@@ -259,41 +259,42 @@ def cp_async_access_ptr_transfer_range_legalize():
     def main(
         A: T.Tensor((9,), dtype=dtype),
     ):
-        A_shared = T.alloc_buffer((8,), dtype=dtype, scope="shared")
-        T.ptx_cp_async(
-            T.access_ptr(A_shared[0], "w", 8),
-            T.access_ptr(A[8], "r", 8),
-            8,
-        )
-        T.ptx_commit_group()
-        T.ptx_wait_group(0)
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(3)}})
+            A_shared = T.sblock_alloc_buffer((8,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.access_ptr(A_shared[0], "w", 8),
+                T.access_ptr(A[8], "r", 8),
+                8,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
 
-    @T.prim_func
-    def expected(
-        A: T.Tensor((9,), dtype=dtype),
-    ):
-        A_shared = T.alloc_buffer((8,), dtype=dtype, scope="shared")
-        T.ptx_cp_async(
-            T.access_ptr(A_shared[0], "w", 8),
-            T.access_ptr(A[8], "r", 8),
-            8,
-            False,
-        )
-        T.ptx_commit_group()
-        T.ptx_wait_group(0)
-
-    return main, expected
+    return main
 
 
 def assert_cp_async_access_ptr_transfer_range_legalize():
-    func, expected = cp_async_access_ptr_transfer_range_legalize()
+    func = cp_async_access_ptr_transfer_range_legalize()
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
     cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
     assert len(cp_async_calls) == 1
-    assert len(cp_async_calls[0].args) == 4
-    _assert_legalize_matches_expected(func, expected)
+    assert len(cp_async_calls[0].args) == 3
+    assert _count_if_then_else(body) > 0
+
+    fallback_loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.For):
+            fallback_loops.append(node)
+
+    post_order_visit(body, _visit)
+    assert len(fallback_loops) == 1
+    assert isinstance(fallback_loops[0].body, tvm.tirx.BufferStore)
+    assert int(fallback_loops[0].extent.value) == 8
 
 
 def cp_async_access_ptr_rank2_transfer_range_legalize():
@@ -372,7 +373,8 @@ def cp_async_access_ptr_nonzero_safe_value_legalize():
                         4,
                     )
                 else:
-                    A_shared[i * 4] = T.float16(3)
+                    for j in T.serial(4):
+                        A_shared[i * 4 + j] = T.float16(3)
             T.ptx_commit_group()
             T.ptx_wait_group(0)
 

@@ -15,6 +15,7 @@
 
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "../op/parallel.h"
@@ -686,6 +687,70 @@ private:
     return Optional<PrimExpr>();
   }
 
+  Stmt MakeCPAsyncFallbackStores(const AccessPtrInfo &dst_info,
+                                 const Call &call, const PrimExpr &safe_value) {
+    Buffer dst_buffer = dst_info.base_load->buffer;
+    Array<PrimExpr> physical_indices =
+        dst_buffer.OffsetOf(dst_info.base_load->indices);
+    Buffer flattened_dst_buffer = dst_buffer.GetFlattenedBuffer();
+    ICHECK_EQ(physical_indices.size(), flattened_dst_buffer->shape.size())
+        << "cp.async destination access cannot be flattened: " << call;
+    ICHECK(!physical_indices.empty())
+        << "cp.async destination access has no physical offset: " << call;
+
+    PrimExpr linear_index = physical_indices[0];
+    for (size_t i = 1; i < physical_indices.size(); ++i) {
+      linear_index =
+          linear_index * flattened_dst_buffer->shape[i] + physical_indices[i];
+    }
+    PrimExpr elem_offset = dst_buffer->elem_offset;
+    if (elem_offset.dtype() != linear_index.dtype()) {
+      elem_offset = Cast(linear_index.dtype(), elem_offset);
+    }
+    linear_index = linear_index - elem_offset;
+
+    PrimExpr num_elems = call->args[2];
+    if (call->op.same_as(builtin::ptx_cp_async())) {
+      int dst_elem_bits = dst_buffer->dtype.bits() * dst_buffer->dtype.lanes();
+      ICHECK_GT(dst_elem_bits, 0)
+          << "cp.async destination element width must be positive: " << call;
+      PrimExpr dst_elem_bits_expr = IntImm(num_elems.dtype(), dst_elem_bits);
+      PrimExpr transfer_bits = num_elems * IntImm(num_elems.dtype(), 8);
+      num_elems = FloorDiv(transfer_bits + dst_elem_bits_expr -
+                               IntImm(num_elems.dtype(), 1),
+                           dst_elem_bits_expr);
+    }
+
+    Var fallback_offset("cp_async_fallback_offset", num_elems.dtype());
+    PrimExpr typed_fallback_offset = fallback_offset;
+    if (typed_fallback_offset.dtype() != linear_index.dtype()) {
+      typed_fallback_offset = Cast(linear_index.dtype(), typed_fallback_offset);
+    }
+    PrimExpr remaining_index = linear_index + typed_fallback_offset;
+    std::vector<PrimExpr> reversed_indices;
+    reversed_indices.reserve(flattened_dst_buffer->shape.size());
+    for (size_t axis = flattened_dst_buffer->shape.size(); axis > 0; --axis) {
+      size_t index = axis - 1;
+      if (index == 0) {
+        reversed_indices.push_back(remaining_index);
+      } else {
+        reversed_indices.push_back(
+            FloorMod(remaining_index, flattened_dst_buffer->shape[index]));
+        remaining_index =
+            FloorDiv(remaining_index, flattened_dst_buffer->shape[index]);
+      }
+    }
+    Array<PrimExpr> dst_indices;
+    for (auto it = reversed_indices.rbegin(); it != reversed_indices.rend();
+         ++it) {
+      dst_indices.push_back(*it);
+    }
+    Stmt fallback_store =
+        BufferStore(flattened_dst_buffer, safe_value, dst_indices);
+    return For(fallback_offset, make_zero(num_elems.dtype()), num_elems,
+               ForKind::kSerial, fallback_store);
+  }
+
   Stmt RewriteCPAsync(const Evaluate &evaluate, const Call &call,
                       const Array<PrimExpr> &conditions) {
     if (conditions.empty()) {
@@ -723,8 +788,7 @@ private:
           Call(call->dtype, call->op, new_args, call->annotations, call->span));
     }
 
-    Stmt else_case = BufferStore(dst_info.base_load->buffer, safe_value,
-                                 dst_info.base_load->indices);
+    Stmt else_case = MakeCPAsyncFallbackStores(dst_info, call, safe_value);
     return IfThenElse(combined, evaluate, else_case);
   }
 
