@@ -114,6 +114,61 @@ def test_vectorize_invariant_index():
 
 
 @tilelang.jit
+def vectorize_global_invariant_store_accumulate(M, K):
+    @T.prim_func
+    def main(
+        A: T.Tensor[(M, K), T.float32],  # noqa: F821
+        B: T.Tensor[(M,), T.float32],  # noqa: F821
+    ):
+        with T.Kernel(M // 128, threads=128) as bx:
+            row = bx * 128 + T.get_thread_binding(0)
+            B[row] = 0.0
+            for k in T.vectorized(K):
+                B[row] = B[row] + A[row, k]
+
+    return main
+
+
+@tilelang.jit
+def vectorize_local_invariant_store_accumulate(M, K):
+    @T.prim_func
+    def main(
+        A: T.Tensor[(M, K), T.float32],  # noqa: F821
+        B: T.Tensor[(M,), T.float32],  # noqa: F821
+    ):
+        with T.Kernel(M // 128, threads=128) as bx:
+            row = bx * 128 + T.get_thread_binding(0)
+            acc = T.alloc_local((1,), T.float32)
+            acc[0] = 0.0
+            for k in T.vectorized(K):
+                acc[0] = acc[0] + A[row, k]
+            B[row] = acc[0]
+
+    return main
+
+
+def run_vectorize_invariant_store_accumulate(kernel_factory):
+    M, K = 128, 4
+    kernel = kernel_factory(M, K)
+    a = torch.ones((M, K), device="cuda", dtype=torch.float32)
+    b = torch.empty((M,), device="cuda", dtype=torch.float32)
+
+    kernel(a, b)
+
+    torch.testing.assert_close(b, torch.full_like(b, float(K)), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_vectorize_global_invariant_store_accumulate():
+    run_vectorize_invariant_store_accumulate(vectorize_global_invariant_store_accumulate)
+
+
+@tilelang.testing.requires_cuda
+def test_vectorize_local_invariant_store_accumulate():
+    run_vectorize_invariant_store_accumulate(vectorize_local_invariant_store_accumulate)
+
+
+@tilelang.jit
 def vectorize_test_all_dtypes(dtype, vec_num):
     @T.prim_func
     def main(A: T.Tensor[(64,), dtype]):
