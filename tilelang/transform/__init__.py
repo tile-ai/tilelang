@@ -105,6 +105,19 @@ def VerifyParallelLoop():
     return _ffi_api.VerifyParallelLoop()  # type: ignore
 
 
+def VerifyGemmAccumInit():
+    """VerifyGemmAccumInit
+
+    Warn when a T.gemm accumulator is not provably initialized before use.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.VerifyGemmAccumInit()  # type: ignore
+
+
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 
