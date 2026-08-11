@@ -645,8 +645,11 @@ private:
                                IntImm(num_elems.dtype(), 1),
                            source_elem_bits_expr);
     }
+    if (num_elems.dtype() != linear_index.dtype()) {
+      num_elems = Cast(linear_index.dtype(), num_elems);
+    }
     PrimExpr last_index =
-        linear_index + num_elems - IntImm(num_elems.dtype(), 1);
+        linear_index + num_elems - IntImm(linear_index.dtype(), 1);
     PrimExpr flattened_extent = flattened_src_buffer->shape[0];
     for (size_t i = 1; i < flattened_src_buffer->shape.size(); ++i) {
       flattened_extent = flattened_extent * flattened_src_buffer->shape[i];
@@ -688,7 +691,8 @@ private:
   }
 
   Stmt MakeCPAsyncFallbackStores(const AccessPtrInfo &dst_info,
-                                 const Call &call, const PrimExpr &safe_value) {
+                                 const Call &call, const PrimExpr &safe_value,
+                                 const Optional<PrimExpr> &existing_predicate) {
     Buffer dst_buffer = dst_info.base_load->buffer;
     Array<PrimExpr> physical_indices =
         dst_buffer.OffsetOf(dst_info.base_load->indices);
@@ -745,8 +749,14 @@ private:
          ++it) {
       dst_indices.push_back(*it);
     }
+    PrimExpr fallback_value = safe_value;
+    if (existing_predicate.defined()) {
+      fallback_value = analyzer_->Simplify(
+          if_then_else(existing_predicate.value(), safe_value,
+                       make_zero(safe_value.dtype())));
+    }
     Stmt fallback_store =
-        BufferStore(flattened_dst_buffer, safe_value, dst_indices);
+        BufferStore(flattened_dst_buffer, fallback_value, dst_indices);
     return For(fallback_offset, make_zero(num_elems.dtype()), num_elems,
                ForKind::kSerial, fallback_store);
   }
@@ -788,7 +798,8 @@ private:
           Call(call->dtype, call->op, new_args, call->annotations, call->span));
     }
 
-    Stmt else_case = MakeCPAsyncFallbackStores(dst_info, call, safe_value);
+    Stmt else_case = MakeCPAsyncFallbackStores(dst_info, call, safe_value,
+                                               existing_predicate);
     return IfThenElse(combined, evaluate, else_case);
   }
 

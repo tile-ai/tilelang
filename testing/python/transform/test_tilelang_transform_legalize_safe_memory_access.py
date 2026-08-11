@@ -252,7 +252,7 @@ def assert_cp_async_access_ptr_legalize():
     _assert_legalize_matches_expected(func, expected)
 
 
-def cp_async_access_ptr_transfer_range_legalize():
+def cp_async_access_ptr_transfer_range_legalize(predicate=None):
     dtype = T.float16
 
     @T.prim_func
@@ -264,25 +264,33 @@ def cp_async_access_ptr_transfer_range_legalize():
             T.writes()
             T.sblock_attr({"safe_value_map": {A.data: T.float16(3)}})
             A_shared = T.sblock_alloc_buffer((8,), dtype=dtype, scope="shared")
-            T.ptx_cp_async(
-                T.access_ptr(A_shared[0], "w", 8),
-                T.access_ptr(A[8], "r", 8),
-                8,
-            )
+            if predicate is None:
+                T.ptx_cp_async(
+                    T.access_ptr(A_shared[0], "w", 8),
+                    T.access_ptr(A[8], "r", 8),
+                    8,
+                )
+            else:
+                T.ptx_cp_async(
+                    T.access_ptr(A_shared[0], "w", 8),
+                    T.access_ptr(A[8], "r", 8),
+                    8,
+                    predicate,
+                )
             T.ptx_commit_group()
             T.ptx_wait_group(0)
 
     return main
 
 
-def assert_cp_async_access_ptr_transfer_range_legalize():
-    func = cp_async_access_ptr_transfer_range_legalize()
+def assert_cp_async_access_ptr_transfer_range_legalize(predicate=None, expected_safe_value=3):
+    func = cp_async_access_ptr_transfer_range_legalize(predicate)
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
     cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
     assert len(cp_async_calls) == 1
-    assert len(cp_async_calls[0].args) == 3
+    assert len(cp_async_calls[0].args) == (3 if predicate is None else 4)
     assert _count_if_then_else(body) > 0
 
     fallback_loops = []
@@ -295,6 +303,7 @@ def assert_cp_async_access_ptr_transfer_range_legalize():
     assert len(fallback_loops) == 1
     assert isinstance(fallback_loops[0].body, tvm.tirx.BufferStore)
     assert int(fallback_loops[0].extent.value) == 8
+    assert float(fallback_loops[0].body.value.value) == expected_safe_value
 
 
 def cp_async_access_ptr_rank2_transfer_range_legalize():
@@ -680,6 +689,10 @@ def test_cp_async_access_ptr_oob():
 
 def test_cp_async_access_ptr_transfer_range_oob():
     assert_cp_async_access_ptr_transfer_range_legalize()
+
+
+def test_cp_async_access_ptr_predicate_transfer_range_oob():
+    assert_cp_async_access_ptr_transfer_range_legalize(predicate=False, expected_safe_value=0)
 
 
 def test_cp_async_access_ptr_rank2_transfer_range_oob():
