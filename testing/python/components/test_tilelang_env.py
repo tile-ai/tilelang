@@ -91,6 +91,30 @@ def test_find_cuda_home_resolves_symlinked_nvcc(monkeypatch, tmp_path):
     assert env_module._find_cuda_home() == str(cuda_home)
 
 
+@pytest.mark.parametrize("symlinked", [False, True])
+def test_find_cuda_home_preserves_versioned_hpc_sdk_cuda_home(monkeypatch, tmp_path, symlinked):
+    cuda_home = tmp_path / "nvidia" / "hpc_sdk" / "Linux_x86_64" / "25.7" / "cuda" / "12.9"
+    nvcc = cuda_home / "bin" / "nvcc"
+    cuda_runtime = cuda_home / "include" / "cuda_runtime.h"
+    nvcc.parent.mkdir(parents=True)
+    cuda_runtime.parent.mkdir(parents=True)
+    nvcc.touch()
+    cuda_runtime.touch()
+
+    nvcc_path = nvcc
+    if symlinked:
+        shim = tmp_path / "local" / "bin" / "nvcc"
+        shim.parent.mkdir(parents=True)
+        _symlink_or_skip(shim, nvcc)
+        nvcc_path = shim
+
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.delenv("CUDA_PATH", raising=False)
+    monkeypatch.setattr(env_module.shutil, "which", lambda _: str(nvcc_path))
+
+    assert env_module._find_cuda_home() == str(cuda_home)
+
+
 @pytest.mark.parametrize("env_var", ["CUDA_HOME", "CUDA_PATH"])
 def test_find_cuda_home_prefers_explicit_environment(monkeypatch, tmp_path, env_var):
     cuda_home = tmp_path / "explicit-cuda"
