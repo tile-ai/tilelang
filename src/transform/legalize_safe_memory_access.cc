@@ -15,6 +15,7 @@
 
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "../op/parallel.h"
@@ -368,6 +369,11 @@ private:
   struct AccessPtrInfo {
     BufferLoad base_load;
     PrimExpr rw_mask;
+    DataType element_dtype;
+    // tvm_access_ptr offsets are expressed in element_dtype units. Keep the
+    // original offset so byte-granular accesses can be checked without losing
+    // an intra-element address through the flattened BufferLoad.
+    std::optional<PrimExpr> raw_element_offset;
   };
 
   // Constructor initializing the base class with the analyzer
@@ -534,6 +540,8 @@ private:
       return AccessPtrInfo{
           Downcast<BufferLoad>(ptr_call->args[0]),
           ptr_call->args[2],
+          base_load->buffer->dtype,
+          std::nullopt,
       };
     }
 
@@ -548,9 +556,34 @@ private:
           << "Buffer data var " << buffer_data
           << " is not registered in buffer_data_to_buffer_.";
       Buffer flat = buffer_data_to_buffer_[buffer_data].GetFlattenedBuffer();
+      DataType pointer_element_dtype = ptr_call->args[0].dtype();
+      PrimExpr offset = ptr_call->args[2];
+      if (pointer_element_dtype != flat->dtype) {
+        int pointer_elem_bits =
+            pointer_element_dtype.bits() * pointer_element_dtype.lanes();
+        int buffer_elem_bits = flat->dtype.bits() * flat->dtype.lanes();
+        ICHECK_GT(pointer_elem_bits, 0)
+            << "tvm_access_ptr element width must be positive: " << expr;
+        ICHECK_GT(buffer_elem_bits, 0)
+            << "tvm_access_ptr buffer element width must be positive: " << expr;
+        DataType address_dtype = DataType::Int(64);
+        offset = FloorDiv(Cast(address_dtype, offset) *
+                              IntImm(address_dtype, pointer_elem_bits),
+                          IntImm(address_dtype, buffer_elem_bits));
+      }
+      PrimExpr elem_offset = flat->elem_offset;
+      if (elem_offset.dtype() != offset.dtype()) {
+        elem_offset = Cast(offset.dtype(), elem_offset);
+      }
+      offset = offset - elem_offset;
+      if (offset.dtype() != flat->shape[0].dtype()) {
+        offset = Cast(flat->shape[0].dtype(), offset);
+      }
       return AccessPtrInfo{
-          BufferLoad(flat, Array<PrimExpr>{ptr_call->args[2]}),
+          BufferLoad(flat, Array<PrimExpr>{offset}),
           ptr_call->args[4],
+          pointer_element_dtype,
+          ptr_call->args[2],
       };
     }
 
@@ -607,10 +640,93 @@ private:
       return conditions;
     }
 
+    Buffer src_buffer = src_info.base_load->buffer;
+    int src_buffer_elem_bits =
+        src_buffer->dtype.bits() * src_buffer->dtype.lanes();
+    int src_pointer_elem_bits =
+        src_info.element_dtype.bits() * src_info.element_dtype.lanes();
+    ICHECK_GT(src_buffer_elem_bits, 0)
+        << "cp.async source buffer element width must be positive: " << call;
+    ICHECK_GT(src_pointer_elem_bits, 0)
+        << "cp.async source access pointer element width must be positive: "
+        << call;
+
+    // A tvm_access_ptr may address a typed buffer through a narrower element
+    // type (for example, uint8 into float64). In that case, rounding the byte
+    // address down to a BufferLoad element loses the intra-element offset and
+    // can miss the final bytes of a transfer. Check that byte range directly.
+    if (src_info.raw_element_offset.has_value() &&
+        src_pointer_elem_bits != src_buffer_elem_bits) {
+      DataType address_dtype = DataType::Int(64);
+      PrimExpr byte_offset =
+          Cast(address_dtype, src_info.raw_element_offset.value()) *
+          IntImm(address_dtype, src_pointer_elem_bits);
+      byte_offset =
+          byte_offset - Cast(address_dtype, src_buffer->elem_offset) *
+                            IntImm(address_dtype, src_buffer_elem_bits);
+
+      PrimExpr transfer_bits = GetCPAsyncTransferBits(
+          call, src_info, "source", /*address_dtype=*/address_dtype);
+      Buffer flattened_src_buffer = src_buffer.GetFlattenedBuffer();
+      PrimExpr flattened_extent =
+          Cast(address_dtype, flattened_src_buffer->shape[0]);
+      for (size_t i = 1; i < flattened_src_buffer->shape.size(); ++i) {
+        flattened_extent = flattened_extent *
+                           Cast(address_dtype, flattened_src_buffer->shape[i]);
+      }
+      PrimExpr flattened_extent_bits =
+          flattened_extent * IntImm(address_dtype, src_buffer_elem_bits);
+      SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
+      checker.PushCondition(byte_offset >= make_zero(byte_offset.dtype()));
+      checker.PushCondition(byte_offset + transfer_bits <=
+                            flattened_extent_bits);
+      return checker.GetConditions();
+    }
+
     SafeMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
-    checker.CheckBufferIndices(src_info.base_load->buffer,
-                               src_info.base_load->indices,
+    checker.CheckBufferIndices(src_buffer, src_info.base_load->indices,
                                /*is_load=*/true, /*throw_warning=*/false);
+
+    Array<PrimExpr> physical_indices =
+        src_buffer.OffsetOf(src_info.base_load->indices);
+    Buffer flattened_src_buffer = src_buffer.GetFlattenedBuffer();
+    ICHECK_EQ(physical_indices.size(), flattened_src_buffer->shape.size())
+        << "cp.async source access cannot be flattened: " << call;
+    ICHECK(!physical_indices.empty())
+        << "cp.async source access has no physical offset: " << call;
+
+    PrimExpr linear_index = physical_indices[0];
+    for (size_t i = 1; i < physical_indices.size(); ++i) {
+      linear_index =
+          linear_index * flattened_src_buffer->shape[i] + physical_indices[i];
+    }
+    PrimExpr elem_offset = src_buffer->elem_offset;
+    if (elem_offset.dtype() != linear_index.dtype()) {
+      elem_offset = Cast(linear_index.dtype(), elem_offset);
+    }
+    linear_index = linear_index - elem_offset;
+
+    PrimExpr num_elems =
+        GetCPAsyncTransferBufferElements(call, src_info, "source");
+    if (num_elems.dtype() != linear_index.dtype()) {
+      num_elems = Cast(linear_index.dtype(), num_elems);
+    }
+    PrimExpr last_index =
+        linear_index + num_elems - IntImm(linear_index.dtype(), 1);
+    PrimExpr flattened_extent = flattened_src_buffer->shape[0];
+    for (size_t i = 1; i < flattened_src_buffer->shape.size(); ++i) {
+      flattened_extent = flattened_extent * flattened_src_buffer->shape[i];
+    }
+    auto push_distinct_condition = [this, &checker](const PrimExpr &condition) {
+      for (const PrimExpr &existing : checker.GetConditions()) {
+        if (analyzer_->CanProveEqual(existing, condition)) {
+          return;
+        }
+      }
+      checker.PushCondition(condition);
+    };
+    push_distinct_condition(linear_index >= make_zero(linear_index.dtype()));
+    push_distinct_condition(last_index < flattened_extent);
     return checker.GetConditions();
   }
 
@@ -620,6 +736,90 @@ private:
     AccessPtrInfo src_info =
         GetRequiredAccessPtrInfo(call->args[kCPAsyncSrcPtrArg], "cp.async");
     return src_info.base_load->buffer;
+  }
+
+  PrimExpr GetCPAsyncTransferBits(const Call &call, const AccessPtrInfo &info,
+                                  const char *operand_name) {
+    return GetCPAsyncTransferBits(call, info, operand_name,
+                                  call->args[2].dtype());
+  }
+
+  PrimExpr GetCPAsyncTransferBits(const Call &call, const AccessPtrInfo &info,
+                                  const char *operand_name,
+                                  DataType address_dtype) {
+    PrimExpr num_elems = call->args[2];
+    int transfer_elem_bits = 8;
+    if (!call->op.same_as(builtin::ptx_cp_async())) {
+      transfer_elem_bits =
+          info.element_dtype.bits() * info.element_dtype.lanes();
+      ICHECK_GT(transfer_elem_bits, 0)
+          << "cp.async " << operand_name
+          << " access pointer element width must be positive: " << call;
+    }
+    return Cast(address_dtype, num_elems) *
+           IntImm(address_dtype, transfer_elem_bits);
+  }
+
+  PrimExpr GetCPAsyncTransferBufferElements(const Call &call,
+                                            const AccessPtrInfo &info,
+                                            const char *operand_name) {
+    if (!call->op.same_as(builtin::ptx_cp_async()) &&
+        info.element_dtype == info.base_load->buffer->dtype) {
+      return call->args[2];
+    }
+
+    int buffer_elem_bits = info.base_load->buffer->dtype.bits() *
+                           info.base_load->buffer->dtype.lanes();
+    ICHECK_GT(buffer_elem_bits, 0)
+        << "cp.async " << operand_name
+        << " buffer element width must be positive: " << call;
+
+    PrimExpr transfer_bits = GetCPAsyncTransferBits(call, info, operand_name);
+    PrimExpr num_elems = call->args[2];
+    PrimExpr buffer_elem_bits_expr =
+        IntImm(num_elems.dtype(), buffer_elem_bits);
+    return analyzer_->Simplify(FloorDiv(transfer_bits + buffer_elem_bits_expr -
+                                            IntImm(num_elems.dtype(), 1),
+                                        buffer_elem_bits_expr));
+  }
+
+  bool CanMakeCPAsyncFallbackStores(const AccessPtrInfo &dst_info,
+                                    const Call &call) {
+    Buffer dst_buffer = dst_info.base_load->buffer;
+    int buffer_elem_bits = dst_buffer->dtype.bits() * dst_buffer->dtype.lanes();
+    ICHECK_GT(buffer_elem_bits, 0)
+        << "cp.async destination buffer element width must be positive: "
+        << call;
+
+    PrimExpr transfer_bits =
+        GetCPAsyncTransferBits(call, dst_info, "destination");
+    PrimExpr buffer_elem_bits_expr =
+        IntImm(transfer_bits.dtype(), buffer_elem_bits);
+    if (!analyzer_->CanProveEqual(
+            FloorMod(transfer_bits, buffer_elem_bits_expr),
+            make_zero(transfer_bits.dtype()))) {
+      return false;
+    }
+
+    if (!dst_info.raw_element_offset.has_value()) {
+      return true;
+    }
+
+    int pointer_elem_bits =
+        dst_info.element_dtype.bits() * dst_info.element_dtype.lanes();
+    ICHECK_GT(pointer_elem_bits, 0) << "cp.async destination access pointer "
+                                       "element width must be positive: "
+                                    << call;
+    DataType address_dtype = DataType::Int(64);
+    PrimExpr byte_offset =
+        Cast(address_dtype, dst_info.raw_element_offset.value()) *
+        IntImm(address_dtype, pointer_elem_bits);
+    byte_offset = byte_offset - Cast(address_dtype, dst_buffer->elem_offset) *
+                                    IntImm(address_dtype, buffer_elem_bits);
+    PrimExpr offset_elem_bits_expr = IntImm(address_dtype, buffer_elem_bits);
+    return analyzer_->CanProveEqual(
+        FloorMod(byte_offset, offset_elem_bits_expr),
+        make_zero(byte_offset.dtype()));
   }
 
   PrimExpr CombineConditions(const Array<PrimExpr> &conditions) {
@@ -636,6 +836,83 @@ private:
       return call->args[3];
     }
     return Optional<PrimExpr>();
+  }
+
+  Stmt MakeCPAsyncFallbackStores(const AccessPtrInfo &dst_info,
+                                 const Call &call, const PrimExpr &safe_value,
+                                 const Optional<PrimExpr> &existing_predicate) {
+    Buffer dst_buffer = dst_info.base_load->buffer;
+    Array<PrimExpr> physical_indices =
+        dst_buffer.OffsetOf(dst_info.base_load->indices);
+    Buffer flattened_dst_buffer = dst_buffer.GetFlattenedBuffer();
+    ICHECK_EQ(physical_indices.size(), flattened_dst_buffer->shape.size())
+        << "cp.async destination access cannot be flattened: " << call;
+    ICHECK(!physical_indices.empty())
+        << "cp.async destination access has no physical offset: " << call;
+
+    PrimExpr linear_index = physical_indices[0];
+    for (size_t i = 1; i < physical_indices.size(); ++i) {
+      linear_index =
+          linear_index * flattened_dst_buffer->shape[i] + physical_indices[i];
+    }
+    PrimExpr elem_offset = dst_buffer->elem_offset;
+    if (elem_offset.dtype() != linear_index.dtype()) {
+      elem_offset = Cast(linear_index.dtype(), elem_offset);
+    }
+    linear_index = linear_index - elem_offset;
+
+    PrimExpr num_elems =
+        GetCPAsyncTransferBufferElements(call, dst_info, "destination");
+    if (num_elems.dtype() != linear_index.dtype()) {
+      num_elems = Cast(linear_index.dtype(), num_elems);
+    }
+    PrimExpr flattened_extent = flattened_dst_buffer->shape[0];
+    for (size_t i = 1; i < flattened_dst_buffer->shape.size(); ++i) {
+      flattened_extent = flattened_extent * flattened_dst_buffer->shape[i];
+    }
+    if (flattened_extent.dtype() != linear_index.dtype()) {
+      flattened_extent = Cast(linear_index.dtype(), flattened_extent);
+    }
+    PrimExpr zero = make_zero(linear_index.dtype());
+    PrimExpr fallback_extent =
+        tirx::Min(num_elems, tirx::Max(zero, flattened_extent - linear_index));
+    fallback_extent = analyzer_->Simplify(
+        if_then_else(linear_index >= zero, fallback_extent, zero));
+
+    Var fallback_offset("cp_async_fallback_offset", fallback_extent.dtype());
+    PrimExpr typed_fallback_offset = fallback_offset;
+    if (typed_fallback_offset.dtype() != linear_index.dtype()) {
+      typed_fallback_offset = Cast(linear_index.dtype(), typed_fallback_offset);
+    }
+    PrimExpr remaining_index = linear_index + typed_fallback_offset;
+    std::vector<PrimExpr> reversed_indices;
+    reversed_indices.reserve(flattened_dst_buffer->shape.size());
+    for (size_t axis = flattened_dst_buffer->shape.size(); axis > 0; --axis) {
+      size_t index = axis - 1;
+      if (index == 0) {
+        reversed_indices.push_back(remaining_index);
+      } else {
+        reversed_indices.push_back(
+            FloorMod(remaining_index, flattened_dst_buffer->shape[index]));
+        remaining_index =
+            FloorDiv(remaining_index, flattened_dst_buffer->shape[index]);
+      }
+    }
+    Array<PrimExpr> dst_indices;
+    for (auto it = reversed_indices.rbegin(); it != reversed_indices.rend();
+         ++it) {
+      dst_indices.push_back(*it);
+    }
+    PrimExpr fallback_value = safe_value;
+    if (existing_predicate.defined()) {
+      fallback_value = analyzer_->Simplify(
+          if_then_else(existing_predicate.value(), safe_value,
+                       make_zero(safe_value.dtype())));
+    }
+    Stmt fallback_store =
+        BufferStore(flattened_dst_buffer, fallback_value, dst_indices);
+    return For(fallback_offset, make_zero(fallback_extent.dtype()),
+               fallback_extent, ForKind::kSerial, fallback_store);
   }
 
   Stmt RewriteCPAsync(const Evaluate &evaluate, const Call &call,
@@ -675,8 +952,17 @@ private:
           Call(call->dtype, call->op, new_args, call->annotations, call->span));
     }
 
-    Stmt else_case = BufferStore(dst_info.base_load->buffer, safe_value,
-                                 dst_info.base_load->indices);
+    if (!CanMakeCPAsyncFallbackStores(dst_info, call)) {
+      LOG(FATAL)
+          << "cp.async nonzero safe-value fallback requires a destination byte "
+             "range aligned to backing-buffer elements; byte-granular "
+             "fallback stores are unsupported because a BufferStore could "
+             "overwrite bytes outside the transfer. Got "
+          << call;
+    }
+
+    Stmt else_case = MakeCPAsyncFallbackStores(dst_info, call, safe_value,
+                                               existing_predicate);
     return IfThenElse(combined, evaluate, else_case);
   }
 

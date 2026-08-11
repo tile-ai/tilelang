@@ -2,6 +2,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+import pytest
 from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 
 
@@ -252,6 +253,372 @@ def assert_cp_async_access_ptr_legalize():
     _assert_legalize_matches_expected(func, expected)
 
 
+def cp_async_access_ptr_transfer_range_legalize(predicate=None):
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((9,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(3)}})
+            A_shared = T.sblock_alloc_buffer((8,), dtype=dtype, scope="shared")
+            if predicate is None:
+                T.ptx_cp_async(
+                    T.access_ptr(A_shared[0], "w", 8),
+                    T.access_ptr(A[8], "r", 8),
+                    8,
+                )
+            else:
+                T.ptx_cp_async(
+                    T.access_ptr(A_shared[0], "w", 8),
+                    T.access_ptr(A[8], "r", 8),
+                    8,
+                    predicate,
+                )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_transfer_range_legalize(predicate=None, expected_safe_value=3):
+    func = cp_async_access_ptr_transfer_range_legalize(predicate)
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    cp_async_calls = _collect_call_nodes(body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
+    assert len(cp_async_calls) == 1
+    assert len(cp_async_calls[0].args) == (3 if predicate is None else 4)
+    assert _count_if_then_else(body) > 0
+
+    fallback_loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.For):
+            fallback_loops.append(node)
+
+    post_order_visit(body, _visit)
+    assert len(fallback_loops) == 1
+    assert isinstance(fallback_loops[0].body, tvm.tirx.BufferStore)
+    assert int(fallback_loops[0].extent.value) == 8
+    assert float(fallback_loops[0].body.value.value) == expected_safe_value
+
+
+def cp_async_access_ptr_destination_transfer_range_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(3)}})
+            A_shared = T.sblock_alloc_buffer((4,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.access_ptr(A_shared[0], "w", 8),
+                T.access_ptr(A[4], "r", 8),
+                8,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_destination_transfer_range_legalize():
+    func = cp_async_access_ptr_destination_transfer_range_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+    fallback_loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.For):
+            fallback_loops.append(node)
+
+    post_order_visit(transformed["main"].body, _visit)
+    assert len(fallback_loops) == 1
+    assert isinstance(fallback_loops[0].body, tvm.tirx.BufferStore)
+    assert int(fallback_loops[0].extent.value) == 4
+
+
+def cp_async_access_ptr_rank2_transfer_range_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((2, 4), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((2,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 2),
+            T.access_ptr(A[1, 3], "r", 2),
+            2,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    @T.prim_func
+    def expected(
+        A: T.Tensor((2, 4), dtype=dtype),
+    ):
+        A_shared = T.alloc_buffer((2,), dtype=dtype, scope="shared")
+        T.ptx_cp_async(
+            T.access_ptr(A_shared[0], "w", 2),
+            T.access_ptr(A[1, 3], "r", 2),
+            2,
+            False,
+        )
+        T.ptx_commit_group()
+        T.ptx_wait_group(0)
+
+    return main, expected
+
+
+def assert_cp_async_access_ptr_rank2_transfer_range_legalize():
+    func, expected = cp_async_access_ptr_rank2_transfer_range_legalize()
+    _assert_legalize_matches_expected(func, expected)
+
+
+def cp_async_access_ptr_byte_pointer_transfer_range_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((3,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(3)}})
+            A_shared = T.sblock_alloc_buffer((4,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 8, 2),
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A.data, 0, 8, 1),
+                8,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_byte_pointer_transfer_range_legalize():
+    func = cp_async_access_ptr_byte_pointer_transfer_range_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+    fallback_loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.For):
+            fallback_loops.append(node)
+
+    post_order_visit(transformed["main"].body, _visit)
+    assert len(fallback_loops) == 1
+    assert isinstance(fallback_loops[0].body, tvm.tirx.BufferStore)
+    assert int(fallback_loops[0].extent.value) == 4
+    assert float(fallback_loops[0].body.value.value) == 3
+
+
+def cp_async_access_ptr_byte_pointer_offset_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((6,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(3)}})
+            A_shared = T.sblock_alloc_buffer((4,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 8, 2),
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A.data, 4, 8, 1),
+                8,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_byte_pointer_offset_legalize():
+    func = cp_async_access_ptr_byte_pointer_offset_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    cp_async_calls = _collect_call_nodes(transformed["main"].body, {"tirx.ptx_cp_async", "tl.ptx_cp_async"})
+    assert len(cp_async_calls) == 1
+    assert len(cp_async_calls[0].args) == 3
+    assert _count_if_then_else(transformed["main"].body) == 0
+
+
+def cp_async_access_ptr_elem_offset_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(A_handle: T.handle):
+        A = T.match_buffer(A_handle, (4,), dtype=dtype, elem_offset=4)
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            A_shared = T.sblock_alloc_buffer((4,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(dtype), A_shared.data, 0, 4, 2),
+                T.tvm_access_ptr(T.type_annotation(dtype), A.data, 4, 4, 1),
+                4,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_elem_offset_legalize():
+    func = cp_async_access_ptr_elem_offset_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    assert _count_if_then_else(transformed["main"].body) == 0
+
+
+def cp_async_access_ptr_large_byte_range_legalize():
+    dtype = T.float16
+    transfer_bytes = 300_000_000
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((transfer_bytes // 2,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            A_shared = T.sblock_alloc_buffer((transfer_bytes // 2,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, transfer_bytes, 2),
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A.data, 0, transfer_bytes, 1),
+                transfer_bytes,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_large_byte_range_legalize():
+    func = cp_async_access_ptr_large_byte_range_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    assert _count_if_then_else(transformed["main"].body) == 0
+
+
+def cp_async_access_ptr_partial_byte_range_legalize():
+    dtype = T.float64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((1,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float64(3)}})
+            A_shared = T.sblock_alloc_buffer((2,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 0, 4, 2),
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A.data, 6, 4, 1),
+                4,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_partial_byte_range_legalize():
+    func = cp_async_access_ptr_partial_byte_range_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    with pytest.raises(tvm.TVMError, match="destination byte range aligned"):
+        tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+
+def cp_async_access_ptr_unaligned_byte_destination_legalize():
+    dtype = T.float64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((1,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float64(3)}})
+            A_shared = T.sblock_alloc_buffer((2,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A_shared.data, 4, 8, 2),
+                T.tvm_access_ptr(T.type_annotation(T.uint8), A.data, 8, 8, 1),
+                8,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_unaligned_byte_destination_legalize():
+    func = cp_async_access_ptr_unaligned_byte_destination_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    with pytest.raises(tvm.TVMError, match="destination byte range aligned"):
+        tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+
+def cp_async_access_ptr_negative_transfer_legalize():
+    dtype = T.float16
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4,), dtype=dtype),
+    ):
+        with T.sblock("root"):
+            T.reads()
+            T.writes()
+            T.sblock_attr({"safe_value_map": {A.data: T.float16(3)}})
+            A_shared = T.sblock_alloc_buffer((4,), dtype=dtype, scope="shared")
+            T.ptx_cp_async(
+                T.access_ptr(A_shared[0], "w", 4),
+                T.access_ptr(A[-1], "r", 4),
+                4,
+            )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    return main
+
+
+def assert_cp_async_access_ptr_negative_transfer_legalize():
+    func = cp_async_access_ptr_negative_transfer_legalize()
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    body = transformed["main"].body
+    assert _count_if_then_else(body) > 0
+
+    fallback_loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.For):
+            fallback_loops.append(node)
+
+    post_order_visit(body, _visit)
+    assert len(fallback_loops) == 1
+    assert int(fallback_loops[0].extent.value) == 4
+    assert float(fallback_loops[0].body.value.value) == 3
+
+
 def cp_async_access_ptr_nonzero_safe_value_legalize():
     dtype = T.float16
 
@@ -290,7 +657,8 @@ def cp_async_access_ptr_nonzero_safe_value_legalize():
                         4,
                     )
                 else:
-                    A_shared[i * 4] = T.float16(3)
+                    for j in T.serial(4):
+                        A_shared[i * 4 + j] = T.float16(3)
             T.ptx_commit_group()
             T.ptx_wait_group(0)
 
@@ -592,6 +960,50 @@ def test_oob_store():
 
 def test_cp_async_access_ptr_oob():
     assert_cp_async_access_ptr_legalize()
+
+
+def test_cp_async_access_ptr_transfer_range_oob():
+    assert_cp_async_access_ptr_transfer_range_legalize()
+
+
+def test_cp_async_access_ptr_destination_transfer_range_oob():
+    assert_cp_async_access_ptr_destination_transfer_range_legalize()
+
+
+def test_cp_async_access_ptr_predicate_transfer_range_oob():
+    assert_cp_async_access_ptr_transfer_range_legalize(predicate=False, expected_safe_value=0)
+
+
+def test_cp_async_access_ptr_rank2_transfer_range_oob():
+    assert_cp_async_access_ptr_rank2_transfer_range_legalize()
+
+
+def test_cp_async_access_ptr_byte_pointer_transfer_range_oob():
+    assert_cp_async_access_ptr_byte_pointer_transfer_range_legalize()
+
+
+def test_cp_async_access_ptr_byte_pointer_offset():
+    assert_cp_async_access_ptr_byte_pointer_offset_legalize()
+
+
+def test_cp_async_access_ptr_elem_offset():
+    assert_cp_async_access_ptr_elem_offset_legalize()
+
+
+def test_cp_async_access_ptr_large_byte_range():
+    assert_cp_async_access_ptr_large_byte_range_legalize()
+
+
+def test_cp_async_access_ptr_partial_byte_range_oob():
+    assert_cp_async_access_ptr_partial_byte_range_legalize()
+
+
+def test_cp_async_access_ptr_unaligned_byte_destination_oob():
+    assert_cp_async_access_ptr_unaligned_byte_destination_legalize()
+
+
+def test_cp_async_access_ptr_negative_transfer_oob():
+    assert_cp_async_access_ptr_negative_transfer_legalize()
 
 
 def test_cp_async_access_ptr_nonzero_safe_value_oob():
