@@ -20,6 +20,7 @@ import cloudpickle
 from tvm.target import Target
 from tvm.tirx import PrimFunc
 from tvm.runtime import Executable
+from tilelang.backend.module import BackendContext, create_backend_context
 from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
@@ -286,12 +287,13 @@ class KernelCache:
         func: PrimFunc = None,
         out_idx: list[int] = None,
         *args,
-        target: str | Target,
+        target: str | Target | None = None,
         target_host: str | Target | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
         verbose: bool,
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
+        backend_context: BackendContext | None = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -306,6 +308,7 @@ class KernelCache:
                 Use a dict for target attributes, for example {"kind": "cuda", "arch": "sm_90"}.
             target_host: Host target platform
             execution_backend: Execution backend (None = read from TILELANG_EXECUTION_BACKEND)
+            backend_context: Pre-resolved context supplied by compiler infrastructure.
             verbose: Enable verbose output (None = read from TILELANG_VERBOSE)
             *args: Arguments passed to func
 
@@ -323,6 +326,16 @@ class KernelCache:
             Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
         """
 
+        if backend_context is None:
+            if target is None:
+                target = env.get_default_target()
+            if execution_backend is None:
+                execution_backend = env.get_default_execution_backend()
+            backend_context = create_backend_context(target, target_host, execution_backend)
+        target = backend_context.target
+        target_host = backend_context.target_host
+        execution_backend = backend_context.execution_backend.name
+
         if not env.is_cache_enabled():
             if verbose:
                 self.logger.info("Cache is disabled; compiling kernel without caching.")
@@ -335,6 +348,7 @@ class KernelCache:
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+                backend_context=backend_context,
             )
 
         key = self._generate_key(
@@ -363,11 +377,22 @@ class KernelCache:
         if verbose:
             self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
 
-        # Disk loads can be expensive for large kernel sets; keep them outside
-        # the global cache lock so independent cache hits can proceed in parallel.
-        kernel = self._load_kernel_from_disk(
-            key, target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
-        )
+        if execution_backend == "torch":
+            # Metal's torch backend does not support cache yet
+            env.disable_cache()
+            kernel = None
+        else:
+            # Disk loads can be expensive for large kernel sets; keep them outside
+            # the global cache lock so independent cache hits can proceed in parallel.
+            kernel = self._load_kernel_from_disk(
+                key,
+                backend_context,
+                out_idx,
+                pass_configs,
+                compile_flags,
+                func,
+                verbose,
+            )
         if kernel is not None:
             if verbose:
                 self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
@@ -400,13 +425,15 @@ class KernelCache:
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+                backend_context=backend_context,
             )
-        with self._lock:
-            if env.is_cache_enabled():
-                cache_path = self._get_cache_path(key)
-                self._save_kernel_to_disk(key, kernel, func, verbose)
-                # Set cache path on adapter so it can save cubin after first execution
-                self._set_adapter_cache_path(kernel, cache_path)
+        # Save outside the lock: staging+rename is atomic and idempotent (like the
+        # disk load above). Holding the lock here serialized every worker's save.
+        if env.is_cache_enabled():
+            cache_path = self._get_cache_path(key)
+            self._save_kernel_to_disk(key, kernel, func, verbose)
+            # Set cache path on adapter so it can save cubin after first execution
+            self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
         self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
@@ -549,10 +576,8 @@ class KernelCache:
     def _load_kernel_from_disk(
         self,
         key: str,
-        target: str | Target = "auto",
-        target_host: str | Target | None = None,
+        backend_context: BackendContext,
         out_idx: list[int] | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
         func: Callable | None = None,
@@ -563,10 +588,8 @@ class KernelCache:
 
         Args:
             key (str): The hash key identifying the kernel.
-            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, dict, Target], optional): Host target platform.
+            backend_context: Resolved target and execution policy for this compilation.
             out_idx (List[int], optional): Indices specifying which outputs to return.
-            execution_backend (Literal): Backend type for execution. Defaults to "tvm_ffi".
             pass_configs (dict, optional): Configuration for compiler passes.
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
@@ -603,10 +626,8 @@ class KernelCache:
                 device_kernel_source=CachedTextSource(path=device_kernel_path),
                 kernel_lib_path=kernel_lib_path,
                 kernel_params=kernel_params,
-                target=target,
-                target_host=target_host,
+                backend_context=backend_context,
                 out_idx=out_idx,
-                execution_backend=execution_backend,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
@@ -663,7 +684,8 @@ class KernelCache:
 
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
-        src_lib_path = kernel.adapter.libpath
+        if (src_lib_path := getattr(kernel.adapter, "libpath", None)) is None:
+            return
         if verbose:
             self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
         KernelCache._safe_write_file(kernel_lib_path, "wb", lambda file: file.write(KernelCache._load_binary(src_lib_path)))
@@ -729,10 +751,8 @@ class KernelCache:
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         kernel_params: list[KernelParam] | None,
-        target: str | Target,
-        target_host: str | Target | None,
+        backend_context: BackendContext,
         out_idx: list[int] | None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
         pass_configs: dict | None,
         compile_flags: list[str] | str | None,
     ) -> JITKernel | None:
@@ -751,10 +771,11 @@ class KernelCache:
             device_kernel_source=device_kernel_source,
             kernel_lib_path=kernel_lib_path,
             params=kernel_params,
-            target=target,
-            target_host=target_host,
+            target=backend_context.target,
+            target_host=backend_context.target_host,
             out_idx=out_idx,
-            execution_backend=execution_backend,
+            execution_backend=backend_context.execution_backend.name,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
+            backend_context=backend_context,
         )

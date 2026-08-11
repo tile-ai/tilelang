@@ -136,12 +136,12 @@ public:
    * bound.  For example, `binder.Bind(var, expr_1)` will produce an
    * entry mapping `var` to `expr_1` in the `binder.Defs()`.  If
    * `binder.Bind(var, expr_2)` is called later, then this will
-   * produce an assert statemtn that `expr_1 == expr_2`.
+   * produce an assert statement that `expr_1 == expr_2`.
    *
    * Note: Some assert statements produced by BindDLTensor are located
    * in `binder.InitNest()`, not within `binder.Asserts()`.  This is
    * deliberate, as some values may require checks prior to
-   * initialization.  (e.g. Intializing `m = dl_tensor->shape[3]`
+   * initialization.  (e.g. Initializing `m = dl_tensor->shape[3]`
    * requires first asserting that `3 < dl_tensor->ndim`.)
    */
   const std::vector<Stmt> &Asserts() const { return asserts_; }
@@ -194,7 +194,7 @@ private:
   std::vector<Var> defs_;
   /*! \brief Initialize nest */
   std::vector<Stmt> init_nest_;
-  /*! \brief handle data type in the defintiions */
+  /*! \brief handle data type in the definitions */
   ffi::Map<Var, PrimExpr> def_handle_dtype_;
   /*! \brief asserts generated */
   std::vector<Stmt> asserts_;

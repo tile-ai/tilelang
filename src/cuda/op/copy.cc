@@ -9,12 +9,13 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
+#include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
+#include "cuda/op/tma_layout.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 #include "layout/cute_layout.h"
 #include "layout/tcgen05_layout.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "span_utils.h"
 #include "transform/common/loop_fusion_utils.h"
@@ -366,12 +367,9 @@ MakeTMARows(const Buffer &src, const Array<Range> &src_ranges,
   return std::make_pair(Array<Stmt>{for_loop}, extent * body_cnt);
 }
 
-// CuTe's make_tmem_copy works in the tensor's value width by upcasting the
-// atom's ValID (copy_traits_sm100.hpp:300).  Our tiles already address
-// (datapath@0, value-column@1), so the same unit change is one composition
-// with the value -> storage column map ((1),(vpb,1)):((1@0),(0,1@1)):
-// b32 column = value column / vpb, the sub-slot position dropping onto the
-// stride-0 mode (exactly CuTe upcast's shape-division, layout.hpp:1809).
+// Recast a (datapath, value-column) tile to b32 columns (CuTe upcast on the
+// column axis): b32 column = value column / values_per_b32, the sub-slot
+// position dropping onto a stride-0 mode.
 cute::Layout TmemTileToB32Columns(const cute::Layout &tile,
                                   int64_t values_per_b32) {
   cute::Layout value_to_b32 =
@@ -381,22 +379,19 @@ cute::Layout TmemTileToB32Columns(const cute::Layout &tile,
   return cute::Composition(value_to_b32, tile);
 }
 
-// A 16-bit fragment that needs the tcgen05.ld/st pack::16b / unpack::16b
-// modifiers does not cover its codomain: every value column is half-filled,
-// so size < cosize.  This is the accumulator format the MMA hardware writes
-// -- PTX ISA "Packing format for matrix D in Tensor Memory"
-// (9.7.17.10.4.1): a 16-bit matrix D element occupies the lower 16 bits of
-// its own 32-bit tensor-memory word (CUTLASS FrgTypeC's
-// StorageType=uint32_t / ValueType=half) -- and pack::16b is how tcgen05.ld
-// gathers those low halves (two adjacent words per register).  A fragment
-// with two values packed per b32 column is a bijection onto its footprint
-// and moves with the plain instruction.  The storage format is a property
-// of the buffer's layout, so it is decided on the WHOLE fragment -- a
-// Region slice of a batched buffer also leaves codomain gaps, but those
-// are batch gaps, not half-filled columns.
+// Whether a 16-bit fragment stores one value per b32 word (the low half:
+// the MMA accumulator format, PTX "Packing format for matrix D in Tensor
+// Memory") and so needs the tcgen05 pack::16b/unpack::16b modifiers.  Its
+// columns are then half-filled: size < occupied datapaths * column cosize.
+// Decided on the WHOLE fragment (storage is a property of the buffer);
+// counting only occupied datapaths keeps Layout F's datapath gaps from
+// looking like holes.
 bool TmemFragmentNeedsPack16b(const cute::Layout &fragment) {
-  return cute::AsConst(cute::Size(fragment)) !=
-         cute::AsConst(cute::Cosize(fragment));
+  int64_t datapaths = cute::AsConst(
+      cute::Size(cute::Filter(cute::Composition(kDpOnly, fragment))));
+  int64_t columns =
+      cute::AsConst(cute::Cosize(cute::Composition(kColOnly, fragment)));
+  return cute::AsConst(cute::Size(fragment)) < datapaths * columns;
 }
 
 } // namespace
@@ -412,23 +407,6 @@ PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer) {
   return Call(DataType::Handle(), builtin::handle_add_byte_offset(),
               {buffer->data, byte_offset});
 }
-
-// The TMA unit applies the descriptor's swizzle pattern relative to the
-// shared-memory base address, so the base must sit on a swizzle-pattern
-// repeat boundary or the data lands with a shifted phase (silently wrong
-// results, no fault). Report the requirement implied by the chosen
-// CU_TENSOR_MAP_SWIZZLE_* mode so MergeSharedMemoryAllocations can align the
-// buffer accordingly.
-static void RequireTMASmemAlignment(const LowerArgs &lower_args,
-                                    const Buffer &shared_tensor,
-                                    int cu_tensor_map_swizzle) {
-  if (!lower_args.require_smem_alignment)
-    return;
-  // CU_TENSOR_MAP_SWIZZLE_* values equal the SwizzleMode canonical ordinals.
-  SwizzleMode mode = SwizzleMode::FromOrdinal(cu_tensor_map_swizzle);
-  lower_args.require_smem_alignment(shared_tensor->data, mode.SmemAlignment());
-}
-
 struct TMAIm2ColDesc {
   size_t rank;
   int data_type;
@@ -615,16 +593,14 @@ void Copy::CheckParallelLoopLayout(const CopyNode &op, CopyInst copy_inst) {
 }
 
 // Infer the register Fragment of a TMEM<->fragment copy from the TMEM
-// buffer's inferred layout, so that the copy later lowers to one
-// tcgen05.ld/st (LowerTmem below).
+// buffer's layout, so the copy lowers to tcgen05.ld/st (LowerTmem below).
 //
-// Running example used throughout (a split epilogue reading one accumulator
-// in two halves with 128 threads):
+// Running example (a split epilogue reading one accumulator in two halves,
+// 128 threads):
 //   C_tmem  = alloc_tmem((128, 128), f32), fragment (128,128):(1@0,1@1)
-//             (@0 = TMEM datapath axis, @1 = TMEM column axis)
 //   C_local = alloc_fragment((128, 128), f32)
 //   T.copy(C_tmem[:, 0:64],   C_local[:, 0:64])    <- this op
-//   T.copy(C_tmem[:, 64:128], C_local[:, 64:128])  <- a later op, same result
+//   T.copy(C_tmem[:, 64:128], C_local[:, 64:128])  <- later op, same result
 LayoutMap Copy::InferTMemLayout(const CopyNode &op,
                                 const LayoutInferArgs &layout_args,
                                 CopyInst copy_inst) {
@@ -638,43 +614,37 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
       layout_args.layout_map.count(tmem_buf)) {
     Layout tmem_layout = layout_args.layout_map[tmem_buf];
 
-    // logical buffer coord -> physical TMEM (datapath@0, column@1)
-    // E.g., tmem_frag = (128,128):(1@0,1@1)
+    // tmem_frag: logical buffer coord -> physical TMEM (datapath@0,
+    //   column@1).
+    //   E.g. (128,128):(1@0,1@1).
     Optional<cute::Layout> tmem_frag =
         cute::LayoutFromTileLangHierarchical(tmem_layout);
     ICHECK(tmem_frag.defined())
         << "TMEM layout of " << tmem_buf->name
         << " is not decodable by the CuTe analyzer: " << tmem_layout;
 
-    // As in CuTe's make_tmem_copy, the tiled copy is described relative to
-    // the Region origin: cute::Restrict splits the fragment into origin +
-    // tile, where the (possibly dynamic) origin only moves the tcgen05_ld/st
-    // base address and the static tile maps region-local coordinates to
-    // (datapath, column) steps.  Leading batch modes of a rank>2 buffer ride
-    // in the tile like any other mode (the fragment repeats them along
-    // columns).
-    // region-local coord -> (datapath, column) step from the origin
-    // E.g., origin = (0,0),  tile = (128,64):(1@0,1@1)
-    //       (the second copy differs only in origin = (0,64))
+    // cute::Restrict splits the fragment into Region origin + tile: the
+    // (possibly dynamic) origin only moves the base address.
+    // tile: region-local coord -> (datapath, column) step from the origin.
+    //   E.g. origin = (0,0), tile = (128,64):(1@0,1@1); the second copy
+    //   differs only in origin = (0,64).
     const Array<Range> &tmem_ranges =
         is_tmem_load ? op.src_range : op.dst_range;
     const Array<Range> &reg_ranges = is_tmem_load ? op.dst_range : op.src_range;
     cute::Layout tile = cute::Restrict(tmem_frag.value(), tmem_ranges).get<1>();
 
-    // A pack::16b tile (one value per b32 storage slot, CUTLASS FrgTypeC)
-    // is planned in b32 columns -- the CuTe upcast make_tmem_copy applies
-    // to ValID.  Shapes are untouched, so the fragment's logical
-    // coordinates and value order carry over unchanged (b32 column j holds
-    // exactly value j).  A 16-bit tile with two values per b32 column keeps
-    // its value-column planning: the plain instruction moves whole columns
-    // of packed pairs.
+    // A pack::16b tile is planned in b32 columns (shapes untouched: b32
+    // column j holds exactly value j); a packed-pair tile keeps value
+    // columns and moves whole columns with the plain instruction.
     int64_t values_per_b32 = 32 / (tmem_buf->dtype.bits());
-    if (values_per_b32 > 1 && TmemFragmentNeedsPack16b(tmem_frag.value()))
+    bool pack16b_tile =
+        values_per_b32 > 1 && TmemFragmentNeedsPack16b(tmem_frag.value());
+    if (pack16b_tile)
       tile = TmemTileToB32Columns(tile, values_per_b32);
 
     // The register buffer is a grid of such slices (a split epilogue issues
     // one copy per slice), each appending its own registers.
-    // E.g., nrep = (1, 2): two column halves.
+    // E.g. nrep = (1, 2): two column halves.
     size_t rank = reg_ranges.size();
     Array<int64_t> nrep;
     int64_t total_reps = 1;
@@ -700,11 +670,18 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
     for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
          --num_useful_wgs) {
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-      // region-local coord -> (thread@0, value@1)
-      // E.g., local_frag = (128,64):(1@0,1@1) for 32dp32b, 128 threads
-      //       (thread = datapath, value = column within the slice).
-      Tcgen05CopyPlan expanded = ExpandTcgen05Layout(GetTcgen05MetaLd32Dp32B(),
-                                                     tile, num_useful_threads);
+      // local_frag: region-local coord -> (thread@0, value@1).
+      //   E.g. (128,64):(1@0,1@1) for 32dp32b, 128 threads.
+      int64_t values_per_column = pack16b_tile ? 1 : values_per_b32;
+      Tcgen05CopyPlan expanded =
+          ExpandTcgen05Layout(GetTcgen05MetaLd32Dp32B(), tile,
+                              num_useful_threads, values_per_column);
+      // A Layout F tile occupies only the low 16 datapaths per
+      // sub-partition, which no full-width atom can tile; fall back to the
+      // narrowest half-subpartition atom.
+      if (!expanded.defined())
+        expanded = ExpandTcgen05Layout(GetTcgen05MetaLd16Dp64B(), tile,
+                                       num_useful_threads, values_per_column);
       if (!expanded.defined()) {
         continue;
       }
@@ -713,18 +690,13 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
           cute::AsConst(cute::Size(local_frag)) / num_useful_threads;
 
       // Repeat the slice along the value vector to cover the whole register
-      // buffer: each further slice appends one slice's worth of registers
-      // per thread (row-major slice grid, matching the buffer's row-major
-      // element order), so every slice of a split copy lands in its own
-      // value range of one full-buffer Fragment.  Unit-extent region dims
-      // (dropped by Restrict) carry only their repetition mode.
-      // per-dim slice index -> value@1
-      // E.g., rep_grid = Composition(2:64@1, (1,2):(2,1)) = (1,2):(128@1,64@1)
-      //       full mode 1 pairs the slice's column mode with its repetition:
-      //       full = ((128,1),(64,2)):((1@0,128@1),(1@1,64@1))
-      //       so C_local[i, 64+j] -> thread i, value 64+j: the second copy's
-      //       64 registers per thread follow the first's, and the layout is
-      //       identical no matter which half inferred it.
+      // buffer (row-major slice grid): each further slice appends one
+      // slice's worth of registers per thread, so both halves of a split
+      // copy infer the same full-buffer Fragment.  Unit-extent region dims
+      // carry only their repetition mode.
+      // rep_grid: per-dim slice index -> value@1.
+      //   E.g. (1,2):(128@1,64@1) -- the second half's 64 registers per
+      //   thread follow the first's.
       cute::Layout rep_grid = cute::Composition(
           cute::Layout(total_reps, vals_per_slice * cute::E({1})),
           cute::MakeRowMajorLayout(nrep));
@@ -741,7 +713,7 @@ LayoutMap Copy::InferTMemLayout(const CopyNode &op,
       ICHECK_EQ(tile_idx, cute::Rank(tile))
           << "TMEM copy tile rank does not match the register loop rank";
 
-      // full buffer coord -> (thread@0, value@1)
+      // logical_coord2frag: full buffer coord -> (thread@0, value@1).
       Fragment logical_coord2frag = FragmentToTileLang(cute::MakeLayout(modes));
       results.Set(reg_buf, logical_coord2frag->BindThreadRange(
                                layout_args.thread_bounds));
@@ -1368,10 +1340,9 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
 
 namespace {
 
-// Unpack a (datapath, column) coordinate IntTuple produced by evaluating a
-// TMEM cute fragment into exactly two scalar expressions.  Adding the rank-2
-// zero ArithmeticTuple first normalizes the coordinate: an axis the layout
-// never touches materializes as a plain zero slot.
+// Unpack a (datapath, column) coordinate IntTuple into two scalar
+// expressions; adding the rank-2 zero first materializes an axis the layout
+// never touches as a plain zero.
 Array<PrimExpr> TmemCoordExprs(const cute::IntTuple &coord) {
   DataType dtype = DataType::Int(32);
   cute::IntTuple normalized = coord + cute::IntTupleTuple({0, 0});
@@ -1384,21 +1355,16 @@ Array<PrimExpr> TmemCoordExprs(const cute::IntTuple &coord) {
 
 } // namespace
 
-// Lower a TMEM<->fragment copy to one tcgen05.ld/st call.
+// Lower a TMEM<->fragment copy to tcgen05.ld/st calls.
 //
-// Running example (the same split epilogue as InferTMemLayout, lowering its
-// SECOND half so the Region origin is nonzero):
-//   C_tmem  = alloc_tmem((128, 128), f32), fragment (128,128):(1@0,1@1)
-//   C_local = alloc_fragment((128, 128), f32), 128 threads, whose inferred
-//             Fragment is full_tv = ((128,1),(64,2)):((1@0,128@1),(1@1,64@1))
+// Running example (the SECOND half of InferTMemLayout's split epilogue, so
+// the Region origin is nonzero):
 //   T.copy(C_tmem[:, 64:128], C_local[:, 64:128])
 //
-// The instruction pattern (which threads move which (datapath, column)) is
-// static and validated against the register Fragment; the Region origin only
-// selects WHERE: it becomes the tcgen05_ld/st base-address token
-// (LowerSharedTmem later encodes it as datapath<<16 | b32column), so a
-// dynamic origin -- e.g. a software-pipeline stage index -- just moves the
-// base address.
+// The instruction pattern is static and validated against the register
+// Fragment; the (possibly dynamic) Region origin only becomes the
+// tcgen05_ld/st base-address token (datapath<<16 | b32column in
+// LowerSharedTmem).
 Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) {
   const Buffer &src = op.src;
@@ -1476,21 +1442,16 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   Array<PrimExpr> reg_logical_indices =
       op.MakeIndices(loop_vars, 1 - tmem_side);
 
-  // logical buffer coord -> physical TMEM (datapath@0, column@1)
+  // tmem_frag: logical buffer coord -> physical TMEM (datapath@0, column@1).
   Optional<cute::Layout> tmem_frag =
       cute::LayoutFromTileLangHierarchical(tmem_layout);
   ICHECK(tmem_frag.defined())
       << "TMEM layout of " << tmem_buf->name
       << " is not decodable by the CuTe analyzer: " << tmem_layout;
 
-  // As in CuTe's make_tmem_copy, describe the tiled copy relative to the
-  // Region origin: cute::Restrict splits the fragment into origin + tile,
-  // where the origin — which may be dynamic, for example a software-pipeline
-  // stage — only moves the base address carried by the tcgen05_ld/st address
-  // token, and the static tile maps the region-local loop coordinates to
-  // (datapath, column) steps.
-  // region-local coord -> (datapath, column) step from the origin
-  // E.g., phy_origin = (0, 64),  tile = (128,64):(1@0,1@1)
+  // As in InferTMemLayout, split the fragment into Region origin + tile.
+  // tile: region-local coord -> (datapath, column) step from the origin.
+  //   E.g. phy_origin = (0,64), tile = (128,64):(1@0,1@1).
   const Array<Range> &tmem_ranges =
       tmem_side == 0 ? op.src_range : op.dst_range;
   auto restricted = cute::Restrict(tmem_frag.value(), tmem_ranges);
@@ -1499,17 +1460,11 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   ICHECK_EQ(cute::Rank(tile), static_cast<int64_t>(loop_vars.size()))
       << "TMEM copy tile rank does not match the copy loop rank";
 
-  // 16-bit values in 32-bit TMEM columns come in two layouts (see
-  // InferTMemLayout):
-  //  * pack::16b / unpack::16b (one value in the low half of each word,
-  //    CUTLASS FrgTypeC): plan on the b32-upcast tile; the modifier's
-  //    registers gather the low halves of two ADJACENT b32 columns
-  //    (Copy_Traits<*_16b> ValID) -- one register per two columns;
-  //  * two values packed per b32 column: plan in value columns and move
-  //    whole columns of packed pairs with the PLAIN instruction -- one
-  //    register per column, i.e. per two values.
-  // Either way one register covers two values, so the wrapper's N is half
-  // the planned chunk count.
+  // 16-bit values come in two layouts (TmemFragmentNeedsPack16b): pack::16b
+  // plans on the b32-upcast tile (one register gathers two adjacent
+  // columns' low halves); packed pairs plan in value columns (one register
+  // per column).  Either way one register covers two values, so the
+  // wrapper's N is half the planned chunk count.
   int64_t values_per_b32 = 32 / (tmem_buf->dtype.bits());
   bool pack16b =
       values_per_b32 > 1 && TmemFragmentNeedsPack16b(tmem_frag.value());
@@ -1527,10 +1482,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
 
   size_t tmem_rank = tmem_buf->shape.size();
 
-  // The address token below is the Region's logical origin across all buffer
-  // modes (leading batch modes are pinned by the Region).  LowerTileOp
-  // materializes the buffer's layout over it, so no separate origin
-  // adjustment is needed here.
+  // The address token below is the Region's logical origin; LowerTileOp
+  // materializes the buffer's layout over it.
   Map<Var, PrimExpr> loop_to_origin;
   for (const auto &iv : loop_vars) {
     loop_to_origin.Set(iv->var, iv->dom->min);
@@ -1567,28 +1520,23 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
     for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
          num_useful_wgs--) {
       int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
-      // region-local loop coord -> (thread@0, value@1)
-      Tcgen05CopyPlan plan =
-          ExpandTcgen05Layout(meta, tile, num_useful_threads);
+      // plan: region-local loop coord -> (thread@0, value@1).
+      Tcgen05CopyPlan plan = ExpandTcgen05Layout(meta, tile, num_useful_threads,
+                                                 pack16b ? 1 : values_per_b32);
       if (!plan.defined()) {
         continue;
       }
       int num_chunks_each_wg = static_cast<int>(plan->num_chunks_each_wg);
 
-      // The single conversion to a TileLang Fragment happens only on this
-      // final composed layout.
-      // E.g., fragment = (128,64):(1@0,1@1): loop (i, j) -> thread i,
-      //       value j.
+      // target_frag: loop coord -> (thread@0, value@1), the single
+      //   conversion to a TileLang Fragment.
+      //   E.g. (128,64):(1@0,1@1).
       Fragment target_frag = FragmentToTileLang(plan->fragment);
 
-      // The instruction's pattern must agree with the register buffer's
-      // Fragment on this Region, up to the Region's base register -- like
-      // the TMEM origin, that base may be dynamic (e.g. a serial slice
-      // loop) and only offsets the register pointer below.
-      // E.g., reg_layout maps C_local[i, 64+j] -> thread i, value 64+j, so
-      //       reg_thread == target_thread == i, and reg_val == 64+j with
-      //       reg_origin = 64: the instruction covers registers 64..127 of
-      //       each thread, and the access_ptr below starts at offset 64.
+      // The pattern must agree with the register Fragment up to the
+      // Region's (possibly dynamic) base register, which only offsets the
+      // register pointer below.
+      // E.g. reg_val == 64+j with reg_origin = 64: registers 64..127.
       PrimExpr target_thread =
           target_frag->ForwardThread(loop_exprs, std::nullopt);
       PrimExpr reg_thread =
@@ -1605,17 +1553,14 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       }
 
       bool use_pack_unpack_modifier = pack16b;
-      // One register covers two 16-bit values -- pack::16b spans two b32
-      // columns, a packed pair shares one -- so the wrapper's N is half the
-      // planned chunk count (N is always a power of two).
+      // One register covers two 16-bit values, so N halves.
       int effective_chunks =
           needs_pack_unpack ? num_chunks_each_wg / 2 : num_chunks_each_wg;
       PrimExpr relative_wg_idx =
           FloorDiv(Sub(lower_args.thread_index, lower_args.thread_bounds->min),
                    WARPGROUP_SIZE);
-      // Column offsets are raw b32 columns: a pack::16b tile's chunk count
-      // already is b32 columns, a packed-pair tile's is halved (planned in
-      // value columns, two per b32).
+      // Column offsets are raw b32 columns: pack::16b already counts b32
+      // columns, a packed-pair count halves (two value columns per b32).
       int chunk_cols =
           pack16b ? num_chunks_each_wg * width : effective_chunks * width;
       PrimExpr col_offset = num_useful_threads == WARPGROUP_SIZE
@@ -1624,17 +1569,12 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
       int64_t vals_per_issue = plan->vals_per_issue;
       have_succeeded = true;
 
-      // One tcgen05 call per issue (rest coordinate): a gapped tile copies
-      // one contiguous chunk at a time.  Issue r starts at the region-local
-      // logical coords idx2crd(rest_domain(r)) -- decoded column-major over
-      // the loop extents -- and appends vals_per_issue registers per
-      // thread after the previous issues'.
-      // E.g., the running example (one issue) emits
+      // One tcgen05 call per issue: issue r starts at the region-local
+      // coords idx2crd(rest_domain(r)) and appends vals_per_issue registers
+      // per thread.
+      // E.g. the running example (one issue) emits
       //   tl::tcgen05_ld_32dp32bNx<64, false>(C_tmem[0, 64], 0,
       //                                       &C_local[64]);
-      // where the C_tmem[0, 64] token becomes base + (0<<16 | 64) in
-      // LowerSharedTmem, and &C_local[64] is the per-thread register slice
-      // at offset reg_origin.
       Array<Stmt> calls;
       Buffer orig_reg_buf = is_ld ? op.dst : op.src;
       for (int64_t issue = 0; issue < plan->num_issues; ++issue) {
@@ -1650,11 +1590,9 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
             tmem_logical_indices.Map([&](const PrimExpr &index) {
               return analyzer->Simplify(Substitute(index, loop_to_issue));
             });
-        // The access_ptr offset is a LOGICAL linear offset: LowerTileOp's
-        // HandleAccessPtrAndOffset later decodes it over the register
-        // buffer's logical shape and maps it through the Fragment to the
-        // per-thread register index.  Linearize the issue's register origin
-        // row-major over the buffer shape.
+        // The access_ptr offset is a LOGICAL linear offset (row-major over
+        // the buffer shape); LowerTileOp later maps it through the Fragment
+        // to the per-thread register index.
         PrimExpr issue_reg_offset = IntImm(DataType::Int(32), 0);
         for (size_t d = 0; d < reg_logical_indices.size(); ++d) {
           issue_reg_offset = issue_reg_offset * orig_reg_buf->shape[d] +
@@ -1667,6 +1605,8 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
         args.push_back(Bool(use_pack_unpack_modifier));
         args.push_back(BufferLoad(tmem_buf, issue_tmem_indices));
         args.push_back(col_offset);
+        args.push_back(IntImm(DataType::Int(32),
+                              static_cast<int>(plan->datapaths_per_warp)));
         args.push_back(reg_buf.access_ptr(
             /*access_mask=*/is_ld ? 2 : 1, DataType::Handle(),
             /*content_lanes=*/1, /*offset=*/issue_reg_offset,
@@ -1841,7 +1781,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
 
-  auto fallback_to_normal = [&](const char *reason) -> Stmt {
+  auto fallback_to_normal = [&](const std::string &reason) -> Stmt {
     if (GetIsTmaCopy(op)) {
       LOG(FATAL) << "T.tma_copy() cannot fall back to normal copy in "
                  << "LowerBulk: " << reason << ", src=" << src->name
@@ -1899,39 +1839,21 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     shared_layout = MakeLinearLayout(shared_shape);
   }
 
-  // Convert the TileLang layout to a possibly swizzled CuTe ComposedLayout.
-  // This computes the swizzle from an arbitrary TileLang layout.
-  // E.g., composed = Sw<3,3,3> o 0 o (64,64,8):(64,1,4096)
-  auto composed = cute::ComposedLayoutFromTileLang(shared_layout);
-  if (!composed.defined()) {
+  // Convert the TileLang layout to a TensorMap-compatible CuTe layout.
+  TMASharedLayoutAnalysis layout_analysis =
+      AnalyzeTMASharedLayout(shared_layout, shared_tensor->dtype);
+  if (!layout_analysis.encoding.has_value()) {
     DLOG(WARNING) << "Shared layout for src: " << src->name
                   << ", dst: " << dst->name
-                  << " is not a CuTe swizzle over an affine layout, fallback "
-                     "to normal copy";
-    return fallback_to_normal("undecodable shared swizzle layout");
+                  << " cannot be encoded for TMA: " << layout_analysis.reason
+                  << ", fallback to normal copy";
+    return fallback_to_normal(layout_analysis.reason);
   }
-  // Recast element-space layout into byte-address space.
-  // Because CuTe swizzle are based on byte addresses.
+  const TMASharedLayoutEncoding &layout_encoding =
+      layout_analysis.encoding.value();
+  desc.swizzle = layout_encoding.swizzle_mode.CanonicalOrdinal();
   int elem_bits = shared_tensor->dtype.bits();
-  // E.g., composed_bytes = Sw<3,4,3> o 0 o (64,64,8):(128,2,8192)
-  auto composed_bytes = composed.value().Recast(elem_bits, /*new_bits=*/8);
-  const auto *sw = composed_bytes->swizzle.get();
-  int b_bits = sw->b_bits, m_base = sw->m_base, s_shift = sw->s_shift;
-  if (!sw->IsSwizzled()) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-  } else if (b_bits == 1 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-  } else if (b_bits == 2 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-  } else if (b_bits == 3 && m_base == 4 && s_shift == 3) {
-    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
-  } else {
-    DLOG(WARNING) << "Shared swizzle Sw<" << b_bits << "," << m_base << ","
-                  << s_shift << "> for src: " << src->name
-                  << ", dst: " << dst->name
-                  << " is not a TMA swizzle atom, fallback to normal copy";
-    return fallback_to_normal("non-TMA shared swizzle layout");
-  }
+  const cute::SwizzleNode *sw = layout_encoding.composed_bytes->swizzle.get();
 
   ICHECK(CanProveTMADescriptorBaseAligned(
       global_tensor, shared_tensor->dtype, analyzer,
@@ -1949,11 +1871,12 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
   // repeat boundary or the data lands with a shifted phase (silently wrong
   // results, no fault). Report the requirement implied by the chosen swizzle
   // mode so MergeSharedMemoryAllocations can align the buffer accordingly.
-  RequireTMASmemAlignment(lower_args, shared_tensor, desc.swizzle);
+  RequireTMASmemAlignment(lower_args, shared_tensor,
+                          layout_encoding.swizzle_mode);
 
   // logical shared -> physical shared (without swizzle)
   // E.g., smem_plain = (64,64,8):(64,1,4096)
-  auto smem_plain = composed.value()->layout;
+  auto smem_plain = layout_encoding.composed->layout;
 
   // tile -> logical shared -> physical shared (without siwzzle)
   // E.g., tile_to_smem_plain = (64,64,8):(64,1,4096)
@@ -2029,7 +1952,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     int64_t box_dim = cute::AsConst(tile_gbasis->shape[i]);
     if (box_dim > cap) {
       // This exceeds the hardware constraint. But we can make it work by
-      // spliting a mode.
+      // splitting a mode.
       // Only the slowest box mode has leftover the rest loop can absorb;
       // shrinking a faster mode would gap the contiguous shared prefix.
       int64_t inner = -1;
@@ -2553,7 +2476,8 @@ Stmt Copy::LowerBulkGather4(const CopyNode &op, const LowerArgs &lower_args,
              desc.swizzle != static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE))
       << "-byte-aligned global buffer view, but elem_offset for "
       << global_tensor->name << " is " << global_tensor->elem_offset;
-  RequireTMASmemAlignment(lower_args, shared_tensor, desc.swizzle);
+  RequireTMASmemAlignment(lower_args, shared_tensor,
+                          SwizzleMode::FromOrdinal(desc.swizzle));
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
@@ -2837,7 +2761,7 @@ Stmt Im2Col::Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
   RequireTMASmemAlignment(
       lower_args,
       lower_args.buffer_remap.count(dst) ? lower_args.buffer_remap[dst] : dst,
-      desc.swizzle);
+      SwizzleMode::FromOrdinal(desc.swizzle));
 
   Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
                           desc.EncodeCallArgs());

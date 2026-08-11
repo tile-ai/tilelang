@@ -49,6 +49,24 @@ def cumsum_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.f
     return cumsum
 
 
+def test_fragment_scan_annotations_preserved():
+    @T.prim_func
+    def scan(A: T.Tensor((32,), T.float32)):
+        with T.Kernel(1, threads=32):
+            sum_frag = T.alloc_fragment((32,), T.float32)
+            max_frag = T.alloc_fragment((32,), T.float32)
+            T.copy(A, sum_frag)
+            T.copy(A, max_frag)
+            T.cumsum(sum_frag, annotations={"test.scan": "cumsum"})
+            T.cummax(max_frag, annotations={"test.scan": "cummax"})
+
+    lines = scan.script().splitlines()
+    cumsum_line = next(line for line in lines if "T.cumsum(" in line)
+    cummax_line = next(line for line in lines if "T.cummax(" in line)
+    assert 'test.scan="cumsum"' in cumsum_line
+    assert 'test.scan="cummax"' in cummax_line
+
+
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
     if scope == "smem":
         program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
@@ -689,7 +707,7 @@ def test_scan_offset_subregion():
         for dim in (0, 1):
             for reverse in (False, True):
                 # r0 == 64 is the regressing case (r0 == 0 is already covered by
-                # the full-region region tests above).
+                # the full-region tests above).
                 run_scan_offset_subregion(H, W, 64, 128, op=op, dim=dim, reverse=reverse)
 
 

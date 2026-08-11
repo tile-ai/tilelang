@@ -6,6 +6,7 @@
 #include "support/check.h"
 #include <optional>
 #include <tvm/ir/cast.h>
+#include <tvm/relax/analysis.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
 #include <tvm/tirx/builtin.h>
@@ -18,11 +19,11 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
-#include "../op/builtin.h"
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
@@ -406,14 +407,42 @@ private:
     return block;
   }
 
-  int CheckAndGetBufferRowSize(const Buffer &buffer) {
-    ICHECK(buffer->shape.size() >= 2)
-        << "The dimension of Buffer \"" << buffer->name << "\" with shape "
-        << buffer->shape << " should be at least 2";
+  Array<PrimExpr> RemapAccessIndices(const Array<PrimExpr> &indices,
+                                     const Array<PrimExpr> &old_shape,
+                                     const Array<PrimExpr> &new_shape,
+                                     const Layout &layout,
+                                     const Optional<PrimExpr> &offset) {
+    ICHECK_EQ(indices.size(), old_shape.size())
+        << "The access rank must match the original buffer rank, but got "
+        << indices << " and " << old_shape;
+    ICHECK(!old_shape.empty())
+        << "Layout-remapped access pointers do not support scalar buffers";
+    const Array<PrimExpr> input_shape = layout->InputShape();
+    const Array<PrimExpr> output_shape = layout->OutputShape();
+    ICHECK(relax::CanProveShapeEqual(old_shape, input_shape, analyzer_))
+        << "The original buffer shape must match the layout input shape, but "
+           "got "
+        << old_shape << " and " << input_shape;
+    ICHECK(relax::CanProveShapeEqual(new_shape, output_shape, analyzer_))
+        << "The remapped buffer shape must match the layout output shape, but "
+           "got "
+        << new_shape << " and " << output_shape;
 
-    auto dim = buffer->shape.size();
-    auto buffer_row_size = buffer->shape[dim - 1].as<IntImmNode>()->value;
-    return buffer_row_size;
+    // Delinearize only the additional offset. Keeping the original indices in
+    // multidimensional form preserves slice-local expressions for the layout.
+    PrimExpr remaining_offset =
+        analyzer_->Simplify(offset.value_or(make_zero(indices[0].dtype())));
+    Array<PrimExpr> multi_dim_indices;
+    for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
+      multi_dim_indices.insert(multi_dim_indices.begin(),
+                               floormod(remaining_offset, old_shape[i]));
+      remaining_offset = floordiv(remaining_offset, old_shape[i]);
+    }
+    for (size_t i = 0; i < indices.size(); ++i) {
+      multi_dim_indices.Set(
+          i, analyzer_->Simplify(indices[i] + multi_dim_indices[i]));
+    }
+    return layout->Forward(multi_dim_indices);
   }
 
   struct AccessPtrResult {
@@ -481,21 +510,15 @@ private:
       if (offset.defined()) {
         elem_offset = elem_offset + offset.value();
       }
-      // Get original and new buffer shapes
+      // Get original and new buffer shapes.
       Array<PrimExpr> old_shape = original_buffer->shape;
       Array<PrimExpr> new_shape = new_buffer->shape;
-      // Convert linear offset to multi-dimensional indices
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = elem_offset;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(
-            multi_dim_indices.begin(),
-            analyzer_->Simplify(floormod(remaining_offset, old_shape[i])));
-        remaining_offset =
-            analyzer_->Simplify(floordiv(remaining_offset, old_shape[i]));
+      Array<PrimExpr> zero_indices;
+      for (size_t i = 0; i < old_shape.size(); ++i) {
+        zero_indices.push_back(make_zero(elem_offset.dtype()));
       }
-      // Apply layout transformation
-      auto forward_indices = layout->Forward(multi_dim_indices);
+      Array<PrimExpr> forward_indices = RemapAccessIndices(
+          zero_indices, old_shape, new_shape, layout, elem_offset);
       PrimExpr new_offset = 0;
       PrimExpr stride_offset = 1;
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
@@ -561,47 +584,8 @@ private:
         return result;
       }
 
-      PrimExpr elem_offset = 0;
-      PrimExpr stride = 1;
-
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        elem_offset += indices[i] * stride;
-        stride *= old_shape[i];
-      }
-
-      PrimExpr smem_offset =
-          elem_offset + (offset.defined() ? offset.value() : 0);
-
-      auto buffer_map_iter = buffer_map_.find(Downcast<Var>(remap_key->data));
-
-      int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
-      (void)buffer_row_size;
-
-      // Convert offset to target-dimension, reindex it and convert it back
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = smem_offset;
-
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(multi_dim_indices.begin(),
-                                 floormod(remaining_offset, old_shape[i]));
-        remaining_offset = floordiv(remaining_offset, old_shape[i]);
-      }
-
-      auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
-
-      Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(),
-                           floormod(new_offset, new_shape[i]));
-        new_offset = floordiv(new_offset, new_shape[i]);
-      }
+      Array<PrimExpr> new_indices = RemapAccessIndices(
+          indices, old_shape, new_shape, layout.value(), offset);
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices)};
       if (buffer_remap_.count(remap_key)) {
@@ -667,44 +651,8 @@ private:
         return result;
       }
 
-      PrimExpr elem_offset = 0;
-      PrimExpr stride = 1;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        elem_offset += indices[i] * stride;
-        stride *= old_shape[i];
-      }
-
-      PrimExpr smem_offset =
-          elem_offset + (offset.defined() ? offset.value() : 0);
-
-      auto buffer_map_iter = buffer_map_.find(Downcast<Var>(remap_key->data));
-      int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
-      (void)buffer_row_size;
-
-      // Convert offset to target-dimension, reindex it and convert it back
-      Array<PrimExpr> multi_dim_indices;
-      PrimExpr remaining_offset = smem_offset;
-      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
-        multi_dim_indices.insert(multi_dim_indices.begin(),
-                                 floormod(remaining_offset, old_shape[i]));
-        remaining_offset = floordiv(remaining_offset, old_shape[i]);
-      }
-
-      auto forward_indices = layout.value()->Forward(multi_dim_indices);
-      PrimExpr new_offset = 0;
-      PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= new_shape[i];
-      }
-      new_offset = analyzer_->Simplify(new_offset);
-
-      Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(),
-                           floormod(new_offset, new_shape[i]));
-        new_offset = floordiv(new_offset, new_shape[i]);
-      }
+      Array<PrimExpr> new_indices = RemapAccessIndices(
+          indices, old_shape, new_shape, layout.value(), offset);
 
       Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices), extent,
                                   rw_mask};
@@ -1441,20 +1389,26 @@ private:
     // the body, buffers may have been remapped via var_remap_. We need to find
     // the original var to check against reducer_info.
     bool has_reducer = false;
+    // Stores to buffers in this list must execute only for REP=0 of the
+    // current T.Parallel loop layout.
+    Array<Buffer> fully_replicated_reducer_buffers;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (!has_reducer) {
-        if (const auto *store = obj.as<BufferStoreNode>()) {
-          Var data_var = store->buffer->data;
-          // Find the original var if it was remapped
-          // var_remap_ maps old_var -> new_var, so we need reverse lookup
-          Var original_var = data_var;
-          for (const auto &[old_var, new_var] : var_remap_) {
-            if (new_var.same_as(data_var)) {
-              original_var = old_var;
-              break;
-            }
+      if (const auto *store = obj.as<BufferStoreNode>()) {
+        Var data_var = store->buffer->data;
+        // Find the original var if it was remapped
+        // var_remap_ maps old_var -> new_var, so we need reverse lookup
+        Var original_var = data_var;
+        for (const auto &[old_var, new_var] : var_remap_) {
+          if (new_var.same_as(data_var)) {
+            original_var = old_var;
+            break;
           }
-          has_reducer = reducer_info.count(original_var) != 0;
+        }
+        if (reducer_info.count(original_var)) {
+          has_reducer = true;
+          if (reducer_info[original_var]->rep == ReducerRepType::ALL) {
+            fully_replicated_reducer_buffers.push_back(store->buffer);
+          }
         }
       }
     });
@@ -1480,7 +1434,8 @@ private:
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
-        predicate, parallel_loop, should_vectorize, require_padding_guard);
+        predicate, parallel_loop, should_vectorize, require_padding_guard,
+        fully_replicated_reducer_buffers);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to

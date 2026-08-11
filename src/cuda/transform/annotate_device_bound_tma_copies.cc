@@ -10,7 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 #include "op/copy.h"
 #include "op/operator.h"
 #include "op/utils.h"

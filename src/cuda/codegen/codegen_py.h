@@ -102,7 +102,7 @@ protected:
 
 protected:
   /*!
-   * \brief Print Type representation of type type.
+   * \brief Print the type representation.
    * \param t The type representation.
    * \param os The output stream
    */
@@ -161,7 +161,7 @@ protected:
   void VisitExpr_(const BufferLoadNode *op,
                   std::ostream &os) override; // NOLINT(*)
 
-  // statment
+  // statement
   void VisitStmt_(const BufferStoreNode *op) override;
   void VisitStmt_(const DeclBufferNode *op) override;
   void VisitStmt_(const BindNode *op) override;
@@ -188,7 +188,7 @@ protected:
   /*!
    * \brief Print external function call.
    * \param ret_type The return type.
-   * \param global_symbol The symbolc of the target function.
+   * \param global_symbol The symbolic name of the target function.
    * \param args The arguments to the function.
    * \param skip_first_arg Whether to skip the first arguments.
    * \param os The output stream.

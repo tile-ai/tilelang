@@ -51,6 +51,7 @@ def _get_device_kernel_script(detect_inplace: bool) -> str:
     return artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)

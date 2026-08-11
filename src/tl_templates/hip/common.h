@@ -379,4 +379,16 @@ template <> TL_DEVICE bfloat16_t shfl(bfloat16_t val, int srcLane) {
   return bfloat16_t(r);
 }
 
+TL_DEVICE half_t RoundTiesAwayFromZero(half_t x) {
+  return half_t(roundf(static_cast<float>(x)));
+}
+
+TL_DEVICE float RoundTiesAwayFromZero(float x) { return roundf(x); }
+
+TL_DEVICE double RoundTiesAwayFromZero(double x) { return round(x); }
+
+TL_DEVICE bfloat16_t RoundTiesAwayFromZero(bfloat16_t x) {
+  return bfloat16_t(roundf(static_cast<float>(x)));
+}
+
 } // namespace tl

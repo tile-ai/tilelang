@@ -155,6 +155,7 @@ def test_lower_opaque_block_skips_empty_alloc():
 # ---------------------------------------------------------------------------
 # Test 4: GEMM descriptor allocs inside loop should get the marker
 # ---------------------------------------------------------------------------
+@tilelang.testing.requires_cuda
 def test_lower_opaque_block_inserts_scope_for_gemm_descriptor_alloc():
     """Lowered WGMMA descriptor buffers inside a loop should trigger lexical_alloc_scope."""
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
@@ -272,6 +273,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
 # ---------------------------------------------------------------------------
 # Test 8: disable-ws pipelined GEMM should not wrap the fragment root block
 # ---------------------------------------------------------------------------
+@tilelang.testing.requires_cuda
 def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
     """A fragment root block should not force lexical_alloc_scope in disable-ws pipeline."""
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})

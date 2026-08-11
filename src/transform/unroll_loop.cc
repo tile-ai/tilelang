@@ -66,7 +66,7 @@ struct UnrollLoopConfigNode
         .def_ro(
             "explicit_unroll", &UnrollLoopConfigNode::explicit_unroll,
             "Whether to explicitly unroll the loop instead of setting a pragma",
-            refl::DefaultValue(true))
+            refl::DefaultValue(false))
         .def_ro(
             "unroll_local_access", &UnrollLoopConfigNode::unroll_local_access,
             "Whether to always unroll local access", refl::DefaultValue(false));
@@ -177,7 +177,15 @@ public:
     // Post order so we can collect more information
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     op = stmt.as<ForNode>();
-    int value = GetExtent(op);
+    int value = GetTripCount(op);
+
+    // Whether to explicitly unroll.
+    bool explicit_unroll = explicit_unroll_;
+    if (auto attr = op->annotations.Get(tirx::attr::pragma_unroll_explicit)) {
+      explicit_unroll =
+          static_cast<bool>(Downcast<Integer>(attr.value())->value);
+    }
+
     // condition for auto unroll
     bool auto_unroll =
         (op->kind == ForKind::kSerial && value >= 0 &&
@@ -187,9 +195,9 @@ public:
                                   value <= auto_max_extent_);
 
     if (op->kind == ForKind::kUnrolled) {
-      if (explicit_unroll_) {
+      if (explicit_unroll) {
         ICHECK_GE(value, 0)
-            << "Cannot unroll non-constant loop " << explicit_unroll_;
+            << "Cannot unroll non-constant loop " << explicit_unroll;
       }
       auto_unroll = true;
     }
@@ -208,7 +216,7 @@ public:
       normal_loop_depth_ += 1;
     }
 
-    if ((auto_unroll && explicit_unroll_) ||
+    if ((auto_unroll && explicit_unroll) ||
         // unroll loops with extent = 1, no matter how many steps in body
         (0 <= value && value <= auto_max_extent_ && auto_max_extent_ == 1)) {
       return Unroll(op);
@@ -278,27 +286,21 @@ public:
   }
 
   Stmt Unroll(const ForNode *op) {
-    int value = GetExtent(op);
+    int value = GetTripCount(op);
     // For loop must have a constant integer extent
-    ICHECK_NE(value, -1) << "loop doesn't have a constant integer extent";
-    if (value == 0)
+    ICHECK_GE(value, 0) << "loop doesn't have a constant integer extent";
+    if (value <= 0)
       return Evaluate(0);
+    int step = GetStep(op);
     Stmt body = op->body;
     Map<Var, PrimExpr> vmap;
     Array<Stmt> unrolled;
     for (int i = 0; i < value; ++i) {
-      // The i-th iteration value is min + i * step (step defaults to 1).
-      PrimExpr iter_value;
-      if (op->step.defined() && !is_one(op->step.value())) {
-        iter_value =
-            op->min + make_const(op->loop_var.dtype(), i) * op->step.value();
-      } else {
-        iter_value = op->min + make_const(op->loop_var.dtype(), i);
-      }
-      vmap.Set(op->loop_var, iter_value);
-      Stmt step = Substitute(body, vmap);
-      step = UnrolledBodyDefFreshener()(std::move(step));
-      unrolled.push_back(step);
+      vmap.Set(op->loop_var,
+               op->min + make_const(op->loop_var.dtype(), i * step));
+      Stmt step_body = Substitute(body, vmap);
+      step_body = UnrolledBodyDefFreshener()(std::move(step_body));
+      unrolled.push_back(step_body);
     }
     return SeqStmt::Flatten(unrolled);
   }
@@ -317,6 +319,28 @@ private:
       value = static_cast<int>(v1->value);
     }
     return value;
+  }
+
+  // returns the step of the loop
+  int GetStep(const ForNode *op) {
+    if (!op->step.defined()) {
+      return 1;
+    }
+    auto *step = as_const_int(op->step.value());
+    ICHECK(step) << "An loop's step must be constant";
+    ICHECK_GT(*step, 0) << "A loop's step must be positive";
+    return *step;
+  }
+
+  // returns the trip count of the loop if it's a constant integer, otherwise
+  // return -1
+  int GetTripCount(const ForNode *op) {
+    int extent = GetExtent(op);
+    if (extent < 0) {
+      return -1;
+    }
+    int step = GetStep(op);
+    return 1 + (extent - 1) / step;
   }
 
   // maximum number of step to perform auto unroll.

@@ -7,12 +7,15 @@ expands tile ops by field name, with per-class operator highlighting.
 """
 
 from .core import (
-    build_pass_stages,  # noqa: F401
     build_module,  # noqa: F401
+    capture_structure,  # noqa: F401
     inspect_structure,  # noqa: F401
     load_user_module,  # noqa: F401
     discover_jit_kernels,  # noqa: F401
     kernel_to_tir,  # noqa: F401
+    PassStructureRecord,  # noqa: F401
+    StructureTreePassInstrument,  # noqa: F401
+    StructureTreePassTool,  # noqa: F401
 )
 
 # NOTE: viewer (build_pass_data / emit_html / emit_txt) is intentionally NOT

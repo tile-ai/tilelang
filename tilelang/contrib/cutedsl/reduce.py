@@ -26,9 +26,7 @@ __all__ = [
 
 import cutlass
 import cutlass.cute as cute
-from cutlass.cute.typing import Int32
-from cutlass._mlir.dialects import nvvm
-from cutlass.cute.arch.nvvm_wrappers import shuffle_sync_op
+from cutlass.experimental import primitives as prims
 
 
 def min(a, b, c=None):
@@ -97,25 +95,15 @@ class BitXorOp:
 
 
 def bar_sync(barrier_id, number_of_threads):
-    cute.arch.barrier(barrier_id=barrier_id, number_of_threads=number_of_threads)
+    prims.barrier_cta_sync(barrier_id, thread_count=number_of_threads)
 
 
 def bar_sync_ptx(barrier_id, number_of_threads):
-    from cutlass._mlir.dialects import llvm
-
-    llvm.inline_asm(
-        None,
-        [Int32(barrier_id).ir_value(), Int32(number_of_threads).ir_value()],
-        "bar.sync $0, $1;",
-        "r,r",
-        has_side_effects=True,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-    )
+    prims.barrier_cta_sync(barrier_id, thread_count=number_of_threads)
 
 
 # Import shuffle functions from warp module
-from .warp import __shfl_sync, __shfl_up_sync, __shfl_down_sync
+from .warp import __shfl_sync, __shfl_up_sync, __shfl_down_sync, _shfl_xor_sync
 
 
 def _warp_prefix_sum_forward(val, lane, MASK=0xFFFFFFFF):
@@ -509,10 +497,10 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
                 if self.batch_size > 1:
                     x_tensor = cute.make_tensor(x, (self.batch_size,))
                     for i in range(self.batch_size):
-                        other = shuffle_sync_op(x_tensor[i], offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                        other = _shfl_xor_sync(x_tensor[i], offset)
                         x_tensor[i] = self.reducer()(x_tensor[i], other)
                 else:
-                    other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                    other = _shfl_xor_sync(x, offset)
                     x = self.reducer()(x, other)
 
             if offset == self.scale:
@@ -550,10 +538,10 @@ def AllReduce(reducer, threads, scale, thread_offset, all_threads=None, batch_si
                 if self.batch_size > 1:
                     x_tensor = cute.make_tensor(x, (self.batch_size,))
                     for i in range(self.batch_size):
-                        other = shuffle_sync_op(x_tensor[i], offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                        other = _shfl_xor_sync(x_tensor[i], offset)
                         x_tensor[i] = self.reducer()(x_tensor[i], other)
                 else:
-                    other = shuffle_sync_op(x, offset, mask=0xFFFFFFFF, mask_and_clamp=0x1F, kind=nvvm.ShflKind.bfly)
+                    other = _shfl_xor_sync(x, offset)
                     x = self.reducer()(x, other)
 
             if offset == self.scale:

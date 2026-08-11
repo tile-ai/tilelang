@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion
+from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
 from tilelang.utils import is_fragment, is_full_region
 from math import gcd
@@ -28,6 +28,30 @@ def _min_leaf_stride(stride) -> int:
     if isinstance(stride, tuple):
         return min(_min_leaf_stride(s) for s in stride)
     return int(stride)
+
+
+def select_wgmma_inst_n(warp_col_tiles: int) -> int:
+    """Widest legal WGMMA ``N`` that tiles ``warp_col_tiles`` exactly.
+
+    Hopper WGMMA accepts ``N`` in ``[8, 256]`` with ``N % 8 == 0``, so an extent
+    such as 96 or 160 is a single legal instruction.  Selecting
+    ``gcd(warp_col_tiles, 256)`` instead splits those into n32 / n16 atoms and
+    gives up most of the tensor-core throughput.
+
+    Widening is restricted to multiples of 16 for two independent reasons:
+    ``N % 16 == 8`` already miscomputes for ``warp_cols > 1`` (issue #2593), and
+    the integer instruction tables in ``wgmma.h`` / ``wgmma_sp.h`` only
+    instantiate multiples of 16 (plus 8 and 24), so a wider ``N % 16 == 8``
+    would not even compile for the s8 path.
+    """
+    # gcd is always a legal width, so it is the floor of the search.
+    fallback = gcd(warp_col_tiles, 256)
+    if warp_col_tiles % 16 != 0:
+        return fallback
+    for cand in range(256, fallback, -16):
+        if warp_col_tiles % cand == 0:
+            return cand
+    return fallback
 
 
 @dataclass(frozen=True)
@@ -101,8 +125,9 @@ def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     if region is not None:
         slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
         # A statically-zero origin is a plain int 0; a runtime origin is a PrimExpr.
-        if slice_off_elems != 0:
-            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_off_elems * bits // 8)
+        slice_byte_offset = slice_off_elems * bits // 8
+        if not isinstance(slice_byte_offset, int):
+            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"WGMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
 
     # Present in GMMA (MN, K) order, then recast the swizzled element layout to
@@ -242,7 +267,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return self
 
     def _initialize_wgmma_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, gcd(self.warp_col_tiles, 256)
+        inst_m, inst_n = 64, select_wgmma_inst_n(self.warp_col_tiles)
         assert inst_n % 8 == 0, (
             f"inst_n must be a multiple of 8, got {inst_n} (block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})"
         )
@@ -443,7 +468,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
         B_base_ptr = B_buf.access_ptr("r")
         slice_byte_offset = b_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        if not isinstance(slice_byte_offset, int):
+            # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            # A static slice. Add to the pointer directly to avoid an excessive `increase_descriptor_offset`.
+            is_sliced = False
+            B_base_ptr = handle_add_byte_offset(B_base_ptr, slice_byte_offset)
+        else:
+            # Non-sliced.
+            is_sliced = False
         swizzle_mode = b_params.swizzle_mode.wgmma_layout_type()
         lbo = b_params.leading_byte_offset
         sbo = b_params.stride_byte_offset
@@ -480,7 +514,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
         A_base_ptr = A_buf.access_ptr("r")
         slice_byte_offset = a_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        if not isinstance(slice_byte_offset, int):
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            is_sliced = False
+            A_base_ptr = handle_add_byte_offset(A_base_ptr, slice_byte_offset)
+        else:
+            is_sliced = False
         swizzle_mode = a_params.swizzle_mode.wgmma_layout_type()
         lbo = a_params.leading_byte_offset
         sbo = a_params.stride_byte_offset

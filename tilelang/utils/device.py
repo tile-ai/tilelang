@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 IS_CUDA = torch.cuda.is_available()
@@ -19,3 +21,15 @@ def get_current_device():
         device = "mps:0"
 
     return device
+
+
+def get_available_cpu_count() -> int:
+    """CPU cores available to this process (cpuset affinity), at least 1.
+
+    Falls back to ``os.cpu_count`` where affinity is unavailable (macOS/Windows).
+    """
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpu_count = os.cpu_count()
+    return max(1, cpu_count or 1)

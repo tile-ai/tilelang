@@ -23,7 +23,8 @@
 #include "arith/pattern_match.h"
 #include "backend/common/target_utils.h"
 #include "cuda/codegen/ptx.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
+#include "cuda/target_utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -3819,33 +3820,43 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "tl::tcgen05_sf_warp_transpose(reinterpret_cast<uint32_t*>("
                  << smem_ptr << "));\n";
   } else if (op->op.same_as(tl::tcgen05_ld())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_ld expects 6 arguments";
+    ICHECK(op->args.size() == 6U || op->args.size() == 7U)
+        << "tcgen05_ld expects 6 or 7 arguments";
     need_copy_sm100_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool pack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = this->PrintExpr(op->args[3]);
     std::string col_offset = this->PrintExpr(op->args[4]);
-    std::string dst_ptr = this->PrintExpr(op->args[5]);
+    // The datapath count is optional: a hand-written call from before it
+    // existed means the sub-partition-filling (32dp) wrappers.
+    bool has_datapaths = op->args.size() == 7U;
+    int datapaths = has_datapaths ? Downcast<IntImm>(op->args[5])->value : 32;
+    std::string dst_ptr = this->PrintExpr(op->args[has_datapaths ? 6 : 5]);
     this->PrintIndent();
-    this->stream << "tl::tcgen05_ld_32dp" << inst_bits << "bNx<" << chunks
-                 << ", " << (pack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", " << dst_ptr
-                 << ");\n";
+    this->stream << "tl::tcgen05_ld_" << datapaths << "dp" << inst_bits
+                 << "bNx<" << chunks << ", " << (pack16 ? "true" : "false")
+                 << ">(" << tmem_start_col << ", " << col_offset << ", "
+                 << dst_ptr << ");\n";
   } else if (op->op.same_as(tl::tcgen05_st())) {
-    ICHECK_EQ(op->args.size(), 6U) << "tcgen05_st expects 6 arguments";
+    ICHECK(op->args.size() == 6U || op->args.size() == 7U)
+        << "tcgen05_st expects 6 or 7 arguments";
     need_copy_sm100_h_ = true;
     int inst_bits = Downcast<IntImm>(op->args[0])->value;
     int chunks = Downcast<IntImm>(op->args[1])->value;
     bool unpack16 = Downcast<Bool>(op->args[2])->value;
     std::string tmem_start_col = this->PrintExpr(op->args[3]);
     std::string col_offset = this->PrintExpr(op->args[4]);
-    std::string src_ptr = this->PrintExpr(op->args[5]);
+    // The datapath count is optional: a hand-written call from before it
+    // existed means the sub-partition-filling (32dp) wrappers.
+    bool has_datapaths = op->args.size() == 7U;
+    int datapaths = has_datapaths ? Downcast<IntImm>(op->args[5])->value : 32;
+    std::string src_ptr = this->PrintExpr(op->args[has_datapaths ? 6 : 5]);
     this->PrintIndent();
-    this->stream << "tl::tcgen05_st_32dp" << inst_bits << "bNx<" << chunks
-                 << ", " << (unpack16 ? "true" : "false") << ">("
-                 << tmem_start_col << ", " << col_offset << ", " << src_ptr
-                 << ");\n";
+    this->stream << "tl::tcgen05_st_" << datapaths << "dp" << inst_bits
+                 << "bNx<" << chunks << ", " << (unpack16 ? "true" : "false")
+                 << ">(" << tmem_start_col << ", " << col_offset << ", "
+                 << src_ptr << ");\n";
   } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(op->args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
@@ -5379,6 +5390,47 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       EndScope(vec_scope);
     }
   }
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const SelectNode *op, std::ostream &os) {
+  // Non-vector cases.
+  if (!op->condition.dtype().is_fixed_length_vector()) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+
+  // Codegen vector condition case by serializing the select op.
+  TVM_FFI_ICHECK(op->false_value->dtype == op->dtype &&
+                 op->true_value->dtype == op->dtype &&
+                 op->dtype.lanes() == op->condition.dtype().lanes());
+
+  std::string r_var = name_supply_->FreshName("_");
+  this->PrintIndent();
+  this->PrintType(op->dtype, stream);
+  stream << ' ' << r_var << ";\n";
+  {
+    std::string c_var =
+        SSAGetID(PrintExpr(op->condition), op->condition.dtype());
+    std::string t_var = SSAGetID(PrintExpr(op->true_value), op->dtype);
+    std::string f_var = SSAGetID(PrintExpr(op->false_value), op->dtype);
+
+    // The condition is stored as an ushort vector.
+    int lanes = op->dtype.lanes();
+    DataType memory_ty(DataType::TypeCode::kUInt, 16, lanes);
+
+    for (int i = 0; i < lanes; ++i) {
+      std::ostringstream item;
+      item << "(bool(";
+      PrintVecElemLoad(c_var, memory_ty, i, item);
+      item << ")?";
+      PrintVecElemLoad(t_var, op->dtype, i, item);
+      item << ':';
+      PrintVecElemLoad(f_var, op->dtype, i, item);
+      item << ')';
+      PrintVecElemStore(r_var, op->dtype, i, item.str());
+    }
+  }
+  os << r_var;
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,

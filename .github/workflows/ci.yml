@@ -90,12 +90,11 @@ jobs:
             # E.g., "CUDA-auto", "CUDA-13.0", or "Nightly-CUDA-13.0".
             # Use "Nightly-" prefix to use torch nightly builds.
             toolkit: CUDA-auto
-          # ROCm CI is temporarily disabled.
-          # - tags: [self-hosted, amd, gpu]
-          #   name: self-hosted-amd
-          #   # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
-          #   # Use "Nightly-" prefix to use torch nightly builds.
-          #   toolkit: Nightly-ROCm-7.2
+          - tags: [self-hosted, amd, gfx942]
+            name: self-hosted-amd-gfx942
+            # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
+            # Use "Nightly-" prefix to use torch nightly builds.
+            toolkit: ROCm-7.2
           - tags: [macos-latest]
             name: macos-latest
             toolkit: Metal # or Nightly-Metal
@@ -390,7 +389,6 @@ jobs:
             ./python
 
       # AMD ROCm tests
-      # runtime and transform tests needs to repair, then rm it from ignore list
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: rocm-tests
         if: contains(matrix.runner.toolkit, 'ROCm')
@@ -401,7 +399,6 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
-            --ignore=./python/runtime --ignore=./python/transform \
             ./python
 
       # Apple Metal tests

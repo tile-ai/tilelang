@@ -50,7 +50,14 @@ class PassConfigKey(str, Enum):
     """Enable inlining of let statements during simplification. Default: True"""
 
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
-    """Disable data race check in TileLang. Default: False"""
+    """Disable data race check in TileLang. Default: True
+
+    The data race check is disabled by default because it can report false
+    positives (e.g. shared buffer stores whose per-thread addresses cannot be
+    proven distinct). To enable it, set this config to False in pass configs,
+    or set the ``TILELANG_ENABLE_DATA_RACE_CHECK`` environment variable to a
+    truthy value (e.g. ``1``).
+    """
 
     TL_DISABLE_PRELOWER_SEMANTIC_CHECK = "tl.disable_prelower_semantic_check"
     """Disable Python-side pre-lower semantic checks. Default: False"""

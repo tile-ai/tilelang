@@ -1,184 +1,348 @@
-# TileLang Backend Layout
+# TileLang Backend Architecture
 
-This is a short draft of the current multi-backend layout. The main goal of
-this refactor is to make backend ownership explicit while keeping the frontend
-TileLang language surface backend-neutral.
+TileLang treats a target backend as a compiler vertical slice, from its
+language dialect through target code generation. Generated code is handed to a
+separate, reusable execution backend for Build, loading, and launch. The goal
+is to make both ownership boundaries explicit while keeping the common
+TileLang frontend and compiler entry points backend-neutral.
 
-## Overview
+Coding agents implementing a new backend must use the
+[`tilelang-backend` skill](../../.agents/skills/tilelang-backend/SKILL.md).
 
-The Python backend layer is split into two parts:
+## Design Model
 
-- `tilelang/backend/`: common backend infrastructure, especially pass-pipeline
-  registration, host/device-codegen registration, and shared pipeline
-  utilities.
-- `tilelang/<backend>/`: backend-owned Python implementation files, such as
-  pass pipelines, host/device-codegen entry registration, tile-op
-  implementation registration, and backend intrinsics.
+A target backend owns four implementation areas:
 
-The native side mirrors this split under `src/<backend>/`, where C++ op
-lowering, codegen, runtime modules, stubs, and backend-local CMake files live.
-`src/backend/` is reserved for shared native backend helpers.
+| Part | Responsibility |
+| --- | --- |
+| Language dialect | Extends the common TileLang language with backend-specific operations and intrinsics. |
+| Context contribution | Defines target detection/normalization, target ownership, and compatible execution backends used by shared context resolution. |
+| Pass pipeline | Lowers common and backend-specific IR through one explicit, backend-owned pass sequence. |
+| Host/device codegen | Converts lowered host and device IR into source or runtime modules and provides target-specific toolchain hooks. |
 
-## Lowering Entry
+The target backend also declares which shared execution backends can consume
+its outputs. This is a compatibility declaration, not a fifth implementation
+area. A new target backend normally reuses `tvm_ffi`, `nvrtc`, `cython`,
+`torch`, or another existing execution implementation.
 
-`tilelang/engine/lower.py` owns the high-level lowering entry. It runs
-backend-independent semantic checks first, then resolves a pass pipeline from
-the TVM target kind:
-
-```text
-PreLowerSemanticCheck(mod)
-pipeline = resolve_pipeline(target)
-mod = pipeline.lower(mod, target)
-```
-
-The resolver is implemented in `tilelang/backend/pass_pipeline/pipeline.py`.
-Backends register a `PassPipeline(name, lower)` at import time. The pipeline
-name should match `target.kind.name`.
-
-Device codegen follows the same ownership model after host/device splitting:
+The logical flow is:
 
 ```text
-codegen = resolve_device_codegen(target)
-device_mod = codegen.lower(device_mod, target, compile_device=...)
+target-backend language dialect
+        |
+        v
+    frontend IR
+        |
+        v
+shared BackendContext resolution
+  - selects target backend
+  - selects compatible ExecutionBackend
+        |
+        v
+target-backend PassPipeline
+        |
+        v
+host/device split
+        |
+        +-----------> HostCodegen ----+
+        |                             |
+        +-----------> DeviceCodegen --+
+                                      |
+                                      v
+                       shared ExecutionBackend
+                           Build -> Load -> Launch
 ```
 
-The resolver is implemented in `tilelang/backend/device_codegen.py`. Backend
-packages register one or more `DeviceCodegen` entries for their target kind.
-CUDA, for example, owns both the plain CUDA entry and the CuTeDSL target
-variant, while CPU owns the `c` and `llvm` entries. The engine-level lowering
-code should not keep backend-specific `target.kind.name` dispatch for device
-codegen.
+`BackendContext` is created once and accompanies the compilation through the
+pipeline and codegen stages. It also records the selected shared execution
+backend, which consumes the generated outputs. A later stage must not infer or
+resolve either backend again.
 
-Host codegen is resolved from the host target in the same style:
+### Terminology
+
+- A **target backend**, such as CUDA, ROCm, CPU, Metal, or WebGPU, owns the
+  dialect, lowering, codegen, and target-specific toolchain primitives.
+- An **execution backend**, such as `tvm_ffi`, `nvrtc`, `cython`, `torch`, or
+  `cutedsl`, is a reusable Build/JIT/Runtime implementation that may serve one
+  or more compatible target backends.
+- A target backend **declares execution compatibility** and satisfies the
+  selected implementation's source, artifact, and launch-metadata contract; it
+  does not normally implement another JIT adapter or runtime.
+- `BackendModule` is the compiler-facing registration manifest. It describes
+  the components used by the current implementation, but it is not the whole
+  backend implementation.
+- `BackendContext` is the resolved, immutable state for one compilation.
+
+Target backends and execution backends are deliberately separate. For example,
+CUDA can execute through `tvm_ffi`, `nvrtc`, or `cython`; selecting `nvrtc` does
+not select a different target architecture or pass pipeline.
+
+## Source Layout
+
+The Python implementation is split into common infrastructure and
+backend-owned packages:
+
+- `tilelang/backend/` contains the backend registry, component interfaces,
+  context resolution, and small shared helpers.
+- `tilelang/<backend>/` owns the dialect, target helpers, pipeline, codegen,
+  toolchain hooks, operation implementations, intrinsics, and execution
+  compatibility declarations for a target backend.
+- `tilelang/jit/` contains shared JIT infrastructure and the current execution
+  adapters.
+
+The native side mirrors target-backend ownership under `src/<backend>/`, where
+C++ op lowering, codegen, runtime modules, toolchain stubs, and backend-local
+CMake files live. `src/backend/` is reserved for shared native backend helpers.
+
+## Backend Manifest
+
+Each backend's `backend.py` publishes a `BackendModule`, the typed manifest used
+by the compiler registry:
+
+```python
+BACKEND = register_backend(
+    BackendModule(
+        name="cuda",
+        target_kinds=("cuda",),
+        supports_target=is_plain_cuda_target,
+        pipelines={...},
+        device_codegens={...},
+        host_codegens={...},
+        host_codegen_hooks={...},
+        execution_backends=(
+            ExecutionBackendSpec("tvm_ffi"),
+            ExecutionBackendSpec("nvrtc"),
+        ),
+        callbacks={...},
+    )
+)
+```
+
+The manifest currently declares:
+
+- its name and owned TVM target kinds;
+- an optional target predicate used to distinguish variants;
+- one pass pipeline and one device-codegen entry for every owned target kind;
+- optional host-codegen entries and pre-codegen hooks;
+- the compatible shared execution backends in `auto` preference order;
+- FFI callbacks used by backend validation or target-toolchain integration.
+
+`register_backend()` validates the complete declaration and publishes it once.
+Backend packages are initialized during TileLang import, so the registry does
+not maintain import paths, loading state, or synchronization.
+
+Several manifests may share one TVM target kind when predicates make the
+variants unambiguous. CUDA and CuTeDSL are separate manifests that both match
+the `cuda` target kind. They intentionally reuse the CUDA pipeline but declare
+different device codegen and execution compatibility. Pipeline reuse must be
+explicit; it must not come from target-specific branching in the engine.
+
+## Backend Context Preparation
+
+The public compiler or JIT entry creates one immutable `BackendContext`:
+
+```python
+context = create_backend_context(target, target_host, execution_backend)
+```
+
+Context preparation performs three operations:
+
+1. Normalize the device target and host target.
+2. Select exactly one `BackendModule` using `target.kind.name` and, when
+   needed, `supports_target`.
+3. Resolve one available `ExecutionBackendSpec` from the user request or the
+   backend's ordered `auto` preference.
+
+The resulting context binds:
 
 ```text
-host_mod = apply_host_codegen_hooks(host_mod, target_host, target)
-codegen = resolve_host_codegen(target_host)
-host_mod = codegen.lower(host_mod, target_host)
+BackendContext
+  module             selected target-backend manifest
+  target             normalized device target
+  target_host        normalized host target
+  execution_backend  selected shared Build/JIT/Runtime implementation
 ```
 
-The resolver is implemented in `tilelang/backend/host_codegen.py`. Host build
-entries are registered by the package that owns the host target kind, such as
-`tilelang/cpu` for `c` and `llvm`. Device backends may also register host
-codegen hooks for target-specific host preparation; Metal uses this to mark
-host functions that need Metal runtime context.
+Cache, lowering, codegen, and JIT code pass the same context instance.
+Backend-specific target parsing and canonicalization belong in the backend
+package; backend selection itself stays in the shared context factory.
 
-## Target Registration
+## Language Dialects
+
+`tilelang/language` defines the backend-neutral language surface. A backend may
+freely compose that surface with extensions under
+`tilelang/<backend>/language`:
+
+```python
+from tilelang import language as T       # common + CUDA compatibility facade
+from tilelang.cuda import language as T  # common + CUDA extensions
+from tilelang.rocm import language as T  # common + ROCm extensions
+```
+
+Dialect selection is static and follows the import path; it does not depend on
+a process-global mutable dialect registry. Backend-specific language APIs emit
+IR operations or annotations that the corresponding backend pipeline knows how
+to lower. The language layer should describe semantics and construct IR, not
+perform target code generation itself.
+
+For example, CUDA owns WGMMA and TCGEN05 language helpers and intrinsic
+emitters, while ROCm owns MFMA and WMMA helpers. Library code, tests, and
+examples using backend-specific symbols should prefer explicit backend
+language imports so static analysis and autocomplete can identify the dialect.
+
+The language dialect is part of the logical backend, even though it is not a
+field of the current `BackendModule` manifest.
+
+## Pass Pipeline
+
+Every target backend must explicitly own a complete lowering sequence after
+the shared semantic checks:
+
+```text
+PreLowerSemanticCheck(mod)  # shared frontend boundary
+mod = context.lower(mod)    # selected backend pipeline
+```
+
+The complete compiler entry point owns any pass-instrumentation session.
+`BackendContext.lower` and `PassPipeline.lower` never create one implicitly;
+the pipeline only contributes its backend-specific phase scope when a session
+is already active. Calling the backend interface without a session still runs
+the lowering pipeline normally, without developer-tool instrumentation.
+
+The ordered pass list lives in `tilelang/<backend>/pipeline.py`. Backend-only
+passes must be called there rather than dispatched from
+`tilelang/engine/lower.py`. A backend pipeline may use small shared helpers from
+`tilelang/backend/pass_pipeline`, but its ordering and target-specific choices
+must remain visible in the backend package.
+
+A target variant may deliberately reference another backend's pipeline when
+their IR lowering is identical, as CuTeDSL currently does with CUDA. This is
+explicit pipeline composition, not implicit engine behavior.
+
+## Host and Device Codegen
+
+After the pipeline, the compiler splits the module into host and device IR.
+Both codegen paths are selected through `BackendContext`:
+
+```text
+device_mod = context.codegen_device(device_mod, compile_device=...)
+
+host_mod = context.preprocess_host_codegen(host_mod)
+host_mod = context.codegen_host(host_mod)
+```
+
+`DeviceCodegen` provides compiled and source-only entry points when the backend
+supports both. `HostCodegen` is selected from the concrete host target, usually
+`c` or `llvm`. `HostCodegenHook` lets a device backend prepare host IR without
+adding target checks to the shared engine; Metal uses such a hook to mark
+functions that require Metal runtime context.
+
+The engine must not contain a `target.kind.name` dispatch table for backend
+codegen. Backend variants, such as CUDA and CuTeDSL, declare their own codegen
+entries in their manifests.
+
+## Execution Backend Compatibility
+
+A target backend normally does not implement JIT or runtime behavior. It
+declares which shared execution backends can consume its generated outputs:
+
+```text
+execution_backends:
+  tvm_ffi -> compatible with TVM FFI runtime modules
+  nvrtc   -> compatible with CUDA source + driver launch
+  cython  -> compatible with generated Cython wrappers
+  torch   -> compatible with framework-provided compile/launch
+```
+
+`ExecutionBackendSpec` currently records the execution name, availability and
+target predicates, and whether host codegen or eager device compilation is
+required. A compatible target backend must provide the codegen mode and output
+contract expected by the selected implementation:
+
+- compiled or source-only device codegen as requested;
+- host codegen when requested;
+- source, artifact, global-symbol, argument, and launch metadata;
+- target-specific validation, compiler callbacks, and toolchain helpers.
+
+The shared execution backend owns cache orchestration, wrapper creation,
+artifact loading, argument/stream binding, launch, and runtime lifetime. It may
+invoke target-owned compiler callbacks during Build, but those callbacks do not
+make JIT/Runtime a target-backend implementation area.
+
+Only add a new execution backend when no existing implementation can consume
+the target output or drive its runtime API. That is a separate integration
+task. Concrete adapters currently live under `tilelang/jit/adapter`, while
+adapter dispatch still occurs in the shared JIT layer; new execution behavior
+should move behind that shared interface rather than into target passes or
+codegen dispatch.
+
+Parts of CodeGen and Build remain combined behind native `target.build.*`
+functions and the historical `DeviceCodegen.build` name. Treat this as an
+implementation detail at the boundary: target codegen supplies the operation,
+and the selected execution backend decides whether and when it is invoked.
+
+## Registered Target Backends
 
 | Python package | Target kind | Notes |
 | --- | --- | --- |
-| `tilelang/cuda` | `cuda` | CUDA-specific pass sequence, CUDA tile ops, MMA/WGMMA/TCGEN05 intrinsics, CUDA transform wrappers. |
-| `tilelang/rocm` | `hip` | ROCm/HIP pass sequence and MFMA/WMMA tile-op implementations. |
-| `tilelang/cpu` | `c`, `llvm` | CPU pass sequence and scalar CPU tile-op implementations. |
-| `tilelang/metal` | `metal` | Metal pass sequence and Metal GEMM registration. |
-| `tilelang/backend/common.py` | `webgpu` | Temporary/common registration for targets that do not yet own a dedicated Python backend package. |
+| `tilelang/cuda/backend.py` | `cuda` | Plain CUDA codegen, compiler callbacks, and execution compatibility. |
+| `tilelang/cuda/cutedsl_backend.py` | `cuda` | CuTeDSL variant explicitly reusing the CUDA pipeline. |
+| `tilelang/rocm` | `hip` | ROCm/HIP pipeline, codegen, compiler callback, and MFMA/WMMA extensions. |
+| `tilelang/cpu` | `c`, `llvm` | CPU pipeline, codegen, and scalar CPU tile-op implementations. |
+| `tilelang/metal` | `metal` | Metal pipeline, codegen, host hook, and Metal language extensions. |
+| `tilelang/webgpu/backend.py` | `webgpu` | WebGPU compiler component registration. |
 
-## `tilelang/backend`
+## Common Backend Infrastructure
 
-`tilelang/backend` should stay small. It contains shared backend plumbing, not
-backend-specific implementation details.
+`tilelang/backend` should stay small and contain shared interfaces and
+plumbing, not target-specific implementations:
 
 ```text
 tilelang/backend/
   __init__.py
-  common.py
+  module.py
+  target.py
   device_codegen.py
   host_codegen.py
+  execution_backend.py
   pass_pipeline/
     __init__.py
     pipeline.py
     pipeline_utils.py
 ```
 
-- `pass_pipeline/pipeline.py` defines `PassPipeline`, `register_pipeline`, and
-  `resolve_pipeline`.
-- `device_codegen.py` defines `DeviceCodegen`, `register_device_codegen`, and
-  `resolve_device_codegen`.
-- `host_codegen.py` defines `HostCodegen`, host codegen hooks, and
-  `resolve_host_codegen`.
+- `module.py` defines `BackendModule`, `BackendContext`, registration,
+  validation, and context resolution.
+- `target.py` provides common target detection and normalization plumbing.
+- `pass_pipeline/pipeline.py` defines `PassPipeline`.
+- `device_codegen.py` and `host_codegen.py` define codegen component types and
+  shared global-function helpers.
+- `execution_backend.py` defines the current execution-backend selection and
+  capability descriptor.
 - `pass_pipeline/pipeline_utils.py` contains small shared helpers for pass
-  configuration, layout visualization, vectorization gates, and shared-memory
-  reuse flags.
-- `common.py` registers shared fallback pipelines for target kinds that do not
-  yet have a fully dedicated package.
+  configuration, visualization, vectorization gates, and shared-memory reuse.
 
-Backend-specific pass lists should not live here. They should live in the
-backend package that owns the target.
+## Backend Package Layout
 
-## Backend Packages
-
-Each backend package owns the Python pieces needed to lower and register code
-for that backend.
+A typical target-backend package has the following shape:
 
 ```text
-tilelang/cuda/
-  codegen.py
-  pipeline.py
-  transform/
-  op/
-  intrinsics/
-
-tilelang/rocm/
-  codegen.py
-  pipeline.py
-  op/
-  intrinsics/
-
-tilelang/cpu/
-  codegen.py
-  pipeline.py
-  op/
-
-tilelang/metal/
-  codegen.py
-  pipeline.py
-  transform/
-  op/
-  intrinsics/
+tilelang/<backend>/
+  __init__.py
+  backend.py             manifest and backend toolchain callbacks
+  target.py              target parsing and normalization helpers
+  execution_backend.py   compatible execution paths and auto preference
+  language/              backend language dialect
+  pipeline.py            complete lowering sequence
+  codegen.py             host/device codegen entries
+  transform/             backend-only Python passes
+  op/                    tile-op implementations and registration
+  intrinsics/            backend intrinsic emitters and helpers
 ```
 
-The `pipeline.py` file should expose one complete backend pass sequence after
-semantic checking. It may use shared helpers from `tilelang/backend`, but the
-ordered pass list should be visible in the backend-owned file. CUDA-only,
-ROCm-only, and Metal-only passes should be called from the corresponding
-backend pipeline rather than from engine-level code.
-
-The `codegen.py` file should register the backend-owned host/device codegen
-entry points, usually by mapping the target kind to native `target.build.*`
-global functions. Target variants should be represented by backend-owned
-predicates, not by engine-level branching.
-
-The `op/` and `intrinsics/` folders contain Python implementation and helper
-code used by tile-op lowering. For example, CUDA owns MMA/WGMMA/TCGEN05
-intrinsic emitters, while ROCm owns MFMA/WMMA emitters. Backend-local
-transform passes, such as Metal's simdgroup lowering and host-context marking,
-should live under that backend's `transform/` package.
-
-## Language Dialects
-
-`tilelang/language/__init__.py` assembles the backend-neutral language surface,
-and `tilelang/language/common.py` exposes its stable common manifest.
-Backend-specific language modules compose that manifest with explicit backend
-extensions. After TileLang finishes initializing, `tilelang.language` is
-augmented as the CUDA-compatible facade.
-
-Backend-specific language surfaces live under the backend package:
-
-```python
-from tilelang import language as T       # common + CUDA compatibility facade
-from tilelang.cuda import language as T  # common + CUDA extension
-from tilelang.rocm import language as T  # common + ROCm extension
-```
-
-Each backend language module re-exports the common language and adds only the
-symbols owned by that backend. For example, CUDA exposes `T.tcgen05_mma`,
-WGMMA/TCGEN05 helpers, and CUDA intrinsic emitters; ROCm exposes MFMA/WMMA
-helpers. Dialect selection is static and follows the import path; there is no
-process-global dialect registry or mutable default.
-
-Library code, tests, and examples that rely on backend-specific symbols should
-prefer explicit imports such as `from tilelang.cuda import language as T` so
-static analysis and autocomplete can resolve the intended dialect.
+Not every backend needs every file. Component files define implementations;
+`backend.py` is the single place that assembles and registers the manifest.
+Import-time registration should remain deterministic and lightweight.
 
 ## Native Backend Layout
 
@@ -197,25 +361,32 @@ src/backend/
 
 Typical backend-local subdirectories are:
 
-- `op/`: native tile-op lowering helpers.
-- `codegen/`: backend codegen and runtime module integration.
-- `stubs/`: optional lazy-loading driver/runtime stubs for GPU backends.
+- `op/`: native tile-op lowering helpers;
+- `transform/`: native backend-only passes;
+- `codegen/`: target codegen, toolchain entry points, and runtime-module
+  integration;
+- `stubs/`: optional lazy-loading driver/runtime stubs;
 - `CMakeLists.txt`: backend-local source selection and toolchain setup.
 
-Shared native helpers that have no target runtime dependency belong in
+Shared native helpers with no target-runtime dependency belong in
 `src/backend/common`.
 
-## Guidelines
+## Ownership Rules
 
-- Keep `tilelang/language` and `tilelang/tileop` backend-neutral.
-- Keep backend-specific pass ordering in the backend package.
-- Keep backend-specific host-codegen dispatch and host preparation hooks in the
-  backend package.
-- Keep backend-specific device-codegen dispatch in the backend package.
-- Register backend implementations at import time, but keep import-time work
-  light.
-- Prefer explicit target-kind registration over implicit folder-name matching,
-  because some names differ, such as `tilelang/rocm` registering target kind
-  `hip`.
-- When adding a backend-specific pass, put the call site in that backend's
-  `pipeline.py` and keep only small shared predicates in `pipeline_utils.py`.
+- Keep the common language surface and shared semantic checks backend-neutral.
+- Put backend language extensions under `tilelang/<backend>/language` and lower
+  them in that backend's pipeline.
+- Resolve target and execution state once when creating `BackendContext`.
+- Keep the complete backend-specific pass order in
+  `tilelang/<backend>/pipeline.py`.
+- Keep host/device codegen dispatch, host preparation hooks, compiler
+  callbacks, and target-specific toolchain helpers under target-backend
+  ownership.
+- Make target backends declare execution compatibility rather than reimplement
+  JIT/Runtime. Add a new execution backend only for a new artifact or runtime
+  contract.
+- Do not spread execution-mode checks through compiler passes.
+- Keep backend registration explicit. Do not infer target ownership from a
+  directory name: `tilelang/rocm`, for example, owns the TVM `hip` target kind.
+- Register manifests during normal package initialization, without maintaining
+  a second lazy-loading registry.

@@ -35,8 +35,8 @@ from pathlib import Path
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
+from tilelang.utils.device import get_available_cpu_count
 from tilelang.autotuner.capture import get_autotune_inputs
-from tilelang.backend.target import determine_target
 from tilelang import __version__
 
 TargetLike = str | dict[str, object] | Target
@@ -203,16 +203,6 @@ def _init_logger_handlers():
     _logger_handlers_initialized = True
 
 
-def get_available_cpu_count() -> int:
-    """Gets the number of CPU cores available to the current process."""
-    try:
-        cpu_count = len(os.sched_getaffinity(0))
-    except AttributeError:
-        cpu_count = os.cpu_count()
-
-    return cpu_count or 1
-
-
 def _normalize_value(value, sort_dict_items: bool = False):
     if isinstance(value, torch.Tensor):
         return ("tensor", str(value.dtype), tuple(value.shape), value.stride())
@@ -327,17 +317,15 @@ class AutoTuner:
         if verbose is None:
             verbose = env.get_default_verbose()
 
-        # Normalize target to a concrete TVM Target and resolve execution backend
-        t = Target(determine_target(target))
-        from tilelang.backend.execution_backend import resolve_execution_backend
+        from tilelang.backend.module import create_backend_context
 
-        resolved_backend = resolve_execution_backend(execution_backend, t)
+        backend_context = create_backend_context(target, target_host, execution_backend)
 
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=t,
-            execution_backend=resolved_backend,
-            target_host=target_host,
+            target=backend_context.target,
+            execution_backend=backend_context.execution_backend.name,
+            target_host=backend_context.target_host,
             verbose=verbose,
             pass_configs=pass_configs,
         )

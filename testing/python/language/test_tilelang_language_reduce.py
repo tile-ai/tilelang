@@ -502,6 +502,7 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
     torch.testing.assert_close(B, _ref(A, op), atol=tol, rtol=tol)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -523,6 +524,7 @@ def test_reduce_local_packed_codegen(op, packed_op):
     assert f"tl::{packed_op}" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -546,6 +548,7 @@ def test_reduce_local_noncontiguous_dim_packed_codegen(op, packed_op):
     assert f"tl::{packed_op}" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -737,6 +740,59 @@ def test_finalize_reducer_correctness(op, dtype, block_M, block_N, batch):
         pass_configs=_COMPILE_FLAGS,
     )(A)
     torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
+
+
+def test_finalize_reducer_short_parallel_extent():
+    extent = 8
+    threads = 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((extent,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((extent,), T.float32)
+            T.copy(A, src)
+            total = T.alloc_reducer((1,), T.float32, replication="all")
+            T.clear(total)
+            for i in T.Parallel(extent):
+                total[0] += src[i]
+            T.finalize_reducer(total)
+            if T.get_thread_binding() == 0:
+                B[0] = total[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(A)
+    torch.testing.assert_close(B, A.sum().reshape(1), atol=0, rtol=0)
+
+
+def test_finalize_reducer_mixed_parallel_extents():
+    extent = 8
+    threads = 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((extent,), T.float32),
+        B: T.Tensor((2 * extent,), T.float32),
+        C: T.Tensor((1,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((extent,), T.float32)
+            b_frag = T.alloc_fragment((2 * extent,), T.float32)
+            T.copy(A, a_frag)
+            T.copy(B, b_frag)
+            total = T.alloc_reducer((1,), T.float32, replication="all")
+            T.clear(total)
+            for i in T.Parallel(extent):
+                total[0] += a_frag[i]
+            for j in T.Parallel(2 * extent):
+                total[0] += b_frag[j]
+            T.finalize_reducer(total)
+            if T.get_thread_binding() == 0:
+                C[0] = total[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    B = torch.arange(1, 2 * extent + 1, dtype=torch.float32, device="cuda")
+    C = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(A, B)
+    torch.testing.assert_close(C, (A.sum() + B.sum()).reshape(1), atol=0, rtol=0)
 
 
 # (batch, exc_type, match)

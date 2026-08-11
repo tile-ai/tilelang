@@ -205,7 +205,7 @@ jobs:
           }
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v4.1
+        uses: pypa/cibuildwheel@v4.2
         with:
           package-dir: .
           output-dir: wheelhouse

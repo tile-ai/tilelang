@@ -81,6 +81,8 @@ public:
   void VisitExpr_(const tvm::tirx::MaxNode *op,
                   std::ostream &os) final; // NOLINT(*)
 
+  void VisitStmt_(const tvm::tirx::EvaluateNode *op) final; // NOLINT(*)
+
   void VisitStmt_(const tvm::tirx::AssertStmtNode *op) final; // NOLINT(*)
 
   void VisitStmt_(const tvm::tirx::AttrStmtNode *op) final; // NOLINT(*)
@@ -98,7 +100,7 @@ private:
   Array<String> function_names_;
   /*! \brief whether to emit asserts in the resulting C code */
   bool emit_asserts_;
-  /*! \brief whether to emit forwared function declarations in the resulting C
+  /*! \brief whether to emit forwarded function declarations in the resulting C
    * code */
   bool emit_fwd_func_decl_;
   /*! \brief whether to generate the entry function if encountered */

@@ -403,6 +403,7 @@ def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, blo
     return kernel, batch_sizes
 
 
+@tilelang.testing.requires_cuda
 def test_tiled_ws_skips_device_bound_tma_descriptor_base():
     func = device_bound_copy_pipelined().with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
@@ -420,6 +421,7 @@ def test_tiled_ws_skips_device_bound_tma_descriptor_base():
     assert "T.tma_copy" not in script
 
 
+@tilelang.testing.requires_cuda
 def test_tiled_ws_places_producer_in_first_warp_group():
     """Auto-WS should put the producer in the low threadIdx.x partition."""
 
@@ -441,6 +443,7 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     assert "if 128 <= tx:" not in script
 
 
+@tilelang.testing.requires_cuda
 def test_tiled_ws_accepts_int64_pipeline_indices():
     """Inductor-style TIR may use int64 shapes and loop extents."""
 
@@ -744,6 +747,7 @@ def test_tiled_ws_sinks_preloop_tma_waits_into_consumer():
     assert k_load < v_load < branch < first_wait
 
 
+@tilelang.testing.requires_cuda
 def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     """Explicit cp.async destinations must pull the consumer wait earlier."""
 
@@ -783,6 +787,7 @@ def test_tiled_ws_keeps_preloop_tma_scalar_bind_shared():
     assert start_bind < k_load < branch
 
 
+@tilelang.testing.requires_cuda
 def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     """Outer scalar binds used by nested post-loop consumers must stay shared."""
 

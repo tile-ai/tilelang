@@ -199,7 +199,6 @@ def matmul(M, N, K):
     return autotuner.run(warmup=3, rep=20)
 
 
-@tilelang.testing.requires_cuda
 def test_autotune_get_configs():
     get_configs()
 

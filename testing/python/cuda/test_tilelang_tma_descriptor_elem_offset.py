@@ -5,6 +5,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 from tilelang import tvm
+from tilelang.backend import create_backend_context
 from tilelang.engine.lower import lower_to_host_device_ir
 from tilelang.layout import make_linear_layout
 from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
@@ -15,8 +16,9 @@ from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
 def _descriptor_base_byte_offsets(func, arch):
     pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True}
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
-    with target, tvm.transform.PassContext(config=pass_configs):
-        host_mod, device_mod, _, _, _ = lower_to_host_device_ir(func, target=target)
+    context = create_backend_context(target, execution_backend="tvm_ffi")
+    with context.target, tvm.transform.PassContext(config=pass_configs):
+        host_mod, device_mod, _, _, _ = lower_to_host_device_ir(func, context)
 
     handle_add = tvm.ir.Op.get("tirx.handle_add_byte_offset")
     offsets = []
@@ -233,14 +235,38 @@ def test_cutedsl_descriptor_aliases_are_kernel_local():
     assert "&tma_descs[0]" in launch_0
     assert "&tma_descs[1]" in launch_1
 
+    descriptor_info = {
+        "is_img2col": False,
+        "dtype": 0,
+        "global_dim": [32, 32],
+        "global_stride": [1, 32],
+        "box_dim": [16, 16],
+        "element_strides": [1, 1],
+        "interleave": 0,
+        "swizzle": 0,
+        "l2Promotion": 0,
+        "oobFill": 0,
+    }
+    wrapper.tma_desc_info = {
+        "__tma_0_A_desc": descriptor_info,
+        "__tma_1_A_desc": descriptor_info,
+    }
     cubin = wrapper._generate_cubin_gen_code(
         kernel_metadata,
         [{"name": "A", "type": "buffer", "dtype": "cutlass.Float16"}],
         ["A"],
         ["__tma_0_A_desc", "__tma_1_A_desc"],
+        ["A"],
+        {
+            "__tma_0_A_desc": ("A", 0),
+            "__tma_1_A_desc": ("A", 1),
+        },
+        True,
+        "def kernel_0(A, A_desc):\n  pass\ndef kernel_1(A, A_desc):\n  pass",
     )
-    assert "__tma_0_A_desc = tl.Gemm_SM90.get_tma_atom" in cubin
-    assert "__tma_1_A_desc = tl.Gemm_SM90.get_tma_atom" in cubin
+    assert cubin.count("A_desc: cutlass.GridConstant[cuda.TensorMap]") == 2
+    assert "__tma_0_A_desc = cuda.create_tensor_map_tiled" in cubin
+    assert "__tma_1_A_desc = cuda.create_tensor_map_tiled" in cubin
     assert "kernel_0(A_, __tma_0_A_desc)" in cubin
     assert "kernel_1(A_, __tma_1_A_desc)" in cubin
 

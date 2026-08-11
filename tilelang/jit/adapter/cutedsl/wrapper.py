@@ -11,6 +11,7 @@ Key features:
 """
 
 from __future__ import annotations
+import re
 from typing import Any, ClassVar
 
 from tvm import IRModule
@@ -137,10 +138,9 @@ CPP_TMA_LAUNCH_INIT_TEMPLATE = """\
   // Declare stack-local TMA descriptor array (eliminates concurrency race)
   CUtensorMap tma_descs[{num_tma_descs}];
 
-  // Initialize TMA descriptors (HOST memory - passed via __grid_constant__)
-  // NOTE: We intentionally do NOT reuse/cached descriptors across launches.
-  // Pointer-only reuse is a correctness trap (shape/stride may change with same ptr),
-  // and correctness beats micro-optimizations.
+  // Initialize TMA descriptors (HOST memory - passed via __grid_constant__).
+  // B200 launch-overhead experiments showed safe descriptor cache-key checks cost
+  // more than re-encoding these descriptors for the current generated launcher.
   result = tma_init(tma_descs, {tma_tensor_args});
   if (result != CUDA_SUCCESS) {{
     std::cerr << "Failed to initialize TMA descriptors: " << result << "\\n";
@@ -172,6 +172,55 @@ CPP_KERNEL_LAUNCH_TEMPLATE = """\
     );
     if (result != CUDA_SUCCESS) {{
       std::cerr << "Failed to launch kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+  }}
+"""
+
+# Clustered kernel launch template.
+CPP_CLUSTER_KERNEL_LAUNCH_TEMPLATE = """\
+  // Launch kernel {kernel_idx}: {kernel_name} (clustered)
+  {{
+    // Get the kernel for current device
+    auto kernels_it = g_device_kernels.find(device_id);
+    if (kernels_it == g_device_kernels.end()) {{
+      std::cerr << "Kernels not initialized for device " << device_id << "\\n";
+      return CUDA_ERROR_NOT_INITIALIZED;
+    }}
+    const std::vector<CUfunction>& kernels = kernels_it->second;
+
+    void* args[] = {{{kernel_args}}};
+    CUlaunchAttribute attrs[2];
+    attrs[0].id = CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION;
+    attrs[0].value.clusterDim.x = {cluster_x};
+    attrs[0].value.clusterDim.y = {cluster_y};
+    attrs[0].value.clusterDim.z = {cluster_z};
+    attrs[1].id = CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+    attrs[1].value.programmaticStreamSerializationAllowed = 1;
+
+    CUlaunchConfig config = {{}};
+    config.gridDimX = {grid_x};
+    config.gridDimY = {grid_y};
+    config.gridDimZ = {grid_z};
+    config.blockDimX = {block_x};
+    config.blockDimY = {block_y};
+    config.blockDimZ = {block_z};
+    config.sharedMemBytes = {smem_size};
+    config.hStream = stream;
+    config.attrs = attrs;
+    config.numAttrs = 2;
+
+    result = cuFuncSetAttribute(kernels[{kernel_idx}],
+                                CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED,
+                                1);
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to set cluster attribute for {kernel_name} on device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+
+    result = cuLaunchKernelEx(&config, kernels[{kernel_idx}], args, nullptr);
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to launch clustered kernel {kernel_name} on device " << device_id << ": " << result << "\\n";
       return result;
     }}
   }}
@@ -548,16 +597,35 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(cleanup_module, cleanup_module);
 # PYTHON CUBIN GENERATION TEMPLATES
 # =============================================================================
 
-# TMA descriptor atom initialization template
-CUBIN_TMA_ATOM_INIT_TEMPLATE = """\
-    {desc_name} = tl.Gemm_SM90.get_tma_atom(__fake_tensor__, (32, 32))"""
+# TensorMap initialization template for cubin generation. Tiled descriptors use
+# their real descriptor fields. Descriptor modes without a CUTLASS host-side
+# builder, such as im2col, use valid tiled fields only as a compile-time typed
+# TensorMap placeholder; the generated C++ launcher still encodes the real
+# runtime descriptor.
+CUBIN_TMA_DESC_INIT_TEMPLATE = """\
+    {desc_name}__dtype, {desc_name}__format = _tma_dtype_and_format({dtype})
+    {desc_name} = cuda.create_tensor_map_tiled(
+        global_address={tensor_name}_.iterator.toint(),
+        dtype={desc_name}__dtype,
+        global_dims=[{global_dim_values}],
+        global_strides=[{global_stride_values}],
+        box_dims=[{box_dim_values}],
+        traversal_strides=[{element_stride_values}],
+        interleave=_tma_interleave({interleave}),
+        swizzle=_tma_swizzle({swizzle}),
+        l2_promotion=_tma_l2_promotion({l2_promotion}),
+        oob_fill=_tma_oob_fill({oob_fill}),
+        tma_format={desc_name}__format,
+    )"""
 
 # Kernel launch call template
 CUBIN_KERNEL_LAUNCH_TEMPLATE = """\
     {function_name}({call_args}).launch(
       grid=[{grid_x}, {grid_y}, {grid_z}],
       block=[{block_x}, {block_y}, {block_z}],
+{cluster_arg}\
       smem={smem_size},
+      min_blocks_per_mp=1,
       stream=stream,
       use_pdl={use_pdl},
     )"""
@@ -594,6 +662,17 @@ CUBIN_GEN_CODE_TEMPLATE = """\
         {compile_args},
         options=f"--enable-tvm-ffi --keep-cubin --gpu-arch={target_arch} --dump-dir={{_staging_dir.as_posix()}}",
     )
+    engine = getattr(_kernel_wrapper, "engine", None)
+    if engine is not None and hasattr(engine, "initialize"):
+      engine.initialize()
+    _cutlass_launcher = _kernel_wrapper
+    try:
+      import tvm_ffi
+      _cutlass_tvmffi_launcher = tvm_ffi.convert(_kernel_wrapper)
+      _cutlass_tvmffi_error = None
+    except Exception as err:
+      _cutlass_tvmffi_launcher = None
+      _cutlass_tvmffi_error = repr(err)
 
     # CuTeDSL generates a long, mangled cubin filename that includes argument/type info,
     # e.g. "cutlass_kernel_wrapper_FakeTensor...sm_90a.cubin". We expect exactly one cubin.
@@ -620,6 +699,13 @@ import tvm.runtime as runtime
 _cpp_launcher = None
 _cpp_launcher_lib = None
 _cubin_generated = False
+_cutlass_launcher = None
+_cutlass_tvmffi_launcher = None
+_cutlass_tvmffi_error = None
+_cutlass_custream_cls = None
+_has_tma_descs = {has_tma_descs}
+_cutlass_host_launcher_supported = {cutlass_host_launcher_supported}
+_cutlass_host_launcher_disabled_reason = {cutlass_host_launcher_disabled_reason!r}
 
 # Pre-compute paths - cubin is stored alongside the launcher .so
 # Use module basename to avoid conflicts when multiple kernels run concurrently
@@ -631,17 +717,20 @@ _cubin_path_bytes = _cubin_path.as_posix().encode('utf-8')
 _cubin_needs_generation = not _cubin_path.exists()
 
 def _generate_cubin_if_needed({cubin_gen_params}):
-  \"\"\"Generate cubin file on first call.
+  \"\"\"Compile the CUTLASS host wrapper and keep the cubin artifact.
 
-  All CuTeDSL imports are inside this function to avoid slow
-  module-level initialization when loading from cache.
+  All CuTeDSL imports are inside this function to avoid slow module-level
+  initialization when loading from cache. The compiled handle is retained so
+  TILELANG_CUTEDSL_HOST_LAUNCHER=cutlass can launch through CUTLASS directly.
   \"\"\"
-  global _cubin_generated, _cubin_path
+  global _cubin_generated, _cubin_path, _cutlass_launcher
+  global _cutlass_tvmffi_launcher, _cutlass_tvmffi_error
 
   # Lazy import CuTeDSL only when cubin generation is needed
   from cuda.bindings.driver import CUstream
   import cutlass
   import cutlass.cute as cute
+  import cutlass.experimental.cuda as cuda
   from cutlass.cute.runtime import make_fake_stream, make_fake_compact_tensor
   import tilelang.contrib.cutedsl as tl
   # We rely on CuTeDSL's keep-cubin artifact rather than custom extraction.
@@ -667,12 +756,104 @@ def _generate_cubin_if_needed({cubin_gen_params}):
       "torch.uint16": cutlass.Uint16,
       "torch.uchar": cutlass.Uint8}}
 
+  _TMA_DTYPE_NAMES = {{
+      0: "Uint8",
+      1: "Uint16",
+      2: "Uint32",
+      3: "Int32",
+      4: "Uint64",
+      5: "Int64",
+      6: "Float16",
+      7: "Float32",
+      8: "Float64",
+      9: "BFloat16",
+      10: "Float32",
+      11: "TFloat32",
+      12: "TFloat32",
+      13: "Float4E2M1FN",
+      14: "Float4E2M1FN",
+      15: "Float6E3M2FN",
+  }}
+  _TMA_FORMAT_NAMES = {{
+      0: "BYTE",
+      1: "DEFAULT",
+      2: "DEFAULT",
+      3: "DEFAULT",
+      4: "DEFAULT",
+      5: "DEFAULT",
+      6: "DEFAULT",
+      7: "DEFAULT",
+      8: "DEFAULT",
+      9: "DEFAULT",
+      10: "F32_FTZ",
+      11: "DEFAULT",
+      12: "TF32_FTZ",
+      13: "B4X16",
+      14: "B4X16_P64",
+      15: "B6X16_P32",
+  }}
+
+  def _tma_dtype_and_format(value):
+    value = int(value)
+    dtype_name = _TMA_DTYPE_NAMES.get(value)
+    if dtype_name is None:
+      raise ValueError(f"Unsupported TMA TensorMap dtype enum: {{value}}")
+    dtype = getattr(cutlass, dtype_name, None)
+    if dtype is None:
+      raise ValueError(f"CUTLASS dtype {{dtype_name}} is unavailable")
+    return dtype, getattr(cuda.TensorMapDataFormat, _TMA_FORMAT_NAMES[value])
+
+  def _tma_interleave(value):
+    return cuda.TensorMapInterleave(int(value))
+
+  def _tma_swizzle(value):
+    return cuda.TensorMapSwizzle(int(value))
+
+  def _tma_l2_promotion(value):
+    return cuda.TensorMapL2Promotion(int(value))
+
+  def _tma_oob_fill(value):
+    return cuda.TensorMapFloatOOBFill(int(value))
+
   def _positive_fake_shape(shape):
     return tuple(max(int(dim), 1) for dim in tuple(shape))
 
 {cubin_gen_code}
 
   _cubin_generated = True
+
+def _host_launcher_mode():
+  mode = os.environ.get("TILELANG_CUTEDSL_HOST_LAUNCHER", "cpp").strip().lower()
+  if mode in ("", "cpp", "c++"):
+    return "cpp"
+  if mode in ("cutlass", "cute"):
+    return "cutlass"
+  raise ValueError(
+      "TILELANG_CUTEDSL_HOST_LAUNCHER must be one of: cpp, cutlass"
+  )
+
+def _as_cutlass_stream(stream):
+  global _cutlass_custream_cls
+  if _cutlass_custream_cls is None:
+    from cuda.bindings.driver import CUstream
+    _cutlass_custream_cls = CUstream
+  return _cutlass_custream_cls(stream)
+
+def _load_cutlass_launcher({cubin_gen_params}):
+  \"\"\"Return the compiled CUTLASS host launcher, compiling it if needed.\"\"\"
+  global _cubin_needs_generation
+  if _cutlass_launcher is None:
+    _generate_cubin_if_needed({cubin_gen_call_args})
+    _cubin_needs_generation = False
+  if _cutlass_tvmffi_launcher is not None:
+    return _cutlass_tvmffi_launcher
+  require_tvmffi = os.environ.get("TILELANG_CUTEDSL_REQUIRE_TVMFFI", "").strip().lower()
+  if require_tvmffi in ("1", "true", "yes", "on"):
+    raise RuntimeError(
+        "CUTLASS host launcher did not produce a TVM-FFI function"
+        + (f": {{_cutlass_tvmffi_error}}" if _cutlass_tvmffi_error else "")
+    )
+  return _cutlass_launcher
 
 def _load_cpp_launcher():
   \"\"\"Load C++ kernel launcher.\"\"\"
@@ -702,6 +883,20 @@ def call({call_func_params}, stream, device_id=0):
     _cubin_needs_generation = False
 
 {arg_prep_code}
+
+  host_launcher_mode = _host_launcher_mode()
+  if host_launcher_mode == "cutlass" and _cutlass_host_launcher_supported:
+    _cutlass_stream = _as_cutlass_stream(stream)
+    launcher = _cutlass_tvmffi_launcher
+    if launcher is None:
+      launcher = _load_cutlass_launcher({cubin_gen_call_args})
+    launcher({cutlass_launcher_call_args})
+    return
+
+  if host_launcher_mode == "cutlass":
+    require_cutlass_host = os.environ.get("TILELANG_CUTEDSL_REQUIRE_CUTLASS_HOST", "").strip().lower()
+    if require_cutlass_host in ("1", "true", "yes", "on"):
+      raise RuntimeError(_cutlass_host_launcher_disabled_reason)
 
   launcher = _load_cpp_launcher()
   result = launcher({launcher_call_args}, stream, device_id, _cubin_path_bytes)
@@ -827,8 +1022,15 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     # =========================================================================
 
     def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
-        """Convert TVM expression to Python string."""
-        return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="//")
+        """Convert TVM expression to Python string, ignoring casts."""
+        return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
+
+    def _generate_cubin_cluster_arg(self, cluster_dims: list[Any] | None) -> str:
+        """Render the optional CuTeDSL launch cluster argument."""
+        if not cluster_dims or not any(int(dim) != 1 for dim in cluster_dims):
+            return ""
+        cluster = ", ".join(str(int(dim)) for dim in cluster_dims)
+        return f"      cluster=[{cluster}],\n"
 
     def _target_arch(self) -> str:
         """Return the CUDA SM architecture requested by the TileLang target."""
@@ -1225,13 +1427,19 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         grid = function_info["grid_info"]
         block = function_info["block_info"]
         smem_size = function_info["dynamic_smem_buf"] or 0
+        cluster = function_info.get("cluster_dims")
+        use_cluster = bool(cluster and any(dim != 1 for dim in cluster))
 
         # Choose launch template based on cooperative groups / PDL requirements
         function_name = kernel_meta["function_name"]
         use_cooperative = self.use_cooperative_groups.get(function_name, False)
         use_pdl = function_name in self.pdl_sync_map
         if use_cooperative:
+            if use_cluster:
+                raise AssertionError("Cluster launch is not supported for cooperative groups")
             template = CPP_COOPERATIVE_KERNEL_LAUNCH_TEMPLATE
+        elif use_cluster:
+            template = CPP_CLUSTER_KERNEL_LAUNCH_TEMPLATE
         elif use_pdl:
             template = CPP_PDL_KERNEL_LAUNCH_TEMPLATE
         else:
@@ -1248,6 +1456,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             block_y=self._cxx_expr(block[1]),
             block_z=self._cxx_expr(block[2]),
             smem_size=smem_size,
+            cluster_x=self._cxx_expr(cluster[0]) if cluster else 1,
+            cluster_y=self._cxx_expr(cluster[1]) if cluster else 1,
+            cluster_z=self._cxx_expr(cluster[2]) if cluster else 1,
         )
 
     # =========================================================================
@@ -1346,12 +1557,120 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
     # Python Wrapper Generation
     # =========================================================================
 
+    @staticmethod
+    def _collect_wrapper_params_union(kernel_metadata_list: list[dict]) -> list[str]:
+        """Collect parameters used by the generated CUTLASS host wrapper."""
+        wrapper_params_union = []
+        for kernel_meta in kernel_metadata_list:
+            descriptor_aliases = kernel_meta.get("descriptor_aliases", {})
+            for arg_name, _ in kernel_meta["call_args"]:
+                if arg_name in descriptor_aliases:
+                    continue
+                if arg_name not in wrapper_params_union:
+                    wrapper_params_union.append(arg_name)
+        return wrapper_params_union
+
+    def _collect_cutlass_host_args(
+        self,
+        kernel_metadata_list: list[dict],
+        all_desc_names: list[str],
+        all_tma_tensors: list[str],
+    ) -> list[str]:
+        """Collect runtime args needed by the generated CUTLASS host wrapper."""
+        host_args = []
+        for arg_name in self._collect_wrapper_params_union(kernel_metadata_list):
+            if arg_name in all_desc_names:
+                continue
+            if arg_name not in host_args:
+                host_args.append(arg_name)
+        for tensor_name in all_tma_tensors:
+            if tensor_name not in host_args:
+                host_args.append(tensor_name)
+        return host_args
+
+    def _supports_cutlass_tma_host_launcher(self, desc_names: list[str]) -> tuple[bool, str]:
+        """Return whether direct CUTLASS host launch can create all TMA descriptors."""
+        unsupported = []
+        for desc_name in desc_names:
+            info = getattr(self, "tma_desc_info", {}).get(desc_name, {})
+            if info.get("is_img2col", False):
+                unsupported.append(f"{desc_name}: im2col TensorMap creation is not exposed")
+        if unsupported:
+            return False, "; ".join(unsupported)
+        return True, ""
+
+    def _py_expr_list(self, values: list[Any]) -> str:
+        """Render a Python list body from TVM/Python scalar expressions."""
+        return ", ".join(value if isinstance(value, str) else self._pythonic_expr(value) for value in values)
+
+    def _py_expr_list_div(self, values: list[Any], divisor: int) -> str:
+        """Render a Python list body with integer division applied to each value."""
+        return ", ".join(f"({self._pythonic_expr(value)}) // {divisor}" for value in values)
+
+    def _generate_cubin_tma_desc_init(
+        self,
+        desc_name: str,
+        tensor_arg_map: dict[str, tuple[str, int]],
+    ) -> str:
+        """Generate CUTLASS TensorMap creation code for cubin generation."""
+        info = self.tma_desc_info[desc_name]
+        tensor_name, _ = tensor_arg_map[desc_name]
+        if info.get("is_img2col", False):
+            tensor_rank = int(info["tensor_rank"])
+            box_dims = [info["smem_box_channel"], info["smem_box_pixel"]] + [1] * max(tensor_rank - 2, 0)
+        else:
+            box_dims = info["box_dim"]
+        return CUBIN_TMA_DESC_INIT_TEMPLATE.format(
+            desc_name=desc_name,
+            tensor_name=tensor_name,
+            dtype=info["dtype"],
+            global_dim_values=self._py_expr_list(info["global_dim"]),
+            global_stride_values=self._py_expr_list_div(info["global_stride"][1:], 16),
+            box_dim_values=self._py_expr_list(box_dims),
+            element_stride_values=self._py_expr_list(info["element_strides"]),
+            interleave=info["interleave"],
+            swizzle=info["swizzle"],
+            l2_promotion=info["l2Promotion"],
+            oob_fill=info["oobFill"],
+        )
+
+    @staticmethod
+    def _annotate_tma_tensor_map_params(lib_code: str, desc_names: list[str]) -> str:
+        """Annotate generated kernel TMA params as grid-constant TensorMaps."""
+        if not lib_code or not desc_names:
+            return lib_code
+        desc_set = {str(desc_name) for desc_name in desc_names}
+
+        def annotate_param(param: str) -> str:
+            stripped = param.strip()
+            if not stripped:
+                return param
+            name = stripped.split(":", 1)[0].split("=", 1)[0].strip()
+            if name not in desc_set or ":" in stripped:
+                return param
+            leading = param[: len(param) - len(param.lstrip())]
+            trailing = param[len(param.rstrip()) :]
+            return f"{leading}{name}: cutlass.GridConstant[cuda.TensorMap]{trailing}"
+
+        def annotate_signature(match: re.Match) -> str:
+            params = ", ".join(annotate_param(param) for param in match.group("params").split(","))
+            return f"{match.group('prefix')}{params}{match.group('suffix')}"
+
+        return re.sub(
+            r"(?m)^(?P<prefix>\s*def\s+\w+\s*\()(?P<params>[^()\n]*)(?P<suffix>\)\s*:)",
+            annotate_signature,
+            lib_code,
+        )
+
     def _generate_cubin_gen_code(
         self,
         kernel_metadata_list: list[dict],
         function_args: list[dict],
         buffer_args: list[str],
         all_desc_names: list[str],
+        all_tma_tensors: list[str],
+        tensor_arg_map: dict[str, tuple[str, int]],
+        use_tensor_map_descs: bool,
         lib_code: str = "",
     ) -> str:
         """Generate cubin generation code for Python wrapper using templates.
@@ -1361,20 +1680,27 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                       This will be embedded inside _generate_cubin_if_needed to enable
                       lazy loading of cutlass/cute modules.
         """
-        # Build unified wrapper parameters
-        wrapper_params_union = []
-        for kernel_meta in kernel_metadata_list:
-            descriptor_aliases = kernel_meta.get("descriptor_aliases", {})
-            for arg_name, _ in kernel_meta["call_args"]:
-                if arg_name in descriptor_aliases:
-                    continue
-                if arg_name not in wrapper_params_union:
-                    wrapper_params_union.append(arg_name)
+        if use_tensor_map_descs:
+            descriptor_params = list(all_desc_names)
+            for kernel_meta in kernel_metadata_list:
+                for raw_name in kernel_meta.get("descriptor_aliases", {}):
+                    if raw_name not in descriptor_params:
+                        descriptor_params.append(raw_name)
+            lib_code = self._annotate_tma_tensor_map_params(lib_code, descriptor_params)
+
+        # Build host wrapper parameters. TensorMap descriptors are created from
+        # backing tensors inside the generated CUTLASS wrapper.
+        wrapper_params_union = self._collect_wrapper_params_union(kernel_metadata_list)
+        host_arg_names = (
+            self._collect_cutlass_host_args(kernel_metadata_list, all_desc_names, all_tma_tensors)
+            if use_tensor_map_descs
+            else wrapper_params_union
+        )
 
         # Build inner args for cute.compile
         inner_args = []
         fake_inner_args = []
-        for arg_name in wrapper_params_union:
+        for arg_name in host_arg_names:
             if arg_name in buffer_args:
                 inner_args.append(f"{arg_name}_")
                 fake_inner_args.append(f"__fake_{arg_name}__")
@@ -1383,16 +1709,13 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             else:
                 inner_args.append(arg_name)
                 fake_inner_args.append(arg_name)
-        if all_desc_names:
-            inner_args.append("__fake_tensor__")
-            fake_inner_args.append("__fake_tensor__")
         fake_inner_args.append("__fake_stream__")
 
         # Generate TMA init code
         tma_init_code = ""
         if all_desc_names:
-            tma_init_lines = ["    # Create dummy TMA atoms for compilation"]
-            tma_init_lines.extend(CUBIN_TMA_ATOM_INIT_TEMPLATE.format(desc_name=desc_name) for desc_name in all_desc_names)
+            tma_init_lines = ["    # Create typed TensorMap descriptors for cubin generation"]
+            tma_init_lines.extend(self._generate_cubin_tma_desc_init(desc_name, tensor_arg_map) for desc_name in all_desc_names)
             tma_init_code = "\n".join(tma_init_lines) + "\n"
 
         # Generate kernel launch calls
@@ -1409,6 +1732,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 block_x=self._pythonic_expr(km["function_info"]["block_info"][0]),
                 block_y=self._pythonic_expr(km["function_info"]["block_info"][1]),
                 block_z=self._pythonic_expr(km["function_info"]["block_info"][2]),
+                cluster_arg=self._generate_cubin_cluster_arg(km["function_info"].get("cluster_dims")),
                 smem_size=km["function_info"]["dynamic_smem_buf"] or 0,
                 use_pdl=str(km["function_name"] in self.pdl_sync_map),
             )
@@ -1430,18 +1754,11 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 arg_name=arg_name,
                 dtype_expr=buffer_arg_dtypes.get(arg_name) or f"_DTYPE_MAP[str({arg_name}.dtype)]",
             )
-            for arg_name in wrapper_params_union
+            for arg_name in host_arg_names
             if arg_name in buffer_args
         )
         if fake_tensor_code:
             fake_tensor_code += "\n"
-
-        # Generate fake TMA tensor code
-        fake_tma_tensor_code = ""
-        if all_desc_names:
-            fake_tma_tensor_code = (
-                "  __fake_tensor__ = make_fake_compact_tensor(cutlass.Int32, (32, 32), stride_order=(1, 0), assumed_align=16)\n"
-            )
 
         # Indent lib_code to be inside the function
         indented_lib_code = "\n".join("  " + line if line.strip() else line for line in lib_code.split("\n")) if lib_code else ""
@@ -1452,7 +1769,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             tma_init_code=tma_init_code,
             kernel_launches=kernel_launches,
             fake_tensor_code=fake_tensor_code,
-            fake_tma_tensor_code=fake_tma_tensor_code,
+            fake_tma_tensor_code="",
             compile_args=", ".join(fake_inner_args),
             target_arch=self._target_arch(),
             primary_name=kernel_metadata_list[0]["function_name"],
@@ -1462,13 +1779,18 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         self,
         function_args: list[dict],
         launcher_args: list[dict],
+        cutlass_launcher_args: list[str],
         cubin_gen_code: str,
         cubin_gen_params: str,
+        has_tma_descs: bool,
+        cutlass_host_launcher_supported: bool,
+        cutlass_host_launcher_disabled_reason: str,
     ) -> str:
         """Generate Python wrapper code."""
         # Build function parameters
         call_func_params = ", ".join(arg["name"] for arg in function_args)
         launcher_call_args = ", ".join(arg["name"] for arg in launcher_args)
+        cutlass_launcher_call_args = ", ".join(cutlass_launcher_args)
 
         return PYTHON_HOST_FUNC_TEMPLATE.format(
             cubin_gen_params=cubin_gen_params,
@@ -1478,6 +1800,10 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             cubin_gen_call_args=cubin_gen_params,
             arg_prep_code="",
             launcher_call_args=launcher_call_args,
+            cutlass_launcher_call_args=cutlass_launcher_call_args,
+            has_tma_descs=str(bool(has_tma_descs)),
+            cutlass_host_launcher_supported=str(bool(cutlass_host_launcher_supported)),
+            cutlass_host_launcher_disabled_reason=cutlass_host_launcher_disabled_reason,
         )
 
     # =========================================================================
@@ -1682,12 +2008,18 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         self._launcher_lib_name = "launcher_lib.so"
         self.launcher_lib_name = self._launcher_lib_name
 
+        tma_host_supported, tma_host_disabled_reason = self._supports_cutlass_tma_host_launcher(all_desc_names_union)
+        cutlass_host_launcher_supported = not all_desc_names_union or tma_host_supported
+
         # Generate cubin generation code (includes lib_code with @cute.kernel definitions)
         cubin_gen_code = self._generate_cubin_gen_code(
             kernel_metadata,
             function_args,
             buffer_args,
             all_desc_names_union,
+            all_tma_tensors,
+            tensor_arg_map,
+            use_tensor_map_descs=bool(all_desc_names_union),
             lib_code=getattr(self, "lib_code", ""),
         )
 
@@ -1698,8 +2030,19 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         # `_generate_cubin_if_needed(...)` scope, so include them in its signature.
         scalar_names = [arg["name"] for arg in function_args if arg["type"] != "buffer"]
         cubin_gen_params = ", ".join(buffer_names + scalar_names)
+        cutlass_launcher_args = self._collect_cutlass_host_args(kernel_metadata, all_desc_names_union, all_tma_tensors)
+        cutlass_launcher_args.append("_cutlass_stream")
 
-        python_wrapper = self._generate_python_wrapper(function_args, launcher_args, cubin_gen_code, cubin_gen_params)
+        python_wrapper = self._generate_python_wrapper(
+            function_args,
+            launcher_args,
+            cutlass_launcher_args,
+            cubin_gen_code,
+            cubin_gen_params,
+            has_tma_descs=bool(all_desc_names_union),
+            cutlass_host_launcher_supported=cutlass_host_launcher_supported,
+            cutlass_host_launcher_disabled_reason=tma_host_disabled_reason,
+        )
 
         return python_wrapper
 
@@ -1732,6 +2075,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                     "block_info": self.block_info[function_name],
                     "grid_info": self.grid_info[function_name],
                     "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
+                    "cluster_dims": self.cluster_dims.get(function_name, None),
                     "function_params": call_site["function_params"],
                 }
             )

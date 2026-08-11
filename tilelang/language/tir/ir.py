@@ -95,13 +95,10 @@ def unroll(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any
     res : frame.ForFrame
         The ForFrame.
     """
-    # Ensure annotations has {"pragma_unroll_explicit": True} by default
     if annotations is None:
-        annotations = {"pragma_unroll_explicit": False}
+        annotations = dict()
     else:
-        # Add "pragma_unroll_explicit": True if not already present
         annotations = dict(annotations)
-        annotations.setdefault("pragma_unroll_explicit", False)
     return _ir.unroll(start=start, stop=stop, annotations=annotations)
 
 
@@ -268,7 +265,6 @@ tvm_throw_last_error = _op_wrapper(_tir_op.tvm_throw_last_error)
 tvm_stack_alloca = _op_wrapper(_tir_op.tvm_stack_alloca)
 tvm_stack_make_shape = _op_wrapper(_tir_op.tvm_stack_make_shape)
 tvm_stack_make_array = _op_wrapper(_tir_op.tvm_stack_make_array)
-tvm_check_return = _op_wrapper(_tir_op.tvm_check_return)
 call_packed = _op_wrapper(_tir_op.call_packed)
 call_cpacked = _op_wrapper(_tir_op.call_cpacked)
 call_packed_lowered = _op_wrapper(_tir_op.call_packed_lowered)
@@ -316,8 +312,6 @@ call_llvm_intrin = _dtype_forward(_tir_op.call_llvm_intrin)
 call_llvm_pure_intrin = _dtype_forward(_tir_op.call_llvm_pure_intrin)
 call_pure_extern = _dtype_forward(_tir_op.call_pure_extern)
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
-mma_store = _dtype_forward(_tir_op.mma_store)
-mma_fill = _dtype_forward(_tir_op.mma_fill)
 vectorlow = _dtype_forward(_tir_op.vectorlow)
 vectorhigh = _dtype_forward(_tir_op.vectorhigh)
 vectorcombine = _dtype_forward(_tir_op.vectorcombine)
@@ -465,8 +459,6 @@ __all__ = (
     "max_value",
     "min",
     "min_value",
-    "mma_fill",
-    "mma_store",
     "nearbyint",
     "nextafter",
     "parallel",
@@ -501,7 +493,6 @@ __all__ = (
     "truncmod",
     "tvm_access_ptr",
     "tvm_bmma_sync",
-    "tvm_check_return",
     "tvm_fill_fragment",
     "tvm_load_matrix_sync",
     "tvm_mma_sync",

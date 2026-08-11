@@ -137,10 +137,24 @@ from .utils import index_to_coordinates  # noqa: F401
 
 from .symbolics import dynamic, symbolic  # noqa: F401
 from .annotations import (  # noqa: F401
+    WSID,
     use_swizzle,
     annotate_layout,
     annotate_safe_value,
     annotate_restrict_buffers,
+    annotate_ws_schedule,
+    ws_op,
+)
+
+from .ws_schedule import (  # noqa: F401
+    WSRole,
+    WSPipeline,
+    WSInstr,
+    WSOpRef,
+    WSSync,
+    WSSyncKind,
+    WSScope,
+    WSSchedule,
 )
 
 from .meta import (
@@ -187,6 +201,15 @@ _LOCAL_EXPORTS = (
     "Tensor",
     "Unroll",
     "Vectorized",
+    "WSID",
+    "WSInstr",
+    "WSOpRef",
+    "WSPipeline",
+    "WSRole",
+    "WSSchedule",
+    "WSScope",
+    "WSSync",
+    "WSSyncKind",
     "access_ptr",
     "activemask",
     "all_of",
@@ -202,6 +225,8 @@ _LOCAL_EXPORTS = (
     "annotate_layout",
     "annotate_restrict_buffers",
     "annotate_safe_value",
+    "annotate_ws_schedule",
+    "ws_op",
     "any_of",
     "any_sync",
     "async_copy",

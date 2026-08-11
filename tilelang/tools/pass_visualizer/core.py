@@ -1,9 +1,9 @@
-"""Core helpers for the pass visualizer: load a user TileLang kernel, build the
-CUDA lowering pass pipeline, and render a PrimFunc's SBlock structure tree.
+"""Core helpers for the pass visualizer: load a user TileLang kernel, capture
+real compiler-pass executions, and render a PrimFunc's SBlock structure tree.
 
-This mirrors ``CUDAPassPipelineBodyPrologue`` in ``tilelang/cuda/pipeline.py``,
-running each prologue pass (through LayoutInference and the post-LayoutInference
-lowering passes) so the structure tree can be captured before/after every stage.
+``StructureTreePassInstrument`` observes the canonical CUDA lowering prologue
+through TVM's ``PassInstrument`` API.  The visualizer therefore follows the
+passes that actually execute instead of maintaining a duplicate pass list.
 
 The kernel file is taken as input; any ``@tilelang.jit`` kernel in the file is
 auto-discovered. These helpers are consumed by ``viewer.py`` to emit an
@@ -13,26 +13,28 @@ interactive HTML pass browser.
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib.util
+import io
+import logging
+from dataclasses import dataclass
 
-import tilelang
 from tilelang import tvm as tvm
 from tvm import tirx
 from tvm.tirx import PrimFunc, SBlock
 from tvm.target import Target
 
+from tilelang.backend import create_backend_context
 from tilelang.jit import JITImpl
-
-try:
-    from tilelang.backend.target import determine_target
-except ImportError:  # installed package (0.1.x) exposes it here
-    from tilelang.utils.target import determine_target
-from tilelang.engine.lower import canon_target_host
-from tilelang.cuda.pipeline import allow_warp_specialized
-from tilelang.backend.pass_pipeline.pipeline_utils import (
-    should_enable_race_check,
-    should_force_let_inline,
+from tilelang.instrumentation import (
+    IncompletePass,
+    PassEvent,
+    PassEventObserver,
+    PassInstrumentationTool,
+    StackedPassInstrument,
 )
+
+logger = logging.getLogger("tilelang.pass_visualizer")
 
 
 def load_user_module(path: str):
@@ -83,64 +85,8 @@ def build_module(func: tirx.PrimFunc, target: str | Target = "auto"):
     """Wrap a PrimFunc into an IRModule and resolve the (target, target_host) pair."""
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
 
-    if isinstance(target, str):
-        target = determine_target(target)
-    target_host = canon_target_host(target, None)
-    target_host = tvm.target.Target(target_host)
-    target = tvm.target.Target(target, target_host)
-    return mod, target
-
-
-def build_pass_stages(target: Target) -> list[tuple[str, object]]:
-    """Build the ordered CUDA prologue pass list, through the full Prologue.
-
-    Each stage is a ``(name, transform)`` pair where ``transform`` is a TVM pass
-    object callable as ``transform(mod) -> mod``. Conditional passes are resolved
-    here so the returned list reflects what actually runs for this target/config.
-
-    Matches CUDAPassPipelineBodyPrologue (tilelang/cuda/pipeline.py:68-137).
-    """
-    stages: list[tuple[str, object]] = []
-
-    stages.append(("BindTarget", tirx.transform.BindTarget(target)))
-    stages.append(("MaterializeKernelLaunch", tilelang.transform.MaterializeKernelLaunch()))
-    stages.append(("AnnotateDeviceBoundTmaCopies", tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()))
-
-    if should_force_let_inline():
-        stages.append(("LetInline", tilelang.transform.LetInline()))
-    stages.append(("AddWrapperForSingleBufStore", tilelang.transform.AddWrapperForSingleBufStore()))
-    stages.append(("LegalizeNegativeIndex", tilelang.transform.LegalizeNegativeIndex()))
-
-    if should_enable_race_check():
-        stages.append(("VerifyParallelLoop", tilelang.transform.VerifyParallelLoop()))
-    stages.append(("InjectAssumes", tilelang.transform.InjectAssumes()))
-    stages.append(("Simplify", tilelang.transform.Simplify()))
-    stages.append(("LayoutReducer", tilelang.transform.LayoutReducer()))
-
-    if allow_warp_specialized(target=target):
-        stages.append(("ProducerConsumerWarpSpecialized", tilelang.cuda.transform.ProducerConsumerWarpSpecialized()))
-
-    stages.append(("LowerBlackwell2SM", tilelang.cuda.transform.LowerBlackwell2SM()))
-    stages.append(("IfStmtBinding", tilelang.transform.IfStmtBinding()))
-    stages.append(("PipelinePlanning", tilelang.transform.PipelinePlanning()))
-    stages.append(("InjectSoftwarePipeline", tilelang.transform.InjectSoftwarePipeline()))
-    stages.append(("Simplify", tilelang.transform.Simplify()))
-
-    # Infer memory layouts for fragments and shared memory (pipeline.py:113).
-    stages.append(("LayoutInference", tilelang.transform.LayoutInference()))
-
-    # --- Post-LayoutInference lowering (pipeline.py:117-137) ---
-    # LayoutVisual (pipeline.py:115) is skipped: it only visualizes, not a transform.
-    stages.append(("LowerTileOp", tilelang.transform.LowerTileOp()))
-    stages.append(("LowerL2Persistent", tilelang.cuda.transform.LowerL2Persistent()))
-    stages.append(("DecoupleTypeCast", tilelang.transform.DecoupleTypeCast()))
-    stages.append(("LegalizeVectorizedLoop", tilelang.transform.LegalizeVectorizedLoop()))
-    stages.append(("LegalizeSafeMemoryAccess", tilelang.transform.LegalizeSafeMemoryAccess()))
-    stages.append(("LowerAccessPtr", tilelang.transform.LowerAccessPtr()))
-    stages.append(("Simplify", tilelang.transform.Simplify()))
-    stages.append(("HoistNonRestrictParams", tilelang.transform.HoistNonRestrictParams()))
-
-    return stages
+    context = create_backend_context(target)
+    return mod, context.target
 
 
 def _fmt_shape(shape) -> list:
@@ -391,6 +337,104 @@ def inspect_structure(mod: tvm.IRModule) -> None:
         print("└─ body")
         _walk_stmt(func.body, "       ")
         print()
+
+
+def capture_structure(mod: tvm.IRModule) -> list[str]:
+    """Render ``inspect_structure`` into stable text lines for diffing."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        inspect_structure(mod)
+    return buf.getvalue().splitlines()
+
+
+@dataclass
+class PassStructureRecord:
+    """Before/after structure snapshots for one top-level compiler pass."""
+
+    name: str
+    sequence: int
+    before_lines: list[str]
+    after_lines: list[str]
+
+    @property
+    def changed(self) -> bool:
+        return self.before_lines != self.after_lines
+
+
+class _StructureTreeObserver(PassEventObserver):
+    """Pass-event consumer that snapshots the visualizer's structure tree."""
+
+    def __init__(self):
+        self.records: list[PassStructureRecord] = []
+        self.input_lines: list[str] | None = None
+        self.incomplete_passes: list[str] = []
+
+    def enter_pass_context(self):
+        self.records.clear()
+        self.input_lines = None
+        self.incomplete_passes.clear()
+
+    def pass_started(self, mod: tvm.IRModule, event: PassEvent) -> list[str]:
+        before_lines = capture_structure(mod)
+        if self.input_lines is None:
+            self.input_lines = before_lines
+        return before_lines
+
+    def pass_finished(self, mod: tvm.IRModule, event: PassEvent, before_lines: list[str]):
+        self.records.append(
+            PassStructureRecord(
+                name=event.name,
+                sequence=event.sequence,
+                before_lines=before_lines,
+                after_lines=capture_structure(mod),
+            )
+        )
+
+    def passes_incomplete(self, passes: list[IncompletePass], error: BaseException | None):
+        self.incomplete_passes.extend(item.name for item in passes)
+
+    def callback_mismatch(self, actual: str, expected: str | None):
+        logger.warning("Ignoring mismatched after-pass callback for %s (expected %s)", actual, expected)
+
+
+class StructureTreePassInstrument(StackedPassInstrument):
+    """Capture structure trees around the real top-level passes in a pipeline.
+
+    Some top-level TileLang passes invoke nested TVM passes internally.  The
+    shared stack instrument tracks every callback for pairing, while this
+    consumer snapshots only depth-zero passes so the browser remains linear.
+    """
+
+    def __init__(self):
+        self._structure_observer = _StructureTreeObserver()
+        super().__init__(self._structure_observer, capture_nested=False)
+
+    @property
+    def records(self) -> list[PassStructureRecord]:
+        return self._structure_observer.records
+
+    @property
+    def input_lines(self) -> list[str] | None:
+        return self._structure_observer.input_lines
+
+    @property
+    def incomplete_passes(self) -> list[str]:
+        return self._structure_observer.incomplete_passes
+
+    def ordered_records(self) -> list[PassStructureRecord]:
+        """Return completed top-level pass records in execution order."""
+        return sorted(self.records, key=lambda record: record.sequence)
+
+
+class StructureTreePassTool(PassInstrumentationTool):
+    """Per-viewer tool that creates its PassContext-local capture instrument."""
+
+    def __init__(self) -> None:
+        self.instrument: StructureTreePassInstrument | None = None
+
+    def create_pass_instrument(self) -> StructureTreePassInstrument:
+        self.instrument = StructureTreePassInstrument()
+        return self.instrument
 
 
 def _parse_kv(pairs: list[str]) -> dict[str, object]:

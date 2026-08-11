@@ -7,8 +7,8 @@
 #include <tvm/runtime/logging.h>
 
 #include "backend/common/target_utils.h"
+#include "metal/op/builtin.h"
 #include "metal/op/utils.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"

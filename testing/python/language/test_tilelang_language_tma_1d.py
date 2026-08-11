@@ -1,6 +1,7 @@
 import torch
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 
 
 def ref_program(x, y):
@@ -54,6 +55,7 @@ def run_elementwise_add(M, N):
         assert "tma_load" in code and "CUtensorMap" in code
 
 
+@tilelang.testing.requires_cuda
 def test_tilelang_language_tma_1d():
     run_elementwise_add(128, 128)
     run_elementwise_add(256, 128)

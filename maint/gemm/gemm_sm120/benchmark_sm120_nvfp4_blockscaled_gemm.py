@@ -159,7 +159,7 @@ def tilelang_nvfp4_blockscaled_gemm(
                         tile_m = tile_id // n_blocks
                         owner = stream & 1
                         owner_iter = stream // 2
-                        for ko in T.unroll(k_tiles, explicit=False, unroll_factor=1):
+                        for ko in T.unroll(k_tiles, unroll_factor=1):
                             stage = ko % num_stages
                             phase = ((owner_iter * k_tiles + ko) // num_stages) & 1
                             barrier_slot = owner * num_stages + stage
@@ -209,7 +209,7 @@ def tilelang_nvfp4_blockscaled_gemm(
                             T.barrier_wait(wg_order[0], (owner_iter - 1) & 1)
 
                         T.clear(C0_local)
-                        for ko in T.unroll(k_tiles, explicit=False, unroll_factor=1):
+                        for ko in T.unroll(k_tiles, unroll_factor=1):
                             stage = ko % num_stages
                             phase = ((owner_iter * k_tiles + ko) // num_stages) & 1
                             barrier_slot = stage
@@ -247,7 +247,7 @@ def tilelang_nvfp4_blockscaled_gemm(
                         T.barrier_wait(wg_order[1], owner_iter & 1)
 
                         T.clear(C1_local)
-                        for ko in T.unroll(k_tiles, explicit=False, unroll_factor=1):
+                        for ko in T.unroll(k_tiles, unroll_factor=1):
                             stage = ko % num_stages
                             phase = ((owner_iter * k_tiles + ko) // num_stages) & 1
                             barrier_slot = num_stages + stage
