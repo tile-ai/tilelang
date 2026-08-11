@@ -366,5 +366,36 @@ def test_fastmath_versions(name, func):
     print(f"✓ {name} test passed")
 
 
+TAN_MATHOPS = [
+    ("tan", T.tan),
+    ("__tan", T.__tan),
+]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(("name", "func"), TAN_MATHOPS, ids=[name for name, _ in TAN_MATHOPS])
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16], ids=["float16", "bfloat16"])
+def test_tan_16bit_compiles_and_runs(name, func, dtype):
+    """Test that 16-bit tan lowers to a callable htan and matches torch.tan"""
+    n = 32
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), dtype), B: T.Tensor((n,), dtype)):
+        with T.Kernel(1, threads=32):
+            for i in T.Parallel(n):
+                B[i] = func(A[i])
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    source = kernel.get_kernel_source()
+    assert "htan(" in source, f"expected htan in generated source for {name}"
+
+    inputs = torch.linspace(-1.0, 1.0, n, device="cuda", dtype=torch.float32).to(dtype.as_torch())
+    actual = kernel(inputs)
+    expected = torch.tan(inputs).to(dtype.as_torch())
+
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+    print(f"✓ {name} 16-bit test passed")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
