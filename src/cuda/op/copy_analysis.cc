@@ -387,6 +387,17 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   bool global_is_contiguous =
       IsContiguousGlobalRegion(global_tensor, global_range, analyzer);
 
+  Array<PrimExpr> global_indices =
+      global_range.Map([](const Range &range) { return range->min; });
+  Array<PrimExpr> global_offsets = global_tensor.OffsetOf(global_indices);
+  bool global_address_aligned =
+      global_offsets.size() == 1 &&
+      analyzer->CanProveEqual(
+          FloorMod(TMAGlobalBitsFromElements(global_offsets[0],
+                                             global_tensor->dtype),
+                   IntImm(DataType::Int(64), 128)),
+          0);
+
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {
     shared_elements *= shared_range[i]->extent;
@@ -408,8 +419,8 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   bool total_16b_aligned = !analyzer->CanProve(
       FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
 
-  return shared_is_contiguous && global_is_contiguous && element_match &&
-         total_16b_aligned;
+  return shared_is_contiguous && global_is_contiguous &&
+         global_address_aligned && element_match && total_16b_aligned;
 }
 
 bool CanProveRegionInBounds(const Buffer &buffer, const Array<Range> &region,
