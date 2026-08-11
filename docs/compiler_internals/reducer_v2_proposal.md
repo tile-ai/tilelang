@@ -849,22 +849,30 @@ T.finalize_reducer(acc, result)
 ```
 
 这里每个 logical iteration `i` 只负责 logical output `acc[i]`，不存在两个不同的
-`i` 需要先合并才能得到同一个结果。planner 在 layout inference 之后执行以下证明：
+`i` 需要先合并才能得到同一个结果。普通 destination layout 稳定后，reducer-aware
+layout planning 执行以下证明：
 
 1. reducer shape、destination logical shape 和 `T.Parallel` shape 完全相同；
 2. update indices 与 parallel variables 逐维相同，这里就是 `acc[i]` 对应 `i`；
 3. destination Fragment layout、thread extent、replicate extent 和每线程 physical
    storage shape 都是编译期已知的；
-4. loop body 可以安全地在 destination replicas 上重复执行；如果读取
-   thread-private Fragment/local value、包含普通 store 或其他副作用，就放弃该计划；
+4. loop body 可以安全地在 destination replicas 上重复执行；Fragment read 必须能在
+   constrained layout solve 中与 destination ownership 联合推导，普通 local read、
+   普通 store 或其他副作用会放弃该计划；
 5. 多个 reducers 共用同一个 parallel loop 时，它们要求的 destination layout
    不能冲突。
 
-证明成功后，planner 把 destination layout 同时用作 storage layout 和 ownership
-certificate：
+LayoutInference 先按普通规则得到一份完整、可独立使用的 baseline。reducer analysis 只读
+消费 baseline 中的 destination、contribution 和 loop layouts，完成上述结构与 ownership
+证明，然后返回具体的 `Map<For, Fragment>` constraints。约束非空时，LayoutInference 从
+原始 fused function 和原始 layout anchors 启动一次全新的 constrained solve；`ParallelOp`
+从本次求解一开始就使用具体 destination ownership，并正常推导相关 Fragment、predicate 和
+padding guard，而不是事后覆盖 `for_map`。
 
-实现上，`ReducerPhysicalPlanner::CanUseLocalComplete` 完成上述证明，
-`ReducerMaterializer` 改写 storage shape、loop layout 和 update region，最后由
+第二次求解是事务式的：只有完整成功才整体采用；任何 incompatibility 都丢弃整个 constrained
+result 并保留 baseline，因此不会混合两次求解的状态，也不修改中间 AST。随后
+`ReducerPhysicalPlanner::CanRequestLocalComplete` 在 materialization 前复核最终 layout。
+`ReducerMaterializer` 只改写 storage shape 和 update region，不再改变 loop layout。最后由
 `FinalizeReducerLowerer` 生成不含 collective 的 direct-local finalize。
 
 - reducer 的每 participant 完整 8-element array 被压缩为
@@ -1113,10 +1121,13 @@ flowchart LR
 各阶段职责是：
 
 1. `VerifyReducerEpochs` 只验证 lifecycle、access、effect 和 control flow。
-2. `LayoutInference` 正常推导 contribution inputs、parallel loops 和 destination，
-   不给 reducer handle 强行分配 Fragment layout。
-3. `PlanAndMaterializeReducers` 选择 physical plan，并把 `local.reducer` 改写为
-   真实 `local` storage。
+2. `LayoutInference` 不给 reducer handle 分配 Fragment layout。它先做普通 baseline solve，
+   再从完整 baseline 证明 eligible LocalComplete candidates 并生成具体 loop constraints；
+   constraints 非空时从原始输入重跑一次事务式 constrained solve。成功时整体采用
+   destination、contribution inputs、parallel loops、predicate 和 padding guard，失败时
+   整体保留 baseline。
+3. `PlanAndMaterializeReducers` 只消费最终 Parallel layout、选择 physical plan，并把
+   `local.reducer` 改写为真实 `local` storage，不再晚期改写 loop layout。
 4. `LowerTileOp / PartitionLoop` 实现 update 的贡献次数和 physical indexing。
 5. `VerifyReducerLowered` 保证虚拟 scope、first-class ops 和 effect markers 已全部
    被消费。
@@ -1186,8 +1197,8 @@ replicas。reducer storage 可以从每 participant 8 个 slots 缩成 1 个 slo
 - reducer shape、destination input shape 和 parallel loop shape 相同；
 - update indices 与 parallel logical variables 逐维相等；
 - thread、replicate 和 physical output extents 都是 compile-time known；
-- loop 可以安全复制：没有普通 store、thread-private Fragment/local load 或
-  non-pure call；
+- loop 可以安全复制：没有普通 store、普通 local load 或 non-pure call；Fragment
+  load 必须通过 constrained solve 的 ownership compatibility 检查；
 - 同一 parallel root 上的 LocalComplete candidates 请求完全相同的 layout。
 
 需要强调：LocalComplete 不是“只选一个 physical owner”。它允许多个 destination
@@ -1212,9 +1223,9 @@ for i in T.Parallel(M):
 
 因为负责 `i` 的每个 destination replica 都执行完整 serial `K`。
 
-Fragment/local contribution 也暂不进入 LocalComplete，因为其值可能取决于原有
-physical layout。未来只有在 source Fragment ownership 与 destination ownership
-兼容性可证明时才放开。
+Fragment contribution 可以进入 LocalComplete。第二次 constrained solve 会从原始 anchors
+重新推导 source Fragment，并证明它与 destination ownership compatible；冲突时整次求解
+回滚到 baseline。普通 local contribution 仍然保守 fallback。
 
 ### 6.5 Projected partial groups
 
@@ -1321,7 +1332,7 @@ segmented/sparse storage planner 和 batched finalize 提供正确对照。
 LocalComplete 当前只覆盖 direct identity ownership。它不处理：
 
 - affine/permuted output mapping；
-- Fragment/local contribution；
+- ordinary local contribution 和 incompatible Fragment ownership；
 - mixed side effects；
 - 一个 Parallel root 上互相冲突的 destination layouts；
 - subgroup communication。
@@ -1417,7 +1428,8 @@ occupancy 和 real kernels 的系统评估。
 - compiler-known `Parallel(M, K) -> output[M]` 选择 projected partial group。
 - 不兼容 projected signatures 拆成独立 physical partial groups。
 - 不支持的 update site 与 projected groups 共存时只让该 site 进入 canonical fallback。
-- Fragment/local contribution 不错误选择 LocalComplete。
+- compatible Fragment contribution 随 destination constraint 重新推导并选择
+  LocalComplete；incompatible Fragment ownership 确定性 fallback。
 - 多个 reducers 共享 Parallel 时，相同 destination layout 可共同 fast path。
 - 同一个 Parallel 上 destination layout 冲突时确定性 fallback。
 - 不同 thread counts、replicate extents 和每线程多 physical slots。

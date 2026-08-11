@@ -1,7 +1,7 @@
 # Reducer v2 重构设计方案
 
 - 状态：v2 correctness baseline 与 conservative LocalComplete fast path 已在 `refactor/reducer-v2` 分支实现并进入验证；subgroup fast path 尚未实现
-- 更新日期：2026-08-06
+- 更新日期：2026-08-11
 - 相关讨论：[RFC #2897](https://github.com/tile-ai/tilelang/issues/2897)
 - 当前止血修复：[PR #2881](https://github.com/tile-ai/tilelang/pull/2881)
 
@@ -524,6 +524,17 @@ frontend 直接生成 `local.reducer` allocation 和三个 first-class ops，不
 - `ReducerUpdateOp` 的 contribution 中的普通 fragment reads 仍参与 loop layout inference。
 - logical reducer indices 用于边界和 output projection 分析，但不要求 reducer partial 有 Fragment layout。
 - `FinalizeReducerOp` 只对 destination 参与正常 layout inference。
+- 第一次执行不带 reducer 约束的普通 layout solve，得到完整且可用的 baseline：包括
+  destination Fragment、contribution Fragment、Parallel layout、predicate 和 padding guard。
+- reducer analysis 只读消费这份完整结果；仅当 direct identity update、loop body safety、
+  destination ownership 和多个 reducer 的共享约束都满足时，才产生具体的
+  `Map<For, Fragment>` LocalComplete constraints。
+- 如果约束非空，从原始 fused function 和原始 layout anchors 启动一次新的 constrained
+  solve。约束在 `ParallelOp` 正常推导、Fragment compatibility、injectivity、predicate 和
+  padding-guard 生成中一起生效，而不是事后覆盖 `for_map`。
+- 第二次求解是事务式的：全部成功才采用完整结果；任何 layout conflict、normalize failure
+  或 non-injective mapping 都丢弃整个 constrained result，并保留 baseline。过程不修改 AST，
+  也不会混合两次求解的 layout/predicate 状态。
 
 ### 9.3 `PlanAndMaterializeReducers`
 
@@ -534,6 +545,7 @@ Analyze 阶段：
 - 从 init/finalize execution scope 确定 participant range。
 - 要求 participant domain 可表示为 compiler-known contiguous `Range`。允许在新增 lanes 可执行 init/finalize 并始终提供 identity 时，安全扩大到一个已知连续 superset；否则拒绝。
 - 为每个 update site 获取 enclosing parallel layout。
+- 把 enclosing parallel layout 当作只读的最终输入；LocalComplete 只做一致性验证，不再在 materialization 中覆盖它。
 - 验证 replica-invariant predicate/value requirements。
 - 默认选择 canonical unique-contribution plan。
 - 可选计算并比较 `ThreadGroupSignature`。
@@ -761,7 +773,8 @@ epoch 只有在以下条件全部满足时才能采用 subgroup plan：
 
 - 复用 finalize destination Fragment layout 作为 storage layout 与 ownership certificate。
 - 第一版只接受 `Parallel(M) -> output[M]` 的逐维 identity mapping；inner serial loops 可以继续向同一 output 累加。
-- 只在 loop 可安全复制时用 destination layout 覆盖原 Parallel layout；ordinary stores、Fragment/local loads、非 pure calls 或 layout conflicts 全部 fallback。
+- 先由普通 LayoutInference baseline 得到完整 destination/Fragment/loop layouts，再只对可安全复制的 loop 生成具体 LocalComplete layout constraints，并从原始输入事务式重跑 constrained solve。compatible Fragment loads 可在第二次求解中随约束重新推导；ordinary stores/local loads、非 pure calls、incompatible Fragment ownership 或 layout conflicts 全部保留 baseline。
+- `PlanAndMaterializeReducers` 不再晚期改写 Parallel layout；它只验证 LocalComplete 的最终 loop layout 与 destination layout 一致，并消费普通 LayoutInference 为 projected/canonical 路径选出的 layout。
 - materialized partial shape 改为 destination layout 的 `OutputShape()`。
 - update 在所有 destination replicas 上执行，并使用独立的 partition-required marker；不能复用会产生 `REP == 0` 的 multiplicity marker。
 - finalize 直接把 local partial slots 写到 destination physical slots，不生成 AllReduce、barrier 或 workspace。

@@ -14,7 +14,8 @@ namespace tl {
 /*! \brief Verify first-class reducer lifecycle and access legality. */
 TVM_DLL tvm::transform::Pass VerifyReducerEpochs();
 
-/*! \brief Materialize opaque reducer handles as full per-thread local arrays.
+/*! \brief Plan reducer partials and materialize opaque handles as local
+ * buffers.
  */
 TVM_DLL tvm::transform::Pass PlanAndMaterializeReducers();
 

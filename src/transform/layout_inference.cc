@@ -19,6 +19,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <utility>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -33,6 +34,7 @@
 #include "common/pipeline_utils.h"
 #include "common/union_find.h"
 #include "parallel_loop_layout_validator.h"
+#include "reducer/reducer_loop_layout.h"
 #include "span_utils.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -91,7 +93,9 @@ struct LayoutInferenceResult {
 
 class BufferUseDefCollector : public IRVisitorWithAnalyzer {
 public:
-  BufferUseDefCollector() = default;
+  explicit BufferUseDefCollector(
+      Map<For, Fragment> loop_layout_constraints = {})
+      : loop_layout_constraints_(std::move(loop_layout_constraints)) {}
 
   using arith::IRVisitorWithAnalyzer::IRVisitorWithAnalyzer;
 
@@ -623,7 +627,11 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      auto infer = ParallelOp(GetRef<For>(op));
+      For root = GetRef<For>(op);
+      auto infer = ParallelOp(root);
+      if (loop_layout_constraints_.count(root)) {
+        infer->SetLoopLayoutConstraint(loop_layout_constraints_[root]);
+      }
       for (const auto &buffer : infer->GetAccessOrder()) {
         addToUseList(buffer);
       }
@@ -973,6 +981,9 @@ private:
   }
 
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
+  // Concrete optional constraints for this solver invocation. Reducer
+  // discovery supplies these only to the speculative second solve.
+  Map<For, Fragment> loop_layout_constraints_;
   // Map from Bind variable to its bound expression
   Map<Var, PrimExpr> bind_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
@@ -1172,15 +1183,50 @@ public:
     arith::Analyzer analyzer;
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = ParallelLoopFuser::Fuse(f->body);
-    BufferUseDefCollector collector;
-    collector.Collect(f);
-    auto result = collector.Run();
-    LayoutInferencer substituter(result, &analyzer);
+
+    // LocalComplete is an optional physical optimization, not a semantic
+    // requirement. First solve the ordinary layout problem to obtain complete
+    // destination and loop layouts. Reducer analysis may then propose concrete
+    // loop constraints for a fresh solve. The second solve is transactional:
+    // any incompatibility discards it in full and keeps the valid baseline.
+    LayoutInferenceResult baseline = Solve(f);
+    Map<For, Fragment> reducer_constraints =
+        DiscoverReducerLoopLayoutConstraints(f, baseline.layout_map,
+                                             baseline.for_map);
+    std::optional<LayoutInferenceResult> constrained;
+    if (!reducer_constraints.empty()) {
+      try {
+        constrained.emplace(Solve(f, reducer_constraints));
+      } catch (const LayoutConflictException &error) {
+        DLOG(INFO) << "Reducer-constrained layout solve failed; retaining "
+                      "baseline: "
+                   << error.what();
+      } catch (const NormalizeIterException &error) {
+        DLOG(INFO) << "Reducer-constrained layout solve failed; retaining "
+                      "baseline: "
+                   << error.what();
+      } catch (const LoopLayoutInjectiveException &error) {
+        DLOG(INFO) << "Reducer-constrained layout solve failed; retaining "
+                      "baseline: "
+                   << error.what();
+      }
+    }
+
+    const LayoutInferenceResult &selected =
+        constrained.has_value() ? constrained.value() : baseline;
+    LayoutInferencer substituter(selected, &analyzer);
     fptr->body = substituter.VisitStmt(f->body);
     return f;
   }
 
 private:
+  static LayoutInferenceResult
+  Solve(const PrimFunc &f, Map<For, Fragment> loop_layout_constraints = {}) {
+    BufferUseDefCollector collector(std::move(loop_layout_constraints));
+    collector.Collect(f);
+    return collector.Run();
+  }
+
   LayoutInferencer(const LayoutInferenceResult &result,
                    arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result) {};

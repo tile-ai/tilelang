@@ -4,6 +4,7 @@
  */
 
 #include "reducer.h"
+#include "reducer_loop_layout.h"
 #include "reducer_metadata.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -58,7 +59,6 @@ using ReducerLoopLayoutMap =
 
 struct ReducerPlanningResult {
   ReducerEpochPlanMap reducer_plans;
-  ReducerLoopLayoutMap loop_layout_overrides;
 };
 
 PrimExpr MakeRegionCall(const Buffer &buffer, const Array<PrimExpr> &mins,
@@ -99,10 +99,10 @@ public:
   }
 
 private:
-  // Replacing the inferred loop layout can introduce physical replicas. Keep
-  // the first implementation deliberately narrow: loads from shared/global
-  // storage are repeatable, while any ordinary store or thread-private load
-  // requires a more general effect/ownership proof.
+  // LocalComplete may change physical ownership. Shared/global loads are
+  // repeatable, and Fragment loads are accepted only when the constrained
+  // layout solve proves their compatibility with destination ownership.
+  // Ordinary local loads still lack that proof.
   void VisitStmt_(const BufferStoreNode *op) final {
     safe_ = false;
     StmtExprVisitor::VisitStmt_(op);
@@ -110,6 +110,7 @@ private:
 
   void VisitExpr_(const BufferLoadNode *op) final {
     if (!IsGlobalBuffer(op->buffer) && !IsSharedBuffer(op->buffer) &&
+        !IsFragmentBuffer(op->buffer) &&
         op->buffer.scope() != "local.reducer") {
       safe_ = false;
     }
@@ -138,6 +139,15 @@ public:
     return planner.BuildPlans();
   }
 
+  static ReducerLoopLayoutMap DiscoverLoopLayoutConstraints(
+      const PrimFunc &func, const ReducerMetadata &metadata,
+      LayoutMap inferred_layouts, Map<For, Fragment> inferred_loop_layouts) {
+    ReducerPhysicalPlanner planner(metadata, std::move(inferred_layouts),
+                                   std::move(inferred_loop_layouts));
+    planner(func->body);
+    return planner.SelectLocalComplete().loop_layouts;
+  }
+
 private:
   struct ParallelContext {
     For root;
@@ -150,15 +160,30 @@ private:
 
   explicit ReducerPhysicalPlanner(const ReducerMetadata &metadata)
       : metadata_(metadata) {
-    for (const auto &[var, _] : metadata.info) {
+    InitializeFacts();
+  }
+
+  ReducerPhysicalPlanner(const ReducerMetadata &metadata,
+                         LayoutMap inferred_layouts,
+                         Map<For, Fragment> inferred_loop_layouts)
+      : metadata_(metadata), current_layout_map_(std::move(inferred_layouts)),
+        inferred_loop_layouts_(std::move(inferred_loop_layouts)),
+        use_inferred_layouts_(true) {
+    InitializeFacts();
+  }
+
+  void InitializeFacts() {
+    for (const auto &[var, _] : metadata_.info) {
       facts_.emplace(var, ReducerPlanFacts{});
     }
   }
 
   void VisitStmt_(const SBlockNode *op) final {
     LayoutMap previous_layout_map = current_layout_map_;
-    if (Optional<Any> annotation = op->annotations.Get(attr::kLayoutMap)) {
-      current_layout_map_ = annotation.value().cast<LayoutMap>();
+    if (!use_inferred_layouts_) {
+      if (Optional<Any> annotation = op->annotations.Get(attr::kLayoutMap)) {
+        current_layout_map_ = annotation.value().cast<LayoutMap>();
+      }
     }
     arith::IRVisitorWithAnalyzer::VisitStmt_(op);
     current_layout_map_ = std::move(previous_layout_map);
@@ -171,8 +196,10 @@ private:
       ParallelContext context;
       context.root = GetRef<For>(op);
       context.body_safe = LocalCompleteLoopSafetyChecker::Check(op->body);
-      Optional<Any> layout_ref = op->annotations.Get(attr::kParallelLoopLayout);
-      if (layout_ref.has_value()) {
+      if (inferred_loop_layouts_.count(context.root)) {
+        context.layout = inferred_loop_layouts_[context.root];
+      } else if (Optional<Any> layout_ref =
+                     op->annotations.Get(attr::kParallelLoopLayout)) {
         context.layout = layout_ref.value().cast<Fragment>();
       } else {
         context.supported = false;
@@ -267,32 +294,46 @@ private:
     std::vector<reduction::ThreadReduceStep> thread_steps;
   };
 
-  ReducerPlanningResult BuildPlans() const {
-    ReducerPlanningResult result;
+  struct LocalCompleteSelection {
     std::unordered_map<Var, LocalCompleteCandidate, ObjectPtrHash,
                        ObjectPtrEqual>
         candidates;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> selected_reducers;
+    ReducerLoopLayoutMap loop_layouts;
+  };
+
+  LocalCompleteSelection SelectLocalComplete() const {
+    LocalCompleteSelection selection;
     for (const auto &[var, buffer] : metadata_.buffers) {
       const ReducerPlanFacts &facts = facts_.at(var);
       std::vector<For> parallel_roots;
       if (!facts.supported || !facts.destination_layout.defined() ||
           facts.updates.empty() ||
-          !CanUseLocalComplete(buffer, facts.destination_layout.value(),
-                               facts.updates, &parallel_roots)) {
+          !CanRequestLocalComplete(buffer, facts.destination_layout.value(),
+                                   facts.updates, &parallel_roots)) {
         continue;
       }
-      candidates.emplace(
+      selection.candidates.emplace(
           var, LocalCompleteCandidate{facts.destination_layout.value(),
                                       std::move(parallel_roots)});
     }
 
-    ReducerLoopLayoutMap requested_layouts;
+    std::unordered_map<For, Fragment, ObjectPtrHash, ObjectPtrEqual>
+        requested_layouts;
     std::unordered_set<For, ObjectPtrHash, ObjectPtrEqual> conflicts;
-    // One T.Parallel loop can feed multiple reducers. Only rewrite its layout
+    // One T.Parallel loop can feed multiple reducers. Only constrain its layout
     // when every selected LocalComplete candidate requests the same physical
     // mapping; a conflict sends all affected reducers back to the baseline.
-    for (const auto &[_, candidate] : candidates) {
+    for (const auto &[_, candidate] : selection.candidates) {
       for (const For &root : candidate.parallel_roots) {
+        if (Optional<Any> annotated =
+                root->annotations.Get(attr::kParallelLoopLayout)) {
+          Fragment annotated_layout = annotated.value().cast<Fragment>();
+          if (!LayoutsEqual(annotated_layout, candidate.layout)) {
+            conflicts.insert(root);
+            continue;
+          }
+        }
         auto requested = requested_layouts.find(root);
         if (requested == requested_layouts.end()) {
           requested_layouts.emplace(root, candidate.layout);
@@ -302,9 +343,7 @@ private:
       }
     }
 
-    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
-        selected_local_complete;
-    for (const auto &[var, candidate] : candidates) {
+    for (const auto &[var, candidate] : selection.candidates) {
       bool has_conflict = false;
       for (const For &root : candidate.parallel_roots) {
         has_conflict |= conflicts.count(root) != 0;
@@ -312,18 +351,31 @@ private:
       if (has_conflict) {
         continue;
       }
-      selected_local_complete.insert(var);
+      selection.selected_reducers.insert(var);
       for (const For &root : candidate.parallel_roots) {
-        result.loop_layout_overrides.emplace(root, candidate.layout);
+        selection.loop_layouts.emplace(root, candidate.layout);
       }
     }
+    return selection;
+  }
+
+  ReducerPlanningResult BuildPlans() const {
+    ReducerPlanningResult result;
+    LocalCompleteSelection selection = SelectLocalComplete();
 
     for (const auto &[var, buffer] : metadata_.buffers) {
       const ReducerPlanFacts &facts = facts_.at(var);
       ReducerEpochPhysicalPlan epoch_plan;
-      auto local_complete = candidates.find(var);
-      if (selected_local_complete.count(var) != 0 &&
-          local_complete != candidates.end()) {
+      auto local_complete = selection.candidates.find(var);
+      bool layout_matches = local_complete != selection.candidates.end();
+      if (layout_matches) {
+        for (const ReducerUpdateSite &site : facts.updates) {
+          layout_matches &=
+              site.loop_layout.defined() &&
+              LayoutsEqual(site.loop_layout, local_complete->second.layout);
+        }
+      }
+      if (selection.selected_reducers.count(var) != 0 && layout_matches) {
         ReducerPartialGroupPlan group;
         group.partial_layout = local_complete->second.layout;
         for (const ReducerUpdateSite &site : facts.updates) {
@@ -331,8 +383,7 @@ private:
         }
         epoch_plan.groups.push_back(std::move(group));
       } else {
-        epoch_plan =
-            BuildProjectedGroups(buffer, facts, result.loop_layout_overrides);
+        epoch_plan = BuildProjectedGroups(buffer, facts);
       }
       if (epoch_plan.groups.empty()) {
         epoch_plan.groups.push_back(MakeCanonicalGroup(std::vector<Call>{}));
@@ -349,22 +400,17 @@ private:
     return result;
   }
 
-  ReducerEpochPhysicalPlan BuildProjectedGroups(
-      const Buffer &logical_buffer, const ReducerPlanFacts &facts,
-      const ReducerLoopLayoutMap &loop_layout_overrides) const {
+  ReducerEpochPhysicalPlan
+  BuildProjectedGroups(const Buffer &logical_buffer,
+                       const ReducerPlanFacts &facts) const {
     ReducerEpochPhysicalPlan result;
     std::optional<size_t> canonical_group;
     for (const ReducerUpdateSite &site : facts.updates) {
       std::optional<ProjectedCandidate> candidate;
       if (facts.supported && facts.destination_layout.defined()) {
-        Fragment effective_layout = site.loop_layout;
-        auto override_it = loop_layout_overrides.find(site.parallel_root);
-        if (override_it != loop_layout_overrides.end()) {
-          effective_layout = override_it->second;
-        }
         candidate = TryBuildProjectedCandidate(logical_buffer,
                                                facts.destination_layout.value(),
-                                               site, effective_layout);
+                                               site, site.loop_layout);
       }
 
       if (!candidate.has_value()) {
@@ -599,10 +645,20 @@ private:
            group.thread_steps == candidate.thread_steps;
   }
 
-  bool CanUseLocalComplete(const Buffer &logical_buffer,
-                           const Fragment &destination_layout,
-                           const std::vector<ReducerUpdateSite> &updates,
-                           std::vector<For> *parallel_roots) const {
+  bool CanRequestLocalComplete(const Buffer &logical_buffer,
+                               const Fragment &destination_layout,
+                               const std::vector<ReducerUpdateSite> &updates,
+                               std::vector<For> *parallel_roots) const {
+    if (!CanUseLocalCompleteDestination(logical_buffer, destination_layout)) {
+      return false;
+    }
+    return CanRequestLocalCompleteStructure(logical_buffer, updates,
+                                            parallel_roots);
+  }
+
+  bool
+  CanUseLocalCompleteDestination(const Buffer &logical_buffer,
+                                 const Fragment &destination_layout) const {
     arith::Analyzer shape_analyzer;
     if (destination_layout->InputDim() != logical_buffer->shape.size()) {
       return false;
@@ -641,11 +697,18 @@ private:
       }
     }
 
+    return true;
+  }
+
+  bool CanRequestLocalCompleteStructure(
+      const Buffer &logical_buffer,
+      const std::vector<ReducerUpdateSite> &updates,
+      std::vector<For> *parallel_roots) const {
     for (const ReducerUpdateSite &site : updates) {
       if (!site.supported || !site.loop_body_safe ||
           !site.parallel_root.defined() ||
-          site.parallel_vars.size() != destination_layout->InputDim() ||
-          site.logical_indices.size() != destination_layout->InputDim()) {
+          site.parallel_vars.size() != logical_buffer->shape.size() ||
+          site.logical_indices.size() != logical_buffer->shape.size()) {
         return false;
       }
 
@@ -663,7 +726,7 @@ private:
         }
         if (!domain.defined() ||
             !analyzer.CanProveEqual(domain.value()->extent,
-                                    destination_layout->InputShape()[i]) ||
+                                    logical_buffer->shape[i]) ||
             !analyzer.CanProveEqual(site.logical_indices[i],
                                     site.parallel_vars[i])) {
           return false;
@@ -700,6 +763,8 @@ private:
   std::unordered_map<Var, ReducerPlanFacts, ObjectPtrHash, ObjectPtrEqual>
       facts_;
   LayoutMap current_layout_map_;
+  Map<For, Fragment> inferred_loop_layouts_;
+  bool use_inferred_layouts_{false};
   std::optional<ParallelContext> parallel_context_;
   std::vector<std::pair<Var, Range>> loop_domains_;
 };
@@ -708,10 +773,9 @@ class ReducerMaterializer : public arith::IRMutatorWithAnalyzer {
 public:
   ReducerMaterializer(const ReducerMetadata &metadata,
                       const ReducerEpochPlanMap &plans,
-                      const ReducerLoopLayoutMap &loop_layout_overrides,
                       arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), metadata_(metadata),
-        plans_(plans), loop_layout_overrides_(loop_layout_overrides) {
+        plans_(plans) {
     for (const auto &[var, buffer] : metadata_.buffers) {
       const auto *pointer_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
@@ -748,7 +812,6 @@ public:
                           const ReducerPlanningResult &planning_result) {
     arith::Analyzer analyzer;
     ReducerMaterializer materializer(metadata, planning_result.reducer_plans,
-                                     planning_result.loop_layout_overrides,
                                      &analyzer);
     PrimFuncNode *func_ptr = func.CopyOnWrite();
     func_ptr->body = materializer.VisitStmt(func->body);
@@ -779,22 +842,13 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     bool is_parallel = op->kind == ForKind::kParallel;
     bool starts_replicated_parallel = false;
-    Optional<Fragment> override_layout;
     if (is_parallel && parallel_depth_ == 0) {
-      auto override_it = loop_layout_overrides_.find(GetRef<For>(op));
-      Fragment layout;
-      if (override_it != loop_layout_overrides_.end()) {
-        layout = override_it->second;
-        override_layout = layout;
-      } else {
-        Optional<Any> layout_ref =
-            op->annotations.Get(attr::kParallelLoopLayout);
-        ICHECK(layout_ref.has_value())
-            << "Reducer update is inside a T.Parallel loop without an inferred "
-               "loop layout"
-            << SpanHintSuffix(op->span);
-        layout = layout_ref.value().cast<Fragment>();
-      }
+      Optional<Any> layout_ref = op->annotations.Get(attr::kParallelLoopLayout);
+      ICHECK(layout_ref.has_value())
+          << "Reducer update is inside a T.Parallel loop without an inferred "
+             "loop layout"
+          << SpanHintSuffix(op->span);
+      Fragment layout = layout_ref.value().cast<Fragment>();
       starts_replicated_parallel =
           !analyzer_->CanProveEqual(layout->ReplicateExtent(), Integer(1));
     }
@@ -809,15 +863,6 @@ private:
     replica_variant_control_depth_ -= variant_bounds ? 1 : 0;
     replicated_parallel_depth_ -= starts_replicated_parallel ? 1 : 0;
     parallel_depth_ -= is_parallel ? 1 : 0;
-    if (override_layout.defined()) {
-      For result_for = Downcast<For>(result);
-      ForNode *result_ptr = result_for.CopyOnWrite();
-      result_ptr->annotations.Set(attr::kParallelLoopLayout,
-                                  override_layout.value());
-      result_ptr->annotations.erase(attr::kParallelLoopPredicate);
-      result_ptr->annotations.erase(attr::kParallelLoopRequiresPaddingGuard);
-      result = std::move(result_for);
-    }
     return result;
   }
 
@@ -984,7 +1029,6 @@ private:
 
   const ReducerMetadata &metadata_;
   const ReducerEpochPlanMap &plans_;
-  const ReducerLoopLayoutMap &loop_layout_overrides_;
   std::unordered_map<Buffer, std::vector<Buffer>, ObjectPtrHash, ObjectPtrEqual>
       group_buffers_;
 
@@ -1057,6 +1101,23 @@ private:
 };
 
 } // namespace
+
+Map<For, Fragment> DiscoverReducerLoopLayoutConstraints(
+    const PrimFunc &func, const LayoutMap &inferred_layouts,
+    const Map<For, Fragment> &inferred_loop_layouts) {
+  ReducerMetadata metadata = CollectReducerMetadata(func);
+  if (metadata.info.empty()) {
+    return {};
+  }
+  ReducerLoopLayoutMap discovered =
+      ReducerPhysicalPlanner::DiscoverLoopLayoutConstraints(
+          func, metadata, inferred_layouts, inferred_loop_layouts);
+  Map<For, Fragment> result;
+  for (const auto &[loop, layout] : discovered) {
+    result.Set(loop, layout);
+  }
+  return result;
+}
 
 tvm::transform::Pass PlanAndMaterializeReducers() {
   auto pass_func = [](PrimFunc func, IRModule, tvm::transform::PassContext) {

@@ -11,6 +11,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../layout/layout.h"
@@ -77,6 +78,9 @@ public:
   mutable Optional<Fragment> annotated_layout_unbound_;
   mutable Optional<PrimExpr> annotated_predicate_;
   mutable bool annotated_requires_padding_guard_ = false;
+  // Optional concrete hard loop-layout constraint supplied for this solver
+  // invocation. InferLayout rebinds it to the invocation's thread range.
+  mutable Optional<Fragment> loop_layout_constraint_;
 
   // Type key for TVM object system.
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ParallelOp", ParallelOpNode,
@@ -101,6 +105,13 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
 
+  /*! \brief Supply a concrete hard loop-layout constraint for this solve. */
+  void SetLoopLayoutConstraint(Fragment constraint) const {
+    ICHECK(!loop_layout_inferred_)
+        << "Cannot add a loop-layout constraint after inference";
+    loop_layout_constraint_ = std::move(constraint);
+  }
+
   // Copy constructor for ParallelOpNode.
   ParallelOpNode(const ParallelOpNode &other) : ParallelOpNode(other.root_) {
     loop_layout_ = other.loop_layout_;
@@ -111,6 +122,7 @@ public:
     annotated_layout_unbound_ = other.annotated_layout_unbound_;
     annotated_predicate_ = other.annotated_predicate_;
     annotated_requires_padding_guard_ = other.annotated_requires_padding_guard_;
+    loop_layout_constraint_ = other.loop_layout_constraint_;
   }
 
   // Get the inferred loop layout.
@@ -153,6 +165,7 @@ private:
       const Fragment &candidate, const LayoutInferArgs &layout_args,
       bool throw_on_error = false, bool check_forward_index = false,
       const Buffer &source_buffer = Buffer()) const;
+  bool LoopLayoutsEqual(const Fragment &lhs, const Fragment &rhs) const;
   // Choose the better loop layout from two candidates using validation,
   // containment and replication heuristic.
   Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,

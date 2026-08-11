@@ -3,6 +3,8 @@ import tilelang.language as T
 import tilelang.testing
 import pytest
 import torch
+from tilelang import tvm
+from tvm.tirx.stmt_functor import post_order_visit
 
 
 _COMPILE_FLAGS = {
@@ -29,6 +31,36 @@ _VECTORIZED_OUTPUT_LAYOUT = T.Fragment(
 _VECTORIZED_REDUCTION_LAYOUT = T.Fragment(
     (_VECTORIZED_REDUCTION_EXTENT,),
     forward_fn=lambda k: (k // _VECTORIZED_LOCAL_EXTENT, k % _VECTORIZED_LOCAL_EXTENT),
+)
+
+_UNRELATED_FRAGMENT_LAYOUT = T.Fragment(
+    (32,),
+    forward_fn=lambda i: (i, 0),
+)
+
+_LOCAL_COMPLETE_COMPACT_LAYOUT = T.Fragment(
+    (8,),
+    forward_fn=lambda i: (i // 2, i % 2),
+)
+
+_INCOMPATIBLE_CONTRIBUTION_LAYOUT = T.Fragment(
+    (8,),
+    forward_fn=lambda i: (i, 0),
+)
+
+_CONFLICT_LOOP_LAYOUT = T.Fragment(
+    (128,),
+    forward_fn=lambda i: (i % 32, i // 32),
+)
+
+_CONFLICT_RESULT_A_LAYOUT = T.Fragment(
+    (128,),
+    forward_fn=lambda i: (i // 4, i % 4),
+)
+
+_CONFLICT_RESULT_B_LAYOUT = T.Fragment(
+    (128,),
+    forward_fn=lambda i: ((i // 4 + 1) % 32, i % 4),
 )
 
 
@@ -122,6 +154,132 @@ def unique_owner_serial_reduction_v2(A: T.Tensor((8, 4), T.float32), B: T.Tensor
 
 
 @T.prim_func
+def local_complete_layout_propagation_v2(
+    A: T.Tensor((128, 8), T.float32),
+    B: T.Tensor((128,), T.float32),
+):
+    with T.Kernel(1, threads=32):
+        # Keep a partial explicit layout map in the source IR. Reducer layout
+        # propagation must consume LayoutInference's complete result instead of
+        # mistaking this unrelated annotation for the final map.
+        scratch = T.alloc_fragment((32,), T.float32)
+        T.annotate_layout({scratch: _UNRELATED_FRAGMENT_LAYOUT})
+        T.clear(scratch)
+
+        total = T.alloc_reducer((128,), T.float32, op="sum")
+        result = T.alloc_fragment((128,), T.float32)
+        T.reducer_init(total)
+        for i in T.Parallel(128):
+            for k in range(8):
+                T.reducer_update(total[i], A[i, k])
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def local_complete_constrained_solve_v2(
+    A: T.Tensor((8,), T.float32),
+    B: T.Tensor((8,), T.float32),
+):
+    with T.Kernel(1, threads=32):
+        total = T.alloc_reducer((8,), T.float32, op="sum")
+        result = T.alloc_fragment((8,), T.float32)
+        T.annotate_layout({result: _LOCAL_COMPLETE_COMPACT_LAYOUT})
+
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total[i], A[i])
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def local_complete_fragment_contribution_constrained_solve_v2(
+    A: T.Tensor((8,), T.float32),
+    B: T.Tensor((8,), T.float32),
+):
+    with T.Kernel(1, threads=32):
+        x_frag = T.alloc_fragment((8,), T.float32)
+        T.copy(A, x_frag)
+
+        total = T.alloc_reducer((8,), T.float32, op="sum")
+        result = T.alloc_fragment((8,), T.float32)
+        T.annotate_layout({result: _LOCAL_COMPLETE_COMPACT_LAYOUT})
+
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total[i], x_frag[i])
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def incompatible_fragment_contribution_fallback_v2(
+    A: T.Tensor((8,), T.float32),
+    B: T.Tensor((8,), T.float32),
+):
+    with T.Kernel(1, threads=32):
+        x_frag = T.alloc_fragment((8,), T.float32)
+        T.annotate_layout({x_frag: _INCOMPATIBLE_CONTRIBUTION_LAYOUT})
+        T.copy(A, x_frag)
+
+        total = T.alloc_reducer((8,), T.float32, op="sum")
+        result = T.alloc_fragment((8,), T.float32)
+        T.annotate_layout({result: _LOCAL_COMPLETE_COMPACT_LAYOUT})
+
+        T.reducer_init(total)
+        for i in T.Parallel(8):
+            T.reducer_update(total[i], x_frag[i])
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
+def conflicting_local_complete_layouts_v2(
+    A: T.Tensor((128,), T.float32),
+    B: T.Tensor((2, 128), T.float32),
+):
+    with T.Kernel(1, threads=32):
+        total_a = T.alloc_reducer((128,), T.float32, op="sum")
+        total_b = T.alloc_reducer((128,), T.float32, op="sum")
+        result_a = T.alloc_fragment((128,), T.float32)
+        result_b = T.alloc_fragment((128,), T.float32)
+        T.annotate_layout(
+            {
+                result_a: _CONFLICT_RESULT_A_LAYOUT,
+                result_b: _CONFLICT_RESULT_B_LAYOUT,
+            }
+        )
+
+        T.reducer_init(total_a)
+        T.reducer_init(total_b)
+        for i in T.Parallel(128, loop_layout=_CONFLICT_LOOP_LAYOUT):
+            T.reducer_update(total_a[i], A[i])
+            T.reducer_update(total_b[i], A[i])
+        T.finalize_reducer(total_a, result_a)
+        T.finalize_reducer(total_b, result_b)
+        T.copy(result_a, B[0, :])
+        T.copy(result_b, B[1, :])
+
+
+@T.prim_func
+def explicit_loop_layout_conflicts_with_local_complete_v2(
+    A: T.Tensor((128,), T.float32),
+    B: T.Tensor((128,), T.float32),
+):
+    with T.Kernel(1, threads=32):
+        total = T.alloc_reducer((128,), T.float32, op="sum")
+        result = T.alloc_fragment((128,), T.float32)
+        T.annotate_layout({result: _CONFLICT_RESULT_A_LAYOUT})
+
+        T.reducer_init(total)
+        for i in T.Parallel(128, loop_layout=_CONFLICT_LOOP_LAYOUT):
+            T.reducer_update(total[i], A[i])
+        T.finalize_reducer(total, result)
+        T.copy(result, B)
+
+
+@T.prim_func
 def unique_owner_with_global_side_effect_v2(A: T.Tensor((8,), T.float32), B: T.Tensor((8,), T.float32)):
     with T.Kernel(1, threads=128):
         total = T.alloc_reducer((8,), T.float32, op="sum")
@@ -163,6 +321,74 @@ def split_projection_groups_v2(
         T.finalize_reducer(total, result)
         if T.get_thread_binding() == 0:
             B[0] = result[0]
+
+
+def _run_reducer_layout_and_planning(func):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    mod = tvm.IRModule.from_expr(func)
+    with target:
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+        mod = tilelang.transform.VerifyReducerEpochs()(mod)
+        after_layout = tilelang.transform.LayoutInference()(mod)
+        after_planning = tilelang.transform.PlanAndMaterializeReducers()(after_layout)
+    return after_layout, after_planning
+
+
+def _find_reducer_parallel_layout(func):
+    layouts = []
+
+    def visit(node):
+        if not isinstance(node, tvm.tirx.For) or node.kind != tvm.tirx.ForKind.PARALLEL or "parallel_loop_layout" not in node.annotations:
+            return
+        contains_update = False
+
+        def find_update(child):
+            nonlocal contains_update
+            contains_update |= (
+                isinstance(child, tvm.tirx.Call) and isinstance(child.op, tvm.ir.Op) and child.op.name == "tl.tileop.reducer_update"
+            )
+
+        post_order_visit(node.body, find_update)
+        if contains_update:
+            layouts.append(node.annotations["parallel_loop_layout"])
+
+    post_order_visit(func.body, visit)
+    assert len(layouts) == 1
+    return layouts[0]
+
+
+def _find_reducer_parallel_predicate(func):
+    predicates = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.For) and "parallel_loop_layout" in node.annotations and "parallel_loop_predicate" in node.annotations:
+            predicates.append(node.annotations["parallel_loop_predicate"])
+
+    post_order_visit(func.body, _visit)
+    assert len(predicates) == 1
+    return predicates[0]
+
+
+def _find_fragment_layout(func, buffer_name):
+    layouts = []
+
+    def visit(node):
+        if not isinstance(node, tvm.tirx.SBlock) or "layout_map" not in node.annotations:
+            return
+        for buffer, layout in node.annotations["layout_map"].items():
+            if buffer.name == buffer_name:
+                layouts.append(layout)
+
+    post_order_visit(func.body, visit)
+    assert layouts
+    for layout in layouts[1:]:
+        assert tvm.ir.structural_equal(layouts[0], layout)
+    return layouts[0]
+
+
+def _same_fragment_mapping(lhs, rhs):
+    return tvm.ir.structural_equal(lhs.forward_thread, rhs.forward_thread) and tvm.ir.structural_equal(lhs.forward_index, rhs.forward_index)
 
 
 @T.prim_func
@@ -272,6 +498,160 @@ def test_reducer_v2_cuda_codegen():
     assert "tl::AllReduce<tl::SumOp, 8, 1" in source
     assert "tl::AllReduce<tl::SumOp, 128" not in source
     assert "local.reducer" not in source
+
+
+def test_reducer_v2_layout_inference_propagates_local_complete_layout():
+    after_layout, after_planning = _run_reducer_layout_and_planning(local_complete_layout_propagation_v2)
+    layout_func = after_layout["local_complete_layout_propagation_v2"]
+    planning_func = after_planning["local_complete_layout_propagation_v2"]
+
+    result_layout = _find_fragment_layout(layout_func, "result")
+    inferred_loop_layout = _find_reducer_parallel_layout(layout_func)
+    planned_loop_layout = _find_reducer_parallel_layout(planning_func)
+
+    assert tvm.ir.structural_equal(inferred_loop_layout, result_layout)
+    assert tvm.ir.structural_equal(planned_loop_layout, inferred_loop_layout)
+
+
+def test_reducer_v2_local_complete_constraint_drives_final_layout_solve():
+    after_layout, after_planning = _run_reducer_layout_and_planning(local_complete_constrained_solve_v2)
+    layout_func = after_layout["local_complete_constrained_solve_v2"]
+    planning_func = after_planning["local_complete_constrained_solve_v2"]
+
+    result_layout = _find_fragment_layout(layout_func, "result")
+    inferred_loop_layout = _find_reducer_parallel_layout(layout_func)
+    planned_loop_layout = _find_reducer_parallel_layout(planning_func)
+
+    assert _same_fragment_mapping(inferred_loop_layout, result_layout)
+    assert tvm.ir.structural_equal(planned_loop_layout, inferred_loop_layout)
+    # The compact destination uses four of the 32 participants. This predicate
+    # is rebuilt by ParallelOp during the constrained solve; replacing for_map
+    # after a completed solve would leave it absent.
+    predicate = _find_reducer_parallel_predicate(layout_func)
+    assert "< 4" in str(predicate)
+    assert tvm.ir.structural_equal(_find_reducer_parallel_predicate(planning_func), predicate)
+
+    source = tilelang.compile(
+        local_complete_constrained_solve_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "float total_partial_0[2];" in source
+    assert "if (((int)threadIdx.x) < 4)" in source
+    assert "float2" in source
+    assert "tl::AllReduce<" not in source
+
+
+def test_reducer_v2_local_complete_constraint_propagates_to_fragment():
+    after_layout, after_planning = _run_reducer_layout_and_planning(local_complete_fragment_contribution_constrained_solve_v2)
+    name = "local_complete_fragment_contribution_constrained_solve_v2"
+    layout_func = after_layout[name]
+    planning_func = after_planning[name]
+
+    result_layout = _find_fragment_layout(layout_func, "result")
+    contribution_layout = _find_fragment_layout(layout_func, "x_frag")
+    inferred_loop_layout = _find_reducer_parallel_layout(layout_func)
+    planned_loop_layout = _find_reducer_parallel_layout(planning_func)
+
+    assert _same_fragment_mapping(inferred_loop_layout, result_layout)
+    assert _same_fragment_mapping(contribution_layout, result_layout)
+    assert tvm.ir.structural_equal(planned_loop_layout, inferred_loop_layout)
+
+    source = tilelang.compile(
+        local_complete_fragment_contribution_constrained_solve_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "float x_frag[2];" in source
+    assert "float total_partial_0[2];" in source
+    assert "float2" in source
+    assert "tl::AllReduce<" not in source
+
+
+def test_reducer_v2_incompatible_fragment_constraint_falls_back():
+    after_layout, after_planning = _run_reducer_layout_and_planning(incompatible_fragment_contribution_fallback_v2)
+    name = "incompatible_fragment_contribution_fallback_v2"
+    layout_func = after_layout[name]
+    planning_func = after_planning[name]
+
+    result_layout = _find_fragment_layout(layout_func, "result")
+    contribution_layout = _find_fragment_layout(layout_func, "x_frag")
+    inferred_loop_layout = _find_reducer_parallel_layout(layout_func)
+    planned_loop_layout = _find_reducer_parallel_layout(planning_func)
+
+    assert _same_fragment_mapping(inferred_loop_layout, contribution_layout)
+    assert not _same_fragment_mapping(inferred_loop_layout, result_layout)
+    assert tvm.ir.structural_equal(planned_loop_layout, inferred_loop_layout)
+
+    source = tilelang.compile(
+        incompatible_fragment_contribution_fallback_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "float total_partial_0[8];" in source
+    assert "tl::AllReduce<tl::SumOp, 32" in source
+
+
+@pytest.mark.parametrize(
+    ("func", "name"),
+    [
+        (projected_row_reducer_v2, "projected_row_reducer_v2"),
+        (reducer_sum_v2, "reducer_sum_v2"),
+    ],
+)
+def test_reducer_v2_planning_preserves_non_local_complete_loop_layout(func, name):
+    after_layout, after_planning = _run_reducer_layout_and_planning(func)
+    inferred_loop_layout = _find_reducer_parallel_layout(after_layout[name])
+    planned_loop_layout = _find_reducer_parallel_layout(after_planning[name])
+    assert tvm.ir.structural_equal(planned_loop_layout, inferred_loop_layout)
+
+
+def test_reducer_v2_conflicting_local_complete_layouts_preserve_loop_layout():
+    after_layout, after_planning = _run_reducer_layout_and_planning(conflicting_local_complete_layouts_v2)
+    layout_func = after_layout["conflicting_local_complete_layouts_v2"]
+    planning_func = after_planning["conflicting_local_complete_layouts_v2"]
+
+    inferred_loop_layout = _find_reducer_parallel_layout(layout_func)
+    planned_loop_layout = _find_reducer_parallel_layout(planning_func)
+    result_a_layout = _find_fragment_layout(layout_func, "result_a")
+    result_b_layout = _find_fragment_layout(layout_func, "result_b")
+
+    assert _same_fragment_mapping(inferred_loop_layout, _CONFLICT_LOOP_LAYOUT)
+    assert not _same_fragment_mapping(inferred_loop_layout, result_a_layout)
+    assert not _same_fragment_mapping(inferred_loop_layout, result_b_layout)
+    assert tvm.ir.structural_equal(planned_loop_layout, inferred_loop_layout)
+
+    source = tilelang.compile(
+        conflicting_local_complete_layouts_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "float total_a_partial_0[128];" in source
+    assert "float total_b_partial_0[128];" in source
+    assert source.count("tl::AllReduce<tl::SumOp, 32") == 2
+
+
+def test_reducer_v2_explicit_loop_layout_conflict_falls_back():
+    after_layout, after_planning = _run_reducer_layout_and_planning(explicit_loop_layout_conflicts_with_local_complete_v2)
+    name = "explicit_loop_layout_conflicts_with_local_complete_v2"
+    layout_func = after_layout[name]
+    planning_func = after_planning[name]
+
+    inferred_loop_layout = _find_reducer_parallel_layout(layout_func)
+    planned_loop_layout = _find_reducer_parallel_layout(planning_func)
+    result_layout = _find_fragment_layout(layout_func, "result")
+
+    assert _same_fragment_mapping(inferred_loop_layout, _CONFLICT_LOOP_LAYOUT)
+    assert not _same_fragment_mapping(inferred_loop_layout, result_layout)
+    assert tvm.ir.structural_equal(planned_loop_layout, inferred_loop_layout)
+
+    source = tilelang.compile(
+        explicit_loop_layout_conflicts_with_local_complete_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    ).get_kernel_source()
+    assert "float total_partial_0[128];" in source
+    assert "tl::AllReduce<tl::SumOp, 32" in source
 
 
 def test_reducer_v2_unique_owner_codegen_uses_local_complete_plan():
@@ -385,6 +765,28 @@ def test_reducer_v2_unique_owner_serial_reduction_correctness():
         pass_configs=_COMPILE_FLAGS,
     )(A)
     torch.testing.assert_close(B, A.sum(dim=1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_local_complete_fragment_contribution_correctness():
+    A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
+    B = tilelang.compile(
+        local_complete_fragment_contribution_constrained_solve_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, A, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_reducer_v2_incompatible_fragment_fallback_correctness():
+    A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
+    B = tilelang.compile(
+        incompatible_fragment_contribution_fallback_v2,
+        out_idx=-1,
+        pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, A, atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda

@@ -1,7 +1,7 @@
 # Reducer v2 当前实现状态
 
 - 分支：`refactor/reducer-v2`
-- 记录日期：2026-08-10
+- 记录日期：2026-08-11
 - 当前阶段：correctness baseline、conservative LocalComplete 和受限 projected partial groups 已实现
 - 长期设计：[Reducer v2 重构设计方案](./reducer_v2_refactor_plan.md)
 - 相关讨论：[Issue #2408](https://github.com/tile-ai/tilelang/issues/2408)、[RFC #2897](https://github.com/tile-ai/tilelang/issues/2897)、[PR #2881](https://github.com/tile-ai/tilelang/pull/2881)
@@ -154,13 +154,16 @@ VerifyReducerEpochs
         |
         v
 LayoutInference
-  只为 Fragment、Shared 和 T.Parallel 推导 layout
   reducer handle 本身不参与 Fragment layout inference
+  普通求解产生完整 baseline layout result
+  从 baseline 证明并生成 LocalComplete loop constraints
+  从原始输入事务式重跑 constrained solve，失败则保留 baseline
         |
         v
 PlanAndMaterializeReducers
   再次验证 epoch
   检查 replica invariance
+  只读消费最终 Parallel layout
   local.reducer -> full local partial array
   为三个 first-class calls 写入 planned annotations
         |
@@ -196,7 +199,25 @@ CUDA / ROCm codegen
 - contribution 使用的 Fragment values 如何映射；
 - destination Fragment 的 owner 和 local index 是什么。
 
-等这些信息稳定后，planner 才把 reducer 物化成普通 `local` full array。这样 reducer storage 不会反过来影响 loop layout，也不会再出现“先给 reducer 推一个 fully replicated Fragment layout，然后把这个 layout 当成 reduction semantics”的问题。
+LayoutInference 首先完全按照普通规则求解一次，得到可独立使用的 baseline。此时
+destination Fragment、contribution Fragment、Parallel layout、predicate 和 padding guard
+都已经完整。reducer analysis 随后只读消费这份结果：对
+`Parallel(M) -> output[M]` 这种 direct identity mapping，继续验证 loop body safety、
+destination ownership、显式 loop annotation 和共享该 loop 的多个 reducers，只为证明成立的
+root 产生具体 `Map<For, Fragment>` constraints。
+
+如果 constraint map 非空，LayoutInference 会从原始 fused function 和原始 layout anchors
+构造一个全新的 collector，执行第二次 constrained solve。`ParallelOp` 在本次求解开始时就
+拿到具体 layout，正常完成 Fragment compatibility、injectivity、predicate 和 padding guard
+推导；不是先算完再替换 `for_map`。第二次求解是事务式的：全部成功才整体采用，任何 layout
+conflict、normalize failure 或 non-injective mapping 都整体丢弃，并保留 baseline。两次结果
+不会混合，也不需要修改中间 AST。当前实现为简单清晰而重跑整个 function；只重跑受影响
+connected components 可以作为后续编译时间优化。
+
+planner 再把 reducer 物化成普通 `local` storage，并从最终 loop layout 构造 projected
+或 canonical plan。reducer storage 本身不会反过来参与 layout inference，也不会再出现
+“先给 reducer 推一个 fully replicated Fragment layout，然后把这个 layout 当成
+reduction semantics”的问题。
 
 ## 4. 新增的 first-class IR
 
@@ -358,9 +379,10 @@ update 的 index rank 必须等于 reducer rank，每个 index 必须能被 `ari
 
 canonical baseline 中 Fragment loads 可以保留，因为 Parallel layout inference 已验证
 logical Fragment access 与 loop layout compatible。Global/Shared load 也可以保留，
-只要地址表达式本身不依赖 physical replica。LocalComplete 第一版会改写 loop layout，
-因此只接受可安全重复的 Global/Shared loads；带普通 Fragment/local load 的 loop
-保守 fallback。
+只要地址表达式本身不依赖 physical replica。LocalComplete 第一版会让 destination
+ownership 约束 loop layout：Global/Shared loads 可以安全重复；Fragment loads 必须在
+第二次 constrained solve 中重新推导并证明与 destination ownership compatible，失败就
+整体丢弃 constrained result 并保留 baseline。普通 local load 仍然保守 fallback。
 
 对 ordinary local value 的规则目前是保守的：即使用户知道所有 threads 写入了同一个值，只要 compiler 没有对应证明，它仍会拒绝 replicated update。
 
@@ -418,12 +440,17 @@ LocalComplete：
 - reducer logical shape、destination layout input shape 和 parallel loop shape 一致；
 - update indices 与 parallel logical vars 逐维相等；
 - participant/thread/replicate/output extents 都是 compiler-known；
-- loop 中没有 ordinary BufferStore、thread-private Fragment/local load 或非 pure call；
+- loop 中没有 ordinary BufferStore、普通 local load 或 non-pure call；Fragment load
+  必须通过 constrained solve 的 ownership compatibility 检查；
 - 同一 parallel root 上的所有 LocalComplete candidates 请求完全相同的 layout。
 
-planner 随后把 parallel root 改成 destination layout。这样 `M < threads` 时并不是只让
-一个 physical owner 计算后再广播，而是让 destination 的每个 physical replica 都执行
-相同 logical contribution：
+LayoutInference 先生成普通 baseline，再从完整 baseline 证明 structurally eligible update
+loop 与 destination ownership 的关系。具体 destination layout 作为 hard constraint 传给一个
+全新的 solver invocation；成功时采用其完整结果，失败时完整保留 baseline。
+`PlanAndMaterializeReducers` 随后只在最终 loop layout 与 destination layout 语义相等时选择
+LocalComplete，不再晚期改写 Parallel annotation。这样
+`M < threads` 时并不是只让一个 physical owner 计算后再广播，而是让 destination 的
+每个 physical replica 都执行相同 logical contribution：
 
 ```text
 logical reducer[M]
@@ -680,7 +707,7 @@ result[0] = reduced;
 | 组件 | 现在负责什么 |
 |---|---|
 | reducer verifier/planner | lifecycle、contribution multiplicity、storage materialization |
-| Fragment LayoutInference | 普通数据的 physical placement |
+| Fragment LayoutInference | 普通数据的 physical placement，以及 proven LocalComplete 的 destination-to-loop ownership 约束 |
 | ParallelOp | logical loop 到 physical threads 的 layout |
 | PartitionLoop | 实现 generic multiplicity marker |
 | finalize backend | 对已确定 participant range 执行 collective |
@@ -730,7 +757,7 @@ GEMV 现在显式 init，在 `T.Parallel` 内调用 update，并 finalize 到独
 testing/python/language/test_tilelang_language_reducer_v2.py
 ```
 
-当前包含 13 个测试，覆盖：
+当前包含 40 个测试，覆盖：
 
 - frontend IR 中存在 `local.reducer` 和三个 first-class calls；
 - CUDA source 中 reducer-only IR 已消失；
@@ -746,7 +773,11 @@ testing/python/language/test_tilelang_language_reducer_v2.py
 - missing init/finalize 和 double init 拒绝；
 - output index 越界或无法证明安全时拒绝；
 - replicated update 使用 physical `threadIdx` 时拒绝；
-- replicated update 读取 ordinary thread-private local value 时拒绝。
+- replicated update 读取 ordinary thread-private local value 时拒绝；
+- LocalComplete destination constraint 会重新推导 Parallel predicate、vector width 和
+  source Fragment layout；
+- incompatible Fragment ownership、显式 loop layout 冲突和多个 destination layout
+  冲突都会确定性 fallback。
 
 ### 13.2 已通过的检查
 
@@ -754,7 +785,9 @@ testing/python/language/test_tilelang_language_reducer_v2.py
 pre-commit: passed
 default/CUDA CMake build: passed
 ROCm + HIP stub CMake build: passed
-focused reducer/reduce pytest: 41 passed
+reducer v2专项 pytest: 40 passed
+LayoutInference regression pytest: 14 passed
+legacy finalize_reducer pytest: 18 passed
 broad reducer/reduce run: 104 passed outside the known ordinary reduce cases
 GEMV 128 x 128 numerical check: passed
 ```
@@ -852,19 +885,21 @@ v2 latency 分别为 7.168 us 和 11.200 us，与 legacy 的 7.168 us 和 11.168
    - 看 init/update 的基本 lowering 和 multiplicity marker。
 5. `src/transform/reducer/verify_reducer_epochs.cc`
    - 看 metadata collector 和 lifecycle verifier。
-6. `src/transform/reducer/reducer.cc`
+6. `src/transform/reducer/reducer_loop_layout.h` 和 `src/transform/layout_inference.cc`
+   - 看 baseline 如何生成具体 LocalComplete constraints，以及事务式 constrained solve 如何约束 Parallel。
+7. `src/transform/reducer/reducer.cc`
    - 看 physical planner、replica checks 和 materializer。
-7. `tilelang/cuda/pipeline.py`
+8. `tilelang/cuda/pipeline.py`
    - 看三个 reducer passes 位于整个 compiler pipeline 的位置。
-8. `src/transform/lower_tile_op.cc`
+9. `src/transform/lower_tile_op.cc`
    - 看 marker 如何影响 loop partition/vectorize decision。
-9. `src/transform/loop_partition.cc`
-   - 看 `REP == 0` 与 partition-required 两类 marker 如何分别消费。
-10. `src/backend/common/op/finalize_reducer.h`
-- 对照 FullParticipant collective 与 LocalComplete direct-local finalize。
-11. `src/cuda/op/finalize_reducer.cc` 和 `src/rocm/op/finalize_reducer.cc`
+10. `src/transform/loop_partition.cc`
+    - 看 `REP == 0` 与 partition-required 两类 marker 如何分别消费。
+11. `src/backend/common/op/finalize_reducer.h`
+    - 对照 FullParticipant collective 与 LocalComplete direct-local finalize。
+12. `src/cuda/op/finalize_reducer.cc` 和 `src/rocm/op/finalize_reducer.cc`
     - 看 target-specific AllReduce emitter。
-12. `testing/python/language/test_tilelang_language_reducer_v2.py`
+13. `testing/python/language/test_tilelang_language_reducer_v2.py`
     - 用正例和 diagnostics 对照前面的 contract。
 
 ## 16. 当前工作区状态

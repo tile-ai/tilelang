@@ -119,11 +119,13 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
-    # Infer memory layouts for fragments and shared memory
+    # Infer an ordinary baseline first. Proven LocalComplete reducers may then
+    # trigger a fresh constrained solve; if that solve is incompatible, layout
+    # inference retains the baseline transaction in full.
     mod = tilelang.transform.LayoutInference()(mod)
-    # Reducer handles deliberately do not participate in Fragment layout
-    # inference. Plan their physical storage afterwards, using the canonical
-    # full-participant fallback or a proven LocalComplete destination layout.
+    # Reducer handles deliberately do not own Fragment layouts. Consume the
+    # final loop layouts without changing them, then select LocalComplete,
+    # projected, or canonical physical storage and communication plans.
     mod = tilelang.transform.PlanAndMaterializeReducers()(mod)
     # Visualize the layout
     LayoutVisual(mod)

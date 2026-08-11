@@ -296,6 +296,19 @@ bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   return StructuralEqual()(GetAccessInfo(buffer).indices, common_indice);
 }
 
+bool ParallelOpNode::LoopLayoutsEqual(const Fragment &lhs,
+                                      const Fragment &rhs) const {
+  if (lhs->InputDim() != rhs->InputDim()) {
+    return false;
+  }
+  for (size_t i = 0; i < lhs->InputDim(); ++i) {
+    if (!analyzer_.CanProveEqual(lhs->InputShape()[i], rhs->InputShape()[i])) {
+      return false;
+    }
+  }
+  return lhs->IsEqual(rhs.get());
+}
+
 /*! \brief Infer the layout for parallel operations based on different inference
  * levels
  *
@@ -415,6 +428,43 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   bool allow_layout_propgate =
       const_index_fragment_buffer.empty() ||
       (fragment_buffers.size() > const_index_fragment_buffer.size());
+
+  // A solver-provided constraint is concrete before this inference attempt
+  // starts. It takes part in the ordinary validation and propagation below;
+  // no operator-specific pending or fallback state is needed here.
+  if (!loop_layout_.defined() && loop_layout_constraint_.defined()) {
+    Fragment constrained = loop_layout_constraint_.value()->BindThreadRange(
+        layout_args.thread_bounds);
+    bool shape_matches = constrained->InputDim() == loop_vars_.size();
+    for (size_t i = 0; shape_matches && i < loop_vars_.size(); ++i) {
+      shape_matches &= analyzer_.CanProveEqual(constrained->InputShape()[i],
+                                               loop_vars_[i]->dom->extent);
+    }
+    if (!shape_matches) {
+      std::ostringstream message;
+      message << "Explicit layout-solver constraint does not match T.Parallel "
+                 "iteration shape:\n  constraint: "
+              << constrained->DebugOutput() << "\n  loop: " << root_;
+      throw LayoutConflictException(message.str());
+    }
+    if (annotated_layout_unbound_.defined()) {
+      Fragment annotated = annotated_layout_unbound_.value()->BindThreadRange(
+          layout_args.thread_bounds);
+      if (!LoopLayoutsEqual(constrained, annotated)) {
+        std::ostringstream message;
+        message << "Explicit layout-solver constraint conflicts with the "
+                   "annotated T.Parallel layout:\n  constraint: "
+                << constrained->DebugOutput()
+                << "\n  annotation: " << annotated->DebugOutput();
+        throw LayoutConflictException(message.str());
+      }
+      if (annotated_predicate_.defined()) {
+        predicate_ = annotated_predicate_.value();
+      }
+      loop_layout_requires_padding_guard_ = annotated_requires_padding_guard_;
+    }
+    loop_layout_ = std::move(constrained);
+  }
 
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
