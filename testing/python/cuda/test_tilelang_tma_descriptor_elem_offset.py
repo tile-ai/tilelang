@@ -160,6 +160,17 @@ def _unaligned_region_1d_tma_copy_program():
     return main
 
 
+def _aligned_effective_region_1d_tma_copy_program():
+    @T.prim_func
+    def main(src_handle: T.handle):
+        src = T.match_buffer(src_handle, (1031,), T.float16, elem_offset=1)
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((1024,), T.float16)
+            T.copy(src[7:1031], shared, prefer_instruction="tma")
+
+    return main
+
+
 def _fp4_unpacked_copy_program(elem_offset=32):
     @T.prim_func
     def main(src_handle: T.handle):
@@ -405,6 +416,12 @@ def test_unaligned_region_start_does_not_use_descriptorless_1d_tma():
     offsets, descriptors = _descriptor_base_byte_offsets(_unaligned_region_1d_tma_copy_program(), "sm_90")
     assert offsets == [0]
     assert len(descriptors) == 1
+
+
+def test_aligned_effective_region_start_uses_descriptorless_1d_tma():
+    offsets, descriptors = _descriptor_base_byte_offsets(_aligned_effective_region_1d_tma_copy_program(), "sm_90")
+    assert offsets == []
+    assert descriptors == []
 
 
 def test_fp4_unpacked_copy_rejects_16_byte_offset():

@@ -210,7 +210,8 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
                    bool check_last_dim, bool emit_diagnostics,
                    const Array<Var> &host_visible_vars,
                    bool require_host_visible = true,
-                   bool require_swizzled_global_address = false) {
+                   bool require_swizzled_global_address = false,
+                   bool check_descriptor_base_alignment = true) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
@@ -218,7 +219,8 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
     return false;
   }
-  if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer,
+  if (check_descriptor_base_alignment &&
+      !CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer,
                                         host_visible_vars, require_host_visible,
                                         require_swizzled_global_address)) {
     if (emit_diagnostics) {
@@ -266,7 +268,8 @@ bool CheckBulkStore(const CopyNode &op, Target target,
                     arith::Analyzer *analyzer, bool check_last_dim,
                     bool emit_diagnostics, const Array<Var> &host_visible_vars,
                     bool require_host_visible = true,
-                    bool require_swizzled_global_address = false) {
+                    bool require_swizzled_global_address = false,
+                    bool check_descriptor_base_alignment = true) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
@@ -274,7 +277,8 @@ bool CheckBulkStore(const CopyNode &op, Target target,
       op.dst.scope() != "global") {
     return false;
   }
-  if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer,
+  if (check_descriptor_base_alignment &&
+      !CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer,
                                         host_visible_vars, require_host_visible,
                                         require_swizzled_global_address)) {
     if (emit_diagnostics) {
@@ -449,7 +453,9 @@ bool CheckBulkLoad1D(const CopyNode &op, Target target,
                      bool emit_diagnostics,
                      const Array<Var> &host_visible_vars) {
   if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics,
-                     host_visible_vars, /*require_host_visible=*/false)) {
+                     host_visible_vars, /*require_host_visible=*/false,
+                     /*require_swizzled_global_address=*/false,
+                     /*check_descriptor_base_alignment=*/false)) {
     return false;
   }
   return CheckBulkCopy1D(op.src, op.dst, op.src_range, op.dst_range, layout_map,
@@ -461,7 +467,9 @@ bool CheckBulkStore1D(const CopyNode &op, Target target,
                       bool emit_diagnostics,
                       const Array<Var> &host_visible_vars) {
   if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics,
-                      host_visible_vars, /*require_host_visible=*/false)) {
+                      host_visible_vars, /*require_host_visible=*/false,
+                      /*require_swizzled_global_address=*/false,
+                      /*check_descriptor_base_alignment=*/false)) {
     return false;
   }
   return CheckBulkCopy1D(op.dst, op.src, op.dst_range, op.src_range, layout_map,
