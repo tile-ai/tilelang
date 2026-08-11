@@ -249,11 +249,19 @@ public:
                 << "\n";
     }
 
-    // Classify before selecting a strategy so physical buffer scope is not
-    // overloaded with semantic properties such as broadcast or scalarization.
-    // SeqStmt bodies stay conservative; simple memory loops may defer
-    // local/fragment and cast constraints, while must-scalarize constraints
-    // always take precedence.
+    // Compute the final vector size from the classified constraints.
+    // Strategy:
+    // - A must-scalarize constraint always selects vector_size=1.
+    // - If the body contains SeqStmt, combine all constraints conservatively.
+    // - If there is no vector memory access, combine local, broadcast-load,
+    //   and call constraints.
+    // - Otherwise, select from memory and non-cast call constraints, then
+    //   revalidate deferred local and broadcast-load accesses.
+    // Rationale: local/fragment accesses are register-level and impose no
+    // memory alignment constraints. Invariant non-local loads become scalar
+    // broadcasts, while invariant stores carry ordering semantics and must
+    // remain scalar. Explicit classification keeps these semantic properties
+    // separate from physical buffer scope.
     VectorConstraintSummary constraints = SummarizeConstraints(verbose);
     vector_size_ = SelectVectorSize(constraints, has_seq_stmt, verbose);
 
