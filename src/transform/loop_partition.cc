@@ -70,7 +70,9 @@ private:
 // has no replication (or REP is provably zero) the marker is stripped. This
 // mutator understands only execution multiplicity — it knows nothing about
 // what the marked statement does.
-class MultiplicityMarkerLowerer : public StmtExprMutator {
+// The marker is a statement-level AttrStmt, so a statement-only mutator
+// suffices (expression subtrees cannot carry it).
+class MultiplicityMarkerLowerer : public StmtMutator {
 public:
   static Stmt Rewrite(Stmt stmt, const Optional<PrimExpr> &replica_guard) {
     MultiplicityMarkerLowerer lowerer(replica_guard);
@@ -89,7 +91,7 @@ private:
       }
       return IfThenElse(replica_guard_.value(), body);
     }
-    return StmtExprMutator::VisitStmt_(op);
+    return StmtMutator::VisitStmt_(op);
   }
 
   Optional<PrimExpr> replica_guard_;
@@ -126,8 +128,9 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
   Stmt body = std::move(op);
   Array<PrimExpr> loop_mins;
   Array<PrimExpr> loop_extents;
-  auto inverse_info = loop_layout->InverseWithLevel(require_padding_guard);
-  auto inv_loop = inverse_info.first;
+  // Only the inverse layout is needed here; the accompanying IterMapLevel is
+  // for callers that must distinguish exact from padded inversions.
+  Layout inv_loop = loop_layout->InverseWithLevel(require_padding_guard).first;
   auto indices = inv_loop->Forward(forward_inputs);
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
@@ -147,10 +150,7 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
   // must stay within bounds to ensure correctness. Example: layout([i, j]) =
   // floor((i * 16 + j) / 32) may generate extra points when the new loop
   // enumerates 0..31; the guard drops iterations whose inverse-mapped (i, j)
-  // or replicate index fall outside their original extents.
-  // Example: layout([i, j]) = floor((i * 16 + j) / 32) may produce extra points
-  // when the new loop enumerates 0..31; this guard skips iterations where the
-  // inverse i, j land outside the original extents. This protects
+  // or replicate index fall outside their original extents. This protects
   // non-surjective loop_layout mappings that otherwise over-cover the parallel
   // space.
   // Always build guard and let analyzer decide if it can be proved true.
