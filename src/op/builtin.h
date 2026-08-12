@@ -79,6 +79,8 @@ static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 //   * plan-choice A/B measurement (registers, collective width, latency).
 static constexpr const char *kReducerForceBaseline =
     "tl.reducer_force_baseline";
+static constexpr const char *kEnableReducerPlanVerbose =
+    "tl.enable_reducer_plan_verbose";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableLoopUnswitching =

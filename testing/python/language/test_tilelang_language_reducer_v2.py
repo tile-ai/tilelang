@@ -303,9 +303,9 @@ def test_narrow_plan_row_reduction_projected_width():
     torch.testing.assert_close(B, A.sum(dim=1), atol=1e-3, rtol=1e-3)
 
 
-def test_seed_falls_back_to_baseline():
-    """The narrow plan does not support seeds yet; the epoch must fall back
-    to the wide plan and stay numerically correct."""
+def test_seed_with_narrow_plan():
+    """Seeds work with narrow plans: combined exactly once per logical
+    output after the projected collective, not once per replica group."""
     extent, threads, seed = 8, 128, 100.0
 
     @T.prim_func
@@ -323,7 +323,92 @@ def test_seed_falls_back_to_baseline():
                 B[0] = result[0]
 
     source = tl.compile(kernel, out_idx=-1).get_kernel_source()
-    assert f"SumOp, {threads}" in source, source
+    assert f"SumOp, {extent}" in source, source  # narrow plan fires
+    assert f"SumOp, {threads}" not in source, source
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, (A.sum() + seed).reshape(1), atol=0, rtol=0)
+
+
+def test_seed_with_local_complete():
+    """Seed on a zero-collective (LocalComplete) epoch: the finalize still
+    materializes to apply the seed once per slot."""
+    M, threads, seed = 8, 128, 5.0
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M,), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M,), T.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((M,), T.float32, op="sum", seed=seed)
+            T.reducer_init(acc)
+            for i in T.Parallel(M):
+                T.reducer_update(acc[i], src[i])
+            result = T.alloc_fragment((M,), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    source = tl.compile(kernel, out_idx=-1).get_kernel_source()
+    assert "AllReduce" not in source, source
+
+    A = torch.randn(M, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, A + seed, atol=0, rtol=0)
+
+
+def test_narrow_plan_permuted_indices():
+    """Update indices may permute the parallel loop order: acc[j, i] with
+    Parallel(i, j). The induced storage layout is rebuilt over the reducer's
+    own dim order."""
+    M, N, threads = 8, 16, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), T.float32), B: T.Tensor((N, M), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, N), T.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((N, M), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i, j in T.Parallel(M, N):
+                T.reducer_update(acc[j, i], src[i, j])
+            result = T.alloc_fragment((N, M), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    source = tl.compile(kernel, out_idx=-1).get_kernel_source()
+    assert "AllReduce" not in source, source
+
+    A = torch.randn(M, N, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, A.t().contiguous(), atol=0, rtol=0)
+
+
+def test_narrow_plan_unit_dim_indices():
+    """A constant zero index on a unit reducer dim mixes with loop-var
+    indices: acc[0, i] with shape (1, M)."""
+    M, K, threads = 16, 16, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float32), B: T.Tensor((1, M), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, K), T.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((1, M), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[0, i], src[i, k])
+            result = T.alloc_fragment((1, M), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    source = tl.compile(kernel, out_idx=-1).get_kernel_source()
+    assert "AllReduce" in source, source
+    assert f"SumOp, {threads}" not in source, source
+
+    A = torch.randn(M, K, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, A.sum(dim=1).reshape(1, M), atol=1e-3, rtol=1e-3)
 
 
 @pytest.mark.parametrize("force_baseline", [False, True])
@@ -348,6 +433,180 @@ def test_differential_forced_baseline_vs_auto(force_baseline):
     A = torch.randn(M, K, dtype=torch.float32, device="cuda")
     B = tl.compile(kernel, out_idx=-1, pass_configs=configs)(A)
     torch.testing.assert_close(B, A.sum(dim=1), atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Packed partial accumulation (16-bit floats)
+# ---------------------------------------------------------------------------
+
+
+def _rowsum_kernel(M, K, threads, dtype):
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), dtype), B: T.Tensor((M,), dtype)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, K), dtype)
+            T.copy(A, src)
+            acc = T.alloc_reducer((M,), dtype, op="sum")
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], src[i, k])
+            result = T.alloc_fragment((M,), dtype)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    return kernel
+
+
+def test_packed_accumulation_fp16_parallel_reduction():
+    """fp16 narrow plans split each per-thread partial into two lanes keyed
+    by the reduction var's parity ("_pk" storage), halving the serial combine
+    dependence chain; a per-thread fold recombines the lanes before the
+    (unchanged) projected collective."""
+    M, K, threads = 32, 64, 128
+    source = tl.compile(_rowsum_kernel(M, K, threads, T.float16), out_idx=-1).get_kernel_source()
+    assert "_pk" in source, source
+    assert "SumOp, 8" in source, source  # collective width unchanged by packing
+
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = tl.compile(_rowsum_kernel(M, K, threads, T.float16), out_idx=-1)(A)
+    torch.testing.assert_close(B, A.float().sum(dim=1).to(torch.float16), atol=1e-2, rtol=1e-2)
+
+
+def test_packed_accumulation_fp16_inner_serial():
+    """An enclosing serial loop is the preferred lane source: its parity
+    alternates lanes on the owning thread with zero cross-thread effects."""
+    M, K, threads = 8, 16, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float16), B: T.Tensor((M,), T.float16)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, K), T.float16)
+            T.copy(A, src)
+            acc = T.alloc_reducer((M,), T.float16, op="sum")
+            T.reducer_init(acc)
+            for i in T.Parallel(M):
+                for k in T.serial(K):
+                    T.reducer_update(acc[i], src[i, k])
+            result = T.alloc_fragment((M,), T.float16)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    source = tl.compile(kernel, out_idx=-1).get_kernel_source()
+    assert "_pk" in source, source
+    assert "AllReduce" not in source, source  # still LocalComplete
+
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, A.float().sum(dim=1).to(torch.float16), atol=1e-2, rtol=1e-2)
+
+
+def test_packed_accumulation_bf16_max():
+    """Packing applies to idempotent combines on bf16 too (max folds are
+    order-insensitive, so lanes cannot change the result)."""
+    M, K, threads = 32, 64, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.bfloat16), B: T.Tensor((M,), T.bfloat16)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, K), T.bfloat16)
+            T.copy(A, src)
+            acc = T.alloc_reducer((M,), T.bfloat16, op="max")
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], src[i, k])
+            result = T.alloc_fragment((M,), T.bfloat16)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    source = tl.compile(kernel, out_idx=-1).get_kernel_source()
+    assert "_pk" in source, source
+
+    A = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, A.max(dim=1).values, atol=0, rtol=0)
+
+
+def test_fp32_narrow_plan_not_packed():
+    """Packing is a 16-bit optimization: fp32 partials stay single-lane."""
+    M, K, threads = 32, 64, 128
+    source = tl.compile(_rowsum_kernel(M, K, threads, T.float32), out_idx=-1).get_kernel_source()
+    assert "_pk" not in source, source
+
+
+@pytest.mark.parametrize("force_baseline", [False, True])
+def test_differential_packed_vs_baseline_fp16(force_baseline):
+    """The packed narrow plan and the wide baseline must agree numerically
+    (fp16 sum: same contribution multiset up to reassociation)."""
+    M, K, threads = 32, 64, 128
+    configs = _FORCE_BASELINE if force_baseline else None
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = tl.compile(_rowsum_kernel(M, K, threads, T.float16), out_idx=-1, pass_configs=configs)(A)
+    torch.testing.assert_close(B, A.float().sum(dim=1).to(torch.float16), atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Bitwise combine ops
+# ---------------------------------------------------------------------------
+
+
+def _bitwise_rowreduce_kernel(M, K, threads, op):
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.int32), B: T.Tensor((M,), T.int32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, K), T.int32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((M,), T.int32, op=op)
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], src[i, k])
+            result = T.alloc_fragment((M,), T.int32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    return kernel
+
+
+def _bitwise_ref(A, op):
+    out = None
+    for col in range(A.shape[1]):
+        cur = A[:, col]
+        if out is None:
+            out = cur.clone()
+        elif op == "bitand":
+            out &= cur
+        elif op == "bitor":
+            out |= cur
+        elif op == "bitxor":
+            out ^= cur
+    return out
+
+
+@pytest.mark.parametrize("op", ["bitand", "bitor", "bitxor"])
+@pytest.mark.parametrize("force_baseline", [False, True])
+def test_bitwise_reduce(op, force_baseline):
+    """Bitwise combines under both plans. The narrow plan's collective and
+    the wide baseline must agree bit-for-bit (bitwise ops are associative,
+    commutative and exact)."""
+    M, K, threads = 16, 64, 128
+    configs = _FORCE_BASELINE if force_baseline else None
+    A = torch.randint(0, 2**31 - 1, (M, K), dtype=torch.int32, device="cuda")
+    B = tl.compile(_bitwise_rowreduce_kernel(M, K, threads, op), out_idx=-1, pass_configs=configs)(A)
+    torch.testing.assert_close(B, _bitwise_ref(A, op), atol=0, rtol=0)
+
+
+def test_bitwise_reducer_rejects_float_dtype():
+    with pytest.raises(AssertionError, match="integer dtype"):
+
+        @T.prim_func
+        def kernel(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=32):
+                acc = T.alloc_reducer((1,), T.float32, op="bitand")
+                T.reducer_init(acc)
+                for i in T.Parallel(8):
+                    T.reducer_update(acc[0], A[i])
+                result = T.alloc_fragment((1,), T.float32)
+                T.finalize_reducer(acc, result)
+                B[0] = result[0]
 
 
 # ---------------------------------------------------------------------------

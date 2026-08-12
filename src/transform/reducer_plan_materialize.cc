@@ -51,10 +51,13 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <functional>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "../config.h"
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
@@ -102,6 +105,11 @@ struct UpdateSite {
   Array<Var> loop_vars;    // nest loop vars in order
   Array<PrimExpr> indices; // logical output indices of the update target
   PrimExpr value;          // contribution expression
+  // Serial loops between the parallel nest and the update (outermost
+  // first). They accumulate on one thread; the packed-accumulation
+  // optimization uses the innermost one as its lane source.
+  Array<Var> serial_vars;
+  Array<PrimExpr> serial_extents;
 };
 
 struct EpochInfo {
@@ -177,9 +185,23 @@ private:
         }
       }
       cur_loop_vars_ = vars;
+      auto prev_serial_vars = cur_serial_vars_;
+      auto prev_serial_extents = cur_serial_extents_;
+      cur_serial_vars_.clear();
+      cur_serial_extents_.clear();
       IRVisitorWithAnalyzer::VisitStmt_(op);
       cur_loop_layout_ = prev_layout;
       cur_loop_vars_ = prev_vars;
+      cur_serial_vars_ = prev_serial_vars;
+      cur_serial_extents_ = prev_serial_extents;
+      return;
+    }
+    if (op->kind == ForKind::kSerial && cur_loop_layout_.defined()) {
+      cur_serial_vars_.push_back(op->loop_var);
+      cur_serial_extents_.push_back(op->extent);
+      IRVisitorWithAnalyzer::VisitStmt_(op);
+      cur_serial_vars_.pop_back();
+      cur_serial_extents_.pop_back();
       return;
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
@@ -204,9 +226,9 @@ private:
         if (cur_loop_layout_.defined()) {
           ReducerUpdateOp update(op->args, {});
           const auto *node = update.as<ReducerUpdateOpNode>();
-          epoch->updates.push_back(UpdateSite{cur_loop_layout_.value(),
-                                              cur_loop_vars_, node->indices,
-                                              node->value});
+          epoch->updates.push_back(UpdateSite{
+              cur_loop_layout_.value(), cur_loop_vars_, node->indices,
+              node->value, cur_serial_vars_, cur_serial_extents_});
         } else {
           epoch->analyzable = false;
         }
@@ -250,6 +272,8 @@ private:
   IterVar thread_var_;
   Optional<Fragment> cur_loop_layout_;
   Array<Var> cur_loop_vars_;
+  Array<Var> cur_serial_vars_;
+  Array<PrimExpr> cur_serial_extents_;
 };
 
 // ---------------------------------------------------------------------------
@@ -258,31 +282,103 @@ private:
 
 struct NarrowDecision {
   Fragment storage_layout; // induced partial layout (also post-collective)
-  bool has_step{false};
-  int reducing_threads{0};
-  int scale{1};
+  // Collective steps: (reducing_threads, scale) per thread-expression split
+  // sourced from a reduction axis. Empty = no communication (LocalComplete).
+  std::vector<std::pair<int, int>> steps;
   // True when the destination's free-level inferred layout is replaced by
-  // the induced layout (legal only for unconstrained destinations).
+  // the induced layout (legal only for unconstrained destinations); the
+  // chain lists further downstream fragments (fp32->fp16 staging hops etc.)
+  // that must be overridden together so the connecting copies stay
+  // slot-compatible.
   bool override_dst_layout{false};
+  std::vector<Buffer> override_chain;
+  // Packed partial accumulation (16-bit floats): updates write two
+  // interleaved lanes per logical slot selected by the parity of
+  // `pack_lane_var` (the innermost on-thread reduction loop), which breaks
+  // the serial combine dependence chain and lets the vectorizer emit
+  // paired 16-bit (half2-style) operations. A fold loop combines the lanes
+  // into the plain induced storage before the collective, so the plan's
+  // communication and destination proofs are untouched.
+  bool packed{false};
+  Var pack_lane_var;
+  Fragment packed_layout; // storage_layout with an extra innermost lane dim
 };
 
-/*! \brief Access census of a finalize destination, used to decide whether
- *  its inferred layout may be replaced. A destination is unconstrained when
- *  it is written only by the finalize and read only as the source of copies
- *  into global memory: such uses lower against whatever layout the buffer
- *  has, and the free-level layout LayoutInference picked for it never
- *  constrained any other buffer. */
-struct DstUseCensus {
-  int64_t loads{0};         // every BufferLoad occurrence (incl. regions)
-  int64_t stores{0};        // ordinary stores (must be zero)
-  int64_t safe_copy_src{0}; // tl.copy(dst -> global) source regions
-  int64_t finalize_dst{0};  // finalize_reducer destination regions
-
-  bool Unconstrained() const {
-    return stores == 0 && finalize_dst == 1 &&
-           loads == safe_copy_src + finalize_dst;
-  }
+/*! \brief Per-buffer access census plus the copy graph, used to decide
+ *  whether a finalize destination's inferred layout may be replaced. A
+ *  destination is unconstrained when it is written only by the finalize and
+ *  every read is the source of a copy into global memory or into another
+ *  fragment that is itself unconstrained (written only by that copy): such
+ *  uses lower against whatever layout the buffers have, and the free-level
+ *  layouts LayoutInference picked for them never constrained anything
+ *  else. */
+struct BufferUseCensus {
+  int64_t loads{0};        // every BufferLoad occurrence (incl. regions)
+  int64_t stores{0};       // ordinary stores (must be zero)
+  int64_t finalize_dst{0}; // finalize_reducer destination regions
+  int64_t copy_src{0};     // tl.copy source regions
+  int64_t copy_dst{0};     // tl.copy destination regions
 };
+
+struct CopyEdge {
+  const VarNode *src{nullptr};
+  const VarNode *dst{nullptr};
+  bool dst_global{false};
+  bool dst_fragment{false};
+  Buffer dst_buffer;
+};
+
+struct UseGraph {
+  std::unordered_map<const VarNode *, BufferUseCensus> census;
+  std::vector<CopyEdge> copies;
+};
+
+/*! \brief Check the destination override chain rooted at `root` and collect
+ *  the downstream fragments (excluding the root) that must be overridden
+ *  with it. Returns false when any buffer on the chain has uses beyond
+ *  "written once by its producer, read only by copies to global or further
+ *  chain members". */
+bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
+                          std::vector<Buffer> *chain) {
+  std::unordered_set<const VarNode *> visited;
+  std::function<bool(const VarNode *)> visit = [&](const VarNode *var) -> bool {
+    if (!visited.insert(var).second) {
+      return false; // cycle
+    }
+    auto it = graph.census.find(var);
+    BufferUseCensus c =
+        it == graph.census.end() ? BufferUseCensus{} : it->second;
+    bool is_root = (var == root);
+    if (c.stores != 0) {
+      return false;
+    }
+    if (is_root ? (c.finalize_dst != 1 || c.copy_dst != 0)
+                : (c.finalize_dst != 0 || c.copy_dst != 1)) {
+      return false;
+    }
+    // Every load occurrence must be accounted for by the uses above.
+    if (c.loads != c.copy_src + c.copy_dst + (is_root ? c.finalize_dst : 0)) {
+      return false;
+    }
+    for (const CopyEdge &edge : graph.copies) {
+      if (edge.src != var) {
+        continue;
+      }
+      if (edge.dst_global) {
+        continue;
+      }
+      if (!edge.dst_fragment || !edge.dst_buffer.defined()) {
+        return false;
+      }
+      if (!visit(edge.dst)) {
+        return false;
+      }
+      chain->push_back(edge.dst_buffer);
+    }
+    return true;
+  };
+  return visit(root);
+}
 
 bool IsPowerOfTwo(int64_t x) { return x > 0 && (x & (x - 1)) == 0; }
 
@@ -311,7 +407,7 @@ bool ValueIsReplicaSafe(const PrimExpr &value) {
 
 std::optional<NarrowDecision>
 TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
-              const DstUseCensus &dst_census, arith::Analyzer *analyzer,
+              const UseGraph &use_graph, arith::Analyzer *analyzer,
               std::string *reason) {
   auto fail = [&](const std::string &why) -> std::optional<NarrowDecision> {
     *reason = why;
@@ -319,12 +415,6 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
   };
   if (!epoch.analyzable) {
     return fail("incomplete epoch structure");
-  }
-  if (epoch.seed.defined()) {
-    return fail("seed not yet supported by the narrow plan");
-  }
-  if (epoch.batch > 1) {
-    return fail("batched finalize not yet supported by the narrow plan");
   }
   if (epoch.updates.empty()) {
     return fail("no update sites");
@@ -346,10 +436,11 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
     }
 
     // Map update indices to loop dims: each index must be a distinct nest
-    // var used in nest order (direct identity ownership), or a constant
-    // zero on a unit reducer dim.
+    // var (in any order — direct identity ownership up to permutation), or
+    // a constant zero on a unit reducer dim.
     std::vector<bool> is_output_dim(ndim, false);
-    int last_pos = -1;
+    // acc dim -> loop dim it is driven by, or -1 for a constant unit dim.
+    std::vector<int> acc_dim_to_loop_dim(site.indices.size(), -1);
     for (size_t d = 0; d < site.indices.size(); ++d) {
       const PrimExpr &index = site.indices[d];
       if (const auto *var = index.as<VarNode>()) {
@@ -363,9 +454,6 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
         if (pos < 0 || is_output_dim[pos]) {
           return fail("update index is not a distinct parallel loop var");
         }
-        if (pos <= last_pos) {
-          return fail("update indices permute the parallel loop order");
-        }
         const int64_t *loop_extent =
             as_const_int(site.loop_layout->InputShape()[pos]);
         const int64_t *dim_extent = as_const_int(buffer->shape[d]);
@@ -373,7 +461,7 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
           return fail("loop extent does not match the reducer dim extent");
         }
         is_output_dim[pos] = true;
-        last_pos = pos;
+        acc_dim_to_loop_dim[d] = pos;
       } else if (is_zero(index)) {
         const int64_t *dim_extent = as_const_int(buffer->shape[d]);
         if (!dim_extent || *dim_extent != 1) {
@@ -406,11 +494,61 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
     }
 
     // Induced partial layout: project every reduction dim (descending, so
-    // dim numbers stay stable while dims are removed).
+    // dim numbers stay stable while dims are removed). Its input dims are
+    // the surviving loop dims in NEST order.
     Fragment induced = site.loop_layout;
     for (int dim = static_cast<int>(ndim) - 1; dim >= 0; --dim) {
       if (!is_output_dim[dim]) {
         induced = backend::reduce::ComputeReducerLayout(induced, dim);
+      }
+    }
+    // Rebuild the fragment over the reducer's own dim order: permuted
+    // indices reorder the inputs, and constant unit dims insert inputs the
+    // forward expressions never reference. `nest_rank[p]` is the position
+    // of loop dim p among the surviving dims (= its input slot in
+    // `induced`); feed each such slot the placeholder of the acc dim it
+    // drives.
+    {
+      std::vector<int> nest_rank(ndim, -1);
+      int rank = 0;
+      for (size_t p = 0; p < ndim; ++p) {
+        if (is_output_dim[p]) {
+          nest_rank[p] = rank++;
+        }
+      }
+      // When every dim is projected (all-constant indices),
+      // ComputeReducerLayout keeps one synthetic unit input.
+      bool synthetic_unit = (rank == 0);
+      size_t expected_rank = synthetic_unit ? 1 : static_cast<size_t>(rank);
+      if (expected_rank != induced->InputShape().size()) {
+        return fail("induced layout rank mismatch");
+      }
+      std::vector<PrimExpr> slot_placeholders(expected_rank, PrimExpr());
+      bool identity = (expected_rank == buffer->shape.size());
+      if (synthetic_unit) {
+        // The synthetic slot is never referenced by the forward exprs; feed
+        // it the first reducer-dim placeholder for the (rare) rebuild.
+        slot_placeholders[0] = InputPlaceholder(0);
+      }
+      for (size_t d = 0; d < acc_dim_to_loop_dim.size(); ++d) {
+        int p = acc_dim_to_loop_dim[d];
+        if (p < 0) {
+          continue; // constant unit dim: no slot to feed
+        }
+        slot_placeholders[nest_rank[p]] = InputPlaceholder(d);
+        if (nest_rank[p] != static_cast<int>(d)) {
+          identity = false;
+        }
+      }
+      if (!identity) {
+        Array<PrimExpr> slot_args(slot_placeholders.begin(),
+                                  slot_placeholders.end());
+        Array<PrimExpr> fwd_index = induced->Forward(slot_args);
+        PrimExpr fwd_thread =
+            induced->ForwardThread(slot_args, ReplicationPlaceholder());
+        induced = Fragment(buffer->shape, fwd_index, fwd_thread,
+                           induced->ReplicateExtent(), std::nullopt)
+                      ->BindThreadRange(site.loop_layout->ThreadRange());
       }
     }
     if (induced->InputShape().size() != buffer->shape.size()) {
@@ -447,34 +585,87 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
           iter_sum, Downcast<Var>(InputPlaceholder(i)));
       steps.insert(steps.end(), var_steps.begin(), var_steps.end());
     }
-    if (steps.size() > 1) {
-      return fail("multi-step collectives not yet supported");
-    }
-    bool has_step = !steps.empty();
-    int reducing_threads = 0;
-    int scale = 1;
-    if (has_step) {
-      if (!IsPowerOfTwo(steps[0].extent)) {
+    std::vector<std::pair<int, int>> site_steps;
+    for (const auto &step : steps) {
+      if (!IsPowerOfTwo(step.extent)) {
         return fail("collective width is not a power of two");
       }
-      reducing_threads = steps[0].ReducingThreads();
-      scale = steps[0].scale;
+      int reducing_threads = step.ReducingThreads();
       if (reducing_threads > epoch.thread_extent) {
         return fail("collective width exceeds the participant extent");
       }
+      site_steps.emplace_back(reducing_threads, step.scale);
     }
 
     if (first_site) {
       decision.storage_layout = induced;
-      decision.has_step = has_step;
-      decision.reducing_threads = reducing_threads;
-      decision.scale = scale;
+      decision.steps = std::move(site_steps);
       first_site = false;
+
+      // Packed partial accumulation (single-site 16-bit epochs only): pick
+      // a lane source whose iterations accumulate serially on one thread.
+      // Prefer an enclosing serial loop; otherwise the innermost parallel
+      // reduction dim when the layout leaves it an even on-thread run.
+      // Lane assignment never changes which thread a contribution lands
+      // on, so this is profit-only: any layout keeps the plan correct.
+      if (epoch.updates.size() == 1 &&
+          (buffer->dtype.is_float16() || buffer->dtype.is_bfloat16()) &&
+          induced->OutputDim() == 1) {
+        // NOTE: `tirx::Var()` default-constructs a REAL variable named "v",
+        // not a null ref; use Optional to represent "no lane source found".
+        Optional<Var> lane_var;
+        if (!site.serial_vars.empty()) {
+          const int64_t *extent =
+              as_const_int(site.serial_extents[site.serial_extents.size() - 1]);
+          if (extent && *extent >= 2 && *extent % 2 == 0) {
+            lane_var = site.serial_vars[site.serial_vars.size() - 1];
+          }
+        }
+        if (!lane_var.has_value() && ndim > 0 && !is_output_dim[ndim - 1]) {
+          const int64_t *extent =
+              as_const_int(site.loop_layout->InputShape()[ndim - 1]);
+          if (extent) {
+            int64_t thread_multiplicity = 1;
+            // Packing pays off only when the dim's LOW BIT stays on one
+            // thread: a thread-expression split at an odd lower_factor
+            // pins the lane parity per thread, leaving one lane idle.
+            bool bit0_serial = true;
+            auto inner_steps = backend::reduce::CollectThreadReduceSteps(
+                iter_sum, Downcast<Var>(InputPlaceholder(ndim - 1)));
+            for (const auto &step : inner_steps) {
+              thread_multiplicity *= step.extent;
+              if (step.lower_factor % 2 != 0) {
+                bit0_serial = false;
+              }
+            }
+            int64_t run = *extent / thread_multiplicity;
+            if (bit0_serial && run >= 2 && run % 2 == 0) {
+              lane_var = site.loop_vars[ndim - 1];
+            }
+          }
+        }
+        if (lane_var.has_value()) {
+          Array<PrimExpr> slot_args;
+          for (size_t d = 0; d < buffer->shape.size(); ++d) {
+            slot_args.push_back(InputPlaceholder(d));
+          }
+          Array<PrimExpr> fwd_index = induced->Forward(slot_args);
+          PrimExpr fwd_thread =
+              induced->ForwardThread(slot_args, ReplicationPlaceholder());
+          PrimExpr lane = InputPlaceholder(buffer->shape.size());
+          Array<PrimExpr> packed_shape = buffer->shape;
+          packed_shape.push_back(IntImm(DataType::Int(32), 2));
+          decision.packed_layout =
+              Fragment(packed_shape, {fwd_index[0] * 2 + lane}, fwd_thread,
+                       induced->ReplicateExtent(), std::nullopt)
+                  ->BindThreadRange(site.loop_layout->ThreadRange());
+          decision.packed = true;
+          decision.pack_lane_var = lane_var.value();
+        }
+      }
     } else {
       if (!StructuralEqual()(decision.storage_layout, induced) ||
-          decision.has_step != has_step ||
-          decision.reducing_threads != reducing_threads ||
-          decision.scale != scale) {
+          decision.steps != site_steps) {
         return fail("update sites induce incompatible plans");
       }
     }
@@ -501,20 +692,18 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
     if (!ProveFragmentContains(dst_frag.value(), decision.storage_layout,
                                element_indices, element_indices, *analyzer)) {
       // The inferred layout mismatches the reduction's natural placement.
-      // When the destination is unconstrained (finalize-written, read only
-      // by copies to global), its free-level layout was an arbitrary choice
-      // and can be replaced by the induced layout — but only when the
-      // induced layout keeps one slot per thread: downstream copy lowering
-      // re-infers a loop layout and must be able to validate against the
-      // override, which multi-slot induced layouts are not guaranteed to
-      // survive (proof failure must never become a compile error).
-      int64_t induced_slots = 1;
-      for (const auto &extent : decision.storage_layout->OutputShape()) {
-        const int64_t *p = as_const_int(extent);
-        induced_slots = (p == nullptr) ? -1 : induced_slots * *p;
-      }
-      if (dst_census.Unconstrained() && induced_slots == 1) {
+      // When the whole destination chain is unconstrained (finalize-written,
+      // read only by copies to global or by staging copies into further
+      // unconstrained fragments), its free-level layouts were arbitrary
+      // choices and can be replaced by the induced layout together.
+      // Downstream copy lowering re-infers loop layouts against the
+      // overrides; ParallelOp's candidate selection falls back to the
+      // operand-compatible candidate when the register-preferred one
+      // conflicts, so multi-slot overrides are safe.
+      std::vector<Buffer> chain;
+      if (CollectOverrideChain(epoch.dst->data.get(), use_graph, &chain)) {
         decision.override_dst_layout = true;
+        decision.override_chain = std::move(chain);
       } else {
         return fail("destination layout is not covered by the induced layout");
       }
@@ -542,7 +731,7 @@ public:
     // destination-containment proof; the per-buffer use census decides
     // whether an inferred destination layout may be replaced.
     Map<Buffer, Layout> known_layouts;
-    std::unordered_map<const VarNode *, DstUseCensus> census;
+    UseGraph use_graph;
     PostOrderVisit(f->body, [&](const ObjectRef &obj) {
       if (const auto *block = obj.as<SBlockNode>()) {
         if (auto anno = block->annotations.Get(tl::attr::kLayoutMap)) {
@@ -553,35 +742,34 @@ public:
           }
         }
       } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        census[load->buffer->data.get()].loads++;
+        use_graph.census[load->buffer->data.get()].loads++;
       } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        census[store->buffer->data.get()].stores++;
+        use_graph.census[store->buffer->data.get()].stores++;
       } else if (const auto *call = obj.as<CallNode>()) {
-        auto region_buffer = [](const PrimExpr &arg) -> const VarNode * {
+        auto region_buffer = [](const PrimExpr &arg) -> Buffer {
           if (auto region = arg.as<CallNode>()) {
             if (region->op.same_as(RegionOp::Get())) {
               if (auto ld = region->args[0].as<BufferLoadNode>()) {
-                return ld->buffer->data.get();
+                return ld->buffer;
               }
             }
           }
-          return nullptr;
+          return Buffer();
         };
         if (call->op.same_as(Copy::Get()) && call->args.size() >= 2) {
-          const VarNode *src = region_buffer(call->args[0]);
-          const VarNode *dst = region_buffer(call->args[1]);
-          if (src != nullptr && dst != nullptr) {
-            if (auto dst_region = call->args[1].as<CallNode>()) {
-              if (auto ld = dst_region->args[0].as<BufferLoadNode>()) {
-                if (IsGlobalBuffer(ld->buffer)) {
-                  census[src].safe_copy_src++;
-                }
-              }
-            }
+          Buffer src = region_buffer(call->args[0]);
+          Buffer dst = region_buffer(call->args[1]);
+          if (src.defined() && dst.defined()) {
+            use_graph.census[src->data.get()].copy_src++;
+            use_graph.census[dst->data.get()].copy_dst++;
+            use_graph.copies.push_back(
+                CopyEdge{src->data.get(), dst->data.get(), IsGlobalBuffer(dst),
+                         IsFragmentBuffer(dst), dst});
           }
         } else if (call->op.same_as(FinalizeReducerV2Op::Get())) {
-          if (const VarNode *dst = region_buffer(call->args[1])) {
-            census[dst].finalize_dst++;
+          Buffer dst = region_buffer(call->args[1]);
+          if (dst.defined()) {
+            use_graph.census[dst->data.get()].finalize_dst++;
           }
         }
       }
@@ -598,24 +786,29 @@ public:
       std::string reason = "forced baseline (tl.reducer_force_baseline)";
       std::optional<NarrowDecision> decision;
       if (!force_baseline) {
-        DstUseCensus dst_census;
-        if (epoch.dst.defined()) {
-          auto census_it = census.find(epoch.dst->data.get());
-          if (census_it != census.end()) {
-            dst_census = census_it->second;
+        decision =
+            TryNarrowPlan(epoch, known_layouts, use_graph, &analyzer, &reason);
+      }
+      bool verbose = tl_config::ReducerPlanVerboseEnabled();
+      if (decision.has_value()) {
+        std::string msg = "[ReducerPlan] `" + std::string(epoch.buffer->name) +
+                          "`: narrow plan, ";
+        if (decision->steps.empty()) {
+          msg += "no collective";
+        } else {
+          for (const auto &[rt, s] : decision->steps) {
+            msg += "AllReduce<" + std::to_string(rt) + "," + std::to_string(s) +
+                   "> ";
           }
         }
-        decision =
-            TryNarrowPlan(epoch, known_layouts, dst_census, &analyzer, &reason);
-      }
-      if (decision.has_value()) {
-        DLOG(INFO) << "[ReducerPlan] `" << epoch.buffer->name
-                   << "`: narrow plan, "
-                   << (decision->has_step
-                           ? "AllReduce<" +
-                                 std::to_string(decision->reducing_threads) +
-                                 "," + std::to_string(decision->scale) + ">"
-                           : std::string("no collective"));
+        if (decision->packed) {
+          msg += ", packed lanes";
+        }
+        if (verbose) {
+          LOG(INFO) << msg;
+        } else {
+          DLOG(INFO) << msg;
+        }
         rewriter.narrow_decisions_.emplace(var, *decision);
         // Destination-layout overrides must be registered BEFORE traversal:
         // LayoutInference publishes the stale entry on every block, and the
@@ -626,11 +819,20 @@ public:
         if (decision->override_dst_layout) {
           rewriter.extra_layout_entries_.Set(epoch.dst,
                                              decision->storage_layout);
+          for (const Buffer &staged : decision->override_chain) {
+            rewriter.extra_layout_entries_.Set(staged,
+                                               decision->storage_layout);
+          }
         }
       } else {
-        DLOG(INFO) << "[ReducerPlan] `" << epoch.buffer->name
-                   << "`: wide plan (FullParticipant); narrow rejected: "
-                   << reason;
+        std::string msg =
+            "[ReducerPlan] `" + std::string(epoch.buffer->name) +
+            "`: wide plan (FullParticipant); narrow rejected: " + reason;
+        if (verbose) {
+          LOG(INFO) << msg;
+        } else {
+          DLOG(INFO) << msg;
+        }
       }
     }
 
@@ -651,9 +853,13 @@ private:
     ReducerV2OpType op;
     Optional<PrimExpr> seed;
     bool narrow{false};
-    bool has_step{false};
-    int reducing_threads{0};
-    int scale{1};
+    std::vector<std::pair<int, int>> steps;
+    // Packed accumulation: updates RMW `packed_buffer[slot, lane_var % 2]`;
+    // finalize folds the lanes into `new_buffer` before the collective.
+    bool packed{false};
+    Buffer packed_buffer;
+    Fragment packed_layout;
+    Var pack_lane_var;
   };
 
   // ---- context tracking ---------------------------------------------------
@@ -699,6 +905,10 @@ private:
       if (it != plans_.end()) {
         new_allocs.push_back(it->second.new_buffer);
         layout_map.Set(it->second.new_buffer, it->second.layout);
+        if (it->second.packed) {
+          new_allocs.push_back(it->second.packed_buffer);
+          layout_map.Set(it->second.packed_buffer, it->second.packed_layout);
+        }
         changed = true;
       } else {
         new_allocs.push_back(buffer);
@@ -769,9 +979,10 @@ private:
       const NarrowDecision &decision = narrow_it->second;
       plan.narrow = true;
       plan.layout = decision.storage_layout;
-      plan.has_step = decision.has_step;
-      plan.reducing_threads = decision.reducing_threads;
-      plan.scale = decision.scale;
+      plan.steps = decision.steps;
+      plan.packed = decision.packed;
+      plan.packed_layout = decision.packed_layout;
+      plan.pack_lane_var = decision.pack_lane_var;
     } else {
       // Wide-plan storage: one full logical partial per participant. The
       // analyzer narrows threadIdx.x inside warp-specialized branches.
@@ -807,15 +1018,30 @@ private:
         new_var, old_buffer->dtype, old_buffer->shape, old_buffer->strides,
         old_buffer->elem_offset, old_buffer->name, old_buffer->data_alignment,
         old_buffer->offset_factor, old_buffer->buffer_type);
+    if (plan.packed) {
+      Array<PrimExpr> packed_shape = old_buffer->shape;
+      packed_shape.push_back(IntImm(DataType::Int(32), 2));
+      Var packed_var(
+          old_buffer->data->name_hint + "_pk",
+          PointerType(PrimType(old_buffer->dtype), "local.fragment"));
+      plan.packed_buffer =
+          Buffer(packed_var, old_buffer->dtype, packed_shape,
+                 /*strides=*/{}, old_buffer->elem_offset,
+                 old_buffer->name + "_pk", old_buffer->data_alignment,
+                 old_buffer->offset_factor, old_buffer->buffer_type);
+    }
     plans_.emplace(var, plan);
     const Plan &stored = plans_.at(var);
 
     // Every participant starts from the combine identity; the seed is
-    // combined exactly once at finalize.
-    PrimExpr identity = ReducerV2Identity(stored.op, stored.new_buffer->dtype);
+    // combined exactly once at finalize. Packed plans accumulate into the
+    // lane buffer (`new_buffer` is fully written by the finalize fold).
+    const Buffer &init_target =
+        stored.packed ? stored.packed_buffer : stored.new_buffer;
+    PrimExpr identity = ReducerV2Identity(stored.op, init_target->dtype);
     return Evaluate(
         Call(DataType::Handle(), Fill::Get(),
-             {MakeFullRegion(stored.new_buffer, kAccessWrite), identity}));
+             {MakeFullRegion(init_target, kAccessWrite), identity}));
   }
 
   Stmt MaterializeUpdate(const CallNode *call) {
@@ -831,9 +1057,18 @@ private:
 
     PrimExpr value = VisitExpr(node->value);
     Array<PrimExpr> indices = node->indices;
-    PrimExpr current = BufferLoad(plan.new_buffer, indices);
-    Stmt store = BufferStore(
-        plan.new_buffer, ReducerV2Combine(plan.op, current, value), indices);
+    Buffer target = plan.new_buffer;
+    if (plan.packed) {
+      // Alternate between the two lanes of the executing thread's slot:
+      // the lane parity splits the on-thread combine chain in half and
+      // makes adjacent iterations touch adjacent physical elements.
+      target = plan.packed_buffer;
+      indices.push_back(
+          FloorMod(plan.pack_lane_var, IntImm(DataType::Int(32), 2)));
+    }
+    PrimExpr current = BufferLoad(target, indices);
+    Stmt store =
+        BufferStore(target, ReducerV2Combine(plan.op, current, value), indices);
     if (plan.narrow) {
       // Narrow plan: every replica executes the update. Each thread's
       // partial accumulates exactly the contributions of the iterations
@@ -878,19 +1113,58 @@ private:
 
     Array<Stmt> seq;
     if (plan.narrow) {
+      if (plan.packed) {
+        // Fold the two accumulation lanes into the plain induced storage.
+        // The fold loop is a frozen-layout parallel nest (the storage
+        // fragment doubles as its loop layout): every thread combines the
+        // lanes of exactly the slots it owns, replicas included, so the
+        // collective and destination proofs below see the unpacked layout
+        // they were made for.
+        Array<Var> fold_vars;
+        Array<PrimExpr> fold_indices;
+        for (size_t d = 0; d < plan.new_buffer->shape.size(); ++d) {
+          Var v("__red_fold_" + std::to_string(d), DataType::Int(32));
+          fold_vars.push_back(v);
+          fold_indices.push_back(v);
+        }
+        Array<PrimExpr> lane0 = fold_indices;
+        lane0.push_back(IntImm(DataType::Int(32), 0));
+        Array<PrimExpr> lane1 = fold_indices;
+        lane1.push_back(IntImm(DataType::Int(32), 1));
+        Stmt fold = BufferStore(
+            plan.new_buffer,
+            ReducerV2Combine(plan.op, BufferLoad(plan.packed_buffer, lane0),
+                             BufferLoad(plan.packed_buffer, lane1)),
+            fold_indices);
+        for (int d = static_cast<int>(fold_vars.size()) - 1; d >= 0; --d) {
+          Map<String, Any> annotations;
+          if (d == 0) {
+            annotations.Set(tl::attr::kParallelLoopLayout, plan.layout);
+          }
+          fold = For(fold_vars[d], make_zero(DataType::Int(32)),
+                     plan.new_buffer->shape[d], ForKind::kParallel, fold,
+                     std::nullopt, annotations);
+        }
+        seq.push_back(fold);
+      }
       // Narrow plan: combine only the reduction-axis splits (when any);
       // replication groups already hold equal values.
-      if (plan.has_step) {
-        seq.push_back(
-            Evaluate(Call(DataType::Handle(), FinalizeReducerOp::Get(),
-                          {MakeFullRegion(plan.new_buffer, kAccessReadWrite),
-                           IntImm(DataType::Int(32), static_cast<int>(plan.op)),
-                           IntImm(DataType::Int(32), plan.reducing_threads),
-                           IntImm(DataType::Int(32), plan.scale)},
-                          call->annotations)));
+      if (!plan.steps.empty() || plan.seed.defined()) {
+        Array<PrimExpr> args = {
+            MakeFullRegion(plan.new_buffer, kAccessReadWrite),
+            IntImm(DataType::Int(32), static_cast<int>(plan.op))};
+        for (const auto &[reducing_threads, scale] : plan.steps) {
+          args.push_back(IntImm(DataType::Int(32), reducing_threads));
+          args.push_back(IntImm(DataType::Int(32), scale));
+        }
+        Map<String, ObjectRef> annotations = call->annotations;
+        annotations.Set("plan", Integer(1));
+        if (plan.seed.defined()) {
+          annotations.Set("seed", plan.seed.value());
+        }
+        seq.push_back(Evaluate(Call(
+            DataType::Handle(), FinalizeReducerOp::Get(), args, annotations)));
       }
-      ICHECK(!plan.seed.defined())
-          << "narrow plan with seed should have been rejected in analysis";
       // Publish via tl.copy: it partitions by the destination layout, and
       // destination containment was proven (or the destination layout IS
       // the induced layout).
@@ -900,34 +1174,19 @@ private:
       return seq.size() == 1 ? seq[0] : SeqStmt(seq);
     }
 
-    // Wide plan: participant-extent AllReduce per logical output. The
-    // finalize call's annotations (e.g. `batch`) are forwarded.
-    seq.push_back(
-        Evaluate(Call(DataType::Handle(), FinalizeReducerOp::Get(),
-                      {MakeFullRegion(plan.new_buffer, kAccessReadWrite),
-                       IntImm(DataType::Int(32), static_cast<int>(plan.op))},
-                      call->annotations)));
-
-    // Seed: after the collective every participant holds the combined value,
-    // so a uniform per-thread combine applies the seed exactly once per
-    // logical output while keeping all replicas equal.
-    if (plan.seed.defined()) {
-      Array<PrimExpr> indices;
-      Array<Var> loop_vars;
-      for (size_t i = 0; i < plan.new_buffer->shape.size(); ++i) {
-        Var v("__seed_" + std::to_string(i), DataType::Int(32));
-        loop_vars.push_back(v);
-        indices.push_back(v);
+    // Wide plan: participant-extent AllReduce per logical output, then the
+    // optional seed combined once per slot inside the finalize lowering.
+    // The finalize call's annotations (e.g. `batch`) are forwarded.
+    {
+      Map<String, ObjectRef> annotations = call->annotations;
+      if (plan.seed.defined()) {
+        annotations.Set("seed", plan.seed.value());
       }
-      PrimExpr current = BufferLoad(plan.new_buffer, indices);
-      Stmt body = BufferStore(
-          plan.new_buffer,
-          ReducerV2Combine(plan.op, current, plan.seed.value()), indices);
-      for (int i = static_cast<int>(loop_vars.size()) - 1; i >= 0; --i) {
-        body = For(loop_vars[i], make_zero(DataType::Int(32)),
-                   plan.new_buffer->shape[i], ForKind::kSerial, body);
-      }
-      seq.push_back(body);
+      seq.push_back(
+          Evaluate(Call(DataType::Handle(), FinalizeReducerOp::Get(),
+                        {MakeFullRegion(plan.new_buffer, kAccessReadWrite),
+                         IntImm(DataType::Int(32), static_cast<int>(plan.op))},
+                        annotations)));
     }
 
     // Publish the logical result into the independent destination fragment.

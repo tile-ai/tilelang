@@ -92,6 +92,11 @@ class PassConfigKey(str, Enum):
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
 
+    TL_ENABLE_REDUCER_PLAN_VERBOSE = "tl.enable_reducer_plan_verbose"
+    """Log each reducer epoch's chosen physical plan (and narrow-plan
+    rejection reason) at INFO level during ReducerPlanAndMaterialize.
+    Default: False"""
+
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,
     disabling narrow physical plans (compact storage / sub-block collectives).

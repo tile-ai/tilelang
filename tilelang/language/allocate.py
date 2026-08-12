@@ -280,7 +280,8 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
 
 
-ReducerOp = Literal["sum", "max", "min"]
+ReducerOp = Literal["sum", "max", "min", "bitand", "bitor", "bitxor"]
+_BITWISE_REDUCER_OPS = ("bitand", "bitor", "bitxor")
 
 
 def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None, seed=None) -> Buffer:
@@ -305,7 +306,8 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
     Args:
         shape (tuple): Logical shape of the reduction result.
         dtype (str): Element data type (e.g., 'float32', 'int32').
-        op (str): Combine op: "sum", "max" or "min".
+        op (str): Combine op: "sum", "max", "min", "bitand", "bitor" or
+            "bitxor" (the bitwise ops require an integer dtype).
         replication (str | None): Deprecated legacy (v1) knob. Passing "all"
             or "none" selects the legacy fragment-based reducer for backward
             compatibility; it will be removed together with the v1 lowering.
@@ -316,7 +318,13 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
         T.Buffer: The reducer handle.
     """
 
-    assert op in ["sum", "max", "min"]
+    assert op in ["sum", "max", "min", "bitand", "bitor", "bitxor"]
+    if op in _BITWISE_REDUCER_OPS:
+        dtype_str = str(dtype)
+        assert dtype_str.startswith(("int", "uint")) or dtype_str == "bool", (
+            f"bitwise reducer op '{op}' requires an integer dtype, got {dtype_str}"
+        )
+        assert replication is None, "the legacy v1 reducer only supports sum/max/min"
 
     if replication is not None:
         # Legacy v1 reducer path (fragment buffer + reducer_info annotation).

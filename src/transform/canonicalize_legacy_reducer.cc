@@ -180,6 +180,8 @@ private:
       case ReducerV2OpType::kMin:
         info.Set("op", String("min"));
         break;
+      default:
+        LOG(FATAL) << "legacy (v1) reducers only support sum/max/min";
       }
       if (entry.seed.defined()) {
         info.Set("seed", entry.seed.value());
@@ -365,6 +367,8 @@ private:
         return match_binary(min->a, min->b);
       }
       break;
+    default:
+      break; // legacy (v1) reducers only support sum/max/min
     }
     return PrimExpr();
   }

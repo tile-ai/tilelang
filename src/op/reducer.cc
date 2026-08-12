@@ -29,8 +29,14 @@ ReducerV2OpType ParseReducerV2OpType(const ffi::String &op_str) {
     return ReducerV2OpType::kMax;
   if (op_str == "min")
     return ReducerV2OpType::kMin;
+  if (op_str == "bitand")
+    return ReducerV2OpType::kBitAnd;
+  if (op_str == "bitor")
+    return ReducerV2OpType::kBitOr;
+  if (op_str == "bitxor")
+    return ReducerV2OpType::kBitXor;
   LOG(FATAL) << "reducer v2: unsupported combine op `" << op_str
-             << "`; expected one of sum/max/min";
+             << "`; expected one of sum/max/min/bitand/bitor/bitxor";
   return ReducerV2OpType::kSum; // unreachable
 }
 
@@ -50,6 +56,11 @@ PrimExpr ReducerV2Identity(ReducerV2OpType op, DataType dtype) {
     return bits >= 64 ? std::numeric_limits<uint64_t>::max()
                       : (static_cast<uint64_t>(1) << bits) - 1;
   };
+  auto check_bitwise_dtype = [&]() {
+    ICHECK(is_int || is_uint)
+        << "bitwise reducer combine ops require an integer dtype, got "
+        << dtype;
+  };
   switch (op) {
   case ReducerV2OpType::kSum:
     return make_zero(dtype);
@@ -65,6 +76,16 @@ PrimExpr ReducerV2Identity(ReducerV2OpType op, DataType dtype) {
     if (is_uint)
       return make_const(dtype, unsigned_max());
     return make_const(dtype, INFINITY);
+  case ReducerV2OpType::kBitAnd:
+    // All-ones: x & identity == x for every bit pattern.
+    check_bitwise_dtype();
+    if (is_uint)
+      return make_const(dtype, unsigned_max());
+    return make_const(dtype, -1);
+  case ReducerV2OpType::kBitOr:
+  case ReducerV2OpType::kBitXor:
+    check_bitwise_dtype();
+    return make_zero(dtype);
   }
   LOG(FATAL) << "unreachable";
   return PrimExpr();
@@ -79,6 +100,12 @@ PrimExpr ReducerV2Combine(ReducerV2OpType op, const PrimExpr &lhs,
     return Max(lhs, rhs);
   case ReducerV2OpType::kMin:
     return Min(lhs, rhs);
+  case ReducerV2OpType::kBitAnd:
+    return lhs & rhs;
+  case ReducerV2OpType::kBitOr:
+    return lhs | rhs;
+  case ReducerV2OpType::kBitXor:
+    return lhs ^ rhs;
   }
   LOG(FATAL) << "unreachable";
   return PrimExpr();
@@ -274,23 +301,30 @@ FinalizeReducerOp::FinalizeReducerOp(
   node->reducer = reducer_access.region->buffer;
   node->SetAccessRegions({reducer_access});
   node->op = (ReducerV2OpType)*as_const_int(args[1]);
-  // Optional explicit collective plan (reducer v2 narrow plans):
-  // args[2] = reducing_threads, args[3] = scale.
-  if (args.size() >= 3) {
-    node->reducing_threads = (int)*as_const_int(args[2]);
-    ICHECK_GT(node->reducing_threads, 0)
+  // Optional explicit collective plan (reducer v2 narrow plans): flattened
+  // (reducing_threads, scale) pairs starting at args[2].
+  ICHECK(args.size() % 2 == 0) << "finalize_reducer: plan steps must come in "
+                                  "(reducing_threads, scale) pairs";
+  for (size_t i = 2; i + 1 < args.size(); i += 2) {
+    int reducing_threads = (int)*as_const_int(args[i]);
+    int scale = (int)*as_const_int(args[i + 1]);
+    ICHECK_GT(reducing_threads, 0)
         << "finalize_reducer: explicit reducing_threads must be positive";
-  }
-  if (args.size() >= 4) {
-    node->scale = (int)*as_const_int(args[3]);
-    ICHECK_GT(node->scale, 0)
-        << "finalize_reducer: explicit scale must be positive";
+    ICHECK_GT(scale, 0) << "finalize_reducer: explicit scale must be positive";
+    node->plan_steps.push_back(Integer(reducing_threads));
+    node->plan_steps.push_back(Integer(scale));
   }
   // Read explicit batch size from annotations (0 means auto-detect).
   if (annotations.count("batch")) {
     node->batch = (int)*as_const_int(Downcast<PrimExpr>(annotations["batch"]));
     ICHECK_GE(node->batch, 1)
         << "finalize_reducer: batch must be >= 1, got " << node->batch;
+  }
+  if (annotations.count("plan")) {
+    node->explicit_plan = true;
+  }
+  if (annotations.count("seed")) {
+    node->seed = Downcast<PrimExpr>(annotations["seed"]);
   }
   data_ = std::move(node);
 }

@@ -41,10 +41,19 @@ constexpr const char *kReducerInfo = "reducer_info";
 constexpr const char *kParallelMultiplicity = "tl.parallel_multiplicity";
 } // namespace attr
 
-/*! \brief Combine op kinds supported by reducer v2 (first version). */
-enum class ReducerV2OpType : int { kSum = 0, kMax = 1, kMin = 2 };
+/*! \brief Combine op kinds supported by reducer v2. The bitwise ops require
+ *  an integer dtype (checked when their identity is materialized). */
+enum class ReducerV2OpType : int {
+  kSum = 0,
+  kMax = 1,
+  kMin = 2,
+  kBitAnd = 3,
+  kBitOr = 4,
+  kBitXor = 5,
+};
 
-/*! \brief Parse a reducer combine-op string ("sum"/"max"/"min"). */
+/*! \brief Parse a reducer combine-op string
+ *  ("sum"/"max"/"min"/"bitand"/"bitor"/"bitxor"). */
 ReducerV2OpType ParseReducerV2OpType(const ffi::String &op_str);
 
 /*! \brief Identity element of a combine op for the given dtype. */
@@ -180,12 +189,18 @@ public:
   // Batch size for batched AllReduce (1 = scalar path, same as T.reduce
   // default).
   int batch{1};
-  // Explicit collective plan (reducer v2 narrow plans). When
-  // reducing_threads > 0, the AllReduce combines `reducing_threads / scale`
-  // lanes at stride `scale` instead of deriving the width from the storage
-  // layout's ReplicateExtent. -1 = wide plan.
-  int reducing_threads{-1};
-  int scale{1};
+  // Explicit collective plan (reducer v2 narrow plans): flattened
+  // (reducing_threads, scale) pairs, one per reduction step. Each step's
+  // AllReduce combines `reducing_threads / scale` lanes at stride `scale`.
+  // `explicit_plan` distinguishes an explicit empty plan (LocalComplete: no
+  // communication) from the legacy wide plan (width derived from the
+  // storage layout's ReplicateExtent).
+  bool explicit_plan{false};
+  ffi::Array<Integer> plan_steps;
+  // Optional logical seed, combined into every physical slot exactly once
+  // after the collective (all replicas hold the final value by then, so a
+  // uniform per-slot combine applies the seed once per logical output).
+  ffi::Optional<PrimExpr> seed;
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerOp",
                                     FinalizeReducerOpNode, TileOperatorNode);
@@ -196,8 +211,9 @@ public:
         .def_ro("reducer", &FinalizeReducerOpNode::reducer)
         .def_ro("op", &FinalizeReducerOpNode::op)
         .def_ro("batch", &FinalizeReducerOpNode::batch)
-        .def_ro("reducing_threads", &FinalizeReducerOpNode::reducing_threads)
-        .def_ro("scale", &FinalizeReducerOpNode::scale);
+        .def_ro("explicit_plan", &FinalizeReducerOpNode::explicit_plan)
+        .def_ro("plan_steps", &FinalizeReducerOpNode::plan_steps)
+        .def_ro("seed", &FinalizeReducerOpNode::seed);
   }
 
   Stmt Lower(const LowerArgs &lower_args,
