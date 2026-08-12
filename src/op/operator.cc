@@ -18,14 +18,6 @@ namespace tl {
 
 using namespace tirx;
 
-bool IsPerIterationOpCall(const tirx::CallNode *call) {
-  static const auto per_iteration_op_map =
-      Op::GetAttrMap<Bool>(kTLPerIterationOp);
-  const auto *op_node = call->op.as<OpNode>();
-  return op_node != nullptr &&
-         per_iteration_op_map.count(tvm::ffi::GetRef<Op>(op_node));
-}
-
 /**
  * @brief Construct a TileOperator from a TIR Call using a registered builder.
  *

@@ -21,6 +21,7 @@
 #include "../op/copy.h"
 #include "../op/operator.h"
 #include "../op/parallel.h"
+#include "../op/reducer.h"
 #include "../op/region.h"
 #include "../op/utils.h"
 #include "backend/common/target_utils.h"
@@ -191,7 +192,7 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
     StmtExprVisitor::VisitExpr_(op);
     return;
   }
-  if (IsPerIterationOpCall(op)) {
+  if (IsReducerUpdateCall(op)) {
     // Per-iteration intrinsics (e.g. tl.reducer_update) are compute, not
     // copies; their reads are plain BufferLoad args collected by the
     // recursion below (their write target is register-local and commutes,
@@ -552,7 +553,7 @@ public:
       }
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
-        if (IsPerIterationOpCall(call)) {
+        if (IsReducerUpdateCall(call)) {
           saw_non_copy_tile_op = true; // e.g. tl.reducer_update: compute
         }
         return;
@@ -591,7 +592,7 @@ public:
       }
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
-        if (IsPerIterationOpCall(call)) {
+        if (IsReducerUpdateCall(call)) {
           saw_non_copy_tile_op = true; // e.g. tl.reducer_update: compute
         }
         return;

@@ -162,6 +162,10 @@ TIR_REGISTER_TL_TILE_OP(ReducerInitOp, reducer_init)
 // tl.reducer_update: per-iteration builtin intrinsic (see reducer.h)
 // ---------------------------------------------------------------------------
 
+bool IsReducerUpdateCall(const tirx::CallNode *call) {
+  return call->op.same_as(reducer_update());
+}
+
 ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call) {
   ICHECK(call->op.same_as(reducer_update()));
   ICHECK_EQ(call->args.size(), 2)
@@ -183,9 +187,7 @@ ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call) {
 TIR_DEFINE_TL_BUILTIN(reducer_update)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque))
-    // Executes once per iteration inside T.Parallel; see kTLPerIterationOp.
-    .set_attr<Bool>(kTLPerIterationOp, Bool(true));
+                               Integer(CallEffectKind::kOpaque));
 
 // ---------------------------------------------------------------------------
 // FinalizeReducerV2Op

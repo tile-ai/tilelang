@@ -158,7 +158,7 @@ private:
   Fragment ChooseBestCandidate(const Fragment &candidate_from_buffer,
                                const Fragment &candidate_from_plan,
                                const LayoutInferArgs &layout_args) const;
-  // Driver decision for an operand-driven loop (see has_per_iteration_op_):
+  // Driver decision for an operand-driven loop (see has_reducer_update_):
   // `solved` is the best fragment operand that can drive the loop's layout
   // now; `pending` reports that a drivable operand exists but has no layout
   // yet (the loop should defer and let the operand's producer solve it).
@@ -217,8 +217,8 @@ private:
   mutable arith::Analyzer analyzer_;
   // Whether the loop body has cross-thread shared/global memory access.
   bool has_cross_thread_access_ = false;
-  // True when the loop body performs a side effect through a per-iteration
-  // tile op (kTLPerIterationOp, e.g. T.reducer_update). Such a loop has no
+  // True when the loop body contains a T.reducer_update intrinsic
+  // (IsReducerUpdateCall). Such a loop has no
   // visible BufferStore to anchor layout inference: the op's write is hidden
   // inside the call, and its target buffer deliberately has no layout until
   // ReducerPlanAndMaterialize. Free-mode inference therefore treats the loop
@@ -228,7 +228,7 @@ private:
   // loop unconditionally would optimize its own register count while
   // degrading the layouts it forces onto the fragments it reads (their
   // producing copies lose vectorization; 40% end-to-end on fp16 GEMV).
-  bool has_per_iteration_op_ = false;
+  bool has_reducer_update_ = false;
   // Buffers that are stored to shared/global memory in the loop body.
   std::vector<Buffer> store_shared_global_buffers_;
   // Fragment buffers that are stored to in the loop body.

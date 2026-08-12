@@ -109,7 +109,7 @@ public:
 /// output selected by `indices`, exactly once per dynamic logical iteration.
 ///
 /// Unlike the other epoch ops this is a plain builtin INTRINSIC, not a tile
-/// op: it executes once per iteration inside T.Parallel (kTLPerIterationOp),
+/// op: it executes once per iteration inside T.Parallel,
 /// owns no layout (the enclosing loop and the planner decide physics), and
 /// never lowers on its own (ReducerPlanAndMaterialize rewrites it; leftovers
 /// are caught by VerifyReducerConsumed). args[0] is a plain BufferLoad
@@ -118,6 +118,17 @@ public:
 /// as a read; updates commute, and VerifyReducerEpoch pins init/finalize to
 /// straight-line code, so no cross-statement write ordering is lost).
 TVM_DLL const Op &reducer_update();
+
+/*! \brief True for tl.reducer_update calls. Two generic analyses key on
+ *  this (through this predicate, so a future sibling op — e.g. a rescale
+ *  intrinsic — only needs a new clause here):
+ *  - ParallelOp layout inference: the call's write is hidden inside the
+ *    intrinsic and targets a buffer with deliberately no layout, so the
+ *    enclosing loop has no write anchor and must take its layout from a
+ *    fragment operand (see ParallelOpNode::has_reducer_update_);
+ *  - pipeline statement classification: the call is compute, not a copy,
+ *    even though it does not parse as a tile op. */
+TVM_DLL bool IsReducerUpdateCall(const tirx::CallNode *call);
 
 /*! \brief Parsed form of a tl.reducer_update call. */
 struct ReducerUpdateArgs {

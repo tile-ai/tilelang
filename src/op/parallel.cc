@@ -20,6 +20,7 @@
 #include "../transform/loop_vectorize.h"
 #include "arith/int_operator.h"
 #include "backend/common/target_utils.h"
+#include "reducer.h"
 #include "region.h"
 #include "span_utils.h"
 #include "utils.h"
@@ -180,8 +181,8 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
                    << ". Ignore override.";
     }
   }
-  // Collect cross-thread access info, buffer store info, and per-iteration
-  // intrinsics (kTLPerIterationOp; see has_per_iteration_op_).
+  // Collect cross-thread access info, buffer store info, and reducer
+  // updates (see has_reducer_update_).
   PostOrderVisit(root_, [&](const ObjectRef &obj) {
     if (const auto *store = obj.as<BufferStoreNode>()) {
       auto buffer = store->buffer;
@@ -196,8 +197,8 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
         has_cross_thread_access_ = true;
       }
     } else if (const auto *call = obj.as<CallNode>()) {
-      if (IsPerIterationOpCall(call)) {
-        has_per_iteration_op_ = true;
+      if (IsReducerUpdateCall(call)) {
+        has_reducer_update_ = true;
       }
     }
   });
@@ -304,7 +305,7 @@ bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
 }
 
 /*! \brief Pick the fragment operand that should drive an operand-driven
- *  loop's layout (see has_per_iteration_op_).
+ *  loop's layout (see has_reducer_update_).
  *
  *  A fragment operand can DRIVE the loop only when it is addressed purely by
  *  the parallel loop vars: an operand indexed by anything else (e.g. an
@@ -536,10 +537,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     Fragment candidate_from_plan;
     bool selected_plan_candidate = false;
 
-    // Operand-driven loops (see has_per_iteration_op_): adopt a solved
+    // Operand-driven loops (see has_reducer_update_): adopt a solved
     // driver operand's layout, defer while a driver is pending, and only
     // self-plan below when no operand can drive the loop.
-    if (has_per_iteration_op_) {
+    if (has_reducer_update_) {
       OperandDriver driver = FindOperandDriver(fragment_buffers, layout_args,
                                                allow_layout_propgate);
       if (driver.solved.defined()) {
@@ -567,7 +568,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
       // operand can express the iteration space (e.g. every operand is
       // indexed by an inner serial var), so only self-planning remains.
       if (read_source_buffer.defined() && allow_layout_propgate &&
-          !has_per_iteration_op_) {
+          !has_reducer_update_) {
         candidate_from_buffer =
             ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
       }
