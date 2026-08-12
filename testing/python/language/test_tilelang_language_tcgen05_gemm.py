@@ -316,7 +316,7 @@ def test_tcgen05_gemm_can_omit_intermediate_completion_event():
 def test_sync_gemm_preserves_sliced_ts_operands_for_sm100_selection():
     source = tilelang.compile(_make_sync_sliced_ts_tmem_kernel(), target="cuda").get_kernel_source()
     assert source.count("tl::tcgen05mma_ts") == 4
-    assert "increase_descriptor_offset" in source
+    assert source.count("initialize_tcgen05_descriptor") == 4
 
 
 @tilelang.testing.requires_cuda
