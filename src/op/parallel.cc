@@ -485,48 +485,45 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     Fragment candidate_from_plan;
     bool selected_plan_candidate = false;
 
-    if (!loop_layout_.defined()) {
-      if (read_source_buffer.defined() && allow_layout_propgate) {
-        candidate_from_buffer =
-            ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
-      }
-      candidate_from_plan = ComputePlanCandidate(layout_args);
+    if (read_source_buffer.defined() && allow_layout_propgate) {
+      candidate_from_buffer =
+          ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
+    }
+    candidate_from_plan = ComputePlanCandidate(layout_args);
 
-      // Choose the best candidate:
-      if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {
-        loop_layout_ = ChooseBestCandidate(candidate_from_buffer,
-                                           candidate_from_plan, layout_args);
-        // The register-count preference is a heuristic; a cheaper candidate
-        // that conflicts with an already-solved fragment layout must yield
-        // to the compatible one instead of failing the inference (or, at
-        // lowering time, the whole compilation).
-        if (!ValidateCandidateAgainstFragments(loop_layout_, layout_args,
-                                               /*throw_on_error=*/false,
-                                               /*check_forward_index=*/false,
-                                               source_buffer)) {
-          Fragment other = loop_layout_.same_as(candidate_from_plan)
-                               ? candidate_from_buffer
-                               : candidate_from_plan;
-          if (ValidateCandidateAgainstFragments(other, layout_args,
-                                                /*throw_on_error=*/false,
-                                                /*check_forward_index=*/false,
-                                                source_buffer)) {
-            DLOG(INFO) << "[FreeInfer] preferred candidate conflicts with "
-                          "solved fragment layouts; using the other one.";
-            loop_layout_ = other;
-          }
+    // Choose the best candidate:
+    if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {
+      loop_layout_ = ChooseBestCandidate(candidate_from_buffer,
+                                         candidate_from_plan, layout_args);
+      // The register-count preference is a heuristic; a cheaper candidate
+      // that conflicts with an already-solved fragment layout must yield
+      // to the compatible one instead of failing the inference (or, at
+      // lowering time, the whole compilation).
+      if (!ValidateCandidateAgainstFragments(loop_layout_, layout_args,
+                                             /*throw_on_error=*/false,
+                                             /*check_forward_index=*/false,
+                                             source_buffer)) {
+        Fragment other = loop_layout_.same_as(candidate_from_plan)
+                             ? candidate_from_buffer
+                             : candidate_from_plan;
+        if (ValidateCandidateAgainstFragments(other, layout_args,
+                                              /*throw_on_error=*/false,
+                                              /*check_forward_index=*/false,
+                                              source_buffer)) {
+          DLOG(INFO) << "[FreeInfer] preferred candidate conflicts with "
+                        "solved fragment layouts; using the other one.";
+          loop_layout_ = other;
         }
-        selected_plan_candidate = loop_layout_.same_as(candidate_from_plan);
-      } else if (candidate_from_plan.defined()) {
-        loop_layout_ = candidate_from_plan;
-        selected_plan_candidate = true;
-        DLOG(INFO)
-            << "[FreeInfer] only PlanLoopPartition available, choose it.";
-      } else if (candidate_from_buffer.defined()) {
-        loop_layout_ = candidate_from_buffer;
-        DLOG(INFO)
-            << "[FreeInfer] only compute_from_buffer available, choose it.";
       }
+      selected_plan_candidate = loop_layout_.same_as(candidate_from_plan);
+    } else if (candidate_from_plan.defined()) {
+      loop_layout_ = candidate_from_plan;
+      selected_plan_candidate = true;
+      DLOG(INFO) << "[FreeInfer] only PlanLoopPartition available, choose it.";
+    } else if (candidate_from_buffer.defined()) {
+      loop_layout_ = candidate_from_buffer;
+      DLOG(INFO)
+          << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
     loop_layout_requires_padding_guard_ =
         selected_plan_candidate && indice_map_.empty();
