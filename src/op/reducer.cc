@@ -203,7 +203,9 @@ TileOperator ReducerUpdateOpNode::Clone() const {
 TIR_REGISTER_TL_TILE_OP(ReducerUpdateOp, reducer_update)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+                               Integer(CallEffectKind::kOpaque))
+    // Executes once per iteration inside T.Parallel; see kTLPerIterationOp.
+    .set_attr<Bool>(kTLPerIterationOp, Bool(true));
 
 // ---------------------------------------------------------------------------
 // FinalizeReducerV2Op

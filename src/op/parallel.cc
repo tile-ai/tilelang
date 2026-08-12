@@ -180,10 +180,10 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
                    << ". Ignore override.";
     }
   }
-  // Collect cross-thread access info, buffer store info, and opaque tile-op
-  // calls (side effects the layout system cannot see, e.g. reducer updates).
-  static const auto op_builder_map =
-      Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
+  // Collect cross-thread access info, buffer store info, and per-iteration
+  // tile ops (kTLPerIterationOp; see has_per_iteration_op_).
+  static const auto per_iteration_op_map =
+      Op::GetAttrMap<Bool>(kTLPerIterationOp);
   PostOrderVisit(root_, [&](const ObjectRef &obj) {
     if (const auto *store = obj.as<BufferStoreNode>()) {
       auto buffer = store->buffer;
@@ -199,10 +199,8 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
       }
     } else if (const auto *call = obj.as<CallNode>()) {
       if (const auto *op_node = call->op.as<OpNode>()) {
-        Op op_ref = tvm::ffi::GetRef<Op>(op_node);
-        // tl.region is a transport-only argument wrapper, not a side effect.
-        if (op_builder_map.count(op_ref) && !op_ref.same_as(RegionOp::Get())) {
-          has_opaque_tile_op_ = true;
+        if (per_iteration_op_map.count(tvm::ffi::GetRef<Op>(op_node))) {
+          has_per_iteration_op_ = true;
         }
       }
     }
@@ -307,6 +305,53 @@ Stmt ParallelOpNode::Lower(const LowerArgs &lower_args,
 bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(GetAccessInfo(buffer).indices, common_indice);
+}
+
+/*! \brief Pick the fragment operand that should drive an operand-driven
+ *  loop's layout (see has_per_iteration_op_).
+ *
+ *  A fragment operand can DRIVE the loop only when it is addressed purely by
+ *  the parallel loop vars: an operand indexed by anything else (e.g. an
+ *  inner serial reduction var) needs the LOOP to own the operand's layout
+ *  instead, so it can never be a driver. Among solved drivers, prefer the
+ *  one with the most indices (more index dims pin the loop layout more
+ *  accurately — the same preference generic inference uses for its read
+ *  source). A solved driver wins over a pending one: adopting a layout now
+ *  lets this loop publish layouts for the remaining fragments, whereas
+ *  deferring with no other producer in the worklist could stall inference.
+ */
+ParallelOpNode::OperandDriver
+ParallelOpNode::FindOperandDriver(const std::vector<Buffer> &fragment_buffers,
+                                  const LayoutInferArgs &layout_args,
+                                  bool allow_layout_propgate) const {
+  OperandDriver result;
+  std::unordered_set<const VarNode *> loop_var_set;
+  for (const auto &iv : loop_vars_) {
+    loop_var_set.insert(iv->var.get());
+  }
+  for (const auto &buffer : fragment_buffers) {
+    bool drivable = true;
+    for (const auto &index : GetAccessInfo(buffer).indices) {
+      if (tirx::UsesVar(index, [&](const VarNode *var) {
+            return !loop_var_set.count(var);
+          })) {
+        drivable = false;
+        break;
+      }
+    }
+    if (!drivable) {
+      continue;
+    }
+    if (!layout_args.layout_map.count(buffer)) {
+      result.pending = true;
+    } else if (allow_layout_propgate &&
+               (!result.solved.defined() ||
+                GetAccessInfo(buffer).indices.size() >
+                    GetAccessInfo(result.solved).indices.size())) {
+      result.solved = buffer;
+    }
+  }
+  return result;
 }
 
 /*! \brief Infer the layout for parallel operations based on different inference
@@ -495,75 +540,42 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     Fragment candidate_from_plan;
     bool selected_plan_candidate = false;
 
-    if (read_source_buffer.defined() && allow_layout_propgate) {
-      if (has_opaque_tile_op_) {
-        // For opaque tile-op loops the operand is only a PREFERRED driver:
-        // when its indices cannot express this loop's iteration space
-        // (e.g. they involve inner serial vars), fall through to
-        // self-planning instead of failing the whole inference attempt.
+    // Operand-driven loops (see has_per_iteration_op_): adopt a solved
+    // driver operand's layout, defer while a driver is pending, and only
+    // self-plan below when no operand can drive the loop.
+    if (has_per_iteration_op_) {
+      OperandDriver driver = FindOperandDriver(fragment_buffers, layout_args,
+                                               allow_layout_propgate);
+      if (driver.solved.defined()) {
+        // Drivability constrains index VARS, not affineness: a driver with
+        // a non-affine index is treated like no driver at all.
         try {
-          candidate_from_buffer =
-              ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
+          loop_layout_ =
+              ComputeLoopLayoutFromBuffer(driver.solved, layout_args);
+          DLOG(INFO) << "[FreeInfer] operand-driven loop follows `"
+                     << driver.solved << "`.";
         } catch (const NormalizeIterException &e) {
-          DLOG(INFO) << "[FreeInfer] operand cannot drive opaque tile-op "
-                        "loop: "
-                     << e.what();
+          DLOG(INFO) << "[FreeInfer] operand-driven loop: driver `"
+                     << driver.solved << "` is not affine: " << e.what();
         }
-      } else {
-        candidate_from_buffer =
-            ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
+      }
+      if (!loop_layout_.defined() && driver.pending) {
+        DLOG(INFO) << "[FreeInfer] operand-driven loop deferred: a drivable "
+                      "operand is not solved yet.";
+        return {};
       }
     }
 
-    // A fragment operand can DRIVE this loop's layout only when it is
-    // addressed purely by the parallel loop vars; indices involving other
-    // vars (e.g. an inner serial reduction var) require the LOOP to own the
-    // operand's layout instead, so such operands must not hold us back.
-    std::unordered_set<const VarNode *> loop_var_set;
-    for (const auto &iv : loop_vars_) {
-      loop_var_set.insert(iv->var.get());
-    }
-    bool unsolved_drivable_operand = false;
-    for (const auto &buffer : fragment_buffers) {
-      bool drivable = true;
-      for (const auto &index : GetAccessInfo(buffer).indices) {
-        if (tirx::UsesVar(index, [&](const VarNode *var) {
-              return !loop_var_set.count(var);
-            })) {
-          drivable = false;
-          break;
-        }
+    if (!loop_layout_.defined()) {
+      // Generic free inference. For operand-driven loops reaching here no
+      // operand can express the iteration space (e.g. every operand is
+      // indexed by an inner serial var), so only self-planning remains.
+      if (read_source_buffer.defined() && allow_layout_propgate &&
+          !has_per_iteration_op_) {
+        candidate_from_buffer =
+            ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
       }
-      if (drivable && !layout_args.layout_map.count(buffer)) {
-        unsolved_drivable_operand = true;
-        break;
-      }
-    }
-    if (has_opaque_tile_op_ &&
-        (candidate_from_buffer.defined() || unsolved_drivable_operand)) {
-      // The loop carries an opaque side effect (e.g. a reducer update) and
-      // therefore has no visible write to anchor it. Self-planning such a
-      // loop optimizes only its own register count and can force degraded
-      // layouts onto the fragments it reads (their producing copies then
-      // lose vectorization). Propagate from a fragment operand instead;
-      // while a drivable operand is still unsolved, defer so the worklist
-      // lets the producing ops fix the operands first. Self-planning below
-      // remains the fallback when no operand can drive the loop, validated
-      // against the solved operand layouts.
-      if (candidate_from_buffer.defined()) {
-        loop_layout_ = candidate_from_buffer;
-        DLOG(INFO) << "[FreeInfer] opaque tile-op loop follows fragment "
-                      "operand layout.";
-      } else {
-        DLOG(INFO) << "[FreeInfer] opaque tile-op loop deferred: drivable "
-                      "fragment operands not solved yet.";
-        return {};
-      }
-    } else {
-      // try to infer loop layout with two mechanisms and choose the best one
-      {
-        candidate_from_plan = ComputePlanCandidate(layout_args);
-      }
+      candidate_from_plan = ComputePlanCandidate(layout_args);
 
       // Choose the best candidate:
       if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {

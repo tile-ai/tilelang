@@ -209,6 +209,20 @@ using OpBlockAnnotationHandlerFunc =
 static constexpr const char *kTLOpBlockAnnotationHandler =
     "TLOpBlockAnnotationHandler";
 
+/*! \brief Op attribute (Bool): marks a tile op whose statement executes once
+ *  per iteration INSIDE an enclosing T.Parallel loop (e.g. tl.reducer_update)
+ *  instead of operating on whole tiles at block level. Declaring the contract
+ *  here keeps its two consumers free of op-name special cases:
+ *  - the nested-loop checker exempts such ops from the "no tile ops inside
+ *    T.Parallel" rule;
+ *  - ParallelOp layout inference treats the enclosing loop as
+ *    OPERAND-DRIVEN: the op's buffer effects are carried by region
+ *    arguments (invisible to statement-level access scans) and its write
+ *    target deliberately has no layout yet, so the loop has no write anchor
+ *    and must take its layout from a fragment operand (see
+ *    ParallelOpNode::has_per_iteration_op_). */
+static constexpr const char *kTLPerIterationOp = "TLPerIterationOp";
+
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \
     static const Op &op = Op::Get("tl.tileop." #OpName);                       \
