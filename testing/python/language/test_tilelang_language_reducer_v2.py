@@ -142,8 +142,8 @@ def test_seed_applied_exactly_once():
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((extent,), T.float32)
             T.copy(A, src)
-            acc = T.alloc_reducer((1,), T.float32, op="sum", seed=seed)
-            T.reducer_init(acc)
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.reducer_init(acc, seed)
             for i in T.Parallel(extent):
                 T.reducer_update(acc[0], src[i])
             result = T.alloc_fragment((1,), T.float32)
@@ -313,8 +313,8 @@ def test_seed_with_narrow_plan():
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((extent,), T.float32)
             T.copy(A, src)
-            acc = T.alloc_reducer((1,), T.float32, op="sum", seed=seed)
-            T.reducer_init(acc)
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.reducer_init(acc, seed)
             for i in T.Parallel(extent):
                 T.reducer_update(acc[0], src[i])
             result = T.alloc_fragment((1,), T.float32)
@@ -341,8 +341,8 @@ def test_seed_with_local_complete():
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((M,), T.float32)
             T.copy(A, src)
-            acc = T.alloc_reducer((M,), T.float32, op="sum", seed=seed)
-            T.reducer_init(acc)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            T.reducer_init(acc, seed)
             for i in T.Parallel(M):
                 T.reducer_update(acc[i], src[i])
             result = T.alloc_fragment((M,), T.float32)
@@ -618,6 +618,30 @@ def _compile_expect_error(kernel_factory, match):
     with pytest.raises(Exception, match=match):
         kernel = kernel_factory()
         tl.compile(kernel, out_idx=-1)
+
+
+def test_reject_init_value_dtype_mismatch():
+    """The T.reducer_init starting value must already have the reducer's
+    dtype when passed as a PrimExpr (Python numbers are auto-converted)."""
+
+    def make():
+        @T.prim_func
+        def kernel(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=128):
+                src = T.alloc_fragment((8,), T.float32)
+                T.copy(A, src)
+                acc = T.alloc_reducer((1,), T.float32, op="sum")
+                T.reducer_init(acc, T.float16(1.0))
+                for i in T.Parallel(8):
+                    T.reducer_update(acc[0], src[i])
+                result = T.alloc_fragment((1,), T.float32)
+                T.finalize_reducer(acc, result)
+                if T.get_thread_binding() == 0:
+                    B[0] = result[0]
+
+        return kernel
+
+    _compile_expect_error(make, "does not match reducer")
 
 
 def test_reject_update_before_init():

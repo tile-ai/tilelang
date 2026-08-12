@@ -348,25 +348,38 @@ def reduce_bitxor(
     reduce(buffer, out, "bitxor", dim, clear, batch=batch, annotations=annotations)
 
 
-def reducer_init(reducer: tirx.Buffer) -> tirx.PrimExpr:
-    """Open a reducer epoch: initialize its partials with the combine identity.
+def reducer_init(reducer: tirx.Buffer, init=None) -> tirx.PrimExpr:
+    """Open a reducer epoch, optionally with a logical starting value.
 
     Must be called exactly once per `T.alloc_reducer` allocation, before any
-    `T.reducer_update`. The identity is determined by the reducer's combine op
-    and dtype (sum -> 0, max -> dtype lowest, min -> dtype highest); the
-    optional `seed` passed to `T.alloc_reducer` is NOT written here — it is
-    combined exactly once at finalize time.
+    `T.reducer_update`. Without `init`, the reduction starts from the combine
+    identity (sum -> 0, max -> dtype lowest, min -> dtype highest, bitand ->
+    all ones, bitor/bitxor -> 0).
+
+    `init` is a LOGICAL starting value: the result is as if one extra
+    contribution `init` were combined into every logical output, exactly
+    once. It is not a physical fill — physical partials always start from
+    the identity, and the compiler combines `init` once per logical output
+    at finalize time, so physical replication can never multiply it.
 
     Args:
         reducer (tirx.Buffer): Handle returned by `T.alloc_reducer`.
+        init (PrimExpr | int | float | None): Optional logical starting
+            value; converted to the reducer's dtype when given as a Python
+            number.
 
     Returns:
         tirx.Call: Handle to the reducer_init intrinsic call.
     """
+    args = [to_tile_region(reducer, access_type="w")]
+    if init is not None:
+        if isinstance(init, (int, float)):
+            init = tirx.const(init, reducer.dtype)
+        args.append(init)
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get("tl.tileop.reducer_init"),
-        to_tile_region(reducer, access_type="w"),
+        *args,
     )
 
 
@@ -409,10 +422,10 @@ def finalize_reducer(
     """Close a reducer epoch.
 
     v2 form (``dst`` given): complete the cross-participant communication the
-    chosen physical plan requires, combine the optional seed exactly once, and
-    write the logical result into the independent destination fragment
-    ``dst``. After this call the reducer handle is dead; read results from
-    ``dst``.
+    chosen physical plan requires, combine the optional ``T.reducer_init``
+    starting value exactly once per logical output, and write the logical
+    result into the independent destination fragment ``dst``. After this
+    call the reducer handle is dead; read results from ``dst``.
 
     Legacy v1 form (``dst`` omitted): in-place finalize of a legacy
     ``alloc_reducer(replication=...)`` fragment reducer. Deprecated.

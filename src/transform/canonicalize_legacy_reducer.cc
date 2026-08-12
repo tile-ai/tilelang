@@ -183,9 +183,6 @@ private:
       default:
         LOG(FATAL) << "legacy (v1) reducers only support sum/max/min";
       }
-      if (entry.seed.defined()) {
-        info.Set("seed", entry.seed.value());
-      }
       v2_info.Set(entry.acc->data, info);
       changed = true;
     }
@@ -222,7 +219,7 @@ private:
             LOG(FATAL) << "legacy reducer `" << entry->old_buffer
                        << "` (op=sum) is filled with a non-zero value; its v1 "
                           "behavior depended on the physical thread count. Use "
-                          "T.alloc_reducer(..., seed=value) with the v2 API "
+                          "T.reducer_init(acc, value) with the v2 API "
                           "instead.";
           }
           // max/min are idempotent: a per-partial clamp equals a one-time
@@ -237,8 +234,15 @@ private:
           }
         }
         entry->phase = Phase::kActive;
-        return Evaluate(Call(DataType::Handle(), ReducerInitOp::Get(),
-                             {MakeFullRegionCall(entry->acc, kAccessWrite)}));
+        // The non-identity fill value (idempotent combines only) rides as
+        // the epoch's logical init value on the synthesized reducer_init.
+        Array<PrimExpr> init_args = {
+            MakeFullRegionCall(entry->acc, kAccessWrite)};
+        if (entry->seed.defined()) {
+          init_args.push_back(entry->seed.value());
+        }
+        return Evaluate(
+            Call(DataType::Handle(), ReducerInitOp::Get(), init_args));
       }
     }
     // In-place T.finalize_reducer(acc) becomes out-of-place v2 finalize.

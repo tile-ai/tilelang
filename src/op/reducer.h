@@ -24,8 +24,8 @@ namespace tl {
 using namespace tirx;
 
 namespace attr {
-/*! \brief SBlock annotation: Map<Var, Map<String, Any>> with keys
- *  "op" (String: sum/max/min) and optional "seed" (PrimExpr). */
+/*! \brief SBlock annotation: Map<Var, Map<String, Any>> with the key
+ *  "op" (String: sum/max/min/bitand/bitor/bitxor). */
 constexpr const char *kReducerInfoV2 = "reducer_info_v2";
 /*! \brief Legacy (v1) SBlock annotation emitted by
  *  `alloc_reducer(replication=...)`: Map<Var, Map<String, String>> with keys
@@ -68,11 +68,15 @@ inline bool IsReducerV2Buffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.reducer";
 }
 
-/// T.reducer_init(acc): initialize the epoch's physical partials with the
-/// combine identity. args[0] = tl.region(acc, "w").
+/// T.reducer_init(acc, init=None): open the epoch. The physical partials
+/// always start from the combine identity; the optional `init` value is a
+/// logical starting value, combined exactly once per logical output at
+/// finalize time (so physical replication can never multiply it).
+/// args[0] = tl.region(acc, "w"), optional args[1] = init value.
 class ReducerInitOpNode : public TileOperatorNode {
 public:
   Buffer reducer;
+  ffi::Optional<PrimExpr> seed; ///< logical starting value (args[1])
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerInitOp", ReducerInitOpNode,
                                     TileOperatorNode);
 
@@ -85,8 +89,9 @@ public:
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<ReducerInitOpNode>().def_ro("reducer",
-                                                &ReducerInitOpNode::reducer);
+    refl::ObjectDef<ReducerInitOpNode>()
+        .def_ro("reducer", &ReducerInitOpNode::reducer)
+        .def_ro("seed", &ReducerInitOpNode::seed);
   }
 };
 

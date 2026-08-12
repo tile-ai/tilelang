@@ -85,16 +85,6 @@ private:
             << "` is allocated in scope local.reducer but has no "
                "reducer_info_v2 annotation; allocate reducers with "
                "T.alloc_reducer.";
-        auto seed = info_.at(buffer->data.get()).Get("seed");
-        if (seed) {
-          auto seed_expr = seed.value().try_cast<PrimExpr>();
-          ICHECK(seed_expr)
-              << "reducer `" << buffer << "` seed must be a PrimExpr";
-          ICHECK(seed_expr.value().dtype() == buffer->dtype)
-              << "reducer `" << buffer << "` seed dtype "
-              << seed_expr.value().dtype() << " does not match reducer dtype "
-              << buffer->dtype;
-        }
         var_to_buffer_.emplace(buffer->data.get(), buffer);
       }
     }
@@ -131,13 +121,24 @@ private:
       Var var = RegionArgBufferVar(op->args[0], "reducer_init");
       RequireReducer(var, "reducer_init");
       RequireStraightLine(var, "T.reducer_init");
+      if (op->args.size() >= 2) {
+        const Buffer &buffer = var_to_buffer_.at(var.get());
+        ICHECK(op->args[1].dtype() == buffer->dtype)
+            << "T.reducer_init init value dtype " << op->args[1].dtype()
+            << " does not match reducer `" << var << "` dtype "
+            << buffer->dtype;
+      }
       auto &state = state_.at(var);
       if (state != EpochState::kAllocated) {
         LOG(FATAL) << "double T.reducer_init on reducer `" << var
                    << "`; each allocation supports exactly one epoch.";
       }
       state = EpochState::kActive;
-      return; // region arg consumed; nothing else to visit
+      // The optional init value is an ordinary read expression.
+      for (size_t i = 1; i < op->args.size(); ++i) {
+        VisitExpr(op->args[i]);
+      }
+      return;
     }
     if (op->op.same_as(ReducerUpdateOp::Get())) {
       Var var = RegionArgBufferVar(op->args[0], "reducer_update");

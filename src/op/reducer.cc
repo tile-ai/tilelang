@@ -117,13 +117,19 @@ PrimExpr ReducerV2Combine(ReducerV2OpType op, const PrimExpr &lhs,
 
 ReducerInitOp::ReducerInitOp(ffi::Array<PrimExpr> args,
                              ffi::Map<ffi::String, ffi::ObjectRef>) {
-  ICHECK_EQ(args.size(), 1)
-      << "reducer_init expects exactly one region argument";
+  ICHECK(args.size() == 1 || args.size() == 2)
+      << "reducer_init expects (region) or (region, init value)";
   auto node = tvm::ffi::make_object<ReducerInitOpNode>();
   auto access = NormalizeToAccessRegion(args[0], kAccessWrite);
   access.region = BufferRegion::FullRegion(access.region->buffer);
   access.access_mask = kAccessWrite;
   node->reducer = access.region->buffer;
+  if (args.size() == 2) {
+    ICHECK(args[1].dtype() == node->reducer->dtype)
+        << "reducer_init init value dtype " << args[1].dtype()
+        << " does not match reducer dtype " << node->reducer->dtype;
+    node->seed = args[1];
+  }
   node->SetAccessRegions({access});
   data_ = std::move(node);
 }

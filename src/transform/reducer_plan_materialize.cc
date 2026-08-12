@@ -140,9 +140,6 @@ private:
       for (const auto &[var, info] : map.value()) {
         EpochInfo &epoch = epochs_[var.get()];
         epoch.op = ParseReducerV2OpType(info.Get("op").value().cast<String>());
-        if (auto seed = info.Get("seed")) {
-          epoch.seed = seed.value().cast<PrimExpr>();
-        }
       }
     }
     for (const auto &buffer : op->alloc_buffers) {
@@ -210,6 +207,9 @@ private:
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(ReducerInitOp::Get())) {
       if (EpochInfo *epoch = FindEpoch(op->args[0])) {
+        if (op->args.size() >= 2) {
+          epoch->seed = op->args[1];
+        }
         if (thread_var_.defined() &&
             analyzer_.const_int_bound.IsBound(thread_var_->var)) {
           auto bound = analyzer_.const_int_bound(thread_var_->var);
@@ -970,8 +970,10 @@ private:
     plan.old_buffer = old_buffer;
     const auto &info = reducer_info_.at(var);
     plan.op = ParseReducerV2OpType(info.Get("op").value().cast<String>());
-    if (auto seed = info.Get("seed")) {
-      plan.seed = seed.value().cast<PrimExpr>();
+    if (call->args.size() >= 2) {
+      // Logical starting value from T.reducer_init(acc, init): combined
+      // exactly once per logical output at finalize time.
+      plan.seed = call->args[1];
     }
 
     auto narrow_it = narrow_decisions_.find(var);

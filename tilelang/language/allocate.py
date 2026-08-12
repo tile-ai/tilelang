@@ -284,7 +284,7 @@ ReducerOp = Literal["sum", "max", "min", "bitand", "bitor", "bitxor"]
 _BITWISE_REDUCER_OPS = ("bitand", "bitor", "bitxor")
 
 
-def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None, seed=None) -> Buffer:
+def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replication=None) -> Buffer:
     """
     Allocate a reducer: a first-class deferred reduction epoch handle.
 
@@ -292,7 +292,7 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
     accessed through the epoch operations::
 
         acc = T.alloc_reducer(shape, dtype, op="sum")
-        T.reducer_init(acc)
+        T.reducer_init(acc)          # or T.reducer_init(acc, init_value)
         for ...:
             T.reducer_update(acc[indices], contribution)
         dst = T.alloc_fragment(shape, dtype)
@@ -311,8 +311,6 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
         replication (str | None): Deprecated legacy (v1) knob. Passing "all"
             or "none" selects the legacy fragment-based reducer for backward
             compatibility; it will be removed together with the v1 lowering.
-        seed (PrimExpr | int | float | None): Optional extra logical input,
-            combined exactly once into each logical output at finalize time.
 
     Returns:
         T.Buffer: The reducer handle.
@@ -337,20 +335,12 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
             stacklevel=2,
         )
         assert replication in ["all", "none"]
-        assert seed is None, "seed is not supported by the legacy v1 reducer"
         reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
         sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
         return reducer
 
     reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
-    info: dict = {"op": op}
-    if seed is not None:
-        if isinstance(seed, (int, float)):
-            from tvm import tirx
-
-            seed = tirx.const(seed, dtype)
-        info["seed"] = seed
-    sblock_attr({"reducer_info_v2": {reducer.data: info}})
+    sblock_attr({"reducer_info_v2": {reducer.data: {"op": op}}})
 
     return reducer
 
