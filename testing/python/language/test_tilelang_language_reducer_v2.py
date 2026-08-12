@@ -77,6 +77,40 @@ def test_deferred_sum_across_serial_tiles():
     torch.testing.assert_close(B, A.sum(dim=1), atol=1e-2, rtol=1e-2)
 
 
+def test_pipelined_accumulation():
+    """reducer_update inside a T.Pipelined body: pipeline planning must
+    classify the per-iteration intrinsic as compute (the shared-staging copy
+    is the only copy stage), and the epoch spans all pipeline iterations
+    with a single finalize.
+
+    Warp specialization is disabled: a WS-split epoch (init/update/finalize
+    inside one warp-group branch) is out of scope for reducer v2 and is
+    rejected by a compile-time check in the finalize lowering."""
+    M, K, BLOCK_K, threads = 32, 512, 128, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            T.reducer_init(acc)
+            a_shared = T.alloc_shared((M, BLOCK_K), T.float32)
+            for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=2):
+                T.copy(A[0, k_tile * BLOCK_K], a_shared)
+                for i, k in T.Parallel(M, BLOCK_K):
+                    T.reducer_update(acc[i], a_shared[i, k])
+            result = T.alloc_fragment((M,), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    A = torch.randn(M, K, dtype=torch.float32, device="cuda")
+    B = tl.compile(
+        kernel,
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )(A)
+    torch.testing.assert_close(B, A.sum(dim=1), atol=1e-2, rtol=1e-2)
+
+
 def test_multiple_update_sites_mixed_extents():
     extent = 8
     threads = 128
