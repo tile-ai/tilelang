@@ -557,6 +557,15 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
         }
       }
       if (!loop_layout_.defined() && driver.pending) {
+        // KNOWN LIMITATION: deferring assumes some other op will eventually
+        // solve the pending operand. If the operand has NO producer at all
+        // (an update reading a fragment that nothing ever writes), the loop
+        // defers on every free-level round and inference ends with the
+        // operand unsolved — a compile-time "layout can not be inferred"
+        // ICHECK, never wrong code, and only on degenerate input. A sound
+        // fix needs the engine to order solving (or guarantee a final
+        // round); deliberately left to a follow-up redesign rather than
+        // patched here.
         DLOG(INFO) << "[FreeInfer] operand-driven loop deferred: a drivable "
                       "operand is not solved yet.";
         return {};
