@@ -181,8 +181,7 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
                    << ". Ignore override.";
     }
   }
-  // Collect cross-thread access info, buffer store info, and reducer
-  // updates (see has_reducer_update_).
+  // Collect cross-thread access info and buffer store info.
   PostOrderVisit(root_, [&](const ObjectRef &obj) {
     if (const auto *store = obj.as<BufferStoreNode>()) {
       auto buffer = store->buffer;
@@ -195,10 +194,6 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
     } else if (const auto *load = obj.as<BufferLoadNode>()) {
       if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
         has_cross_thread_access_ = true;
-      }
-    } else if (const auto *call = obj.as<CallNode>()) {
-      if (IsReducerUpdateCall(call)) {
-        has_reducer_update_ = true;
       }
     }
   });
@@ -302,53 +297,6 @@ Stmt ParallelOpNode::Lower(const LowerArgs &lower_args,
 bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(GetAccessInfo(buffer).indices, common_indice);
-}
-
-/*! \brief Pick the fragment operand that should drive an operand-driven
- *  loop's layout (see has_reducer_update_).
- *
- *  A fragment operand can DRIVE the loop only when it is addressed purely by
- *  the parallel loop vars: an operand indexed by anything else (e.g. an
- *  inner serial reduction var) needs the LOOP to own the operand's layout
- *  instead, so it can never be a driver. Among solved drivers, prefer the
- *  one with the most indices (more index dims pin the loop layout more
- *  accurately — the same preference generic inference uses for its read
- *  source). A solved driver wins over a pending one: adopting a layout now
- *  lets this loop publish layouts for the remaining fragments, whereas
- *  deferring with no other producer in the worklist could stall inference.
- */
-ParallelOpNode::OperandDriver
-ParallelOpNode::FindOperandDriver(const std::vector<Buffer> &fragment_buffers,
-                                  const LayoutInferArgs &layout_args,
-                                  bool allow_layout_propgate) const {
-  OperandDriver result;
-  std::unordered_set<const VarNode *> loop_var_set;
-  for (const auto &iv : loop_vars_) {
-    loop_var_set.insert(iv->var.get());
-  }
-  for (const auto &buffer : fragment_buffers) {
-    bool drivable = true;
-    for (const auto &index : GetAccessInfo(buffer).indices) {
-      if (tirx::UsesVar(index, [&](const VarNode *var) {
-            return !loop_var_set.count(var);
-          })) {
-        drivable = false;
-        break;
-      }
-    }
-    if (!drivable) {
-      continue;
-    }
-    if (!layout_args.layout_map.count(buffer)) {
-      result.pending = true;
-    } else if (allow_layout_propgate &&
-               (!result.solved.defined() ||
-                GetAccessInfo(buffer).indices.size() >
-                    GetAccessInfo(result.solved).indices.size())) {
-      result.solved = buffer;
-    }
-  }
-  return result;
 }
 
 /*! \brief Infer the layout for parallel operations based on different inference
@@ -537,47 +485,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     Fragment candidate_from_plan;
     bool selected_plan_candidate = false;
 
-    // Operand-driven loops (see has_reducer_update_): adopt a solved
-    // driver operand's layout, defer while a driver is pending, and only
-    // self-plan below when no operand can drive the loop.
-    if (has_reducer_update_) {
-      OperandDriver driver = FindOperandDriver(fragment_buffers, layout_args,
-                                               allow_layout_propgate);
-      if (driver.solved.defined()) {
-        // Drivability constrains index VARS, not affineness: a driver with
-        // a non-affine index is treated like no driver at all.
-        try {
-          loop_layout_ =
-              ComputeLoopLayoutFromBuffer(driver.solved, layout_args);
-          DLOG(INFO) << "[FreeInfer] operand-driven loop follows `"
-                     << driver.solved << "`.";
-        } catch (const NormalizeIterException &e) {
-          DLOG(INFO) << "[FreeInfer] operand-driven loop: driver `"
-                     << driver.solved << "` is not affine: " << e.what();
-        }
-      }
-      if (!loop_layout_.defined() && driver.pending) {
-        // KNOWN LIMITATION: deferring assumes some other op will eventually
-        // solve the pending operand. If the operand has NO producer at all
-        // (an update reading a fragment that nothing ever writes), the loop
-        // defers on every free-level round and inference ends with the
-        // operand unsolved — a compile-time "layout can not be inferred"
-        // ICHECK, never wrong code, and only on degenerate input. A sound
-        // fix needs the engine to order solving (or guarantee a final
-        // round); deliberately left to a follow-up redesign rather than
-        // patched here.
-        DLOG(INFO) << "[FreeInfer] operand-driven loop deferred: a drivable "
-                      "operand is not solved yet.";
-        return {};
-      }
-    }
-
     if (!loop_layout_.defined()) {
-      // Generic free inference. For operand-driven loops reaching here no
-      // operand can express the iteration space (e.g. every operand is
-      // indexed by an inner serial var), so only self-planning remains.
-      if (read_source_buffer.defined() && allow_layout_propgate &&
-          !has_reducer_update_) {
+      if (read_source_buffer.defined() && allow_layout_propgate) {
         candidate_from_buffer =
             ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
       }

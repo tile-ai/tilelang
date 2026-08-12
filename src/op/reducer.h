@@ -119,15 +119,14 @@ public:
 /// straight-line code, so no cross-statement write ordering is lost).
 TVM_DLL const Op &reducer_update();
 
-/*! \brief True for tl.reducer_update calls. Two generic analyses key on
- *  this (through this predicate, so a future sibling op — e.g. a rescale
- *  intrinsic — only needs a new clause here):
- *  - ParallelOp layout inference: the call's write is hidden inside the
- *    intrinsic and targets a buffer with deliberately no layout, so the
- *    enclosing loop has no write anchor and must take its layout from a
- *    fragment operand (see ParallelOpNode::has_reducer_update_);
- *  - pipeline statement classification: the call is compute, not a copy,
- *    even though it does not parse as a tile op. */
+/*! \brief True for tl.reducer_update calls. Pipeline statement
+ *  classification keys on this (through this predicate, so a future
+ *  sibling op — e.g. a rescale intrinsic — only needs a new clause here):
+ *  the call is compute, not a copy, even though it does not parse as a
+ *  tile op. Note the call's write stays hidden from layout inference (the
+ *  target buffer deliberately has no layout): the enclosing parallel loop
+ *  free-infers like any anchor-less loop, and the layout-order RFC is the
+ *  designated home for making that ordering explicit. */
 TVM_DLL bool IsReducerUpdateCall(const tirx::CallNode *call);
 
 /*! \brief Parsed form of a tl.reducer_update call. */
