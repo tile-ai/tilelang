@@ -33,6 +33,10 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutInference()(mod)
     LayoutVisual(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
+    # Scalar-path atomic intrinsics (tl.atomic_*_elem_op) survive LowerTileOp;
+    # rewrite them to plain serial RMW before vectorization/legalization so
+    # that both the `c` and `llvm` codegens only see BufferLoad/BufferStore.
+    mod = tilelang.cpu.transform.LowerCPUAtomics()(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)

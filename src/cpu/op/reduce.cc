@@ -134,8 +134,8 @@ struct Reduce {
                         reduce_body, std::nullopt));
 
     // 8. Outer dst-dim loops. Built as kSerial then wrapped with
-    //    PragmaUnrollLoop to match the fill.cc/transpose.cc CPU op convention.
-    //    PragmaUnrollLoop (LoopPramaUnroller, loop_partition.cc:163-181)
+    //    PragmaUnrollLoop to match the fill.cc CPU op convention.
+    //    PragmaUnrollLoop (LoopPramaUnroller, loop_partition.cc)
     //    only retags the outermost kSerial For it meets and returns without
     //    recursing into the body, so the inner kSerial reduce loop above is
     //    left untouched. Under the default UnrollLoopConfig
