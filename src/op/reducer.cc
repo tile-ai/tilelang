@@ -162,10 +162,6 @@ TIR_REGISTER_TL_TILE_OP(ReducerInitOp, reducer_init)
 // tl.reducer_update: per-iteration builtin intrinsic (see reducer.h)
 // ---------------------------------------------------------------------------
 
-bool IsReducerUpdateCall(const tirx::CallNode *call) {
-  return call->op.same_as(reducer_update());
-}
-
 ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call) {
   ICHECK(call->op.same_as(reducer_update()));
   ICHECK_EQ(call->args.size(), 2)
