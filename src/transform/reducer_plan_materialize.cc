@@ -700,9 +700,9 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
       // unconstrained fragments), its free-level layouts were arbitrary
       // choices and can be replaced by the induced layout together.
       // Downstream copy lowering re-infers loop layouts against the
-      // overrides; ParallelOp's candidate selection falls back to the
-      // operand-compatible candidate when the register-preferred one
-      // conflicts, so multi-slot overrides are safe.
+      // overrides; ParallelOp validates its candidates against the solved
+      // fragment layouts and returns an operand-compatible one, so
+      // multi-slot overrides are safe.
       std::vector<Buffer> chain;
       if (CollectOverrideChain(epoch.dst->data.get(), use_graph, &chain)) {
         decision.override_dst_layout = true;
