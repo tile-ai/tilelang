@@ -119,103 +119,139 @@ PrimExpr RestoreInputPlaceholders(const PrimExpr &expr,
   return restored;
 }
 
-Layout TryPackedSubtypeReshape(const LayoutNode *layout_node,
+/*!
+ * \brief Derive the layout of a reinterpreting view (same storage, new
+ *        element width).
+ *
+ * Layout outputs are measured in the buffer's own elements, so aliases of
+ * one storage are compatible iff they induce the same storage-bit map,
+ * bit(k) = flat_output(k) * elem_bits. Deriving a view's layout is unit
+ * conversion through that map, and the directions are not symmetric:
+ *  - Narrowing by a factor f: old element q becomes new elements
+ *    f*q .. f*q+f-1; always representable, as last_output * f + lane.
+ *  - Widening by f: representable only when every aligned group of f old
+ *    elements sits contiguously in one aligned slot, which is proven here;
+ *    a layout that interleaves storage below the new element width (e.g.
+ *    the pack::16b TMEM form) has no compatible view layout, a hard error.
+ *
+ * Returns an undefined Layout when the widths match: the generic flat-index
+ * reshape is exact then, and only then.
+ */
+Layout TryReinterpretReshape(const LayoutNode *layout_node,
+                             const Array<PrimExpr> &shape,
+                             arith::Analyzer *analyzer,
+                             const PrimExpr &old_elem_bits_expr,
+                             const PrimExpr &new_elem_bits_expr) {
+  const int64_t *old_elem_bits = as_const_int(old_elem_bits_expr);
+  const int64_t *new_elem_bits = as_const_int(new_elem_bits_expr);
+  if (old_elem_bits == nullptr || new_elem_bits == nullptr ||
+      *old_elem_bits == *new_elem_bits) {
+    return Layout();
+  }
+  ICHECK_GT(*old_elem_bits, 0);
+  ICHECK_GT(*new_elem_bits, 0);
+
+  const Array<PrimExpr> &input_shape = layout_node->InputShape();
+  Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
+  PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
+
+  if (*old_elem_bits > *new_elem_bits) {
+    ICHECK_EQ(*old_elem_bits % *new_elem_bits, 0)
+        << "cannot reinterpret " << *old_elem_bits << "-bit elements as "
+        << *new_elem_bits << "-bit elements";
+    int64_t pack_factor = *old_elem_bits / *new_elem_bits;
+    PrimExpr old_flat_index = floordiv(flat_index, Integer(pack_factor));
+    PrimExpr lane_in_pack = floormod(flat_index, Integer(pack_factor));
+
+    Array<PrimExpr> original_indices =
+        RecoverOriginalIndices(input_shape, old_flat_index);
+    Array<PrimExpr> new_forward_index =
+        SubstituteForwardIndex(layout_node->GetForwardIndex(), input_shape,
+                               original_indices, analyzer);
+    ICHECK(!new_forward_index.empty());
+    PrimExpr last = new_forward_index.back();
+    new_forward_index.Set(
+        new_forward_index.size() - 1,
+        analyzer->Simplify(last * Integer(pack_factor) + lane_in_pack));
+    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
+    return Layout(shape, new_forward_index);
+  } else { // *old_elem_bits < *new_elem_bits
+    ICHECK_EQ(*new_elem_bits % *old_elem_bits, 0)
+        << "cannot reinterpret " << *old_elem_bits << "-bit elements as "
+        << *new_elem_bits << "-bit elements";
+    int64_t pack_factor = *new_elem_bits / *old_elem_bits;
+
+    Var lane("_lane", flat_index.dtype());
+    analyzer->Bind(lane, Range(0, Integer(pack_factor)));
+    Array<PrimExpr> base = SubstituteForwardIndex(
+        layout_node->GetForwardIndex(), input_shape,
+        RecoverOriginalIndices(input_shape, flat_index * Integer(pack_factor)),
+        analyzer);
+    Array<PrimExpr> probe = SubstituteForwardIndex(
+        layout_node->GetForwardIndex(), input_shape,
+        RecoverOriginalIndices(input_shape,
+                               flat_index * Integer(pack_factor) + lane),
+        analyzer);
+    ICHECK(!base.empty());
+    PrimExpr slot = floordiv(base.back(), Integer(pack_factor));
+    bool compatible = analyzer->CanProveEqual(
+        probe.back(), slot * Integer(pack_factor) + lane);
+    for (size_t i = 0; compatible && i + 1 < base.size(); ++i) {
+      compatible = analyzer->CanProveEqual(probe[i], base[i]);
+    }
+    ICHECK(compatible)
+        << "cannot reinterpret layout " << layout_node->DebugOutput() << " as "
+        << *new_elem_bits << "-bit elements: aliasing buffers must induce the "
+        << "same storage layout, and this one interleaves storage below the "
+        << "new element width";
+    Array<PrimExpr> new_forward_index = base;
+    new_forward_index.Set(new_forward_index.size() - 1,
+                          analyzer->Simplify(slot));
+    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
+    return Layout(shape, new_forward_index);
+  }
+}
+
+/*!
+ * \brief The Fragment counterpart of TryReinterpretReshape above: the same
+ *        unit conversion over the per-thread value index, with the thread
+ *        mapping required to be invariant inside each widened group.
+ */
+Fragment TryReinterpretReshape(const FragmentNode *fragment_node,
                                const Array<PrimExpr> &shape,
                                arith::Analyzer *analyzer,
                                const PrimExpr &old_elem_bits_expr,
                                const PrimExpr &new_elem_bits_expr) {
   const int64_t *old_elem_bits = as_const_int(old_elem_bits_expr);
   const int64_t *new_elem_bits = as_const_int(new_elem_bits_expr);
-  if (old_elem_bits == nullptr || new_elem_bits == nullptr) {
-    return Layout();
-  }
-  if (*old_elem_bits <= 0 || *new_elem_bits <= 0) {
-    return Layout();
-  }
-
-  const Array<PrimExpr> &input_shape = layout_node->InputShape();
-
-  // Narrower target element, e.g. uint8 -> fp4.
-  // One old logical element now contains `pack_factor` new logical elements.
-  // The generic flat-index reshape would lose this packed-storage structure, so
-  // we materialize it as an extra trailing output dimension ("pack lane").
-  if (*old_elem_bits > *new_elem_bits && *old_elem_bits % *new_elem_bits == 0 &&
-      *new_elem_bits < 8) {
-    int64_t pack_factor = *old_elem_bits / *new_elem_bits;
-    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
-    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
-    PrimExpr old_flat_index = floordiv(flat_index, Integer(pack_factor));
-    PrimExpr lane_in_pack = floormod(flat_index, Integer(pack_factor));
-
-    Array<PrimExpr> original_indices =
-        RecoverOriginalIndices(input_shape, old_flat_index);
-    Array<PrimExpr> new_forward_index =
-        SubstituteForwardIndex(layout_node->GetForwardIndex(), input_shape,
-                               original_indices, analyzer);
-    new_forward_index.push_back(analyzer->Simplify(lane_in_pack));
-    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
-    return Layout(shape, new_forward_index);
-  }
-
-  // Wider target element, e.g. fp4 -> uint8.
-  // This is only valid if the current layout already exposes the packed
-  // sub-elements as its last output dimension.  We collapse that trailing pack
-  // lane back into the logical element index of the wider dtype.
-  if (*old_elem_bits < *new_elem_bits && *new_elem_bits % *old_elem_bits == 0 &&
-      *old_elem_bits < 8) {
-    int64_t pack_factor = *new_elem_bits / *old_elem_bits;
-    Array<PrimExpr> output_shape = layout_node->OutputShape();
-    if (output_shape.empty() ||
-        !analyzer->CanProveEqual(output_shape.back(), Integer(pack_factor))) {
-      return Layout();
-    }
-
-    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
-    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
-    PrimExpr old_flat_index = flat_index * Integer(pack_factor);
-    Array<PrimExpr> original_indices =
-        RecoverOriginalIndices(input_shape, old_flat_index);
-
-    Array<PrimExpr> expanded_forward_index =
-        SubstituteForwardIndex(layout_node->GetForwardIndex(), input_shape,
-                               original_indices, analyzer);
-    ICHECK_GT(expanded_forward_index.size(), 0);
-    Array<PrimExpr> new_forward_index;
-    new_forward_index.reserve(expanded_forward_index.size() - 1);
-    for (size_t i = 0; i + 1 < expanded_forward_index.size(); ++i) {
-      new_forward_index.push_back(expanded_forward_index[i]);
-    }
-    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
-    return Layout(shape, new_forward_index);
-  }
-
-  return Layout();
-}
-
-Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
-                                 const Array<PrimExpr> &shape,
-                                 arith::Analyzer *analyzer,
-                                 const PrimExpr &old_elem_bits_expr,
-                                 const PrimExpr &new_elem_bits_expr) {
-  const int64_t *old_elem_bits = as_const_int(old_elem_bits_expr);
-  const int64_t *new_elem_bits = as_const_int(new_elem_bits_expr);
-  if (old_elem_bits == nullptr || new_elem_bits == nullptr) {
+  if (old_elem_bits == nullptr || new_elem_bits == nullptr ||
+      *old_elem_bits == *new_elem_bits) {
     return Fragment();
   }
-  if (*old_elem_bits <= 0 || *new_elem_bits <= 0) {
-    return Fragment();
-  }
+  ICHECK_GT(*old_elem_bits, 0);
+  ICHECK_GT(*new_elem_bits, 0);
 
   const Array<PrimExpr> &input_shape = fragment_node->InputShape();
+  Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
+  PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
 
-  // Same idea as Layout::Reshape above: preserve packed sub-byte storage by
-  // making the pack lane explicit in the fragment mapping instead of silently
-  // flattening it away.
-  if (*old_elem_bits > *new_elem_bits && *old_elem_bits % *new_elem_bits == 0 &&
-      *new_elem_bits < 8) {
+  auto make_fragment = [&](Array<PrimExpr> forward_index,
+                           PrimExpr forward_thread) {
+    forward_index = RestoreInputPlaceholders(forward_index, new_vars);
+    forward_thread = RestoreInputPlaceholders(forward_thread, new_vars);
+    Fragment reshaped(shape, forward_index, forward_thread,
+                      fragment_node->ReplicateExtent(), std::nullopt);
+    if (fragment_node->ThreadRange().defined()) {
+      reshaped = reshaped->BindThreadRange(fragment_node->ThreadRange());
+    }
+    return reshaped;
+  };
+
+  if (*old_elem_bits > *new_elem_bits) {
+    ICHECK_EQ(*old_elem_bits % *new_elem_bits, 0)
+        << "cannot reinterpret " << *old_elem_bits << "-bit elements as "
+        << *new_elem_bits << "-bit elements";
     int64_t pack_factor = *old_elem_bits / *new_elem_bits;
-    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
-    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
     PrimExpr old_flat_index = floordiv(flat_index, Integer(pack_factor));
     PrimExpr lane_in_pack = floormod(flat_index, Integer(pack_factor));
 
@@ -224,62 +260,56 @@ Fragment TryPackedSubtypeReshape(const FragmentNode *fragment_node,
     Array<PrimExpr> new_forward_index =
         SubstituteForwardIndex(fragment_node->GetForwardIndex(), input_shape,
                                original_indices, analyzer);
-    new_forward_index.push_back(analyzer->Simplify(lane_in_pack));
-
+    ICHECK(!new_forward_index.empty());
+    PrimExpr last = new_forward_index.back();
+    new_forward_index.Set(
+        new_forward_index.size() - 1,
+        analyzer->Simplify(last * Integer(pack_factor) + lane_in_pack));
     PrimExpr new_forward_thread =
         SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
                                original_indices, analyzer);
-    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
-    new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
-
-    Fragment reshaped(shape, new_forward_index, new_forward_thread,
-                      fragment_node->ReplicateExtent(), std::nullopt);
-    if (fragment_node->ThreadRange().defined()) {
-      reshaped = reshaped->BindThreadRange(fragment_node->ThreadRange());
-    }
-    return reshaped;
-  }
-
-  if (*old_elem_bits < *new_elem_bits && *new_elem_bits % *old_elem_bits == 0 &&
-      *old_elem_bits < 8) {
+    return make_fragment(new_forward_index, new_forward_thread);
+  } else { // *old_elem_bits < *new_elem_bits
+    ICHECK_EQ(*new_elem_bits % *old_elem_bits, 0)
+        << "cannot reinterpret " << *old_elem_bits << "-bit elements as "
+        << *new_elem_bits << "-bit elements";
     int64_t pack_factor = *new_elem_bits / *old_elem_bits;
-    Array<PrimExpr> output_shape = fragment_node->OutputShape();
-    if (output_shape.empty() ||
-        !analyzer->CanProveEqual(output_shape.back(), Integer(pack_factor))) {
-      return Fragment();
-    }
-
-    Array<Var> new_vars = CreateReshapeVars(shape, analyzer);
-    PrimExpr flat_index = ComputeFlatIndex(shape, new_vars);
-    PrimExpr old_flat_index = flat_index * Integer(pack_factor);
     Array<PrimExpr> original_indices =
-        RecoverOriginalIndices(input_shape, old_flat_index);
+        RecoverOriginalIndices(input_shape, flat_index * Integer(pack_factor));
 
-    Array<PrimExpr> expanded_forward_index =
+    Var lane("_lane", flat_index.dtype());
+    analyzer->Bind(lane, Range(0, Integer(pack_factor)));
+    Array<PrimExpr> probe_indices = RecoverOriginalIndices(
+        input_shape, flat_index * Integer(pack_factor) + lane);
+    Array<PrimExpr> base =
         SubstituteForwardIndex(fragment_node->GetForwardIndex(), input_shape,
                                original_indices, analyzer);
-    ICHECK_GT(expanded_forward_index.size(), 0);
-    Array<PrimExpr> new_forward_index;
-    new_forward_index.reserve(expanded_forward_index.size() - 1);
-    for (size_t i = 0; i + 1 < expanded_forward_index.size(); ++i) {
-      new_forward_index.push_back(expanded_forward_index[i]);
-    }
-
-    PrimExpr new_forward_thread =
+    Array<PrimExpr> probe = SubstituteForwardIndex(
+        fragment_node->GetForwardIndex(), input_shape, probe_indices, analyzer);
+    PrimExpr thread_base =
         SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
                                original_indices, analyzer);
-    new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
-    new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
-
-    Fragment reshaped(shape, new_forward_index, new_forward_thread,
-                      fragment_node->ReplicateExtent(), std::nullopt);
-    if (fragment_node->ThreadRange().defined()) {
-      reshaped = reshaped->BindThreadRange(fragment_node->ThreadRange());
+    PrimExpr thread_probe =
+        SubstituteReshapedExpr(fragment_node->GetForwardThread(), input_shape,
+                               probe_indices, analyzer);
+    ICHECK(!base.empty());
+    PrimExpr slot = floordiv(base.back(), Integer(pack_factor));
+    bool compatible = analyzer->CanProveEqual(
+                          probe.back(), slot * Integer(pack_factor) + lane) &&
+                      analyzer->CanProveEqual(thread_probe, thread_base);
+    for (size_t i = 0; compatible && i + 1 < base.size(); ++i) {
+      compatible = analyzer->CanProveEqual(probe[i], base[i]);
     }
-    return reshaped;
+    ICHECK(compatible)
+        << "cannot reinterpret fragment " << fragment_node->DebugOutput()
+        << " as " << *new_elem_bits << "-bit elements: aliasing buffers must "
+        << "induce the same storage layout, and this one interleaves storage "
+        << "or threads below the new element width";
+    Array<PrimExpr> new_forward_index = base;
+    new_forward_index.Set(new_forward_index.size() - 1,
+                          analyzer->Simplify(slot));
+    return make_fragment(new_forward_index, thread_base);
   }
-
-  return Fragment();
 }
 
 } // namespace
@@ -873,14 +903,13 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
       << "InputShape() = " << InputShape() << " shape = " << shape
       << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den;
 
-  // The generic reshape below only reasons about a flat logical element index.
-  // For subtype-changing views on packed sub-byte dtypes, that is not enough:
-  // we must preserve which sub-element inside a packed storage slot is being
-  // referenced.  Handle that first, then fall back to the ordinary reshape.
-  if (auto packed =
-          TryPackedSubtypeReshape(this, shape, az, rescale_num, rescale_den);
-      packed.defined()) {
-    return packed;
+  // The generic reshape below only reasons about a flat logical element
+  // index, which is exact only when the element width is unchanged.
+  // Reinterpreting views are handled first.
+  if (auto reinterpreted =
+          TryReinterpretReshape(this, shape, az, rescale_num, rescale_den);
+      reinterpreted.defined()) {
+    return reinterpreted;
   }
 
   // Step 2. Create new forward indices by reshaping
@@ -927,12 +956,12 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
       << ", rescale_num = " << rescale_num << ", rescale_den = " << rescale_den
       << " input fragment layout is = " << DebugOutput();
 
-  // Fragments need the same special handling as plain layouts so that packed
-  // subtype views keep a stable thread/data mapping through reshape.
-  if (auto packed =
-          TryPackedSubtypeReshape(this, shape, az, rescale_num, rescale_den);
-      packed.defined()) {
-    return packed;
+  // Fragments need the same special handling as plain layouts so that
+  // reinterpreting views keep a stable thread/data mapping through reshape.
+  if (auto reinterpreted =
+          TryReinterpretReshape(this, shape, az, rescale_num, rescale_den);
+      reinterpreted.defined()) {
+    return reinterpreted;
   }
 
   // 2) Build flat index from new-shape indices

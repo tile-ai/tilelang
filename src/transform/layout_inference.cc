@@ -49,7 +49,7 @@ int64_t GetElementStorageBits(DataType dtype) {
   // Layout aliasing must be reasoned about in logical storage bits per element,
   // not in bytes.  For sub-byte dtypes such as fp4, `dtype.bytes()` rounds up
   // to 1 and loses the "two fp4 values share one byte" relationship that
-  // subtype-changing views rely on.
+  // reinterpreting views rely on.
   return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
 }
 
