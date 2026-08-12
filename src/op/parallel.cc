@@ -181,9 +181,7 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
     }
   }
   // Collect cross-thread access info, buffer store info, and per-iteration
-  // tile ops (kTLPerIterationOp; see has_per_iteration_op_).
-  static const auto per_iteration_op_map =
-      Op::GetAttrMap<Bool>(kTLPerIterationOp);
+  // intrinsics (kTLPerIterationOp; see has_per_iteration_op_).
   PostOrderVisit(root_, [&](const ObjectRef &obj) {
     if (const auto *store = obj.as<BufferStoreNode>()) {
       auto buffer = store->buffer;
@@ -198,10 +196,8 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
         has_cross_thread_access_ = true;
       }
     } else if (const auto *call = obj.as<CallNode>()) {
-      if (const auto *op_node = call->op.as<OpNode>()) {
-        if (per_iteration_op_map.count(tvm::ffi::GetRef<Op>(op_node))) {
-          has_per_iteration_op_ = true;
-        }
+      if (IsPerIterationOpCall(call)) {
+        has_per_iteration_op_ = true;
       }
     }
   });

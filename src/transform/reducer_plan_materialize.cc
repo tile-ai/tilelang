@@ -221,14 +221,17 @@ private:
       }
       return;
     }
-    if (op->op.same_as(ReducerUpdateOp::Get())) {
-      if (EpochInfo *epoch = FindEpoch(op->args[0])) {
+    if (op->op.same_as(reducer_update())) {
+      const auto *load = op->args[0].as<BufferLoadNode>();
+      auto it = load != nullptr ? epochs_.find(load->buffer->data.get())
+                                : epochs_.end();
+      if (it != epochs_.end()) {
+        EpochInfo *epoch = &it->second;
         if (cur_loop_layout_.defined()) {
-          ReducerUpdateOp update(op->args, {});
-          const auto *node = update.as<ReducerUpdateOpNode>();
+          ReducerUpdateArgs update = ParseReducerUpdate(op);
           epoch->updates.push_back(UpdateSite{
-              cur_loop_layout_.value(), cur_loop_vars_, node->indices,
-              node->value, cur_serial_vars_, cur_serial_extents_});
+              cur_loop_layout_.value(), cur_loop_vars_, update.indices,
+              update.value, cur_serial_vars_, cur_serial_extents_});
         } else {
           epoch->analyzable = false;
         }
@@ -948,7 +951,7 @@ private:
     if (call->op.same_as(ReducerInitOp::Get())) {
       return MaterializeInit(call);
     }
-    if (call->op.same_as(ReducerUpdateOp::Get())) {
+    if (call->op.same_as(reducer_update())) {
       return MaterializeUpdate(call);
     }
     if (call->op.same_as(FinalizeReducerV2Op::Get())) {
@@ -1047,18 +1050,16 @@ private:
   }
 
   Stmt MaterializeUpdate(const CallNode *call) {
-    // Reuse the op parser for (buffer, indices, value) extraction.
-    ReducerUpdateOp update(call->args, {});
-    const auto *node = update.as<ReducerUpdateOpNode>();
-    auto it = plans_.find(node->reducer->data.get());
+    ReducerUpdateArgs update = ParseReducerUpdate(call);
+    auto it = plans_.find(update.reducer->data.get());
     ICHECK(it != plans_.end())
-        << "reducer_update on `" << node->reducer
+        << "reducer_update on `" << update.reducer
         << "` before reducer_init (should have been rejected by "
            "VerifyReducerEpoch)";
     const Plan &plan = it->second;
 
-    PrimExpr value = VisitExpr(node->value);
-    Array<PrimExpr> indices = node->indices;
+    PrimExpr value = VisitExpr(update.value);
+    Array<PrimExpr> indices = update.indices;
     Buffer target = plan.new_buffer;
     if (plan.packed) {
       // Alternate between the two lanes of the executing thread's slot:

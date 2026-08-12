@@ -39,7 +39,7 @@ void CheckFunc(const PrimFunc &f) {
              "ReducerPlanAndMaterialize.";
     } else if (const auto *call = obj.as<CallNode>()) {
       ICHECK(!call->op.same_as(ReducerInitOp::Get()) &&
-             !call->op.same_as(ReducerUpdateOp::Get()) &&
+             !call->op.same_as(reducer_update()) &&
              !call->op.same_as(FinalizeReducerV2Op::Get()))
           << "internal error: first-class reducer op `" << call->op
           << "` survived past ReducerPlanAndMaterialize.";

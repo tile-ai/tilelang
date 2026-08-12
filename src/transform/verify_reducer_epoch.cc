@@ -140,8 +140,12 @@ private:
       }
       return;
     }
-    if (op->op.same_as(ReducerUpdateOp::Get())) {
-      Var var = RegionArgBufferVar(op->args[0], "reducer_update");
+    if (op->op.same_as(reducer_update())) {
+      const auto *load = op->args[0].as<BufferLoadNode>();
+      ICHECK(load) << "reducer_update target must be written as "
+                      "`acc[indices]` in the first argument position, got "
+                   << op->args[0];
+      Var var = load->buffer->data;
       RequireReducer(var, "reducer_update");
       auto &state = state_.at(var);
       if (state == EpochState::kAllocated) {
@@ -160,8 +164,12 @@ private:
                "thread-uniform execution is ambiguous. Wrap the update in a "
                "T.Parallel loop.";
       }
-      // Only the contribution expression is a real read; the target region
-      // is an update descriptor, not a load of the reducer.
+      // Only the target's indices and the contribution expression are real
+      // reads; the target BufferLoad itself is an update descriptor, not a
+      // load of the reducer (visiting it would trip the illegal-read check).
+      for (const auto &index : load->indices) {
+        VisitExpr(index);
+      }
       VisitExpr(op->args[1]);
       return;
     }

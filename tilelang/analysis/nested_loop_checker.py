@@ -16,14 +16,14 @@ def is_pipelined_for(op: For) -> bool:
 
 
 def is_tile_op(op: Call) -> bool:
-    """Check if a call is a tile-op that must not appear inside T.Parallel.
+    """Check if a call is a tile-op (must not appear inside T.Parallel).
 
-    Ops declaring `TLPerIterationOp` (e.g. `tl.reducer_update`) execute once
-    per dynamic iteration by design and are exempt; see kTLPerIterationOp in
-    src/op/operator.h for the full contract.
+    Per-iteration intrinsics like `tl.reducer_update` are plain builtins
+    (no TLOpBuilder), so they pass this check by construction; see
+    kTLPerIterationOp in src/op/operator.h.
     """
 
-    return op.op.get_attr("TLOpBuilder") is not None and op.op.get_attr("TLPerIterationOp") is None
+    return op.op.get_attr("TLOpBuilder") is not None
 
 
 @tirx.functor.visitor

@@ -280,13 +280,8 @@ private:
         << ". Rewrite with the v2 API (T.reducer_update) if this is a "
            "different access pattern.";
     contribution = VisitExpr(contribution);
-    return Evaluate(
-        Call(DataType::Handle(), ReducerUpdateOp::Get(),
-             {MakeRegionCall(entry.acc, op->indices,
-                             Array<PrimExpr>(op->indices.size(),
-                                             IntImm(DataType::Int(32), 1)),
-                             kAccessReadWrite),
-              contribution}));
+    return Evaluate(Call(DataType::Handle(), reducer_update(),
+                         {BufferLoad(entry.acc, op->indices), contribution}));
   }
 
   // ---- post-finalize redirection & opaqueness ------------------------------

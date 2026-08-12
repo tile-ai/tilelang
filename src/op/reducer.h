@@ -105,42 +105,29 @@ public:
   static const Op &Get();
 };
 
-/// T.reducer_update(acc[indices], value): contribute `value` to the logical
+/// tl.reducer_update(acc[indices], value): contribute `value` to the logical
 /// output selected by `indices`, exactly once per dynamic logical iteration.
-/// args[0] = tl.region(acc[indices], "rw") (point region), args[1] = value.
-class ReducerUpdateOpNode : public TileOperatorNode {
-public:
+///
+/// Unlike the other epoch ops this is a plain builtin INTRINSIC, not a tile
+/// op: it executes once per iteration inside T.Parallel (kTLPerIterationOp),
+/// owns no layout (the enclosing loop and the planner decide physics), and
+/// never lowers on its own (ReducerPlanAndMaterialize rewrites it; leftovers
+/// are caught by VerifyReducerConsumed). args[0] is a plain BufferLoad
+/// `acc[indices]` — an update-target descriptor whose multi-dim indices the
+/// planner reads directly, not a read of the reducer (analyses may treat it
+/// as a read; updates commute, and VerifyReducerEpoch pins init/finalize to
+/// straight-line code, so no cross-statement write ordering is lost).
+TVM_DLL const Op &reducer_update();
+
+/*! \brief Parsed form of a tl.reducer_update call. */
+struct ReducerUpdateArgs {
   Buffer reducer;
-  ffi::Array<PrimExpr> indices; ///< logical output indices (region mins)
+  ffi::Array<PrimExpr> indices; ///< logical output indices
   PrimExpr value;               ///< contribution expression
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerUpdateOp", ReducerUpdateOpNode,
-                                    TileOperatorNode);
-
-  Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
-                        InferLevel level) const override;
-  TileOperator Clone() const override;
-  static const Op &Get();
-
-  static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<ReducerUpdateOpNode>()
-        .def_ro("reducer", &ReducerUpdateOpNode::reducer)
-        .def_ro("indices", &ReducerUpdateOpNode::indices)
-        .def_ro("value", &ReducerUpdateOpNode::value);
-  }
 };
 
-class ReducerUpdateOp : public TileOperator {
-public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReducerUpdateOp, TileOperator,
-                                             ReducerUpdateOpNode);
-  TVM_DLL ReducerUpdateOp(ffi::Array<PrimExpr> args,
-                          ffi::Map<ffi::String, ffi::ObjectRef> annotations =
-                              ffi::Map<ffi::String, ffi::ObjectRef>());
-  static const Op &Get();
-};
+/*! \brief Parse and validate a tl.reducer_update call. */
+ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call);
 
 /// T.finalize_reducer(acc, dst): complete the epoch's cross-participant
 /// communication and write the logical result into the independent

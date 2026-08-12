@@ -191,6 +191,13 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
     StmtExprVisitor::VisitExpr_(op);
     return;
   }
+  if (IsPerIterationOpCall(op)) {
+    // Per-iteration intrinsics (e.g. tl.reducer_update) are compute, not
+    // copies; their reads are plain BufferLoad args collected by the
+    // recursion below (their write target is register-local and commutes,
+    // so no cross-statement ordering is lost by not declaring it).
+    has_non_copy_tile_op_ = true;
+  }
   if (op->op.same_as(builtin::address_of())) {
     BufferRegion buffer_region;
     if (const auto *load = op->args[0].as<BufferLoadNode>()) {
@@ -545,6 +552,9 @@ public:
       }
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
+        if (IsPerIterationOpCall(call)) {
+          saw_non_copy_tile_op = true; // e.g. tl.reducer_update: compute
+        }
         return;
       }
       if (tile_op.as<RegionOpNode>()) {
@@ -581,6 +591,9 @@ public:
       }
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
+        if (IsPerIterationOpCall(call)) {
+          saw_non_copy_tile_op = true; // e.g. tl.reducer_update: compute
+        }
         return;
       }
       if (tile_op.as<RegionOpNode>()) {

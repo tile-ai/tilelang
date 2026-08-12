@@ -408,10 +408,13 @@ def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
         value = tirx.const(value, dtype)
     elif isinstance(value, tirx.PrimExpr) and value.dtype != dtype:
         value = tirx.Cast(dtype, value)
+    # A builtin intrinsic, not a tile op: the target rides as a plain
+    # BufferLoad (an update descriptor keeping the multi-dim indices for the
+    # planner), and the layout story belongs to the enclosing T.Parallel.
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.reducer_update"),
-        to_tile_region(target, access_type="rw"),
+        tirx.op.Op.get("tl.reducer_update"),
+        target,
         value,
     )
 

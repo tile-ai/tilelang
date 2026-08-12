@@ -15,6 +15,7 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
+#include "builtin_registry.h"
 #include "utils.h"
 
 namespace tvm {
@@ -158,49 +159,28 @@ TIR_REGISTER_TL_TILE_OP(ReducerInitOp, reducer_init)
                                Integer(CallEffectKind::kOpaque));
 
 // ---------------------------------------------------------------------------
-// ReducerUpdateOp
+// tl.reducer_update: per-iteration builtin intrinsic (see reducer.h)
 // ---------------------------------------------------------------------------
 
-ReducerUpdateOp::ReducerUpdateOp(ffi::Array<PrimExpr> args,
-                                 ffi::Map<ffi::String, ffi::ObjectRef>) {
-  ICHECK_EQ(args.size(), 2)
-      << "reducer_update expects (target region, contribution value)";
-  auto node = tvm::ffi::make_object<ReducerUpdateOpNode>();
-  auto access = NormalizeToAccessRegion(args[0], kAccessReadWrite);
-  access.access_mask = kAccessReadWrite;
-  node->reducer = access.region->buffer;
-  for (const auto &range : access.region->region) {
-    ICHECK(is_one(range->extent))
-        << "reducer_update target must be a point region (one logical "
-           "output), got extent "
-        << range->extent << " on `" << node->reducer << "`";
-    node->indices.push_back(range->min);
-  }
-  node->value = args[1];
-  ICHECK(node->value.dtype() == node->reducer->dtype)
-      << "reducer_update contribution dtype " << node->value.dtype()
-      << " does not match reducer dtype " << node->reducer->dtype;
-  node->SetAccessRegions({access});
-  data_ = std::move(node);
+ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call) {
+  ICHECK(call->op.same_as(reducer_update()));
+  ICHECK_EQ(call->args.size(), 2)
+      << "reducer_update expects (acc[indices], contribution value)";
+  const auto *load = call->args[0].as<BufferLoadNode>();
+  ICHECK(load) << "reducer_update target must be written as `acc[indices]` "
+                  "in the first argument position, got "
+               << call->args[0];
+  ReducerUpdateArgs result;
+  result.reducer = load->buffer;
+  result.indices = load->indices;
+  result.value = call->args[1];
+  ICHECK(result.value.dtype() == result.reducer->dtype)
+      << "reducer_update contribution dtype " << result.value.dtype()
+      << " does not match reducer dtype " << result.reducer->dtype;
+  return result;
 }
 
-Stmt ReducerUpdateOpNode::Lower(const LowerArgs &, arith::Analyzer *) const {
-  LOG(FATAL) << "reducer_update on `" << reducer
-             << "` reached LowerTileOp; it must be materialized by "
-                "ReducerPlanAndMaterialize first.";
-}
-
-LayoutMap ReducerUpdateOpNode::InferLayout(const LayoutInferArgs &,
-                                           InferLevel) const {
-  return {};
-}
-
-TileOperator ReducerUpdateOpNode::Clone() const {
-  auto node = tvm::ffi::make_object<ReducerUpdateOpNode>(*this);
-  return TileOperator(node);
-}
-
-TIR_REGISTER_TL_TILE_OP(ReducerUpdateOp, reducer_update)
+TIR_DEFINE_TL_BUILTIN(reducer_update)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque))
@@ -364,7 +344,6 @@ TIR_REGISTER_TL_TILE_OP(FinalizeReducerOp, finalize_reducer)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   ReducerInitOpNode::RegisterReflection();
-  ReducerUpdateOpNode::RegisterReflection();
   FinalizeReducerV2OpNode::RegisterReflection();
   FinalizeReducerOpNode::RegisterReflection();
 }
