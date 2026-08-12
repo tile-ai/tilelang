@@ -192,6 +192,8 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
     )
 
     assert counter.count == 1, f"Cache hit: postproc should not be called again, got {counter.count} calls"
+    if backend == "nvrtc":
+        assert kernel1.adapter.kernels is not kernel2.adapter.kernels
 
     source2 = kernel2.get_kernel_source()
     assert counter.marker in source2, f"Expected cached marker '{counter.marker}' in source"

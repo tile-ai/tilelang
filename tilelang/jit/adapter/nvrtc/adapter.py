@@ -26,7 +26,7 @@ if is_nvrtc_available:
 
 class NVRTCKernelAdapter(BaseKernelAdapter):
     pymodule = None
-    kernels = {}
+    kernels: dict[str, Any]
 
     def __init__(
         self,
@@ -89,6 +89,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.lib_generator.load_lib()
         self.libpath = self.lib_generator.libpath
         self.pymodule = self.lib_generator.pymodule
+        self.kernels = {}
         culib = self.lib_generator.culib
         for name in self.function_names:
             result, self.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
@@ -148,6 +149,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter.pymodule = adapter.lib_generator.pymodule
         adapter.function_names = adapter.pymodule._function_names
 
+        adapter.kernels = {}
         culib = adapter.lib_generator.culib
         for name in adapter.function_names:
             result, adapter.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
