@@ -194,7 +194,8 @@ __device__ __forceinline__ void tcgen05_ld_core(uint32_t const &tmem_start_col,
   target_call_cls::copy<CUR_SEGMENT_LEN>(tmem_start_col, (uint32_t *)dst_ptr);
   if constexpr (N - CUR_SEGMENT_LEN > 0) {
     tcgen05_ld_core<target_call_cls, MAX_LOGN, N - CUR_SEGMENT_LEN>(
-        tmem_start_col + CUR_SEGMENT_LEN, dst_ptr + CUR_SEGMENT_LEN);
+        tmem_start_col + CUR_SEGMENT_LEN,
+        dst_ptr + CUR_SEGMENT_LEN * sizeof(uint32_t) / sizeof(dst_t));
   }
 }
 
@@ -323,7 +324,8 @@ __device__ __forceinline__ void tcgen05_st_core(uint32_t const &tmem_start_col,
                                                   (uint32_t const *)src_ptr);
   if constexpr (N - CUR_SEGMENT_LEN > 0) {
     tcgen05_st_core<target_call_cls, MAX_LOGN, N - CUR_SEGMENT_LEN>(
-        tmem_start_col + CUR_SEGMENT_LEN, src_ptr + CUR_SEGMENT_LEN);
+        tmem_start_col + CUR_SEGMENT_LEN,
+        src_ptr + CUR_SEGMENT_LEN * sizeof(uint32_t) / sizeof(src_t));
   }
 }
 
