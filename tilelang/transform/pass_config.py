@@ -97,6 +97,12 @@ class PassConfigKey(str, Enum):
     rejection reason) at INFO level during ReducerPlanAndMaterialize.
     Default: False"""
 
+    TL_LAYOUT_COST_MODEL = "tl.layout_cost_model"
+    """Score free-mode layout attempts by estimated global-memory access
+    cost (vector width / warp coalescing of every fragment<->global copy,
+    weighted by bytes moved) instead of by total register count alone;
+    register count remains the tiebreak. Default: False"""
+
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,
     disabling narrow physical plans (compact storage / sub-block collectives).

@@ -81,6 +81,11 @@ static constexpr const char *kReducerForceBaseline =
     "tl.reducer_force_baseline";
 static constexpr const char *kEnableReducerPlanVerbose =
     "tl.enable_reducer_plan_verbose";
+// Score free-mode layout attempts by estimated global-memory access cost
+// (vector width / coalescing of every fragment<->global copy, weighted by
+// bytes moved) instead of by total register count alone. Register count
+// remains the tiebreak. Default off while the model is calibrated.
+static constexpr const char *kLayoutCostModel = "tl.layout_cost_model";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableLoopUnswitching =

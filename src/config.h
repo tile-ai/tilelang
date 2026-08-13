@@ -26,6 +26,17 @@ inline bool ReducerPlanVerboseEnabled() {
 }
 
 /*!
+ * \brief Check if free-mode layout attempts are scored by the IO cost model
+ *  (bytes x vector-width/coalescing penalty over fragment<->global copies)
+ *  instead of by register count alone.
+ */
+inline bool LayoutCostModelEnabled() {
+  auto ctxt = tvm::transform::PassContext::Current();
+  return ctxt->GetConfig("tl.layout_cost_model", ffi::Optional<Bool>())
+      .value_or(Bool(false));
+}
+
+/*!
  * \brief Check if vectorize planner verbose output is enabled.
  */
 inline bool VectorizePlannerVerboseEnabled() {

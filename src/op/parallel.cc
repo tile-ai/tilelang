@@ -627,9 +627,31 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   PrimExpr thd_b = loop_layout_->ForwardThread(
       ind_inv->Forward(fwd),
       FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-  return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent,
-                  std::nullopt)
-      ->CondenseReplicateVar();
+  Fragment completed =
+      Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, std::nullopt)
+          ->CondenseReplicateVar();
+  // Broadcast reads touched many times per thread produce an
+  // occurrence-indexed replication whose (logical, replica) -> physical map
+  // wraps around the thread extent and stops being injective; every
+  // consumer that partitions by such a fragment throws. The thread
+  // OWNERSHIP the map describes is sound, so for a buffer this loop only
+  // READS, fall back to the canonical over-approximation of that ownership:
+  // full replication. (For written buffers replication changes execution
+  // multiplicity, so those keep the exact form and fail loudly downstream.)
+  if (!GetAccessInfo(buffer).is_write &&
+      !completed->DetectInjective()->errors.empty()) {
+    PrimExpr thread_extent = loop_layout_->ThreadExtent();
+    const int64_t *extent_ptr = as_const_int(thread_extent);
+    if (extent_ptr != nullptr) {
+      Fragment replicated = Fragment::FullyReplicated(
+          buffer->shape, static_cast<int>(*extent_ptr));
+      if (loop_layout_->ThreadRange().defined()) {
+        replicated = replicated->BindThreadRange(loop_layout_->ThreadRange());
+      }
+      return replicated;
+    }
+  }
+  return completed;
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() { ParallelOpNode::RegisterReflection(); }
