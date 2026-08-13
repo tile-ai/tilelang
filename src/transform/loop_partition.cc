@@ -30,6 +30,7 @@
 
 #include <utility>
 
+#include "../op/reducer.h"
 #include "../op/utils.h"
 #include "loop_vectorize.h"
 
@@ -63,36 +64,42 @@ private:
   arith::Analyzer *analyzer_;
 };
 
-class ReducerStoreGuarder : public StmtExprMutator {
+// Lower generic `tl.parallel_multiplicity` markers: the marked side effect
+// must execute once per dynamic logical iteration of the partitioned loop,
+// so it is guarded to the canonical replica (REP == 0). When the loop layout
+// has no replication (or REP is provably zero) the marker is stripped. This
+// mutator understands only execution multiplicity — it knows nothing about
+// what the marked statement does.
+// The marker is a statement-level AttrStmt, so a statement-only mutator
+// suffices (expression subtrees cannot carry it).
+class MultiplicityMarkerLowerer : public StmtMutator {
 public:
-  static Stmt Rewrite(Stmt stmt, const Array<Buffer> &reducer_buffers,
-                      const PrimExpr &predicate) {
-    ReducerStoreGuarder guarder(reducer_buffers, predicate);
-    return guarder(std::move(stmt));
+  static Stmt Rewrite(Stmt stmt, const Optional<PrimExpr> &replica_guard) {
+    MultiplicityMarkerLowerer lowerer(replica_guard);
+    return lowerer(std::move(stmt));
   }
 
 private:
-  ReducerStoreGuarder(const Array<Buffer> &reducer_buffers, PrimExpr predicate)
-      : reducer_buffers_(reducer_buffers), predicate_(std::move(predicate)) {}
+  explicit MultiplicityMarkerLowerer(Optional<PrimExpr> replica_guard)
+      : replica_guard_(std::move(replica_guard)) {}
 
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    for (const Buffer &buffer : reducer_buffers_) {
-      if (buffer.same_as(store->buffer)) {
-        return IfThenElse(predicate_, store);
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kParallelMultiplicity) {
+      Stmt body = VisitStmt(op->body);
+      if (!replica_guard_.defined()) {
+        return body;
       }
+      return IfThenElse(replica_guard_.value(), body);
     }
-    return store;
+    return StmtMutator::VisitStmt_(op);
   }
 
-  Array<Buffer> reducer_buffers_;
-  PrimExpr predicate_;
+  Optional<PrimExpr> replica_guard_;
 };
 
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout, bool require_padding_guard,
-                  const Array<Buffer> &fully_replicated_reducer_buffers) {
+                  const Fragment &loop_layout, bool require_padding_guard) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_index.defined());
   int old_loop_depth = loop_layout->InputDim();
@@ -121,8 +128,9 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
   Stmt body = std::move(op);
   Array<PrimExpr> loop_mins;
   Array<PrimExpr> loop_extents;
-  auto inverse_info = loop_layout->InverseWithLevel(require_padding_guard);
-  auto inv_loop = inverse_info.first;
+  // Only the inverse layout is needed here; the accompanying IterMapLevel is
+  // for callers that must distinguish exact from padded inversions.
+  Layout inv_loop = loop_layout->InverseWithLevel(require_padding_guard).first;
   auto indices = inv_loop->Forward(forward_inputs);
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
@@ -142,10 +150,7 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
   // must stay within bounds to ensure correctness. Example: layout([i, j]) =
   // floor((i * 16 + j) / 32) may generate extra points when the new loop
   // enumerates 0..31; the guard drops iterations whose inverse-mapped (i, j)
-  // or replicate index fall outside their original extents.
-  // Example: layout([i, j]) = floor((i * 16 + j) / 32) may produce extra points
-  // when the new loop enumerates 0..31; this guard skips iterations where the
-  // inverse i, j land outside the original extents. This protects
+  // or replicate index fall outside their original extents. This protects
   // non-surjective loop_layout mappings that otherwise over-cover the parallel
   // space.
   // Always build guard and let analyzer decide if it can be proved true.
@@ -171,18 +176,20 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
         analyzer->Simplify(replicate_index < replicate_extent);
     guard = And(guard, And(lower_bound, upper_bound));
   }
-  if (!fully_replicated_reducer_buffers.empty()) {
-    ICHECK_GT(indices.size(), static_cast<size_t>(old_loop_depth));
-    // InverseWithLevel appends REP after the original loop indices, so
-    // indices[old_loop_depth] is REP. Stores to buffers in this list execute
-    // only for REP=0.
-    PrimExpr is_replica_zero = analyzer->Simplify(EQ(
-        indices[old_loop_depth], make_zero(indices[old_loop_depth].dtype())));
-    if (!analyzer->CanProve(is_replica_zero)) {
-      // Rewrite with IfThenElse statement
-      body = ReducerStoreGuarder::Rewrite(
-          std::move(body), fully_replicated_reducer_buffers, is_replica_zero);
+  {
+    // Lower generic execution-multiplicity markers against this loop's
+    // replicate index. REP exists only when the inverse layout carries a
+    // replicate component; otherwise every physical execution is a distinct
+    // logical iteration and the markers are simply stripped.
+    Optional<PrimExpr> replica_guard;
+    if (indices.size() > static_cast<size_t>(old_loop_depth)) {
+      PrimExpr is_replica_zero = analyzer->Simplify(EQ(
+          indices[old_loop_depth], make_zero(indices[old_loop_depth].dtype())));
+      if (!analyzer->CanProve(is_replica_zero)) {
+        replica_guard = is_replica_zero;
+      }
     }
+    body = MultiplicityMarkerLowerer::Rewrite(std::move(body), replica_guard);
   }
   PrimExpr simplified_guard = analyzer->Simplify(guard);
   if (!analyzer->CanProve(simplified_guard)) {
@@ -307,8 +314,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
                        PrimExpr thread_index, arith::Analyzer *analyzer,
                        const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool should_vectorize, bool require_padding_guard,
-                       const Array<Buffer> &fully_replicated_reducer_buffers) {
+                       bool should_vectorize, bool require_padding_guard) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
@@ -326,9 +332,8 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {
-    result_loop =
-        PartitionLoop(result_loop, thread_index, analyzer, loop_layout,
-                      require_padding_guard, fully_replicated_reducer_buffers);
+    result_loop = PartitionLoop(result_loop, thread_index, analyzer,
+                                loop_layout, require_padding_guard);
   }
 
   // Step 2: Vectorize the loop (if requested)

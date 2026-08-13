@@ -697,12 +697,19 @@ def _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch):
     ids=[f"{op}-{dtype}-{bM}x{bN}-b{batch}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CASES],
 )
 def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
-    """batch=1 → scalar run; batch>1 → run_batch with correct template arg."""
+    """batch=1 → scalar run; batch>1 → run_batch with correct template arg.
+
+    Forces the FullParticipant baseline: this test verifies the batched
+    AllReduce plumbing of the wide plan. Under automatic plan selection
+    these kernels take a narrow plan whose collective fits in a warp, where
+    batching (which amortizes block-wide barriers) has nothing to amortize
+    and run_batch is legitimately absent.
+    """
 
     src = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
         out_idx=-1,
-        pass_configs=_COMPILE_FLAGS,
+        pass_configs={**_COMPILE_FLAGS, "tl.reducer_force_baseline": True},
     ).get_kernel_source()
 
     if batch == 1:

@@ -86,8 +86,10 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    # Set layouts for reducers
-    mod = tilelang.transform.LayoutReducer()(mod)
+    # Verify reducer v2 epoch lifecycle and access rules (early, so
+    # diagnostics point at user-written code)
+    mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
+    mod = tilelang.transform.VerifyReducerEpoch()(mod)
 
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
@@ -122,10 +124,16 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
 
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
+    # Plan physical storage/communication for reducer v2 epochs and
+    # materialize the first-class reducer ops. Loop layouts are frozen at
+    # this point; the planner only reads them.
+    mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
+    # Assert no reducer v2 construct survived materialization
+    mod = tilelang.transform.VerifyReducerConsumed()(mod)
 
     # @CUDA specific
     # Lower l2 persistent map

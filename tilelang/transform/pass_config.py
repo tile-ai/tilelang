@@ -92,6 +92,21 @@ class PassConfigKey(str, Enum):
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
 
+    TL_ENABLE_REDUCER_PLAN_VERBOSE = "tl.enable_reducer_plan_verbose"
+    """Log each reducer epoch's chosen physical plan (and narrow-plan
+    rejection reason) at INFO level during ReducerPlanAndMaterialize.
+    Default: False"""
+
+    TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
+    """Force the canonical FullParticipant baseline for every reducer epoch,
+    disabling narrow physical plans (compact storage / sub-block collectives).
+
+    Not a workaround for expected narrow-plan bugs: the baseline is the
+    reducer design's always-available reference lowering. Use it for
+    differential testing (forced baseline and auto plan selection must agree
+    numerically), as a field escape hatch if a narrow plan ever miscompiles,
+    and for plan-choice A/B measurement. Default: False"""
+
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
 

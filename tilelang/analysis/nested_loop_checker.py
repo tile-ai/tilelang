@@ -16,7 +16,11 @@ def is_pipelined_for(op: For) -> bool:
 
 
 def is_tile_op(op: Call) -> bool:
-    """Check if a call is a tile-op"""
+    """Check if a call is a tile-op (must not appear inside T.Parallel).
+
+    Per-iteration intrinsics like `tl.reducer_update` are plain builtins
+    (no TLOpBuilder), so they pass this check by construction.
+    """
 
     return op.op.get_attr("TLOpBuilder") is not None
 
