@@ -140,6 +140,9 @@ struct LowerArgs {
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
   // the results into the kSmemAlignmentMap PrimFunc attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
+  // PrimFunc parameters are visible to host-side descriptor initialization;
+  // loop-local variables are not.
+  ffi::Array<tirx::Var> host_visible_vars;
 };
 
 struct LayoutInferArgs {
@@ -154,6 +157,9 @@ struct LayoutInferArgs {
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
+  // PrimFunc parameters are visible to host-side descriptor initialization;
+  // loop-local variables are not.
+  ffi::Array<tirx::Var> host_visible_vars;
 };
 
 class TileOperator;

@@ -136,7 +136,8 @@ public:
                                                   cur_analyzer,
                                                   {},
                                                   bind_var_to_expr_,
-                                                  false},
+                                                  false,
+                                                  host_visible_vars_},
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
@@ -476,6 +477,7 @@ public:
     ICHECK(target.defined())
         << "Layout_Inference: Require the target attribute";
     target_ = target.value();
+    host_visible_vars_ = f->params;
     this->operator()(f->body);
     // Compute floating fragment buffers after collection
     ComputeFloatingFragmentBuffers(f->body);
@@ -998,6 +1000,7 @@ private:
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
+  Array<Var> host_visible_vars_;
 
   std::vector<TileOperator> BackupInferList() {
     std::vector<TileOperator> back_infer_list;

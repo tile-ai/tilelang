@@ -275,6 +275,13 @@ class TLCUDASourceWrapper:
         # and '//' is not a valid operator in C/C++.
         return pythonic_expr(expr, self._TYPE_MAP, floor_div_op="/")
 
+    def _tma_global_address(self, expr: tvm.tirx.PrimExpr) -> str:
+        if isinstance(expr, tvm.tirx.Call) and expr.op.name == "tirx.handle_add_byte_offset":
+            base = self._tma_global_address(expr.args[0])
+            offset = self._pythonic_expr(expr.args[1])
+            return f"(void*)((char*)({base}) + ({offset}))"
+        return self._pythonic_expr(expr)
+
     def _lookup_type(self, dtype: str | Any) -> str:
         key = dtype if isinstance(dtype, str) else str(dtype)
         result = self._TYPE_MAP.get(key)
@@ -325,9 +332,8 @@ class TLCUDASourceWrapper:
         kernel_launch_code = """"""
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE
-        desc_name_map: dict[str, str] = {}
-        desc_name_var_map: dict[str, tvm.tirx.Var] = {}
-        for function_name, function_info in function_informations.items():
+        init_tma_descriptor_args = ""
+        for kernel_index, (function_name, function_info) in enumerate(function_informations.items()):
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
@@ -352,8 +358,22 @@ class TLCUDASourceWrapper:
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
 
+            raw_desc_name_map: dict[str, str] = {}
+            raw_desc_name_var_map: dict[str, tvm.tirx.Var] = {}
+            args_list = parse_function_call_args(
+                declaration,
+                function_args,
+                function_params,
+                raw_desc_name_map,
+                raw_desc_name_var_map,
+            )
+            descriptor_aliases = {raw_name: f"__tma_{kernel_index}_{raw_name}" for raw_name in raw_desc_name_map}
+            desc_name_map = {descriptor_aliases[raw_name]: tensor_name for raw_name, tensor_name in raw_desc_name_map.items()}
+            desc_name_var_map = {descriptor_aliases[raw_name]: desc_var for raw_name, desc_var in raw_desc_name_var_map.items()}
+            args_list = [descriptor_aliases.get(arg, arg) for arg in args_list]
+            init_tma_descriptor_args += self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
+
             if self.use_cooperative_groups[function_name]:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
@@ -366,7 +386,6 @@ class TLCUDASourceWrapper:
                     function_name, grid_str, block_str, function_name + "_args", smem_str
                 )
             else:
-                args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
@@ -382,7 +401,6 @@ class TLCUDASourceWrapper:
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
-        init_tma_descriptor_args = self.generate_tma_descriptor_args(desc_name_map, desc_name_var_map)
         kernel_launch_code = init_tma_descriptor_args + kernel_launch_code
 
         # Wrap the kernel dispatch logic in an external C function
@@ -416,7 +434,13 @@ class TLCUDASourceWrapper:
             return tma_descriptor_init
 
         # Parse TMA descriptor arguments using the common utility
-        parsed_params = parse_tma_descriptor_args(self.tma_descriptor_args, desc_name_map, desc_name_var_map, self._pythonic_expr)
+        parsed_params = parse_tma_descriptor_args(
+            self.tma_descriptor_args,
+            desc_name_map,
+            desc_name_var_map,
+            self._pythonic_expr,
+            self._tma_global_address,
+        )
 
         # Generate C++ code from parsed parameters
         for params in parsed_params:

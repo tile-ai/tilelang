@@ -665,12 +665,14 @@ static bool HasGlobalToSharedCopyShape(const CopyNode *copy) {
          IsSharedBuffer(copy->dst) && copy->src->dtype == copy->dst->dtype;
 }
 
-static cuda::CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode *copy,
-                                                           Target target) {
+static cuda::CopyInstSelection
+ClassifyWarpSpecializedCopy(const CopyNode *copy, Target target,
+                            const Array<Var> &host_visible_vars) {
   if (copy == nullptr) {
     return {cuda::CopyInst::kNormal, true, ""};
   }
-  return cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
+  return cuda::ClassifyWarpSpecializedProducerCopy(*copy, target,
+                                                   host_visible_vars);
 }
 
 static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
@@ -681,7 +683,9 @@ static bool CheckPipelineManagedCPAsyncCopy(const CopyNode *copy,
   return cuda::IsPipelineManagedCPAsyncCopy(*copy, target);
 }
 
-static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
+static bool
+IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target,
+                                 const Array<Var> &host_visible_vars) {
   Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
   if (!call.defined()) {
     return false;
@@ -695,14 +699,17 @@ static bool IsSyncGlobalToSharedCopyLikeStmt(const Stmt &stmt, Target target) {
     return false;
   }
 
-  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+  cuda::CopyInstSelection result =
+      ClassifyWarpSpecializedCopy(copy, target, host_visible_vars);
   return HasGlobalToSharedCopyShape(copy) && result.supported &&
          !cuda::CopyInstIsTMA(result.inst) &&
          !cuda::CopyInstIsCPAsync(result.inst);
 }
 
-static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
-  if (IsSyncGlobalToSharedCopyLikeStmt(stmt, target)) {
+static bool
+IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target,
+                                const Array<Var> &host_visible_vars) {
+  if (IsSyncGlobalToSharedCopyLikeStmt(stmt, target, host_visible_vars)) {
     return true;
   }
 
@@ -750,12 +757,14 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
 
 /// Classify a tile-op copy as TMA load producer, cp.async producer, or
 /// consumer using coarse pre-layout checks.
-static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
+static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target,
+                                 const Array<Var> &host_visible_vars) {
   if (copy == nullptr) {
     return TileStmtKind::kConsumer;
   }
 
-  cuda::CopyInstSelection result = ClassifyWarpSpecializedCopy(copy, target);
+  cuda::CopyInstSelection result =
+      ClassifyWarpSpecializedCopy(copy, target, host_visible_vars);
   if (cuda::CopyInstIsTMA(result.inst)) {
     return TileStmtKind::kTmaProducer;
   }
@@ -767,14 +776,15 @@ static TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
 }
 
 /// Classify a single statement in the pipeline loop body.
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
+TileStmtKind ClassifyStmt(const Stmt &stmt, Target target,
+                          const Array<Var> &host_visible_vars) {
   // Tile-op Calls: classify directly via CopyNode checks.
   if (auto *eval = stmt.as<EvaluateNode>()) {
     if (auto *call = eval->value.as<CallNode>()) {
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (tile_op.defined()) {
         if (auto *copy = tile_op.as<CopyNode>()) {
-          return ClassifyCopy(copy, target);
+          return ClassifyCopy(copy, target, host_visible_vars);
         }
         // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
         // producer so it goes to the producer warp group.
@@ -1241,6 +1251,7 @@ public:
 
     ProducerConsumerWSRewriter T;
     T.target_ = target.value();
+    T.host_visible_vars_ = f->params;
     f.CopyOnWrite()->body = T(f->body);
 
     if (T.ws_transformed_) {
@@ -1364,7 +1375,7 @@ private:
     int num_tma = 0;
     int num_simt = 0;
     for (const Stmt &s : flat_stmts) {
-      auto k = ClassifyStmt(s, target_);
+      auto k = ClassifyStmt(s, target_, host_visible_vars_);
       kinds.push_back(k);
       if (k == TileStmtKind::kTmaProducer)
         ++num_tma;
@@ -1470,7 +1481,8 @@ private:
         CollectPreludeStmtsToPipelineLoop(orig_block->body, pipeline_loop);
     std::vector<PreludeTmaLoadPlan> prelude_tma_plans;
     for (const Stmt &stmt : prelude_stmts) {
-      if (ClassifyStmt(stmt, target_) != TileStmtKind::kTmaProducer) {
+      if (ClassifyStmt(stmt, target_, host_visible_vars_) !=
+          TileStmtKind::kTmaProducer) {
         continue;
       }
       Optional<Var> write_buffer_data = ExtractProducerWriteBufferData(stmt);
@@ -1613,7 +1625,7 @@ private:
           continue;
         }
         if (!IsProducerMovableLoopPrefixStmt(consumer_compute_stmts[ci],
-                                             target_)) {
+                                             target_, host_visible_vars_)) {
           all_movable = false;
           break;
         }
@@ -1666,14 +1678,16 @@ private:
     for (size_t i = 0;
          i < flat_stmts.size() && !producer_needs_full_thread_extent; ++i) {
       if (kinds[i] == TileStmtKind::kSimtProducer ||
-          IsSyncGlobalToSharedCopyLikeStmt(flat_stmts[i], target_)) {
+          IsSyncGlobalToSharedCopyLikeStmt(flat_stmts[i], target_,
+                                           host_visible_vars_)) {
         producer_needs_full_thread_extent = true;
       }
     }
     if (!producer_needs_full_thread_extent) {
       for (const auto &prefix_stmts : producer_loop_prefix_stmts) {
         for (const auto &stmt : prefix_stmts) {
-          if (IsSyncGlobalToSharedCopyLikeStmt(stmt, target_)) {
+          if (IsSyncGlobalToSharedCopyLikeStmt(stmt, target_,
+                                               host_visible_vars_)) {
             producer_needs_full_thread_extent = true;
             break;
           }
@@ -2686,6 +2700,7 @@ private:
 
   // State
   Target target_;
+  Array<Var> host_visible_vars_;
   IterVar thread_iv_;
   Optional<PrimExpr> num_threads_; // total (consumer + producer)
   bool ws_transformed_{false};
@@ -2745,9 +2760,11 @@ static bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
 
 class TiledWSCandidate : public StmtExprVisitor {
 public:
-  static bool Check(const Stmt &stmt, Target target) {
+  static bool Check(const Stmt &stmt, Target target,
+                    const Array<Var> &host_visible_vars) {
     TiledWSCandidate c;
     c.target_ = target;
+    c.host_visible_vars_ = host_visible_vars;
     c(stmt);
     return c.has_pipeline_loop_ && c.has_tma_tile_op_;
   }
@@ -2771,7 +2788,8 @@ private:
     if (in_pipeline_ && !has_tma_tile_op_) {
       auto tile_op = ParseOperator(GetRef<Call>(op));
       if (auto *copy = tile_op.as<CopyNode>()) {
-        if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
+        if (ClassifyCopy(copy, target_, host_visible_vars_) ==
+            TileStmtKind::kTmaProducer) {
           // If the destination buffer has a layout annotation, verify
           // that the layout is TMA-compatible (swizzle or linear).
           // Copies whose layout is incompatible with TMA cannot become
@@ -2825,6 +2843,7 @@ private:
   }
 
   Target target_;
+  Array<Var> host_visible_vars_;
   bool in_pipeline_{false};
   bool has_pipeline_loop_{false};
   bool has_tma_tile_op_{false};
@@ -2856,7 +2875,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       return f;
     }
     // Only apply MVB + WS if the function is a tiled WS candidate.
-    if (!TiledWSCandidate::Check(f->body, target.value())) {
+    if (!TiledWSCandidate::Check(f->body, target.value(), f->params)) {
       DLOG(WARNING) << "[WS] skipped: no TMA copies in pipeline loop";
       return f;
     }

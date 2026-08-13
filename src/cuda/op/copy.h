@@ -40,6 +40,24 @@ const char *CopyInstToString(CopyInst inst);
 bool CopyInstIsTMA(CopyInst inst);
 bool CopyInstIsCPAsync(CopyInst inst);
 
+// Return the descriptor base for a global buffer view, including elem_offset.
+PrimExpr GetTMADescriptorBaseAddress(const Buffer &buffer);
+
+// Return the minimum global-address alignment for the selected TMA data type.
+int TMARequiredGlobalAddressAlignment(DataType global_dtype,
+                                      DataType shared_dtype);
+
+// TMA tensor-map addresses must satisfy the selected data type's alignment.
+// The data Var denotes an aligned allocation, so a view is eligible only when
+// its byte offset is provably a multiple of that alignment. Descriptor-based
+// paths also require every offset dependency to be host-visible; descriptorless
+// 1D bulk copies may disable that additional requirement.
+bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
+                                      DataType shared_dtype,
+                                      arith::Analyzer *analyzer,
+                                      const Array<Var> &host_visible_vars,
+                                      bool require_host_visible = true);
+
 struct TMADesc {
   size_t rank;
   int data_type;
@@ -82,6 +100,7 @@ struct CopyAnalysisContext {
   const LayoutMap *layout_map = nullptr;
   arith::Analyzer *analyzer = nullptr;
   bool emit_diagnostics = false;
+  Array<Var> host_visible_vars;
 };
 
 struct CopyInstSelection {
@@ -96,8 +115,9 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx);
 
 // Pre-layout producer classification used by warp-specialized scheduling.
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target);
+CopyInstSelection
+ClassifyWarpSpecializedProducerCopy(const CopyNode &op, Target target,
+                                    const Array<Var> &host_visible_vars);
 
 // Semantic queries used by transform passes that need copy shape/capability
 // information without knowing the CUDA lowering policy knobs.

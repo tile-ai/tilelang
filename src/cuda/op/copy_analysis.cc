@@ -9,8 +9,11 @@
 
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
+#include "layout/layout.h"
+#include "op/builtin.h"
 #include "op/utils.h"
 
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/transform.h>
 
 #include <optional>
@@ -193,12 +196,30 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
 }
 
 bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
-                   bool check_last_dim, bool emit_diagnostics) {
+                   bool check_last_dim, bool emit_diagnostics,
+                   const Array<Var> &host_visible_vars,
+                   bool require_host_visible = true,
+                   bool check_descriptor_base_alignment = true) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
   if (op.src.scope() != "global" ||
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
+    return false;
+  }
+  if (check_descriptor_base_alignment &&
+      !CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer,
+                                        host_visible_vars,
+                                        require_host_visible)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "TMA bulk load requires a provably "
+                    << TMARequiredGlobalAddressAlignment(op.src->dtype,
+                                                         op.dst->dtype)
+                    << "-byte-aligned "
+                       "global buffer view, but elem_offset for "
+                    << op.src->name << " is " << op.src->elem_offset
+                    << "; fallback to normal copy.";
+    }
     return false;
   }
   if (check_last_dim &&
@@ -232,12 +253,29 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
 
 bool CheckBulkStore(const CopyNode &op, Target target,
                     arith::Analyzer *analyzer, bool check_last_dim,
-                    bool emit_diagnostics) {
+                    bool emit_diagnostics, const Array<Var> &host_visible_vars,
+                    bool require_host_visible = true,
+                    bool check_descriptor_base_alignment = true) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
   if ((op.src.scope() != "shared.dyn" && op.src.scope() != "shared") ||
       op.dst.scope() != "global") {
+    return false;
+  }
+  if (check_descriptor_base_alignment &&
+      !CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer,
+                                        host_visible_vars,
+                                        require_host_visible)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "TMA bulk store requires a provably "
+                    << TMARequiredGlobalAddressAlignment(op.dst->dtype,
+                                                         op.src->dtype)
+                    << "-byte-aligned "
+                       "global buffer view, but elem_offset for "
+                    << op.dst->name << " is " << op.dst->elem_offset
+                    << "; fallback to normal copy.";
+    }
     return false;
   }
   if (check_last_dim &&
@@ -338,6 +376,17 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   bool global_is_contiguous =
       IsContiguousGlobalRegion(global_tensor, global_range, analyzer);
 
+  Array<PrimExpr> global_indices =
+      global_range.Map([](const Range &range) { return range->min; });
+  Array<PrimExpr> global_offsets = global_tensor.OffsetOf(global_indices);
+  bool global_address_aligned =
+      global_offsets.size() == 1 &&
+      analyzer->CanProveEqual(
+          FloorMod(TMAGlobalBitsFromElements(global_offsets[0],
+                                             global_tensor->dtype),
+                   IntImm(DataType::Int(64), 128)),
+          0);
+
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {
     shared_elements *= shared_range[i]->extent;
@@ -359,8 +408,8 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   bool total_16b_aligned = !analyzer->CanProve(
       FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
 
-  return shared_is_contiguous && global_is_contiguous && element_match &&
-         total_16b_aligned;
+  return shared_is_contiguous && global_is_contiguous &&
+         global_address_aligned && element_match && total_16b_aligned;
 }
 
 bool CanProveRegionInBounds(const Buffer &buffer, const Array<Range> &region,
@@ -386,8 +435,11 @@ bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
 
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
                      const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                     bool emit_diagnostics) {
-  if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics)) {
+                     bool emit_diagnostics,
+                     const Array<Var> &host_visible_vars) {
+  if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics,
+                     host_visible_vars, /*require_host_visible=*/false,
+                     /*check_descriptor_base_alignment=*/false)) {
     return false;
   }
   return CheckBulkCopy1D(op.src, op.dst, op.src_range, op.dst_range, layout_map,
@@ -396,8 +448,11 @@ bool CheckBulkLoad1D(const CopyNode &op, Target target,
 
 bool CheckBulkStore1D(const CopyNode &op, Target target,
                       const LayoutMap &layout_map, arith::Analyzer *analyzer,
-                      bool emit_diagnostics) {
-  if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics)) {
+                      bool emit_diagnostics,
+                      const Array<Var> &host_visible_vars) {
+  if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics,
+                      host_visible_vars, /*require_host_visible=*/false,
+                      /*check_descriptor_base_alignment=*/false)) {
     return false;
   }
   return CheckBulkCopy1D(op.dst, op.src, op.dst_range, op.src_range, layout_map,
@@ -443,6 +498,56 @@ bool CheckCPAsyncCopy(const CopyNode &op, Target target,
 }
 
 } // namespace
+
+int TMARequiredGlobalAddressAlignment(DataType global_dtype,
+                                      DataType shared_dtype) {
+  // CUDA requires 32-byte global addresses for the unpacked-FP4 TensorMap
+  // type (16U4_ALIGN16B), even though the ordinary TMA minimum is 16 bytes.
+  if (IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype)) {
+    return 32;
+  }
+  return 16;
+}
+
+bool CanProveTMADescriptorBaseAligned(const Buffer &buffer,
+                                      DataType shared_dtype,
+                                      arith::Analyzer *analyzer,
+                                      const Array<Var> &host_visible_vars,
+                                      bool require_host_visible) {
+  if (!buffer->elem_offset.defined() || is_zero(buffer->elem_offset)) {
+    return true;
+  }
+  if (require_host_visible) {
+    bool has_device_local_dependency = false;
+    tirx::UsesVar(buffer->elem_offset, [&](const VarNode *var_node) {
+      Var var = GetRef<Var>(var_node);
+      for (const Var &host_var : host_visible_vars) {
+        if (var.same_as(host_var)) {
+          return false;
+        }
+      }
+      has_device_local_dependency = true;
+      return true;
+    });
+    if (has_device_local_dependency) {
+      return false;
+    }
+  }
+  PrimExpr bit_offset =
+      cast(DataType::Int(64), buffer->elem_offset) *
+      IntImm(DataType::Int(64), TMAPayloadElementBits(buffer->dtype));
+  if (!analyzer->CanProveEqual(
+          FloorMod(bit_offset, IntImm(DataType::Int(64), 8)), 0)) {
+    return false;
+  }
+  PrimExpr byte_offset =
+      TMAGlobalBytesFromElements(buffer->elem_offset, buffer->dtype);
+  int alignment =
+      TMARequiredGlobalAddressAlignment(buffer->dtype, shared_dtype);
+  bool aligned = analyzer->CanProveEqual(
+      FloorMod(byte_offset, IntImm(DataType::Int(64), alignment)), 0);
+  return aligned;
+}
 
 const char *CopyInstToString(CopyInst inst) {
   switch (inst) {
@@ -658,38 +763,44 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   if (facts.layout_dependent_tma_available) {
     facts.can_bulk_load_1d =
         CheckBulkLoad1D(op, ctx.target, layout_map, analyzer,
-                        /*emit_diagnostics=*/false);
+                        /*emit_diagnostics=*/false, ctx.host_visible_vars);
     facts.can_bulk_store_1d =
         CheckBulkStore1D(op, ctx.target, layout_map, analyzer,
-                         /*emit_diagnostics=*/false);
+                         /*emit_diagnostics=*/false, ctx.host_visible_vars);
   }
 
   if (facts.can_bulk_load_1d) {
     facts.can_bulk_load_ignore_last_dim = true;
     facts.can_bulk_load =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+                      ctx.emit_diagnostics, ctx.host_visible_vars,
+                      /*require_host_visible=*/true);
   } else {
     facts.can_bulk_load_ignore_last_dim =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/false,
-                      ctx.emit_diagnostics);
+                      ctx.emit_diagnostics, ctx.host_visible_vars,
+                      /*require_host_visible=*/true);
     facts.can_bulk_load =
         CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+                      ctx.emit_diagnostics, ctx.host_visible_vars,
+                      /*require_host_visible=*/true);
   }
 
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
+                       ctx.emit_diagnostics, ctx.host_visible_vars,
+                       /*require_host_visible=*/true);
   } else {
     facts.can_bulk_store_ignore_last_dim =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/false, ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/false,
+                       ctx.emit_diagnostics, ctx.host_visible_vars,
+                       /*require_host_visible=*/true);
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+        CheckBulkStore(op, ctx.target, analyzer, /*check_last_dim=*/true,
+                       ctx.emit_diagnostics, ctx.host_visible_vars,
+                       /*require_host_visible=*/true);
   }
 
   facts.can_cp_async = CheckCPAsyncCopy(op, ctx.target, layout_map, analyzer);
@@ -719,11 +830,31 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
       return Unsupported(MakeTmaUnavailableReason(op));
     }
+    arith::Analyzer local_analyzer;
+    arith::Analyzer *analyzer =
+        ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
+    if (!CanProveTMADescriptorBaseAligned(op.src, op.dst->dtype, analyzer,
+                                          ctx.host_visible_vars, true)) {
+      return Unsupported("tma_gather4 requires a provably " +
+                         std::to_string(TMARequiredGlobalAddressAlignment(
+                             op.src->dtype, op.dst->dtype)) +
+                         "-byte-aligned global buffer view");
+    }
     return Supported(CopyInst::kBulkLoadGather4);
   }
   if (GetBoolAnnotation(op, "is_scatter4")) {
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
       return Unsupported(MakeTmaUnavailableReason(op));
+    }
+    arith::Analyzer local_analyzer;
+    arith::Analyzer *analyzer =
+        ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
+    if (!CanProveTMADescriptorBaseAligned(op.dst, op.src->dtype, analyzer,
+                                          ctx.host_visible_vars, true)) {
+      return Unsupported("tma_scatter4 requires a provably " +
+                         std::to_string(TMARequiredGlobalAddressAlignment(
+                             op.dst->dtype, op.src->dtype)) +
+                         "-byte-aligned global buffer view");
     }
     return Supported(CopyInst::kBulkStoreScatter4);
   }
@@ -804,10 +935,12 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target) {
+CopyInstSelection
+ClassifyWarpSpecializedProducerCopy(const CopyNode &op, Target target,
+                                    const Array<Var> &host_visible_vars) {
   CopyAnalysisContext ctx;
   ctx.target = target;
+  ctx.host_visible_vars = host_visible_vars;
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);

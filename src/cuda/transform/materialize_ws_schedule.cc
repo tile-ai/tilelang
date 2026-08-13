@@ -265,13 +265,14 @@ enum class OpAtom : uint8_t {
 
 // Classify one call with the same instruction-selection helpers the
 // lowering uses, so the atom matches what the op actually lowers to.
-OpAtom ClassifyCall(const Call &call, const Target &target) {
+OpAtom ClassifyCall(const Call &call, const Target &target,
+                    const Array<Var> &host_visible_vars) {
   TileOperator tile_op = ParseOperator(call);
   if (!tile_op.defined())
     return OpAtom::kSync; // a non-tile-op intrinsic
   if (const auto *copy = tile_op.as<CopyNode>()) {
-    cuda::CopyInstSelection sel =
-        cuda::ClassifyWarpSpecializedProducerCopy(*copy, target);
+    cuda::CopyInstSelection sel = cuda::ClassifyWarpSpecializedProducerCopy(
+        *copy, target, host_visible_vars);
     ICHECK(sel.supported)
         << "ws_schedule: producer copy instruction selection failed: "
         << sel.reason;
@@ -388,9 +389,11 @@ struct ScopeSpec {
 // ---------------------------------------------------------------------------
 class WSScheduleMaterializer {
 public:
-  WSScheduleMaterializer(SBlock block, Var thread_var, Target target)
+  WSScheduleMaterializer(SBlock block, Var thread_var, Target target,
+                         Array<Var> host_visible_vars)
       : block_(std::move(block)), thread_var_(std::move(thread_var)),
-        target_(std::move(target)) {}
+        target_(std::move(target)),
+        host_visible_vars_(std::move(host_visible_vars)) {}
 
   int NumThreads() const { return num_warps_ * 32; }
 
@@ -935,7 +938,8 @@ private:
     for (auto &[id, op] : ops_) {
       const auto *ev = op.stmt.as<EvaluateNode>();
       if (ev && ev->value.as<CallNode>()) {
-        op.atom = ClassifyCall(Downcast<Call>(ev->value), target_);
+        op.atom = ClassifyCall(Downcast<Call>(ev->value), target_,
+                               host_visible_vars_);
         continue;
       }
       // A compound statement (an op-node loop, a T.ws_op group) stays
@@ -948,7 +952,8 @@ private:
         const auto *call = node.as<CallNode>();
         if (!call || call->op.same_as(RegionOp()))
           return;
-        ICHECK(ClassifyCall(GetRef<Call>(call), target_) == OpAtom::kSync)
+        ICHECK(ClassifyCall(GetRef<Call>(call), target_, host_visible_vars_) ==
+               OpAtom::kSync)
             << "ws_schedule: op '" << op_id << "' nests an asynchronous "
             << "instruction inside a compound statement; make it a "
             << "directly scheduled op so its barrier can be wired:\n"
@@ -1994,6 +1999,7 @@ private:
   SBlock block_;
   Var thread_var_;
   Target target_;
+  Array<Var> host_visible_vars_;
   int num_warps_ = 0;
   std::vector<RoleSpec> roles_;
   std::vector<PipelineSpec> pipelines_;
@@ -2012,8 +2018,9 @@ private:
 // threadIdx.x binding is widened to each schedule's warp count.
 class WSScheduleRewriter : public StmtMutator {
 public:
-  explicit WSScheduleRewriter(Optional<Target> target)
-      : target_(std::move(target)) {}
+  WSScheduleRewriter(Optional<Target> target, Array<Var> host_visible_vars)
+      : target_(std::move(target)),
+        host_visible_vars_(std::move(host_visible_vars)) {}
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
@@ -2056,7 +2063,7 @@ public:
         << "ws_schedule: PrimFunc has no bound target (BindTarget must run "
            "before MaterializeWSSchedule)";
     WSScheduleMaterializer materializer(GetRef<SBlock>(op), thread_iv_->var,
-                                        target_.value());
+                                        target_.value(), host_visible_vars_);
     SBlock block = materializer.Run();
     new_extent_ = materializer.NumThreads();
     return block;
@@ -2064,6 +2071,7 @@ public:
 
 private:
   Optional<Target> target_;
+  Array<Var> host_visible_vars_;
   IterVar thread_iv_;
   bool multi_dim_threads_ = false;
   int new_extent_ = -1;
@@ -2071,7 +2079,8 @@ private:
 
 // A function without a schedule annotation is returned untouched.
 PrimFunc MaterializeWSScheduleImpl(PrimFunc f) {
-  WSScheduleRewriter rewriter(f->GetAttr<Target>(tvm::attr::kTarget));
+  WSScheduleRewriter rewriter(f->GetAttr<Target>(tvm::attr::kTarget),
+                              f->params);
   Stmt body = rewriter(f->body);
   if (body.same_as(f->body))
     return f;

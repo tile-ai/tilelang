@@ -142,7 +142,7 @@ public:
     }
     for (auto &desc_init : desc_inits_) {
       if (!desc_init.emitted &&
-          desc_init.base_var == alloc->buffer->data.get()) {
+          desc_init.base_var.same_as(alloc->buffer->data)) {
         result->push_back(desc_init.stmt);
         desc_init.emitted = true;
       }
@@ -186,15 +186,16 @@ public:
       if (iter != desc_map_.end()) {
         var = iter->second;
       } else {
-        String name = call->args[2].as<Var>().value()->name_hint;
+        Var base_var = GetDescriptorBaseVar(call->args[2]);
+        String name = base_var->name_hint;
         var = Var(name + "_desc",
                   PointerType(PrimType(CuTensorMapType()), "grid_constant"));
         Call call_ref = GetRef<Call>(call);
         desc_map_[call_ref] = var;
         Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
         init_desc_arg_map_.Set(var, init_desc_args);
-        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
-                               MakeInitDescStmt(var, init_desc_args), false});
+        desc_inits_.push_back(
+            {base_var, MakeInitDescStmt(var, init_desc_args), false});
         prefetch_calls_.push_back(Evaluate(
             Call(DataType::Handle(), prefetch_tma_descriptor(), {var})));
       }
@@ -230,10 +231,25 @@ public:
 
 private:
   struct DescInit {
-    const VarNode *base_var;
+    Var base_var;
     Stmt stmt;
     bool emitted;
   };
+
+  static Var GetDescriptorBaseVar(const PrimExpr &address) {
+    if (const auto *var = address.as<VarNode>()) {
+      return GetRef<Var>(var);
+    }
+    if (const auto *call = address.as<CallNode>()) {
+      if (call->op.same_as(builtin::handle_add_byte_offset())) {
+        ICHECK_EQ(call->args.size(), 2u);
+        return GetDescriptorBaseVar(call->args[0]);
+      }
+    }
+    LOG(FATAL) << "TMA descriptor address must be based on a data Var, got "
+               << address;
+    return Var();
+  }
 
   static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
     Array<PrimExpr> init_desc_args;
