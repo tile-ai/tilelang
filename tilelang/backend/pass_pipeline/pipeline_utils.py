@@ -68,6 +68,16 @@ def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
     return not disable
 
 
+def should_enable_buffer_init_check(pass_ctx: PassContext | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    # Enabled by default. The analysis only reports buffers that nothing writes
+    # at all, which keeps false positives rare enough to warrant it; users can
+    # opt out through the `tl.disable_buffer_init_check` pass config.
+    disable = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_BUFFER_INIT_CHECK, False)
+    return not disable
+
+
 def should_disable_shared_memory_reuse(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
