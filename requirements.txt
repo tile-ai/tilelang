@@ -1,7 +1,7 @@
 # Runtime requirements
 
 apache-tvm-ffi>=0.1.11,<0.1.13
-torch-c-dlpack-ext; python_version < '3.14'
+torch-c-dlpack-ext; python_version < '3.14' and (platform_system != 'Windows' or platform_machine != 'ARM64')
 cloudpickle
 ml-dtypes
 numpy>=1.23.5
@@ -10,4 +10,5 @@ torch
 torch>=2.7; platform_system == 'Darwin'
 tqdm>=4.62.3
 typing-extensions>=4.10.0
-z3-solver>=4.13.0,<4.15.5
+z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'
+z3-solver>=4.15.5,<4.15.6; platform_system == 'Windows' and platform_machine == 'ARM64'

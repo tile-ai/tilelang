@@ -30,7 +30,7 @@ dependencies = [
     "apache-tvm-ffi>=0.1.11,<0.1.13",
     # torch-c-dlpack-ext provides prebuilt torch extensions.
     # Without it, TVM FFI may require JIT compilation on first import.
-    "torch-c-dlpack-ext; python_version < '3.14'",
+    "torch-c-dlpack-ext; python_version < '3.14' and (platform_system != 'Windows' or platform_machine != 'ARM64')",
     "cloudpickle",
     "ml-dtypes",
     "numpy>=1.23.5",
@@ -41,7 +41,10 @@ dependencies = [
     "setuptools; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
-    "z3-solver>=4.13.0,<4.15.5",
+    "z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'",
+    # 4.15.5 is the first release with a Windows ARM64 wheel. Keep the newer
+    # release isolated to that platform while the general upper bound remains.
+    "z3-solver>=4.15.5,<4.15.6; platform_system == 'Windows' and platform_machine == 'ARM64'",
 ]
 
 [project.optional-dependencies]
@@ -53,13 +56,17 @@ vis = ["matplotlib"]
 # if you want to build with CUDA NVCC support
 nvcc = [
     "torch",
-    "nvidia-cuda-nvcc>=13.0.48",
-    "nvidia-cuda-cccl>=13.0.50",
+    "nvidia-cuda-nvcc>=13.0.48; platform_system != 'Windows' or platform_machine != 'ARM64'",
+    "nvidia-cuda-nvcc>=13.4.46rc1,<13.5; platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "nvidia-cuda-cccl>=13.0.50; platform_system != 'Windows' or platform_machine != 'ARM64'",
+    "nvidia-cuda-cccl>=13.3.4.1.2rc1,<13.5; platform_system == 'Windows' and platform_machine == 'ARM64'",
     # On Windows, ship nvrtc through the runtime deps so `pip install tilelang`
     # works without a host CUDA install (TileLang JITs CUDA kernels via nvrtc).
-    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
+    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows' and platform_machine != 'ARM64'",
+    "nvidia-cuda-nvrtc>=13.4.46rc1,<13.5; platform_system == 'Windows' and platform_machine == 'ARM64'",
     # cuRAND is required when kernels use tilelang.cuda.language.random
-    "nvidia-curand>=10.4; platform_system == 'Windows'",
+    "nvidia-curand>=10.4; platform_system == 'Windows' and platform_machine != 'ARM64'",
+    "nvidia-curand>=10.4.4.46rc1,<10.5; platform_system == 'Windows' and platform_machine == 'ARM64'",
 ]
 
 [[tool.uv.index]]
@@ -69,22 +76,24 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'win32'", extra = "nvcc" },
+    { index = "pytorch-cu130", marker = "sys_platform == 'win32' and platform_machine != 'ARM64'", extra = "nvcc" },
 ]
 
 [build-system]
 requires = [
     "cython>=3.1.0",
     "scikit-build-core",
-    "z3-solver>=4.13.0,<4.15.5",
+    "z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'",
+    "z3-solver>=4.15.5,<4.15.6; platform_system == 'Windows' and platform_machine == 'ARM64'",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",
     # Under PEP 517 build isolation on Windows, provide nvcc and CUDA headers so
     # CMake's find_package(CUDAToolkit) succeeds without a host CUDA install.
-    "nvidia-cuda-nvcc>=13; platform_system == 'Windows'",
-    "nvidia-cuda-cccl>=13; platform_system == 'Windows'",
-    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
+    # Windows ARM64 uses the native CUDA 13.4 preview installer or a system toolkit.
+    "nvidia-cuda-nvcc>=13; platform_system == 'Windows' and platform_machine != 'ARM64'",
+    "nvidia-cuda-cccl>=13; platform_system == 'Windows' and platform_machine != 'ARM64'",
+    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows' and platform_machine != 'ARM64'",
     # CMake's MSVC helpers in FindPipCUDAToolkit.cmake only activate under the
     # Ninja generator; require ninja on Windows so scikit-build-core can pick
     # it up (paired with the override below that passes -G Ninja).
@@ -255,7 +264,11 @@ skip = "*musllinux*"
 build-frontend = "build"
 environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1" }
 environment-pass = [
+    "USE_CUDA",
     "CUDA_VERSION",
+    "CUDA_PATH",
+    "CUDA_HOME",
+    "CUDAToolkit_ROOT",
     "NO_VERSION_LABEL",
     "NO_TOOLCHAIN_VERSION",
     "NO_GIT_VERSION",
