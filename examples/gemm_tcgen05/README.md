@@ -1,6 +1,6 @@
-# TileLang SM100 Support (Preview)
+# TileLang TCGEN05 Support
 
-This directory contains examples for TileLang's experimental SM100 architecture support. **This is a preview version** with limited functionality.
+This directory contains examples for TileLang's experimental TCGEN05 support on compatible NVIDIA architectures. **This is a preview version** with limited functionality.
 
 ## Current Limitations (Manual Implementation Required)
 
@@ -21,7 +21,7 @@ T.tcgen05_gemm(A_shared, B_shared, C_tmem, trans_A, trans_B, mbar=mbar, clear_ac
 T.mbarrier_wait_parity(mbar, k%2)  # Manual phase calculation required
 ```
 
-TileLang now has a conservative `InjectTcgen05Fence` pass on SM100+ that can
+TileLang now has a conservative `InjectTcgen05Fence` pass on TCGEN05-capable targets that can
 insert `tcgen05_before_thread_sync()` / `tcgen05_after_thread_sync()` around:
 - `tvm_storage_sync("shared"|"shared.dyn")`
 - linear `mbarrier_wait_parity(...) -> tcgen05/TMEM use` regions
@@ -41,6 +41,15 @@ Demonstrates TCGEN5MMA operations with:
 
 ### Traditional MMA Example (`gemm_mma.py`)
 Shows standard MMA operations that work across architectures for comparison.
+
+### Persistent TCGEN05 GEMM (`gemm_tcgen5mma_ws_persistent.py`)
+Warp-specialized persistent kernels (single-CTA and 2-CTA) that use the static
+PersistentTileScheduler, with optional TMA stores.
+
+### Stream-K TCGEN05 GEMM (`gemm_tcgen5mma_ws_persistent_streamk.py`)
+Persistent 2-CTA kernel with Stream-K scheduling: the under-filled tail wave
+is split along K, peers publish partial accumulations to a workspace, and the
+final peer fixes up and writes each output tile.
 
 ## Code Example
 

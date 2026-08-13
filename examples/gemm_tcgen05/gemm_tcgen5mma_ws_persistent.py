@@ -1,4 +1,4 @@
-# Persistent, warp-specialized SM100 GEMM using PersistentTileScheduler.
+# Persistent, warp-specialized TCGEN05 GEMM using PersistentTileScheduler.
 #
 # Each warp role (TMA / tcgen5 MMA / epilogue) creates its own scheduler instance
 # and drives a single ``while sched.valid()`` loop. The scheduler owns the only
@@ -28,6 +28,7 @@ def gemm_persistent(
     out_dtype,
     accum_dtype,
     num_stages,
+    group_size,
     use_tma_store,
 ):
     M, N, K = T.const("M, N, K")
@@ -41,7 +42,6 @@ def gemm_persistent(
     n_blocks = T.ceildiv(N, block_N)
     assert K % (2 * block_K) == 0  # for simplicity
     k_blocks = T.ceildiv(K, block_K)
-    group_size = 8
     assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
 
     with T.Kernel(sm_num, threads=256) as (block_id):
@@ -145,6 +145,7 @@ def gemm_persistent_2cta(
     out_dtype,
     accum_dtype,
     num_stages,
+    group_size,
     use_tma_store,
 ):
     M, N, K = T.const("M, N, K")
@@ -158,7 +159,6 @@ def gemm_persistent_2cta(
     n_blocks = T.ceildiv(N, block_N)
     assert K % (2 * block_K) == 0  # for simplicity
     k_blocks = T.ceildiv(K, block_K)
-    group_size = 8  # in cluster
     assert n_blocks % (2 * group_size) == 0  # Please adjust group_size if not satisfied
     cluster_size = 2
 
@@ -257,7 +257,7 @@ def gemm_persistent_2cta(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Persistent warp-specialized SM100 GEMM")
+    parser = argparse.ArgumentParser(description="Persistent warp-specialized TCGEN05 GEMM")
     parser.add_argument("--m", type=int, default=8192)
     parser.add_argument("--n", type=int, default=8192)
     parser.add_argument("--k", type=int, default=8192)
@@ -266,6 +266,7 @@ def main():
     parser.add_argument("--block_K", type=int, default=64)
     parser.add_argument("--store_block_N", type=int, default=64, help="block_N for C_shared")
     parser.add_argument("--num_stages", type=int, default=None, help="pipeline stages (default: 6 with 2cta, else 4)")
+    parser.add_argument("--group_size", type=int, default=8)
     parser.add_argument("--enable_2cta_tcgen5mma", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use_tma_store", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
@@ -287,25 +288,33 @@ def main():
         "out_dtype": out_dtype,
         "accum_dtype": accum_dtype,
         "num_stages": num_stages,
+        "group_size": args.group_size,
         "use_tma_store": args.use_tma_store,
     }
 
     a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
     b = torch.randn(K, N, device="cuda", dtype=torch.bfloat16)
-    print(kernel.get_kernel_source(a, b, **kwargs))
-    c = kernel(a, b, **kwargs)
+    kernel_args = (a, b)
+
+    print(kernel.get_kernel_source(*kernel_args, **kwargs))
+    c = kernel(*kernel_args, **kwargs)
 
     ref_c = (a.to(torch.float) @ b.to(torch.float)).to(torch.bfloat16)
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("All checks passed. ✅")
 
     tl_latency = do_bench(
-        lambda: kernel(a, b, **kwargs),
+        lambda: kernel(*kernel_args, **kwargs),
         _n_warmup=50,
         _n_repeat=50,
         backend="cupti",
     )
-    torch_latency = do_bench(lambda: a @ b, backend="cupti")
+    torch_latency = do_bench(
+        lambda: a @ b,
+        _n_warmup=50,
+        _n_repeat=50,
+        backend="cupti",
+    )
     print(f"Tilelang latency: {tl_latency} ms")
     print(f"Flops: {2 * M * N * K / (tl_latency / 1e3) / 1e12} TFLOPS")
     print(f"Torch latency: {torch_latency} ms")
