@@ -287,17 +287,16 @@ struct BufferInitVerifier : public StmtExprVisitor {
     current_span_ = saved;
   }
 
-  /*! \brief A direct store initializes.
+  /*! \brief A direct store initializes, but only after it has been evaluated.
    *
-   * Recorded before visiting the stored value. Reading `x = f(..., x)` as a
-   * read-before-write would make this a definite-assignment analysis over
-   * scalars, which reports idioms like
-   * `idx = T.if_then_else(cond, i, idx)` that are conventional and benign.
-   * Every other buffer the value and the indices read is still visited below.
+   * The destination is recorded last, so `x[i] = x[i] + 1` reports x when
+   * nothing wrote it earlier: a store reads its own right-hand side before it
+   * establishes anything. Cross-thread scopes are unaffected, since they
+   * ignore source order and ask only whether another node writes the buffer.
    */
   void VisitStmt_(const BufferStoreNode *op) final {
-    written_.insert(op->buffer->data);
     StmtExprVisitor::VisitStmt_(op);
+    written_.insert(op->buffer->data);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {

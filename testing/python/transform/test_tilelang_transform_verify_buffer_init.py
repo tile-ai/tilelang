@@ -159,18 +159,34 @@ def test_reports_an_uninitialized_local_buffer(capfd):
     assert MESSAGE in _verify(kernel, capfd)
 
 
-def test_silent_for_scalar_self_referential_assignment(capfd):
-    """`idx = T.if_then_else(cond, i, idx)` is conventional, not a finding.
+def test_reports_a_store_that_reads_its_own_destination(capfd):
+    """A store evaluates its right-hand side before it establishes anything.
 
-    Reading the destination on the right-hand side does not make this a
-    read-before-write in the sense the pass reports; treating it as one turns
-    the pass into a definite-assignment analysis over scalars.
+    `idx = T.if_then_else(cond, i, idx)` carries the previous value forward, so
+    with nothing written beforehand the first pass reads whatever the slot
+    held. examples/grouped_gemm/example_grouped_gemm_fwd_ptr.py writes the
+    initializer that its sibling files omit.
     """
 
     @T.prim_func
     def kernel(A: T.Tensor((NB,), torch.int32), C: T.Tensor((NB,), torch.int32)):
         with T.Kernel(NB, threads=64) as bx:
             idx = T.alloc_local((1,), torch.int32)
+            for i in T.serial(NB):
+                idx[0] = T.if_then_else(A[i] > 0, i, idx[0])
+            C[bx] = idx[0]
+
+    assert MESSAGE in _verify(kernel, capfd)
+
+
+def test_silent_when_the_destination_is_initialized_first(capfd):
+    """The same carry-forward is fine once something establishes a value."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((NB,), torch.int32), C: T.Tensor((NB,), torch.int32)):
+        with T.Kernel(NB, threads=64) as bx:
+            idx = T.alloc_local((1,), torch.int32)
+            idx[0] = 0
             for i in T.serial(NB):
                 idx[0] = T.if_then_else(A[i] > 0, i, idx[0])
             C[bx] = idx[0]
