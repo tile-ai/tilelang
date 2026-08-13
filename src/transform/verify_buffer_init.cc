@@ -20,6 +20,7 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "span_utils.h"
+#include <exception>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -74,12 +75,14 @@ bool IsCrossThreadScope(const String &scope) {
  * A tile op call is not always in its final form at this point in the
  * pipeline, and an op builder that indexes an argument it has not been given
  * throws. This pass only warns, so a call it cannot interpret must degrade to
- * the opaque-escape treatment rather than abort the build.
+ * the opaque-escape treatment rather than abort the build. Every builder
+ * failure seen so far raises tvm::ffi::Error, which derives from
+ * std::exception; catching the base covers the rest by the same rule.
  */
 TileOperator TryParseOperator(const Call &call) {
   try {
     return ParseOperator(call);
-  } catch (const tvm::ffi::Error &) {
+  } catch (const std::exception &) {
     return TileOperator();
   }
 }
@@ -375,7 +378,7 @@ struct BufferInitVerifier : public StmtExprVisitor {
        << " buffer(s) read before anything writes them\n";
     for (size_t k = 0; k < reports_.size(); ++k) {
       const Report &report = reports_[k];
-      os << "  [" << k + 1 << "] `" << report.buffer
+      os << "  [" << k + 1 << "] `" << report.buffer->name
          << "` is read before anything writes it"
          << SpanHintSuffix({report.span}) << "\n";
       if (report.kind == Kind::kGemmAccum) {
