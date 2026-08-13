@@ -21,9 +21,9 @@
 #include "../op/operator.h"
 #include "span_utils.h"
 #include <sstream>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <string>
 #include <vector>
 
 #include <tvm/runtime/logging.h>
@@ -69,6 +69,114 @@ bool IsCrossThreadScope(const String &scope) {
   return s.rfind("shared", 0) == 0;
 }
 
+/*! \brief Parse a call as a tile op, or return null if it cannot be.
+ *
+ * A tile op call is not always in its final form at this point in the
+ * pipeline, and an op builder that indexes an argument it has not been given
+ * throws. This pass only warns, so a call it cannot interpret must degrade to
+ * the opaque-escape treatment rather than abort the build.
+ */
+TileOperator TryParseOperator(const Call &call) {
+  try {
+    return ParseOperator(call);
+  } catch (const tvm::ffi::Error &) {
+    return TileOperator();
+  }
+}
+
+/*! \brief Whether this call is a tile op, however well-formed. */
+bool IsTileOpCall(const CallNode *op) {
+  auto opt_op = op->op.as<Op>();
+  if (!opt_op.has_value()) {
+    return false;
+  }
+  const std::string &name = opt_op.value()->name;
+  return name.rfind("tl.tileop.", 0) == 0;
+}
+
+/*! \brief Whether this call may write through one of its arguments.
+ *
+ * A pure op only reads what it is given, so its BufferLoad arguments are
+ * ordinary reads. Anything at kUpdateState (== kOpaque) or beyond may write,
+ * as may an op that never registered an effect kind, or a call to something
+ * other than an Op at all.
+ */
+bool MayWriteThroughArgs(const CallNode *op) {
+  static const auto effect_map =
+      Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
+  auto opt_op = op->op.as<Op>();
+  if (!opt_op.has_value()) {
+    return true;
+  }
+  Op call_op = opt_op.value();
+  if (!effect_map.count(call_op)) {
+    return true;
+  }
+  return effect_map[call_op]->value >=
+         static_cast<int>(CallEffectKind::kUpdateState);
+}
+
+/*! \brief Whether a buffer reaching this call may be written by it. */
+bool EscapesThroughArgs(const CallNode *op) {
+  return op->op.same_as(builtin::address_of()) ||
+         op->op.same_as(builtin::tvm_access_ptr()) ||
+         op->op.same_as(tl::access_ptr()) ||
+         op->op.same_as(builtin::call_extern()) || IsTileOpCall(op) ||
+         MayWriteThroughArgs(op);
+}
+
+/*!
+ * \brief Report every buffer variable an uninterpretable call may write.
+ *
+ * A buffer whose pointer escapes into an opaque call may be written by it.
+ * Assuming it is written trades recall for precision, which is the trade this
+ * check is built on. The two walks below both route through here, so their
+ * notions of what a call may write cannot drift apart.
+ */
+template <typename F>
+void ForEachOpaqueWrite(const CallNode *op, const F &record) {
+  if (op->op.same_as(builtin::address_of())) {
+    if (!op->args.empty()) {
+      if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+        record(load->buffer->data);
+      }
+    }
+    return;
+  }
+  if (op->op.same_as(tl::access_ptr())) {
+    // access_ptr(base_load, extent, rw_mask)
+    if (op->args.size() >= 3 &&
+        (GetConservativeAccessMask(op->args[2]) & kAccessWrite)) {
+      if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+        record(load->buffer->data);
+      }
+    }
+    return;
+  }
+  if (op->op.same_as(builtin::tvm_access_ptr())) {
+    // args: [type_hint, data_var, offset, extent, rw_mask]
+    if (op->args.size() >= 5 &&
+        (GetConservativeAccessMask(op->args[4]) & kAccessWrite)) {
+      if (const auto *var = op->args[1].as<VarNode>()) {
+        record(GetRef<Var>(var));
+      }
+    }
+    return;
+  }
+  for (const PrimExpr &arg : op->args) {
+    if (const auto *var = arg.as<VarNode>()) {
+      if (var->dtype.is_handle()) {
+        record(GetRef<Var>(var));
+      }
+    } else if (const auto *load = arg.as<BufferLoadNode>()) {
+      record(load->buffer->data);
+    } else if (const auto *call = arg.as<CallNode>()) {
+      // Nested address_of / tvm_access_ptr inside an extern argument list.
+      ForEachOpaqueWrite(call, record);
+    }
+  }
+}
+
 /*! \brief Collects every buffer a function potentially writes.
  *
  * Records which node performed each write so that a read can discount the
@@ -88,24 +196,15 @@ struct PotentialWriteCollector : public StmtExprVisitor {
   }
 
   void VisitExpr_(const CallNode *op) final {
-    TileOperator tile_op;
-    try {
-      tile_op = ParseOperator(GetRef<Call>(op));
-    } catch (const tvm::ffi::Error &) {
-      tile_op = TileOperator();
-    }
-    if (tile_op.defined()) {
+    if (TileOperator tile_op = TryParseOperator(GetRef<Call>(op));
+        tile_op.defined()) {
       for (const BufferRegion &region : tile_op->GetAccessRegions().writes) {
         Record(region->buffer->data, op);
       }
       return;
     }
-    // Anything the pass cannot interpret may write through its arguments; see
-    // BufferInitVerifier::MarkOpaqueEscapes for the same reasoning.
-    for (const PrimExpr &arg : op->args) {
-      if (const auto *load = arg.as<BufferLoadNode>()) {
-        Record(load->buffer->data, op);
-      }
+    if (EscapesThroughArgs(op)) {
+      ForEachOpaqueWrite(op, [&](const Var &var) { Record(var, op); });
     }
     StmtExprVisitor::VisitExpr_(op);
   }
@@ -194,6 +293,7 @@ struct BufferInitVerifier : public StmtExprVisitor {
    * read-before-write would make this a definite-assignment analysis over
    * scalars, which reports idioms like
    * `idx = T.if_then_else(cond, i, idx)` that are conventional and benign.
+   * Every other buffer the value and the indices read is still visited below.
    */
   void VisitStmt_(const BufferStoreNode *op) final {
     written_.insert(op->buffer->data);
@@ -205,122 +305,20 @@ struct BufferInitVerifier : public StmtExprVisitor {
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  /*! \brief Parse a call as a tile op, or return null if it cannot be.
-   *
-   * A tile op call is not always in its final form at this point in the
-   * pipeline, and an op builder that indexes an argument it has not been
-   * given throws. This pass only warns, so a call it cannot interpret must
-   * degrade to the opaque-escape treatment rather than abort the build.
-   */
-  static TileOperator TryParseOperator(const Call &call) {
-    try {
-      return ParseOperator(call);
-    } catch (const tvm::ffi::Error &) {
-      return TileOperator();
-    }
-  }
-
   void VisitExpr_(const CallNode *op) final {
-    if (auto tile_op = TryParseOperator(GetRef<Call>(op)); tile_op.defined()) {
+    if (TileOperator tile_op = TryParseOperator(GetRef<Call>(op));
+        tile_op.defined()) {
       VisitTileOp(tile_op, op);
       // Do not recurse. A tl.region argument wraps a BufferLoad that marks the
       // region, not a real read; visiting it would double-count and ignore the
       // op's own semantics.
       return;
     }
-    if (op->op.same_as(builtin::address_of()) ||
-        op->op.same_as(builtin::tvm_access_ptr()) ||
-        op->op.same_as(tl::access_ptr()) ||
-        op->op.same_as(builtin::call_extern()) || IsTileOpCall(op) ||
-        MayWriteThroughArgs(op)) {
-      MarkOpaqueEscapes(op);
+    if (EscapesThroughArgs(op)) {
+      ForEachOpaqueWrite(op, [&](const Var &var) { written_.insert(var); });
       return;
     }
     StmtExprVisitor::VisitExpr_(op);
-  }
-
-  /*! \brief Whether this call may write through one of its arguments.
-   *
-   * A pure op only reads what it is given, so its BufferLoad arguments are
-   * ordinary reads. Anything at kUpdateState (== kOpaque) or beyond may write,
-   * as may an op that never registered an effect kind, or a call to something
-   * other than an Op at all.
-   */
-  static bool MayWriteThroughArgs(const CallNode *op) {
-    static const auto effect_map =
-        Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
-    auto opt_op = op->op.as<Op>();
-    if (!opt_op.has_value()) {
-      return true;
-    }
-    Op call_op = opt_op.value();
-    if (!effect_map.count(call_op)) {
-      return true;
-    }
-    return effect_map[call_op]->value >=
-           static_cast<int>(CallEffectKind::kUpdateState);
-  }
-
-  /*! \brief Whether this call is a tile op, however well-formed. */
-  static bool IsTileOpCall(const CallNode *op) {
-    auto opt_op = op->op.as<Op>();
-    if (!opt_op.has_value()) {
-      return false;
-    }
-    const std::string &name = opt_op.value()->name;
-    return name.rfind("tl.tileop.", 0) == 0;
-  }
-
-  /*!
-   * \brief Conservatively record writes for calls the pass cannot interpret.
-   *
-   * A buffer whose pointer escapes into an opaque call may be written by it.
-   * Assuming it is written trades recall for precision, which is the trade
-   * this check is built on.
-   */
-  void MarkOpaqueEscapes(const CallNode *op) {
-    if (op->op.same_as(builtin::address_of())) {
-      if (!op->args.empty()) {
-        if (const auto *load = op->args[0].as<BufferLoadNode>()) {
-          written_.insert(load->buffer->data);
-        }
-      }
-      return;
-    }
-    if (op->op.same_as(tl::access_ptr())) {
-      // access_ptr(base_load, extent, rw_mask)
-      if (op->args.size() >= 3) {
-        if (GetConservativeAccessMask(op->args[2]) & kAccessWrite) {
-          if (const auto *load = op->args[0].as<BufferLoadNode>()) {
-            written_.insert(load->buffer->data);
-          }
-        }
-      }
-      return;
-    }
-    if (op->op.same_as(builtin::tvm_access_ptr())) {
-      // args: [type_hint, data_var, offset, extent, rw_mask]
-      if (op->args.size() >= 5) {
-        if (GetConservativeAccessMask(op->args[4]) & kAccessWrite) {
-          if (const auto *var = op->args[1].as<VarNode>()) {
-            written_.insert(GetRef<Var>(var));
-          }
-        }
-      }
-      return;
-    }
-    for (const PrimExpr &arg : op->args) {
-      if (const auto *var = arg.as<VarNode>()) {
-        if (var->dtype.is_handle()) {
-          written_.insert(GetRef<Var>(var));
-        }
-      } else if (const auto *load = arg.as<BufferLoadNode>()) {
-        written_.insert(load->buffer->data);
-      } else if (const auto *call = arg.as<CallNode>()) {
-        // Nested address_of / tvm_access_ptr inside an extern argument list.
-        MarkOpaqueEscapes(call);
-      }
-    }
   }
 
   /*! \brief Check an op's definite reads, then apply its writes.

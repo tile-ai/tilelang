@@ -219,6 +219,26 @@ def test_reports_a_fragment_written_only_after_its_read(capfd):
     assert MESSAGE in _verify(kernel, capfd)
 
 
+def test_reports_an_unguarded_loop_carried_read(capfd):
+    """An unguarded loop-carried read is a real finding, not an artifact.
+
+    The write at the bottom of the body reaches the read only on iterations
+    after the first, so iteration zero reads whatever the fragment happened to
+    hold. Source-order tracking gets this case right. A read guarded so it
+    cannot run on the first iteration is the case it does not.
+    """
+
+    @T.prim_func
+    def kernel(A: T.Tensor((BC,), torch.float32), C: T.Tensor((BC,), torch.float32)):
+        with T.Kernel(1, threads=64) as _:
+            f = T.alloc_fragment((1,), torch.float32)
+            for k in T.serial(BC):
+                C[k] = f[0]
+                f[0] = A[k]
+
+    assert MESSAGE in _verify(kernel, capfd)
+
+
 # ---------------------------------------------------------- reporting cases
 
 
@@ -318,7 +338,7 @@ def _reducer_kernel():
 
 
 def test_reducer_kernel_does_not_raise(capfd):
-    """An unparseable tile op degrades to opaque, it does not throw."""
+    """A tile op the pass cannot parse degrades to opaque, it does not throw."""
     err = _verify(_reducer_kernel(), capfd)
 
     assert MESSAGE not in err
