@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import functools
+import glob
 import hashlib
 import os
+import platform
 import re
-import glob
 import shutil
 import subprocess
 import tempfile
@@ -28,6 +29,15 @@ def _clang_cl_disabled() -> bool:
     return val not in ("", "0", "OFF", "off", "false", "False")
 
 
+def _windows_arch() -> str:
+    machine = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine()).lower()
+    if machine in ("arm64", "aarch64"):
+        return "arm64"
+    if machine in ("x86", "i386", "i686"):
+        return "x86"
+    return "x64"
+
+
 def _vs_install_roots() -> list[str]:
     roots: list[str] = []
     for base in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)")):
@@ -46,6 +56,8 @@ def _vs_install_roots() -> list[str]:
 
 def _candidate_clang_cl_paths(compiler_env: dict[str, str] | None) -> list[str]:
     candidates: list[str] = []
+    target_arch = _windows_arch()
+    llvm_arch = "ARM64" if target_arch == "arm64" else "x64"
 
     def add(path: str | None) -> None:
         if path and os.path.exists(path) and path not in candidates:
@@ -54,10 +66,15 @@ def _candidate_clang_cl_paths(compiler_env: dict[str, str] | None) -> list[str]:
     if explicit := os.environ.get("CLANG_CL"):
         add(explicit)
 
+    if compiler_env and (vc_install := compiler_env.get("VCINSTALLDIR")):
+        vs_install = os.path.dirname(os.path.normpath(vc_install))
+        add(os.path.join(vs_install, "VC", "Tools", "Llvm", llvm_arch, "bin", "clang-cl.exe"))
+        add(os.path.join(vs_install, "VC", "Tools", "Llvm", "bin", "clang-cl.exe"))
+
     # VS-bundled LLVM (when the "C++ Clang Compiler for Windows" workload is installed).
     for vs_root in _vs_install_roots():
         for pattern in (
-            os.path.join(vs_root, "*", "*", "VC", "Tools", "Llvm", "x64", "bin", "clang-cl.exe"),
+            os.path.join(vs_root, "*", "*", "VC", "Tools", "Llvm", llvm_arch, "bin", "clang-cl.exe"),
             os.path.join(vs_root, "*", "*", "VC", "Tools", "Llvm", "bin", "clang-cl.exe"),
         ):
             for hit in sorted(glob.glob(pattern), reverse=True):
@@ -128,6 +145,11 @@ def _find_vsdevcmd() -> str | None:
                 vswhere_candidates.append(candidate)
 
     for vswhere in vswhere_candidates:
+        vc_tools_component = (
+            "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+            if _windows_arch() == "arm64"
+            else "Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+        )
         try:
             proc = subprocess.run(
                 [
@@ -136,7 +158,7 @@ def _find_vsdevcmd() -> str | None:
                     "-products",
                     "*",
                     "-requires",
-                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    vc_tools_component,
                     "-find",
                     r"Common7\Tools\VsDevCmd.bat",
                 ],
@@ -159,10 +181,7 @@ def _find_vsdevcmd() -> str | None:
         if not base:
             continue
         root = os.path.join(base, "Microsoft Visual Studio")
-        for pattern in (
-            os.path.join(root, "2022", "*", "Common7", "Tools", "VsDevCmd.bat"),
-            os.path.join(root, "2019", "*", "Common7", "Tools", "VsDevCmd.bat"),
-        ):
+        for pattern in (os.path.join(root, "*", "*", "Common7", "Tools", "VsDevCmd.bat"),):
             matches = sorted(glob.glob(pattern), reverse=True)
             if matches:
                 return matches[0]
@@ -174,7 +193,8 @@ def _import_vsdevcmd_environment(vsdevcmd: str) -> dict[str, str] | None:
     if not cmd_exe:
         cmd_exe = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "cmd.exe")
 
-    command = f'call "{vsdevcmd}" -no_logo -arch=x64 -host_arch=x64 >nul && set'
+    target_arch = _windows_arch()
+    command = f'call "{vsdevcmd}" -no_logo -arch={target_arch} -host_arch={target_arch} >nul && set'
     command_line = f'"{cmd_exe}" /d /s /c "{command}"'
     try:
         proc = subprocess.run(
