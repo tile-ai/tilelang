@@ -101,9 +101,9 @@ public:
   //   new_num_elems = old_num_elems * factor
   // For example, f32->i8 (32b -> 8b) uses rescale_num=32, rescale_den=8.
   // i8->f32 (8b -> 32b) uses rescale_num=8, rescale_den=32.
-  // For sub-byte subtype views, the output layout may temporarily gain or drop
-  // a trailing "pack lane" dimension so that the layout still describes how
-  // multiple logical elements share the same physical storage slot.
+  // Reinterpreting views rescale the last (stride-1) output mode, keeping
+  // the output in the view dtype's element units; widening requires storage
+  // to be contiguous and aligned at the new element width.
   virtual Layout Reshape(const ffi::Array<PrimExpr> &shape,
                          arith::Analyzer *analyzer = nullptr,
                          const PrimExpr rescale_num = Integer(1),

@@ -148,6 +148,42 @@ def _make_sync_sliced_ts_tmem_kernel():
     return main
 
 
+def _make_ts_gemm_through_punned_view_kernel():
+    """A bf16 operand overlaying the upper half of an f32 TMEM buffer.
+
+    The FA4-style P-in-S overlay: the dtype-punned view's layout must
+    preserve the sub-element position (pack lane) of the base buffer, and
+    its addresses must resolve through the base's tcgen05.alloc word.
+    """
+
+    @T.prim_func
+    def main(
+        P: T.Tensor((128, 128), T.bfloat16),
+        V: T.Tensor((128, 128), T.bfloat16),
+        D: T.Tensor((128, 128), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            P_shared = T.alloc_shared((128, 128), T.bfloat16)
+            V_shared = T.alloc_shared((128, 128), T.bfloat16)
+            P_frag = T.alloc_fragment((128, 128), T.bfloat16)
+            O_frag = T.alloc_fragment((128, 128), T.float32)
+            S_tmem = T.alloc_tmem((128, 128), T.float32)
+            O_tmem = T.alloc_tmem((128, 128), T.float32)
+            P_view = T.view(S_tmem, shape=(128, 256), dtype=T.bfloat16)
+            done = T.alloc_barrier(1)
+
+            T.copy(P, P_shared)
+            T.copy(P_shared, P_frag)
+            T.copy(P_frag, P_view[:, 128:256])
+            T.copy(V, V_shared)
+            T.gemm(P_view[:, 128:256], V_shared, O_tmem, mbar=done, clear_accum=True)
+            T.mbarrier_wait_parity(done, 0)
+            T.copy(O_tmem, O_frag)
+            T.copy(O_frag, D)
+
+    return main
+
+
 def _make_explicit_2cta_gemm_kernel():
     """Explicit two-CTA GEMM: user-scheduled operand publish and completion.
 
@@ -317,6 +353,21 @@ def test_sync_gemm_preserves_sliced_ts_operands_for_sm100_selection():
     source = tilelang.compile(_make_sync_sliced_ts_tmem_kernel(), target="cuda").get_kernel_source()
     assert source.count("tl::tcgen05mma_ts") == 4
     assert "increase_descriptor_offset" in source
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_ts_gemm_through_dtype_punned_view():
+    import torch
+
+    kernel = tilelang.compile(_make_ts_gemm_through_punned_view_kernel(), target="cuda")
+    torch.manual_seed(0)
+    p = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    d = torch.empty(128, 128, device="cuda", dtype=torch.float32)
+    kernel(p, v, d)
+    torch.testing.assert_close(d, p.float() @ v.float(), rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_cuda

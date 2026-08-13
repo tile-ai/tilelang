@@ -356,6 +356,38 @@ def test_tmem_copy_roundtrip_sliced_batch(name, shape, forward, threads):
     _run_roundtrip(_make_batch_sliced_roundtrip_kernel(shape, forward, threads), shape)
 
 
+def _make_widening_view_of_interleaved_layout_kernel():
+    """pack::16b keeps each bf16 in its own b32 slot (column stride 2), so
+    bf16 pairs are not stored contiguously and a float32 view of the buffer
+    has no compatible layout."""
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            frag16 = T.alloc_fragment((128, 64), T.bfloat16)
+            frag32 = T.alloc_fragment((128, 32), T.float32)
+            tmem = T.alloc_tmem((128, 64), T.bfloat16)
+            view = T.view(tmem, shape=(128, 32), dtype=T.float32)
+
+            T.annotate_layout({tmem: T.Layout((128, 64), lambda i, j: [i, 2 * j])})
+            T.copy(frag16, tmem)
+            T.copy(view, frag32)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_widening_view_of_interleaved_layout_is_rejected():
+    with pytest.raises(Exception, match="cannot reinterpret"):
+        tilelang.compile(
+            _make_widening_view_of_interleaved_layout_kernel(),
+            target="cuda",
+            pass_configs=PASS_CONFIGS,
+        )
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
