@@ -120,6 +120,27 @@ def test_silent_for_global_scope_buffers(capfd):
     assert MESSAGE not in _verify(kernel, capfd)
 
 
+def test_silent_for_a_scoped_parameter_buffer(capfd):
+    """A parameter is the caller's to fill, whatever storage scope it carries.
+
+    Cross-thread scopes ask whether some other *node in this body* writes the
+    buffer, and the caller is not one. A shared-scope parameter therefore has
+    to be admitted on the strength of being a parameter, or it reports while
+    an identical local-scope parameter stays silent.
+    """
+
+    @T.prim_func
+    def kernel(
+        S: T.Tensor((BC,), torch.float32, scope="shared.dyn"),
+        C: T.Tensor((BC,), torch.float32),
+    ):
+        with T.Kernel(1, threads=64) as _:
+            for i in T.Parallel(BC):
+                C[i] = S[i]
+
+    assert MESSAGE not in _verify(kernel, capfd)
+
+
 def test_reports_a_shared_buffer_read_before_any_copy(capfd):
     """The general case the gemm-specific check could not see."""
 

@@ -222,6 +222,8 @@ struct BufferInitVerifier : public StmtExprVisitor {
 
   std::vector<Report> reports_;
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> written_;
+  /*! \brief Buffers the caller established, written by no node here. */
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> params_;
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> reported_;
   std::unordered_map<const VarNode *, std::vector<const Object *>>
       potential_writers_;
@@ -229,10 +231,15 @@ struct BufferInitVerifier : public StmtExprVisitor {
   /*! \brief The store whose subexpressions are being visited, if any. */
   const Object *active_store_ = nullptr;
 
-  /*! \brief Treat every parameter buffer as written by the caller. */
+  /*! \brief Treat every parameter buffer as written by the caller.
+   *
+   * Recorded separately as well: the caller is not a node in this body, so a
+   * cross-thread scope asking who else writes the buffer would never find it.
+   */
   void SeedParams(const PrimFunc &f) {
     for (const auto &kv : f->buffer_map) {
       written_.insert(kv.second->data);
+      params_.insert(kv.second->data);
     }
   }
 
@@ -270,9 +277,12 @@ struct BufferInitVerifier : public StmtExprVisitor {
     if (reported_.count(var)) {
       return;
     }
-    const bool satisfied = IsCrossThreadScope(buffer.scope())
-                               ? WrittenByAnotherNode(var, reader)
-                               : written_.count(var) > 0;
+    // A parameter arrives written whatever its scope; only buffers the body
+    // has to establish itself go through the scope-dependent question.
+    const bool satisfied =
+        params_.count(var) > 0 ||
+        (IsCrossThreadScope(buffer.scope()) ? WrittenByAnotherNode(var, reader)
+                                            : written_.count(var) > 0);
     if (satisfied) {
       return;
     }
