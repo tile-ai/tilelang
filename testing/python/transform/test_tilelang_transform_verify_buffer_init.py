@@ -216,6 +216,43 @@ def test_silent_when_shared_buffer_is_written_by_a_later_branch(capfd):
     assert MESSAGE not in _verify(kernel, capfd)
 
 
+def test_reports_a_shared_store_that_reads_its_own_destination(capfd):
+    """Ignoring source order must not let a store vouch for itself.
+
+    A shared buffer is satisfied when some *other* node writes it, so the
+    reading node's own write has to be discounted here exactly as it is for a
+    gemm accumulating into an untouched accumulator. The store below is the
+    only writer of `s` and reads the destination it is about to establish.
+    """
+
+    @T.prim_func
+    def kernel(A: T.Tensor((NB, BC), torch.float32), C: T.Tensor((NB, BC), torch.float32)):
+        with T.Kernel(NB, threads=128) as bx:
+            s = T.alloc_shared((BC,), torch.float32)
+            for i in T.Parallel(BC):
+                s[i] = s[i] + A[bx, i]
+            for i in T.Parallel(BC):
+                C[bx, i] = s[i]
+
+    assert MESSAGE in _verify(kernel, capfd)
+
+
+def test_silent_when_another_node_writes_the_shared_destination(capfd):
+    """The same accumulation is fine once anything else establishes a value."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((NB, BC), torch.float32), C: T.Tensor((NB, BC), torch.float32)):
+        with T.Kernel(NB, threads=128) as bx:
+            s = T.alloc_shared((BC,), torch.float32)
+            T.clear(s)
+            for i in T.Parallel(BC):
+                s[i] = s[i] + A[bx, i]
+            for i in T.Parallel(BC):
+                C[bx, i] = s[i]
+
+    assert MESSAGE not in _verify(kernel, capfd)
+
+
 def test_reports_a_fragment_written_only_after_its_read(capfd):
     """Per-thread storage keeps order-sensitive tracking.
 
@@ -331,9 +368,9 @@ def no_kernel_cache():
 
 
 def _reducer_kernel():
-    """A kernel using T.alloc_reducer / T.finalize_reducer.
+    """A kernel using the legacy T.alloc_reducer / T.finalize_reducer form.
 
-    Before LayoutReducer runs, the tl.tileop.finalize_reducer call carries a
+    At the point this pass runs, the tl.tileop.finalize_reducer call carries a
     single argument while the op's builder reads args[1]. Parsing it there
     throws, which must never take a compile down.
     """
@@ -351,6 +388,32 @@ def _reducer_kernel():
             T.copy(r_f, B)
 
     return kernel
+
+
+def test_silent_for_the_reducer_v2_idiom(capfd):
+    """The first-class reducer ops inherit the default read-before-write set.
+
+    `T.reducer_init` establishes the accumulator, `T.reducer_update` reads and
+    writes it, and `T.finalize_reducer` reads it into a destination it writes.
+    None of these ops overrides GetReadBeforeWriteRegions, so this pins that
+    the op-agnostic default is already right for them.
+    """
+
+    @T.prim_func
+    def kernel(A: T.Tensor((BC,), torch.float32), B: T.Tensor((1,), torch.float32)):
+        with T.Kernel(1, threads=64) as _:
+            src = T.alloc_fragment((BC,), torch.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((1,), torch.float32, op="sum")
+            T.reducer_init(acc)
+            for i in T.Parallel(BC):
+                T.reducer_update(acc[0], src[i])
+            result = T.alloc_fragment((1,), torch.float32)
+            T.finalize_reducer(acc, result)
+            if T.get_thread_binding() == 0:
+                B[0] = result[0]
+
+    assert MESSAGE not in _verify(kernel, capfd)
 
 
 def test_reducer_kernel_does_not_raise(capfd):

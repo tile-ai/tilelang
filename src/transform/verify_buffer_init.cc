@@ -226,6 +226,8 @@ struct BufferInitVerifier : public StmtExprVisitor {
   std::unordered_map<const VarNode *, std::vector<const Object *>>
       potential_writers_;
   Span current_span_;
+  /*! \brief The store whose subexpressions are being visited, if any. */
+  const Object *active_store_ = nullptr;
 
   /*! \brief Treat every parameter buffer as written by the caller. */
   void SeedParams(const PrimFunc &f) {
@@ -291,16 +293,24 @@ struct BufferInitVerifier : public StmtExprVisitor {
    *
    * The destination is recorded last, so `x[i] = x[i] + 1` reports x when
    * nothing wrote it earlier: a store reads its own right-hand side before it
-   * establishes anything. Cross-thread scopes are unaffected, since they
-   * ignore source order and ask only whether another node writes the buffer.
+   * establishes anything. The store is also published as the reader of every
+   * subexpression it contains, so a cross-thread scope discounts this store
+   * when asking whether another node writes the buffer. Without that, a store
+   * that reads its own destination would vouch for itself and the same code
+   * would report under a per-thread scope but not a shared one.
    */
   void VisitStmt_(const BufferStoreNode *op) final {
+    const Object *saved = active_store_;
+    active_store_ = op;
     StmtExprVisitor::VisitStmt_(op);
+    active_store_ = saved;
     written_.insert(op->buffer->data);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
-    CheckRead(op->buffer);
+    // Discounting the enclosing store only affects loads of its own
+    // destination; it is recorded as a writer of nothing else.
+    CheckRead(op->buffer, Kind::kGeneric, active_store_);
     StmtExprVisitor::VisitExpr_(op);
   }
 
