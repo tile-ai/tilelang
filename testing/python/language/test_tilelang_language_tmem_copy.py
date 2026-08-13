@@ -205,6 +205,60 @@ def _make_16bit_roundtrip_kernel(shape, forward, dtype):
     return main
 
 
+def _make_16bit_split_kernel(shape, dtype, nsplit, split_store):
+    """One whole-buffer copy against sliced copies on the other side.
+
+    A 16-bit buffer whose b32-column count is not a power of two (e.g. 96
+    bf16 values = 48 columns) decomposes into multiple instruction segments
+    inside ONE tcgen05 call (x32 + x16); the segment recursion must advance
+    the register pointer in b32 columns, not in dst_t elements.  A symmetric
+    whole-store/whole-load roundtrip cancels a unit error, so exactly one
+    side is split into power-of-two (single-segment) slices.
+    """
+    last = shape[-1]
+    assert last % nsplit == 0
+    step = last // nsplit
+    rank = len(shape)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor(shape, dtype),
+        D: T.Tensor(shape, dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(shape, dtype)
+            A_frag = T.alloc_fragment(shape, dtype)
+            tmem = T.alloc_tmem(shape, dtype)
+            B_frag = T.alloc_fragment(shape, dtype)
+            B_shared = T.alloc_shared(shape, dtype)
+
+            T.annotate_layout({tmem: T.Layout(shape, lambda i, j: [i, j])})
+            T.copy(A, A_shared)
+            T.copy(A_shared, A_frag)
+            if split_store:
+                for s in range(nsplit):
+                    T.copy(
+                        _last_dim_slice(A_frag, rank, s * step, (s + 1) * step),
+                        _last_dim_slice(tmem, rank, s * step, (s + 1) * step),
+                    )
+            else:
+                T.copy(A_frag, tmem)
+            T.fill(A_frag, -1.0)
+            T.fill(B_frag, -2.0)
+            if split_store:
+                T.copy(tmem, B_frag)
+            else:
+                for s in range(nsplit):
+                    T.copy(
+                        _last_dim_slice(tmem, rank, s * step, (s + 1) * step),
+                        _last_dim_slice(B_frag, rank, s * step, (s + 1) * step),
+                    )
+            T.copy(B_frag, B_shared)
+            T.copy(B_shared, D)
+
+    return main
+
+
 def _make_shared_allocation_roundtrip_kernel(wide_cols, narrow_cols):
     """Roundtrip two TMEM buffers that share one physical tcgen05.alloc.
 
@@ -386,6 +440,26 @@ def test_widening_view_of_interleaved_layout_is_rejected():
             target="cuda",
             pass_configs=PASS_CONFIGS,
         )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize("split_store", [True, False], ids=["whole_load", "whole_store"])
+def test_tmem_copy_16bit_multi_segment(split_store):
+    shape = (128, 96)
+    kernel = tilelang.compile(
+        _make_16bit_split_kernel(shape, T.bfloat16, nsplit=3, split_store=split_store),
+        target="cuda",
+        pass_configs=PASS_CONFIGS,
+    )
+    source = kernel.get_kernel_source()
+    # The whole-buffer side must be one multi-segment call (48 b32 columns).
+    assert "tcgen05_st_32dp32bNx<48," in source or "tcgen05_ld_32dp32bNx<48," in source
+    a = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+    d = torch.empty(*shape, device="cuda", dtype=torch.bfloat16)
+    kernel(a, d)
+    torch.testing.assert_close(d, a, rtol=0.0, atol=0.0)
 
 
 @tilelang.testing.requires_cuda
