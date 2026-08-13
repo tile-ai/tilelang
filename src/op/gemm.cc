@@ -159,6 +159,27 @@ AccessRegions GemmNode::GetAccessRegions() const {
   return result;
 }
 
+ffi::Array<BufferRegion> GemmNode::GetReadBeforeWriteRegions() const {
+  ffi::Array<BufferRegion> result;
+  result.push_back(aRegion_);
+  result.push_back(bRegion_);
+  if (sfaRegion_.defined()) {
+    result.push_back(sfaRegion_);
+  }
+  if (sfbRegion_.defined()) {
+    result.push_back(sfbRegion_);
+  }
+  // The accumulator's old contents are consumed only when the clear is
+  // provably absent. GetAccessRegions() uses !is_one() because a clear that
+  // cannot be proven still creates a read dependency for pipelining; here the
+  // question is whether the op definitely reads, so the pipelined idiom
+  // `clear_accum=(k == 0)` must not count.
+  if (is_zero(clearAccum_)) {
+    result.push_back(cRegion_);
+  }
+  return result;
+}
+
 TileOperator GemmNode::Clone() const {
   auto op = make_object<GemmNode>(*this);
   return Gemm(op);
