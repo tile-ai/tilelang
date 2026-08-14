@@ -27,12 +27,21 @@
 
 #include "../op/operator.h"
 #include <tvm/arith/analyzer.h>
+#include <tvm/target/target.h>
 #include <tvm/tirx/op.h>
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+
+// Widest vector memory access, in bits, that the vectorize planner will
+// consider for code whose memory-access mix is described by
+// `global_only_access` (touches global memory and no shared memory).
+// Single source of truth for the width-cap policy: the layout-inference
+// cost model calls this too, so a candidate layout is scored under exactly
+// the cap the vectorizer will later enforce on it.
+int MaxVectorLoadBits(const Target &target, bool global_only_access);
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 

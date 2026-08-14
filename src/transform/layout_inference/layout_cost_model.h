@@ -1,21 +1,31 @@
 /*!
  * \file layout_cost_model.h
- * \brief Score free-mode layout attempts by estimated memory access cost
- *        (layout RFC, design B2).
+ * \brief Cost models that rank free-mode layout attempts.
  *
- * The scoring walks a connected component's global-memory-touching
- * statements — fragment<->global copies and parallel loops with direct
- * global accesses — and charges each one max(bandwidth bytes, issue-
- * equivalent bytes) under the attempt's tentative layouts. Registers stay
- * as the lexicographic tiebreak, and are the entire score when the cost
- * model is disabled (reproducing the legacy register-count ordering).
+ * The inference engine enumerates one attempt per candidate root inside a
+ * connected component and keeps the cheapest complete layout assignment.
+ * What "cheapest" means is a pluggable policy behind LayoutCostModel:
+ *
+ *  - RegisterCountCostModel (legacy): total fragment register slots,
+ *    nothing else. Kept as the default so the historical ordering stays
+ *    byte-identical.
+ *  - IOAwareCostModel (layout RFC, design B2): walks the component's
+ *    global-memory-touching statements (fragment<->global copies and
+ *    parallel loops with direct global accesses) and charges each one
+ *    max(bandwidth bytes, issue-equivalent bytes) under the attempt's
+ *    tentative layouts; registers remain the lexicographic tiebreak.
+ *
+ * Concrete models live in the .cc; callers go through Create().
  */
 
 #ifndef TVM_TL_TRANSFORM_LAYOUT_INFERENCE_LAYOUT_COST_MODEL_H_
 #define TVM_TL_TRANSFORM_LAYOUT_INFERENCE_LAYOUT_COST_MODEL_H_
 
 #include <cstdint>
+#include <memory>
 #include <vector>
+
+#include <tvm/target/target.h>
 
 #include "../../op/operator.h"
 
@@ -24,8 +34,8 @@ namespace tl {
 
 /*! \brief Score of one complete free-mode layout assignment. Compared
  *  lexicographically: estimated memory cost first, total register count as
- *  the tiebreak. With the cost model disabled `mem` stays 0 for every
- *  attempt and the ordering degenerates to the legacy register count. */
+ *  the tiebreak. Models that do not estimate memory leave `mem` at 0, so
+ *  their ordering degenerates to the register count. */
 struct AttemptCost {
   int64_t mem{0};
   int64_t regs{0};
@@ -37,15 +47,28 @@ struct AttemptCost {
   }
 };
 
-/*! \brief Score one attempt: `members` indexes the component's operators
- *  inside `infer_list` (carrying the attempt's solved state, e.g. loop
- *  layouts), and `tmp_layout_map` holds the attempt's tentative buffer
- *  layouts. Statements outside the model are charged a conservative worst
- *  case — an attempt must never profit from opacity. */
-AttemptCost ComputeAttemptCost(const std::vector<int> &members,
-                               const std::vector<TileOperator> &infer_list,
-                               const LayoutMap &tmp_layout_map,
-                               bool cost_model_enabled);
+/*! \brief Policy interface: rank one attempt of a component.
+ *
+ *  `members` indexes the component's operators inside `infer_list` (which
+ *  carries the attempt's solved state, e.g. loop layouts), and
+ *  `tmp_layout_map` holds the attempt's tentative buffer layouts. */
+class LayoutCostModel {
+public:
+  virtual ~LayoutCostModel() = default;
+
+  virtual AttemptCost Score(const std::vector<int> &members,
+                            const std::vector<TileOperator> &infer_list,
+                            const LayoutMap &tmp_layout_map) const = 0;
+
+  /*! \brief Model name for diagnostics. */
+  virtual const char *Name() const = 0;
+
+  /*! \brief Instantiate the model selected by `tl.layout_cost_model`
+   *  (false = legacy register count, true = IO-aware). `target` feeds the
+   *  vectorizer's shared width-cap policy (MaxVectorLoadBits); the legacy
+   *  model ignores it. */
+  static std::unique_ptr<LayoutCostModel> Create(bool io_aware, Target target);
+};
 
 } // namespace tl
 } // namespace tvm

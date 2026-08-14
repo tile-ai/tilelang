@@ -32,11 +32,11 @@
 #include "../common/loop_fusion_utils.h"
 #include "../common/pipeline_utils.h"
 #include "../common/union_find.h"
-#include "parallel_loop_layout_validator.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
-#include "layout_cost_model.h"
 #include "backend/common/target_utils.h"
+#include "layout_cost_model.h"
+#include "parallel_loop_layout_validator.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -1080,7 +1080,9 @@ private:
     std::deque<int> q;
     std::vector<bool> in_queue(infer_list_.size(), false);
 
-    bool cost_model_enabled = tl_config::LayoutCostModelEnabled();
+    std::unique_ptr<LayoutCostModel> cost_model =
+        LayoutCostModel::Create(tl_config::LayoutCostModelEnabled(), target_);
+    DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
     for (auto &&[root, members] : components) {
       DLOG(INFO) << "======================= processing component " << root
                  << '\n';
@@ -1131,8 +1133,8 @@ private:
         }
 
         if (do_update) {
-          AttemptCost cost = ComputeAttemptCost(
-              members, infer_list_, tmp_layout_map, cost_model_enabled);
+          AttemptCost cost =
+              cost_model->Score(members, infer_list_, tmp_layout_map);
           DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
                      << ": mem=" << cost.mem << " regs=" << cost.regs;
           // Keep the cheapest attempt; ties resolve to the earliest root so
