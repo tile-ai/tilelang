@@ -236,6 +236,7 @@ public:
 
     // Clear previous buffer info and collect new ones
     buffer_vector_infos_.clear();
+    has_bf16_numeric_op_ = false;
     this->operator()(node);
 
     if (verbose) {
@@ -265,6 +266,40 @@ public:
 
     // GCD with loop extent to ensure vector_size divides the loop extent
     vector_size_ = arith::ZeroAwareGCD(loop_extent_vector_size_, vector_size_);
+
+    // Metal: bf16 accesses inside loops that touch local/fragment buffers
+    // must not exceed 2 lanes (MSL has no bf16 vectors beyond bfloat2 in the
+    // register path; the packed uint path is only valid for pure copy loops
+    // without fragment participation). Additionally, ANY bf16 numeric
+    // operation (arithmetic, comparison, min/max, numeric cast) caps the
+    // total lanes at 2: the packed uintN carrier must never enter a numeric
+    // expression, since the Metal codegen would silently emit integer
+    // arithmetic on it.
+    if (TargetIsMetal(Target::Current(false)) && vector_size_ > 2) {
+      bool has_fragment = false;
+      bool has_bf16 = false;
+      for (const auto &info : buffer_vector_infos_) {
+        if (!info.buffer.defined()) {
+          continue;
+        }
+        if (info.buffer->dtype.is_bfloat16()) {
+          has_bf16 = true;
+        }
+        // The legacy local/fragment bucket covered both local/fragment-scope
+        // buffers and loop-invariant non-local broadcast loads (upstream
+        // #2935 now classifies them as kLocal / kBroadcastLoad).
+        if (IsLocalBuffer(info.buffer, /*allow_var=*/true) ||
+            IsFragmentBuffer(info.buffer) || IsBroadcastLoad(info)) {
+          has_fragment = true;
+        }
+        if (has_fragment && has_bf16) {
+          break;
+        }
+      }
+      if (has_bf16_numeric_op_ || (has_fragment && has_bf16)) {
+        vector_size_ = 2;
+      }
+    }
 
     if (verbose) {
       std::cerr << "=== Final vector_size: " << vector_size_ << " ===" << "\n";
@@ -600,6 +635,12 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *node) final {
+    // A bf16-typed call (other than if_then_else, which is a bit-level pick
+    // used by predicated pure copies) is a numeric operation on bf16 vectors:
+    // packed carriers must never enter it.
+    if (node->dtype.is_bfloat16() && node->op != builtin::if_then_else()) {
+      has_bf16_numeric_op_ = true;
+    }
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
@@ -862,11 +903,29 @@ private:
   }
 
   PrimExpr VisitExpr_(const CastNode *node) final {
+    // Any bf16 numeric cast (bf16 on either side, non-identity) is a numeric
+    // operation: packed carriers must not be produced/consumed by it.
+    // Identity casts are bit-level pass-throughs.
+    if ((node->dtype.is_bfloat16() || node->value.dtype().is_bfloat16()) &&
+        node->dtype != node->value.dtype()) {
+      has_bf16_numeric_op_ = true;
+    }
     // Consider both source and target types to ensure all intermediate
     // vector types can be represented. For example, casting int32 to
     // float8_e4m3fn: target allows 128/8=16 lanes but int32 only supports
     // up to 128/32=4 lanes in CUDA vector types.
     int target_lanes = vector_load_bits_max_ / node->dtype.bits();
+    // Metal: MSL vector types cap bfloat16 at 2 lanes (bfloat2) on EITHER
+    // side of the cast; other 16/32-bit element vectors cap at 4 lanes (no
+    // 128-bit vectors beyond float4). CUDA's 128-bit packing does not apply
+    // to MSL. Checking only the target dtype (previous behavior) let
+    // bf16->fp32 casts plan 4 lanes and emit an illegal uint2->float4 cast.
+    if (TargetIsMetal(Target::Current(false))) {
+      int metal_max_lanes =
+          (node->dtype.is_bfloat16() || node->value.dtype().is_bfloat16()) ? 2
+                                                                           : 4;
+      target_lanes = std::min(target_lanes, metal_max_lanes);
+    }
     int source_bits = node->value.dtype().bits();
     int max_lanes = target_lanes;
     if (source_bits > 0) {
@@ -924,6 +983,14 @@ private:
     int min_vec_size = arith::ZeroAwareGCD(
         buffer_vec_size,
         vector_load_bits_max_ / (buffer->dtype.bits() * buffer->dtype.lanes()));
+    // Metal: MSL has no bfloat16 vectors beyond bfloat2 (2 lanes) in the
+    // fragment/register path; global/shared buffers keep the packed uint
+    // path (bf16x8 via uint4). Cap bf16 at 2 lanes for local/fragment only.
+    if (TargetIsMetal(Target::Current(false)) && buffer->dtype.is_bfloat16() &&
+        (IsLocalBuffer(buffer, /*allow_var=*/true) ||
+         IsFragmentBuffer(buffer))) {
+      min_vec_size = std::min(min_vec_size, 2);
+    }
     bool is_invariant = false;
     int try_vec_size = buffer_vec_size;
     while (try_vec_size >= min_vec_size) {
@@ -938,6 +1005,12 @@ private:
     // If is_invariant is still false, use the fallback min_vec_size
     if (!is_invariant) {
       buffer_vec_size = min_vec_size;
+    }
+    if (TargetIsMetal(Target::Current(false)) && buffer->dtype.is_bfloat16() &&
+        (IsLocalBuffer(buffer, /*allow_var=*/true) ||
+         IsFragmentBuffer(buffer)) &&
+        buffer_vec_size > 2) {
+      buffer_vec_size = 2;
     }
 
     // 3. If element offset is independent with loop_var, ignore it.
@@ -995,12 +1068,44 @@ private:
     }
   }
 
+  // Mark the loop as containing a bf16 numeric operation (arithmetic,
+  // comparison, min/max) when either operand is bfloat16. The Metal codegen
+  // represents bf16x4/x8 as packed uintN carriers that are only valid for
+  // pure memory copies; any numeric use must cap the vector width at 2 lanes
+  // (bfloat2), otherwise the packed carrier would silently enter integer
+  // arithmetic.
+#define TL_MARK_BF16_NUMERIC_BINARY(NodeType)                                  \
+  PrimExpr VisitExpr_(const NodeType *node) final {                            \
+    if (node->a.dtype().is_bfloat16() || node->b.dtype().is_bfloat16() ||      \
+        node->dtype.is_bfloat16()) {                                           \
+      has_bf16_numeric_op_ = true;                                             \
+    }                                                                          \
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);                     \
+  }
+
+  TL_MARK_BF16_NUMERIC_BINARY(AddNode)
+  TL_MARK_BF16_NUMERIC_BINARY(SubNode)
+  TL_MARK_BF16_NUMERIC_BINARY(MulNode)
+  TL_MARK_BF16_NUMERIC_BINARY(DivNode)
+  TL_MARK_BF16_NUMERIC_BINARY(ModNode)
+  TL_MARK_BF16_NUMERIC_BINARY(MinNode)
+  TL_MARK_BF16_NUMERIC_BINARY(MaxNode)
+  TL_MARK_BF16_NUMERIC_BINARY(EQNode)
+  TL_MARK_BF16_NUMERIC_BINARY(NENode)
+  TL_MARK_BF16_NUMERIC_BINARY(LTNode)
+  TL_MARK_BF16_NUMERIC_BINARY(LENode)
+  TL_MARK_BF16_NUMERIC_BINARY(GTNode)
+  TL_MARK_BF16_NUMERIC_BINARY(GENode)
+
+#undef TL_MARK_BF16_NUMERIC_BINARY
+
   int vector_load_bits_max_;
   int initial_vector_size_ = 128;
   int loop_extent_vector_size_ = 128;
 
   const ForNode *inner_for_{};
   bool has_nonlocal_memory_access_ = false;
+  bool has_bf16_numeric_op_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
   LayoutMap layout_map_;

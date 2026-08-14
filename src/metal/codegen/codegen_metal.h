@@ -65,6 +65,18 @@ public:
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;    // NOLINT(*)
   void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const AddNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const SubNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const MulNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const DivNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const ModNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const MinNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const MaxNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const EQNode *op, std::ostream &os) final;        // NOLINT(*)
+  void VisitExpr_(const NENode *op, std::ostream &os) final;        // NOLINT(*)
+  void VisitExpr_(const LTNode *op, std::ostream &os) final;        // NOLINT(*)
+  void VisitExpr_(const LENode *op, std::ostream &os) final;        // NOLINT(*)
+  void VisitExpr_(const GTNode *op, std::ostream &os) final;        // NOLINT(*)
+  void VisitExpr_(const GENode *op, std::ostream &os) final;        // NOLINT(*)
   void VisitExpr_(const CastNode *op, std::ostream &os) final;      // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) final;      // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;  // NOLINT(*)
@@ -91,6 +103,12 @@ private:
                                std::ostream &os) const;
   void EnsureFragmentLaneVars();
   void EnsureCooperativeTensorBuffer(const Var &var);
+  // Reject packed bf16 carriers (bf16x4/x6/x8 -> uint2/uint3/uint4) inside
+  // numeric expressions: the packed uint path is only valid for pure memory
+  // copies (load/store/select/broadcast/identity cast). Any arithmetic,
+  // comparison, min/max or non-identity cast consuming a packed carrier would
+  // silently compile to integer operations.
+  void CheckNoPackedBF16Carrier(DataType dtype, const char *ctx) const;
 
   std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       simdgroup_dtype_;
