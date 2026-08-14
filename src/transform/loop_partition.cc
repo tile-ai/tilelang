@@ -102,6 +102,9 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
                   const Fragment &loop_layout, bool require_padding_guard) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_index.defined());
+  // `op` is moved into `body` below; capture its span up front so reconstructed
+  // statements can still inherit the source location of the original loop.
+  const Span op_span = op->span;
   int old_loop_depth = loop_layout->InputDim();
   int new_loop_depth = loop_layout->OutputDim();
   // Create the new loop iter var
@@ -193,12 +196,12 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
   }
   PrimExpr simplified_guard = analyzer->Simplify(guard);
   if (!analyzer->CanProve(simplified_guard)) {
-    body = IfThenElse(simplified_guard, body, Stmt());
+    body = IfThenElse(simplified_guard, body, Stmt(), op_span);
   }
 
   for (int i = new_loop_depth - 1; i >= 0; i--) {
     body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
-               ForKind::kSerial, body);
+               ForKind::kSerial, body, std::nullopt, {}, std::nullopt, op_span);
     analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
   }
 
@@ -345,7 +348,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
 
   // Step 3: Wrap with predicate if provided and this is a parallel loop
   if (predicate.defined() && parallel_loop) {
-    return IfThenElse(predicate.value(), result_loop);
+    return IfThenElse(predicate.value(), result_loop, Stmt(), loop->span);
   }
 
   return result_loop;

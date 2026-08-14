@@ -75,6 +75,7 @@ from tvm.tirx.transform import prim_func_pass
 # Cache the Op for if_then_else to avoid repeated lookups
 _IF_THEN_ELSE_OP = Op.get("tirx.if_then_else")
 
+from tilelang.ir import get_stmt_span, stamp_stmt_spans
 from tilelang.utils.language import (
     is_fragment,
     is_global,
@@ -251,7 +252,9 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
                 result.append(normalized)
         if not result:
             return None
-        return SeqStmt(result) if len(result) > 1 else result[0]
+        normalized = SeqStmt(result) if len(result) > 1 else result[0]
+        stamp_stmt_spans(normalized, get_stmt_span(stmt))
+        return normalized
 
     if isinstance(stmt, IfThenElse):
         condition = _substitute_bind_env(stmt.condition, env)
@@ -260,15 +263,17 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
         normalized_else = None
         if stmt.else_case:
             normalized_else = else_case if else_case is not None else Evaluate(0)
-        return IfThenElse(
+        normalized_if = IfThenElse(
             condition,
             then_case if then_case is not None else Evaluate(0),
             normalized_else,
         )
+        stamp_stmt_spans(normalized_if, get_stmt_span(stmt))
+        return normalized_if
 
     if isinstance(stmt, For):
         body = _normalize_flat_binds(stmt.body, dict(env))
-        return For(
+        new_for = For(
             stmt.loop_var,
             _substitute_bind_env(stmt.min, env),
             _substitute_bind_env(stmt.extent, env),
@@ -278,8 +283,13 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
             stmt.annotations,
             _substitute_bind_env(stmt.step, env),
         )
+        stamp_stmt_spans(new_for, get_stmt_span(stmt))
+        return new_for
 
-    return _substitute_bind_env(stmt, env)
+    result = _substitute_bind_env(stmt, env)
+    # `substitute` rebuilds any node referencing a bind var, dropping its span.
+    stamp_stmt_spans(result, get_stmt_span(stmt))
+    return result
 
 
 def normalize_flat_binds(stmt: Stmt) -> Stmt:
@@ -359,7 +369,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
     def _make_for(self, original: For, new_body: Stmt) -> For:
         """Create a new For node with updated body, preserving other attributes."""
-        return For(
+        new_for = For(
             original.loop_var,
             original.min,
             original.extent,
@@ -369,6 +379,8 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             original.annotations,
             original.step,
         )
+        stamp_stmt_spans(new_for, get_stmt_span(original))
+        return new_for
 
     # ----- entry point for each For loop -----
 
@@ -469,6 +481,10 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         # Wrap with buffer declarations and allocations
         result = self._wrap_with_allocations(result, store_entries + load_entries)
 
+        # The replacement subtree inherits the original loop's span. Nodes
+        # already stamped above (compute loop, normalized body) keep their own
+        # spans; the staging copies and the alloc-scope wrapper get stamped too.
+        stamp_stmt_spans(result, get_stmt_span(op))
         return result
 
     # ----- helpers -----
@@ -498,7 +514,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
     def _make_vectorized_loop(self, original: For, body: Stmt) -> For:
         """Create a vectorized For loop based on the original."""
-        return For(
+        new_for = For(
             original.loop_var,
             original.min,
             original.extent,
@@ -508,6 +524,8 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             original.annotations,
             original.step,
         )
+        stamp_stmt_spans(new_for, get_stmt_span(original))
+        return new_for
 
     def _create_copy_loops(
         self,
