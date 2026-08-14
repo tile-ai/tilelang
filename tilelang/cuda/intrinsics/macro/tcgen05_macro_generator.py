@@ -58,6 +58,14 @@ class TCGEN05DescriptorParams:
     buffer; passed to ``T.increase_descriptor_offset`` after building the
     descriptor from the buffer base. ``0`` for a whole-buffer / base-origin
     operand. Computed by :func:`compute_umma_descriptor` from the CuTe layout."""
+    k_panel_elems: int | None = None
+    """Element stride between consecutive K swizzle-atom panels (K-major only),
+    read off the decoded layout. ``None`` when the layout has a single K panel,
+    or for an MN-major operand, in which case the ``ki // k_atom_size`` term the
+    offset formulas multiply it into is always zero / unused. Callers must not
+    reconstruct this as ``mn_extent * swizzle_atom_elems``: for an operand that
+    is a slice of a wider buffer (``B[64:128, :]``) the panels stay spaced by the
+    *buffer's* MN extent, not the operand's."""
 
 
 @dataclass(frozen=True)
@@ -187,6 +195,20 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         f"only row-major operand layouts are supported."
     )
 
+    # Element stride between consecutive K swizzle-atom panels, taken from the
+    # decoded layout: a K-major operand wider than one swizzle atom decodes as
+    # (MN, (atom, panels)), and the panel sub-mode's stride is what the offset
+    # formulas need. Reconstructing it as `mn_dim * swizzle_atom_elems` only holds
+    # when the operand covers its whole buffer -- for a slice, mn_dim shrinks while
+    # the panel spacing does not.
+    k_panel_elems = None
+    if k_major:
+        k_shape = tile[k_idx].shape
+        if isinstance(k_shape, tuple) and len(k_shape) == 2:
+            panel_stride = tile[k_idx].stride[-1]
+            if isinstance(panel_stride, int):
+                k_panel_elems = panel_stride
+
     # SwizzleAtomMNSize per UMMA LayoutType (NONE->1, B32->2, B64->4, B128->8) = 1 << b_bits.
     W = 1 << byte_swizzle.b_bits
     swizzled = not swizzle_mode.is_none()
@@ -236,6 +258,7 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         elem_bits=elem_bits,
         is_k_major=k_major,
         slice_byte_offset=slice_byte_offset,
+        k_panel_elems=k_panel_elems,
     )
 
 
@@ -951,6 +974,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        # K-panel stride from the decoded layout; m_dim / n_dim_per_cta are operand
+        # extents and only match the panel spacing for a whole-buffer operand
+        # (see TCGEN05DescriptorParams.k_panel_elems).
+        a_k_panel_elems = a_params.k_panel_elems if a_params.k_panel_elems is not None else m_dim * a_swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim_per_cta * b_swizzle_atom_elems
         mask_zero = T.cast(0, T.int32)
 
         # Pre-compute offsets
@@ -958,16 +986,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             A_elem_offset = (
                 (ki % ak_atom_size) * micro_size_k
                 + inst_m_idx * atom_m_per_cta * a_swizzle_atom_elems
-                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                + (ki // ak_atom_size) * a_k_panel_elems
             )
         else:
             A_elem_offset = inst_m_idx * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
 
         if b_params.is_k_major:
             B_elem_offset = (
-                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + inst_n_idx * atom_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
             B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (
@@ -1052,15 +1078,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_elem_bits = b_params.elem_bits
         bk_atom_size = b_params.k_atom_size
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        # See TCGEN05DescriptorParams.k_panel_elems.
+        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim_per_cta * b_swizzle_atom_elems
         mask_zero = T.cast(0, T.int32)
 
         A_tmem_offset = a_params.atom_offset(inst_m_idx * atom_m_per_cta, ki * meta.atom_k)
 
         if b_params.is_k_major:
             B_elem_offset = (
-                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + inst_n_idx * atom_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
             B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (
@@ -1144,21 +1170,22 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        # See TCGEN05DescriptorParams.k_panel_elems.
+        a_k_panel_elems = a_params.k_panel_elems if a_params.k_panel_elems is not None else m_dim * a_swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim_per_cta * b_swizzle_atom_elems
 
         if a_params.is_k_major:
             A_elem_offset = (
                 (ki % ak_atom_size) * micro_size_k
                 + inst_m_idx * atom_m_per_cta * a_swizzle_atom_elems
-                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                + (ki // ak_atom_size) * a_k_panel_elems
             )
         else:
             A_elem_offset = inst_m_idx * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
 
         if b_params.is_k_major:
             B_elem_offset = (
-                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + inst_n_idx * atom_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
             B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (

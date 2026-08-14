@@ -80,6 +80,14 @@ class WGMMADescriptorParams:
     buffer; passed to ``T.increase_descriptor_offset`` after building the
     descriptor from the buffer base. ``0`` for a whole-buffer / base-origin
     operand. Computed by :func:`compute_gmma_descriptor` from the CuTe layout."""
+    k_panel_elems: int | None = None
+    """Element stride between consecutive K swizzle-atom panels (K-major only),
+    read off the decoded layout. ``None`` when the layout has a single K panel,
+    or for an MN-major operand, in which case the ``ki // k_atom_size`` term the
+    offset formulas multiply it into is always zero / unused. Callers must not
+    reconstruct this as ``mn_extent * swizzle_atom_elems``: for an operand that
+    is a slice of a wider buffer (``B[64:128, :]``) the panels stay spaced by the
+    *buffer's* MN extent, not the operand's."""
 
 
 def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: int = 16, region=None) -> WGMMADescriptorParams:
@@ -149,6 +157,21 @@ def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         f"only row-major operand layouts are supported."
     )
 
+    # Element stride between consecutive K swizzle-atom panels, taken from the
+    # decoded layout in element space. A K-major operand wider than one swizzle
+    # atom decodes as (MN, (atom, panels)), and the panel sub-mode's stride is
+    # what the atom offset formulas need to step by. Reconstructing it as
+    # `mn_dim * swizzle_atom_elems` is only valid when the operand covers the
+    # whole buffer -- for a slice (`B[64:128, :]`) mn_dim is the slice extent
+    # while the panels stay spaced by the buffer's MN extent.
+    k_panel_elems = None
+    if k_major:
+        k_shape = tile[k_idx].shape
+        if isinstance(k_shape, tuple) and len(k_shape) == 2:
+            panel_stride = tile[k_idx].stride[-1]
+            if isinstance(panel_stride, int):
+                k_panel_elems = panel_stride
+
     # W per CuTe LayoutType (INTERLEAVE->1, B32->2, B64->4, B128->8) = 1 << b_bits.
     W = 1 << byte_swizzle.b_bits
     swizzled = not swizzle_mode.is_none()
@@ -203,6 +226,7 @@ def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         elems_in_bytes=elems_in_bytes,
         is_k_major=k_major,
         slice_byte_offset=slice_byte_offset,
+        k_panel_elems=k_panel_elems,
     )
 
 
@@ -643,6 +667,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         elems_in_bytes = b_params.elems_in_bytes
         bk_atom_size = b_params.k_atom_size
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim * b_swizzle_atom_elems
 
         thread_binding = self.get_thread_binding()
 
@@ -656,9 +681,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
 
             B_offset = (
-                (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
-                + warp_j * wgmma_inst_n * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
+                (ki // bk_atom_size) * b_k_panel_elems + warp_j * wgmma_inst_n * b_swizzle_atom_elems + (ki % bk_atom_size) * micro_size_k
                 if b_params.is_k_major
                 else (
                     ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
@@ -744,6 +767,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        a_k_panel_elems = a_params.k_panel_elems if a_params.k_panel_elems is not None else m_dim * a_swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim * b_swizzle_atom_elems
 
         thread_binding = self.get_thread_binding()
 
@@ -757,16 +782,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             warp_j = warp_n * num_inst_n + inst_n_idx
 
             A_offset = (
-                (ki % ak_atom_size) * micro_size_k
-                + warp_i * 64 * a_swizzle_atom_elems
-                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                (ki % ak_atom_size) * micro_size_k + warp_i * 64 * a_swizzle_atom_elems + (ki // ak_atom_size) * a_k_panel_elems
                 if a_is_k_major
                 else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
             )
             B_offset = (
-                (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + warp_j * wgmma_inst_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + warp_j * wgmma_inst_n * b_swizzle_atom_elems
                 if b_is_k_major
                 else (
                     ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)

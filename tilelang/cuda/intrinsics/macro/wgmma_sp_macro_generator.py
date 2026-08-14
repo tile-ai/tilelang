@@ -184,6 +184,11 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         # where max specially handles the case when n_dim is 8.
         ak_atom_size = a_params.k_atom_size
         bk_atom_size = b_params.k_atom_size
+        # K-panel stride comes from the decoded layout; m_dim/n_dim are the operand
+        # extents and only coincide with the panel spacing when the operand covers
+        # its whole buffer (see WGMMADescriptorParams.k_panel_elems).
+        a_k_panel_elems = a_params.k_panel_elems if a_params.k_panel_elems is not None else m_dim * a_swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim * b_swizzle_atom_elems
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
@@ -253,13 +258,13 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                         A_offset = (
                             (ki % ak_atom_size) * (micro_size_k // self.SPARSE_FACTOR)
                             + warp_i * 64 * a_swizzle_atom_elems
-                            + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                            + (ki // ak_atom_size) * a_k_panel_elems
                             if a_is_k_major
                             else warp_i * 64 * (k_dim // self.SPARSE_FACTOR)
                             + ki * a_swizzle_atom_elems * (micro_size_k // self.SPARSE_FACTOR)
                         )
                         B_offset = (
-                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                            (ki // bk_atom_size) * b_k_panel_elems
                             + (ki % bk_atom_size) * micro_size_k
                             + warp_j * wgmma_inst_n * b_swizzle_atom_elems
                             if b_is_k_major
@@ -339,6 +344,9 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
         b_slice_byte_offset = b_params.slice_byte_offset
         bk_atom_size = b_params.k_atom_size
+        # See WGMMADescriptorParams.k_panel_elems: n_dim is the operand extent, not
+        # the panel spacing, once the operand is a slice of a wider buffer.
+        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim * b_swizzle_atom_elems
         wgmma_inst_m, wgmma_inst_n = self.wgmma_inst_m, self.wgmma_inst_n
         num_inst_m = 4 * self.warp_row_tiles // wgmma_inst_m
         num_inst_n = self.warp_col_tiles // wgmma_inst_n
@@ -395,7 +403,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
                         warp_j = warp_n * num_inst_n + j
                         A_offset = ki * warp_rows * local_size_a + i * local_size_a
                         B_offset = (
-                            (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                            (ki // bk_atom_size) * b_k_panel_elems
                             + warp_j * wgmma_inst_n * b_swizzle_atom_elems
                             + (ki % bk_atom_size) * micro_size_k
                             if b_is_k_major
