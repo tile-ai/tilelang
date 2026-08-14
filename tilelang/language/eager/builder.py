@@ -212,6 +212,13 @@ class Builder(BaseBuilder):
         self.eager_jit_subs: dict[str, PrimExpr] = {}
         self.func_pass_configs: dict[str, Any] | None = None
         self.func_compile_flags: list[str] | str | None = None
+        # Capacity-dim contract markers: populated ONLY by the
+        # explicit ``T.annotate_capacity_dims(...)`` opt-in (see below); the
+        # syntactic auto-inference from tensor annotations was removed
+        # because ordinary exact dimensions must remain strict. Attached to the PrimFunc as
+        # ``tilelang_capacity_dims`` so the Metal adapter can exempt exactly
+        # the explicitly declared dims from strict extent checks.
+        self._capacity_dims: dict[str, tuple[int, ...]] = {}
         self.current_file = "<unknown>"
         self.current_line = 0
         self.current_macro_name = "<unknown-macro>"
@@ -1111,6 +1118,46 @@ def annotate_compile_flags(flags: list[str] | str) -> None:
     builder.func_compile_flags = flags
 
 
+def annotate_capacity_dims(dims: dict[str, Sequence[int]]) -> None:
+    """Explicitly declare capacity dimensions of tensor parameters.
+
+    A *capacity* dimension is a shape dimension whose declared extent is an
+    upper bound for the accesses the kernel will perform: the kernel body
+    is expected to bound its accesses with a runtime mask/offset guard
+    (condition against a runtime bound, a runtime-bounded loop, or an
+    offset/clamp), so the caller may supply an actual buffer whose extent
+    differs from the declared one (the legal padded/masked grouped-QMM
+    pattern, e.g. declared rows=64, actual per-expert slices of 15).
+
+    Only dims listed here are exempted from the Metal adapter's strict
+    per-dimension extent validation; every other dim (including dims that
+    merely reference scalar function parameters in the tensor annotation)
+    is validated exactly.  The declaration is a compiled contract: it is
+    attached to the PrimFunc as ``tilelang_capacity_dims`` and the Metal
+    adapter audits the marked dims' accesses for mask/offset guard evidence
+    (warning when none is found).
+
+    Can be placed before or after tensor type annotations.  Lazy
+    ``@T.prim_func`` kernels can equivalently opt in per function via
+    ``func.with_attr("tilelang_capacity_dims", {"W": (0,)})``.
+
+    Example::
+
+        @tilelang.jit
+        def kernel(A_q, rows, m):
+            A_q: T.Tensor((rows, K), "uint8")
+            T.annotate_capacity_dims({"A_q": (0,)})
+            ...
+    """
+    builder = Builder.current()
+    if builder is None:
+        raise JITNoBuilderError("T.annotate_capacity_dims() can only be used inside @tilelang.jit or @T.prim_func")
+    if builder.eager_jit == "phase1":
+        return
+    for name, name_dims in dims.items():
+        builder._capacity_dims[str(name)] = tuple(int(d) for d in name_dims)
+
+
 def annotate_pass_configs(configs: dict[str, Any]) -> None:
     """
     Annotate pass configuration inside a function body.
@@ -1146,6 +1193,16 @@ def _patch_prim_func_attrs(pf: PrimFunc, builder: Builder) -> PrimFunc:
         if isinstance(flags, str):
             flags = [flags]
         pf = pf.with_attr("tilelang_compile_flags", flags)
+    if builder._capacity_dims:
+        tensor_param_names = {str(buf.name) for var in pf.params if (buf := pf.buffer_map.get(var)) is not None}
+        unknown_names = sorted(set(builder._capacity_dims) - tensor_param_names)
+        if unknown_names:
+            raise ValueError(
+                "T.annotate_capacity_dims: unknown tensor parameter name(s) "
+                f"{unknown_names}; declared tensor parameters are "
+                f"{sorted(tensor_param_names)}"
+            )
+        pf = pf.with_attr("tilelang_capacity_dims", dict(builder._capacity_dims))
     return pf
 
 
