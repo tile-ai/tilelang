@@ -14,6 +14,22 @@
 #   3. Otherwise, try auto-detecting from the current Python environment's
 #      site-packages (works with --no-build-isolation).
 
+function(_tilelang_get_native_windows_arch OUTPUT_VAR)
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _tilelang_host_processor)
+  if(NOT "$ENV{PROCESSOR_ARCHITEW6432}" STREQUAL "")
+    string(TOLOWER "$ENV{PROCESSOR_ARCHITEW6432}" _tilelang_env_processor)
+  else()
+    string(TOLOWER "$ENV{PROCESSOR_ARCHITECTURE}" _tilelang_env_processor)
+  endif()
+
+  set(_tilelang_native_arch "x64")
+  if(_tilelang_host_processor MATCHES "^(arm64|aarch64)$"
+      OR _tilelang_env_processor MATCHES "^(arm64|aarch64)$")
+    set(_tilelang_native_arch "arm64")
+  endif()
+  set(${OUTPUT_VAR} "${_tilelang_native_arch}" PARENT_SCOPE)
+endfunction()
+
 function(_tilelang_activate_msvc_env)
   if(NOT WIN32)
     return()
@@ -27,13 +43,7 @@ function(_tilelang_activate_msvc_env)
     return()
   endif()
 
-  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _tilelang_host_processor)
-  string(TOLOWER "$ENV{PROCESSOR_ARCHITECTURE}" _tilelang_env_processor)
-  set(_tilelang_native_arch "x64")
-  if(_tilelang_host_processor MATCHES "^(arm64|aarch64)$"
-      OR _tilelang_env_processor MATCHES "^(arm64|aarch64)$")
-    set(_tilelang_native_arch "arm64")
-  endif()
+  _tilelang_get_native_windows_arch(_tilelang_native_arch)
 
   set(_tilelang_target_arch "${_tilelang_native_arch}")
   if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")

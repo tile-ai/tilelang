@@ -17,6 +17,8 @@ set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 project(TILE_LANG C CXX)
 
+_tilelang_get_native_windows_arch(_tilelang_native_windows_arch)
+
 # MSVC-specific build configuration. Must run after project() so MSVC is
 # defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
 # inherit these settings. CMake also sets MSVC=1 when the compiler is
@@ -54,7 +56,8 @@ if(MSVC)
     $<$<COMPILE_LANGUAGE:C,CXX>:/bigobj>)
 
   if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
-      AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$")
+      AND (CMAKE_SYSTEM_PROCESSOR MATCHES "^(ARM64|arm64|aarch64)$"
+           OR _tilelang_native_windows_arch STREQUAL "arm64"))
     add_compile_options(
       $<$<COMPILE_LANGUAGE:CXX>:/FI${TILELANG_CMAKELISTS_DIR}/cmake/windows_arm64_clang_compat.h>)
   endif()
@@ -138,11 +141,8 @@ function(tilelang_generate_windows_import_library DLL_PATH OUTPUT_VAR STEM)
       set(_tilelang_machine "ARM64")
     elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "")
       string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _tilelang_system_processor)
-      string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _tilelang_host_processor)
-      string(TOLOWER "$ENV{PROCESSOR_ARCHITECTURE}" _tilelang_env_processor)
       if(_tilelang_system_processor MATCHES "^(arm64|aarch64)$"
-          OR _tilelang_host_processor MATCHES "^(arm64|aarch64)$"
-          OR _tilelang_env_processor MATCHES "^(arm64|aarch64)$")
+          OR _tilelang_native_windows_arch STREQUAL "arm64")
         set(_tilelang_machine "ARM64")
       endif()
     endif()
