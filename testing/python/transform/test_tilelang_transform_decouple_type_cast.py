@@ -214,7 +214,13 @@ def test_local_to_memory_with_bind_chain():
 
 
 def test_local_to_memory_with_branch_local_bind():
-    """Test Bind definitions inside an IfThenElse branch do not escape."""
+    """Test Bind definitions inside an IfThenElse branch do not escape.
+
+    The guarded store gets a per-entry validity mask (Codex C1): the mask is
+    zeroed by an init loop, set to 1 at the compute store site (inside the
+    branch), and the copy-to loop is guarded by ``mask[i_copy] != 0`` instead
+    of re-evaluating the original branch condition.
+    """
 
     @T.prim_func
     def before(b: T.Tensor[(16,), T.float8_e4m3fn]):
@@ -234,11 +240,15 @@ def test_local_to_memory_with_branch_local_bind():
             T.reads()
             T.writes()
             b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
+            b_local_cast_mask = T.decl_buffer((16,), "int32", scope="local")
+            for i_mask in T.vectorized(16):
+                b_local_cast_mask[i_mask] = 0
             for i in T.vectorized(16):
                 if i < 8:
                     b_local_cast[i] = T.cast(a_frag[i] * scale[i], T.float8_e4m3fn)
+                    b_local_cast_mask[i] = 1
             for i_copy in T.vectorized(16):
-                if i_copy < 8:
+                if b_local_cast_mask[i_copy] != 0:
                     b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
@@ -274,6 +284,225 @@ def test_cast_buffers_wrapped_in_lexical_alloc_scope():
     post_order_visit(mod["main"].body, _visit)
     assert annotated_blocks[0] == 1, f"Expected 1 lexical_alloc_scope block, got {annotated_blocks[0]}"
     assert allocs_inside[0] == 1, f"Expected the cast buffer alloc inside the scope, got {allocs_inside[0]}"
+
+
+def test_mask_guard_root_if_else_codex_repro():
+    """Codex C1 minimal repro: copy-to guards must NOT re-evaluate original
+    buffer conditions, because an earlier copy-to write-back can flip them.
+
+    Structure: root if/else where the then-branch stores to A (the buffer the
+    guard reads) and the else-branch stores to B. Re-evaluating ``A[i] > 0``
+    in B's copy-to loop after A's copy-to wrote back would flip the guard and
+    read an uninitialized cast local. The mask scheme records compute-time
+    truth at the store site, so B's copy-to fires exactly where the original
+    else-branch store fired.
+    """
+
+    @T.prim_func
+    def before(
+        A: T.Tensor[(8,), T.bfloat16],
+        src: T.Tensor[(8,), T.float32],
+        B: T.Tensor[(8,), T.bfloat16],
+    ):
+        for i in T.vectorized(8):
+            if A[i] > 0:
+                A[i] = T.cast(src[i], T.bfloat16)
+            else:
+                B[i] = T.cast(src[i], T.bfloat16)
+
+    @T.prim_func
+    def after(
+        A: T.Tensor[(8,), T.bfloat16],
+        src: T.Tensor[(8,), T.float32],
+        B: T.Tensor[(8,), T.bfloat16],
+    ):
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            A_local_cast = T.decl_buffer((8,), T.bfloat16, scope="local")
+            B_local_cast_1 = T.decl_buffer((8,), T.bfloat16, scope="local")
+            src_local_cast_2 = T.decl_buffer((8,), T.float32, scope="local")
+            A_local_cast_mask = T.decl_buffer((8,), "int32", scope="local")
+            B_local_cast_1_mask = T.decl_buffer((8,), "int32", scope="local")
+            for i_mask in T.vectorized(8):
+                A_local_cast_mask[i_mask] = 0
+            for i_mask in T.vectorized(8):
+                B_local_cast_1_mask[i_mask] = 0
+            for i_copy in T.vectorized(8):
+                src_local_cast_2[i_copy] = src[i_copy]
+            for i_copy in T.vectorized(8):
+                A_local_cast[i_copy] = A[i_copy]
+            for i in T.vectorized(8):
+                if A_local_cast[i] > T.bfloat16(0.0):
+                    A_local_cast[i] = T.cast(src_local_cast_2[i], T.bfloat16)
+                    A_local_cast_mask[i] = 1
+                else:
+                    B_local_cast_1[i] = T.cast(src_local_cast_2[i], T.bfloat16)
+                    B_local_cast_1_mask[i] = 1
+            for i_copy in T.vectorized(8):
+                if A_local_cast_mask[i_copy] != 0:
+                    A[i_copy] = A_local_cast[i_copy]
+            for i_copy in T.vectorized(8):
+                if B_local_cast_1_mask[i_copy] != 0:
+                    B[i_copy] = B_local_cast_1[i_copy]
+
+    _check(before, after)
+
+
+def _collect_guarded_copy_guards(mod, mask_name: str) -> list[str]:
+    """Return the guard expressions of every IfThenElse guarding a copy loop
+    whose condition references ``mask_name`` (as printed IR strings)."""
+    from tvm.tirx.stmt_functor import post_order_visit
+
+    guards: list[str] = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.IfThenElse) and mask_name in str(node.condition):
+            guards.append(str(node.condition))
+
+    post_order_visit(mod["main"].body, _visit)
+    return guards
+
+
+def test_mask_or_semantics_multi_branch_same_entry():
+    """OR/nested-branch semantics: several stores to the SAME (buffer, indices)
+    entry under different conditions map to ONE validity mask; the copy-to
+    fires iff any branch actually executed. No copy-to guard may reference the
+    original buffers (only the mask)."""
+
+    @T.prim_func
+    def before(
+        src: T.Tensor[(8,), T.float32],
+        B: T.Tensor[(8,), T.float8_e4m3fn],
+    ):
+        # Two branches kept separate so the OR-of-path-conditions semantics of
+        # the decoupled copy guard is exercised as written.
+        for i in T.vectorized(8):
+            if i < 4:  # noqa: SIM114
+                B[i] = T.cast(src[i], T.float8_e4m3fn)
+            elif i < 8:
+                B[i] = T.cast(src[i], T.float8_e4m3fn)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = DecoupleTypeCast()(mod)
+
+    # Exactly one mask buffer, named after the single B entry's cast buffer.
+    from tvm.tirx.stmt_functor import post_order_visit
+
+    buffers = []
+
+    def _collect(node):
+        if isinstance(node, tvm.tirx.AllocBuffer):
+            buffers.append(node.buffer.name)
+
+    post_order_visit(mod["main"].body, _collect)
+    mask_buffers = [n for n in buffers if n.endswith("_mask")]
+    assert mask_buffers == ["B_local_cast_mask"], f"Unexpected mask buffers: {mask_buffers}"
+
+    # Every guarded copy loop reads ONLY the mask, never the original buffers.
+    guards = _collect_guarded_copy_guards(mod, "B_local_cast_mask")
+    assert guards, "Expected at least one mask-guarded copy-to loop"
+    for guard in guards:
+        assert "B[" not in guard, f"Copy-to guard re-reads original buffer: {guard}"
+        assert "src[" not in guard, f"Copy-to guard re-reads original buffer: {guard}"
+
+    # The mask is set inside both branches (OR semantics).
+    body_str = str(mod["main"].body)
+    assert body_str.count("B_local_cast_mask[i] = 1") == 2, body_str
+
+
+def test_unconditional_store_gets_no_mask():
+    """Anti-over-fix: an unconditional store needs no validity mask; the
+    copy-to loop stays unconditional and no mask buffer/init loop is emitted."""
+    from tvm.tirx.stmt_functor import post_order_visit
+
+    @T.prim_func
+    def before(b: T.Tensor[(16,), T.float4_e2m1fn]):
+        b_frag = T.alloc_local((16,), T.float32)
+        for i in T.vectorized(16):
+            b[i] = b_frag[i]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = DecoupleTypeCast()(mod)
+
+    buffers = []
+
+    def _collect(node):
+        if isinstance(node, tvm.tirx.AllocBuffer):
+            buffers.append(node.buffer.name)
+
+    post_order_visit(mod["main"].body, _collect)
+    assert not any(n.endswith("_mask") for n in buffers), f"Unexpected masks: {buffers}"
+
+
+def test_guarded_copy_from_substitutes_loop_var():
+    """Guarded copy-from loops run under their own loop var: the collected
+    path condition (over the original loop var) must be substituted, otherwise
+    the original loop var is left free inside the copy loop ("used before
+    definition" in VarUseDefAnalysis). Regression catch from the D9 C1 mask
+    refactor, which initially dropped the substitution for from_memory guards.
+    """
+
+    @T.prim_func
+    def before(src: T.Tensor[(8,), T.float32], B: T.Tensor[(8,), T.bfloat16]):
+        for i in T.vectorized(8):
+            if i < 4:
+                B[i] = T.cast(src[i], T.bfloat16)
+
+    @T.prim_func
+    def after(src: T.Tensor[(8,), T.float32], B: T.Tensor[(8,), T.bfloat16]):
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            B_local_cast = T.decl_buffer((8,), T.bfloat16, scope="local")
+            src_local_cast_1 = T.decl_buffer((8,), T.float32, scope="local")
+            B_local_cast_mask = T.decl_buffer((8,), "int32", scope="local")
+            for i_mask in T.vectorized(8):
+                B_local_cast_mask[i_mask] = 0
+            for i_copy in T.vectorized(8):
+                if i_copy < 4:
+                    src_local_cast_1[i_copy] = src[i_copy]
+            for i in T.vectorized(8):
+                if i < 4:
+                    B_local_cast[i] = T.cast(src_local_cast_1[i], T.bfloat16)
+                    B_local_cast_mask[i] = 1
+            for i_copy in T.vectorized(8):
+                if B_local_cast_mask[i_copy] != 0:
+                    B[i_copy] = B_local_cast[i_copy]
+
+    _check(before, after)
+
+
+def test_ternary_value_load_copy_from_is_unconditional():
+    """Both value branches of ``if_then_else`` are staged unconditionally.
+
+    DecoupleTypeCast must not apply the ternary condition to either copy-from:
+    the condition selects a value in the compute loop; it is not an enclosing
+    statement guard on either memory load.
+    """
+
+    @T.prim_func
+    def before(
+        src: T.Tensor[(16,), T.bfloat16],
+        out: T.Tensor[(8,), T.float32],
+    ):
+        for i in T.vectorized(8):
+            out[i] = T.if_then_else(
+                i < 4,
+                T.cast(src[i], T.float32),
+                T.cast(src[i + 8], T.float32) * T.float32(2),
+            )
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = DecoupleTypeCast()(mod)
+    text = mod["main"].script()
+
+    assert "src_local_cast_1[i_copy] = src[i_copy]" in text
+    assert "src_local_cast_2[i_copy] = src[i_copy + 8]" in text
+    assert "if i_copy < 4:" not in text
+    assert "if 4 <= i_copy:" not in text
 
 
 # =============================================================================

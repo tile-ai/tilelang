@@ -116,9 +116,12 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
 
 CodeGenTileLangMetal::CodeGenTileLangMetal(Target target) : target_(target) {
   restrict_keyword_ = "__restrict";
-  decl_stream << "union __TVMArgUnion {\n"
+  decl_stream << "#ifndef __TILELANG_ARGUNION_DEFINED\n"
+              << "#define __TILELANG_ARGUNION_DEFINED\n"
+              << "union __TVMArgUnion {\n"
               << " int v_int[2];\n"
-              << "};\n\n";
+              << "};\n"
+              << "#endif\n\n";
 }
 
 std::string CodeGenTileLangMetal::Finish() {
@@ -362,8 +365,17 @@ void CodeGenTileLangMetal::PrintType(DataType t,
     os << "bool";
     return;
   }
-  if ((t.is_float16() || t.is_bfloat16()) && lanes > 4 && lanes <= 8 &&
-      lanes % 2 == 0) {
+  if (t.is_float16() && lanes > 4 && lanes <= 8 && lanes % 2 == 0) {
+    os << "uint" << lanes / 2;
+    return;
+  }
+  // bf16 packed carriers are only legal for pure memory copies (Codex C2).
+  // Only widths whose packed size matches the logical size are representable:
+  // bf16x4 -> uint2 (8 bytes) and bf16x8 -> uint4 (16 bytes). bf16x6 would
+  // map to uint3 whose 16-byte array stride does NOT match the 12-byte
+  // logical size, silently misaddressing every element after the first, so it
+  // is rejected here (loud compile error) instead of miscompiled.
+  if (t.is_bfloat16() && (lanes == 4 || lanes == 8)) {
     os << "uint" << lanes / 2;
     return;
   }
@@ -420,6 +432,16 @@ void CodeGenTileLangMetal::PrintType(DataType t,
       return;
     }
   } else if (t.is_bfloat16()) {
+    // MSL has no 128-bit bfloat vectors: bfloat (1 lane) and bfloat2 are
+    // the only representable forms. Wider bfloat vectors are carried as
+    // packed uint2/uint4 elsewhere in the codegen.
+    if (t.lanes() == 2) {
+      os << "bfloat2";
+      return;
+    }
+    TVM_FFI_ICHECK_EQ(t.lanes(), 1)
+        << "Metal: bfloat16 vectors with " << t.lanes()
+        << " lanes are not representable in MSL (max 2 lanes: bfloat2)";
     os << "bfloat";
     return;
   }
@@ -763,8 +785,9 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
                    dtype == DataType::Float(32) ||
                    dtype == DataType::BFloat(16))
-        << "Only float16, float32, and bfloat16 are supported, but got "
-        << dtype;
+        << "Only float16, float32, and bfloat16 are supported for "
+           "metal.simdgroup, but got "
+        << dtype << " for buffer " << op->buffer->name;
     TVM_FFI_ICHECK(constant_size % 64 == 0)
         << "Only 8x8 matrix is supported, but got " << constant_size
         << " bytes\n";
@@ -862,25 +885,44 @@ void CodeGenTileLangMetal::EnsureFragmentLaneVars() {
 
 void CodeGenTileLangMetal::VisitExpr_(const SelectNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  os << "select(" << PrintExpr(op->false_value) << ", "
-     << PrintExpr(op->true_value) << ", " << PrintExpr(op->condition) << ")";
+  // MSL's select() requires both operands to have identical types; untyped
+  // integer/float literals (e.g. INT32_MIN) make the overload ambiguous.
+  // Cast literal operands to the select result dtype explicitly.
+  auto print_operand = [&](const PrimExpr &operand) {
+    if (op->dtype.lanes() == 1 && (operand.as<IntImmNode>() != nullptr ||
+                                   operand.as<FloatImmNode>() != nullptr)) {
+      os << "(";
+      PrintType(op->dtype, os);
+      os << ")(" << PrintExpr(operand) << ")";
+    } else {
+      os << PrintExpr(operand);
+    }
+  };
+  os << "select(";
+  print_operand(op->false_value);
+  os << ", ";
+  print_operand(op->true_value);
+  os << ", " << PrintExpr(op->condition) << ")";
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const BroadcastNode *op,
                                       std::ostream &os) { // NOLINT(*)
   std::string v = PrintExpr(op->value);
   int lanes = op->dtype.lanes();
-  if ((op->dtype.is_float16() || op->dtype.is_bfloat16()) && lanes > 4 &&
-      lanes % 2 == 0) {
+  if (op->dtype.is_float16() && lanes > 4 && lanes % 2 == 0) {
     os << "uint" << lanes / 2 << "(";
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      if (op->dtype.is_float16()) {
-        os << "as_type<uint>(half2(" << v << ", " << v << "))";
-      } else if (op->dtype.is_bfloat16()) {
-        os << "as_type<uint>(bfloat2(" << v << ", " << v << "))";
-      }
+      os << "as_type<uint>(half2(" << v << ", " << v << "))";
+    }
+    os << ')';
+  } else if (op->dtype.is_bfloat16() && lanes >= 4 && lanes % 2 == 0) {
+    os << "uint" << lanes / 2 << "(";
+    for (int i = 0; i < lanes / 2; ++i) {
+      if (i != 0)
+        os << ", ";
+      os << "as_type<uint>(bfloat2(" << v << ", " << v << "))";
     }
     os << ')';
   } else {
@@ -895,8 +937,121 @@ void CodeGenTileLangMetal::VisitExpr_(const BroadcastNode *op,
   }
 }
 
+void CodeGenTileLangMetal::CheckNoPackedBF16Carrier(DataType dtype,
+                                                    const char *ctx) const {
+  if (dtype.is_bfloat16() && dtype.lanes() >= 4) {
+    LOG(FATAL) << "Metal: packed bf16 carrier (bf16x" << dtype.lanes()
+               << " -> uint" << dtype.lanes() / 2
+               << ") must not enter a numeric " << ctx
+               << " expression. bf16 numeric operations are capped at 2 lanes "
+                  "(bfloat2) by the vectorizer; the packed uint path is only "
+                  "valid for pure memory copies (Codex external review C2).";
+  }
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const SubNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "subtract");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "subtract");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const MulNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "multiply");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "multiply");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const DivNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "divide");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "divide");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const ModNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "modulo");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "modulo");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const MinNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "min");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "min");
+  if (op->dtype.is_bfloat16()) {
+    // MSL's standard library has no min() overload for bfloat/bfloat2
+    // (bfloat16 support is limited to arithmetic/relational ops); emit the
+    // equivalent ternary select. TIR min semantics: a < b ? a : b.
+    os << "select(" << PrintExpr(op->b) << ", " << PrintExpr(op->a) << ", "
+       << PrintExpr(op->a) << " < " << PrintExpr(op->b) << ")";
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const MaxNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "max");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "max");
+  if (op->dtype.is_bfloat16()) {
+    // See MinNode: no max() overload for bfloat/bfloat2; a > b ? a : b
+    // (MSL select(false_value, true_value, condition)).
+    os << "select(" << PrintExpr(op->b) << ", " << PrintExpr(op->a) << ", "
+       << PrintExpr(op->a) << " > " << PrintExpr(op->b) << ")";
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const EQNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "equality comparison");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "equality comparison");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const NENode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "inequality comparison");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "inequality comparison");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const LTNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "less-than comparison");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "less-than comparison");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const LENode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "less-equal comparison");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "less-equal comparison");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const GTNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "greater-than comparison");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "greater-than comparison");
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const GENode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "greater-equal comparison");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "greater-equal comparison");
+  CodeGenC::VisitExpr_(op, os);
+}
+
 void CodeGenTileLangMetal::VisitExpr_(const AddNode *op,
                                       std::ostream &os) { // NOLINT(*)
+  CheckNoPackedBF16Carrier(op->a.dtype(), "add");
+  CheckNoPackedBF16Carrier(op->b.dtype(), "add");
   if (TryPrintMlxSwizzleExpr(ffi::GetRef<PrimExpr>(op), os)) {
     return;
   }
@@ -905,6 +1060,13 @@ void CodeGenTileLangMetal::VisitExpr_(const AddNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
                                       std::ostream &os) { // NOLINT(*)
+  // Identity casts are bit-level pass-throughs (pure copy); any non-identity
+  // cast touching a packed bf16 carrier is a numeric conversion and must be
+  // rejected (Codex C2).
+  if (op->dtype != op->value.dtype()) {
+    CheckNoPackedBF16Carrier(op->dtype, "cast");
+    CheckNoPackedBF16Carrier(op->value.dtype(), "cast");
+  }
   std::ostringstream value;
   if (TryPrintMlxSwizzleExpr(op->value, value)) {
     os << CastFromTo(value.str(), op->value.dtype(), op->dtype);
@@ -1338,6 +1500,16 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       << "CodegenMetal does not support inter-function calls, "
       << "but expression " << ffi::GetRef<Call>(op) << " calls PrimFunc "
       << op->op;
+  // Packed bf16 carriers are only valid in pure-copy call contexts:
+  // if_then_else (bit-level pick used by predicated copies) and reinterpret
+  // (bit-level). Any other call consuming a packed carrier would compile to
+  // integer-typed operands (Codex C2).
+  if (!op->op.same_as(builtin::if_then_else()) &&
+      !op->op.same_as(builtin::reinterpret())) {
+    for (const PrimExpr &arg : op->args) {
+      CheckNoPackedBF16Carrier(arg.dtype(), "call");
+    }
+  }
   if (TryPrintSimdgroupIndexExpr(op, os)) {
     return;
   }
@@ -1707,6 +1879,19 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     os << " + ";
     this->PrintExpr(op->args[1], os);
     os << "))";
+  } else if (op->op.same_as(builtin::if_then_else())) {
+    // CodeGenC's default if_then_else-expression printing emits a temp
+    // declaration into the current stream, which breaks when the expression
+    // is nested inside another expression (e.g. "x = if (...) ...").
+    // MSL accepts a plain C ternary for scalar/vector operands.
+    TVM_FFI_ICHECK_EQ(op->args.size(), 3U);
+    os << "(";
+    this->PrintExpr(op->args[0], os);
+    os << " ? ";
+    this->PrintExpr(op->args[1], os);
+    os << " : ";
+    this->PrintExpr(op->args[2], os);
+    os << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -1726,11 +1911,18 @@ void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
     temp << std::scientific << op->value;
     if (op->dtype.bits() == 32)
       temp << 'f';
-    else if (op->dtype.bits() == 16)
+    else if (op->dtype.bits() == 16 && op->dtype.is_float16())
       temp << 'h';
+    else if (op->dtype.is_bfloat16())
+      temp << ')';
   }
   MarkConst(temp.str());
-  os << temp.str();
+  if (op->dtype.is_bfloat16() && !std::isinf(op->value) &&
+      !std::isnan(op->value)) {
+    os << "bfloat(" << temp.str();
+  } else {
+    os << temp.str();
+  }
 }
 
 ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
