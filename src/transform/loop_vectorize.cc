@@ -274,7 +274,7 @@ public:
     // operation (arithmetic, comparison, min/max, numeric cast) caps the
     // total lanes at 2: the packed uintN carrier must never enter a numeric
     // expression, since the Metal codegen would silently emit integer
-    // arithmetic on it (Codex external review C2).
+    // arithmetic on it.
     if (TargetIsMetal(Target::Current(false)) && vector_size_ > 2) {
       bool has_fragment = false;
       bool has_bf16 = false;
@@ -637,7 +637,7 @@ private:
   PrimExpr VisitExpr_(const CallNode *node) final {
     // A bf16-typed call (other than if_then_else, which is a bit-level pick
     // used by predicated pure copies) is a numeric operation on bf16 vectors:
-    // packed carriers must never enter it (Codex C2).
+    // packed carriers must never enter it.
     if (node->dtype.is_bfloat16() && node->op != builtin::if_then_else()) {
       has_bf16_numeric_op_ = true;
     }
@@ -904,8 +904,8 @@ private:
 
   PrimExpr VisitExpr_(const CastNode *node) final {
     // Any bf16 numeric cast (bf16 on either side, non-identity) is a numeric
-    // operation: packed carriers must not be produced/consumed by it (Codex
-    // C2). Identity casts are bit-level pass-throughs.
+    // operation: packed carriers must not be produced/consumed by it.
+    // Identity casts are bit-level pass-throughs.
     if ((node->dtype.is_bfloat16() || node->value.dtype().is_bfloat16()) &&
         node->dtype != node->value.dtype()) {
       has_bf16_numeric_op_ = true;
@@ -1073,7 +1073,7 @@ private:
   // represents bf16x4/x8 as packed uintN carriers that are only valid for
   // pure memory copies; any numeric use must cap the vector width at 2 lanes
   // (bfloat2), otherwise the packed carrier would silently enter integer
-  // arithmetic (Codex external review C2).
+  // arithmetic.
 #define TL_MARK_BF16_NUMERIC_BINARY(NodeType)                                  \
   PrimExpr VisitExpr_(const NodeType *node) final {                            \
     if (node->a.dtype().is_bfloat16() || node->b.dtype().is_bfloat16() ||      \

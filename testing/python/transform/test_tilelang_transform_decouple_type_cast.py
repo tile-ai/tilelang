@@ -216,7 +216,7 @@ def test_local_to_memory_with_bind_chain():
 def test_local_to_memory_with_branch_local_bind():
     """Test Bind definitions inside an IfThenElse branch do not escape.
 
-    The guarded store gets a per-entry validity mask (Codex C1): the mask is
+    The guarded store gets a per-entry validity mask: the mask is
     zeroed by an init loop, set to 1 at the compute store site (inside the
     branch), and the copy-to loop is guarded by ``mask[i_copy] != 0`` instead
     of re-evaluating the original branch condition.
@@ -286,8 +286,8 @@ def test_cast_buffers_wrapped_in_lexical_alloc_scope():
     assert allocs_inside[0] == 1, f"Expected the cast buffer alloc inside the scope, got {allocs_inside[0]}"
 
 
-def test_mask_guard_root_if_else_codex_repro():
-    """Codex C1 minimal repro: copy-to guards must NOT re-evaluate original
+def test_mask_guard_root_if_else_regression():
+    """Copy-to guards must NOT re-evaluate original
     buffer conditions, because an earlier copy-to write-back can flip them.
 
     Structure: root if/else where the then-branch stores to A (the buffer the
@@ -440,8 +440,8 @@ def test_guarded_copy_from_substitutes_loop_var():
     """Guarded copy-from loops run under their own loop var: the collected
     path condition (over the original loop var) must be substituted, otherwise
     the original loop var is left free inside the copy loop ("used before
-    definition" in VarUseDefAnalysis). Regression catch from the D9 C1 mask
-    refactor, which initially dropped the substitution for from_memory guards.
+    definition" in VarUseDefAnalysis). This catches a mask refactor that
+    drops the substitution for from-memory guards.
     """
 
     @T.prim_func

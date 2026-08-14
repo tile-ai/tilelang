@@ -1,55 +1,29 @@
-"""Metal fragment-reduce F1 single-simdgroup plan enforcement (D14/D16/D17/D18).
+"""Metal fragment-reduce single-simdgroup plan enforcement.
 
-D14 made the F1 discipline plan-level: every thread_step of a fragment
-reduce's XOR-butterfly must stay inside one 32-lane simdgroup (Metal has
-no named barriers; cross-simdgroup in-place combine relies on SIMD
-lockstep ordering that does not hold across simdgroups, and the raw
-thread index addresses the scratch buffer without a tid < nt guard).
+Every XOR-butterfly step must remain inside a 32-lane simdgroup. Metal has
+no named barriers, so an in-place cross-simdgroup combine cannot rely on SIMD
+lockstep ordering. For each step, ``nt = extent * scale`` must describe a
+power-of-two closure no wider than 32 lanes, and the full threadgroup must be
+an integer number of complete ``nt`` blocks. Otherwise a partner read can
+escape the participating range, the threadgroup, or the initialized scratch.
 
-D16 (Codex review 54fd8741 HIGH-1, cross-validated by internal audit
-AS-24) tightened the criterion to per-step nt = extent*scale > 32 ->
-reject: CheckAllReduceWidth (src/backend/common/op/reduce.h) only
-requires logical_width == extent to be a positive power of two and
-scale > 0; scale itself need NOT be a power of two, so the public
-constructor _make_allreduce_dim0_scale_kernel(T.reduce_sum, 16, 3)
-generated a 48-thread plan (offsets 24/12/6/3) whose partner 32^24 = 56
-is OOB on the scratch and outside the threadgroup.
-
-D17 (Codex review 6dc03835 HIGH-1 mathematical deepening) closes the
-remaining closure window: nt <= 32 is NOT sufficient.  The raw XOR
-butterfly is closed on the participating range [0, nt) iff nt is a power
-of two — each offset must flip a single lane bit below log2(nt); for a
-non-power-of-two nt the partner of a participating lane escapes the
-range even though every offset is < 32 (e.g. extent=8, scale=3, nt=24:
-partner 16^12 = 28 >= 24).
-
-D18 (Codex review 2c5ae8b7 HIGH-1, this round) closes the ACTUAL
-EXECUTION domain: the raw butterfly runs on ALL N threadgroup threads
-(no tid < nt guard), so the closure domain is the whole prefix [0, N),
-not just the first block [0, nt).  The largest mask nt/2 partitions
-lanes into aligned nt-blocks; [0, N) is closed under every mask iff
-N % nt == 0 (N = threadgroup extent, compile-time constant).  A
-misaligned extent (e.g. (8,2) with N=24: nt=16, N%16=8) lets the last
-incomplete block read partners >= N (OOB: scratch sized N) or
-never-written codegen-padding slots.  The criterion is now per-step
+The enforced criterion is:
 
     reject iff nt = extent*scale is not a power of two
                 OR nt > 32
                 OR N % nt != 0
     (allow iff nt is a power of two AND nt <= 32 AND N % nt == 0)
 
-(v2's 32*1 = 32 with N=128, power-of-two replication plans like
-16*2 = 32, and complete multi-block closures like (8,2) with N=32 =
-2*16 stay inside XOR-closed simdgroups and are allowed).
+Power-of-two replication plans and complete multi-block closures remain
+valid, including the 32-lane reduction shape used by Qwen and DeepSeek-style
+normalization and routing kernels.
 
 These tests are compile/lower-only (no GPU launch): the Metal backend
 must reject unsafe plans at lowering time with the single-simdgroup
 diagnostic (naming the step's scale, the offending nt, and the
 threadgroup extent N), and must accept every plan whose nt is a power
 of two <= 32 with N % nt == 0, with all XOR offsets < 32 AND the raw
-[0, N) execution prefix closed under every mask found in the MSL.  The
-runtime-correctness half lives in the workspace verification suite
-(reduce_f1_planlevel_regression.py, GPU-gated).
+[0, N) execution prefix closed under every mask found in the MSL.
 """
 
 import re
@@ -65,10 +39,10 @@ from tilelang import tvm as tvm
 def _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale, threads=None):
     """Copy of the upstream public constructor
     (testing/python/language/test_tilelang_language_reduce.py), used as
-    the HIGH-1 repro path for the Metal backend.
+    the public construction path for the Metal backend.
 
-    threads defaults to logical_width * scale (N == nt); D18 decouples
-    the threadgroup extent from the plan's nt so misaligned N % nt
+    Threads default to logical_width * scale (N == nt). Supplying an
+    explicit value decouples the threadgroup extent from nt so misaligned
     threadgroups are reachable through the same public constructor.
     """
     if threads is None:
@@ -95,9 +69,9 @@ def _xor_closed(offsets, n):
 
     XOR with a mask is a permutation of the integers, so the image of
     [0, n) is [0, n) iff the maximum partner stays inside the range.
-    D17: for the participating range [0, nt) this holds iff nt is a
+    For the participating range [0, nt), this holds iff nt is a
     power of two (a non-power-of-two nt e.g. 24 with masks 12/6/3 lets
-    some partner escape even though every mask is < 32).  D18: the raw
+    some partner escape even though every mask is < 32). The raw
     butterfly runs on ALL N threads without a tid < nt guard, so the
     domain that must actually be closed is the whole prefix [0, N);
     with nt a power of two this holds iff N % nt == 0 (every nt-block
@@ -123,12 +97,12 @@ def _lower_metal(prim_func):
 @pytest.mark.parametrize(
     ("logical_width", "scale", "nt"),
     [
-        (16, 3, 48),  # HIGH-1 (D16) repro: 32^24 = 56 -> OOB on 48-thread
+        (16, 3, 48),  # 32^24 = 56 -> OOB on a 48-thread group
         # group; nt is neither a power of two nor <= 32
         (8, 5, 40),  # same window: offset 20, partner 32^20 = 52 -> OOB
     ],
 )
-def test_f1_rejects_nt_gt_32_non_pow2_scale(logical_width, scale, nt):
+def test_rejects_nt_gt_32_non_pow2_scale(logical_width, scale, nt):
     with pytest.raises(
         Exception,
         match=rf"single-simdgroup.*scale={scale}.*"
@@ -140,7 +114,7 @@ def test_f1_rejects_nt_gt_32_non_pow2_scale(logical_width, scale, nt):
 @pytest.mark.parametrize(
     ("logical_width", "scale", "nt"),
     [
-        # D17 HIGH-1 closure window: nt <= 32 yet NOT a power of two.
+        # nt <= 32 yet not a power of two.
         # Masks 12/6/3: partner 16^12 = 28 >= 24 escapes [0, 24) (OOB
         # scratch / never-written slot) even though every mask < 32.
         (8, 3, 24),
@@ -149,7 +123,7 @@ def test_f1_rejects_nt_gt_32_non_pow2_scale(logical_width, scale, nt):
         (4, 3, 12),
     ],
 )
-def test_f1_rejects_nt_le_32_non_pow2_scale(logical_width, scale, nt):
+def test_rejects_nt_le_32_non_pow2_scale(logical_width, scale, nt):
     with pytest.raises(
         Exception,
         match=rf"single-simdgroup.*scale={scale}.*"
@@ -163,11 +137,11 @@ def test_f1_rejects_nt_le_32_non_pow2_scale(logical_width, scale, nt):
     [
         (16, 4, 64),  # offsets 32..4: first offset crosses the boundary
         (32, 2, 64),  # offsets 32..2: first offset crosses the boundary
-        (64, 1, 64),  # cross-group extent (D14 family)
-        (128, 1, 128),  # cross-group extent (D14 family)
+        (64, 1, 64),  # cross-group extent
+        (128, 1, 128),  # cross-group extent
     ],
 )
-def test_f1_rejects_nt_gt_32_pow2_scale(logical_width, scale, nt):
+def test_rejects_nt_gt_32_pow2_scale(logical_width, scale, nt):
     with pytest.raises(
         Exception,
         match=rf"single-simdgroup.*scale={scale}.*"
@@ -179,15 +153,13 @@ def test_f1_rejects_nt_gt_32_pow2_scale(logical_width, scale, nt):
 @pytest.mark.parametrize(
     ("logical_width", "scale", "threads", "nt"),
     [
-        # D18 HIGH-1 (Codex review 2c5ae8b7) execution-domain window:
-        # nt is a power of two <= 32 (passes the D17 gate) but the
+        # nt is a power of two <= 32, but the
         # threadgroup extent is NOT an integer multiple of nt, so the
         # last incomplete nt-block reads partners >= N (OOB: scratch is
         # sized N) or never-written codegen-padding slots.  All these
-        # shapes reach the F1 gate (probe-verified) and were silently
-        # ALLOWED before D18.
+        # shapes reach the plan-level gate and were previously allowed.
         # (8,2,24): nt=16, N%16=8; partners 24..31 escape the 24-slot
-        #           scratch (Codex compile-only repro: max partners
+        #           scratch (maximum partners
         #           tid 16..23 ^ 8 = 24..31).
         (8, 2, 24, 16),
         # (2,4,12): nt=8, N%8=4; tid 8..11 ^ 4 = 12..15 read slots that
@@ -201,10 +173,8 @@ def test_f1_rejects_nt_gt_32_pow2_scale(logical_width, scale, nt):
         (8, 2, 56, 16),  # N=3*nt+8 boundary: tail block incomplete
     ],
 )
-def test_f1_rejects_misaligned_threadgroup(logical_width, scale, threads, nt):
-    """D18: N % nt != 0 -> compile-time rejection with the tail-block
-    alignment diagnostic (this is the HIGH-1 closure of the ACTUAL
-    [0, N) execution prefix)."""
+def test_rejects_misaligned_threadgroup(logical_width, scale, threads, nt):
+    """N % nt != 0 must produce a tail-block alignment diagnostic."""
     with pytest.raises(
         Exception,
         match=rf"single-simdgroup.*scale={scale}.*"
@@ -217,15 +187,15 @@ def test_f1_rejects_misaligned_threadgroup(logical_width, scale, threads, nt):
 @pytest.mark.parametrize(
     ("logical_width", "scale", "threads", "nt"),
     [
-        # N == nt single-block closures (D17 family, threads unchanged)
+        # N == nt single-block closures.
         (32, 1, 32, 32),  # v2 boundary: full 32-lane closure, offsets 16..1
         (16, 2, 32, 32),  # power-of-two replication: offsets 16..2
         (8, 4, 32, 32),  # power-of-two replication: offsets 16..4
         (16, 1, 16, 16),  # sub-simdgroup closure: offsets 8..1
-        (8, 2, 16, 16),  # boundary (D17): power-of-two nt, offsets 8..2
-        (2, 4, 8, 8),  # boundary (D17): power-of-two nt, offset 4
+        (8, 2, 16, 16),  # power-of-two nt, offsets 8..2
+        (2, 4, 8, 8),  # power-of-two nt, offset 4
         (4, 8, 32, 32),  # replicated small fragment: offsets 16..8
-        # D18 multi-block closures (N = k*nt complete blocks; every
+        # Multi-block closures (N = k*nt complete blocks; every
         # block computes its own copy of the same group total, owners
         # store): the [0, N) execution prefix must be closed under every
         # mask — this is the property N % nt == 0 guarantees.
@@ -238,15 +208,14 @@ def test_f1_rejects_misaligned_threadgroup(logical_width, scale, threads, nt):
         (8, 2, 128, 16),  # N = 8*nt (v2-scale threadgroup extent)
     ],
 )
-def test_f1_allows_pow2_nt_le_32_closure(logical_width, scale, threads, nt):
+def test_allows_pow2_nt_le_32_closure(logical_width, scale, threads, nt):
     src = _lower_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale, threads))
     # every XOR butterfly offset must be < 32 (closure inside one
     # simdgroup; offsets are nt/2 halving down to scale), the max offset
     # must be nt/2, the threadgroup extent must be an integer multiple
-    # of nt (D18: complete nt-blocks in the [0, N) execution prefix),
+    # of nt (complete nt-blocks in the [0, N) execution prefix),
     # and the raw [0, N) prefix must be closed under every mask in the
-    # MSL (D17 closure on the participating range, D18 on the actual
-    # execution domain)
+    # MSL on the actual execution domain.
     offsets = [int(v) for v in re.findall(r"\^ ?(\d+)", src)]
     assert offsets, "no XOR butterfly offsets found in MSL"
     assert all(o < 32 for o in offsets)

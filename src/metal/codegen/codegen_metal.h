@@ -107,7 +107,7 @@ private:
   // numeric expressions: the packed uint path is only valid for pure memory
   // copies (load/store/select/broadcast/identity cast). Any arithmetic,
   // comparison, min/max or non-identity cast consuming a packed carrier would
-  // silently compile to integer operations (Codex external review C2).
+  // silently compile to integer operations.
   void CheckNoPackedBF16Carrier(DataType dtype, const char *ctx) const;
 
   std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>

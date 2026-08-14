@@ -7,21 +7,19 @@ planner used to record as a *single-element kRead* — hiding the write side
 of simdgroup_store and the full 8x8 tile footprint. Multi-simdgroup staged
 epilogues (fragment -> shared via simdgroup_store, then cross-simdgroup
 reads) therefore got 0 barriers between the staging stores and the reads
-(AS-10: t256 staged 12/12 rounds wrong, maxerr=5.969).
+(the 256-thread staged kernel failed 12/12 rounds, maxerr=5.969).
 
 The same gap exists for the second official pointer form, the Metal
 macro / tensor-intrin T.access_ptr (tvm_access_ptr) used by
 metal_macro_generator.py and tensor_intrin/metal.py: those accesses were
 recorded as plain single-element pointer accesses and FindConflict could
 prove them disjoint from other accesses via PointerAccessIsDisjoint —
-again skipping the barrier between overlapping cross-simdgroup tiles
-(Codex external review HIGH #1 on commit 96ce20b8). The regression below
+again skipping the barrier between overlapping cross-simdgroup tiles. The regression below
 covers both forms: the staged address_of path and the explicit
 T.access_ptr simdgroup_store/load path (normal + transpose + padded
 stride, cross-warp RAW and WAR).
 
-Criterion (AS-10 baseline / wgd2_verify.py, tolerance-based, no post-hoc
-relaxation):
+Acceptance criteria:
   1. per-round max abs err vs fp32 CPU reference < 1e-2
      (bf16 noise floor measured ~2.4e-04; 1e-2 separates races like 5.969
      from rounding noise),
@@ -33,21 +31,27 @@ relaxation):
      exist between the producer simdgroup op (store for RAW / load for
      WAR) and the consumer simdgroup op of the other warp (pre-fix: no
      such barrier, 8/8 configs),
-  6. B-class guard: the direct fragment-C -> global path (dense_gemm_frag
+  6. the direct fragment-C -> global path (dense_gemm_frag
      t256, zero-communication) must keep barriers==2 and stay bit-identical.
 
-The staged kernel below is the AS-10 reproduction pattern (t256 = 8
-simdgroups, block_M=8 -> each warp owns one row; the epilogue reads
-Cs_sh[i, 0] which is warp-0's column).
+The staged kernel below represents a DeepSeek V4 Flash-style gated-MoE
+epilogue (t256 = 8 simdgroups, block_M=8 -> each warp owns one row; the
+epilogue reads Cs_sh[i, 0], which is warp 0's column).
 """
 
 import tilelang
 import tilelang.metal.language as T
 import tilelang.testing
+import pytest
 import torch
 
+pytestmark = pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="PyTorch MPS device is required",
+)
+
 # bf16 noise floor measured on M2 (maxerr of the correct t32 staged path).
-# 1e-2 is the AS-10 baseline threshold: races give O(1) errors (5.969),
+# 1e-2 separates the observed race failures (O(1), maxerr=5.969)
 # rounding noise is ~2.4e-04.
 MAX_ERR = 1e-2
 N_ROUNDS = 12
@@ -56,7 +60,7 @@ STAGED_SHAPE = "64_512_2048"  # T_ x Is x H
 
 @tilelang.jit
 def _staged_msg(x, Wg, Wu, Ws_g, mid, T_, Is, H, block_M=8, block_N=128, block_K=32, threads=256):
-    """t256 staged-epilogue pattern (AS-10 own code): fragment->shared
+    """DeepSeek V4 Flash-style t256 epilogue: fragment-to-shared
     T.copy + cross-group epilogue read (Cs_sh[i,0] is warp-0's column)."""
     x: T.Tensor((T_, H), "bfloat16")
     Wg: T.Tensor((Is, H), "bfloat16")
@@ -107,7 +111,7 @@ def _staged_msg(x, Wg, Wu, Ws_g, mid, T_, Is, H, block_M=8, block_N=128, block_K
 
 @tilelang.jit
 def _dense_gemm_frag(A, B, C, M, N, K, block_M, block_N, block_K, threads):
-    """B-class: fragment-C direct simdgroup_store to global (zero
+    """Fragment-C direct simdgroup_store to global (zero
     cross-warp communication; must stay unchanged by the fix)."""
     A: T.Tensor((M, K), "bfloat16")
     B: T.Tensor((N, K), "bfloat16")
@@ -172,7 +176,7 @@ def _check_staged_threads(threads, n_rounds=N_ROUNDS, seed=11):
     det_ok = True
     prev = None
     for _ in range(n_rounds):
-        # fresh buffer every round (AS-10 protocol)
+        # Use a fresh output buffer every round.
         mid = torch.empty(T_, Is, dtype=torch.bfloat16, device=dev)
         _staged_msg(x, Wg, Wu, Ws, mid, T_, Is, H, 8, bn, 32, threads)
         torch.mps.synchronize()
@@ -208,7 +212,7 @@ def test_codegen_staged_t256_barrier_after_store():
 
 
 def test_codegen_frag_t256_unchanged_barriers():
-    """B-class guard (static): the direct fragment-C -> global path must keep
+    """The direct fragment-C -> global path must keep
     the zero-communication barrier structure (2 barriers, all in the kk
     loop, none added around the final simdgroup_store)."""
     dev = "mps"
@@ -239,7 +243,7 @@ def test_correctness_staged_t32():
 
 @tilelang.testing.requires_metal
 def test_correctness_frag_t256_bit_identical():
-    """B-class guard (dynamic): dense_gemm_frag t256 direct-to-global must
+    """dense_gemm_frag t256 direct-to-global must
     stay bit-identical to the fp32 reference and keep barriers==2."""
     dev = "mps"
     M, N, K = 64, 2048, 512
@@ -256,11 +260,11 @@ def test_correctness_frag_t256_bit_identical():
 
 
 # ---------------------------------------------------------------------------
-# T.access_ptr (tvm_access_ptr) pointer-form coverage (Codex HIGH #1)
+# T.access_ptr (tvm_access_ptr) pointer-form coverage
 # ---------------------------------------------------------------------------
 # The Metal macro / tensor-intrin path builds simdgroup_store/load pointer
 # arguments as T.access_ptr(...) (lowered to tvm_access_ptr with a
-# single-element default extent). Before the D8 fix these were recorded as
+# single-element default extent). Previously these were recorded as
 # plain single-element pointer accesses and PointerAccessIsDisjoint could
 # prove two *base elements* disjoint while the 8x8 tile footprints overlap
 # (here: warp 0 stores the tile at sh[1, 0] covering rows 1..8; warp 1
@@ -292,7 +296,7 @@ def _access_ptr_raw(x, out, transpose, stride, threads=64):
     the tile at sh[1, 0] (rows 1..8), warp 1 loads the tile at sh[8, 0]
     (rows 8..15). The footprints overlap at row 8 while the base elements
     are disjoint, so the pre-fix single-element disjointness proof skipped
-    the RAW barrier (Codex HIGH #1)."""
+    the RAW barrier."""
     x: T.Tensor((8, 16), "float32")
     out: T.Tensor((8, 16), "float32")
     with T.Kernel(1, threads=threads) as (bx,):
@@ -315,7 +319,7 @@ def _access_ptr_war(x, out, transpose, stride, threads=64):
     """Cross-warp WAR through the T.access_ptr pointer form: warp 0 loads
     the tile at sh[1, 0] (rows 1..8), warp 1 stores the tile at sh[8, 0]
     (rows 8..15). The footprints overlap at row 8; a barrier must separate
-    the load from the store (Codex HIGH #1)."""
+    the load from the store."""
     x: T.Tensor((8, 16), "float32")
     out: T.Tensor((8, 16), "float32")
     with T.Kernel(1, threads=threads) as (bx,):
@@ -331,6 +335,30 @@ def _access_ptr_war(x, out, transpose, stride, threads=64):
         if T.get_thread_binding() >= 32:
             T.simdgroup_store(C_l.data, 0, T.access_ptr(sh[8, 0], "w"), stride, 8, 8, T.bool(transpose))
         T.simdgroup_store(C2.data, 0, T.access_ptr(out[0, T.get_thread_binding() // 32 * 8], "w"), 16, 8, 8, T.bool(transpose))
+
+
+@tilelang.jit
+def _access_ptr_waw(out, stride, threads=64):
+    """Two sequential simdgroups store overlapping 8x8 shared tiles.
+
+    The first tile covers rows 1..8 and the second covers rows 8..15, so
+    row 8 requires a barrier between the stores. The final load keeps the
+    shared-memory writes observable in generated code.
+    """
+    out: T.Tensor((8, 16), "float32")
+    with T.Kernel(1, threads=threads) as (bx,):
+        sh = T.alloc_shared((16, stride), "float32")
+        first = T.alloc_local((64,), "float32", scope="metal.simdgroup")
+        second = T.alloc_local((64,), "float32", scope="metal.simdgroup")
+        loaded = T.alloc_local((64,), "float32", scope="metal.simdgroup")
+        T.make_filled_simdgroup_matrix(first.data, 0, T.cast(1.0, "float32"))
+        T.make_filled_simdgroup_matrix(second.data, 0, T.cast(2.0, "float32"))
+        if T.get_thread_binding() < 32:
+            T.simdgroup_store(first.data, 0, T.access_ptr(sh[1, 0], "w"), stride, 8, 8, T.bool(False))
+        if T.get_thread_binding() >= 32:
+            T.simdgroup_store(second.data, 0, T.access_ptr(sh[8, 0], "w"), stride, 8, 8, T.bool(False))
+        T.simdgroup_load(loaded.data, 0, T.access_ptr(sh[8, 0], "r"), stride, 8, 8, T.bool(False))
+        T.simdgroup_store(loaded.data, 0, T.access_ptr(out[0, T.get_thread_binding() // 32 * 8], "w"), 16, 8, 8, T.bool(False))
 
 
 def _msl_barrier_between(src, first_marker, second_marker):
@@ -351,6 +379,13 @@ def _msl_barrier_between(src, first_marker, second_marker):
     return any(last_first < b < min(second_after) for b in bars)
 
 
+def _msl_barrier_between_first_two(src, marker):
+    lines = src.splitlines()
+    positions = [i for i, line in enumerate(lines) if marker in line]
+    assert len(positions) >= 2, f"expected at least two {marker} occurrences"
+    return any("threadgroup_barrier" in line for line in lines[positions[0] + 1 : positions[1]])
+
+
 def _access_ptr_inputs(seed=3):
     dev = "mps"
     torch.manual_seed(seed)
@@ -368,8 +403,8 @@ def _access_ptr_inputs(seed=3):
 def test_codegen_access_ptr_raw_barrier():
     """Static: a threadgroup_barrier must separate the access_ptr-form
     simdgroup_store (warp 0) from the overlapping simdgroup_load (warp 1)
-    for normal/transpose x stride 8/16. Pre-fix (96ce20b8): no barrier in
-    any of the 8 configs (single-element disjointness proof)."""
+    for normal/transpose x stride 8/16. The single-element disjointness
+    proof must not hide the full tile footprint."""
     dev = "mps"
     x = torch.randn(8, 16, dtype=torch.float32, device=dev)
     out = torch.empty(8, 16, dtype=torch.float32, device=dev)
@@ -383,8 +418,7 @@ def test_codegen_access_ptr_raw_barrier():
 def test_codegen_access_ptr_war_barrier():
     """Static: a threadgroup_barrier must separate the access_ptr-form
     simdgroup_load (warp 0) from the overlapping simdgroup_store (warp 1)
-    for normal/transpose x stride 8/16. Pre-fix (96ce20b8): no barrier in
-    any of the 8 configs."""
+    for normal/transpose x stride 8/16."""
     dev = "mps"
     x = torch.randn(8, 16, dtype=torch.float32, device=dev)
     out = torch.empty(8, 16, dtype=torch.float32, device=dev)
@@ -393,6 +427,16 @@ def test_codegen_access_ptr_war_barrier():
         assert _msl_barrier_between(k.get_kernel_source(), "simdgroup_load", "simdgroup_store"), (
             f"WAR access_ptr t{transpose} s{stride}: no barrier between simdgroup_load and simdgroup_store"
         )
+
+
+@pytest.mark.parametrize("stride", (8, 16))
+def test_codegen_access_ptr_overlapping_waw_barrier(stride):
+    """Overlapping tile stores must be ordered for compact and padded rows."""
+    out = torch.empty(8, 16, dtype=torch.float32, device="mps")
+    kernel = _access_ptr_waw.compile(out, stride, 64)
+    assert _msl_barrier_between_first_two(kernel.get_kernel_source(), "simdgroup_store"), (
+        f"overlapping WAW access_ptr stride={stride}: no barrier between tile stores"
+    )
 
 
 @tilelang.testing.requires_metal

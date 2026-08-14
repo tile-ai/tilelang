@@ -50,7 +50,7 @@ an uninitialized cast local is written to memory. Re-evaluating the original
 path-condition *expression* in the copy-to loop is unsound: the expression is
 structurally identical to the compute-time condition, but earlier copy-to
 write-backs may have modified the buffers it reads, flipping its truth value
-between compute time and copy time (Codex external review C1, 2026-08-11).
+between compute time and copy time.
 
 Instead, each store entry that has any enclosing condition gets a per-entry
 **validity mask** (a local int32 buffer, 0/1 per lane). The mask is set to 1
@@ -246,7 +246,7 @@ class MemoryAccessCollector(PyStmtExprVisitor):
     loops (safe: they are evaluated before the compute loop and before any
     copy-to write-back). Store conditions are no longer re-evaluated in the
     copy-to loops: each store entry gets a validity mask set at the compute
-    store site instead (see module docstring, Codex C1).
+    store site instead (see module docstring).
     """
 
     def __init__(self, loop_var: Var):
@@ -534,7 +534,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         # compute loop will see. Copy-to loops must NOT re-evaluate the store
         # path conditions (earlier write-backs could flip them); they are
         # guarded by the per-entry validity masks set at the compute store
-        # sites instead (Codex C1). The store conditions are kept only to
+        # sites instead. The store conditions are kept only to
         # decide which entries are unconditional (mask=None).
         load_conditions = _entry_conditions(load_entries, load_list)
         store_conditions = _entry_conditions(store_entries, store_list)
@@ -571,7 +571,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
 
         # Build copy-to-memory loops (after compute). Guards are the per-entry
         # validity masks (set at the compute store sites), never a re-evaluation
-        # of the original path conditions (Codex C1).
+        # of the original path conditions.
         copy_to_loops = self._create_copy_loops(
             op,
             store_entries,
@@ -643,7 +643,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         ``<cast_buffer>_mask`` with one int32 per lane; the compute loop sets
         it to 1 exactly where the original store executed, and the copy-to
         loop reads it instead of re-evaluating the original path conditions
-        (Codex C1).
+        directly.
         """
         return [
             tirx.decl_buffer(
@@ -654,7 +654,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             )
             if condition is not None
             else None
-            for entry, condition in zip(entries, conditions)
+            for entry, condition in zip(entries, conditions, strict=True)
         ]
 
     def _create_mask_init_loops(self, op: For, masks: list[Buffer]) -> list[For]:
@@ -699,7 +699,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         compute stage actually executed the original store (``mask[i] != 0``).
         The original path conditions are deliberately NOT re-evaluated here —
         earlier copy-to write-backs could flip their truth value between
-        compute time and copy time (Codex C1). ``None`` mask means the copy is
+        compute time and copy time. ``None`` mask means the copy is
         unconditional.
 
         ``from_memory`` guards come from ``conditions`` (per-entry OR of load
@@ -826,7 +826,7 @@ class AccessReplacer(tirx.PyStmtExprMutator):
             cast_store = BufferStore(cast_buf, new_value, [self.loop_var])
             if mask is not None:
                 # Record that this entry's cast local was actually defined on
-                # this lane (validity mask, Codex C1). The mask store sits at
+                # this lane using a validity mask. The mask store sits at
                 # the exact statement position of the original store, so it
                 # inherits every enclosing branch condition.
                 mask_store = BufferStore(mask, IntImm("int32", 1), [self.loop_var])

@@ -21,7 +21,7 @@
  *   Phase 3: duplicate-buffer update back into dst (guarded by fragment
  *            ownership, same as the generic lowering).
  *
- * Hard domain (enforced at lowering entry, plan-level since D14): the
+ * Hard domain (enforced at lowering entry): the
  * XOR-butterfly AllReduce is only correct when every value exchange stays
  * inside a single simdgroup. Within one butterfly level each thread reads
  * its partner's old value while writing its own; that ordering is
@@ -30,7 +30,7 @@
  * barrier to the participating range. The threadgroup must be [0, N) with
  * a compile-time-constant N (raw thread index addresses the scratch), and
  * every reduce-plan thread step must satisfy nt = extent*scale a power of
- * two with nt <= 32 (D17): the participating range [0, nt) is closed
+ * two with nt <= 32: the participating range [0, nt) is closed
  * under the butterfly masks (nt/2 halving down to scale) iff nt is a
  * power of two — each mask then flips a single lane bit below log2(nt),
  * so no XOR partner escapes the range (a non-power-of-two nt like
@@ -38,15 +38,15 @@
  * nt <= 32 keeps the closure inside one 32-lane block (no XOR partner
  * across a simdgroup boundary). The raw butterfly executes on ALL N
  * threads (no tid < nt guard), so the actual execution prefix [0, N)
- * must itself be a union of complete nt-blocks: N % nt == 0 (D18,
- * Codex review 2c5ae8b7 HIGH-1) — the largest mask nt/2 partitions
+ * must itself be a union of complete nt-blocks: N % nt == 0. The largest
+ * mask nt/2 partitions
  * lanes into aligned nt-blocks, and an incomplete tail block reads
  * partners >= N (OOB: scratch sized N) or never-written padding slots
  * (e.g. extent=8, scale=2, nt=16, N=24: tid 16..23 ^ 8 = 24..31).
  * Multi-simdgroup threadgroups whose steps stay inside 32-lane closures
- * with N % nt == 0 (B-class group-local reduces, e.g.
- * r1_gdn_decode_v2 SG=4/threads=128 with extent=32/scale=1 and offsets
- * 16..1) are therefore ALLOWED; cross-simdgroup exchange, non-
+ * with N % nt == 0 (for example, a DeepSeek V4 Flash-style grouped
+ * reduction with threads=128, extent=32, scale=1, and offsets 16..1) are
+ * therefore allowed; cross-simdgroup exchange, non-
  * power-of-two participating widths, or misaligned threadgroup extents
  * are rejected with an unsupported diagnostic.
  *
@@ -55,15 +55,14 @@
  * materialized only at the final ownership write-back. With multiple
  * thread steps, every intermediate step round-trips through the fp32
  * accumulator (the next step reloads the updated group totals) and only
- * the LAST step's store casts fp32 -> bf16 into dst (F7, Codex external
- * review e5e2e8e7: per-step bf16 casts silently dropped every intermediate
- * result). bf16 bitwise reduce is rejected (fp32 routing would change bit
- * semantics).
+ * the last step casts fp32 -> bf16 into dst. Casting after every step would
+ * discard intermediate fp32 group totals. bf16 bitwise reduce is rejected
+ * because fp32 routing would change bit semantics.
  *
  * This avoids both call_extern (unsupported by the Metal codegen) and
  * global-workspace plumbing (not present in the Metal runtime).
  *
- * v1 documented limitations (class F follow-ups):
+ * v1 documented limitations (follow-ups):
  *   - op.batch > 1 is not supported yet (LOG(FATAL)).
  *   - vectorized (packed) local reduction is disabled (vsize = 1).
  *   - fp16/bf16 nan_propagate reducers are not supported (no MSL __hmax_nan).
@@ -121,8 +120,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
     }
 
     if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
-      // F1 (D14 plan-level fix; the e5e2e8e7 shape-level check was too
-      // broad): the XOR-butterfly AllReduce below is only correct when every
+      // The XOR-butterfly AllReduce below is only correct when every
       // value exchange stays inside a single simdgroup. Within one level
       // each thread reads its partner's old value while writing its own;
       // that ordering is guaranteed by SIMD lockstep inside a simdgroup, but
@@ -132,9 +130,9 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       // The threadgroup must be [0, N) with compile-time-constant N (the raw
       // thread index addresses the scratch buffer and PartitionLoop guards);
       // the actual single-simdgroup discipline is enforced on the reduce
-      // PLAN after MakeReduceOwnershipPlan below (D17: per thread step,
+      // plan after MakeReduceOwnershipPlan below. Per thread step,
       // nt = extent*scale must be a power of two and <= 32 — the XOR-
-      // closed, single-simdgroup closure; D18: the threadgroup extent N
+      // closed, single-simdgroup closure; the threadgroup extent N
       // must additionally satisfy N % nt == 0 so the ALL-N-thread execution
       // prefix is a union of complete nt-blocks).
       const int64_t *tb_min = as_const_int(lower_args.thread_bounds->min);
@@ -196,10 +194,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       auto reduce_plan = backend::reduce::MakeReduceOwnershipPlan(
           src_indices, src_thread, src_vars, src_vars[op.dim]->var, analyzer);
 
-      // F1 plan-level enforcement (D14, R-1 fix; AS-21 wording audit;
-      // D16 tightening, Codex review 54fd8741 HIGH-1 + AS-24
-      // cross-validation; D17 XOR-closure deepening, Codex review
-      // 6dc03835 HIGH-1): the predicate is per thread_step —
+      // Plan-level enforcement is per thread_step:
       // thread_step.extent is the PER-STEP participating thread range,
       // NOT the threadgroup extent. The raw XOR butterfly must be closed
       // on the participating range [0, nt): within one butterfly level
@@ -208,7 +203,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       // simdgroup, and every partner must be a real, written lane.
       //
       // Reject iff nt = extent*scale is not a power of two OR nt > 32:
-      //  - XOR closure (D17): [0, nt) is closed under every butterfly
+      //  - XOR closure: [0, nt) is closed under every butterfly
       //    mask (nt/2 halving down to scale) iff nt is a power of two —
       //    each mask then flips a single lane bit below log2(nt), so
       //    tid^mask stays in [0, nt). For a non-power-of-two nt the
@@ -218,14 +213,14 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       //    never-written slot / OOB. CheckAllReduceWidth
       //    (backend/common/op/reduce.h) only requires logical_width ==
       //    extent to be a positive power of two and scale > 0; scale
-      //    need NOT be a power of two, so both the D16 window
+      //    need NOT be a power of two, so both the wider-than-simdgroup case
       //    (32 < nt < 64, e.g. (16,3)=48 -> partner 32^24 = 56) and the
-      //    D17 window (nt <= 32 non-pow2, e.g. (8,3)=24 -> partner
+      //    and the non-power-of-two case (nt <= 32, e.g. (8,3)=24 -> partner
       //    16^12 = 28) were reachable through the shared lowering.
-      //  - single-simdgroup closure (D16): nt > 32 means the range
+      //  - single-simdgroup closure: nt > 32 means the range
       //    exceeds one 32-lane simdgroup and the largest mask nt/2
       //    pairs threads across a simdgroup boundary.
-      //  - threadgroup alignment (D18, Codex review 2c5ae8b7 HIGH-1):
+      //  - threadgroup alignment:
       //    the raw butterfly executes on ALL N threads without a
       //    tid < nt guard, so the ACTUAL closure domain is the whole
       //    execution prefix [0, N), not just the first block [0, nt).
@@ -241,16 +236,20 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       //
       // Group-local closures in multi-simdgroup threadgroups (every step
       // nt a power of two <= 32 with N % nt == 0, e.g.
-      // r1_gdn_decode_v2 SG=4/threads=128 with extent=32, scale=1,
-      // offsets 16..1, or power-of-two replication extent=16, scale=2,
-      // nt=32, or N=2*nt complete two-block closures) perform ZERO
-      // cross-simdgroup value exchange and are allowed (B class) even
+      // a DeepSeek V4 Flash-style grouped reduction with threads=128,
+      // extent=32, scale=1, offsets 16..1, or power-of-two replication
+      // extent=16, scale=2, nt=32, or N=2*nt complete two-block closures)
+      // perform zero cross-simdgroup value exchange and are allowed even
       // though the threadgroup extent is 128. An empty thread_steps plan
       // has no butterfly at all and is always safe.
       for (const auto &thread_step : reduce_plan.thread_steps) {
         int64_t nt =
             static_cast<int64_t>(thread_step.extent) * thread_step.scale;
         const int64_t N = *tb_extent;
+        ICHECK_GT(nt, 0) << "Metal reduce: reduce plan thread step must have a "
+                            "positive extent*scale (got extent="
+                         << thread_step.extent
+                         << ", scale=" << thread_step.scale << ")";
         int shift = 0;
         const bool nt_is_pow2 =
             tirx::is_const_power_of_two_integer(Integer(nt), &shift);
@@ -343,7 +342,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
                                    GetPtrStorageScope(dst_buffer->data));
       }
 
-      // F2 (Codex external review B1): bf16 accumulator/destination reduce
+      // A bf16 accumulator/destination reduce
       // runs entirely in fp32. MSL has no bf16 min/max overloads and the
       // codegen cannot print a bf16 infinity literal, so a bf16
       // accumulator/scratch cannot compile. Mirror the upstream CUDA
@@ -435,7 +434,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       // barrier sequence (MSL has no CUDA-style named barriers);
       // non-participants contribute the reduce identity element, and their
       // scratch slots are never read (XOR partners stay inside the
-      // participating range). D14/D16/D17/D18 plan-level F1 guarantees per
+      // participating range). The plan-level checks guarantee per
       // step nt = extent*scale is a power of two and <= 32 with the
       // threadgroup extent N % nt == 0, so [0, nt) is closed under every
       // mask (each mask flips a single lane bit below log2(nt)) and the
@@ -447,7 +446,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       // accumulator buffer between steps, mirroring the per-step extern
       // calls on CUDA.
       //
-      // F3 (Codex external review B1): a raw extent=1 reduce has an empty
+      // A raw extent=1 reduce has an empty
       // thread_steps plan (no thread-owned reduce factor), so the Phase-1
       // partials are already final and Phase 2 (butterfly + scratch +
       // barriers) is omitted entirely. No dummy loop / dummy barrier is
@@ -456,11 +455,11 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       Stmt butterfly_body;
       Buffer scratch;
       if (!reduce_plan.thread_steps.empty()) {
-        // D14: scratch is sized by the FULL threadgroup extent (all threads
+        // Scratch is sized by the full threadgroup extent (all threads
         // execute the barrier sequence and write their slot; group-local
         // closures in multi-simdgroup threadgroups are legal). The extent is
-        // compile-time-constant by the entry check above; D18 additionally
-        // requires N % nt == 0 per step (F1 gate above) so every read
+        // compile-time-constant by the entry check above. Requiring
+        // N % nt == 0 per step ensures every read
         // partner of the all-thread butterfly stays within these N slots.
         const int64_t *thread_extent =
             as_const_int(lower_args.thread_bounds->extent);
@@ -481,7 +480,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
           dst_strides[d] = dst_strides[d + 1] * *p;
         }
 
-        // F2: the threadgroup scratch uses the fp32 accumulator dtype for
+        // The threadgroup scratch uses the fp32 accumulator dtype for
         // bf16 destinations (bf16 scratch cannot compile: no MSL max/min
         // overloads, no bf16 infinity literal).
         scratch =
@@ -499,8 +498,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
           }
           auto elem_red_indices = red_layout->Forward(elem_dst_indices);
 
-          // Participation predicate (F6 fix, found while moving the static
-          // audit into the F1 32-thread domain): the scratch-write partial
+          // The scratch-write partial
           // and the step_store must be gated by "thread t holds a real
           // partial for element e", i.e. the red_layout partition guard —
           // the same predicate PartitionLoop generates for the generic
@@ -554,10 +552,10 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
               PrimExpr partner = lower_args.thread_index ^ Integer(offset);
               // No tid<nt guard: XOR partners self-organize inside the
               // participating block, and neutral values from non-
-              // participants never leak into block slots. D17/D18 F1
-              // guarantees [0, nt) is closed under every mask (nt a power
+              // participants never leak into block slots. The plan checks
+              // guarantee [0, nt) is closed under every mask (nt a power
               // of two <= 32) and that the threadgroup extent N is an
-              // integer multiple of nt (N % nt == 0, D18), so every
+              // integer multiple of nt (N % nt == 0), so every
               // nt-block of the ALL-N-thread execution prefix is complete
               // and the partner of every participating lane is a
               // participating, written lane.
@@ -570,7 +568,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
               step_body = SeqStmt({step_body, combine, sync_shared});
             }
             // Every participant holds its group total; owners store it
-            // back. F7 (Codex external review e5e2e8e7): with multiple
+            // back. With multiple
             // thread steps, ALL non-final steps round-trip through the fp32
             // accumulator so the next step's `partial` reloads the updated
             // group totals (per-step bf16 casts to dst silently dropped
@@ -636,7 +634,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
                           : BufferLoad(dst_buffer, dst_indices),
                       BufferLoad(accum_buffer, red_indices))
                 : BufferLoad(accum_buffer, red_indices);
-        // F2: the clear=False update for a bf16 destination is computed in
+        // The clear=False update for a bf16 destination is computed in
         // fp32 (accumulator dtype) and only the final store casts back to
         // bf16.
         Stmt store = BufferStore(
@@ -660,7 +658,7 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
         }
       }
 
-      // ---- Phase 2.5: bf16 empty-plan write-back (F2/F3 interaction). ----
+      // ---- Phase 2.5: bf16 empty-plan write-back. ----
       // With an empty thread_steps plan (raw extent=1) the butterfly is
       // skipped, so no step_store exists to materialize bf16. Phase 1 then
       // left the fp32 partials in the private accum buffer; write them back

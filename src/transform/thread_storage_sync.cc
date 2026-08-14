@@ -1162,7 +1162,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       // The tile descriptor is propagated to the pointer argument (args[2])
       // only; the remaining six arguments (fragment, tile index, stride,
       // rows, cols, transpose) are plain metadata and must not be tagged as
-      // tile accesses (Codex external review HIGH #1).
+      // tile accesses.
       ICHECK_EQ(op->args.size(), 7U);
       bool is_store = op->op.same_as(builtin::simdgroup_store());
       int tile_rows = 8, tile_cols = 8;
@@ -1178,6 +1178,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           pending_tile_access_type_ = is_store ? kWrite : kRead;
           pending_tile_rows_ = tile_rows;
           pending_tile_cols_ = tile_cols;
+          pending_tile_stride_ = op->args[3];
         } else {
           has_pending_tile_access_ = false;
         }
@@ -1329,15 +1330,21 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         // (T.access_ptr). Tag the access as a tile access and expand the
         // touched range to a safe linear bounding box covering the whole
         // rows x cols tile so the conservative tile rule in FindConflict
-        // applies (Codex external review HIGH #1). The rw_mask semantics are
+        // applies. The rw_mask semantics are
         // preserved below ("r" -> kRead tile, "w" -> kWrite tile; the Metal
         // macros emit "w" for simdgroup_store and "r" for simdgroup_load,
         // matching the pending tile type).
         bool is_tile_access = has_pending_tile_access_;
         e.is_tile_access = is_tile_access;
         if (is_tile_access) {
-          PrimExpr tile_extent = make_const(
-              extent.dtype(), pending_tile_rows_ * pending_tile_cols_);
+          ICHECK(pending_tile_stride_.defined());
+          PrimExpr tile_stride = pending_tile_stride_;
+          if (tile_stride.dtype() != extent.dtype()) {
+            tile_stride = Cast(extent.dtype(), tile_stride);
+          }
+          PrimExpr tile_extent =
+              make_const(extent.dtype(), pending_tile_rows_ - 1) * tile_stride +
+              make_const(extent.dtype(), pending_tile_cols_);
           e.touched = {arith::IntSet::FromRange(
               Range::FromMinExtent(offset, tile_extent))};
         } else {
@@ -1603,6 +1610,7 @@ private:
   AccessType pending_tile_access_type_{kRead};
   int pending_tile_rows_{1};
   int pending_tile_cols_{1};
+  PrimExpr pending_tile_stride_;
   // the current free stmt entry.
   StmtEntry curr_stmt_;
   // The involving threads
@@ -1624,7 +1632,7 @@ private:
     syncs_inserted_.insert(obj);
   }
   bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
-    if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
+    if (lhs.touched.empty() || lhs.touched.size() != rhs.touched.size()) {
       return false;
     }
     ConstrSet prev_cset{lhs.cset};
@@ -1639,10 +1647,6 @@ private:
         {"ty1", "ty2"},
         {"tz1", "tz2"},
     };
-    PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
-    PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
-    PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
-    PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
     Map<Var, PrimExpr> prev_sub, curr_sub;
     for (unsigned idx = 0; idx != 3; ++idx) {
       auto &info = thread_vars[idx];
@@ -1658,23 +1662,27 @@ private:
                                      /*rename_ranges=*/false);
     curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,
                                      /*rename_ranges=*/false);
-    lhs_min = Substitute(lhs_min, prev_sub);
-    lhs_max = Substitute(lhs_max, prev_sub);
-    rhs_min = Substitute(rhs_min, curr_sub);
-    rhs_max = Substitute(rhs_max, curr_sub);
     // Lower to predicates before merging so that a variable bound to different
     // values on the two sides does not trip the analyzer's re-bind check.
     prev_cset.ToConstraints()
         .Merge(curr_cset.ToConstraints())
         .Populate(analyzer);
 
-    if (analyzer.CanProve(lhs_max < rhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
-    }
-    if (analyzer.CanProve(rhs_max < lhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
+    for (size_t i = 0; i < lhs.touched.size(); ++i) {
+      PrimExpr lhs_min =
+          Substitute(analyzer.Simplify(lhs.touched[i].min()), prev_sub);
+      PrimExpr lhs_max =
+          Substitute(analyzer.Simplify(lhs.touched[i].max()), prev_sub);
+      PrimExpr rhs_min =
+          Substitute(analyzer.Simplify(rhs.touched[i].min()), curr_sub);
+      PrimExpr rhs_max =
+          Substitute(analyzer.Simplify(rhs.touched[i].max()), curr_sub);
+      if (analyzer.CanProve(lhs_max < rhs_min,
+                            arith::ProofStrength::kSymbolicBound) ||
+          analyzer.CanProve(rhs_max < lhs_min,
+                            arith::ProofStrength::kSymbolicBound)) {
+        return true;
+      }
     }
     return false;
   }
@@ -1808,14 +1816,15 @@ private:
     // epilogues previously got 0 barriers between simdgroup_store and
     // cross-group reads).
     //
-    // Exception: write-after-write between two tile accesses needs no
-    // ordering — within one warp program order suffices, and across warps
-    // the tiles are disjoint by construction (overlapping cross-warp tiles
-    // are a program-level data race that no barrier can fix).
+    // Write-after-write between two tile accesses needs no ordering only
+    // when their full tile footprints are provably disjoint. Overlapping
+    // cross-simdgroup stores are sequential program statements, so a barrier
+    // is required to make the later store deterministically win.
     if (prev.is_tile_access || curr.is_tile_access) {
       if (prev.is_tile_access && curr.is_tile_access && prev.type == kWrite &&
           curr.type == kWrite) {
-        return false;
+        return !(prev.is_pointer_access && curr.is_pointer_access &&
+                 PointerAccessIsDisjoint(prev, curr));
       }
       return true;
     }

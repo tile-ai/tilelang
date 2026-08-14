@@ -369,7 +369,7 @@ void CodeGenTileLangMetal::PrintType(DataType t,
     os << "uint" << lanes / 2;
     return;
   }
-  // bf16 packed carriers are only legal for pure memory copies (Codex C2).
+  // bf16 packed carriers are only legal for pure memory copies.
   // Only widths whose packed size matches the logical size are representable:
   // bf16x4 -> uint2 (8 bytes) and bf16x8 -> uint4 (16 bytes). bf16x6 would
   // map to uint3 whose 16-byte array stride does NOT match the 12-byte
@@ -917,7 +917,7 @@ void CodeGenTileLangMetal::VisitExpr_(const BroadcastNode *op,
       os << "as_type<uint>(half2(" << v << ", " << v << "))";
     }
     os << ')';
-  } else if (op->dtype.is_bfloat16() && lanes >= 4 && lanes % 2 == 0) {
+  } else if (op->dtype.is_bfloat16() && (lanes == 4 || lanes == 8)) {
     os << "uint" << lanes / 2 << "(";
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
@@ -945,7 +945,7 @@ void CodeGenTileLangMetal::CheckNoPackedBF16Carrier(DataType dtype,
                << ") must not enter a numeric " << ctx
                << " expression. bf16 numeric operations are capped at 2 lanes "
                   "(bfloat2) by the vectorizer; the packed uint path is only "
-                  "valid for pure memory copies (Codex external review C2).";
+                  "valid for pure memory copies.";
   }
 }
 
@@ -1062,7 +1062,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
                                       std::ostream &os) { // NOLINT(*)
   // Identity casts are bit-level pass-throughs (pure copy); any non-identity
   // cast touching a packed bf16 carrier is a numeric conversion and must be
-  // rejected (Codex C2).
+  // rejected.
   if (op->dtype != op->value.dtype()) {
     CheckNoPackedBF16Carrier(op->dtype, "cast");
     CheckNoPackedBF16Carrier(op->value.dtype(), "cast");
@@ -1503,7 +1503,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
   // Packed bf16 carriers are only valid in pure-copy call contexts:
   // if_then_else (bit-level pick used by predicated copies) and reinterpret
   // (bit-level). Any other call consuming a packed carrier would compile to
-  // integer-typed operands (Codex C2).
+  // integer-typed operands.
   if (!op->op.same_as(builtin::if_then_else()) &&
       !op->op.same_as(builtin::reinterpret())) {
     for (const PrimExpr &arg : op->args) {

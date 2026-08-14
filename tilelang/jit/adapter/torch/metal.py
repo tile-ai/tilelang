@@ -9,29 +9,29 @@ dynamic symbol (symbolic scalar such as ``N``), allocates ``out_idx`` outputs
 and compiler-generated buffers, and pins every buffer of a launch batch with
 a completion fence until the enqueued work finishes.
 
-Design notes (P1-B + P1-B2, Codex external reviews H1-H5 + M1):
+Design notes:
 
-- H1 (scalar interleave): shape resolution only ever consumes actual tensor
+- Scalar interleave: shape resolution only ever consumes actual tensor
   arguments; scalars stay in the positional ``full`` binding but never
   contribute shapes.
-- H2 (dynamic ``out_idx``): a runtime symbol table keyed by ``tirx.Var``
+- Dynamic ``out_idx``: a runtime symbol table keyed by ``tirx.Var``
   identity is built from caller-supplied tensor inputs only; output /
   workspace dimensions (``IntImm``, ``Var``, or general ``PrimExpr`` such as
   ``N + 1``) are evaluated against it, with an explicit error when a symbol
   cannot be determined.
-- H3 (compiler-generated buffers): binding information comes from the
+- Compiler-generated buffers: binding information comes from the
   lowered host call site / allocation semantics (``AllocBuffer`` nodes), not
   from assuming every device parameter back-references a user parameter name.
-- H4 (multi-kernel ordering): the launch plan follows the host call sites in
+- Multi-kernel ordering: the launch plan follows the host call sites in
   program order (duplicates preserved, constant-extent host loops expanded
   with the loop variable substituted into call-site arguments and launch
   geometry; statically resolvable conditionals follow their branch;
   runtime-dependent control flow is rejected at plan build time).
-- H5 (aborted launch batches): the keepalive fence is established from the
+- Aborted launch batches: the keepalive fence is established from the
   first successful enqueue via ``try/finally``; an exception mid-batch still
   pins everything already submitted, and event-record failures fall back to
   ``torch.mps.synchronize()``.
-- M1 (one-shot release): a background reaper thread drops each batch's
+- One-shot release: a background reaper thread drops each batch's
   strong refs when its completion event fires, so a single launch does not
   hold tensors until the next launch; the global queue also outlives the
   adapter (destruction path). Reaping is batch-atomic (observation outside
@@ -40,7 +40,7 @@ Design notes (P1-B + P1-B2, Codex external reviews H1-H5 + M1):
   exception transitions through ``torch.mps.synchronize()`` (drop) or moves
   the batch to a pinned stuck list out of the head-of-line path.
 
-P1-B2 (second Codex review round) call-site contract:
+Call-site contract:
 
 - Every device parameter is bound from the *call site's* actual argument
   (``args[1:1 + len(device_func.params)]``, the same slice the common
@@ -57,7 +57,7 @@ P1-B2 (second Codex review round) call-site contract:
   name string; the runtime symbol table is keyed by ``tirx.Var`` identity
   with an unambiguous-name fallback only.
 
-P1-B3 (third Codex review round):
+Shape and host-loop validation:
 
 - Retained-prefix validation: the trailing-singleton rank relaxation drops
   only trailing declared dims that are all constant 1, then EVERY retained
@@ -71,7 +71,7 @@ P1-B3 (third Codex review round):
   bound like ``_i + 1`` is statically enumerable and never mistaken for a
   runtime loop.
 
-P1-B4 (fourth Codex review round, blocking HIGH):
+Strict extent validation:
 
 - Rank matching is no longer a validation criterion.  EVERY declared
   dimension of EVERY tensor input is validated exactly (constants and
@@ -82,7 +82,7 @@ P1-B4 (fourth Codex review round, blocking HIGH):
   differ from the actual extent (e.g. declared ``(7,)`` fed a ``(3,)``
   tensor) are rejected before launch.
 
-P1-B5 (fifth Codex review round, blocking HIGH):
+Explicit capacity dimensions:
 
 - Capacity marking is EXPLICIT opt-in only.  The eager-jit pipeline no
   longer infers capacity dims from tensor annotations that reference
@@ -98,10 +98,10 @@ P1-B5 (fifth Codex review round, blocking HIGH):
   every access of the marked buffer along the marked dim and warns when a
   dim has no accesses or ANY access lacks guard evidence.  The audit is
   evidence, never a rejection: the explicit declaration is the trust
-  boundary (Codex review round 4 removal gate).  Both caller directions
-  are legal for a capacity dim -- declared > actual (padded/masked, the
-  r7 G5 QMM pattern) and declared < actual (active-prefix processing of a
-  larger allocation, the r7 act_quant pattern); safety for the former
+  boundary. Both caller directions
+  are legal for a capacity dim -- declared > actual (padded/masked grouped
+  QMM) and declared < actual (active-prefix processing of a larger
+  allocation); safety for the former
   rests on the kernel's masks, which the audit advises on.
 """
 
@@ -129,20 +129,20 @@ from tilelang.engine.param import KernelParam
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module-level keepalive reaper (M1): batches live in a global queue so they
+# Module-level keepalive reaper: batches live in a global queue so they
 # are reaped on completion regardless of the adapter's lifetime; the reaper
 # is a single lazily-started daemon thread.  Reaping is batch-atomic: the
 # completion observation happens outside the lock, the removal happens under
 # the lock and re-checks that the queue head is still the observed batch, so
 # concurrent releasers (reaper / launcher / destructor) can never pop a
-# batch they did not observe finished (P1-B2 finding 2).
+# batch they did not observe finished.
 # ---------------------------------------------------------------------------
 _KEEPALIVE_POLL_SECONDS = float(os.environ.get("TILELANG_METAL_KEEPALIVE_POLL_MS", "20")) / 1000.0
 
 _pending_keepalive: deque[tuple[tuple[torch.Tensor, ...], Any]] = deque()
 # Batches whose event query raised and whose synchronize fallback also
 # failed (MPS teardown): kept pinned (fail-safe) but out of the head-of-line
-# path, retried on later drains (P1-B2 finding 4).
+# path, retried on later drains.
 _stuck_keepalive: list[tuple[tuple[torch.Tensor, ...], Any]] = []
 _keepalive_lock = threading.Lock()
 _reaper_lock = threading.Lock()
@@ -225,7 +225,7 @@ def _track_keepalive(refs: list[torch.Tensor]) -> None:
     A completion event is recorded on the MPS stream after the batch was
     enqueued; the background reaper drops the strong refs once the event
     fires. If the event cannot be created/recorded, synchronize instead so
-    dropping the refs cannot dangle (H5 boundary).
+    dropping the refs cannot dangle.
     """
     unique: list[torch.Tensor] = []
     seen: set[int] = set()
@@ -277,7 +277,7 @@ def _ensure_reaper() -> None:
 # ---------------------------------------------------------------------------
 # Module-level launch-time resolvers.  These are plain functions (no ``self``)
 # so the launcher closure never captures the adapter, keeping the destruction
-# path deterministic (P1-B2 finding 4: provable ``__del__`` cleanup).
+# path deterministic with provable ``__del__`` cleanup.
 # ---------------------------------------------------------------------------
 def _symbol_value(var: Any, symtab: dict[Any, int]) -> int:
     """Resolve a dynamic scalar symbol by ``tirx.Var`` identity.
@@ -308,7 +308,7 @@ def _pack_scalar_args(scalar_slots: list[tuple[Any, Any]], device: Any) -> torch
     ``torch.mps.compile_shader`` launcher, however, binds each positional
     argument to its own buffer slot, so passing ``m`` separate Python
     scalars only ever lands the first one inside the struct and silently
-    misreads the rest (P1-B3: ``kern(a, 5, 7)`` produced ``a + 5000``).
+    misreads the rest (for example, ``kern(a, 5, 7)`` can produce ``a + 5000``).
     Packing every scalar into a single tensor reproduces the struct layout
     exactly and binds it to the struct buffer slot.
     """
@@ -377,12 +377,12 @@ def _resolve_int_value(
     if isinstance(expr, tirx.PrimExpr):
         vmap: dict[Any, Any] = {}
         for var, val in symtab.items():
-            vmap[var] = tirx.IntImm("int32", int(val))
+            vmap[var] = tirx.IntImm(str(var.dtype), int(val))
         if scalar_vars is not None and full is not None:
             for var, slot in scalar_vars.items():
                 value = full[slot]
                 if isinstance(value, numbers.Integral):
-                    vmap[var] = tirx.IntImm("int32", int(value))
+                    vmap[var] = tirx.IntImm(str(var.dtype), int(value))
         substituted = tvm.tirx.stmt_functor.substitute(expr, vmap) if vmap else expr
         simplified = analyzer.simplify(substituted)
         if isinstance(simplified, tirx.IntImm):
@@ -397,13 +397,13 @@ def _build_symbol_table(
     result_idx: list[int],
     capacity_dims: dict[int, frozenset[int]] | None = None,
 ) -> dict[Any, int]:
-    """Runtime symbol table keyed by ``tirx.Var`` identity (H1/H2).
+    """Build a runtime symbol table keyed by ``tirx.Var`` identity.
 
     Built from caller-supplied tensor inputs only: outputs never contribute,
     shared symbols resolve from the input binding, and conflicting bindings
     of the same symbol are rejected.
 
-    Shape discipline (P1-B4, Codex review round 3 HIGH): every declared
+    Shape discipline: every declared
     dimension of every tensor input is validated against the caller's actual
     extent -- constants and general expressions must evaluate to the exact
     actual value, ``Var`` dimensions are bound into the symbol table by
@@ -417,18 +417,18 @@ def _build_symbol_table(
       rejected instead of launching out of bounds;
     - dimensions explicitly declared as *capacity* dimensions in the
       compiled contract (``capacity_dims`` map; PrimFunc attr
-      ``tilelang_capacity_dims``, P1-B5 explicit opt-in only): the kernel
+      ``tilelang_capacity_dims``, explicit opt-in only): the kernel
       contract states the declared extent bounds every access the kernel
       performs (internally masked/offset-guarded), so the caller's actual
-      extent may differ -- the legal padded/masked pattern (r7 G5 masked
-      QMM: declared rows=64, actual per-expert slices of 15) and the
-      active-prefix pattern (declared active rows, larger allocation, the
-      r7 act_quant call).  Both directions are legal; the guard audit
+      extent may differ -- the legal padded/masked grouped-QMM pattern
+      (declared rows=64, actual per-expert slices of 15) and the
+      active-prefix pattern (declared active rows, larger allocation).
+      Both directions are legal; the guard audit
       advises on mask evidence for the declared > actual direction.
 
     ``capacity_dims`` maps public parameter positions to the shape-dim
     indices that are contractually capacity declarations; everything else is
-    strict.  Rank matching is NOT a criterion (P1-B4): an unmarked
+    strict. Rank matching is not a criterion: an unmarked
     rank-matched constant dim that differs from the actual extent is a real
     out-of-bounds hazard and is rejected.
     """
@@ -474,7 +474,7 @@ def _build_symbol_table(
     # are exact by construction.  A mismatched extent would launch the
     # static geometry over a buffer of a different size (GPU OOB).  Rank
     # matching or relaxation is NOT a criterion: an unmarked rank-matched
-    # constant dim must still match exactly (P1-B4).
+    # constant dim must still match exactly.
     analyzer = tvm.arith.Analyzer()
     for var, val in symtab.items():
         analyzer.bind(var, val)
@@ -483,16 +483,16 @@ def _build_symbol_table(
         for dim_idx, (dim, val) in enumerate(zip(declared, shape)):
             if dim_idx in cap:
                 # Explicit capacity declaration (PrimFunc attr
-                # ``tilelang_capacity_dims``, P1-B5 explicit opt-in): the
+                # ``tilelang_capacity_dims``, explicit opt-in): the
                 # kernel contract states the declared extent bounds every
                 # access (masked/offset-guarded), so the caller's actual
                 # extent may differ in EITHER direction -- declared >
-                # actual (padded/masked, r7 G5 QMM: declared rows=64,
+                # actual (padded/masked grouped QMM: declared rows=64,
                 # actual per-expert slices of 15) or declared < actual
-                # (active-prefix processing of a larger allocation, the
-                # r7 act_quant call).  The guard audit advises on mask
+                # (active-prefix processing of a larger allocation).
+                # The guard audit advises on mask
                 # evidence; the explicit declaration is the trust
-                # boundary (Codex review round 4 removal gate).
+                # boundary.
                 continue
             if isinstance(dim, tirx.Var):
                 continue
@@ -519,7 +519,7 @@ def _eval_param_shape(symtab: dict[Any, int], param: Any) -> tuple[int, ...]:
 
 
 # ---------------------------------------------------------------------------
-# Capacity-dimension guard audit (P1-B5)
+# Capacity-dimension guard audit
 # ---------------------------------------------------------------------------
 # Capacity dims are exempt from strict extent validation ONLY when explicitly
 # declared (``T.annotate_capacity_dims`` in the eager DSL /
@@ -529,15 +529,15 @@ def _eval_param_shape(symtab: dict[Any, int], param: Any) -> tuple[int, ...]:
 # accessed out of bounds.  The audit below gathers STRUCTURAL evidence for
 # such guards from the compiled body (best-effort, advisory): it warns when
 # a marked dim has no accesses or no guard evidence at all, and never
-# rejects -- the explicit declaration is the trust boundary (Codex review
-# round 4 removal gate), the audit is evidence for it.
+# rejects -- the explicit declaration is the trust boundary, and the audit
+# provides evidence for it.
 #
 # Evidence rules (an access is guarded when ANY holds):
 #   - condition: an enclosing ``Select`` / ``IfThenElse`` condition (only
 #     ``And`` conjuncts) UPPER-bounds a subexpression of the access index
 #     with a bound that is not the declared extent (not structurally
 #     equal to it and not derived from it) and not derived from the index
-#     itself.  Direction-aware (Codex review 26745011 LOW-1): for a
+#     itself. For a
 #     capacity dim the danger is an index that runs past the extent, so
 #     only comparisons that bound the index from above count (``idx < b``
 #     / ``idx <= b`` / ``b > idx`` / ``b >= idx``); lower-bound
@@ -627,7 +627,7 @@ def _structural_contains(expr: Any, sub: Any) -> bool:
 
 def _condition_bounds_access(cond: Any, idx: Any, declared: Any) -> bool:
     """Condition evidence: ``cond`` UPPER-bounds the access index ``idx``
-    (Codex review 26745011 LOW-1: direction-aware).  For a capacity dim
+    using direction-aware comparisons. For a capacity dim
     the danger is an index that runs past the extent, so only comparisons
     that bound ``idx`` from above count -- ``idx < b`` / ``idx <= b``
     (index on the left) and ``b > idx`` / ``b >= idx`` (index on the
@@ -657,7 +657,7 @@ def _upper_bound_is_valid(bound: Any, idx: Any, declared: Any) -> bool:
 def _clamp_evidence(idx: Any, declared: Any) -> bool:
     """Clamp evidence: the access index contains a ``Min`` that bounds it
     from above with operands all not derived from the declared extent
-    (Codex review 26745011 LOW-1: direction-aware).  ``Max`` clamps from
+    using direction-aware analysis. ``Max`` clamps from
     below -- it can only grow the index -- so it is not evidence by
     itself; its children are still searched for a genuine ``Min``."""
     if isinstance(idx, tirx.Min):
@@ -792,7 +792,7 @@ def _audit_capacity_guards(
     capacity_dims: dict[int, frozenset[int]],
     name_to_pos: dict[str, int],
 ) -> None:
-    """Advisory guard audit for explicitly declared capacity dims (P1-B5).
+    """Advisory guard audit for explicitly declared capacity dims.
 
     Emits a warning when a marked (param, dim) has no accesses in the
     kernel body or no guard evidence for any of its accesses.  Never
@@ -909,14 +909,14 @@ class MetalKernelAdapter(BaseKernelAdapter):
             func_name = func_or_mod.__name__
         self.kernel_name = func_name + "_kernel"
         self.verbose = verbose
-        # Explicit capacity-dimension contract markers (P1-B5): capacity
+        # Explicit capacity-dimension contract markers: capacity
         # dims are exempt from strict extent validation ONLY when the kernel
         # author explicitly declares them -- eager kernels via
         # ``T.annotate_capacity_dims({"A_q": (0,)})`` in the body, lazy
         # kernels via ``func.with_attr("tilelang_capacity_dims", {"W": (0,)})``.
         # The syntactic auto-inference from tensor annotations was removed
-        # (Codex review round 4 blocking HIGH: ordinary exact dims that
-        # happened to reference scalar parameters were auto-exempted).
+        # because ordinary exact dims that reference scalar parameters must
+        # not be auto-exempted.
         # Keyed by public parameter position (the ``params``/call-site
         # order).  Must be set BEFORE ``super().__init__``: the base
         # ``_post_init`` builds the launcher closure, which captures this
@@ -934,11 +934,18 @@ class MetalKernelAdapter(BaseKernelAdapter):
                 if buf is not None:
                     name_to_pos[str(buf.name)] = i
         if cap_attr and isinstance(func_or_mod, tirx.PrimFunc):
+            unknown_names = sorted(str(pname) for pname in cap_attr if str(pname) not in name_to_pos)
+            if unknown_names:
+                raise ValueError(
+                    "Metal adapter: tilelang_capacity_dims contains unknown "
+                    f"tensor parameter name(s) {unknown_names}; declared "
+                    f"tensor parameters are {sorted(name_to_pos)}"
+                )
             for pname, dims in cap_attr.items():
                 pos = name_to_pos.get(str(pname))
                 if pos is not None and not params[pos].is_scalar():
                     self._capacity_dims[pos] = frozenset(int(d) for d in dims)
-            # P1-B5 advisory guard audit: structural mask/offset-guard
+            # Advisory guard audit: structural mask/offset-guard
             # evidence for every explicitly declared capacity dim (warns on
             # absence; never rejects).
             _audit_capacity_guards(func_or_mod, self._capacity_dims, name_to_pos)
@@ -949,7 +956,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
     def __del__(self) -> None:
         # Best-effort: drop completed batches promptly at adapter destruction.
         # Pending (in-flight) batches stay in the module-global queue and are
-        # reaped by the background thread on completion (M1 destruction path).
+        # reaped by the background thread on completion.
         with contextlib.suppress(Exception):
             _release_finished_work()
 
@@ -963,7 +970,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         return self.kernel_global_source
 
     # ------------------------------------------------------------------
-    # Host call-site analysis (H3/H4)
+    # Host call-site analysis
     # ------------------------------------------------------------------
     def _host_entry_funcs(self) -> list[Any]:
         """Lowered host functions whose bodies contain the kernel calls."""
@@ -994,7 +1001,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         Call-site buffer/scalar arguments are resolved to public parameters
         through the ``args`` slot index of the FFI entry (the packed-ABI
         slot order is the public parameter order), so binding never depends
-        on parameter names (P1-B2 finding 1).
+        on parameter names.
         """
         for param in entry.params:
             if str(param) == "args":
@@ -1008,11 +1015,11 @@ class MetalKernelAdapter(BaseKernelAdapter):
         return tvm.tirx.stmt_functor.substitute(expr, loop_vmap)
 
     def _static_condition(self, condition: Any, loop_vmap: dict[Any, Any]) -> bool:
-        """Statically resolve an ``IfThenElse`` condition (H4, P1-B2).
+        """Statically resolve an ``IfThenElse`` condition.
 
         Conditions that depend on runtime values cannot be represented in a
         static launch plan: raise at plan build time instead of silently
-        emitting both branches (finding 3).
+        emitting both branches.
         """
         cond = self._loop_substitute(condition, loop_vmap)
         if isinstance(cond, tirx.IntImm):
@@ -1042,7 +1049,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         ``min`` is honored); statically resolvable ``IfThenElse`` nodes walk
         only their taken branch; runtime-dependent control flow raises.
         ``Bind`` statements are recorded for FFI slot resolution and
-        ``AllocBuffer`` nodes for compiler-generated buffer binding (H3).
+        ``AllocBuffer`` nodes for compiler-generated buffer binding.
         """
         if isinstance(node, tirx.Evaluate):
             value = node.value
@@ -1052,7 +1059,10 @@ class MetalKernelAdapter(BaseKernelAdapter):
                     return
                 if loop_vmap:
                     args = [self._loop_substitute(a, loop_vmap) for a in args]
-                call_sites.append((str(args[0].value), args[1:], args_var, bind_map))
+                # Snapshot the bindings at the call site: a tirx.Bind in a
+                # later static loop iteration must not overwrite the bindings
+                # used by earlier sites.
+                call_sites.append((str(args[0].value), args[1:], args_var, dict(bind_map)))
             return
         if isinstance(node, tirx.SeqStmt):
             for stmt in node.seq:
@@ -1069,7 +1079,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
             return
         if isinstance(node, tirx.For):
             # Substitute the outer constant iterations into the bounds and
-            # simplify BEFORE the constant check (P1-B3 finding 2): a nested
+            # simplify BEFORE the constant check: a nested
             # loop whose bound references the outer loop variable
             # (``T.serial(_i + 1)`` inside ``T.serial(2, 4)``) is statically
             # enumerable and must not be mistaken for a runtime loop.  Bounds
@@ -1101,7 +1111,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
             return
         # Leaf nodes in this tirx version (no body to descend into):
         #   AllocBuffer (compiler-generated global buffer), DeclBuffer,
-        #   AssertStmt. AllocBuffer is recorded for H3 binding resolution
+        #   AssertStmt. AllocBuffer is recorded for binding resolution
         #   keyed by its data-handle Var identity.
         if isinstance(node, tirx.AllocBuffer):
             host_buffers.setdefault(node.buffer.data, node.buffer)
@@ -1216,7 +1226,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         )
 
     def _launch_plan(self) -> list[_LaunchSite]:
-        """Per-call-site launch plan from the lowered host module (H3/H4).
+        """Build a per-call-site launch plan from the lowered host module.
 
         Every kernel is represented once per host call site, in program
         order, with its DCE'd buffer signature (call-site args are in the
@@ -1314,7 +1324,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         return plan
 
     # ------------------------------------------------------------------
-    # Dynamic shape resolution (H1/H2)
+    # Dynamic shape resolution
     # ------------------------------------------------------------------
     def _symbol_table(self, tensor_input_shapes: list[tuple[int, ...]]) -> dict[Any, int]:
         return _build_symbol_table(tensor_input_shapes, self.params, self.result_idx, self._capacity_dims)
@@ -1326,7 +1336,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         return _eval_param_shape(symtab, param)
 
     def _resolve_output_shapes(self, tensor_input_shapes: list[tuple[int, ...]]) -> list[tuple[int, ...]]:
-        """Resolve ``out_idx`` output tensor shapes (H2)."""
+        """Resolve ``out_idx`` output tensor shapes."""
         symtab = self._symbol_table(tensor_input_shapes)
         return [self._eval_param_shape(symtab, self.params[idx]) for idx in self.result_idx]
 
@@ -1347,7 +1357,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
             _input_param_idx = [i for i in range(len(_params)) if i not in _result_idx]
 
             def launcher(*args: Any) -> Any:
-                # H1: `args` are the user-supplied non-output arguments in
+                # `args` are the user-supplied non-output arguments in
                 # positional order and may mix tensors and scalars; only
                 # actual tensor arguments ever contribute shapes.
                 if len(args) != len(_input_param_idx):
@@ -1381,7 +1391,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                     full[i] = arg
 
                 # Allocate out_idx outputs (mirrors the TVMFFI adapter
-                # contract; shapes may be dynamic, H2).
+                # contract; shapes may be dynamic).
                 outputs: list[torch.Tensor] = []
                 for idx in _result_idx:
                     shape = _eval_param_shape_fn(symtab, _params[idx])
@@ -1389,7 +1399,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                     full[idx] = tensor
                     outputs.append(tensor)
 
-                # Compiler-generated workspaces (H3): one allocation per host
+                # Compiler-generated workspaces: one allocation per host
                 # AllocBuffer per launch, shared across call sites (keyed by
                 # the tirx.Buffer identity, not its name).
                 gen_buffers: dict[Any, torch.Tensor] = {}
@@ -1406,7 +1416,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                         # must be packed into ONE tensor at the struct slot:
                         # passing them individually only lands the first
                         # scalar in the struct and silently misreads the rest
-                        # (P1-B3 multi-runtime-scalar ABI bug).
+                        # due to the multi-runtime-scalar ABI layout.
                         tensor_kargs: list[torch.Tensor] = []
                         scalar_slots: list[tuple[Any, Any]] = []
                         seen_scalar = False
@@ -1485,7 +1495,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                         )
                         submitted = True
                 finally:
-                    # H5: from the first successful enqueue on, an exception
+                    # From the first successful enqueue on, an exception
                     # mid-batch still establishes the completion fence and
                     # keeps every submitted buffer pinned.
                     if submitted:

@@ -212,10 +212,10 @@ class Builder(BaseBuilder):
         self.eager_jit_subs: dict[str, PrimExpr] = {}
         self.func_pass_configs: dict[str, Any] | None = None
         self.func_compile_flags: list[str] | str | None = None
-        # Capacity-dim contract markers (P1-B5): populated ONLY by the
+        # Capacity-dim contract markers: populated ONLY by the
         # explicit ``T.annotate_capacity_dims(...)`` opt-in (see below); the
         # syntactic auto-inference from tensor annotations was removed
-        # (Codex review round 4 blocking HIGH).  Attached to the PrimFunc as
+        # because ordinary exact dimensions must remain strict. Attached to the PrimFunc as
         # ``tilelang_capacity_dims`` so the Metal adapter can exempt exactly
         # the explicitly declared dims from strict extent checks.
         self._capacity_dims: dict[str, tuple[int, ...]] = {}
@@ -1119,15 +1119,15 @@ def annotate_compile_flags(flags: list[str] | str) -> None:
 
 
 def annotate_capacity_dims(dims: dict[str, Sequence[int]]) -> None:
-    """Explicitly declare capacity dimensions of tensor parameters (P1-B5).
+    """Explicitly declare capacity dimensions of tensor parameters.
 
     A *capacity* dimension is a shape dimension whose declared extent is an
     upper bound for the accesses the kernel will perform: the kernel body
     is expected to bound its accesses with a runtime mask/offset guard
     (condition against a runtime bound, a runtime-bounded loop, or an
     offset/clamp), so the caller may supply an actual buffer whose extent
-    differs from the declared one (the legal padded/masked pattern, e.g.
-    r7 G5 masked QMM: declared rows=64, actual per-expert slices of 15).
+    differs from the declared one (the legal padded/masked grouped-QMM
+    pattern, e.g. declared rows=64, actual per-expert slices of 15).
 
     Only dims listed here are exempted from the Metal adapter's strict
     per-dimension extent validation; every other dim (including dims that
@@ -1194,6 +1194,14 @@ def _patch_prim_func_attrs(pf: PrimFunc, builder: Builder) -> PrimFunc:
             flags = [flags]
         pf = pf.with_attr("tilelang_compile_flags", flags)
     if builder._capacity_dims:
+        tensor_param_names = {str(buf.name) for var in pf.params if (buf := pf.buffer_map.get(var)) is not None}
+        unknown_names = sorted(set(builder._capacity_dims) - tensor_param_names)
+        if unknown_names:
+            raise ValueError(
+                "T.annotate_capacity_dims: unknown tensor parameter name(s) "
+                f"{unknown_names}; declared tensor parameters are "
+                f"{sorted(tensor_param_names)}"
+            )
         pf = pf.with_attr("tilelang_capacity_dims", dict(builder._capacity_dims))
     return pf
 

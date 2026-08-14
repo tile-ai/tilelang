@@ -486,12 +486,12 @@ class DSLMutator(ast.NodeTransformer):
             return node
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
-        # P1-B5: tensor annotations are EXACT declarations only.  A shape
+        # Tensor annotations are exact declarations. A shape
         # dimension that happens to reference a scalar function parameter is
         # still an exact declaration unless the author explicitly declares it
         # as a capacity dimension via ``T.annotate_capacity_dims(...)`` in the
-        # kernel body (Codex review round 4 blocking HIGH: the old syntactic
-        # auto-inference exempted ordinary exact dims from adapter validation).
+        # kernel body; syntactic auto-inference could otherwise exempt ordinary
+        # exact dims from adapter validation.
         node = self.generic_visit(node)
         rval = node.value or quote_expr("__tb.empty", span=node, annot=node)
         return self._emit_assign_target(node.target, rval, annot=node.annotation)

@@ -1,8 +1,8 @@
 """ABI/RUNTIME regression corpus: MetalKernelAdapter argument binding.
 
-Upgraded from the single-case regression for commit 681bdd4f (SplitHostDevice
-sorts device params by (not is_handle, name_hint); the adapter must permute
-user args to that order). The corpus is designed so that ANY future parameter
+SplitHostDevice sorts device parameters by handle class and name; the adapter
+must permute user arguments to the resulting order. The corpus is designed so
+that any future parameter
 reordering, host lowering change, or adapter modification is caught
 automatically:
 
@@ -18,10 +18,16 @@ torch.mps.synchronize(), exact error threshold. Failing = ABI regression.
 """
 
 import numpy as np
+import pytest
 import torch
 
 import tilelang
 import tilelang.language as T
+
+pytestmark = pytest.mark.skipif(
+    not torch.backends.mps.is_available(),
+    reason="PyTorch MPS device is required",
+)
 
 
 def _check(kern, args, out, oracle, tag, atol=1e-4):
