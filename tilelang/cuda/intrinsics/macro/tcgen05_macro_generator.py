@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
+from .wgmma_macro_generator import decode_k_panel_elems
 from ..layout.mma_sm100_layout import (
     TCGEN05Meta,
     make_tmem_frg_a,
@@ -60,12 +61,22 @@ class TCGEN05DescriptorParams:
     operand. Computed by :func:`compute_umma_descriptor` from the CuTe layout."""
     k_panel_elems: int | None = None
     """Element stride between consecutive K swizzle-atom panels (K-major only),
-    read off the decoded layout. ``None`` when the layout has a single K panel,
-    or for an MN-major operand, in which case the ``ki // k_atom_size`` term the
-    offset formulas multiply it into is always zero / unused. Callers must not
-    reconstruct this as ``mn_extent * swizzle_atom_elems``: for an operand that
-    is a slice of a wider buffer (``B[64:128, :]``) the panels stay spaced by the
-    *buffer's* MN extent, not the operand's."""
+    read off the decoded layout by :func:`decode_k_panel_elems`. ``None`` only
+    when no panel step is needed -- see :meth:`k_panel_stride`, which is how
+    callers should read it."""
+
+    def k_panel_stride(self, mn_extent: int) -> int:
+        """K-panel step for the atom offset formulas.
+
+        ``mn_extent`` is the operand's own MN extent, used only for the
+        single-panel / MN-major case where the ``ki // k_atom_size`` factor is
+        always zero and any value works. Never reconstruct the multi-panel step
+        from it: for a slice of a wider buffer the panels stay spaced by the
+        *buffer's* MN extent, not the operand's.
+        """
+        if self.k_panel_elems is not None:
+            return self.k_panel_elems
+        return mn_extent * self.swizzle_atom_elems
 
 
 @dataclass(frozen=True)
@@ -195,20 +206,6 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         f"only row-major operand layouts are supported."
     )
 
-    # Element stride between consecutive K swizzle-atom panels, taken from the
-    # decoded layout: a K-major operand wider than one swizzle atom decodes as
-    # (MN, (atom, panels)), and the panel sub-mode's stride is what the offset
-    # formulas need. Reconstructing it as `mn_dim * swizzle_atom_elems` only holds
-    # when the operand covers its whole buffer -- for a slice, mn_dim shrinks while
-    # the panel spacing does not.
-    k_panel_elems = None
-    if k_major:
-        k_shape = tile[k_idx].shape
-        if isinstance(k_shape, tuple) and len(k_shape) == 2:
-            panel_stride = tile[k_idx].stride[-1]
-            if isinstance(panel_stride, int):
-                k_panel_elems = panel_stride
-
     # SwizzleAtomMNSize per UMMA LayoutType (NONE->1, B32->2, B64->4, B128->8) = 1 << b_bits.
     W = 1 << byte_swizzle.b_bits
     swizzled = not swizzle_mode.is_none()
@@ -249,6 +246,8 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     # Elements per swizzle atom along the non-K (MN) dimension; the unswizzled
     # case spans the whole MN tile (bit-based so sub-byte dtypes stay packed).
     swizzle_atom_elems = mn_dim if swizzle_mode.is_none() else _bytes_to_elements(swizzle_mode.swizzle_byte_size(), elem_bits)
+
+    k_panel_elems = decode_k_panel_elems(tile[k_idx], k_major, swizzle_mode, swizzle_atom_elems, "UMMA")
     return TCGEN05DescriptorParams(
         swizzle_mode=swizzle_mode,
         leading_byte_offset=int(lbo),
@@ -974,11 +973,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
-        # K-panel stride from the decoded layout; m_dim / n_dim_per_cta are operand
-        # extents and only match the panel spacing for a whole-buffer operand
-        # (see TCGEN05DescriptorParams.k_panel_elems).
-        a_k_panel_elems = a_params.k_panel_elems if a_params.k_panel_elems is not None else m_dim * a_swizzle_atom_elems
-        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim_per_cta * b_swizzle_atom_elems
+        a_k_panel_elems = a_params.k_panel_stride(m_dim)
+        b_k_panel_elems = b_params.k_panel_stride(n_dim_per_cta)
         mask_zero = T.cast(0, T.int32)
 
         # Pre-compute offsets
@@ -1078,8 +1074,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_elem_bits = b_params.elem_bits
         bk_atom_size = b_params.k_atom_size
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
-        # See TCGEN05DescriptorParams.k_panel_elems.
-        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim_per_cta * b_swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_stride(n_dim_per_cta)
         mask_zero = T.cast(0, T.int32)
 
         A_tmem_offset = a_params.atom_offset(inst_m_idx * atom_m_per_cta, ki * meta.atom_k)
@@ -1170,9 +1165,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
-        # See TCGEN05DescriptorParams.k_panel_elems.
-        a_k_panel_elems = a_params.k_panel_elems if a_params.k_panel_elems is not None else m_dim * a_swizzle_atom_elems
-        b_k_panel_elems = b_params.k_panel_elems if b_params.k_panel_elems is not None else n_dim_per_cta * b_swizzle_atom_elems
+        a_k_panel_elems = a_params.k_panel_stride(m_dim)
+        b_k_panel_elems = b_params.k_panel_stride(n_dim_per_cta)
 
         if a_params.is_k_major:
             A_elem_offset = (
