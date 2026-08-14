@@ -66,24 +66,352 @@ namespace {
 //     time(S) ~ max(bw, issue);      cost = sum over statements.
 // ---------------------------------------------------------------------------
 
-using VarBindings = std::unordered_map<const VarNode *, int64_t>;
+/*! \brief A statement-lifetime compiled form of an index expression.
+ *
+ *  The scoring walk executes each expression once per (logical point,
+ *  replica) — 10^4..10^6 times — so per-point symbolic evaluation is the
+ *  wrong shape. Instead: canonicalize ONCE with the Analyzer (TIR
+ *  semantics stay the Analyzer's), flatten ONCE into a postfix program,
+ *  then execute as straight-line int64 arithmetic. Vars outside the slot
+ *  map (block indices inside region offsets) compile to the constant 0:
+ *  they shift every address of the statement equally and cancel out of
+ *  both contiguity and segment geometry. An unsupported node fails
+ *  COMPILATION, marking the statement outside the model up front — the
+ *  same protocol the per-point evaluation signalled, just earlier. */
+class ExprProgram {
+public:
+  static std::optional<ExprProgram>
+  Compile(const PrimExpr &expr,
+          const std::unordered_map<const VarNode *, int> &var_slots,
+          arith::Analyzer *analyzer) {
+    // Zero out foreign vars BEFORE canonicalization: Simplify then folds
+    // their dead terms away (e.g. `bx*16384 + rest` -> `rest`), so the
+    // compiled program carries only live instructions into the hot loop.
+    // Non-int foreign vars are kept and fail Emit below, as before.
+    PrimExpr canon =
+        Substitute(expr, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+          if (var_slots.count(var.get()) ||
+              (!var->dtype.is_int() && !var->dtype.is_uint())) {
+            return ffi::Optional<PrimExpr>();
+          }
+          return make_zero(var->dtype); // foreign additive offset
+        });
+    ExprProgram prog;
+    if (!prog.Emit(analyzer->Simplify(canon), var_slots)) {
+      return std::nullopt;
+    }
+    // Verify the fixed eval stack suffices (postfix depth simulation).
+    int depth = 0, max_depth = 0;
+    for (const Instr &instr : prog.code_) {
+      if (instr.op == Op::kConst || instr.op == Op::kVar) {
+        ++depth;
+      } else if (instr.op == Op::kSelect) {
+        depth -= 2;
+      } else {
+        --depth;
+      }
+      max_depth = std::max(max_depth, depth);
+    }
+    if (max_depth > kMaxStackDepth) {
+      return std::nullopt;
+    }
+    return prog;
+  }
 
-/*! \brief Evaluate an index expression at a concrete point through the
- *  Analyzer: substitute every var — bound vars with their value, unbound
- *  vars (block indices inside region offsets) with zero, since they shift
- *  every address of the statement equally and cancel out of both
- *  contiguity and segment geometry — then constant-fold with Simplify.
- *  Anything that does not fold to an integer is outside the model. */
-std::optional<int64_t> EvalIndexExpr(const PrimExpr &e,
-                                     const VarBindings &bindings,
-                                     arith::Analyzer *analyzer) {
+  /*! \brief Max eval-stack depth any program may need; programs deeper
+   *  than this fail compilation (an index expression this deep is not a
+   *  layout expression). Keeps Eval on a fixed C array. */
+  static constexpr int kMaxStackDepth = 64;
+
+  /*! \brief Evaluate against `slots` (one value per var slot). Nullopt
+   *  only on a division by a computed zero. */
+  std::optional<int64_t> Eval(const int64_t *slots) const {
+    int64_t stack[kMaxStackDepth];
+    int top = 0; // index one past the top of the stack
+    for (const Instr &instr : code_) {
+      switch (instr.op) {
+      case Op::kConst:
+        stack[top++] = instr.imm;
+        break;
+      case Op::kVar:
+        stack[top++] = slots[instr.imm];
+        break;
+      case Op::kSelect: {
+        int64_t b = stack[--top], a = stack[--top], cond = stack[--top];
+        stack[top++] = cond != 0 ? a : b;
+        break;
+      }
+      default: {
+        int64_t b = stack[--top], a = stack[--top];
+        int64_t v = 0;
+        switch (instr.op) {
+        case Op::kAdd:
+          v = a + b;
+          break;
+        case Op::kSub:
+          v = a - b;
+          break;
+        case Op::kMul:
+          v = a * b;
+          break;
+        case Op::kFloorDiv: {
+          if (b == 0) {
+            return std::nullopt;
+          }
+          v = a / b;
+          if ((a % b != 0) && ((a < 0) != (b < 0))) {
+            --v;
+          }
+          break;
+        }
+        case Op::kFloorMod: {
+          if (b == 0) {
+            return std::nullopt;
+          }
+          v = a % b;
+          if (v != 0 && ((v < 0) != (b < 0))) {
+            v += b;
+          }
+          break;
+        }
+        case Op::kMin:
+          v = std::min(a, b);
+          break;
+        case Op::kMax:
+          v = std::max(a, b);
+          break;
+        case Op::kLT:
+          v = a < b ? 1 : 0;
+          break;
+        case Op::kLE:
+          v = a <= b ? 1 : 0;
+          break;
+        case Op::kGT:
+          v = a > b ? 1 : 0;
+          break;
+        case Op::kGE:
+          v = a >= b ? 1 : 0;
+          break;
+        case Op::kEQ:
+          v = a == b ? 1 : 0;
+          break;
+        case Op::kNE:
+          v = a != b ? 1 : 0;
+          break;
+        case Op::kAnd:
+          v = (a != 0 && b != 0) ? 1 : 0;
+          break;
+        case Op::kOr:
+          v = (a != 0 || b != 0) ? 1 : 0;
+          break;
+        case Op::kBitAnd:
+          v = a & b;
+          break;
+        case Op::kBitOr:
+          v = a | b;
+          break;
+        case Op::kBitXor:
+          v = a ^ b;
+          break;
+        case Op::kShl:
+          if (b < 0 || b > 63) {
+            return std::nullopt;
+          }
+          v = a << b;
+          break;
+        case Op::kShr:
+          if (b < 0 || b > 63) {
+            return std::nullopt;
+          }
+          v = a >> b; // arithmetic shift, matching TIR's shift_right on ints
+          break;
+        default:
+          return std::nullopt; // unreachable
+        }
+        stack[top++] = v;
+        break;
+      }
+      }
+    }
+    return stack[top - 1];
+  }
+
+private:
+  enum class Op : uint8_t {
+    kConst,
+    kVar,
+    kAdd,
+    kSub,
+    kMul,
+    kFloorDiv,
+    kFloorMod,
+    kMin,
+    kMax,
+    kSelect,
+    kLT,
+    kLE,
+    kGT,
+    kGE,
+    kEQ,
+    kNE,
+    kAnd,
+    kOr,
+    kBitAnd,
+    kBitOr,
+    kBitXor,
+    kShl,
+    kShr,
+  };
+  struct Instr {
+    Op op;
+    int64_t imm{0}; // kConst: value; kVar: slot index
+  };
+  std::vector<Instr> code_;
+
+  bool Emit(const PrimExpr &e,
+            const std::unordered_map<const VarNode *, int> &var_slots) {
+    if (const auto *imm = e.as<IntImmNode>()) {
+      code_.push_back({Op::kConst, imm->value});
+      return true;
+    }
+    if (const auto *var = e.as<VarNode>()) {
+      if (!var->dtype.is_int() && !var->dtype.is_uint()) {
+        return false;
+      }
+      auto it = var_slots.find(var);
+      if (it != var_slots.end()) {
+        code_.push_back({Op::kVar, it->second});
+      } else {
+        code_.push_back({Op::kConst, 0}); // foreign additive offset
+      }
+      return true;
+    }
+    if (const auto *op = e.as<CastNode>()) {
+      return Emit(op->value, var_slots);
+    }
+    if (const auto *op = e.as<SelectNode>()) {
+      return Emit(op->condition, var_slots) &&
+             Emit(op->true_value, var_slots) &&
+             Emit(op->false_value, var_slots) &&
+             (code_.push_back({Op::kSelect}), true);
+    }
+    if (const auto *op = e.as<CallNode>()) {
+      auto call_binary = [&](Op op_code) {
+        return op->args.size() == 2 && Emit(op->args[0], var_slots) &&
+               Emit(op->args[1], var_slots) &&
+               (code_.push_back({op_code}), true);
+      };
+      if (op->op.same_as(builtin::if_then_else()) && op->args.size() == 3) {
+        return Emit(op->args[0], var_slots) && Emit(op->args[1], var_slots) &&
+               Emit(op->args[2], var_slots) &&
+               (code_.push_back({Op::kSelect}), true);
+      }
+      if (op->op.same_as(builtin::bitwise_and())) {
+        return call_binary(Op::kBitAnd);
+      }
+      if (op->op.same_as(builtin::bitwise_or())) {
+        return call_binary(Op::kBitOr);
+      }
+      if (op->op.same_as(builtin::bitwise_xor())) {
+        return call_binary(Op::kBitXor);
+      }
+      if (op->op.same_as(builtin::shift_left())) {
+        return call_binary(Op::kShl);
+      }
+      if (op->op.same_as(builtin::shift_right())) {
+        return call_binary(Op::kShr);
+      }
+      if (op->op.same_as(builtin::bitwise_not()) && op->args.size() == 1) {
+        // ~a == a ^ -1
+        if (!Emit(op->args[0], var_slots)) {
+          return false;
+        }
+        code_.push_back({Op::kConst, -1});
+        code_.push_back({Op::kBitXor});
+        return true;
+      }
+      return false;
+    }
+    if (const auto *op = e.as<NotNode>()) {
+      // !a  ==  (a == 0)
+      if (!Emit(op->a, var_slots)) {
+        return false;
+      }
+      code_.push_back({Op::kConst, 0});
+      code_.push_back({Op::kEQ});
+      return true;
+    }
+    auto binary = [&](const PrimExpr &a, const PrimExpr &b, Op op_code) {
+      if (!Emit(a, var_slots) || !Emit(b, var_slots)) {
+        return false;
+      }
+      code_.push_back({op_code});
+      return true;
+    };
+    if (const auto *op = e.as<AddNode>()) {
+      return binary(op->a, op->b, Op::kAdd);
+    }
+    if (const auto *op = e.as<SubNode>()) {
+      return binary(op->a, op->b, Op::kSub);
+    }
+    if (const auto *op = e.as<MulNode>()) {
+      return binary(op->a, op->b, Op::kMul);
+    }
+    if (const auto *op = e.as<FloorDivNode>()) {
+      return binary(op->a, op->b, Op::kFloorDiv);
+    }
+    if (const auto *op = e.as<FloorModNode>()) {
+      return binary(op->a, op->b, Op::kFloorMod);
+    }
+    if (const auto *op = e.as<MinNode>()) {
+      return binary(op->a, op->b, Op::kMin);
+    }
+    if (const auto *op = e.as<MaxNode>()) {
+      return binary(op->a, op->b, Op::kMax);
+    }
+    if (const auto *op = e.as<LTNode>()) {
+      return binary(op->a, op->b, Op::kLT);
+    }
+    if (const auto *op = e.as<LENode>()) {
+      return binary(op->a, op->b, Op::kLE);
+    }
+    if (const auto *op = e.as<GTNode>()) {
+      return binary(op->a, op->b, Op::kGT);
+    }
+    if (const auto *op = e.as<GENode>()) {
+      return binary(op->a, op->b, Op::kGE);
+    }
+    if (const auto *op = e.as<EQNode>()) {
+      return binary(op->a, op->b, Op::kEQ);
+    }
+    if (const auto *op = e.as<NENode>()) {
+      return binary(op->a, op->b, Op::kNE);
+    }
+    if (const auto *op = e.as<AndNode>()) {
+      return binary(op->a, op->b, Op::kAnd);
+    }
+    if (const auto *op = e.as<OrNode>()) {
+      return binary(op->a, op->b, Op::kOr);
+    }
+    return false;
+  }
+};
+
+/*! \brief Reference evaluation through the Analyzer: substitute concrete
+ *  values (vars outside the slot map fold to 0) and constant-fold. This is
+ *  the semantic ORACLE ExprProgram must agree with — used only to validate
+ *  freshly compiled programs at a few witness points, never per point. */
+std::optional<int64_t>
+EvalByAnalyzer(const PrimExpr &e,
+               const std::unordered_map<const VarNode *, int> &var_slots,
+               const int64_t *slots, arith::Analyzer *analyzer) {
   PrimExpr bound =
       Substitute(e, [&](const Var &var) -> ffi::Optional<PrimExpr> {
         if (!var->dtype.is_int() && !var->dtype.is_uint()) {
-          return ffi::Optional<PrimExpr>(); // not foldable: outside the model
+          return ffi::Optional<PrimExpr>();
         }
-        auto it = bindings.find(var.get());
-        int64_t value = it == bindings.end() ? 0 : it->second;
+        auto it = var_slots.find(var.get());
+        int64_t value = it == var_slots.end() ? 0 : slots[it->second];
         return IntImm(var->dtype, value);
       });
   PrimExpr folded = analyzer->Simplify(bound);
@@ -91,6 +419,36 @@ std::optional<int64_t> EvalIndexExpr(const PrimExpr &e,
     return imm->value;
   }
   return std::nullopt;
+}
+
+/*! \brief Cross-check a compiled program against the Analyzer oracle at
+ *  the given witness points. A disagreement means ExprProgram mis-compiled
+ *  (or mis-executes) a node: warn loudly and reject the program, so a
+ *  compiler bug degrades to the conservative worst case instead of ever
+ *  reaching a score. Witnesses the oracle cannot fold are inconclusive
+ *  and skipped. */
+bool ValidateProgram(const ExprProgram &prog, const PrimExpr &expr,
+                     const std::unordered_map<const VarNode *, int> &var_slots,
+                     const std::vector<std::vector<int64_t>> &witnesses,
+                     arith::Analyzer *analyzer) {
+  for (const auto &witness : witnesses) {
+    auto expected = EvalByAnalyzer(expr, var_slots, witness.data(), analyzer);
+    if (!expected.has_value()) {
+      continue; // oracle is silent here: inconclusive
+    }
+    auto got = prog.Eval(witness.data());
+    if (!got.has_value() || *got != *expected) {
+      LOG(WARNING) << "[LayoutCost] compiled index program disagrees with "
+                      "the Analyzer (expected "
+                   << *expected << ", got "
+                   << (got.has_value() ? std::to_string(*got) : "<none>")
+                   << ") for expr: " << expr
+                   << " — rejecting the program; statement falls back to "
+                      "the conservative worst case.";
+      return false;
+    }
+  }
+  return true;
 }
 
 /*! \brief One global-memory access stream of a statement. `addr` is the
@@ -205,35 +563,77 @@ ScoreStatementImpl(const StatementProbe &probe) {
   // stay active for stores under the replication guard.
   std::vector<uint8_t> lead_replica(table_size, 0);
 
+  // Compile every expression once (Analyzer canonicalization included);
+  // the walk below is then pure int64 arithmetic. Slot layout:
+  // [point_vars..., rep_var].
+  size_t ndim = probe.point_vars.size();
   arith::Analyzer analyzer;
-  VarBindings bindings;
-  std::vector<int64_t> point(probe.extents.size(), 0);
+  std::unordered_map<const VarNode *, int> var_slots;
+  for (size_t d = 0; d < ndim; ++d) {
+    var_slots[probe.point_vars[d].get()] = static_cast<int>(d);
+  }
+  var_slots[probe.rep_var.get()] = static_cast<int>(ndim);
+  // Witness points for differential validation: origin, far corner, and an
+  // interior point (rep slot included). Compilation failure and oracle
+  // disagreement both reject to the worst case — never a wrong score.
+  std::vector<std::vector<int64_t>> witnesses;
+  for (int kind = 0; kind < 3; ++kind) {
+    std::vector<int64_t> w(ndim + 1, 0);
+    for (size_t d = 0; d < ndim; ++d) {
+      int64_t last = probe.extents[d] - 1;
+      w[d] = kind == 0 ? 0 : (kind == 1 ? last : last / 2);
+    }
+    w[ndim] = kind == 0 ? 0 : (kind == 1 ? probe.rep - 1 : probe.rep / 2);
+    witnesses.push_back(std::move(w));
+  }
+  auto compile_checked =
+      [&](const PrimExpr &expr) -> std::optional<ExprProgram> {
+    auto prog = ExprProgram::Compile(expr, var_slots, &analyzer);
+    if (!prog) {
+      DLOG(INFO) << "[LayoutCost] unsupported node in index expr, "
+                    "charged worst-case: "
+                 << expr;
+      return std::nullopt;
+    }
+    if (!ValidateProgram(*prog, expr, var_slots, witnesses, &analyzer)) {
+      return std::nullopt;
+    }
+    return prog;
+  };
+  auto slot_prog = compile_checked(probe.slot_expr);
+  auto thread_prog = compile_checked(probe.thread_expr);
+  if (!slot_prog || !thread_prog) {
+    return std::nullopt;
+  }
+  std::vector<ExprProgram> addr_progs;
+  addr_progs.reserve(naccess);
+  for (const auto &access : probe.accesses) {
+    auto prog = compile_checked(access.addr);
+    if (!prog) {
+      return std::nullopt;
+    }
+    addr_progs.push_back(std::move(*prog));
+  }
+
+  std::vector<int64_t> slots_buf(ndim + 1, 0);
   std::vector<int64_t> point_addr(naccess, 0);
   for (int64_t flat = 0; flat < points; ++flat) {
-    int64_t rem = flat;
-    for (int d = static_cast<int>(probe.extents.size()) - 1; d >= 0; --d) {
-      point[d] = rem % probe.extents[d];
-      rem /= probe.extents[d];
-    }
-    for (size_t d = 0; d < probe.point_vars.size(); ++d) {
-      bindings[probe.point_vars[d].get()] = point[d];
-    }
-    bindings[probe.rep_var.get()] = 0;
+    slots_buf[ndim] = 0;
     // Address and slot are replica-independent: evaluate once per point.
     for (size_t a = 0; a < naccess; ++a) {
-      auto addr = EvalIndexExpr(probe.accesses[a].addr, bindings, &analyzer);
+      auto addr = addr_progs[a].Eval(slots_buf.data());
       if (!addr) {
         return std::nullopt;
       }
       point_addr[a] = *addr;
     }
-    auto slot = EvalIndexExpr(probe.slot_expr, bindings, &analyzer);
+    auto slot = slot_prog->Eval(slots_buf.data());
     if (!slot || *slot < 0 || *slot >= probe.slots) {
       return std::nullopt;
     }
     for (int64_t r = 0; r < probe.rep; ++r) {
-      bindings[probe.rep_var.get()] = r;
-      auto thread = EvalIndexExpr(probe.thread_expr, bindings, &analyzer);
+      slots_buf[ndim] = r;
+      auto thread = thread_prog->Eval(slots_buf.data());
       if (!thread || *thread < 0 || *thread >= probe.threads) {
         return std::nullopt;
       }
@@ -247,6 +647,13 @@ ScoreStatementImpl(const StatementProbe &probe) {
       if (r == 0) {
         lead_replica[cell] = 1;
       }
+    }
+    // Advance the multi-index (row-major, innermost fastest).
+    for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
+      if (++slots_buf[d] < probe.extents[d]) {
+        break;
+      }
+      slots_buf[d] = 0;
     }
   }
   // points * rep == table_size and no collisions: every cell is filled.
@@ -298,6 +705,10 @@ ScoreStatementImpl(const StatementProbe &probe) {
 
   StatementTraffic traffic;
   int64_t num_warps = (probe.threads + probe.warp_size - 1) / probe.warp_size;
+  // Distinct segments per (step, warp): a warp touches only a handful, so
+  // a reused flat vector with linear dedupe beats a heap-allocating set.
+  std::vector<int64_t> segments;
+  segments.reserve(2 * probe.warp_size);
   for (size_t a = 0; a < naccess; ++a) {
     const auto &access = probe.accesses[a];
     traffic.issue += steps * access.repeat * probe.threads * vector_lane_bytes;
@@ -305,7 +716,7 @@ ScoreStatementImpl(const StatementProbe &probe) {
     int64_t segments_total = 0;
     for (int64_t q = 0; q < steps; ++q) {
       for (int64_t w = 0; w < num_warps; ++w) {
-        std::set<int64_t> segments;
+        segments.clear();
         for (int64_t lane = 0; lane < probe.warp_size; ++lane) {
           int64_t t = w * probe.warp_size + lane;
           if (t >= probe.threads) {
@@ -319,7 +730,10 @@ ScoreStatementImpl(const StatementProbe &probe) {
           int64_t last_byte = first_byte + vector * access.elem_bytes - 1;
           for (int64_t seg = first_byte / probe.segment_bytes;
                seg <= last_byte / probe.segment_bytes; ++seg) {
-            segments.insert(seg);
+            if (std::find(segments.begin(), segments.end(), seg) ==
+                segments.end()) {
+              segments.push_back(seg);
+            }
           }
         }
         segments_total += static_cast<int64_t>(segments.size());
@@ -717,26 +1131,6 @@ public:
     AttemptCost cost;
     cost.regs = CountRegisterSlots(tmp_layout_map);
 
-    auto charge = [&](const std::optional<StatementProbe> &probe,
-                      const char *what) {
-      if (!probe.has_value() || probe->accesses.empty()) {
-        return; // no global traffic to model / nothing sensible to charge
-      }
-      std::optional<StatementTraffic> traffic;
-      if (probe->measurable) {
-        traffic = ScoreStatement(*probe);
-      }
-      if (traffic.has_value()) {
-        cost.mem += traffic->Time();
-        DLOG(INFO) << "[LayoutCost] " << what << ": bw=" << traffic->bw
-                   << " issue=" << traffic->issue;
-      } else {
-        cost.mem += WorstCaseBytes(*probe);
-        DLOG(INFO) << "[LayoutCost] " << what
-                   << " outside the model; charged worst-case.";
-      }
-    };
-
     for (int idx : members) {
       if (const auto *copy = infer_list[idx].as<CopyNode>()) {
         bool src_frag = IsFragmentBuffer(copy->src);
@@ -759,23 +1153,31 @@ public:
         if (!frag_layout.has_value()) {
           continue;
         }
-        std::optional<StatementProbe> probe;
-        try {
-          probe =
-              BuildCopyProbe(copy, frag_layout.value(), frag_is_src, target_);
-        } catch (const std::exception &e) {
-          probe = std::nullopt; // charge() skips; builder-side fallbacks
-                                // cover every non-throwing failure
-        }
-        charge(probe, "copy");
+        cost.mem += CachedStatementMem(idx, frag_layout.value(), [&]() {
+          std::optional<StatementProbe> probe;
+          try {
+            probe =
+                BuildCopyProbe(copy, frag_layout.value(), frag_is_src, target_);
+          } catch (const std::exception &e) {
+            probe = std::nullopt; // skipped below; builder-side fallbacks
+                                  // cover every non-throwing failure
+          }
+          return ChargeStatement(probe, "copy");
+        });
       } else if (const auto *loop = infer_list[idx].as<ParallelOpNode>()) {
-        std::optional<StatementProbe> probe;
-        try {
-          probe = BuildLoopProbe(loop, target_);
-        } catch (const std::exception &e) {
-          probe = std::nullopt;
-        }
-        charge(probe, "parallel loop");
+        auto compute = [&]() {
+          std::optional<StatementProbe> probe;
+          try {
+            probe = BuildLoopProbe(loop, target_);
+          } catch (const std::exception &e) {
+            probe = std::nullopt;
+          }
+          return ChargeStatement(probe, "parallel loop");
+        };
+        Fragment loop_layout = loop->GetLoopLayout();
+        cost.mem += loop_layout.defined()
+                        ? CachedStatementMem(idx, loop_layout, compute)
+                        : compute();
       }
     }
     return cost;
@@ -784,7 +1186,49 @@ public:
   const char *Name() const final { return "io-aware"; }
 
 private:
+  /*! \brief Final charge of one prepared statement, honoring the probe's
+   *  three-state protocol (zero / worst-case / measured). */
+  static int64_t ChargeStatement(const std::optional<StatementProbe> &probe,
+                                 const char *what) {
+    if (!probe.has_value() || probe->accesses.empty()) {
+      return 0; // no global traffic to model / nothing sensible to charge
+    }
+    std::optional<StatementTraffic> traffic;
+    if (probe->measurable) {
+      traffic = ScoreStatement(*probe);
+    }
+    if (traffic.has_value()) {
+      DLOG(INFO) << "[LayoutCost] " << what << ": bw=" << traffic->bw
+                 << " issue=" << traffic->issue;
+      return traffic->Time();
+    }
+    DLOG(INFO) << "[LayoutCost] " << what
+               << " outside the model; charged worst-case.";
+    return WorstCaseBytes(*probe);
+  }
+
+  /*! \brief Memoize a statement's charge by (op index, layout): the charge
+   *  depends only on the op (fixed per index) and the layout under test,
+   *  and different attempt roots frequently converge to the same layout —
+   *  those attempts then score the statement for free. Structural layout
+   *  equality; entries per index stay tiny (one per distinct layout). */
+  template <typename F>
+  int64_t CachedStatementMem(int idx, const Fragment &layout,
+                             F &&compute) const {
+    auto &entries = stmt_cache_[idx];
+    for (const auto &[cached_layout, mem] : entries) {
+      if (cached_layout->IsEqual(layout.get())) {
+        return mem;
+      }
+    }
+    int64_t mem = compute();
+    entries.emplace_back(layout, mem);
+    return mem;
+  }
+
   Target target_;
+  mutable std::unordered_map<int, std::vector<std::pair<Fragment, int64_t>>>
+      stmt_cache_;
 };
 
 } // namespace
