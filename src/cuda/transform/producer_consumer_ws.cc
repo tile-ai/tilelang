@@ -43,7 +43,6 @@
 #include "op/fill.h"
 #include "op/gemm.h"
 #include "op/operator.h"
-#include "op/region.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
 

@@ -21,7 +21,6 @@
 #include "arith/int_operator.h"
 #include "backend/common/target_utils.h"
 #include "reducer.h"
-#include "region.h"
 #include "span_utils.h"
 #include "utils.h"
 

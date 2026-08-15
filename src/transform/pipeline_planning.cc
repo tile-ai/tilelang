@@ -21,7 +21,6 @@
 #include "../op/copy.h"
 #include "../op/operator.h"
 #include "../op/parallel.h"
-#include "../op/region.h"
 #include "../op/utils.h"
 #include "backend/common/target_utils.h"
 #include "common/bind_utils.h"
@@ -107,9 +106,6 @@ bool BufferRegionCollector::IsGlobalLikeBuffer(const Buffer &buffer) {
 }
 
 void BufferRegionCollector::HandleTileOp(const TileOperator &tile_op) {
-  if (tile_op.as<RegionOpNode>()) {
-    return;
-  }
   if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
     BufferRegionCollector nested(buffer_data_to_buffer_, target_);
     nested(parallel->GetRoot());
@@ -547,9 +543,6 @@ public:
       if (!tile_op.defined()) {
         return;
       }
-      if (tile_op.as<RegionOpNode>()) {
-        return;
-      }
       if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
         if (IsPureCopyStmt(parallel->GetRoot())) {
           saw_copy = true;
@@ -581,9 +574,6 @@ public:
       }
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (!tile_op.defined()) {
-        return;
-      }
-      if (tile_op.as<RegionOpNode>()) {
         return;
       }
       if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {

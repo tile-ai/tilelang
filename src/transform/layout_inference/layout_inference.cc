@@ -27,7 +27,6 @@
 #include "../../op/builtin.h"
 #include "../../op/copy.h"
 #include "../../op/parallel.h"
-#include "../../op/region.h"
 #include "../../op/utils.h"
 #include "../../span_utils.h"
 #include "../common/loop_fusion_utils.h"
@@ -607,7 +606,7 @@ private:
 
   Optional<Buffer> getBufferFromRegion(const PrimExpr &expr) {
     if (auto call = expr.as<CallNode>()) {
-      if (call->op.same_as(RegionOp::Get())) {
+      if (call->op.same_as(region())) {
         if (auto bl = call->args[0].as<BufferLoadNode>()) {
           return bl->buffer;
         }

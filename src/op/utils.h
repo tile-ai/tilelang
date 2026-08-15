@@ -8,7 +8,6 @@
 
 #include "./operator.h"
 #include "cuda/stubs/cuda.h"
-#include "region.h"
 #include "support/check.h"
 #include "tvm/runtime/base.h"
 #include <tvm/tirx/buffer.h>

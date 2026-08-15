@@ -58,6 +58,7 @@ public:
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
                          const std::string &value) final;
   // overload visitor
+  void VisitStmt_(const BindNode *op) final;                        // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final;                 // NOLINT(*)
   void VisitStmt_(const AttrStmtNode *op) final;                    // NOLINT(*)
   void VisitStmt_(const ForNode *op) final;                         // NOLINT(*)
@@ -72,6 +73,7 @@ public:
   using CodeGenC::PrintType;
 
 private:
+  std::string GetStorageScopeOf(const PrimExpr &ptr_expr) const;
   std::string GetAddrSpaceOf(const PrimExpr &ptr_expr) const;
   std::string GetPointeeTypeOf(const PrimExpr &ptr_expr,
                                const std::string &fallback);

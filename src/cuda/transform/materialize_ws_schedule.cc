@@ -150,10 +150,6 @@ Map<String, V> FilterAnnotations(const Map<String, V> &ann, Pred keep) {
 // ---------------------------------------------------------------------------
 // Tile op helpers
 // ---------------------------------------------------------------------------
-const Op &RegionOp() {
-  static const Op &op = Op::Get("tl.tileop.region");
-  return op;
-}
 const Op &TmaCopyOp() {
   static const Op &op = Op::Get("tl.tileop.tma_copy");
   return op;
@@ -204,7 +200,7 @@ void QueryAccess(const Stmt &stmt, AccessSet *acc) {
     const auto *call = node.as<CallNode>();
     if (!call)
       return;
-    if (call->op.same_as(RegionOp())) {
+    if (call->op.same_as(region())) {
       const auto *load = call->args[0].as<BufferLoadNode>();
       ICHECK(load) << "ws_schedule: region arg0 must be a BufferLoad";
       address_roots.insert(GetRef<BufferLoad>(load));
@@ -946,7 +942,7 @@ private:
       const Stmt &stmt = op.stmt;
       PostOrderVisit(stmt, [&](const ObjectRef &node) {
         const auto *call = node.as<CallNode>();
-        if (!call || call->op.same_as(RegionOp()))
+        if (!call || call->op.same_as(region()))
           return;
         ICHECK(ClassifyCall(GetRef<Call>(call), target_) == OpAtom::kSync)
             << "ws_schedule: op '" << op_id << "' nests an asynchronous "
@@ -1497,7 +1493,7 @@ private:
     // keep the region's indices-per-extent invariant.
     PrimExpr VisitExpr_(const CallNode *op) final {
       Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-      if (call->op.same_as(RegionOp()) && call->args.size() >= 2) {
+      if (call->op.same_as(region()) && call->args.size() >= 2) {
         if (const auto *load = call->args[0].as<BufferLoadNode>()) {
           size_t num_extents = call->args.size() - 2;
           if (load->indices.size() == num_extents + 1) {
