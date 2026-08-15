@@ -5,6 +5,7 @@
 
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/ir/repr.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
 #include <tvm/tirx/builtin.h>
@@ -380,8 +381,16 @@ public:
     // step 2: infer common layout with BFS
     FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
                      in_queue);
+    LOG(INFO) << "Before InferInFreeMode";
+    for (const auto &[buffer, layout] : layout_map) {
+      LOG(INFO) << "buffer: " << buffer << " layout " << layout;
+    }
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
+    LOG(INFO) << "After InferInFreeMode";
+    for (const auto &[buffer, layout] : layout_map) {
+      LOG(INFO) << "buffer: " << buffer << " layout " << layout;
+    }
     // step 4: finalize alias layouts by Var
     // For each storage var, if any buffer in the group has a layout,
     // propagate (reshape if needed) to the rest to ensure completeness.
@@ -1015,6 +1024,47 @@ private:
     return back_infer_list;
   }
 
+  void LogAttemptState(int attempt_infer_root,
+                       const LayoutMap &tmp_layout_map) const {
+    ICHECK_EQ(infer_list_.size(), infer_list_stmt_.size());
+
+    LOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+              << " inferred infer_list_ (" << infer_list_.size()
+              << " operators):";
+    for (size_t i = 0; i < infer_list_.size(); ++i) {
+      const TileOperator &op = infer_list_[i];
+      ICHECK(op.defined()) << "infer_list_[" << i << "] is undefined";
+      LOG(INFO) << "  infer_list_[" << i << "] type=" << op->GetTypeKey()
+                << "\n    operator=" << op
+                << "\n    source_stmt=" << infer_list_stmt_[i];
+
+      if (const auto *parallel = op.as<ParallelOpNode>()) {
+        Fragment loop_layout = parallel->GetLoopLayout();
+        if (loop_layout.defined()) {
+          LOG(INFO) << "    loop_layout=" << loop_layout->DebugOutput();
+        } else {
+          LOG(INFO) << "    loop_layout=<undefined>";
+        }
+      } else if (const auto *copy = op.as<CopyNode>();
+                 copy && copy->par_op_.defined()) {
+        Fragment loop_layout = copy->par_op_->GetLoopLayout();
+        if (loop_layout.defined()) {
+          LOG(INFO) << "    copy_parallel_loop_layout="
+                    << loop_layout->DebugOutput();
+        } else {
+          LOG(INFO) << "    copy_parallel_loop_layout=<undefined>";
+        }
+      }
+    }
+
+    LOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+              << " tmp_layout_map (" << tmp_layout_map.size() << " entries):";
+    for (const auto &[buffer, layout] : tmp_layout_map) {
+      LOG(INFO) << "  buffer=" << buffer
+                << "\n    layout=" << layout->DebugOutput();
+    }
+  }
+
   void InferInFreeMode(LayoutMap &layout_map,
                        const LayoutMap &strict_layout_map) {
 
@@ -1082,10 +1132,10 @@ private:
 
     std::unique_ptr<LayoutCostModel> cost_model =
         LayoutCostModel::Create(tl_config::LayoutCostModelEnabled(), target_);
-    DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
+    LOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
     for (auto &&[root, members] : components) {
-      DLOG(INFO) << "======================= processing component " << root
-                 << '\n';
+      LOG(INFO) << "======================= processing component " << root
+                << '\n';
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
       AttemptCost best_cost;
@@ -1094,8 +1144,8 @@ private:
 
       // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
-        DLOG(INFO) << "----------------------- try root " << attempt_infer_root
-                   << " members " << members.size() << '\n';
+        LOG(INFO) << "----------------------- try root " << attempt_infer_root
+                  << " members " << members.size() << '\n';
         // Backup the current infer_list_ state
         auto back_infer_list = BackupInferList();
         // Copy the current layout_map for temporary use
@@ -1120,23 +1170,26 @@ private:
           }
         } catch (const LayoutConflictException &e) {
           do_update = false;
-          DLOG(INFO) << "attempt failed due to LayoutConflictException "
-                     << e.what() << '\n';
+          LOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                    << " failed due to LayoutConflictException " << e.what();
         } catch (const NormalizeIterException &e) {
           do_update = false;
-          DLOG(INFO) << "attempt failed due to NormalizeIterException "
-                     << e.what() << '\n';
+          LOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                    << " failed due to NormalizeIterException " << e.what();
         } catch (const LoopLayoutInjectiveException &e) {
           do_update = false;
-          DLOG(INFO) << "attempt failed due to LoopLayoutInjectiveException "
-                     << e.what() << '\n';
+          LOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                    << " failed due to LoopLayoutInjectiveException "
+                    << e.what();
         }
 
+        LogAttemptState(attempt_infer_root, tmp_layout_map);
         if (do_update) {
           AttemptCost cost =
               cost_model->Score(members, infer_list_, tmp_layout_map);
-          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
-                     << ": mem=" << cost.mem << " regs=" << cost.regs;
+          LOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                    << " cost model " << cost_model->Name()
+                    << " output: mem=" << cost.mem << " regs=" << cost.regs;
           // Keep the cheapest attempt; ties resolve to the earliest root so
           // the selection stays deterministic (and, with the cost model
           // disabled, byte-identical to the legacy register ordering).
@@ -1150,6 +1203,10 @@ private:
             has_best = true;
             best_infer_root = attempt_infer_root;
           }
+        } else {
+          LOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                    << " cost model " << cost_model->Name()
+                    << " skipped because layout inference failed";
         }
         // Restore infer_list_ state for the next attempt
         infer_list_ = std::move(back_infer_list);
@@ -1158,8 +1215,10 @@ private:
       // Apply the best plan for this component
       infer_list_ = std::move(best_infer_list);
       layout_map = best_layout_map;
-      DLOG(INFO) << "[InferInFreeMode] Final selection is attempt_infer_root = "
-                 << best_infer_root << '\n';
+      LOG(INFO) << "[InferInFreeMode] final selection: attempt root "
+                << best_infer_root << " cost model " << cost_model->Name()
+                << " output: mem=" << best_cost.mem
+                << " regs=" << best_cost.regs;
     }
   }
 };
