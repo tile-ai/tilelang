@@ -64,7 +64,6 @@
 #include "../op/copy.h"
 #include "../op/fill.h"
 #include "../op/reducer.h"
-#include "../op/region.h"
 #include "../op/utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -93,7 +92,7 @@ PrimExpr MakeFullRegion(const Buffer &buffer, int access_mask) {
   for (const auto &extent : buffer->shape) {
     args.push_back(extent);
   }
-  return Call(DataType::Handle(), RegionOp::Get(), args);
+  return Call(DataType::Handle(), region(), args);
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +240,7 @@ private:
     if (op->op.same_as(FinalizeReducerV2Op::Get())) {
       if (EpochInfo *epoch = FindEpoch(op->args[0])) {
         if (auto call2 = op->args[1].as<CallNode>()) {
-          if (call2->op.same_as(RegionOp::Get())) {
+          if (call2->op.same_as(region())) {
             if (auto load = call2->args[0].as<BufferLoadNode>()) {
               epoch->dst = load->buffer;
             }
@@ -260,7 +259,7 @@ private:
 
   EpochInfo *FindEpoch(const PrimExpr &region_arg) {
     if (auto call = region_arg.as<CallNode>()) {
-      if (call->op.same_as(RegionOp::Get())) {
+      if (call->op.same_as(region())) {
         if (auto load = call->args[0].as<BufferLoadNode>()) {
           auto it = epochs_.find(load->buffer->data.get());
           if (it != epochs_.end()) {
@@ -750,9 +749,9 @@ public:
         use_graph.census[store->buffer->data.get()].stores++;
       } else if (const auto *call = obj.as<CallNode>()) {
         auto region_buffer = [](const PrimExpr &arg) -> Buffer {
-          if (auto region = arg.as<CallNode>()) {
-            if (region->op.same_as(RegionOp::Get())) {
-              if (auto ld = region->args[0].as<BufferLoadNode>()) {
+          if (auto region_call = arg.as<CallNode>()) {
+            if (region_call->op.same_as(region())) {
+              if (auto ld = region_call->args[0].as<BufferLoadNode>()) {
                 return ld->buffer;
               }
             }
@@ -1228,7 +1227,7 @@ private:
 
   static Buffer RegionArgBuffer(const PrimExpr &arg) {
     if (auto call = arg.as<CallNode>()) {
-      if (call->op.same_as(RegionOp::Get())) {
+      if (call->op.same_as(region())) {
         if (auto load = call->args[0].as<BufferLoadNode>()) {
           return load->buffer;
         }

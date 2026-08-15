@@ -181,7 +181,6 @@ def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list
 
     - Buffer/BufferLoad/BufferRegion -> returns BufferRegion when extents is None
     - Buffer/BufferLoad/BufferRegion -> returns a tl.region call when extents is provided
-    - tl.region Call -> returns the decoded BufferRegion for analysis
     """
     from tilelang.language.frame import has_let_value, get_let_value
 

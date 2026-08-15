@@ -36,7 +36,6 @@
 #include "op/copy.h"
 #include "op/gemm.h"
 #include "op/operator.h"
-#include "op/region.h"
 #include "op/utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
@@ -1133,7 +1132,7 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
-    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+    if (call->op.same_as(region()) && call->args.size() >= 2) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         size_t num_extents = call->args.size() - 2;
         if (load->indices.size() == num_extents + 1) {

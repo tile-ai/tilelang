@@ -29,8 +29,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "../op/builtin.h"
 #include "../op/reducer.h"
-#include "../op/region.h"
 
 namespace tvm {
 namespace tl {
@@ -230,7 +230,7 @@ private:
 
   Var RegionArgBufferVar(const PrimExpr &arg, const char *who) const {
     if (auto call = arg.as<CallNode>()) {
-      if (call->op.same_as(RegionOp::Get())) {
+      if (call->op.same_as(region())) {
         if (auto load = call->args[0].as<BufferLoadNode>()) {
           return load->buffer->data;
         }

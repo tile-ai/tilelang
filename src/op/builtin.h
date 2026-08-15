@@ -143,6 +143,32 @@ TVM_DLL const Op &tvm_ffi_call_with_result();
  */
 TVM_DLL const Op &access_ptr();
 
+/*!
+ * \brief Tile memory region descriptor: a transport-only bridge that carries
+ * a BufferRegion (plus an access mask) through Call args.
+ *
+ * Why tl.region instead of passing BufferRegion directly?
+ * - When a BufferRegion is passed as a call argument through call_intrin/FFI,
+ *   the Python->C++ conversion lowers it to a BufferLoad(indices), encoding a
+ *   contiguous interval as Ramp(base, stride, lanes).
+ * - Ramp lanes may only be a constant or vscale*k, so a dynamic extent
+ *   (e.g. H1 - H0) cannot be encoded as lanes, and BufferLoad carries no
+ *   per-axis extents, so downstream tile operators (tl.copy, tl.reduce, ...)
+ *   cannot losslessly recover dynamic extents from a BufferLoad alone.
+ * - tl.region packs buffer + mins (BufferLoad indices) + explicit extents
+ *   into Call args; the backend reconstructs a BufferRegion faithfully via
+ *   NormalizeToBufferRegion / NormalizeToAccessRegion (op/utils.h).
+ *
+ * region(BufferLoad(buffer, [min_0, ..., min_{n-1}]), access_mask,
+ *        extent_0, ..., extent_{n-1})
+ *
+ * - args[0]: BufferLoad whose indices are the per-axis minima.
+ * - args[1]: constant int access mask (1=read, 2=write, 3=read-write).
+ *   Transport metadata only; it does not affect lowering.
+ * - args[2 + i]: extent of axis i (may be a dynamic PrimExpr).
+ */
+TVM_DLL const Op &region();
+
 // Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
 TVM_DLL const Op &add2();
 TVM_DLL const Op &sub2();

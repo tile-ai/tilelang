@@ -68,8 +68,7 @@ _STY_TY = "color:#c586c0"
 # 1) Tile ops — the authoritative set: every operator registered in C++ via
 #    TIR_REGISTER_TL_TILE_OP ("tl.tileop.*") in src/op/*.cc. These are the
 #    high-level tile/fragment operators LowerTileOp consumes. ('region' is a
-#    TileOperator too but appears as an argument everywhere, so we leave it plain
-#    to avoid noise.)
+#    plain builtin argument bridge, not a TileOperator, so it stays unhighlighted.)
 _TILE_OPS = (
     "gemm",
     "gemm_sp",
