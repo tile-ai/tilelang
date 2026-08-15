@@ -101,7 +101,8 @@ class PassConfigKey(str, Enum):
     """Score free-mode layout attempts by estimated global-memory access
     cost (vector width / warp coalescing of every fragment<->global copy,
     weighted by bytes moved) instead of by total register count alone;
-    register count remains the tiebreak. Default: False"""
+    register count remains the tiebreak. Set to False for the legacy
+    register-count-only selection. Default: True"""
 
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,

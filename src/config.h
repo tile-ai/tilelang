@@ -28,12 +28,13 @@ inline bool ReducerPlanVerboseEnabled() {
 /*!
  * \brief Check if free-mode layout attempts are scored by the IO cost model
  *  (bytes x vector-width/coalescing penalty over fragment<->global copies)
- *  instead of by register count alone.
+ *  instead of by register count alone. Default on; set to false to restore
+ *  the legacy register-count-only selection.
  */
 inline bool LayoutCostModelEnabled() {
   auto ctxt = tvm::transform::PassContext::Current();
   return ctxt->GetConfig("tl.layout_cost_model", ffi::Optional<Bool>())
-      .value_or(Bool(false));
+      .value_or(Bool(true));
 }
 
 /*!
