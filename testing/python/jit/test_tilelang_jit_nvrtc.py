@@ -173,6 +173,30 @@ def test_gemm_jit_kernel():
     )
 
 
+def _make_add_constant_kernel(value):
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128) as bx:
+            for tx in T.Parallel(128):
+                B[bx * 128 + tx] = A[bx * 128 + tx] + value
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_nvrtc_kernel_handles_are_isolated_between_adapters():
+    first_kernel = tilelang.compile(_make_add_constant_kernel(1.0), out_idx=-1, execution_backend="nvrtc")
+    x = torch.zeros(128, device="cuda", dtype=torch.float32)
+
+    first_result_before = first_kernel(x)
+    second_kernel = tilelang.compile(_make_add_constant_kernel(5.0), out_idx=-1, execution_backend="nvrtc")
+
+    assert first_kernel.adapter.kernels is not second_kernel.adapter.kernels
+    torch.testing.assert_close(first_result_before, torch.ones_like(x))
+    torch.testing.assert_close(first_kernel(x), torch.ones_like(x))
+    torch.testing.assert_close(second_kernel(x), torch.full_like(x, 5.0))
+
+
 def run_nvrtc_kernel_do_bench(
     M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
 ):
