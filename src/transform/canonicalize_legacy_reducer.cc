@@ -44,9 +44,9 @@
 #include <optional>
 #include <unordered_map>
 
+#include "../op/builtin.h"
 #include "../op/fill.h"
 #include "../op/reducer.h"
-#include "../op/region.h"
 
 namespace tvm {
 namespace tl {
@@ -66,7 +66,7 @@ PrimExpr MakeRegionCall(const Buffer &buffer, const Array<PrimExpr> &mins,
   for (const auto &extent : extents) {
     args.push_back(extent);
   }
-  return Call(DataType::Handle(), RegionOp::Get(), args);
+  return Call(DataType::Handle(), region(), args);
 }
 
 PrimExpr MakeFullRegionCall(const Buffer &buffer, int access_mask) {
@@ -315,7 +315,7 @@ private:
 
   LegacyReducer *FindReducerInRegionArg(const PrimExpr &arg) {
     if (auto call = arg.as<CallNode>()) {
-      if (call->op.same_as(RegionOp::Get())) {
+      if (call->op.same_as(region())) {
         if (auto load = call->args[0].as<BufferLoadNode>()) {
           auto it = reducers_.find(load->buffer->data.get());
           if (it != reducers_.end()) {

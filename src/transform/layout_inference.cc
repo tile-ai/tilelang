@@ -24,7 +24,6 @@
 #include "../layout/utils.h"
 #include "../op/builtin.h"
 #include "../op/parallel.h"
-#include "../op/region.h"
 #include "../op/utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -591,7 +590,7 @@ private:
 
   Optional<Buffer> getBufferFromRegion(const PrimExpr &expr) {
     if (auto call = expr.as<CallNode>()) {
-      if (call->op.same_as(RegionOp::Get())) {
+      if (call->op.same_as(region())) {
         if (auto bl = call->args[0].as<BufferLoadNode>()) {
           return bl->buffer;
         }
