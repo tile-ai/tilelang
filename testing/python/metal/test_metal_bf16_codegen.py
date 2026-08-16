@@ -8,9 +8,9 @@ import pytest
 import torch
 
 import tilelang
-from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
+from metal_test_utils import lower_prim_to_metal
 
 
 @T.prim_func
@@ -78,29 +78,7 @@ def repro_gemm(dtype: str):
 
 def lower_to_metal(dtype: str) -> str:
     prim_func = repro_gemm.get_tir(dtype)
-    target = tvm.target.Target("metal", tvm.target.Target("llvm"))
-    with target:
-        artifact = tilelang.lower(
-            prim_func,
-            target=target,
-            target_host="llvm",
-            enable_host_codegen=False,
-            enable_device_compile=False,
-        )
-    return artifact.kernel_source or ""
-
-
-def lower_prim_to_metal(prim_func) -> str:
-    target = tvm.target.Target("metal", tvm.target.Target("llvm"))
-    with target:
-        artifact = tilelang.lower(
-            prim_func,
-            target=target,
-            target_host="llvm",
-            enable_host_codegen=False,
-            enable_device_compile=False,
-        )
-    return artifact.kernel_source or ""
+    return lower_prim_to_metal(prim_func)
 
 
 def test_metal_bf16_vectorized_copy_uses_packed_uint_type():
