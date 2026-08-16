@@ -7,8 +7,8 @@
  * What "cheapest" means is a pluggable policy behind LayoutCostModel:
  *
  *  - RegisterCountCostModel (legacy): total fragment register slots,
- *    nothing else. Available through `tl.layout_cost_model=false` for
- *    compatibility and A/B comparisons.
+ *    nothing else. Available through
+ *    `tl.layout_cost_model="register-count"` for A/B comparisons.
  *  - IOAwareCostModel (layout RFC, design B2): walks the component's
  *    global-memory-touching statements (fragment<->global copies and
  *    parallel loops with direct global accesses) and charges each one
@@ -24,6 +24,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <tvm/target/target.h>
@@ -65,10 +66,12 @@ public:
   virtual const char *Name() const = 0;
 
   /*! \brief Instantiate the model selected by `tl.layout_cost_model`
-   *  (false = legacy register count, true = IO-aware). `target` feeds the
-   *  vectorizer's shared width-cap policy (MaxVectorLoadBits); the legacy
-   *  model ignores it. */
-  static std::unique_ptr<LayoutCostModel> Create(bool io_aware, Target target);
+   *  by name ("io-aware" or "register-count" — each model's Name());
+   *  unknown names are a hard error listing the valid values. `target`
+   *  feeds the vectorizer's shared width-cap policy (MaxVectorLoadBits);
+   *  the legacy model ignores it. */
+  static std::unique_ptr<LayoutCostModel> Create(const std::string &name,
+                                                 Target target);
 };
 
 } // namespace tl

@@ -2,8 +2,9 @@
 
 Constructed IR cases with reviewed expected layouts, for validating the
 free-mode layout search — in particular the selection policy behind
-`tl.layout_cost_model` (off = legacy register count, on = the io-aware
-model from `src/transform/layout_inference/layout_cost_model.cc`).
+`tl.layout_cost_model` ("register-count" = the legacy ordering,
+"io-aware" = the default model in
+`src/transform/layout_inference/layout_cost_model.cc`).
 
 Why this exists:
 

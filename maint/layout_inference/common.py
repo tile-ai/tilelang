@@ -23,14 +23,11 @@ from tilelang.backend.target import determine_target
 from tilelang.layout import Fragment
 from tvm.tirx.stmt_functor import post_order_visit
 
-# The two selection policies behind `tl.layout_cost_model`.
-COST_MODELS = {
-    "register-count": False,
-    "io-aware": True,
-}
+# The two selection policies behind `tl.layout_cost_model`, by name.
+COST_MODELS = ("register-count", "io-aware")
 
 
-def _run_passes(prim_func, cost_model_enabled: bool, target=None):
+def _run_passes(prim_func, cost_model: str, target=None):
     """The exact pass prefix LayoutInference sees in the real pipeline."""
     if target is None:
         target = tvm.target.Target(determine_target("auto"))
@@ -38,27 +35,27 @@ def _run_passes(prim_func, cost_model_enabled: bool, target=None):
     with tvm.target.Target(target):
         mod = tvm.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
-        with tvm.transform.PassContext(config={"tl.layout_cost_model": cost_model_enabled}):
+        with tvm.transform.PassContext(config={"tl.layout_cost_model": cost_model}):
             mod = tl.transform.LayoutInference()(mod)
     return mod["main"]
 
 
-def run_layout_inference(prim_func, cost_model_enabled: bool, target=None):
+def run_layout_inference(prim_func, cost_model: str, target=None):
     """Run LayoutInference on `prim_func` and return the inferred layouts.
 
     Returns ``{"buffers": {name: layout_dict}, "loops": {key: layout_dict}}``
     where a loop key names the parallel nest by its loop vars and extents,
     e.g. ``"i,j[128x128]"``, and layout_dict is `layout_to_dict` output.
     """
-    return extract_layouts(_run_passes(prim_func, cost_model_enabled, target))
+    return extract_layouts(_run_passes(prim_func, cost_model, target))
 
 
-def run_layout_inference_objects(prim_func, cost_model_enabled: bool, target=None):
+def run_layout_inference_objects(prim_func, cost_model: str, target=None):
     """Like run_layout_inference, but returns the LIVE objects:
     ``{"buffers": {name: (Buffer, Layout)}}`` — for consumers that need the
     layout expressions themselves (e.g. the CuTe experiment), not the
     structured snapshot."""
-    func = _run_passes(prim_func, cost_model_enabled, target)
+    func = _run_passes(prim_func, cost_model, target)
     buffers: dict[str, tuple] = {}
 
     def visit(node):

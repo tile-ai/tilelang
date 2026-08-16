@@ -9,6 +9,8 @@
 #include <tvm/ffi/optional.h>
 #include <tvm/ir/transform.h>
 
+#include <string>
+
 namespace tvm {
 namespace tl {
 namespace tl_config {
@@ -26,15 +28,15 @@ inline bool ReducerPlanVerboseEnabled() {
 }
 
 /*!
- * \brief Check if free-mode layout attempts are scored by the IO cost model
- *  (bytes x vector-width/coalescing penalty over fragment<->global copies)
- *  instead of by register count alone. Default on; set to false to restore
- *  the legacy register-count-only selection.
+ * \brief The cost model that ranks free-mode layout attempts. Valid
+ *  values: "io-aware" (default — bytes x vector-width/coalescing over
+ *  fragment<->global traffic, registers as tiebreak) and "register-count"
+ *  (the legacy total-register-slots ordering).
  */
-inline bool LayoutCostModelEnabled() {
+inline std::string LayoutCostModelName() {
   auto ctxt = tvm::transform::PassContext::Current();
-  return ctxt->GetConfig("tl.layout_cost_model", ffi::Optional<Bool>())
-      .value_or(Bool(true));
+  return ctxt->GetConfig("tl.layout_cost_model", ffi::Optional<ffi::String>())
+      .value_or(ffi::String("io-aware"));
 }
 
 /*!

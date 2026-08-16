@@ -3,8 +3,8 @@
 
 Each module under ``cases/`` constructs PrimFuncs whose free-mode layout
 search has a known-good answer.  This driver runs LayoutInference under
-both selection policies (``tl.layout_cost_model`` off = register-count,
-on = io-aware), snapshots the inferred layouts, and compares them against
+both selection policies (``tl.layout_cost_model`` = "register-count" or
+"io-aware"), snapshots the inferred layouts, and compares them against
 the reviewed golden files under ``expected/``.
 
 Usage:
@@ -139,8 +139,8 @@ def run_cute(modules) -> int:
     for case_name, module in modules:
         cute_specs = getattr(module, "CUTE_STATEMENTS", {})
         for variant, build in module.VARIANTS.items():
-            for model, enabled in COST_MODELS.items():
-                objs = run_layout_inference_objects(build(), enabled)
+            for model in COST_MODELS:
+                objs = run_layout_inference_objects(build(), model)
                 for name, (buffer, layout) in sorted(objs["buffers"].items()):
                     if not isinstance(layout, Fragment):
                         continue
@@ -216,10 +216,10 @@ def main() -> int:
         recording: dict = {}
 
         for variant, build in module.VARIANTS.items():
-            for model, enabled in COST_MODELS.items():
+            for model in COST_MODELS:
                 tag = f"{case_name}/{variant}/{model}"
                 try:
-                    result = run_layout_inference(build(), enabled)
+                    result = run_layout_inference(build(), model)
                 except Exception as exc:  # noqa: BLE001 - report, keep going
                     print(f"ERROR {tag}: {type(exc).__name__}: {exc}")
                     failures += 1

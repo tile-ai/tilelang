@@ -1096,12 +1096,18 @@ private:
 
 } // namespace
 
-std::unique_ptr<LayoutCostModel> LayoutCostModel::Create(bool io_aware,
-                                                         Target target) {
-  if (io_aware) {
+std::unique_ptr<LayoutCostModel>
+LayoutCostModel::Create(const std::string &name, Target target) {
+  if (name == "io-aware") {
     return std::make_unique<IOAwareCostModel>(std::move(target));
   }
-  return std::make_unique<RegisterCountCostModel>();
+  if (name == "register-count") {
+    return std::make_unique<RegisterCountCostModel>();
+  }
+  LOG(FATAL) << "Unknown layout cost model \"" << name
+             << "\" for pass config `tl.layout_cost_model`; valid values "
+                "are \"io-aware\" (default) and \"register-count\".";
+  return nullptr; // unreachable
 }
 
 } // namespace tl

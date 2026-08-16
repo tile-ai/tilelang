@@ -97,7 +97,7 @@ annotation contract.
 
 "Cheapest" is a pluggable policy (`layout_cost_model.{h,cc}`):
 
-- `tl.layout_cost_model=true` (default): **io-aware** — every
+- `tl.layout_cost_model="io-aware"` (default): every
   fragment<->global copy and global-touching parallel loop is charged
   `max(bandwidth bytes, issue bytes)` under the attempt's layouts, scored
   symbolically on the CuTe algebra (pack -> `LayoutFromTileLang` ->
@@ -105,7 +105,8 @@ annotation contract.
   segments counted at warp/step granularity). Registers are the tiebreak.
   Statements outside the model are charged a conservative worst case — an
   attempt must never profit from opacity.
-- `tl.layout_cost_model=false`: legacy register-count-only ordering.
+- `tl.layout_cost_model="register-count"`: legacy register-slots-only
+  ordering.
 - The scoring formulas are guarded by the Python parity check
   `maint/layout_inference/run.py --cute` (symbolic scorer vs an
   independent NumPy enumeration oracle); keep `cute_model.py` in lockstep

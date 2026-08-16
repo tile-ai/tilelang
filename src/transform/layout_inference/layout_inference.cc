@@ -1081,7 +1081,7 @@ private:
     std::vector<bool> in_queue(infer_list_.size(), false);
 
     std::unique_ptr<LayoutCostModel> cost_model =
-        LayoutCostModel::Create(tl_config::LayoutCostModelEnabled(), target_);
+        LayoutCostModel::Create(tl_config::LayoutCostModelName(), target_);
     DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
     for (auto &&[root, members] : components) {
       DLOG(INFO) << "======================= processing component " << root

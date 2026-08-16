@@ -98,11 +98,11 @@ class PassConfigKey(str, Enum):
     Default: False"""
 
     TL_LAYOUT_COST_MODEL = "tl.layout_cost_model"
-    """Score free-mode layout attempts by estimated global-memory access
-    cost (vector width / warp coalescing of every fragment<->global copy,
-    weighted by bytes moved) instead of by total register count alone;
-    register count remains the tiebreak. Set to False for the legacy
-    register-count-only selection. Default: True"""
+    """The cost model that ranks free-mode layout attempts, by name:
+    "io-aware" scores estimated global-memory access cost (vector width /
+    warp coalescing of every fragment<->global copy, weighted by bytes
+    moved) with register count as the tiebreak; "register-count" is the
+    legacy total-register-slots-only ordering. Default: 'io-aware'"""
 
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,
