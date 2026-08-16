@@ -33,6 +33,22 @@ def bf16_six_lane_copy(
         B[0] = A[0]
 
 
+@T.prim_func
+def bf16_fp16_literals(
+    A: T.Tensor((4,), "bfloat16"),
+    B: T.Tensor((4,), "bfloat16"),
+    C: T.Tensor((4,), "float16"),
+    D: T.Tensor((4,), "bfloat16"),
+    E: T.Tensor((4,), "float16"),
+):
+    with T.Kernel(1, threads=4):
+        for i in T.Parallel(4):
+            B[i] = A[i] + T.bfloat16(1.5)
+            C[i] = T.float16(2.5)
+            D[i] = T.bfloat16(float("inf"))
+            E[i] = T.float16(float("inf"))
+
+
 @tilelang.jit(out_idx=[2], target="metal", execution_backend="torch")
 def repro_gemm(dtype: str):
     M = 32
@@ -112,6 +128,22 @@ def test_metal_bf16_numeric_vector_uses_native_bfloat2():
 def test_metal_bf16_six_lane_packed_copy_is_rejected():
     with pytest.raises(Exception, match=r"bf16x6|6 lanes|not representable"):
         lower_prim_to_metal(bf16_six_lane_copy)
+
+
+def test_metal_fp16_bf16_literals_use_explicit_cast():
+    """fp16/bf16 FloatImm literals (finite and INFINITY) must be emitted with
+    an explicit ``(half)``/``(bfloat)`` cast: MSL has no implicit conversion
+    into bfloat from float/half, and bare INFINITY/NAN or `h`-suffixed
+    literals break bf16 assignments and half select() overloads. This also
+    pins the unified form shared with the reduce PR: no ``bfloat(...)``
+    wrapper and no ``h`` suffix on bf16 finite literals."""
+    src = lower_prim_to_metal(bf16_fp16_literals)
+    assert "(bfloat)(1.500000e+00)" in src
+    assert "1.500000e+00h" not in src
+    assert "bfloat(1.500000e+00)" not in src
+    assert "(half)(2.500000e+00h)" in src
+    assert "(bfloat)(INFINITY)" in src
+    assert "(half)(INFINITY)" in src
 
 
 @tilelang.testing.requires_metal
