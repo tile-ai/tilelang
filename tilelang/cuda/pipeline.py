@@ -12,7 +12,6 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     allow_vectorize,
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
-    should_enable_buffer_init_check,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -96,8 +95,7 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # canonicalized, and before PipelinePlanning and LowerTileOp, while
     # loop bodies are still in source order and tile ops still declare
     # their access regions.
-    if should_enable_buffer_init_check():
-        mod = tilelang.transform.VerifyBufferInit()(mod)
+    mod = tilelang.transform.VerifyBufferInit()(mod)
 
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that

@@ -450,20 +450,18 @@ def test_reducer_kernel_compiles(no_kernel_cache):
     tilelang.compile(_reducer_kernel())
 
 
-def test_check_enabled_by_default():
+def test_check_enabled_by_default(capfd):
     """The check is on unless a pass config turns it off."""
-    from tilelang.backend.pass_pipeline import pipeline_utils
-
-    assert pipeline_utils.should_enable_buffer_init_check() is True
+    assert MESSAGE in _verify(_gemm_kernel("none"), capfd)
 
 
-def test_check_can_be_disabled_via_pass_config():
-    """tl.disable_buffer_init_check silences the check."""
-    from tilelang.backend.pass_pipeline import pipeline_utils
+def test_check_can_be_disabled_via_pass_config(capfd):
+    """tl.disable_buffer_init_check silences the pass itself, not just the
+    pipeline that schedules it."""
     from tilelang.transform import PassContext
 
     with PassContext(config={"tl.disable_buffer_init_check": True}):
-        assert pipeline_utils.should_enable_buffer_init_check() is False
+        assert MESSAGE not in _verify(_gemm_kernel("none"), capfd)
 
 
 @tilelang.testing.requires_cuda

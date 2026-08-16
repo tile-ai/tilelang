@@ -399,6 +399,13 @@ using namespace tirx::transform;
 
 tvm::transform::Pass VerifyBufferInit() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    // Enabled by default. The analysis reports buffers that nothing writes at
+    // all, plus order-sensitive cases in per-thread storage where the only
+    // write comes after the read, which keeps false positives rare enough to
+    // warrant it; users can opt out through this pass config.
+    if (ctx->GetConfig(kDisableBufferInitCheck, Bool(false)).value()->value) {
+      return f;
+    }
     BufferInitVerifier verifier;
     verifier.SeedParams(f);
     verifier.CollectPotentialWrites(f);
