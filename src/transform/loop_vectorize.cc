@@ -24,6 +24,7 @@
 
 #include "loop_vectorize.h"
 #include "../config.h"
+#include "backend/common/bf16_numeric_op.h"
 #include "../op/builtin.h"
 #include "../op/utils.h"
 #include "arith/int_operator.h"
@@ -638,7 +639,8 @@ private:
     // A bf16-typed call (other than if_then_else, which is a bit-level pick
     // used by predicated pure copies) is a numeric operation on bf16 vectors:
     // packed carriers must never enter it.
-    if (node->dtype.is_bfloat16() && node->op != builtin::if_then_else()) {
+    if (IsBF16NumericCallOp(node->dtype,
+                            node->op == builtin::if_then_else())) {
       has_bf16_numeric_op_ = true;
     }
     if (node->op == builtin::if_then_else()) {
@@ -906,8 +908,7 @@ private:
     // Any bf16 numeric cast (bf16 on either side, non-identity) is a numeric
     // operation: packed carriers must not be produced/consumed by it.
     // Identity casts are bit-level pass-throughs.
-    if ((node->dtype.is_bfloat16() || node->value.dtype().is_bfloat16()) &&
-        node->dtype != node->value.dtype()) {
+    if (IsBF16NumericCastOp(node->value.dtype(), node->dtype)) {
       has_bf16_numeric_op_ = true;
     }
     // Consider both source and target types to ensure all intermediate
@@ -1069,15 +1070,16 @@ private:
   }
 
   // Mark the loop as containing a bf16 numeric operation (arithmetic,
-  // comparison, min/max) when either operand is bfloat16. The Metal codegen
-  // represents bf16x4/x8 as packed uintN carriers that are only valid for
-  // pure memory copies; any numeric use must cap the vector width at 2 lanes
-  // (bfloat2), otherwise the packed carrier would silently enter integer
-  // arithmetic.
+  // comparison, min/max) when either operand or the result is bfloat16. The
+  // Metal codegen represents bf16x4/x8 as packed uintN carriers that are only
+  // valid for pure memory copies; any numeric use must cap the vector width
+  // at 2 lanes (bfloat2), otherwise the packed carrier would silently enter
+  // integer arithmetic. The classification is shared with the Metal codegen
+  // via backend/common/bf16_numeric_op.h.
 #define TL_MARK_BF16_NUMERIC_BINARY(NodeType)                                  \
   PrimExpr VisitExpr_(const NodeType *node) final {                            \
-    if (node->a.dtype().is_bfloat16() || node->b.dtype().is_bfloat16() ||      \
-        node->dtype.is_bfloat16()) {                                           \
+    if (IsBF16NumericBinaryOp(node->a.dtype(), node->b.dtype(),                \
+                              node->dtype)) {                                  \
       has_bf16_numeric_op_ = true;                                             \
     }                                                                          \
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);                     \

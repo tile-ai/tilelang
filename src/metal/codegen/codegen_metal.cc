@@ -37,6 +37,7 @@
 #include <utility>
 #include <vector>
 
+#include "backend/common/bf16_numeric_op.h"
 #include "metal/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "target/build_common.h"
@@ -946,38 +947,48 @@ void CodeGenTileLangMetal::CheckNoPackedBF16Carrier(DataType dtype,
   }
 }
 
+void CodeGenTileLangMetal::CheckNoPackedBF16CarrierForBinary(
+    DataType lhs, DataType rhs, DataType result, const char *ctx) const {
+  // Share the bf16-numeric-op classification with the vectorizer so both
+  // sides cannot drift apart (see backend/common/bf16_numeric_op.h).
+  if (tl::IsBF16NumericBinaryOp(lhs, rhs, result)) {
+    CheckNoPackedBF16Carrier(lhs, ctx);
+    CheckNoPackedBF16Carrier(rhs, ctx);
+  }
+}
+
 void CodeGenTileLangMetal::VisitExpr_(const SubNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "subtract");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "subtract");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "subtract");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const MulNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "multiply");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "multiply");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "multiply");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const DivNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "divide");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "divide");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "divide");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const ModNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "modulo");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "modulo");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "modulo");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const MinNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "min");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "min");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "min");
   if (op->dtype.is_bfloat16()) {
     // MSL's standard library has no min() overload for bfloat/bfloat2
     // (bfloat16 support is limited to arithmetic/relational ops); emit the
@@ -991,8 +1002,8 @@ void CodeGenTileLangMetal::VisitExpr_(const MinNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const MaxNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "max");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "max");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "max");
   if (op->dtype.is_bfloat16()) {
     // See MinNode: no max() overload for bfloat/bfloat2; a > b ? a : b
     // (MSL select(false_value, true_value, condition)).
@@ -1005,50 +1016,50 @@ void CodeGenTileLangMetal::VisitExpr_(const MaxNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const EQNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "equality comparison");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "equality comparison");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "equality comparison");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const NENode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "inequality comparison");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "inequality comparison");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "inequality comparison");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const LTNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "less-than comparison");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "less-than comparison");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "less-than comparison");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const LENode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "less-equal comparison");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "less-equal comparison");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "less-equal comparison");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const GTNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "greater-than comparison");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "greater-than comparison");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "greater-than comparison");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const GENode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "greater-equal comparison");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "greater-equal comparison");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "greater-equal comparison");
   CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const AddNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  CheckNoPackedBF16Carrier(op->a.dtype(), "add");
-  CheckNoPackedBF16Carrier(op->b.dtype(), "add");
+  CheckNoPackedBF16CarrierForBinary(op->a.dtype(), op->b.dtype(),
+                                    op->dtype, "add");
   if (TryPrintMlxSwizzleExpr(ffi::GetRef<PrimExpr>(op), os)) {
     return;
   }
@@ -1060,7 +1071,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
   // Identity casts are bit-level pass-throughs (pure copy); any non-identity
   // cast touching a packed bf16 carrier is a numeric conversion and must be
   // rejected.
-  if (op->dtype != op->value.dtype()) {
+  if (tl::IsBF16NumericCastOp(op->value.dtype(), op->dtype)) {
     CheckNoPackedBF16Carrier(op->dtype, "cast");
     CheckNoPackedBF16Carrier(op->value.dtype(), "cast");
   }
@@ -1501,9 +1512,11 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
   // if_then_else (bit-level pick used by predicated copies) and reinterpret
   // (bit-level). Any other call consuming a packed carrier would compile to
   // integer-typed operands.
-  if (!op->op.same_as(builtin::if_then_else()) &&
-      !op->op.same_as(builtin::reinterpret())) {
-    for (const PrimExpr &arg : op->args) {
+  bool is_bit_level_pure_copy =
+      op->op.same_as(builtin::if_then_else()) ||
+      op->op.same_as(builtin::reinterpret());
+  for (const PrimExpr &arg : op->args) {
+    if (tl::IsBF16NumericCallArg(arg.dtype(), is_bit_level_pure_copy)) {
       CheckNoPackedBF16Carrier(arg.dtype(), "call");
     }
   }

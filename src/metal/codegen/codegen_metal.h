@@ -109,6 +109,9 @@ private:
   // comparison, min/max or non-identity cast consuming a packed carrier would
   // silently compile to integer operations.
   void CheckNoPackedBF16Carrier(DataType dtype, const char *ctx) const;
+  void CheckNoPackedBF16CarrierForBinary(DataType lhs, DataType rhs,
+                                         DataType result,
+                                         const char *ctx) const;
 
   std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       simdgroup_dtype_;
