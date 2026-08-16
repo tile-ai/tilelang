@@ -12,6 +12,9 @@ automatically:
   4. buffer + scalar interleave (A, S, B, OUT)
   5. odd/tail shapes (rows not multiple of 128, dim not multiple of 64)
   6. read-only alias (same tensor bound to two inputs)
+  7. non-trailing out_idx (A, OUT, B) with an input after the output
+  8. non-trailing out_idx + scalar (A, OUT, S, B)
+  9. non-trailing multiple outputs (A, OUT1, B, OUT2)
 
 Every case: fp64 oracle, NaN sentinel prefill, real GPU execution,
 torch.mps.synchronize(), exact error threshold. Failing = ABI regression.
@@ -243,3 +246,83 @@ def test_abi_readonly_alias():
         oracle,
         "alias(X==Y)",
     )
+
+
+# ---------------------------------------------------------------- 7. non-trailing out_idx (A, OUT, B)
+# Non-trailing outputs are the packed-ABI stress case: under the
+# callee-allocated output ABI (CUDA tilelang_out_idx path) MakePackedAPI
+# assigns packed FFI slots ONLY to non-output parameters (out_idx positions
+# are skipped and an allocator anchor is appended), so every input AFTER a
+# non-trailing output has a packed slot that differs from its public index;
+# the adapter must remap through the non-output parameter list or the later
+# input is silently bound to the launcher's freshly allocated output tensor.
+# Under the legacy layout (Metal today) the packed slot equals the public
+# index; these tests pin the contract for both.
+@T.prim_func
+def non_trailing_out_mid(
+    A: T.Tensor((64,), "float32"),
+    OUT: T.Tensor((64,), "float32"),
+    B: T.Tensor((64,), "float32"),
+):
+    with T.Kernel(64) as bx:
+        OUT[bx] = A[bx] * 2.0 + B[bx]
+
+
+def test_abi_non_trailing_out_idx_mid():
+    g = np.random.default_rng(29)
+    A = g.normal(size=(64,)).astype(np.float32)
+    B = g.normal(size=(64,)).astype(np.float32)
+    kern = tilelang.compile(non_trailing_out_mid, out_idx=[1], execution_backend="torch", target="metal")
+    out = kern(torch.from_numpy(A).to("mps"), torch.from_numpy(B).to("mps"))
+    torch.mps.synchronize()
+    err = np.abs(out.cpu().numpy() - (A * 2.0 + B)).max()
+    assert err < 1e-4, f"[non-trailing out_idx mid] binding mismatch: max_abs_err={err}"
+
+
+# ---------------------------------------------------------------- 8. non-trailing out_idx + scalar (A, OUT, S, B)
+@T.prim_func
+def non_trailing_out_scalar(
+    A: T.Tensor((64,), "float32"),
+    OUT: T.Tensor((64,), "float32"),
+    S: T.int32,
+    B: T.Tensor((64,), "float32"),
+):
+    with T.Kernel(64) as bx:
+        OUT[bx] = A[bx] * T.cast(S, T.float32) + B[bx]
+
+
+def test_abi_non_trailing_out_idx_scalar():
+    g = np.random.default_rng(31)
+    A = g.normal(size=(64,)).astype(np.float32)
+    B = g.normal(size=(64,)).astype(np.float32)
+    S = 3
+    kern = tilelang.compile(non_trailing_out_scalar, out_idx=[1], execution_backend="torch", target="metal")
+    out = kern(torch.from_numpy(A).to("mps"), S, torch.from_numpy(B).to("mps"))
+    torch.mps.synchronize()
+    err = np.abs(out.cpu().numpy() - (A * S + B)).max()
+    assert err < 1e-4, f"[non-trailing out_idx scalar] binding mismatch: max_abs_err={err}"
+
+
+# ---------------------------------------------------------------- 9. non-trailing multiple outputs (A, OUT1, B, OUT2)
+@T.prim_func
+def non_trailing_out_multi(
+    A: T.Tensor((64,), "float32"),
+    OUT1: T.Tensor((64,), "float32"),
+    B: T.Tensor((64,), "float32"),
+    OUT2: T.Tensor((64,), "float32"),
+):
+    with T.Kernel(64) as bx:
+        OUT1[bx] = A[bx] + B[bx]
+        OUT2[bx] = A[bx] * B[bx]
+
+
+def test_abi_non_trailing_out_idx_multi():
+    g = np.random.default_rng(37)
+    A = g.normal(size=(64,)).astype(np.float32)
+    B = g.normal(size=(64,)).astype(np.float32)
+    kern = tilelang.compile(non_trailing_out_multi, out_idx=[1, 3], execution_backend="torch", target="metal")
+    o1, o2 = kern(torch.from_numpy(A).to("mps"), torch.from_numpy(B).to("mps"))
+    torch.mps.synchronize()
+    e1 = np.abs(o1.cpu().numpy() - (A + B)).max()
+    e2 = np.abs(o2.cpu().numpy() - (A * B)).max()
+    assert e1 < 1e-4 and e2 < 1e-4, f"[non-trailing out_idx multi] OUT1 err={e1} OUT2 err={e2}"

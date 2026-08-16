@@ -57,6 +57,35 @@ def _wait_keepalive_drained(timeout: float = 15.0) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# packed-slot -> public-parameter-index mapping for BOTH MakePackedAPI ABI
+# layouts (legacy slot == public index, and the callee-allocated output ABI
+# whose slots skip out_idx positions).  Non-trailing out_idx is the case that
+# distinguishes them: ``(A, OUT, B)`` with ``out_idx=[1]`` gives B packed
+# slot 2 in the legacy layout but slot 1 in the callee-allocated layout.
+# ---------------------------------------------------------------------------
+def test_packed_slot_to_param_index_both_layouts():
+    from tilelang.jit.adapter.torch.metal import _packed_slot_to_param_index
+
+    input_param_idx = [0, 2]  # public indices of (A, B) for params (A, OUT, B)
+    num_params = 3
+    # Legacy layout (Metal today): the packed slot IS the public index,
+    # including for the output parameter itself.
+    assert _packed_slot_to_param_index(0, input_param_idx, num_params, False) == 0  # A
+    assert _packed_slot_to_param_index(1, input_param_idx, num_params, False) == 1  # OUT
+    assert _packed_slot_to_param_index(2, input_param_idx, num_params, False) == 2  # B
+    # Callee-allocated output ABI: slots number only non-output parameters,
+    # so B (packed slot 1) must remap to public index 2 -- the exact
+    # silent-misbinding scenario this guards against.
+    assert _packed_slot_to_param_index(0, input_param_idx, num_params, True) == 0  # A
+    assert _packed_slot_to_param_index(1, input_param_idx, num_params, True) == 2  # B
+    # Out-of-range diagnostics instead of silent misbinding.
+    with pytest.raises(RuntimeError, match="packed slot 2"):
+        _packed_slot_to_param_index(2, input_param_idx, num_params, True)
+    with pytest.raises(RuntimeError, match="out of range"):
+        _packed_slot_to_param_index(3, input_param_idx, num_params, False)
+
+
+# ---------------------------------------------------------------------------
 # scalar binding: out_idx + scalar interleave — scalar first / middle / tail x
 # single / multi output. All six cases must bind and run on real MPS.
 # ---------------------------------------------------------------------------

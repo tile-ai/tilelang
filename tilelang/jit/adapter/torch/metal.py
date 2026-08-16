@@ -298,6 +298,47 @@ def _symbol_value(var: Any, symtab: dict[Any, int]) -> int:
     raise RuntimeError(f"Metal adapter: dynamic scalar '{name}' is not determined by any caller-supplied tensor input shape")
 
 
+def _packed_slot_to_param_index(
+    slot: int,
+    input_param_idx: list[int],
+    num_params: int,
+    skips_outputs: bool,
+    kparam: Any = None,
+) -> int:
+    """Map a packed-ABI slot to the public parameter index.
+
+    ``MakePackedAPI`` has two layouts:
+
+    - legacy (Metal today): every public parameter occupies a packed slot
+      equal to its public index, so the slot IS the public index;
+    - callee-allocated output ABI (``tilelang_out_idx``): output parameters
+      are skipped when numbering packed slots and an allocator anchor is
+      appended, so a non-output parameter's slot is its position in
+      ``input_param_idx`` (the public indices of the non-output parameters,
+      in public order).
+
+    ``skips_outputs`` selects the layout (detected from the lowered host
+    entry by the adapter).  ``kparam`` is only used for diagnostics.
+    """
+    if skips_outputs:
+        if slot < 0 or slot >= len(input_param_idx):
+            raise RuntimeError(
+                f"Metal adapter: FFI packed slot {slot} for kernel "
+                f"parameter '{kparam}' cannot be mapped to a public "
+                f"parameter (kernel has {len(input_param_idx)} "
+                "non-output parameters); the packed-API slot order skips "
+                "callee-allocated outputs"
+            )
+        return input_param_idx[slot]
+    if slot < 0 or slot >= num_params:
+        raise RuntimeError(
+            f"Metal adapter: FFI packed slot {slot} for kernel parameter "
+            f"'{kparam}' is out of range for a function with {num_params} "
+            "public parameters"
+        )
+    return slot
+
+
 def _pack_scalar_args(scalar_slots: list[tuple[Any, Any]], device: Any) -> torch.Tensor:
     """Pack runtime scalar kernel arguments into the Metal ``args_t`` buffer.
 
@@ -999,14 +1040,28 @@ class MetalKernelAdapter(BaseKernelAdapter):
         """The FFI packed-``args`` handle of a host entry function, if any.
 
         Call-site buffer/scalar arguments are resolved to public parameters
-        through the ``args`` slot index of the FFI entry (the packed-ABI
-        slot order is the public parameter order), so binding never depends
-        on parameter names.
+        through the ``args`` slot index of the FFI entry, so binding never
+        depends on parameter names.  The slot semantics depend on the packed
+        ABI layout: the legacy layout numbers every public parameter
+        (slot == public index); the callee-allocated output ABI skips
+        ``out_idx`` positions and appends an allocator anchor (slot == rank
+        in the non-output parameter list).  ``_bind_function_arg`` detects
+        the active layout from the lowered host entry and remaps via
+        ``_input_param_idx`` when needed.
         """
         for param in entry.params:
             if str(param) == "args":
                 return param
         return None
+
+    # NOTE: with the callee-allocated output ABI (CUDA ``tilelang_out_idx``
+    # path), the packed ``args`` slot order is the NON-OUTPUT parameter order
+    # (``out_idx`` positions are skipped and an allocator anchor is appended),
+    # NOT the public parameter order; ``_resolve_slot`` returns that packed
+    # slot and ``_bind_function_arg`` remaps it through ``_input_param_idx``.
+    # The legacy layout (Metal today) keeps slot == public index, and the
+    # active layout is detected from the lowered host entry (the
+    # ``allocator_anchor`` binding).
 
     def _loop_substitute(self, expr: Any, loop_vmap: dict[Any, Any]) -> Any:
         """Substitute constant host loop iterations into ``expr``."""
@@ -1074,7 +1129,12 @@ class MetalKernelAdapter(BaseKernelAdapter):
         if isinstance(node, tirx.Bind):
             # Flat tirx Bind: record the value behind the local var (with the
             # current loop iteration substituted, so loop-local bindings that
-            # reference the loop variable resolve per iteration).
+            # reference the loop variable resolve per iteration).  The
+            # callee-allocated output ABI's allocator anchor binds a
+            # ``<name>.allocator_anchor.*`` var in the entry; detecting it
+            # here marks the packed-ABI layout that skips output slots.
+            if "allocator_anchor" in str(node.var):
+                self._packed_api_skips_outputs = True
             bind_map[node.var] = self._loop_substitute(node.value, loop_vmap)
             return
         if isinstance(node, tirx.For):
@@ -1121,15 +1181,21 @@ class MetalKernelAdapter(BaseKernelAdapter):
         raise RuntimeError(f"Metal adapter: unsupported host node {type(node).__name__} while collecting kernel call sites")
 
     def _resolve_slot(self, expr: Any, bind_map: dict[Any, Any], args_var: Any, depth: int = 0) -> int | None:
-        """Map an FFI call-site argument back to its public-parameter slot.
+        """Map an FFI call-site argument back to its packed-ABI slot.
 
         Follows the host lowering's unpacking chain:
         ``X = tvm_struct_get(X_handle, 0, 1, "handle")`` where
         ``X_handle = Select(_, handle_add_byte_offset(tvm_struct_get(args, i, 15)), tvm_struct_get(args, i, 15))``
         (and the scalar variant ``S = Cast(_, tvm_struct_get(args, i, 15))``)
-        -- the slot ``i`` is the packed-ABI argument index, i.e. the public
-        parameter index.  Returns ``None`` when the expression cannot be
-        traced to an ``args`` slot.
+        -- the slot ``i`` is the packed-ABI argument index.  The packed slot
+        equals the public parameter index in the legacy layout (Metal
+        today); with the callee-allocated output ABI (``MakePackedAPI``,
+        gated to CUDA ``tilelang_out_idx``) the packed slots number only
+        non-output parameters and an allocator anchor is appended, so the
+        slot must be remapped through ``_input_param_idx`` before it can
+        index the launcher's ``full`` binding (see
+        ``_packed_slot_to_param_index``).  Returns ``None`` when the
+        expression cannot be traced to an ``args`` slot.
         """
         if depth > 24:
             return None
@@ -1189,11 +1255,34 @@ class MetalKernelAdapter(BaseKernelAdapter):
         """
         slot = self._resolve_slot(call_arg, bind_map, args_var)
         if slot is not None:
+            # ``MakePackedAPI`` has two packed-ABI layouts:
+            #
+            #  - legacy layout (Metal today): every public parameter keeps a
+            #    packed slot equal to its public index (``out_idx`` outputs
+            #    are ordinary arguments);
+            #  - callee-allocated layout (CUDA ``tilelang_out_idx`` ABI):
+            #    output parameters are skipped when numbering packed slots
+            #    and an allocator anchor is appended, so a non-output
+            #    parameter's packed slot is its position in
+            #    ``_input_param_idx``, NOT its public index.  The launcher's
+            #    ``full`` binding and scalar symbol resolution are keyed by
+            #    public parameter index, so remap before use.
+            #
+            # The active layout is detected from the lowered host entry (see
+            # ``_launch_plan``) so non-trailing ``out_idx`` stays correct
+            # under either ABI.
+            param_index = _packed_slot_to_param_index(
+                slot,
+                self._input_param_idx,
+                len(self.params),
+                self._packed_api_skips_outputs,
+                kparam,
+            )
             scalar_var = call_arg if isinstance(call_arg, tirx.Var) and str(kparam.dtype) != "handle" else None
             return (
                 _BufferBinding(
                     kind="user",
-                    param_index=slot,
+                    param_index=param_index,
                     dtype=None if str(kparam.dtype) == "handle" else kparam.dtype,
                 ),
                 scalar_var,
@@ -1233,6 +1322,23 @@ class MetalKernelAdapter(BaseKernelAdapter):
         device-parameter order == MSL buffer order) and its own grid/block
         derived from the call-site launch arguments.
         """
+        # Public indices of the non-output parameters, in public order.  In
+        # the callee-allocated output ABI (``MakePackedAPI`` skips
+        # ``out_idx`` positions when numbering packed slots and appends an
+        # allocator anchor) the packed-slot order equals this list, so it is
+        # the packed-slot -> public-parameter-index remap used by
+        # ``_bind_function_arg``.  In the legacy layout (Metal today) packed
+        # slots equal public parameter indices and this list is only used for
+        # the launcher's non-output argument contract.  Computed here so
+        # direct ``_launch_plan()`` callers (tests) get the same mapping as
+        # launcher construction.
+        self._input_param_idx = [i for i in range(len(self.params)) if i not in self.result_idx]
+        # Detect the packed-ABI layout from the lowered host entry: the
+        # callee-allocated output ABI materializes an ``allocator_anchor``
+        # binding in the entry body (CUDA ``tilelang_out_idx`` path); its
+        # absence means the legacy layout where every packed slot is a public
+        # parameter index.
+        self._packed_api_skips_outputs = False
         if self.device_mod is None:
             raise RuntimeError("Metal adapter: device_mod is required to build the launch plan")
         host_buffers: dict[Any, Any] = {}
@@ -1244,6 +1350,16 @@ class MetalKernelAdapter(BaseKernelAdapter):
             args_var = self._entry_args_var(entry)
             bind_map: dict[Any, Any] = {}
             self._walk_host(entry.body, call_sites, host_buffers, bind_map, args_var, {})
+        if not self._packed_api_skips_outputs:
+            # Fallback signal: the callee-allocated ABI also leaves its
+            # anchor's distinctive name/message in the serialized entry body
+            # (e.g. if a later pass renamed the Bind var but kept the assert
+            # message).  Host entry bodies are small, so the scan is cheap.
+            for entry in self._host_entry_funcs():
+                body = str(entry.body)
+                if "allocator_anchor" in body or "allocator anchor" in body:
+                    self._packed_api_skips_outputs = True
+                    break
         self._host_alloc_buffers = host_buffers
 
         plan: list[_LaunchSite] = []
@@ -1354,7 +1470,9 @@ class MetalKernelAdapter(BaseKernelAdapter):
             _result_idx = list(self.result_idx)
             _params = list(self.params)
             _capacity_dims = dict(self._capacity_dims)
-            _input_param_idx = [i for i in range(len(_params)) if i not in _result_idx]
+            # Established by ``_launch_plan`` above (single source of truth
+            # for the packed-slot -> public-parameter-index remap).
+            _input_param_idx = list(self._input_param_idx)
 
             def launcher(*args: Any) -> Any:
                 # `args` are the user-supplied non-output arguments in
