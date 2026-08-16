@@ -361,6 +361,38 @@ def _access_ptr_waw(out, stride, threads=64):
         T.simdgroup_store(loaded.data, 0, T.access_ptr(out[0, T.get_thread_binding() // 32 * 8], "w"), 16, 8, 8, T.bool(False))
 
 
+@tilelang.jit(execution_backend="tvm_ffi")
+def _address_of_waw(out, stride, threads=64):
+    """Two sequential simdgroups store overlapping 8x8 shared tiles through
+    the address_of(BufferLoad) pointer form.
+
+    This is the LowerSIMDGroupCopy staged form (src/metal/op/copy.cc): the
+    pointer argument is address_of(BufferLoad(dst, {row, col})) and the Metal
+    pipeline runs FlattenBuffer before ThreadSync, so ThreadSync sees a
+    flattened 1-D buffer with a single linear index. The first tile covers
+    rows 1..8 and the second covers rows 8..15, so row 8 requires a barrier
+    between the stores; the base elements (1 * stride and 8 * stride) are
+    disjoint, so the pre-fix row-only touched range let
+    PointerAccessIsDisjoint prove the two stores disjoint and skip the
+    barrier. The final load keeps the shared-memory writes observable in
+    generated code.
+    """
+    out: T.Tensor((8, 16), "float32")
+    with T.Kernel(1, threads=threads) as (bx,):
+        sh = T.alloc_shared((16, stride), "float32")
+        first = T.alloc_local((64,), "float32", scope="metal.simdgroup")
+        second = T.alloc_local((64,), "float32", scope="metal.simdgroup")
+        loaded = T.alloc_local((64,), "float32", scope="metal.simdgroup")
+        T.make_filled_simdgroup_matrix(first.data, 0, T.cast(1.0, "float32"))
+        T.make_filled_simdgroup_matrix(second.data, 0, T.cast(2.0, "float32"))
+        if T.get_thread_binding() < 32:
+            T.simdgroup_store(first.data, 0, T.address_of(sh[1, 0]), stride, 8, 8, T.bool(False))
+        if T.get_thread_binding() >= 32:
+            T.simdgroup_store(second.data, 0, T.address_of(sh[8, 0]), stride, 8, 8, T.bool(False))
+        T.simdgroup_load(loaded.data, 0, T.address_of(sh[8, 0]), stride, 8, 8, T.bool(False))
+        T.simdgroup_store(loaded.data, 0, T.address_of(out[0, T.get_thread_binding() // 32 * 8]), 16, 8, 8, T.bool(False))
+
+
 def _msl_barrier_between(src, first_marker, second_marker):
     """True if a threadgroup_barrier line exists between the last
     first_marker line that precedes some second_marker line and the first
@@ -437,6 +469,50 @@ def test_codegen_access_ptr_overlapping_waw_barrier(stride):
     assert _msl_barrier_between_first_two(kernel.get_kernel_source(), "simdgroup_store"), (
         f"overlapping WAW access_ptr stride={stride}: no barrier between tile stores"
     )
+
+
+@pytest.mark.parametrize("stride", (8, 16))
+def test_codegen_address_of_overlapping_waw_barrier(stride):
+    """Overlapping tile stores through the flattened address_of form must be
+    ordered for compact and padded rows.
+
+    Pre-fix the flattened 1-D touched range only covered tile_rows elements
+    (e.g. stride=8: intervals [8, 15] and [64, 71] are disjoint), so the
+    tile-tile WAW disjointness proof skipped the barrier even though the
+    tiles overlap at row 8. Post-fix the touched range is the full linear
+    bounding box (tile_rows - 1) * stride + tile_cols, so the intervals
+    overlap and ThreadSync inserts the barrier.
+    """
+    out = torch.empty(8, 16, dtype=torch.float32, device="mps")
+    kernel = _address_of_waw.compile(out, stride, 64)
+    assert _msl_barrier_between_first_two(kernel.get_kernel_source(), "simdgroup_store"), (
+        f"overlapping WAW address_of stride={stride}: no barrier between tile stores"
+    )
+
+
+@tilelang.testing.requires_metal
+def test_correctness_address_of_overlapping_waw():
+    """Dynamic: with the barrier the second store deterministically wins the
+    overlap row (row 8 = 2.0), and the final load of rows 8..15 reads all 2.0
+    for compact and padded rows. Without the barrier the overlap row races
+    between 1.0 and 2.0."""
+    for stride in (8, 16):
+        out = torch.empty(8, 16, dtype=torch.float32, device="mps")
+        kernel = _address_of_waw.compile(out, stride, 64)
+        exp = torch.full((8, 16), 2.0, dtype=torch.float32)
+        prev = None
+        for _ in range(N_ROUNDS):
+            out = torch.empty(8, 16, dtype=torch.float32, device="mps")
+            kernel(out)
+            torch.mps.synchronize()
+            got = out.cpu()
+            assert torch.equal(got, exp), (
+                f"address_of WAW stride={stride} diverged "
+                f"(maxerr={(got - exp).abs().max().item():.3e})"
+            )
+            if prev is not None:
+                assert torch.equal(got, prev), f"address_of WAW stride={stride}: run-to-run divergence"
+            prev = got
 
 
 @tilelang.testing.requires_metal

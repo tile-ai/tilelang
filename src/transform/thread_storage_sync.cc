@@ -1140,8 +1140,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     }
     if (op->op.same_as(builtin::simdgroup_store()) ||
         op->op.same_as(builtin::simdgroup_load())) {
-      // simdgroup_store(frag, tile_idx, ptr, stride, rows, cols, transpose)
-      // simdgroup_load(frag, tile_idx, ptr, stride, rows, cols, transpose)
+      // simdgroup_store(frag, tile_idx, ptr, stride, cols, rows, transpose)
+      // simdgroup_load(frag, tile_idx, ptr, stride, cols, rows, transpose)
       //
       // The pointer argument (args[2]) covers an entire rows x cols (8x8)
       // tile of shared (or global) memory. It comes in two official forms:
@@ -1159,16 +1159,19 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       //
       // The tile descriptor is propagated to the pointer argument (args[2])
       // only; the remaining six arguments (fragment, tile index, stride,
-      // rows, cols, transpose) are plain metadata and must not be tagged as
+      // cols, rows, transpose) are plain metadata and must not be tagged as
       // tile accesses.
       ICHECK_EQ(op->args.size(), 7U);
       bool is_store = op->op.same_as(builtin::simdgroup_store());
-      int tile_rows = 8, tile_cols = 8;
-      if (const auto *rows = op->args[4].as<IntImmNode>()) {
-        tile_rows = rows->value;
-      }
-      if (const auto *cols = op->args[5].as<IntImmNode>()) {
+      // The builtin signature is (d, index, ptr, stride, col, row, transpose)
+      // (see 3rdparty/tvm/include/tvm/tirx/builtin.h), so args[4] is the
+      // column extent and args[5] is the row extent.
+      int tile_cols = 8, tile_rows = 8;
+      if (const auto *cols = op->args[4].as<IntImmNode>()) {
         tile_cols = cols->value;
+      }
+      if (const auto *rows = op->args[5].as<IntImmNode>()) {
+        tile_rows = rows->value;
       }
       for (size_t i = 0; i < op->args.size(); ++i) {
         if (i == 2) {
@@ -1204,20 +1207,47 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         bool is_tile_access = has_pending_tile_access_;
         AccessType tile_type = kRead;
         int tile_rows = 1, tile_cols = 1;
+        // For a flattened (post-FlattenBuffer) 1-D buffer the pointer
+        // argument is address_of(BufferLoad(flat, {row * stride + col})) and
+        // the tile covers a linear bounding box of
+        // (tile_rows - 1) * tile_stride + tile_cols elements starting at the
+        // base element (tile_stride is the row stride in elements). Record
+        // that extent so PointerAccessIsDisjoint (used by the tile-tile WAW
+        // branch of FindConflict) cannot prove overlapping tiles disjoint
+        // based on the row extent alone. Multi-dimensional buffers keep the
+        // per-dimension rows/cols expansion below.
+        PrimExpr flattened_tile_extent;
         if (is_tile_access) {
           tile_type = pending_tile_access_type_;
           tile_rows = pending_tile_rows_;
           tile_cols = pending_tile_cols_;
+          if (buffer->shape.size() == 1) {
+            ICHECK(pending_tile_stride_.defined());
+            PrimExpr tile_stride = pending_tile_stride_;
+            DataType index_dtype = load->indices[0].dtype();
+            if (tile_stride.dtype() != index_dtype) {
+              tile_stride = Cast(index_dtype, tile_stride);
+            }
+            flattened_tile_extent =
+                make_const(index_dtype, tile_rows - 1) * tile_stride +
+                make_const(index_dtype, tile_cols);
+          }
         }
         // Use buffer shape and indices to compute the buffer_ranges for each
         // dimension.
         for (size_t i = 0; i < buffer->shape.size(); ++i) {
           PrimExpr min = AddAliasElemOffset(GetRef<Var>(buffer_var),
                                             buffer->dtype, load->indices[i]);
-          int extent = is_tile_access
-                           ? ((i == 0) ? tile_rows : (i == 1 ? tile_cols : 1))
-                           : 1;
-          PrimExpr extent_expr = make_const(buffer->shape[i].dtype(), extent);
+          PrimExpr extent_expr;
+          if (flattened_tile_extent.defined()) {
+            extent_expr = flattened_tile_extent;
+          } else {
+            int extent = is_tile_access
+                             ? ((i == 0) ? tile_rows
+                                         : (i == 1 ? tile_cols : 1))
+                             : 1;
+            extent_expr = make_const(buffer->shape[i].dtype(), extent);
+          }
           buffer_ranges.push_back(Range::FromMinExtent(min, extent_expr));
         }
         if (Enabled(buffer_var, scope)) {
@@ -1233,16 +1263,25 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
             PrimExpr physical_index = AddAliasElemOffset(
                 GetRef<Var>(buffer_var), buffer->dtype, load->indices[i]);
             if (is_tile_access) {
-              // Cover the whole tile extent along this dimension. For a
-              // flattened (post-FlattenBuffer) 1-D buffer this is only an
-              // approximation of the 2-D footprint; the planner never relies
-              // on tile touched ranges for disjointness (see FindConflict),
-              // so the approximation is safe.
-              int extent = (i == 0) ? tile_rows : (i == 1 ? tile_cols : 1);
-              PrimExpr extent_minus_one =
-                  make_const(physical_index.dtype(), extent - 1);
-              e.touched.push_back(arith::IntSet::Interval(
-                  physical_index, physical_index + extent_minus_one));
+              if (flattened_tile_extent.defined()) {
+                // Flattened 1-D tile: the whole linear bounding box
+                // (rows x cols with the given row stride) is touched by every
+                // thread of the simdgroup. FindConflict's tile-tile WAW
+                // branch relies on these touched ranges (via
+                // PointerAccessIsDisjoint) to decide whether two stores can
+                // be left unordered, so the bounding box must cover the full
+                // tile footprint including the column extent and stride.
+                PrimExpr extent_minus_one = flattened_tile_extent - 1;
+                e.touched.push_back(arith::IntSet::Interval(
+                    physical_index, physical_index + extent_minus_one));
+              } else {
+                // Cover the whole tile extent along this dimension.
+                int extent = (i == 0) ? tile_rows : (i == 1 ? tile_cols : 1);
+                PrimExpr extent_minus_one =
+                    make_const(physical_index.dtype(), extent - 1);
+                e.touched.push_back(arith::IntSet::Interval(
+                    physical_index, physical_index + extent_minus_one));
+              }
             } else {
               e.touched.push_back(arith::IntSet::Vector(physical_index));
             }
