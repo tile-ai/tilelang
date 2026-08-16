@@ -27,7 +27,6 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAsyncCopy, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kReducerForceBaseline, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableReducerPlanVerbose, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutCostModel, Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION(kLayoutCostModelVerify, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableVectorizePlannerVerbose, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kStorageRewriteDetectInplace, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kASTPrintEnable, Bool);

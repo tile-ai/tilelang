@@ -106,9 +106,10 @@ annotation contract.
   Statements outside the model are charged a conservative worst case — an
   attempt must never profit from opacity.
 - `tl.layout_cost_model=false`: legacy register-count-only ordering.
-- `tl.layout_cost_model_verify=true` (dev only): cross-checks every
-  symbolic score against an exact-enumeration oracle; disagreement warns
-  and falls back to worst case.
+- The scoring formulas are guarded by the Python parity check
+  `maint/layout_inference/run.py --cute` (symbolic scorer vs an
+  independent NumPy enumeration oracle); keep `cute_model.py` in lockstep
+  when changing `layout_cost_model.cc`.
 
 Hardware geometry is parameterized: lane width via `MaxVectorLoadBits`
 (`src/transform/loop_vectorize.h`, SHARED with the vectorizer so the
@@ -136,8 +137,7 @@ model's width beliefs match codegen), warp size from the target's
   with a new case whenever you change inference, the cost model, or the
   converters; goldens are recorded then human-reviewed (`--record`).
 - **Diagnostics**: the inference and cost-model passes log decisions via
-  DLOG (debug builds); `tl.layout_cost_model_verify` for score
-  cross-checking; `tl.layout_visualization_enable` renders layouts.
+  DLOG (debug builds); `tl.layout_visualization_enable` renders layouts.
 - **Python inspection**: run `tl.transform.LayoutInference()` on a module
   and read the annotations (see `maint/layout_inference/common.py` for
   the extraction idiom), or `cute.Layout.from_tilelang(...)` to see a

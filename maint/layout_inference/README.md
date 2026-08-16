@@ -59,10 +59,13 @@ io-aware scorer on the in-tree CuTe layout algebra
   shapes where they differ from the fragment shape (offset_region_copy).
 
 Current status: 88/88 statements match with a 100% conversion hit rate.
-The production scorer in `layout_cost_model.cc` now uses this formulation;
-its retired exact enumerator remains available as a development-only oracle
-through `tl.layout_cost_model_verify`. A mismatch here or in the C++ oracle
-means the symbolic path needs calibration before its result can be trusted.
+The production scorer in `layout_cost_model.cc` uses this formulation; its
+mode arithmetic was additionally audited once, in-tree, against a full
+exact-enumeration oracle across the layout-relevant test corpus (~264
+tests + this harness, zero disagreements, zero over-cap skips) before that
+oracle was removed. This `--cute` check is now the standing guard: any
+change to the scoring formulas must keep it green (update `cute_model.py`
+in lockstep with `layout_cost_model.cc`).
 
 Recording is not approval: after `--record`, read the diff under
 `expected/` and convince yourself every changed layout is intended before

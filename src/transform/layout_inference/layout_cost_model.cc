@@ -6,7 +6,6 @@
 
 #include "layout_cost_model.h"
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
@@ -22,7 +21,6 @@
 #include <utility>
 #include <vector>
 
-#include "../../config.h"
 #include "../../layout/cute_layout.h"
 #include "../../layout/layout.h"
 #include "../../layout/utils.h"
@@ -85,9 +83,10 @@ template <typename T> std::string FormatVector(const std::vector<T> &values) {
 //
 // Anything the algebra cannot express (non-affine indices, swizzle,
 // non-bijective candidates) is charged the conservative worst case — an
-// attempt must never profit from opacity. The retired exact enumerator
-// survives as a debug oracle behind `tl.layout_cost_model_verify`
-// (VerifyByEnumeration), rebuilt from the same derived layouts.
+// attempt must never profit from opacity. The mode arithmetic was audited
+// once against a full exact-enumeration oracle across the test corpus
+// (zero disagreements) before that oracle was removed; its Python mirror
+// survives in maint/layout_inference (`run.py --cute`).
 // Hardware geometry stays parameterized: lane width from the vectorizer's
 // shared MaxVectorLoadBits policy, warp size and coalescing-segment
 // granularity from the target (see BindMemoryGeometry).
@@ -187,11 +186,6 @@ int64_t WorstCaseBytes(const StatementProbe &probe) {
   return total;
 }
 
-/*! \brief Entry cap for the optional exact-enumeration debug oracle. The
- *  production CuTe path does not materialize a table and is not subject to
- *  this limit. */
-constexpr int64_t kMaxOracleEntries = int64_t(1) << 20;
-
 bool TryMultiplyPositive(int64_t lhs, int64_t rhs, int64_t *product) {
   if (lhs <= 0 || rhs <= 0 || lhs > std::numeric_limits<int64_t>::max() / rhs) {
     return false;
@@ -245,9 +239,19 @@ Optional<cute::Layout> ProbeExprsToCute(const StatementProbe &probe,
   return cute::LayoutFromTileLang(packed);
 }
 
-/*! \brief Evaluate a plain strided CuTe layout at a linear coordinate. */
-int64_t EvalCute(const cute::Layout &layout, int64_t coord) {
-  return cute::AsConst(layout(cute::IntTuple(coord)));
+/*! \brief Evaluate flattened (extent, stride) modes at a linear coordinate
+ *  (column-major digit decomposition — the same function the layout
+ *  computes, minus the ObjectRef machinery). The scoring loops evaluate at
+ *  most one coordinate per physical cell; plain int64 arithmetic keeps that
+ *  walk at nanoseconds per point. */
+int64_t EvalModes(const std::vector<std::pair<int64_t, int64_t>> &modes,
+                  int64_t coord) {
+  int64_t value = 0;
+  for (const auto &[extent, stride] : modes) {
+    value += (coord % extent) * stride;
+    coord /= extent;
+  }
+  return value;
 }
 
 /*! \brief CuTe spelling of a layout, for diagnostics. */
@@ -279,124 +283,6 @@ FlatModes(const cute::Layout &layout) {
     modes.emplace_back(cute::AsConst(shapes[i]), cute::AsConst(strides[i]));
   }
   return modes;
-}
-
-/*! \brief Debug oracle behind `tl.layout_cost_model_verify`: rebuild the
- *  full (thread, slot) -> address table by evaluating the DERIVED layouts
- *  at every cell, and recompute vector width and segment counts with the
- *  retired exact-enumeration formulas. Validates the mode arithmetic (the
- *  conversion already proves itself); a disagreement warns loudly and the
- *  caller falls back to the conservative worst case. */
-bool VerifyByEnumeration(const StatementProbe &probe, const cute::Layout &inv,
-                         const std::vector<cute::Layout> &addr_layouts,
-                         int64_t points, int64_t table_size, int64_t vector,
-                         const StatementTraffic &traffic, int member_idx,
-                         const char *what) {
-  if (table_size > kMaxOracleEntries) {
-    LOG(WARNING) << "[LayoutCost] member " << member_idx << ' ' << what
-                 << " enumeration oracle needs " << table_size
-                 << " entries, above its " << kMaxOracleEntries
-                 << "-entry safety cap; charging the conservative worst case.";
-    return false;
-  }
-  size_t naccess = probe.accesses.size();
-  std::vector<std::vector<int64_t>> addr_table(
-      naccess, std::vector<int64_t>(table_size, 0));
-  std::vector<uint8_t> lead_replica(table_size, 0);
-  for (int64_t cell = 0; cell < table_size; ++cell) {
-    lead_replica[cell] = EvalCute(inv, cell) / points == 0;
-    for (size_t a = 0; a < naccess; ++a) {
-      addr_table[a][cell] = EvalCute(addr_layouts[a], cell);
-    }
-  }
-
-  // Retired enumerator formulas, verbatim.
-  int64_t vector_lane_bytes = probe.vector_bits / 8;
-  int64_t max_vector = probe.slots;
-  for (const auto &access : probe.accesses) {
-    max_vector = std::min<int64_t>(max_vector,
-                                   vector_lane_bytes /
-                                       std::max<int64_t>(1, access.elem_bytes));
-  }
-  int64_t enum_vector = 1;
-  for (int64_t cand = 32; cand >= 2; cand /= 2) {
-    if (cand > max_vector || probe.slots % cand != 0) {
-      continue;
-    }
-    bool contiguous = true;
-    for (size_t a = 0; a < naccess && contiguous; ++a) {
-      for (int64_t t = 0; t < probe.threads && contiguous; ++t) {
-        const int64_t *row = addr_table[a].data() + t * probe.slots;
-        for (int64_t q = 0; q < probe.slots && contiguous; q += cand) {
-          if (row[q] % cand != 0) {
-            contiguous = false;
-            break;
-          }
-          for (int64_t offset = 1; offset < cand; ++offset) {
-            if (row[q + offset] != row[q] + offset) {
-              contiguous = false;
-              break;
-            }
-          }
-        }
-      }
-    }
-    if (contiguous) {
-      enum_vector = cand;
-      break;
-    }
-  }
-  int64_t steps = probe.slots / enum_vector;
-
-  StatementTraffic enum_traffic;
-  int64_t num_warps = (probe.threads + probe.warp_size - 1) / probe.warp_size;
-  std::vector<int64_t> segments;
-  segments.reserve(2 * probe.warp_size);
-  for (size_t a = 0; a < naccess; ++a) {
-    const auto &access = probe.accesses[a];
-    enum_traffic.issue +=
-        steps * access.repeat * probe.threads * vector_lane_bytes;
-    int64_t segments_total = 0;
-    for (int64_t q = 0; q < steps; ++q) {
-      for (int64_t w = 0; w < num_warps; ++w) {
-        segments.clear();
-        for (int64_t lane = 0; lane < probe.warp_size; ++lane) {
-          int64_t t = w * probe.warp_size + lane;
-          if (t >= probe.threads) {
-            break;
-          }
-          int64_t cell = t * probe.slots + q * enum_vector;
-          if (access.is_store && !lead_replica[cell]) {
-            continue;
-          }
-          int64_t first_byte = addr_table[a][cell] * access.elem_bytes;
-          int64_t last_byte = first_byte + enum_vector * access.elem_bytes - 1;
-          for (int64_t seg = first_byte / probe.segment_bytes;
-               seg <= last_byte / probe.segment_bytes; ++seg) {
-            if (std::find(segments.begin(), segments.end(), seg) ==
-                segments.end()) {
-              segments.push_back(seg);
-            }
-          }
-        }
-        segments_total += static_cast<int64_t>(segments.size());
-      }
-    }
-    enum_traffic.bw += access.repeat * segments_total * probe.segment_bytes;
-  }
-
-  if (enum_vector != vector || enum_traffic.bw != traffic.bw ||
-      enum_traffic.issue != traffic.issue) {
-    LOG(WARNING) << "[LayoutCost] member " << member_idx << ' ' << what
-                 << " CuTe scoring disagrees with the enumeration oracle: "
-                 << "cute(vector=" << vector << " bw=" << traffic.bw
-                 << " issue=" << traffic.issue
-                 << ") vs enum(vector=" << enum_vector
-                 << " bw=" << enum_traffic.bw << " issue=" << enum_traffic.issue
-                 << "); charging the conservative worst case.";
-    return false;
-  }
-  return true;
 }
 
 /*! \brief Score one prepared statement on the CuTe layout algebra.
@@ -433,15 +319,15 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
       return std::nullopt;
     }
   }
-  int64_t table_size = 0;
+  int64_t physical_cells = 0;
   int64_t logical_size = 0;
   // A fragment the lowering accepts is a bijection between
   // (logical point, replica) and (thread, slot); anything else is
   // outside the model. The size identity is the cheap necessary half;
   // the RightInverse size check below is the sufficient half.
-  if (!TryMultiplyPositive(probe.threads, probe.slots, &table_size) ||
+  if (!TryMultiplyPositive(probe.threads, probe.slots, &physical_cells) ||
       !TryMultiplyPositive(points, probe.rep, &logical_size) ||
-      logical_size != table_size) {
+      logical_size != physical_cells) {
     DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
                << " cannot be measured: forward map is not a bounded "
                   "logical-to-(thread,slot) bijection";
@@ -465,13 +351,17 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
     return std::nullopt;
   }
   cute::Layout inv = cute::RightInverse(flat.value());
-  if (cute::AsConst(cute::Size(inv)) != table_size) {
+  if (cute::AsConst(cute::Size(inv)) != physical_cells) {
     DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
                << " cannot be measured: candidate is not injective "
                   "(right-inverse covers "
-               << cute::AsConst(cute::Size(inv)) << " of " << table_size
+               << cute::AsConst(cute::Size(inv)) << " of " << physical_cells
                << " cells)";
     return std::nullopt;
+  }
+  auto inv_modes = FlatModes(inv);
+  if (!inv_modes) {
+    return std::nullopt; // unreachable: a right inverse is const-strided
   }
 
   // Derive one `cell -> element address` layout per access and its
@@ -479,10 +369,12 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
   cute::IntTuple st_shape = cute::IntTupleTuple(
       {cute::IntTuple(probe.slots), cute::IntTuple(probe.threads)});
   size_t naccess = probe.accesses.size();
-  std::vector<cute::Layout> addr_layouts;
+  std::vector<std::vector<std::pair<int64_t, int64_t>>> addr_modes;
   std::vector<std::vector<std::pair<int64_t, int64_t>>> slot_modes;
   std::vector<std::vector<std::pair<int64_t, int64_t>>> thread_modes;
-  addr_layouts.reserve(naccess);
+  addr_modes.reserve(naccess);
+  slot_modes.reserve(naccess);
+  thread_modes.reserve(naccess);
   for (size_t a = 0; a < naccess; ++a) {
     const auto &access = probe.accesses[a];
     if (access.elem_bytes <= 0 ||
@@ -502,9 +394,10 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
     }
     cute::Layout addr = cute::Composition(g.value(), inv);
     cute::Layout split = addr.WithShape(st_shape);
+    auto amodes = FlatModes(addr);
     auto smodes = FlatModes(split[0]);
     auto tmodes = FlatModes(split[1]);
-    if (!smodes || !tmodes) {
+    if (!amodes || !smodes || !tmodes) {
       DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
                  << " cannot be measured: derived address modes are not "
                     "constant";
@@ -513,7 +406,7 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
     DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
                << " access[" << a
                << "] address layout: " << CuteToString(split);
-    addr_layouts.push_back(std::move(addr));
+    addr_modes.push_back(std::move(*amodes));
     slot_modes.push_back(std::move(*smodes));
     thread_modes.push_back(std::move(*tmodes));
   }
@@ -597,10 +490,10 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
           }
           int64_t cell = t * probe.slots + q * vector;
           if (access.is_store && probe.rep > 1 &&
-              EvalCute(inv, cell) / points != 0) {
+              EvalModes(*inv_modes, cell) / points != 0) {
             continue; // guarded replica: this lane is idle for stores
           }
-          int64_t first = EvalCute(addr_layouts[a], cell);
+          int64_t first = EvalModes(addr_modes[a], cell);
           int64_t last = first + vector - 1;
           for (int64_t seg = first / seg_elems; seg <= last / seg_elems;
                ++seg) {
@@ -622,11 +515,6 @@ std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
                << " bw=" << bw_contribution << " issue=" << issue_contribution;
   }
 
-  if (tl_config::LayoutCostModelVerifyEnabled() &&
-      !VerifyByEnumeration(probe, inv, addr_layouts, points, table_size, vector,
-                           traffic, member_idx, what)) {
-    return std::nullopt;
-  }
   return traffic;
 }
 

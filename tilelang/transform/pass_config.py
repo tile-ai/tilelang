@@ -104,12 +104,6 @@ class PassConfigKey(str, Enum):
     register count remains the tiebreak. Set to False for the legacy
     register-count-only selection. Default: True"""
 
-    TL_LAYOUT_COST_MODEL_VERIFY = "tl.layout_cost_model_verify"
-    """Cross-check every CuTe-algebra statement score of the layout cost
-    model against the exact-enumeration debug oracle; disagreements warn
-    and fall back to the conservative worst case. Slow — development and
-    calibration only. Default: False"""
-
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,
     disabling narrow physical plans (compact storage / sub-block collectives).
