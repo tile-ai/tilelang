@@ -18,7 +18,6 @@ import tilelang.language as T
 
 
 def _broadcast(rows, cols, threads):
-
     @T.prim_func
     def main(S: T.Tensor((rows,), T.float32), Out: T.Tensor((rows, cols), T.float32)):
         with T.Kernel(1, threads=threads):
@@ -50,3 +49,12 @@ def check(variant, model, result):
     assert frag["replicate"] == threads, f"broadcast-read fragment must be fully replicated over {threads} threads, got: {frag}"
     (loop,) = result["loops"].values()
     assert loop["replicate"] == 1, f"loop layout must not replicate execution, got: {loop}"
+
+
+# Under the default (io-aware) config: S loads via the fully replicated
+# fragment (vector = its slot count), Out streams 4-wide and coalesced —
+# the whole point of rejecting the #1729 thread-collapsed candidate.
+VECTOR_ANCHOR = {
+    "issue1729_2x2560_t256": {"S": 2, "Out": 4},
+    "rows4_cols1024_t128": {"S": 4, "Out": 4},
+}

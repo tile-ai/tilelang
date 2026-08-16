@@ -12,7 +12,6 @@ import tilelang.language as T
 
 
 def _softmaxish(M, N, threads):
-
     @T.prim_func
     def main(A: T.Tensor((M, N), T.float32), B: T.Tensor((M, N), T.float32)):
         with T.Kernel(1, threads=threads):
@@ -38,3 +37,9 @@ def check(variant, model, result):
     for name in ("x", "y"):
         frag = result["buffers"][name]
         assert frag["replicate"] == 1, f"elementwise fragment {name} needs no replication, got: {frag}"
+
+
+VECTOR_ANCHOR = {
+    "64x128_t128": {"A": 4, "B": 4},
+    "128x256_t256": {"A": 4, "B": 4},
+}

@@ -7,13 +7,14 @@
  * What "cheapest" means is a pluggable policy behind LayoutCostModel:
  *
  *  - RegisterCountCostModel (legacy): total fragment register slots,
- *    nothing else. Kept as the default so the historical ordering stays
- *    byte-identical.
+ *    nothing else. Available through `tl.layout_cost_model=false` for
+ *    compatibility and A/B comparisons.
  *  - IOAwareCostModel (layout RFC, design B2): walks the component's
  *    global-memory-touching statements (fragment<->global copies and
  *    parallel loops with direct global accesses) and charges each one
  *    max(bandwidth bytes, issue-equivalent bytes) under the attempt's
- *    tentative layouts; registers remain the lexicographic tiebreak.
+ *    tentative layouts; registers remain the lexicographic tiebreak. This
+ *    is the default policy.
  *
  * Concrete models live in the .cc; callers go through Create().
  */

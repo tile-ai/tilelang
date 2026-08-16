@@ -30,13 +30,8 @@ COST_MODELS = {
 }
 
 
-def run_layout_inference(prim_func, cost_model_enabled: bool, target=None):
-    """Run LayoutInference on `prim_func` and return the inferred layouts.
-
-    Returns ``{"buffers": {name: layout_dict}, "loops": {key: layout_dict}}``
-    where a loop key names the parallel nest by its loop vars and extents,
-    e.g. ``"i,j[128x128]"``, and layout_dict is `layout_to_dict` output.
-    """
+def _run_passes(prim_func, cost_model_enabled: bool, target=None):
+    """The exact pass prefix LayoutInference sees in the real pipeline."""
     if target is None:
         target = tvm.target.Target(determine_target("auto"))
     mod = tvm.IRModule({"main": prim_func})
@@ -45,7 +40,64 @@ def run_layout_inference(prim_func, cost_model_enabled: bool, target=None):
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         with tvm.transform.PassContext(config={"tl.layout_cost_model": cost_model_enabled}):
             mod = tl.transform.LayoutInference()(mod)
-    return extract_layouts(mod["main"])
+    return mod["main"]
+
+
+def run_layout_inference(prim_func, cost_model_enabled: bool, target=None):
+    """Run LayoutInference on `prim_func` and return the inferred layouts.
+
+    Returns ``{"buffers": {name: layout_dict}, "loops": {key: layout_dict}}``
+    where a loop key names the parallel nest by its loop vars and extents,
+    e.g. ``"i,j[128x128]"``, and layout_dict is `layout_to_dict` output.
+    """
+    return extract_layouts(_run_passes(prim_func, cost_model_enabled, target))
+
+
+def run_layout_inference_objects(prim_func, cost_model_enabled: bool, target=None):
+    """Like run_layout_inference, but returns the LIVE objects:
+    ``{"buffers": {name: (Buffer, Layout)}}`` — for consumers that need the
+    layout expressions themselves (e.g. the CuTe experiment), not the
+    structured snapshot."""
+    func = _run_passes(prim_func, cost_model_enabled, target)
+    buffers: dict[str, tuple] = {}
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.SBlock) and "layout_map" in node.annotations:
+            for buf, layout in node.annotations["layout_map"].items():
+                buffers[buf.name] = (buf, layout)
+
+    post_order_visit(func.body, visit)
+    return {"buffers": buffers}
+
+
+def lower_and_extract_vector_widths(prim_func, target=None) -> dict[str, int]:
+    """Fully lower under the DEFAULT pass config and report, per global
+    buffer, the widest vectorized access (in lanes) the final device TIR
+    performs.
+
+    This is the ground truth that anchors the cost model's vector-width
+    beliefs: the model scores a layout assuming the vectorizer will emit a
+    given width, and this function reads back what the vectorizer actually
+    emitted for the layout that won.
+    """
+    if target is None:
+        target = tvm.target.Target(determine_target("auto"))
+    with tvm.target.Target(target):
+        artifact = tl.lower(prim_func, target=target, enable_device_compile=False)
+    widths: dict[str, int] = {}
+
+    def visit(node):
+        buf, lanes = None, 0
+        if isinstance(node, tvm.tirx.BufferLoad):
+            buf, lanes = node.buffer, node.dtype.lanes
+        elif isinstance(node, tvm.tirx.BufferStore):
+            buf, lanes = node.buffer, node.value.dtype.lanes
+        if buf is not None and buf.scope() == "global":
+            widths[buf.name] = max(widths.get(buf.name, 1), lanes)
+
+    for _, func in artifact.device_mod.functions.items():
+        post_order_visit(func.body, visit)
+    return widths
 
 
 def _shape_list(arr) -> list:

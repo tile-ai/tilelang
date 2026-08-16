@@ -87,6 +87,11 @@ static constexpr const char *kEnableReducerPlanVerbose =
 // remains the tiebreak. Default on; set to false for the legacy
 // register-count-only selection.
 static constexpr const char *kLayoutCostModel = "tl.layout_cost_model";
+// Cross-check every CuTe-algebra statement score against the exact
+// enumeration debug oracle; disagreements warn and fall back to the
+// conservative worst case. Slow — development and calibration only.
+static constexpr const char *kLayoutCostModelVerify =
+    "tl.layout_cost_model_verify";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableLoopUnswitching =

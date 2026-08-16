@@ -22,7 +22,47 @@ python run.py                # verify all cases against expected/
 python run.py --case NAME    # substring filter
 python run.py --show         # also print the inferred layouts
 python run.py --record       # rewrite goldens from current behavior
+python run.py --anchor       # lower fully; check per-buffer vector widths
+                             # in device TIR against VECTOR_ANCHOR
+python run.py --cute         # compare symbolic scores with the exact oracle
 ```
+
+`--anchor` closes the loop between the model and the real vectorizer: the
+cost model scores a layout assuming a vector width, and the anchor reads
+back what the vectorizer actually emitted for the winning layout under the
+default config. Each case declares `VECTOR_ANCHOR = {variant: {buffer:
+lanes}}`; variants without one print observed widths for review. A
+mismatch means the model's width belief and codegen diverged — exactly the
+drift the shared MaxVectorLoadBits policy is supposed to prevent.
+
+## CuTe parity checking (`--cute`)
+
+`python run.py --cute` validates the symbolic formulation used by the
+io-aware scorer on the in-tree CuTe layout algebra
+(`tilelang/layout/cute.py`, `src/layout/cute_layout.cc`):
+
+- `cute_model.py` packs each fragment as
+  `(coords..., rep) -> [thread, slot]` (the canonical packing of
+  `FragmentNode::InverseWithLevel`), converts it with
+  `cute.Layout.from_tilelang` into ONE plain strided layout computing the
+  enumerator's cell index, then derives the byte-address layout with
+  `right_inverse` + `composition` and reads the vector width off the
+  coalesced slot modes. Segment counts evaluate the derived layout at
+  warp/step granularity, once per issued vector lane rather than once per
+  logical point and replica.
+- `oracle.py` is the independent arbiter: a numpy implementation of the
+  retired exact-enumeration formulas, with whole-grid evaluation of the
+  fragment's own forward expressions.
+- Every fragment golden layout is scored by both paths, as a load and as a
+  store (replication gating included), and (V, issue, bw, segments) must match
+  exactly. `CUTE_STATEMENTS` in a case supplies real enclosing-buffer
+  shapes where they differ from the fragment shape (offset_region_copy).
+
+Current status: 88/88 statements match with a 100% conversion hit rate.
+The production scorer in `layout_cost_model.cc` now uses this formulation;
+its retired exact enumerator remains available as a development-only oracle
+through `tl.layout_cost_model_verify`. A mismatch here or in the C++ oracle
+means the symbolic path needs calibration before its result can be trusted.
 
 Recording is not approval: after `--record`, read the diff under
 `expected/` and convince yourself every changed layout is intended before

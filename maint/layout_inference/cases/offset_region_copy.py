@@ -12,7 +12,6 @@ import tilelang.language as T
 
 
 def _tiled(M, N, BM, BN, dtype, threads):
-
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=threads) as (bx, by):
@@ -32,3 +31,17 @@ VARIANTS = {
 def check(variant, model, result):
     frag = result["buffers"]["frag"]
     assert frag["replicate"] == 1, f"tiled roundtrip copy needs no replication, got: {frag}"
+
+
+# Offset regions must vectorize exactly like their zero-offset kin.
+VECTOR_ANCHOR = {
+    "fp16_tile64x64_t128": {"A": 8, "B": 8},
+    "fp32_tile32x128_t128": {"A": 4, "B": 4},
+}
+
+# The one case whose copies address an ENCLOSING global buffer: the CuTe
+# experiment must use the real row-major strides, not the fragment shape.
+CUTE_STATEMENTS = {
+    "fp16_tile64x64_t128": {"frag": (256, 256)},
+    "fp32_tile32x128_t128": {"frag": (128, 512)},
+}

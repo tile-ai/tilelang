@@ -11,7 +11,6 @@ import tilelang.language as T
 
 
 def _chain(M, N, threads):
-
     @T.prim_func
     def main(A: T.Tensor((M, N), T.float16), B: T.Tensor((M, N), T.float32)):
         with T.Kernel(1, threads=threads):
@@ -35,3 +34,10 @@ def check(variant, model, result):
     for name in ("x16", "x32"):
         frag = result["buffers"][name]
         assert frag["replicate"] == 1, f"{name} needs no replication in a pure elementwise chain, got: {frag}"
+
+
+# The io-aware pick splits 4-wide (16B for fp32, 8B for fp16) on both ends.
+VECTOR_ANCHOR = {
+    "128x128_t128": {"A": 4, "B": 4},
+    "64x512_t256": {"A": 4, "B": 4},
+}

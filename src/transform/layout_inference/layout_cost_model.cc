@@ -15,11 +15,15 @@
 #include <algorithm>
 #include <limits>
 #include <optional>
-#include <set>
+#include <sstream>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "../../config.h"
+#include "../../layout/cute_layout.h"
 #include "../../layout/layout.h"
 #include "../../layout/utils.h"
 #include "../../op/copy.h"
@@ -35,421 +39,59 @@ using namespace tirx;
 
 namespace {
 
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+
+template <typename T> std::string FormatVector(const std::vector<T> &values) {
+  std::ostringstream os;
+  os << '[';
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) {
+      os << ", ";
+    }
+    os << values[i];
+  }
+  os << ']';
+  return os.str();
+}
+
 // ---------------------------------------------------------------------------
 // Statement-level bottleneck traffic model (layout RFC, design B2)
 //
 // The unit of account is one STATEMENT that touches global memory — a
 // fragment<->global tl.copy or a parallel loop with direct global accesses.
-// The statement is measured in the FORWARD direction: enumerate every
-// (logical point, replica) pair, evaluate the layout's own forward maps
-//     thread = forward_thread(x, r)        slot = forward_index(x)
-// plus the trivially affine global address addr(x), and materialize the
-// exact (thread, slot) -> address table the lowered code will execute.
-// No layout inversion (the forward maps are total and already built) and
-// no witness sampling: the full walk is exact, with each point folded to
-// a constant by the Analyzer.
-//
-// Execution time is bounded by two resources, both measured in BYTES so a
-// fully busy block streaming maximal-width lanes scores exactly its
-// logical byte count on either. The hardware geometry is parameterized:
-// lane width from the vectorizer's shared MaxVectorLoadBits policy, warp
-// size and coalescing-segment granularity from the target (see
-// BindMemoryGeometry).
-//     bw    = coalescing segments touched, counted exactly per (vector
-//             step, warp); intra-warp broadcast merges into one segment,
-//             store lanes holding a replica != 0 sleep behind the
-//             replication guard and count nothing
-//     issue = per-thread instruction depth x what a fully busy block
-//             would stream at max lane width over that many steps:
-//             steps x threads x lane_bytes. Idle lanes do not shorten the
-//             depth, so thread-collapse pathologies surface here (#1729).
+// The statement is scored SYMBOLICALLY on the in-tree CuTe layout algebra
+// (src/layout/cute_layout.h). The forward maps are packed into one plain
+// multi-output layout whose row-major output serialization is exactly the
+// physical cell index `thread * slots + slot`; LayoutFromTileLang recovers
+// its (shape, stride) normal form (probe-then-prove, so the conversion is
+// self-certifying), RightInverse + Composition derive the per-cell address
+// layout, and the questions become mode arithmetic:
+//     vector = the innermost stride-1 run of the coalesced slot axis,
+//              alignment-checked against every other mode stride (the
+//              vectorizer's question, answered on the normal form)
+//     bw     = coalescing segments touched, counted exactly per (vector
+//              step, warp) by evaluating the DERIVED layout once per issued
+//              vector lane rather than once per logical point and replica.
+//              Intra-warp broadcast merges into one segment; store lanes
+//              holding a replica != 0 sleep behind the replication guard
+//              (the replica index is read back through the inverse) and
+//              count nothing.
+//     issue  = per-thread instruction depth x what a fully busy block
+//              would stream at max lane width over that many steps:
+//              steps x threads x lane_bytes. Idle lanes do not shorten
+//              the depth, so thread-collapse pathologies surface here
+//              (#1729).
 //     time(S) ~ max(bw, issue);      cost = sum over statements.
+//
+// Anything the algebra cannot express (non-affine indices, swizzle,
+// non-bijective candidates) is charged the conservative worst case — an
+// attempt must never profit from opacity. The retired exact enumerator
+// survives as a debug oracle behind `tl.layout_cost_model_verify`
+// (VerifyByEnumeration), rebuilt from the same derived layouts.
+// Hardware geometry stays parameterized: lane width from the vectorizer's
+// shared MaxVectorLoadBits policy, warp size and coalescing-segment
+// granularity from the target (see BindMemoryGeometry).
 // ---------------------------------------------------------------------------
-
-/*! \brief A statement-lifetime compiled form of an index expression.
- *
- *  The scoring walk executes each expression once per (logical point,
- *  replica) — 10^4..10^6 times — so per-point symbolic evaluation is the
- *  wrong shape. Instead: canonicalize ONCE with the Analyzer (TIR
- *  semantics stay the Analyzer's), flatten ONCE into a postfix program,
- *  then execute as straight-line int64 arithmetic. Vars outside the slot
- *  map (block indices inside region offsets) compile to the constant 0:
- *  they shift every address of the statement equally and cancel out of
- *  both contiguity and segment geometry. An unsupported node fails
- *  COMPILATION, marking the statement outside the model up front — the
- *  same protocol the per-point evaluation signalled, just earlier. */
-class ExprProgram {
-public:
-  static std::optional<ExprProgram>
-  Compile(const PrimExpr &expr,
-          const std::unordered_map<const VarNode *, int> &var_slots,
-          arith::Analyzer *analyzer) {
-    // Zero out foreign vars BEFORE canonicalization: Simplify then folds
-    // their dead terms away (e.g. `bx*16384 + rest` -> `rest`), so the
-    // compiled program carries only live instructions into the hot loop.
-    // Non-int foreign vars are kept and fail Emit below, as before.
-    PrimExpr canon =
-        Substitute(expr, [&](const Var &var) -> ffi::Optional<PrimExpr> {
-          if (var_slots.count(var.get()) ||
-              (!var->dtype.is_int() && !var->dtype.is_uint())) {
-            return ffi::Optional<PrimExpr>();
-          }
-          return make_zero(var->dtype); // foreign additive offset
-        });
-    ExprProgram prog;
-    if (!prog.Emit(analyzer->Simplify(canon), var_slots)) {
-      return std::nullopt;
-    }
-    // Verify the fixed eval stack suffices (postfix depth simulation).
-    int depth = 0, max_depth = 0;
-    for (const Instr &instr : prog.code_) {
-      if (instr.op == Op::kConst || instr.op == Op::kVar) {
-        ++depth;
-      } else if (instr.op == Op::kSelect) {
-        depth -= 2;
-      } else {
-        --depth;
-      }
-      max_depth = std::max(max_depth, depth);
-    }
-    if (max_depth > kMaxStackDepth) {
-      return std::nullopt;
-    }
-    return prog;
-  }
-
-  /*! \brief Max eval-stack depth any program may need; programs deeper
-   *  than this fail compilation (an index expression this deep is not a
-   *  layout expression). Keeps Eval on a fixed C array. */
-  static constexpr int kMaxStackDepth = 64;
-
-  /*! \brief Evaluate against `slots` (one value per var slot). Nullopt
-   *  only on a division by a computed zero. */
-  std::optional<int64_t> Eval(const int64_t *slots) const {
-    int64_t stack[kMaxStackDepth];
-    int top = 0; // index one past the top of the stack
-    for (const Instr &instr : code_) {
-      switch (instr.op) {
-      case Op::kConst:
-        stack[top++] = instr.imm;
-        break;
-      case Op::kVar:
-        stack[top++] = slots[instr.imm];
-        break;
-      case Op::kSelect: {
-        int64_t b = stack[--top], a = stack[--top], cond = stack[--top];
-        stack[top++] = cond != 0 ? a : b;
-        break;
-      }
-      default: {
-        int64_t b = stack[--top], a = stack[--top];
-        int64_t v = 0;
-        switch (instr.op) {
-        case Op::kAdd:
-          v = a + b;
-          break;
-        case Op::kSub:
-          v = a - b;
-          break;
-        case Op::kMul:
-          v = a * b;
-          break;
-        case Op::kFloorDiv: {
-          if (b == 0) {
-            return std::nullopt;
-          }
-          v = a / b;
-          if ((a % b != 0) && ((a < 0) != (b < 0))) {
-            --v;
-          }
-          break;
-        }
-        case Op::kFloorMod: {
-          if (b == 0) {
-            return std::nullopt;
-          }
-          v = a % b;
-          if (v != 0 && ((v < 0) != (b < 0))) {
-            v += b;
-          }
-          break;
-        }
-        case Op::kMin:
-          v = std::min(a, b);
-          break;
-        case Op::kMax:
-          v = std::max(a, b);
-          break;
-        case Op::kLT:
-          v = a < b ? 1 : 0;
-          break;
-        case Op::kLE:
-          v = a <= b ? 1 : 0;
-          break;
-        case Op::kGT:
-          v = a > b ? 1 : 0;
-          break;
-        case Op::kGE:
-          v = a >= b ? 1 : 0;
-          break;
-        case Op::kEQ:
-          v = a == b ? 1 : 0;
-          break;
-        case Op::kNE:
-          v = a != b ? 1 : 0;
-          break;
-        case Op::kAnd:
-          v = (a != 0 && b != 0) ? 1 : 0;
-          break;
-        case Op::kOr:
-          v = (a != 0 || b != 0) ? 1 : 0;
-          break;
-        case Op::kBitAnd:
-          v = a & b;
-          break;
-        case Op::kBitOr:
-          v = a | b;
-          break;
-        case Op::kBitXor:
-          v = a ^ b;
-          break;
-        case Op::kShl:
-          if (b < 0 || b > 63) {
-            return std::nullopt;
-          }
-          v = a << b;
-          break;
-        case Op::kShr:
-          if (b < 0 || b > 63) {
-            return std::nullopt;
-          }
-          v = a >> b; // arithmetic shift, matching TIR's shift_right on ints
-          break;
-        default:
-          return std::nullopt; // unreachable
-        }
-        stack[top++] = v;
-        break;
-      }
-      }
-    }
-    return stack[top - 1];
-  }
-
-private:
-  enum class Op : uint8_t {
-    kConst,
-    kVar,
-    kAdd,
-    kSub,
-    kMul,
-    kFloorDiv,
-    kFloorMod,
-    kMin,
-    kMax,
-    kSelect,
-    kLT,
-    kLE,
-    kGT,
-    kGE,
-    kEQ,
-    kNE,
-    kAnd,
-    kOr,
-    kBitAnd,
-    kBitOr,
-    kBitXor,
-    kShl,
-    kShr,
-  };
-  struct Instr {
-    Op op;
-    int64_t imm{0}; // kConst: value; kVar: slot index
-  };
-  std::vector<Instr> code_;
-
-  bool Emit(const PrimExpr &e,
-            const std::unordered_map<const VarNode *, int> &var_slots) {
-    if (const auto *imm = e.as<IntImmNode>()) {
-      code_.push_back({Op::kConst, imm->value});
-      return true;
-    }
-    if (const auto *var = e.as<VarNode>()) {
-      if (!var->dtype.is_int() && !var->dtype.is_uint()) {
-        return false;
-      }
-      auto it = var_slots.find(var);
-      if (it != var_slots.end()) {
-        code_.push_back({Op::kVar, it->second});
-      } else {
-        code_.push_back({Op::kConst, 0}); // foreign additive offset
-      }
-      return true;
-    }
-    if (const auto *op = e.as<CastNode>()) {
-      return Emit(op->value, var_slots);
-    }
-    if (const auto *op = e.as<SelectNode>()) {
-      return Emit(op->condition, var_slots) &&
-             Emit(op->true_value, var_slots) &&
-             Emit(op->false_value, var_slots) &&
-             (code_.push_back({Op::kSelect}), true);
-    }
-    if (const auto *op = e.as<CallNode>()) {
-      auto call_binary = [&](Op op_code) {
-        return op->args.size() == 2 && Emit(op->args[0], var_slots) &&
-               Emit(op->args[1], var_slots) &&
-               (code_.push_back({op_code}), true);
-      };
-      if (op->op.same_as(builtin::if_then_else()) && op->args.size() == 3) {
-        return Emit(op->args[0], var_slots) && Emit(op->args[1], var_slots) &&
-               Emit(op->args[2], var_slots) &&
-               (code_.push_back({Op::kSelect}), true);
-      }
-      if (op->op.same_as(builtin::bitwise_and())) {
-        return call_binary(Op::kBitAnd);
-      }
-      if (op->op.same_as(builtin::bitwise_or())) {
-        return call_binary(Op::kBitOr);
-      }
-      if (op->op.same_as(builtin::bitwise_xor())) {
-        return call_binary(Op::kBitXor);
-      }
-      if (op->op.same_as(builtin::shift_left())) {
-        return call_binary(Op::kShl);
-      }
-      if (op->op.same_as(builtin::shift_right())) {
-        return call_binary(Op::kShr);
-      }
-      if (op->op.same_as(builtin::bitwise_not()) && op->args.size() == 1) {
-        // ~a == a ^ -1
-        if (!Emit(op->args[0], var_slots)) {
-          return false;
-        }
-        code_.push_back({Op::kConst, -1});
-        code_.push_back({Op::kBitXor});
-        return true;
-      }
-      return false;
-    }
-    if (const auto *op = e.as<NotNode>()) {
-      // !a  ==  (a == 0)
-      if (!Emit(op->a, var_slots)) {
-        return false;
-      }
-      code_.push_back({Op::kConst, 0});
-      code_.push_back({Op::kEQ});
-      return true;
-    }
-    auto binary = [&](const PrimExpr &a, const PrimExpr &b, Op op_code) {
-      if (!Emit(a, var_slots) || !Emit(b, var_slots)) {
-        return false;
-      }
-      code_.push_back({op_code});
-      return true;
-    };
-    if (const auto *op = e.as<AddNode>()) {
-      return binary(op->a, op->b, Op::kAdd);
-    }
-    if (const auto *op = e.as<SubNode>()) {
-      return binary(op->a, op->b, Op::kSub);
-    }
-    if (const auto *op = e.as<MulNode>()) {
-      return binary(op->a, op->b, Op::kMul);
-    }
-    if (const auto *op = e.as<FloorDivNode>()) {
-      return binary(op->a, op->b, Op::kFloorDiv);
-    }
-    if (const auto *op = e.as<FloorModNode>()) {
-      return binary(op->a, op->b, Op::kFloorMod);
-    }
-    if (const auto *op = e.as<MinNode>()) {
-      return binary(op->a, op->b, Op::kMin);
-    }
-    if (const auto *op = e.as<MaxNode>()) {
-      return binary(op->a, op->b, Op::kMax);
-    }
-    if (const auto *op = e.as<LTNode>()) {
-      return binary(op->a, op->b, Op::kLT);
-    }
-    if (const auto *op = e.as<LENode>()) {
-      return binary(op->a, op->b, Op::kLE);
-    }
-    if (const auto *op = e.as<GTNode>()) {
-      return binary(op->a, op->b, Op::kGT);
-    }
-    if (const auto *op = e.as<GENode>()) {
-      return binary(op->a, op->b, Op::kGE);
-    }
-    if (const auto *op = e.as<EQNode>()) {
-      return binary(op->a, op->b, Op::kEQ);
-    }
-    if (const auto *op = e.as<NENode>()) {
-      return binary(op->a, op->b, Op::kNE);
-    }
-    if (const auto *op = e.as<AndNode>()) {
-      return binary(op->a, op->b, Op::kAnd);
-    }
-    if (const auto *op = e.as<OrNode>()) {
-      return binary(op->a, op->b, Op::kOr);
-    }
-    return false;
-  }
-};
-
-/*! \brief Reference evaluation through the Analyzer: substitute concrete
- *  values (vars outside the slot map fold to 0) and constant-fold. This is
- *  the semantic ORACLE ExprProgram must agree with — used only to validate
- *  freshly compiled programs at a few witness points, never per point. */
-std::optional<int64_t>
-EvalByAnalyzer(const PrimExpr &e,
-               const std::unordered_map<const VarNode *, int> &var_slots,
-               const int64_t *slots, arith::Analyzer *analyzer) {
-  PrimExpr bound =
-      Substitute(e, [&](const Var &var) -> ffi::Optional<PrimExpr> {
-        if (!var->dtype.is_int() && !var->dtype.is_uint()) {
-          return ffi::Optional<PrimExpr>();
-        }
-        auto it = var_slots.find(var.get());
-        int64_t value = it == var_slots.end() ? 0 : slots[it->second];
-        return IntImm(var->dtype, value);
-      });
-  PrimExpr folded = analyzer->Simplify(bound);
-  if (const auto *imm = folded.as<IntImmNode>()) {
-    return imm->value;
-  }
-  return std::nullopt;
-}
-
-/*! \brief Cross-check a compiled program against the Analyzer oracle at
- *  the given witness points. A disagreement means ExprProgram mis-compiled
- *  (or mis-executes) a node: warn loudly and reject the program, so a
- *  compiler bug degrades to the conservative worst case instead of ever
- *  reaching a score. Witnesses the oracle cannot fold are inconclusive
- *  and skipped. */
-bool ValidateProgram(const ExprProgram &prog, const PrimExpr &expr,
-                     const std::unordered_map<const VarNode *, int> &var_slots,
-                     const std::vector<std::vector<int64_t>> &witnesses,
-                     arith::Analyzer *analyzer) {
-  for (const auto &witness : witnesses) {
-    auto expected = EvalByAnalyzer(expr, var_slots, witness.data(), analyzer);
-    if (!expected.has_value()) {
-      continue; // oracle is silent here: inconclusive
-    }
-    auto got = prog.Eval(witness.data());
-    if (!got.has_value() || *got != *expected) {
-      LOG(WARNING) << "[LayoutCost] compiled index program disagrees with "
-                      "the Analyzer (expected "
-                   << *expected << ", got "
-                   << (got.has_value() ? std::to_string(*got) : "<none>")
-                   << ") for expr: " << expr
-                   << " — rejecting the program; statement falls back to "
-                      "the conservative worst case.";
-      return false;
-    }
-  }
-  return true;
-}
 
 /*! \brief One global-memory access stream of a statement. `addr` is the
  *  flat element index into the global buffer, written in the probe's
@@ -499,6 +141,41 @@ struct StatementTraffic {
   int64_t Time() const { return std::max(bw, issue); }
 };
 
+void LogProbe(int member_idx, const char *what, const StatementProbe &probe) {
+  const char *state = probe.accesses.empty()
+                          ? "no-global-access"
+                          : (probe.measurable ? "measurable" : "worst-case");
+  DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+             << " probe: state=" << state
+             << " accesses=" << probe.accesses.size()
+             << " extents=" << FormatVector(probe.extents)
+             << " worst_elements=" << probe.worst_elements
+             << " threads=" << probe.threads << " slots=" << probe.slots
+             << " replicas=" << probe.rep
+             << " vector_bits=" << probe.vector_bits
+             << " warp_size=" << probe.warp_size
+             << " segment_bytes=" << probe.segment_bytes;
+  if (probe.measurable) {
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " maps: thread=" << probe.thread_expr
+               << " slot=" << probe.slot_expr;
+  }
+  for (size_t i = 0; i < probe.accesses.size(); ++i) {
+    const GlobalAccessProbe &access = probe.accesses[i];
+    std::ostringstream os;
+    os << "[LayoutCost] member " << member_idx << ' ' << what << " access[" << i
+       << "]: kind=" << (access.is_store ? "store" : "load")
+       << " elem_bytes=" << access.elem_bytes << " repeat=" << access.repeat
+       << " addr=";
+    if (access.addr.defined()) {
+      os << access.addr;
+    } else {
+      os << "<unavailable>";
+    }
+    DLOG(INFO) << os.str();
+  }
+}
+
 /*! \brief The conservative charge for a statement outside the model:
  *  every element its own full-segment transaction. An attempt must never
  *  profit from opacity — evaluability depends on the layout under test. */
@@ -510,162 +187,130 @@ int64_t WorstCaseBytes(const StatementProbe &probe) {
   return total;
 }
 
-/*! \brief Table cap: statements whose (thread, slot) table would exceed
- *  this fall back to the worst case. Generous — a 128-thread x 128-slot
- *  fragment is 16K entries — while bounding pathological replications. */
-constexpr int64_t kMaxTableEntries = int64_t(1) << 20;
-constexpr int64_t kAbsentAddr = std::numeric_limits<int64_t>::min();
+/*! \brief Entry cap for the optional exact-enumeration debug oracle. The
+ *  production CuTe path does not materialize a table and is not subject to
+ *  this limit. */
+constexpr int64_t kMaxOracleEntries = int64_t(1) << 20;
 
-/*! \brief Measure one prepared statement.
- *
- *  Walk every (logical point, replica) pair, evaluate the forward maps,
- *  and fill the (thread, slot) -> address table; any unevaluable or
- *  out-of-range value, any collision (a non-injective candidate), or a
- *  table over the cap aborts to nullopt and the caller charges the
- *  conservative worst case. From the table, exactly:
- *    vector = widest power-of-two width every thread's aligned slot
- *             blocks sustain contiguously (the vectorizer's question)
- *    issue  = steps x repeat x threads x lane_bytes  (instruction depth)
- *    bw     = repeat x segments x segment_bytes      (transaction bytes)
- *  with segments summed over every (vector step, warp). */
-std::optional<StatementTraffic>
-ScoreStatementImpl(const StatementProbe &probe) {
-  if (probe.accesses.empty()) {
-    return StatementTraffic{};
+bool TryMultiplyPositive(int64_t lhs, int64_t rhs, int64_t *product) {
+  if (lhs <= 0 || rhs <= 0 || lhs > std::numeric_limits<int64_t>::max() / rhs) {
+    return false;
   }
-  if (!probe.measurable || probe.threads <= 0 || probe.slots <= 0 ||
-      probe.rep <= 0 || probe.warp_size <= 0 || probe.segment_bytes <= 0 ||
-      !probe.rep_var.defined()) {
+  *product = lhs * rhs;
+  return true;
+}
+
+/*! \brief Zero out vars outside the probe's own coordinate set: block
+ *  indices inside region offsets shift every address of the statement
+ *  equally and cancel out of both contiguity and segment geometry.
+ *  Non-int foreign vars are kept and fail the affine recovery, marking the
+ *  statement outside the model. */
+PrimExpr ZeroForeignVars(const PrimExpr &e, const VarSet &own) {
+  return Substitute(e, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+    if (own.count(var) || (!var->dtype.is_int() && !var->dtype.is_uint())) {
+      return ffi::Optional<PrimExpr>();
+    }
+    return make_zero(var->dtype);
+  });
+}
+
+/*! \brief The probe's iteration space as IterVars: (point_vars..., rep) —
+ *  the canonical packing of FragmentNode::InverseWithLevel, replication as
+ *  a trailing ordinary dimension. */
+Array<IterVar> ProbeIterVars(const StatementProbe &probe) {
+  Array<IterVar> ivs;
+  for (size_t d = 0; d < probe.point_vars.size(); ++d) {
+    ivs.push_back(IterVar(Range(IntImm(DataType::Int(32), 0),
+                                IntImm(DataType::Int(32), probe.extents[d])),
+                          probe.point_vars[d], IterVarType::kDataPar));
+  }
+  ivs.push_back(IterVar(
+      Range(IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), probe.rep)),
+      probe.rep_var, IterVarType::kDataPar));
+  return ivs;
+}
+
+/*! \brief Recover expressions over the probe's iteration space as ONE
+ *  plain strided CuTe layout. Multi-output layouts are serialized
+ *  row-major by the recovery probe, so outputs [thread, slot] yield the
+ *  physical cell index `thread * slots + slot` directly. Nullopt when the
+ *  expressions are not affine-recoverable (the conversion proves its own
+ *  equivalence, so a wrong recovery cannot slip through). */
+Optional<cute::Layout> ProbeExprsToCute(const StatementProbe &probe,
+                                        Array<PrimExpr> outputs,
+                                        const VarSet &own) {
+  outputs =
+      outputs.Map([&](const PrimExpr &e) { return ZeroForeignVars(e, own); });
+  Layout packed(ProbeIterVars(probe), outputs);
+  return cute::LayoutFromTileLang(packed);
+}
+
+/*! \brief Evaluate a plain strided CuTe layout at a linear coordinate. */
+int64_t EvalCute(const cute::Layout &layout, int64_t coord) {
+  return cute::AsConst(layout(cute::IntTuple(coord)));
+}
+
+/*! \brief CuTe spelling of a layout, for diagnostics. */
+std::string CuteToString(const cute::Layout &layout) {
+  std::ostringstream os;
+  layout.Print(os);
+  return os.str();
+}
+
+/*! \brief Coalesced (extent, stride) mode pairs, innermost first; nullopt
+ *  when any leaf is not a constant (dynamic strides are outside the
+ *  model). */
+std::optional<std::vector<std::pair<int64_t, int64_t>>>
+FlatModes(const cute::Layout &layout) {
+  cute::Layout lay = cute::Coalesce(layout);
+  cute::IntTuple shape = cute::Flatten(lay->shape);
+  cute::IntTuple stride = cute::Flatten(lay->stride);
+  Array<cute::IntTuple> shapes = cute::Wrap(shape)->fields;
+  Array<cute::IntTuple> strides = cute::Wrap(stride)->fields;
+  if (shapes.size() != strides.size()) {
     return std::nullopt;
   }
-
-  int64_t points = 1;
-  for (int64_t extent : probe.extents) {
-    if (extent <= 0 || points > kMaxTableEntries / extent) {
+  std::vector<std::pair<int64_t, int64_t>> modes;
+  modes.reserve(shapes.size());
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    if (!cute::IsConst(shapes[i]) || !cute::IsConst(strides[i])) {
       return std::nullopt;
     }
-    points *= extent;
+    modes.emplace_back(cute::AsConst(shapes[i]), cute::AsConst(strides[i]));
   }
-  int64_t table_size = probe.threads * probe.slots;
-  // A fragment the lowering accepts is a bijection between
-  // (logical point, replica) and (thread, slot); anything else is
-  // outside the model. The size identity is the cheap necessary half;
-  // the collision check during the walk is the sufficient half.
-  if (table_size > kMaxTableEntries || points > kMaxTableEntries / probe.rep ||
-      points * probe.rep != table_size) {
-    return std::nullopt;
-  }
+  return modes;
+}
 
+/*! \brief Debug oracle behind `tl.layout_cost_model_verify`: rebuild the
+ *  full (thread, slot) -> address table by evaluating the DERIVED layouts
+ *  at every cell, and recompute vector width and segment counts with the
+ *  retired exact-enumeration formulas. Validates the mode arithmetic (the
+ *  conversion already proves itself); a disagreement warns loudly and the
+ *  caller falls back to the conservative worst case. */
+bool VerifyByEnumeration(const StatementProbe &probe, const cute::Layout &inv,
+                         const std::vector<cute::Layout> &addr_layouts,
+                         int64_t points, int64_t table_size, int64_t vector,
+                         const StatementTraffic &traffic, int member_idx,
+                         const char *what) {
+  if (table_size > kMaxOracleEntries) {
+    LOG(WARNING) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " enumeration oracle needs " << table_size
+                 << " entries, above its " << kMaxOracleEntries
+                 << "-entry safety cap; charging the conservative worst case.";
+    return false;
+  }
   size_t naccess = probe.accesses.size();
   std::vector<std::vector<int64_t>> addr_table(
-      naccess, std::vector<int64_t>(table_size, kAbsentAddr));
-  // Cells whose entry is the lead replica (r == 0): the only lanes that
-  // stay active for stores under the replication guard.
+      naccess, std::vector<int64_t>(table_size, 0));
   std::vector<uint8_t> lead_replica(table_size, 0);
-
-  // Compile every expression once (Analyzer canonicalization included);
-  // the walk below is then pure int64 arithmetic. Slot layout:
-  // [point_vars..., rep_var].
-  size_t ndim = probe.point_vars.size();
-  arith::Analyzer analyzer;
-  std::unordered_map<const VarNode *, int> var_slots;
-  for (size_t d = 0; d < ndim; ++d) {
-    var_slots[probe.point_vars[d].get()] = static_cast<int>(d);
-  }
-  var_slots[probe.rep_var.get()] = static_cast<int>(ndim);
-  // Witness points for differential validation: origin, far corner, and an
-  // interior point (rep slot included). Compilation failure and oracle
-  // disagreement both reject to the worst case — never a wrong score.
-  std::vector<std::vector<int64_t>> witnesses;
-  for (int kind = 0; kind < 3; ++kind) {
-    std::vector<int64_t> w(ndim + 1, 0);
-    for (size_t d = 0; d < ndim; ++d) {
-      int64_t last = probe.extents[d] - 1;
-      w[d] = kind == 0 ? 0 : (kind == 1 ? last : last / 2);
-    }
-    w[ndim] = kind == 0 ? 0 : (kind == 1 ? probe.rep - 1 : probe.rep / 2);
-    witnesses.push_back(std::move(w));
-  }
-  auto compile_checked =
-      [&](const PrimExpr &expr) -> std::optional<ExprProgram> {
-    auto prog = ExprProgram::Compile(expr, var_slots, &analyzer);
-    if (!prog) {
-      DLOG(INFO) << "[LayoutCost] unsupported node in index expr, "
-                    "charged worst-case: "
-                 << expr;
-      return std::nullopt;
-    }
-    if (!ValidateProgram(*prog, expr, var_slots, witnesses, &analyzer)) {
-      return std::nullopt;
-    }
-    return prog;
-  };
-  auto slot_prog = compile_checked(probe.slot_expr);
-  auto thread_prog = compile_checked(probe.thread_expr);
-  if (!slot_prog || !thread_prog) {
-    return std::nullopt;
-  }
-  std::vector<ExprProgram> addr_progs;
-  addr_progs.reserve(naccess);
-  for (const auto &access : probe.accesses) {
-    auto prog = compile_checked(access.addr);
-    if (!prog) {
-      return std::nullopt;
-    }
-    addr_progs.push_back(std::move(*prog));
-  }
-
-  std::vector<int64_t> slots_buf(ndim + 1, 0);
-  std::vector<int64_t> point_addr(naccess, 0);
-  for (int64_t flat = 0; flat < points; ++flat) {
-    slots_buf[ndim] = 0;
-    // Address and slot are replica-independent: evaluate once per point.
+  for (int64_t cell = 0; cell < table_size; ++cell) {
+    lead_replica[cell] = EvalCute(inv, cell) / points == 0;
     for (size_t a = 0; a < naccess; ++a) {
-      auto addr = addr_progs[a].Eval(slots_buf.data());
-      if (!addr) {
-        return std::nullopt;
-      }
-      point_addr[a] = *addr;
-    }
-    auto slot = slot_prog->Eval(slots_buf.data());
-    if (!slot || *slot < 0 || *slot >= probe.slots) {
-      return std::nullopt;
-    }
-    for (int64_t r = 0; r < probe.rep; ++r) {
-      slots_buf[ndim] = r;
-      auto thread = thread_prog->Eval(slots_buf.data());
-      if (!thread || *thread < 0 || *thread >= probe.threads) {
-        return std::nullopt;
-      }
-      int64_t cell = *thread * probe.slots + *slot;
-      if (addr_table[0][cell] != kAbsentAddr) {
-        return std::nullopt; // collision: candidate is not injective
-      }
-      for (size_t a = 0; a < naccess; ++a) {
-        addr_table[a][cell] = point_addr[a];
-      }
-      if (r == 0) {
-        lead_replica[cell] = 1;
-      }
-    }
-    // Advance the multi-index (row-major, innermost fastest).
-    for (int d = static_cast<int>(ndim) - 1; d >= 0; --d) {
-      if (++slots_buf[d] < probe.extents[d]) {
-        break;
-      }
-      slots_buf[d] = 0;
+      addr_table[a][cell] = EvalCute(addr_layouts[a], cell);
     }
   }
-  // points * rep == table_size and no collisions: every cell is filled.
 
-  // Widest power-of-two vector width every access of the statement
-  // sustains. This is the numeric mirror of IndicesCanVectorize (the
-  // vectorizer's symbolic predicate), checked exhaustively on the table:
-  //   - width cap: the shared MaxVectorLoadBits policy per access dtype;
-  //   - extent divisibility: slots % cand == 0;
-  //   - base alignment: every block base divisible by the width;
-  //   - contiguity: slot + 1 advances every address by exactly 1 inside
-  //     aligned width-sized blocks.
+  // Retired enumerator formulas, verbatim.
   int64_t vector_lane_bytes = probe.vector_bits / 8;
   int64_t max_vector = probe.slots;
   for (const auto &access : probe.accesses) {
@@ -673,7 +318,7 @@ ScoreStatementImpl(const StatementProbe &probe) {
                                    vector_lane_bytes /
                                        std::max<int64_t>(1, access.elem_bytes));
   }
-  int64_t vector = 1;
+  int64_t enum_vector = 1;
   for (int64_t cand = 32; cand >= 2; cand /= 2) {
     if (cand > max_vector || probe.slots % cand != 0) {
       continue;
@@ -684,7 +329,7 @@ ScoreStatementImpl(const StatementProbe &probe) {
         const int64_t *row = addr_table[a].data() + t * probe.slots;
         for (int64_t q = 0; q < probe.slots && contiguous; q += cand) {
           if (row[q] % cand != 0) {
-            contiguous = false; // misaligned base: vectorizer would reject
+            contiguous = false;
             break;
           }
           for (int64_t offset = 1; offset < cand; ++offset) {
@@ -697,22 +342,20 @@ ScoreStatementImpl(const StatementProbe &probe) {
       }
     }
     if (contiguous) {
-      vector = cand;
+      enum_vector = cand;
       break;
     }
   }
-  int64_t steps = probe.slots / vector;
+  int64_t steps = probe.slots / enum_vector;
 
-  StatementTraffic traffic;
+  StatementTraffic enum_traffic;
   int64_t num_warps = (probe.threads + probe.warp_size - 1) / probe.warp_size;
-  // Distinct segments per (step, warp): a warp touches only a handful, so
-  // a reused flat vector with linear dedupe beats a heap-allocating set.
   std::vector<int64_t> segments;
   segments.reserve(2 * probe.warp_size);
   for (size_t a = 0; a < naccess; ++a) {
     const auto &access = probe.accesses[a];
-    traffic.issue += steps * access.repeat * probe.threads * vector_lane_bytes;
-
+    enum_traffic.issue +=
+        steps * access.repeat * probe.threads * vector_lane_bytes;
     int64_t segments_total = 0;
     for (int64_t q = 0; q < steps; ++q) {
       for (int64_t w = 0; w < num_warps; ++w) {
@@ -722,12 +365,12 @@ ScoreStatementImpl(const StatementProbe &probe) {
           if (t >= probe.threads) {
             break;
           }
-          int64_t cell = t * probe.slots + q * vector;
+          int64_t cell = t * probe.slots + q * enum_vector;
           if (access.is_store && !lead_replica[cell]) {
-            continue; // guarded replica: this lane is idle for stores
+            continue;
           }
           int64_t first_byte = addr_table[a][cell] * access.elem_bytes;
-          int64_t last_byte = first_byte + vector * access.elem_bytes - 1;
+          int64_t last_byte = first_byte + enum_vector * access.elem_bytes - 1;
           for (int64_t seg = first_byte / probe.segment_bytes;
                seg <= last_byte / probe.segment_bytes; ++seg) {
             if (std::find(segments.begin(), segments.end(), seg) ==
@@ -739,7 +382,250 @@ ScoreStatementImpl(const StatementProbe &probe) {
         segments_total += static_cast<int64_t>(segments.size());
       }
     }
-    traffic.bw += access.repeat * segments_total * probe.segment_bytes;
+    enum_traffic.bw += access.repeat * segments_total * probe.segment_bytes;
+  }
+
+  if (enum_vector != vector || enum_traffic.bw != traffic.bw ||
+      enum_traffic.issue != traffic.issue) {
+    LOG(WARNING) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " CuTe scoring disagrees with the enumeration oracle: "
+                 << "cute(vector=" << vector << " bw=" << traffic.bw
+                 << " issue=" << traffic.issue
+                 << ") vs enum(vector=" << enum_vector
+                 << " bw=" << enum_traffic.bw << " issue=" << enum_traffic.issue
+                 << "); charging the conservative worst case.";
+    return false;
+  }
+  return true;
+}
+
+/*! \brief Score one prepared statement on the CuTe layout algebra.
+ *
+ *  Pack (coords, rep) -> [thread, slot] and recover it as the plain
+ *  strided cell layout; RightInverse (bijectivity checked by size) and
+ *  per-access Composition derive `cell -> element address` layouts. The
+ *  vector width is read off the coalesced (slot, thread) mode split; the
+ *  segment count evaluates the derived layouts at (step, warp, lane)
+ *  granularity only. Every failure — non-affine expressions, dynamic
+ *  modes, algebra ICHECKs (caught by the ScoreStatement wrapper) — lands
+ *  on nullopt and the caller charges the conservative worst case. */
+std::optional<StatementTraffic> ScoreStatementImpl(const StatementProbe &probe,
+                                                   int member_idx,
+                                                   const char *what) {
+  if (probe.accesses.empty()) {
+    return StatementTraffic{};
+  }
+  if (!probe.measurable || probe.threads <= 0 || probe.slots <= 0 ||
+      probe.rep <= 0 || probe.warp_size <= 0 || probe.segment_bytes <= 0 ||
+      !probe.rep_var.defined()) {
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " cannot be measured: invalid probe geometry";
+    return std::nullopt;
+  }
+
+  int64_t points = 1;
+  for (int64_t extent : probe.extents) {
+    if (!TryMultiplyPositive(points, extent, &points)) {
+      DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " cannot be measured: invalid or overflowing logical "
+                    "domain at extent="
+                 << extent;
+      return std::nullopt;
+    }
+  }
+  int64_t table_size = 0;
+  int64_t logical_size = 0;
+  // A fragment the lowering accepts is a bijection between
+  // (logical point, replica) and (thread, slot); anything else is
+  // outside the model. The size identity is the cheap necessary half;
+  // the RightInverse size check below is the sufficient half.
+  if (!TryMultiplyPositive(probe.threads, probe.slots, &table_size) ||
+      !TryMultiplyPositive(points, probe.rep, &logical_size) ||
+      logical_size != table_size) {
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " cannot be measured: forward map is not a bounded "
+                  "logical-to-(thread,slot) bijection";
+    return std::nullopt;
+  }
+
+  VarSet own;
+  for (const Var &v : probe.point_vars) {
+    own.insert(v);
+  }
+  own.insert(probe.rep_var);
+
+  // Recover the packed forward map as the plain strided cell layout.
+  Optional<cute::Layout> flat =
+      ProbeExprsToCute(probe, {probe.thread_expr, probe.slot_expr}, own);
+  if (!flat.defined()) {
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " cannot be measured: forward map is not affine-"
+                  "recoverable (thread="
+               << probe.thread_expr << " slot=" << probe.slot_expr << ")";
+    return std::nullopt;
+  }
+  cute::Layout inv = cute::RightInverse(flat.value());
+  if (cute::AsConst(cute::Size(inv)) != table_size) {
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " cannot be measured: candidate is not injective "
+                  "(right-inverse covers "
+               << cute::AsConst(cute::Size(inv)) << " of " << table_size
+               << " cells)";
+    return std::nullopt;
+  }
+
+  // Derive one `cell -> element address` layout per access and its
+  // (slot, thread) mode split.
+  cute::IntTuple st_shape = cute::IntTupleTuple(
+      {cute::IntTuple(probe.slots), cute::IntTuple(probe.threads)});
+  size_t naccess = probe.accesses.size();
+  std::vector<cute::Layout> addr_layouts;
+  std::vector<std::vector<std::pair<int64_t, int64_t>>> slot_modes;
+  std::vector<std::vector<std::pair<int64_t, int64_t>>> thread_modes;
+  addr_layouts.reserve(naccess);
+  for (size_t a = 0; a < naccess; ++a) {
+    const auto &access = probe.accesses[a];
+    if (access.elem_bytes <= 0 ||
+        probe.segment_bytes % access.elem_bytes != 0) {
+      DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " cannot be measured: element size does not divide the "
+                    "segment granularity";
+      return std::nullopt;
+    }
+    Optional<cute::Layout> g = ProbeExprsToCute(probe, {access.addr}, own);
+    if (!g.defined()) {
+      DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " has a non-affine address expression; charged "
+                    "worst-case: "
+                 << access.addr;
+      return std::nullopt;
+    }
+    cute::Layout addr = cute::Composition(g.value(), inv);
+    cute::Layout split = addr.WithShape(st_shape);
+    auto smodes = FlatModes(split[0]);
+    auto tmodes = FlatModes(split[1]);
+    if (!smodes || !tmodes) {
+      DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " cannot be measured: derived address modes are not "
+                    "constant";
+      return std::nullopt;
+    }
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " access[" << a
+               << "] address layout: " << CuteToString(split);
+    addr_layouts.push_back(std::move(addr));
+    slot_modes.push_back(std::move(*smodes));
+    thread_modes.push_back(std::move(*tmodes));
+  }
+
+  // Widest power-of-two vector width every access sustains, read off the
+  // mode decomposition (the vectorizer's question on the normal form):
+  //   - width cap: the shared MaxVectorLoadBits policy per access dtype;
+  //   - extent divisibility: slots % cand == 0;
+  //   - contiguity: the innermost slot mode must be a stride-1 run whose
+  //     extent the width divides;
+  //   - base alignment: every other nonzero mode stride (higher slot
+  //     modes and all thread modes) divisible by the width.
+  int64_t vector_lane_bytes = probe.vector_bits / 8;
+  int64_t max_vector = probe.slots;
+  for (const auto &access : probe.accesses) {
+    max_vector = std::min<int64_t>(max_vector,
+                                   vector_lane_bytes /
+                                       std::max<int64_t>(1, access.elem_bytes));
+  }
+  int64_t vector = 1;
+  for (int64_t cand = 32; cand >= 2; cand /= 2) {
+    if (cand > max_vector || probe.slots % cand != 0) {
+      continue;
+    }
+    bool sustained = true;
+    for (size_t a = 0; a < naccess && sustained; ++a) {
+      const auto &smodes = slot_modes[a];
+      int64_t run =
+          (!smodes.empty() && smodes[0].second == 1) ? smodes[0].first : 1;
+      if (run % cand != 0) {
+        sustained = false;
+        break;
+      }
+      for (size_t m = 1; m < smodes.size() && sustained; ++m) {
+        if (smodes[m].second != 0 && smodes[m].second % cand != 0) {
+          sustained = false;
+        }
+      }
+      for (const auto &mode : thread_modes[a]) {
+        if (mode.second != 0 && mode.second % cand != 0) {
+          sustained = false;
+          break;
+        }
+      }
+    }
+    if (sustained) {
+      vector = cand;
+      break;
+    }
+  }
+  int64_t steps = probe.slots / vector;
+  DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+             << " vectorization: vector_lanes=" << vector
+             << " issue_bytes_per_thread_step=" << vector_lane_bytes
+             << " steps_per_thread=" << steps;
+
+  // Segments per (vector step, warp): evaluate the derived address layout
+  // at warp/step granularity — steps x warps x warp_size points, bounded
+  // by the machine shape. The replica index of a cell is read back through
+  // the inverse (rep is the slowest packed input, so it is the flat
+  // logical index divided by the logical point count).
+  StatementTraffic traffic;
+  int64_t num_warps = (probe.threads + probe.warp_size - 1) / probe.warp_size;
+  std::vector<int64_t> segments;
+  segments.reserve(2 * probe.warp_size);
+  for (size_t a = 0; a < naccess; ++a) {
+    const auto &access = probe.accesses[a];
+    int64_t issue_contribution =
+        steps * access.repeat * probe.threads * vector_lane_bytes;
+    traffic.issue += issue_contribution;
+
+    int64_t seg_elems = probe.segment_bytes / access.elem_bytes;
+    int64_t segments_total = 0;
+    for (int64_t q = 0; q < steps; ++q) {
+      for (int64_t w = 0; w < num_warps; ++w) {
+        segments.clear();
+        for (int64_t lane = 0; lane < probe.warp_size; ++lane) {
+          int64_t t = w * probe.warp_size + lane;
+          if (t >= probe.threads) {
+            break;
+          }
+          int64_t cell = t * probe.slots + q * vector;
+          if (access.is_store && probe.rep > 1 &&
+              EvalCute(inv, cell) / points != 0) {
+            continue; // guarded replica: this lane is idle for stores
+          }
+          int64_t first = EvalCute(addr_layouts[a], cell);
+          int64_t last = first + vector - 1;
+          for (int64_t seg = first / seg_elems; seg <= last / seg_elems;
+               ++seg) {
+            if (std::find(segments.begin(), segments.end(), seg) ==
+                segments.end()) {
+              segments.push_back(seg);
+            }
+          }
+        }
+        segments_total += static_cast<int64_t>(segments.size());
+      }
+    }
+    int64_t bw_contribution =
+        access.repeat * segments_total * probe.segment_bytes;
+    traffic.bw += bw_contribution;
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " access[" << a
+               << "] contribution: segments=" << segments_total
+               << " bw=" << bw_contribution << " issue=" << issue_contribution;
+  }
+
+  if (tl_config::LayoutCostModelVerifyEnabled() &&
+      !VerifyByEnumeration(probe, inv, addr_layouts, points, table_size, vector,
+                           traffic, member_idx, what)) {
+    return std::nullopt;
   }
   return traffic;
 }
@@ -747,11 +633,13 @@ ScoreStatementImpl(const StatementProbe &probe) {
 /*! \brief Exception-safe wrapper: printing/substitution on pathological
  *  candidate layouts can throw deep inside the layout stack; every such
  *  case is simply outside the model. */
-std::optional<StatementTraffic> ScoreStatement(const StatementProbe &probe) {
+std::optional<StatementTraffic>
+ScoreStatement(const StatementProbe &probe, int member_idx, const char *what) {
   try {
-    return ScoreStatementImpl(probe);
+    return ScoreStatementImpl(probe, member_idx, what);
   } catch (const std::exception &e) {
-    DLOG(INFO) << "[LayoutCost] statement scoring threw: " << e.what();
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " scoring threw; charged worst-case: " << e.what();
     return std::nullopt;
   }
 }
@@ -833,7 +721,7 @@ bool BindForwardMaps(StatementProbe *probe, const Fragment &layout) {
  *  walk is the fragment's full logical shape, the thread/slot maps are
  *  the fragment layout's own forward expressions, and the single access
  *  is the global side's affine address in the same logical point. */
-StatementProbe BuildCopyProbe(const CopyNode *copy, const Fragment &frag_layout,
+StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
                               bool frag_is_src, const Target &target) {
   const Buffer &global = frag_is_src ? copy->dst : copy->src;
   const Array<Range> &frag_range =
@@ -844,7 +732,9 @@ StatementProbe BuildCopyProbe(const CopyNode *copy, const Fragment &frag_layout,
   // Sized worst-case fallback for every shape outside the model: logical
   // elements from the fragment-side range (symbolic extents count as 1 —
   // worst geometry, optimistic count).
-  auto worst_only = [&]() {
+  auto worst_only = [&](const char *reason) {
+    DLOG(INFO) << "[LayoutCost] copy probe falls back to worst-case: "
+               << reason;
     StatementProbe probe;
     BindMemoryGeometry(&probe, target);
     probe.worst_elements = 1;
@@ -860,7 +750,7 @@ StatementProbe BuildCopyProbe(const CopyNode *copy, const Fragment &frag_layout,
 
   size_t ndim = frag_layout->InputShape().size();
   if (frag_range.size() != ndim || global_range.size() != ndim) {
-    return worst_only();
+    return worst_only("region rank differs from fragment layout rank");
   }
   // Whole-fragment copies only: the iteration space is the fragment's full
   // logical shape.
@@ -868,14 +758,14 @@ StatementProbe BuildCopyProbe(const CopyNode *copy, const Fragment &frag_layout,
   int64_t logical_elements = 1;
   for (size_t d = 0; d < ndim; ++d) {
     if (!is_zero(frag_range[d]->min)) {
-      return worst_only();
+      return worst_only("copy covers a nonzero fragment-side offset");
     }
     const int64_t *frag_extent = as_const_int(frag_range[d]->extent);
     const int64_t *global_extent = as_const_int(global_range[d]->extent);
     const int64_t *shape_extent = as_const_int(frag_layout->InputShape()[d]);
     if (!frag_extent || !global_extent || !shape_extent ||
         *frag_extent != *shape_extent || *global_extent != *shape_extent) {
-      return worst_only();
+      return worst_only("copy is symbolic, partial, or shape-mismatched");
     }
     extents.push_back(*shape_extent);
     logical_elements *= *shape_extent;
@@ -883,11 +773,11 @@ StatementProbe BuildCopyProbe(const CopyNode *copy, const Fragment &frag_layout,
 
   int64_t elem_bits = global->dtype.bits() * global->dtype.lanes();
   if (elem_bits < 8) {
-    return worst_only();
+    return worst_only("global element width is below one byte");
   }
   auto strides = RowMajorStrides(global);
   if (!strides.has_value()) {
-    return worst_only();
+    return worst_only("global buffer shape has unsupported address geometry");
   }
 
   StatementProbe probe;
@@ -895,7 +785,7 @@ StatementProbe BuildCopyProbe(const CopyNode *copy, const Fragment &frag_layout,
   probe.extents = std::move(extents);
   probe.point_vars = MakePointVars(ndim);
   if (!BindForwardMaps(&probe, frag_layout)) {
-    return worst_only();
+    return worst_only("fragment forward maps have unsupported geometry");
   }
   // A fragment<->global copy touches global memory and no shared memory.
   probe.vector_bits = MaxVectorLoadBits(target, /*global_only_access=*/true);
@@ -983,12 +873,14 @@ private:
  *  Returns: probe with empty accesses (charge zero) when the loop touches
  *  no global memory; a full probe otherwise; nullopt when the loop cannot
  *  even be sized (skip — nothing sensible to charge). */
-std::optional<StatementProbe> BuildLoopProbe(const ParallelOpNode *loop,
+std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
                                              const Target &target) {
   LoopGlobalAccessCollector collector;
   collector.Collect(loop->GetRoot());
   StatementProbe probe;
   if (collector.accesses.empty()) {
+    DLOG(INFO) << "[LayoutCost] parallel-loop probe has no direct global "
+                  "accesses";
     return probe; // pure fragment/shared loop: no global traffic to model
   }
 
@@ -1003,6 +895,8 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOpNode *loop,
     while (cur != nullptr && cur->kind == ForKind::kParallel) {
       const int64_t *value = as_const_int(cur->extent);
       if (!value) {
+        DLOG(INFO) << "[LayoutCost] parallel-loop probe is unavailable: "
+                      "symbolic parallel extent";
         return std::nullopt; // truly unsizeable: nothing sensible to charge
       }
       extents.push_back(*value);
@@ -1016,7 +910,9 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOpNode *loop,
   // Mark the probe un-scoreable but sized (worst-case) when any structural
   // requirement fails. Symbolic serial trip counts fall back to repeat=1:
   // worst geometry, optimistic count.
-  auto worst_only = [&]() -> std::optional<StatementProbe> {
+  auto worst_only = [&](const char *reason) -> std::optional<StatementProbe> {
+    DLOG(INFO) << "[LayoutCost] parallel-loop probe falls back to worst-case: "
+               << reason;
     StatementProbe worst;
     BindMemoryGeometry(&worst, target);
     worst.worst_elements = probe.worst_elements;
@@ -1033,16 +929,15 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOpNode *loop,
 
   Fragment layout = loop->GetLoopLayout();
   if (!layout.defined()) {
-    DLOG(INFO) << "[LayoutCost] loop layout undefined; charged worst-case";
-    return worst_only();
+    return worst_only("loop layout is undefined");
   }
   if (nest_vars.size() != layout->InputShape().size()) {
-    return worst_only();
+    return worst_only("loop nest rank differs from loop layout rank");
   }
   probe.extents = std::move(extents);
   probe.point_vars = std::move(nest_vars);
   if (!BindForwardMaps(&probe, layout)) {
-    return worst_only();
+    return worst_only("loop forward maps have unsupported geometry");
   }
   probe.vector_bits = MaxVectorLoadBits(
       target, /*global_only_access=*/!collector.touches_shared);
@@ -1050,13 +945,13 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOpNode *loop,
 
   for (const auto &raw : collector.accesses) {
     if (raw.symbolic_repeat) {
-      return worst_only();
+      return worst_only("global access has a symbolic serial repeat count");
     }
     int64_t elem_bits = raw.buffer->dtype.bits() * raw.buffer->dtype.lanes();
     auto strides = RowMajorStrides(raw.buffer);
     if (elem_bits < 8 || !strides.has_value() ||
         raw.indices.size() != raw.buffer->shape.size()) {
-      return worst_only();
+      return worst_only("global access has unsupported dtype, shape, or rank");
     }
     PrimExpr addr = make_zero(DataType::Int(32));
     for (size_t d = 0; d < raw.indices.size(); ++d) {
@@ -1077,6 +972,8 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOpNode *loop,
  *  the attempt. Shared by every cost model: it is the legacy score and the
  *  IO-aware model's tiebreak. */
 int64_t CountRegisterSlots(const LayoutMap &tmp_layout_map) {
+  DLOG(INFO) << "[LayoutCost] register count: layout_entries="
+             << tmp_layout_map.size();
   int64_t regs = 0;
   for (const auto &[buffer, layout] : tmp_layout_map) {
     if (auto frag = layout.as<Fragment>()) {
@@ -1094,8 +991,13 @@ int64_t CountRegisterSlots(const LayoutMap &tmp_layout_map) {
         frag_reg_num *= *pci;
       }
       regs += frag_reg_num;
+      DLOG(INFO) << "[LayoutCost] register count: buffer=" << buffer
+                 << " output_shape=" << frag.value()->OutputShape()
+                 << " contribution=" << frag_reg_num
+                 << " running_total=" << regs;
     }
   }
+  DLOG(INFO) << "[LayoutCost] register count total=" << regs;
   return regs;
 }
 
@@ -1107,10 +1009,13 @@ public:
   AttemptCost Score(const std::vector<int> &members,
                     const std::vector<TileOperator> &infer_list,
                     const LayoutMap &tmp_layout_map) const final {
-    (void)members;
     (void)infer_list;
+    DLOG(INFO) << "[LayoutCost] register-count score begin: members="
+               << FormatVector(members);
     AttemptCost cost;
     cost.regs = CountRegisterSlots(tmp_layout_map);
+    DLOG(INFO) << "[LayoutCost] register-count score end: mem=" << cost.mem
+               << " regs=" << cost.regs;
     return cost;
   }
   const char *Name() const final { return "register-count"; }
@@ -1128,11 +1033,22 @@ public:
   AttemptCost Score(const std::vector<int> &members,
                     const std::vector<TileOperator> &infer_list,
                     const LayoutMap &tmp_layout_map) const final {
+    DLOG(INFO) << "[LayoutCost] io-aware score begin: members="
+               << FormatVector(members)
+               << " layout_entries=" << tmp_layout_map.size();
     AttemptCost cost;
     cost.regs = CountRegisterSlots(tmp_layout_map);
 
     for (int idx : members) {
+      const TileOperator &op = infer_list[idx];
+      DLOG(INFO) << "[LayoutCost] member " << idx
+                 << " begin: type=" << op->GetTypeKey();
       if (const auto *copy = infer_list[idx].as<CopyNode>()) {
+        Copy copy_op = GetRef<Copy>(copy);
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy: src=" << copy->src
+                   << " (scope=" << copy->src.scope() << ") dst=" << copy->dst
+                   << " (scope=" << copy->dst.scope() << ')';
         bool src_frag = IsFragmentBuffer(copy->src);
         bool dst_frag = IsFragmentBuffer(copy->dst);
         Buffer frag;
@@ -1143,43 +1059,84 @@ public:
         } else if (dst_frag && IsGlobalBuffer(copy->src)) {
           frag = copy->dst;
         } else {
+          DLOG(INFO) << "[LayoutCost] member " << idx
+                     << " copy ignored: not a fragment<->global transfer";
           continue; // register moves / shared staging: out of the model
         }
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy modeled as global "
+                   << (frag_is_src ? "store" : "load")
+                   << " through fragment=" << frag;
         auto layout = tmp_layout_map.Get(frag);
         if (!layout.has_value()) {
+          DLOG(INFO) << "[LayoutCost] member " << idx
+                     << " copy ignored: fragment has no tentative layout";
           continue;
         }
         auto frag_layout = layout.value().as<Fragment>();
         if (!frag_layout.has_value()) {
+          DLOG(INFO) << "[LayoutCost] member " << idx
+                     << " copy ignored: tentative layout is not a Fragment";
           continue;
         }
-        cost.mem += CachedStatementMem(idx, frag_layout.value(), [&]() {
-          std::optional<StatementProbe> probe;
-          try {
-            probe =
-                BuildCopyProbe(copy, frag_layout.value(), frag_is_src, target_);
-          } catch (const std::exception &e) {
-            probe = std::nullopt; // skipped below; builder-side fallbacks
-                                  // cover every non-throwing failure
-          }
-          return ChargeStatement(probe, "copy");
-        });
+        DLOG(INFO) << "[LayoutCost] member " << idx << " copy fragment layout: "
+                   << frag_layout.value()->DebugOutput();
+        int64_t statement_mem =
+            CachedStatementMem(idx, frag_layout.value(), [&]() {
+              std::optional<StatementProbe> probe;
+              try {
+                probe = BuildCopyProbe(copy_op, frag_layout.value(),
+                                       frag_is_src, target_);
+              } catch (const std::exception &e) {
+                DLOG(INFO) << "[LayoutCost] member " << idx
+                           << " copy probe construction threw: " << e.what();
+                probe = std::nullopt; // skipped below; builder-side fallbacks
+                                      // cover every non-throwing failure
+              }
+              return ChargeStatement(probe, idx, "copy");
+            });
+        cost.mem += statement_mem;
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy contribution=" << statement_mem
+                   << " running_mem=" << cost.mem;
       } else if (const auto *loop = infer_list[idx].as<ParallelOpNode>()) {
+        ParallelOp loop_op = GetRef<ParallelOp>(loop);
+        Fragment loop_layout = loop_op->GetLoopLayout();
+        if (loop_layout.defined()) {
+          DLOG(INFO) << "[LayoutCost] member " << idx
+                     << " parallel-loop layout: " << loop_layout->DebugOutput();
+        } else {
+          DLOG(INFO) << "[LayoutCost] member " << idx
+                     << " parallel-loop layout is undefined";
+        }
         auto compute = [&]() {
           std::optional<StatementProbe> probe;
           try {
-            probe = BuildLoopProbe(loop, target_);
+            probe = BuildLoopProbe(loop_op, target_);
           } catch (const std::exception &e) {
+            DLOG(INFO) << "[LayoutCost] member " << idx
+                       << " parallel-loop probe construction threw: "
+                       << e.what();
             probe = std::nullopt;
           }
-          return ChargeStatement(probe, "parallel loop");
+          return ChargeStatement(probe, idx, "parallel-loop");
         };
-        Fragment loop_layout = loop->GetLoopLayout();
-        cost.mem += loop_layout.defined()
-                        ? CachedStatementMem(idx, loop_layout, compute)
-                        : compute();
+        int64_t statement_mem =
+            loop_layout.defined()
+                ? CachedStatementMem(idx, loop_layout, compute)
+                : compute();
+        cost.mem += statement_mem;
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " parallel-loop contribution=" << statement_mem
+                   << " running_mem=" << cost.mem;
+      } else {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " ignored: type=" << op->GetTypeKey()
+                   << " is outside the IO-aware statement model";
       }
     }
+    DLOG(INFO) << "[LayoutCost] io-aware score end: mem=" << cost.mem
+               << " regs=" << cost.regs;
     return cost;
   }
 
@@ -1189,22 +1146,34 @@ private:
   /*! \brief Final charge of one prepared statement, honoring the probe's
    *  three-state protocol (zero / worst-case / measured). */
   static int64_t ChargeStatement(const std::optional<StatementProbe> &probe,
-                                 const char *what) {
-    if (!probe.has_value() || probe->accesses.empty()) {
-      return 0; // no global traffic to model / nothing sensible to charge
+                                 int member_idx, const char *what) {
+    if (!probe.has_value()) {
+      DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " probe unavailable; contribution=0";
+      return 0; // nothing sensible to charge
+    }
+    LogProbe(member_idx, what, *probe);
+    if (probe->accesses.empty()) {
+      DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " has no direct global traffic; contribution=0";
+      return 0;
     }
     std::optional<StatementTraffic> traffic;
     if (probe->measurable) {
-      traffic = ScoreStatement(*probe);
+      traffic = ScoreStatement(*probe, member_idx, what);
     }
     if (traffic.has_value()) {
-      DLOG(INFO) << "[LayoutCost] " << what << ": bw=" << traffic->bw
-                 << " issue=" << traffic->issue;
+      DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+                 << " measured: bw=" << traffic->bw
+                 << " issue=" << traffic->issue
+                 << " contribution=max(bw,issue)=" << traffic->Time();
       return traffic->Time();
     }
-    DLOG(INFO) << "[LayoutCost] " << what
-               << " outside the model; charged worst-case.";
-    return WorstCaseBytes(*probe);
+    int64_t worst_case = WorstCaseBytes(*probe);
+    DLOG(INFO) << "[LayoutCost] member " << member_idx << ' ' << what
+               << " outside the measurable model; worst-case contribution="
+               << worst_case;
+    return worst_case;
   }
 
   /*! \brief Memoize a statement's charge by (op index, layout): the charge
@@ -1218,11 +1187,17 @@ private:
     auto &entries = stmt_cache_[idx];
     for (const auto &[cached_layout, mem] : entries) {
       if (cached_layout->IsEqual(layout.get())) {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " statement cache hit: contribution=" << mem;
         return mem;
       }
     }
+    DLOG(INFO) << "[LayoutCost] member " << idx
+               << " statement cache miss: cached_layouts=" << entries.size();
     int64_t mem = compute();
     entries.emplace_back(layout, mem);
+    DLOG(INFO) << "[LayoutCost] member " << idx
+               << " statement cache store: contribution=" << mem;
     return mem;
   }
 

@@ -10,7 +10,6 @@ import tilelang.language as T
 
 
 def _roundtrip(M, N, threads):
-
     @T.prim_func
     def main(A: T.Tensor((M, N), T.float8_e4m3), B: T.Tensor((M, N), T.float8_e4m3)):
         with T.Kernel(1, threads=threads):
@@ -30,3 +29,10 @@ VARIANTS = {
 def check(variant, model, result):
     frag = result["buffers"]["frag"]
     assert frag["replicate"] == 1, f"roundtrip copy needs no replication, got: {frag}"
+
+
+# 1-byte dtype reaches the 128-bit lane cap: 16 elements per access.
+VECTOR_ANCHOR = {
+    "128x256_t128": {"A": 16, "B": 16},
+    "64x128_t64": {"A": 16, "B": 16},
+}

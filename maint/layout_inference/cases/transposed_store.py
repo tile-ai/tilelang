@@ -15,7 +15,6 @@ import tilelang.language as T
 
 
 def _transposed(M, N, dtype, threads):
-
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((N, M), dtype)):
         with T.Kernel(1, threads=threads):
@@ -30,4 +29,14 @@ def _transposed(M, N, dtype, threads):
 VARIANTS = {
     "fp32_128x128_t128": lambda: _transposed(128, 128, T.float32, 128),
     "fp16_64x256_t128": lambda: _transposed(64, 256, T.float16, 128),
+}
+
+
+# The trade-off the io-aware model made, visible in real codegen: the fp32
+# pick sacrifices the load (A scalar) for vectorized stores (B 4-wide); the
+# fp16 variant trades the opposite way (A 8-wide, B scalar). If either side
+# of the asymmetry drifts, the model's belief and the vectorizer diverged.
+VECTOR_ANCHOR = {
+    "fp32_128x128_t128": {"A": 1, "B": 4},
+    "fp16_64x256_t128": {"A": 8, "B": 1},
 }

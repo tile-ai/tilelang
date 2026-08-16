@@ -13,7 +13,6 @@ import tilelang.language as T
 
 
 def _roundtrip(M, N, dtype, threads):
-
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(1, threads=threads):
@@ -33,3 +32,11 @@ VARIANTS = {
 def check(variant, model, result):
     frag = result["buffers"]["frag"]
     assert frag["replicate"] == 1, f"roundtrip copy needs no replication, got: {frag}"
+
+
+# Widest per-buffer vector access the lowered kernel must exhibit under the
+# default (io-aware) config — the width the winning layout was scored at.
+VECTOR_ANCHOR = {
+    "fp16_128x128_t128": {"A": 8, "B": 8},
+    "fp32_64x256_t256": {"A": 4, "B": 4},
+}

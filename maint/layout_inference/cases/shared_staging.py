@@ -12,7 +12,6 @@ import tilelang.language as T
 
 
 def _staged(M, N, dtype, threads):
-
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(1, threads=threads):
@@ -34,3 +33,9 @@ VARIANTS = {
 def check(variant, model, result):
     frag = result["buffers"]["frag"]
     assert frag["replicate"] == 1, f"staged roundtrip needs no replication, got: {frag}"
+
+
+VECTOR_ANCHOR = {
+    "fp16_64x64_t128": {"A": 8, "B": 8},
+    "fp32_128x128_t128": {"A": 4, "B": 4},
+}

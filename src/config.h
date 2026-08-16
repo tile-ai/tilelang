@@ -38,6 +38,16 @@ inline bool LayoutCostModelEnabled() {
 }
 
 /*!
+ * \brief Check if every CuTe-algebra statement score is cross-checked
+ *  against the exact-enumeration debug oracle (slow; development only).
+ */
+inline bool LayoutCostModelVerifyEnabled() {
+  auto ctxt = tvm::transform::PassContext::Current();
+  return ctxt->GetConfig("tl.layout_cost_model_verify", ffi::Optional<Bool>())
+      .value_or(Bool(false));
+}
+
+/*!
  * \brief Check if vectorize planner verbose output is enabled.
  */
 inline bool VectorizePlannerVerboseEnabled() {
