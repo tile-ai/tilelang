@@ -1737,8 +1737,9 @@ void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
     temp << std::scientific << op->value;
     if (op->dtype.bits() == 32)
       temp << 'f';
-    else if (op->dtype.bits() == 16)
+    else if (op->dtype.bits() == 16 && op->dtype.is_float16())
       temp << 'h';
+    // bf16 finite: no h suffix; the explicit cast wrapper provides the type.
   }
   if (needs_cast) {
     temp << ")";

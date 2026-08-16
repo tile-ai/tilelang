@@ -408,8 +408,9 @@ def test_infinity_lowers_to_msl_infinity_literal(dtype):
 def test_infinity_msl_compiles(dtype):
     """The emitted ``INFINITY`` literal must be accepted by the offline Metal
     compiler. This is the legality check for the bf16 case in particular:
-    ``bfloat`` has no dedicated MSL infinity literal, so the codegen's bare
-    ``INFINITY`` relies on MSL's implicit float -> bfloat conversion."""
+    ``bfloat`` has no dedicated MSL infinity literal, so the codegen emits an
+    explicit ``(bfloat)(INFINITY)`` cast (MSL has no implicit float/half ->
+    bfloat conversion)."""
     _compile_msl_with_metal_toolchain(
         _lower_metal(_make_infinity_fill_kernel(dtype)), label=f"infinity-{dtype}"
     )
