@@ -47,8 +47,8 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+from metal_test_utils import lower_prim_to_metal
 from reduce_test_utils import make_allreduce_dim0_scale_kernel
-from tilelang import tvm as tvm
 
 _make_allreduce_dim0_scale_kernel = make_allreduce_dim0_scale_kernel
 
@@ -135,19 +135,6 @@ def _xor_closed(offsets, n):
     return all(max(tid ^ mask for tid in range(n)) < n for mask in offsets)
 
 
-def _lower_metal(prim_func):
-    target = tvm.target.Target("metal", tvm.target.Target("llvm"))
-    with target:
-        artifact = tilelang.lower(
-            prim_func,
-            target=target,
-            target_host="llvm",
-            enable_host_codegen=False,
-            enable_device_compile=False,
-        )
-    return artifact.kernel_source or ""
-
-
 def _compile_metal(prim_func):
     """Compile for real MPS execution through the supported Metal path.
 
@@ -210,7 +197,7 @@ def test_rejects_nt_gt_32_non_pow2_scale(logical_width, scale, nt):
         match=rf"single-simdgroup.*scale={scale}.*"
         rf"nt = extent\*scale = {nt}.*\b32\b",
     ):
-        _lower_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale))
+        lower_prim_to_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale))
 
 
 @pytest.mark.parametrize(
@@ -231,7 +218,7 @@ def test_rejects_nt_le_32_non_pow2_scale(logical_width, scale, nt):
         match=rf"single-simdgroup.*scale={scale}.*"
         rf"nt = extent\*scale = {nt}.*\b32\b",
     ):
-        _lower_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale))
+        lower_prim_to_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale))
 
 
 @pytest.mark.parametrize(
@@ -249,7 +236,7 @@ def test_rejects_nt_gt_32_pow2_scale(logical_width, scale, nt):
         match=rf"single-simdgroup.*scale={scale}.*"
         rf"nt = extent\*scale = {nt}.*\b32\b",
     ):
-        _lower_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale))
+        lower_prim_to_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale))
 
 
 @pytest.mark.parametrize(
@@ -283,7 +270,7 @@ def test_rejects_misaligned_threadgroup(logical_width, scale, threads, nt):
         rf"nt = extent\*scale = {nt}.*N = {threads}.*"
         rf"not an integer multiple of nt = {nt}",
     ):
-        _lower_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale, threads))
+        lower_prim_to_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale, threads))
 
 
 @pytest.mark.parametrize(
@@ -311,7 +298,7 @@ def test_rejects_misaligned_threadgroup(logical_width, scale, threads, nt):
     ],
 )
 def test_allows_pow2_nt_le_32_closure(logical_width, scale, threads, nt):
-    src = _lower_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale, threads))
+    src = lower_prim_to_metal(_make_allreduce_dim0_scale_kernel(T.reduce_sum, logical_width, scale, threads))
     # every XOR butterfly offset must be < 32 (closure inside one
     # simdgroup; offsets are nt/2 halving down to scale), the max offset
     # must be nt/2, the threadgroup extent must be an integer multiple
@@ -357,7 +344,7 @@ def test_infinity_lowers_to_msl_infinity_literal(dtype):
     call or a per-dtype hex pattern). bf16 additionally requires an
     explicit ``(bfloat)`` cast: MSL has no implicit float/half -> bfloat
     conversion, so the bare macro is rejected by the Metal compiler."""
-    src = _lower_metal(_make_infinity_fill_kernel(dtype))
+    src = lower_prim_to_metal(_make_infinity_fill_kernel(dtype))
     assert "INFINITY" in src
     if dtype == "bfloat16":
         assert "(bfloat)(INFINITY)" in src
@@ -383,7 +370,7 @@ def test_infinity_msl_compiles(dtype):
     explicit ``(bfloat)(INFINITY)`` cast (MSL has no implicit float/half ->
     bfloat conversion)."""
     _compile_msl_with_metal_toolchain(
-        _lower_metal(_make_infinity_fill_kernel(dtype)), label=f"infinity-{dtype}"
+        lower_prim_to_metal(_make_infinity_fill_kernel(dtype)), label=f"infinity-{dtype}"
     )
 
 
@@ -413,7 +400,7 @@ def test_reduce_bf16_fp16_lowers(reduce_fn, dtype):
     accumulates in fp32, so the butterfly offsets must still be present in
     the MSL."""
     logical_width, scale, threads = 16, 2, 32
-    src = _lower_metal(
+    src = lower_prim_to_metal(
         _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale, threads, dtype=dtype)
     )
     if dtype == "bfloat16":
@@ -439,7 +426,7 @@ def test_reduce_bf16_fp16_lowers(reduce_fn, dtype):
 def test_reduce_bf16_fp16_msl_compiles(reduce_fn, dtype):
     """Offline MSL legality for the bf16/fp16 reduce path (including the
     bf16 max INFINITY identity)."""
-    src = _lower_metal(
+    src = lower_prim_to_metal(
         _make_allreduce_dim0_scale_kernel(reduce_fn, 16, 2, 32, dtype=dtype)
     )
     _compile_msl_with_metal_toolchain(src, label=f"reduce-{dtype}-{reduce_fn.__name__}")
@@ -481,7 +468,7 @@ def test_reduce_clear_false_lowers(dtype):
     bf16, an fp32 accumulator with a final cast back to dst). It must lower
     without crashing and keep the butterfly closure."""
     logical_width, scale, threads = 16, 2, 32
-    src = _lower_metal(
+    src = lower_prim_to_metal(
         _make_allreduce_dim0_scale_kernel(
             T.reduce_sum, logical_width, scale, threads, dtype=dtype, clear=False
         )
@@ -499,7 +486,7 @@ def test_reduce_clear_false_lowers(dtype):
 def test_reduce_clear_false_bf16_msl_compiles():
     """Offline MSL legality for the bf16 clear=False update path (fp32
     accumulator scratch + final bf16 cast)."""
-    src = _lower_metal(
+    src = lower_prim_to_metal(
         _make_allreduce_dim0_scale_kernel(
             T.reduce_sum, 16, 2, 32, dtype="bfloat16", clear=False
         )
@@ -553,7 +540,7 @@ def test_finalize_reducer_v2_rejected_on_metal():
     with pytest.raises(
         Exception, match=r"no finalize_reducer implementation is registered"
     ):
-        _lower_metal(_make_finalize_reducer_v2_kernel())
+        lower_prim_to_metal(_make_finalize_reducer_v2_kernel())
 
 
 if __name__ == "__main__":
