@@ -96,11 +96,15 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
           dst_col_base + warp_n * (warp_col_tiles * kNPerWarp) + j * kNPerWarp;
       PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
                           {BufferLoad(op.dst, {row, col})});
+      // builtin::simdgroup_store(d, index, ptr, stride, col, row, transpose)
+      // expects the tile extents in (col, row) order. kMPerWarp is the row
+      // extent (M) and kNPerWarp is the column extent (N), so pass
+      // kNPerWarp as col and kMPerWarp as row.
       stmts.push_back(Evaluate(
           Call(DataType::Handle(), builtin::simdgroup_store(),
                {op.src->data, IntImm(DataType::Int(32), tile_idx), ptr,
-                dst_stride, IntImm(DataType::Int(32), kMPerWarp),
-                IntImm(DataType::Int(32), kNPerWarp),
+                dst_stride, IntImm(DataType::Int(32), kNPerWarp),
+                IntImm(DataType::Int(32), kMPerWarp),
                 Cast(DataType::Bool(), IntImm(DataType::Int(32), 0))})));
     }
   }
