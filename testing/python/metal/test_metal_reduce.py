@@ -26,7 +26,7 @@ of two <= 32 with N % nt == 0, with all XOR offsets < 32 AND the raw
 [0, N) execution prefix closed under every mask found in the MSL.
 
 Additional coverage in this file:
-  - tl.infinity lowering/offline-MSL legality for fp32/fp16/bf16;
+  - T.infinity lowering/offline-MSL legality for fp32/fp16/bf16;
   - bf16/fp16 reduce lowering (fp32-accumulate path) and offline MSL
     legality, including the bf16 max INFINITY identity;
   - clear=False duplicate-buffer update lowering (fp32 + bf16);
@@ -47,7 +47,10 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+from reduce_test_utils import make_allreduce_dim0_scale_kernel
 from tilelang import tvm as tvm
+
+_make_allreduce_dim0_scale_kernel = make_allreduce_dim0_scale_kernel
 
 
 def _metal_toolchain_available() -> bool:
@@ -72,43 +75,11 @@ def _metal_toolchain_available() -> bool:
 _HAS_METAL_TOOLCHAIN = _metal_toolchain_available()
 
 
-def _make_allreduce_dim0_scale_kernel(
-    reduce_fn, logical_width, scale, threads=None, dtype="float32", clear=True
-):
-    """Copy of the upstream public constructor
-    (testing/python/language/test_tilelang_language_reduce.py), used as
-    the public construction path for the Metal backend.
-
-    Threads default to logical_width * scale (N == nt). Supplying an
-    explicit value decouples the threadgroup extent from nt so misaligned
-    threadgroups are reachable through the same public constructor.
-
-    ``dtype`` covers the fp32/fp16/bf16 paths; ``clear=False`` exercises
-    the duplicate-buffer update path (Phase 3) that accumulate-into-dst
-    reductions take on Metal.
-    """
-    if threads is None:
-        threads = logical_width * scale
-
-    @T.prim_func
-    def kernel(
-        A: T.Tensor((logical_width, scale), dtype),
-        B: T.Tensor((scale,), dtype),
-    ):
-        with T.Kernel(1, threads=threads):
-            src = T.alloc_fragment((logical_width, scale), dtype)
-            dst = T.alloc_fragment((scale,), dtype)
-            T.copy(A, src)
-            reduce_fn(src, dst, dim=0, clear=clear)
-            T.copy(dst, B)
-
-    return kernel
-
 
 def _make_infinity_fill_kernel(dtype):
-    """Tiny fill kernel whose only payload is ``tl.infinity(dtype)``.
+    """Tiny fill kernel whose only payload is ``T.infinity(dtype)``.
 
-    Used to verify that the Metal ``tl.infinity`` lowering folds to a
+    Used to verify that the Metal ``T.infinity`` lowering folds to a
     constant ``FloatImm`` and that the codegen emits an MSL-legal
     ``INFINITY`` literal for fp32, fp16 and bf16 destinations.
     """
@@ -373,7 +344,7 @@ def test_runtime_float32_reduction(reduce_fn):
 
 
 # ---------------------------------------------------------------------------
-# tl.infinity lowering (fp32 / fp16 / bf16)
+# T.infinity lowering (fp32 / fp16 / bf16)
 # ---------------------------------------------------------------------------
 
 
@@ -381,7 +352,7 @@ def test_runtime_float32_reduction(reduce_fn):
     "dtype", ["float32", "float16", "bfloat16"], ids=["fp32", "fp16", "bf16"]
 )
 def test_infinity_lowers_to_msl_infinity_literal(dtype):
-    """tl.infinity must fold to a constant FloatImm that the Metal codegen
+    """T.infinity must fold to a constant FloatImm that the Metal codegen
     prints as the MSL ``INFINITY`` literal (never an unsupported extern
     call or a per-dtype hex pattern). bf16 additionally requires an
     explicit ``(bfloat)`` cast: MSL has no implicit float/half -> bfloat
@@ -421,12 +392,12 @@ def test_infinity_msl_compiles(dtype):
     "dtype", ["float32", "float16", "bfloat16"], ids=["fp32", "fp16", "bf16"]
 )
 def test_runtime_infinity_fill(dtype):
-    """Real MPS execution: a fill with tl.infinity must produce +inf."""
+    """Real MPS execution: a fill with T.infinity must produce +inf."""
     kernel = _compile_metal(_make_infinity_fill_kernel(dtype))
     out = torch.empty(32, dtype=getattr(torch, dtype), device="mps")
     kernel(out)
     torch.mps.synchronize()
-    assert torch.all(out.cpu() == torch.inf), f"fill with tl.infinity({dtype}) != inf"
+    assert torch.all(out.cpu() == torch.inf), f"fill with T.infinity({dtype}) != inf"
 
 
 # ---------------------------------------------------------------------------

@@ -155,50 +155,18 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout =
-          backend::reduce::ComputeReducerLayout(src_layout, op.dim);
-      auto src_dim = src_layout->InputDim();
-      auto dst_dim = dst_layout->InputDim();
-
-      auto is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
-
-      if (is_1d_reduce) {
-        ICHECK(is_one(dst_layout->OutputShape().back()))
-            << "Reduce for scalar not implemented.";
-      } else {
-        ICHECK_EQ(src_dim, dst_dim + 1) << "Reduce dimension mismatch.";
-      }
+      auto ctx = backend::reduce::MakeFragmentReduceContext(
+          op, src_buffer, dst_buffer, src_layout, dst_layout, analyzer);
+      auto red_layout = ctx.red_layout;
+      auto dst_dim = ctx.dst_dim;
+      auto &dst_vars = ctx.dst_vars;
+      auto &dst_indices = ctx.dst_indices;
+      auto &red_indices = ctx.red_indices;
+      auto &reduce_plan = ctx.reduce_plan;
 
       ICHECK_EQ(op.batch, 1)
           << "Metal reduce: batch > 1 is not supported yet (op.batch="
           << op.batch << ")";
-
-      Array<IterVar> dst_vars;
-      for (size_t i = 0; i < dst_dim; ++i) {
-        Var var = Var(std::string{char('i' + i)});
-        dst_vars.push_back(IterVar(Range(0, dst_layout->InputShape()[i]), var,
-                                   IterVarType::kDataPar));
-      }
-
-      Array<IterVar> src_vars;
-      if (!is_1d_reduce) {
-        src_vars = dst_vars;
-      }
-      Range reduce_dom(0, src_layout->InputShape()[op.dim]);
-      IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
-      src_vars.insert(src_vars.begin() + op.dim, reduce_iv);
-
-      auto src_indices = src_layout->Forward(
-          src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      auto dst_indices = dst_layout->Forward(
-          dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      auto red_indices = red_layout->Forward(
-          dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      auto src_thread = src_layout->ForwardThread(
-          src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
-
-      auto reduce_plan = backend::reduce::MakeReduceOwnershipPlan(
-          src_indices, src_thread, src_vars, src_vars[op.dim]->var, analyzer);
 
       // Plan-level enforcement is per thread_step:
       // thread_step.extent is the PER-STEP participating thread range,
@@ -317,45 +285,12 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
 
       Array<Stmt> stmts;
 
-      auto require_init = op.clear;
-      if (op.type->IsSum() || op.type->IsAbsSum() || op.type->IsBitAnd() ||
-          op.type->IsBitOr() || op.type->IsBitXor()) {
-        require_init = true;
-      }
-
-      auto clear_buffer = dst_buffer;
-      auto need_duplicate = false;
-      auto need_update = false;
-      if ((op.type->IsSum() || op.type->IsAbsSum()) && !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      } else if (op.type->IsBitAnd() && !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      } else if ((op.type->IsBitOr() || op.type->IsBitXor()) && !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      } else if ((op.type->IsMax() || op.type->IsMin() ||
-                  op.type->IsAbsMax()) &&
-                 !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      }
-
-      if (!analyzer->CanProve(dst_layout->ReplicateExtent() ==
-                              red_layout->ReplicateExtent())) {
-        need_duplicate = true;
-      }
-      ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
-                                 red_layout->ReplicateExtent()))
-          << "Inconsistent layouts between src and dst in ReduceOp: "
-          << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
-
-      if (need_duplicate) {
-        clear_buffer = decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
-                                   dst_buffer->name + "_clear",
-                                   GetPtrStorageScope(dst_buffer->data));
-      }
+      auto plan = backend::reduce::MakeReduceBufferPlan(
+          op, dst_buffer, dst_layout, red_layout, analyzer);
+      auto require_init = plan.require_init;
+      auto clear_buffer = plan.clear_buffer;
+      auto need_duplicate = plan.need_duplicate;
+      auto need_update = plan.need_update;
 
       // A bf16 accumulator/destination reduce
       // runs entirely in fp32. MSL has no bf16 min/max overloads and the
@@ -403,42 +338,15 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       Array<IterVar> src_var_compressed = reduce_plan.local_reduce_vars;
 
       // ---- Phase 1: per-thread local partials (vsize = 1). ----
-      {
-        if (require_init ||
-            (need_duplicate &&
-             (op.type->IsMax() || op.type->IsMin() || op.type->IsAbsMax()))) {
-          stmts.push_back(BufferStore(accum_buffer, init_value, red_indices));
-        }
-
-        Stmt reduce_local =
-            BufferStore(accum_buffer,
-                        backend::reduce::MakeReduce(
-                            op, 1, BufferLoad(accum_buffer, red_indices),
-                            BufferLoad(src_buffer, src_indice_compressed)),
-                        red_indices);
-
-        for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0;
-             --i) {
-          reduce_local = For(src_var_compressed[i]->var, 0,
-                             src_var_compressed[i]->dom->extent,
-                             ForKind::kUnrolled, reduce_local, std::nullopt);
-        }
-        stmts.push_back(reduce_local);
-      }
+      stmts.push_back(backend::reduce::MakeUnvectorizedLocalReduce(
+          op, accum_buffer, src_buffer, src_indice_compressed,
+          src_var_compressed, red_indices, init_value, require_init,
+          need_duplicate, src_layout->OutputDim()));
 
       auto phase1 = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
-      for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
-        phase1 = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
-                     ForKind::kParallel, phase1);
-      }
-      if (dst_layout->InputDim() > 0) {
-        phase1 = PartitionLoop(Downcast<For>(phase1), lower_args.thread_index,
-                               analyzer, red_layout);
-        phase1 = PragmaUnrollLoop(Downcast<For>(phase1));
-      } else {
-        auto guard = (lower_args.thread_index == lower_args.thread_bounds->min);
-        phase1 = IfThenElse(guard, phase1);
-      }
+      phase1 = backend::reduce::MakeParallelPartitionLoop(
+          phase1, dst_vars, lower_args.thread_index, lower_args.thread_bounds,
+          analyzer, red_layout);
 
       // ---- Phase 2: lockstep threadgroup butterfly. ----
       // Faithful to the CUDA AllReduce template semantics: one step per
@@ -623,54 +531,13 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       // ---- Phase 3: duplicate-buffer update (guarded). ----
       Stmt phase3;
       if (need_duplicate) {
-        PrimExpr predicate = Bool(true);
-        {
-          PrimExpr local_thread_index = lower_args.thread_index;
-          if (dst_layout->ThreadRange().defined()) {
-            local_thread_index =
-                local_thread_index - dst_layout->ThreadRange()->min;
-          }
-          auto dst_th_indices = dst_indices;
-          dst_th_indices.push_back(local_thread_index);
-          auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
-          inv.pop_back();
-          for (size_t i = 0; i < static_cast<size_t>(dst_dim); ++i) {
-            predicate = predicate && (inv[i] == dst_vars[i]->var);
-          }
-          predicate = analyzer->Simplify(predicate);
-        }
-        PrimExpr update =
-            need_update
-                ? backend::reduce::MakeUpdate(
-                      op,
-                      bf16_accum
-                          ? PrimExpr(Cast(DataType::Float(32),
-                                          BufferLoad(dst_buffer, dst_indices)))
-                          : BufferLoad(dst_buffer, dst_indices),
-                      BufferLoad(accum_buffer, red_indices))
-                : BufferLoad(accum_buffer, red_indices);
-        // The clear=False update for a bf16 destination is computed in
-        // fp32 (accumulator dtype) and only the final store casts back to
-        // bf16.
-        Stmt store = BufferStore(
-            dst_buffer,
-            bf16_accum ? PrimExpr(Cast(dst_buffer->dtype, update)) : update,
-            dst_indices);
-        phase3 = analyzer->CanProve(predicate) ? store
-                                               : IfThenElse(predicate, store);
-        for (int i = static_cast<int>(dst_dim) - 1; i >= 0; --i) {
-          phase3 = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
-                       ForKind::kParallel, phase3);
-        }
-        if (dst_dim > 0) {
-          phase3 = PartitionLoop(Downcast<For>(phase3), lower_args.thread_index,
-                                 analyzer, red_layout);
-          phase3 = PragmaUnrollLoop(Downcast<For>(phase3));
-        } else {
-          auto guard =
-              (lower_args.thread_index == lower_args.thread_bounds->min);
-          phase3 = IfThenElse(guard, phase3);
-        }
+        // The clear=False update for a bf16 destination is computed in fp32
+        // (accumulator dtype) and only the final store casts back to bf16.
+        phase3 = backend::reduce::MakeDuplicateUpdatePhase(
+            op, dst_buffer, accum_buffer, dst_indices, red_indices, dst_vars,
+            dst_layout, need_update, /*cast_to_dst=*/bf16_accum,
+            /*cast_dst_load_to_accum=*/bf16_accum, lower_args.thread_index,
+            lower_args.thread_bounds, analyzer, red_layout);
       }
 
       // ---- Phase 2.5: bf16 empty-plan write-back. ----
@@ -684,19 +551,9 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
             dst_buffer,
             Cast(dst_buffer->dtype, BufferLoad(accum_buffer, red_indices)),
             red_indices);
-        for (int i = static_cast<int>(dst_dim) - 1; i >= 0; --i) {
-          wb = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
-                   ForKind::kParallel, wb);
-        }
-        if (dst_dim > 0) {
-          wb = PartitionLoop(Downcast<For>(wb), lower_args.thread_index,
-                             analyzer, red_layout);
-          wb = PragmaUnrollLoop(Downcast<For>(wb));
-        } else {
-          wb = IfThenElse(
-              (lower_args.thread_index == lower_args.thread_bounds->min), wb);
-        }
-        bf16_writeback = wb;
+        bf16_writeback = backend::reduce::MakeParallelPartitionLoop(
+            wb, dst_vars, lower_args.thread_index, lower_args.thread_bounds,
+            analyzer, red_layout);
       }
 
       Array<Stmt> parts;
