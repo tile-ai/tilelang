@@ -1715,6 +1715,17 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
 void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
                                       std::ostream &os) { // NOLINT(*)
   std::ostringstream temp;
+  // MSL has no implicit conversion INTO bfloat from float/half, and the
+  // overloaded builtins (e.g. select(half, half, bool)) require exact
+  // operand types, so fp16/bf16 literals (finite, INFINITY or NAN) must be
+  // explicitly cast to the destination type: bare INFINITY/NAN or
+  // `h`-suffixed literals fail to compile when assigned to bfloat
+  // ("assigning to 'bfloat' from incompatible type") or make
+  // select() ambiguous for half ("call to 'select' is ambiguous").
+  const bool needs_cast = op->dtype.is_bfloat16() || op->dtype.is_float16();
+  if (needs_cast) {
+    temp << "(" << (op->dtype.is_bfloat16() ? "bfloat" : "half") << ")(";
+  }
   if (std::isinf(op->value)) {
     if (op->value < 0) {
       temp << "-";
@@ -1728,6 +1739,9 @@ void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
       temp << 'f';
     else if (op->dtype.bits() == 16)
       temp << 'h';
+  }
+  if (needs_cast) {
+    temp << ")";
   }
   MarkConst(temp.str());
   os << temp.str();

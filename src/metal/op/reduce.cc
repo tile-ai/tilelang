@@ -66,6 +66,12 @@
  *   - op.batch > 1 is not supported yet (LOG(FATAL)).
  *   - vectorized (packed) local reduction is disabled (vsize = 1).
  *   - fp16/bf16 nan_propagate reducers are not supported (no MSL __hmax_nan).
+ *   - Reducer v2 (tl.finalize_reducer / FinalizeReducerOp) is NOT
+ *     implemented on Metal: upstream registers finalize_reducer only for
+ *     CUDA and ROCm, so a v2 epoch fails loudly at lowering with
+ *     "no finalize_reducer implementation is registered for metal".
+ *     This file covers only the legacy T.reduce path; the v2 boundary is
+ *     exercised by test_finalize_reducer_v2_rejected_on_metal.
  */
 
 #include "backend/common/op/reduce.h"
@@ -201,6 +207,15 @@ struct MetalReduce : backend::ReduceLowerer<MetalReduce> {
       // each thread reads its partner's old value while writing its own;
       // that ordering is only guaranteed by SIMD lockstep inside a
       // simdgroup, and every partner must be a real, written lane.
+      //
+      // Explicit alignment contract (participating range vs nt blocks):
+      // the participating range [0, nt) of every thread step must sit on
+      // complete nt-blocks of the [0, N) execution prefix, enforced below
+      // by N % nt == 0. This is a hard correctness invariant, not an
+      // optimization: the raw butterfly runs on ALL N threads without a
+      // tid < nt guard, so an incomplete tail block would read partners
+      // >= N (outside the threadgroup; the scratch is sized N) or
+      // never-written codegen-padding slots.
       //
       // Reject iff nt = extent*scale is not a power of two OR nt > 32:
       //  - XOR closure: [0, nt) is closed under every butterfly
