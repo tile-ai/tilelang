@@ -626,9 +626,45 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   PrimExpr thd_b = loop_layout_->ForwardThread(
       ind_inv->Forward(fwd),
       FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-  return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent,
-                  std::nullopt)
-      ->CondenseReplicateVar();
+  Fragment completed =
+      Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, std::nullopt)
+          ->CondenseReplicateVar();
+  // Broadcast reads touched many times per thread produce an
+  // occurrence-indexed replication whose (logical, replica) -> physical map
+  // wraps around the thread extent and stops being injective; every
+  // consumer that partitions by such a fragment throws.
+  //
+  // Example (issue #1729): a (2,) fragment read as `src[i]` inside a
+  // coalesced `T.Parallel(2, 2560)` over 256 threads. The unused iterator
+  // j becomes the replicate axis (2560 occurrences per element, condensed
+  // to 640), yielding
+  //   Fragment((2,) -> (2,), replicate: 640,
+  //            thread: (_i * 640 + _rep) % 256, index: (_i,))
+  // 2 x 640 (logical, replica) points cannot fit 256 x 2 physical cells:
+  // replicas 0 / 256 / 512 of element 0 all land on (thread 0, slot 0).
+  //
+  // The thread OWNERSHIP the map describes is still sound -- the wrap
+  // covering the whole thread extent means every thread reads the element
+  // -- so for a buffer this loop only READS, fall back to the injective
+  // canonical form of exactly that ownership:
+  //   Fragment((2,) -> (2,), replicate: 256, thread: _rep, index: (_i,))
+  // i.e. full replication. (For written buffers replication changes
+  // execution multiplicity, so those keep the exact form and fail loudly
+  // downstream.)
+  if (!GetAccessInfo(buffer).is_write &&
+      !completed->DetectInjective()->errors.empty()) {
+    PrimExpr thread_extent = loop_layout_->ThreadExtent();
+    const int64_t *extent_ptr = as_const_int(thread_extent);
+    if (extent_ptr != nullptr) {
+      Fragment replicated = Fragment::FullyReplicated(
+          buffer->shape, static_cast<int>(*extent_ptr));
+      if (loop_layout_->ThreadRange().defined()) {
+        replicated = replicated->BindThreadRange(loop_layout_->ThreadRange());
+      }
+      return replicated;
+    }
+  }
+  return completed;
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() { ParallelOpNode::RegisterReflection(); }

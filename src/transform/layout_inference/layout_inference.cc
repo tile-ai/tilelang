@@ -5,6 +5,7 @@
 
 #include "support/check.h"
 #include <tvm/ir/cast.h>
+#include <tvm/ir/repr.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/utils.h>
 #include <tvm/tirx/builtin.h>
@@ -20,19 +21,22 @@
 #include <optional>
 #include <queue>
 
-#include "../layout/layout.h"
-#include "../layout/utils.h"
-#include "../op/builtin.h"
-#include "../op/parallel.h"
-#include "../op/utils.h"
+#include "../../config.h"
+#include "../../layout/layout.h"
+#include "../../layout/utils.h"
+#include "../../op/builtin.h"
+#include "../../op/copy.h"
+#include "../../op/parallel.h"
+#include "../../op/utils.h"
+#include "../../span_utils.h"
+#include "../common/loop_fusion_utils.h"
+#include "../common/pipeline_utils.h"
+#include "../common/union_find.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "backend/common/target_utils.h"
-#include "common/loop_fusion_utils.h"
-#include "common/pipeline_utils.h"
-#include "common/union_find.h"
+#include "layout_cost_model.h"
 #include "parallel_loop_layout_validator.h"
-#include "span_utils.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -74,6 +78,10 @@ Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
   }
   return Optional<Buffer>();
 }
+
+// ---------------------------------------------------------------------------
+// Free-mode attempt scoring (layout RFC, design B)
+// ---------------------------------------------------------------------------
 
 } // namespace
 
@@ -1072,13 +1080,17 @@ private:
     std::deque<int> q;
     std::vector<bool> in_queue(infer_list_.size(), false);
 
+    std::unique_ptr<LayoutCostModel> cost_model =
+        LayoutCostModel::Create(tl_config::LayoutCostModelName(), target_);
+    DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
     for (auto &&[root, members] : components) {
       DLOG(INFO) << "======================= processing component " << root
                  << '\n';
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
-      int64_t min_reg_num = INT64_MAX;
-      int min_reg_num_infer_root = -1;
+      AttemptCost best_cost;
+      bool has_best = false;
+      int best_infer_root = -1;
 
       // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
@@ -1108,59 +1120,54 @@ private:
           }
         } catch (const LayoutConflictException &e) {
           do_update = false;
-          DLOG(INFO) << "attempt failed due to LayoutConflictException "
-                     << e.what() << '\n';
+          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                     << " failed due to LayoutConflictException " << e.what();
         } catch (const NormalizeIterException &e) {
           do_update = false;
-          DLOG(INFO) << "attempt failed due to NormalizeIterException "
-                     << e.what() << '\n';
+          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                     << " failed due to NormalizeIterException " << e.what();
         } catch (const LoopLayoutInjectiveException &e) {
           do_update = false;
-          DLOG(INFO) << "attempt failed due to LoopLayoutInjectiveException "
-                     << e.what() << '\n';
+          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                     << " failed due to LoopLayoutInjectiveException "
+                     << e.what();
         }
 
         if (do_update) {
-          // Compute the total register number for this layout
-          int64_t reg_num = 0;
-          for (const auto &[buffer, layout] : tmp_layout_map) {
-            if (auto frag = layout.as<Fragment>()) {
-              int64_t frag_reg_num = 1;
-              for (auto i : frag.value()->OutputShape()) {
-                auto pci = as_const_int(i);
-                ICHECK(pci != nullptr)
-                    << "Can not use non-constant range to "
-                       "iterate over a fragment/local "
-                       "buffer. Non-constant shape expr is: "
-                    << i
-                    << ". This is possibly because you use symbolic shape when "
-                       "accessing a fragment/local buffer."
-                    << SpanHintSuffix(buffer->span);
-                frag_reg_num *= *pci;
-              }
-              reg_num += frag_reg_num;
-            }
-          }
-          // Update the best plan if this one uses fewer registers
-          if (reg_num < min_reg_num ||
-              (reg_num == min_reg_num &&
-               attempt_infer_root < min_reg_num_infer_root)) {
+          AttemptCost cost =
+              cost_model->Score(members, infer_list_, tmp_layout_map);
+          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                     << " cost model " << cost_model->Name()
+                     << " output: mem=" << cost.mem << " regs=" << cost.regs;
+          // Keep the cheapest attempt; ties resolve to the earliest root so
+          // the selection stays deterministic (and, with the cost model
+          // disabled, byte-identical to the legacy register ordering).
+          if (!has_best || cost.BetterThan(best_cost) ||
+              (!best_cost.BetterThan(cost) &&
+               attempt_infer_root < best_infer_root)) {
             best_infer_list =
                 BackupInferList(); // Use backup to avoid moving out infer_list_
             best_layout_map = tmp_layout_map;
-            min_reg_num = reg_num;
-            min_reg_num_infer_root = attempt_infer_root;
+            best_cost = cost;
+            has_best = true;
+            best_infer_root = attempt_infer_root;
           }
+        } else {
+          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                     << " cost model " << cost_model->Name()
+                     << " skipped because layout inference failed";
         }
         // Restore infer_list_ state for the next attempt
         infer_list_ = std::move(back_infer_list);
       }
-      ICHECK(min_reg_num < INT64_MAX) << "no available layout found" << '\n';
+      ICHECK(has_best) << "no available layout found" << '\n';
       // Apply the best plan for this component
       infer_list_ = std::move(best_infer_list);
       layout_map = best_layout_map;
-      DLOG(INFO) << "[InferInFreeMode] Final selection is attempt_infer_root = "
-                 << min_reg_num_infer_root << '\n';
+      DLOG(INFO) << "[InferInFreeMode] final selection: attempt root "
+                 << best_infer_root << " cost model " << cost_model->Name()
+                 << " output: mem=" << best_cost.mem
+                 << " regs=" << best_cost.regs;
     }
   }
 };

@@ -9,6 +9,8 @@
 #include <tvm/ffi/optional.h>
 #include <tvm/ir/transform.h>
 
+#include <string>
+
 namespace tvm {
 namespace tl {
 namespace tl_config {
@@ -23,6 +25,18 @@ inline bool ReducerPlanVerboseEnabled() {
   return ctxt
       ->GetConfig("tl.enable_reducer_plan_verbose", ffi::Optional<Bool>())
       .value_or(Bool(false));
+}
+
+/*!
+ * \brief The cost model that ranks free-mode layout attempts. Valid
+ *  values: "io-aware" (default — bytes x vector-width/coalescing over
+ *  fragment<->global traffic, registers as tiebreak) and "register-count"
+ *  (the legacy total-register-slots ordering).
+ */
+inline std::string LayoutCostModelName() {
+  auto ctxt = tvm::transform::PassContext::Current();
+  return ctxt->GetConfig("tl.layout_cost_model", ffi::Optional<ffi::String>())
+      .value_or(ffi::String("io-aware"));
 }
 
 /*!
