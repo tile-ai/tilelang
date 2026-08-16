@@ -56,6 +56,16 @@ def _wait_keepalive_drained(timeout: float = 15.0) -> bool:
     return True
 
 
+def _compile(f, out_idx=None):
+    """Compile ``f`` through the Metal eager adapter (torch execution backend).
+
+    Every test in this module targets the MPS path via the torch execution
+    backend, so the boilerplate ``tilelang.compile(..., execution_backend="torch",
+    target="metal")`` lives here instead of at each call site.
+    """
+    return tilelang.compile(f, out_idx=out_idx, execution_backend="torch", target="metal")
+
+
 # ---------------------------------------------------------------------------
 # packed-slot -> public-parameter-index mapping for BOTH MakePackedAPI ABI
 # layouts (legacy slot == public index, and the callee-allocated output ABI
@@ -206,7 +216,7 @@ def test_scalar_binding_scalar_interleave_out_idx(build):
     S = 3
     g = np.random.default_rng(23)
     prim, out_idx, call_args, expected = build(S, g)
-    kern = tilelang.compile(prim, out_idx=out_idx, execution_backend="torch", target="metal")
+    kern = _compile(prim, out_idx=out_idx)
     got = kern(*call_args)
     if isinstance(got, (list, tuple)):
         got = tuple(got)
@@ -319,7 +329,7 @@ def test_dynamic_shape_undetermined_symbol_raises():
         with T.Kernel(N) as bx:
             OUT[bx] = A[bx] * 2.0
 
-    kern = tilelang.compile(f, out_idx=[1], execution_backend="torch", target="metal")
+    kern = _compile(f, out_idx=[1])
     a = torch.randn(31, device=MPS)
     with pytest.raises(RuntimeError, match="not determined by any caller-supplied tensor input shape"):
         kern(a)
@@ -336,7 +346,7 @@ def test_dynamic_shape_conflicting_symbol_bindings_raise():
         with T.Kernel(N) as bx:
             OUT[bx] = A[bx] + B[bx]
 
-    kern = tilelang.compile(f, out_idx=[2], execution_backend="torch", target="metal")
+    kern = _compile(f, out_idx=[2])
     a = torch.randn(17, device=MPS)
     b = torch.randn(19, device=MPS)
     with pytest.raises(RuntimeError, match="conflicting sizes"):
@@ -357,7 +367,7 @@ def global_buffer_alloc_global_lazy(A: T.Tensor((97,), "float32"), B: T.Tensor((
 
 def test_global_buffer_alloc_global_lazy():
     a = torch.randn(97, device=MPS)
-    kern = tilelang.compile(global_buffer_alloc_global_lazy, out_idx=[1], execution_backend="torch", target="metal")
+    kern = _compile(global_buffer_alloc_global_lazy, out_idx=[1])
     b = kern(a)
     torch.mps.synchronize()
     assert torch.allclose(b, (a + 1.0) * 2.0, atol=1e-5)
@@ -396,7 +406,7 @@ def launch_order_two_stage(A: T.Tensor((97,), "float32"), B: T.Tensor((97,), "fl
 
 def test_launch_order_producer_consumer_order():
     a = torch.randn(97, device=MPS)
-    kern = tilelang.compile(launch_order_two_stage, out_idx=[1, 2], execution_backend="torch", target="metal")
+    kern = _compile(launch_order_two_stage, out_idx=[1, 2])
     plan = kern.adapter._launch_plan()
     assert [s.symbol for s in plan] == ["launch_order_two_stage_kernel", "launch_order_two_stage_kernel_1"]
     b, c = kern(a)
@@ -409,7 +419,7 @@ def test_launch_order_reversed_function_map_still_host_order():
     """device_mod function-map order reversed vs host call sites: the launch
     plan must follow the HOST order; following the map would compute C from
     uninitialized B (NaN) and fail."""
-    kern = tilelang.compile(launch_order_two_stage, out_idx=[1, 2], execution_backend="torch", target="metal")
+    kern = _compile(launch_order_two_stage, out_idx=[1, 2])
     art = kern.artifact
     funcs = list(art.device_mod.functions.items())
     assert len(funcs) == 2
@@ -445,7 +455,7 @@ def launch_order_repeated_symbol(A: T.Tensor((97,), "float32"), OUT: T.Tensor((9
 
 
 def test_launch_order_repeated_same_symbol():
-    kern = tilelang.compile(launch_order_repeated_symbol, out_idx=[1], execution_backend="torch", target="metal")
+    kern = _compile(launch_order_repeated_symbol, out_idx=[1])
     plan = kern.adapter._launch_plan()
     assert len(plan) == 2, "duplicate host call sites must be preserved"
     assert plan[0].symbol == plan[1].symbol == "launch_order_repeated_symbol_kernel"
@@ -482,7 +492,7 @@ def test_keepalive_aborted_launch_pins_submitted_buffers():
         return _RaisingModule(real_compile_shader(source))
 
     with mock.patch("torch.mps.compile_shader", side_effect=_compile_wrapper):
-        kern = tilelang.compile(launch_order_two_stage, out_idx=[1, 2], execution_backend="torch", target="metal")
+        kern = _compile(launch_order_two_stage, out_idx=[1, 2])
 
     a = torch.randn(97, device=MPS)
     with pytest.raises(RuntimeError, match="injected second-launch failure"):
@@ -498,7 +508,7 @@ def test_keepalive_temporary_output_stress():
     """Caller-supplied outputs dropped immediately after launch:
     every batch must stay pinned across many launches, with no caller strong
     reference left behind."""
-    kern = tilelang.compile(completion_inplace, execution_backend="torch", target="metal")
+    kern = _compile(completion_inplace)
     a = torch.randn(64, device=MPS)
     # Pause the reaper and neutralize the release helper so pinning is
     # observable while batches are pending: no drain can release the current
@@ -555,7 +565,7 @@ def completion_inplace(A: T.Tensor((64,), "float32"), OUT: T.Tensor((64,), "floa
 
 
 def test_completion_releases_without_second_launch():
-    kern = tilelang.compile(completion_inplace, execution_backend="torch", target="metal")
+    kern = _compile(completion_inplace)
     a = torch.randn(64, device=MPS)
     out = torch.zeros(64, device=MPS)
     weak = weakref.ref(out)
@@ -570,7 +580,7 @@ def test_completion_releases_without_second_launch():
 
 
 def test_completion_adapter_destruction_path():
-    kern = tilelang.compile(completion_inplace, execution_backend="torch", target="metal")
+    kern = _compile(completion_inplace)
     a = torch.randn(64, device=MPS)
     out = torch.zeros(64, device=MPS)
     weak = weakref.ref(out)
@@ -585,7 +595,7 @@ def test_completion_adapter_destruction_path():
 
 
 def test_completion_sequential_launches_do_not_accumulate():
-    kern = tilelang.compile(completion_inplace, execution_backend="torch", target="metal")
+    kern = _compile(completion_inplace)
     a = torch.randn(64, device=MPS)
     for i in range(5):
         out = torch.zeros(64, device=MPS)
@@ -616,7 +626,7 @@ def test_host_plan_loop_carried_args_and_geometry():
     writes are non-idempotent (iter 1 overwrites iter 0 with +1.0)."""
     # No out_idx: the caller supplies OUT explicitly, so the never-written
     # tail element can be deterministically initialized.
-    kern = tilelang.compile(host_plan_loop_carried, execution_backend="torch", target="metal")
+    kern = _compile(host_plan_loop_carried)
     plan = kern.adapter._launch_plan()
     assert len(plan) == 2, "constant loop must expand to two call sites"
     assert plan[0].symbol == plan[1].symbol == "host_plan_loop_carried_kernel"
@@ -659,7 +669,7 @@ def test_host_plan_same_name_distinct_identity_vars():
     """Two tirx.Vars with the same name but different identity.
     The symbol binding must use Var identity (grid + device scalar resolve to
     HOST_PLAN_N1 = 5), not the first string match (which would pick HOST_PLAN_N2 = 9)."""
-    kern = tilelang.compile(host_plan_same_name_vars, out_idx=[2], execution_backend="torch", target="metal")
+    kern = _compile(host_plan_same_name_vars, out_idx=[2])
     plan = kern.adapter._launch_plan()
     site = plan[0]
     sym_bindings = [b for b in site.bindings if b.kind == "symbol"]
@@ -681,7 +691,7 @@ def test_host_plan_same_name_distinct_identity_vars():
             return _MockFn()
 
     with mock.patch("torch.mps.compile_shader", return_value=_MockModule()):
-        kern_mock = tilelang.compile(host_plan_same_name_vars, out_idx=[2], execution_backend="torch", target="metal")
+        kern_mock = _compile(host_plan_same_name_vars, out_idx=[2])
     a9 = torch.randn(9, device=MPS)
     b5 = torch.randn(5, device=MPS)
     kern_mock(a9, b5)
@@ -712,7 +722,7 @@ def host_plan_cond_branch(A: T.Tensor((97,), "float32"), OUT: T.Tensor((97,), "f
 def test_host_plan_static_conditional_taken_branch_only():
     """An IfThenElse whose condition is resolved by the substituted
     loop variable must walk only its taken branch (2 sites, not 4)."""
-    kern = tilelang.compile(host_plan_cond_branch, out_idx=[1], execution_backend="torch", target="metal")
+    kern = _compile(host_plan_cond_branch, out_idx=[1])
     plan = kern.adapter._launch_plan()
     assert len(plan) == 2, f"one branch per iteration expected, got {len(plan)} sites"
     assert plan[0].symbol == "host_plan_cond_branch_kernel"  # iter 0: then (A+1)
@@ -738,7 +748,7 @@ def test_host_plan_runtime_conditional_plan_build_error():
                 OUT[bx] = A[bx] * 2.0
 
     with pytest.raises(RuntimeError, match="cannot be resolved statically"):
-        tilelang.compile(f, out_idx=[1], execution_backend="torch", target="metal")
+        _compile(f, out_idx=[1])
 
 
 def test_host_plan_runtime_loop_plan_build_error():
@@ -753,7 +763,7 @@ def test_host_plan_runtime_loop_plan_build_error():
                 OUT[bx] = A[bx] + 1.0
 
     with pytest.raises(RuntimeError, match="non-constant bounds"):
-        tilelang.compile(f, out_idx=[1], execution_backend="torch", target="metal")
+        _compile(f, out_idx=[1])
 
 
 def test_host_plan_call_site_args_swapped_binding():
@@ -762,7 +772,7 @@ def test_host_plan_call_site_args_swapped_binding():
     must bind device param 0 to the call site's first actual argument (OUT,
     slot 1) and device param 1 to A (slot 0) -- never by device-parameter
     name."""
-    kern = tilelang.compile(completion_inplace, execution_backend="torch", target="metal")
+    kern = _compile(completion_inplace)
     art = kern.artifact
     device_mod = art.device_mod
     assert "completion_inplace_kernel" in device_mod
@@ -971,7 +981,7 @@ def test_host_plan_adapter_destruction_weakref_finalizer():
     """The adapter's destruction path is provable: the object
     must be collectable after `del kern` with weakref + finalizer evidence
     (the launcher closure must not capture the adapter)."""
-    kern = tilelang.compile(completion_inplace, execution_backend="torch", target="metal")
+    kern = _compile(completion_inplace)
     adapter = kern.adapter
     weak = weakref.ref(adapter)
     fired = []
@@ -1016,7 +1026,7 @@ def test_host_plan_rank_mismatch_non_singleton_still_raises():
         with T.Kernel(T_) as bx:
             OUT[bx] = W[bx, 0] * 2.0
 
-    kern = tilelang.compile(f, out_idx=[1], execution_backend="torch", target="metal")
+    kern = _compile(f, out_idx=[1])
     w = torch.randn(7, device=MPS)
     with pytest.raises(RuntimeError, match="declared rank 2"):
         kern(w)
@@ -1049,7 +1059,7 @@ def test_adapter_expr_rank_relax_rejects_retained_prefix_mismatch():
             return _MockFn()
 
     with mock.patch("torch.mps.compile_shader", return_value=_MockModule()):
-        kern = tilelang.compile(f, out_idx=[1], execution_backend="torch", target="metal")
+        kern = _compile(f, out_idx=[1])
     w = torch.randn(3, device=MPS)
     with pytest.raises(RuntimeError, match="declared dimension"):
         kern(w)
@@ -1106,7 +1116,7 @@ def test_adapter_expr_rank_relax_expression_prefix_validation():
         with T.Kernel(N) as bx:
             OUT[bx] = A[bx] + W[bx, 0]
 
-    kern = tilelang.compile(f, out_idx=[2], execution_backend="torch", target="metal")
+    kern = _compile(f, out_idx=[2])
     a = torch.randn(3, device=MPS)  # binds N = 3 -> declared W prefix N+1 = 4
     # Wrong extent: N+1 = 4 != 3 must be rejected.
     w_bad = torch.randn(3, device=MPS)
@@ -1153,7 +1163,7 @@ def test_adapter_expr_nested_static_host_loops_expand():
     walker rejected this as a 'non-constant bounds' runtime loop."""
     # No out_idx: the caller supplies OUT explicitly (deterministic init,
     # deterministic caller initialization).
-    kern = tilelang.compile(adapter_expr_nested_static_loops, execution_backend="torch", target="metal")
+    kern = _compile(adapter_expr_nested_static_loops)
     plan = kern.adapter._launch_plan()
     assert len(plan) == 7, f"nested static expansion expected 7 sites, got {len(plan)}"
     analyzer = tvm.arith.Analyzer()
@@ -1215,7 +1225,7 @@ def test_strict_shape_rank_matched_constant_mismatch_rejected():
             return _MockFn()
 
     with mock.patch("torch.mps.compile_shader", return_value=_MockModule()):
-        kern = tilelang.compile(f, out_idx=[1], execution_backend="torch", target="metal")
+        kern = _compile(f, out_idx=[1])
         with pytest.raises(RuntimeError, match="declared dimension"):
             kern(torch.randn(3))  # CPU tensor: rejection precedes any device use
     torch.mps.synchronize()
@@ -1240,7 +1250,7 @@ def test_strict_shape_rank_matched_rank1_constant_mismatch_rejected():
             return _MockFn()
 
     with mock.patch("torch.mps.compile_shader", return_value=_MockModule()):
-        kern = tilelang.compile(f, out_idx=[1], execution_backend="torch", target="metal")
+        kern = _compile(f, out_idx=[1])
         with pytest.raises(RuntimeError, match="declared dimension"):
             kern(torch.randn(3, 1))
     torch.mps.synchronize()
@@ -1263,7 +1273,7 @@ def test_strict_shape_rank_matched_expression_mismatch_rejected():
         with T.Kernel(N) as bx:
             OUT[bx] = A[bx] + W[bx]
 
-    kern = tilelang.compile(f, out_idx=[2], execution_backend="torch", target="metal")
+    kern = _compile(f, out_idx=[2])
     a = torch.randn(3, device=MPS)  # binds N = 3 -> declared W = N + 1 = 4
     w_bad = torch.randn(3, device=MPS)
     with pytest.raises(RuntimeError, match="declared dimension"):
@@ -1425,7 +1435,7 @@ def test_strict_shape_explicit_capacity_attr_lazy_allowed():
     marked = fcap.with_attr("tilelang_capacity_dims", {"W": (0,)})
     # No out_idx: the caller supplies OUT explicitly (deterministic init,
     # the masked tail must stay caller-initialized to zero).
-    kern = tilelang.compile(marked, execution_backend="torch", target="metal")
+    kern = _compile(marked)
     w = torch.randn(3, device=MPS)
     out = torch.zeros(7, device=MPS)
     kern(w, out)
@@ -1433,7 +1443,7 @@ def test_strict_shape_explicit_capacity_attr_lazy_allowed():
     assert torch.allclose(out[:3], w * 2.0, atol=1e-5), "masked region must be computed"
     assert out[3:].abs().max().item() == 0.0, "masked tail must never be written"
     # The unmarked twin must reject the same call.
-    kern2 = tilelang.compile(fcap, execution_backend="torch", target="metal")
+    kern2 = _compile(fcap)
     with pytest.raises(RuntimeError, match="declared dimension"):
         kern2(torch.randn(3, device=MPS), torch.zeros(7, device=MPS))
     torch.mps.synchronize()
@@ -1626,7 +1636,7 @@ def test_capacity_eager_capacity_guard_audit_warns_unguarded(caplog):
         mock.patch("torch.mps.compile_shader", return_value=_MockModule()),
         caplog.at_level(logging.WARNING, logger="tilelang.jit.adapter.torch.metal"),
     ):
-        tilelang.compile(pf, execution_backend="torch", target="metal")
+        _compile(pf)
     assert any("no mask/offset guard evidence" in r.message and "'a'" in r.message for r in caplog.records), (
         f"expected guard-audit warning, got {[r.message for r in caplog.records]}"
     )
@@ -1660,7 +1670,7 @@ def test_capacity_eager_capacity_guard_audit_silent_when_guarded(caplog):
         mock.patch("torch.mps.compile_shader", return_value=_MockModule()),
         caplog.at_level(logging.WARNING, logger="tilelang.jit.adapter.torch.metal"),
     ):
-        tilelang.compile(pf, execution_backend="torch", target="metal")
+        _compile(pf)
     assert not any("no mask/offset guard evidence" in r.message for r in caplog.records), (
         f"unexpected guard-audit warning: {[r.message for r in caplog.records]}"
     )
@@ -1696,7 +1706,7 @@ def test_capacity_eager_capacity_guard_against_declared_extent_warns(caplog):
         mock.patch("torch.mps.compile_shader", return_value=_MockModule()),
         caplog.at_level(logging.WARNING, logger="tilelang.jit.adapter.torch.metal"),
     ):
-        tilelang.compile(pf, execution_backend="torch", target="metal")
+        _compile(pf)
     assert any("no mask/offset guard evidence" in r.message and "'a'" in r.message for r in caplog.records), (
         f"expected guard-audit warning, got {[r.message for r in caplog.records]}"
     )
@@ -1731,7 +1741,7 @@ def adapter_expr_int_float_scalar_tail(A: T.Tensor((64,), "float32"), scalar_i: 
 
 
 def _adapter_expr_run(prim, out_idx, call_args, expected):
-    kern = tilelang.compile(prim, out_idx=out_idx, execution_backend="torch", target="metal")
+    kern = _compile(prim, out_idx=out_idx)
     got = kern(*call_args)
     torch.mps.synchronize()
     err = np.abs(got.cpu().numpy() - expected).max()
@@ -1764,7 +1774,7 @@ def test_loop_local_bind_snapshot():
     site. The loop rebinds OUT to args slot 0 then
     slot 1; without the snapshot both sites resolve the final (slot 1)
     binding and the plan would enqueue two identical launches."""
-    kern = tilelang.compile(completion_inplace, execution_backend="torch", target="metal")
+    kern = _compile(completion_inplace)
     art = kern.artifact
     device_mod = art.device_mod
     assert "completion_inplace_kernel" in device_mod
@@ -1892,4 +1902,4 @@ def test_annotate_capacity_dims_rejects_unknown_name():
 
     bad_attr = valid_capacity_attr.with_attr("tilelang_capacity_dims", {"B": (0,)})
     with pytest.raises(ValueError, match="unknown tensor parameter"):
-        tilelang.compile(bad_attr, out_idx=[1], execution_backend="torch", target="metal")
+        _compile(bad_attr, out_idx=[1])

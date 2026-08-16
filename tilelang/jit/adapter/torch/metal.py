@@ -1442,19 +1442,16 @@ class MetalKernelAdapter(BaseKernelAdapter):
     # ------------------------------------------------------------------
     # Dynamic shape resolution
     # ------------------------------------------------------------------
-    def _symbol_table(self, tensor_input_shapes: list[tuple[int, ...]]) -> dict[Any, int]:
-        return _build_symbol_table(tensor_input_shapes, self.params, self.result_idx, self._capacity_dims)
-
-    def _eval_dim(self, dim: Any, symtab: dict[Any, int], analyzer: Any) -> int:
-        return _resolve_int_value(dim, symtab, analyzer)
-
-    def _eval_param_shape(self, symtab: dict[Any, int], param: Any) -> tuple[int, ...]:
-        return _eval_param_shape(symtab, param)
-
     def _resolve_output_shapes(self, tensor_input_shapes: list[tuple[int, ...]]) -> list[tuple[int, ...]]:
-        """Resolve ``out_idx`` output tensor shapes."""
-        symtab = self._symbol_table(tensor_input_shapes)
-        return [self._eval_param_shape(symtab, self.params[idx]) for idx in self.result_idx]
+        """Resolve ``out_idx`` output tensor shapes.
+
+        The module-level helpers ``_build_symbol_table``, ``_resolve_int_value``,
+        and ``_eval_param_shape`` are the single implementation; the launcher
+        closure binds them as plain functions too, so no thin per-method
+        forwarding wrappers are kept here.
+        """
+        symtab = _build_symbol_table(tensor_input_shapes, self.params, self.result_idx, self._capacity_dims)
+        return [_eval_param_shape(symtab, self.params[idx]) for idx in self.result_idx]
 
     # ------------------------------------------------------------------
     # Launcher

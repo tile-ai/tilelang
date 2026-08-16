@@ -33,6 +33,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _compile(f, out_idx=None):
+    """Compile ``f`` through the Metal eager adapter (torch execution backend)."""
+    return tilelang.compile(f, out_idx=out_idx, execution_backend="torch", target="metal")
+
+
 def _check(kern, args, out, oracle, tag, atol=1e-4):
     """Sentinel + real GPU launch + sync + numerical assert."""
     out.fill_(float("nan"))
@@ -272,7 +277,7 @@ def test_abi_non_trailing_out_idx_mid():
     g = np.random.default_rng(29)
     A = g.normal(size=(64,)).astype(np.float32)
     B = g.normal(size=(64,)).astype(np.float32)
-    kern = tilelang.compile(non_trailing_out_mid, out_idx=[1], execution_backend="torch", target="metal")
+    kern = _compile(non_trailing_out_mid, out_idx=[1])
     out = kern(torch.from_numpy(A).to("mps"), torch.from_numpy(B).to("mps"))
     torch.mps.synchronize()
     err = np.abs(out.cpu().numpy() - (A * 2.0 + B)).max()
@@ -296,7 +301,7 @@ def test_abi_non_trailing_out_idx_scalar():
     A = g.normal(size=(64,)).astype(np.float32)
     B = g.normal(size=(64,)).astype(np.float32)
     S = 3
-    kern = tilelang.compile(non_trailing_out_scalar, out_idx=[1], execution_backend="torch", target="metal")
+    kern = _compile(non_trailing_out_scalar, out_idx=[1])
     out = kern(torch.from_numpy(A).to("mps"), S, torch.from_numpy(B).to("mps"))
     torch.mps.synchronize()
     err = np.abs(out.cpu().numpy() - (A * S + B)).max()
@@ -320,7 +325,7 @@ def test_abi_non_trailing_out_idx_multi():
     g = np.random.default_rng(37)
     A = g.normal(size=(64,)).astype(np.float32)
     B = g.normal(size=(64,)).astype(np.float32)
-    kern = tilelang.compile(non_trailing_out_multi, out_idx=[1, 3], execution_backend="torch", target="metal")
+    kern = _compile(non_trailing_out_multi, out_idx=[1, 3])
     o1, o2 = kern(torch.from_numpy(A).to("mps"), torch.from_numpy(B).to("mps"))
     torch.mps.synchronize()
     e1 = np.abs(o1.cpu().numpy() - (A + B)).max()
