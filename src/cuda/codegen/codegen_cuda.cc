@@ -959,6 +959,11 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
           os << "char";
         }
         return;
+      } else if (t.lanes() == 2) {
+        // Two packed 4-bit lanes occupy exactly one byte.
+        enable_int8_ = true;
+        os << "int8_t";
+        return;
       } else if (t.lanes() == 4) {
         os << "int16_t";
         return;
