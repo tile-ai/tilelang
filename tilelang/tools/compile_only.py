@@ -198,12 +198,16 @@ def _build_parser() -> argparse.ArgumentParser:
 def cli_main(argv: list[str] | None = None) -> int:
     """CE-shaped CLI (D2): ``--output_file`` + example.py. Default target ``c`` (D3)."""
     args = _build_parser().parse_args(argv)
+    output = Path(args.output_file)
+    # Match CuTe CE wrapper: drop a previous artifact before compile so a
+    # failed run cannot leave yesterday's assembly for CE to read.
+    output.unlink(missing_ok=True)
 
     try:
         module = load_example(args.input_file)
         func = discover_prim_func(module)
         source = compile_kernel_source(func, resolve_target(args.target))
-        Path(args.output_file).write_text(source)
+        output.write_text(source)
     except Exception as exc:
         print(f"{_ERROR_PREFIX}: {exc}", file=sys.stderr)
         return 1
