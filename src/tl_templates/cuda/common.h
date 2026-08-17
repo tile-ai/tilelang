@@ -233,6 +233,16 @@ TL_PATCH TL_DEVICE bfloat16_t hexp(const bfloat16_t x) {
   return bfloat16_t(hexp(x.to_nv_bfloat16()));
 }
 
+// CUDA has no __ldg overloads for CUTLASS's 16-bit wrappers. Forward through
+// the bit-compatible native CUDA types.
+TL_PATCH TL_DEVICE half_t __ldg(const half_t *ptr) {
+  return half_t(__ldg(reinterpret_cast<const __half *>(ptr)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t __ldg(const bfloat16_t *ptr) {
+  return bfloat16_t(__ldg(reinterpret_cast<const __nv_bfloat16 *>(ptr)));
+}
+
 // Pack two half values.
 TL_DEVICE unsigned __pack_half2(const half x, const half y) {
   unsigned v0 = *((unsigned short *)&x);
