@@ -15,12 +15,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_line_directives.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangCUDA final : public CodeGenC {
+class CodeGenTileLangCUDA final : public CodeGenCWithLineDirectives {
 public:
   CodeGenTileLangCUDA();
   std::string Finish();

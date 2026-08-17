@@ -154,6 +154,6 @@ def AddWrapperForSingleBufStore():
 
         new_body = ir_transform(func.body, pre_visit, post_visit)
 
-        return func.with_body(new_body)
+        return func.with_body(new_body, span=func.span)
 
     return prim_func_pass(pass_fn, opt_level=0, name="tl.AddWrapperForSingleBufStore")

@@ -6196,6 +6196,8 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   // Sync-insertion passes may split the block containing rng_init across
   // __syncthreads(), so a declaration emitted at the call site can go out
   // of scope before later rng_rand / rng_rand_float uses.
+  // Emit the function-entry #line before the pre-scan output below.
+  this->PreFunctionBody(f);
   rng_state_name_map_.clear();
   tirx::PostOrderVisit(f->body, [this](const ObjectRef &n) {
     const auto *call = n.as<CallNode>();
@@ -6208,7 +6210,6 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
                  << name << ";\n";
     rng_state_name_map_.emplace(call, std::move(name));
   });
-  this->PreFunctionBody(f);
   int func_scope = this->BeginScope();
   this->PrintStmt(f->body);
   this->EndScope(func_scope);

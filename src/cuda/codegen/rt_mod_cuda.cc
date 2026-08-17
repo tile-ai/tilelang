@@ -1,4 +1,5 @@
 #include "codegen_cuda.h"
+#include "op/builtin.h"
 #include "runtime/pack_args.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
@@ -98,6 +99,10 @@ Module BuildTileLangCUDA(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
+  cg.SetEmitLineDirectives(
+      tvm::transform::PassContext::Current()
+          ->GetConfig<Bool>(tl::kEmitLineDirectives, Bool(false))
+          .value());
 
   ValidateUniqueDeviceGlobalSymbols(mod);
   if (const auto f = Function::GetGlobal("tilelang_callback_cuda_validate")) {
@@ -141,6 +146,10 @@ Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
+  cg.SetEmitLineDirectives(
+      tvm::transform::PassContext::Current()
+          ->GetConfig<Bool>(tl::kEmitLineDirectives, Bool(false))
+          .value());
 
   ValidateUniqueDeviceGlobalSymbols(mod);
   if (const auto f = Function::GetGlobal("tilelang_callback_cuda_validate")) {

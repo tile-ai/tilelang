@@ -97,6 +97,13 @@ class PassConfigKey(str, Enum):
     CUDA compile callback. Default: None
     """
 
+    TL_EMIT_LINE_DIRECTIVES = "tl.emit_line_directives"
+    """Emit ``#line`` directives in generated C-family source from TIR spans,
+    mapping generated statements back to their Python source lines. Combined
+    with the always-on ``-lineinfo`` for nvcc, PTX ``.loc`` entries then point
+    at the Python source. Default: False
+    """
+
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
 

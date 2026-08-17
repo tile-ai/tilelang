@@ -94,6 +94,6 @@ def HoistBroadcastValues():
     def pass_fn(func: PrimFunc, mod, ctx):
         mutator = HoistBroadcastValuesMutator()
         new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body)
+        return func.with_body(new_body, span=func.span)
 
     return prim_func_pass(pass_fn, opt_level=0)

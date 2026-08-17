@@ -103,6 +103,10 @@ static constexpr const char *kLayoutVisualizationEnable =
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
+/*! \brief Emit #line directives in generated C-family source from TIR spans,
+ * mapping generated statements back to their Python source lines. Default:
+ * false. */
+static constexpr const char *kEmitLineDirectives = "tl.emit_line_directives";
 static constexpr const char *kDisableDataRaceCheck =
     "tl.disable_data_race_check";
 /*! \brief Disable the buffer-initialization check.
