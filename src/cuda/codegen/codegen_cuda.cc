@@ -1325,7 +1325,20 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
   ICHECK(i >= 0 && i < 256 / t.bits())
       << "i: " << i << " t: " << t << " t.bits(): " << t.bits()
       << " t.lanes(): " << t.lanes();
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
+  if (is_packed_int4) {
+    std::ostringstream packed_byte;
+    packed_byte << "((const unsigned char*)(&(" << vec << ")))[" << i / 2
+                << "]";
+    int shift = i % 2 * 4;
+    if (t.is_uint()) {
+      os << "((static_cast<unsigned int>(" << packed_byte.str() << ") >> "
+         << shift << ") & 0x0fu)";
+    } else {
+      os << "((static_cast<int>((static_cast<unsigned int>("
+         << packed_byte.str() << ") >> " << shift << ") & 0x0fu) ^ 8) - 8)";
+    }
+  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
       os << vec << "." << access[i % t.lanes()];
@@ -1415,7 +1428,17 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
   ICHECK(i >= 0 && i < 256 / t.bits());
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
+  if (is_packed_int4) {
+    std::ostringstream packed_byte;
+    packed_byte << "((unsigned char*)(&(" << vec << ")))[" << i / 2 << "]";
+    stream << packed_byte.str() << " = ";
+    if (i % 2 != 0) {
+      stream << "(" << packed_byte.str() << " & 0x0fu) | ";
+    }
+    stream << "((static_cast<unsigned int>(" << value << ") & 0x0fu) << "
+           << i % 2 * 4 << ");\n";
+  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "="
              << "(" << value << ");\n";
