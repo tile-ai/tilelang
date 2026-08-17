@@ -958,8 +958,8 @@ def test_seed_captured_at_init_site():
 
 
 def test_reject_finalize_in_different_scope():
-    """An epoch must open and close in the same control-flow scope: init
-    inside a serial loop with the finalize outside is rejected."""
+    """Init inside a serial loop with the finalize outside is rejected: the
+    finalize is not in the init's scope (nor a conditional refinement)."""
 
     def make():
         @T.prim_func
@@ -979,7 +979,68 @@ def test_reject_finalize_in_different_scope():
 
         return kernel
 
-    _compile_expect_error(make, "same loop/branch scope")
+    _compile_expect_error(make, "not in the scope of its T.reducer_init")
+
+
+def test_finalize_in_conditional_refinement():
+    """A finalize inside a block-uniform conditional nested in the init's
+    scope runs 0 or 1 times per init — legal. Blocks that skip the branch
+    leave the partials unread. (The sum_smaller_probs pattern.)"""
+    extent, threads = 8, 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((extent,), T.float32),
+        S: T.Tensor((2,), T.int32),
+        B: T.Tensor((2,), T.float32),
+    ):
+        with T.Kernel(2, threads=threads) as bx:
+            src = T.alloc_fragment((extent,), T.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.reducer_init(acc)
+            if S[bx] < 0:
+                if T.get_thread_binding() == 0:
+                    B[bx] = 0.0
+            else:
+                for i in T.Parallel(extent):
+                    T.reducer_update(acc[0], src[i])
+                result = T.alloc_fragment((1,), T.float32)
+                T.finalize_reducer(acc, result)
+                if T.get_thread_binding() == 0:
+                    B[bx] = result[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    S = torch.tensor([-1, 1], dtype=torch.int32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A, S)
+    expected = torch.stack([torch.zeros((), device="cuda"), A.sum()])
+    torch.testing.assert_close(B, expected, atol=0, rtol=0)
+
+
+def test_reject_finalize_in_extra_loop():
+    """A finalize inside a loop the init is not in would rerun the collective
+    on already-combined partials — rejected even though the init context is
+    a prefix of the finalize context."""
+
+    def make():
+        @T.prim_func
+        def kernel(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=128):
+                src = T.alloc_fragment((8,), T.float32)
+                T.copy(A, src)
+                acc = T.alloc_reducer((1,), T.float32, op="sum")
+                T.reducer_init(acc)
+                result = T.alloc_fragment((1,), T.float32)
+                for _ in T.serial(4):
+                    for i in T.Parallel(8):
+                        T.reducer_update(acc[0], src[i])
+                    T.finalize_reducer(acc, result)
+                if T.get_thread_binding() == 0:
+                    B[0] = result[0]
+
+        return kernel
+
+    _compile_expect_error(make, "not in the scope of its T.reducer_init")
 
 
 if __name__ == "__main__":
