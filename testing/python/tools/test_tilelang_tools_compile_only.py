@@ -7,7 +7,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang.tools.compile_only import compile_kernel_source, resolve_target
+from tilelang.tools.compile_only import compile_kernel_source, cuda_codegen_available, resolve_target
 
 _COMPILE_ONLY_EXAMPLE = """\
 import tilelang
@@ -37,15 +37,6 @@ def _add(A, B):
         for i in T.Parallel(N):
             C[i] = A[i] + B[i]
     return C
-
-
-def _cuda_codegen_ffi_available() -> bool:
-    try:
-        from tilelang.cuda import _ffi_api
-
-        return hasattr(_ffi_api, "AnnotateDeviceBoundTmaCopies")
-    except Exception:
-        return False
 
 
 def _run_cli(*args):
@@ -138,7 +129,39 @@ def test_compile_only_cli_rejects_auto_target(tmp_path: Path):
 
 
 @pytest.mark.skipif(
-    not _cuda_codegen_ffi_available(),
+    cuda_codegen_available(),
+    reason="CUDA codegen FFI present; soft-fail path is for Metal-style wheels",
+)
+def test_compile_only_cli_cuda_soft_fails_without_ffi(tmp_path: Path):
+    example = tmp_path / "example.py"
+    output = tmp_path / "out.s"
+    example.write_text(_COMPILE_ONLY_EXAMPLE)
+
+    with pytest.raises(RuntimeError, match="CUDA codegen FFI missing"):
+        compile_kernel_source(_add.get_tir(), "cuda")
+
+    result = _run_cli("--target", "cuda", "--output_file", str(output), str(example))
+
+    assert result.returncode != 0
+    assert "CUDA codegen FFI missing" in result.stderr
+    assert not output.is_file() or not output.read_text().strip()
+
+
+@pytest.mark.skipif(
+    not cuda_codegen_available(),
+    reason="CUDA codegen FFI missing (e.g. macOS Metal wheel)",
+)
+def test_compile_kernel_source_optional_cuda():
+    source = compile_kernel_source(_add.get_tir(), "cuda")
+
+    assert source.strip()
+    assert _looks_like_generated_source(source)
+    assert "__global__" in source
+    assert "add_kernel" in source
+
+
+@pytest.mark.skipif(
+    not cuda_codegen_available(),
     reason="CUDA codegen FFI missing (e.g. macOS Metal wheel)",
 )
 def test_compile_only_cli_optional_cuda_target(tmp_path: Path):
@@ -152,7 +175,8 @@ def test_compile_only_cli_optional_cuda_target(tmp_path: Path):
     text = output.read_text()
     assert text.strip()
     assert _looks_like_generated_source(text)
-    assert "__global__" in text or "cuda" in text.lower()
+    assert "__global__" in text
+    assert "add_kernel" in text
 
 
 if __name__ == "__main__":
