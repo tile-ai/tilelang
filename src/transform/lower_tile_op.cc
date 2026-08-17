@@ -23,6 +23,7 @@
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
 #include "../op/utils.h"
+#include "../span_utils.h"
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
@@ -85,7 +86,7 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   }
   return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
                 buffer->name, buffer->data_alignment, buffer->offset_factor,
-                buffer->buffer_type);
+                buffer->buffer_type, {}, buffer->span);
 }
 
 // The function `makeBufferWithLayout` creates a new Buffer object based on the
@@ -949,13 +950,16 @@ private:
       auto new_indices = layout_map_[buffer]->Forward(load->indices);
       auto new_buffer = buffer_remap_[load->buffer];
       layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
-      return BufferLoad(new_buffer, new_indices);
+      return BufferLoad(new_buffer, new_indices, /*predicate=*/std::nullopt,
+                        load->span);
     } else if (var_remap_.count(buffer->data)) {
-      auto new_buffer = Buffer(
-          var_remap_[buffer->data], buffer->dtype, buffer->shape,
-          buffer->strides, buffer->elem_offset, buffer->name,
-          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
-      return BufferLoad(new_buffer, load->indices);
+      auto new_buffer =
+          Buffer(var_remap_[buffer->data], buffer->dtype, buffer->shape,
+                 buffer->strides, buffer->elem_offset, buffer->name,
+                 buffer->data_alignment, buffer->offset_factor,
+                 buffer->buffer_type, {}, buffer->span);
+      return BufferLoad(new_buffer, load->indices, /*predicate=*/std::nullopt,
+                        load->span);
     }
     return load;
   }
@@ -967,13 +971,16 @@ private:
       auto new_indices = layout_map_[buffer]->Forward(store->indices);
       auto new_buffer = buffer_remap_[store->buffer];
       layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
-      return BufferStore(new_buffer, store->value, new_indices);
+      return BufferStore(new_buffer, store->value, new_indices,
+                         /*predicate=*/std::nullopt, store->span);
     } else if (var_remap_.count(buffer->data)) {
-      auto new_buffer = Buffer(
-          var_remap_[buffer->data], buffer->dtype, buffer->shape,
-          buffer->strides, buffer->elem_offset, buffer->name,
-          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
-      return BufferStore(new_buffer, store->value, store->indices);
+      auto new_buffer =
+          Buffer(var_remap_[buffer->data], buffer->dtype, buffer->shape,
+                 buffer->strides, buffer->elem_offset, buffer->name,
+                 buffer->data_alignment, buffer->offset_factor,
+                 buffer->buffer_type, {}, buffer->span);
+      return BufferStore(new_buffer, store->value, store->indices,
+                         /*predicate=*/std::nullopt, store->span);
     }
     return store;
   }
@@ -1053,7 +1060,8 @@ private:
       }
       Buffer new_buf(new_var, buffer->dtype, buffer->shape, buffer->strides,
                      buffer->elem_offset, buffer->name, buffer->data_alignment,
-                     buffer->offset_factor, buffer->buffer_type);
+                     buffer->offset_factor, buffer->buffer_type, {},
+                     buffer->span);
       buffer_remap_.Set(buffer, new_buf);
       auto node = Downcast<AllocBuffer>(IRMutatorWithAnalyzer::VisitStmt_(op));
       node.CopyOnWrite()->buffer = new_buf;
@@ -1141,6 +1149,9 @@ private:
     lower_args.require_smem_alignment = require_smem_alignment_callback;
 
     auto lowered = tile_op->Lower(lower_args, analyzer_);
+    // Let the whole lowered subtree inherit the source location of the tile
+    // op statement, keeping any finer-grained spans already present.
+    StampSubtreeSpans(lowered, op->span);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
@@ -1422,6 +1433,8 @@ private:
         lowered = inject_result.stmt;
       }
     }
+    // Stamp after PTX async-copy injection so injected nodes are covered too.
+    StampSubtreeSpans(lowered, op->span);
     return lowered;
   }
 

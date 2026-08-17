@@ -83,7 +83,7 @@ private:
       IterVar iter_var(Range::FromMinExtent(op->min, op->extent), op->loop_var,
                        IterVarType::kThreadIndex, tag);
       return AttrStmt(std::move(iter_var), tirx::attr::thread_extent,
-                      op->extent, std::move(body));
+                      op->extent, std::move(body), op->span);
     }
     // No SIMT: grid dims run as plain serial loops; thread dims are ignored
     // (a unit loop keeps the loop variable defined and pinned to 0).
@@ -92,7 +92,8 @@ private:
                           : op->extent;
     return For(op->loop_var, op->min, std::move(extent), ForKind::kSerial,
                std::move(body),
-               /*thread_binding=*/std::nullopt, op->annotations, op->step);
+               /*thread_binding=*/std::nullopt, op->annotations, op->step,
+               op->span);
   }
 
   bool lower_thread_binding_;
