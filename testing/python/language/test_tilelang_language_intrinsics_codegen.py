@@ -1,3 +1,6 @@
+import pytest
+import torch
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -24,6 +27,29 @@ def test_language_ldg_codegen():
     # We look for the intrinsic call with address-of argument
     assert "__ldg(" in src, "Expected __ldg call in generated CUDA source"
     assert "__ldg(&" in src or "__ldg(&(" in src, "Expected address-of form in __ldg call"
+
+
+def run_ldg_roundtrip(dtype, N=128):
+    @T.prim_func
+    def main(
+        x: T.Tensor((N,), dtype),
+        y: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(N, threads=32) as pid:
+            y[pid] = T.__ldg(x[pid])
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    # Match the address-of form emitted by CUDA codegen.
+    assert "__ldg(&(" in kernel.get_kernel_source()
+
+    x = torch.randn(N, device="cuda").to(dtype.as_torch())
+    assert torch.equal(kernel(x), x)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+def test_language_ldg_roundtrip(dtype):
+    run_ldg_roundtrip(dtype)
 
 
 if __name__ == "__main__":

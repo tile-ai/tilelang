@@ -550,9 +550,8 @@ TVM_DLL const Op &warp_reduce_bitor();
  * \brief tilelang intrinsic for CUDA/HIP read-only cache load (__ldg).
  *
  *  This op allows users to explicitly request a non-coherent cached load
- *  from global memory by emitting `__ldg(&ptr[idx])` for 32-bit
- *  element types on supported architectures. It provides a direct way to
- *  leverage the read-only data cache for performance-sensitive loads when
+ *  from global memory by emitting `__ldg(&ptr[idx])`. It provides a direct way
+ *  to leverage the read-only data cache for performance-sensitive loads when
  *  the compiler cannot infer `const __restrict__` automatically.
  *
  *  Usage from TVMScript:
