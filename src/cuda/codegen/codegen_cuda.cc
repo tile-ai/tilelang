@@ -1096,6 +1096,15 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   LOG(FATAL) << "Cannot convert type " << t << " to CUDA type";
 }
 
+void CodeGenTileLangCUDA::PrintVecConstructor(DataType t,
+                                              std::ostream &os) { // NOLINT(*)
+  if ((t.is_int() || t.is_uint()) && t.bits() == 4 && t.lanes() == 2) {
+    os << (t.is_uint() ? "tl_pack_uint4x2" : "tl_pack_int4x2");
+    return;
+  }
+  CodeGenC::PrintVecConstructor(t, os);
+}
+
 void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
                                            PrimExpr lhs, PrimExpr rhs,
                                            std::ostream &os) { // NOLINT(*)
@@ -5211,8 +5220,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
 
   // ICHECK_LE(lanes, 8) << "Translate Ramp Node " << GetRef<Ramp>(op)
   //                    << "error: " << lanes << " exceeds max ramp lanes 8.";
-  os << "(make_";
-  PrintType(op->dtype, os);
+  bool is_packed_int4x2 = (op->dtype.is_int() || op->dtype.is_uint()) &&
+                          op->dtype.bits() == 4 && op->dtype.lanes() == 2;
+  os << "(";
+  if (is_packed_int4x2) {
+    PrintVecConstructor(op->dtype, os);
+  } else {
+    os << "make_";
+    PrintType(op->dtype, os);
+  }
   os << "(";
   for (int i = 0; i < lanes; i++) {
     os << "(" << PrintExpr(op->base) << ")"
@@ -5580,6 +5596,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4 &&
+      lanes == 2) {
+    std::string value = PrintExpr(op->value);
+    PrintVecConstructor(op->dtype, os);
+    os << '(' << value << ", " << value << ')';
+    return;
+  }
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
     const int64_t *p = as_const_int(op->value);
     if (p) {
@@ -5980,6 +6003,15 @@ void CodeGenTileLangCUDA::PrintVecElemLoadExpr(DataType t, int i,
                                                const std::string &value,
                                                std::ostream &os) {
   ICHECK_GT(t.lanes(), 1);
+  if ((t.is_int() || t.is_uint()) && t.bits() == 4 && t.lanes() == 2) {
+    if (i == 0) {
+      PrintVecConstructor(t, os);
+      os << '(';
+    }
+    os << value;
+    os << (i == t.lanes() - 1 ? ")" : ",");
+    return;
+  }
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (!(t.lanes() == 2 || t.lanes() == 3)) {
       if (i != 0) {
