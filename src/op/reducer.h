@@ -70,8 +70,10 @@ inline bool IsReducerV2Buffer(const Buffer &buffer) {
 
 /// T.reducer_init(acc, init=None): open the epoch. The physical partials
 /// always start from the combine identity; the optional `init` value is a
-/// logical starting value, combined exactly once per logical output at
-/// finalize time (so physical replication can never multiply it).
+/// logical starting value, evaluated (captured) at the init site and
+/// combined exactly once per logical output at finalize time (so physical
+/// replication can never multiply it, and a loop-variant init expression
+/// keeps the value the epoch opened with).
 /// args[0] = tl.region(acc, "w"), optional args[1] = init value.
 class ReducerInitOpNode : public TileOperatorNode {
 public:

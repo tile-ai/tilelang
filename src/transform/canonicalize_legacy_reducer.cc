@@ -9,6 +9,13 @@
  *   T.finalize_reducer(acc)           # in-place
  *   ... reads of acc ...
  *
+ * The same legacy syntax is also accepted on a v2 allocation
+ * (T.alloc_reducer without `replication`, the pre-v2 default): a
+ * `local.reducer` buffer that is never touched by any first-class v2 op
+ * is canonicalized under the same whitelist, keeping code written against
+ * the old default compiling. Mixing v2 ops and legacy syntax on one buffer
+ * is not canonicalized and fails in VerifyReducerEpoch.
+ *
  * Canonical v2 form produced by this pass:
  *   local.reducer allocation + reducer_info_v2 annotation
  *   tl.reducer_init(acc)
@@ -43,6 +50,7 @@
 
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "../op/builtin.h"
 #include "../op/fill.h"
@@ -91,10 +99,44 @@ std::optional<double> TryConstValue(PrimExpr e) {
   return std::nullopt;
 }
 
+/*! \brief Collect the buffer vars referenced by any first-class v2 reducer
+ *  op. A v2-allocated reducer outside this set only ever appears in legacy
+ *  syntax and is eligible for canonicalization. */
+class ReducerV2OpUseCollector : public StmtExprVisitor {
+public:
+  static std::unordered_set<const VarNode *> Collect(const Stmt &body) {
+    ReducerV2OpUseCollector collector;
+    collector.VisitStmt(body);
+    return std::move(collector.used_);
+  }
+
+private:
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(ReducerInitOp::Get()) ||
+        op->op.same_as(FinalizeReducerV2Op::Get())) {
+      if (auto call = op->args[0].as<CallNode>()) {
+        if (call->op.same_as(region())) {
+          if (auto load = call->args[0].as<BufferLoadNode>()) {
+            used_.insert(load->buffer->data.get());
+          }
+        }
+      }
+    } else if (op->op.same_as(reducer_update())) {
+      if (auto load = op->args[0].as<BufferLoadNode>()) {
+        used_.insert(load->buffer->data.get());
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  std::unordered_set<const VarNode *> used_;
+};
+
 class LegacyReducerCanonicalizer : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
     LegacyReducerCanonicalizer canonicalizer;
+    canonicalizer.v2_op_used_ = ReducerV2OpUseCollector::Collect(f->body);
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = canonicalizer.VisitStmt(f->body);
     return f;
@@ -110,6 +152,7 @@ private:
     ReducerV2OpType op;
     Optional<PrimExpr> seed;
     Phase phase{Phase::kAllocated};
+    bool was_v2{false}; // v2 allocation used with legacy syntax only
   };
 
   // ---- allocation & annotation rewrite ------------------------------------
@@ -123,20 +166,45 @@ private:
                            ParseReducerV2OpType(info.Get("op").value()));
       }
     }
-    for (const auto &buffer : op->alloc_buffers) {
-      auto it = legacy_op_.find(buffer->data.get());
-      if (it == legacy_op_.end()) {
-        continue;
+    // A v2 allocation never touched by a first-class v2 op carries the old
+    // default of pre-v2 T.alloc_reducer: canonicalize its legacy syntax too.
+    if (auto anno = op->annotations.Get(attr::kReducerInfoV2)) {
+      auto map = anno.value().as<Map<Var, Map<String, Any>>>();
+      ICHECK(map) << "malformed reducer_info_v2 annotation";
+      for (const auto &[var, info] : map.value()) {
+        if (v2_op_used_.count(var.get())) {
+          continue;
+        }
+        auto op_str = info.Get("op");
+        ICHECK(op_str) << "reducer_info_v2 for `" << var
+                       << "` is missing the combine op";
+        legacy_v2_op_.emplace(
+            var.get(), ParseReducerV2OpType(op_str.value().cast<String>()));
       }
+    }
+    for (const auto &buffer : op->alloc_buffers) {
       LegacyReducer entry;
+      auto it = legacy_op_.find(buffer->data.get());
+      if (it != legacy_op_.end()) {
+        // v1 allocation: retype the handle into the local.reducer scope.
+        entry.op = it->second;
+        Var acc_var(buffer->data->name_hint,
+                    PointerType(PrimType(buffer->dtype), "local.reducer"));
+        entry.acc =
+            Buffer(acc_var, buffer->dtype, buffer->shape, buffer->strides,
+                   buffer->elem_offset, buffer->name, buffer->data_alignment,
+                   buffer->offset_factor, buffer->buffer_type);
+      } else {
+        auto v2_it = legacy_v2_op_.find(buffer->data.get());
+        if (v2_it == legacy_v2_op_.end()) {
+          continue;
+        }
+        // v2 allocation used with legacy syntax only: keep the buffer.
+        entry.op = v2_it->second;
+        entry.acc = buffer;
+        entry.was_v2 = true;
+      }
       entry.old_buffer = buffer;
-      entry.op = it->second;
-      Var acc_var(buffer->data->name_hint,
-                  PointerType(PrimType(buffer->dtype), "local.reducer"));
-      entry.acc =
-          Buffer(acc_var, buffer->dtype, buffer->shape, buffer->strides,
-                 buffer->elem_offset, buffer->name, buffer->data_alignment,
-                 buffer->offset_factor, buffer->buffer_type);
       Var dst_var(buffer->data->name_hint + "_result",
                   PointerType(PrimType(buffer->dtype), "local.fragment"));
       entry.dst = Buffer(dst_var, buffer->dtype, buffer->shape, buffer->strides,
@@ -169,6 +237,12 @@ private:
           << "` has no T.finalize_reducer; cannot canonicalize.";
       new_allocs.push_back(entry.acc);
       new_allocs.push_back(entry.dst);
+      changed = true;
+      if (entry.was_v2) {
+        // The allocation and its reducer_info_v2 entry are already correct;
+        // only the finalize destination is new.
+        continue;
+      }
       Map<String, Any> info;
       switch (entry.op) {
       case ReducerV2OpType::kSum:
@@ -184,7 +258,6 @@ private:
         LOG(FATAL) << "legacy (v1) reducers only support sum/max/min";
       }
       v2_info.Set(entry.acc->data, info);
-      changed = true;
     }
     if (changed) {
       p_result->alloc_buffers = new_allocs;
@@ -373,6 +446,8 @@ private:
   }
 
   std::unordered_map<const VarNode *, ReducerV2OpType> legacy_op_;
+  std::unordered_map<const VarNode *, ReducerV2OpType> legacy_v2_op_;
+  std::unordered_set<const VarNode *> v2_op_used_;
   std::unordered_map<const VarNode *, LegacyReducer> reducers_;
 };
 

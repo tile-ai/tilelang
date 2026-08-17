@@ -4,9 +4,15 @@
  *
  * Enforced rules (first version):
  *   - every `local.reducer` allocation has exactly one reducer_init,
- *     zero or more reducer_update, and exactly one finalize_reducer;
- *   - init and finalize execute exactly once: they may not appear inside
- *     any loop or conditional;
+ *     zero or more reducer_update, and exactly one finalize_reducer
+ *     (statically: one epoch site per allocation);
+ *   - init and finalize share the exact same control-flow scope (the same
+ *     stack of enclosing serial loops and conditional branches), so every
+ *     dynamic execution of the init is closed by exactly one finalize in
+ *     the same iteration. Neither may appear inside a `T.Parallel` loop.
+ *     An epoch nested in a serial loop reopens once per iteration; the
+ *     enclosing control flow must be thread-uniform, as with any other
+ *     collective tile op;
  *   - updates appear only between init and finalize, and only inside a
  *     `T.Parallel` loop;
  *   - the reducer is opaque outside the three first-class ops: ordinary
@@ -28,6 +34,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "../op/builtin.h"
 #include "../op/reducer.h"
@@ -93,25 +100,45 @@ private:
 
   // ---- control-flow tracking ---------------------------------------------
 
+  // One frame per enclosing loop or conditional branch. `branch`
+  // distinguishes the then (0) and else (1) arms of a conditional: an epoch
+  // opened in one arm may not close in the other.
+  struct ContextFrame {
+    const Object *node;
+    int branch;
+    bool operator==(const ContextFrame &other) const {
+      return node == other.node && branch == other.branch;
+    }
+  };
+
   void VisitStmt_(const ForNode *op) final {
     bool is_parallel = op->kind == ForKind::kParallel;
     parallel_depth_ += is_parallel;
-    loop_depth_ += 1;
-    StmtExprVisitor::VisitStmt_(op);
-    loop_depth_ -= 1;
+    VisitExpr(op->min);
+    VisitExpr(op->extent);
+    ctx_stack_.push_back({op, 0});
+    VisitStmt(op->body);
+    ctx_stack_.pop_back();
     parallel_depth_ -= is_parallel;
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
-    if_depth_ += 1;
-    StmtExprVisitor::VisitStmt_(op);
-    if_depth_ -= 1;
+    VisitExpr(op->condition);
+    ctx_stack_.push_back({op, 0});
+    VisitStmt(op->then_case);
+    ctx_stack_.pop_back();
+    if (op->else_case) {
+      ctx_stack_.push_back({op, 1});
+      VisitStmt(op->else_case.value());
+      ctx_stack_.pop_back();
+    }
   }
 
   void VisitStmt_(const WhileNode *op) final {
-    loop_depth_ += 1;
-    StmtExprVisitor::VisitStmt_(op);
-    loop_depth_ -= 1;
+    VisitExpr(op->condition);
+    ctx_stack_.push_back({op, 0});
+    VisitStmt(op->body);
+    ctx_stack_.pop_back();
   }
 
   // ---- reducer op events / opaque-access enforcement ---------------------
@@ -120,7 +147,11 @@ private:
     if (op->op.same_as(ReducerInitOp::Get())) {
       Var var = RegionArgBufferVar(op->args[0], "reducer_init");
       RequireReducer(var, "reducer_init");
-      RequireStraightLine(var, "T.reducer_init");
+      if (parallel_depth_ > 0) {
+        LOG(FATAL) << "T.reducer_init on reducer `" << var
+                   << "` may not appear inside a T.Parallel loop.";
+      }
+      epoch_ctx_[var.get()] = ctx_stack_;
       if (op->args.size() >= 2) {
         const Buffer &buffer = var_to_buffer_.at(var.get());
         ICHECK(op->args[1].dtype() == buffer->dtype)
@@ -177,7 +208,14 @@ private:
       Var var = RegionArgBufferVar(op->args[0], "finalize_reducer");
       Var dst_var = RegionArgBufferVar(op->args[1], "finalize_reducer");
       RequireReducer(var, "finalize_reducer");
-      RequireStraightLine(var, "T.finalize_reducer");
+      auto ctx_it = epoch_ctx_.find(var.get());
+      if (ctx_it != epoch_ctx_.end() && !(ctx_it->second == ctx_stack_)) {
+        LOG(FATAL) << "T.finalize_reducer on reducer `" << var
+                   << "` is not in the same loop/branch scope as its "
+                      "T.reducer_init: a reduction epoch must open and close "
+                      "within the same iteration of every enclosing loop and "
+                      "the same conditional branch.";
+      }
       if (info_.count(dst_var.get())) {
         LOG(FATAL) << "T.finalize_reducer destination `" << dst_var
                    << "` must be an ordinary fragment, not a reducer.";
@@ -249,20 +287,12 @@ private:
     }
   }
 
-  void RequireStraightLine(const Var &var, const char *who) const {
-    if (loop_depth_ > 0 || if_depth_ > 0) {
-      LOG(FATAL) << who << " on reducer `" << var
-                 << "` must execute exactly once and may not appear inside "
-                    "a loop or conditional.";
-    }
-  }
-
   std::unordered_map<const VarNode *, Map<String, Any>> info_;
   std::unordered_map<const VarNode *, Buffer> var_to_buffer_;
   std::unordered_map<Var, EpochState, ObjectPtrHash, ObjectPtrEqual> state_;
+  std::unordered_map<const VarNode *, std::vector<ContextFrame>> epoch_ctx_;
+  std::vector<ContextFrame> ctx_stack_;
   int parallel_depth_ = 0;
-  int loop_depth_ = 0;
-  int if_depth_ = 0;
 };
 
 } // namespace

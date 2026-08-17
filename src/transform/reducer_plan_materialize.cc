@@ -854,6 +854,12 @@ private:
     Fragment layout;
     ReducerV2OpType op;
     Optional<PrimExpr> seed;
+    // Per-thread register capturing the seed expression at the init site.
+    // The epoch may reopen once per iteration of an enclosing serial loop,
+    // and the seed expression (e.g. a running maximum) may be overwritten
+    // between init and finalize — the finalize-time combine must read the
+    // value the epoch opened with.
+    Buffer seed_buffer;
     bool narrow{false};
     std::vector<std::pair<int, int>> steps;
     // Packed accumulation: updates RMW `packed_buffer[slot, lane_var % 2]`;
@@ -911,6 +917,10 @@ private:
           new_allocs.push_back(it->second.packed_buffer);
           layout_map.Set(it->second.packed_buffer, it->second.packed_layout);
         }
+        if (it->second.seed_buffer.defined()) {
+          // Plain per-thread register; no fragment layout to publish.
+          new_allocs.push_back(it->second.seed_buffer);
+        }
         changed = true;
       } else {
         new_allocs.push_back(buffer);
@@ -964,18 +974,33 @@ private:
     const auto *var = old_buffer->data.get();
     ICHECK(reducer_info_.count(var))
         << "reducer_init on unknown reducer `" << old_buffer << "`";
-    ICHECK(!plans_.count(var))
-        << "double reducer_init on `" << old_buffer
-        << "` (should have been rejected by VerifyReducerEpoch)";
+    if (plans_.count(var)) {
+      // VerifyReducerEpoch guarantees one epoch site per allocation in the
+      // code the user wrote, but software pipelining / unrolling may have
+      // multi-versioned the enclosing loop since, duplicating the site.
+      // Every copy shares the allocation's plan; each emits its own
+      // capture+fill.
+      return EmitInitStmts(plans_.at(var), call);
+    }
 
     Plan plan;
     plan.old_buffer = old_buffer;
     const auto &info = reducer_info_.at(var);
     plan.op = ParseReducerV2OpType(info.Get("op").value().cast<String>());
     if (call->args.size() >= 2) {
-      // Logical starting value from T.reducer_init(acc, init): combined
-      // exactly once per logical output at finalize time.
-      plan.seed = call->args[1];
+      // Logical starting value from T.reducer_init(acc, init): captured
+      // into a per-thread register here at the init site, and combined
+      // exactly once per logical output at finalize time. Capturing (rather
+      // than re-evaluating at finalize) keeps a loop-variant seed correct
+      // when the epoch sits inside a serial loop.
+      Var seed_var(old_buffer->data->name_hint + "_seed",
+                   PointerType(PrimType(old_buffer->dtype), "local"));
+      plan.seed_buffer =
+          Buffer(seed_var, old_buffer->dtype, {IntImm(DataType::Int(32), 1)},
+                 /*strides=*/{}, old_buffer->elem_offset,
+                 old_buffer->name + "_seed", old_buffer->data_alignment,
+                 old_buffer->offset_factor, old_buffer->buffer_type);
+      plan.seed = BufferLoad(plan.seed_buffer, {make_zero(DataType::Int(32))});
     }
 
     auto narrow_it = narrow_decisions_.find(var);
@@ -1035,17 +1060,32 @@ private:
                  old_buffer->offset_factor, old_buffer->buffer_type);
     }
     plans_.emplace(var, plan);
-    const Plan &stored = plans_.at(var);
+    return EmitInitStmts(plans_.at(var), call);
+  }
 
+  /*! \brief The statements a reducer_init site lowers to: the identity fill
+   *  of the physical partials, preceded by the seed capture when the epoch
+   *  declares a starting value. */
+  Stmt EmitInitStmts(const Plan &stored, const CallNode *call) {
     // Every participant starts from the combine identity; the seed is
-    // combined exactly once at finalize. Packed plans accumulate into the
-    // lane buffer (`new_buffer` is fully written by the finalize fold).
+    // captured here and combined exactly once at finalize. Packed plans
+    // accumulate into the lane buffer (`new_buffer` is fully written by the
+    // finalize fold).
     const Buffer &init_target =
         stored.packed ? stored.packed_buffer : stored.new_buffer;
     PrimExpr identity = ReducerV2Identity(stored.op, init_target->dtype);
-    return Evaluate(
-        Call(DataType::Handle(), Fill::Get(),
-             {MakeFullRegion(init_target, kAccessWrite), identity}));
+    Stmt fill =
+        Evaluate(Call(DataType::Handle(), Fill::Get(),
+                      {MakeFullRegion(init_target, kAccessWrite), identity}));
+    if (stored.seed_buffer.defined()) {
+      ICHECK_GE(call->args.size(), 2)
+          << "reducer_init on `" << stored.old_buffer
+          << "`: duplicated epoch sites disagree about the seed";
+      Stmt capture = BufferStore(stored.seed_buffer, VisitExpr(call->args[1]),
+                                 {make_zero(DataType::Int(32))});
+      return SeqStmt({capture, fill});
+    }
+    return fill;
   }
 
   Stmt MaterializeUpdate(const CallNode *call) {
