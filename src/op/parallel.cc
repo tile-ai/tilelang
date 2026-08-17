@@ -5,6 +5,7 @@
 
 #include "parallel.h"
 #include "support/check.h"
+#include <tvm/arith/int_set.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -16,6 +17,7 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../transform/common/storage_size.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "arith/int_operator.h"
@@ -72,15 +74,372 @@ private:
   Map<Buffer, Layout> layout_map_;
 };
 
+struct PackedSubByteStoreAccess {
+  Buffer buffer;
+  Array<PrimExpr> indices;
+  Array<IterVar> iter_vars;
+  std::vector<size_t> parallel_positions;
+};
+
+enum class PackedSubByteStoreKind { kPhysical, kFragment };
+
+bool RequiresPackedPair(const Buffer &buffer,
+                        const Array<Buffer> &pair_fragment_buffers) {
+  return std::any_of(pair_fragment_buffers.begin(), pair_fragment_buffers.end(),
+                     [&](const Buffer &required) {
+                       return required->data.same_as(buffer->data);
+                     });
+}
+
+// Collect every packed four-bit store together with its complete lexical loop
+// domain. Serial iterators participate in the address relation even though
+// only parallel iterators participate in CUDA thread ownership.
+class PackedSubByteStoreCollector : public StmtExprVisitor {
+public:
+  static std::vector<PackedSubByteStoreAccess>
+  Collect(const Stmt &stmt, PackedSubByteStoreKind kind,
+          const Array<Buffer> &pair_fragment_buffers = {}) {
+    PackedSubByteStoreCollector collector(kind, pair_fragment_buffers);
+    collector(stmt);
+    return collector.stores_;
+  }
+
+private:
+  explicit PackedSubByteStoreCollector(
+      PackedSubByteStoreKind kind, const Array<Buffer> &pair_fragment_buffers)
+      : kind_(kind), pair_fragment_buffers_(pair_fragment_buffers) {}
+
+  void VisitStmt_(const ForNode *op) final {
+    size_t position = iter_vars_.size();
+    IterVarType iter_type = op->kind == ForKind::kParallel
+                                ? IterVarType::kDataPar
+                                : IterVarType::kOrdered;
+    iter_vars_.push_back(IterVar(Range::FromMinExtent(op->min, op->extent),
+                                 op->loop_var, iter_type));
+    if (op->kind == ForKind::kParallel) {
+      parallel_positions_.push_back(position);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+    if (op->kind == ForKind::kParallel) {
+      parallel_positions_.pop_back();
+    }
+    iter_vars_.pop_back();
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    bool scope_matches =
+        kind_ == PackedSubByteStoreKind::kPhysical
+            ? IsGlobalBuffer(op->buffer) || IsSharedBuffer(op->buffer)
+            : IsFragmentBuffer(op->buffer);
+    bool needs_pair =
+        kind_ == PackedSubByteStoreKind::kPhysical
+            ? op->buffer->dtype.lanes() == 1 &&
+                  IsPacked4BitStorage(op->buffer->dtype)
+            : RequiresPackedPair(op->buffer, pair_fragment_buffers_);
+    if (needs_pair && !iter_vars_.empty() && scope_matches) {
+      stores_.push_back({op->buffer, op->indices,
+                         Array<IterVar>(iter_vars_.begin(), iter_vars_.end()),
+                         parallel_positions_});
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  PackedSubByteStoreKind kind_;
+  Array<Buffer> pair_fragment_buffers_;
+  std::vector<IterVar> iter_vars_;
+  std::vector<size_t> parallel_positions_;
+  std::vector<PackedSubByteStoreAccess> stores_;
+};
+
+Optional<PrimExpr>
+GetPackedStoreElementOffset(const PackedSubByteStoreAccess &access) {
+  Array<PrimExpr> physical = access.buffer.OffsetOf(access.indices);
+  Buffer flattened = access.buffer.GetFlattenedBuffer();
+  if (physical.empty() || physical.size() != flattened->shape.size()) {
+    return Optional<PrimExpr>();
+  }
+
+  PrimExpr linear = physical[0];
+  for (size_t i = 1; i < physical.size(); ++i) {
+    linear = linear * flattened->shape[i] + physical[i];
+  }
+  return linear;
+}
+
+Optional<PrimExpr>
+GetPackedStoreByteOffset(const PackedSubByteStoreAccess &access) {
+  Optional<PrimExpr> maybe_elem_offset = GetPackedStoreElementOffset(access);
+  if (!maybe_elem_offset.defined()) {
+    return Optional<PrimExpr>();
+  }
+  PrimExpr elem_offset = maybe_elem_offset.value();
+  return floordiv(elem_offset, make_const(elem_offset.dtype(), 2));
+}
+
+struct ProvenPackedStoreOwner {
+  Var storage;
+  PrimExpr owner;
+  arith::IntSet byte_domain;
+};
+
+arith::IntSet GetPackedStoreByteDomain(const PackedSubByteStoreAccess &access,
+                                       const PrimExpr &byte_offset) {
+  Map<IterVar, arith::IntSet> iter_domains;
+  for (const IterVar &iter_var : access.iter_vars) {
+    iter_domains.Set(iter_var, arith::IntSet::FromRange(iter_var->dom));
+  }
+  return arith::EvalSet(byte_offset, iter_domains);
+}
+
+bool PackedStoreDomainsAreProvablyDisjoint(const arith::IntSet &lhs,
+                                           const arith::IntSet &rhs,
+                                           arith::Analyzer *analyzer) {
+  if (!lhs.HasLowerBound() || !lhs.HasUpperBound() || !rhs.HasLowerBound() ||
+      !rhs.HasUpperBound()) {
+    return false;
+  }
+  return analyzer->CanProve(lhs.max() < rhs.min()) ||
+         analyzer->CanProve(rhs.max() < lhs.min());
+}
+
+bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
+                                      const Fragment &candidate,
+                                      arith::Analyzer *analyzer,
+                                      bool canonical_replica_guard_guaranteed,
+                                      bool throw_on_error = false) {
+  auto stores = PackedSubByteStoreCollector::Collect(
+      stmt, PackedSubByteStoreKind::kPhysical);
+  Var byte_var("__tl_packed_byte");
+  std::vector<ProvenPackedStoreOwner> proven_store_owners;
+  for (const auto &access : stores) {
+    if (access.parallel_positions.size() != candidate->InputDim()) {
+      if (throw_on_error) {
+        throw LayoutConflictException(
+            "Cannot prove packed four-bit byte ownership: candidate thread "
+            "layout does not match the parallel loop domain.");
+      }
+      return false;
+    }
+
+    Optional<PrimExpr> maybe_byte_offset = GetPackedStoreByteOffset(access);
+    if (!maybe_byte_offset.defined()) {
+      if (throw_on_error) {
+        throw LayoutConflictException(
+            "Cannot prove packed four-bit byte ownership: buffer indices "
+            "cannot be flattened to one physical storage offset.");
+      }
+      return false;
+    }
+
+    try {
+      PrimExpr byte_offset = analyzer->Simplify(maybe_byte_offset.value());
+      arith::IntSet byte_domain = GetPackedStoreByteDomain(access, byte_offset);
+      PrimExpr occurrence = MakeFlattenedExpression(
+          DivideUnusedIterators({byte_offset}, access.iter_vars, analyzer));
+      Layout inverse =
+          Layout(access.iter_vars, {byte_offset, occurrence})->Inverse();
+
+      Var occurrence_var("__tl_packed_occurrence");
+      auto inverse_shape = inverse->InputShape();
+      ICHECK_EQ(inverse_shape.size(), 2U);
+      Array<PrimExpr> recovered = inverse->Forward({byte_var, occurrence_var});
+
+      Array<PrimExpr> parallel_indices;
+      for (size_t position : access.parallel_positions) {
+        parallel_indices.push_back(recovered[position]);
+      }
+
+      bool is_replicated =
+          !analyzer->CanProveEqual(candidate->ReplicateExtent(), Integer(1));
+      if (is_replicated && !canonical_replica_guard_guaranteed) {
+        if (throw_on_error) {
+          std::ostringstream oss;
+          oss << "Cannot safely lower a replicated packed four-bit physical "
+                 "store without a proven single-replica guard. Buffer="
+              << access.buffer->name;
+          throw LayoutConflictException(oss.str());
+        }
+        return false;
+      }
+      Optional<PrimExpr> replica =
+          is_replicated ? Optional<PrimExpr>(Integer(0)) : Optional<PrimExpr>();
+
+      PrimExpr owner = analyzer->Simplify(
+          candidate->ForwardThread(parallel_indices, replica));
+      const int64_t *occurrence_extent =
+          as_const_int(analyzer->Simplify(inverse_shape[1]));
+      if (occurrence_extent == nullptr || *occurrence_extent <= 0) {
+        if (throw_on_error) {
+          std::ostringstream oss;
+          oss << "Cannot prove packed four-bit byte ownership: the byte "
+                 "occurrence domain is not statically bounded. Buffer="
+              << access.buffer->name;
+          throw LayoutConflictException(oss.str());
+        }
+        return false;
+      }
+      arith::Analyzer occurrence_analyzer;
+      occurrence_analyzer.Bind(
+          byte_var, Range::FromMinExtent(Integer(0), inverse_shape[0]));
+      occurrence_analyzer.Bind(
+          occurrence_var,
+          Range::FromMinExtent(Integer(0), Integer(*occurrence_extent)));
+
+      Map<Var, PrimExpr> recovered_iter_vars;
+      for (size_t i = 0; i < access.iter_vars.size(); ++i) {
+        recovered_iter_vars.Set(access.iter_vars[i]->var, recovered[i]);
+      }
+      PrimExpr roundtrip_byte = occurrence_analyzer.Simplify(
+          Substitute(byte_offset, recovered_iter_vars));
+      PrimExpr roundtrip_occurrence = occurrence_analyzer.Simplify(
+          Substitute(occurrence, recovered_iter_vars));
+      if (!occurrence_analyzer.CanProveEqual(roundtrip_byte, byte_var) ||
+          !occurrence_analyzer.CanProveEqual(roundtrip_occurrence,
+                                             occurrence_var)) {
+        if (throw_on_error) {
+          std::ostringstream oss;
+          oss << "Cannot prove packed four-bit byte ownership: the recovered "
+                 "ownership inverse does not round-trip the physical byte "
+                 "mapping. Buffer="
+              << access.buffer->name;
+          throw LayoutConflictException(oss.str());
+        }
+        return false;
+      }
+
+      owner = occurrence_analyzer.Simplify(owner);
+      bool occurrence_changes_owner = UsesVar(owner, [&](const VarNode *var) {
+        return var == occurrence_var.get();
+      });
+      if (!occurrence_changes_owner) {
+        bool agrees_with_other_store_sites = true;
+        for (const auto &previous : proven_store_owners) {
+          if (previous.storage.same_as(access.buffer->data) &&
+              !PackedStoreDomainsAreProvablyDisjoint(previous.byte_domain,
+                                                     byte_domain, analyzer) &&
+              !analyzer->CanProveEqual(previous.owner, owner)) {
+            agrees_with_other_store_sites = false;
+            break;
+          }
+        }
+        if (agrees_with_other_store_sites) {
+          proven_store_owners.push_back(
+              {access.buffer->data, owner, byte_domain});
+          continue;
+        }
+      }
+    } catch (const NormalizeIterException &) {
+      // An unprovable inverse is unsafe for a non-atomic packed store.
+    }
+
+    if (throw_on_error) {
+      std::ostringstream oss;
+      oss << "Cannot safely lower a packed four-bit store: logical elements "
+             "that share a writable byte may be assigned to different CUDA "
+             "threads. Use a byte-owned layout or rewrite the access pattern. "
+             "Buffer="
+          << access.buffer->name << ", candidate=" << candidate->DebugOutput();
+      throw LayoutConflictException(oss.str());
+    }
+    return false;
+  }
+  return true;
+}
+
+// Fragment stores do not update a shared physical byte, so replicas may write
+// their own register values independently. For bijective fragment accesses,
+// still keep the two logical nibbles of each future byte on the same thread;
+// this lets a later fragment-to-global/shared copy inherit a byte-safe layout.
+bool ProvePackedFragmentPairLayout(const Stmt &stmt, const Fragment &candidate,
+                                   arith::Analyzer *analyzer,
+                                   const Array<Buffer> &pair_fragment_buffers,
+                                   bool throw_on_error = false) {
+  auto stores = PackedSubByteStoreCollector::Collect(
+      stmt, PackedSubByteStoreKind::kFragment, pair_fragment_buffers);
+  Var byte_var("__tl_packed_fragment_byte");
+  Var replica_var("__tl_packed_fragment_replica");
+  for (const auto &access : stores) {
+    if (access.parallel_positions.size() != candidate->InputDim()) {
+      if (throw_on_error) {
+        throw LayoutConflictException(
+            "Cannot propagate packed fragment byte ownership: candidate "
+            "thread layout does not match the parallel loop domain.");
+      }
+      return false;
+    }
+
+    Optional<PrimExpr> maybe_elem_offset = GetPackedStoreElementOffset(access);
+    if (!maybe_elem_offset.defined()) {
+      if (throw_on_error) {
+        throw LayoutConflictException(
+            "Cannot propagate packed fragment byte ownership: buffer indices "
+            "cannot be flattened to one physical storage offset.");
+      }
+      return false;
+    }
+
+    try {
+      PrimExpr elem_offset = analyzer->Simplify(maybe_elem_offset.value());
+      Layout inverse = Layout(access.iter_vars, {elem_offset})->Inverse();
+      if (inverse->InputDim() != 1) {
+        continue;
+      }
+
+      PrimExpr two = make_const(byte_var.dtype(), 2);
+      Array<PrimExpr> low = inverse->Forward({byte_var * two});
+      Array<PrimExpr> high = inverse->Forward({byte_var * two + 1});
+      Array<PrimExpr> low_parallel;
+      Array<PrimExpr> high_parallel;
+      for (size_t position : access.parallel_positions) {
+        low_parallel.push_back(low[position]);
+        high_parallel.push_back(high[position]);
+      }
+
+      Optional<PrimExpr> replica;
+      if (!analyzer->CanProveEqual(candidate->ReplicateExtent(), Integer(1))) {
+        replica = replica_var;
+      }
+      PrimExpr low_owner =
+          analyzer->Simplify(candidate->ForwardThread(low_parallel, replica));
+      PrimExpr high_owner =
+          analyzer->Simplify(candidate->ForwardThread(high_parallel, replica));
+      if (analyzer->CanProveEqual(low_owner, high_owner)) {
+        continue;
+      }
+    } catch (const NormalizeIterException &) {
+      // Non-bijective fragment accesses may intentionally represent
+      // per-thread replicas. Existing fragment compatibility checks remain
+      // authoritative for those cases.
+      continue;
+    }
+
+    if (throw_on_error) {
+      std::ostringstream oss;
+      oss << "Cannot propagate a packed four-bit fragment layout: the two "
+             "logical nibbles of one byte would be assigned to different "
+             "CUDA threads. Buffer="
+          << access.buffer->name << ", candidate=" << candidate->DebugOutput();
+      throw LayoutConflictException(oss.str());
+    }
+    return false;
+  }
+  return true;
+}
+
 // Choose a vector width for non-fragment SIMT loops while keeping the full
 // thread extent active.  The loop partitioner covers work in chunks of
 // `thread_extent * vector_size`; when the logical loop size is ragged, the
 // excess points are guarded as padding.  Prefer the candidate that introduces
-// the fewest padded points, and keep the wider vector width on ties.
+// the fewest padded points, keep the wider vector width on ties, and do not
+// cross the caller's physical-store lower bound.
 int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
                                PrimExpr thread_extent,
-                               arith::Analyzer *analyzer) {
+                               arith::Analyzer *analyzer,
+                               int min_vector_size = 1) {
   ICHECK_GT(max_vector_size, 0);
+  ICHECK_GT(min_vector_size, 0);
+  ICHECK_GE(max_vector_size, min_vector_size);
+  ICHECK_EQ(max_vector_size % min_vector_size, 0);
   const int64_t *total = as_const_int(analyzer->Simplify(loop_total_size));
   const int64_t *threads = as_const_int(analyzer->Simplify(thread_extent));
   // This is a compile-time planning heuristic.  If the size is symbolic, keep
@@ -94,8 +453,10 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
   bool has_best = false;
   PrimExpr total_i64 = cast(DataType::Int(64), loop_total_size);
   // Candidate vector widths are generated by halving the maximum legal width,
-  // matching the rest of the vectorization planner's power-of-two choices.
-  for (int candidate = max_vector_size; candidate >= 1; candidate /= 2) {
+  // matching the rest of the vectorization planner's power-of-two choices,
+  // down to the physical-store lower bound.
+  for (int candidate = max_vector_size; candidate >= min_vector_size;
+       candidate /= 2) {
     PrimExpr partition_width =
         IntImm(DataType::Int(64), (*threads) * static_cast<int64_t>(candidate));
     // Use tirx::ceildiv instead of hand-rolled integer arithmetic so the same
@@ -113,7 +474,7 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
       best_padding = padding;
       best_vector_size = candidate;
     }
-    if (candidate == 1) {
+    if (candidate == min_vector_size) {
       break;
     }
   }
@@ -553,6 +914,19 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     // In non-free mode without a source buffer, if we don't have any layout
     // yet (e.g., no annotation), we have nothing to infer here.
     return {};
+  }
+
+  if (TargetIsCuda(layout_args.target)) {
+    auto ownership_root = IfBufferRemapLoopGenerator::run(
+        root_, layout_args.buffer_remap, layout_args.layout_map);
+    bool canonical_replica_guard_guaranteed = store_fragment_buffers_.empty();
+    ProvePackedSubByteStoreOwnership(ownership_root, loop_layout_,
+                                     layout_args.analyzer,
+                                     canonical_replica_guard_guaranteed,
+                                     /*throw_on_error=*/true);
+    ProvePackedFragmentPairLayout(root_, loop_layout_, layout_args.analyzer,
+                                  layout_args.packed_pair_fragment_buffers,
+                                  /*throw_on_error=*/true);
   }
 
   // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
@@ -1000,10 +1374,11 @@ Fragment
 ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Vectorize Size must be aware of the buffer_remap
   // As the pass will do post processing to the layout
-  auto maybe_remapped_root_ = IfBufferRemapLoopGenerator::run(
+  auto maybe_remapped_root = IfBufferRemapLoopGenerator::run(
       root_, layout_args.buffer_remap, layout_args.layout_map);
-  int vector_size = GetVectorizeSize(maybe_remapped_root_, layout_args.analyzer,
+  int vector_size = GetVectorizeSize(maybe_remapped_root, layout_args.analyzer,
                                      layout_args.layout_map);
+  int max_vector_size = vector_size;
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;
@@ -1011,43 +1386,98 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
     loop_total_size = loop_total_size * l.as<For>().value()->extent;
   DLOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
              << '\n';
+
   bool has_fragment_access = !indice_map_.empty();
-  if (has_fragment_access) {
+  bool enforce_packed_byte_ownership = TargetIsCuda(layout_args.target);
+  bool has_packed_physical_store =
+      enforce_packed_byte_ownership &&
+      !PackedSubByteStoreCollector::Collect(maybe_remapped_root,
+                                            PackedSubByteStoreKind::kPhysical)
+           .empty();
+  bool has_packed_fragment_store =
+      enforce_packed_byte_ownership &&
+      !PackedSubByteStoreCollector::Collect(
+           root_, PackedSubByteStoreKind::kFragment,
+           layout_args.packed_pair_fragment_buffers)
+           .empty();
+  bool has_packed_store =
+      has_packed_physical_store || has_packed_fragment_store;
+  bool canonical_replica_guard_guaranteed = store_fragment_buffers_.empty();
+
+  // Explicit widths are user constraints. Validate the resulting candidate
+  // instead of interpreting coalesced_width as a correctness property.
+  if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
+    const auto *imm = coalesced_width->as<IntImmNode>();
+    if (imm == nullptr) {
+      LOG(FATAL) << "coalesced_width should be an IntImmNode.";
+    }
+    int expected = imm->value;
+    if (vector_size % expected != 0) {
+      LOG(FATAL) << "Vector size " << vector_size
+                 << " is not divisible by coalesced width " << expected;
+    }
+    auto candidate =
+        PlanLoopPartition(root_, expected, layout_args.thread_bounds);
+    if (enforce_packed_byte_ownership &&
+        (!ProvePackedSubByteStoreOwnership(
+             maybe_remapped_root, candidate, layout_args.analyzer,
+             canonical_replica_guard_guaranteed) ||
+         !ProvePackedFragmentPairLayout(
+             root_, candidate, layout_args.analyzer,
+             layout_args.packed_pair_fragment_buffers))) {
+      LOG(FATAL) << "coalesced_width=" << expected
+                 << " would split a writable byte across threads for a "
+                    "packed four-bit store.";
+    }
+    return candidate;
+  }
+
+  if (!has_packed_store && has_fragment_access) {
     while (!analyzer_.CanProve(
                floormod(loop_total_size, layout_args.thread_bounds->extent *
                                              vector_size) == 0) &&
            vector_size > 1) {
       vector_size /= 2;
     }
-  } else if (!root_->annotations.count(attr::kCoalescedWidth)) {
+    return PlanLoopPartition(root_, vector_size, layout_args.thread_bounds);
+  } else if (!has_packed_store) {
     vector_size = SelectMinPaddingVectorSize(vector_size, loop_total_size,
                                              layout_args.thread_bounds->extent,
                                              &analyzer_);
+    return PlanLoopPartition(root_, vector_size, layout_args.thread_bounds);
   }
-  DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
-             << vector_size << '\n';
 
-  // Check if coalesced_width is defined
-  if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
-    if (const auto *imm = coalesced_width->as<IntImmNode>()) {
-      int expected = imm->value;
-      // Verify that vector_size is divisible by expected
-      if (vector_size % expected != 0) {
-        LOG(FATAL) << "Vector size " << vector_size
-                   << " is not divisible by coalesced width " << expected;
+  // Rank widths by the existing padding heuristic, then accept the first
+  // candidate whose completed thread map proves one owner per byte.
+  std::unordered_set<int> tried_widths;
+  for (int min_vector_size = 1; min_vector_size <= max_vector_size;
+       min_vector_size *= 2) {
+    int candidate_width = SelectMinPaddingVectorSize(
+        max_vector_size, loop_total_size, layout_args.thread_bounds->extent,
+        &analyzer_, min_vector_size);
+    if (tried_widths.insert(candidate_width).second) {
+      auto candidate =
+          PlanLoopPartition(root_, candidate_width, layout_args.thread_bounds);
+      if (ProvePackedSubByteStoreOwnership(
+              maybe_remapped_root, candidate, layout_args.analyzer,
+              canonical_replica_guard_guaranteed) &&
+          ProvePackedFragmentPairLayout(
+              root_, candidate, layout_args.analyzer,
+              layout_args.packed_pair_fragment_buffers) &&
+          ValidateCandidateAgainstFragments(candidate, layout_args)) {
+        DLOG(INFO) << "[PlanLoopPartition] packed-store-safe vector_size = "
+                   << candidate_width << '\n';
+        return candidate;
       }
-      vector_size = expected;
-    } else {
-      LOG(FATAL) << "coalesced_width should be an IntImmNode.";
+    }
+    if (min_vector_size > max_vector_size / 2) {
+      break;
     }
   }
-  DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
-             << " ############# vector_size = " << vector_size
-             << ", thread_bounds = " << layout_args.thread_bounds << '\n';
-  auto plan = PlanLoopPartition(root_, vector_size, layout_args.thread_bounds);
-  DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
-             << '\n';
-  return plan;
+
+  throw LayoutConflictException(
+      "Cannot safely lower a packed four-bit store: no legal vector width "
+      "keeps each writable byte on one CUDA thread.");
 }
 
 void ParallelOpNode::BuildReplicationGuardsIfNeeded(
@@ -1122,10 +1552,27 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
     return ProveFragmentContains(small, big, vars, vars, analyzer_);
   };
 
+  auto ownership_root = IfBufferRemapLoopGenerator::run(
+      root_, layout_args.buffer_remap, layout_args.layout_map);
+  bool canonical_replica_guard_guaranteed = store_fragment_buffers_.empty();
+  bool enforce_packed_byte_ownership = TargetIsCuda(layout_args.target);
+
+  auto packed_ownership_is_valid = [&](const Fragment &candidate) {
+    return !enforce_packed_byte_ownership ||
+           (ProvePackedSubByteStoreOwnership(
+                ownership_root, candidate, layout_args.analyzer,
+                canonical_replica_guard_guaranteed) &&
+            ProvePackedFragmentPairLayout(
+                root_, candidate, layout_args.analyzer,
+                layout_args.packed_pair_fragment_buffers));
+  };
+
   bool buf_ok =
-      ValidateCandidateAgainstFragments(candidate_from_buffer, layout_args);
+      ValidateCandidateAgainstFragments(candidate_from_buffer, layout_args) &&
+      packed_ownership_is_valid(candidate_from_buffer);
   bool plan_ok =
-      ValidateCandidateAgainstFragments(candidate_from_plan, layout_args);
+      ValidateCandidateAgainstFragments(candidate_from_plan, layout_args) &&
+      packed_ownership_is_valid(candidate_from_plan);
 
   if (buf_ok && !plan_ok) {
     DLOG(INFO)
