@@ -106,7 +106,60 @@ def test_compile_only_cli_reports_compile_error(tmp_path: Path):
     assert result.returncode != 0
     assert result.stderr.strip()
     assert "no @tilelang.jit kernel or PrimFunc found" in result.stderr
-    assert "CUDA" not in result.stderr or "driver" not in result.stderr.lower()
+    # A4: this is a compile diagnostic, not a missing-GPU / missing-driver abort.
+    assert "CUDA" not in result.stderr
+    assert "driver" not in result.stderr.lower()
+    assert not output.is_file() or not output.read_text().strip()
+
+
+def test_compile_only_cli_unlinks_stale_output_on_failure(tmp_path: Path):
+    # CE reuses --output_file. A failed compile must not leave yesterday's assembly.
+    example = tmp_path / "broken.py"
+    output = tmp_path / "out.s"
+    stale = "YESTERDAY_ASSEMBLY_MUST_NOT_SURVIVE\n"
+    output.write_text(stale)
+    example.write_text("x = 1\n")
+
+    result = _run_cli("--output_file", str(output), str(example))
+
+    assert result.returncode != 0
+    assert "no @tilelang.jit kernel or PrimFunc found" in result.stderr
+    assert not output.is_file() or output.read_text() != stale
+
+
+def test_compile_only_cli_reports_syntax_error(tmp_path: Path):
+    example = tmp_path / "bad.py"
+    output = tmp_path / "out.s"
+    example.write_text("def (\n")
+
+    result = _run_cli("--output_file", str(output), str(example))
+
+    assert result.returncode != 0
+    assert result.stderr.strip()
+    assert "SyntaxError" in result.stderr or "invalid syntax" in result.stderr.lower()
+    assert not output.is_file() or not output.read_text().strip()
+
+
+def test_compile_only_cli_reports_empty_file(tmp_path: Path):
+    example = tmp_path / "empty.py"
+    output = tmp_path / "out.s"
+    example.write_text("")
+
+    result = _run_cli("--output_file", str(output), str(example))
+
+    assert result.returncode != 0
+    assert "no @tilelang.jit kernel or PrimFunc found" in result.stderr
+    assert not output.is_file() or not output.read_text().strip()
+
+
+def test_compile_only_cli_reports_missing_input_file(tmp_path: Path):
+    missing = tmp_path / "no_such.py"
+    output = tmp_path / "out.s"
+
+    result = _run_cli("--output_file", str(output), str(missing))
+
+    assert result.returncode != 0
+    assert result.stderr.strip()
     assert not output.is_file() or not output.read_text().strip()
 
 
