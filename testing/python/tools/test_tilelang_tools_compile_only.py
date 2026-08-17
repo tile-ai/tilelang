@@ -1,13 +1,20 @@
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang.tools.compile_only import compile_kernel_source, cuda_codegen_available, resolve_target
+from tilelang.tools.compile_only import (
+    _is_cuda_target,
+    compile_kernel_source,
+    cuda_codegen_available,
+    discover_prim_func,
+    resolve_target,
+)
 
 _COMPILE_ONLY_EXAMPLE = """\
 import tilelang
@@ -113,6 +120,41 @@ def test_compile_only_cli_requires_output_file(tmp_path: Path):
     assert "output_file" in result.stderr
 
 
+def test_discover_prim_func_respects_module_order():
+    # A later @tilelang.jit must not steal an earlier PrimFunc (module order).
+    prim = _add.get_tir()
+    module = ModuleType("tilelang_compile_only_order")
+    module.early_prim = prim
+    module.later_jit = _add
+
+    found = discover_prim_func(module)
+
+    assert found is prim
+
+
+def test_is_cuda_target_recognizes_option_strings():
+    assert _is_cuda_target("cuda")
+    assert _is_cuda_target("cuda -arch=sm_90")
+    assert _is_cuda_target("CUDA -arch=sm_80")
+    assert _is_cuda_target('{"kind": "cuda", "arch": "sm_90"}')
+    assert not _is_cuda_target("c")
+    assert not _is_cuda_target("llvm")
+    assert not _is_cuda_target('{"kind": "c"}')
+
+
+def test_resolve_target_parses_cuda_options():
+    pinned = resolve_target("cuda")
+    assert pinned == {"kind": "cuda", "arch": "sm_80"}
+
+    cli = resolve_target("cuda -arch=sm_90")
+    assert cli["kind"] == "cuda"
+    assert cli["arch"] == "sm_90"
+
+    json_target = resolve_target('{"kind": "cuda", "arch": "sm_90"}')
+    assert json_target["kind"] == "cuda"
+    assert json_target["arch"] == "sm_90"
+
+
 def test_compile_only_cli_rejects_auto_target(tmp_path: Path):
     example = tmp_path / "example.py"
     output = tmp_path / "out.s"
@@ -145,6 +187,18 @@ def test_compile_only_cli_cuda_soft_fails_without_ffi(tmp_path: Path):
     assert result.returncode != 0
     assert "CUDA codegen FFI missing" in result.stderr
     assert not output.is_file() or not output.read_text().strip()
+
+    with pytest.raises(RuntimeError, match="CUDA codegen FFI missing"):
+        compile_kernel_source(_add.get_tir(), "cuda -arch=sm_90")
+    with pytest.raises(RuntimeError, match="CUDA codegen FFI missing"):
+        compile_kernel_source(_add.get_tir(), '{"kind": "cuda", "arch": "sm_90"}')
+
+    optioned = tmp_path / "out_sm90.s"
+    result = _run_cli("--target", "cuda -arch=sm_90", "--output_file", str(optioned), str(example))
+
+    assert result.returncode != 0
+    assert "CUDA codegen FFI missing" in result.stderr
+    assert not optioned.is_file() or not optioned.read_text().strip()
 
 
 @pytest.mark.skipif(
