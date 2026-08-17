@@ -6,13 +6,14 @@
  *   - every `local.reducer` allocation has exactly one reducer_init,
  *     zero or more reducer_update, and exactly one finalize_reducer
  *     (statically: one epoch site per allocation);
- *   - init and finalize share the exact same control-flow scope (the same
- *     stack of enclosing serial loops and conditional branches), so every
- *     dynamic execution of the init is closed by exactly one finalize in
- *     the same iteration. Neither may appear inside a `T.Parallel` loop.
- *     An epoch nested in a serial loop reopens once per iteration; the
- *     enclosing control flow must be thread-uniform, as with any other
- *     collective tile op;
+ *   - the finalize sits in the init's control-flow scope (the same stack of
+ *     enclosing serial loops and conditional branches) or in a conditional
+ *     refinement of it, so every dynamic execution of the init is closed by
+ *     at most one finalize in the same iteration (a finalize skipped by a
+ *     branch leaves the partials unread — harmless). Neither may appear
+ *     inside a `T.Parallel` loop. An epoch nested in a serial loop reopens
+ *     once per iteration; the enclosing control flow must be thread-uniform,
+ *     as with any other collective tile op;
  *   - updates appear only between init and finalize, and only inside a
  *     `T.Parallel` loop;
  *   - the reducer is opaque outside the three first-class ops: ordinary
@@ -209,12 +210,8 @@ private:
       Var dst_var = RegionArgBufferVar(op->args[1], "finalize_reducer");
       RequireReducer(var, "finalize_reducer");
       auto ctx_it = epoch_ctx_.find(var.get());
-      if (ctx_it != epoch_ctx_.end() && !(ctx_it->second == ctx_stack_)) {
-        LOG(FATAL) << "T.finalize_reducer on reducer `" << var
-                   << "` is not in the same loop/branch scope as its "
-                      "T.reducer_init: a reduction epoch must open and close "
-                      "within the same iteration of every enclosing loop and "
-                      "the same conditional branch.";
+      if (ctx_it != epoch_ctx_.end()) {
+        RequireConditionalRefinement(ctx_it->second, var);
       }
       if (info_.count(dst_var.get())) {
         LOG(FATAL) << "T.finalize_reducer destination `" << dst_var
@@ -265,6 +262,33 @@ private:
   }
 
   // ---- helpers ------------------------------------------------------------
+
+  /*! \brief T.finalize_reducer must sit in the init's scope or a conditional
+   *  refinement of it: the init context must be a prefix of the current
+   *  context, and every extra frame must be a conditional branch. A finalize
+   *  under extra conditionals runs 0 or 1 times per init (safe: a skipped
+   *  finalize leaves partials unread). Extra LOOP frames would run the
+   *  collective repeatedly on already-combined partials and are rejected, as
+   *  is a finalize outside the init's scope (it could run without any init).
+   */
+  void RequireConditionalRefinement(const std::vector<ContextFrame> &init_ctx,
+                                    const Var &var) const {
+    bool ok = init_ctx.size() <= ctx_stack_.size();
+    for (size_t i = 0; ok && i < ctx_stack_.size(); ++i) {
+      if (i < init_ctx.size()) {
+        ok = init_ctx[i] == ctx_stack_[i];
+      } else {
+        ok = ctx_stack_[i].node->IsInstance<IfThenElseNode>();
+      }
+    }
+    if (!ok) {
+      LOG(FATAL)
+          << "T.finalize_reducer on reducer `" << var
+          << "` is not in the scope of its T.reducer_init: the epoch must "
+             "close in the same loop iteration and branch it opened in, or "
+             "in a conditional branch nested inside that scope.";
+    }
+  }
 
   Var RegionArgBufferVar(const PrimExpr &arg, const char *who) const {
     if (auto call = arg.as<CallNode>()) {
