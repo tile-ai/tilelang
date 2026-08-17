@@ -309,7 +309,7 @@ def test_cast_rs_static_asserts_without_sm100a_feature(target_dtype, arch):
     [
         ("float8_e4m3fn", "__tl_cvt_f32x1_to_e4m3x1_rs_sat"),
         ("float8_e5m2", "__tl_cvt_f32x1_to_e5m2x1_rs_sat"),
-        ("float4_e2m1fn", "__tl_cvt_f32x1_to_e2m1x1_rs_sat"),
+        ("float4_e2m1fn", "__tl_cvt_f32x2_to_e2m1x2_rs_sat"),
     ],
 )
 def test_cast_rs_compiles_for_sm100a(target_dtype, expected):
@@ -341,7 +341,7 @@ def test_cast_rs_fp8_lanes(M, threads, expected):
 @pytest.mark.parametrize(
     "M,threads,expected",
     [
-        (128, 128, "__tl_cvt_f32x1_to_e2m1x1_rs_sat"),
+        (128, 128, "__tl_cvt_f32x2_to_e2m1x2_rs_sat"),
         (256, 128, "__tl_cvt_f32x2_to_e2m1x2_rs_sat"),
         (512, 128, "__tl_cvt_f32x4_to_e2m1x4_rs_sat"),
         (1024, 128, "__tl_cvt_f32x4_to_e2m1x4_rs_sat"),

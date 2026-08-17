@@ -154,6 +154,11 @@ struct LayoutInferArgs {
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
+  // Fragment buffers in a connected pipeline that eventually feeds a packed
+  // four-bit shared/global store. Their layouts must keep each adjacent pair
+  // of logical elements on one CUDA thread so byte ownership survives through
+  // mixed-dtype fragment stages.
+  ffi::Array<tirx::Buffer> packed_pair_fragment_buffers;
 };
 
 class TileOperator;
