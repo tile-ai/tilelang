@@ -105,6 +105,13 @@ static constexpr const char *kLayoutVisualizationFormats =
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
 static constexpr const char *kDisableDataRaceCheck =
     "tl.disable_data_race_check";
+/*! \brief Disable the buffer-initialization check.
+ *
+ * The check warns when a non-global-scope buffer is read before anything
+ * writes it. It is enabled by default.
+ */
+static constexpr const char *kDisableBufferInitCheck =
+    "tl.disable_buffer_init_check";
 static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
 static constexpr const char *kForceLetInline = "tl.force_let_inline";

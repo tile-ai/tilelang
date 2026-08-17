@@ -49,6 +49,14 @@ class PassConfigKey(str, Enum):
     TL_SIMPLIFY_ENABLE_LET_INLINE = "enable_simplify_let_inline"
     """Enable inlining of let statements during simplification. Default: True"""
 
+    TL_DISABLE_BUFFER_INIT_CHECK = "tl.disable_buffer_init_check"
+    """Disable the buffer-initialization check. Default: False
+
+    The check warns when a non-global-scope buffer is read before anything
+    writes it. It is enabled by default; set this config to True to silence
+    it.
+    """
+
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
     """Disable data race check in TileLang. Default: True
 

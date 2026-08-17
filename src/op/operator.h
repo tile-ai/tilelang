@@ -176,6 +176,19 @@ public:
     return result;
   }
 
+  /*!
+   * \brief Regions whose preexisting contents this op consumes before
+   *        establishing a value of its own.
+   *
+   * A subset of GetAccessRegions().reads, which answers the weaker may-read
+   * question ("could this op read this region?") and is deliberately
+   * conservative for dependency analysis. Ops whose read set depends on an
+   * argument value narrow it here; the default reports every read.
+   */
+  virtual ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const {
+    return GetAccessRegions().reads;
+  }
+
   void SetAccessRegions(std::vector<AccessRegion> access_regions) {
     access_regions_ = std::move(access_regions);
   }
