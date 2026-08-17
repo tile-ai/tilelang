@@ -351,16 +351,21 @@ def reduce_bitxor(
 def reducer_init(reducer: tirx.Buffer, init=None) -> tirx.PrimExpr:
     """Open a reducer epoch, optionally with a logical starting value.
 
-    Must be called exactly once per `T.alloc_reducer` allocation, before any
-    `T.reducer_update`. Without `init`, the reduction starts from the combine
-    identity (sum -> 0, max -> dtype lowest, min -> dtype highest, bitand ->
-    all ones, bitor/bitxor -> 0).
+    Must appear exactly once per `T.alloc_reducer` allocation, before any
+    `T.reducer_update`. The whole epoch (init, updates, finalize) may sit
+    inside thread-uniform serial loops or conditionals — the epoch then
+    reopens once per dynamic execution — but init and finalize must share
+    the same enclosing loop/branch scope. Without `init`, the reduction
+    starts from the combine identity (sum -> 0, max -> dtype lowest, min ->
+    dtype highest, bitand -> all ones, bitor/bitxor -> 0).
 
     `init` is a LOGICAL starting value: the result is as if one extra
     contribution `init` were combined into every logical output, exactly
     once. It is not a physical fill — physical partials always start from
-    the identity, and the compiler combines `init` once per logical output
-    at finalize time, so physical replication can never multiply it.
+    the identity, and the compiler captures `init` at the init site and
+    combines it once per logical output at finalize time, so physical
+    replication can never multiply it and later writes to buffers the
+    expression reads cannot change the epoch's starting value.
 
     Args:
         reducer (tirx.Buffer): Handle returned by `T.alloc_reducer`.

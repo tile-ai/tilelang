@@ -822,5 +822,165 @@ def test_reject_double_init():
     _compile_expect_error(make, "double T.reducer_init")
 
 
+# ---------------------------------------------------------------------------
+# Epochs inside thread-uniform control flow (reopen once per iteration)
+# ---------------------------------------------------------------------------
+
+
+def test_epoch_inside_serial_loop_online_softmax():
+    """A full epoch (init/update/finalize) inside a serial tile loop reopens
+    once per iteration — the online-softmax rescale pattern. The max epoch
+    seeds from the running maximum, a loop-variant expression."""
+    K, BLOCK_K, threads = 512, 128, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((K,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((BLOCK_K,), T.float32)
+            running_max = T.alloc_fragment((1,), T.float32)
+            running_sum = T.alloc_fragment((1,), T.float32)
+            running_max[0] = -T.infinity(T.float32)
+            running_sum[0] = 0.0
+            for k_tile in T.serial(T.ceildiv(K, BLOCK_K)):
+                T.copy(A[k_tile * BLOCK_K], a_frag)
+                new_max = T.alloc_reducer((1,), T.float32, op="max")
+                T.reducer_init(new_max, running_max[0])
+                for i in T.Parallel(BLOCK_K):
+                    T.reducer_update(new_max[0], a_frag[i])
+                max_result = T.alloc_fragment((1,), T.float32)
+                T.finalize_reducer(new_max, max_result)
+
+                new_sum = T.alloc_reducer((1,), T.float32, op="sum")
+                T.reducer_init(new_sum)
+                for i in T.Parallel(BLOCK_K):
+                    T.reducer_update(new_sum[0], T.exp(a_frag[i] - max_result[0]))
+                sum_result = T.alloc_fragment((1,), T.float32)
+                T.finalize_reducer(new_sum, sum_result)
+
+                running_sum[0] = T.exp(running_max[0] - max_result[0]) * running_sum[0] + sum_result[0]
+                running_max[0] = max_result[0]
+            if T.get_thread_binding() == 0:
+                B[0] = T.log(running_sum[0]) + running_max[0]
+
+    A = torch.randn(K, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, torch.logsumexp(A, dim=0).reshape(1), atol=1e-4, rtol=1e-4)
+
+
+def test_epoch_inside_pipelined_loop():
+    """A full epoch inside a T.Pipelined body: the per-iteration collective
+    must survive software pipelining. Warp specialization is disabled, as
+    for every reducer-under-pipelining test."""
+    K, BLOCK_K, threads = 512, 128, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((K,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_shared = T.alloc_shared((BLOCK_K,), T.float32)
+            a_frag = T.alloc_fragment((BLOCK_K,), T.float32)
+            running_max = T.alloc_fragment((1,), T.float32)
+            running_max[0] = -T.infinity(T.float32)
+            for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=2):
+                T.copy(A[k_tile * BLOCK_K], a_shared)
+                T.copy(a_shared, a_frag)
+                new_max = T.alloc_reducer((1,), T.float32, op="max")
+                T.reducer_init(new_max, running_max[0])
+                for i in T.Parallel(BLOCK_K):
+                    T.reducer_update(new_max[0], a_frag[i])
+                max_result = T.alloc_fragment((1,), T.float32)
+                T.finalize_reducer(new_max, max_result)
+                running_max[0] = max_result[0]
+            if T.get_thread_binding() == 0:
+                B[0] = running_max[0]
+
+    A = torch.randn(K, dtype=torch.float32, device="cuda")
+    B = tl.compile(
+        kernel,
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )(A)
+    torch.testing.assert_close(B, A.max().reshape(1), atol=0, rtol=0)
+
+
+def test_epoch_inside_uniform_conditional():
+    """A full epoch inside a block-uniform conditional: every thread of the
+    block takes the same branch, so the collective stays barrier-uniform."""
+    extent, threads = 8, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((extent,), T.float32), B: T.Tensor((2,), T.float32)):
+        with T.Kernel(2, threads=threads) as bx:
+            src = T.alloc_fragment((extent,), T.float32)
+            T.copy(A, src)
+            result = T.alloc_fragment((1,), T.float32)
+            result[0] = 0.0
+            if bx == 0:
+                acc = T.alloc_reducer((1,), T.float32, op="sum")
+                T.reducer_init(acc)
+                for i in T.Parallel(extent):
+                    T.reducer_update(acc[0], src[i])
+                T.finalize_reducer(acc, result)
+            if T.get_thread_binding() == 0:
+                B[bx] = result[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    expected = torch.stack([A.sum(), torch.zeros((), device="cuda")])
+    torch.testing.assert_close(B, expected, atol=0, rtol=0)
+
+
+def test_seed_captured_at_init_site():
+    """The T.reducer_init starting value is evaluated at the init site:
+    overwriting the expression's source before finalize must not change the
+    epoch's logical starting value."""
+    extent, threads = 8, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((extent,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((extent,), T.float32)
+            T.copy(A, src)
+            seed = T.alloc_fragment((1,), T.float32)
+            seed[0] = 5.0
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.reducer_init(acc, seed[0])
+            seed[0] = 100.0  # after init, before finalize: must not matter
+            for i in T.Parallel(extent):
+                T.reducer_update(acc[0], src[i])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(acc, result)
+            if T.get_thread_binding() == 0:
+                B[0] = result[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, (A.sum() + 5.0).reshape(1), atol=0, rtol=0)
+
+
+def test_reject_finalize_in_different_scope():
+    """An epoch must open and close in the same control-flow scope: init
+    inside a serial loop with the finalize outside is rejected."""
+
+    def make():
+        @T.prim_func
+        def kernel(A: T.Tensor((8,), T.float32), B: T.Tensor((1,), T.float32)):
+            with T.Kernel(1, threads=128):
+                src = T.alloc_fragment((8,), T.float32)
+                T.copy(A, src)
+                acc = T.alloc_reducer((1,), T.float32, op="sum")
+                for _ in T.serial(4):
+                    T.reducer_init(acc)
+                    for i in T.Parallel(8):
+                        T.reducer_update(acc[0], src[i])
+                result = T.alloc_fragment((1,), T.float32)
+                T.finalize_reducer(acc, result)
+                if T.get_thread_binding() == 0:
+                    B[0] = result[0]
+
+        return kernel
+
+    _compile_expect_error(make, "same loop/branch scope")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
