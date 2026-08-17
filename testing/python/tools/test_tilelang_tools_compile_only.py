@@ -208,6 +208,15 @@ def test_resolve_target_parses_cuda_options():
     assert json_target["arch"] == "sm_90"
 
 
+def test_resolve_target_rejects_json_auto():
+    with pytest.raises(ValueError, match="auto"):
+        resolve_target('{"kind": "auto"}')
+
+
+def test_resolve_target_pins_json_cuda_without_arch():
+    assert resolve_target('{"kind": "cuda"}') == {"kind": "cuda", "arch": "sm_80"}
+
+
 def test_compile_only_cli_rejects_auto_target(tmp_path: Path):
     example = tmp_path / "example.py"
     output = tmp_path / "out.s"
@@ -217,6 +226,18 @@ def test_compile_only_cli_rejects_auto_target(tmp_path: Path):
         resolve_target("auto")
 
     result = _run_cli("--target", "auto", "--output_file", str(output), str(example))
+
+    assert result.returncode != 0
+    assert "auto" in result.stderr
+    assert not output.is_file() or not output.read_text().strip()
+
+
+def test_compile_only_cli_rejects_json_auto_target(tmp_path: Path):
+    example = tmp_path / "example.py"
+    output = tmp_path / "out.s"
+    example.write_text(_COMPILE_ONLY_EXAMPLE)
+
+    result = _run_cli("--target", '{"kind": "auto"}', "--output_file", str(output), str(example))
 
     assert result.returncode != 0
     assert "auto" in result.stderr

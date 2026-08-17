@@ -116,6 +116,11 @@ def resolve_target(target: str) -> str | dict[str, str]:
             raise ValueError(f"target JSON is invalid: {target}") from err
         if not isinstance(parsed, dict) or "kind" not in parsed:
             raise ValueError("target JSON must be an object with kind")
+        kind = _target_kind_name(parsed)
+        if kind == "auto":
+            raise ValueError("target must be explicit; do not use auto")
+        if kind == "cuda" and "arch" not in parsed:
+            return {**_PINNED_CUDA_TARGET, **parsed}
         return parsed
     if _target_kind_name(normalized) == "cuda":
         return _parse_cuda_cli_options(normalized)
