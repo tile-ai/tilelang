@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -51,13 +52,41 @@ def cuda_codegen_available() -> bool:
         return False
 
 
-def _is_cuda_target(target: object) -> bool:
-    if isinstance(target, str):
-        return target.strip().lower() == "cuda"
+def _target_kind_name(target: object) -> str:
+    """Return the TVM target kind after parsing a string, dict, or Target."""
     if isinstance(target, dict):
-        return str(target.get("kind", "")).lower() == "cuda"
+        return str(target.get("kind", "")).strip().lower()
+    if isinstance(target, str):
+        normalized = target.strip()
+        if not normalized:
+            return ""
+        if normalized.startswith("{"):
+            try:
+                parsed = json.loads(normalized)
+            except json.JSONDecodeError:
+                return ""
+            if isinstance(parsed, dict):
+                return str(parsed.get("kind", "")).strip().lower()
+            return ""
+        return normalized.split(None, 1)[0].lower()
     kind = getattr(target, "kind", None)
-    return getattr(kind, "name", None) == "cuda"
+    return str(getattr(kind, "name", "") or "").strip().lower()
+
+
+def _is_cuda_target(target: object) -> bool:
+    return _target_kind_name(target) == "cuda"
+
+
+def _parse_cuda_cli_options(target: str) -> dict[str, str]:
+    """Turn ``cuda -arch=sm_90`` into a TVM JSON-style dict (CLI form is gone)."""
+    parts = target.split()
+    spec = {"kind": "cuda"}
+    for part in parts[1:]:
+        if not part.startswith("-") or "=" not in part[1:]:
+            raise ValueError('CUDA target options must look like -arch=sm_90, or use JSON {"kind": "cuda", "arch": "sm_90"}')
+        key, value = part[1:].split("=", 1)
+        spec[key] = value
+    return spec
 
 
 def resolve_target(target: str) -> str | dict[str, str]:
@@ -67,11 +96,12 @@ def resolve_target(target: str) -> str | dict[str, str]:
     ----------
     target : str
         User-facing target. ``auto`` is rejected. ``cuda`` is pinned to sm_80.
+        Option-bearing CUDA strings (``cuda -arch=sm_90`` or JSON) keep their arch.
 
     Returns
     -------
     str or dict
-        A TVM target string, or a pinned CUDA target dict.
+        A TVM target string, or a CUDA target dict.
     """
     normalized = target.strip()
     key = normalized.lower()
@@ -79,6 +109,16 @@ def resolve_target(target: str) -> str | dict[str, str]:
         raise ValueError("target must be explicit; do not use auto")
     if key == "cuda":
         return dict(_PINNED_CUDA_TARGET)
+    if normalized.startswith("{"):
+        try:
+            parsed = json.loads(normalized)
+        except json.JSONDecodeError as err:
+            raise ValueError(f"target JSON is invalid: {target}") from err
+        if not isinstance(parsed, dict) or "kind" not in parsed:
+            raise ValueError("target JSON must be an object with kind")
+        return parsed
+    if _target_kind_name(normalized) == "cuda":
+        return _parse_cuda_cli_options(normalized)
     return normalized
 
 
@@ -101,7 +141,6 @@ def discover_prim_func(module: ModuleType):
     for obj in vars(module).values():
         if isinstance(obj, JITImpl):
             return obj.get_tir()
-    for obj in vars(module).values():
         if isinstance(obj, PrimFunc):
             return obj
     raise RuntimeError("no @tilelang.jit kernel or PrimFunc found")
