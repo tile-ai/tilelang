@@ -27,6 +27,7 @@ __all__ = [
     "DEFAULT_TARGET",
     "cli_main",
     "compile_kernel_source",
+    "cuda_codegen_available",
     "discover_prim_func",
     "load_example",
     "resolve_target",
@@ -37,6 +38,26 @@ __all__ = [
 DEFAULT_TARGET = "c"
 _PINNED_CUDA_TARGET: dict[str, str] = {"kind": "cuda", "arch": "sm_80"}
 _ERROR_PREFIX = "tilelang compile-only error"
+_CUDA_FFI_MISSING = "CUDA codegen FFI missing (e.g. macOS Metal wheel); use default --target c"
+
+
+def cuda_codegen_available() -> bool:
+    """Return whether this wheel can lower CUDA (``AnnotateDeviceBoundTmaCopies``)."""
+    try:
+        from tilelang.cuda import _ffi_api
+
+        return hasattr(_ffi_api, "AnnotateDeviceBoundTmaCopies")
+    except Exception:
+        return False
+
+
+def _is_cuda_target(target: object) -> bool:
+    if isinstance(target, str):
+        return target.strip().lower() == "cuda"
+    if isinstance(target, dict):
+        return str(target.get("kind", "")).lower() == "cuda"
+    kind = getattr(target, "kind", None)
+    return getattr(kind, "name", None) == "cuda"
 
 
 def resolve_target(target: str) -> str | dict[str, str]:
@@ -106,6 +127,10 @@ def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -
 
     if isinstance(target, str):
         target = resolve_target(target)
+    # Optional CUDA: Metal wheels lack the transform FFI. Fail clearly instead
+    # of leaking AttributeError from AnnotateDeviceBoundTmaCopies.
+    if _is_cuda_target(target) and not cuda_codegen_available():
+        raise RuntimeError(_CUDA_FFI_MISSING)
     # Match JITKernel._compile_artifact: LayoutInference reads Target.current().
     resolved = target if isinstance(target, Target) else Target(target)
     with tilelang.transform.PassContext(opt_level=3), resolved:
