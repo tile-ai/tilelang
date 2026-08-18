@@ -144,6 +144,19 @@ bool AllowTuringMma(const GemmNode &op) {
   return false;
 }
 
+bool AllowMmaKShape(const GemmNode &op) {
+  int element_bits = op.a_->dtype.bits();
+  if (element_bits <= 0 || element_bits > 64 || 256 % element_bits != 0) {
+    return false;
+  }
+
+  int atom_k = std::min(256 / element_bits, op.k_);
+  bool atom_k_supported = atom_k == 4 || atom_k == 8 || atom_k == 16 ||
+                          atom_k == 32 || atom_k == 64 || atom_k == 128 ||
+                          atom_k == 256;
+  return atom_k_supported && op.k_ % atom_k == 0;
+}
+
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
@@ -384,6 +397,9 @@ struct Gemm {
       return kCudaFMA;
     }
     if (TargetIsTuring(target) && !AllowTuringMma(op)) {
+      return kCudaFMA;
+    }
+    if (!AllowMmaKShape(op)) {
       return kCudaFMA;
     }
     return kCudaMMA;
