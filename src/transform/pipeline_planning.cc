@@ -418,10 +418,10 @@ private:
  * - For copy stages: indicates the index of the last statement that reads
  * from the copied data, helping determine optimal placement of copy
  * operations
- * - Used to ensure copy operations are scheduled before their consumers
  * - A value of -1 means no subsequent statement uses this stage's output
- * - This information enables better pipeline scheduling by minimizing data
- *   dependencies and maximizing parallelism
+ * \param schedule_anchor_stmt_index Statement after which this first-stage
+ * operation is scheduled. It is kept separate from the true last use because
+ * dependent first-stage operations must share a common anchor.
  */
 struct PipelineStageInfo {
   Array<BufferRegion> reads, writes;
@@ -435,6 +435,7 @@ struct PipelineStageInfo {
   bool producer_for_copy = false;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
+  int schedule_anchor_stmt_index = -1;
 
 public:
   bool IsFirstStage() const { return copy_stage || producer_for_copy; }
@@ -442,6 +443,19 @@ public:
   bool IsTmaCopy() const { return tma_copy; }
   bool IsProducerForCopy() const { return producer_for_copy; }
   bool IsLastUseStmtIndexValid() const { return last_use_stmt_index != -1; }
+  bool HasScheduleAnchor() const { return schedule_anchor_stmt_index != -1; }
+
+  /*!
+   * \brief Whether scheduling will actually place this statement in stage 0.
+   *
+   * Being classified as a first-stage operation is not sufficient: without an
+   * anchor there is nothing to hoist the statement in front of, so it stays
+   * with the consumers instead. Reasoning about stage distance must use this
+   * predicate rather than IsFirstStage().
+   */
+  bool IsScheduledFirstStage() const {
+    return IsFirstStage() && HasScheduleAnchor();
+  }
 };
 
 class PipelineStageAnalyzer {
@@ -760,6 +774,138 @@ public:
     }
   }
 
+  /*!
+   * \brief Whether \p consumer has a read-after-write dependency on \p
+   * producer, that is, whether it reads a region that \p producer writes.
+   */
+  static bool HasRawDependency(const PipelineStageInfo &producer,
+                               const PipelineStageInfo &consumer) {
+    for (const BufferRegion &read : consumer.reads) {
+      for (const BufferRegion &write : producer.writes) {
+        if (write->buffer.same_as(read->buffer) &&
+            MayConflict(write->region, read->region)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /*!
+   * \brief Compute a common scheduling anchor for dependent first-stage
+   * statements.
+   *
+   * A first-stage producer and the copy that consumes it must be emitted as one
+   * ordered group.  Anchoring the members independently can invert their RAW
+   * dependency or overwrite a loop-carried local value before later-stage
+   * consumers read it.  Keep the true last-use information intact and use the
+   * latest schedulable consumer as a separate group anchor.
+   */
+  void ComputeFirstStageScheduleAnchors(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    auto &infos = *pipeline_stage_infos;
+    const int num_stmts = static_cast<int>(infos.size());
+
+    for (PipelineStageInfo &info : infos) {
+      if (!info.IsFirstStage() || !info.IsLastUseStmtIndexValid()) {
+        continue;
+      }
+      const int last_use = info.last_use_stmt_index;
+      if (!infos[last_use].IsFirstStage()) {
+        info.schedule_anchor_stmt_index = last_use;
+      }
+    }
+
+    // Propagating in both directions gives every RAW-connected first-stage
+    // component the latest usable anchor.  If a component has no
+    // non-first-stage consumer, its members retain no anchor and fall back to
+    // original order in the main scheduling loop.
+    //
+    // Anchors only ever move forward, so the fixpoint always exists.  A pass
+    // visits producers in ascending order, so an anchor travels forward along a
+    // dependency chain within a single pass but backward by only one link; a
+    // chain spanning every statement therefore needs at most `num_stmts`
+    // passes, plus one final pass to observe that nothing changed.
+    const int max_iterations = num_stmts + 1;
+    for (int iter = 0;; ++iter) {
+      ICHECK_LE(iter, max_iterations)
+          << "Pipeline planning: Exceeded maximum iterations while repairing "
+             "schedule anchors for first-stage statements.";
+      bool updated = false;
+      for (int producer_idx = 0; producer_idx < num_stmts; ++producer_idx) {
+        auto &producer = infos[producer_idx];
+        if (!producer.IsFirstStage()) {
+          continue;
+        }
+        for (int consumer_idx = producer_idx + 1; consumer_idx < num_stmts;
+             ++consumer_idx) {
+          auto &consumer = infos[consumer_idx];
+          if (!consumer.IsFirstStage()) {
+            continue;
+          }
+          if (!HasRawDependency(producer, consumer)) {
+            continue;
+          }
+          int group_anchor = std::max(producer.schedule_anchor_stmt_index,
+                                      consumer.schedule_anchor_stmt_index);
+          if (producer.schedule_anchor_stmt_index != group_anchor) {
+            producer.schedule_anchor_stmt_index = group_anchor;
+            updated = true;
+          }
+          if (consumer.schedule_anchor_stmt_index != group_anchor) {
+            consumer.schedule_anchor_stmt_index = group_anchor;
+            updated = true;
+          }
+        }
+      }
+      if (!updated) {
+        break;
+      }
+    }
+  }
+
+  /*!
+   * \brief Find a local.var value that stage 0 produces and a later stage
+   * consumes.
+   *
+   * TileLang lowers local.var to scalar storage, so such a value has no version
+   * dimension and cannot stay alive across overlapped iterations.
+   *
+   * Both ends are tested with IsScheduledFirstStage() rather than
+   * IsFirstStage(): an anchor-less first-stage statement stays with the
+   * consumers, so it neither creates nor suffers a stage gap and must not
+   * trigger the fallback.
+   *
+   * Must run after ComputeFirstStageScheduleAnchors().
+   *
+   * \return The name of the offending buffer, or nullopt when there is none.
+   */
+  Optional<String> FindCrossStageLocalVarCarry(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    for (const PipelineStageInfo &producer : pipeline_stage_infos) {
+      if (!producer.IsScheduledFirstStage()) {
+        continue;
+      }
+      for (const BufferRegion &write : producer.writes) {
+        if (!IsLocalVarBuffer(write->buffer)) {
+          continue;
+        }
+        for (const PipelineStageInfo &consumer : pipeline_stage_infos) {
+          if (consumer.IsScheduledFirstStage()) {
+            continue;
+          }
+          for (const BufferRegion &read : consumer.reads) {
+            if (write->buffer.same_as(read->buffer) &&
+                MayConflict(write->region, read->region)) {
+              return write->buffer->name;
+            }
+          }
+        }
+      }
+    }
+    return Optional<String>();
+  }
+
   std::unordered_map<const VarNode *, int> BuildScalarDefMap(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     std::unordered_map<const VarNode *, int> scalar_def_to_stmt;
@@ -1037,6 +1183,17 @@ private:
     MakeStageAnalyzer().PropagateScalarProducersForCopy(pipeline_stage_infos);
   }
 
+  void ComputeFirstStageScheduleAnchors(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    MakeStageAnalyzer().ComputeFirstStageScheduleAnchors(pipeline_stage_infos);
+  }
+
+  Optional<String> FindCrossStageLocalVarCarry(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
+    return MakeStageAnalyzer().FindCrossStageLocalVarCarry(
+        pipeline_stage_infos);
+  }
+
   void ValidateScalarDependencies(
       const std::vector<PipelineStageInfo> &pipeline_stage_infos) const {
     MakeStageAnalyzer().ValidateScalarDependencies(pipeline_stage_infos);
@@ -1212,31 +1369,50 @@ private:
 
     PropagateScalarProducersForCopy(&pipeline_stage_infos);
 
+    // A first-stage statement may feed another first-stage statement (a scalar
+    // loaded into a local.var and used in the guard of a pipelined copy, for
+    // example).  Reconcile their anchors so the producer stays reachable and
+    // ordered before its consumer.
+    ComputeFirstStageScheduleAnchors(&pipeline_stage_infos);
+
+    // TileLang backends emit local.var as scalar storage, so it cannot carry
+    // multiple physical pipeline versions. When such a value crosses from a
+    // first-stage producer to later-stage consumers, conservatively cap the
+    // pipeline distance at one iteration.
+    Optional<String> cross_stage_local_var =
+        FindCrossStageLocalVarCarry(pipeline_stage_infos);
+    const int effective_num_stages = cross_stage_local_var ? 1 : num_stages;
+    if (cross_stage_local_var && num_stages > 1) {
+      LOG(WARNING) << "PipelinePlanning: reducing num_stages from "
+                   << num_stages << " to " << effective_num_stages
+                   << " for the loop over '" << loop->loop_var->name_hint
+                   << "' because '" << cross_stage_local_var.value()
+                   << "' is produced in the pipeline's first stage and read by "
+                      "a later stage. It lives in local.var, which lowers to "
+                      "scalar storage and cannot hold one value per in-flight "
+                      "iteration.";
+    }
+
     // Making stages and orders
     int order_idx = 0;
     // Stage 1. Create pipeline stages and assign order
     for (auto &pinfo : pipeline_stage_infos) {
-      // Skip elements that must be in first stage:
-      // 1. Copy stages (with active last_use_stmt_index) - these need special
-      // handling
-      //    because they have consumers that depend on their data
-      // 2. All Producer stages for copy stages.
-      if (pinfo.IsFirstStage() && pinfo.IsLastUseStmtIndexValid()) {
+      // First-stage statements with an anchor are scheduled as a group when
+      // the main loop reaches that anchor.
+      if (pinfo.IsScheduledFirstStage()) {
         continue;
       }
 
       // Main logic stage assignment:
       // - Increment order index
-      // - Assign to new stage (current num_stages)
+      // - Assign to the effective consumer stage
       pinfo.order = order_idx++;
-      pinfo.stage = num_stages;
+      pinfo.stage = effective_num_stages;
 
-      // Schedule copy stages that have this stage as their last consumer
-      // This ensures copy operations are placed right before their final
-      // consumer for optimal pipeline efficiency
+      // Schedule the first-stage group after its common anchor.
       for (auto &pinfo_1 : pipeline_stage_infos) {
         if ((pinfo_1.IsFirstStage() &&
-             pinfo_1.last_use_stmt_index == pinfo.original_stmt_index)) {
+             pinfo_1.schedule_anchor_stmt_index == pinfo.original_stmt_index)) {
           pinfo_1.order = order_idx++;
           pinfo_1.stage = 0; // Copy stages are typically assigned to stage 0
         }
@@ -1267,7 +1443,7 @@ private:
         return copy_stage_cnt;
       return -1;
     }();
-    if (copy_stage_at_end > 0 && num_stages >= 2) {
+    if (copy_stage_at_end > 0 && effective_num_stages >= 2) {
       for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
         pinfo.order =
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
@@ -1285,12 +1461,14 @@ private:
         annotations.Set(key, value);
       }
     }
-    // Preserve the original TileLang pipelining depth for downstream scheduling
-    // (e.g. generated async-copy wait placement). We intentionally do NOT
-    // keep the legacy key "num_stages" here because multiple downstream passes
-    // (e.g. internal buffer versioning / warp specialization) treat it as an
-    // active pipeline marker and do not support nested pipelines.
-    annotations.Set("tl_pipelined_num_stages", Integer(num_stages));
+    // Propagate the effective pipeline depth to downstream scheduling (e.g.
+    // generated async-copy wait placement and barrier sizing). This can be
+    // smaller than the user-requested depth when local.var requires the
+    // single-version fallback above. We intentionally do NOT keep the legacy
+    // key "num_stages" here because multiple downstream passes (e.g. internal
+    // buffer versioning / warp specialization) treat it as an active pipeline
+    // marker and do not support nested pipelines.
+    annotations.Set("tl_pipelined_num_stages", Integer(effective_num_stages));
 
     std::vector<Integer> orders, stages;
     orders.reserve(pipeline_stage_infos.size());
