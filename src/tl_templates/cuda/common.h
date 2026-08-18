@@ -1136,6 +1136,26 @@ template <typename T> TL_DEVICE T fast_min(T a, T b) { return b < a ? b : a; }
 
 template <> TL_DEVICE float fast_min(float a, float b) { return fminf(a, b); }
 
+TL_DEVICE float_e4m3_t max(float_e4m3_t lhs, float_e4m3_t rhs) {
+  return float_e4m3_t(
+      ::fmaxf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
+TL_DEVICE float_e4m3_t min(float_e4m3_t lhs, float_e4m3_t rhs) {
+  return float_e4m3_t(
+      ::fminf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
+TL_DEVICE float_e5m2_t max(float_e5m2_t lhs, float_e5m2_t rhs) {
+  return float_e5m2_t(
+      ::fmaxf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
+TL_DEVICE float_e5m2_t min(float_e5m2_t lhs, float_e5m2_t rhs) {
+  return float_e5m2_t(
+      ::fminf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
 // --- max2 ----------------------------------------------------------------
 
 TL_DEVICE float2 max2(float2 a, float2 b) {
