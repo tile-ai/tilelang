@@ -384,6 +384,67 @@ bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
 
 bool IsPowerOfTwo(int64_t x) { return x > 0 && (x & (x - 1)) == 0; }
 
+/*! \brief Wide-plan destination override. The wide finalize publishes through
+ *  an `accumulator -> dst` copy. When LayoutInference gave dst a distributed
+ *  free-level layout (picked only to serve the later `dst -> global` copy),
+ *  that publication copy partitions by dst ownership and reads the fully
+ *  replicated accumulator registers at thread-dependent physical indices;
+ *  ptxas lowers the whole array to local memory. When the destination chain
+ *  is unconstrained (finalize-written, read only by copies to global or into
+ *  further unconstrained fragments), those free-level layouts were arbitrary
+ *  choices: replace them with participant-wide replication so every
+ *  fragment-to-fragment copy on the chain lowers to per-thread identity
+ *  slots and the final global publication takes the static-index
+ *  replica-zero path. Returns the layout entries to publish, or nothing when
+ *  the chain has other consumers (their inferred layouts then stand). */
+std::optional<std::vector<std::pair<Buffer, Fragment>>>
+TryWideFinalizeDstOverride(const EpochInfo &epoch,
+                           const Map<Buffer, Layout> &known_layouts,
+                           const UseGraph &use_graph) {
+  if (!epoch.dst.defined() || !IsFragmentBuffer(epoch.dst) ||
+      epoch.thread_extent <= 0) {
+    return std::nullopt;
+  }
+  // Without an inferred layout MaterializeFinalize already assigns
+  // participant-wide replication itself.
+  if (!known_layouts.count(epoch.dst)) {
+    return std::nullopt;
+  }
+  std::vector<Buffer> chain;
+  if (!CollectOverrideChain(epoch.dst->data.get(), use_graph, &chain)) {
+    return std::nullopt;
+  }
+  std::vector<std::pair<Buffer, Fragment>> entries;
+  auto add_entry = [&](const Buffer &buffer) -> bool {
+    for (const auto &dim : buffer->shape) {
+      if (!as_const_int(dim)) {
+        return false;
+      }
+    }
+    Fragment layout = Fragment::FullyReplicated(
+        buffer->shape, IntImm(DataType::Int(32), epoch.thread_extent));
+    if (epoch.thread_min != 0) {
+      // Copy loop layouts derived from these fragments carry the thread
+      // range; warp-specialized participants need the real one, not
+      // FullyReplicated's default [0, extent).
+      layout = layout->BindThreadRange(Range(
+          IntImm(DataType::Int(32), epoch.thread_min),
+          IntImm(DataType::Int(32), epoch.thread_min + epoch.thread_extent)));
+    }
+    entries.emplace_back(buffer, layout);
+    return true;
+  };
+  if (!add_entry(epoch.dst)) {
+    return std::nullopt;
+  }
+  for (const Buffer &staged : chain) {
+    if (!add_entry(staged)) {
+      return std::nullopt;
+    }
+  }
+  return entries;
+}
+
 /*! \brief A contribution is replica-safe when every physical execution of
  *  the same logical iteration computes the same value: pure expressions of
  *  loop vars plus loads from buffers whose replicas are value-equal by
@@ -827,9 +888,23 @@ public:
           }
         }
       } else {
+        // Same pre-traversal registration rationale as the narrow overrides
+        // above; per-buffer participant-wide replication instead of the
+        // induced layout.
+        auto wide_override =
+            TryWideFinalizeDstOverride(epoch, known_layouts, use_graph);
+        if (wide_override.has_value()) {
+          for (const auto &[buffer, layout] : *wide_override) {
+            rewriter.extra_layout_entries_.Set(buffer, layout);
+          }
+        }
         std::string msg =
             "[ReducerPlan] `" + std::string(epoch.buffer->name) +
             "`: wide plan (FullParticipant); narrow rejected: " + reason;
+        if (wide_override.has_value()) {
+          msg += "; unconstrained finalize destination re-layouted to "
+                 "participant-wide replication";
+        }
         if (verbose) {
           LOG(INFO) << msg;
         } else {
