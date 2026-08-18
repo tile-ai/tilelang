@@ -629,6 +629,19 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
      * return values).
      */
     bool is_atomic = false;
+    /*! \brief Whether this access originates from a simdgroup tile op
+     *         (simdgroup_store/simdgroup_load through address_of or
+     *         tvm_access_ptr).
+     *
+     * An 8x8 tile is produced/consumed cooperatively by every thread of
+     * the simdgroup: the per-thread element is lane-dependent and invisible
+     * in the base index expression, so the planner must treat the whole
+     * tile as touched and must not rely on single-element disjointness or
+     * same-index reasoning for ordering. Otherwise, multi-simdgroup staged
+     * epilogues can miss the barrier between simdgroup_store and cross-group
+     * reads.
+     */
+    bool is_tile_access = false;
   };
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
@@ -1125,6 +1138,56 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
       return;
     }
+    if (op->op.same_as(builtin::simdgroup_store()) ||
+        op->op.same_as(builtin::simdgroup_load())) {
+      // simdgroup_store(frag, tile_idx, ptr, stride, cols, rows, transpose)
+      // simdgroup_load(frag, tile_idx, ptr, stride, cols, rows, transpose)
+      //
+      // The pointer argument (args[2]) covers an entire rows x cols (8x8)
+      // tile of shared (or global) memory. It comes in two official forms:
+      //   - address_of(BufferLoad): LowerSIMDGroupCopy staged path
+      //     (src/metal/op/copy.cc),
+      //   - tvm_access_ptr: Metal macro / tensor-intrin path (T.access_ptr
+      //     in metal_macro_generator.py and tensor_intrin/metal.py).
+      // The generic address_of / tvm_access_ptr handling records only the
+      // single base element and the address_of path always as kRead, which
+      // hides the write side of simdgroup_store (and the full tile
+      // footprint) from the sync planner. That left multi-simdgroup staged
+      // epilogues with no barrier between the staging stores and the
+      // cross-group epilogue reads. Record the pointer argument explicitly
+      // as a tile access with the full tile extent and correct access type.
+      //
+      // The tile descriptor is propagated to the pointer argument (args[2])
+      // only; the remaining six arguments (fragment, tile index, stride,
+      // cols, rows, transpose) are plain metadata and must not be tagged as
+      // tile accesses.
+      ICHECK_EQ(op->args.size(), 7U);
+      bool is_store = op->op.same_as(builtin::simdgroup_store());
+      // The builtin signature is (d, index, ptr, stride, col, row, transpose)
+      // (see 3rdparty/tvm/include/tvm/tirx/builtin.h), so args[4] is the
+      // column extent and args[5] is the row extent.
+      int tile_cols = 8, tile_rows = 8;
+      if (const auto *cols = op->args[4].as<IntImmNode>()) {
+        tile_cols = cols->value;
+      }
+      if (const auto *rows = op->args[5].as<IntImmNode>()) {
+        tile_rows = rows->value;
+      }
+      for (size_t i = 0; i < op->args.size(); ++i) {
+        if (i == 2) {
+          has_pending_tile_access_ = true;
+          pending_tile_access_type_ = is_store ? kWrite : kRead;
+          pending_tile_rows_ = tile_rows;
+          pending_tile_cols_ = tile_cols;
+          pending_tile_stride_ = op->args[3];
+        } else {
+          has_pending_tile_access_ = false;
+        }
+        this->VisitExpr(op->args[i]);
+      }
+      has_pending_tile_access_ = false;
+      return;
+    }
     if (op->op.same_as(builtin::address_of())) {
       ICHECK_EQ(op->args.size(), 1U);
       if (auto load = op->args[0].as<BufferLoadNode>()) {
@@ -1136,13 +1199,56 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         Array<Range> buffer_ranges;
         // from indices to buffer indices
         ICHECK(buffer->shape.size() == load->indices.size());
+        // Tile extents for an enclosing simdgroup_store/load (defaults to a
+        // single element for plain address_of uses). For a simdgroup tile
+        // access the touched extent along dimension i is the tile extent
+        // (rows for dim 0, cols for dim 1, 1 otherwise): the whole tile is
+        // touched by every thread of the simdgroup.
+        bool is_tile_access = has_pending_tile_access_;
+        AccessType tile_type = kRead;
+        int tile_rows = 1, tile_cols = 1;
+        // For a flattened (post-FlattenBuffer) 1-D buffer the pointer
+        // argument is address_of(BufferLoad(flat, {row * stride + col})) and
+        // the tile covers a linear bounding box of
+        // (tile_rows - 1) * tile_stride + tile_cols elements starting at the
+        // base element (tile_stride is the row stride in elements). Record
+        // that extent so PointerAccessIsDisjoint (used by the tile-tile WAW
+        // branch of FindConflict) cannot prove overlapping tiles disjoint
+        // based on the row extent alone. Multi-dimensional buffers keep the
+        // per-dimension rows/cols expansion below.
+        PrimExpr flattened_tile_extent;
+        if (is_tile_access) {
+          tile_type = pending_tile_access_type_;
+          tile_rows = pending_tile_rows_;
+          tile_cols = pending_tile_cols_;
+          if (buffer->shape.size() == 1) {
+            ICHECK(pending_tile_stride_.defined());
+            PrimExpr tile_stride = pending_tile_stride_;
+            DataType index_dtype = load->indices[0].dtype();
+            if (tile_stride.dtype() != index_dtype) {
+              tile_stride = Cast(index_dtype, tile_stride);
+            }
+            flattened_tile_extent =
+                make_const(index_dtype, tile_rows - 1) * tile_stride +
+                make_const(index_dtype, tile_cols);
+          }
+        }
         // Use buffer shape and indices to compute the buffer_ranges for each
         // dimension.
         for (size_t i = 0; i < buffer->shape.size(); ++i) {
           PrimExpr min = AddAliasElemOffset(GetRef<Var>(buffer_var),
                                             buffer->dtype, load->indices[i]);
-          PrimExpr extent = make_const(buffer->shape[i].dtype(), 1);
-          buffer_ranges.push_back(Range::FromMinExtent(min, extent));
+          PrimExpr extent_expr;
+          if (flattened_tile_extent.defined()) {
+            extent_expr = flattened_tile_extent;
+          } else {
+            int extent = is_tile_access
+                             ? ((i == 0) ? tile_rows
+                                         : (i == 1 ? tile_cols : 1))
+                             : 1;
+            extent_expr = make_const(buffer->shape[i].dtype(), extent);
+          }
+          buffer_ranges.push_back(Range::FromMinExtent(min, extent_expr));
         }
         if (Enabled(buffer_var, scope)) {
           ICHECK(allow_append_);
@@ -1152,14 +1258,38 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           e.buffer = Downcast<Var>(buffer->data);
           e.buffer_name = buffer;
           e.buffer_ranges = buffer_ranges;
-          for (const auto &index : load->indices) {
+          size_t n_indices = load->indices.size();
+          for (size_t i = 0; i < n_indices; ++i) {
             PrimExpr physical_index = AddAliasElemOffset(
-                GetRef<Var>(buffer_var), buffer->dtype, index);
-            e.touched.push_back(arith::IntSet::Vector(physical_index));
+                GetRef<Var>(buffer_var), buffer->dtype, load->indices[i]);
+            if (is_tile_access) {
+              if (flattened_tile_extent.defined()) {
+                // Flattened 1-D tile: the whole linear bounding box
+                // (rows x cols with the given row stride) is touched by every
+                // thread of the simdgroup. FindConflict's tile-tile WAW
+                // branch relies on these touched ranges (via
+                // PointerAccessIsDisjoint) to decide whether two stores can
+                // be left unordered, so the bounding box must cover the full
+                // tile footprint including the column extent and stride.
+                PrimExpr extent_minus_one = flattened_tile_extent - 1;
+                e.touched.push_back(arith::IntSet::Interval(
+                    physical_index, physical_index + extent_minus_one));
+              } else {
+                // Cover the whole tile extent along this dimension.
+                int extent = (i == 0) ? tile_rows : (i == 1 ? tile_cols : 1);
+                PrimExpr extent_minus_one =
+                    make_const(physical_index.dtype(), extent - 1);
+                e.touched.push_back(arith::IntSet::Interval(
+                    physical_index, physical_index + extent_minus_one));
+              }
+            } else {
+              e.touched.push_back(arith::IntSet::Vector(physical_index));
+            }
           }
           e.is_pointer_access = true;
+          e.is_tile_access = is_tile_access;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-          e.type = kRead;
+          e.type = is_tile_access ? tile_type : kRead;
           e.scope = scope;
           curr_stmt_.access.emplace_back(e);
         }
@@ -1227,8 +1357,36 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.buffer_ranges = buffer_ranges;
         e.is_pointer_access = true;
         e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-        e.touched = {
-            arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
+        // The pointer argument of an enclosing simdgroup_store/load is a
+        // tvm_access_ptr with a single-element default extent (LowerAccessPtr
+        // for a BufferLoad base). Without special handling it would be
+        // recorded as a plain single-element pointer access, and FindConflict
+        // could prove it disjoint from other accesses via single-element
+        // PointerAccessIsDisjoint reasoning. For the Metal macro/tensor-intrin
+        // simdgroup path (T.access_ptr), tag it as a tile access and expand the
+        // touched range to a safe linear bounding box covering the whole
+        // rows x cols tile so the conservative tile rule in FindConflict
+        // applies. The rw_mask semantics are
+        // preserved below ("r" -> kRead tile, "w" -> kWrite tile; the Metal
+        // macros emit "w" for simdgroup_store and "r" for simdgroup_load,
+        // matching the pending tile type).
+        bool is_tile_access = has_pending_tile_access_;
+        e.is_tile_access = is_tile_access;
+        if (is_tile_access) {
+          ICHECK(pending_tile_stride_.defined());
+          PrimExpr tile_stride = pending_tile_stride_;
+          if (tile_stride.dtype() != extent.dtype()) {
+            tile_stride = Cast(extent.dtype(), tile_stride);
+          }
+          PrimExpr tile_extent =
+              make_const(extent.dtype(), pending_tile_rows_ - 1) * tile_stride +
+              make_const(extent.dtype(), pending_tile_cols_);
+          e.touched = {arith::IntSet::FromRange(
+              Range::FromMinExtent(offset, tile_extent))};
+        } else {
+          e.touched = {
+              arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
+        }
         e.scope = scope;
         if (flag->value & 1) {
           e.type = kRead;
@@ -1480,6 +1638,15 @@ private:
   // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
   // the pointer metadata ops are tagged as atomic.
   int atomic_dst_ptr_depth_{0};
+  // Enclosing simdgroup_store/simdgroup_load tile-access descriptor. While
+  // visiting the pointer argument of such a call, address_of(BufferLoad)
+  // records the access with the tile type (kWrite for store / kRead for
+  // load) and the full tile extent instead of a single-element kRead.
+  bool has_pending_tile_access_{false};
+  AccessType pending_tile_access_type_{kRead};
+  int pending_tile_rows_{1};
+  int pending_tile_cols_{1};
+  PrimExpr pending_tile_stride_;
   // the current free stmt entry.
   StmtEntry curr_stmt_;
   // The involving threads
@@ -1501,7 +1668,7 @@ private:
     syncs_inserted_.insert(obj);
   }
   bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
-    if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
+    if (lhs.touched.empty() || lhs.touched.size() != rhs.touched.size()) {
       return false;
     }
     ConstrSet prev_cset{lhs.cset};
@@ -1516,10 +1683,6 @@ private:
         {"ty1", "ty2"},
         {"tz1", "tz2"},
     };
-    PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
-    PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
-    PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
-    PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
     Map<Var, PrimExpr> prev_sub, curr_sub;
     for (unsigned idx = 0; idx != 3; ++idx) {
       auto &info = thread_vars[idx];
@@ -1535,23 +1698,27 @@ private:
                                      /*rename_ranges=*/false);
     curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,
                                      /*rename_ranges=*/false);
-    lhs_min = Substitute(lhs_min, prev_sub);
-    lhs_max = Substitute(lhs_max, prev_sub);
-    rhs_min = Substitute(rhs_min, curr_sub);
-    rhs_max = Substitute(rhs_max, curr_sub);
     // Lower to predicates before merging so that a variable bound to different
     // values on the two sides does not trip the analyzer's re-bind check.
     prev_cset.ToConstraints()
         .Merge(curr_cset.ToConstraints())
         .Populate(analyzer);
 
-    if (analyzer.CanProve(lhs_max < rhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
-    }
-    if (analyzer.CanProve(rhs_max < lhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
+    for (size_t i = 0; i < lhs.touched.size(); ++i) {
+      PrimExpr lhs_min =
+          Substitute(analyzer.Simplify(lhs.touched[i].min()), prev_sub);
+      PrimExpr lhs_max =
+          Substitute(analyzer.Simplify(lhs.touched[i].max()), prev_sub);
+      PrimExpr rhs_min =
+          Substitute(analyzer.Simplify(rhs.touched[i].min()), curr_sub);
+      PrimExpr rhs_max =
+          Substitute(analyzer.Simplify(rhs.touched[i].max()), curr_sub);
+      if (analyzer.CanProve(lhs_max < rhs_min,
+                            arith::ProofStrength::kSymbolicBound) ||
+          analyzer.CanProve(rhs_max < lhs_min,
+                            arith::ProofStrength::kSymbolicBound)) {
+        return true;
+      }
     }
     return false;
   }
@@ -1673,6 +1840,27 @@ private:
     // Access to different buffers does not conflict.
     if (!prev.buffer.same_as(curr.buffer)) {
       return false;
+    }
+
+    // simdgroup tile accesses (simdgroup_store/simdgroup_load through
+    // address_of): the whole tile is touched cooperatively by every thread
+    // of the simdgroup, and the per-thread element is lane-dependent
+    // (invisible in the base index). Any RAW/WAR ordering between a tile
+    // access and another access to the same buffer must therefore be
+    // enforced with a barrier — the single-element / same-index reasoning
+    // below cannot prove safety for multi-simdgroup staged epilogues.
+    //
+    // Write-after-write between two tile accesses needs no ordering only
+    // when their full tile footprints are provably disjoint. Overlapping
+    // cross-simdgroup stores are sequential program statements, so a barrier
+    // is required to make the later store deterministically win.
+    if (prev.is_tile_access || curr.is_tile_access) {
+      if (prev.is_tile_access && curr.is_tile_access && prev.type == kWrite &&
+          curr.type == kWrite) {
+        return !(prev.is_pointer_access && curr.is_pointer_access &&
+                 PointerAccessIsDisjoint(prev, curr));
+      }
+      return true;
     }
 
     // Atomic ops already provide correctness for concurrent access.
