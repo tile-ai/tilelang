@@ -858,8 +858,8 @@ def test_pipeline_planning_groups_dependent_copy_guard_scalars():
     # The first-stage group is emitted as one contiguous run after every
     # consumer of the current iteration, so the single physical scalar is
     # overwritten only once all of its readers have run.
-    first_stage_orders = sorted(o for s, o in zip(stages, orders) if s == 0)
-    consumer_orders = sorted(o for s, o in zip(stages, orders) if s != 0)
+    first_stage_orders = sorted(o for s, o in zip(stages, orders, strict=True) if s == 0)
+    consumer_orders = sorted(o for s, o in zip(stages, orders, strict=True) if s != 0)
     assert consumer_orders == list(range(len(consumer_orders)))
     assert first_stage_orders == list(range(len(consumer_orders), len(stages)))
 
