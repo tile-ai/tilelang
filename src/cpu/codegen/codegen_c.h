@@ -31,14 +31,14 @@
 #include <utility>
 #include <vector>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_line_directives.h"
 #include "tvm/target/codegen.h"
 #include <tvm/tirx/expr.h>
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangC : public CodeGenC {
+class CodeGenTileLangC : public CodeGenCWithLineDirectives {
 public:
   CodeGenTileLangC();
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,

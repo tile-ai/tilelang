@@ -51,7 +51,7 @@ def MarkHostMetalContext():
     def pass_fn(func, mod, ctx):
         mutator = _MarkHostMetalContextMutator()
         new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body)
+        return func.with_body(new_body, span=func.span)
 
     return prim_func_pass(pass_fn, opt_level=0)
 
