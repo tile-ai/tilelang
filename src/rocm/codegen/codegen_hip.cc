@@ -1532,9 +1532,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(builtin::ptx_commit_group())) {
     print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
-    int n = Downcast<IntImm>(op->args[0])->value;
-    std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
-    print_extern_call_stmt(func_name, 1);
+    if (const auto *n = op->args[0].as<IntImmNode>()) {
+      std::string func_name =
+          "tl::cp_async_wait<" + std::to_string(n->value) + ">";
+      print_extern_call_stmt(func_name, 1);
+    } else {
+      this->PrintIndent();
+      this->stream << "tl::cp_async_wait_dynamic("
+                   << this->PrintExpr(op->args[0]) << ");\n";
+    }
   } else if (op->op.same_as(builtin::create_barriers())) {
     this->PrintIndent();
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
@@ -2364,6 +2370,9 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
     PrintConst(const_f32.get(), os, p);
     os << ')';
+    return;
+  } else if (op->dtype.is_float4_e2m1fn()) {
+    os << "__tl_float_to_fp4(" << std::scientific << op->value << 'f' << ')';
     return;
   }
   // Type code is kFloat
