@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ def add(A, B):
     C = T.empty((N,), T.float16)
     with T.Kernel(1, threads=64):
         for i in T.Parallel(N):
-            C[i] = A[i] + B[i]
+            C[i] = A[i] + B[i]  # line_marker_store
     return C
 """
 
@@ -46,7 +47,7 @@ def _add(A, B):
     C = T.empty((N,), T.float16)
     with T.Kernel(1, threads=64):
         for i in T.Parallel(N):
-            C[i] = A[i] + B[i]
+            C[i] = A[i] + B[i]  # line_marker_store
     return C
 
 
@@ -58,6 +59,17 @@ def _run_cli(*args):
         check=False,
         timeout=180,
     )
+
+
+def _line_directives(source: str) -> list[tuple[int, str]]:
+    return [(int(num), fname) for num, fname in re.findall(r'^#line (\d+) "(.*)"$', source, re.M)]
+
+
+def _marker_line(path: Path, marker: str) -> int:
+    for i, line in enumerate(path.read_text().splitlines(), 1):
+        if marker in line:
+            return i
+    raise ValueError(f"marker not found: {marker}")
 
 
 def _looks_like_generated_source(text: str) -> bool:
@@ -93,13 +105,27 @@ def test_pass_context_config_enables_line_directives_when_supported():
         assert config == {}
 
 
+def test_line_directive_parser_reads_file_and_line():
+    source = '#line 12 "/tmp/example.py"\nint x;\n'
+    assert _line_directives(source) == [(12, "/tmp/example.py")]
+
+
 @pytest.mark.skipif(
     not _CAN_EMIT_LINE_DIRECTIVES,
     reason="tl.emit_line_directives is not in this wheel; CI merge with main has it",
 )
 def test_compile_kernel_source_emits_line_directives():
     source = compile_kernel_source(_add.get_tir())
-    assert "#line" in source
+    directives = _line_directives(source)
+    assert directives, f"no #line directives:\n{source}"
+    store_line = _marker_line(Path(__file__), "line_marker_store")
+    files = {fname for _, fname in directives}
+    assert any(Path(fname).name == Path(__file__).name for fname in files), files
+    assert any(num == store_line and Path(fname).name == Path(__file__).name for num, fname in directives), (
+        store_line,
+        directives,
+        source,
+    )
 
 
 def test_compile_only_cli_writes_kernel_source(tmp_path: Path):
@@ -129,7 +155,15 @@ def test_compile_only_cli_emits_line_directives(tmp_path: Path):
     result = _run_cli("--output_file", str(output), str(example))
 
     assert result.returncode == 0, result.stderr
-    assert "#line" in output.read_text()
+    text = output.read_text()
+    directives = _line_directives(text)
+    assert directives, f"no #line directives:\n{text}"
+    store_line = _marker_line(example, "line_marker_store")
+    assert any(num == store_line and Path(fname).name == example.name for num, fname in directives), (
+        store_line,
+        directives,
+        text,
+    )
 
 
 def test_compile_only_cli_reports_compile_error(tmp_path: Path):
