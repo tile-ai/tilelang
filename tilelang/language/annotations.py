@@ -127,14 +127,14 @@ def annotate_restrict_buffers(*buffers):
 def annotate_ws_schedule(schedule):
     """Attach a warp-specialization schedule to the kernel.
 
-    ``schedule`` is a typed :class:`~tilelang.language.ws_schedule.WSSchedule`
+    ``schedule`` is a typed :class:`~tilelang.language.warp_specialize.WSSchedule`
     object describing how to transform the straight-line kernel into a
     warp-specialized one: warp roles, pipelines (full/empty barrier pairs
     protecting multi-versioned buffers), and per-role instruction sequences
     per loop scope. It is materialized by the ``MaterializeWSSchedule`` pass;
     see ``examples/aws/gemm.py`` for a complete example.
     """
-    from tilelang.language.ws_schedule import WSSchedule
+    from tilelang.language.warp_specialize import WSSchedule
 
     assert isinstance(schedule, WSSchedule), f"annotate_ws_schedule expects a T.WSSchedule object, got {type(schedule)}"
     return sblock_attr({"tl.ws_schedule": schedule})

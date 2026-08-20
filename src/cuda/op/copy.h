@@ -37,7 +37,8 @@ enum class CopyInst : uint8_t {
 };
 
 const char *CopyInstToString(CopyInst inst);
-bool CopyInstIsTMA(CopyInst inst);
+bool CopyInstIsTMALoad(CopyInst inst);
+bool CopyInstIsTMAStore(CopyInst inst);
 bool CopyInstIsCPAsync(CopyInst inst);
 
 struct TMADesc {
@@ -95,9 +96,9 @@ struct CopyInstSelection {
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx);
 
-// Pre-layout producer classification used by warp-specialized scheduling.
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target);
+// Pre-layout classification used by warp-specialized scheduling.
+CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
+                                              Target target);
 
 // Semantic queries used by transform passes that need copy shape/capability
 // information without knowing the CUDA lowering policy knobs.

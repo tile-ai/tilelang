@@ -1357,7 +1357,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   const Buffer &src = op.src;
   const Buffer &dst = op.dst;
 
-  if (src.scope() != "shared.tmem" && dst.scope() != "shared.tmem") {
+  if (!IsTmemBuffer(src) && !IsTmemBuffer(dst)) {
     return Stmt();
   }
   ICHECK(TargetHasTmem(lower_args.target))
@@ -1370,11 +1370,11 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   bool src_needs_pack = 16 == src->dtype.bits();
   bool dst_needs_unpack = 16 == dst->dtype.bits();
 
-  if (src.scope() == "shared.tmem" && IsFragmentBuffer(dst)) {
+  if (IsTmemBuffer(src) && IsFragmentBuffer(dst)) {
     is_ld = true;
-  } else if (IsFragmentBuffer(src) && dst.scope() == "shared.tmem") {
+  } else if (IsFragmentBuffer(src) && IsTmemBuffer(dst)) {
     is_st = true;
-  } else if (src.scope() == "shared.dyn" && dst.scope() == "shared.tmem") {
+  } else if (src.scope() == "shared.dyn" && IsTmemBuffer(dst)) {
     is_cp = true;
   } else {
     LOG(FATAL) << "Unsupported tensor memory copy: " << "src scope = "

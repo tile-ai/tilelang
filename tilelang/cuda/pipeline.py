@@ -36,6 +36,13 @@ def allow_warp_specialized(pass_ctx: PassContext | None = None, target: Target |
     return not disable_warp_specialized
 
 
+def auto_schedule_scheduler(pass_ctx: PassContext | None = None) -> str | None:
+    """The scheduler named by tl.enable_auto_schedule; None when disabled."""
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return pass_ctx.config.get("tl.enable_auto_schedule")
+
+
 def module_has_tma(mod: IRModule) -> bool:
     """Check if any function in the module was lowered with TMA operations.
 
@@ -100,9 +107,13 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
+    # AutoSchedule: derive a WSSchedule for kernels without one, using the scheduler named by tl.enable_auto_schedule (opt-in).
     # MaterializeWSSchedule: Materialize a user-provided warp-specialization schedule (T.annotate_ws_schedule).
     # ProducerConsumerWarpSpecialized: The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers are multi-versioned internally only for functions where the WS transformation actually applies.
     if allow_warp_specialized(target=target):
+        scheduler = auto_schedule_scheduler()
+        if scheduler is not None:
+            mod = tilelang.cuda.transform.AutoSchedule(scheduler)(mod)
         mod = tilelang.cuda.transform.MaterializeWSSchedule()(mod)
         mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
