@@ -1,6 +1,6 @@
 ---
 name: tilelang-semantic
-description: Design, implement, debug, or review TileLang semantic rules and validation, especially loop nesting, T.Parallel/T.Pipelined/T.vectorized/T.Persistent contracts, buffer-scope legality, reducer lifecycle, data races, and actionable diagnostics. Use when changing tilelang/analysis checkers, early Verify* passes, language legality rules, or regression tests for invalid TileLang programs.
+description: Design, implement, debug, or review TileLang semantic rules and validation, including loop nesting, buffer bounds/initialization/ownership, data races, synchronization and async lifecycles, TileOp shape/dtype/scope contracts, software pipelines, reducers, layouts, kernel launch constraints, and actionable diagnostics. Use when changing tilelang/analysis checkers, early Verify* passes, language legality rules, or regression tests for invalid TileLang programs.
 ---
 
 # TileLang Semantic Validation
@@ -34,7 +34,16 @@ Before proposing or changing a rule:
 3. Trace the construct through the target pipelines and identify the first pass
    that assumes the proposed invariant.
 4. Search tests and examples for valid counterexamples.
-5. For loop-nesting work, read `references/loop-rules.md` completely and run:
+5. Load the relevant domain reference completely:
+
+   - loop nesting and loop/storage ownership:
+     `references/loop-rules.md`;
+   - bounds, initialization, scopes, races, synchronization, barriers, or
+     async operations: `references/memory-concurrency.md`;
+   - TileOps, software pipelines, reducers, layouts, kernel launch, or dtype
+     contracts: `references/operations-layout.md`.
+
+For loop-nesting work, also run:
 
 ```bash
 python .agents/skills/tilelang-semantic/scripts/scan_loop_nesting.py
@@ -98,9 +107,11 @@ Add, at minimum:
 
 1. one failing test for each violation shape;
 2. one near-neighbor valid test;
-3. nested and sibling cases for lexical-state rules;
-4. multidimensional cases for `T.Parallel`;
-5. a diagnostic assertion that checks the useful part of the message.
+3. a proof-boundary case that remains accepted when the analysis is
+   inconclusive;
+4. alternate control-flow paths for state/lifecycle rules;
+5. target-specific accepted and unsupported cases when capability matters;
+6. a diagnostic assertion that checks the useful part of the message.
 
 Also run affected backend codegen tests when a rule migrates existing kernels.
 Use `$tilelang-build` for repository test commands. For a Python pre-lower
@@ -119,6 +130,12 @@ git diff --check
   frontend diagnostics.
 - `src/transform/verify_*.cc`: native effect/dataflow verification such as
   reducer lifecycle, buffer initialization, and parallel races.
+- `src/transform/legalize_safe_memory_access.cc`: bounds proof, global guards,
+  and optional local/shared warnings.
+- `tilelang/language/*_op.py` and `tilelang/language/builtin.py`: source API
+  operand and annotation validation.
+- `src/transform/{pipeline_planning,inject_pipeline}.cc`: pipeline dependency,
+  ordering, replayability, and multi-versioning contracts.
 - `src/transform/layout_inference/parallel_loop_layout_validator.h`:
   post-inference parallel-layout annotation contract.
 - `tilelang/{cuda,rocm,cpu,metal,webgpu}/pipeline.py`: target pipeline order.
@@ -133,6 +150,8 @@ ownership, replication, loop partitioning, or inferred loop layouts.
   execution layers and use different lowering paths.
 - Do not reject every construct that falls back to serial execution.
 - Do not promote “cannot prove safe” to “proven unsafe.”
+- Do not use Python `assert` for new user-facing legality checks; assertions
+  disappear under optimized Python and usually produce poor diagnostics.
 - Do not infer source intent from `ForKind` alone when annotations define the
   construct.
 - Do not ban all nested `T.Pipelined` syntax; distinguish a bare serial-like
@@ -140,10 +159,18 @@ ownership, replication, loop partitioning, or inferred loop layouts.
 - Do not require parallel extent to equal thread count or explicit layout
   shape; partitioning, replication, and guarded tails intentionally permit
   differences.
+- Do not reject barriers merely because they occur inside `T.Parallel`;
+  validate participant sets, path uniformity, and execution counts.
+- Do not report a missing target feature or missed optimization as universal
+  semantic invalidity.
 
 ## Resources
 
 - `references/loop-rules.md`: established loop contracts, representation
   details, non-rules, and the pipeline-path rule under development.
+- `references/memory-concurrency.md`: buffer bounds/initialization/ownership,
+  aliasing, races, collective synchronization, barriers, and async lifetimes.
+- `references/operations-layout.md`: TileOp, pipeline, reducer, layout,
+  kernel/target, and dtype contracts plus the implementation roadmap.
 - `scripts/scan_loop_nesting.py`: inventory lexical loop pairs and detect
   nested software-pipeline requests in Python sources.
