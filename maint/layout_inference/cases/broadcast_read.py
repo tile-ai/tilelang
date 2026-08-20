@@ -51,7 +51,7 @@ def check(variant, model, result):
     assert loop["replicate"] == 1, f"loop layout must not replicate execution, got: {loop}"
 
 
-# Under the default (io-aware) config: S loads via the fully replicated
+# Under the explicit io-aware config: S loads via the fully replicated
 # fragment (vector = its slot count), Out streams 4-wide and coalesced —
 # the whole point of rejecting the #1729 thread-collapsed candidate.
 VECTOR_ANCHOR = {

@@ -1106,7 +1106,7 @@ LayoutCostModel::Create(const std::string &name, Target target) {
   }
   LOG(FATAL) << "Unknown layout cost model \"" << name
              << "\" for pass config `tl.layout_cost_model`; valid values "
-                "are \"io-aware\" (default) and \"register-count\".";
+                "are \"register-count\" (default) and \"io-aware\".";
   return nullptr; // unreachable
 }
 

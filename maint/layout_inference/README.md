@@ -2,8 +2,8 @@
 
 Constructed IR cases with reviewed expected layouts, for validating the
 free-mode layout search — in particular the selection policy behind
-`tl.layout_cost_model` ("register-count" = the legacy ordering,
-"io-aware" = the default model in
+`tl.layout_cost_model` ("register-count" = the default ordering,
+"io-aware" = the opt-in global-memory model in
 `src/transform/layout_inference/layout_cost_model.cc`).
 
 Why this exists:
@@ -30,8 +30,8 @@ python run.py --cute         # compare symbolic scores with the exact oracle
 
 `--anchor` closes the loop between the model and the real vectorizer: the
 cost model scores a layout assuming a vector width, and the anchor reads
-back what the vectorizer actually emitted for the winning layout under the
-default config. Each case declares `VECTOR_ANCHOR = {variant: {buffer:
+back what the vectorizer actually emitted for the winning layout under an
+explicit `io-aware` config. Each case declares `VECTOR_ANCHOR = {variant: {buffer:
 lanes}}`; variants without one print observed widths for review. A
 mismatch means the model's width belief and codegen diverged — exactly the
 drift the shared MaxVectorLoadBits policy is supposed to prevent.

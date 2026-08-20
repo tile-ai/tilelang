@@ -117,7 +117,7 @@ class PassConfigKey(str, Enum):
     "io-aware" scores estimated global-memory access cost (vector width /
     warp coalescing of every fragment<->global copy, weighted by bytes
     moved) with register count as the tiebreak; "register-count" is the
-    legacy total-register-slots-only ordering. Default: 'io-aware'"""
+    total-register-slots-only ordering. Default: 'register-count'"""
 
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,

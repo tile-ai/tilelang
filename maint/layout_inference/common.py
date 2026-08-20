@@ -68,7 +68,7 @@ def run_layout_inference_objects(prim_func, cost_model: str, target=None):
 
 
 def lower_and_extract_vector_widths(prim_func, target=None) -> dict[str, int]:
-    """Fully lower under the DEFAULT pass config and report, per global
+    """Fully lower under the IO-AWARE pass config and report, per global
     buffer, the widest vectorized access (in lanes) the final device TIR
     performs.
 
@@ -79,7 +79,7 @@ def lower_and_extract_vector_widths(prim_func, target=None) -> dict[str, int]:
     """
     if target is None:
         target = tvm.target.Target(determine_target("auto"))
-    with tvm.target.Target(target):
+    with tvm.target.Target(target), tvm.transform.PassContext(config={"tl.layout_cost_model": "io-aware"}):
         artifact = tl.lower(prim_func, target=target, enable_device_compile=False)
     widths: dict[str, int] = {}
 
