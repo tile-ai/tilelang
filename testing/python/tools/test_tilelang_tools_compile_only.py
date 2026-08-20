@@ -127,6 +127,33 @@ def test_compile_only_cli_unlinks_stale_output_on_failure(tmp_path: Path):
     assert not output.is_file() or output.read_text() != stale
 
 
+def test_compile_only_cli_keeps_input_when_output_is_same_path(tmp_path: Path):
+    example = tmp_path / "example.py"
+    example.write_text(_COMPILE_ONLY_EXAMPLE)
+
+    result = _run_cli("--output_file", str(example), str(example))
+
+    assert result.returncode != 0
+    assert example.is_file()
+    assert example.read_text() == _COMPILE_ONLY_EXAMPLE
+    assert "output_file" in result.stderr
+    assert "input" in result.stderr.lower()
+
+
+def test_compile_only_cli_keeps_input_when_output_is_symlink(tmp_path: Path):
+    example = tmp_path / "example.py"
+    alias = tmp_path / "out.py"
+    example.write_text(_COMPILE_ONLY_EXAMPLE)
+    alias.symlink_to(example)
+
+    result = _run_cli("--output_file", str(alias), str(example))
+
+    assert result.returncode != 0
+    assert example.is_file()
+    assert example.read_text() == _COMPILE_ONLY_EXAMPLE
+    assert alias.is_symlink()
+
+
 def test_compile_only_cli_reports_syntax_error(tmp_path: Path):
     example = tmp_path / "bad.py"
     output = tmp_path / "out.s"
