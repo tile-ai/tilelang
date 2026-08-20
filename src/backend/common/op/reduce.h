@@ -630,6 +630,248 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
   return PrimExpr();
 }
 
+// Shared fragment-reduce lowering helpers. These are the common building
+// blocks used by both the generic ReduceLowerer (CUDA/ROCm) and the Metal
+// backend's single-simdgroup butterfly lowering. Keeping them here prevents
+// the Metal implementation from copying Phase-1/Phase-3 and layout/plan
+// construction from the generic path.
+
+struct FragmentReduceContext {
+  Buffer src_buffer;
+  Buffer dst_buffer;
+  Fragment src_layout;
+  Fragment dst_layout;
+  Fragment red_layout;
+  int src_dim = 0;
+  int dst_dim = 0;
+  bool is_1d_reduce = false;
+  Array<IterVar> dst_vars;
+  Array<IterVar> src_vars;
+  Array<PrimExpr> src_indices;
+  Array<PrimExpr> dst_indices;
+  Array<PrimExpr> red_indices;
+  PrimExpr src_thread;
+  ReduceOwnershipPlan reduce_plan;
+};
+
+inline FragmentReduceContext MakeFragmentReduceContext(
+    const ReduceOpNode &op, const Buffer &src_buffer, const Buffer &dst_buffer,
+    const Fragment &src_layout, const Fragment &dst_layout,
+    arith::Analyzer *analyzer) {
+  FragmentReduceContext ctx;
+  ctx.src_buffer = src_buffer;
+  ctx.dst_buffer = dst_buffer;
+  ctx.src_layout = src_layout;
+  ctx.dst_layout = dst_layout;
+  ctx.red_layout = ComputeReducerLayout(src_layout, op.dim);
+  ctx.src_dim = src_layout->InputDim();
+  ctx.dst_dim = dst_layout->InputDim();
+
+  ctx.is_1d_reduce = ctx.src_dim == ctx.dst_dim && ctx.dst_dim == 1;
+
+  if (ctx.is_1d_reduce) {
+    ICHECK(is_one(dst_layout->OutputShape().back()))
+        << "Reduce for scalar not implemented.";
+  } else {
+    ICHECK_EQ(ctx.src_dim, ctx.dst_dim + 1) << "Reduce dimension mismatch.";
+  }
+
+  for (size_t i = 0; i < ctx.dst_dim; ++i) {
+    Var var = Var(std::string{char('i' + i)});
+    ctx.dst_vars.push_back(IterVar(Range(0, dst_layout->InputShape()[i]), var,
+                                   IterVarType::kDataPar));
+  }
+
+  if (!ctx.is_1d_reduce) {
+    ctx.src_vars = ctx.dst_vars;
+  }
+  Range reduce_dom(0, src_layout->InputShape()[op.dim]);
+  IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
+  ctx.src_vars.insert(ctx.src_vars.begin() + op.dim, reduce_iv);
+
+  ctx.src_indices = src_layout->Forward(
+      ctx.src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+  ctx.dst_indices = dst_layout->Forward(
+      ctx.dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+  ctx.red_indices = ctx.red_layout->Forward(
+      ctx.dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+  ctx.src_thread = src_layout->ForwardThread(
+      ctx.src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
+
+  ctx.reduce_plan = MakeReduceOwnershipPlan(
+      ctx.src_indices, ctx.src_thread, ctx.src_vars, ctx.src_vars[op.dim]->var,
+      analyzer);
+
+  return ctx;
+}
+
+struct ReduceBufferPlan {
+  bool require_init = false;
+  bool need_duplicate = false;
+  bool need_update = false;
+  Buffer clear_buffer;
+};
+
+inline ReduceBufferPlan MakeReduceBufferPlan(const ReduceOpNode &op,
+                                             const Buffer &dst_buffer,
+                                             const Fragment &dst_layout,
+                                             const Fragment &red_layout,
+                                             arith::Analyzer *analyzer) {
+  ReduceBufferPlan plan;
+  plan.require_init = op.clear;
+  if (op.type->IsSum() || op.type->IsAbsSum() || op.type->IsBitAnd() ||
+      op.type->IsBitOr() || op.type->IsBitXor()) {
+    plan.require_init = true;
+  }
+
+  plan.clear_buffer = dst_buffer;
+  if ((op.type->IsSum() || op.type->IsAbsSum()) && !op.clear) {
+    plan.need_duplicate = true;
+    plan.need_update = true;
+  } else if (op.type->IsBitAnd() && !op.clear) {
+    plan.need_duplicate = true;
+    plan.need_update = true;
+  } else if ((op.type->IsBitOr() || op.type->IsBitXor()) && !op.clear) {
+    plan.need_duplicate = true;
+    plan.need_update = true;
+  } else if ((op.type->IsMax() || op.type->IsMin() ||
+              op.type->IsAbsMax()) &&
+             !op.clear) {
+    plan.need_duplicate = true;
+    plan.need_update = true;
+  }
+
+  if (!analyzer->CanProve(dst_layout->ReplicateExtent() ==
+                          red_layout->ReplicateExtent())) {
+    plan.need_duplicate = true;
+  }
+  ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
+                             red_layout->ReplicateExtent()))
+      << "Inconsistent layouts between src and dst in ReduceOp: "
+      << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
+
+  if (plan.need_duplicate) {
+    plan.clear_buffer =
+        decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
+                    dst_buffer->name + "_clear",
+                    GetPtrStorageScope(dst_buffer->data));
+  }
+  return plan;
+}
+
+inline Stmt MakeUnvectorizedLocalReduce(
+    const ReduceOpNode &op, const Buffer &accum_buffer, const Buffer &src_buffer,
+    const Array<PrimExpr> &src_indices, const Array<IterVar> &src_vars,
+    const Array<PrimExpr> &red_indices, const PrimExpr &init_value,
+    bool require_init, bool need_duplicate, int src_output_dim) {
+  Array<Stmt> stmts;
+  if (require_init ||
+      (need_duplicate &&
+       (op.type->IsMax() || op.type->IsMin() || op.type->IsAbsMax()))) {
+    stmts.push_back(BufferStore(accum_buffer, init_value, red_indices));
+  }
+
+  Stmt reduce_local =
+      BufferStore(accum_buffer,
+                  MakeReduce(op, 1, BufferLoad(accum_buffer, red_indices),
+                             BufferLoad(src_buffer, src_indices)),
+                  red_indices);
+
+  for (int i = src_output_dim - 1; i >= 0; --i) {
+    reduce_local = For(src_vars[i]->var, 0, src_vars[i]->dom->extent,
+                       ForKind::kUnrolled, reduce_local, std::nullopt);
+  }
+  stmts.push_back(reduce_local);
+  return stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
+}
+
+inline PrimExpr MakeFragmentOwnershipPredicate(
+    const Fragment &layout, const Array<PrimExpr> &indices,
+    const Array<PrimExpr> &lhs, const PrimExpr &thread_index,
+    arith::Analyzer *analyzer) {
+  PrimExpr predicate = Bool(true);
+  // The fragment inverse expects a zero-based logical thread coordinate
+  // within the destination layout's thread range, so normalize the absolute
+  // thread index against that range.
+  PrimExpr local_thread_index = thread_index;
+  if (layout->ThreadRange().defined()) {
+    local_thread_index = local_thread_index - layout->ThreadRange()->min;
+  }
+  auto th_indices = indices;
+  th_indices.push_back(local_thread_index);
+  auto inv = layout->Inverse()->Forward(th_indices);
+  inv.pop_back();
+  for (size_t i = 0; i < lhs.size(); ++i) {
+    predicate = predicate && (inv[i] == lhs[i]);
+  }
+  return analyzer->Simplify(predicate);
+}
+
+inline Stmt MakeParallelPartitionLoop(Stmt body, const Array<IterVar> &dst_vars,
+                                      const PrimExpr &thread_index,
+                                      const Range &thread_bounds,
+                                      arith::Analyzer *analyzer,
+                                      const Fragment &red_layout) {
+  for (int i = static_cast<int>(dst_vars.size()) - 1; i >= 0; --i) {
+    body = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
+               ForKind::kParallel, body);
+  }
+  if (!dst_vars.empty()) {
+    body = PartitionLoop(Downcast<For>(body), thread_index, analyzer,
+                         red_layout);
+    body = PragmaUnrollLoop(Downcast<For>(body));
+  } else {
+    auto guard = (thread_index == thread_bounds->min);
+    body = IfThenElse(guard, body);
+  }
+  return body;
+}
+
+inline Stmt MakeDuplicateUpdateStmt(const ReduceOpNode &op,
+                                    const Buffer &dst_buffer,
+                                    const Buffer &accum_buffer,
+                                    const Array<PrimExpr> &dst_indices,
+                                    const Array<PrimExpr> &red_indices,
+                                    bool need_update, bool cast_to_dst,
+                                    bool cast_dst_load_to_accum,
+                                    const PrimExpr &predicate,
+                                    arith::Analyzer *analyzer) {
+  PrimExpr update = BufferLoad(accum_buffer, red_indices);
+  if (need_update) {
+    PrimExpr dst_val =
+        cast_dst_load_to_accum
+            ? PrimExpr(Cast(accum_buffer->dtype,
+                            BufferLoad(dst_buffer, dst_indices)))
+            : BufferLoad(dst_buffer, dst_indices);
+    update = MakeUpdate(op, dst_val, BufferLoad(accum_buffer, red_indices));
+  }
+  if (cast_to_dst) {
+    update = Cast(dst_buffer->dtype, update);
+  }
+  Stmt store = BufferStore(dst_buffer, update, dst_indices);
+  return analyzer->CanProve(predicate) ? store : IfThenElse(predicate, store);
+}
+
+inline Stmt MakeDuplicateUpdatePhase(
+    const ReduceOpNode &op, const Buffer &dst_buffer,
+    const Buffer &accum_buffer, const Array<PrimExpr> &dst_indices,
+    const Array<PrimExpr> &red_indices, const Array<IterVar> &dst_vars,
+    const Fragment &dst_layout, bool need_update, bool cast_to_dst,
+    bool cast_dst_load_to_accum, const PrimExpr &thread_index,
+    const Range &thread_bounds, arith::Analyzer *analyzer,
+    const Fragment &red_layout) {
+  PrimExpr predicate = MakeFragmentOwnershipPredicate(
+      dst_layout, dst_indices,
+      dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }),
+      thread_index, analyzer);
+  Stmt store = MakeDuplicateUpdateStmt(op, dst_buffer, accum_buffer, dst_indices,
+                                       red_indices, need_update, cast_to_dst,
+                                       cast_dst_load_to_accum, predicate,
+                                       analyzer);
+  return MakeParallelPartitionLoop(store, dst_vars, thread_index, thread_bounds,
+                                   analyzer, red_layout);
+}
+
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
@@ -764,87 +1006,23 @@ template <typename Impl> struct ReduceLowerer {
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout = reduce::ComputeReducerLayout(src_layout, op.dim);
-      auto src_dim = src_layout->InputDim();
-      auto dst_dim = dst_layout->InputDim();
-
-      auto is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
-
-      if (is_1d_reduce) {
-        ICHECK(is_one(dst_layout->OutputShape().back()))
-            << "Reduce for scalar not implemented.";
-      } else {
-        ICHECK_EQ(src_dim, dst_dim + 1) << "Reduce dimension mismatch.";
-      }
-
-      Array<IterVar> dst_vars;
-      for (size_t i = 0; i < dst_dim; ++i) {
-        Var var = Var(std::string{char('i' + i)});
-        dst_vars.push_back(IterVar(Range(0, dst_layout->InputShape()[i]), var,
-                                   IterVarType::kDataPar));
-      }
-
-      Array<IterVar> src_vars;
-      if (!is_1d_reduce) {
-        src_vars = dst_vars;
-      }
-      Range reduce_dom(0, src_layout->InputShape()[op.dim]);
-      IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
-      src_vars.insert(src_vars.begin() + op.dim, reduce_iv);
-
-      auto src_indices = src_layout->Forward(
-          src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      auto dst_indices = dst_layout->Forward(
-          dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      auto red_indices = red_layout->Forward(
-          dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
-      auto src_thread = src_layout->ForwardThread(
-          src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
-
-      auto reduce_plan = reduce::MakeReduceOwnershipPlan(
-          src_indices, src_thread, src_vars, src_vars[op.dim]->var, analyzer);
+      auto ctx = reduce::MakeFragmentReduceContext(
+          op, src_buffer, dst_buffer, src_layout, dst_layout, analyzer);
+      auto red_layout = ctx.red_layout;
+      auto dst_dim = ctx.dst_dim;
+      auto &dst_vars = ctx.dst_vars;
+      auto &dst_indices = ctx.dst_indices;
+      auto &red_indices = ctx.red_indices;
+      auto &reduce_plan = ctx.reduce_plan;
 
       Array<Stmt> stmts;
 
-      auto require_init = op.clear;
-      if (op.type->IsSum() || op.type->IsAbsSum() || op.type->IsBitAnd() ||
-          op.type->IsBitOr() || op.type->IsBitXor()) {
-        require_init = true;
-      }
-
-      auto clear_buffer = dst_buffer;
-      auto need_duplicate = false;
-      auto need_update = false;
-      if ((op.type->IsSum() || op.type->IsAbsSum()) && !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      } else if (op.type->IsBitAnd() && !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      } else if ((op.type->IsBitOr() || op.type->IsBitXor()) && !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      } else if ((op.type->IsMax() || op.type->IsMin() ||
-                  op.type->IsAbsMax()) &&
-                 !op.clear) {
-        need_duplicate = true;
-        need_update = true;
-      }
-
-      if (!analyzer->CanProve(dst_layout->ReplicateExtent() ==
-                              red_layout->ReplicateExtent())) {
-        need_duplicate = true;
-      }
-      ICHECK(!analyzer->CanProve(dst_layout->ReplicateExtent() >
-                                 red_layout->ReplicateExtent()))
-          << "Inconsistent layouts between src and dst in ReduceOp: "
-          << "dst_layout=" << dst_layout << "red_layout=" << red_layout;
-
-      if (need_duplicate) {
-        clear_buffer = decl_buffer(red_layout->OutputShape(), dst_buffer->dtype,
-                                   dst_buffer->name + "_clear",
-                                   GetPtrStorageScope(dst_buffer->data));
-      }
+      auto plan = reduce::MakeReduceBufferPlan(op, dst_buffer, dst_layout,
+                                               red_layout, analyzer);
+      auto require_init = plan.require_init;
+      auto clear_buffer = plan.clear_buffer;
+      auto need_duplicate = plan.need_duplicate;
+      auto need_update = plan.need_update;
 
       Array<PrimExpr> src_indice_compressed = reduce_plan.local_src_indices;
       Array<IterVar> src_var_compressed = reduce_plan.local_reduce_vars;
@@ -932,26 +1110,10 @@ template <typename Impl> struct ReduceLowerer {
       }
 
       if (!can_pack) {
-        if (require_init ||
-            (need_duplicate &&
-             (op.type->IsMax() || op.type->IsMin() || op.type->IsAbsMax()))) {
-          stmts.push_back(BufferStore(clear_buffer, reduce::MakeInitValue(op),
-                                      red_indices));
-        }
-
-        Stmt reduce_local = BufferStore(
-            clear_buffer,
-            reduce::MakeReduce(op, 1, BufferLoad(clear_buffer, red_indices),
-                               BufferLoad(src_buffer, src_indice_compressed)),
-            red_indices);
-
-        for (int i = static_cast<int>(src_layout->OutputDim()) - 1; i >= 0;
-             --i) {
-          reduce_local = For(src_var_compressed[i]->var, 0,
-                             src_var_compressed[i]->dom->extent,
-                             ForKind::kUnrolled, reduce_local, std::nullopt);
-        }
-        stmts.push_back(reduce_local);
+        stmts.push_back(reduce::MakeUnvectorizedLocalReduce(
+            op, clear_buffer, src_buffer, src_indice_compressed,
+            src_var_compressed, red_indices, reduce::MakeInitValue(op),
+            require_init, need_duplicate, src_layout->OutputDim()));
       }
 
       const int batch = op.batch;
@@ -1229,53 +1391,21 @@ template <typename Impl> struct ReduceLowerer {
         stmts.push_back(BufferStore(clear_buffer, call, red_indices));
       }
 
-      PrimExpr predicate = Bool(true);
-      {
-        // The fragment inverse expects a zero-based logical thread coordinate
-        // within the destination layout's thread range, so normalize the
-        // absolute thread index against that range.
-        PrimExpr local_thread_index = lower_args.thread_index;
-        if (dst_layout->ThreadRange().defined()) {
-          local_thread_index =
-              local_thread_index - dst_layout->ThreadRange()->min;
-        }
-        auto dst_th_indices = dst_indices;
-        dst_th_indices.push_back(local_thread_index);
-        auto inv = dst_layout->Inverse()->Forward(dst_th_indices);
-        inv.pop_back();
-        for (int i = 0; i < static_cast<int>(dst_layout->InputDim()); i++) {
-          predicate = predicate && (inv[i] == dst_vars[i]->var);
-        }
-        predicate = analyzer->Simplify(predicate);
-      }
+      PrimExpr predicate = reduce::MakeFragmentOwnershipPredicate(
+          dst_layout, dst_indices,
+          dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }),
+          lower_args.thread_index, analyzer);
       if (need_duplicate) {
-        PrimExpr update =
-            need_update
-                ? reduce::MakeUpdate(op, BufferLoad(dst_buffer, dst_indices),
-                                     BufferLoad(clear_buffer, red_indices))
-                : BufferLoad(clear_buffer, red_indices);
-        auto store = BufferStore(dst_buffer, update, dst_indices);
-        if (analyzer->CanProve(predicate)) {
-          stmts.push_back(store);
-        } else {
-          stmts.push_back(IfThenElse(predicate, store));
-        }
+        stmts.push_back(reduce::MakeDuplicateUpdateStmt(
+            op, dst_buffer, clear_buffer, dst_indices, red_indices, need_update,
+            /*cast_to_dst=*/false, /*cast_dst_load_to_accum=*/false, predicate,
+            analyzer));
       }
 
       auto body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
-      for (int i = static_cast<int>(dst_layout->InputDim()) - 1; i >= 0; --i) {
-        body = For(dst_vars[i]->var, 0, dst_vars[i]->dom->extent,
-                   ForKind::kParallel, body);
-      }
-
-      if (dst_layout->InputDim() > 0) {
-        body = PartitionLoop(Downcast<For>(body), lower_args.thread_index,
-                             analyzer, red_layout);
-        body = PragmaUnrollLoop(Downcast<For>(body));
-      } else {
-        auto guard = (lower_args.thread_index == lower_args.thread_bounds->min);
-        body = IfThenElse(guard, body);
-      }
+      body = reduce::MakeParallelPartitionLoop(
+          body, dst_vars, lower_args.thread_index, lower_args.thread_bounds,
+          analyzer, red_layout);
 
       if (need_duplicate) {
         body = SeqStmt({AllocBuffer(clear_buffer), body});
