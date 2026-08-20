@@ -47,7 +47,7 @@ def _add(A, B):
     C = T.empty((N,), T.float16)
     with T.Kernel(1, threads=64):
         for i in T.Parallel(N):
-            C[i] = A[i] + B[i]  # line_marker_store
+            C[i] = A[i] + B[i]  # line_marker_jit
     return C
 
 
@@ -110,6 +110,17 @@ def test_line_directive_parser_reads_file_and_line():
     assert _line_directives(source) == [(12, "/tmp/example.py")]
 
 
+def test_line_markers_do_not_collide():
+    # In-process lookup scans this file. First hit of each marker must differ
+    # or compile_kernel_source asserts the example-string line.
+    jit = _marker_line(Path(__file__), "line_marker_jit")
+    store = _marker_line(Path(__file__), "line_marker_store")
+    assert jit != store
+    lines = Path(__file__).read_text().splitlines()
+    assert lines[jit - 1].rstrip().endswith("# line_marker_jit")
+    assert "def _add" in "\n".join(lines[max(0, jit - 10) : jit])
+
+
 @pytest.mark.skipif(
     not _CAN_EMIT_LINE_DIRECTIVES,
     reason="tl.emit_line_directives is not in this wheel; CI merge with main has it",
@@ -118,7 +129,7 @@ def test_compile_kernel_source_emits_line_directives():
     source = compile_kernel_source(_add.get_tir())
     directives = _line_directives(source)
     assert directives, f"no #line directives:\n{source}"
-    store_line = _marker_line(Path(__file__), "line_marker_store")
+    store_line = _marker_line(Path(__file__), "line_marker_jit")
     files = {fname for _, fname in directives}
     assert any(Path(fname).name == Path(__file__).name for fname in files), files
     assert any(num == store_line and Path(fname).name == Path(__file__).name for num, fname in directives), (
