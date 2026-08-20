@@ -8,13 +8,17 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tilelang.transform import PassConfigKey
 from tilelang.tools.compile_only import (
     _is_cuda_target,
+    _pass_context_config,
     compile_kernel_source,
     cuda_codegen_available,
     discover_prim_func,
     resolve_target,
 )
+
+_CAN_EMIT_LINE_DIRECTIVES = hasattr(PassConfigKey, "TL_EMIT_LINE_DIRECTIVES")
 
 _COMPILE_ONLY_EXAMPLE = """\
 import tilelang
@@ -81,6 +85,23 @@ def test_compile_kernel_source_default_cpu_c():
     assert "AnnotateDeviceBoundTmaCopies" not in source
 
 
+def test_pass_context_config_enables_line_directives_when_supported():
+    config = _pass_context_config()
+    if _CAN_EMIT_LINE_DIRECTIVES:
+        assert config.get(PassConfigKey.TL_EMIT_LINE_DIRECTIVES) is True
+    else:
+        assert config == {}
+
+
+@pytest.mark.skipif(
+    not _CAN_EMIT_LINE_DIRECTIVES,
+    reason="tl.emit_line_directives is not in this wheel; CI merge with main has it",
+)
+def test_compile_kernel_source_emits_line_directives():
+    source = compile_kernel_source(_add.get_tir())
+    assert "#line" in source
+
+
 def test_compile_only_cli_writes_kernel_source(tmp_path: Path):
     example = tmp_path / "example.py"
     output = tmp_path / "out.s"
@@ -94,6 +115,21 @@ def test_compile_only_cli_writes_kernel_source(tmp_path: Path):
     assert text.strip()
     assert _looks_like_generated_source(text)
     assert "__global__" not in text
+
+
+@pytest.mark.skipif(
+    not _CAN_EMIT_LINE_DIRECTIVES,
+    reason="tl.emit_line_directives is not in this wheel; CI merge with main has it",
+)
+def test_compile_only_cli_emits_line_directives(tmp_path: Path):
+    example = tmp_path / "example.py"
+    output = tmp_path / "out.s"
+    example.write_text(_COMPILE_ONLY_EXAMPLE)
+
+    result = _run_cli("--output_file", str(output), str(example))
+
+    assert result.returncode == 0, result.stderr
+    assert "#line" in output.read_text()
 
 
 def test_compile_only_cli_reports_compile_error(tmp_path: Path):

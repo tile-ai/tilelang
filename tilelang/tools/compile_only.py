@@ -151,6 +151,20 @@ def discover_prim_func(module: ModuleType):
     raise RuntimeError("no @tilelang.jit kernel or PrimFunc found")
 
 
+def _pass_context_config() -> dict:
+    """Enable ``#line`` when this build registered ``TL_EMIT_LINE_DIRECTIVES``.
+
+    Older wheels reject the unknown pass key. CI merge with main has the
+    option; CE can then map generated C back to the example.
+    """
+    from tilelang.transform import PassConfigKey
+
+    key = getattr(PassConfigKey, "TL_EMIT_LINE_DIRECTIVES", None)
+    if key is None:
+        return {}
+    return {key: True}
+
+
 def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -> str:
     """Lower ``func`` with ``enable_device_compile=False`` and return ``kernel_source`` (D1).
 
@@ -177,7 +191,7 @@ def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -
         raise RuntimeError(_CUDA_FFI_MISSING)
     # Match JITKernel._compile_artifact: LayoutInference reads Target.current().
     resolved = target if isinstance(target, Target) else Target(target)
-    with tilelang.transform.PassContext(opt_level=3), resolved:
+    with tilelang.transform.PassContext(opt_level=3, config=_pass_context_config()), resolved:
         artifact = tilelang.lower(func, target=resolved, enable_device_compile=False)
     source = artifact.kernel_source
     if not source or not str(source).strip():
