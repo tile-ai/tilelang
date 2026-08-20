@@ -109,7 +109,7 @@ class NestingVisitor(ast.NodeVisitor):
         self.stack: list[tuple[LoopInfo, int]] = []
         self.pairs: Counter[tuple[str, str]] = Counter()
         self.examples: dict[tuple[str, str], list[str]] = defaultdict(list)
-        self.pipeline_violations: list[str] = []
+        self.nested_pipeline_requests: list[str] = []
 
     def visit_For(self, node: ast.For) -> None:
         self._visit_loop(node)
@@ -133,7 +133,7 @@ class NestingVisitor(ast.NodeVisitor):
             ancestor = next((entry for entry in reversed(self.stack) if entry[0].pipeline_requested), None)
             if ancestor is not None:
                 ancestor_info, ancestor_line = ancestor
-                self.pipeline_violations.append(
+                self.nested_pipeline_requests.append(
                     f"{self.path}:{node.lineno}: {info.label} is nested under {ancestor_info.label} at line {ancestor_line}"
                 )
 
@@ -163,11 +163,6 @@ def parse_args() -> argparse.Namespace:
         help="Python files or directories to scan",
     )
     parser.add_argument("--examples", type=int, default=3, help="example locations to retain per pair")
-    parser.add_argument(
-        "--check-pipeline-paths",
-        action="store_true",
-        help="exit nonzero when two pipeline-requested loops share a lexical path",
-    )
     return parser.parse_args()
 
 
@@ -175,7 +170,7 @@ def main() -> int:
     args = parse_args()
     pair_counts: Counter[tuple[str, str]] = Counter()
     pair_examples: dict[tuple[str, str], list[str]] = defaultdict(list)
-    violations: list[str] = []
+    nested_pipeline_requests: list[str] = []
     parse_failures: list[str] = []
 
     for path in sorted(set(python_files(args.roots))):
@@ -187,7 +182,7 @@ def main() -> int:
         visitor = NestingVisitor(path, args.examples)
         visitor.visit(tree)
         pair_counts.update(visitor.pairs)
-        violations.extend(visitor.pipeline_violations)
+        nested_pipeline_requests.extend(visitor.nested_pipeline_requests)
         for pair, locations in visitor.examples.items():
             remaining = args.examples - len(pair_examples[pair])
             if remaining > 0:
@@ -198,10 +193,10 @@ def main() -> int:
         locations = ", ".join(pair_examples[pair])
         print(f"  {pair[0]:24s} -> {pair[1]:24s} {count:5d}  {locations}")
 
-    print("\nNested pipeline-requested paths:")
-    if violations:
-        for violation in violations:
-            print(f"  {violation}")
+    print("\nNested pipeline-requested paths (inventory only; backend support decides validity):")
+    if nested_pipeline_requests:
+        for request in nested_pipeline_requests:
+            print(f"  {request}")
     else:
         print("  none")
 
@@ -210,7 +205,7 @@ def main() -> int:
         for failure in parse_failures:
             print(f"  {failure}")
 
-    return 1 if args.check_pipeline_paths and violations else 0
+    return 0
 
 
 if __name__ == "__main__":

@@ -154,8 +154,8 @@ ownership, replication, loop partitioning, or inferred loop layouts.
   disappear under optimized Python and usually produce poor diagnostics.
 - Do not infer source intent from `ForKind` alone when annotations define the
   construct.
-- Do not ban all nested `T.Pipelined` syntax; distinguish a bare serial-like
-  loop from two nested loops that both request software-pipeline lowering.
+- Do not treat nested pipeline requests as backend-independent invalidity;
+  hierarchical-pipeline support is a backend capability.
 - Do not require parallel extent to equal thread count or explicit layout
   shape; partitioning, replication, and guarded tails intentionally permit
   differences.
@@ -167,10 +167,11 @@ ownership, replication, loop partitioning, or inferred loop layouts.
 ## Resources
 
 - `references/loop-rules.md`: established loop contracts, representation
-  details, non-rules, and the pipeline-path rule under development.
+  details, non-rules, and backend-specific nested-pipeline guidance.
 - `references/memory-concurrency.md`: buffer bounds/initialization/ownership,
   aliasing, races, collective synchronization, barriers, and async lifetimes.
 - `references/operations-layout.md`: TileOp, pipeline, reducer, layout,
   kernel/target, and dtype contracts plus the implementation roadmap.
 - `scripts/scan_loop_nesting.py`: inventory lexical loop pairs and detect
-  nested software-pipeline requests in Python sources.
+  nested software-pipeline requests in Python sources without judging backend
+  support.

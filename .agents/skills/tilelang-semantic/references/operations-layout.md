@@ -50,7 +50,7 @@ the frontend.
 
 ## Software-pipeline contracts
 
-In addition to the loop-path rule in `loop-rules.md`, require:
+For each requested pipeline, require:
 
 - `order` and `stage` metadata to be present together and aligned with the
   schedulable statement list;
@@ -67,8 +67,9 @@ In addition to the loop-path rule in `loop-rules.md`, require:
 Classify failures carefully:
 
 - malformed metadata or an impossible dependency schedule is invalid;
-- nested pipeline-requested loops are currently unsupported, not theoretically
-  invalid;
+- nested pipeline-requested loops are legal at the language level; accept or
+  reject them according to the selected backend's hierarchical-pipeline
+  capability;
 - a requested pipeline with no profitable overlap is valid and may fall back
   to serial execution with a warning;
 - a backend without validated async pipelining should produce a target-specific
@@ -166,7 +167,7 @@ storage changes.
 | Area | Current state | Next step |
 |---|---|---|
 | TileOp operands/shapes | Many frontend checks, often `assert`; native builders also check | Normalize errors and define per-op contracts |
-| Pipeline dependencies | Strong late planning/injection checks | Add source-friendly metadata and nested-request diagnostics |
+| Pipeline dependencies | Strong late planning/injection checks | Add source-friendly metadata and backend capability diagnostics |
 | Reducer lifecycle | Strong early and post-consumption verification | Preserve and reuse this pattern |
 | Parallel layout annotations | Structural post-inference validation | Add thread-range and ownership compatibility checks |
 | Kernel launch arguments | Basic frontend validation | Add target capability diagnostics |
@@ -189,7 +190,8 @@ For pipelines:
 
 - malformed stage/order metadata and valid replayable-bind compatibility;
 - cyclic/conflicting dependencies versus a serial fallback;
-- nested pipeline requests versus bare nested `T.Pipelined` and siblings;
+- nested pipeline requests on supporting and unsupported backends, plus bare
+  nested `T.Pipelined` and siblings;
 - conditional async producer/consumer paths.
 
 For layouts and kernels:

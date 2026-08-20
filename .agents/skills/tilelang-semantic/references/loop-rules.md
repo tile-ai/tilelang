@@ -5,7 +5,7 @@
 1. [Scope and terminology](#scope-and-terminology)
 2. [Source representation](#source-representation)
 3. [Established rules](#established-rules)
-4. [Pipeline requests on a lexical path](#pipeline-requests-on-a-lexical-path)
+4. [Nested pipelines are backend capabilities](#nested-pipelines-are-backend-capabilities)
 5. [Vectorized loops are not required to be leaves](#vectorized-loops-are-not-required-to-be-leaves)
 6. [Non-rules](#non-rules)
 7. [Rule-design checklist](#rule-design-checklist)
@@ -105,13 +105,31 @@ reducer updates; do not classify every effectful call as a tile operator.
 These checks live in `parallel_local_index_checker.py` and
 `fragment_loop_checker.py`.
 
-## Pipeline requests on a lexical path
+## Nested pipelines are backend capabilities
 
-Use this current implementation contract when adding the agreed nesting rule:
+Do not impose a language-wide limit on the number of pipeline-requested loops
+along one lexical path. Hierarchical software pipelines are semantically
+meaningful, and known Ascend kernels intentionally pipeline an outer tile loop
+and inner GEMM reduction loops at the same time.
 
-> One lexical path may contain at most one pipeline-requested loop.
+Comments in one backend's pipeline planning or multi-versioning passes establish
+only that backend's current implementation limit. They do not justify a
+backend-independent `PreLowerSemanticCheck`, which runs before the target
+pipeline has selected its lowering strategy.
 
-Reject:
+Use `pipeline-requested` classification for inventory and backend dispatch, not
+for global rejection. When reviewing nested pipelines:
+
+1. Resolve the selected target and backend pipeline.
+2. Determine whether that backend supports hierarchical pipeline planning,
+   buffer versioning, barriers, and warp/core specialization.
+3. Allow nesting when the backend contract supports it.
+4. If unsupported, diagnose it inside that backend after target resolution:
+   `Backend <name> does not support nested software pipelines`.
+5. Never silently discard one requested schedule if doing so can change async
+   or multi-buffer semantics.
+
+Keep the source scanner informational. It should report shapes such as:
 
 ```python
 for ko in T.Pipelined(K, num_stages=3):
@@ -119,56 +137,18 @@ for ko in T.Pipelined(K, num_stages=3):
         ...
 ```
 
-Allow sibling pipelines because no statement is enclosed by both:
-
-```python
-for ko in T.Pipelined(K, num_stages=3):
-    ...
-for qo in T.Pipelined(Q, num_stages=2):
-    ...
-```
-
-Do not reject the existing serial-like nesting shape:
-
-```python
-for repeat in T.Pipelined(R):
-    for ko in T.Pipelined(K, num_stages=3):
-        ...
-```
-
-Only the inner loop requests pipeline lowering. Prefer `T.serial(R)` for the
-outer loop in new code because it expresses the intent directly.
-
-This is not a theoretical prohibition on hierarchical software pipelines. It
-is a current lowering contract: pipeline planning preserves an active marker
-for downstream multi-versioning and warp-specialization passes that do not
-support nested active pipelines. Keep the diagnostic explicit about current
-support so the rule can be relaxed when hierarchical lowering is implemented.
-
-Do not reuse `nested_loop_checker.is_pipelined_for()` unchanged for this rule.
-That helper intentionally uses a broader classification and currently treats
-`tl_pipeline_group` as pipelined. Define a narrower
-`is_pipeline_requested_for()` predicate for nested-active detection.
-
-For a source pre-lower checker:
-
-1. Maintain a stack or count of pipeline-requested ancestor loops.
-2. Report when entering another pipeline-requested loop while the count is
-   nonzero.
-3. Restore state before visiting sibling statements.
-4. Include both loop spans when available.
-5. Suggest replacing one loop with `T.serial` or removing one pipeline request.
+but exit successfully without deciding whether the target can lower them.
 
 Cover this boundary matrix:
 
-- reject `num_stages` inside `num_stages`;
-- reject manual stage/order inside manual stage/order;
-- reject both mixed outer/inner combinations;
-- reject nesting hidden through serial, unroll, and conditional wrappers;
-- allow bare outer plus pipeline-requested inner;
-- allow pipeline-requested outer plus bare inner;
-- allow sequential pipeline-requested siblings;
-- do not count group/sync-only metadata as a pipeline request.
+- a supporting backend accepts nested `num_stages` and manual stage/order
+  schedules;
+- an unsupported backend rejects the same source with a target-specific
+  diagnostic;
+- target-agnostic pre-lower validation accepts both cases;
+- bare and pipeline-requested nested loops remain distinguishable for
+  analysis;
+- sequential sibling pipelines remain independent.
 
 ## Vectorized loops are not required to be leaves
 
@@ -195,8 +175,9 @@ occurs before changing this behavior.
 
 Do not adopt these statements as general semantic rules:
 
-- “Every nested `T.Pipelined` is invalid.” Bare outer pipeline syntax is
-  currently serial-like, and existing tests use it.
+- “Every nested `T.Pipelined` is invalid” or “one lexical path may contain at
+  most one pipeline-requested loop.” Nested pipeline support is a backend
+  capability; bare outer pipeline syntax is also serial-like.
 - “`T.vectorized` must be an AST leaf.” Sequential inner loops can be valid.
 - “`T.Parallel` extent must equal launched thread count.” Loop partitioning
   and replication intentionally support different extents.
