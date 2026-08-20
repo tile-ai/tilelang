@@ -185,6 +185,19 @@ def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -
     return str(source)
 
 
+def _paths_are_same(left: Path, right: Path) -> bool:
+    """True if both paths name the same file, including via symlink."""
+    try:
+        if left.resolve() == right.resolve():
+            return True
+    except OSError:
+        pass
+    try:
+        return left.exists() and right.exists() and left.samefile(right)
+    except OSError:
+        return False
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tilelang.tools.compile_only",
@@ -204,6 +217,10 @@ def cli_main(argv: list[str] | None = None) -> int:
     """CE-shaped CLI (D2): ``--output_file`` + example.py. Default target ``c`` (D3)."""
     args = _build_parser().parse_args(argv)
     output = Path(args.output_file)
+    source_path = Path(args.input_file)
+    if _paths_are_same(output, source_path):
+        print(f"{_ERROR_PREFIX}: --output_file must not be the input file", file=sys.stderr)
+        return 1
     # Match CuTe CE wrapper: drop a previous artifact before compile so a
     # failed run cannot leave yesterday's assembly for CE to read.
     output.unlink(missing_ok=True)
