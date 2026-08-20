@@ -29,14 +29,14 @@ inline bool ReducerPlanVerboseEnabled() {
 
 /*!
  * \brief The cost model that ranks free-mode layout attempts. Valid
- *  values: "io-aware" (default — bytes x vector-width/coalescing over
- *  fragment<->global traffic, registers as tiebreak) and "register-count"
- *  (the legacy total-register-slots ordering).
+ *  values: "register-count" (default — total fragment register slots) and
+ *  "io-aware" (bytes x vector-width/coalescing over fragment<->global
+ *  traffic, registers as tiebreak).
  */
 inline std::string LayoutCostModelName() {
   auto ctxt = tvm::transform::PassContext::Current();
   return ctxt->GetConfig("tl.layout_cost_model", ffi::Optional<ffi::String>())
-      .value_or(ffi::String("io-aware"));
+      .value_or(ffi::String("register-count"));
 }
 
 /*!

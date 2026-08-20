@@ -15,7 +15,7 @@ Usage:
     python run.py --anchor        # lower fully and check that the widest
                                   # per-buffer vector access in device TIR
                                   # matches each case's VECTOR_ANCHOR (the
-                                  # width the cost model believed in);
+                                  # width the io-aware model believed in);
                                   # variants without an anchor print the
                                   # observed widths for review
     python run.py --cute          # compare the symbolic scorer with the
@@ -92,7 +92,7 @@ def format_layout(info: dict) -> str:
 
 
 def run_anchor(modules) -> int:
-    """Anchor mode: lower each variant under the DEFAULT pass config and
+    """Anchor mode: lower each variant under the IO-AWARE pass config and
     check the widest per-buffer vector access in the device TIR against the
     case's VECTOR_ANCHOR — the width the cost model's winning layout was
     scored to sustain. A mismatch means the model believed a width the
