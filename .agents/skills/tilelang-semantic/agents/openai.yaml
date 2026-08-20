@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Semantic Checks"
+  short_description: "Design and review TileLang semantic rules"
+  default_prompt: "Use $tilelang-semantic to design or review a TileLang semantic check with precise validity rules and regression tests."
