@@ -49,6 +49,10 @@ def reduce(
             float16/bfloat16. When True, lower to CUDA __hmax_nan/__hmin_nan so
             NaNs propagate through the reduction. When False (default), use
             __hmax/__hmin which return the non-NaN operand. CUDA-only.
+        annotations (dict, optional): Additional lowering controls. On CUDA
+            SM100+, FP32 sum/abssum reductions accept
+            ``{"enable_fadd2": False}`` to keep the reducer scalar. Packed
+            FP32x2 reduction remains enabled by default.
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
@@ -237,6 +241,9 @@ def reduce_sum(
                               If False, results will be accumulated on existing values.
                               Defaults to True.
         batch (int): Number of output elements per batched AllReduce call (default 1).
+        annotations (dict, optional): On CUDA SM100+, set
+            ``{"enable_fadd2": False}`` to disable packed FP32x2 accumulation
+            for this reduction. It is enabled by default.
     Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because
           during warp reduction, the same value would be accumulated multiple times (number of threads
           in the warp). Therefore, the implementation with clear=True follows these steps:
@@ -260,6 +267,9 @@ def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: i
         out (tirx.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
         batch (int): Number of output elements per batched AllReduce call (default 1).
+        annotations (dict, optional): On CUDA SM100+, set
+            ``{"enable_fadd2": False}`` to disable packed FP32x2 accumulation
+            for this reduction. It is enabled by default.
 
     Returns:
         tirx.Call: Handle to the reduction operation
