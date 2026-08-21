@@ -27,6 +27,7 @@ from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.diagnostics import jit_phase
+from tilelang.transform.pass_config import normalize_pass_configs
 from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 
@@ -324,7 +325,14 @@ class KernelCache:
             Default execution backend. Defaults to "auto".
         TILELANG_VERBOSE : str
             Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
+        TILELANG_LAYOUT_COST_MODEL : str
+            Default value for the `tl.layout_cost_model` pass config when it is
+            not set explicitly in `pass_configs`. Unset keeps the built-in default.
         """
+
+        # Resolve env-var-derived pass-config defaults up front so they are
+        # reflected in the cache key.
+        pass_configs = normalize_pass_configs(pass_configs)
 
         if backend_context is None:
             if target is None:

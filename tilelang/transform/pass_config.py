@@ -117,7 +117,9 @@ class PassConfigKey(str, Enum):
     "io-aware" scores estimated global-memory access cost (vector width /
     warp coalescing of every fragment<->global copy, weighted by bytes
     moved) with register count as the tiebreak; "register-count" is the
-    total-register-slots-only ordering. Default: 'register-count'"""
+    total-register-slots-only ordering. When unset, the
+    ``TILELANG_LAYOUT_COST_MODEL`` environment variable supplies the
+    default. Default: 'register-count'"""
 
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,
@@ -342,14 +344,14 @@ _DEPRECATED_PASS_CONFIG_MESSAGES = {
 
 
 def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) -> dict[str, Any]:
-    """Canonicalize known pass-config keys and emit compatibility warnings."""
-    if pass_configs is None:
-        return {}
+    """Canonicalize known pass-config keys, apply environment-variable
+    defaults, and emit compatibility warnings."""
+    from tilelang.env import env
 
     normalized: dict[str, Any] = {}
     warned_keys: set[str] = set()
 
-    for key, value in pass_configs.items():
+    for key, value in (pass_configs or {}).items():
         normalized_key = key.value if isinstance(key, PassConfigKey) else key
 
         normalized[normalized_key] = value
@@ -357,5 +359,10 @@ def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) 
         if normalized_key in _DEPRECATED_PASS_CONFIG_MESSAGES and normalized_key not in warned_keys:
             warnings.warn(_DEPRECATED_PASS_CONFIG_MESSAGES[normalized_key], DeprecationWarning, stacklevel=3)
             warned_keys.add(normalized_key)
+
+    # Environment-derived defaults; an explicit pass_configs entry wins.
+    layout_cost_model = env.get_default_layout_cost_model()
+    if layout_cost_model is not None:
+        normalized.setdefault(PassConfigKey.TL_LAYOUT_COST_MODEL.value, layout_cost_model)
 
     return normalized
