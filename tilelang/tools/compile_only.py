@@ -74,6 +74,7 @@ def _target_kind_name(target: object) -> str:
 
 
 def _is_cuda_target(target: object) -> bool:
+    """Return whether ``target`` parses to the ``cuda`` kind, in any input form."""
     return _target_kind_name(target) == "cuda"
 
 
@@ -213,6 +214,7 @@ def _paths_are_same(left: Path, right: Path) -> bool:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the compile-only CLI."""
     parser = argparse.ArgumentParser(
         prog="tilelang.tools.compile_only",
         description="Compile a TileLang example to inspectable kernel source without a GPU.",
