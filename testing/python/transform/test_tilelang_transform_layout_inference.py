@@ -146,12 +146,12 @@ def test_parallel_fragment_layout_covers_mixed_loop_extents(cost_model):
     @T.prim_func
     def main(C: T.Tensor((256,), T.float32)):
         with T.Kernel(1, threads=128):
-            fragment = T.alloc_fragment((256,), T.float32)
-            T.clear(fragment)
+            frag = T.alloc_fragment((256,), T.float32)
+            T.clear(frag)
             for i in T.Parallel(100):
-                fragment[i] = 5.0
+                frag[i] = 5.0
             for i in T.Parallel(256):
-                C[i] = fragment[i] + 1.0
+                C[i] = frag[i] + 1.0
 
     target = auto_target
     with target, tvm.transform.PassContext(config={"tl.layout_cost_model": cost_model}):
@@ -166,7 +166,7 @@ def test_parallel_fragment_layout_covers_mixed_loop_extents(cost_model):
     def collect_layouts(node):
         if isinstance(node, tvm.tirx.SBlock) and "layout_map" in node.annotations:
             for buffer, layout in node.annotations["layout_map"].items():
-                if buffer.name == "fragment":
+                if buffer.name == "frag":
                     fragment_shapes.append([int(value) for value in layout.get_input_shape()])
         if isinstance(node, tvm.tirx.For) and "parallel_loop_layout" in node.annotations:
             layout = node.annotations["parallel_loop_layout"]
