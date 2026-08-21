@@ -1,9 +1,8 @@
 #include "codegen_c.h"
-#include "op/builtin.h"
+#include "config.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ir/cast.h>
-#include <tvm/ir/transform.h>
 
 namespace tvm {
 namespace codegen {
@@ -28,10 +27,7 @@ Module BuildTileLangC(IRModule mod, Target target) {
   cg.Init(output_ssa, emit_asserts, emit_fwd_func_decl, target->str(), devices);
   cg.SetConstantsByteAlignment(
       target->GetAttr<Integer>("constants-byte-alignment").value_or(16));
-  cg.SetEmitLineDirectives(
-      tvm::transform::PassContext::Current()
-          ->GetConfig<Bool>(tl::kEmitLineDirectives, Bool(false))
-          .value());
+  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
 
   auto is_aot_executor_fn = [](const PrimFunc &func) -> bool {
     return func->GetAttr<Bool>("runner_function", Bool(false)).value();
