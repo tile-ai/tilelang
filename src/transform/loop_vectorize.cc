@@ -530,6 +530,19 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
+  PrimExpr VisitExpr_(const SelectNode *node) final {
+    // Automatic vectorization can turn a data-dependent condition into a wide
+    // boolean vector, which is not supported consistently across codegens.
+    // Keep Select scalar; explicit T.vectorized loops are handled separately.
+    buffer_vector_infos_.push_back({Buffer(),
+                                    1,
+                                    false,
+                                    {},
+                                    /*is_cast=*/false,
+                                    /*requires_scalarization=*/true});
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+  }
+
   static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
     const auto *ptr_call = expr.as<CallNode>();
     if (ptr_call == nullptr) {
