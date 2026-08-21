@@ -7,6 +7,7 @@ import tilelang.language as T
 import tilelang.testing
 import pytest
 import torch
+from tvm.tirx.stmt_functor import post_order_visit
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -14,6 +15,78 @@ auto_target = tvm.target.Target(determine_target("auto"))
 def _assert_launch_bounds(kernel_source: str, threads: int) -> None:
     # CUDA emits `__launch_bounds__(N, 1)` while HIP emits `__launch_bounds__(N)`.
     assert re.search(rf"__launch_bounds__\({threads}\b", kernel_source)
+
+
+def _infer_coalesced_width_layout(coalesced_width=None, *, use_annotations=False):
+    length = 132
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((length,), T.float32),
+        B: T.Tensor((length,), T.float32),
+    ):
+        with T.Kernel(1, threads=64):
+            if use_annotations:
+                for i in T.Parallel(length, annotations={"coalesced_width": coalesced_width}):
+                    B[i] = A[i]
+            elif coalesced_width is not None:
+                for i in T.Parallel(length, coalesced_width=coalesced_width):
+                    B[i] = A[i]
+            else:
+                for i in T.Parallel(length):
+                    B[i] = A[i]
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        mod = tvm.IRModule({"main": main})
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+
+    layouts = []
+
+    def collect_layout(node):
+        if isinstance(node, tvm.tirx.For) and "parallel_loop_layout" in node.annotations:
+            layouts.append(node.annotations["parallel_loop_layout"])
+
+    post_order_visit(mod["main"].body, collect_layout)
+    assert len(layouts) == 1
+    return layouts[0]
+
+
+@pytest.mark.parametrize(
+    "coalesced_width,use_annotations",
+    [
+        pytest.param(4, False, id="keyword-int"),
+        pytest.param(4, True, id="annotation-int"),
+        pytest.param(T.IntImm("int32", 4), False, id="int-imm-i32"),
+        pytest.param(T.IntImm("int64", 4), False, id="int-imm-i64"),
+    ],
+)
+def test_parallel_coalesced_width_controls_inferred_layout(coalesced_width, use_annotations):
+    default_layout = _infer_coalesced_width_layout()
+    annotated_layout = _infer_coalesced_width_layout(coalesced_width, use_annotations=use_annotations)
+
+    assert [int(extent) for extent in default_layout.get_output_shape()] == [3]
+    assert [int(extent) for extent in annotated_layout.get_output_shape()] == [4]
+    assert not tvm.ir.structural_equal(default_layout, annotated_layout)
+
+
+@pytest.mark.parametrize("coalesced_width", [True, 4.0])
+def test_parallel_coalesced_width_rejects_non_integer(coalesced_width):
+    with pytest.raises(TypeError, match=r"Loop annotation `coalesced_width` expects an integer"):
+        _infer_coalesced_width_layout(coalesced_width)
+
+
+@pytest.mark.parametrize("coalesced_width", [0, -1])
+def test_parallel_coalesced_width_requires_positive_integer(coalesced_width):
+    with pytest.raises(ValueError, match=r"Loop annotation `coalesced_width` expects a positive integer"):
+        _infer_coalesced_width_layout(coalesced_width)
+
+
+def test_parallel_coalesced_width_preserves_divisibility_check():
+    with pytest.raises(tvm.error.InternalError, match=r"Vector size 4 is not divisible by coalesced width 3"):
+        _infer_coalesced_width_layout(3)
 
 
 @pytest.mark.parametrize(

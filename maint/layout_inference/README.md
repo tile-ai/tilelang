@@ -103,6 +103,7 @@ nest's `parallel_loop_layout` annotation (see `common.py`).
 
 | case | what it pins |
 |---|---|
+| `coalesced_width` | Issue #3013. Bare Python integers from both the typed keyword and generic annotation map must select the requested parallel-loop vector width. |
 | `elementwise_copy` | Baseline: both models must agree on the coalesced, vectorized roundtrip layout. Primary equal-score anchor. |
 | `fp8_copy` | 1-byte dtype: the 16-element vector width at the wide end of the shared width policy. |
 | `broadcast_read` | Issue #1729. The models disagree **by design**: register-count keeps the thread-collapsed legacy pathology (golden documents it); io-aware must pick full replication + a non-replicated coalesced loop (enforced by `check`). |
