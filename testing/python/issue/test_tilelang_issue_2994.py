@@ -75,9 +75,9 @@ def _packed_x2_constructor_source(dtype, constructor):
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
-def _packed_x2_load_source(dtype, base, stride, dynamic_base=False):
-    name = f"packed_{dtype}_x2_load"
-    buffer = tirx.decl_buffer((8,), dtype=dtype, name="input")
+def _packed_vector_load_source(dtype, base, stride, dynamic_base=False, lanes=2):
+    name = f"packed_{dtype}_x{lanes}_load"
+    buffer = tirx.decl_buffer((64,), dtype=dtype, name="input")
     params = [buffer.data]
 
     if dynamic_base:
@@ -89,11 +89,55 @@ def _packed_x2_load_source(dtype, base, stride, dynamic_base=False):
     index = tirx.Ramp(
         base_expr,
         tirx.const(stride, "int32"),
-        2,
+        lanes,
     )
     func = tirx.PrimFunc(
         params,
         tirx.Evaluate(tirx.BufferLoad(buffer, [index])),
+        buffer_map={buffer.data: buffer},
+    )
+    func = func.with_attr("global_symbol", name)
+    func = func.with_attr(
+        "calling_conv",
+        tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
+    )
+    mod = tvm.IRModule({name: func})
+    build = tvm.get_global_func("target.build.tilelang_cuda")
+    return build(mod, tvm.target.Target("cuda")).inspect_source()
+
+
+def _packed_vector_store_source(
+    dtype,
+    base,
+    stride,
+    *,
+    dynamic_base=False,
+    dynamic_scale=1,
+    lanes=2,
+):
+    name = f"packed_{dtype}_x{lanes}_store"
+    buffer = tirx.decl_buffer((64,), dtype=dtype, name="output")
+    value = tirx.Var("value", f"{dtype}x{lanes}")
+    params = [buffer.data, value]
+
+    if dynamic_base:
+        dynamic = tirx.Var("base", "int32")
+        params.append(dynamic)
+        base_expr = dynamic * tirx.const(dynamic_scale, "int32") + tirx.const(
+            base,
+            "int32",
+        )
+    else:
+        base_expr = tirx.const(base, "int32")
+
+    index = tirx.Ramp(
+        base_expr,
+        tirx.const(stride, "int32"),
+        lanes,
+    )
+    func = tirx.PrimFunc(
+        params,
+        tirx.BufferStore(buffer, value, [index]),
         buffer_map={buffer.data: buffer},
     )
     func = func.with_attr("global_symbol", name)
@@ -134,6 +178,18 @@ def _packed_x2_gather_kernel(dtype):
     ):
         with T.Kernel(1, threads=1):
             output[T.Ramp(0, 1, 2)] = source[T.Ramp(0, 2, 2)]
+
+    return kernel
+
+
+def _packed_x2_store_kernel(dtype):
+    @T.prim_func
+    def kernel(
+        source: T.Tensor((2,), dtype),
+        output: T.Tensor((8,), dtype),
+    ):
+        with T.Kernel(1, threads=1):
+            output[T.Ramp(2, 1, 2)] = source[T.Ramp(0, 1, 2)]
 
     return kernel
 
@@ -209,7 +265,7 @@ def test_packed_int4x2_gather_uses_logical_indices(
     stride,
     dynamic_base,
 ):
-    source = _packed_x2_load_source(
+    source = _packed_vector_load_source(
         dtype,
         base,
         stride,
@@ -232,11 +288,162 @@ def test_packed_int4x2_gather_uses_logical_indices(
     ],
 )
 def test_packed_int4x2_aligned_load_keeps_direct_path(dtype, storage_type):
-    source = _packed_x2_load_source(dtype, base=2, stride=1)
+    source = _packed_vector_load_source(dtype, base=2, stride=1)
 
     assert f"*((({storage_type}*)input) + 1);" in source
     assert f"tl_{dtype}_packed_load(" not in source
     assert f"tl_pack_{dtype}x2(" not in source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("dtype", "storage_type"),
+    [
+        ("int4", "int8_t"),
+        ("uint4", "uint8_t"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("base", "dynamic_base", "dynamic_scale"),
+    [
+        (2, False, 1),
+        (0, True, 2),
+        (2, True, 4),
+    ],
+)
+def test_packed_int4x2_aligned_store_keeps_direct_path(
+    dtype,
+    storage_type,
+    base,
+    dynamic_base,
+    dynamic_scale,
+):
+    source = _packed_vector_store_source(
+        dtype,
+        base,
+        stride=1,
+        dynamic_base=dynamic_base,
+        dynamic_scale=dynamic_scale,
+    )
+
+    assert f"(({storage_type}*)output)" in source
+    assert f"tl_{dtype}_packed_store(" not in source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+@pytest.mark.parametrize(
+    ("base", "stride", "dynamic_base", "dynamic_scale"),
+    [
+        (1, 1, False, 1),
+        (0, 2, False, 1),
+        (0, 1, True, 1),
+        (1, 1, True, 2),
+    ],
+)
+def test_packed_int4x2_unsafe_store_rejected(
+    dtype,
+    base,
+    stride,
+    dynamic_base,
+    dynamic_scale,
+):
+    with pytest.raises(tvm.TVMError, match="provably divisible by the vector lane count"):
+        _packed_vector_store_source(
+            dtype,
+            base,
+            stride,
+            dynamic_base=dynamic_base,
+            dynamic_scale=dynamic_scale,
+        )
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+@pytest.mark.parametrize("lanes", [4, 8])
+@pytest.mark.parametrize("access", ["load", "store"])
+def test_packed_int4_wide_aligned_access_keeps_direct_path(
+    dtype,
+    lanes,
+    access,
+):
+    if access == "load":
+        constant_source = _packed_vector_load_source(
+            dtype,
+            base=lanes,
+            stride=1,
+            lanes=lanes,
+        )
+        symbolic_source = None
+    else:
+        constant_source = _packed_vector_store_source(
+            dtype,
+            base=lanes,
+            stride=1,
+            lanes=lanes,
+        )
+        symbolic_source = _packed_vector_store_source(
+            dtype,
+            base=0,
+            stride=1,
+            dynamic_base=True,
+            dynamic_scale=lanes,
+            lanes=lanes,
+        )
+
+    carrier_type = {
+        ("int4", 4): "int16_t",
+        ("uint4", 4): "uint16_t",
+        ("int4", 8): "int",
+        ("uint4", 8): "uint",
+    }[(dtype, lanes)]
+    buffer_name = "input" if access == "load" else "output"
+    expected_access = f"*((({carrier_type}*){buffer_name}) + 1)"
+
+    if access == "load":
+        assert f"{expected_access};" in constant_source
+    else:
+        assert f"{expected_access} = value;" in constant_source
+    assert f"tl_{dtype}_packed_load(" not in constant_source
+    assert f"tl_{dtype}_packed_store(" not in constant_source
+
+    if symbolic_source is not None:
+        assert f"tl_{dtype}_packed_store(" not in symbolic_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+@pytest.mark.parametrize("lanes", [4, 8])
+@pytest.mark.parametrize("access", ["load", "store"])
+def test_packed_int4_wide_unsafe_access_rejected(dtype, lanes, access):
+    unsafe_cases = [
+        (1, 1, False, 1),
+        (lanes // 2, 1, False, 1),
+        (0, 2, False, 1),
+        (0, 1, True, 1),
+    ]
+    for base, stride, dynamic_base, dynamic_scale in unsafe_cases:
+        with pytest.raises(
+            tvm.TVMError,
+            match="provably divisible by the vector lane count",
+        ):
+            if access == "load":
+                _packed_vector_load_source(
+                    dtype,
+                    base,
+                    stride,
+                    dynamic_base=dynamic_base,
+                    lanes=lanes,
+                )
+            else:
+                _packed_vector_store_source(
+                    dtype,
+                    base,
+                    stride,
+                    dynamic_base=dynamic_base,
+                    dynamic_scale=dynamic_scale,
+                    lanes=lanes,
+                )
 
 
 @tilelang.testing.requires_cuda
@@ -259,6 +466,33 @@ def test_packed_int4x2_strided_gather_runtime(dtype, values, expected):
     assert kernel_source.count(f"tl_{dtype}_packed_load(") == 2
     assert kernel_source.count(f"tl_pack_{dtype}x2(") == 1
     assert result.view(torch.uint8).item() == expected
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+def test_packed_int4x2_aligned_store_preserves_neighboring_bytes(dtype):
+    compiled = tilelang.compile(_packed_x2_store_kernel(dtype))
+    storage_dtype = torch.uint8 if dtype == "uint4" else torch.int8
+    source = torch.tensor([0x21], dtype=torch.uint8, device="cuda")
+    output = torch.tensor(
+        [0xBA, 0xDC, 0xFE, 0x98],
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    if dtype == "int4":
+        source = source.view(torch.int8)
+        output = output.view(torch.int8)
+
+    compiled(source, output)
+
+    expected = torch.tensor(
+        [0xBA, 0x21, 0xFE, 0x98],
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    assert torch.equal(output.view(torch.uint8), expected)
+    assert f"tl_{dtype}_packed_store(" not in compiled.get_kernel_source()
+    assert output.dtype == storage_dtype
 
 
 @tilelang.testing.requires_cuda
