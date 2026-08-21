@@ -20,6 +20,8 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "../../config.h"
 #include "../../layout/layout.h"
@@ -66,6 +68,14 @@ bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
     }
   }
   return true;
+}
+
+bool IsBytePacked4Bit(DataType dtype) {
+  if (dtype.lanes() != 1) {
+    return false;
+  }
+  return (dtype.bits() == 4 && (dtype.is_int() || dtype.is_uint())) ||
+         dtype.is_float4_e2m1fn();
 }
 
 Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
@@ -137,14 +147,16 @@ public:
     // Run InferLayout
     LayoutMap updates;
     try {
-      updates = next->InferLayout(LayoutInferArgs{target_,
-                                                  thread_bounds,
-                                                  layout_map,
-                                                  cur_analyzer,
-                                                  {},
-                                                  bind_var_to_expr_,
-                                                  false},
-                                  level);
+      updates =
+          next->InferLayout(LayoutInferArgs{target_,
+                                            thread_bounds,
+                                            layout_map,
+                                            cur_analyzer,
+                                            {},
+                                            bind_var_to_expr_,
+                                            false,
+                                            packed_pair_fragment_buffers_},
+                            level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
                  << cur_infer_id << " (" << next->GetTypeKey() << ") at level "
@@ -486,9 +498,181 @@ public:
     this->operator()(f->body);
     // Compute floating fragment buffers after collection
     ComputeFloatingFragmentBuffers(f->body);
+    packed_pair_fragment_buffers_ = ComputePackedPairFragmentBuffers();
   }
 
 private:
+  static void AddUniqueBuffer(std::vector<Buffer> *buffers,
+                              const Buffer &buffer) {
+    if (std::none_of(buffers->begin(), buffers->end(),
+                     [&](const Buffer &other) {
+                       return other->data.same_as(buffer->data);
+                     })) {
+      buffers->push_back(buffer);
+    }
+  }
+
+  static void AddUniqueFragmentBuffer(std::vector<Buffer> *buffers,
+                                      const Buffer &buffer) {
+    if (IsFragmentBuffer(buffer)) {
+      AddUniqueBuffer(buffers, buffer);
+    }
+  }
+
+  class StoreValueBufferReadCollector : public ExprVisitor {
+  public:
+    StoreValueBufferReadCollector(
+        const std::unordered_map<const VarNode *, PrimExpr> &bindings,
+        std::vector<Buffer> *reads)
+        : bindings_(bindings), reads_(reads) {}
+
+    void Collect(const PrimExpr &value) { VisitExpr(value); }
+
+    void VisitExpr_(const BufferLoadNode *op) final {
+      // The loaded buffer supplies the stored value. Buffer loads used only in
+      // its indices choose an address; they do not supply nibbles to pack.
+      AddUniqueBuffer(reads_, op->buffer);
+    }
+
+    void VisitExpr_(const VarNode *op) final {
+      auto binding = bindings_.find(op);
+      if (binding != bindings_.end() && resolving_.insert(op).second) {
+        VisitExpr(binding->second);
+        resolving_.erase(op);
+      }
+    }
+
+  private:
+    const std::unordered_map<const VarNode *, PrimExpr> &bindings_;
+    std::vector<Buffer> *reads_;
+    std::unordered_set<const VarNode *> resolving_;
+  };
+
+  struct StorageDependency {
+    Buffer destination;
+    std::vector<Buffer> sources;
+  };
+
+  struct OperatorStorageDataflow {
+    std::vector<Buffer> packed_sink_sources;
+    std::vector<StorageDependency> dependencies;
+    std::vector<Buffer> fragment_buffers;
+  };
+
+  OperatorStorageDataflow GetOperatorStorageDataflow(int infer_idx) const {
+    OperatorStorageDataflow dataflow;
+    std::unordered_map<const VarNode *, PrimExpr> bindings;
+    PostOrderVisit(infer_list_stmt_[infer_idx], [&](const ObjectRef &node) {
+      if (const auto *bind = node.as<BindNode>()) {
+        bindings[bind->var.get()] = bind->value;
+      } else if (const auto *let = node.as<LetNode>()) {
+        bindings[let->var.get()] = let->value;
+      }
+    });
+
+    std::unordered_set<const VarNode *> explicit_write_storage;
+    PostOrderVisit(infer_list_stmt_[infer_idx], [&](const ObjectRef &node) {
+      const auto *store = node.as<BufferStoreNode>();
+      if (store == nullptr) {
+        return;
+      }
+
+      explicit_write_storage.insert(store->buffer->data.get());
+      AddUniqueFragmentBuffer(&dataflow.fragment_buffers, store->buffer);
+
+      std::vector<Buffer> sources;
+      StoreValueBufferReadCollector collector(bindings, &sources);
+      collector.Collect(store->value);
+      for (const auto &source : sources) {
+        AddUniqueFragmentBuffer(&dataflow.fragment_buffers, source);
+      }
+      dataflow.dependencies.push_back({store->buffer, sources});
+
+      if ((IsGlobalBuffer(store->buffer) || IsSharedBuffer(store->buffer)) &&
+          IsBytePacked4Bit(store->buffer->dtype)) {
+        for (const auto &source : sources) {
+          AddUniqueBuffer(&dataflow.packed_sink_sources, source);
+        }
+      }
+    });
+
+    // Tile operators represented as opaque calls have access regions rather
+    // than BufferStore nodes. Keep a conservative read-to-write edge only for
+    // write storages that the explicit statement analysis did not represent.
+    auto regions = infer_list_[infer_idx]->GetAccessRegions();
+    std::vector<Buffer> region_sources;
+    for (const auto &region : regions.reads) {
+      AddUniqueBuffer(&region_sources, region->buffer);
+      AddUniqueFragmentBuffer(&dataflow.fragment_buffers, region->buffer);
+    }
+    for (const auto &region : regions.writes) {
+      const auto &destination = region->buffer;
+      AddUniqueFragmentBuffer(&dataflow.fragment_buffers, destination);
+      if (explicit_write_storage.count(destination->data.get())) {
+        continue;
+      }
+      dataflow.dependencies.push_back({destination, region_sources});
+      if ((IsGlobalBuffer(destination) || IsSharedBuffer(destination)) &&
+          IsBytePacked4Bit(destination->dtype)) {
+        for (const auto &source : region_sources) {
+          AddUniqueBuffer(&dataflow.packed_sink_sources, source);
+        }
+      }
+    }
+
+    return dataflow;
+  }
+
+  Array<Buffer> ComputePackedPairFragmentBuffers() const {
+    std::vector<OperatorStorageDataflow> op_dataflow;
+    op_dataflow.reserve(infer_list_.size());
+    for (int i = 0; i < static_cast<int>(infer_list_.size()); ++i) {
+      op_dataflow.push_back(GetOperatorStorageDataflow(i));
+    }
+
+    std::unordered_set<const VarNode *> required_storage;
+    for (const auto &dataflow : op_dataflow) {
+      for (const auto &source : dataflow.packed_sink_sources) {
+        required_storage.insert(source->data.get());
+      }
+    }
+
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (const auto &dataflow : op_dataflow) {
+        for (const auto &dependency : dataflow.dependencies) {
+          if (!required_storage.count(dependency.destination->data.get())) {
+            continue;
+          }
+          // Shared/global memory is an ownership boundary: a later loop may
+          // load the same values with a different thread layout. Packed
+          // physical writes are seeded separately, so stopping here does not
+          // weaken byte-ownership checks at an actual packed destination.
+          if (IsGlobalBuffer(dependency.destination) ||
+              IsSharedBuffer(dependency.destination)) {
+            continue;
+          }
+          for (const auto &source : dependency.sources) {
+            changed |= required_storage.insert(source->data.get()).second;
+          }
+        }
+      }
+    }
+
+    Array<Buffer> result;
+    std::unordered_set<const VarNode *> seen_storage;
+    for (const auto &dataflow : op_dataflow) {
+      for (const auto &buffer : dataflow.fragment_buffers) {
+        if (required_storage.count(buffer->data.get()) &&
+            seen_storage.insert(buffer->data.get()).second) {
+          result.push_back(buffer);
+        }
+      }
+    }
+    return result;
+  }
+
   Map<Var, Buffer> GetBufferMap() const {
     Map<Var, Buffer> buffer_map;
     for (const auto &[var, buffers] : buffer_data_to_buffers_) {
@@ -995,6 +1179,7 @@ private:
       use_list_;
   // Per-op list of buffers it touches (fragment scope), used for prioritization
   std::unordered_map<int, std::vector<Buffer>> op_touched_buffers_;
+  Array<Buffer> packed_pair_fragment_buffers_;
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
   // exists. Stays undefined for targets without thread bindings (e.g. CPU),
   // where the logical thread index is the constant 0 and thread bounds are
@@ -1077,9 +1262,6 @@ private:
 
     // For each component, try each op as root, and determine the least
     // replicated one
-    std::deque<int> q;
-    std::vector<bool> in_queue(infer_list_.size(), false);
-
     std::unique_ptr<LayoutCostModel> cost_model =
         LayoutCostModel::Create(tl_config::LayoutCostModelName(), target_);
     DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
@@ -1091,9 +1273,12 @@ private:
       AttemptCost best_cost;
       bool has_best = false;
       int best_infer_root = -1;
+      std::optional<std::string> last_layout_conflict;
 
       // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
+        std::deque<int> q;
+        std::vector<bool> in_queue(infer_list_.size(), false);
         DLOG(INFO) << "----------------------- try root " << attempt_infer_root
                    << " members " << members.size() << '\n';
         // Backup the current infer_list_ state
@@ -1119,6 +1304,7 @@ private:
             }
           }
         } catch (const LayoutConflictException &e) {
+          last_layout_conflict = e.what();
           do_update = false;
           DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
                      << " failed due to LayoutConflictException " << e.what();
@@ -1159,6 +1345,9 @@ private:
         }
         // Restore infer_list_ state for the next attempt
         infer_list_ = std::move(back_infer_list);
+      }
+      if (!has_best && last_layout_conflict.has_value()) {
+        throw LayoutConflictException(*last_layout_conflict);
       }
       ICHECK(has_best) << "no available layout found" << '\n';
       // Apply the best plan for this component

@@ -382,6 +382,16 @@ TL_DEVICE uint4 make_uint4(unsigned short x0, unsigned short x1,
 // TileLang lowers scalar int4/uint4 storage through byte-packed buffers, where
 // each byte carries 2 logical 4-bit elements.
 
+TL_DEVICE int8_t tl_pack_int4x2(int low, int high) {
+  unsigned int packed = (static_cast<unsigned int>(low) & 0xF) |
+                        ((static_cast<unsigned int>(high) & 0xF) << 4);
+  return static_cast<int8_t>(packed);
+}
+
+TL_DEVICE uint8_t tl_pack_uint4x2(unsigned int low, unsigned int high) {
+  return static_cast<uint8_t>((low & 0xF) | ((high & 0xF) << 4));
+}
+
 TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
   unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
   unsigned int shift = (idx & 1) * 4;
