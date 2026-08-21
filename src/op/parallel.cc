@@ -512,6 +512,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     return {};
   }
 
+  ValidateCandidateCoversLoop(loop_layout_, /*throw_on_error=*/true);
+
   // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
   // space; PartitionLoop emits guards for the padded points. Fragment/reducer
   // loops stay strict because padding would change per-thread ownership.
@@ -668,6 +670,39 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() { ParallelOpNode::RegisterReflection(); }
+
+bool ParallelOpNode::ValidateCandidateCoversLoop(const Fragment &candidate,
+                                                 bool throw_on_error) const {
+  if (!candidate.defined() ||
+      candidate->InputShape().size() != loop_vars_.size()) {
+    if (throw_on_error) {
+      std::ostringstream oss;
+      oss << "T.Parallel layout rank mismatch: layout rank "
+          << (candidate.defined() ? candidate->InputShape().size() : 0)
+          << ", loop rank " << loop_vars_.size();
+      throw LayoutConflictException(oss.str());
+    }
+    return false;
+  }
+
+  // Over-coverage is safe because loop partitioning guards padded points.
+  // Require proof of coverage so symbolic relations cannot hide undercoverage.
+  for (size_t i = 0; i < loop_vars_.size(); ++i) {
+    const PrimExpr &layout_extent = candidate->InputShape()[i];
+    const PrimExpr &loop_extent = loop_vars_[i]->dom->extent;
+    if (!analyzer_.CanProve(layout_extent >= loop_extent)) {
+      if (throw_on_error) {
+        std::ostringstream oss;
+        oss << "T.Parallel layout does not provably cover axis " << i
+            << ": layout extent " << layout_extent << ", loop extent "
+            << loop_extent;
+        throw LayoutConflictException(oss.str());
+      }
+      return false;
+    }
+  }
+  return true;
+}
 
 bool ParallelOpNode::ValidateCandidateAgainstFragments(
     const Fragment &candidate, const LayoutInferArgs &layout_args,
@@ -909,8 +944,10 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
   };
 
   bool buf_ok =
+      ValidateCandidateCoversLoop(candidate_from_buffer) &&
       ValidateCandidateAgainstFragments(candidate_from_buffer, layout_args);
   bool plan_ok =
+      ValidateCandidateCoversLoop(candidate_from_plan) &&
       ValidateCandidateAgainstFragments(candidate_from_plan, layout_args);
 
   if (buf_ok && !plan_ok) {
