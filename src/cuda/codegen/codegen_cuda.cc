@@ -38,6 +38,13 @@ bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
 
+bool IsProvablyDivisible(const PrimExpr &expr, int64_t divisor) {
+  ICHECK_GT(divisor, 0);
+  arith::Analyzer analyzer;
+  arith::ModularSet modular_set = analyzer.modular_set(expr);
+  return modular_set->coeff % divisor == 0 && modular_set->base % divisor == 0;
+}
+
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   const auto *ptr_call = expr.as<CallNode>();
   if (ptr_call == nullptr) {
@@ -5254,9 +5261,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   const bool is_packed_int4_buffer = (element_dtype == DataType::Int(4) ||
                                       element_dtype == DataType::UInt(4)) &&
                                      element_dtype.is_scalar();
-  const bool is_packed_int4x2 = is_packed_int4_buffer &&
-                                value_dtype.lanes() == 2 &&
-                                value_dtype.element_of() == element_dtype;
+  const bool is_packed_int4_vector = is_packed_int4_buffer &&
+                                     value_dtype.lanes() > 1 &&
+                                     value_dtype.element_of() == element_dtype;
+  const bool is_packed_int4x2 =
+      is_packed_int4_vector && value_dtype.lanes() == 2;
 
   std::string vid = GetVarID(buffer_var.get());
   auto print_packed_int4_load = [&](const std::string &idx_str,
@@ -5305,13 +5314,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     if (arith::ramp(base, 1, ramp_lanes).Match(index)) {
       can_vector_load = true;
 
-      // A direct int4x2/uint4x2 load reads one physical byte, so the first
-      // logical element must be aligned to an even index.
-      if (is_packed_int4x2) {
-        arith::Analyzer analyzer;
-        arith::ModularSet modular_base = analyzer.modular_set(base.Eval());
-        can_vector_load =
-            modular_base->coeff % 2 == 0 && modular_base->base % 2 == 0;
+      // A direct packed int4/uint4 vector load reinterprets the underlying
+      // bytes as one vector carrier, so its logical base must be aligned to
+      // the full vector lane count.
+      if (is_packed_int4_vector) {
+        can_vector_load = IsProvablyDivisible(base.Eval(), value_dtype.lanes());
       }
     }
 
@@ -5319,6 +5326,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
       std::string ref = GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
       HandleVolatileLoads(ref, op, os);
     } else {
+      if (is_packed_int4_vector && !is_packed_int4x2) {
+        LOG(FATAL)
+            << "Packed int4/uint4 vector loads wider than x2 require a "
+               "unit-stride ramp with a logical base provably divisible by "
+               "the vector lane count, but got "
+            << index;
+      }
       std::ostringstream svalue_expr;
       std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
       DataType elem_type = op->dtype.element_of();
@@ -5364,6 +5378,13 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   DataType element_dtype = op->buffer->dtype;
   PrimExpr index_expr = op->indices[0];
   Var buffer_var = op->buffer->data;
+
+  const bool is_packed_int4_buffer = (element_dtype == DataType::Int(4) ||
+                                      element_dtype == DataType::UInt(4)) &&
+                                     element_dtype.is_scalar();
+  const bool is_packed_int4_vector = is_packed_int4_buffer &&
+                                     value_dtype.lanes() > 1 &&
+                                     value_dtype.element_of() == element_dtype;
 
   if ((element_dtype == DataType::Int(4) ||
        element_dtype == DataType::UInt(4)) &&
@@ -5415,9 +5436,24 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     arith::PVar<PrimExpr> base;
     int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
     if (arith::ramp(base, 1, ramp_lanes).Match(index_expr)) {
+      if (is_packed_int4_vector &&
+          !IsProvablyDivisible(base.Eval(), value_dtype.lanes())) {
+        LOG(FATAL)
+            << "Packed int4/uint4 vector stores require a unit-stride ramp "
+               "with a logical base provably divisible by the vector lane "
+               "count, but got "
+            << index_expr;
+      }
       std::string value = this->PrintExpr(op->value);
       this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
     } else {
+      if (is_packed_int4_vector) {
+        LOG(FATAL)
+            << "Packed int4/uint4 vector stores require a unit-stride ramp "
+               "with a logical base provably divisible by the vector lane "
+               "count, but got "
+            << index_expr;
+      }
       // The assignment below introduces side-effect, and the resulting value
       // cannot be reused across multiple expression, thus a new scope is needed
       int vec_scope = BeginScope();
