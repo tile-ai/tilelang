@@ -1,0 +1,130 @@
+{
+  "issue2957_100_to_256_t128": {
+    "io-aware": {
+      "buffers": {
+        "fragment": {
+          "forward_index": [
+            "_i % 2"
+          ],
+          "forward_thread": "_i // 2",
+          "input_shape": [
+            256
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            2
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      },
+      "loops": {
+        "i[100]": {
+          "forward_index": [
+            "_i % 2"
+          ],
+          "forward_thread": "_i // 2",
+          "input_shape": [
+            256
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            2
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        },
+        "i[256]": {
+          "forward_index": [
+            "_i % 2"
+          ],
+          "forward_thread": "_i // 2",
+          "input_shape": [
+            256
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            2
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      }
+    },
+    "register-count": {
+      "buffers": {
+        "fragment": {
+          "forward_index": [
+            "_i % 2"
+          ],
+          "forward_thread": "_i // 2",
+          "input_shape": [
+            256
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            2
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      },
+      "loops": {
+        "i[100]": {
+          "forward_index": [
+            "_i % 2"
+          ],
+          "forward_thread": "_i // 2",
+          "input_shape": [
+            256
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            2
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        },
+        "i[256]": {
+          "forward_index": [
+            "_i % 2"
+          ],
+          "forward_thread": "_i // 2",
+          "input_shape": [
+            256
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            2
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      }
+    }
+  }
+}

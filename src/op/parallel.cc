@@ -512,6 +512,22 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     return {};
   }
 
+  // A layout may over-cover a loop and guard its padded points, but it must
+  // never under-cover valid iterations.
+  ICHECK_EQ(loop_layout_->InputShape().size(), loop_vars_.size());
+  Stmt loop = root_;
+  for (size_t i = 0; i < loop_vars_.size(); ++i) {
+    For for_node = loop.as<For>().value();
+    if (analyzer_.CanProve(loop_layout_->InputShape()[i] < for_node->extent)) {
+      std::ostringstream oss;
+      oss << "Inferred T.Parallel layout under-covers axis " << i
+          << ": layout extent " << loop_layout_->InputShape()[i]
+          << " is smaller than loop extent " << for_node->extent;
+      throw LayoutConflictException(oss.str());
+    }
+    loop = for_node->body;
+  }
+
   // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
   // space; PartitionLoop emits guards for the padded points. Fragment/reducer
   // loops stay strict because padding would change per-thread ownership.
