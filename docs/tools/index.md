@@ -7,6 +7,7 @@ or invoke only the tool needed for the current workflow.
 
 | Task | Tool | Entry point |
 | --- | --- | --- |
+| Emit kernel source without a GPU | [Compile-Only Tool](compile_only.md) | `python -m tilelang.tools.compile_only` |
 | Estimate compute and memory cost from TIR | [Performance Analyzer](analyzer.md) | `tilelang.tools.Analyzer` |
 | Inspect thread and data mappings | [Layout Visualization](layout_visualization.md) | `tilelang.tools.plot_layout` |
 | Reduce a failing program to a smaller reproducer | [AutoDD](autodd.md) | `python -m tilelang.autodd` |
@@ -16,6 +17,9 @@ or invoke only the tool needed for the current workflow.
 
 ## Choosing a Tool
 
+- Use the **Compile-Only Tool** to inspect the kernel source `lower()`
+  generates for an example file, on any machine and without launching
+  anything. It is the entry point behind the Compiler Explorer integration.
 - Use **Analyzer** before benchmarking when you need a rough roofline-style
   estimate from a `PrimFunc` or `IRModule`.
 - Use **Layout Visualization** to inspect how logical indices map to threads and
