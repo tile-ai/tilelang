@@ -530,6 +530,13 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
+  PrimExpr VisitExpr_(const SelectNode *node) final {
+    // Select stays an expression-level ternary. Constrain its vector width
+    // using the same condition-uniformity rule as IfThenElse.
+    CheckConditionVectorized(node->condition);
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+  }
+
   static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
     const auto *ptr_call = expr.as<CallNode>();
     if (ptr_call == nullptr) {
