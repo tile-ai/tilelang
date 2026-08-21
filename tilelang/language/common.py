@@ -148,7 +148,7 @@ from .annotations import (  # noqa: F401
     ws_op,
 )
 
-from .ws_schedule import (  # noqa: F401
+from .warp_specialize import (  # noqa: F401
     WSRole,
     WSPipeline,
     WSInstr,
