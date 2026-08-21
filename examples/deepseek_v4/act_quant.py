@@ -28,6 +28,7 @@ def fast_round_scale(amax, fp8_max_inv):
 )
 def fp8_quant_kernel(
     x,
+    fp8_max,
     block_size=128,
     round_scale=True,  # round scale to exponential of 2
 ):
@@ -35,7 +36,7 @@ def fp8_quant_kernel(
 
     M = T.dynamic("M")
     N = T.const("N")
-    fp8_min, fp8_max = -448.0, 448.0
+    fp8_min = -fp8_max
     in_dtype = T.bfloat16
     out_dtype = T.float8_e4m3
     scale_dtype = T.float32
@@ -94,13 +95,19 @@ def fp8_act_quant(x: torch.Tensor, block_size: int = 128, round_scale: bool = Fa
         round_scale: If True, round scale to nearest power of 2 (MXFP style).
 
     Returns:
-        quant: FP8 quantized tensor, same shape as x, dtype float8_e4m3fn.
+        quant: FP8 quantized tensor, same shape as x, using the target's E4M3 FN/FNUZ variant.
         scale: Per-block scales, shape (..., N // block_size), dtype float32.
     """
     N = x.size(-1)
     assert N % block_size == 0, f"N={N} must be divisible by block_size={block_size}"
     z = x.contiguous()
-    quant, scale = fp8_quant_kernel(z.view(-1, N), block_size=block_size, round_scale=round_scale)
+    fp8_max = float(torch.finfo(T.float8_e4m3.as_torch()).max)
+    quant, scale = fp8_quant_kernel(
+        z.view(-1, N),
+        fp8_max=fp8_max,
+        block_size=block_size,
+        round_scale=round_scale,
+    )
     return quant.view(x.shape), scale.view(*x.size()[:-1], -1)
 
 
@@ -192,11 +199,12 @@ def fp8_act_quant_ref(x: torch.Tensor, block_size: int = 128, round_scale: bool 
     """PyTorch reference for block-wise FP8 quantization.
 
     Returns:
-        quant: shape (M, N), dtype torch.float8_e4m3fn.
+        quant: shape (M, N), using the target's E4M3 FN/FNUZ variant.
         scale: shape (M, num_blocks), dtype torch.float32.
     """
     M, N = x.shape
-    fp8_max = 448.0
+    out_dtype = T.float8_e4m3.as_torch()
+    fp8_max = float(torch.finfo(out_dtype).max)
     num_blocks = N // block_size
     x_float = x.float().reshape(M, num_blocks, block_size)
     amax = x_float.abs().amax(dim=-1).clamp(min=1e-4)
@@ -206,7 +214,7 @@ def fp8_act_quant_ref(x: torch.Tensor, block_size: int = 128, round_scale: bool 
         scale = amax / fp8_max
     x_scaled = x_float / scale.unsqueeze(-1)
     x_clamped = x_scaled.clamp(-fp8_max, fp8_max)
-    quant = x_clamped.reshape(M, N).to(torch.float8_e4m3fn)
+    quant = x_clamped.reshape(M, N).to(out_dtype)
     return quant, scale
 
 

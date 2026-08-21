@@ -31,7 +31,7 @@ using hip_fp8_e4_t = __hip_fp8_e4m3;
 using hip_fp8x2_e4_t = __hip_fp8x2_e4m3;
 using hip_fp8x4_e4_t = __hip_fp8x4_e4m3;
 #else
-// FNUZ path (MI300X and universal fallback)
+// FNUZ path (gfx940/gfx941/gfx942)
 using hip_fp8_e4_t = __hip_fp8_e4m3_fnuz;
 using hip_fp8x2_e4_t = __hip_fp8x2_e4m3_fnuz;
 using hip_fp8x4_e4_t = __hip_fp8x4_e4m3_fnuz;

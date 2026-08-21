@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,47 @@ def test_env_var(monkeypatch):
         assert tilelang.env.TILELANG_PRINT_ON_COMPILATION == "1"
     finally:
         _restore_forced_value("TILELANG_PRINT_ON_COMPILATION", original_forced_value)
+
+
+def test_rocm_keeps_tvm_ffi_torch_c_dlpack_enabled(monkeypatch):
+    monkeypatch.setattr(tilelang.sys, "platform", "linux")
+    monkeypatch.delenv("TVM_FFI_DISABLE_TORCH_C_DLPACK", raising=False)
+    monkeypatch.delenv("TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API", raising=False)
+    torch_module = SimpleNamespace(
+        version=SimpleNamespace(hip="test"),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+    )
+
+    tilelang._disable_tvm_ffi_torch_c_dlpack(torch_module)
+
+    assert "TVM_FFI_DISABLE_TORCH_C_DLPACK" not in os.environ
+    assert "TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API" not in os.environ
+
+
+def test_mps_still_disables_tvm_ffi_torch_c_dlpack(monkeypatch):
+    from tvm_ffi import _optional_torch_c_dlpack
+
+    monkeypatch.setattr(tilelang.sys, "platform", "darwin")
+    env_names = ("TVM_FFI_DISABLE_TORCH_C_DLPACK", "TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API")
+    original_env = {name: os.environ.pop(name, None) for name in env_names}
+    original_loader = _optional_torch_c_dlpack.load_torch_c_dlpack_extension
+    monkeypatch.setattr(_optional_torch_c_dlpack, "load_torch_c_dlpack_extension", original_loader)
+    torch_module = SimpleNamespace(
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+    )
+
+    try:
+        tilelang._disable_tvm_ffi_torch_c_dlpack(torch_module)
+
+        assert os.environ["TVM_FFI_DISABLE_TORCH_C_DLPACK"] == "1"
+        assert os.environ["TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API"] == "1"
+        assert _optional_torch_c_dlpack.load_torch_c_dlpack_extension() is None
+    finally:
+        for name, value in original_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_tilelang_tmp_dir_default_tracks_cache_dir(monkeypatch, tmp_path):

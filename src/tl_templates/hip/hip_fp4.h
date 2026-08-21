@@ -2,11 +2,11 @@
 
 #include "common.h"
 
-// FP4 E2M1 support for AMD gfx950 (CDNA4 / MI350).
-// All device types and conversion helpers are guarded by __gfx950__ so that
-// this header is safe to include on any ROCm target but only activates on
-// CDNA4.  The CUDA equivalent is tl_templates/cuda/cuda_fp4.h.
-#if defined(__gfx950__)
+// Software FP4 E2M1 support for AMD HIP targets.
+//
+// These device types and conversion helpers use portable bit manipulation;
+// they do not depend on a gfx950-only hardware intrinsic.  The CUDA equivalent
+// is tl_templates/cuda/cuda_fp4.h.
 
 #include <stdint.h>
 
@@ -254,5 +254,3 @@ TL_DEVICE void tl_fp4_packed_store(fp4_e2_2_t *packed, int idx, fp4_e2_t val) {
     packed[idx >> 1].set_x(val);
   }
 }
-
-#endif // defined(__gfx950__)

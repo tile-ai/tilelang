@@ -3,6 +3,7 @@
  */
 
 #include "codegen_hip.h"
+#include "backend/common/codegen/codegen_utils.h"
 #include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -297,7 +299,7 @@ static std::string GetFP8Type(DataType type) {
 }
 
 // Returns the HIP C type string for a float4_e2m1fn DataType.
-// Only used on gfx950; caller sets enable_fp4_ before invoking.
+// The backing type and conversions in hip_fp4.h are software implementations.
 static std::string GetFP4Type(DataType type) {
   std::stringstream stream;
   int32_t lanes = type.lanes();
@@ -565,10 +567,9 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     os << GetFP8Type(t);
     return;
   } else if (t.is_float4()) {
-    // FP4 E2M1 is only supported on gfx950 (CDNA4). Setting enable_fp4_ will
-    // cause Finish() to include hip_fp4.h which is itself guarded by
-    // #if defined(__gfx950__), so this is safe to emit on all HIP targets
-    // (the compiler will reject FP4 kernel code on non-gfx950 anyway).
+    // FP4 E2M1 uses the target-independent software types and conversions in
+    // hip_fp4.h. Hardware-specific FP4 matrix instructions remain separately
+    // target-gated by the corresponding lowering paths.
     enable_fp4_ = true;
     if (t.lanes() <= 32) {
       os << GetFP4Type(t);
@@ -1110,12 +1111,20 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
   DataType target_ty = op->dtype;
   ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
+  if (from_ty.is_scalar() && target_ty.is_float4()) {
+    // A C-style cast would select fp4_e2_t(uint8_t) and truncate the numeric
+    // value into raw encoding bits. Use the software round-to-nearest encoder.
+    enable_fp4_ = true;
+    os << "__tl_float_to_fp4((float)(" << PrintExpr(op->value) << "))";
+    return;
+  }
+
   // Emit simple C-style type conversion.
   if (from_ty.is_scalar())
     return CodeGenC::VisitExpr_(op, os);
 
   // ---------------------------------------------------------------------------
-  // Vectorized FP4 <-> float/half/bfloat16 conversions (gfx950 only).
+  // Vectorized FP4 <-> float/half/bfloat16 software conversions.
   // These use the pair-wise helpers from hip_fp4.h.  We process two lanes at a
   // time: odd-indexed lane is the "high" nibble, even-indexed is "low".
   // Only enabled when the FP4 header is included (enable_fp4_ is set by
@@ -1398,7 +1407,7 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
     scope = alloc_storage_scope_.at(buffer_var_node);
   }
 
-  // FP4 scalar access on gfx950: redirect to tl_fp4_packed_load helper.
+  // Redirect scalar FP4 access to the software packed-load helper.
   // Non-scalar FP4 accesses fall through to the normal path (the vector
   // types fp4_e2_4_t etc. are directly addressable as structs).
   if (t.is_float4() && t.is_scalar()) {
@@ -2152,6 +2161,65 @@ void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
 }
 
+void CodeGenTileLangHIP::VisitExpr_(const BufferLoadNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  ICHECK_EQ(op->indices.size(), 1)
+      << "Load from non-flat memory not supported.";
+  ICHECK(!op->predicate.defined())
+      << "Predicated buffer load is not supported.";
+
+  DataType value_dtype = op->dtype;
+  DataType element_dtype = op->buffer->dtype;
+  if (!(element_dtype.is_float4() && element_dtype.is_scalar() &&
+        value_dtype.is_float4() && !value_dtype.is_scalar())) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+
+  // CodeGenC scalarizes vector FP4 loads, but its generic path addresses the
+  // logical buffer as one byte per element. HIP FP4 storage packs two logical
+  // elements per byte, including local buffers whose emitted name has a
+  // `_packed` suffix. Load each nibble through the packed helper instead.
+  Var buffer_var = op->buffer->data;
+  auto packed_it = fp4_packed_buffers_.find(buffer_var);
+  std::string packed_buffer =
+      packed_it != fp4_packed_buffers_.end()
+          ? packed_it->second
+          : "(fp4_e2_2_t*)" + GetVarID(buffer_var.get());
+  int vec_scope = BeginScope();
+  PrimExpr index_expr = op->indices[0];
+  const auto *ramp = index_expr.as<RampNode>();
+  std::string index;
+  std::string ramp_base;
+  std::string ramp_stride;
+  if (ramp != nullptr) {
+    ramp_base = SSAGetID(PrintExpr(ramp->base), ramp->base.dtype());
+    ramp_stride = SSAGetID(PrintExpr(ramp->stride), ramp->stride.dtype());
+  } else {
+    index = SSAGetID(PrintExpr(index_expr), index_expr.dtype());
+  }
+  auto print_lane_index = [&](int lane, std::ostream &lane_os) {
+    if (ramp != nullptr) {
+      lane_os << "(" << ramp_base << ")+(" << ramp_stride << "*" << lane << ")";
+    } else {
+      PrintVecElemLoad(index, index_expr.dtype(), lane, lane_os);
+    }
+  };
+  std::string result = name_supply_->FreshName("_fp4_load_");
+  this->PrintIndent();
+  this->PrintType(value_dtype, stream);
+  stream << ' ' << result << "{};\n";
+  for (int i = 0; i < value_dtype.lanes(); ++i) {
+    std::ostringstream lane_index;
+    print_lane_index(i, lane_index);
+    PrintVecElemStore(result, value_dtype, i,
+                      "tl_fp4_packed_load(" + packed_buffer + ", " +
+                          lane_index.str() + ")");
+  }
+  EndScope(vec_scope);
+  os << result;
+}
+
 void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
   ICHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
   ICHECK(!op->predicate.defined())
@@ -2160,6 +2228,50 @@ void CodeGenTileLangHIP::VisitStmt_(const BufferStoreNode *op) {
   DataType value_dtype = op->value.dtype();
   DataType element_dtype = op->buffer->dtype;
   Var buffer_var = op->buffer->data;
+
+  // Vector FP4 values targeting scalar FP4 buffers need lane-wise packed
+  // stores; CodeGenC's generic scalarization advances one byte per element.
+  if (element_dtype.is_float4() && element_dtype.is_scalar() &&
+      value_dtype.is_float4() && !value_dtype.is_scalar()) {
+    enable_fp4_ = true;
+    auto packed_it = fp4_packed_buffers_.find(buffer_var);
+    std::string packed_buffer =
+        packed_it != fp4_packed_buffers_.end()
+            ? packed_it->second
+            : "(fp4_e2_2_t*)" + GetVarID(buffer_var.get());
+    int vec_scope = BeginScope();
+    PrimExpr index_expr = op->indices[0];
+    const auto *ramp = index_expr.as<RampNode>();
+    std::string index;
+    std::string ramp_base;
+    std::string ramp_stride;
+    if (ramp != nullptr) {
+      ramp_base = SSAGetID(PrintExpr(ramp->base), ramp->base.dtype());
+      ramp_stride = SSAGetID(PrintExpr(ramp->stride), ramp->stride.dtype());
+    } else {
+      index = SSAGetID(PrintExpr(index_expr), index_expr.dtype());
+    }
+    auto print_lane_index = [&](int lane, std::ostream &lane_os) {
+      if (ramp != nullptr) {
+        lane_os << "(" << ramp_base << ")+(" << ramp_stride << "*" << lane
+                << ")";
+      } else {
+        PrintVecElemLoad(index, index_expr.dtype(), lane, lane_os);
+      }
+    };
+    std::string value = SSAGetID(PrintExpr(op->value), value_dtype);
+    for (int i = 0; i < value_dtype.lanes(); ++i) {
+      std::ostringstream lane_index;
+      std::ostringstream lane_value;
+      print_lane_index(i, lane_index);
+      PrintVecElemLoad(value, value_dtype, i, lane_value);
+      this->PrintIndent();
+      stream << "tl_fp4_packed_store(" << packed_buffer << ", "
+             << lane_index.str() << ", " << lane_value.str() << ");\n";
+    }
+    EndScope(vec_scope);
+    return;
+  }
 
   // FP4 scalar store: use tl_fp4_packed_store to correctly handle nibble-level
   // writes without corrupting the neighbouring nibble.
@@ -2379,9 +2491,27 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     } else if (std::isnan(op->value)) {
       temp << ((op->dtype.bits() == 32) ? "NAN" : "NAN");
     } else {
-      temp << std::scientific << op->value;
-      if (op->dtype.bits() == 32)
-        temp << 'f';
+      std::ostringstream decimal;
+      decimal << std::scientific << op->value;
+      std::istringstream parser(decimal.str());
+      double round_tripped = 0.0;
+      parser >> round_tripped;
+      bool decimal_is_exact =
+          !parser.fail() && round_tripped == op->value &&
+          std::signbit(round_tripped) == std::signbit(op->value);
+      if (decimal_is_exact) {
+        temp << decimal.str();
+        if (op->dtype.bits() == 32)
+          temp << 'f';
+      } else {
+        // Preserve exact TIR constants whose legacy decimal spelling does not
+        // round-trip (for example 1.0f / 6.0f), which can otherwise change
+        // branch and quantization boundary results.
+        temp << FlexibleHexFormat(op->value);
+        if (op->dtype.bits() == 32)
+          temp << 'f';
+        temp << "/*" << decimal.str() << "*/";
+      }
     }
     p->MarkConst(temp.str());
     os << temp.str();

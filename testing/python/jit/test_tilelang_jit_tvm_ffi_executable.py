@@ -1,8 +1,10 @@
+import sys
 import threading
 from types import SimpleNamespace
 
 import pytest
 import torch
+import tvm_ffi
 
 from tilelang import tvm
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
@@ -84,6 +86,38 @@ def test_executable_is_initialized_once_and_reused():
     assert adapter.get_exportable_executable() is executable
     assert adapter.executable is executable
     assert len(created) == 1
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="TileLang intentionally disables C DLPack on MPS")
+@pytest.mark.parametrize(
+    ("torch_dtype_name", "shape", "expected_tvm_dtype"),
+    [
+        ("float8_e4m3fn", (2, 4), "float8_e4m3fn"),
+        ("float8_e4m3fnuz", (2, 4), "float8_e4m3fnuz"),
+        ("float4_e2m1fn_x2", (2, 2), "float4_e2m1fnx2"),
+    ],
+)
+def test_tvm_ffi_c_dlpack_preserves_narrow_float_metadata(torch_dtype_name, shape, expected_tvm_dtype):
+    torch_dtype = getattr(torch, torch_dtype_name, None)
+    if torch_dtype is None:
+        pytest.skip(f"PyTorch does not provide {torch_dtype_name}")
+
+    assert hasattr(torch.Tensor, "__dlpack_c_exchange_api__")
+    observed = []
+    func_name = "testing.tilelang_narrow_float_c_dlpack_metadata"
+
+    @tvm_ffi.register_global_func(func_name, override=True)
+    def capture_metadata(tensor):
+        observed.append((tuple(tensor.shape), str(tensor.dtype), str(tensor.device)))
+        return tensor.ndim
+
+    try:
+        callback = tvm_ffi.get_global_func(func_name)
+        tensor = torch.empty(shape, dtype=torch_dtype, device="cpu")
+        assert callback(tensor) == len(shape)
+        assert observed == [(shape, expected_tvm_dtype, "cpu:0")]
+    finally:
+        tvm_ffi.remove_global_func(func_name)
 
 
 def test_preloaded_executable_is_reused():
