@@ -396,7 +396,7 @@ TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
   unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
   unsigned int shift = (idx & 1) * 4;
   int value = static_cast<int>((byte >> shift) & 0xF);
-  return (value << 28) >> 28;
+  return (value ^ 8) - 8;
 }
 
 TL_DEVICE unsigned int tl_uint4_packed_load(const unsigned char *packed,

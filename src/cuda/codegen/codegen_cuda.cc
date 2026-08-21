@@ -5251,18 +5251,27 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
 
-  if ((element_dtype == DataType::Int(4) ||
-       element_dtype == DataType::UInt(4)) &&
-      element_dtype.is_scalar() && value_dtype.is_scalar()) {
-    std::string idx_str = PrintExpr(index);
-    std::string vid = GetVarID(buffer_var.get());
+  const bool is_packed_int4_buffer = (element_dtype == DataType::Int(4) ||
+                                      element_dtype == DataType::UInt(4)) &&
+                                     element_dtype.is_scalar();
+  const bool is_packed_int4x2 = is_packed_int4_buffer &&
+                                value_dtype.lanes() == 2 &&
+                                value_dtype.element_of() == element_dtype;
+
+  std::string vid = GetVarID(buffer_var.get());
+  auto print_packed_int4_load = [&](const std::string &idx_str,
+                                    std::ostream &stream) {
     if (element_dtype.is_uint()) {
-      os << "tl_uint4_packed_load((const unsigned char*)" << vid << ", "
-         << idx_str << ")";
+      stream << "tl_uint4_packed_load((const unsigned char*)" << vid << ", "
+             << idx_str << ")";
     } else {
-      os << "tl_int4_packed_load((const signed char*)" << vid << ", " << idx_str
-         << ")";
+      stream << "tl_int4_packed_load((const signed char*)" << vid << ", "
+             << idx_str << ")";
     }
+  };
+
+  if (is_packed_int4_buffer && value_dtype.is_scalar()) {
+    print_packed_int4_load(PrintExpr(index), os);
     return;
   }
 
@@ -5294,15 +5303,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     arith::PVar<PrimExpr> base;
     int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
     if (arith::ramp(base, 1, ramp_lanes).Match(index)) {
-      const RampNode *ramp = index.as<RampNode>();
-      ICHECK(ramp);
       can_vector_load = true;
-      // arith::ModularSet me = arith::Analyzer().modular_set(ramp->base);
-      // The condition: {k * coeff + base} divisible by the alignment for any k
-      // if (me->coeff % op->dtype.lanes() == 0 && me->base % op->dtype.lanes()
-      // == 0) {
-      //   can_vector_load = true;
-      // }
+
+      // A direct int4x2/uint4x2 load reads one physical byte, so the first
+      // logical element must be aligned to an even index.
+      if (is_packed_int4x2) {
+        arith::Analyzer analyzer;
+        arith::ModularSet modular_base = analyzer.modular_set(base.Eval());
+        can_vector_load =
+            modular_base->coeff % 2 == 0 && modular_base->base % 2 == 0;
+      }
     }
 
     if (can_vector_load) {
@@ -5311,26 +5321,33 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     } else {
       std::ostringstream svalue_expr;
       std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
-      std::string vid = GetVarID(buffer_var.get());
       DataType elem_type = op->dtype.element_of();
       for (int i = 0; i < lanes; ++i) {
         std::ostringstream value_temp;
-        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
-          value_temp << "((";
-          if (buffer_var.get()->dtype.is_handle()) {
-            auto it = alloc_storage_scope_.find(buffer_var.get());
-            if (it != alloc_storage_scope_.end()) {
-              PrintStorageScope(it->second, value_temp);
-            }
-          }
-          PrintType(elem_type, value_temp);
-          value_temp << "*)" << vid << ')';
+
+        if (is_packed_int4x2) {
+          std::ostringstream lane_index;
+          PrintVecElemLoad(sindex, index.dtype(), i, lane_index);
+          print_packed_int4_load(lane_index.str(), value_temp);
         } else {
-          value_temp << vid;
+          if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+            value_temp << "((";
+            if (buffer_var.get()->dtype.is_handle()) {
+              auto it = alloc_storage_scope_.find(buffer_var.get());
+              if (it != alloc_storage_scope_.end()) {
+                PrintStorageScope(it->second, value_temp);
+              }
+            }
+            PrintType(elem_type, value_temp);
+            value_temp << "*)" << vid << ')';
+          } else {
+            value_temp << vid;
+          }
+          value_temp << '[';
+          PrintVecElemLoad(sindex, index.dtype(), i, value_temp);
+          value_temp << ']';
         }
-        value_temp << '[';
-        PrintVecElemLoad(sindex, index.dtype(), i, value_temp);
-        value_temp << ']';
+
         PrintVecElemLoadExpr(op->dtype, i, value_temp.str(), svalue_expr);
       }
       os << svalue_expr.str();

@@ -75,6 +75,37 @@ def _packed_x2_constructor_source(dtype, constructor):
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
+def _packed_x2_load_source(dtype, base, stride, dynamic_base=False):
+    name = f"packed_{dtype}_x2_load"
+    buffer = tirx.decl_buffer((8,), dtype=dtype, name="input")
+    params = [buffer.data]
+
+    if dynamic_base:
+        base_expr = tirx.Var("base", "int32")
+        params.append(base_expr)
+    else:
+        base_expr = tirx.const(base, "int32")
+
+    index = tirx.Ramp(
+        base_expr,
+        tirx.const(stride, "int32"),
+        2,
+    )
+    func = tirx.PrimFunc(
+        params,
+        tirx.Evaluate(tirx.BufferLoad(buffer, [index])),
+        buffer_map={buffer.data: buffer},
+    )
+    func = func.with_attr("global_symbol", name)
+    func = func.with_attr(
+        "calling_conv",
+        tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
+    )
+    mod = tvm.IRModule({name: func})
+    build = tvm.get_global_func("target.build.tilelang_cuda")
+    return build(mod, tvm.target.Target("cuda")).inspect_source()
+
+
 def _packed_x2_broadcast_kernel(dtype, value):
     @T.prim_func
     def kernel(output: T.Tensor((2,), dtype)):
@@ -91,6 +122,31 @@ def _packed_x2_ramp_kernel(dtype, offset):
         with T.Kernel(1, threads=1):
             for i in T.vectorized(2):
                 output[i] = T.cast(i + offset, dtype)
+
+    return kernel
+
+
+def _packed_x2_gather_kernel(dtype):
+    @T.prim_func
+    def kernel(
+        source: T.Tensor((8,), dtype),
+        output: T.Tensor((2,), dtype),
+    ):
+        with T.Kernel(1, threads=1):
+            output[T.Ramp(0, 1, 2)] = source[T.Ramp(0, 2, 2)]
+
+    return kernel
+
+
+def _packed_int4_scalar_load_kernel():
+    @T.prim_func
+    def kernel(
+        source: T.Tensor((4,), "int4"),
+        output: T.Tensor((4,), "int32"),
+    ):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(4):
+                output[i] = T.cast(source[i], "int32")
 
     return kernel
 
@@ -135,6 +191,93 @@ def test_packed_int4x2_constructor_codegen(dtype, constructor):
     assert len(calls) == 1
     assert "make_int8_t(" not in source
     assert "make_uint8_t(" not in source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+@pytest.mark.parametrize(
+    ("base", "stride", "dynamic_base"),
+    [
+        (0, 2, False),
+        (1, 1, False),
+        (0, 1, True),
+    ],
+)
+def test_packed_int4x2_gather_uses_logical_indices(
+    dtype,
+    base,
+    stride,
+    dynamic_base,
+):
+    source = _packed_x2_load_source(
+        dtype,
+        base,
+        stride,
+        dynamic_base=dynamic_base,
+    )
+
+    assert source.count(f"tl_{dtype}_packed_load(") == 2
+    assert source.count(f"tl_pack_{dtype}x2(") == 1
+    pack_line = next(line for line in source.splitlines() if f"tl_pack_{dtype}x2(" in line)
+    assert pack_line.count("v_.x") == 1
+    assert pack_line.count("v_.y") == 1
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("dtype", "storage_type"),
+    [
+        ("int4", "int8_t"),
+        ("uint4", "uint8_t"),
+    ],
+)
+def test_packed_int4x2_aligned_load_keeps_direct_path(dtype, storage_type):
+    source = _packed_x2_load_source(dtype, base=2, stride=1)
+
+    assert f"*((({storage_type}*)input) + 1);" in source
+    assert f"tl_{dtype}_packed_load(" not in source
+    assert f"tl_pack_{dtype}x2(" not in source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("dtype", "values", "expected"),
+    [
+        ("int4", [0xF8, 0x72, 0x05, 0x00], 0x28),
+        ("uint4", [0x21, 0x43, 0x65, 0x07], 0x31),
+    ],
+)
+def test_packed_int4x2_strided_gather_runtime(dtype, values, expected):
+    compiled = tilelang.compile(_packed_x2_gather_kernel(dtype), out_idx=[1])
+    source = torch.tensor(values, dtype=torch.uint8, device="cuda")
+    if dtype == "int4":
+        source = source.view(torch.int8)
+
+    result = compiled(source)
+    kernel_source = compiled.get_kernel_source()
+
+    assert kernel_source.count(f"tl_{dtype}_packed_load(") == 2
+    assert kernel_source.count(f"tl_pack_{dtype}x2(") == 1
+    assert result.view(torch.uint8).item() == expected
+
+
+@tilelang.testing.requires_cuda
+def test_packed_int4_scalar_load_sign_extension():
+    compiled = tilelang.compile(_packed_int4_scalar_load_kernel(), out_idx=[1])
+    source = torch.tensor(
+        [0xF8, 0x70],
+        dtype=torch.uint8,
+        device="cuda",
+    ).view(torch.int8)
+
+    result = compiled(source)
+    expected = torch.tensor(
+        [-8, -1, 0, 7],
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    assert torch.equal(result, expected)
 
 
 @tilelang.testing.requires_cuda
