@@ -14,6 +14,22 @@
 #   3. Otherwise, try auto-detecting from the current Python environment's
 #      site-packages (works with --no-build-isolation).
 
+function(_tilelang_get_native_windows_arch OUTPUT_VAR)
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _tilelang_host_processor)
+  if(NOT "$ENV{PROCESSOR_ARCHITEW6432}" STREQUAL "")
+    string(TOLOWER "$ENV{PROCESSOR_ARCHITEW6432}" _tilelang_env_processor)
+  else()
+    string(TOLOWER "$ENV{PROCESSOR_ARCHITECTURE}" _tilelang_env_processor)
+  endif()
+
+  set(_tilelang_native_arch "x64")
+  if(_tilelang_host_processor MATCHES "^(arm64|aarch64)$"
+      OR _tilelang_env_processor MATCHES "^(arm64|aarch64)$")
+    set(_tilelang_native_arch "arm64")
+  endif()
+  set(${OUTPUT_VAR} "${_tilelang_native_arch}" PARENT_SCOPE)
+endfunction()
+
 function(_tilelang_activate_msvc_env)
   if(NOT WIN32)
     return()
@@ -25,6 +41,23 @@ function(_tilelang_activate_msvc_env)
 
   if(DEFINED ENV{VSCMD_VER} AND DEFINED ENV{VCINSTALLDIR})
     return()
+  endif()
+
+  _tilelang_get_native_windows_arch(_tilelang_native_arch)
+
+  set(_tilelang_target_arch "${_tilelang_native_arch}")
+  if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
+    set(_tilelang_target_arch "x86")
+  elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+    set(_tilelang_target_arch "arm64")
+  elseif(NOT CMAKE_GENERATOR_PLATFORM STREQUAL "")
+    set(_tilelang_target_arch "x64")
+  endif()
+  set(_tilelang_host_arch "${_tilelang_native_arch}")
+
+  set(_tilelang_vc_tools_component "Microsoft.VisualStudio.Component.VC.Tools.x86.x64")
+  if(_tilelang_target_arch STREQUAL "arm64")
+    set(_tilelang_vc_tools_component "Microsoft.VisualStudio.Component.VC.Tools.ARM64")
   endif()
 
   set(_vswhere_hints
@@ -40,7 +73,7 @@ function(_tilelang_activate_msvc_env)
   endif()
 
   execute_process(
-    COMMAND "${_TILELANG_VSWHERE}" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    COMMAND "${_TILELANG_VSWHERE}" -latest -products * -requires "${_tilelang_vc_tools_component}" -property installationPath
     OUTPUT_VARIABLE _tilelang_vs_install
     OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE _tilelang_vswhere_result
@@ -80,17 +113,10 @@ function(_tilelang_activate_msvc_env)
     set(ENV{PATHEXT} "$ENV{PATHEXT};${_tilelang_default_pathext}")
   endif()
 
-  set(_tilelang_target_arch "x64")
-  if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
-    set(_tilelang_target_arch "x86")
-  elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
-    set(_tilelang_target_arch "arm64")
-  endif()
-
   set(_tilelang_vsenv_script "${CMAKE_BINARY_DIR}/tilelang-vsenv.bat")
   file(WRITE "${_tilelang_vsenv_script}"
     "@echo off\r\n"
-    "call \"${_tilelang_vsdevcmd_native}\" -no_logo -arch=${_tilelang_target_arch} -host_arch=x64 >nul\r\n"
+    "call \"${_tilelang_vsdevcmd_native}\" -no_logo -arch=${_tilelang_target_arch} -host_arch=${_tilelang_host_arch} >nul\r\n"
     "if errorlevel 1 exit /b 1\r\n"
     "set PATH\r\n"
     "set INCLUDE\r\n"

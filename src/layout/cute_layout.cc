@@ -9,6 +9,7 @@
 
 #include "support/check.h"
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -38,7 +39,7 @@ namespace {
 int Log2Exact(int64_t v) {
   if (v <= 0 || (v & (v - 1)) != 0)
     return -1;
-  return __builtin_ctzll(static_cast<uint64_t>(v));
+  return std::countr_zero(static_cast<uint64_t>(v));
 }
 
 } // namespace
@@ -1600,7 +1601,7 @@ protected:
       int64_t mn = std::min(bx, by);
       if (mn < (int64_t(1) << 20)) {
         int width = std::max<int>(
-            1, 64 - __builtin_clzll(static_cast<uint64_t>(mn) | 1));
+            1, 64 - std::countl_zero(static_cast<uint64_t>(mn) | 1));
         // wide = the operand whose high bits (>= width) pass through unchanged.
         PrimExpr wide = bx >= by ? x : y;
         PrimExpr hi = FloorDiv(wide, MakeI32(int64_t(1) << width)) *
@@ -1996,7 +1997,7 @@ ComposedLayoutFromTileLang(const tvm::tl::Layout &layout) {
   uint64_t weight1 = 0; // bit positions that are some atom's identity image.
   for (int64_t k = 0; k < n; ++k) {
     ICHECK_GT(shape[k], 0); // ctz is undefined at 0; extents are >= 1.
-    int max_p = __builtin_ctz(static_cast<uint32_t>(shape[k]));
+    int max_p = std::countr_zero(static_cast<uint32_t>(shape[k]));
     for (int p = 0; p < max_p; ++p) {
       std::vector<int32_t> x(n, 0);
       x[k] = int32_t(1) << p;
@@ -2005,16 +2006,16 @@ ComposedLayoutFromTileLang(const tvm::tl::Layout &layout) {
         return std::nullopt;
       uint64_t col = static_cast<uint64_t>(*a ^ *A0);
       cols.push_back(col);
-      if (__builtin_popcountll(col) == 1)
+      if (std::popcount(col) == 1)
         weight1 |= col;
     }
   }
   std::map<int, int> s_at; // swizzle target bit -> s_shift.
   for (uint64_t col : cols) {
-    if (__builtin_popcountll(col) != 2)
+    if (std::popcount(col) != 2)
       continue;
-    int lo = __builtin_ctzll(col);
-    int hi = 63 - __builtin_clzll(col);
+    int lo = std::countr_zero(col);
+    int hi = 63 - std::countl_zero(col);
     if (!(weight1 & (uint64_t(1) << lo)))
       continue; // two-bit column from a plain stride, not a swizzle.
     if (s_at.count(lo))
