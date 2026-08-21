@@ -175,8 +175,26 @@ def test_parallel_fragment_layout_covers_mixed_loop_extents(cost_model):
     post_order_visit(mod["main"].body, collect_layouts)
     assert fragment_shapes
     assert all(shape == [256] for shape in fragment_shapes)
-    assert loop_shapes
+    assert {extent for extent, _ in loop_shapes} == {100, 256}
     assert all(shape[0] >= extent for extent, shape in loop_shapes)
+
+
+def test_parallel_layout_rejects_unproven_symbolic_coverage():
+    n = T.dynamic("n")
+    loop_layout = T.Fragment((128,), forward_fn=lambda i: (i, 0))
+
+    @T.prim_func
+    def main(C: T.Tensor((n,), T.float32)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(n, loop_layout=loop_layout):
+                C[i] = 0.0
+
+    target = auto_target
+    with pytest.raises(tvm.TVMError, match="does not provably cover"), target:
+        mod = tvm.IRModule({"main": main})
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        tl.transform.LayoutInference()(mod)
 
 
 def test_static_ragged_copy_minimizes_full_thread_padding():
