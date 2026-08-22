@@ -1449,6 +1449,9 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
     std::ostringstream packed_byte;
     packed_byte << "((unsigned char*)(&(" << vec << ")))[" << i / 2 << "]";
     stream << packed_byte.str() << " = ";
+    // Packed vector temporaries are initialized in ascending lane order.
+    // Each even lane starts a new byte; each odd lane preserves the low
+    // nibble written immediately before it.
     if (i % 2 != 0) {
       stream << "(" << packed_byte.str() << " & 0x0fu) | ";
     }
@@ -5327,11 +5330,36 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
       HandleVolatileLoads(ref, op, os);
     } else {
       if (is_packed_int4_vector && !is_packed_int4x2) {
-        LOG(FATAL)
-            << "Packed int4/uint4 vector loads wider than x2 require a "
-               "unit-stride ramp with a logical base provably divisible by "
-               "the vector lane count, but got "
-            << index;
+        // A packed vector load that cannot use a directly aligned carrier is
+        // still safe to scalarize: loads do not introduce byte-level
+        // read-modify-write races. Load each logical nibble and assemble the
+        // carrier in a temporary.
+        std::string result = name_supply_->FreshName("_");
+        this->PrintIndent();
+        this->PrintType(value_dtype, stream);
+        stream << ' ' << result << ";\n";
+        int ssa_scope = BeginScope();
+        const RampNode *ramp = index.as<RampNode>();
+        std::string sindex;
+        if (ramp == nullptr) {
+          sindex = SSAGetID(PrintExpr(index), index.dtype());
+        }
+        for (int i = 0; i < lanes; ++i) {
+          std::ostringstream lane_index;
+          if (ramp != nullptr) {
+            PrimExpr lane =
+                arith::Analyzer().Simplify(ramp->base + ramp->stride * i);
+            lane_index << PrintExpr(lane);
+          } else {
+            PrintVecElemLoad(sindex, index.dtype(), i, lane_index);
+          }
+          std::ostringstream lane_value;
+          print_packed_int4_load(lane_index.str(), lane_value);
+          PrintVecElemStore(result, value_dtype, i, lane_value.str());
+        }
+        EndScope(ssa_scope);
+        os << result;
+        return;
       }
       std::ostringstream svalue_expr;
       std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
@@ -5386,9 +5414,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
                                      value_dtype.lanes() > 1 &&
                                      value_dtype.element_of() == element_dtype;
 
-  if ((element_dtype == DataType::Int(4) ||
-       element_dtype == DataType::UInt(4)) &&
-      element_dtype.is_scalar() && value_dtype.is_scalar()) {
+  if (is_packed_int4_buffer && value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(index_expr);
     std::string value = this->PrintExpr(op->value);
     std::string vid = GetVarID(buffer_var.get());
@@ -5435,25 +5461,21 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   } else {
     arith::PVar<PrimExpr> base;
     int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
-    if (arith::ramp(base, 1, ramp_lanes).Match(index_expr)) {
-      if (is_packed_int4_vector &&
-          !IsProvablyDivisible(base.Eval(), value_dtype.lanes())) {
-        LOG(FATAL)
-            << "Packed int4/uint4 vector stores require a unit-stride ramp "
-               "with a logical base provably divisible by the vector lane "
-               "count, but got "
-            << index_expr;
-      }
+    bool is_unit_stride_ramp =
+        arith::ramp(base, 1, ramp_lanes).Match(index_expr);
+    if (is_packed_int4_vector &&
+        (!is_unit_stride_ramp ||
+         !IsProvablyDivisible(base.Eval(), value_dtype.lanes()))) {
+      LOG(FATAL)
+          << "Packed int4/uint4 vector stores require a unit-stride ramp "
+             "with a logical base provably divisible by the vector lane "
+             "count, but got "
+          << index_expr;
+    }
+    if (is_unit_stride_ramp) {
       std::string value = this->PrintExpr(op->value);
       this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
     } else {
-      if (is_packed_int4_vector) {
-        LOG(FATAL)
-            << "Packed int4/uint4 vector stores require a unit-stride ramp "
-               "with a logical base provably divisible by the vector lane "
-               "count, but got "
-            << index_expr;
-      }
       // The assignment below introduces side-effect, and the resulting value
       // cannot be reused across multiple expression, thus a new scope is needed
       int vec_scope = BeginScope();
