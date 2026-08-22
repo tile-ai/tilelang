@@ -282,7 +282,17 @@ public:
   }
 
   PrimExpr VisitExpr(const PrimExpr &e) final {
-    return ExprFunctor::VisitExpr(e);
+    if (need_scalarize_) {
+      return e;
+    }
+    PrimExpr ret = ExprFunctor::VisitExpr(e);
+    // Vectorized boolean types with more than 4 lanes (e.g., boolx8)
+    // are not representable, scalarize for backend compatibility
+    if (ret.dtype().is_vector_bool() && ret.dtype().lanes() > 4) {
+      need_scalarize_ = true;
+      return e;
+    }
+    return ret;
   }
 
   PrimExpr VisitExpr_(const AddNode *op) final {
