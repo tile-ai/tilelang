@@ -255,6 +255,9 @@ def retrieve_stride(obj: BufferLikeType) -> list:
 
     For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
     """
+    # Imported lazily to avoid a cycle: `tilelang.language` imports this module.
+    from tilelang.language.eager.utils import construct_strides
+
     if isinstance(obj, tirx.Buffer):
         shape = obj.shape
     elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
@@ -262,12 +265,7 @@ def retrieve_stride(obj: BufferLikeType) -> list:
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
 
-    strides = []
-    stride = 1
-    for s in reversed(shape):
-        strides.insert(0, stride)
-        stride *= s
-    return strides
+    return list(construct_strides(shape))
 
 
 def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, access_type: str = "r") -> PrimExpr:
