@@ -93,7 +93,7 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
-wheel.py-api = "cp38"
+wheel.py-api = "cp39"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
