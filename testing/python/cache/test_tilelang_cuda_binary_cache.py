@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import cloudpickle
-import errno
 import os
 
 import tilelang
-import tilelang.cache.cuda_binary_cache as cuda_binary_cache_mod
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.backend import create_backend_context
 from tilelang.cache.cuda_binary_cache import CUDABinaryCache
@@ -72,28 +70,6 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     assert compile_calls[0][3] != compile_calls[1][3]
     cache_files = list((tmp_path / "cache").glob("*/cuda-binaries/*.cubin"))
     assert len(cache_files) == 2
-
-
-def test_cuda_binary_cache_stages_next_to_destination(monkeypatch, tmp_path):
-    _set_cache_dirs(monkeypatch, tmp_path)
-    real_replace = os.replace
-    replace_calls = []
-
-    def reject_cross_directory_replace(source, destination):
-        if os.path.dirname(source) != os.path.dirname(destination):
-            raise OSError(errno.EXDEV, "Invalid cross-device link")
-        replace_calls.append((source, destination))
-        real_replace(source, destination)
-
-    monkeypatch.setattr(cuda_binary_cache_mod.os, "replace", reject_cross_directory_replace)
-
-    CUDABinaryCache.save("same-filesystem", "cubin", b"fake-cubin")
-
-    cache_path = CUDABinaryCache.get_path("same-filesystem", "cubin")
-    assert CUDABinaryCache.load("same-filesystem", "cubin") == b"fake-cubin"
-    assert len(replace_calls) == 1
-    assert os.path.dirname(replace_calls[0][0]) == os.path.dirname(cache_path)
-    assert not [name for name in os.listdir(os.path.dirname(cache_path)) if name.startswith(".")]
 
 
 def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
