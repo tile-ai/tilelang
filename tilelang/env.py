@@ -354,7 +354,6 @@ class Environment:
     # TileLang resources
     TILELANG_TEMPLATE_PATH = EnvVar("TL_TEMPLATE_PATH", None)
     TILELANG_CACHE_DIR = EnvVar("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
-    TILELANG_TMP_DIR = EnvVar("TILELANG_TMP_DIR", lambda: os.path.join(Environment.TILELANG_CACHE_DIR, "tmp"))
 
     # Kernel Build options
     TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION", "1")  # print kernel name on compile
