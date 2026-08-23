@@ -143,9 +143,8 @@ class CUDABinaryCache:
         os.makedirs(cache_root, exist_ok=True)
         path = cls.get_path(key, compile_format)
         # Atomic replacement requires the temporary file and destination to be
-        # on the same filesystem. Keep the temporary file next to the cache
-        # entry instead of relying on TILELANG_TMP_DIR, which may be mounted
-        # elsewhere.
+        # on the same filesystem, so keep the temporary file next to the cache
+        # entry.
         temp_path = os.path.join(cache_root, f".{os.getpid()}_{uuid.uuid4()}.{compile_format}.tmp")
         try:
             with open(temp_path, "wb") as f:

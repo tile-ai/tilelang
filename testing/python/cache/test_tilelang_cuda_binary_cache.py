@@ -16,11 +16,8 @@ from tvm.target import Target
 
 def _set_cache_dirs(monkeypatch, tmp_path):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
     tilelang.enable_cache()
     KernelCache._get_cache_namespace.cache_clear()
@@ -96,7 +93,7 @@ def test_cuda_binary_cache_stages_next_to_destination(monkeypatch, tmp_path):
     assert CUDABinaryCache.load("same-filesystem", "cubin") == b"fake-cubin"
     assert len(replace_calls) == 1
     assert os.path.dirname(replace_calls[0][0]) == os.path.dirname(cache_path)
-    assert not os.listdir(tmp_path / "tmp")
+    assert not [name for name in os.listdir(os.path.dirname(cache_path)) if name.startswith(".")]
 
 
 def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):

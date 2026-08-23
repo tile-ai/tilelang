@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
@@ -193,7 +194,6 @@ class KernelCache:
     @staticmethod
     def _create_dirs():
         os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
-        os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
         os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
         os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
@@ -493,19 +493,29 @@ class KernelCache:
 
     @staticmethod
     def _safe_write_file(path: str, mode: str, operation: Callable):
-        # Random a temporary file within the same FS as the cache directory
-        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}")
-        with open(temp_path, mode) as temp_file:
-            operation(temp_file)
-
-        # Use atomic POSIX replace, so other processes cannot see a partial write
-        os.replace(temp_path, path)
+        """Atomically write a cache file through a temporary sibling."""
+        directory, filename = os.path.split(path)
+        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
+        try:
+            with open(temp_path, mode) as temp_file:
+                operation(temp_file)
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str, export_kwargs: dict | None = None):
-        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path, **(export_kwargs or {}))
-        os.replace(temp_path, path)
+        """Atomically export an executable through a temporary sibling."""
+        directory, filename = os.path.split(path)
+        stem, suffix = os.path.splitext(filename)
+        temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
+        try:
+            executable.export_library(temp_path, **(export_kwargs or {}))
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
         """

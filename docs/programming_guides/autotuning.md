@@ -209,7 +209,6 @@ Disk cache contents (per key)
 
 Control via env vars (tilelang.env)
 - `TILELANG_CACHE_DIR` (default `~/.tilelang/cache`)
-- `TILELANG_TMP_DIR` (default `$TILELANG_CACHE_DIR/tmp`)
 - Disable all kernel caches: `TILELANG_DISABLE_CACHE=1`
 - Disable autotune disk cache only: `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`
 

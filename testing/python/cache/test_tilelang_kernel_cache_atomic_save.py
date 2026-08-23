@@ -33,11 +33,8 @@ class _FakeKernel:
 @pytest.fixture
 def cache_dirs(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     return cache_dir
 
 
@@ -344,24 +341,52 @@ def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
     assert not (cache_path / "legacy.txt").exists()
 
 
-def test_safe_write_executable_uses_explicit_export_kwargs(cache_dirs, tmp_path):
+def test_safe_write_file_stages_next_to_destination(tmp_path, monkeypatch):
+    destination = tmp_path / "value.json"
+    real_replace = kernel_cache_mod.os.replace
+    replace_calls = []
+
+    def reject_cross_directory_replace(source, target):
+        if Path(source).parent != Path(target).parent:
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        replace_calls.append((source, target))
+        real_replace(source, target)
+
+    monkeypatch.setattr(kernel_cache_mod.os, "replace", reject_cross_directory_replace)
+
+    KernelCache._safe_write_file(str(destination), "w", lambda file: file.write("cached"))
+
+    assert destination.read_text() == "cached"
+    assert len(replace_calls) == 1
+    assert Path(replace_calls[0][0]).parent == destination.parent
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith(".")]
+
+
+def test_safe_write_executable_uses_sibling_and_explicit_export_kwargs(cache_dirs, tmp_path):
     captured = []
+    export_paths = []
 
     class FakeExecutable:
         def export_library(self, path, **kwargs):
             captured.append(dict(kwargs))
+            export_paths.append(Path(path))
             with open(path, "wb") as f:
                 f.write(b"fake-so")
 
     export_kwargs = {"options": ["-Wl,-dead_strip"], "custom": "keep"}
+    destination = tmp_path / "explicit.so"
 
     KernelCache._safe_write_executable(
         FakeExecutable(),
-        str(tmp_path / "explicit.so"),
+        str(destination),
         export_kwargs=export_kwargs,
     )
 
     assert captured == [export_kwargs]
+    assert export_paths[0].parent == destination.parent
+    assert export_paths[0].suffix == destination.suffix
+    assert destination.read_bytes() == b"fake-so"
+    assert not export_paths[0].exists()
 
 
 def test_tvm_ffi_kernel_cache_selects_export_kwargs_from_host_target(cache_dirs, tmp_path, monkeypatch):

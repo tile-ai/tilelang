@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import tilelang
 from tilelang import tvm as tvm
 from tvm.tirx import PrimFunc
@@ -22,7 +23,6 @@ from tilelang import logger
 import json
 import hashlib
 import uuid
-from tilelang import env
 from tvm.runtime import Executable
 
 if TYPE_CHECKING:
@@ -181,23 +181,28 @@ class AutotuneResult:
     @staticmethod
     def _safe_write_file(path: str, mode: str, operation: Callable[[Any], None]):
         """Atomically write one cache file through a temporary sibling file."""
-        # Random a temporary file within the same FS as the cache directory
-        tmp_dir = env.TILELANG_TMP_DIR
-        os.makedirs(tmp_dir, exist_ok=True)
-        temp_path = os.path.join(tmp_dir, f"{os.getpid()}_{uuid.uuid4()}")
-        with open(temp_path, mode) as temp_file:
-            operation(temp_file)
-        # Use atomic POSIX replace, so other processes cannot see a partial write
-        os.replace(temp_path, path)
+        directory, filename = os.path.split(path)
+        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
+        try:
+            with open(temp_path, mode) as temp_file:
+                operation(temp_file)
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str):
         """Atomically export one runtime executable to disk."""
-        tmp_dir = env.TILELANG_TMP_DIR
-        os.makedirs(tmp_dir, exist_ok=True)
-        temp_path = os.path.join(tmp_dir, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path)
-        os.replace(temp_path, path)
+        directory, filename = os.path.split(path)
+        stem, suffix = os.path.splitext(filename)
+        temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
+        try:
+            executable.export_library(temp_path)
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     def _save_kernel_to_disk(self, cache_path: Path, kernel: JITKernel, verbose: bool = False):
         """

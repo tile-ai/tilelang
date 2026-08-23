@@ -1,4 +1,5 @@
 import errno
+import os
 
 import pytest
 
@@ -44,11 +45,8 @@ def _fake_func():
 @pytest.fixture
 def cache_dirs(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     return cache_dir
 
 
@@ -69,6 +67,27 @@ def _make_result(tmp_path, execution_backend: str = "cython"):
         func=_fake_func,
         kernel=_FakeKernel(str(lib_path), execution_backend=execution_backend),
     )
+
+
+def test_autotune_safe_write_stages_next_to_destination(tmp_path, monkeypatch):
+    destination = tmp_path / "value.json"
+    real_replace = autotune_param.os.replace
+    replace_calls = []
+
+    def reject_cross_directory_replace(source, target):
+        if os.path.dirname(source) != os.path.dirname(target):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        replace_calls.append((source, target))
+        real_replace(source, target)
+
+    monkeypatch.setattr(autotune_param.os, "replace", reject_cross_directory_replace)
+
+    AutotuneResult._safe_write_file(str(destination), "w", lambda file: file.write("cached"))
+
+    assert destination.read_text() == "cached"
+    assert len(replace_calls) == 1
+    assert os.path.dirname(replace_calls[0][0]) == str(destination.parent)
+    assert not [path for path in tmp_path.iterdir() if path.name.startswith(".")]
 
 
 def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
