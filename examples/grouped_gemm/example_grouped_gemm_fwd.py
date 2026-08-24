@@ -82,6 +82,7 @@ def grouped_gemm(
 
         m_start_padded = bx * block_M
 
+        cur_batch_idx = 0
         for i in range(batch_count):
             in_cur_batch_idx = m_start_padded >= batch_padded_offsets[i]
             cur_batch_idx = T.if_then_else(in_cur_batch_idx, i, cur_batch_idx)

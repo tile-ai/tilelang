@@ -8,20 +8,6 @@ import tilelang.language as T
 import tilelang
 
 
-def _has_sm100():
-    try:
-        import torch
-    except ImportError:
-        return False
-    if not torch.cuda.is_available():
-        return False
-    major, _ = torch.cuda.get_device_capability(0)
-    return major >= 10
-
-
-requires_sm100 = pytest.mark.skipif(not _has_sm100(), reason="tile::gather4/scatter4 require sm_100a (Blackwell)")
-
-
 def gather_scatter_program(N: int, K: int, K_box: int, in_dtype: str = "float16"):
 
     @T.prim_func
@@ -31,9 +17,6 @@ def gather_scatter_program(N: int, K: int, K_box: int, in_dtype: str = "float16"
         Dst: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(1, 1, threads=128) as (bx, by):
-            T.reads(Src[0:N, 0:K], Idx[0:4])
-            T.writes(Dst[0:N, 0:K])
-
             smem = T.alloc_shared((4, K_box), in_dtype)
             mbar = T.alloc_barrier(1)
 
@@ -87,7 +70,8 @@ def run_gather_scatter(N=64, K=64, K_box=64):
     torch.testing.assert_close(Dst, expected)
 
 
-@requires_sm100
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_gather_scatter_basic():
     run_gather_scatter(N=64, K=64, K_box=64)
 
@@ -118,9 +102,6 @@ def gather_scatter_swizzled_program(N: int, K: int, K_box: int, swizzle_kind: st
         Dst: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(1, 1, threads=128) as (bx, by):
-            T.reads(Src[0:N, 0:K], Idx[0:4])
-            T.writes(Dst[0:N, 0:K])
-
             smem = T.alloc_shared((4, K_box), in_dtype)
             T.annotate_layout({smem: make_layout(smem)})
 
@@ -175,7 +156,8 @@ def run_gather_scatter_swizzled(N, K, K_box, swizzle_kind):
     torch.testing.assert_close(Dst, expected)
 
 
-@requires_sm100
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize(
     "K_box, swizzle_kind",
     [

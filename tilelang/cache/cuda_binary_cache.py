@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os
@@ -137,12 +138,18 @@ class CUDABinaryCache:
     def save(cls, key: str, compile_format: str, data: bytes) -> None:
         if not env.is_cache_enabled():
             return
-        os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
-        os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
-        os.makedirs(cls._get_cache_root(), exist_ok=True)
 
+        cache_root = cls._get_cache_root()
+        os.makedirs(cache_root, exist_ok=True)
         path = cls.get_path(key, compile_format)
-        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.{compile_format}")
-        with open(temp_path, "wb") as f:
-            f.write(data)
-        os.replace(temp_path, path)
+        # Atomic replacement requires the temporary file and destination to be
+        # on the same filesystem, so keep the temporary file next to the cache
+        # entry.
+        temp_path = os.path.join(cache_root, f".{os.getpid()}_{uuid.uuid4()}.{compile_format}.tmp")
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(data)
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)

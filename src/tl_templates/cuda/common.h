@@ -233,6 +233,16 @@ TL_PATCH TL_DEVICE bfloat16_t hexp(const bfloat16_t x) {
   return bfloat16_t(hexp(x.to_nv_bfloat16()));
 }
 
+// CUDA has no __ldg overloads for CUTLASS's 16-bit wrappers. Forward through
+// the bit-compatible native CUDA types.
+TL_PATCH TL_DEVICE half_t __ldg(const half_t *ptr) {
+  return half_t(__ldg(reinterpret_cast<const __half *>(ptr)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t __ldg(const bfloat16_t *ptr) {
+  return bfloat16_t(__ldg(reinterpret_cast<const __nv_bfloat16 *>(ptr)));
+}
+
 // Pack two half values.
 TL_DEVICE unsigned __pack_half2(const half x, const half y) {
   unsigned v0 = *((unsigned short *)&x);
@@ -1126,6 +1136,26 @@ template <typename T> TL_DEVICE T fast_min(T a, T b) { return b < a ? b : a; }
 
 template <> TL_DEVICE float fast_min(float a, float b) { return fminf(a, b); }
 
+TL_DEVICE float_e4m3_t max(float_e4m3_t lhs, float_e4m3_t rhs) {
+  return float_e4m3_t(
+      ::fmaxf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
+TL_DEVICE float_e4m3_t min(float_e4m3_t lhs, float_e4m3_t rhs) {
+  return float_e4m3_t(
+      ::fminf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
+TL_DEVICE float_e5m2_t max(float_e5m2_t lhs, float_e5m2_t rhs) {
+  return float_e5m2_t(
+      ::fmaxf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
+TL_DEVICE float_e5m2_t min(float_e5m2_t lhs, float_e5m2_t rhs) {
+  return float_e5m2_t(
+      ::fminf(static_cast<float>(lhs), static_cast<float>(rhs)));
+}
+
 // --- max2 ----------------------------------------------------------------
 
 TL_DEVICE float2 max2(float2 a, float2 b) {
@@ -1229,6 +1259,49 @@ TL_DEVICE __half2 abs2(__half2 a) {
 } // namespace tl
 
 using tl::tfloat32_t;
+
+// CUDA declares __shfl_*_sync only for its native arithmetic types, so
+// shuffling a CUTLASS sub-32-bit float wrapper either binds to the `float`
+// overload or is ambiguous, and fails to compile. Carry the raw bits through
+// the native 32-bit unsigned overload instead, as the tl::shfl_*_sync helpers
+// below do. The warpSize default also lets their three-argument generic
+// template resolve for these types.
+#define TL_DEFINE_SHFL_SYNC_OVERLOADS(TYPE, RAW)                               \
+  TL_PATCH TL_DEVICE TYPE __shfl_sync(unsigned mask, TYPE val, int src_lane,   \
+                                      int width = warpSize) {                  \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_sync(mask, static_cast<uint32_t>(raw), src_lane, width));       \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }                                                                            \
+  TL_PATCH TL_DEVICE TYPE __shfl_xor_sync(                                     \
+      unsigned mask, TYPE val, int lane_mask, int width = warpSize) {          \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_xor_sync(mask, static_cast<uint32_t>(raw), lane_mask, width));  \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }                                                                            \
+  TL_PATCH TL_DEVICE TYPE __shfl_down_sync(unsigned mask, TYPE val, int delta, \
+                                           int width = warpSize) {             \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_down_sync(mask, static_cast<uint32_t>(raw), delta, width));     \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }                                                                            \
+  TL_PATCH TL_DEVICE TYPE __shfl_up_sync(unsigned mask, TYPE val, int delta,   \
+                                         int width = warpSize) {               \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_up_sync(mask, static_cast<uint32_t>(raw), delta, width));       \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }
+
+TL_DEFINE_SHFL_SYNC_OVERLOADS(half_t, uint16_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(bfloat16_t, uint16_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e4m3_t, uint8_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e5m2_t, uint8_t)
+
+#undef TL_DEFINE_SHFL_SYNC_OVERLOADS
 
 //
 // Optimized type-punned warp shuffle helpers for 16-bit types

@@ -354,7 +354,6 @@ class Environment:
     # TileLang resources
     TILELANG_TEMPLATE_PATH = EnvVar("TL_TEMPLATE_PATH", None)
     TILELANG_CACHE_DIR = EnvVar("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
-    TILELANG_TMP_DIR = EnvVar("TILELANG_TMP_DIR", lambda: os.path.join(Environment.TILELANG_CACHE_DIR, "tmp"))
 
     # Kernel Build options
     TILELANG_PRINT_ON_COMPILATION = EnvVar("TILELANG_PRINT_ON_COMPILATION", "1")  # print kernel name on compile
@@ -399,6 +398,9 @@ class Environment:
     TILELANG_DEFAULT_TARGET = EnvVar("TILELANG_DEFAULT_TARGET", "auto")
     TILELANG_DEFAULT_EXECUTION_BACKEND = EnvVar("TILELANG_EXECUTION_BACKEND", "auto")
     TILELANG_DEFAULT_VERBOSE = EnvVar("TILELANG_VERBOSE", "0")
+    TILELANG_LAYOUT_COST_MODEL = EnvVar(
+        "TILELANG_LAYOUT_COST_MODEL", None
+    )  # default for the `tl.layout_cost_model` pass config; unset keeps the built-in default
 
     # TVM integration
     SKIP_LOADING_TILELANG_SO = EnvVar("SKIP_LOADING_TILELANG_SO", "0")
@@ -511,6 +513,16 @@ class Environment:
     def get_default_verbose(self) -> bool:
         """Get default verbose flag from environment."""
         return self.TILELANG_DEFAULT_VERBOSE.lower() in ("1", "true", "yes", "on")
+
+    def get_default_layout_cost_model(self) -> str | None:
+        """Default for the `tl.layout_cost_model` pass config, or None when
+        unset (the compiler then falls back to its built-in default). An
+        explicit `pass_configs` entry always takes precedence over this."""
+        value = self.TILELANG_LAYOUT_COST_MODEL
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
 
     def is_running_autodd(self) -> bool:
         """Return True if we are running under `python -m tilelang.autodd`."""

@@ -485,7 +485,8 @@ private:
     // If a store is out of bounds, we skip the corresponding stmt directly.
     Stmt store_with_conditions = store;
     for (auto cond : conditions) {
-      store_with_conditions = IfThenElse(cond, store_with_conditions);
+      store_with_conditions =
+          IfThenElse(cond, store_with_conditions, Stmt(), store->span);
     }
     return store_with_conditions;
   }
@@ -677,7 +678,7 @@ private:
 
     Stmt else_case = BufferStore(dst_info.base_load->buffer, safe_value,
                                  dst_info.base_load->indices);
-    return IfThenElse(combined, evaluate, else_case);
+    return IfThenElse(combined, evaluate, else_case, evaluate->span);
   }
 
   Stmt WrapEvaluateWithConditions(const Evaluate &evaluate,
@@ -687,7 +688,8 @@ private:
     }
     Stmt evaluate_with_conditions = evaluate;
     for (auto cond : conditions) {
-      evaluate_with_conditions = IfThenElse(cond, evaluate_with_conditions);
+      evaluate_with_conditions =
+          IfThenElse(cond, evaluate_with_conditions, Stmt(), evaluate->span);
     }
     return evaluate_with_conditions;
   }

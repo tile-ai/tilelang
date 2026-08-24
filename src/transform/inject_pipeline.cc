@@ -36,7 +36,6 @@
 #include "op/copy.h"
 #include "op/gemm.h"
 #include "op/operator.h"
-#include "op/region.h"
 #include "op/utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
@@ -473,7 +472,9 @@ SBlock MakeBlock(const Stmt &body,
   }
   if (!block.defined()) {
     block = SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                   /*name_hint=*/"", /*body*/ body);
+                   /*name_hint=*/"", /*body*/ body, /*init=*/std::nullopt,
+                   /*alloc_buffers=*/{}, /*match_buffers=*/{},
+                   /*annotations=*/{}, /*span=*/body->span);
   }
   Array<Array<BufferRegion>> access =
       GetSBlockReadWriteRegion(block, buffer_data_to_buffer);
@@ -1133,7 +1134,7 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
-    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+    if (call->op.same_as(region()) && call->args.size() >= 2) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         size_t num_extents = call->args.size() - 2;
         if (load->indices.size() == num_extents + 1) {
@@ -3035,7 +3036,8 @@ private:
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
-                     std::move(new_loop), std::nullopt, preserved_annotations);
+                     std::move(new_loop), std::nullopt, preserved_annotations,
+                     std::nullopt, pipeline_loop_->span);
     }
     Stmt result = SBlockRealize({}, Bool(true),
                                 MakeBlock(new_loop, buffer_data_to_buffer_));

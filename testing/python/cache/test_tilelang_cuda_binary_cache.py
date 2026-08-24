@@ -14,11 +14,8 @@ from tvm.target import Target
 
 def _set_cache_dirs(monkeypatch, tmp_path):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
     tilelang.enable_cache()
     KernelCache._get_cache_namespace.cache_clear()

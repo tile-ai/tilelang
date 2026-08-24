@@ -151,6 +151,19 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
   return result;
 }
 
+ffi::Array<BufferRegion> GemmSPNode::GetReadBeforeWriteRegions() const {
+  ffi::Array<BufferRegion> result;
+  result.push_back(aRegion_);
+  result.push_back(eRegion_);
+  result.push_back(bRegion_);
+  // See GemmNode::GetReadBeforeWriteRegions: only a provable absence of the
+  // clear makes the accumulator's old contents a definite read.
+  if (is_zero(clear_accum)) {
+    result.push_back(cRegion_);
+  }
+  return result;
+}
+
 TileOperator GemmSPNode::Clone() const {
   auto op = make_object<GemmSPNode>(*this);
   return GemmSP(op);

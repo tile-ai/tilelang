@@ -80,7 +80,6 @@ def setup_module_env():
     """Setup and restore module-level environment and cache state."""
     # Save original env values
     original_cache_dir = env.TILELANG_CACHE_DIR
-    original_tmp_dir = env.TILELANG_TMP_DIR
 
     # Enable cache once for entire module
     tilelang.enable_cache()
@@ -89,7 +88,6 @@ def setup_module_env():
 
     # Restore env at module end
     env.TILELANG_CACHE_DIR = original_cache_dir
-    env.TILELANG_TMP_DIR = original_tmp_dir
 
     # Restore default postproc callbacks
     tvm_ffi.register_global_func("tilelang_callback_cuda_postproc", f=lambda code, _: code, override=True)
@@ -100,15 +98,10 @@ def setup_module_env():
 def clean_cache_env(tmp_path, request):
     """Provide isolated cache environment for each test.
 
-    Creates isolated cache/tmp directories to ensure:
+    Creates an isolated cache directory to ensure:
     - No interference from previous test runs
     - No interference between parallel tests
     - Clean slate for testing cache miss/hit behavior
-    - No "Invalid cross-device link" errors (os.replace requires same filesystem)
-
-    Technical notes:
-    - TILELANG_TMP_DIR MUST be on same filesystem as TILELANG_CACHE_DIR because
-      cache implementation uses os.replace() for atomic writes
     - Env restoration is handled by setup_module_env at module scope
     """
     # This fixture should ONLY be used with @pytest.mark.parametrize("backend", ...)
@@ -118,12 +111,8 @@ def clean_cache_env(tmp_path, request):
     cache_dir = tmp_path / "tilelang_cache"
     cache_dir.mkdir()
 
-    tmp_dir = tmp_path / "tilelang_tmp"
-    tmp_dir.mkdir()
-
-    # Patch env variables to point to isolated directories
+    # Patch the cache root to point to an isolated directory.
     env.TILELANG_CACHE_DIR = str(cache_dir)
-    env.TILELANG_TMP_DIR = str(tmp_dir)
 
     # Clear memory caches to force disk I/O
     _dispatch_map[backend]._memory_cache.clear()
@@ -192,6 +181,8 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
     )
 
     assert counter.count == 1, f"Cache hit: postproc should not be called again, got {counter.count} calls"
+    if backend == "nvrtc":
+        assert kernel1.adapter.kernels is not kernel2.adapter.kernels
 
     source2 = kernel2.get_kernel_source()
     assert counter.marker in source2, f"Expected cached marker '{counter.marker}' in source"

@@ -214,18 +214,12 @@ public:
       : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
   int Plan(const For &node) {
-    bool disable_vectorize_256 = tl_config::Vectorize256Disabled();
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
-    if (TargetSupportVectorize256(Target::Current(false)) &&
-        !disable_vectorize_256 &&
-        VectorizeFindMemoryAccess::MaySupportVectorize256(node)) {
-      vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
-          256;
-    } else {
-      vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
-          128;
-    }
+    vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
+        MaxVectorLoadBits(
+            Target::Current(false),
+            VectorizeFindMemoryAccess::MaySupportVectorize256(node));
 
     // Check if For body contains SeqStmt (multiple statements).
     // When there's SeqStmt, we use conservative strategy - treating local
@@ -534,6 +528,13 @@ private:
   Stmt VisitStmt_(const IfThenElseNode *node) final {
     CheckConditionVectorized(node->condition);
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
+  }
+
+  PrimExpr VisitExpr_(const SelectNode *node) final {
+    // Select stays an expression-level ternary. Constrain its vector width
+    // using the same condition-uniformity rule as IfThenElse.
+    CheckConditionVectorized(node->condition);
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
   static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
@@ -1108,6 +1109,14 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
     return true;
   }
   return false;
+}
+
+int MaxVectorLoadBits(const Target &target, bool global_only_access) {
+  if (TargetSupportVectorize256(target) && !tl_config::Vectorize256Disabled() &&
+      global_only_access) {
+    return 256;
+  }
+  return 128;
 }
 
 bool IndicesCanVectorize(const PrimExpr &expr, Var var,

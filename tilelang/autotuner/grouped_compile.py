@@ -20,6 +20,7 @@ from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
+from tilelang.transform.pass_config import normalize_pass_configs
 from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
 from tilelang.tools.pass_timing import create_pass_timing_tool
 
@@ -43,7 +44,7 @@ def compile_grouped_unit_tvm_ffi(
     timing_tool = create_pass_timing_tool(compile_args.pass_configs)
     tools = [timing_tool] if timing_tool is not None else []
     with compile_pass_instrumentation(name="grouped-tvm-ffi", tools=tools):
-        pass_configs = dict(compile_args.pass_configs) if compile_args.pass_configs else {}
+        pass_configs = normalize_pass_configs(compile_args.pass_configs)
         base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")

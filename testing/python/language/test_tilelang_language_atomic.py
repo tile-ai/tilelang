@@ -462,6 +462,41 @@ def run_atomic_add_auto_vectorized_unit_test(vec_size: int, dtype=T.float32):
 
 
 @tilelang.jit
+def atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=T.float16):
+    @T.prim_func
+    def atomic_add(X: T.Tensor((N,), dtype), Out: T.Tensor((N,), dtype)):
+        with T.Kernel(1, threads=threads):
+            T.atomic_add(Out[0:N], X[0:N], memory_order=memory_order)
+
+    return atomic_add
+
+
+def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_order_id, dtype=T.float16):
+    # A vectorized atomic add must carry the requested memory order, just like
+    # the scalar lowering of the same call does. Cache disabled because the key
+    # does not cover the native library by default, so a stale pre-fix kernel
+    # source would otherwise be served here.
+    tilelang.disable_cache()
+    try:
+        kernel = atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=dtype)
+
+        wide_calls = re.findall(r"AtomicAddx\d\([^;]*\);", kernel.get_kernel_source())
+        assert wide_calls, f"expected a vectorized atomic add, got:\n{kernel.get_kernel_source()}"
+        for call in wide_calls:
+            assert call.endswith(f", {memory_order_id});"), f"{memory_order} dropped from vectorized atomic add: {call}"
+
+        # Each order takes a separately spelled asm string in the device helpers,
+        # so run the kernel to check this one actually computes the sum.
+        torch_dtype = getattr(torch, dtype)
+        X = torch.randn(N, dtype=torch_dtype).cuda()
+        Out = torch.zeros(N, dtype=torch_dtype).cuda()
+        kernel(X, Out)
+        torch.testing.assert_close(Out, X, atol=1e-2, rtol=1e-2)
+    finally:
+        tilelang.enable_cache()
+
+
+@tilelang.jit
 def atomic_add_complicated_parallel_program(K, M, N, block_M, block_N, dtype=T.float32):
     @T.prim_func
     def atomic_add(A: T.Tensor((K, M, N), dtype), B: T.Tensor((M, N), dtype)):
@@ -514,6 +549,28 @@ def test_atomic_different_memory_orders():
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float32)
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.float16)
     run_atomic_different_memory_orders(32, 32, 8, 8, dtype=T.bfloat16)
+
+
+# ids match cuda::memory_order. Each one is a separately spelled asm string in
+# the device helpers, so all three ordered spellings need exercising.
+_ORDERED_MEMORY_ORDERS = [("acquire", 2), ("release", 3), ("acq_rel", 4)]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("memory_order, memory_order_id", _ORDERED_MEMORY_ORDERS)
+def test_atomic_add_vectorized_preserves_memory_order(memory_order, memory_order_id):
+    run_atomic_add_vectorized_memory_order(64, 32, memory_order, memory_order_id, dtype=T.float16)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("memory_order, memory_order_id", _ORDERED_MEMORY_ORDERS)
+def test_atomic_add_vectorized_preserves_memory_order_bf16(memory_order, memory_order_id):
+    # bf16 takes a different device path depending on the target: below sm_90
+    # there is no ordered bf16 atomic in any width, so AtomicAddx2 falls back to
+    # fences around a relaxed add, while sm_90 uses the ordered instruction. A
+    # given run covers whichever side the test GPU selects.
+    run_atomic_add_vectorized_memory_order(64, 32, memory_order, memory_order_id, dtype=T.bfloat16)
 
 
 def test_atomic_addx4():

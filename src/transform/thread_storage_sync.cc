@@ -1253,6 +1253,16 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.scope = StorageScope::Create(s);
         curr_stmt_.access.emplace_back(std::move(e));
       }
+    } else if (op->op.same_as(tl::sync_grid())) {
+      // grid.sync() synchronizes every thread of every block and is a full
+      // memory fence, so it subsumes a block-level barrier for any storage
+      // scope planned here.
+      ICHECK(allow_append_);
+      AccessEntry e{.cset = {constr_stack_}};
+      e.threads = env_threads();
+      e.type = kSync;
+      e.scope = sync_scope_;
+      curr_stmt_.access.emplace_back(std::move(e));
     } else {
       ConstrVisitor::VisitExpr_(op);
     }
@@ -1520,6 +1530,16 @@ private:
     PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
     PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
     PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
+    // A touched interval relaxed to (half-)unbounded carries TVM's symbolic
+    // infinity sentinels, which are handle-typed vars: comparing them against
+    // integer offsets throws a dtype mismatch inside tvm::less. An unbounded
+    // side can never prove disjointness anyway (e.g. an atomic whose index is
+    // a data-dependent load), so answer conservatively.
+    for (const PrimExpr &bound : {lhs_min, lhs_max, rhs_min, rhs_max}) {
+      if (!bound.dtype().is_int() && !bound.dtype().is_uint()) {
+        return false;
+      }
+    }
     Map<Var, PrimExpr> prev_sub, curr_sub;
     for (unsigned idx = 0; idx != 3; ++idx) {
       auto &info = thread_vars[idx];

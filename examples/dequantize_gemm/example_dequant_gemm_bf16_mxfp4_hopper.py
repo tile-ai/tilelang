@@ -253,7 +253,7 @@ def matmul(
                 )
 
                 # Finally, store the dequantized data to shared memory.
-                for v in T.Parallel(local_size):
+                for v in T.vectorized(local_size):
                     B_dequantize_local_thread[v] *= Scale_local_thread_exponent[0]
 
                 for v in T.vectorized(0, local_size):

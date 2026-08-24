@@ -44,11 +44,8 @@ def _fake_func():
 @pytest.fixture
 def cache_dirs(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     return cache_dir
 
 

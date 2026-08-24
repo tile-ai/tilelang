@@ -49,6 +49,10 @@ def reduce(
             float16/bfloat16. When True, lower to CUDA __hmax_nan/__hmin_nan so
             NaNs propagate through the reduction. When False (default), use
             __hmax/__hmin which return the non-NaN operand. CUDA-only.
+        annotations (dict, optional): Additional lowering controls. On CUDA
+            SM100+, FP32 sum/abssum reductions accept
+            ``{"enable_fadd2": False}`` to keep the reducer scalar. Packed
+            FP32x2 reduction remains enabled by default.
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
@@ -237,6 +241,9 @@ def reduce_sum(
                               If False, results will be accumulated on existing values.
                               Defaults to True.
         batch (int): Number of output elements per batched AllReduce call (default 1).
+        annotations (dict, optional): On CUDA SM100+, set
+            ``{"enable_fadd2": False}`` to disable packed FP32x2 accumulation
+            for this reduction. It is enabled by default.
     Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because
           during warp reduction, the same value would be accumulated multiple times (number of threads
           in the warp). Therefore, the implementation with clear=True follows these steps:
@@ -260,6 +267,9 @@ def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: i
         out (tirx.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
         batch (int): Number of output elements per batched AllReduce call (default 1).
+        annotations (dict, optional): On CUDA SM100+, set
+            ``{"enable_fadd2": False}`` to disable packed FP32x2 accumulation
+            for this reduction. It is enabled by default.
 
     Returns:
         tirx.Call: Handle to the reduction operation
@@ -351,16 +361,21 @@ def reduce_bitxor(
 def reducer_init(reducer: tirx.Buffer, init=None) -> tirx.PrimExpr:
     """Open a reducer epoch, optionally with a logical starting value.
 
-    Must be called exactly once per `T.alloc_reducer` allocation, before any
-    `T.reducer_update`. Without `init`, the reduction starts from the combine
-    identity (sum -> 0, max -> dtype lowest, min -> dtype highest, bitand ->
-    all ones, bitor/bitxor -> 0).
+    Must appear exactly once per `T.alloc_reducer` allocation, before any
+    `T.reducer_update`. The whole epoch (init, updates, finalize) may sit
+    inside thread-uniform serial loops or conditionals — the epoch then
+    reopens once per dynamic execution — but init and finalize must share
+    the same enclosing loop/branch scope. Without `init`, the reduction
+    starts from the combine identity (sum -> 0, max -> dtype lowest, min ->
+    dtype highest, bitand -> all ones, bitor/bitxor -> 0).
 
     `init` is a LOGICAL starting value: the result is as if one extra
     contribution `init` were combined into every logical output, exactly
     once. It is not a physical fill — physical partials always start from
-    the identity, and the compiler combines `init` once per logical output
-    at finalize time, so physical replication can never multiply it.
+    the identity, and the compiler captures `init` at the init site and
+    combines it once per logical output at finalize time, so physical
+    replication can never multiply it and later writes to buffers the
+    expression reads cannot change the epoch's starting value.
 
     Args:
         reducer (tirx.Buffer): Handle returned by `T.alloc_reducer`.

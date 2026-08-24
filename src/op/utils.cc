@@ -4,6 +4,7 @@
  */
 
 #include "utils.h"
+#include "builtin.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -16,12 +17,61 @@ namespace tl {
 
 using namespace tirx;
 
+namespace {
+
+// Decoded form of a tl.region(...) bridge call.
+struct DecodedRegionCall {
+  Buffer buffer;
+  ffi::Array<Range> ranges;
+  int access_mask;
+};
+
+// Decode a tl.region call's args:
+//   args[0]: BufferLoad whose indices are per-axis minima.
+//   args[1]: constant int access mask (1=read, 2=write, 3=read-write).
+//   args[2 + i]: extent of axis i (supports dynamic PrimExpr).
+// A min encoded as a stride-1 Ramp carries its extent in the Ramp lanes; the
+// lanes must agree with the provided extent when both are constant.
+DecodedRegionCall DecodeRegionCall(const ffi::Array<PrimExpr> &args) {
+  size_t n = args.size();
+  size_t ndim = n - 2;
+  const auto *load = args[0].as<BufferLoadNode>();
+  ICHECK(load);
+  ICHECK(load->indices.size() == ndim)
+      << "load->indices.size() = " << load->indices << " ndim = " << ndim;
+  ffi::Array<Range> ranges;
+  for (size_t i = 0; i < ndim; i++) {
+    PrimExpr index = load->indices[i];
+    PrimExpr extent = args[2 + i];
+    if (const auto *ramp = index.as<RampNode>()) {
+      const auto *stride_imm = ramp->stride.as<IntImmNode>();
+      ICHECK(stride_imm && stride_imm->value == 1)
+          << "tl.region expects stride-1 Ramp for index";
+      if (const auto *lanes_imm = ramp->lanes.as<IntImmNode>()) {
+        if (const auto *ext_imm = extent.as<IntImmNode>()) {
+          ICHECK_EQ(lanes_imm->value, ext_imm->value)
+              << "Ramp lanes and provided extent must match";
+        }
+      }
+      ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
+    } else {
+      ranges.push_back(Range::FromMinExtent(index, extent));
+    }
+  }
+  const int64_t *mask = as_const_int(args[1]);
+  ICHECK(mask) << "tl.region access mask must be a constant int, but got "
+               << args[1];
+  return {load->buffer, std::move(ranges), static_cast<int>(*mask)};
+}
+
+} // namespace
+
 bool IsBufferLikeExpr(const PrimExpr &expr) {
   if (expr.as<BufferLoadNode>() || expr.as<BufferRegionNode>()) {
     return true;
   }
   if (const auto *call = expr.as<CallNode>()) {
-    return (call->op.same_as(RegionOp::Get()));
+    return (call->op.same_as(region()));
   }
   return false;
 }
@@ -51,11 +101,11 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
     return BufferRegion(load->buffer, ranges);
   }
 
-  // Case 3: tl.region(...) — reconstruct via RegionOp (bridge)
+  // Case 3: tl.region(...) — decode the transport bridge
   if (const auto *call = arg.as<CallNode>()) {
-    if (call->op.same_as(RegionOp::Get())) {
-      RegionOp region(call->args);
-      return BufferRegion(region->GetBuffer(), region->GetRanges());
+    if (call->op.same_as(region())) {
+      DecodedRegionCall decoded = DecodeRegionCall(call->args);
+      return BufferRegion(decoded.buffer, decoded.ranges);
     }
     LOG(FATAL) << "Unsupported argument for BufferRegion (expect "
                   "BufferLoad/BufferRegion/tl.region): "
@@ -69,10 +119,10 @@ BufferRegion NormalizeToBufferRegion(const PrimExpr &arg) {
 AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
                                      int default_access_mask) {
   if (const auto *call = arg.as<CallNode>()) {
-    if (call->op.same_as(RegionOp::Get())) {
-      RegionOp region(call->args);
-      return {BufferRegion(region->GetBuffer(), region->GetRanges()),
-              region->GetAccessMask()};
+    if (call->op.same_as(region())) {
+      DecodedRegionCall decoded = DecodeRegionCall(call->args);
+      return {BufferRegion(decoded.buffer, decoded.ranges),
+              decoded.access_mask};
     }
   }
   return {NormalizeToBufferRegion(arg), default_access_mask};

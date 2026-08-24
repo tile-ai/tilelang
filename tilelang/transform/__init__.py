@@ -105,6 +105,17 @@ def VerifyParallelLoop():
     return _ffi_api.VerifyParallelLoop()  # type: ignore
 
 
+def VerifyBufferInit():
+    """Warn when a non-global-scope buffer is read before anything writes it.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The registered pass. It inspects the IR and returns it unchanged.
+    """
+    return _ffi_api.VerifyBufferInit()  # type: ignore
+
+
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 

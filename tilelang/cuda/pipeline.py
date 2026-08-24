@@ -90,6 +90,12 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # diagnostics point at user-written code)
     mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
     mod = tilelang.transform.VerifyReducerEpoch()(mod)
+    # Warn on buffers that are read before anything writes them.
+    # Runs after the reducer passes above, so legacy reducers have been
+    # canonicalized, and before PipelinePlanning and LowerTileOp, while
+    # loop bodies are still in source order and tile ops still declare
+    # their access regions.
+    mod = tilelang.transform.VerifyBufferInit()(mod)
 
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that

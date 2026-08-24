@@ -9,6 +9,8 @@
 #include <tvm/ffi/optional.h>
 #include <tvm/ir/transform.h>
 
+#include <string>
+
 namespace tvm {
 namespace tl {
 namespace tl_config {
@@ -23,6 +25,18 @@ inline bool ReducerPlanVerboseEnabled() {
   return ctxt
       ->GetConfig("tl.enable_reducer_plan_verbose", ffi::Optional<Bool>())
       .value_or(Bool(false));
+}
+
+/*!
+ * \brief The cost model that ranks free-mode layout attempts. Valid
+ *  values: "register-count" (default — total fragment register slots) and
+ *  "io-aware" (bytes x vector-width/coalescing over fragment<->global
+ *  traffic, registers as tiebreak).
+ */
+inline std::string LayoutCostModelName() {
+  auto ctxt = tvm::transform::PassContext::Current();
+  return ctxt->GetConfig("tl.layout_cost_model", ffi::Optional<ffi::String>())
+      .value_or(ffi::String("register-count"));
 }
 
 /*!
@@ -41,6 +55,18 @@ inline bool VectorizePlannerVerboseEnabled() {
 inline bool Vectorize256Disabled() {
   auto ctxt = tvm::transform::PassContext::Current();
   return ctxt->GetConfig("tl.disable_vectorize_256", ffi::Optional<Bool>())
+      .value_or(Bool(false));
+}
+
+/*!
+ * \brief Check if ``#line`` directive emission from TIR source spans is
+ * enabled. When on, C-family codegen maps generated statements back to
+ * their Python source lines via ``#line N "file"`` (consumed by the
+ * CodeGenCWithLineDirectives builders).
+ */
+inline bool EmitLineDirectivesEnabled() {
+  auto ctxt = tvm::transform::PassContext::Current();
+  return ctxt->GetConfig("tl.emit_line_directives", ffi::Optional<Bool>())
       .value_or(Bool(false));
 }
 

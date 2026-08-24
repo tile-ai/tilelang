@@ -181,7 +181,6 @@ def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list
 
     - Buffer/BufferLoad/BufferRegion -> returns BufferRegion when extents is None
     - Buffer/BufferLoad/BufferRegion -> returns a tl.region call when extents is provided
-    - tl.region Call -> returns the decoded BufferRegion for analysis
     """
     from tilelang.language.frame import has_let_value, get_let_value
 
@@ -252,20 +251,24 @@ def retrieve_shape(obj: BufferLikeType) -> list:
 
 def retrieve_stride(obj: BufferLikeType) -> list:
     """
-    Retrieve row-major strides for a buffer-like object based on its buffer.shape.
+    Retrieve strides for a buffer-like object.
 
-    For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
+    For BufferRegion and BufferLoad, uses the underlying buffer. Declared
+    strides take precedence, with compact row-major strides as the fallback.
     """
     if isinstance(obj, tirx.Buffer):
-        shape = obj.shape
+        buffer = obj
     elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
-        shape = obj.buffer.shape
+        buffer = obj.buffer
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
 
+    if len(buffer.strides) == len(buffer.shape) and len(buffer.strides) > 0:
+        return list(buffer.strides)
+
     strides = []
     stride = 1
-    for s in reversed(shape):
+    for s in reversed(buffer.shape):
         strides.insert(0, stride)
         stride *= s
     return strides

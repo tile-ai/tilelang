@@ -11,6 +11,7 @@
 #include "tcgen_05.h"
 #include "tcgen_05_ld.h"
 #include "tcgen_05_st.h"
+#include <cute/arch/config.hpp>
 
 namespace tl {
 
@@ -579,7 +580,8 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
 }
 
 // cp.async.bulk.tensor.2d.tile::{gather4,scatter4} (PTX 8.6).
-// The shared::cta gather4 form requires sm_100; scatter4 requires sm_100a.
+// The shared::cta gather4 form requires sm_100; scatter4 requires an
+// arch-/family-specific target, same set as CuTe's SM100 TMA atoms.
 // Five coordinate operands: {col, r0, r1, r2, r3}; the 4-row pack is implicit.
 // CacheHintSm90 reused from copy_sm90.h (always included alongside this file).
 #if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
@@ -619,7 +621,7 @@ TL_DEVICE void
 tma_store_scatter4(const CUtensorMap &descriptor, void const *const smem_ptr,
                    int32_t const &col, int32_t const &r0, int32_t const &r1,
                    int32_t const &r2, int32_t const &r3) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(CUTE_ARCH_TMA_SM100_ENABLED)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -630,7 +632,9 @@ tma_store_scatter4(const CUtensorMap &descriptor, void const *const smem_ptr,
         "r"(r2), "r"(r3), "l"(cache_hint)
       : "memory");
 #else
-  static_assert(kDependentFalse, "tl::tma_store_scatter4 requires sm_100a");
+  static_assert(kDependentFalse,
+                "tl::tma_store_scatter4 requires sm_100a or a compatible "
+                "architecture-specific target");
 #endif
 }
 #endif // CUDA 12.8+

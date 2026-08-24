@@ -11,7 +11,7 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/stmt_functor.h>
 
-#include "../layout/layout.h"
+#include "../../layout/layout.h"
 
 namespace tvm {
 namespace tl {

@@ -81,6 +81,12 @@ static constexpr const char *kReducerForceBaseline =
     "tl.reducer_force_baseline";
 static constexpr const char *kEnableReducerPlanVerbose =
     "tl.enable_reducer_plan_verbose";
+// The cost model that ranks free-mode layout attempts, by name:
+// "register-count" (default) uses total fragment register slots;
+// "io-aware" scores estimated global-memory access cost — vector width /
+// coalescing of every fragment<->global copy, weighted by bytes moved —
+// with register count as the tiebreak.
+static constexpr const char *kLayoutCostModel = "tl.layout_cost_model";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
 static constexpr const char *kDisableLoopUnswitching =
@@ -97,8 +103,19 @@ static constexpr const char *kLayoutVisualizationEnable =
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
+/*! \brief Emit #line directives in generated C-family source from TIR spans,
+ * mapping generated statements back to their Python source lines. Default:
+ * false. */
+static constexpr const char *kEmitLineDirectives = "tl.emit_line_directives";
 static constexpr const char *kDisableDataRaceCheck =
     "tl.disable_data_race_check";
+/*! \brief Disable the buffer-initialization check.
+ *
+ * The check warns when a non-global-scope buffer is read before anything
+ * writes it. It is enabled by default.
+ */
+static constexpr const char *kDisableBufferInitCheck =
+    "tl.disable_buffer_init_check";
 static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
@@ -142,6 +159,32 @@ TVM_DLL const Op &tvm_ffi_call_with_result();
  * - rw_mask: 1=read, 2=write, 3=read-write.
  */
 TVM_DLL const Op &access_ptr();
+
+/*!
+ * \brief Tile memory region descriptor: a transport-only bridge that carries
+ * a BufferRegion (plus an access mask) through Call args.
+ *
+ * Why tl.region instead of passing BufferRegion directly?
+ * - When a BufferRegion is passed as a call argument through call_intrin/FFI,
+ *   the Python->C++ conversion lowers it to a BufferLoad(indices), encoding a
+ *   contiguous interval as Ramp(base, stride, lanes).
+ * - Ramp lanes may only be a constant or vscale*k, so a dynamic extent
+ *   (e.g. H1 - H0) cannot be encoded as lanes, and BufferLoad carries no
+ *   per-axis extents, so downstream tile operators (tl.copy, tl.reduce, ...)
+ *   cannot losslessly recover dynamic extents from a BufferLoad alone.
+ * - tl.region packs buffer + mins (BufferLoad indices) + explicit extents
+ *   into Call args; the backend reconstructs a BufferRegion faithfully via
+ *   NormalizeToBufferRegion / NormalizeToAccessRegion (op/utils.h).
+ *
+ * region(BufferLoad(buffer, [min_0, ..., min_{n-1}]), access_mask,
+ *        extent_0, ..., extent_{n-1})
+ *
+ * - args[0]: BufferLoad whose indices are the per-axis minima.
+ * - args[1]: constant int access mask (1=read, 2=write, 3=read-write).
+ *   Transport metadata only; it does not affect lowering.
+ * - args[2 + i]: extent of axis i (may be a dynamic PrimExpr).
+ */
+TVM_DLL const Op &region();
 
 // Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
 TVM_DLL const Op &add2();
@@ -511,9 +554,8 @@ TVM_DLL const Op &warp_reduce_bitor();
  * \brief tilelang intrinsic for CUDA/HIP read-only cache load (__ldg).
  *
  *  This op allows users to explicitly request a non-coherent cached load
- *  from global memory by emitting `__ldg(&ptr[idx])` for 32-bit
- *  element types on supported architectures. It provides a direct way to
- *  leverage the read-only data cache for performance-sensitive loads when
+ *  from global memory by emitting `__ldg(&ptr[idx])`. It provides a direct way
+ *  to leverage the read-only data cache for performance-sensitive loads when
  *  the compiler cannot infer `const __restrict__` automatically.
  *
  *  Usage from TVMScript:
