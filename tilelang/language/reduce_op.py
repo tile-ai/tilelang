@@ -10,7 +10,17 @@ from tvm.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
 
 
+def _reject_buffer_region(buffer, role: str) -> None:
+    if isinstance(buffer, tirx.BufferRegion):
+        raise ValueError(
+            "T.reduce_* does not support BufferRegion arguments (for example, fragment slices); "
+            f"got one as the {role}. To reduce selected elements, use T.alloc_reducer, "
+            "call T.reducer_update inside T.Parallel, then call T.finalize_reducer."
+        )
+
+
 def _legalize_dim(buffer: tirx.Buffer, dim: int):
+    _reject_buffer_region(buffer, "input")
     if dim < 0:
         dim = len(buffer.shape) + dim
     return dim
@@ -54,6 +64,8 @@ def reduce(
             ``{"enable_fadd2": False}`` to keep the reducer scalar. Packed
             FP32x2 reduction remains enabled by default.
     """
+    _reject_buffer_region(buffer, "input")
+    _reject_buffer_region(out, "output")
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     out_buffer = to_buffer_region(out).buffer
