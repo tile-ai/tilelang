@@ -186,6 +186,10 @@ class AutotuneResult:
         try:
             with open(temp_path, mode) as temp_file:
                 operation(temp_file)
+                # Without this barrier a crash can persist the rename below
+                # before the file data, publishing a truncated file.
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
             os.replace(temp_path, path)
         finally:
             with contextlib.suppress(OSError):
@@ -199,6 +203,9 @@ class AutotuneResult:
         temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
         try:
             executable.export_library(temp_path)
+            # Flush exported data before the rename publishes the file.
+            with open(temp_path, "rb+") as temp_file:
+                os.fsync(temp_file.fileno())
             os.replace(temp_path, path)
         finally:
             with contextlib.suppress(OSError):
@@ -467,6 +474,13 @@ class AutotuneResult:
 
             # Repair stale/incomplete entries before making the new directory visible.
             self._remove_incomplete_result_dir(path, self.kernel.execution_backend)
+
+            # Durability barrier: keep the staged data ahead of the rename so a
+            # crash cannot publish a truncated cache entry.
+            for entry in os.scandir(staging_path):
+                if entry.is_file(follow_symlinks=False):
+                    with open(entry.path, "rb+") as staged_file:
+                        os.fsync(staged_file.fileno())
 
             # Atomic rename — directory becomes visible in one step.
             try:

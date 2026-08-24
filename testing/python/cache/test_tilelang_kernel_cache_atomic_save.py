@@ -64,6 +64,7 @@ def _write_complete_kernel_cache_entry(
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
     with (cache_path / cache.params_path).open("wb") as f:
         cloudpickle.dump(["param"], f)
+    cache._write_manifest(str(cache_path))
     return cache_path
 
 

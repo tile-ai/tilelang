@@ -54,6 +54,7 @@ class KernelCache:
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
     resource_usage_path = "resource_usage.json"
+    manifest_path = "manifest.json"
     cache_root_dir = "kernels"
     staging_root_dir = ".staging"
 
@@ -492,6 +493,33 @@ class KernelCache:
         return binary
 
     @staticmethod
+    def _fsync_file_contents(path: str):
+        """Flush a written file's data to stable storage before publishing it."""
+        with open(path, "rb+") as file:
+            os.fsync(file.fileno())
+
+    @staticmethod
+    def _fsync_dir(path: str):
+        """Best-effort directory fsync; unsupported on some platforms/filesystems."""
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            with contextlib.suppress(OSError):
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _hash_file(path: str) -> str:
+        file_hash = sha256()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(1 << 20), b""):
+                file_hash.update(chunk)
+        return file_hash.hexdigest()
+
+    @staticmethod
     def _safe_write_file(path: str, mode: str, operation: Callable):
         """Atomically write a cache file through a temporary sibling."""
         directory, filename = os.path.split(path)
@@ -499,6 +527,10 @@ class KernelCache:
         try:
             with open(temp_path, mode) as temp_file:
                 operation(temp_file)
+                # Without this barrier a crash can persist the rename below
+                # before the file data, publishing a truncated file.
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
             os.replace(temp_path, path)
         finally:
             with contextlib.suppress(OSError):
@@ -512,6 +544,7 @@ class KernelCache:
         temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
         try:
             executable.export_library(temp_path, **(export_kwargs or {}))
+            KernelCache._fsync_file_contents(temp_path)
             os.replace(temp_path, path)
         finally:
             with contextlib.suppress(OSError):
@@ -571,10 +604,23 @@ class KernelCache:
             if usage:
                 dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))
 
+            # Record every staged file's size and content hash so loads can
+            # detect corrupted entries and treat them as cache misses.
+            self._write_manifest(staging_path)
+
             missing_files = self._get_missing_complete_cache_files(staging_path)
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
                 raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
+
+            # Durability barrier: a node or filesystem-client crash may otherwise
+            # persist the rename below before the staged file data, publishing a
+            # truncated entry (surfaces as CUDA_ERROR_INVALID_IMAGE at launch,
+            # notably on shared network caches).
+            for entry in os.scandir(staging_path):
+                if entry.is_file(follow_symlinks=False):
+                    KernelCache._fsync_file_contents(entry.path)
+            KernelCache._fsync_dir(staging_path)
 
             # Repair stale/incomplete entries before making the new directory visible.
             self._remove_incomplete_cache_dir(cache_path)
@@ -587,6 +633,8 @@ class KernelCache:
                     raise
                 # Another process won the race with a complete cache entry.
                 shutil.rmtree(staging_path, ignore_errors=True)
+            else:
+                KernelCache._fsync_dir(self._get_cache_root())
         except Exception:
             shutil.rmtree(staging_path, ignore_errors=True)
             self.logger.exception("Error during atomic cache save")
@@ -625,6 +673,18 @@ class KernelCache:
         if missing_files:
             if verbose:
                 self.logger.debug("Disk cache entry is incomplete; missing files: %s", missing_files)
+            return None
+
+        if not self._verify_cache_dir_integrity(cache_path):
+            # A crashed writer (or crashed filesystem client) can publish a
+            # truncated kernel_lib.so that dlopens fine but fails only at first
+            # launch (CUDA_ERROR_INVALID_IMAGE), where nothing repairs the
+            # entry. Catch it here and self-heal by recompiling.
+            self.logger.warning(
+                "Disk cache entry at %s failed integrity verification (corrupted or partially written); removing it and recompiling.",
+                cache_path,
+            )
+            shutil.rmtree(cache_path, ignore_errors=True)
             return None
 
         # Load kernel parameters
@@ -719,6 +779,7 @@ class KernelCache:
                 [
                     os.path.join(cache_path, self.device_kernel_path),
                     os.path.join(cache_path, self.host_kernel_path),
+                    os.path.join(cache_path, self.manifest_path),
                     *self._get_required_files(cache_path),
                 ]
             )
@@ -726,6 +787,54 @@ class KernelCache:
 
     def _get_missing_complete_cache_files(self, cache_path: str) -> list[str]:
         return [file for file in self._get_complete_cache_files(cache_path) if not os.path.exists(file)]
+
+    def _write_manifest(self, cache_path: str):
+        """Record size and content hash of every cache file for load-time verification."""
+        files: dict[str, dict] = {}
+        for entry in sorted(os.scandir(cache_path), key=lambda item: item.name):
+            if not entry.is_file(follow_symlinks=False) or entry.name == self.manifest_path:
+                continue
+            files[entry.name] = {
+                "size": entry.stat().st_size,
+                "sha256": KernelCache._hash_file(entry.path),
+            }
+        manifest = {"version": 1, "files": files}
+        KernelCache._safe_write_file(
+            os.path.join(cache_path, self.manifest_path),
+            "w",
+            lambda file: json.dump(manifest, file, indent=2, sort_keys=True),
+        )
+
+    def _verify_cache_dir_integrity(self, cache_path: str) -> bool:
+        """Check a cache entry against its manifest.
+
+        Every listed file must match its recorded size; the required binary
+        artifacts (e.g. kernel_lib.so, params.pkl) must also match their
+        recorded content hash. Source files are size-checked only so disk
+        cache hits keep deferring source reads. Returns False for entries
+        whose manifest is unreadable or that do not cover the required files.
+        """
+        manifest_file = os.path.join(cache_path, self.manifest_path)
+        try:
+            with open(manifest_file) as file:
+                files = json.load(file)["files"]
+            entries = list(files.items())
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+        required_names = {os.path.basename(path) for path in self._get_required_files(cache_path)}
+        if not required_names.issubset(files):
+            return False
+        verify_hash = env.should_verify_cache_hash()
+        for name, meta in entries:
+            path = os.path.join(cache_path, name)
+            try:
+                if os.path.getsize(path) != meta["size"]:
+                    return False
+                if verify_hash and name in required_names and KernelCache._hash_file(path) != meta["sha256"]:
+                    return False
+            except (OSError, KeyError, TypeError):
+                return False
+        return True
 
     def _is_complete_cache_dir(self, cache_path: str) -> bool:
         return os.path.isdir(cache_path) and not self._get_missing_complete_cache_files(cache_path)

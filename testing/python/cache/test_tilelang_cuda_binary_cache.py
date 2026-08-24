@@ -72,6 +72,52 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     assert len(cache_files) == 2
 
 
+def test_cuda_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+    from tilelang.cuda import backend as cuda_backend
+
+    monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+
+    compile_calls = []
+
+    def fake_compile_cuda(code, target_format, arch, options=None, verbose=False):
+        compile_calls.append(code)
+        return bytearray(b"fake-cubin")
+
+    monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_compile_cuda)
+
+    target = Target({"kind": "cuda", "arch": "sm_90a"})
+    source = 'extern "C" __global__ void kernel() {}'
+
+    cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert len(compile_calls) == 1
+
+    [cache_file] = (tmp_path / "cache").glob("*/cuda-binaries/*.cubin")
+    assert cache_file.with_name(cache_file.name + ".sha256").exists()
+    # Same-size corruption, as left behind by a crashed writer/filesystem client.
+    cache_file.write_bytes(b"\x00" * len(b"fake-cubin"))
+
+    recompiled = cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert bytes(recompiled) == b"fake-cubin"
+    assert len(compile_calls) == 2
+
+    # The corrupted entry was rewritten, so the next call hits the cache again.
+    cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert len(compile_calls) == 2
+
+
+def test_cuda_binary_cache_accepts_legacy_entry_without_sidecar(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+
+    key = "legacy-key"
+    path = CUDABinaryCache.get_path(key, "cubin")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"legacy-cubin")
+
+    assert CUDABinaryCache.load(key, "cubin") == b"legacy-cubin"
+
+
 def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     cache = KernelCache()
@@ -83,6 +129,7 @@ def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
     (cache_path / cache.kernel_lib_path).write_bytes(b"not-loadable")
     with (cache_path / cache.params_path).open("wb") as f:
         cloudpickle.dump(["param"], f)
+    cache._write_manifest(str(cache_path))
 
     def fail_from_database(*args, **kwargs):
         raise RuntimeError("bad host executable")
