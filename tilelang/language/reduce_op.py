@@ -2,28 +2,42 @@
 
 from __future__ import annotations
 from typing import Literal
-from tvm import tirx
+from tvm import arith, tirx
+from tilelang._typing import BufferLikeType
 from tilelang.language.common import copy, macro, alloc_fragment, evaluate
-from tilelang.utils.language import to_buffer_region, to_tile_region
+from tilelang.utils.language import retrieve_shape, to_buffer_region, to_tile_region
 from tilelang.utils.language import is_shared, is_fragment, is_local
 from tvm.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
 
 
-def _reject_buffer_region(buffer, role: str) -> None:
-    if isinstance(buffer, tirx.BufferRegion):
+def _validate_reduce_region(buffer: BufferLikeType, role: str) -> None:
+    if not isinstance(buffer, tirx.BufferRegion):
+        return
+    if is_fragment(buffer):
         raise ValueError(
-            "T.reduce_* does not support BufferRegion arguments (for example, fragment slices); "
-            f"got one as the {role}. To reduce selected elements, use T.alloc_reducer, "
+            f"T.reduce_* does not support slicing a fragment buffer; got a sliced {role}. "
+            "Fragment replication is defined over its complete logical domain. "
+            "To reduce selected elements, use T.alloc_reducer, "
             "call T.reducer_update inside T.Parallel, then call T.finalize_reducer."
+        )
+    if not is_shared(buffer):
+        raise ValueError(
+            f"T.reduce_* only supports BufferRegion arguments backed by shared memory; got a sliced {role} "
+            f"in scope {buffer.buffer.scope()}."
         )
 
 
-def _legalize_dim(buffer: tirx.Buffer, dim: int):
-    _reject_buffer_region(buffer, "input")
+def _legalize_dim(buffer: BufferLikeType, dim: int):
+    _validate_reduce_region(buffer, "input")
     if dim < 0:
-        dim = len(buffer.shape) + dim
+        dim = len(retrieve_shape(buffer)) + dim
     return dim
+
+
+def _shape_equal(lhs: list, rhs: list) -> bool:
+    analyzer = arith.Analyzer()
+    return len(lhs) == len(rhs) and all(analyzer.can_prove_equal(a, b) for a, b in zip(lhs, rhs))
 
 
 _REDUCE_OP_KEY = "tl.tileop.reduce"
@@ -33,8 +47,8 @@ ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor",
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
 def reduce(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: BufferLikeType,
+    out: BufferLikeType,
     reduce_type: ReduceKind,
     dim: int,
     clear: bool,
@@ -63,21 +77,33 @@ def reduce(
             SM100+, FP32 sum/abssum reductions accept
             ``{"enable_fadd2": False}`` to keep the reducer scalar. Packed
             FP32x2 reduction remains enabled by default.
+
+    Shared-memory BufferRegion operands are staged through fragments matching
+    the region extents. Fragment BufferRegion operands are rejected because a
+    fragment's replication policy applies to its complete logical domain.
     """
-    _reject_buffer_region(buffer, "input")
-    _reject_buffer_region(out, "output")
+    _validate_reduce_region(buffer, "input")
+    _validate_reduce_region(out, "output")
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
-    out_buffer = to_buffer_region(out).buffer
+    buffer_region = to_buffer_region(buffer)
+    out_region = to_buffer_region(out)
+    buffer_shape = retrieve_shape(buffer_region)
+    out_shape = retrieve_shape(out_region)
+    src_buffer = buffer_region.buffer
+    out_buffer = out_region.buffer
     if reduce_type in ("bitand", "bitor", "bitxor") and not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
         raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
-    expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
-    if list(out_buffer.shape) not in expected_shapes:
+    expected_shapes = [
+        buffer_shape[:dim] + buffer_shape[dim + 1 :],
+        buffer_shape[:dim] + [1] + buffer_shape[dim + 1 :],
+    ]
+    if not any(_shape_equal(out_shape, expected) for expected in expected_shapes):
         expected_shapes_str = " or ".join(map(str, expected_shapes))
         raise ValueError(
-            f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
-            f"output shape is {out_buffer.shape}, expected shapes are {expected_shapes_str}"
+            f"Invalid reduce output shape, buffer shape is {buffer_shape}, dim is {dim}, "
+            f"output shape is {out_shape}, expected shapes are {expected_shapes_str}"
         )
 
     annotations = _normalize_annotations(annotations)
@@ -103,14 +129,14 @@ def reduce(
         )
 
     @macro
-    def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
+    def reduce_macro(buffer: BufferLikeType, out: BufferLikeType, reduce_type: str, dim: int, clear: bool) -> None:
         if is_shared(buffer) and is_shared(out):
-            red_frag_in = alloc_fragment(buffer.shape, buffer.dtype)
-            red_frag_out = alloc_fragment(out.shape, out.dtype)
+            red_frag_in = alloc_fragment(buffer_shape, src_buffer.dtype)
+            red_frag_out = alloc_fragment(out_shape, out_buffer.dtype)
 
             # rename buffers
-            IRBuilder.name(buffer.name + "_frag", red_frag_in)
-            IRBuilder.name(out.name + "_frag", red_frag_out)
+            IRBuilder.name(src_buffer.name + "_frag", red_frag_in)
+            IRBuilder.name(out_buffer.name + "_frag", red_frag_out)
 
             if not clear:
                 copy(out, red_frag_out)
@@ -128,8 +154,8 @@ def reduce(
             )
             copy(red_frag_out, out)
         elif is_shared(buffer) and is_fragment(out):
-            red_frag_in = alloc_fragment(buffer.shape, buffer.dtype)
-            IRBuilder.name(buffer.name + "_frag", red_frag_in)
+            red_frag_in = alloc_fragment(buffer_shape, src_buffer.dtype)
+            IRBuilder.name(src_buffer.name + "_frag", red_frag_in)
 
             copy(buffer, red_frag_in)
             tirx.call_intrin(
@@ -143,8 +169,8 @@ def reduce(
                 annotations=annotations,
             )
         elif is_fragment(buffer) and is_shared(out):
-            red_frag_out = alloc_fragment(out.shape, out.dtype)
-            IRBuilder.name(out.name + "_frag", red_frag_out)
+            red_frag_out = alloc_fragment(out_shape, out_buffer.dtype)
+            IRBuilder.name(out_buffer.name + "_frag", red_frag_out)
 
             if not clear:
                 copy(out, red_frag_out)
@@ -172,14 +198,14 @@ def reduce(
                 annotations=annotations,
             )
         else:
-            raise ValueError(f"Invalid buffer scopes: {buffer.scope()} and {out.scope()}")
+            raise ValueError(f"Invalid buffer scopes: {src_buffer.scope()} and {out_buffer.scope()}")
 
     reduce_macro(buffer, out, reduce_type, dim, clear)
 
 
 def reduce_max(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: BufferLikeType,
+    out: BufferLikeType,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -213,8 +239,8 @@ def reduce_max(
 
 
 def reduce_min(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: BufferLikeType,
+    out: BufferLikeType,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -241,7 +267,12 @@ def reduce_min(
 
 
 def reduce_sum(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: BufferLikeType,
+    out: BufferLikeType,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce sum on input buffer, store the result to output buffer.
 
@@ -271,7 +302,13 @@ def reduce_sum(
     reduce(buffer, out, "sum", dim, clear, batch=batch, annotations=annotations)
 
 
-def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1, annotations: dict | None = None) -> None:
+def reduce_abssum(
+    buffer: BufferLikeType,
+    out: BufferLikeType,
+    dim: int = -1,
+    batch: int = 1,
+    annotations: dict | None = None,
+) -> None:
     """Perform reduce absolute sum on input buffer, store the result to output buffer.
 
     Args:
@@ -291,8 +328,8 @@ def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: i
 
 
 def reduce_absmax(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: BufferLikeType,
+    out: BufferLikeType,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -318,7 +355,12 @@ def reduce_absmax(
 
 
 def reduce_bitand(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: BufferLikeType,
+    out: BufferLikeType,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce bitwise-and on input buffer, store the result to output buffer.
 
@@ -336,7 +378,12 @@ def reduce_bitand(
 
 
 def reduce_bitor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: BufferLikeType,
+    out: BufferLikeType,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce bitwise-or on input buffer, store the result to output buffer.
 
@@ -354,7 +401,12 @@ def reduce_bitor(
 
 
 def reduce_bitxor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: BufferLikeType,
+    out: BufferLikeType,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
 
