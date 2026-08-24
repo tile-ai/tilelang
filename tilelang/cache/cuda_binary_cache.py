@@ -124,15 +124,36 @@ class CUDABinaryCache:
         return os.path.join(cls._get_cache_root(), filename)
 
     @classmethod
+    def _sidecar_path(cls, path: str) -> str:
+        return path + ".sha256"
+
+    @classmethod
     def load(cls, key: str, compile_format: str) -> bytes | None:
         if not env.is_cache_enabled():
             return None
         path = cls.get_path(key, compile_format)
         try:
             with open(path, "rb") as f:
-                return f.read()
+                data = f.read()
         except FileNotFoundError:
             return None
+        if not env.should_verify_cache_hash():
+            return data
+        try:
+            with open(cls._sidecar_path(path)) as f:
+                expected_hash = f.read().strip()
+        except OSError:
+            # Entries written before content hashes were recorded.
+            return data
+        if sha256(data).hexdigest() == expected_hash:
+            return data
+        # Corrupted entry (e.g. truncated by a crashed writer): feeding it to
+        # cuModuleLoadData would fail with CUDA_ERROR_INVALID_IMAGE on every
+        # future run. Drop it so the caller recompiles and rewrites it.
+        for stale in (path, cls._sidecar_path(path)):
+            with contextlib.suppress(OSError):
+                os.remove(stale)
+        return None
 
     @classmethod
     def save(cls, key: str, compile_format: str, data: bytes) -> None:
@@ -142,13 +163,26 @@ class CUDABinaryCache:
         cache_root = cls._get_cache_root()
         os.makedirs(cache_root, exist_ok=True)
         path = cls.get_path(key, compile_format)
+        # Sidecar first: a crash between the two renames then leaves a hash
+        # without a payload (a plain cache miss) instead of an unverifiable
+        # payload.
+        cls._write_atomic(cls._sidecar_path(path), sha256(data).hexdigest().encode())
+        cls._write_atomic(path, data)
+
+    @classmethod
+    def _write_atomic(cls, path: str, data: bytes) -> None:
+        directory, filename = os.path.split(path)
         # Atomic replacement requires the temporary file and destination to be
         # on the same filesystem, so keep the temporary file next to the cache
         # entry.
-        temp_path = os.path.join(cache_root, f".{os.getpid()}_{uuid.uuid4()}.{compile_format}.tmp")
+        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
         try:
             with open(temp_path, "wb") as f:
                 f.write(data)
+                # Without this barrier a crash can persist the rename below
+                # before the file data, publishing a truncated binary.
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(temp_path, path)
         finally:
             with contextlib.suppress(OSError):
