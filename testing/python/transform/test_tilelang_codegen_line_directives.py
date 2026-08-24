@@ -32,6 +32,13 @@ def vec_add_cuda(A: T.Tensor((N,), "float32"), B: T.Tensor((N,), "float32")):
             B[bx * N + i] = A[bx * N + i] + 1.0  # line_marker_store_cuda
 
 
+@T.prim_func
+def vec_add_hip(A: T.Tensor((N,), "float32"), B: T.Tensor((N,), "float32")):
+    with T.Kernel(1, threads=N) as bx:
+        for i in T.Parallel(N):
+            B[bx * N + i] = A[bx * N + i] + 1.0  # line_marker_store_hip
+
+
 def _lowered_source(func, emit: bool) -> str:
     # target is not passed to lower() explicitly: it resolves through
     # determine_target("auto") reading the ambient Target("c") context.
@@ -98,6 +105,20 @@ def test_line_directives_cuda_source():
     assert source is not None, "CUDA codegen produced no kernel source"
     directives = _line_directives(source)
     store_line = _marker_line("line_marker_store_cuda")
+    assert (store_line, __file__) in directives, f"store line {store_line} not mapped; directives: {directives}\n{source}"
+
+
+@tilelang.testing.requires_rocm
+def test_line_directives_hip_source():
+    """HIP source (compile-only path, no GPU/hipcc) also maps statements."""
+    target = {"kind": "hip"}
+    config = {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: True}
+    with tvm.transform.PassContext(opt_level=3, config=config), tvm.target.Target(target):
+        artifact = tilelang.lower(vec_add_hip, target=target)
+    source = artifact.kernel_source
+    assert source is not None, "HIP codegen produced no kernel source"
+    directives = _line_directives(source)
+    store_line = _marker_line("line_marker_store_hip")
     assert (store_line, __file__) in directives, f"store line {store_line} not mapped; directives: {directives}\n{source}"
 
 

@@ -14,12 +14,12 @@
 #include <string>
 #include <unordered_map>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_line_directives.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangHIP final : public CodeGenC {
+class CodeGenTileLangHIP final : public CodeGenCWithLineDirectives {
 public:
   CodeGenTileLangHIP();
   std::string Finish();
