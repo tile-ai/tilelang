@@ -1093,7 +1093,9 @@ def _cuda_toolkit_below(major: int, minor: int) -> bool:
 
         return _nvcc.get_cuda_version() < (major, minor)
     except Exception:
-        return False
+        # Fail closed: skip the version-gated test when the toolkit version
+        # cannot be determined.
+        return True
 
 
 @tilelang.testing.requires_cuda

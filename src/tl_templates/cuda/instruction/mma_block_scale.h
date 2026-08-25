@@ -95,12 +95,12 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
 }
 
 // SM120a MXFP4 block-scaled warp MMA:
-// mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::2X.m16n8k64...ue8m0
+// mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::2X
+// ...ue8m0
 //
-// The qualifier order (kind before shape) follows the PTX ISA block-scale
-// grammar and CUTLASS cute/arch/mma_sm120.hpp (SM120_16x8x64_TN_VS); ptxas
-// accepts it from CUDA 12.8 on. The legacy 4X ue4m3 wrapper above keeps its
-// original shape-first spelling, which ptxas also accepts.
+// Spelled shape-first to match the documented PTX grammar and the 4X ue4m3
+// wrapper above. (CUTLASS cute/arch/mma_sm120.hpp spells the same
+// instruction kind-first; ptxas accepts both spellings.)
 //
 // The PTX scale operand register stays b32 but the instruction consumes only
 // 16 bits of it. CUTLASS drives this form exclusively with byte_id = 0 and a
@@ -118,8 +118,8 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_2x_ue8m0_regs(
   uint32_t sa = scale_a >> (scale_a_byte_id * 8);
   uint32_t sb = scale_b >> (scale_b_byte_id * 8);
   asm volatile(
-      "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::2X.m16n8k64.row."
-      "col.f32.e2m1.e2m1.f32.ue8m0 "
+      "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
+      "2X.f32.e2m1.e2m1.f32.ue8m0 "
       "{%0, %1, %2, %3}, "
       "{%4, %5, %6, %7}, "
       "{%8, %9}, "
@@ -157,8 +157,8 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue8m0_regs(
     uint16_t scale_b_byte_id = 0, uint16_t scale_b_thread_id = 0) {
 #if defined(TL_SM120_MXF4NVF4_4X_UE8M0_MMA_ENABLED)
   asm volatile(
-      "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row."
-      "col.f32.e2m1.e2m1.f32.ue8m0 "
+      "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
+      "4X.f32.e2m1.e2m1.f32.ue8m0 "
       "{%0, %1, %2, %3}, "
       "{%4, %5, %6, %7}, "
       "{%8, %9}, "
