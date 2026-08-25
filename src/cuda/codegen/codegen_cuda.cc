@@ -3257,18 +3257,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string scale_b_byte_id = this->PrintExpr(op->args[19]);
     std::string scale_b_thread_id = this->PrintExpr(op->args[20]);
 
-    bool supported_mxf4nvf4_4x_ue4m3 =
+    bool supported_mxf4nvf4_common =
         accum_dtype == "float32" && shape == "m16n8k64" && A_layout == "row" &&
-        B_layout == "col" && kind == "mxf4nvf4" && scale_vec_size == 4 &&
-        A_dtype == "e2m1" && B_dtype == "e2m1" && scale_type == "ue4m3";
-    ICHECK(supported_mxf4nvf4_4x_ue4m3)
+        B_layout == "col" && kind == "mxf4nvf4" && A_dtype == "e2m1" &&
+        B_dtype == "e2m1";
+    bool supported_scale_mode = (scale_vec_size == 4 && scale_type == "ue4m3") ||
+                                (scale_vec_size == 2 && scale_type == "ue8m0") ||
+                                (scale_vec_size == 4 && scale_type == "ue8m0");
+    ICHECK(supported_mxf4nvf4_common && supported_scale_mode)
         << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
         << accum_dtype << ", shape=" << shape << ", A_layout=" << A_layout
         << ", B_layout=" << B_layout << ", kind=" << kind
         << ", scale_vec_size=" << scale_vec_size << ", A_dtype=" << A_dtype
         << ", B_dtype=" << B_dtype << ", scale_type=" << scale_type
         << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
-           "scale_vec::4X e2m1.e2m1 f32 ue4m3.";
+           "e2m1.e2m1 f32 with (scale_vec::4X, ue4m3), (scale_vec::2X, "
+           "ue8m0), or (scale_vec::4X, ue8m0).";
 
     auto resolve_fp4_packed_buffer =
         [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {
@@ -3286,7 +3290,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
 
     std::string mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf4nvf4";
-    std::string scale_type_enum = "tl::SM120MmaScaleType::kUE4M3";
+    std::string scale_type_enum = scale_type == "ue8m0"
+                                      ? "tl::SM120MmaScaleType::kUE8M0"
+                                      : "tl::SM120MmaScaleType::kUE4M3";
     std::string mma_call =
         "tl::sm120_mma_sync_blockscaled<(MMA_KIND), (SCALE_VEC_SIZE), "
         "(SCALE_TYPE)>("
