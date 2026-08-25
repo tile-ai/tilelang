@@ -991,22 +991,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
                                              let_var_properties_, warp_size_);
       IterVar tx = GetThreadVar("threadIdx.x");
-      auto condition_prop = checker.AnalyzeCondition(op->condition, tx);
+      auto must_hoist = [&](const PrimExpr &branch_condition) {
+        auto condition_prop = checker.AnalyzeCondition(branch_condition, tx);
 
-      // The estimate calls anything mentioning a thread variable divergent; ask
-      // the prover before hoisting. Only added to it, never subtracted, and
-      // only asked when something below could act on the answer.
-      bool may_hoist =
-          condition_prop.depends_on_runtime || condition_prop.requires_hoist;
-      bool proven_uniform = may_hoist && IsBlockUniformCondition(op->condition);
-      bool is_block_uniform = condition_prop.is_block_uniform || proven_uniform;
-      // requires_hoist means the participation count was not established, so
-      // ThreadPartialSyncRewriter cannot emit `bar.sync id, count`. Uniformity
-      // answers that: the barrier is reached by the whole block or by nobody,
-      // and a plain __syncthreads() is right. Only a proof counts, not the
-      // heuristic.
-      if ((condition_prop.depends_on_runtime && !is_block_uniform) ||
-          (condition_prop.requires_hoist && !proven_uniform)) {
+        // 估计器会把引用线程变量的条件视为发散；提升前必须再用证明器确认。
+        bool may_hoist =
+            condition_prop.depends_on_runtime || condition_prop.requires_hoist;
+        bool proven_uniform =
+            may_hoist && IsBlockUniformCondition(branch_condition);
+        bool is_block_uniform =
+            condition_prop.is_block_uniform || proven_uniform;
+        // 无法确定参与线程数时，partial barrier 不能安全生成；只有严格证明
+        // 整个线程块条件一致，才能保留普通的 __syncthreads()。
+        return (condition_prop.depends_on_runtime && !is_block_uniform) ||
+               (condition_prop.requires_hoist && !proven_uniform);
+      };
+
+      bool hoist_then = !syncs_in_then.empty() && must_hoist(op->condition);
+      bool hoist_else =
+          !syncs_in_else.empty() && must_hoist(tirx::Not(op->condition));
+      if (hoist_then || hoist_else) {
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync out of an if whose condition is not "
                "safe for an in-if sync. This is not a fix: both ends of the "
@@ -1016,14 +1020,18 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                "the "
                "barrier in place instead. Condition: "
             << op->condition;
-        for (const auto &sync : syncs_in_then) {
-          syncs_inserted_.erase(sync);
+        if (hoist_then) {
+          for (const auto &sync : syncs_in_then) {
+            syncs_inserted_.erase(sync);
+          }
         }
-        for (const auto &sync : syncs_in_else) {
-          syncs_inserted_.erase(sync);
+        if (hoist_else) {
+          for (const auto &sync : syncs_in_else) {
+            syncs_inserted_.erase(sync);
+          }
         }
 
-        // Insert sync before the if-statement itself
+        // 为无法安全执行分支内同步的路径，在 if 语句前插入全块同步。
         insert_syncs(op);
       }
     }
