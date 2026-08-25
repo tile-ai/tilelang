@@ -94,8 +94,13 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
       scale_a_byte_id, scale_a_thread_id, scale_b_byte_id, scale_b_thread_id);
 }
 
-// SM120a MXFP4 block-scaled warp MMA (PTX ISA operand order):
+// SM120a MXFP4 block-scaled warp MMA:
 // mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::2X.m16n8k64...ue8m0
+//
+// The qualifier order (kind before shape) follows the PTX ISA block-scale
+// grammar and CUTLASS cute/arch/mma_sm120.hpp (SM120_16x8x64_TN_VS); ptxas
+// accepts it from CUDA 12.8 on. The legacy 4X ue4m3 wrapper above keeps its
+// original shape-first spelling, which ptxas also accepts.
 //
 // The PTX scale operand register stays b32 but the instruction consumes only
 // 16 bits of it. CUTLASS drives this form exclusively with byte_id = 0 and a
@@ -208,9 +213,17 @@ TL_DEVICE void sm120_mma_sync_blockscaled(float *d, const uint32_t *a,
         d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
         scale_b_byte_id, scale_b_thread_id);
   } else {
+#if defined(TL_SM120_MXF4NVF4_4X_UE8M0_MMA_ENABLED)
     detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue8m0(
         d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
         scale_b_byte_id, scale_b_thread_id);
+#else
+    // Instantiated only when a kernel actually selects 4X+ue8m0: fail the
+    // JIT compile with a clear message instead of trapping at runtime.
+    static_assert(ScaleVecSize != 4,
+                  "mxf4nvf4 scale_vec::4X with ue8m0 scale factors requires "
+                  "CUDA 13.1 or later");
+#endif
   }
 }
 

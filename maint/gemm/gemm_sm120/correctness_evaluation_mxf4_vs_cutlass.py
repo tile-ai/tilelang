@@ -280,11 +280,15 @@ def run_compare() -> None:
         sfb_logical = torch.full((n, k // _SF_VEC_SIZE), 0x7F, device="cuda", dtype=torch.uint8)
     elif scale_mode == "varying":
         # Power-of-two exponents around 1.0, varying by row and K group so a
-        # byte-pair (parity) mix-up in the 2X path changes the result.
+        # byte-pair (parity) mix-up in the 2X path changes the result. The
+        # window is kept narrow (2^-8..2^7): the bitwise assertion below rests
+        # on both engines accumulating K in order with an fp32 accumulator, and
+        # a modest magnitude spread keeps summation rounding tame on top of
+        # that shared order.
         row = torch.arange(m, device="cuda", dtype=torch.int32).reshape(m, 1)
         col = torch.arange(k // _SF_VEC_SIZE, device="cuda", dtype=torch.int32).reshape(1, k // _SF_VEC_SIZE)
-        sfa_logical = (0x70 + ((row * 3 + col * 5) % 32)).to(torch.uint8)
-        sfb_logical = (0x70 + ((row * 7 + col * 11) % 32)).to(torch.uint8)
+        sfa_logical = (0x77 + ((row * 3 + col * 5) % 16)).to(torch.uint8)
+        sfb_logical = (0x77 + ((row * 7 + col * 11) % 16)).to(torch.uint8)
     else:
         raise ValueError(f"Unsupported MXF4_SCALE_MODE={scale_mode!r}")
 

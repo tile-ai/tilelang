@@ -733,10 +733,10 @@ def test_sm120_fulltile_contract_scale_words_follow_packer_atoms_for_tile_m_256(
                 sfa_rows, sfb_rows = contract.compact_selector_scale_rows(lane, warp_m, warp_n)
                 for kblock in range(contract.kblocks):
                     sfa_offsets, sfb_offsets = contract.compact_selector_scale_word_offsets(lane, warp_m, warp_n, kblock)
-                    for row, flat in zip(sfa_rows, sfa_offsets):
+                    for row, flat in zip(sfa_rows, sfa_offsets, strict=True):
                         atom_base = (row // 128) * (contract.words_per_stage * 128)
                         assert flat == atom_base + _oracle_blockscaled_chunk_kmajor_flat_word(row % 128, kblock)
-                    for row, flat in zip(sfb_rows, sfb_offsets):
+                    for row, flat in zip(sfb_rows, sfb_offsets, strict=True):
                         # tile_n=128 stays inside a single atom.
                         assert flat == _oracle_blockscaled_chunk_kmajor_flat_word(row, kblock)
 
@@ -1087,8 +1087,18 @@ def test_mxf4_mma_block_scale_varying_scale_correctness(K, sf_layout):
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
 
 
+def _cuda_toolkit_below(major: int, minor: int) -> bool:
+    try:
+        from tilelang.contrib import nvcc as _nvcc
+
+        return _nvcc.get_cuda_version() < (major, minor)
+    except Exception:
+        return False
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.skipif(_cuda_toolkit_below(13, 1), reason="scale_vec::4X with ue8m0 needs CUDA 13.1+")
 def test_mxf4nvf4_4x_ue8m0_varying_scale_correctness():
     # granularity 16 + ue8m0: the CUDA 13.1 scale_vec::4X.ue8m0 instruction.
     import torch

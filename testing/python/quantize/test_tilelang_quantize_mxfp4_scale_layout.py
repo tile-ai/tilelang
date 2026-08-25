@@ -46,6 +46,15 @@ def test_encode_ue8m0_scale_bytes_is_a_ceiling():
     assert bool((decoded <= values * 2.0).all())
 
 
+def test_encode_ue8m0_scale_bytes_saturates_at_format_max():
+    # Finite values above 2**127 (and +inf) saturate to 0xFE = 2**127; 0xFF
+    # stays reserved for NaN.
+    values = torch.tensor([2.0**127, torch.finfo(torch.float32).max, float("inf")], dtype=torch.float32)
+    encoded = encode_ue8m0_scale_bytes(values, rounding="ceil")
+    assert torch.equal(encoded, torch.full((3,), 0xFE, dtype=torch.uint8))
+    assert bool((decode_ue8m0_scale_bytes(encoded) == 2.0**127).all())
+
+
 @pytest.mark.parametrize("block_words", [1, 2])
 def test_pack_blockscaled_chunk_kmajor_ue8m0_matches_oracle(block_words):
     rows = 256

@@ -41,6 +41,8 @@ def encode_ue8m0_scale_bytes(values, *, rounding: str = "ceil"):
 
     ``rounding="ceil"`` rounds up to the next power of two so values divided
     by the scale stay within the FP4 range; zero maps to byte ``0x00``.
+    Values above the largest representable scale (``2**127``) saturate to
+    byte ``0xFE`` (``0xFF`` is the UE8M0 NaN encoding and is never produced).
     """
 
     torch = _import_torch()
@@ -49,7 +51,7 @@ def encode_ue8m0_scale_bytes(values, *, rounding: str = "ceil"):
     if not isinstance(values, torch.Tensor):
         raise TypeError(f"values must be a torch.Tensor, got {type(values)!r}")
 
-    x = torch.nan_to_num(values.to(torch.float32), nan=0.0, posinf=2.0**127, neginf=0.0).clamp(min=0.0).contiguous()
+    x = torch.nan_to_num(values.to(torch.float32), nan=0.0, posinf=2.0**127, neginf=0.0).clamp(min=0.0, max=2.0**127).contiguous()
     bits = x.view(torch.int32)
     exponent = (bits >> 23) & 0xFF
     mantissa = bits & 0x7FFFFF
