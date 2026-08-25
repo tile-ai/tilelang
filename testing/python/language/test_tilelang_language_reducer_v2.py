@@ -1201,9 +1201,15 @@ def test_wide_plan_finalize_staged_chain_override():
     torch.testing.assert_close(B, (A @ A2.T).to(torch.float16), atol=1e-1, rtol=1e-2)
 
 
-def test_wide_plan_dst_extra_consumer_not_overridden():
-    """A destination with a consumer beyond the copy chain must keep its
-    inferred layout (the override proof rejects it) and stay correct."""
+def test_wide_steering_static_accumulator_with_compute_consumer():
+    """A wide-plan destination with a consumer beyond the copy chain: the
+    materializer's override proof must leave a consumer-chosen layout alone,
+    so before dst-steering the publish copy gathered the replicated `acc`
+    at thread-dependent indices and ptxas demoted the hot accumulator to
+    local memory. finalize's kFree proposal now replicates the unconstrained
+    dst up front: `acc` stays statically indexed (registers) and publishes
+    through the replica-zero path; the residual dynamic read moves into the
+    cold consumer loop (`result`, written once)."""
     K, threads = 256, 128
 
     @T.prim_func
@@ -1233,6 +1239,94 @@ def test_wide_plan_dst_extra_consumer_not_overridden():
             T.copy(doubled, C)
 
     compiled = tl.compile(kernel, out_idx=[-2, -1])
+    source = compiled.get_kernel_source()
+    assert not re.search(r"\bacc\[[^\]\n]*threadIdx", source), source
+    assert "if (((int)threadIdx.x) == 0)" in source, source
+
+    A = torch.randn(4, K, dtype=torch.float32, device="cuda")
+    A2 = torch.randn(4, K, dtype=torch.float32, device="cuda")
+    B, C = compiled(A, A2)
+    ref = A @ A2.T
+    torch.testing.assert_close(B, ref, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(C, ref * 2, atol=1e-2, rtol=1e-2)
+
+
+def test_narrow_steering_dst_compute_consumer():
+    """dst-steering main case: `result` is consumed by a compute Parallel
+    loop, not a copy chain. Free mode used to hand it that consumer's
+    arbitrary layout, destination containment failed, and the epoch
+    downgraded to the wide baseline (participant-wide AllReduce plus a
+    shared workspace). finalize's kFree proposal now steers the
+    unconstrained dst to the update sites' induced layout, so the narrow
+    plan survives a compute consumer."""
+    M, K, threads = 16, 64, 256
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float32), C: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, K), T.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], src[i, k])
+            result = T.alloc_fragment((M,), T.float32)
+            T.finalize_reducer(acc, result)
+            out = T.alloc_fragment((M,), T.float32)
+            for i in T.Parallel(M):
+                out[i] = result[i] * T.float32(2.0)
+            T.copy(out, C)
+
+    compiled = tl.compile(kernel, out_idx=-1)
+    source = compiled.get_kernel_source()
+    assert f"SumOp, {threads}" not in source, source  # not the wide baseline
+    assert "SumOp, 16" in source, source  # collective over the K-splits only
+    assert "workspace" not in source, source
+
+    A = torch.randn(M, K, dtype=torch.float32, device="cuda")
+    C = compiled(A)
+    torch.testing.assert_close(C, A.sum(dim=1) * 2, atol=1e-3, rtol=1e-3)
+
+
+def test_annotated_dst_not_steered():
+    """An annotated destination layout is authoritative: steering only fires
+    for unconstrained fragments. The compact annotation stands (one element
+    on each of 16 threads — a single physical slot), even though steering
+    would have replicated it, and the extra compute consumer keeps the
+    materializer's override proof from replacing it either."""
+    K, threads = 256, 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((4, K), T.float32),
+        A2: T.Tensor((4, K), T.float32),
+        B: T.Tensor((4, 4), T.float32),
+        C: T.Tensor((4, 4), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((4, K), T.float32)
+            src2 = T.alloc_fragment((4, K), T.float32)
+            T.copy(A, src)
+            T.copy(A2, src2)
+            acc = T.alloc_reducer((4, 4), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i in T.serial(4):
+                for j in T.serial(4):
+                    for k in T.Parallel(K):
+                        T.reducer_update(acc[i, j], src[i, k] * src2[j, k])
+            result = T.alloc_fragment((4, 4), T.float32)
+            T.annotate_layout({result: T.Fragment(result.shape, forward_fn=lambda a, b: (a * 4 + b, 0))})
+            T.finalize_reducer(acc, result)
+            doubled = T.alloc_fragment((4, 4), T.float32)
+            for i, j in T.Parallel(4, 4):
+                doubled[i, j] = result[i, j] * T.float32(2.0)
+            T.copy(result, B)
+            T.copy(doubled, C)
+
+    compiled = tl.compile(kernel, out_idx=[-2, -1])
+    source = compiled.get_kernel_source()
+    assert "float result[1];" in source, source
+
     A = torch.randn(4, K, dtype=torch.float32, device="cuda")
     A2 = torch.randn(4, K, dtype=torch.float32, device="cuda")
     B, C = compiled(A, A2)

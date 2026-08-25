@@ -382,8 +382,6 @@ bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
   return visit(root);
 }
 
-bool IsPowerOfTwo(int64_t x) { return x > 0 && (x & (x - 1)) == 0; }
-
 /*! \brief Wide-plan destination override. The wide finalize publishes through
  *  an `accumulator -> dst` copy. When LayoutInference gave dst a distributed
  *  free-level layout (picked only to serve the later `dst -> global` copy),
@@ -445,29 +443,6 @@ TryWideFinalizeDstOverride(const EpochInfo &epoch,
   return entries;
 }
 
-/*! \brief A contribution is replica-safe when every physical execution of
- *  the same logical iteration computes the same value: pure expressions of
- *  loop vars plus loads from buffers whose replicas are value-equal by
- *  contract (fragments, validated against the loop layout by inference) or
- *  uniform by address (shared/global). Plain local reads and side effects
- *  disqualify the site. */
-bool ValueIsReplicaSafe(const PrimExpr &value) {
-  if (SideEffect(value) > CallEffectKind::kReadState) {
-    return false;
-  }
-  bool safe = true;
-  PostOrderVisit(value, [&](const ObjectRef &obj) {
-    if (const auto *load = obj.as<BufferLoadNode>()) {
-      const Buffer &buffer = load->buffer;
-      if (!IsFragmentBuffer(buffer) && !IsSharedBuffer(buffer) &&
-          !IsGlobalBuffer(buffer)) {
-        safe = false;
-      }
-    }
-  });
-  return safe;
-}
-
 std::optional<NarrowDecision>
 TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
               const UseGraph &use_graph, arith::Analyzer *analyzer,
@@ -491,178 +466,20 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
   bool first_site = true;
   for (const UpdateSite &site : epoch.updates) {
     size_t ndim = site.loop_vars.size();
-    if (site.loop_layout->InputDim() != ndim) {
-      return fail("loop layout rank does not match the parallel nest");
+    ReducerUpdateSiteHint hint{site.loop_layout, site.loop_vars, site.indices,
+                               site.value};
+    ReducerSiteAnalysis analysis = AnalyzeReducerUpdateSite(
+        hint, buffer->shape, epoch.thread_extent, epoch.thread_min, analyzer);
+    if (!analysis.narrow_eligible) {
+      return fail(analysis.reason);
     }
-    if (site.indices.size() != buffer->shape.size()) {
-      return fail("update index rank does not match the reducer shape");
-    }
-
-    // Map update indices to loop dims: each index must be a distinct nest
-    // var (in any order — direct identity ownership up to permutation), or
-    // a constant zero on a unit reducer dim.
-    std::vector<bool> is_output_dim(ndim, false);
-    // acc dim -> loop dim it is driven by, or -1 for a constant unit dim.
-    std::vector<int> acc_dim_to_loop_dim(site.indices.size(), -1);
-    for (size_t d = 0; d < site.indices.size(); ++d) {
-      const PrimExpr &index = site.indices[d];
-      if (const auto *var = index.as<VarNode>()) {
-        int pos = -1;
-        for (size_t i = 0; i < ndim; ++i) {
-          if (site.loop_vars[i].get() == var) {
-            pos = static_cast<int>(i);
-            break;
-          }
-        }
-        if (pos < 0 || is_output_dim[pos]) {
-          return fail("update index is not a distinct parallel loop var");
-        }
-        const int64_t *loop_extent =
-            as_const_int(site.loop_layout->InputShape()[pos]);
-        const int64_t *dim_extent = as_const_int(buffer->shape[d]);
-        if (!loop_extent || !dim_extent || *loop_extent != *dim_extent) {
-          return fail("loop extent does not match the reducer dim extent");
-        }
-        is_output_dim[pos] = true;
-        acc_dim_to_loop_dim[d] = pos;
-      } else if (is_zero(index)) {
-        const int64_t *dim_extent = as_const_int(buffer->shape[d]);
-        if (!dim_extent || *dim_extent != 1) {
-          return fail("constant update index on a non-unit reducer dim");
-        }
-      } else {
-        return fail("unsupported update index expression");
-      }
-    }
-
-    // Full-block coverage keeps the collective groups and any garbage
-    // threads self-contained and the barrier uniform.
-    const int64_t *layout_threads =
-        as_const_int(site.loop_layout->ThreadExtent());
-    if (!layout_threads || *layout_threads != epoch.thread_extent) {
-      return fail("loop layout does not cover the full participant extent");
-    }
-    if (site.loop_layout->ThreadRange().defined()) {
-      const int64_t *range_min =
-          as_const_int(site.loop_layout->ThreadRange()->min);
-      if (!range_min || *range_min != epoch.thread_min) {
-        return fail("loop layout thread range mismatch");
-      }
-    } else if (epoch.thread_min != 0) {
-      return fail("loop layout thread range mismatch");
-    }
-
-    if (!ValueIsReplicaSafe(site.value)) {
-      return fail("contribution value is not replica-safe");
-    }
-
-    // Induced partial layout: project every reduction dim (descending, so
-    // dim numbers stay stable while dims are removed). Its input dims are
-    // the surviving loop dims in NEST order.
-    Fragment induced = site.loop_layout;
-    for (int dim = static_cast<int>(ndim) - 1; dim >= 0; --dim) {
-      if (!is_output_dim[dim]) {
-        induced = backend::reduce::ComputeReducerLayout(induced, dim);
-      }
-    }
-    // Rebuild the fragment over the reducer's own dim order: permuted
-    // indices reorder the inputs, and constant unit dims insert inputs the
-    // forward expressions never reference. `nest_rank[p]` is the position
-    // of loop dim p among the surviving dims (= its input slot in
-    // `induced`); feed each such slot the placeholder of the acc dim it
-    // drives.
-    {
-      std::vector<int> nest_rank(ndim, -1);
-      int rank = 0;
-      for (size_t p = 0; p < ndim; ++p) {
-        if (is_output_dim[p]) {
-          nest_rank[p] = rank++;
-        }
-      }
-      // When every dim is projected (all-constant indices),
-      // ComputeReducerLayout keeps one synthetic unit input.
-      bool synthetic_unit = (rank == 0);
-      size_t expected_rank = synthetic_unit ? 1 : static_cast<size_t>(rank);
-      if (expected_rank != induced->InputShape().size()) {
-        return fail("induced layout rank mismatch");
-      }
-      std::vector<PrimExpr> slot_placeholders(expected_rank, PrimExpr());
-      bool identity = (expected_rank == buffer->shape.size());
-      if (synthetic_unit) {
-        // The synthetic slot is never referenced by the forward exprs; feed
-        // it the first reducer-dim placeholder for the (rare) rebuild.
-        slot_placeholders[0] = InputPlaceholder(0);
-      }
-      for (size_t d = 0; d < acc_dim_to_loop_dim.size(); ++d) {
-        int p = acc_dim_to_loop_dim[d];
-        if (p < 0) {
-          continue; // constant unit dim: no slot to feed
-        }
-        slot_placeholders[nest_rank[p]] = InputPlaceholder(d);
-        if (nest_rank[p] != static_cast<int>(d)) {
-          identity = false;
-        }
-      }
-      if (!identity) {
-        Array<PrimExpr> slot_args(slot_placeholders.begin(),
-                                  slot_placeholders.end());
-        Array<PrimExpr> fwd_index = induced->Forward(slot_args);
-        PrimExpr fwd_thread =
-            induced->ForwardThread(slot_args, ReplicationPlaceholder());
-        induced = Fragment(buffer->shape, fwd_index, fwd_thread,
-                           induced->ReplicateExtent(), std::nullopt)
-                      ->BindThreadRange(site.loop_layout->ThreadRange());
-      }
-    }
-    if (induced->InputShape().size() != buffer->shape.size()) {
-      return fail("induced layout rank mismatch");
-    }
-    for (size_t d = 0; d < buffer->shape.size(); ++d) {
-      if (!analyzer->CanProveEqual(induced->InputShape()[d],
-                                   buffer->shape[d])) {
-        return fail("induced layout shape mismatch");
-      }
-    }
-
-    // Collective steps: only thread-expression splits sourced from
-    // reduction vars are reduced. Splits from loop replication become value
-    // replication; reduction vars absent from the thread expression
-    // accumulate serially on one thread and need no communication.
-    Map<Var, Range> var_ranges;
-    for (size_t i = 0; i < ndim; ++i) {
-      var_ranges.Set(InputPlaceholder(i),
-                     Range::FromMinExtent(make_zero(DataType::Int(32)),
-                                          site.loop_layout->InputShape()[i]));
-    }
-    var_ranges.Set(ReplicationPlaceholder(),
-                   Range::FromMinExtent(make_zero(DataType::Int(32)),
-                                        site.loop_layout->ReplicateExtent()));
-    auto iter_sum = arith::NormalizeToIterSum(
-        site.loop_layout->GetForwardThread(), var_ranges, analyzer);
-    std::vector<backend::reduce::ThreadReduceStep> steps;
-    for (size_t i = 0; i < ndim; ++i) {
-      if (is_output_dim[i]) {
-        continue;
-      }
-      auto var_steps = backend::reduce::CollectThreadReduceSteps(
-          iter_sum, Downcast<Var>(InputPlaceholder(i)));
-      steps.insert(steps.end(), var_steps.begin(), var_steps.end());
-    }
-    std::vector<std::pair<int, int>> site_steps;
-    for (const auto &step : steps) {
-      if (!IsPowerOfTwo(step.extent)) {
-        return fail("collective width is not a power of two");
-      }
-      int reducing_threads = step.ReducingThreads();
-      if (reducing_threads > epoch.thread_extent) {
-        return fail("collective width exceeds the participant extent");
-      }
-      site_steps.emplace_back(reducing_threads, step.scale);
-    }
+    const Fragment &induced = analysis.induced;
+    const std::vector<bool> &is_output_dim = analysis.is_output_dim;
+    const arith::IterSumExpr &iter_sum = analysis.iter_sum;
 
     if (first_site) {
       decision.storage_layout = induced;
-      decision.steps = std::move(site_steps);
+      decision.steps = std::move(analysis.steps);
       first_site = false;
 
       // Packed partial accumulation (single-site 16-bit epochs only): pick
@@ -728,7 +545,7 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
       }
     } else {
       if (!StructuralEqual()(decision.storage_layout, induced) ||
-          decision.steps != site_steps) {
+          decision.steps != analysis.steps) {
         return fail("update sites induce incompatible plans");
       }
     }

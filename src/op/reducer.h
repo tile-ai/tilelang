@@ -17,6 +17,7 @@
 
 #include "operator.h"
 #include "support/check.h"
+#include <tvm/arith/iter_affine_map.h>
 
 namespace tvm {
 namespace tl {
@@ -67,6 +68,47 @@ PrimExpr ReducerV2Combine(ReducerV2OpType op, const PrimExpr &lhs,
 inline bool IsReducerV2Buffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.reducer";
 }
+
+/*! \brief A contribution is replica-safe when every physical execution of
+ *  the same logical iteration computes the same value: pure expressions of
+ *  loop vars plus loads from buffers whose replicas are value-equal by
+ *  contract (fragments) or uniform by address (shared/global). */
+bool ValueIsReplicaSafe(const PrimExpr &value);
+
+/*! \brief Result of analyzing one reducer_update site against the reducer's
+ *  logical shape and participant thread space. Shared by the narrow-plan
+ *  proofs in ReducerPlanAndMaterialize and by finalize's dst-steering layout
+ *  proposal, so the proposal is by construction the plan's own verdict. */
+struct ReducerSiteAnalysis {
+  /*! \brief True when every narrow-plan site proof passed: well-defined
+   *  index-to-dim ownership, full participant coverage, replica-safe
+   *  contribution, power-of-two in-bounds collective steps. When false, a
+   *  narrow plan is impossible for this site and only `reason` is
+   *  meaningful (the other fields stop at the first failed check). */
+  bool narrow_eligible = false;
+  /*! \brief The first failed check, for plan-rejection diagnostics. */
+  std::string reason;
+  /*! \brief The induced partial layout: the update loop's layout with the
+   *  reduction dims projected out, rebuilt over the reducer's dim order. */
+  Fragment induced;
+  /*! \brief Collective steps (reducing_threads, scale) the site requires. */
+  std::vector<std::pair<int, int>> steps;
+  /*! \brief Per nest dim: does it survive into the reducer shape? */
+  std::vector<bool> is_output_dim;
+  /*! \brief The loop's forward-thread expression in iter-sum form (reused
+   *  by the packed-accumulation lane analysis). */
+  arith::IterSumExpr iter_sum;
+};
+
+/*! \brief Analyze one reducer_update site: derive the induced partial
+ *  layout and run every per-site narrow-plan proof, in the plan's own
+ *  check order (so `reason` matches the planner's rejection diagnostics).
+ *  `thread_extent`/`thread_min` describe the epoch's participant range. */
+ReducerSiteAnalysis
+AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
+                         const ffi::Array<PrimExpr> &reducer_shape,
+                         int64_t thread_extent, int64_t thread_min,
+                         arith::Analyzer *analyzer);
 
 /// T.reducer_init(acc, init=None): open the epoch. The physical partials
 /// always start from the combine identity; the optional `init` value is a

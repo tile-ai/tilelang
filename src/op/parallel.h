@@ -120,6 +120,9 @@ public:
   }
   // Get the root For loop.
   For GetRoot() const { return root_; }
+  // Get the parallel nest loop vars (visit order, outermost first) — the
+  // input dims of GetLoopLayout().
+  const Array<IterVar> &GetLoopVars() const { return loop_vars_; }
   // Get the mapping from buffer to access indices + access type.
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.

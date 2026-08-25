@@ -142,6 +142,19 @@ struct LowerArgs {
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
 };
 
+/*! \brief One reducer_update site, as seen by layout inference: the update
+ *  loop's solved layout (undefined Fragment while the loop is still
+ *  unsolved), the parallel nest vars, the update target's logical indices
+ *  and the contribution expression. The inference engine assembles these
+ *  for FinalizeReducerV2Op so it can steer an unconstrained destination
+ *  toward the reduction's natural placement (dst-steering). */
+struct ReducerUpdateSiteHint {
+  Fragment loop_layout; // undefined while the update loop is unsolved
+  ffi::Array<tirx::Var> loop_vars;
+  ffi::Array<PrimExpr> indices;
+  PrimExpr value;
+};
+
 struct LayoutInferArgs {
   Target target;
   Range thread_bounds;
@@ -154,6 +167,10 @@ struct LayoutInferArgs {
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
+  // The reducer_update sites of the op's reducer, populated by the layout
+  // inference engine only when the op is a finalize_reducer_v2 (null
+  // otherwise, including at lowering-time re-inference call sites).
+  const std::vector<ReducerUpdateSiteHint> *reducer_update_sites = nullptr;
 };
 
 class TileOperator;
