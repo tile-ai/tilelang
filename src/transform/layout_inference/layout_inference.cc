@@ -144,8 +144,22 @@ public:
     std::vector<ReducerUpdateSiteHint> reducer_sites;
     const std::vector<ReducerUpdateSiteHint> *reducer_sites_ptr = nullptr;
     if (const auto *finalize = next.as<FinalizeReducerV2OpNode>()) {
-      reducer_sites = BuildReducerUpdateSiteHints(finalize->reducer);
-      if (!reducer_sites.empty()) {
+      auto site_it = reducer_update_sites_.find(finalize->reducer->data.get());
+      if (site_it != reducer_update_sites_.end()) {
+        for (const auto &record : site_it->second) {
+          const auto *parallel_op =
+              infer_list_[record.infer_idx].as<ParallelOpNode>();
+          ICHECK(parallel_op) << "reducer_update site infer_list_["
+                              << record.infer_idx << "] is not a ParallelOp";
+          ReducerUpdateSiteHint hint;
+          hint.loop_layout = parallel_op->GetLoopLayout(); // may be unsolved
+          for (const auto &iv : parallel_op->GetLoopVars()) {
+            hint.loop_vars.push_back(iv->var);
+          }
+          hint.indices = record.indices;
+          hint.value = record.value;
+          reducer_sites.push_back(std::move(hint));
+        }
         reducer_sites_ptr = &reducer_sites;
       }
     }
@@ -629,7 +643,7 @@ private:
     if (IsReducerV2Buffer(buffer)) {
       // No layout of its own, but it links the epoch's ops (update nests,
       // init, finalize) into one free-mode component.
-      reducer_use_list_[buffer->data].push_back(infer_list_.size());
+      reducer_use_list_[buffer->data.get()].push_back(infer_list_.size());
       return;
     }
     // buffer scope must be local.fragment
@@ -665,9 +679,9 @@ private:
           if (call->op.same_as(reducer_update())) {
             // Record the update site for finalize's dst-steering hints.
             ReducerUpdateArgs update = ParseReducerUpdate(call);
-            reducer_update_sites_[update.reducer->data].push_back(
+            reducer_update_sites_[update.reducer->data.get()].push_back(
                 ReducerUpdateSiteRecord{op_idx, update.indices, update.value});
-            reducer_use_list_[update.reducer->data].push_back(op_idx);
+            reducer_use_list_[update.reducer->data.get()].push_back(op_idx);
           }
         }
         if (auto *buffer_load = node.as<BufferLoadNode>()) {
@@ -1039,16 +1053,14 @@ private:
     PrimExpr value;
   };
   // reducer data Var -> its update sites, in program order.
-  std::unordered_map<Var, std::vector<ReducerUpdateSiteRecord>, ObjectPtrHash,
-                     ObjectPtrEqual>
+  std::unordered_map<const VarNode *, std::vector<ReducerUpdateSiteRecord>>
       reducer_update_sites_;
   // reducer data Var -> infer_list_ indices of the ops touching the reducer
   // (update nests, init, finalize). Reducer buffers carry no layout and stay
   // out of use_list_, so free-mode component grouping must union through
   // them explicitly: finalize's dst proposal has to compete in the same
   // attempt search as the update loop's layout choice.
-  std::unordered_map<Var, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
-      reducer_use_list_;
+  std::unordered_map<const VarNode *, std::vector<int>> reducer_use_list_;
   // Per-op list of buffers it touches (fragment scope), used for prioritization
   std::unordered_map<int, std::vector<Buffer>> op_touched_buffers_;
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
@@ -1061,76 +1073,6 @@ private:
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
-
-  std::vector<ReducerUpdateSiteHint>
-  BuildReducerUpdateSiteHints(const Buffer &reducer) const {
-    std::vector<ReducerUpdateSiteHint> hints;
-    auto site_it = reducer_update_sites_.find(reducer->data);
-    if (site_it == reducer_update_sites_.end()) {
-      return hints;
-    }
-    hints.reserve(site_it->second.size());
-    for (const ReducerUpdateSiteRecord &record : site_it->second) {
-      const auto *parallel_op =
-          infer_list_[record.infer_idx].as<ParallelOpNode>();
-      ICHECK(parallel_op) << "reducer_update site infer_list_["
-                          << record.infer_idx << "] is not a ParallelOp";
-      ReducerUpdateSiteHint hint;
-      hint.loop_layout = parallel_op->GetLoopLayout(); // may be unsolved
-      for (const IterVar &iv : parallel_op->GetLoopVars()) {
-        hint.loop_vars.push_back(iv->var);
-      }
-      hint.indices = record.indices;
-      hint.value = record.value;
-      hints.push_back(std::move(hint));
-    }
-    return hints;
-  }
-
-  // Free-mode cost models rank alternative propagation roots, but a cheaper
-  // consumer-rooted attempt must not bypass finalize's reducer-aware proposal.
-  // Layouts established before free mode remain authoritative; for every other
-  // reducer destination, only score attempts that agree with the plan derived
-  // from the attempt's now-solved update-loop layouts.
-  bool
-  AttemptHonorsReducerDstSteering(const std::vector<int> &members,
-                                  const LayoutMap &base_layout_map,
-                                  const LayoutMap &attempt_layout_map) const {
-    for (int infer_idx : members) {
-      const auto *finalize =
-          infer_list_[infer_idx].as<FinalizeReducerV2OpNode>();
-      if (finalize == nullptr || base_layout_map.count(finalize->dst)) {
-        continue;
-      }
-      std::vector<ReducerUpdateSiteHint> sites =
-          BuildReducerUpdateSiteHints(finalize->reducer);
-      if (sites.empty()) {
-        continue;
-      }
-      LayoutMap proposal =
-          finalize->InferLayout(LayoutInferArgs{target_,
-                                                thread_bounds_vec_[infer_idx],
-                                                base_layout_map,
-                                                analyzer_vec_[infer_idx].get(),
-                                                {},
-                                                bind_var_to_expr_,
-                                                false,
-                                                &sites},
-                                InferLevel::kFree);
-      if (!proposal.count(finalize->dst)) {
-        continue;
-      }
-      if (!attempt_layout_map.count(finalize->dst) ||
-          !proposal[finalize->dst]->IsEqual(
-              attempt_layout_map[finalize->dst].get())) {
-        DLOG(INFO) << "[InferInFreeMode] attempt does not honor reducer dst "
-                      "steering for "
-                   << finalize->dst;
-        return false;
-      }
-    }
-    return true;
-  }
 
   std::vector<TileOperator> BackupInferList() {
     std::vector<TileOperator> back_infer_list;
@@ -1269,13 +1211,6 @@ private:
           DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
                      << " failed due to LoopLayoutInjectiveException "
                      << e.what();
-        }
-
-        if (do_update && !AttemptHonorsReducerDstSteering(members, layout_map,
-                                                          tmp_layout_map)) {
-          do_update = false;
-          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
-                     << " skipped because it bypassed reducer dst steering";
         }
 
         if (do_update) {
