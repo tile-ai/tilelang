@@ -1356,6 +1356,7 @@ def test_update_reduction_axis_stays_scalar():
     torch.testing.assert_close(kern(A), A.sum(dim=1), atol=0, rtol=0)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(("op", "packed_fn"), [("sum", "add2"), ("max", "max2")])
 def test_update_packed_fp16(op, packed_fn):
     """A vectorized fp16 combine takes the packed-math fast path: codegen
@@ -1370,6 +1371,7 @@ def test_update_packed_fp16(op, packed_fn):
     torch.testing.assert_close(kern(A), A, atol=0, rtol=0)
 
 
+@tilelang.testing.requires_cuda
 def test_update_packed_fp32x2_sm100_codegen():
     """On SM100+, a 2-lane fp32 combine takes the f32x2 packed-math path
     (fadd2). Codegen-only: lower for sm_100a and inspect the source."""
