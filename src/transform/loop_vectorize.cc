@@ -29,6 +29,7 @@
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "backend/common/target_utils.h"
+#include "common/int64_promoter.h"
 #include "common/loop_vectorization_utils.h"
 #include "support/check.h"
 #include <iostream>
@@ -1065,6 +1066,51 @@ int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
   return VectorizePlanner(analyzer, layout_map).Plan(loop);
 }
 
+namespace {
+
+// Canonical simplification may multiply an integer subexpression's coefficient
+// by the candidate vector width before it constructs an IntImm. Widen the
+// analysis copy if any such scaled bound can exceed the source dtype. Inspect
+// subexpressions as well as the root so boolean conditions and cancelling
+// affine terms cannot hide a risky integer coefficient.
+bool ScaledIntSubexprMayOverflow(const PrimExpr &expr, int scale,
+                                 arith::Analyzer *analyzer) {
+  ICHECK_GE(scale, 1);
+  bool may_overflow = false;
+  PostOrderVisit(expr, [&](const ObjectRef &obj) {
+    if (may_overflow) {
+      return;
+    }
+    Optional<PrimExpr> opt_subexpr = obj.as<PrimExpr>();
+    if (!opt_subexpr.defined()) {
+      return;
+    }
+    PrimExpr subexpr = opt_subexpr.value();
+    DataType dtype = subexpr.dtype();
+    if (!dtype.is_int() || dtype.bits() >= 64 || dtype.lanes() != 1) {
+      return;
+    }
+
+    arith::ConstIntBound bound = analyzer->const_int_bound(subexpr);
+    const int64_t type_max = (1LL << (dtype.bits() - 1)) - 1;
+    const int64_t type_min = -(1LL << (dtype.bits() - 1));
+    may_overflow = bound->max_value > type_max / scale ||
+                   bound->min_value < type_min / scale;
+  });
+  return may_overflow;
+}
+
+PrimExpr PrepareExprForAnalyzer(const PrimExpr &expr, int scale,
+                                arith::Analyzer *analyzer) {
+  if (!ScaledIntSubexprMayOverflow(expr, scale, analyzer)) {
+    return expr;
+  }
+  Int64Promoter promoter;
+  return promoter(expr);
+}
+
+} // namespace
+
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
   // 1. if var doesn't exist, it is independent
@@ -1074,9 +1120,10 @@ bool CanProveIndependent(const PrimExpr &expr, Var var,
     return true;
   }
   // 2. if \forall v_1, v_2, f(v_1) == f(v_2), f is independent with v
+  PrimExpr analysis_expr = PrepareExprForAnalyzer(expr, 1, analyzer);
   Var var_1("_t", var.dtype());
-  auto expr_1 = Substitute(expr, {{var, var_1}});
-  if (analyzer->CanProveEqual(expr, expr_1)) {
+  PrimExpr expr_1 = Substitute(analysis_expr, {{var, var_1}});
+  if (analyzer->CanProveEqual(analysis_expr, expr_1)) {
     return true;
   }
   return false;
@@ -1095,10 +1142,12 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
   //     A[i] = B[i] * C[i//4]
   // if vecsize=4, f(i)=i//4 depends only on i//4
   // Therefore A[i] = B[i] * C[i//4] can be vectorized with vecsize=4
+  PrimExpr analysis_expr =
+      PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
   PrimExpr var_aligned =
       floordiv(var, target_vectorized_size) * target_vectorized_size;
-  PrimExpr expr_aligned = Substitute(expr, {{var, var_aligned}});
-  if (analyzer->CanProveEqual(expr, expr_aligned)) {
+  PrimExpr expr_aligned = Substitute(analysis_expr, {{var, var_aligned}});
+  if (analyzer->CanProveEqual(analysis_expr, expr_aligned)) {
     return true;
   }
   return false;
@@ -1120,38 +1169,44 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
   if (target_vectorized_size == 1)
     return true;
 
+  PrimExpr analysis_expr =
+      PrepareExprForAnalyzer(expr, target_vectorized_size, analyzer);
+
   // Extent must be divisible
   PrimExpr target_size_for_iter =
       make_const(iter_var_size.dtype(), target_vectorized_size);
   PrimExpr target_size_for_expr =
-      make_const(expr.dtype(), target_vectorized_size);
+      make_const(analysis_expr.dtype(), target_vectorized_size);
   PrimExpr target_size_for_var =
       make_const(var.dtype(), target_vectorized_size);
-  PrimExpr zero = make_const(var.dtype(), 0);
+  PrimExpr zero_var = make_const(var.dtype(), 0);
+  PrimExpr zero_expr = make_const(analysis_expr.dtype(), 0);
 
   if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_size_for_iter),
                                0))
     return false;
 
-  if (IsExprInvariantInVectorBoundary(expr, var, target_vectorized_size,
-                                      analyzer)) {
+  if (IsExprInvariantInVectorBoundary(analysis_expr, var,
+                                      target_vectorized_size, analyzer)) {
     return true;
   }
 
-  auto simplified_expr = analyzer->Simplify(Substitute(expr, {{var, zero}}));
+  PrimExpr simplified_expr =
+      analyzer->Simplify(Substitute(analysis_expr, {{var, zero_var}}));
   // The base offset must be divisible
   if (!analyzer->CanProveEqual(FloorMod(simplified_expr, target_size_for_expr),
-                               zero)) {
+                               zero_expr)) {
     return false;
   }
 
   // Bind thread range
   Var v0("v0", var.dtype()), v1("v1", var.dtype());
-  analyzer->Bind(v0, Range(zero, target_size_for_var));
-  analyzer->Bind(v1, Range(zero, analyzer->Simplify(FloorDiv(
-                                     iter_var_size, target_size_for_iter))));
+  analyzer->Bind(v0, Range(zero_var, target_size_for_var));
+  analyzer->Bind(
+      v1, Range(zero_var, analyzer->Simplify(
+                              FloorDiv(iter_var_size, target_size_for_iter))));
   PrimExpr expr_transformed = analyzer->Simplify(
-      Substitute(expr, {{var, v0 + v1 * target_size_for_var}}));
+      Substitute(analysis_expr, {{var, v0 + v1 * target_size_for_var}}));
   Vectorizer vectorizer(v0, target_size_for_var);
   PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
 
