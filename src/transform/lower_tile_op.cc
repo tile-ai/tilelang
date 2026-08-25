@@ -229,10 +229,9 @@ public:
     }
     fptr = f.CopyOnWrite();
 
-    // If any TMA copies allocated mbarriers, inject the barrier buffer
-    // into the tilelang_root block with a barrier_init annotation.
-    // Pipeline buffer versioning expands it for pipelining, and
-    // LowerSharedBarrier will process it into ptx_init_barrier_thread_count.
+    // If any tile ops allocated mbarriers, inject their barrier buffer into
+    // the tilelang_root block. Each lowered tile-op site owns one slot;
+    // LowerSharedBarrier emits the corresponding initialization.
     if (substituter.mbarrier_count_ > 0) {
       ICHECK(substituter.mbarrier_buffer_.defined())
           << "mbarrier_buffer_ must have been created by alloc_mbarrier "
@@ -1193,24 +1192,16 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     bool pushed_loop_mbar_phase = false;
     if (op->kind == ForKind::kSerial) {
-      int num_stages = 1;
-      if (auto ns_anno = op->annotations.Get("num_stages")) {
-        if (const auto *ns_int = ns_anno.value().as<IntImmNode>()) {
-          if (ns_int->value > 1) {
-            num_stages = static_cast<int>(ns_int->value);
-          }
-        }
-      }
-      PrimExpr phase_expr;
+      // Compiler-generated barriers are allocated per lowered tile-op site, so
+      // their phase follows this loop's invocation count, not pipeline depth.
       DataType loop_dtype = op->loop_var.dtype();
-      PrimExpr two = make_const(loop_dtype, 2);
-      if (num_stages > 1) {
-        PrimExpr num_stages_expr = make_const(loop_dtype, num_stages);
-        phase_expr = FloorMod(FloorDiv(op->loop_var, num_stages_expr), two);
-      } else {
-        phase_expr = FloorMod(op->loop_var, two);
-      }
-      loop_mbar_phase_stack_.push_back(analyzer_->Simplify(phase_expr));
+      PrimExpr step = op->step.defined() ? op->step.value()
+                                         : PrimExpr(make_const(loop_dtype, 1));
+      PrimExpr loop_epoch =
+          analyzer_->Simplify(FloorDiv(op->loop_var - op->min, step));
+      PrimExpr phase =
+          analyzer_->Simplify(FloorMod(loop_epoch, make_const(loop_dtype, 2)));
+      loop_mbar_phase_stack_.push_back(phase);
       pushed_loop_mbar_phase = true;
     }
 
@@ -1485,7 +1476,7 @@ private:
   std::vector<int> mbarrier_arrive_counts_;
   // The shared.barrier scope buffer created lazily by alloc_mbarrier callback.
   Optional<Buffer> mbarrier_buffer_;
-  // Fallback mbarrier parity derived from the nearest enclosing serial loop.
+  // Fallback phase for a tile-op barrier local to the nearest serial loop.
   std::vector<PrimExpr> loop_mbar_phase_stack_;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
