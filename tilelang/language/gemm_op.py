@@ -453,6 +453,9 @@ def tcgen05_gemm_blockscaled(
     )
 
 
+_SM120_BLOCK_SCALE_MODES = {(16, "ue4m3"), (32, "ue8m0"), (16, "ue8m0")}
+
+
 def mma_gemm_blockscaled(
     A: BufferLikeType,
     B: BufferLikeType,
@@ -468,6 +471,7 @@ def mma_gemm_blockscaled(
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     sf_layout: str | None = None,
+    scale_dtype: str | None = None,
 ) -> tirx.PrimExpr:
     """Explicit SM120 warp-level block-scaled MMA GEMM.
 
@@ -477,14 +481,41 @@ def mma_gemm_blockscaled(
     scale addressing. Unlike TCGEN05, this path is synchronous warp-level
     ``mma.sync`` and does not use tensor memory or mbarriers.
 
-    The current supported instruction is SM120 NVF4:
-    ``m16n8k64.kind::mxf4nvf4.block_scale.scale_vec::4X`` with E2M1 operands,
-    FP32 accumulation, and UE4M3 scale factors.
+    Supported instructions, all ``m16n8k64.kind::mxf4nvf4.block_scale`` with
+    E2M1 operands and FP32 accumulation, selected by
+    ``(sf_granularity_k, scale_dtype)``:
+
+    - ``(16, "ue4m3")``: NVF4, ``scale_vec::4X`` (the historical default)
+    - ``(32, "ue8m0")``: MXFP4, ``scale_vec::2X``
+    - ``(16, "ue8m0")``: NVF4 granularity with power-of-two scales,
+      ``scale_vec::4X`` (needs CUDA 13.1+ toolchains)
+
+    ``scale_dtype=None`` infers ``"ue4m3"`` for granularity 16 and
+    ``"ue8m0"`` for granularity 32.
     """
 
+    if int(sf_a_granularity_k) != int(sf_b_granularity_k):
+        raise ValueError(
+            "T.mma_gemm_blockscaled requires matching A/B scale granularities, got "
+            f"sf_a_granularity_k={sf_a_granularity_k}, sf_b_granularity_k={sf_b_granularity_k}"
+        )
+    granularity = int(sf_a_granularity_k)
+    if scale_dtype is None:
+        scale_dtype = {16: "ue4m3", 32: "ue8m0"}.get(granularity)
+    if (granularity, scale_dtype) not in _SM120_BLOCK_SCALE_MODES:
+        supported = ", ".join(str(mode) for mode in sorted(_SM120_BLOCK_SCALE_MODES))
+        raise ValueError(
+            "Unsupported SM120 block-scale mode "
+            f"(sf_granularity_k={granularity}, scale_dtype={scale_dtype}); "
+            f"supported (granularity, scale_dtype): {supported}"
+        )
+
     ann = {
-        "sf_a_granularity_k": int(sf_a_granularity_k),
-        "sf_b_granularity_k": int(sf_b_granularity_k),
+        "sf_a_granularity_k": granularity,
+        "sf_b_granularity_k": granularity,
+        # StringImm rather than a bare str: short strings take tvm-ffi's
+        # small-string form, which the annotations Map<str, Object> rejects.
+        "sf_dtype": tirx.StringImm(scale_dtype),
     }
     if sf_layout is not None:
         ann["sf_layout"] = sf_layout

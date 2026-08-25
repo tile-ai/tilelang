@@ -40,6 +40,25 @@ class GemmMMASm120BlockScaled(GemmMMA):
         if not self.is_gemm_ss():
             raise ValueError("T.mma_gemm_blockscaled supports shared-memory A/B operands only")
 
+    def _scale_mode(self) -> tuple[int, str]:
+        annotations = getattr(self.gemm_node, "annotations", {})
+        sf_a_granularity_k = annotations.get("sf_a_granularity_k")
+        sf_b_granularity_k = annotations.get("sf_b_granularity_k")
+        if sf_a_granularity_k is None or sf_b_granularity_k is None:
+            raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
+        if int(sf_a_granularity_k) != int(sf_b_granularity_k):
+            raise ValueError(
+                "Block-scaled MMA GEMM requires matching A/B scale granularities, got "
+                f"{int(sf_a_granularity_k)} and {int(sf_b_granularity_k)}"
+            )
+        sf_dtype = annotations.get("sf_dtype")
+        if sf_dtype is None:
+            sf_dtype = "ue4m3"
+        else:
+            # The language layer stores a StringImm (see mma_gemm_blockscaled).
+            sf_dtype = str(getattr(sf_dtype, "value", sf_dtype))
+        return int(sf_a_granularity_k), sf_dtype
+
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(
             self.M,
@@ -48,6 +67,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
             target,
             GEMM_INST_MMA_BLOCK_SCALED,
         )
+        granularity, sf_dtype = self._scale_mode()
         return self.intrin_emitter_cls(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
@@ -61,6 +81,10 @@ class GemmMMASm120BlockScaled(GemmMMA):
             chunk=self.chunk,
             thread_var=thread_var,
             is_blockscaled=True,
+            kind="mxf4nvf4",
+            # One k64 MMA atom consumes 64 // granularity scale bytes.
+            scale_vec_size=64 // granularity,
+            stype=sf_dtype,
         )
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -128,6 +152,11 @@ class GemmMMASm120BlockScaled(GemmMMA):
             return _Simplify(_gemm_ss_blockscaled_kmajor, inline_let=True)
 
         if int(block_K // micro_size_k) == 4:
+            # ki parity decides the consumed byte pair inside a scale word for
+            # scale_vec::2X; 4X keeps the literal 0. Blocks reusing fragment
+            # set 0 issue even ki, set 1 issues odd ki.
+            scale_byte_even = mma_emitter._scale_byte_id(self.sf_k_start, 0)
+            scale_byte_odd = mma_emitter._scale_byte_id(self.sf_k_start, 1)
 
             @T.prim_func
             def _gemm_ss_blockscaled_static_kblock() -> None:
@@ -183,6 +212,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_0,
                             i,
                             j,
+                            scale_byte_id=scale_byte_even,
                         )
 
                 mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
@@ -210,6 +240,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_1,
                             i,
                             j,
+                            scale_byte_id=scale_byte_odd,
                         )
 
                 mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
@@ -237,6 +268,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_0,
                             i,
                             j,
+                            scale_byte_id=scale_byte_even,
                         )
                 for i in T.unroll(warp_rows):
                     for j in T.unroll(warp_cols):
@@ -249,6 +281,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_1,
                             i,
                             j,
+                            scale_byte_id=scale_byte_odd,
                         )
 
             return _Simplify(_gemm_ss_blockscaled_static_kblock, inline_let=True)
