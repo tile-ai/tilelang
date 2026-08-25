@@ -125,9 +125,10 @@ class SM120BlockScaleTile:
                 f"SM120 full-tile warp N shape mismatch: warp_col_tiles={self.warp_col_tiles}, "
                 f"warp_cols={self.warp_cols}, micro_size_n={self.micro_size_n}"
             )
-        if self.tile_m % 32 != 0 or self.tile_n % 32 != 0:
+        if self.tile_m % 128 != 0 or self.tile_n % 128 != 0:
             raise ValueError(
-                f"SM120 compact shared scale tiles require block M/N multiples of 32, got tile_m={self.tile_m}, tile_n={self.tile_n}"
+                "SM120 kmajor scale sources stack 128-row BlockScaledBasicChunk atoms, so "
+                f"block M/N must be multiples of 128, got tile_m={self.tile_m}, tile_n={self.tile_n}"
             )
         if self.kblocks <= 0 or self.micro_size_k <= 0 or self.tile_k != self.kblocks * self.micro_size_k:
             raise ValueError(
@@ -152,18 +153,29 @@ class SM120BlockScaleTile:
                 f"{self.warp_issues}, {self.warpgroup_issues}"
             )
 
+    @property
+    def words_per_stage(self) -> int:
+        """uint32 words per staged (tile_rows, tile_k) scale slice row span.
+
+        One word packs four scale bytes; for the 4X/ue4m3 config each byte
+        covers 16 K elements, so a tile_k stage holds ``tile_k // 64`` words.
+        """
+
+        return self.tile_k // 64
+
     def _scale_word_offset(self, row: int, kblock: int, tile_rows: int) -> int:
         """Return the uint32 scale-word offset for the source/smem scale layout."""
 
-        if tile_rows <= 0 or tile_rows % 32 != 0:
-            raise ValueError(f"scale tile rows must be a positive multiple of 32, got {tile_rows}")
+        if tile_rows <= 0 or tile_rows % 128 != 0:
+            raise ValueError(f"scale tile rows must be a positive multiple of 128, got {tile_rows}")
         if row < 0 or row >= tile_rows:
             raise ValueError(f"scale row must be in [0, {tile_rows}), got {row}")
         if kblock < 0 or kblock >= self.kblocks:
             raise ValueError(f"kblock must be in [0, {self.kblocks}), got {kblock}")
-        # K-major storage groups rows as [row % 32][row // 32] within each K atom.
-        row_groups = tile_rows // 32
-        return kblock * tile_rows + (row & 31) * row_groups + (row >> 5)
+        # The packer stacks 128-row K-major atoms vertically; inside one atom
+        # rows are stored as [word][row % 32][row // 32], regardless of the
+        # staged tile height.
+        return (row // 128) * (self.words_per_stage * 128) + kblock * 128 + (row % 32) * 4 + (row % 128) // 32
 
     def compact_selector_scale_rows(self, lane: int, warp_m: int, warp_n: int) -> tuple[tuple[int, int], tuple[int, int]]:
         """Return SFA/SFB semantic rows loaded by the current compact TV package."""
@@ -512,10 +524,16 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         return (_k_start + self.micro_size_k * ki) // packed_word_k
 
     @staticmethod
-    def _tile_kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr, tile_rows: int):
-        """Return a tile-local compact K-major scale-word offset."""
+    def _tile_kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr, words_per_stage: int):
+        """Return a tile-local compact K-major scale-word offset.
 
-        return word_k * tile_rows + (idx % 32) * (tile_rows // 32) + idx // 32
+        The scale source stacks 128-row BlockScaledBasicChunk atoms
+        vertically: the in-atom order is the packer's fixed 4-group split of
+        128 rows regardless of the staged tile height, and rows beyond the
+        first atom live ``words_per_stage * 128`` words further.
+        """
+
+        return (idx // 128) * (words_per_stage * 128) + word_k * 128 + (idx % 32) * 4 + (idx % 128) // 32
 
     def mma(
         self,
@@ -736,6 +754,9 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         if sf_layout != "blockscaled_chunk_kmajor":
             raise ValueError("sm120 full-tile MMA currently requires sf_layout='blockscaled_chunk_kmajor'")
         k_blocks = int(self.chunk // self.micro_size_k)
+        # Words per staged (tile_rows, block_K) scale slice: one uint32 packs
+        # four scale bytes covering sf_vec_size K elements each.
+        words_per_stage = int(self.chunk // (self.sf_vec_size * 4))
         tile = SM120BlockScaleTile.from_emitter(
             self,
             sf_layout=sf_layout,
@@ -744,8 +765,6 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
-        tile_m = tile.tile_m
-        tile_n = tile.tile_n
         sfa_words = tile.sfa_words
         sfb_words = tile.sfb_words
         local_size_a = self.local_size_a
@@ -780,14 +799,14 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             scale_m0 = warp_m * self.warp_row_tiles + (qlane // 2) * 16 + sfa_row
             scale_n0 = warp_n * self.warp_col_tiles + qlane * 8 + sfb_col
             for g in T.unroll(sfa_words):
-                scale_a_word = self._tile_kmajor_scale_word(scale_m0 + g * 32, k_block, tile_m)
+                scale_a_word = self._tile_kmajor_scale_word(scale_m0 + g * 32, k_block, words_per_stage)
                 SFA_local_buf[g] = SFA_data[
-                    tuple(SFA_other) + (SFA_base_m + scale_a_word // k_blocks, SFA_base_k + scale_a_word % k_blocks)
+                    tuple(SFA_other) + (SFA_base_m + scale_a_word // words_per_stage, SFA_base_k + scale_a_word % words_per_stage)
                 ]
             for g in T.unroll(sfb_words):
-                scale_b_word = self._tile_kmajor_scale_word(scale_n0 + g * 32, k_block, tile_n)
+                scale_b_word = self._tile_kmajor_scale_word(scale_n0 + g * 32, k_block, words_per_stage)
                 SFB_local_buf[g] = SFB_data[
-                    tuple(SFB_other) + (SFB_base_n + scale_b_word // k_blocks, SFB_base_k + scale_b_word % k_blocks)
+                    tuple(SFB_other) + (SFB_base_n + scale_b_word // words_per_stage, SFB_base_k + scale_b_word % words_per_stage)
                 ]
 
         @T.macro

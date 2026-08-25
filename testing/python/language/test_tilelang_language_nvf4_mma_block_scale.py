@@ -522,16 +522,44 @@ def test_sm120_fulltile_package_contract_supports_k128_path():
 
 
 def test_sm120_fulltile_package_contract_derives_arbitrary_reasonable_block_shape():
-    contract = _make_sm120_fulltile_contract(
-        chunk=192,
-        warp_row_tiles=32,
-        warp_col_tiles=96,
-    )
+    contract = _make_sm120_fulltile_contract(chunk=192)
 
-    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (64, 192, 192)
-    assert (contract.warp_rows, contract.warp_cols, contract.kblocks) == (2, 6, 3)
-    assert (contract.sfa_words, contract.sfb_words) == (1, 3)
-    assert (contract.warp_issues, contract.warpgroup_issues) == (24, 96)
+    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (128, 128, 192)
+    assert (contract.warp_rows, contract.warp_cols, contract.kblocks) == (4, 4, 3)
+    assert (contract.sfa_words, contract.sfb_words) == (2, 2)
+    assert (contract.warp_issues, contract.warpgroup_issues) == (32, 128)
+
+
+def test_sm120_fulltile_package_contract_rejects_non_atom_multiple_tiles():
+    # The kmajor scale source stacks 128-row BlockScaledBasicChunk atoms, so a
+    # staged tile must cover whole atoms; 64x192 was silently mis-addressed
+    # before the packer-atom fix.
+    with pytest.raises(ValueError, match="multiples of 128"):
+        _make_sm120_fulltile_contract(chunk=192, warp_row_tiles=32, warp_col_tiles=96)
+
+
+def test_sm120_fulltile_contract_scale_words_follow_packer_atoms_for_tile_m_256():
+    # tile_m=256 stacks two 128-row packer atoms. The flat word offset must
+    # follow the host packer (atom index = row // 128, fixed 4-group split
+    # inside the atom), not a tile_rows-wide group split.
+    contract = _make_sm120_fulltile_contract(warp_row_tiles=128)
+
+    assert (contract.tile_m, contract.tile_n) == (256, 128)
+    assert (contract.sfa_words, contract.sfb_words) == (4, 2)
+    assert contract.words_per_stage == contract.kblocks
+
+    for lane in (0, 1, 2, 17, 31):
+        for warp_m in range(contract.block_row_warps):
+            for warp_n in range(contract.block_col_warps):
+                sfa_rows, sfb_rows = contract.compact_selector_scale_rows(lane, warp_m, warp_n)
+                for kblock in range(contract.kblocks):
+                    sfa_offsets, sfb_offsets = contract.compact_selector_scale_word_offsets(lane, warp_m, warp_n, kblock)
+                    for row, flat in zip(sfa_rows, sfa_offsets):
+                        atom_base = (row // 128) * (contract.words_per_stage * 128)
+                        assert flat == atom_base + _oracle_blockscaled_chunk_kmajor_flat_word(row % 128, kblock)
+                    for row, flat in zip(sfb_rows, sfb_offsets):
+                        # tile_n=128 stays inside a single atom.
+                        assert flat == _oracle_blockscaled_chunk_kmajor_flat_word(row, kblock)
 
 
 def test_sm120_fulltile_package_contract_describes_compact_selector_copy_view():
@@ -693,7 +721,7 @@ def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
     [
         (128, 128, 64, 64, 64),
         (128, 128, 128, 64, 64),
-        (64, 192, 192, 32, 96),
+        (128, 128, 192, 64, 64),
         (128, 128, 256, 64, 64),
     ],
 )
