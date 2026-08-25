@@ -23,10 +23,10 @@ from tilelang.profiler import do_bench
 def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, block_words: int = 4):
     """Pack semantic scale words in SM120 BlockScaledBasicChunk K-major order."""
 
-    if block_rows != 128 or block_words != 4:
+    if block_rows != 128 or block_words not in (1, 2, 4):
         raise ValueError(
             "SM120 BlockScaledBasicChunk K-major scale packing requires "
-            f"block_rows=128 and block_words=4, got block_rows={block_rows}, block_words={block_words}"
+            f"block_rows=128 and block_words in (1, 2, 4), got block_rows={block_rows}, block_words={block_words}"
         )
     if not isinstance(words, torch.Tensor):
         raise TypeError(f"words must be a torch.Tensor, got {type(words)!r}")
@@ -80,8 +80,7 @@ def sm120_nvfp4_blockscaled_gemm(
     assert K % block_K == 0
     assert block_M == 128
     assert block_N == 128
-    assert block_K > 0 and block_K % 64 == 0
-    assert K % 256 == 0
+    assert block_K in (64, 128, 256), "the scale packer supports block_K // 64 in (1, 2, 4)"
     assert num_stages >= 2
 
     in_dtype = T.float4_e2m1fn
@@ -265,8 +264,8 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
 
     # Zero-copy tile-rows view of the packed layout (see the kernel docstring).
     sf_words_per_block_k = args.block_k // 64
-    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic).reshape(-1, sf_words_per_block_k)
-    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic).reshape(-1, sf_words_per_block_k)
+    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
+    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
     C = torch.empty((args.m, args.n), device="cuda", dtype=out_torch_dtype)
 
     kernel(A, B, SFA, SFB, C)
