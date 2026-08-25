@@ -425,7 +425,6 @@ def test_nvf4_mma_block_scale_lane_scale_mapping_matches_cute():
     "kwargs",
     [
         {"kind": "mxf4nvf4", "scale_vec_size": 2, "stype": "ue4m3"},
-        {"kind": "mxf4nvf4", "scale_vec_size": 4, "stype": "ue8m0"},
         {"kind": "mxf4", "scale_vec_size": 4, "stype": "ue4m3"},
     ],
 )
@@ -468,6 +467,64 @@ def test_sm120_mma_and_ldscale_reject_chunk_kmajor_scale_layout():
         emitter.mma(None, None, None, 0, SFA_buf=object(), SFB_buf=object(), sf_layout="blockscaled_chunk_kmajor")
     with pytest.raises(ValueError, match="mma_blockscaled_fulltile"):
         emitter.ldscale(None, None, None, None, None, sf_layout="blockscaled_chunk_kmajor")
+
+
+def _make_ue8m0_emitter(scale_vec_size, chunk):
+    return TensorCoreIntrinEmitterSM120(
+        is_blockscaled=True,
+        a_dtype=T.float4_e2m1fn,
+        b_dtype=T.float4_e2m1fn,
+        accum_dtype=T.float32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=2,
+        warp_row_tiles=64,
+        warp_col_tiles=64,
+        chunk=chunk,
+        kind="mxf4nvf4",
+        scale_vec_size=scale_vec_size,
+        stype="ue8m0",
+    )
+
+
+def test_mxf4_2x_ue8m0_emitter_contract():
+    emitter = _make_ue8m0_emitter(2, 256)
+    assert (emitter.kind, emitter.scale_vec_size, emitter.stype) == ("mxf4nvf4", 2, "ue8m0")
+    assert emitter.sf_vec_size == 32
+
+    # One uint32 word covers K=128: word column is the k64-atom pair index,
+    # the byte id selects the 2-byte half by atom parity.
+    word_ks = [emitter._scale_word_k(0, ki, 32) for ki in range(4)]
+    byte_ids = [emitter._scale_byte_id(0, ki) for ki in range(4)]
+    analyzer = tvm.arith.Analyzer()
+    assert [int(analyzer.simplify(w)) for w in word_ks] == [0, 0, 1, 1]
+    assert [int(analyzer.simplify(tvm.tirx.const(0, "int32") + b)) for b in byte_ids] == [0, 2, 0, 2]
+
+    # 2X packs K=128 per word; narrower block_K cannot be staged.
+    for bad_chunk in (64, 192):
+        with pytest.raises(ValueError, match="multiple of"):
+            _make_ue8m0_emitter(2, bad_chunk)
+
+
+def test_mxf4nvf4_4x_ue8m0_emitter_contract():
+    emitter = _make_ue8m0_emitter(4, 256)
+    assert (emitter.kind, emitter.scale_vec_size, emitter.stype) == ("mxf4nvf4", 4, "ue8m0")
+    assert emitter.sf_vec_size == 16
+    # 4X keeps the whole-word consumption: byte id is the literal 0.
+    assert emitter._scale_byte_id(0, 3) == 0
+
+
+def test_sm120_fulltile_contract_tracks_2x_words_per_stage():
+    contract = SM120BlockScaleTile.from_emitter(
+        _make_ue8m0_emitter(2, 256),
+        sf_layout="blockscaled_chunk_kmajor",
+    )
+    assert (contract.kblocks, contract.sf_vec_size) == (4, 32)
+    assert contract.words_per_stage == 2
+    # Word columns range over words_per_stage, not kblocks.
+    with pytest.raises(ValueError, match="word column"):
+        contract._scale_word_offset(0, 2, 128)
 
 
 @pytest.mark.parametrize(

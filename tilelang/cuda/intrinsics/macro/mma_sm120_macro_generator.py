@@ -57,6 +57,8 @@ class SM120BlockScaleTile:
     sfb_words: int
     warp_issues: int
     warpgroup_issues: int
+    # K elements covered by one scale byte (16 for 4X modes, 32 for 2X).
+    sf_vec_size: int = 16
 
     @classmethod
     def from_emitter(
@@ -89,6 +91,7 @@ class SM120BlockScaleTile:
             warpgroup_issues=(
                 int(emitter.warp_rows) * int(emitter.warp_cols) * 2 * int(emitter.block_row_warps) * int(emitter.block_col_warps)
             ),
+            sf_vec_size=int(emitter.sf_vec_size),
         )
         tile.validate()
         return tile
@@ -136,6 +139,11 @@ class SM120BlockScaleTile:
             )
         if self.sf_layout != "blockscaled_chunk_kmajor":
             raise ValueError("SM120 full-tile package contract requires sf_layout='blockscaled_chunk_kmajor'")
+        if self.sf_vec_size <= 0 or self.tile_k % (self.sf_vec_size * 4) != 0:
+            raise ValueError(
+                f"SM120 kmajor scale words pack {self.sf_vec_size * 4} K elements; "
+                f"tile_k must be a multiple of that, got tile_k={self.tile_k}"
+            )
         expected_sfa_words = (self.warp_rows + 1) // 2
         expected_sfb_words = (self.warp_cols + 1) // 2
         if (self.sfa_words, self.sfb_words) != (expected_sfa_words, expected_sfb_words):
@@ -157,11 +165,11 @@ class SM120BlockScaleTile:
     def words_per_stage(self) -> int:
         """uint32 words per staged (tile_rows, tile_k) scale slice row span.
 
-        One word packs four scale bytes; for the 4X/ue4m3 config each byte
-        covers 16 K elements, so a tile_k stage holds ``tile_k // 64`` words.
+        One word packs four scale bytes of ``sf_vec_size`` K elements each,
+        so a tile_k stage holds ``tile_k // (sf_vec_size * 4)`` words.
         """
 
-        return self.tile_k // 64
+        return self.tile_k // (self.sf_vec_size * 4)
 
     def _scale_word_offset(self, row: int, kblock: int, tile_rows: int) -> int:
         """Return the uint32 scale-word offset for the source/smem scale layout."""
@@ -170,8 +178,8 @@ class SM120BlockScaleTile:
             raise ValueError(f"scale tile rows must be a positive multiple of 128, got {tile_rows}")
         if row < 0 or row >= tile_rows:
             raise ValueError(f"scale row must be in [0, {tile_rows}), got {row}")
-        if kblock < 0 or kblock >= self.kblocks:
-            raise ValueError(f"kblock must be in [0, {self.kblocks}), got {kblock}")
+        if kblock < 0 or kblock >= self.words_per_stage:
+            raise ValueError(f"kblock must be a word column in [0, {self.words_per_stage}), got {kblock}")
         # The packer stacks 128-row K-major atoms vertically; inside one atom
         # rows are stored as [word][row % 32][row // 32], regardless of the
         # staged tile height.
@@ -286,6 +294,31 @@ _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
         a_dtype_abbrv="e2m1",
         b_dtype_abbrv="e2m1",
     ),
+    # MXFP4: 32-element scale granularity, power-of-two (ue8m0) scales. One
+    # uint32 scale word covers K=128; each k64 MMA atom consumes a 2-byte
+    # half selected by scale_*_byte_id.
+    ("mxf4nvf4", 2, "ue8m0"): BlockScaleMmaConfig(
+        kind="mxf4nvf4",
+        mma_prefix="m16n8k64",
+        atom_k=64,
+        scale_vec_size=2,
+        sf_vec_size=32,
+        scale_type="ue8m0",
+        a_dtype_abbrv="e2m1",
+        b_dtype_abbrv="e2m1",
+    ),
+    # NVF4 granularity with ue8m0 scales; the instruction needs CUDA 13.1+
+    # (see mma_block_scale.h), word/byte accounting matches the ue4m3 form.
+    ("mxf4nvf4", 4, "ue8m0"): BlockScaleMmaConfig(
+        kind="mxf4nvf4",
+        mma_prefix="m16n8k64",
+        atom_k=64,
+        scale_vec_size=4,
+        sf_vec_size=16,
+        scale_type="ue8m0",
+        a_dtype_abbrv="e2m1",
+        b_dtype_abbrv="e2m1",
+    ),
 }
 
 
@@ -346,6 +379,12 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             self.scale_vec_size = self.block_scale_config.scale_vec_size
             self.stype = self.block_scale_config.scale_type
             self.sf_vec_size = self.block_scale_config.sf_vec_size
+            if int(chunk) % (self.sf_vec_size * 4) != 0:
+                raise ValueError(
+                    f"{self.kind} scale_vec::{self.scale_vec_size}X packs "
+                    f"{self.sf_vec_size * 4} K elements per uint32 scale word; "
+                    f"block_K must be a multiple of that, got block_K={chunk}"
+                )
         super().__init__(
             a_dtype=a_dtype,
             b_dtype=b_dtype,
@@ -523,6 +562,20 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
         return (_k_start + self.micro_size_k * ki) // packed_word_k
 
+    def _scale_byte_id(self, k_start: PrimExpr, ki: PrimExpr):
+        """Byte offset of the consumed scale bytes inside their uint32 word.
+
+        scale_vec::4X consumes the whole word, so the byte id is always the
+        literal 0 (keeping 4X codegen byte-identical). scale_vec::2X consumes
+        a 2-byte half selected by the k64 atom parity inside the K=128 word.
+        """
+
+        if self.scale_vec_size == 4:
+            return 0
+        word_span = self.sf_vec_size * 4
+        _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
+        return ((_k_start + self.micro_size_k * ki) % word_span) // self.sf_vec_size
+
     @staticmethod
     def _tile_kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr, words_per_stage: int):
         """Return a tile-local compact K-major scale-word offset.
@@ -582,6 +635,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
         scale_a_word_k = self._scale_word_k(k_start, k_inner, sf_a_granularity_k)
         scale_b_word_k = self._scale_word_k(k_start, k_inner, sf_b_granularity_k)
+        scale_byte_id = self._scale_byte_id(k_start, k_inner)
         thread_binding = self.get_thread_binding()
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
@@ -621,6 +675,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     i * warp_cols * local_size_out + j * local_size_out,
                     scale_a_ptr,
                     scale_b_ptr,
+                    scale_byte_id,
+                    0,
+                    scale_byte_id,
+                    0,
                 )
                 if replicate_b:
                     scale_b_rep_ptr = T.access_ptr(
@@ -645,6 +703,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                         i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
                         scale_a_ptr,
                         scale_b_rep_ptr,
+                        scale_byte_id,
+                        0,
+                        scale_byte_id,
+                        0,
                     )
 
         return _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
@@ -757,6 +819,8 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         # Words per staged (tile_rows, block_K) scale slice: one uint32 packs
         # four scale bytes covering sf_vec_size K elements each.
         words_per_stage = int(self.chunk // (self.sf_vec_size * 4))
+        # k64 MMA atoms served by one scale word (4X: 1, 2X: 2 via byte halves).
+        atoms_per_word = int((self.sf_vec_size * 4) // self.micro_size_k)
         tile = SM120BlockScaleTile.from_emitter(
             self,
             sf_layout=sf_layout,
@@ -798,19 +862,21 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             sfb_col = self._sfb_col_in_atom(tx)
             scale_m0 = warp_m * self.warp_row_tiles + (qlane // 2) * 16 + sfa_row
             scale_n0 = warp_n * self.warp_col_tiles + qlane * 8 + sfb_col
+            k_word = k_block if atoms_per_word == 1 else k_block // atoms_per_word
             for g in T.unroll(sfa_words):
-                scale_a_word = self._tile_kmajor_scale_word(scale_m0 + g * 32, k_block, words_per_stage)
+                scale_a_word = self._tile_kmajor_scale_word(scale_m0 + g * 32, k_word, words_per_stage)
                 SFA_local_buf[g] = SFA_data[
                     tuple(SFA_other) + (SFA_base_m + scale_a_word // words_per_stage, SFA_base_k + scale_a_word % words_per_stage)
                 ]
             for g in T.unroll(sfb_words):
-                scale_b_word = self._tile_kmajor_scale_word(scale_n0 + g * 32, k_block, words_per_stage)
+                scale_b_word = self._tile_kmajor_scale_word(scale_n0 + g * 32, k_word, words_per_stage)
                 SFB_local_buf[g] = SFB_data[
                     tuple(SFB_other) + (SFB_base_n + scale_b_word // words_per_stage, SFB_base_k + scale_b_word % words_per_stage)
                 ]
 
         @T.macro
-        def _mma_kblock(A_local_buf, B_local_buf, SFA_local_buf, SFB_local_buf, C_local_buf):
+        def _mma_kblock(A_local_buf, B_local_buf, SFA_local_buf, SFB_local_buf, C_local_buf, k_block):
+            scale_byte = 0 if atoms_per_word == 1 else (k_block % atoms_per_word) * 2
             for i in T.unroll(warp_rows):
                 scale_a_ptr = T.access_ptr(SFA_local_buf[i // 2], "r")
                 for j in T.unroll(warp_cols):
@@ -834,9 +900,9 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                             i * warp_cols * local_size_out + j * local_size_out + n8_half * (local_size_out // 2),
                             scale_a_ptr,
                             scale_b_ptr,
-                            0,
+                            scale_byte,
                             i % 2,
-                            0,
+                            scale_byte,
                             (j % 2) * 2 + n8_half,
                         )
 
@@ -852,7 +918,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 SFB_local_0 = T.alloc_local((sfb_words,), "uint32")
 
                 _load_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, 0)
-                _mma_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, C_local_buf)
+                _mma_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, C_local_buf, 0)
 
         else:
 
@@ -872,11 +938,11 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 # Refill a package with k+2 only after its current K block has issued.
                 for k_block in T.unroll(k_blocks):
                     if k_block % 2 == 0:
-                        _mma_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, C_local_buf)
+                        _mma_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, C_local_buf, k_block)
                         if k_block + 2 < k_blocks:
                             _load_kblock(A_local_0, B_local_0, SFA_local_0, SFB_local_0, k_block + 2)
                     else:
-                        _mma_kblock(A_local_1, B_local_1, SFA_local_1, SFB_local_1, C_local_buf)
+                        _mma_kblock(A_local_1, B_local_1, SFA_local_1, SFB_local_1, C_local_buf, k_block)
                         if k_block + 2 < k_blocks:
                             _load_kblock(A_local_1, B_local_1, SFA_local_1, SFB_local_1, k_block + 2)
 
@@ -892,6 +958,8 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         SFB_rep_fragment_buf,
         inst_m_idx: PrimExpr | int,
         inst_n_idx: PrimExpr | int,
+        *,
+        scale_byte_id: PrimExpr | int = 0,
     ):
         """Issue one SM120 block-scaled MMA atom from a full B fragment tile."""
         return self.mma_full_b_atom_with_prefetched_scales(
@@ -903,6 +971,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             SFB_rep_fragment_buf,
             inst_m_idx,
             inst_n_idx,
+            scale_byte_id=scale_byte_id,
         )
 
     def mma_full_b_atom_with_prefetched_scales(
@@ -915,6 +984,8 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         SFB_rep_local_buf,
         inst_m_idx: PrimExpr | int,
         inst_n_idx: PrimExpr | int,
+        *,
+        scale_byte_id: PrimExpr | int = 0,
     ):
         local_size_a = self.local_size_a
         local_size_b = self.local_size_b
@@ -958,6 +1029,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 inst_m_idx * warp_cols * local_size_out + inst_n_idx * local_size_out,
                 scale_a_ptr,
                 scale_b_ptr,
+                scale_byte_id,
+                0,
+                scale_byte_id,
+                0,
             )
             if replicate_b:
                 scale_b_rep_ptr = T.access_ptr(SFB_rep_local_buf[inst_n_idx], "r")
@@ -979,6 +1054,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     inst_m_idx * warp_cols * local_size_out + inst_n_idx * local_size_out + lift(local_size_out) // 2,
                     scale_a_ptr,
                     scale_b_rep_ptr,
+                    scale_byte_id,
+                    0,
+                    scale_byte_id,
+                    0,
                 )
 
         return _warp_mma_block_scale_full_b_atom_prefetched(
