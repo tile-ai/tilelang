@@ -447,6 +447,29 @@ def test_nvf4_mma_block_scale_rejects_unsupported_configs(kwargs):
         )
 
 
+def test_sm120_mma_and_ldscale_reject_chunk_kmajor_scale_layout():
+    # The chunk-kmajor scale layout is served exclusively by
+    # mma_blockscaled_fulltile; the per-word mma()/ldscale() paths only
+    # understand rowmajor scale addressing.
+    emitter = TensorCoreIntrinEmitterSM120(
+        is_blockscaled=True,
+        a_dtype=T.float4_e2m1fn,
+        b_dtype=T.float4_e2m1fn,
+        accum_dtype=T.float32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=2,
+        warp_row_tiles=32,
+        warp_col_tiles=32,
+        chunk=256,
+    )
+    with pytest.raises(ValueError, match="mma_blockscaled_fulltile"):
+        emitter.mma(None, None, None, 0, SFA_buf=object(), SFB_buf=object(), sf_layout="blockscaled_chunk_kmajor")
+    with pytest.raises(ValueError, match="mma_blockscaled_fulltile"):
+        emitter.ldscale(None, None, None, None, None, sf_layout="blockscaled_chunk_kmajor")
+
+
 @pytest.mark.parametrize(
     "dtype_kwargs",
     [

@@ -512,12 +512,6 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         return (_k_start + self.micro_size_k * ki) // packed_word_k
 
     @staticmethod
-    def _kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr):
-        """Return the flattened uint32 offset for one packed scale word."""
-
-        return TensorCoreIntrinEmitterSM120._tile_kmajor_scale_word(idx, word_k, 128)
-
-    @staticmethod
     def _tile_kmajor_scale_word(idx: PrimExpr, word_k: PrimExpr, tile_rows: int):
         """Return a tile-local compact K-major scale-word offset."""
 
@@ -545,6 +539,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             return super().mma(A_local_buf, B_local_buf, C_local_buf, k_inner)
         if SFA_buf is None or SFB_buf is None:
             raise ValueError("Block-scaled MMA requires SFA and SFB buffers")
+        if sf_layout != "rowmajor":
+            raise ValueError(
+                "mma() supports sf_layout='rowmajor' only; blockscaled_chunk_kmajor scales are handled by mma_blockscaled_fulltile"
+            )
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -570,8 +568,6 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
         replicate_b = self.n_dim == 16
-        if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
-            raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
         @T.macro
         def _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
@@ -581,26 +577,14 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             for i, j in T.grid(warp_rows, warp_cols):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
-                if sf_layout == "blockscaled_chunk_kmajor":
-                    scale_a_word = self._kmajor_scale_word(scale_m, scale_a_word_k)
-                    scale_b_word = self._kmajor_scale_word(scale_n, scale_b_word_k)
-                    scale_a_ptr = T.access_ptr(
-                        SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)],
-                        "r",
-                    )
-                    scale_b_ptr = T.access_ptr(
-                        SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)],
-                        "r",
-                    )
-                else:
-                    scale_a_ptr = T.access_ptr(
-                        SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)],
-                        "r",
-                    )
-                    scale_b_ptr = T.access_ptr(
-                        SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)],
-                        "r",
-                    )
+                scale_a_ptr = T.access_ptr(
+                    SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)],
+                    "r",
+                )
+                scale_b_ptr = T.access_ptr(
+                    SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)],
+                    "r",
+                )
                 T.ptx_mma_block_scale(
                     accum_dtype,
                     mma_prefix,
@@ -621,18 +605,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     scale_b_ptr,
                 )
                 if replicate_b:
-                    if sf_layout == "blockscaled_chunk_kmajor":
-                        scale_b_rep_n = scale_n + 8
-                        scale_b_rep_word = self._kmajor_scale_word(scale_b_rep_n, scale_b_word_k)
-                        scale_b_rep_ptr = T.access_ptr(
-                            SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)],
-                            "r",
-                        )
-                    else:
-                        scale_b_rep_ptr = T.access_ptr(
-                            SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
-                            "r",
-                        )
+                    scale_b_rep_ptr = T.access_ptr(
+                        SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
+                        "r",
+                    )
                     T.ptx_mma_block_scale(
                         accum_dtype,
                         mma_prefix,
@@ -668,6 +644,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         sf_b_granularity_k: int | None = None,
         sf_layout: str = "rowmajor",
     ):
+        if sf_layout != "rowmajor":
+            raise ValueError(
+                "ldscale() supports sf_layout='rowmajor' only; blockscaled_chunk_kmajor scales are handled by mma_blockscaled_fulltile"
+            )
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         warp_row_tiles = self.warp_row_tiles
@@ -683,8 +663,6 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
         replicate_b = self.n_dim == 16
-        if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
-            raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
         @T.macro
         def _warp_ldscale_block_scale(SFA_local_buf, SFB_local_buf, SFB_rep_local_buf, SFA_data, SFB_data, thread_binding):
@@ -693,27 +671,12 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             sfb_col = self._sfb_col_in_atom(tx)
             for i in T.unroll(warp_rows):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
-                if sf_layout == "blockscaled_chunk_kmajor":
-                    scale_a_word = self._kmajor_scale_word(scale_m, scale_a_word_k)
-                    SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_a_word // 4, SFA_base_k + scale_a_word % 4)]
-                else:
-                    SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
+                SFA_local_buf[i] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)]
             for j in T.unroll(warp_cols):
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
-                if sf_layout == "blockscaled_chunk_kmajor":
-                    scale_b_word = self._kmajor_scale_word(scale_n, scale_b_word_k)
-                    SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_b_word // 4, SFB_base_k + scale_b_word % 4)]
-                else:
-                    SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)]
+                SFB_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)]
                 if replicate_b:
-                    if sf_layout == "blockscaled_chunk_kmajor":
-                        scale_b_rep_n = scale_n + 8
-                        scale_b_rep_word = self._kmajor_scale_word(scale_b_rep_n, scale_b_word_k)
-                        SFB_rep_local_buf[j] = SFB_data[
-                            tuple(SFB_other) + (SFB_base_n + scale_b_rep_word // 4, SFB_base_k + scale_b_rep_word % 4)
-                        ]
-                    else:
-                        SFB_rep_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)]
+                    SFB_rep_local_buf[j] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)]
 
         return _warp_ldscale_block_scale(
             SFA_local_buf,
