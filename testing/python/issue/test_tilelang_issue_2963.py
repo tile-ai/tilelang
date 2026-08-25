@@ -261,6 +261,116 @@ def test_annotated_pair_layout_preserves_byte_ownership():
 
 
 @tilelang.testing.requires_cuda
+def test_auto_width_search_tries_all_packed_safe_candidates():
+    n = 128
+
+    # Width four gives i and i + 64 different byte owners in each store site;
+    # width two keeps them on one thread, while the branches make runtime
+    # writes unique across the two output buffers.
+    @T.prim_func
+    def kernel(
+        A0: T.Tensor((n // 2,), "uint4"),
+        A1: T.Tensor((n // 2,), "uint4"),
+        B0: T.Tensor((n // 2,), "uint4"),
+        B1: T.Tensor((n // 2,), "uint4"),
+    ):
+        with T.Kernel(1, threads=32):
+            for i in T.Parallel(n):
+                j = i % (n // 2)
+                if i < n // 2:
+                    B0[j] = A0[j]
+                else:
+                    B1[j] = A1[j]
+
+    compiled = tilelang.compile(kernel, out_idx=[2, 3])
+    source0 = torch.arange(n // 4, dtype=torch.uint8, device="cuda")
+    source1 = torch.arange(n // 4 - 1, -1, -1, dtype=torch.uint8, device="cuda")
+    result0, result1 = compiled(source0, source1)
+
+    assert torch.equal(result0.view(torch.uint8), source0)
+    assert torch.equal(result1.view(torch.uint8), source1)
+
+
+@tilelang.testing.requires_cuda
+def test_annotated_shared_layout_revalidates_physical_byte_ownership():
+    n = 128
+
+    def deinterleaved_storage(i):
+        return i // 2 + (i % 2) * (n // 2)
+
+    def logical_pair_owner(i):
+        return i // 2, i % 2
+
+    pair_layout = T.Fragment((n,), forward_fn=logical_pair_owner)
+
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), "uint4"), B: T.Tensor((n,), "uint4")):
+        with T.Kernel(1, threads=64):
+            shared = T.alloc_shared((n,), "uint4")
+            T.annotate_layout({shared: T.Layout((n,), deinterleaved_storage)})
+            for i in T.Parallel(n, loop_layout=pair_layout):
+                shared[i] = A[i]
+            T.sync_threads()
+            for i in T.Parallel(n, loop_layout=pair_layout):
+                B[i] = shared[i]
+
+    with pytest.raises(Exception, match="Cannot safely lower a packed four-bit store"):
+        tilelang.compile(kernel, out_idx=[1])
+
+
+@tilelang.testing.requires_cuda
+def test_byte_safe_annotated_shared_layout_remains_legal():
+    n = 128
+
+    def reversed_byte_storage(i):
+        return 2 * (n // 2 - 1 - i // 2) + i % 2
+
+    def logical_pair_owner(i):
+        return i // 2, i % 2
+
+    pair_layout = T.Fragment((n,), forward_fn=logical_pair_owner)
+
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), "uint4"), B: T.Tensor((n,), "uint4")):
+        with T.Kernel(1, threads=64):
+            shared = T.alloc_shared((n,), "uint4")
+            T.annotate_layout({shared: T.Layout((n,), reversed_byte_storage)})
+            for i in T.Parallel(n, loop_layout=pair_layout):
+                shared[i] = A[i]
+            T.sync_threads()
+            for i in T.Parallel(n, loop_layout=pair_layout):
+                B[i] = shared[i]
+
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    source = torch.arange(n // 2, dtype=torch.uint8, device="cuda")
+    result = compiled(source)
+
+    assert torch.equal(result.view(torch.uint8), source)
+
+
+@tilelang.testing.requires_cuda
+def test_replicated_byte_safe_layout_uses_single_replica_guard():
+    n = 128
+
+    def replicated_pair_owner(i, replica):
+        return (i // 2) % 64 + replica * 64, i % 2
+
+    replicated_pair = T.Fragment((n,), forward_fn=replicated_pair_owner, replicate=2)
+
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), "uint4"), B: T.Tensor((n,), "uint4")):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(n, loop_layout=replicated_pair):
+                B[i] = A[i]
+
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    source = torch.arange(n // 2, dtype=torch.uint8, device="cuda")
+    result = compiled(source)
+
+    assert torch.equal(result.view(torch.uint8), source)
+
+
+@tilelang.testing.requires_cuda
 def test_annotated_one_nibble_per_thread_layout_is_rejected():
     n = 128
 
