@@ -1382,18 +1382,6 @@ private:
       }
     });
 
-    // Reducer combine stores carry an execution-multiplicity marker; loops
-    // containing one are excluded from vectorization until the reduction
-    // axis can be isolated from the vectorized dimension.
-    bool has_reducer = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *attr_stmt = obj.as<AttrStmtNode>()) {
-        if (attr_stmt->attr_key == attr::kParallelMultiplicity) {
-          has_reducer = true;
-        }
-      }
-    });
-
     // Check if vectorizable cast operations exist
     bool has_cast_operations = false;
     PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
@@ -1407,11 +1395,14 @@ private:
       }
     });
 
-    // Decide whether to vectorize:
-    // - Only if there are non-local buffers or vectorizable casts
-    // - AND no reducers are present
-    bool should_vectorize =
-        (has_non_local || has_cast_operations) && !has_reducer;
+    // Decide whether to vectorize: only if there are non-local buffers or
+    // vectorizable casts. Reducer combine stores (multiplicity markers were
+    // already lowered by PartitionLoop) need no special exclusion: the
+    // vectorizer's planner keeps stores whose indices do not advance with
+    // the vectorized loop var scalar, which is exactly the reduction-axis
+    // hazard; output-axis contiguous combine stores vectorize like any
+    // other read-modify-write.
+    bool should_vectorize = has_non_local || has_cast_operations;
     // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
