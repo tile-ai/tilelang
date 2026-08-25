@@ -994,15 +994,17 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       auto must_hoist = [&](const PrimExpr &branch_condition) {
         auto condition_prop = checker.AnalyzeCondition(branch_condition, tx);
 
-        // 估计器会把引用线程变量的条件视为发散；提升前必须再用证明器确认。
+        // The estimate treats any condition using a thread variable as
+        // divergent, so ask the prover before hoisting.
         bool may_hoist =
             condition_prop.depends_on_runtime || condition_prop.requires_hoist;
         bool proven_uniform =
             may_hoist && IsBlockUniformCondition(branch_condition);
         bool is_block_uniform =
             condition_prop.is_block_uniform || proven_uniform;
-        // 无法确定参与线程数时，partial barrier 不能安全生成；只有严格证明
-        // 整个线程块条件一致，才能保留普通的 __syncthreads()。
+        // A partial barrier is unsafe when the participating thread count is
+        // unknown. Keep a plain __syncthreads() only for proven block-uniform
+        // conditions.
         return (condition_prop.depends_on_runtime && !is_block_uniform) ||
                (condition_prop.requires_hoist && !proven_uniform);
       };
@@ -1031,7 +1033,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
         }
 
-        // 为无法安全执行分支内同步的路径，在 if 语句前插入全块同步。
+        // Insert a block-wide sync before the if for branches that cannot
+        // safely synchronize in place.
         insert_syncs(op);
       }
     }

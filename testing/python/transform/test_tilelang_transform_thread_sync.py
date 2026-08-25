@@ -978,7 +978,7 @@ def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
 
 
 def test_safe_else_sync_survives_unsafe_then_condition(capfd):
-    """then 条件不可安全同步时，不应删除 else 中可生成的 partial barrier。"""
+    """An unsafe then condition must not remove a valid else partial barrier."""
     import re
 
     @T.prim_func(private=True)
