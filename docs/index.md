@@ -31,6 +31,7 @@ tutorials/logging
 :caption: TOOLS
 
 tools/index
+tools/compile_only
 tools/analyzer
 tools/layout_visualization
 tools/autodd
