@@ -3257,13 +3257,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string scale_b_byte_id = this->PrintExpr(op->args[19]);
     std::string scale_b_thread_id = this->PrintExpr(op->args[20]);
 
-    bool supported_mxf4nvf4_common =
-        accum_dtype == "float32" && shape == "m16n8k64" && A_layout == "row" &&
-        B_layout == "col" && kind == "mxf4nvf4" && A_dtype == "e2m1" &&
-        B_dtype == "e2m1";
-    bool supported_scale_mode = (scale_vec_size == 4 && scale_type == "ue4m3") ||
-                                (scale_vec_size == 2 && scale_type == "ue8m0") ||
-                                (scale_vec_size == 4 && scale_type == "ue8m0");
+    bool supported_mxf4nvf4_common = accum_dtype == "float32" &&
+                                     shape == "m16n8k64" && A_layout == "row" &&
+                                     B_layout == "col" && kind == "mxf4nvf4" &&
+                                     A_dtype == "e2m1" && B_dtype == "e2m1";
+    bool supported_scale_mode =
+        (scale_vec_size == 4 && scale_type == "ue4m3") ||
+        (scale_vec_size == 2 && scale_type == "ue8m0") ||
+        (scale_vec_size == 4 && scale_type == "ue8m0");
     ICHECK(supported_mxf4nvf4_common && supported_scale_mode)
         << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
         << accum_dtype << ", shape=" << shape << ", A_layout=" << A_layout

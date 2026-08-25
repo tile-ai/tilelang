@@ -37,7 +37,9 @@ def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, b
 
     rows, cols = words.shape
     if cols % block_words != 0:
-        raise ValueError(f"blockscaled_chunk_kmajor scale storage requires K-word columns multiple of {block_words}, got {tuple(words.shape)}")
+        raise ValueError(
+            f"blockscaled_chunk_kmajor scale storage requires K-word columns multiple of {block_words}, got {tuple(words.shape)}"
+        )
     if rows % block_rows != 0:
         padded_rows = (rows + block_rows - 1) // block_rows * block_rows
         padded = torch.zeros((padded_rows, cols), dtype=words.dtype, device=words.device)
