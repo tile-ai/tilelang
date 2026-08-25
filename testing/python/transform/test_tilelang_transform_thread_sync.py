@@ -977,6 +977,31 @@ def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
     assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
 
 
+def test_safe_else_sync_survives_unsafe_then_condition(capfd):
+    """An unsafe then condition must not remove a valid else partial barrier."""
+    import re
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0 or tx >= 33:
+            l[0] = T.float32(0)
+        else:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[33 - tx]
+
+    s = run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a 32-thread barrier:\n{s}"
+    assert s.index('T.tvm_storage_sync("shared"') > s.index("else:"), f"Barrier must stay in else branch:\n{s}"
+    assert "no longer separates" not in warnings, f"Safe else branch should not be hoisted:\n{warnings}"
+
+
 def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
     """A premise can make a threadIdx-dependent guard provably block uniform.
 
