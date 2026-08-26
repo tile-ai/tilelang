@@ -29,6 +29,12 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
     mod = tilelang.transform.VerifyReducerEpoch()(mod)
+    # Warn on buffers that are read before anything writes them.
+    # Runs after the reducer passes above, so legacy reducers have been
+    # canonicalized, and before PipelinePlanning and LowerTileOp, while
+    # loop bodies are still in source order and tile ops still declare
+    # their access regions.
+    mod = tilelang.transform.VerifyBufferInit()(mod)
 
     mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)

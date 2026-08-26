@@ -530,6 +530,13 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
   }
 
+  PrimExpr VisitExpr_(const SelectNode *node) final {
+    // Select stays an expression-level ternary. Constrain its vector width
+    // using the same condition-uniformity rule as IfThenElse.
+    CheckConditionVectorized(node->condition);
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+  }
+
   static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
     const auto *ptr_call = expr.as<CallNode>();
     if (ptr_call == nullptr) {
@@ -939,9 +946,12 @@ private:
         CanProveIndependent(elem_offset, inner_for_->loop_var, analyzer_);
     // For ordinary BufferStore, if indices are invariant or independent with
     // loop_var, vectorization would turn scalar lane stores into a broadcast
-    // store. Keep those scalar. (Reducer v2 combine stores never reach the
-    // vectorizer: loops carrying a multiplicity marker are excluded from
-    // vectorization by LowerTileOp.)
+    // store. Keep those scalar. This is also the guard that keeps reducer
+    // combine stores (read-modify-write chains) correct: a store whose index
+    // does not advance with the loop var is a reduction along the vectorized
+    // axis, and vectorizing it would collapse the dependent chain into
+    // last-lane-wins. Output-axis combines, whose target does advance with
+    // the loop var, vectorize like any other store.
     if (is_store && (is_invariant || is_independent)) {
       return {1, /*requires_scalarization=*/true};
     }

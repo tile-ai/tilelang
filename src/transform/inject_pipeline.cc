@@ -472,7 +472,9 @@ SBlock MakeBlock(const Stmt &body,
   }
   if (!block.defined()) {
     block = SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                   /*name_hint=*/"", /*body*/ body);
+                   /*name_hint=*/"", /*body*/ body, /*init=*/std::nullopt,
+                   /*alloc_buffers=*/{}, /*match_buffers=*/{},
+                   /*annotations=*/{}, /*span=*/body->span);
   }
   Array<Array<BufferRegion>> access =
       GetSBlockReadWriteRegion(block, buffer_data_to_buffer);
@@ -3034,7 +3036,8 @@ private:
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
-                     std::move(new_loop), std::nullopt, preserved_annotations);
+                     std::move(new_loop), std::nullopt, preserved_annotations,
+                     std::nullopt, pipeline_loop_->span);
     }
     Stmt result = SBlockRealize({}, Bool(true),
                                 MakeBlock(new_loop, buffer_data_to_buffer_));

@@ -140,7 +140,7 @@ def _make_auto_vec_fma_kernel(dtype_tl, width: int = 4):
     return main
 
 
-def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False):
+def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False, annotations=None):
     """Build a row reduction whose local fragment is contiguous per thread."""
 
     @T.prim_func
@@ -153,15 +153,15 @@ def _make_auto_vec_reduce_kernel(reduce_func, *, nan_propagate=False):
             dst = T.alloc_fragment((M,), T.float32)
             T.copy(A, src)
             if nan_propagate:
-                reduce_func(src, dst, dim=1, nan_propagate=True)
+                reduce_func(src, dst, dim=1, nan_propagate=True, annotations=annotations)
             else:
-                reduce_func(src, dst, dim=1)
+                reduce_func(src, dst, dim=1, annotations=annotations)
             T.copy(dst, C)
 
     return main
 
 
-def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threads=256):
+def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threads=256, annotations=None):
     """Build a reduction that shuffles packed values between threads."""
 
     @T.prim_func
@@ -173,7 +173,7 @@ def _make_auto_vec_batched_reduce_kernel(reduce_func, *, rows=M, width=64, threa
             src = T.alloc_shared((rows, width), T.float32)
             dst = T.alloc_fragment((rows,), T.float32)
             T.copy(A, src, disable_tma=True)
-            reduce_func(src, dst, dim=1, batch=2)
+            reduce_func(src, dst, dim=1, batch=2, annotations=annotations)
             T.copy(dst, C)
 
     return main
@@ -383,6 +383,29 @@ def test_codegen_auto_vec_reduce_f32_sm100(op_name, reduce_func, packed_ops):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name,reduce_func", [("sum", T.reduce_sum), ("abssum", T.reduce_abssum)])
+def test_codegen_auto_vec_reduce_f32_disable_fadd2(op_name, reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func, annotations={"enable_fadd2": False})
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::add2" not in src, f"tl::add2 should be disabled for float32 {op_name} reduction"
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_reduce_f32_disable_fadd2_does_not_disable_max2():
+    func = _make_auto_vec_reduce_kernel(T.reduce_max, annotations={"enable_fadd2": False})
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::max2" in src
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_auto_vec_batched_reduce_f32_disable_fadd2():
+    func = _make_auto_vec_batched_reduce_kernel(T.reduce_sum, annotations={"enable_fadd2": False})
+    src = _lower_to_cuda_source(func, target=SM100_TARGET)
+    assert "tl::add2" not in src
+    assert "SumOp_f32x2" not in src
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op_name,reduce_func,packed_ops", _REDUCE_OPS, ids=[op[0] for op in _REDUCE_OPS])
 def test_codegen_auto_vec_reduce_f32_no_sm80(op_name, reduce_func, packed_ops):
     func = _make_auto_vec_reduce_kernel(reduce_func)
@@ -476,6 +499,18 @@ def test_correctness_fma2(dtype_name):
 @pytest.mark.parametrize("op_name,reduce_func", [(op_name, reduce_func) for op_name, reduce_func, _ in _REDUCE_OPS])
 def test_correctness_auto_vec_reduce_f32(op_name, reduce_func):
     func = _make_auto_vec_reduce_kernel(reduce_func)
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
+    a = torch.randn((M, 128), device="cuda", dtype=torch.float32)
+    result = kernel(a)
+    reference = _torch_reduce(a, op_name)
+    torch.testing.assert_close(result, reference, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@pytest.mark.parametrize("op_name,reduce_func", [("sum", T.reduce_sum), ("abssum", T.reduce_abssum)])
+def test_correctness_auto_vec_reduce_f32_disable_fadd2(op_name, reduce_func):
+    func = _make_auto_vec_reduce_kernel(reduce_func, annotations={"enable_fadd2": False})
     kernel = tilelang.compile(func, out_idx=[1], target="cuda")
     a = torch.randn((M, 128), device="cuda", dtype=torch.float32)
     result = kernel(a)

@@ -251,21 +251,25 @@ def retrieve_shape(obj: BufferLikeType) -> list:
 
 def retrieve_stride(obj: BufferLikeType) -> list:
     """
-    Retrieve row-major strides for a buffer-like object based on its buffer.shape.
+    Retrieve strides for a buffer-like object.
 
-    For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
+    For BufferRegion and BufferLoad, uses the underlying buffer. Declared
+    strides take precedence, with compact row-major strides as the fallback.
     """
     # Imported lazily to avoid a cycle: `tilelang.language` imports this module.
     from tilelang.language.eager.utils import construct_strides
 
     if isinstance(obj, tirx.Buffer):
-        shape = obj.shape
+        buffer = obj
     elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
-        shape = obj.buffer.shape
+        buffer = obj.buffer
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
 
-    return list(construct_strides(shape))
+    if len(buffer.strides) == len(buffer.shape) and len(buffer.strides) > 0:
+        return list(buffer.strides)
+
+    return list(construct_strides(buffer.shape))
 
 
 def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, access_type: str = "r") -> PrimExpr:

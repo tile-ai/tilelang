@@ -226,6 +226,9 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "int4":
         logger.info("torch doesn't support int4, using int8 as storage dtype.")
         return torch.int8
+    elif dtype_str == "uint4":
+        logger.info("torch doesn't support uint4, using uint8 as storage dtype.")
+        return torch.uint8
     elif dtype_str == "handle":
         return None
     elif dtype_str in _STR_TO_TORCH_DTYPE:

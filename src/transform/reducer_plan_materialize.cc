@@ -384,6 +384,67 @@ bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
 
 bool IsPowerOfTwo(int64_t x) { return x > 0 && (x & (x - 1)) == 0; }
 
+/*! \brief Wide-plan destination override. The wide finalize publishes through
+ *  an `accumulator -> dst` copy. When LayoutInference gave dst a distributed
+ *  free-level layout (picked only to serve the later `dst -> global` copy),
+ *  that publication copy partitions by dst ownership and reads the fully
+ *  replicated accumulator registers at thread-dependent physical indices;
+ *  ptxas lowers the whole array to local memory. When the destination chain
+ *  is unconstrained (finalize-written, read only by copies to global or into
+ *  further unconstrained fragments), those free-level layouts were arbitrary
+ *  choices: replace them with participant-wide replication so every
+ *  fragment-to-fragment copy on the chain lowers to per-thread identity
+ *  slots and the final global publication takes the static-index
+ *  replica-zero path. Returns the layout entries to publish, or nothing when
+ *  the chain has other consumers (their inferred layouts then stand). */
+std::optional<std::vector<std::pair<Buffer, Fragment>>>
+TryWideFinalizeDstOverride(const EpochInfo &epoch,
+                           const Map<Buffer, Layout> &known_layouts,
+                           const UseGraph &use_graph) {
+  if (!epoch.dst.defined() || !IsFragmentBuffer(epoch.dst) ||
+      epoch.thread_extent <= 0) {
+    return std::nullopt;
+  }
+  // Without an inferred layout MaterializeFinalize already assigns
+  // participant-wide replication itself.
+  if (!known_layouts.count(epoch.dst)) {
+    return std::nullopt;
+  }
+  std::vector<Buffer> chain;
+  if (!CollectOverrideChain(epoch.dst->data.get(), use_graph, &chain)) {
+    return std::nullopt;
+  }
+  std::vector<std::pair<Buffer, Fragment>> entries;
+  auto add_entry = [&](const Buffer &buffer) -> bool {
+    for (const auto &dim : buffer->shape) {
+      if (!as_const_int(dim)) {
+        return false;
+      }
+    }
+    Fragment layout = Fragment::FullyReplicated(
+        buffer->shape, IntImm(DataType::Int(32), epoch.thread_extent));
+    if (epoch.thread_min != 0) {
+      // Copy loop layouts derived from these fragments carry the thread
+      // range; warp-specialized participants need the real one, not
+      // FullyReplicated's default [0, extent).
+      layout = layout->BindThreadRange(Range(
+          IntImm(DataType::Int(32), epoch.thread_min),
+          IntImm(DataType::Int(32), epoch.thread_min + epoch.thread_extent)));
+    }
+    entries.emplace_back(buffer, layout);
+    return true;
+  };
+  if (!add_entry(epoch.dst)) {
+    return std::nullopt;
+  }
+  for (const Buffer &staged : chain) {
+    if (!add_entry(staged)) {
+      return std::nullopt;
+    }
+  }
+  return entries;
+}
+
 /*! \brief A contribution is replica-safe when every physical execution of
  *  the same logical iteration computes the same value: pure expressions of
  *  loop vars plus loads from buffers whose replicas are value-equal by
@@ -827,9 +888,23 @@ public:
           }
         }
       } else {
+        // Same pre-traversal registration rationale as the narrow overrides
+        // above; per-buffer participant-wide replication instead of the
+        // induced layout.
+        auto wide_override =
+            TryWideFinalizeDstOverride(epoch, known_layouts, use_graph);
+        if (wide_override.has_value()) {
+          for (const auto &[buffer, layout] : *wide_override) {
+            rewriter.extra_layout_entries_.Set(buffer, layout);
+          }
+        }
         std::string msg =
             "[ReducerPlan] `" + std::string(epoch.buffer->name) +
             "`: wide plan (FullParticipant); narrow rejected: " + reason;
+        if (wide_override.has_value()) {
+          msg += "; unconstrained finalize destination re-layouted to "
+                 "participant-wide replication";
+        }
         if (verbose) {
           LOG(INFO) << msg;
         } else {
@@ -854,6 +929,12 @@ private:
     Fragment layout;
     ReducerV2OpType op;
     Optional<PrimExpr> seed;
+    // Per-thread register capturing the seed expression at the init site.
+    // The epoch may reopen once per iteration of an enclosing serial loop,
+    // and the seed expression (e.g. a running maximum) may be overwritten
+    // between init and finalize — the finalize-time combine must read the
+    // value the epoch opened with.
+    Buffer seed_buffer;
     bool narrow{false};
     std::vector<std::pair<int, int>> steps;
     // Packed accumulation: updates RMW `packed_buffer[slot, lane_var % 2]`;
@@ -911,6 +992,10 @@ private:
           new_allocs.push_back(it->second.packed_buffer);
           layout_map.Set(it->second.packed_buffer, it->second.packed_layout);
         }
+        if (it->second.seed_buffer.defined()) {
+          // Plain per-thread register; no fragment layout to publish.
+          new_allocs.push_back(it->second.seed_buffer);
+        }
         changed = true;
       } else {
         new_allocs.push_back(buffer);
@@ -964,18 +1049,33 @@ private:
     const auto *var = old_buffer->data.get();
     ICHECK(reducer_info_.count(var))
         << "reducer_init on unknown reducer `" << old_buffer << "`";
-    ICHECK(!plans_.count(var))
-        << "double reducer_init on `" << old_buffer
-        << "` (should have been rejected by VerifyReducerEpoch)";
+    if (plans_.count(var)) {
+      // VerifyReducerEpoch guarantees one epoch site per allocation in the
+      // code the user wrote, but software pipelining / unrolling may have
+      // multi-versioned the enclosing loop since, duplicating the site.
+      // Every copy shares the allocation's plan; each emits its own
+      // capture+fill.
+      return EmitInitStmts(plans_.at(var), call);
+    }
 
     Plan plan;
     plan.old_buffer = old_buffer;
     const auto &info = reducer_info_.at(var);
     plan.op = ParseReducerV2OpType(info.Get("op").value().cast<String>());
     if (call->args.size() >= 2) {
-      // Logical starting value from T.reducer_init(acc, init): combined
-      // exactly once per logical output at finalize time.
-      plan.seed = call->args[1];
+      // Logical starting value from T.reducer_init(acc, init): captured
+      // into a per-thread register here at the init site, and combined
+      // exactly once per logical output at finalize time. Capturing (rather
+      // than re-evaluating at finalize) keeps a loop-variant seed correct
+      // when the epoch sits inside a serial loop.
+      Var seed_var(old_buffer->data->name_hint + "_seed",
+                   PointerType(PrimType(old_buffer->dtype), "local"));
+      plan.seed_buffer =
+          Buffer(seed_var, old_buffer->dtype, {IntImm(DataType::Int(32), 1)},
+                 /*strides=*/{}, old_buffer->elem_offset,
+                 old_buffer->name + "_seed", old_buffer->data_alignment,
+                 old_buffer->offset_factor, old_buffer->buffer_type);
+      plan.seed = BufferLoad(plan.seed_buffer, {make_zero(DataType::Int(32))});
     }
 
     auto narrow_it = narrow_decisions_.find(var);
@@ -1035,17 +1135,32 @@ private:
                  old_buffer->offset_factor, old_buffer->buffer_type);
     }
     plans_.emplace(var, plan);
-    const Plan &stored = plans_.at(var);
+    return EmitInitStmts(plans_.at(var), call);
+  }
 
+  /*! \brief The statements a reducer_init site lowers to: the identity fill
+   *  of the physical partials, preceded by the seed capture when the epoch
+   *  declares a starting value. */
+  Stmt EmitInitStmts(const Plan &stored, const CallNode *call) {
     // Every participant starts from the combine identity; the seed is
-    // combined exactly once at finalize. Packed plans accumulate into the
-    // lane buffer (`new_buffer` is fully written by the finalize fold).
+    // captured here and combined exactly once at finalize. Packed plans
+    // accumulate into the lane buffer (`new_buffer` is fully written by the
+    // finalize fold).
     const Buffer &init_target =
         stored.packed ? stored.packed_buffer : stored.new_buffer;
     PrimExpr identity = ReducerV2Identity(stored.op, init_target->dtype);
-    return Evaluate(
-        Call(DataType::Handle(), Fill::Get(),
-             {MakeFullRegion(init_target, kAccessWrite), identity}));
+    Stmt fill =
+        Evaluate(Call(DataType::Handle(), Fill::Get(),
+                      {MakeFullRegion(init_target, kAccessWrite), identity}));
+    if (stored.seed_buffer.defined()) {
+      ICHECK_GE(call->args.size(), 2)
+          << "reducer_init on `" << stored.old_buffer
+          << "`: duplicated epoch sites disagree about the seed";
+      Stmt capture = BufferStore(stored.seed_buffer, VisitExpr(call->args[1]),
+                                 {make_zero(DataType::Int(32))});
+      return SeqStmt({capture, fill});
+    }
+    return fill;
   }
 
   Stmt MaterializeUpdate(const CallNode *call) {

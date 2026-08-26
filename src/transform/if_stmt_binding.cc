@@ -135,9 +135,9 @@ private:
     Array<BufferRegion> writes_;
   };
 
-  static Stmt MakeSeq(Array<Stmt> seq) {
+  static Stmt MakeSeq(Array<Stmt> seq, Span span = Span()) {
     ICHECK(!seq.empty());
-    return seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq));
+    return seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq), span);
   }
 
   std::pair<Array<BufferRegion>, Array<BufferRegion>>
@@ -213,7 +213,7 @@ private:
     for (const Stmt &stmt : stmts) {
       guarded_stmts.push_back(GuardStmt(guard_condition, stmt, span));
     }
-    return MakeSeq(std::move(guarded_stmts));
+    return MakeSeq(std::move(guarded_stmts), span);
   }
 
   Stmt BindIfStmtLegacy(const Stmt &body, const PrimExpr &condition,
@@ -234,7 +234,7 @@ private:
         for (; i < n; ++i) {
           bind_scope.push_back(seq_stmt->seq[i]);
         }
-        guarded_bodies.push_back(MakeSeq(std::move(bind_scope)));
+        guarded_bodies.push_back(MakeSeq(std::move(bind_scope), span));
       }
       return GuardStmts(guarded_bodies, condition, span);
     }
@@ -279,7 +279,7 @@ private:
     }
 
     if (!bind_scope.empty()) {
-      guarded_bodies.push_back(MakeSeq(std::move(bind_scope)));
+      guarded_bodies.push_back(MakeSeq(std::move(bind_scope), span));
     }
     if (guarded_bodies.empty()) {
       return Evaluate(0, span);
@@ -328,7 +328,7 @@ private:
         buffer_data_to_buffer_.erase(it->first);
       }
     }
-    return SeqStmt(std::move(seq));
+    return SeqStmt(std::move(seq), op->span);
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {

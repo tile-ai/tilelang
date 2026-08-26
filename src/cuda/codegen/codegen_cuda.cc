@@ -38,6 +38,13 @@ bool IsValidCPAsyncTransferBytes(int64_t bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }
 
+bool IsProvablyDivisible(const PrimExpr &expr, int64_t divisor) {
+  ICHECK_GT(divisor, 0);
+  arith::Analyzer analyzer;
+  arith::ModularSet modular_set = analyzer.modular_set(expr);
+  return modular_set->coeff % divisor == 0 && modular_set->base % divisor == 0;
+}
+
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   const auto *ptr_call = expr.as<CallNode>();
   if (ptr_call == nullptr) {
@@ -959,6 +966,11 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
           os << "char";
         }
         return;
+      } else if (t.lanes() == 2) {
+        // Two packed 4-bit lanes occupy exactly one byte.
+        enable_int8_ = true;
+        os << "int8_t";
+        return;
       } else if (t.lanes() == 4) {
         os << "int16_t";
         return;
@@ -1089,6 +1101,15 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     }
   }
   LOG(FATAL) << "Cannot convert type " << t << " to CUDA type";
+}
+
+void CodeGenTileLangCUDA::PrintVecConstructor(DataType t,
+                                              std::ostream &os) { // NOLINT(*)
+  if ((t.is_int() || t.is_uint()) && t.bits() == 4 && t.lanes() == 2) {
+    os << (t.is_uint() ? "tl_pack_uint4x2" : "tl_pack_int4x2");
+    return;
+  }
+  CodeGenC::PrintVecConstructor(t, os);
 }
 
 void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
@@ -1320,7 +1341,20 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
   ICHECK(i >= 0 && i < 256 / t.bits())
       << "i: " << i << " t: " << t << " t.bits(): " << t.bits()
       << " t.lanes(): " << t.lanes();
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
+  if (is_packed_int4) {
+    std::ostringstream packed_byte;
+    packed_byte << "((const unsigned char*)(&(" << vec << ")))[" << i / 2
+                << "]";
+    int shift = i % 2 * 4;
+    if (t.is_uint()) {
+      os << "((static_cast<unsigned int>(" << packed_byte.str() << ") >> "
+         << shift << ") & 0x0fu)";
+    } else {
+      os << "((static_cast<int>((static_cast<unsigned int>("
+         << packed_byte.str() << ") >> " << shift << ") & 0x0fu) ^ 8) - 8)";
+    }
+  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
       os << vec << "." << access[i % t.lanes()];
@@ -1410,7 +1444,20 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
   ICHECK(i >= 0 && i < 256 / t.bits());
-  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+  bool is_packed_int4 = t.bits() == 4 && (t.is_int() || t.is_uint());
+  if (is_packed_int4) {
+    std::ostringstream packed_byte;
+    packed_byte << "((unsigned char*)(&(" << vec << ")))[" << i / 2 << "]";
+    stream << packed_byte.str() << " = ";
+    // Packed vector temporaries are initialized in ascending lane order.
+    // Each even lane starts a new byte; each odd lane preserves the low
+    // nibble written immediately before it.
+    if (i % 2 != 0) {
+      stream << "(" << packed_byte.str() << " & 0x0fu) | ";
+    }
+    stream << "((static_cast<unsigned int>(" << value << ") & 0x0fu) << "
+           << i % 2 * 4 << ");\n";
+  } else if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "="
              << "(" << value << ");\n";
@@ -5183,8 +5230,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
 
   // ICHECK_LE(lanes, 8) << "Translate Ramp Node " << GetRef<Ramp>(op)
   //                    << "error: " << lanes << " exceeds max ramp lanes 8.";
-  os << "(make_";
-  PrintType(op->dtype, os);
+  bool is_packed_int4x2 = (op->dtype.is_int() || op->dtype.is_uint()) &&
+                          op->dtype.bits() == 4 && op->dtype.lanes() == 2;
+  os << "(";
+  if (is_packed_int4x2) {
+    PrintVecConstructor(op->dtype, os);
+  } else {
+    os << "make_";
+    PrintType(op->dtype, os);
+  }
   os << "(";
   for (int i = 0; i < lanes; i++) {
     os << "(" << PrintExpr(op->base) << ")"
@@ -5207,18 +5261,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
 
-  if ((element_dtype == DataType::Int(4) ||
-       element_dtype == DataType::UInt(4)) &&
-      element_dtype.is_scalar() && value_dtype.is_scalar()) {
-    std::string idx_str = PrintExpr(index);
-    std::string vid = GetVarID(buffer_var.get());
+  const bool is_packed_int4_buffer = (element_dtype == DataType::Int(4) ||
+                                      element_dtype == DataType::UInt(4)) &&
+                                     element_dtype.is_scalar();
+  const bool is_packed_int4_vector = is_packed_int4_buffer &&
+                                     value_dtype.lanes() > 1 &&
+                                     value_dtype.element_of() == element_dtype;
+  const bool is_packed_int4x2 =
+      is_packed_int4_vector && value_dtype.lanes() == 2;
+
+  std::string vid = GetVarID(buffer_var.get());
+  auto print_packed_int4_load = [&](const std::string &idx_str,
+                                    std::ostream &stream) {
     if (element_dtype.is_uint()) {
-      os << "tl_uint4_packed_load((const unsigned char*)" << vid << ", "
-         << idx_str << ")";
+      stream << "tl_uint4_packed_load((const unsigned char*)" << vid << ", "
+             << idx_str << ")";
     } else {
-      os << "tl_int4_packed_load((const signed char*)" << vid << ", " << idx_str
-         << ")";
+      stream << "tl_int4_packed_load((const signed char*)" << vid << ", "
+             << idx_str << ")";
     }
+  };
+
+  if (is_packed_int4_buffer && value_dtype.is_scalar()) {
+    print_packed_int4_load(PrintExpr(index), os);
     return;
   }
 
@@ -5250,43 +5315,81 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     arith::PVar<PrimExpr> base;
     int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
     if (arith::ramp(base, 1, ramp_lanes).Match(index)) {
-      const RampNode *ramp = index.as<RampNode>();
-      ICHECK(ramp);
       can_vector_load = true;
-      // arith::ModularSet me = arith::Analyzer().modular_set(ramp->base);
-      // The condition: {k * coeff + base} divisible by the alignment for any k
-      // if (me->coeff % op->dtype.lanes() == 0 && me->base % op->dtype.lanes()
-      // == 0) {
-      //   can_vector_load = true;
-      // }
+
+      // A direct packed int4/uint4 vector load reinterprets the underlying
+      // bytes as one vector carrier, so its logical base must be aligned to
+      // the full vector lane count.
+      if (is_packed_int4_vector) {
+        can_vector_load = IsProvablyDivisible(base.Eval(), value_dtype.lanes());
+      }
     }
 
     if (can_vector_load) {
       std::string ref = GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
       HandleVolatileLoads(ref, op, os);
     } else {
+      if (is_packed_int4_vector && !is_packed_int4x2) {
+        // A packed vector load that cannot use a directly aligned carrier is
+        // still safe to scalarize: loads do not introduce byte-level
+        // read-modify-write races. Load each logical nibble and assemble the
+        // carrier in a temporary.
+        std::string result = name_supply_->FreshName("_");
+        this->PrintIndent();
+        this->PrintType(value_dtype, stream);
+        stream << ' ' << result << ";\n";
+        int ssa_scope = BeginScope();
+        const RampNode *ramp = index.as<RampNode>();
+        std::string sindex;
+        if (ramp == nullptr) {
+          sindex = SSAGetID(PrintExpr(index), index.dtype());
+        }
+        for (int i = 0; i < lanes; ++i) {
+          std::ostringstream lane_index;
+          if (ramp != nullptr) {
+            PrimExpr lane =
+                arith::Analyzer().Simplify(ramp->base + ramp->stride * i);
+            lane_index << PrintExpr(lane);
+          } else {
+            PrintVecElemLoad(sindex, index.dtype(), i, lane_index);
+          }
+          std::ostringstream lane_value;
+          print_packed_int4_load(lane_index.str(), lane_value);
+          PrintVecElemStore(result, value_dtype, i, lane_value.str());
+        }
+        EndScope(ssa_scope);
+        os << result;
+        return;
+      }
       std::ostringstream svalue_expr;
       std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
-      std::string vid = GetVarID(buffer_var.get());
       DataType elem_type = op->dtype.element_of();
       for (int i = 0; i < lanes; ++i) {
         std::ostringstream value_temp;
-        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
-          value_temp << "((";
-          if (buffer_var.get()->dtype.is_handle()) {
-            auto it = alloc_storage_scope_.find(buffer_var.get());
-            if (it != alloc_storage_scope_.end()) {
-              PrintStorageScope(it->second, value_temp);
-            }
-          }
-          PrintType(elem_type, value_temp);
-          value_temp << "*)" << vid << ')';
+
+        if (is_packed_int4x2) {
+          std::ostringstream lane_index;
+          PrintVecElemLoad(sindex, index.dtype(), i, lane_index);
+          print_packed_int4_load(lane_index.str(), value_temp);
         } else {
-          value_temp << vid;
+          if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+            value_temp << "((";
+            if (buffer_var.get()->dtype.is_handle()) {
+              auto it = alloc_storage_scope_.find(buffer_var.get());
+              if (it != alloc_storage_scope_.end()) {
+                PrintStorageScope(it->second, value_temp);
+              }
+            }
+            PrintType(elem_type, value_temp);
+            value_temp << "*)" << vid << ')';
+          } else {
+            value_temp << vid;
+          }
+          value_temp << '[';
+          PrintVecElemLoad(sindex, index.dtype(), i, value_temp);
+          value_temp << ']';
         }
-        value_temp << '[';
-        PrintVecElemLoad(sindex, index.dtype(), i, value_temp);
-        value_temp << ']';
+
         PrintVecElemLoadExpr(op->dtype, i, value_temp.str(), svalue_expr);
       }
       os << svalue_expr.str();
@@ -5304,9 +5407,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   PrimExpr index_expr = op->indices[0];
   Var buffer_var = op->buffer->data;
 
-  if ((element_dtype == DataType::Int(4) ||
-       element_dtype == DataType::UInt(4)) &&
-      element_dtype.is_scalar() && value_dtype.is_scalar()) {
+  const bool is_packed_int4_buffer = (element_dtype == DataType::Int(4) ||
+                                      element_dtype == DataType::UInt(4)) &&
+                                     element_dtype.is_scalar();
+  const bool is_packed_int4_vector = is_packed_int4_buffer &&
+                                     value_dtype.lanes() > 1 &&
+                                     value_dtype.element_of() == element_dtype;
+
+  if (is_packed_int4_buffer && value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(index_expr);
     std::string value = this->PrintExpr(op->value);
     std::string vid = GetVarID(buffer_var.get());
@@ -5353,7 +5461,18 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   } else {
     arith::PVar<PrimExpr> base;
     int ramp_lanes = value_dtype.lanes() / element_dtype.lanes();
-    if (arith::ramp(base, 1, ramp_lanes).Match(index_expr)) {
+    bool is_unit_stride_ramp =
+        arith::ramp(base, 1, ramp_lanes).Match(index_expr);
+    if (is_packed_int4_vector &&
+        (!is_unit_stride_ramp ||
+         !IsProvablyDivisible(base.Eval(), value_dtype.lanes()))) {
+      LOG(FATAL)
+          << "Packed int4/uint4 vector stores require a unit-stride ramp "
+             "with a logical base provably divisible by the vector lane "
+             "count, but got "
+          << index_expr;
+    }
+    if (is_unit_stride_ramp) {
       std::string value = this->PrintExpr(op->value);
       this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
     } else {
@@ -5552,6 +5671,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const ShuffleNode *op,
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4 &&
+      lanes == 2) {
+    std::string value = PrintExpr(op->value);
+    PrintVecConstructor(op->dtype, os);
+    os << '(' << value << ", " << value << ')';
+    return;
+  }
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
     const int64_t *p = as_const_int(op->value);
     if (p) {
@@ -5952,6 +6078,15 @@ void CodeGenTileLangCUDA::PrintVecElemLoadExpr(DataType t, int i,
                                                const std::string &value,
                                                std::ostream &os) {
   ICHECK_GT(t.lanes(), 1);
+  if ((t.is_int() || t.is_uint()) && t.bits() == 4 && t.lanes() == 2) {
+    if (i == 0) {
+      PrintVecConstructor(t, os);
+      os << '(';
+    }
+    os << value;
+    os << (i == t.lanes() - 1 ? ")" : ",");
+    return;
+  }
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (!(t.lanes() == 2 || t.lanes() == 3)) {
       if (i != 0) {
@@ -6196,6 +6331,8 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   // Sync-insertion passes may split the block containing rng_init across
   // __syncthreads(), so a declaration emitted at the call site can go out
   // of scope before later rng_rand / rng_rand_float uses.
+  // Emit the function-entry #line before the pre-scan output below.
+  this->PreFunctionBody(f);
   rng_state_name_map_.clear();
   tirx::PostOrderVisit(f->body, [this](const ObjectRef &n) {
     const auto *call = n.as<CallNode>();
@@ -6208,7 +6345,6 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
                  << name << ";\n";
     rng_state_name_map_.emplace(call, std::move(name));
   });
-  this->PreFunctionBody(f);
   int func_scope = this->BeginScope();
   this->PrintStmt(f->body);
   this->EndScope(func_scope);

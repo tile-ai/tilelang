@@ -192,7 +192,10 @@ them with a per‑config timeout. On CUDA, each worker sets the current device t
 avoid context issues.
 
 Notes
-- `timeout` uses POSIX signals; on non‑Unix systems, it may not take effect.
+- `timeout` is enforced portably by running each benchmark call in a daemon
+  thread and waiting for at most the configured duration. A timed-out native or
+  CUDA call cannot be forcibly stopped, so its daemon thread may continue until
+  the underlying call returns.
 - Logs are written to `autotuner.log` in the working directory.
 
 ## Caching
@@ -209,7 +212,6 @@ Disk cache contents (per key)
 
 Control via env vars (tilelang.env)
 - `TILELANG_CACHE_DIR` (default `~/.tilelang/cache`)
-- `TILELANG_TMP_DIR` (default `$TILELANG_CACHE_DIR/tmp`)
 - Disable all kernel caches: `TILELANG_DISABLE_CACHE=1`
 - Disable autotune disk cache only: `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`
 

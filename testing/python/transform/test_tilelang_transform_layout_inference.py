@@ -110,6 +110,36 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
+def test_register_count_is_default_layout_cost_model():
+    @T.prim_func
+    def main(
+        S: T.Tensor((2,), T.float32),
+        Out: T.Tensor((2, 2560), T.float32),
+    ):
+        with T.Kernel(1, threads=256):
+            s_frag = T.alloc_fragment((2,), T.float32)
+            for i in T.Parallel(2):
+                s_frag[i] = S[i]
+            for i, j in T.Parallel(2, 2560):
+                Out[i, j] = s_frag[i] * 2.0
+
+    target = auto_target
+
+    def infer(pass_configs=None):
+        with target, tvm.transform.PassContext(config=pass_configs or {}):
+            mod = tvm.IRModule({"main": main})
+            mod = tvm.tirx.transform.BindTarget(target)(mod)
+            mod = tl.transform.MaterializeKernelLaunch()(mod)
+            return tl.transform.LayoutInference()(mod)
+
+    default = infer()
+    register_count = infer({"tl.layout_cost_model": "register-count"})
+    io_aware = infer({"tl.layout_cost_model": "io-aware"})
+
+    tvm.ir.assert_structural_equal(default, register_count)
+    assert not tvm.ir.structural_equal(default, io_aware)
+
+
 def test_static_ragged_copy_minimizes_full_thread_padding():
     n = 514
     threads = 128

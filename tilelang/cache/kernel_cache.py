@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
@@ -27,6 +28,7 @@ from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.diagnostics import jit_phase
+from tilelang.transform.pass_config import normalize_pass_configs
 from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 
@@ -52,6 +54,7 @@ class KernelCache:
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
     resource_usage_path = "resource_usage.json"
+    manifest_path = "manifest.json"
     cache_root_dir = "kernels"
     staging_root_dir = ".staging"
 
@@ -192,7 +195,6 @@ class KernelCache:
     @staticmethod
     def _create_dirs():
         os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
-        os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
         os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
         os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
@@ -324,7 +326,14 @@ class KernelCache:
             Default execution backend. Defaults to "auto".
         TILELANG_VERBOSE : str
             Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
+        TILELANG_LAYOUT_COST_MODEL : str
+            Default value for the `tl.layout_cost_model` pass config when it is
+            not set explicitly in `pass_configs`. Unset keeps the built-in default.
         """
+
+        # Resolve env-var-derived pass-config defaults up front so they are
+        # reflected in the cache key.
+        pass_configs = normalize_pass_configs(pass_configs)
 
         if backend_context is None:
             if target is None:
@@ -484,20 +493,62 @@ class KernelCache:
         return binary
 
     @staticmethod
-    def _safe_write_file(path: str, mode: str, operation: Callable):
-        # Random a temporary file within the same FS as the cache directory
-        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}")
-        with open(temp_path, mode) as temp_file:
-            operation(temp_file)
+    def _fsync_file_contents(path: str):
+        """Flush a written file's data to stable storage before publishing it."""
+        with open(path, "rb+") as file:
+            os.fsync(file.fileno())
 
-        # Use atomic POSIX replace, so other processes cannot see a partial write
-        os.replace(temp_path, path)
+    @staticmethod
+    def _fsync_dir(path: str):
+        """Best-effort directory fsync; unsupported on some platforms/filesystems."""
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            with contextlib.suppress(OSError):
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _hash_file(path: str) -> str:
+        file_hash = sha256()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(1 << 20), b""):
+                file_hash.update(chunk)
+        return file_hash.hexdigest()
+
+    @staticmethod
+    def _safe_write_file(path: str, mode: str, operation: Callable):
+        """Atomically write a cache file through a temporary sibling."""
+        directory, filename = os.path.split(path)
+        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
+        try:
+            with open(temp_path, mode) as temp_file:
+                operation(temp_file)
+                # Without this barrier a crash can persist the rename below
+                # before the file data, publishing a truncated file.
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str, export_kwargs: dict | None = None):
-        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path, **(export_kwargs or {}))
-        os.replace(temp_path, path)
+        """Atomically export an executable through a temporary sibling."""
+        directory, filename = os.path.split(path)
+        stem, suffix = os.path.splitext(filename)
+        temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
+        try:
+            executable.export_library(temp_path, **(export_kwargs or {}))
+            KernelCache._fsync_file_contents(temp_path)
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
         """
@@ -553,10 +604,23 @@ class KernelCache:
             if usage:
                 dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))
 
+            # Record every staged file's size and content hash so loads can
+            # detect corrupted entries and treat them as cache misses.
+            self._write_manifest(staging_path)
+
             missing_files = self._get_missing_complete_cache_files(staging_path)
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
                 raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
+
+            # Durability barrier: a node or filesystem-client crash may otherwise
+            # persist the rename below before the staged file data, publishing a
+            # truncated entry (surfaces as CUDA_ERROR_INVALID_IMAGE at launch,
+            # notably on shared network caches).
+            for entry in os.scandir(staging_path):
+                if entry.is_file(follow_symlinks=False):
+                    KernelCache._fsync_file_contents(entry.path)
+            KernelCache._fsync_dir(staging_path)
 
             # Repair stale/incomplete entries before making the new directory visible.
             self._remove_incomplete_cache_dir(cache_path)
@@ -569,6 +633,8 @@ class KernelCache:
                     raise
                 # Another process won the race with a complete cache entry.
                 shutil.rmtree(staging_path, ignore_errors=True)
+            else:
+                KernelCache._fsync_dir(self._get_cache_root())
         except Exception:
             shutil.rmtree(staging_path, ignore_errors=True)
             self.logger.exception("Error during atomic cache save")
@@ -607,6 +673,18 @@ class KernelCache:
         if missing_files:
             if verbose:
                 self.logger.debug("Disk cache entry is incomplete; missing files: %s", missing_files)
+            return None
+
+        if not self._verify_cache_dir_integrity(cache_path):
+            # A crashed writer (or crashed filesystem client) can publish a
+            # truncated kernel_lib.so that dlopens fine but fails only at first
+            # launch (CUDA_ERROR_INVALID_IMAGE), where nothing repairs the
+            # entry. Catch it here and self-heal by recompiling.
+            self.logger.warning(
+                "Disk cache entry at %s failed integrity verification (corrupted or partially written); removing it and recompiling.",
+                cache_path,
+            )
+            shutil.rmtree(cache_path, ignore_errors=True)
             return None
 
         # Load kernel parameters
@@ -701,6 +779,7 @@ class KernelCache:
                 [
                     os.path.join(cache_path, self.device_kernel_path),
                     os.path.join(cache_path, self.host_kernel_path),
+                    os.path.join(cache_path, self.manifest_path),
                     *self._get_required_files(cache_path),
                 ]
             )
@@ -708,6 +787,54 @@ class KernelCache:
 
     def _get_missing_complete_cache_files(self, cache_path: str) -> list[str]:
         return [file for file in self._get_complete_cache_files(cache_path) if not os.path.exists(file)]
+
+    def _write_manifest(self, cache_path: str):
+        """Record size and content hash of every cache file for load-time verification."""
+        files: dict[str, dict] = {}
+        for entry in sorted(os.scandir(cache_path), key=lambda item: item.name):
+            if not entry.is_file(follow_symlinks=False) or entry.name == self.manifest_path:
+                continue
+            files[entry.name] = {
+                "size": entry.stat().st_size,
+                "sha256": KernelCache._hash_file(entry.path),
+            }
+        manifest = {"version": 1, "files": files}
+        KernelCache._safe_write_file(
+            os.path.join(cache_path, self.manifest_path),
+            "w",
+            lambda file: json.dump(manifest, file, indent=2, sort_keys=True),
+        )
+
+    def _verify_cache_dir_integrity(self, cache_path: str) -> bool:
+        """Check a cache entry against its manifest.
+
+        Every listed file must match its recorded size; the required binary
+        artifacts (e.g. kernel_lib.so, params.pkl) must also match their
+        recorded content hash. Source files are size-checked only so disk
+        cache hits keep deferring source reads. Returns False for entries
+        whose manifest is unreadable or that do not cover the required files.
+        """
+        manifest_file = os.path.join(cache_path, self.manifest_path)
+        try:
+            with open(manifest_file) as file:
+                files = json.load(file)["files"]
+            entries = list(files.items())
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+        required_names = {os.path.basename(path) for path in self._get_required_files(cache_path)}
+        if not required_names.issubset(files):
+            return False
+        verify_hash = env.should_verify_cache_hash()
+        for name, meta in entries:
+            path = os.path.join(cache_path, name)
+            try:
+                if os.path.getsize(path) != meta["size"]:
+                    return False
+                if verify_hash and name in required_names and KernelCache._hash_file(path) != meta["sha256"]:
+                    return False
+            except (OSError, KeyError, TypeError):
+                return False
+        return True
 
     def _is_complete_cache_dir(self, cache_path: str) -> bool:
         return os.path.isdir(cache_path) and not self._get_missing_complete_cache_files(cache_path)

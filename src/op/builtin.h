@@ -82,10 +82,10 @@ static constexpr const char *kReducerForceBaseline =
 static constexpr const char *kEnableReducerPlanVerbose =
     "tl.enable_reducer_plan_verbose";
 // The cost model that ranks free-mode layout attempts, by name:
-// "io-aware" (default) scores estimated global-memory access cost —
-// vector width / coalescing of every fragment<->global copy, weighted by
-// bytes moved — with register count as the tiebreak; "register-count" is
-// the legacy total-register-slots-only ordering.
+// "register-count" (default) uses total fragment register slots;
+// "io-aware" scores estimated global-memory access cost — vector width /
+// coalescing of every fragment<->global copy, weighted by bytes moved —
+// with register count as the tiebreak.
 static constexpr const char *kLayoutCostModel = "tl.layout_cost_model";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
@@ -103,8 +103,19 @@ static constexpr const char *kLayoutVisualizationEnable =
 static constexpr const char *kLayoutVisualizationFormats =
     "tl.layout_visualization_formats";
 static constexpr const char *kDeviceCompileFlags = "tl.device_compile_flags";
+/*! \brief Emit #line directives in generated C-family source from TIR spans,
+ * mapping generated statements back to their Python source lines. Default:
+ * false. */
+static constexpr const char *kEmitLineDirectives = "tl.emit_line_directives";
 static constexpr const char *kDisableDataRaceCheck =
     "tl.disable_data_race_check";
+/*! \brief Disable the buffer-initialization check.
+ *
+ * The check warns when a non-global-scope buffer is read before anything
+ * writes it. It is enabled by default.
+ */
+static constexpr const char *kDisableBufferInitCheck =
+    "tl.disable_buffer_init_check";
 static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
@@ -543,9 +554,8 @@ TVM_DLL const Op &warp_reduce_bitor();
  * \brief tilelang intrinsic for CUDA/HIP read-only cache load (__ldg).
  *
  *  This op allows users to explicitly request a non-coherent cached load
- *  from global memory by emitting `__ldg(&ptr[idx])` for 32-bit
- *  element types on supported architectures. It provides a direct way to
- *  leverage the read-only data cache for performance-sensitive loads when
+ *  from global memory by emitting `__ldg(&ptr[idx])`. It provides a direct way
+ *  to leverage the read-only data cache for performance-sensitive loads when
  *  the compiler cannot infer `const __restrict__` automatically.
  *
  *  Usage from TVMScript:

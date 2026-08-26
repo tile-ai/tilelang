@@ -15,12 +15,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_line_directives.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangCUDA final : public CodeGenC {
+class CodeGenTileLangCUDA final : public CodeGenCWithLineDirectives {
 public:
   CodeGenTileLangCUDA();
   std::string Finish();
@@ -33,8 +33,9 @@ public:
                          std::ostream &os) final; // NOLINT(*)
   void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
                         PrimExpr rhs,
-                        std::ostream &os) final;      // NOLINT(*)
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
+                        std::ostream &os) final;                // NOLINT(*)
+  void PrintType(DataType t, std::ostream &os) final;           // NOLINT(*)
+  void PrintVecConstructor(DataType t, std::ostream &os) final; // NOLINT(*)
   void PrintVecElemLoad(const std::string &vec, DataType t, int i,
                         std::ostream &os) final; // NOLINT(*)
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
