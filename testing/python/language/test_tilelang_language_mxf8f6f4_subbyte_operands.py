@@ -563,3 +563,74 @@ def test_w4a8_example_perf_smoke():
     ms = do_bench(lambda: kernel(A, B, SFA, SFB, C), warmup=10, rep=20)
     tflops = 2.0 * M * N * K / (ms * 1e-3) / 1e12
     assert tflops > 0
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w4a8_kmajor_matches_rowmajor_bitwise_full_domain():
+    """Order pin for the W4A8 kmajor fulltile path.
+
+    Full-entropy data (random fp4 bytes x random e5m2 bytes incl. Inf/NaN)
+    makes every partial sum order-sensitive; strict integer-view equality
+    between the kmajor example kernel (TMA producer) and the rowmajor
+    serial kernel (SIMT producer) pins the K-atom accumulation order and
+    the NaN payloads across both pipelines and both producers at once.
+    """
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 256
+    K = 512
+    module = _load_w4a8_example()
+
+    A_bytes = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8)
+    B = torch.randint(0, 256, (N, K), device="cuda", dtype=torch.uint8).view(torch.float8_e5m2)
+    sfa_bytes = (torch.randint(-1, 2, (M, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    sfb_bytes = (torch.randint(-1, 2, (N, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+
+    rowmajor = tilelang.compile(_make_w4a8_matmul_kernel(M, N, K, T.float8_e5m2), target="cuda", out_idx=[4])
+    C_row = rowmajor(A_bytes, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+
+    kernel = module.sm120_w4a8_mxf8f6f4_gemm(M, N, K, 128, 128, 128, 2, "e5m2", T.float32)
+    SFA_km = module.swizzle_blockscaled_chunk_kmajor_scale_words(_pack_scale_words(sfa_bytes), block_words=1).reshape(-1, 1)
+    SFB_km = module.swizzle_blockscaled_chunk_kmajor_scale_words(_pack_scale_words(sfb_bytes), block_words=1).reshape(-1, 1)
+    C_km = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    kernel(A_bytes.view(torch.int8), B, SFA_km, SFB_km, C_km)
+
+    assert torch.equal(C_row.view(torch.int32), C_km.view(torch.int32))
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize(
+    "sfa_byte,sfb_byte,expected_bits",
+    [
+        (0xFE, 0xFE, 0x7F800000),
+        (0xFE, 0x7F, 0x7F000000),
+        (0x00, 0x7F, 0x00400000),
+        (0x00, 0x00, 0x00000000),
+        (0x01, 0x7F, 0x00800000),
+    ],
+)
+def test_w4a8_extreme_scale_semantics(sfa_byte, sfb_byte, expected_bits):
+    """The UE8M0 extreme-scale recordings re-run with an fp4 A operand.
+
+    Same expected table as the pure-fp8 recordings (the scale datapath is
+    operand-format independent) - re-measured here rather than assumed.
+    """
+    import torch
+
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(_make_w4a8_matmul_kernel(M, N, K, T.float8_e4m3fn), target="cuda", out_idx=[4])
+    A_bytes = torch.zeros((M, K // 2), device="cuda", dtype=torch.uint8)
+    A_bytes[0, 0] = 0x02  # element k=0 (low nibble) = e2m1 code for 1.0
+    B = torch.zeros((N, K), device="cuda", dtype=torch.float32).to(torch.float8_e4m3fn)
+    B[0, 0] = 1.0
+    sfa = torch.full((M, K // 32), 127, device="cuda", dtype=torch.uint8)
+    sfb = torch.full((N, K // 32), 127, device="cuda", dtype=torch.uint8)
+    sfa[0, 0] = sfa_byte
+    sfb[0, 0] = sfb_byte
+    C = kernel(A_bytes, B, _pack_scale_words(sfa), _pack_scale_words(sfb))
+    assert (C[0, 0].view(torch.int32).item() & 0xFFFFFFFF) == expected_bits
+    assert bool((C.flatten()[1:] == 0).all())
