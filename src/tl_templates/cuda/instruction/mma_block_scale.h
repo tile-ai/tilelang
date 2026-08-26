@@ -36,6 +36,8 @@ enum class SM120MmaOperandType : int {
   kE2M1 = 0,
   kE4M3 = 1,
   kE5M2 = 2,
+  kE2M3 = 3,
+  kE3M2 = 4,
 };
 
 template <SM120MmaBlockScaledKind Kind, int ScaleVecSize,
@@ -64,15 +66,15 @@ struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf4nvf4, 4,
   static constexpr bool kSupported = true;
 };
 
-// kind::mxf8f6f4 (m16n8k32): pure-fp8 {e4m3,e5m2}^2 combinations, ue8m0
-// scales at scale_vec::1X only (PTX allows no other scale_vec for this kind).
+// kind::mxf8f6f4 (m16n8k32): every {e2m1, e2m3, e3m2, e4m3, e5m2} A/B
+// pairing (the full f8f6f4 family, 5x5), ue8m0 scales at scale_vec::1X only
+// (PTX allows no other scale_vec for this kind). fp4/fp6 operands live in
+// 8-bit register containers: e2m1 at bits[5:2] (loader shifts <<2), fp6 at
+// bits[5:0].
 template <SM120MmaOperandType AType, SM120MmaOperandType BType>
 struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf8f6f4, 1,
                                  SM120MmaScaleType::kUE8M0, AType, BType> {
-  static constexpr bool kSupported = (AType == SM120MmaOperandType::kE4M3 ||
-                                      AType == SM120MmaOperandType::kE5M2) &&
-                                     (BType == SM120MmaOperandType::kE4M3 ||
-                                      BType == SM120MmaOperandType::kE5M2);
+  static constexpr bool kSupported = true;
 };
 
 namespace detail {
@@ -220,7 +222,13 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue8m0(
 // byte selection is done in software - shift the requested byte into the low
 // half and issue with a hardware byte id of 0, the only form CUTLASS
 // exercises (mma_sm120.hpp SM120_16x8x32_TN_VS, VS=32).
-#define TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(suffix, atype_str, btype_str)    \
+// Dispatch table: one specialization per (AType, BType) pairing, stamped by
+// the macro below together with its asm wrapper.
+template <SM120MmaOperandType AType, SM120MmaOperandType BType>
+struct SM120Mxf8f6f4MmaImpl;
+
+#define TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(suffix, a_enum, b_enum,          \
+                                              atype_str, btype_str)            \
   TL_DEVICE void sm120_mma_m16n8k32_mxf8f6f4_1x_ue8m0_##suffix##_regs(         \
       float *d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,            \
       uint32_t b0, uint32_t b1, const float *c, uint32_t scale_a,              \
@@ -237,7 +245,21 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue8m0(
         d, a[0], a[1], a[2], a[3], b[0], b[1], c, scale_a, scale_b,            \
         scale_a_byte_id, scale_a_thread_id, scale_b_byte_id,                   \
         scale_b_thread_id);                                                    \
-  }
+  }                                                                            \
+  template <>                                                                  \
+  struct SM120Mxf8f6f4MmaImpl<SM120MmaOperandType::a_enum,                     \
+                              SM120MmaOperandType::b_enum> {                   \
+    static TL_DEVICE void run(float *d, const uint32_t *a, const uint32_t *b,  \
+                              const float *c, uint32_t scale_a,                \
+                              uint32_t scale_b, uint16_t scale_a_byte_id,      \
+                              uint16_t scale_a_thread_id,                      \
+                              uint16_t scale_b_byte_id,                        \
+                              uint16_t scale_b_thread_id) {                    \
+      sm120_mma_m16n8k32_mxf8f6f4_1x_ue8m0_##suffix(                           \
+          d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,    \
+          scale_b_byte_id, scale_b_thread_id);                                 \
+    }                                                                          \
+  };
 
 #if defined(CUTE_ARCH_MXF8F6F4_MMA_ENABLED) &&                                 \
     defined(CUTLASS_ARCH_MMA_SM120A_ENABLED)
@@ -264,11 +286,27 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue8m0(
       "CUDA 12.8 or later");
 #endif
 
-TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(e4m3_e4m3, "e4m3", "e4m3")
-TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(e4m3_e5m2, "e4m3", "e5m2")
-TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(e5m2_e4m3, "e5m2", "e4m3")
-TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(e5m2_e5m2, "e5m2", "e5m2")
+// The full f8f6f4-family 5x5 operand matrix (matches CUTLASS 4.7
+// mma_sm120.hpp SM120_16x8x32_TN_VS specializations).
+#define TL_SM120_FOREACH_MXF8F6F4_B(a_suffix, a_enum, a_str)                   \
+  TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(a_suffix##_e2m1, a_enum, kE2M1, a_str, \
+                                        "e2m1")                                \
+  TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(a_suffix##_e2m3, a_enum, kE2M3, a_str, \
+                                        "e2m3")                                \
+  TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(a_suffix##_e3m2, a_enum, kE3M2, a_str, \
+                                        "e3m2")                                \
+  TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(a_suffix##_e4m3, a_enum, kE4M3, a_str, \
+                                        "e4m3")                                \
+  TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA(a_suffix##_e5m2, a_enum, kE5M2, a_str, \
+                                        "e5m2")
 
+TL_SM120_FOREACH_MXF8F6F4_B(e2m1, kE2M1, "e2m1")
+TL_SM120_FOREACH_MXF8F6F4_B(e2m3, kE2M3, "e2m3")
+TL_SM120_FOREACH_MXF8F6F4_B(e3m2, kE3M2, "e3m2")
+TL_SM120_FOREACH_MXF8F6F4_B(e4m3, kE4M3, "e4m3")
+TL_SM120_FOREACH_MXF8F6F4_B(e5m2, kE5M2, "e5m2")
+
+#undef TL_SM120_FOREACH_MXF8F6F4_B
 #undef TL_SM120_DEFINE_MXF8F6F4_1X_UE8M0_MMA
 #undef TL_SM120_MXF8F6F4_MMA_BODY
 
@@ -292,26 +330,9 @@ TL_DEVICE void sm120_mma_sync_blockscaled(float *d, const uint32_t *a,
                                           BType>::kSupported,
                 "Unsupported sm120 mma.block_scale configuration");
   if constexpr (Kind == SM120MmaBlockScaledKind::kMxf8f6f4) {
-    if constexpr (AType == SM120MmaOperandType::kE4M3 &&
-                  BType == SM120MmaOperandType::kE4M3) {
-      detail::sm120_mma_m16n8k32_mxf8f6f4_1x_ue8m0_e4m3_e4m3(
-          d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
-          scale_b_byte_id, scale_b_thread_id);
-    } else if constexpr (AType == SM120MmaOperandType::kE4M3 &&
-                         BType == SM120MmaOperandType::kE5M2) {
-      detail::sm120_mma_m16n8k32_mxf8f6f4_1x_ue8m0_e4m3_e5m2(
-          d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
-          scale_b_byte_id, scale_b_thread_id);
-    } else if constexpr (AType == SM120MmaOperandType::kE5M2 &&
-                         BType == SM120MmaOperandType::kE4M3) {
-      detail::sm120_mma_m16n8k32_mxf8f6f4_1x_ue8m0_e5m2_e4m3(
-          d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
-          scale_b_byte_id, scale_b_thread_id);
-    } else {
-      detail::sm120_mma_m16n8k32_mxf8f6f4_1x_ue8m0_e5m2_e5m2(
-          d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
-          scale_b_byte_id, scale_b_thread_id);
-    }
+    detail::SM120Mxf8f6f4MmaImpl<AType, BType>::run(
+        d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
+        scale_b_byte_id, scale_b_thread_id);
   } else if constexpr (ScaleVecSize == 4 &&
                        SType == SM120MmaScaleType::kUE4M3) {
     detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
