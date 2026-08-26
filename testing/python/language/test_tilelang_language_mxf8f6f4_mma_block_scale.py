@@ -221,5 +221,149 @@ def test_mxf8f6f4_unit_scale_matches_plain_fp8_gemm_bitwise(a_name, b_name):
     assert torch.equal(C_scaled.view(torch.int32), C_plain.view(torch.int32))
 
 
+def _example_kmajor_kernel(M, N, K, block_K, in_dtype_name, num_stages=2):
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "examples/gemm_sm120/sm120_mxfp8_blockscaled_gemm.py"
+    spec = importlib.util.spec_from_file_location("sm120_mxfp8_blockscaled_gemm_example", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    kernel = module.sm120_mxfp8_blockscaled_gemm(M, N, K, 128, 128, block_K, num_stages, in_dtype_name, T.float32)
+    return module, kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("in_dtype_name", ["e4m3", "e5m2"])
+def test_mxf8f6f4_kmajor_fulltile_correctness(in_dtype_name):
+    """The performance path: blockscaled_chunk_kmajor fulltile, packed scales."""
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 256
+    K = 512
+    block_K = 128
+    module, kernel = _example_kmajor_kernel(M, N, K, block_K, in_dtype_name)
+
+    A = module._make_fp8(M, K, in_dtype_name, seed=0)
+    B = module._make_fp8(N, K, in_dtype_name, seed=1)
+    SFA_semantic = module._make_pow2_scale_words(M, K, seed=100)
+    SFB_semantic = module._make_pow2_scale_words(N, K, seed=200)
+    words = block_K // 128
+    SFA = module.swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=words).reshape(-1, words)
+    SFB = module.swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=words).reshape(-1, words)
+    C = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    kernel(A, B, SFA, SFB, C)
+    module._verify(A, B, SFA_semantic, SFB_semantic, C, torch.float32)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_kmajor_scale_byte_literal_sequence():
+    """Self-failing sentinel for the fulltile scale-byte stride.
+
+    scale_vec::1X consumes one byte per k32 block, so the four unrolled
+    kblocks of a K=128 word must select bytes exactly (0, 1, 2, 3). The
+    pre-fix hardcoded ``* 2`` stride would produce (0, 2, 4, 6) and fail
+    both assertions below.
+    """
+    import re
+
+    _, kernel = _example_kmajor_kernel(128, 128, 128, 128, "e4m3")
+    src = kernel.get_kernel_source()
+    calls = re.findall(r"kMxf8f6f4[^;]+;", src)
+    assert calls, "no mxf8f6f4 mma calls found in the generated source"
+    for call in calls:
+        args = re.findall(r"static_cast<uint16_t>\((.*?)\)[,)]", " ".join(call.split()))
+        assert len(args) == 4, call  # byte_a, tid_a, byte_b, tid_b
+        byte_expr = args[0]
+        assert byte_expr == args[2]
+        # The non-greedy capture can trim trailing parens; rebalance.
+        byte_expr += ")" * (byte_expr.count("(") - byte_expr.count(")"))
+        # The byte id is an expression in the kblock loop variable; evaluate
+        # it over the four kblocks of one K=128 scale word.
+        symbols = set(re.findall(r"[A-Za-z_]\w*", byte_expr))
+        assert len(symbols) == 1, byte_expr
+        (kvar,) = symbols
+        seq = tuple(eval(byte_expr, {"__builtins__": {}}, {kvar: kb}) for kb in range(4))
+        assert seq == (0, 1, 2, 3), seq
+        assert max(seq) < 4
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_e5m2_inf_nan_propagation():
+    """Full-code-domain band: e5m2 Inf/NaN must propagate through the MMA."""
+    import torch
+
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e5m2, T.float8_e5m2),
+        target="cuda",
+        out_idx=[4],
+    )
+    A = torch.ones((M, K), device="cuda", dtype=torch.float32).to(torch.float8_e5m2)
+    B = torch.ones((N, K), device="cuda", dtype=torch.float32).to(torch.float8_e5m2)
+    A[0, 5] = float("inf")
+    A[1, 7] = float("nan")
+    unit = torch.full((M, K // 128), 0x7F7F7F7F, device="cuda", dtype=torch.int64).to(torch.uint32)
+    C = kernel(A, B, unit, unit.clone())
+    assert bool(torch.isinf(C[0]).all())  # inf * 1 accumulates to inf
+    assert bool(torch.isnan(C[1]).all())  # nan poisons the whole row
+    assert bool(torch.isfinite(C[2:]).all())
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_scale_byte_0xff_yields_nan():
+    """Recorded behavior: UE8M0 0xFF is the NaN scale encoding.
+
+    The instruction propagates it as NaN into every product of the scaled
+    block, poisoning the affected accumulator rows.
+    """
+    import torch
+
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e4m3fn, T.float8_e4m3fn),
+        target="cuda",
+        out_idx=[4],
+    )
+    A, B = _make_controlled_fp8_inputs(M, N, K, "e4m3", "e4m3")
+    sfa_bytes = torch.full((M, K // 32), 127, device="cuda", dtype=torch.uint8)
+    sfb_bytes = sfa_bytes.clone()
+    sfa_bytes[3, 1] = 0xFF
+    C = kernel(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+    assert bool(torch.isnan(C[3]).all())
+    mask = torch.ones(M, dtype=torch.bool)
+    mask[3] = False
+    assert bool(torch.isfinite(C[mask]).all())
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_many_tiles_many_stages_correctness():
+    """Scale coverage: total_tiles (1024) > SM count, k stages > 2."""
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 2048
+    K = 384
+    kernel = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e4m3fn, T.float8_e4m3fn, num_stages=3, block_K=128),
+        target="cuda",
+        out_idx=[4],
+    )
+    A, B = _make_controlled_fp8_inputs(M, N, K, "e4m3", "e4m3")
+    sfa_bytes = _make_varying_scale_bytes(M, K)
+    sfb_bytes = _make_varying_scale_bytes(N, K)
+    C = kernel(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+    ref = _reference_scaled_gemm(A, B, sfa_bytes, sfb_bytes)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

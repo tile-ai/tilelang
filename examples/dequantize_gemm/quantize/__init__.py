@@ -28,3 +28,4 @@ from .mxfp4 import (  # noqa: F401
     pack_blockscaled_chunk_kmajor_ue8m0_scale_bytes,
     quantize_bf16_to_mxfp4_blockscaled,
 )
+from .mxfp8 import quantize_bf16_to_mxfp8_blockscaled  # noqa: F401
