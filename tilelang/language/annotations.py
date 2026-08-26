@@ -6,7 +6,7 @@ from tilelang.layout import Fragment, Layout, PartialFragment
 from tilelang.utils.language import is_fragment, is_reducer
 from tvm.tirx.script.parser import attr
 from tvm.tirx.script.builder.ir import sblock_attr
-from tvm.tirx import FloatImm, tvm_tuple
+from tvm.tirx import FloatImm, IntImm, tvm_tuple
 
 __all__ = [
     "WSID",
@@ -16,6 +16,7 @@ __all__ = [
     "annotate_l2_hit_ratio",
     "annotate_restrict_buffers",
     "annotate_min_blocks_per_sm",
+    "annotate_ws_pipeline_depth",
     "annotate_ws_schedule",
     "ws_op",
 ]
@@ -132,17 +133,32 @@ def annotate_restrict_buffers(*buffers):
     return sblock_attr({"tl.non_restrict_params": data_vars})
 
 
+def annotate_ws_pipeline_depth(depth_map: dict):
+    """Declare the depth of the pipelines the automatic scheduler hosts at
+    the ENCLOSING scope for the given buffers, asserting each recurrence
+    resets per version — otherwise the depth derives from the loop's
+    ``num_stages``, and accumulators pin single-buffered.
+
+    ``depth_map`` maps each buffer to its pipeline depth at this scope.
+    """
+    _map = {}
+    for buffer, depth in depth_map.items():
+        assert isinstance(depth, int) and depth >= 1, f"pipeline depth must be a positive int, got {depth!r}"
+        _map[buffer.data] = IntImm("int32", depth)
+    return attr(_map, "tl.ws_pipeline_depth", 0)
+
+
 def annotate_ws_schedule(schedule):
     """Attach a warp-specialization schedule to the kernel.
 
-    ``schedule`` is a typed :class:`~tilelang.language.ws_schedule.WSSchedule`
+    ``schedule`` is a typed :class:`~tilelang.language.warp_specialize.WSSchedule`
     object describing how to transform the straight-line kernel into a
     warp-specialized one: warp roles, pipelines (full/empty barrier pairs
     protecting multi-versioned buffers), and per-role instruction sequences
     per loop scope. It is materialized by the ``MaterializeWSSchedule`` pass;
     see ``examples/aws/gemm.py`` for a complete example.
     """
-    from tilelang.language.ws_schedule import WSSchedule
+    from tilelang.language.warp_specialize import WSSchedule
 
     assert isinstance(schedule, WSSchedule), f"annotate_ws_schedule expects a T.WSSchedule object, got {type(schedule)}"
     return sblock_attr({"tl.ws_schedule": schedule})

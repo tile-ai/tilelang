@@ -144,11 +144,12 @@ from .annotations import (  # noqa: F401
     annotate_layout,
     annotate_safe_value,
     annotate_restrict_buffers,
+    annotate_ws_pipeline_depth,
     annotate_ws_schedule,
     ws_op,
 )
 
-from .ws_schedule import (  # noqa: F401
+from .warp_specialize import (  # noqa: F401
     WSRole,
     WSPipeline,
     WSInstr,
@@ -228,6 +229,7 @@ _LOCAL_EXPORTS = (
     "annotate_layout",
     "annotate_restrict_buffers",
     "annotate_safe_value",
+    "annotate_ws_pipeline_depth",
     "annotate_ws_schedule",
     "ws_op",
     "any_of",

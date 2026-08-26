@@ -3,6 +3,24 @@
 from .. import _ffi_api
 
 
+def AutoSchedule():
+    """Derive a warp-specialization schedule with the scheduler named by
+    the ``tl.enable_auto_schedule`` pass config (currently
+    ``"role_based"``); a no-op when the config is unset.
+
+    Eligible kernels gain stable ``tl.ws_op_id`` markers and a typed
+    ``WSSchedule`` block annotation — the same surface a hand-written
+    schedule uses — which :func:`MaterializeWSSchedule` then lowers.
+    Kernels the scheduler declines are left unchanged.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AutoSchedule()  # type: ignore
+
+
 def AnnotateDeviceBoundTmaCopies():
     """Mark tile copies whose TensorMap base is defined in the device body.
 
@@ -160,6 +178,7 @@ def PersistThreadblock():
 
 __all__ = [
     "AnnotateDeviceBoundTmaCopies",
+    "AutoSchedule",
     "AnnotateWarpGroupRegAlloc",
     "FuseMBarrierArriveExpectTx",
     "InjectFenceProxy",
