@@ -487,14 +487,24 @@ def mma_gemm_blockscaled(
     ``"blockscaled_chunk_kmajor"`` the fulltile path addresses the staged
     scale tile directly and ``k_start`` is ignored.
 
-    Supported instructions, all ``m16n8k64.kind::mxf4nvf4.block_scale`` with
-    E2M1 operands and FP32 accumulation, selected by
+    The MMA kind follows the operand dtype family (FP32 accumulation in all
+    cases); the mode inside a kind is selected by
     ``(sf_granularity_k, scale_dtype)``:
+
+    ``kind::mxf4nvf4`` (E2M1 operands, ``m16n8k64``):
 
     - ``(16, "ue4m3")``: NVF4, ``scale_vec::4X`` (the historical default)
     - ``(32, "ue8m0")``: MXFP4, ``scale_vec::2X``
     - ``(16, "ue8m0")``: NVF4 granularity with power-of-two scales,
       ``scale_vec::4X`` (needs CUDA 13.1+ toolchains)
+
+    ``kind::mxf8f6f4`` (FP8 operands, ``m16n8k32``):
+
+    - ``(32, "ue8m0")``: MXFP8, ``scale_vec::1X`` (the only legal scale
+      vector size for this kind); any {e4m3, e5m2} A/B pairing is accepted.
+      Mixed e4m3 x e5m2 targets fp8 training backward passes, though this
+      synchronous TN path currently covers inference-style forward GEMMs
+      only.
 
     ``scale_dtype=None`` infers ``"ue4m3"`` for granularity 16 and
     ``"ue8m0"`` for granularity 32.

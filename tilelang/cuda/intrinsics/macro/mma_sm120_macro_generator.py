@@ -27,8 +27,11 @@ class BlockScaleMmaConfig:
     scale_vec_size: int
     sf_vec_size: int
     scale_type: str
-    a_dtype_abbrv: str
-    b_dtype_abbrv: str
+    # Fixed operand abbreviation, or None for a per-instance choice from
+    # ``operand_family`` (mxf8f6f4 accepts any {e4m3,e5m2} pairing).
+    a_dtype_abbrv: str | None
+    b_dtype_abbrv: str | None
+    operand_family: tuple[str, ...] = ()
     # Accessing T.float32 here would create a circular import during language initialization.
     accum_dtype: str = "float32"
     active_sfa_threads: int = 16
@@ -319,6 +322,20 @@ _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
         a_dtype_abbrv="e2m1",
         b_dtype_abbrv="e2m1",
     ),
+    # MXFP8: pure-fp8 {e4m3,e5m2}^2 at m16n8k32, one ue8m0 byte per 32 K
+    # elements (scale_vec::1X is the only legal vector size for this kind).
+    # A uint32 scale word still covers K=128, now as four one-byte atoms.
+    ("mxf8f6f4", 1, "ue8m0"): BlockScaleMmaConfig(
+        kind="mxf8f6f4",
+        mma_prefix="m16n8k32",
+        atom_k=32,
+        scale_vec_size=1,
+        sf_vec_size=32,
+        scale_type="ue8m0",
+        a_dtype_abbrv=None,
+        b_dtype_abbrv=None,
+        operand_family=("e4m3", "e5m2"),
+    ),
 }
 
 
@@ -364,14 +381,24 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             self.block_scale_config = _get_block_scale_mma_config(kind, scale_vec_size, stype)
             a_dtype_abbrv = self._get_dtype_abbrv(str(a_dtype))
             b_dtype_abbrv = self._get_dtype_abbrv(str(b_dtype))
+            expected_a = (
+                (self.block_scale_config.a_dtype_abbrv,)
+                if self.block_scale_config.a_dtype_abbrv
+                else self.block_scale_config.operand_family
+            )
+            expected_b = (
+                (self.block_scale_config.b_dtype_abbrv,)
+                if self.block_scale_config.b_dtype_abbrv
+                else self.block_scale_config.operand_family
+            )
             if (
-                a_dtype_abbrv != self.block_scale_config.a_dtype_abbrv
-                or b_dtype_abbrv != self.block_scale_config.b_dtype_abbrv
+                a_dtype_abbrv not in expected_a
+                or b_dtype_abbrv not in expected_b
                 or str(accum_dtype) != self.block_scale_config.accum_dtype
             ):
                 raise ValueError(
-                    f"{self.block_scale_config.kind} expects a_dtype={self.block_scale_config.a_dtype_abbrv}, "
-                    f"b_dtype={self.block_scale_config.b_dtype_abbrv}, "
+                    f"{self.block_scale_config.kind} expects a_dtype in {expected_a}, "
+                    f"b_dtype in {expected_b}, "
                     f"accum_dtype={self.block_scale_config.accum_dtype}; "
                     f"got a_dtype={a_dtype}, b_dtype={b_dtype}, accum_dtype={accum_dtype}"
                 )
@@ -410,8 +437,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
         if self.is_blockscaled:
-            self.a_dtype_abbrv = self.block_scale_config.a_dtype_abbrv
-            self.b_dtype_abbrv = self.block_scale_config.b_dtype_abbrv
+            # Family configs (a_dtype_abbrv=None) take the abbreviation from
+            # the actual operand dtype instead of the config.
+            self.a_dtype_abbrv = self.block_scale_config.a_dtype_abbrv or self._get_dtype_abbrv(str(a_dtype))
+            self.b_dtype_abbrv = self.block_scale_config.b_dtype_abbrv or self._get_dtype_abbrv(str(b_dtype))
             self.accum_dtype_abbrv = self._get_dtype_abbrv(accum_dtype)
         else:
             super()._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
@@ -424,6 +453,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         if not self.is_blockscaled:
+            return super().ldmatrix_a(A_local_buf, A_shared_buf, ki, rk)
+        if tvm.DataType(str(self.a_dtype)).bits == 8:
+            # mxf8f6f4 operands use the standard 8-bit m16n8k32 fragment; the
+            # base emitter's ldmatrix path produces it as-is.
             return super().ldmatrix_a(A_local_buf, A_shared_buf, ki, rk)
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
@@ -474,6 +507,9 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         if not self.is_blockscaled:
+            return super().ldmatrix_b(B_local_buf, B_shared_buf, ki, rk)
+        if tvm.DataType(str(self.b_dtype)).bits == 8:
+            # See ldmatrix_a: 8-bit fragments come from the base emitter.
             return super().ldmatrix_b(B_local_buf, B_shared_buf, ki, rk)
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
@@ -876,7 +912,9 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
         @T.macro
         def _mma_kblock(A_local_buf, B_local_buf, SFA_local_buf, SFB_local_buf, C_local_buf, k_block):
-            scale_byte = 0 if atoms_per_word == 1 else (k_block % atoms_per_word) * 2
+            # Byte stride inside the uint32 scale word: 4X consumes the whole
+            # word (byte 0), 2X a 2-byte half, 1X a single byte.
+            scale_byte = 0 if atoms_per_word == 1 else (k_block % atoms_per_word) * (4 // atoms_per_word)
             for i in T.unroll(warp_rows):
                 scale_a_ptr = T.access_ptr(SFA_local_buf[i // 2], "r")
                 for j in T.unroll(warp_cols):

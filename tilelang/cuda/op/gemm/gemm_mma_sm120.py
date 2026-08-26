@@ -7,7 +7,7 @@ from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import is_full_region
-from tvm import tirx
+from tvm import DataType, tirx
 from tvm.ir import Range
 from tvm.target import Target
 
@@ -30,6 +30,12 @@ class GemmMMASm120BlockScaled(GemmMMA):
     """SM120 warp-level block-scaled MMA lowering."""
 
     intrin_emitter_cls = TensorCoreIntrinEmitterBlockScaled
+
+    @property
+    def allow_f8f6f4_mixed_dtypes(self) -> bool:
+        # kind::mxf8f6f4 accepts any {e4m3, e5m2} A/B pairing; the emitter
+        # config rejects pairings outside the family.
+        return True
 
     @staticmethod
     def _validate_target(target: Target) -> None:
@@ -68,6 +74,21 @@ class GemmMMASm120BlockScaled(GemmMMA):
             GEMM_INST_MMA_BLOCK_SCALED,
         )
         granularity, sf_dtype = self._scale_mode()
+        # The MMA kind follows the operand dtype family: 4-bit e2m1 operands
+        # lower to kind::mxf4nvf4 (k64 atoms), 8-bit fp8 operands to
+        # kind::mxf8f6f4 (k32 atoms). One MMA atom consumes
+        # atom_k // granularity scale bytes; the emitter validates the
+        # resulting (kind, scale_vec_size, sf_dtype) combination.
+        a_bits = DataType(str(self.a_dtype)).bits
+        b_bits = DataType(str(self.b_dtype)).bits
+        if a_bits != b_bits:
+            raise ValueError(
+                f"T.mma_gemm_blockscaled requires A and B from the same operand width family, "
+                f"got a_dtype={self.a_dtype}, b_dtype={self.b_dtype}"
+            )
+        kind, atom_k = ("mxf8f6f4", 32) if a_bits == 8 else ("mxf4nvf4", 64)
+        if granularity > atom_k:
+            raise ValueError(f"sf_granularity_k={granularity} exceeds the {kind} MMA atom K extent {atom_k}")
         return self.intrin_emitter_cls(
             a_dtype=self.a_dtype,
             b_dtype=self.b_dtype,
@@ -81,9 +102,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
             chunk=self.chunk,
             thread_var=thread_var,
             is_blockscaled=True,
-            kind="mxf4nvf4",
-            # One k64 MMA atom consumes 64 // granularity scale bytes.
-            scale_vec_size=64 // granularity,
+            kind=kind,
+            scale_vec_size=atom_k // granularity,
             stype=sf_dtype,
         )
 
@@ -151,10 +171,12 @@ class GemmMMASm120BlockScaled(GemmMMA):
 
             return _Simplify(_gemm_ss_blockscaled_kmajor, inline_let=True)
 
-        if int(block_K // micro_size_k) == 4:
+        if int(block_K // micro_size_k) == 4 and mma_emitter.scale_vec_size != 1:
             # ki parity decides the consumed byte pair inside a scale word for
             # scale_vec::2X; 4X keeps the literal 0. Blocks reusing fragment
-            # set 0 issue even ki, set 1 issues odd ki.
+            # set 0 issue even ki, set 1 issues odd ki. scale_vec::1X byte ids
+            # have period 4, which breaks the even/odd assumption, so
+            # mxf8f6f4 always takes the generic serial path below.
             scale_byte_even = mma_emitter._scale_byte_id(self.sf_k_start, 0)
             scale_byte_odd = mma_emitter._scale_byte_id(self.sf_k_start, 1)
 
