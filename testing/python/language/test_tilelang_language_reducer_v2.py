@@ -18,6 +18,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 import torch
+import tvm
 
 tilelang.testing.set_random_seed()
 
@@ -1377,6 +1378,145 @@ def test_narrow_steering_unsatisfiable_falls_back_wide():
     O = torch.randn(M, dtype=torch.float32, device="cuda")
     C = compiled(A, O)
     torch.testing.assert_close(C, A.sum(dim=1) * 2 + O, atol=1e-2, rtol=1e-2)
+
+
+# ---------------------------------------------------------------------------
+# Vectorized reducer updates: the combine store is an ordinary RMW to the
+# vectorizer. Output-axis contiguous updates vectorize (and 16-bit/f32x2
+# dtypes take the packed-math fast path in codegen); reduction-axis updates
+# are kept scalar by the planner's invariant-store clamp. A float4/float2
+# LOAD DECLARATION of `acc` discriminates a vectorized RMW from the identity
+# fill and the finalize publish copy, which never declare vector loads of it.
+# ---------------------------------------------------------------------------
+
+_VECTOR_RMW_RE = r"float\d+ v\w* = \*\(float\d+\*\)\(acc"
+
+
+def _contiguous_update_kernel(M, threads, dtype, run, op="sum"):
+    layout = T.Fragment((M,), forward_fn=lambda i: (i // run, i % run))
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M,), dtype), B: T.Tensor((M,), dtype)):
+        with T.Kernel(1, threads=threads):
+            a_buf = T.alloc_shared((M,), dtype)
+            T.copy(A, a_buf)
+            acc = T.alloc_reducer((M,), dtype, op=op)
+            T.reducer_init(acc)
+            for i in T.Parallel(M, loop_layout=layout):
+                T.reducer_update(acc[i], a_buf[i])
+            result = T.alloc_fragment((M,), dtype)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    return kernel
+
+
+def test_update_vectorizes_on_contiguous_layout():
+    """Narrow plan, thread-contiguous output runs: the combine RMW lowers to
+    a vector load / add / store of the accumulator."""
+    M, threads = 512, 128
+    kern = tl.compile(_contiguous_update_kernel(M, threads, T.float32, run=4), out_idx=-1)
+    src = kern.get_kernel_source()
+    assert re.search(_VECTOR_RMW_RE, src), src
+    A = torch.randn(M, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kern(A), A, atol=0, rtol=0)
+
+
+def test_update_vectorizes_wide_plan():
+    """The forced FullParticipant baseline vectorizes too: wide combine
+    stores are plain RMWs once the multiplicity marker is lowered, and the
+    former blanket vectorization exclusion is gone."""
+    M, threads = 256, 64
+    kern = tl.compile(
+        _contiguous_update_kernel(M, threads, T.float32, run=4),
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_REDUCER_FORCE_BASELINE: True},
+    )
+    src = kern.get_kernel_source()
+    assert re.search(_VECTOR_RMW_RE, src), src
+    A = torch.randn(M, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kern(A), A, atol=0, rtol=0)
+
+
+def test_update_vectorize_attempt_keeps_replica_guard():
+    """A wide epoch whose loop layout replicates (8 iterations on 128
+    threads) carries a replica guard; attempting vectorization on the loop
+    must not change contribution multiplicity. 36, not 576."""
+    extent, threads = 8, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((extent,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_buf = T.alloc_shared((extent,), T.float32)
+            T.copy(A, a_buf)
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i in T.Parallel(extent):
+                T.reducer_update(acc[0], a_buf[i])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(acc, result)
+            if T.get_thread_binding() == 0:
+                B[0] = result[0]
+
+    kern = tl.compile(
+        kernel,
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_REDUCER_FORCE_BASELINE: True},
+    )
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kern(A), A.sum().reshape(1), atol=0, rtol=0)
+
+
+def test_update_reduction_axis_stays_scalar():
+    """When the per-thread serial axis is the reduction axis (the combine
+    store's index does not advance with it), the planner must keep the RMW
+    scalar — vectorizing it would collapse the dependent chain."""
+    M, K, threads = 4, 128, 128
+    layout = T.Fragment((M, K), forward_fn=lambda i, k: (i * 32 + k // 4, k % 4))
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_buf = T.alloc_shared((M, K), T.float32)
+            T.copy(A, a_buf)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K, loop_layout=layout):
+                T.reducer_update(acc[i], a_buf[i, k])
+            result = T.alloc_fragment((M,), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    kern = tl.compile(kernel, out_idx=-1)
+    src = kern.get_kernel_source()
+    assert re.search(_VECTOR_RMW_RE, src) is None, src
+    A = torch.arange(M * K, dtype=torch.float32, device="cuda").reshape(M, K)
+    torch.testing.assert_close(kern(A), A.sum(dim=1), atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(("op", "packed_fn"), [("sum", "add2"), ("max", "max2")])
+def test_update_packed_fp16(op, packed_fn):
+    """A vectorized fp16 combine takes the packed-math fast path: codegen
+    emits tl::add2/max2 (__hadd2/__hmax2) pairs instead of per-lane scalar
+    half ops. The vectorization itself is op-agnostic; the packed fast path
+    covers add/sub/mul/fma/min/max."""
+    M, threads = 512, 128
+    kern = tl.compile(_contiguous_update_kernel(M, threads, T.float16, run=4, op=op), out_idx=-1)
+    src = kern.get_kernel_source()
+    assert packed_fn in src, src
+    A = torch.randn(M, dtype=torch.float16, device="cuda")
+    torch.testing.assert_close(kern(A), A, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_update_packed_fp32x2_sm100_codegen():
+    """On SM100+, a 2-lane fp32 combine takes the f32x2 packed-math path
+    (fadd2). Codegen-only: lower for sm_100a and inspect the source."""
+    target = {"kind": "cuda", "arch": "sm_100a"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(_contiguous_update_kernel(256, 128, T.float32, run=2), target=target)
+    assert "add2" in artifact.kernel_source, artifact.kernel_source
 
 
 if __name__ == "__main__":

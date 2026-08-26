@@ -16,17 +16,6 @@ def get_pass_context():
     return PassContext.current()
 
 
-def ClusterPlanning():
-    """ClusterPlanning
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.ClusterPlanning()  # type: ignore
-
-
 def PipelinePlanning():
     """infer the fragment/shared memory layout
 

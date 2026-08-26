@@ -117,8 +117,7 @@ struct LowerArgs {
   ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
-  // nearest enclosing serial loop so non-pipelined TMA loops still alternate
-  // barrier phase correctly.
+  // zero-based epoch of the nearest enclosing serial loop.
   PrimExpr mbar_phase_expr = IntImm(DataType::Int(32), 0);
   // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
