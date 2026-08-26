@@ -106,6 +106,12 @@ def quantize_bf16_to_mxfp4_blockscaled(
     scale_source)`` — ``torch.int8[rows, K/2]`` FP4 data and the packed
     ``torch.uint32[rows_pad, K/128]`` K-major scale source — plus the
     semantic ``[rows, K/32]`` scale bytes when ``return_scale_bytes`` is set.
+
+    Special values: a NaN input poisons its block's amax, which encodes to
+    scale byte ``0x00`` and the whole 32-element block is written as zeros;
+    an Inf input saturates the block scale to ``0xFE`` (``2**127``) and the
+    Inf element to the FP4 max, collapsing the block's finite elements
+    toward zero. Both behaviors are pinned by CPU tests.
     """
 
     torch = _import_torch()

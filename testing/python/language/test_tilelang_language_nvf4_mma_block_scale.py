@@ -170,6 +170,7 @@ def _make_nvf4_matmul_codegen_kernel(
     warp_row_tiles=32,
     warp_col_tiles=32,
     sf_layout=None,
+    block_K=None,
 ):
     assert K % 64 == 0
     in_dtype = T.float4_e2m1fn
@@ -178,7 +179,7 @@ def _make_nvf4_matmul_codegen_kernel(
 
     micro_size_k = 64
 
-    chunk = K
+    chunk = block_K if block_K is not None else K
     shared_scope = "shared.dyn"
 
     block_M = block_row_warps * warp_row_tiles
@@ -216,6 +217,11 @@ def _make_nvf4_matmul_codegen_kernel(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.use_swizzle(panel_size=10)
 
+            # clear_accum zeroes the accumulator on every gemm call, so a
+            # multi-ko loop must hoist the clear out of the loop instead.
+            if K // block_K > 1:
+                T.clear(C_local)
+
             for ko in T.Pipelined((K // block_K), num_stages=num_stages):
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -236,8 +242,10 @@ def _make_nvf4_matmul_codegen_kernel(
                     SFA_shared,
                     SFB_shared,
                     transpose_B=True,
-                    clear_accum=True,
-                    k_start=ko * block_K,
+                    clear_accum=(K // block_K == 1),
+                    # rowmajor addresses scales relative to the staged slice
+                    # (buffer-local); kmajor ignores k_start in the fulltile path.
+                    k_start=(ko * block_K) if sf_layout is not None else 0,
                     sf_a_granularity_k=16,
                     sf_b_granularity_k=16,
                     sf_layout=sf_layout,
@@ -372,6 +380,7 @@ def _make_mxf4_matmul_codegen_kernel(
     block_col_warps=2,
     warp_row_tiles=32,
     warp_col_tiles=32,
+    block_K=None,
 ):
     assert K % 64 == 0
     in_dtype = T.float4_e2m1fn
@@ -380,7 +389,7 @@ def _make_mxf4_matmul_codegen_kernel(
 
     word_span = sf_granularity_k * 4
 
-    chunk = K
+    chunk = block_K if block_K is not None else K
     shared_scope = "shared.dyn"
 
     block_M = block_row_warps * warp_row_tiles
@@ -418,6 +427,11 @@ def _make_mxf4_matmul_codegen_kernel(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.use_swizzle(panel_size=10)
 
+            # clear_accum zeroes the accumulator on every gemm call, so a
+            # multi-ko loop must hoist the clear out of the loop instead.
+            if K // block_K > 1:
+                T.clear(C_local)
+
             for ko in T.Pipelined((K // block_K), num_stages=num_stages):
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -438,8 +452,10 @@ def _make_mxf4_matmul_codegen_kernel(
                     SFA_shared,
                     SFB_shared,
                     transpose_B=True,
-                    clear_accum=True,
-                    k_start=ko * block_K,
+                    clear_accum=(K // block_K == 1),
+                    # rowmajor addresses scales relative to the staged slice
+                    # (buffer-local); kmajor ignores k_start in the fulltile path.
+                    k_start=(ko * block_K) if sf_layout is not None else 0,
                     sf_a_granularity_k=sf_granularity_k,
                     sf_b_granularity_k=sf_granularity_k,
                     sf_layout=sf_layout,
@@ -1121,6 +1137,55 @@ def test_mxf4nvf4_4x_ue8m0_varying_scale_correctness():
     C = kernel(A, B, SFA, SFB)
     ref = _reference_ue8m0_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K, 16)
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("block_K", [128, 256])
+def test_nvf4_mma_block_scale_rowmajor_multi_k_stage_correctness(block_K):
+    # Rowmajor with block_K < K stages a per-ko scale slice, so scale
+    # addressing is buffer-local (k_start=0). This path was never covered
+    # before; a global k_start here silently reads out of the staged slice.
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 512
+    kernel = tilelang.compile(
+        _make_nvf4_matmul_codegen_kernel(M, N, K, block_K=block_K),
+        target="cuda",
+        out_idx=[4],
+    )
+
+    A, B = _make_packed_fp4_inputs(M, N, K, "random")
+    SFA, sfa_bytes = _make_varying_power_of_two_scale_words(M, K)
+    SFB, sfb_bytes = _make_varying_power_of_two_scale_words(N, K)
+
+    C = kernel(A, B, SFA, SFB)
+    ref = _reference_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.skipif(_cuda_toolkit_below(13, 1), reason="scale_vec::4X with ue8m0 needs CUDA 13.1+")
+def test_mxf4nvf4_4x_ue8m0_kmajor_codegen():
+    kernel = tilelang.compile(
+        _make_mxf4_matmul_codegen_kernel(
+            128,
+            128,
+            256,
+            sf_granularity_k=16,
+            sf_layout="blockscaled_chunk_kmajor",
+            warp_row_tiles=64,
+            warp_col_tiles=64,
+        ),
+        target="cuda",
+        out_idx=[4],
+    )
+    src = kernel.get_kernel_source()
+    assert "SM120MmaScaleType::kUE8M0" in src
+    assert "tl::sm120_mma_sync_blockscaled<" in src
 
 
 # ---------------------------------------------------------------------------

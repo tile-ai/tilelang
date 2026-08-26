@@ -76,8 +76,15 @@ def sm120_mxfp4_blockscaled_gemm(
             "boundary bug is tracked upstream); pad M or N to a multiple of 128"
         )
     assert K % block_K == 0
+    # block_M/N are pinned to one 128-row packer atom: this example's
+    # tile-rows staging (SFA[(by * k_blocks + ko) * block_M + r, w]) only
+    # matches the packed layout for single-atom tiles. block_M=256 needs
+    # atom-major indexing (((by * 2 + r // 128) * k_blocks + ko) * 128 +
+    # r % 128) instead - see the kmajor dual-atom sweep in the KB tools.
     assert block_M == 128
     assert block_N == 128
+    # block_K in (128, 256) also keeps K a multiple of 32, the packed-fp4
+    # TMA (16U4_ALIGN8B) inner-dim requirement.
     assert block_K in (128, 256), "one scale_vec::2X word covers K=128"
     assert num_stages >= 2
 
@@ -242,22 +249,49 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         source_path.write_text(kernel.get_kernel_source())
         print(f"TileLang CUDA source: {source_path}")
 
-    A = _make_packed_fp4(args.m, args.k, seed=args.seed)
-    B = _make_packed_fp4(args.n, args.k, seed=args.seed + 1)
-    SFA_semantic = _make_pow2_scale_words(args.m, args.k, seed=args.seed + 100)
-    SFB_semantic = _make_pow2_scale_words(args.n, args.k, seed=args.seed + 200)
-
-    # Zero-copy tile-rows view of the packed layout (see the kernel docstring).
     sf_words_per_block_k = args.block_k // 128
-    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
-    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
+    if args.from_bf16:
+        # Full quantization flow: bf16 activations -> packed FP4 + packed
+        # UE8M0 scales -> GEMM, verified against the dequantized product.
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from examples.dequantize_gemm.quantize import quantize_bf16_to_mxfp4_blockscaled
+
+        x_a = (torch.randn(args.m, args.k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+        x_b = (torch.randn(args.n, args.k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+        A, SFA_packed, sfa_bytes = quantize_bf16_to_mxfp4_blockscaled(x_a, block_words=sf_words_per_block_k, return_scale_bytes=True)
+        B, SFB_packed, sfb_bytes = quantize_bf16_to_mxfp4_blockscaled(x_b, block_words=sf_words_per_block_k, return_scale_bytes=True)
+        SFA = SFA_packed.reshape(-1, sf_words_per_block_k)
+        SFB = SFB_packed.reshape(-1, sf_words_per_block_k)
+    else:
+        A = _make_packed_fp4(args.m, args.k, seed=args.seed)
+        B = _make_packed_fp4(args.n, args.k, seed=args.seed + 1)
+        SFA_semantic = _make_pow2_scale_words(args.m, args.k, seed=args.seed + 100)
+        SFB_semantic = _make_pow2_scale_words(args.n, args.k, seed=args.seed + 200)
+
+        # Zero-copy tile-rows view of the packed layout (see the kernel docstring).
+        SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
+        SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
     C = torch.empty((args.m, args.n), device="cuda", dtype=out_torch_dtype)
 
     kernel(A, B, SFA, SFB, C)
     torch.cuda.synchronize()
 
     if args.verify:
-        _verify(A, B, SFA_semantic, SFB_semantic, C, out_torch_dtype)
+        if args.from_bf16:
+            a_deq = _decode_rowmajor_fp4(A, args.m, args.k) * torch.pow(
+                2.0, (sfa_bytes.to(torch.int32) - 127).to(torch.float32)
+            ).repeat_interleave(32, dim=1)
+            b_deq = _decode_rowmajor_fp4(B, args.n, args.k) * torch.pow(
+                2.0, (sfb_bytes.to(torch.int32) - 127).to(torch.float32)
+            ).repeat_interleave(32, dim=1)
+            ref = a_deq @ b_deq.T
+            # Quantized math is exact; the only divergence is the bf16
+            # output rounding (2^-8 relative).
+            torch.testing.assert_close(C.float(), ref, rtol=8e-3, atol=1e-2)
+        else:
+            _verify(A, B, SFA_semantic, SFB_semantic, C, out_torch_dtype)
         print("TileLang correctness: passed")
 
     latency_ms = do_bench(
@@ -290,6 +324,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-repeat", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--from-bf16", action="store_true", help="quantize bf16 inputs instead of synthetic fp4 data")
     parser.add_argument("--dump-source")
     return parser.parse_args()
 

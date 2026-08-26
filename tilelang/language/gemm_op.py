@@ -476,10 +476,16 @@ def mma_gemm_blockscaled(
     """Explicit SM120 warp-level block-scaled MMA GEMM.
 
     This API follows the same scale-factor model as
-    ``T.tcgen05_gemm_blockscaled``: users pass the scale tensors, logical
-    ``k_start``, and K granularity, while the lowering derives the low-level
-    scale addressing. Unlike TCGEN05, this path is synchronous warp-level
-    ``mma.sync`` and does not use tensor memory or mbarriers.
+    ``T.tcgen05_gemm_blockscaled``: users pass the scale tensors and K
+    granularity, while the lowering derives the low-level scale addressing.
+    Unlike TCGEN05, this path is synchronous warp-level ``mma.sync`` and does
+    not use tensor memory or mbarriers.
+
+    ``k_start`` semantics depend on ``sf_layout``: for ``"rowmajor"`` it is
+    the K-word offset *relative to the SFA/SFB buffers passed in* — pass 0
+    when staging a per-k-iteration slice into shared memory; for
+    ``"blockscaled_chunk_kmajor"`` the fulltile path addresses the staged
+    scale tile directly and ``k_start`` is ignored.
 
     Supported instructions, all ``m16n8k64.kind::mxf4nvf4.block_scale`` with
     E2M1 operands and FP32 accumulation, selected by

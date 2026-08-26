@@ -98,6 +98,22 @@ def test_quantize_bf16_to_mxfp4_blockscaled_contract():
     )
 
 
+def test_quantize_mxfp4_nan_input_zeroes_its_block():
+    x = torch.randn(128, 256, dtype=torch.bfloat16)
+    x[0, 5] = float("nan")
+    packed, _, sbytes = quantize_bf16_to_mxfp4_blockscaled(x, return_scale_bytes=True)
+    assert int(sbytes[0, 0]) == 0
+    block = decode_packed_fp4_e2m1(packed, 256)[0, :32]
+    assert bool((block == 0).all())
+
+
+def test_quantize_mxfp4_inf_saturates_block_scale():
+    x = torch.randn(128, 256, dtype=torch.bfloat16)
+    x[0, 5] = float("inf")
+    _, _, sbytes = quantize_bf16_to_mxfp4_blockscaled(x, return_scale_bytes=True)
+    assert int(sbytes[0, 0]) == 0xFE
+
+
 def test_quantize_bf16_to_mxfp4_blockscaled_has_bounded_error():
     rows, cols = 128, 512
     generator = torch.Generator(device="cpu").manual_seed(11)
