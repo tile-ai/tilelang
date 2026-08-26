@@ -451,8 +451,6 @@ struct Copy {
                     arith::Analyzer *analyzer);
 
 private:
-  static Layout ComputeLinearLayout(const Buffer &shared_tensor);
-
   static void CollectFragmentLayouts(const PrimExpr &expr,
                                      const Map<Var, PrimExpr> &bind_var_to_expr,
                                      const LayoutMap &existing_layouts,
@@ -503,23 +501,6 @@ struct Im2Col {
   static Stmt Lower(const Im2ColOpNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer);
 };
-
-Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) {
-  Array<PrimExpr> input_size = shared_tensor->shape;
-  Array<PrimExpr> forward_vars;
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_vars.push_back(InputPlaceholder(i));
-  }
-
-  Array<PrimExpr> forward_index;
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorDiv(forward_vars[i], 256));
-  }
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorMod(forward_vars[i], 256));
-  }
-  return Layout(input_size, forward_index);
-}
 
 void Copy::CollectFragmentLayouts(const PrimExpr &expr,
                                   const Map<Var, PrimExpr> &bind_var_to_expr,
@@ -779,13 +760,15 @@ LayoutMap Copy::InferBulkLayout(const CopyNode &op,
       if (StructuralEqual()(swizzle_layout_2d, MakeLinearLayout(Array<PrimExpr>{
                                                    Integer(mat_stride),
                                                    Integer(mat_continuous)}))) {
-        result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
+        result_map.Set(shared_tensor,
+                       MakeTmaLinearLayout(shared_tensor->shape, shared_range));
       } else {
         result_map.Set(shared_tensor, ExpandLayoutToMatchBuffer(
                                           swizzle_layout_2d, shared_tensor));
       }
     } else {
-      result_map.Set(shared_tensor, ComputeLinearLayout(shared_tensor));
+      result_map.Set(shared_tensor,
+                     MakeTmaLinearLayout(shared_tensor->shape, shared_range));
     }
   }
 
@@ -1873,13 +1856,11 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
       << " elements; try to use annotate_layout to make your SMEM tile "
          "contiguous";
 
-  // Each TMA box dim is at most 256.
-  const int64_t max_box_dim = 256;
-
   // physical shared (without swizzle) -> tile -> logical global mode
   // E.g, physical_shared_to_global_mode = (64,64,8):(1@2,1@1,64@2)
-  auto physical_shared_to_global_mode = cute::Coalesce(
-      cute::Composition(tile_to_global_mode, smem_plain_to_tile), max_box_dim);
+  auto physical_shared_to_global_mode =
+      cute::Coalesce(cute::Composition(tile_to_global_mode, smem_plain_to_tile),
+                     kTmaMaxBoxDim);
 
   // Truncate, because we do not want to start in the middle of a global mode.
   // E.g., smem_rank = 2
@@ -1919,7 +1900,7 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
   // meet some requirements if we need to. This is the modified tile_gbasis.
   Array<cute::IntTuple> box_shape, box_stride;
   for (int64_t i = 0; i < smem_rank; i++) {
-    int64_t cap = max_box_dim;
+    int64_t cap = kTmaMaxBoxDim;
     bool is_swizzle_inner = (i == 0 && sw->IsSwizzled());
     if (is_swizzle_inner) {
       int64_t span_bits = sw->Granularity() * 8;

@@ -38,6 +38,15 @@ void RequireTMASmemAlignment(const LowerArgs &lower_args,
                              const tirx::Buffer &shared_tensor,
                              const SwizzleMode &swizzle_mode);
 
+// A TensorMap box dimension holds at most 256 elements.
+inline constexpr int64_t kTmaMaxBoxDim = 256;
+
+// Unswizzled shared-memory layout whose copied modes are tiled at the TMA box
+// cap. Dimensions fixed by `region` stay outermost so a versioned slice
+// remains contiguous.
+Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
+                           const ffi::Array<Range> &region = {});
+
 } // namespace cuda
 } // namespace tl
 } // namespace tvm
