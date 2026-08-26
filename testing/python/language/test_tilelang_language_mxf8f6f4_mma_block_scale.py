@@ -564,11 +564,14 @@ def test_mxf8f6f4_inf_minus_inf_yields_nan():
 def test_mxf8f6f4_quantize_roundtrip_gemm(dtype_name):
     """End-to-end plumbing pin: bf16 -> quantizer -> packed scales -> GEMM.
 
-    This is a tolerance test by necessity: real quantized data has mixed
-    magnitudes, so fp32 partial sums are rounded and the python reference
-    (torch matmul) does not share the MMA's intra-atom summation tree. The
-    tolerance is set for fp32 rounding-order noise only (~K * 2^-24
-    relative); any packing/layout mistake produces O(1) errors and fails.
+    A tolerance test, because the only oracle available in CI is a torch
+    matmul, which does not share the MMA's intra-atom summation tree on
+    real (mixed-magnitude) quantized data. The exact version of this check
+    is the "quantized band" in correctness_evaluation_mxf8_vs_cutlass.py:
+    the same quantizer output through both engines is bitwise-equal, no
+    tolerance involved. Here the tolerance is sized for fp32
+    rounding-order noise only; any packing/layout mistake produces O(1)
+    errors and fails.
     """
     import torch
 

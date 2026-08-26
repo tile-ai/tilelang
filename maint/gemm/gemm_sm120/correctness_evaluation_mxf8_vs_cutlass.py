@@ -221,6 +221,44 @@ def _compare_one(ext, a_name, b_name, m, n, k, full_domain=False, block_K=None):
         )
 
 
+def _compare_quantized(ext, dtype_name, m, n, k):
+    """The quantized band: real quantizer output, engine vs engine, bitwise.
+
+    Feeding the SAME quantized tensors and scale bytes to both backends
+    removes the python-reference tolerance problem entirely: both engines
+    run the same instruction in the same K order, so the comparison is
+    exact even though the data has mixed magnitudes and rounding partial
+    sums.
+    """
+    from examples.dequantize_gemm.quantize import quantize_bf16_to_mxfp8_blockscaled
+
+    x_a = (torch.randn(m, k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+    x_b = (torch.randn(n, k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+    a, _, sfa_logical = quantize_bf16_to_mxfp8_blockscaled(x_a, dtype=dtype_name, return_scale_bytes=True)
+    b, _, sfb_logical = quantize_bf16_to_mxfp8_blockscaled(x_b, dtype=dtype_name, return_scale_bytes=True)
+
+    kernel = tilelang.compile(_make_tilelang_mxf8_kernel(m, n, k, dtype_name, dtype_name), target="cuda", out_idx=[4])
+    C_tl = kernel(a, b, _pack_tilelang_sf_u32(sfa_logical), _pack_tilelang_sf_u32(sfb_logical))
+
+    C_ref = torch.zeros((m, n), device="cuda", dtype=torch.float32)
+    D_cutlass = torch.zeros((m, n), device="cuda", dtype=torch.float32)
+    ext.cutlass_mxf8_gemm(
+        a.view(torch.int8).contiguous(),
+        b.view(torch.int8).contiguous(),
+        _pack_cutlass_sf_bytes(sfa_logical),
+        _pack_cutlass_sf_bytes(sfb_logical),
+        C_ref,
+        D_cutlass,
+        m,
+        n,
+        k,
+        dtype_name == "e4m3",
+        dtype_name == "e4m3",
+    )
+    assert torch.equal(C_tl.view(torch.int32), D_cutlass.view(torch.int32)), f"{dtype_name} quantized band not bitwise"
+    print(f"{dtype_name}x{dtype_name} [quantized bf16->mxfp8]: TileLang vs CUTLASS bitwise equal")
+
+
 def run_compare() -> None:
     torch.manual_seed(0)
     assert torch.cuda.is_available(), "CUDA is required"
@@ -241,6 +279,9 @@ def run_compare() -> None:
     # byte parity) stays pinned against CUTLASS forever.
     _compare_one(ext, "e4m3", "e4m3", m, n, k, block_K=128)
     _compare_one(ext, "e5m2", "e5m2", m, n, k, full_domain=True, block_K=128)
+    # Real quantizer output through both engines, bitwise (no tolerance).
+    _compare_quantized(ext, "e4m3", m, n, k)
+    _compare_quantized(ext, "e5m2", m, n, k)
 
 
 if __name__ == "__main__":
