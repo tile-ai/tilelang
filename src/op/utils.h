@@ -120,11 +120,24 @@ inline bool IsFP4PackedToUnpackedStorageCopy(DataType global_dtype,
          shared_dtype.is_float4_e2m1_unpacked();
 }
 
+// True when global packed FP6 is copied into f8f6f4/mxf8f6f4 unpacked FP6
+// SMEM (TMA 16U6_ALIGN16B).
+inline bool IsFP6PackedToUnpackedStorageCopy(DataType global_dtype,
+                                             DataType shared_dtype) {
+  return (global_dtype.is_float6_e2m3fn() &&
+          shared_dtype.is_float6_e2m3fn_unpacked()) ||
+         (global_dtype.is_float6_e3m2fn() &&
+          shared_dtype.is_float6_e3m2fn_unpacked());
+}
+
 inline bool IsValidTMALoadDtypePair(DataType global_dtype,
                                     DataType shared_dtype) {
   if (global_dtype.is_float4_e2m1_unpacked() ||
       shared_dtype.is_float4_e2m1_unpacked()) {
     return IsFP4PackedToUnpackedStorageCopy(global_dtype, shared_dtype);
+  }
+  if (global_dtype.is_float6_unpacked() || shared_dtype.is_float6_unpacked()) {
+    return IsFP6PackedToUnpackedStorageCopy(global_dtype, shared_dtype);
   }
   if (global_dtype == shared_dtype) {
     return true;
@@ -135,7 +148,8 @@ inline bool IsValidTMALoadDtypePair(DataType global_dtype,
 inline bool IsValidTMAStoreDtypePair(DataType global_dtype,
                                      DataType shared_dtype) {
   return global_dtype == shared_dtype &&
-         !shared_dtype.is_float4_e2m1_unpacked();
+         !shared_dtype.is_float4_e2m1_unpacked() &&
+         !shared_dtype.is_float6_unpacked();
 }
 
 inline bool IsValidTMADtypePair(bool is_load, DataType global_dtype,
@@ -157,6 +171,11 @@ inline bool IsValidTMACopyDtypePair(DataType global_dtype,
 inline bool IsFP4UnpackLoad(const Buffer &src, const Buffer &dst) {
   return IsGlobalBuffer(src) && IsSharedBuffer(dst) &&
          IsFP4PackedToUnpackedStorageCopy(src->dtype, dst->dtype);
+}
+
+inline bool IsFP6UnpackLoad(const Buffer &src, const Buffer &dst) {
+  return IsGlobalBuffer(src) && IsSharedBuffer(dst) &&
+         IsFP6PackedToUnpackedStorageCopy(src->dtype, dst->dtype);
 }
 
 } // namespace tl

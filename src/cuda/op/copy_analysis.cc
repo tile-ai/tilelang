@@ -30,6 +30,9 @@ int TMAPayloadElementBits(DataType dtype) {
   if (dtype.is_float4_e2m1_unpacked()) {
     return 4;
   }
+  if (dtype.is_float6_unpacked()) {
+    return 6;
+  }
   return dtype.bits();
 }
 
@@ -390,7 +393,7 @@ bool CheckBulkLoad1D(const CopyNode &op, Target target,
   // The 1D bulk path is a descriptorless byte copy: it cannot perform the
   // packed->unpacked FP4 expansion, so such copies must take the tiled
   // (descriptor) path where 16U4_ALIGN16B does the unpacking.
-  if (IsFP4UnpackLoad(op.src, op.dst)) {
+  if (IsFP4UnpackLoad(op.src, op.dst) || IsFP6UnpackLoad(op.src, op.dst)) {
     return false;
   }
   if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics)) {

@@ -596,9 +596,11 @@ void TVMFFIABIBuilder::BindDLTensors(
     // runtime shape [m, 8]. We need to solve for symbolic variables from
     // this packed shape.
     if (data_is_subtype) {
-      // For subtype, bind symbolic variables from the packed shape.
-      // Number of logical elements packed into one byte-sized storage unit.
-      int pack_factor = 8 / logical_element_bits;
+      // For subtype, bind symbolic variables from the packed shape. The
+      // runtime last dimension counts 8-bit storage units, so
+      // logical_last = runtime_last * 8 / logical_bits. Integer division is
+      // exact whenever the total-bits assert above holds (fp4: *2; fp6:
+      // *8/6 - NOT expressible as an integer pack factor).
 
       // Build a mapping from logical shape dimensions to runtime shape
       // expressions For all dimensions except the last, runtime_shape[k] ==
@@ -618,9 +620,9 @@ void TVMFFIABIBuilder::BindDLTensors(
         PrimExpr logical_shape_val;
         bool is_last_dim = (k == buffer->shape.size() - 1);
         if (is_last_dim) {
-          logical_shape_val =
-              runtime_shape_val *
-              make_const(runtime_shape_val.dtype(), pack_factor);
+          logical_shape_val = indexdiv(
+              runtime_shape_val * make_const(runtime_shape_val.dtype(), 8),
+              make_const(runtime_shape_val.dtype(), logical_element_bits));
         } else {
           logical_shape_val = runtime_shape_val;
         }
@@ -790,7 +792,6 @@ void TVMFFIABIBuilder::BindDLTensors(
       // For subtype, only process strides if there are explicit strides
       // with symbolic variables that need binding
       if (!buffer->strides.empty()) {
-        int pack_factor = 8 / logical_element_bits;
 
         Buffer buf_strides =
             decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
@@ -827,8 +828,11 @@ void TVMFFIABIBuilder::BindDLTensors(
           if (is_last_dim) {
             logical_stride_val = runtime_stride;
           } else {
+            // Runtime strides count 8-bit storage units; exact whenever the
+            // enclosing shape/total-bits constraints hold (fp4 *2, fp6 *8/6).
             logical_stride_val =
-                runtime_stride * make_const(stride_dtype, pack_factor);
+                indexdiv(runtime_stride * make_const(stride_dtype, 8),
+                         make_const(stride_dtype, logical_element_bits));
           }
 
           // Relax stride check: if the expected stride is 0, allow any actual

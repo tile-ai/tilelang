@@ -229,6 +229,12 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
     elif dtype_str == "float4_e2m1fn":
         logger.info("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
+    elif dtype_str in ("float6_e2m3fn", "float6_e3m2fn"):
+        # torch has no fp6 dtype; packed fp6 tensors travel as uint8 blobs of
+        # numel*3/4 bytes (LSB-first 6-bit stream), checked by the sub-byte
+        # binder's total-bits constraint.
+        logger.info("torch doesn't support %s, using uint8 blob storage.", dtype_str)
+        return torch.uint8
     elif dtype_str == "custom[tfloat32]":
         return torch.float32
     elif dtype_str == "int4":

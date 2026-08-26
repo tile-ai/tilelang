@@ -204,8 +204,12 @@ int to_CUtensorMapDataType(DataType dtype) {
   // the installed toolkit, so keep the enum value by CUDA's documented order.
   constexpr int kTensorMapDataType16U4Align8B = 13;
   constexpr int kTensorMapDataType16U4Align16B = 14;
+  constexpr int kTensorMapDataType16U6Align16B = 15;
   if (dtype.is_float4_e2m1_unpacked()) {
     return kTensorMapDataType16U4Align16B;
+  }
+  if (dtype.is_float6_unpacked()) {
+    return kTensorMapDataType16U6Align16B;
   }
   if (dtype.is_float4_e2m1fn()) {
     return kTensorMapDataType16U4Align8B;

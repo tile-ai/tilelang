@@ -870,11 +870,12 @@ def test_w6a8_example_synthetic_band_bitwise(a_name, b_flavor, shape):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 def test_w6a8_example_su6_engaged_and_compression():
-    """W6A8 acceptance A3 + A4: su6 path engaged (no shift call), 0.75 B/elem."""
+    """W6A8 acceptance A3 + A4: TMA + su6 engaged (no shift), 0.75 B/elem."""
     module = _load_w6a8_example()
     M = N = K = 256
     kernel, A, B, _, _, _ = _w6a8_example_run(module, M, N, K)
     src = kernel.get_kernel_source()
+    assert "tl::tma_load" in src  # 16U6_ALIGN16B producer engaged
     assert "tl::ptx_ldmatrix_su6_x" in src
     assert "tl::fp4_e2m1_container_shift" not in src  # fp6 containers need no shift
     assert ", tl::SM120MmaOperandType::kE3M2>" in src
@@ -916,3 +917,85 @@ def test_w6a8_example_quantize_band():
     b_dec = module._decode_fp6_blob(B_cpu.cuda(), N, K, "e3m2")
     ref = (A.to(torch.float32) * scale(sfa_bytes)) @ (b_dec * scale(sfb_bytes).cuda()).T
     torch.testing.assert_close(C, ref, rtol=1e-5, atol=1e-3)
+
+
+@simplify_prim_func
+def _make_a8w6_tma_matmul_kernel(M, N, K, a_dtype, num_stages=2, *, block_M=64, block_N=64, block_K=128):
+    """A8W6 with the 16U6_ALIGN16B TMA producer on the fp6 B operand.
+
+    B is declared as a packed float6 GLOBAL tensor (fed as a uint8 blob of
+    N*K*3/4 bytes through the sub-byte binder bypass); the TMA unpacks it
+    into the padded smem form the su6 ldmatrix consumes.
+    """
+    accum_dtype = T.float32
+    scale_words = block_K // 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), a_dtype),
+        B: T.Tensor((N, K), T.float6_e3m2fn),
+        SFA: T.Tensor((M, K // 128), T.uint32),
+        SFB: T.Tensor((N, K // 128), T.uint32),
+        C: T.Tensor((M, N), accum_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), a_dtype, scope="shared.dyn")
+            B_shared = T.alloc_shared((block_N, block_K), T.float6_e3m2fn_unpacked, scope="shared.dyn")
+            SFA_shared = T.alloc_shared((block_M, scale_words), T.uint32, scope="shared.dyn")
+            SFB_shared = T.alloc_shared((block_N, scale_words), T.uint32, scope="shared.dyn")
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+
+            if K // block_K > 1:
+                T.clear(C_local)
+            for ko in T.Pipelined((K // block_K), num_stages=num_stages):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
+                for i, w in T.Parallel(block_M, scale_words):
+                    SFA_shared[i, w] = SFA[by * block_M + i, ko * scale_words + w]
+                for j, w in T.Parallel(block_N, scale_words):
+                    SFB_shared[j, w] = SFB[bx * block_N + j, ko * scale_words + w]
+                T.mma_gemm_blockscaled(
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    SFA_shared,
+                    SFB_shared,
+                    transpose_B=True,
+                    clear_accum=(K // block_K == 1),
+                    k_start=0,
+                    sf_a_granularity_k=32,
+                    sf_b_granularity_k=32,
+                )
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_a8w6_tma_producer_matches_simt_producer_bitwise():
+    """S9 acceptance: the 16U6_ALIGN16B TMA unpack must stage byte-identical
+    smem to the SIMT padded-group fp6 producer."""
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 256
+    tma = tilelang.compile(_make_a8w6_tma_matmul_kernel(M, N, K, T.float8_e4m3fn), target="cuda", out_idx=[4])
+    device_src = tma.get_kernel_source()
+    assert "tl::tma_load" in device_src
+    assert "tl::ptx_ldmatrix_su6_x" in device_src
+
+    simt = tilelang.compile(_make_family_matmul_kernel(M, N, K, "e4m3", "e3m2"), target="cuda", out_idx=[4])
+
+    A = torch.randint(-4, 5, (M, K), device="cuda", dtype=torch.float32).to(torch.float8_e4m3fn)
+    B_blob = torch.randint(0, 256, (N, K * 3 // 4), device="cuda", dtype=torch.uint8)
+    sfa_bytes = (torch.randint(0, 2, (M, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    sfb_bytes = (torch.randint(0, 2, (N, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    SFA = _pack_scale_words(sfa_bytes)
+    SFB = _pack_scale_words(sfb_bytes)
+
+    C_tma = tma(A, B_blob.view(torch.int8), SFA, SFB)
+    C_simt = simt(A, B_blob, SFA, SFB)
+    assert torch.equal(C_tma.view(torch.int32), C_simt.view(torch.int32))

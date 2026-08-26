@@ -8,10 +8,10 @@ a packed uint8 blob - an LSB-first 6-bit stream, 4 elements per 3 bytes
 consecutive K elements share one UE8M0 scale byte; the instruction is
 ``m16n8k32.kind::mxf8f6f4.block_scale.scale_vec::1X``.
 
-B's global->shared staging is a SIMT producer writing the b6x16_p32 padded
-form (12 payload bytes + 4 padding per 16-element group); the su6 ldmatrix
-unpacks the containers into registers (bits[5:0], no shift). The
-16U6_ALIGN16B TMA producer is tracked as follow-up work. Engine-vs-engine
+B's global->shared staging uses the 16U6_ALIGN16B bulk-TMA path (packed
+global -> unpacked 8-bit-container smem, hardware-unpacked); the su6
+ldmatrix lifts the containers into registers (bits[5:0], no shift).
+Engine-vs-engine
 (CUTLASS) bitwise comparison lives in
 maint/gemm/gemm_sm120/correctness_evaluation_w6a8_vs_cutlass.py.
 
@@ -102,6 +102,7 @@ def sm120_w6a8_mxf8f6f4_gemm(
     assert num_stages >= 2
 
     a_dtype = getattr(T, _TILELANG_FP8[a_dtype_name])
+    b_global_dtype = getattr(T, {"e2m3": "float6_e2m3fn", "e3m2": "float6_e3m2fn"}[b_flavor])
     b_smem_dtype = getattr(T, {"e2m3": "float6_e2m3fn_unpacked", "e3m2": "float6_e3m2fn_unpacked"}[b_flavor])
     accum_dtype = T.float32
     sf_words_per_block_k = block_K // 128
@@ -113,7 +114,9 @@ def sm120_w6a8_mxf8f6f4_gemm(
     @T.prim_func
     def main(
         A: T.Tensor((M, K), a_dtype),
-        B_blob: T.Tensor((N, K * 3 // 4), T.uint8),
+        # Declared as packed fp6; the host feeds a uint8 blob of N*K*3/4
+        # bytes through the sub-byte binder (total-bits checked).
+        B: T.Tensor((N, K), b_global_dtype),
         SFA: T.Tensor((M_pad * k_blocks, sf_words_per_block_k), T.uint32),
         SFB: T.Tensor((N_pad * k_blocks, sf_words_per_block_k), T.uint32),
         C: T.Tensor((M, N), out_dtype),
@@ -131,10 +134,10 @@ def sm120_w6a8_mxf8f6f4_gemm(
             T.clear(C_local)
             for ko in T.Pipelined(K // block_K, num_stages=num_stages):
                 T.copy(A[by * block_M, ko * block_K], A_shared)
-                # SIMT producer of the b6x16_p32 padded form: 12 payload
-                # bytes + 4 padding bytes per 16-element group.
-                for j, g, b in T.Parallel(block_N, block_K // 16, 12):
-                    B_shared[j, 16 * g + b] = T.reinterpret(b_smem_dtype, B_blob[bx * block_N + j, ko * (block_K * 3 // 4) + 12 * g + b])
+                # Packed fp6 global -> unpacked smem via 16U6_ALIGN16B TMA
+                # (bitwise-equal to the SIMT reference producer, pinned in
+                # the subbyte test file).
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
 
                 for r, w in T.Parallel(block_M, sf_words_per_block_k):
                     SFA_shared[r, w] = SFA[(by * k_blocks + ko) * block_M + r, w]

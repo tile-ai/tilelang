@@ -487,6 +487,12 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
                << "T.tma_copy() for FP4 unpack loads (src=" << src->name
                << ", dst=" << dst->name << ").";
   }
+  if (IsFP6UnpackLoad(src, dst)) {
+    LOG(FATAL) << "SIMT copy from packed global float6 to unpacked shared "
+               << "float6_*_unpacked is not supported; use the TMA path for "
+               << "FP6 unpack loads (src=" << src->name << ", dst=" << dst->name
+               << ").";
+  }
 
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();

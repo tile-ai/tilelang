@@ -54,6 +54,9 @@ int TMAPayloadElementBits(DataType dtype) {
   if (dtype.is_float4_e2m1_unpacked()) {
     return 4;
   }
+  if (dtype.is_float6_unpacked()) {
+    return 6;
+  }
   return dtype.bits();
 }
 
@@ -159,10 +162,18 @@ int TensorMapDataTypeForTMA(DataType global_dtype, DataType shared_dtype) {
   // (float_e2m1_unpacksmem_t). 16U4_ALIGN8B: packed FP4 for mxf4 / mxf4nvf4
   // (float_e2m1_t).
   constexpr int kTensorMapDataType16U4Align16B = 14;
+  constexpr int kTensorMapDataType16U6Align16B = 15;
   if (shared_dtype.is_float4_e2m1_unpacked()) {
     ICHECK(global_dtype.is_float4_e2m1fn())
         << "FP4 packed global tensor required for unpacked shared TMA copy";
     return kTensorMapDataType16U4Align16B;
+  }
+  if (shared_dtype.is_float6_unpacked()) {
+    ICHECK(IsFP6PackedToUnpackedStorageCopy(global_dtype, shared_dtype))
+        << "matching packed FP6 global tensor required for unpacked shared "
+           "TMA copy, got "
+        << global_dtype << " -> " << shared_dtype;
+    return kTensorMapDataType16U6Align16B;
   }
   return to_CUtensorMapDataType(global_dtype);
 }
