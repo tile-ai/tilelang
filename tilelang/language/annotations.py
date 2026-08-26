@@ -2,8 +2,8 @@
 
 from collections.abc import Callable
 
-from tilelang.layout import Fragment, Layout
-from tilelang.utils.language import is_fragment
+from tilelang.layout import Fragment, Layout, PartialFragment
+from tilelang.utils.language import is_fragment, is_reducer
 from tvm.tirx.script.parser import attr
 from tvm.tirx.script.builder.ir import sblock_attr
 from tvm.tirx import FloatImm, tvm_tuple
@@ -45,7 +45,15 @@ def annotate_layout(layout_map: dict):
     """Annotate the layout of the buffer."""
     _layout_map = {}
     for buffer, layout in layout_map.items():
-        if is_fragment(buffer):
+        if is_reducer(buffer):
+            # The reducer's replicas are addends awaiting the finalize
+            # collective, not equal copies: plain Fragment semantics would
+            # silently misdescribe them.
+            assert isinstance(layout, PartialFragment), (
+                f"for reducer {buffer} (T.alloc_reducer), the layout must be a "
+                f"PartialFragment describing the per-thread partials, but got {type(layout)}"
+            )
+        elif is_fragment(buffer):
             assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
         if isinstance(layout, Layout):
             _layout_map[buffer.data] = layout

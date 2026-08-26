@@ -498,14 +498,20 @@ def test_packed_accumulation_fp16_parallel_reduction():
     """fp16 narrow plans split each per-thread partial into two lanes keyed
     by the reduction var's parity ("_pk" storage), halving the serial combine
     dependence chain; a per-thread fold recombines the lanes before the
-    (unchanged) projected collective."""
+    (unchanged) projected collective.
+
+    256-bit global vectorization (sm100+) is pinned off: it legitimately
+    doubles the per-thread contiguous run to 16 halves and halves the
+    projected collective to `SumOp, 4`, while the exact-width assertions
+    below encode the 128-bit shape."""
     M, K, threads = 32, 64, 128
-    source = tl.compile(_rowsum_kernel(M, K, threads, T.float16), out_idx=-1).get_kernel_source()
+    configs = {tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True}
+    source = tl.compile(_rowsum_kernel(M, K, threads, T.float16), out_idx=-1, pass_configs=configs).get_kernel_source()
     assert "_pk" in source, source
     assert "SumOp, 8" in source, source  # collective width unchanged by packing
 
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    B = tl.compile(_rowsum_kernel(M, K, threads, T.float16), out_idx=-1)(A)
+    B = tl.compile(_rowsum_kernel(M, K, threads, T.float16), out_idx=-1, pass_configs=configs)(A)
     torch.testing.assert_close(B, A.float().sum(dim=1).to(torch.float16), atol=1e-2, rtol=1e-2)
 
 
@@ -1517,6 +1523,372 @@ def test_update_packed_fp32x2_sm100_codegen():
     with tvm.transform.PassContext(), tvm.target.Target(target):
         artifact = tilelang.lower(_contiguous_update_kernel(256, 128, T.float32, run=2), target=target)
     assert "add2" in artifact.kernel_source, artifact.kernel_source
+
+
+def test_partial_layout_widen_on_disagreeing_sites():
+    """PartialFragment widen-on-conflict: two individually narrow-eligible
+    update nests whose induced partial layouts disagree must converge to the
+    participant-wide plan (never a layout-conflict fatal), with exact sums."""
+    M, threads = 32, 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((M, 4), T.float32),
+        B: T.Tensor((M, 8), T.float32),
+        C: T.Tensor((M,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((M, 4), T.float32)
+            b_frag = T.alloc_fragment((M, 8), T.float32)
+            T.copy(A, a_frag)
+            T.copy(B, b_frag)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, 4):
+                T.reducer_update(acc[i], a_frag[i, k])
+            for i, k in T.Parallel(M, 8):
+                T.reducer_update(acc[i], b_frag[i, k])
+            result = T.alloc_fragment((M,), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, C)
+
+    A = torch.randn(M, 4, dtype=torch.float32, device="cuda")
+    B = torch.randn(M, 8, dtype=torch.float32, device="cuda")
+    C = tl.compile(kernel, out_idx=-1)(A, B)
+    torch.testing.assert_close(C, A.sum(dim=1) + B.sum(dim=1), atol=1e-5, rtol=1e-5)
+
+
+def test_zero_update_epoch_wide_floor():
+    """An epoch with no update site has no partial-layout proposer among the
+    update nests; the engine seeds the participant-wide floor so finalize can
+    still steer its destination, and the result is exactly the seed."""
+    threads = 128
+
+    @T.prim_func
+    def kernel(B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.reducer_init(acc, T.float32(3.5))
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(acc, result)
+            if T.get_thread_binding() == 0:
+                B[0] = result[0]
+
+    B = tl.compile(kernel, out_idx=-1)()
+    torch.testing.assert_close(B, torch.full((1,), 3.5, dtype=torch.float32, device="cuda"), atol=0, rtol=0)
+
+
+def _annotated_partial_kernel(annotate: bool, lanes: int):
+    """GEMV-shaped kernel; when `annotate` is set, pin the reducer to a
+    middle plan: thread (i % (128 // lanes)) * lanes + rep, i.e. `lanes`
+    combine lanes per row, 32 * lanes / 128 partials per thread."""
+    M, K, threads = 32, 32, 128
+    groups = threads // lanes
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((M, K), T.float32)
+            T.copy(A, a_frag)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            if annotate:
+                T.annotate_layout(
+                    {
+                        acc: T.PartialFragment(
+                            (M,),
+                            forward_thread_fn=lambda i, rep: (i % groups) * lanes + rep,
+                            replicate=lanes,
+                        )
+                    }
+                )
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], a_frag[i, k])
+            result = T.alloc_fragment((M,), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    return kernel
+
+
+# The automatic plan for _annotated_partial_kernel depends on the target's
+# vector width (128-bit loads -> 8 lanes per row; sm100+ 256-bit loads -> 4
+# lanes), so the exact-width assertions below pin 256-bit vectorization off
+# and encode the 128-bit shape: auto = 8 lanes, annotation = 4.
+_ANNOTATED_PARTIAL_CONFIGS = {tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True}
+
+
+def test_annotated_partial_middle_plan():
+    """A user-annotated PartialFragment pins a middle plan the automatic
+    solution would not pick (auto solves 8 lanes per row under the pinned
+    128-bit vectorization): 4 combine lanes per row, so finalize emits an
+    AllReduce of width exactly 4."""
+    kern = tl.compile(_annotated_partial_kernel(annotate=True, lanes=4), out_idx=-1, pass_configs=_ANNOTATED_PARTIAL_CONFIGS)
+    src = kern.get_kernel_source()
+    assert "AllReduce<tl::SumOp, 4," in src, src
+    A = torch.randn(32, 32, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kern(A), A.sum(dim=1), atol=1e-5, rtol=1e-5)
+
+
+def test_annotated_partial_steers_inputs():
+    """The annotated partial back-propagates through the update loop into
+    the input fragment's layout: the baseline auto-solves 8 lanes per row
+    (pinned 128-bit vectorization), the annotation forces 4, and both stay
+    numerically exact."""
+    base = tl.compile(_annotated_partial_kernel(annotate=False, lanes=4), out_idx=-1, pass_configs=_ANNOTATED_PARTIAL_CONFIGS)
+    pinned = tl.compile(_annotated_partial_kernel(annotate=True, lanes=4), out_idx=-1, pass_configs=_ANNOTATED_PARTIAL_CONFIGS)
+    assert "AllReduce<tl::SumOp, 8," in base.get_kernel_source(), base.get_kernel_source()
+    assert "AllReduce<tl::SumOp, 4," in pinned.get_kernel_source(), pinned.get_kernel_source()
+    A = torch.randn(32, 32, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(base(A), A.sum(dim=1), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(pinned(A), A.sum(dim=1), atol=1e-5, rtol=1e-5)
+
+
+def test_annotated_partial_conflict_raises():
+    """An annotated input fragment forces a loop layout whose induced
+    partial disagrees with the annotated reducer partial: the update site
+    reports the conflict."""
+    M, K, threads = 32, 32, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((M, K), T.float32)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            T.annotate_layout(
+                {
+                    # a_frag: each row spread over 8 lanes of 4 consecutive k.
+                    a_frag: T.Fragment(
+                        (M, K),
+                        forward_thread_fn=lambda i, k: (i % 16) * 8 + k // 4,
+                    ),
+                    # acc: 4 lanes per row — incompatible with a_frag's 8 lanes.
+                    acc: T.PartialFragment(
+                        (M,),
+                        forward_thread_fn=lambda i, rep: (i % 32) * 4 + rep,
+                        replicate=4,
+                    ),
+                }
+            )
+            T.copy(A, a_frag)
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], a_frag[i, k])
+            result = T.alloc_fragment((M,), T.float32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    with pytest.raises(Exception, match="annotated"):
+        tl.compile(kernel, out_idx=-1)
+
+
+def test_annotate_plain_fragment_on_reducer_raises():
+    """The frontend rejects a plain Fragment on a reducer buffer: its
+    replicas are addends, not equal copies."""
+    M, threads = 32, 128
+
+    def build():
+
+        @T.prim_func
+        def kernel(A: T.Tensor((M,), T.float32), B: T.Tensor((M,), T.float32)):
+            with T.Kernel(1, threads=threads):
+                acc = T.alloc_reducer((M,), T.float32, op="sum")
+                T.annotate_layout({acc: T.Fragment((M,), forward_thread_fn=lambda i: i)})
+                T.reducer_init(acc)
+                for i in T.Parallel(M):
+                    T.reducer_update(acc[i], T.float32(1.0))
+                result = T.alloc_fragment((M,), T.float32)
+                T.finalize_reducer(acc, result)
+                T.copy(result, B)
+
+        return kernel
+
+    with pytest.raises(Exception, match="PartialFragment"):
+        build()
+
+
+def test_annotated_dst_incompatible_unconstrained_chain_overridden():
+    """An annotated finalize destination whose placement is incompatible
+    with the reduction's natural placement, but whose whole use chain is
+    unconstrained (finalize-written, read only by the copy to global), is
+    re-layouted to the induced placement: the narrow plan survives and the
+    numerics stay exact."""
+    M, K, threads = 32, 32, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((M, K), T.float32), B: T.Tensor((M,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((M, K), T.float32)
+            T.copy(A, a_frag)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            result = T.alloc_fragment((M,), T.float32)
+            # Each dst element owned by exactly one thread — thread i does
+            # not hold element i's combined value under the narrow plan.
+            T.annotate_layout(
+                {
+                    result: T.Fragment((M,), forward_thread_fn=lambda i: i),
+                }
+            )
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], a_frag[i, k])
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    # 128-bit vectorization pinned: the narrow collective width is 8 on
+    # every arch (256-bit loads would halve it to 4 on sm100+).
+    kern = tl.compile(kernel, out_idx=-1, pass_configs=_ANNOTATED_PARTIAL_CONFIGS)
+    src = kern.get_kernel_source()
+    assert "SumOp, 8," in src, src  # narrow plan survives the override
+    assert f"SumOp, {threads}" not in src, src
+    A = torch.randn(M, K, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kern(A), A.sum(dim=1), atol=1e-5, rtol=1e-5)
+
+
+def test_partial_combine_size_roundtrip():
+    """(storage algebra, combine width) is the complete physical plan: the
+    collective steps must be derivable from the PartialFragment alone. The
+    materializer ICHECKs this equivalence against the loop-layout-derived
+    plan on every compiled kernel; here the node-side derivation is checked
+    structurally on representative decompositions."""
+    from tilelang import _ffi_api
+
+    def steps(partial):
+        return [tuple(map(int, s)) for s in _ffi_api.PartialFragment_combine_steps(partial)]
+
+    # Wide / FullParticipant: every replica is an addend lane.
+    wide = tilelang.layout.make_fully_replicated_partial_fragment([64], 128)
+    assert int(wide.combine_size) == 128
+    assert steps(wide) == [(128, 1)]
+
+    # Middle plan, lanes at thread stride 1.
+    low = T.PartialFragment((32,), forward_thread_fn=lambda i, rep: (i % 16) * 8 + rep, replicate=8)
+    assert int(low.combine_size) == 8
+    assert steps(low) == [(8, 1)]
+
+    # Same lane count at thread stride 16: a different communication
+    # pattern the width alone could not distinguish.
+    high = T.PartialFragment((32,), forward_thread_fn=lambda i, rep: rep * 16 + i % 16, replicate=8)
+    assert int(high.combine_size) == 8
+    assert steps(high) == [(128, 16)]
+
+
+def test_same_storage_different_combine_widens_at_commit():
+    """Two update sites over a scalar reducer induce the SAME storage
+    algebra (thread = _rep, 128 partials) but DIFFERENT combine
+    decompositions (8 vs 16 addend lanes). The combine width is part of the
+    layout's identity, so the commit point widens to the FullParticipant
+    plan instead of silently unifying them, and the numerics stay exact."""
+    threads = 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((8,), T.float32),
+        B: T.Tensor((16,), T.float32),
+        C: T.Tensor((1,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((8,), T.float32)
+            b_frag = T.alloc_fragment((16,), T.float32)
+            T.copy(A, a_frag)
+            T.copy(B, b_frag)
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i in T.Parallel(8):
+                T.reducer_update(acc[0], a_frag[i])
+            for j in T.Parallel(16):
+                T.reducer_update(acc[0], b_frag[j])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(acc, result)
+            if T.get_thread_binding() == 0:
+                C[0] = result[0]
+
+    kern = tl.compile(kernel, out_idx=-1)
+    assert f"SumOp, {threads}" in kern.get_kernel_source(), kern.get_kernel_source()
+    A = torch.arange(1, 9, dtype=torch.float32, device="cuda")
+    B = torch.arange(1, 17, dtype=torch.float32, device="cuda")
+    C = kern(A, B)
+    torch.testing.assert_close(C, (A.sum() + B.sum()).reshape(1), atol=0, rtol=0)
+
+
+def test_partial_fragment_combine_must_divide_replicate():
+    """The low-bits convention `_rep = lane + combine * copy` only makes
+    sense when `combine` evenly divides `replicate`."""
+    with pytest.raises(ValueError, match="divide"):
+        T.PartialFragment((32,), forward_thread_fn=lambda i, rep: rep, replicate=8, combine=3)
+
+
+def test_partial_fragment_explicit_combine_construction():
+    """`combine=` declares a decomposition with copy groups: only the low
+    `combine` lanes are collective addends, the high `replicate / combine`
+    groups are equal-value copies the finalize never reduces over."""
+    from tilelang import _ffi_api
+
+    pf = T.PartialFragment((1,), forward_thread_fn=lambda i, rep: rep, replicate=128, combine=8)
+    assert int(pf.combine_size) == 8
+    assert "(combine 8 x copy 16)" in repr(pf), repr(pf)
+    steps = [tuple(map(int, s)) for s in _ffi_api.PartialFragment_combine_steps(pf)]
+    assert steps == [(8, 1)]  # lanes only; the 16 copy groups need no communication
+
+
+def _scalar_sum_copy_groups_kernel(combine: int, extent=8, threads=128):
+    """Scalar sum whose update loop necessarily carries replication
+    (Parallel(extent) on threads > extent): only expressible as an
+    annotation since `combine=` exists — the total replication is pinned to
+    the participant count with `combine` addend lanes in the low bits."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((extent,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((extent,), T.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.annotate_layout(
+                {
+                    acc: T.PartialFragment(
+                        (1,),
+                        forward_thread_fn=lambda i, rep: rep,
+                        replicate=threads,
+                        combine=combine,
+                    )
+                }
+            )
+            T.reducer_init(acc)
+            for i in T.Parallel(extent):
+                T.reducer_update(acc[0], src[i])
+            result = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(acc, result)
+            if T.get_thread_binding() == 0:
+                B[0] = result[0]
+
+    return kernel
+
+
+def test_annotated_partial_copy_groups_pins_replicated_loop():
+    """Pinning the natural plan of a replicated update loop: replicate=128
+    total partials, combine=8 addend lanes (16 copy groups). The finalize
+    reduces exactly 8 wide; the width is forced by the strict annotation,
+    so the assertion is architecture-independent."""
+    extent, threads = 8, 128
+    kern = tl.compile(_scalar_sum_copy_groups_kernel(combine=extent), out_idx=-1)
+    src = kern.get_kernel_source()
+    assert "AllReduce<tl::SumOp, 8," in src, src
+    assert f"SumOp, {threads}" not in src, src
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kern(A), A.sum().reshape(1), atol=0, rtol=0)
+
+
+def test_annotated_partial_copy_groups_middle_plan():
+    """combine=4 (< the loop's natural 8): each lane locally accumulates 2
+    consecutive elements, 32 copy groups, and finalize emits a width-4
+    collective — a middle plan no automatic solution would pick."""
+    extent = 8
+    kern = tl.compile(_scalar_sum_copy_groups_kernel(combine=4), out_idx=-1)
+    src = kern.get_kernel_source()
+    assert "AllReduce<tl::SumOp, 4," in src, src
+    assert "SumOp, 8," not in src, src
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    torch.testing.assert_close(kern(A), A.sum().reshape(1), atol=0, rtol=0)
 
 
 if __name__ == "__main__":

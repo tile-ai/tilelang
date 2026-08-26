@@ -161,24 +161,24 @@ struct LayoutInferenceResult {
  *  never reach the ownership check. */
 class ReducerDstSteering {
 public:
-  /*! \brief Register every finalize that is a capable proposer: recorded
-   *  update sites plus FinalizeReducerV2OpNode::CanSteerDst. Also builds the
-   *  wake table for the reducer edge (see FinalizesAwaitingSite). */
-  void Reserve(
-      const std::vector<TileOperator> &infer_list,
-      const std::function<std::vector<int>(const VarNode *)> &update_site_ops,
-      const std::vector<Range> &thread_bounds_vec,
-      const std::vector<std::unique_ptr<arith::Analyzer>> &analyzer_vec,
-      const Map<Buffer, Layout> &annotated_layouts) {
+  /*! \brief Register every finalize that is a capable proposer
+   *  (FinalizeReducerV2OpNode::CanSteerDst). The reducer edge needs no wake
+   *  table anymore: the reducer buffer carries a PartialFragment in
+   *  use_list_, so an update nest's commit re-enqueues the finalize like any
+   *  buffer edge, and zero-update reducers are pre-seeded wide by the
+   *  engine — finalize always finds a solved partial to read. */
+  void
+  Reserve(const std::vector<TileOperator> &infer_list,
+          const std::vector<Range> &thread_bounds_vec,
+          const std::vector<std::unique_ptr<arith::Analyzer>> &analyzer_vec,
+          const Map<Buffer, Layout> &annotated_layouts) {
     for (int i = 0; i < static_cast<int>(infer_list.size()); ++i) {
       const auto *finalize = infer_list[i].as<FinalizeReducerV2OpNode>();
       if (finalize == nullptr) {
         continue;
       }
       const Buffer &dst = finalize->dst;
-      std::vector<int> site_ops =
-          update_site_ops(finalize->reducer->data.get());
-      if (site_ops.empty() || annotated_layouts.count(dst) ||
+      if (annotated_layouts.count(dst) ||
           !FinalizeReducerV2OpNode::CanSteerDst(finalize->reducer, dst,
                                                 thread_bounds_vec[i],
                                                 analyzer_vec[i].get())) {
@@ -186,12 +186,6 @@ public:
       }
       owners_[dst].insert(i);
       finalize_ops_.insert(i);
-      for (int site_op : site_ops) {
-        auto &wake = site_wakes_[site_op];
-        if (std::find(wake.begin(), wake.end(), i) == wake.end()) {
-          wake.push_back(i);
-        }
-      }
       DLOG(INFO) << "[ReducerDstSteering] buffer " << dst
                  << " reserved for finalize op " << i;
     }
@@ -209,21 +203,6 @@ public:
     }
     auto it = owners_.find(buffer);
     return it == owners_.end() || it->second.count(proposer);
-  }
-
-  /*! \brief The reducer edge, made real in the worklist graph: finalizes to
-   *  wake when the update-site op `op_idx` has a solved loop layout. The
-   *  dependency "update nest solved -> finalize can compute its verdict"
-   *  flows through no buffer (the reducer carries no layout and solving a
-   *  nest may commit nothing), so use_list_ notifications cannot deliver
-   *  it. Waking is idempotent: finalize is silent once dst is owned. A
-   *  completed attempt must never leave a reserved dst unset — absent
-   *  buffers cost nothing under any cost model, so "nobody decided" would
-   *  outbid every honest attempt. */
-  const std::vector<int> &FinalizesAwaitingSite(int op_idx) const {
-    static const std::vector<int> kEmpty;
-    auto it = site_wakes_.find(op_idx);
-    return it == site_wakes_.end() ? kEmpty : it->second;
   }
 
   /*! \brief Seeds for the wide fallback attempt: every reserved dst of the
@@ -253,7 +232,6 @@ private:
                      ObjectPtrEqual>
       owners_;
   std::unordered_set<int> finalize_ops_;
-  std::unordered_map<int, std::vector<int>> site_wakes_;
 };
 
 class BufferUseDefCollector : public IRVisitorWithAnalyzer {
@@ -294,35 +272,6 @@ public:
         << "thread_bounds->extent is not a constant integer, which is "
            "required for layout inference.";
 
-    // dst-steering: hand a FinalizeReducerV2Op the current state of its
-    // reducer's update sites so it can propose a layout for an unconstrained
-    // dst (see FinalizeReducerV2OpNode::InferLayout). Free mode swaps cloned
-    // op objects in and out of infer_list_, so the sites resolve their
-    // ParallelOps through infer_list_ at call time, never through cached
-    // node pointers.
-    std::vector<ReducerUpdateSiteHint> reducer_sites;
-    const std::vector<ReducerUpdateSiteHint> *reducer_sites_ptr = nullptr;
-    if (const auto *finalize = next.as<FinalizeReducerV2OpNode>()) {
-      auto site_it = reducer_update_sites_.find(finalize->reducer->data.get());
-      if (site_it != reducer_update_sites_.end()) {
-        for (const auto &record : site_it->second) {
-          const auto *parallel_op =
-              infer_list_[record.infer_idx].as<ParallelOpNode>();
-          ICHECK(parallel_op) << "reducer_update site infer_list_["
-                              << record.infer_idx << "] is not a ParallelOp";
-          ReducerUpdateSiteHint hint;
-          hint.loop_layout = parallel_op->GetLoopLayout(); // may be unsolved
-          for (const auto &iv : parallel_op->GetLoopVars()) {
-            hint.loop_vars.push_back(iv->var);
-          }
-          hint.indices = record.indices;
-          hint.value = record.value;
-          reducer_sites.push_back(std::move(hint));
-        }
-        reducer_sites_ptr = &reducer_sites;
-      }
-    }
-
     // Run InferLayout
     LayoutMap updates;
     try {
@@ -333,7 +282,7 @@ public:
                                                   {},
                                                   bind_var_to_expr_,
                                                   false,
-                                                  reducer_sites_ptr},
+                                                  strict_layout_map},
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
@@ -407,6 +356,55 @@ public:
       };
 
       if (layout_map.count(buffer)) {
+        // Reducer partials: monotone widen-on-conflict lattice
+        // (unset -> narrow -> wide). Equal proposals are absorbed;
+        // disagreeing update sites widen to the participant-wide plan,
+        // which every already-committed loop layout is compatible with, so
+        // late widening never rolls back a decision. Fatal conflicts and
+        // ProveFragmentContains (whose fully-replicated shortcut assumes
+        // equal copies, not addends) do not apply here.
+        if (IsReducerV2Buffer(buffer)) {
+          const auto *existing = layout_map[buffer].as<PartialFragmentNode>();
+          const auto *incoming = layout.as<PartialFragmentNode>();
+          ICHECK(existing != nullptr && incoming != nullptr)
+              << "reducer " << buffer << " must carry a PartialFragment, got "
+              << layout->GetTypeKey()
+              << " (mapped: " << layout_map[buffer]->GetTypeKey() << ")";
+          if (incoming->IsEqual(existing)) {
+            continue;
+          }
+          // A strict partial is a user annotation (annotated layouts seed
+          // the strict snapshot; nothing else pins a reducer at kStrict):
+          // never widen the user's plan away — surface the conflict. Thrown,
+          // not fatal: free-mode attempts catch it and may find an ordering
+          // (update nest first, deriving its loop from the pinned partial)
+          // that satisfies the annotation.
+          if (strict_layout_map.count(buffer)) {
+            std::ostringstream oss;
+            oss << "Layout infer conflict for reducer `" << buffer->name
+                << "`: an update site induces a partial layout different "
+                << "from the annotated one.\n  annotated: "
+                << existing->DebugOutput()
+                << "\n  induced:   " << incoming->DebugOutput()
+                << "\nAdjust the T.annotate_layout PartialFragment or the "
+                << "update loop structure so they agree.";
+            throw LayoutConflictException(oss.str());
+          }
+          Layout widened = PartialFragment::FullyReplicated(
+              buffer->shape, thread_bounds->extent, thread_bounds);
+          if (widened->IsEqual(existing)) {
+            continue; // already at the lattice top
+          }
+          DLOG(INFO) << "[RunInferStep] update sites disagree on reducer "
+                     << buffer << "; widening to the participant-wide plan";
+          layout_map.Set(buffer, widened);
+          if (update_queue && use_list_.count(buffer)) {
+            for (int idx : use_list_[buffer]) {
+              EnqueueWithPriority(idx, q, in_queue, cur_infer_id, layout_map);
+            }
+          }
+          continue;
+        }
         // If new layout contains the old one, update map
         if (IsFragmentBuffer(buffer) && level != InferLevel::kStrict &&
             !strict_layout_map.count(buffer)) {
@@ -478,6 +476,12 @@ public:
                      << cur_infer_id;
           continue;
         }
+        // First commit for a reducer must already be the partial kind.
+        if (IsReducerV2Buffer(buffer)) {
+          ICHECK(layout.as<PartialFragmentNode>())
+              << "reducer " << buffer << " must carry a PartialFragment, got "
+              << layout->GetTypeKey();
+        }
         // Otherwise, update map
         layout_map.Set(buffer, layout);
         // Propagate to alias buffers (may enqueue their users)
@@ -507,23 +511,8 @@ public:
       }
     }
 
-    // The reducer edge (see ReducerDstSteering::FinalizesAwaitingSite):
-    // solving an update-site nest is the event its finalize waits for, but
-    // it flows through no buffer, so the use_list_ notifications above
-    // cannot deliver it. Proposals only happen at kFree, so only wake there.
-    if (update_queue && level == InferLevel::kFree) {
-      const std::vector<int> &wake =
-          steering_.FinalizesAwaitingSite(cur_infer_id);
-      if (!wake.empty()) {
-        const auto *parallel_op = next.as<ParallelOpNode>();
-        if (parallel_op && parallel_op->GetLoopLayout().defined()) {
-          for (int finalize_idx : wake) {
-            EnqueueWithPriority(finalize_idx, q, in_queue, cur_infer_id,
-                                layout_map);
-          }
-        }
-      }
-    }
+    // (The former reducer-edge wake table is gone: an update nest's
+    // PartialFragment commit re-enqueues the finalize through use_list_.)
   };
 
   void FinishInferQueue(InferLevel level, LayoutMap &layout_map,
@@ -561,20 +550,8 @@ public:
       DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
     }
 
-    steering_.Reserve(
-        infer_list_,
-        [this](const VarNode *reducer_var) {
-          std::vector<int> site_ops;
-          auto it = reducer_update_sites_.find(reducer_var);
-          if (it != reducer_update_sites_.end()) {
-            site_ops.reserve(it->second.size());
-            for (const auto &record : it->second) {
-              site_ops.push_back(record.infer_idx);
-            }
-          }
-          return site_ops;
-        },
-        thread_bounds_vec_, analyzer_vec_, annotated_layout_map_);
+    steering_.Reserve(infer_list_, thread_bounds_vec_, analyzer_vec_,
+                      annotated_layout_map_);
 
     // If needed, you can also check that annotated_layout_map_ is not empty, or
     // anything else relevant to your setup.
@@ -605,6 +582,23 @@ public:
           Fragment::FullyReplicated(buffer->shape, thread_bounds->extent)
               ->BindThreadRange(thread_bounds);
       layout_map.Set(buffer, frag);
+    }
+
+    // step 0.5: seed the wide-plan floor for zero-update reducers. Reducers
+    // with update sites get their partial layout proposed by the update
+    // nests; an epoch with no update at all (seed/init-only) has no proposer,
+    // so pin it to the participant-wide plan here — deterministically, before
+    // any level runs, so finalize can always read a solved partial.
+    for (const auto &[buffer, users] : use_list_) {
+      if (!IsReducerV2Buffer(buffer) || layout_map.count(buffer) ||
+          reducer_update_sites_.count(buffer->data.get())) {
+        continue;
+      }
+      ICHECK(!users.empty());
+      const Range &thread_bounds = thread_bounds_vec_[users.front()];
+      layout_map.Set(buffer,
+                     PartialFragment::FullyReplicated(
+                         buffer->shape, thread_bounds->extent, thread_bounds));
     }
 
     // step 1: infer strict layout
@@ -669,6 +663,13 @@ public:
       if (IsFragmentBuffer(buffer)) {
         ICHECK_NE(layout_map.count(buffer), 0)
             << "The layout for fragment " << buffer
+            << " can not be inferred correctly."
+            << SpanHintSuffix(buffer->span);
+      } else if (IsReducerV2Buffer(buffer)) {
+        // Every reducer must end up with a partial layout: update nests
+        // propose it, and zero-update epochs were seeded wide in step 0.5.
+        ICHECK_NE(layout_map.count(buffer), 0)
+            << "The partial layout for reducer " << buffer
             << " can not be inferred correctly."
             << SpanHintSuffix(buffer->span);
       }
@@ -849,14 +850,10 @@ private:
   }
 
   void addToUseList(const Buffer &buffer) {
-    if (IsReducerV2Buffer(buffer)) {
-      // No layout of its own, but it links the epoch's ops (update nests,
-      // init, finalize) into one free-mode component.
-      reducer_use_list_[buffer->data.get()].push_back(infer_list_.size());
-      return;
-    }
-    // buffer scope must be local.fragment
-    if (!IsFragmentBuffer(buffer)) {
+    // Fragment buffers and reducers (whose PartialFragment travels the same
+    // use_list_ edges: commits notify users, shared buffers union free-mode
+    // components) both register; anything else has no layout to solve.
+    if (!IsFragmentBuffer(buffer) && !IsReducerV2Buffer(buffer)) {
       return;
     }
     int infer_idx = infer_list_.size();
@@ -886,11 +883,13 @@ private:
       PostOrderVisit(op->body, [this, op_idx](const ObjectRef &node) {
         if (auto *call = node.as<CallNode>()) {
           if (call->op.same_as(reducer_update())) {
-            // Record the update site for finalize's dst-steering hints.
+            // Record the update site for finalize's dst-steering hints, and
+            // register this nest as a use_list_ user of the reducer (at this
+            // point infer_list_.size() == op_idx: the nest is pushed below).
             ReducerUpdateArgs update = ParseReducerUpdate(call);
             reducer_update_sites_[update.reducer->data.get()].push_back(
                 ReducerUpdateSiteRecord{op_idx, update.indices, update.value});
-            reducer_use_list_[update.reducer->data.get()].push_back(op_idx);
+            addToUseList(update.reducer);
           }
         }
         if (auto *buffer_load = node.as<BufferLoadNode>()) {
@@ -991,6 +990,38 @@ private:
             << "buffer " << var << " is not found in the block";
         const auto &buffers = buffer_data_to_buffers_[var];
         ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
+        for (const auto &buffer : buffers) {
+          if (!IsReducerV2Buffer(buffer)) {
+            continue;
+          }
+          const auto *partial = layout.as<PartialFragmentNode>();
+          if (partial == nullptr) {
+            TVM_FFI_THROW(ValueError)
+                << "Invalid layout for reducer `" << buffer->name
+                << "`: T.annotate_layout on a T.alloc_reducer buffer requires "
+                   "a PartialFragment (its replicas are addends awaiting the "
+                   "finalize collective, not equal copies), got "
+                << layout->GetTypeKey() << ".";
+          }
+          // Reshape would degrade the partial kind to a plain Fragment, so
+          // the annotated shape must match the reducer exactly.
+          if (!ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_)) {
+            TVM_FFI_THROW(ValueError)
+                << "Invalid layout for reducer `" << buffer->name
+                << "`: the PartialFragment shape " << layout->InputShape()
+                << " must equal the reducer shape " << buffer->shape
+                << " exactly. Check the layout passed to T.annotate_layout.";
+          }
+          arith::IterMapResult injectivity = partial->DetectInjective();
+          if (!injectivity->errors.empty()) {
+            TVM_FFI_THROW(ValueError)
+                << "Invalid layout for reducer `" << buffer->name
+                << "`: the partial map must be injective over "
+                   "(thread, index). Details: "
+                << injectivity->errors << ". Layout: " << partial->DebugOutput()
+                << ". Check the layout passed to T.annotate_layout.";
+          }
+        }
         Optional<Buffer> anchor_buffer =
             FindLayoutAnchorBuffer(buffers, layout, &analyzer_);
         int64_t anchor_bits =
@@ -1264,12 +1295,6 @@ private:
   // reducer data Var -> its update sites, in program order.
   std::unordered_map<const VarNode *, std::vector<ReducerUpdateSiteRecord>>
       reducer_update_sites_;
-  // reducer data Var -> infer_list_ indices of the ops touching the reducer
-  // (update nests, init, finalize). Reducer buffers carry no layout and stay
-  // out of use_list_, so free-mode component grouping must union through
-  // them explicitly: finalize's dst proposal has to compete in the same
-  // attempt search as the update loop's layout choice.
-  std::unordered_map<const VarNode *, std::vector<int>> reducer_use_list_;
   // All reducer dst-steering knowledge, behind one interface (see the class
   // comment). Populated once in Run(), consulted at the commit point and by
   // the free-mode attempt runner.
@@ -1407,18 +1432,8 @@ private:
         }
       }
     }
-    // Union through reducer buffers: an epoch's update nests and its
-    // init/finalize ops share no fragment buffer directly (the reducer is
-    // not in use_list_), yet finalize's dst-steering proposal must compete
-    // in the same attempt search as the update loop's layout choice.
-    for (const auto &[var, infer_indices] : reducer_use_list_) {
-      if (infer_indices.empty())
-        continue;
-      int first_idx = infer_indices[0];
-      for (size_t i = 1; i < infer_indices.size(); i++) {
-        uf.Union(first_idx, infer_indices[i]);
-      }
-    }
+    // (An epoch's update nests and its init/finalize ops now share the
+    // reducer buffer in use_list_, so the union above already links them.)
 
     std::unordered_map<int, std::vector<int>> components;
     for (int i = 0; i < infer_list_.size(); i++) {

@@ -889,21 +889,104 @@ int64_t CountRegisterSlots(const LayoutMap &tmp_layout_map) {
   return regs;
 }
 
-/*! \brief Legacy policy: total register slots, nothing else. `mem` stays 0
- *  so the ordering is byte-identical to the historical register-count
- *  selection. */
+/*! \brief Estimated local-memory traffic an attempt's layouts would force:
+ *  for every member loop (plain parallel nests and copies' inner SIMT
+ *  nests), any fragment access whose PHYSICAL slot index depends on the
+ *  thread variable demotes the whole per-thread register array to local
+ *  memory, turning every executed access into a local load/store. Charged
+ *  in bytes as `max(array bytes, 2 x threads x per-thread iterations x
+ *  element bytes)` — the round-trip traffic of touching the demoted array
+ *  once per iteration — so it competes honestly with the io-aware model's
+ *  global-byte estimates (an 8-byte array spill must not veto kilobytes of
+ *  parallel global bandwidth) while still burying any register-count
+ *  difference in the spill-blind model. */
+int64_t CountSpilledBytes(const std::vector<int> &members,
+                          const std::vector<TileOperator> &infer_list,
+                          const LayoutMap &layout_map) {
+  int64_t spilled = 0;
+  auto charge_loop = [&](const ParallelOpNode *loop_op) {
+    if (loop_op == nullptr) {
+      return;
+    }
+    Fragment loop_layout = loop_op->GetLoopLayout();
+    if (!loop_layout.defined()) {
+      return;
+    }
+    arith::Analyzer analyzer;
+    FragmentThreadIndexProbe probe(loop_layout, loop_op->GetLoopVars(),
+                                   &analyzer);
+    if (!probe.valid()) {
+      return;
+    }
+    auto const_product = [](const Array<PrimExpr> &dims) -> int64_t {
+      int64_t product = 1;
+      for (const PrimExpr &dim : dims) {
+        const int64_t *extent = as_const_int(dim);
+        if (extent == nullptr) {
+          return -1;
+        }
+        product *= *extent;
+      }
+      return product;
+    };
+    for (const Buffer &buffer : loop_op->GetAccessOrder()) {
+      if (!layout_map.count(buffer)) {
+        continue;
+      }
+      auto fragment = layout_map[buffer].as<Fragment>();
+      if (!fragment.has_value()) {
+        continue;
+      }
+      const auto &access = loop_op->GetIndiceMap().at(buffer);
+      if (!probe.AccessUsesThread(access.indices, fragment.value())) {
+        continue;
+      }
+      int64_t elem_bytes =
+          (buffer->dtype.bits() * buffer->dtype.lanes() + 7) / 8;
+      // The whole per-thread array is demoted, not just the touched slot.
+      int64_t array_slots = const_product(fragment.value()->OutputShape());
+      int64_t array_bytes = (array_slots < 0 ? 1 : array_slots) * elem_bytes;
+      // Every executed iteration touches the demoted array through local
+      // memory (round trip).
+      int64_t per_thread_iters = const_product(loop_layout->OutputShape());
+      const int64_t *threads = as_const_int(loop_layout->ThreadExtent());
+      int64_t traffic_bytes =
+          (per_thread_iters < 0 || threads == nullptr)
+              ? array_bytes
+              : 2 * (*threads) * per_thread_iters * elem_bytes;
+      spilled += std::max(array_bytes, traffic_bytes);
+    }
+  };
+  for (int idx : members) {
+    const TileOperator &op = infer_list[idx];
+    if (const auto *loop_op = op.as<ParallelOpNode>()) {
+      charge_loop(loop_op);
+    } else if (const auto *copy = op.as<CopyNode>()) {
+      // Bulk/TMA/TMem copies never build a SIMT nest; nothing to probe.
+      if (copy->par_op_.defined()) {
+        charge_loop(copy->par_op_.get());
+      }
+    }
+  }
+  return spilled;
+}
+
+/*! \brief Legacy policy: total register slots, with spill traffic as the
+ *  leading `mem` charge (this model estimates no other memory, so mem is
+ *  exactly the spill term). Among spill-free attempts the ordering is
+ *  byte-identical to the historical register-count selection. */
 class RegisterCountCostModel final : public LayoutCostModel {
 public:
   AttemptCost Score(const std::vector<int> &members,
                     const std::vector<TileOperator> &infer_list,
                     const LayoutMap &tmp_layout_map) const final {
-    (void)infer_list;
     DLOG(INFO) << "[LayoutCost] register-count score begin: members="
                << FormatVector(members);
     AttemptCost cost;
+    cost.mem = CountSpilledBytes(members, infer_list, tmp_layout_map);
     cost.regs = CountRegisterSlots(tmp_layout_map);
-    DLOG(INFO) << "[LayoutCost] register-count score end: mem=" << cost.mem
-               << " regs=" << cost.regs;
+    DLOG(INFO) << "[LayoutCost] register-count score end: mem(spill)="
+               << cost.mem << " regs=" << cost.regs;
     return cost;
   }
   const char *Name() const final { return "register-count"; }
@@ -925,6 +1008,9 @@ public:
                << FormatVector(members)
                << " layout_entries=" << tmp_layout_map.size();
     AttemptCost cost;
+    // Spill traffic enters the same byte-denominated channel as the global
+    // estimates below, competing rather than vetoing.
+    cost.mem = CountSpilledBytes(members, infer_list, tmp_layout_map);
     cost.regs = CountRegisterSlots(tmp_layout_map);
 
     for (int idx : members) {

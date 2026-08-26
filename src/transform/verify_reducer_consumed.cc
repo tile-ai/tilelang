@@ -37,6 +37,19 @@ void CheckFunc(const PrimFunc &f) {
       ICHECK(!block->annotations.count(attr::kReducerInfoV2))
           << "internal error: reducer_info_v2 annotation survived past "
              "ReducerPlanAndMaterialize.";
+      // The inferred PartialFragment entries are keyed by local.reducer
+      // buffers and must be consumed (and erased) by the materializer:
+      // downstream layout consumers know only value-replication semantics.
+      if (auto layout_anno = block->annotations.Get(tl::attr::kLayoutMap)) {
+        if (auto as_map = layout_anno.value().as<Map<Buffer, Layout>>()) {
+          for (const auto &[buffer, layout] : as_map.value()) {
+            ICHECK(!IsReducerV2Buffer(buffer))
+                << "internal error: the partial layout of reducer `" << buffer
+                << "` survived past ReducerPlanAndMaterialize in a block's "
+                   "layout_map annotation.";
+          }
+        }
+      }
     } else if (const auto *call = obj.as<CallNode>()) {
       ICHECK(!call->op.same_as(ReducerInitOp::Get()) &&
              !call->op.same_as(reducer_update()) &&

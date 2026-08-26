@@ -44,6 +44,32 @@ bool ValueIsReplicaSafe(const PrimExpr &value) {
   return safe;
 }
 
+/*! \brief One projection step of the induced-layout construction: identical
+ *  to backend::reduce::ComputeReducerLayout minus the scale-ordered
+ *  CondenseReplicateVar (which would destroy the low-bits combine/copy
+ *  boundary) and the thread-range bind (done once after the final,
+ *  boundary-preserving condensation). The projected dim's lanes take the
+ *  LOW bits of the new replication coordinate, the pre-existing replication
+ *  moves high, so successive projections keep every reduction-sourced lane
+ *  contiguous at the bottom. */
+static Fragment ProjectReducerDimNoCondense(const Fragment &src_layout,
+                                            int dim) {
+  PrimExpr src_rep_extent = src_layout->ReplicateExtent();
+  PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
+  PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
+  auto fwd = backend::reduce::InputPlaceholders(src_layout->InputDim() - 1);
+  fwd.insert(fwd.begin() + dim,
+             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  auto thd = src_layout->ForwardThread(
+      fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+  auto reducer_shape = src_layout->InputShape();
+  reducer_shape.erase(reducer_shape.begin() + dim);
+  if (reducer_shape.empty()) {
+    reducer_shape.push_back(1);
+  }
+  return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt);
+}
+
 ReducerSiteAnalysis
 AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
                          const ffi::Array<PrimExpr> &reducer_shape,
@@ -125,12 +151,29 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
 
   // Induced partial layout: project every reduction dim (descending, so
   // dim numbers stay stable while dims are removed). Its input dims are
-  // the surviving loop dims in NEST order.
+  // the surviving loop dims in NEST order. Every projection stacks the
+  // projected dim's lanes below the existing replication, so the combine
+  // block (reduction-sourced lanes) stays contiguous in the low bits with
+  // the loop's own replication (copy groups) above it; one final
+  // boundary-preserving condensation compacts both halves without mixing
+  // them, keeping `_rep % combine` = addend lanes true on the result.
   Fragment induced = site.loop_layout;
+  PrimExpr combine_raw = make_const(DataType::Int(32), 1);
   for (int dim = static_cast<int>(ndim) - 1; dim >= 0; --dim) {
     if (!is_output_dim[dim]) {
-      induced = backend::reduce::ComputeReducerLayout(induced, dim);
+      combine_raw = combine_raw * induced->InputShape()[dim];
+      induced = ProjectReducerDimNoCondense(induced, dim);
     }
+  }
+  {
+    auto [condensed, combine_expr] =
+        CondenseReplicateVarKeepingBoundary(induced, combine_raw);
+    induced = condensed->BindThreadRange(site.loop_layout->ThreadRange());
+    const int64_t *combine_ptr = as_const_int(combine_expr);
+    if (combine_ptr == nullptr) {
+      return reject("non-constant combine width");
+    }
+    analysis.combine_size = *combine_ptr;
   }
   // Rebuild the fragment over the reducer's own dim order: permuted
   // indices reorder the inputs, and constant unit dims insert inputs the
@@ -433,71 +476,46 @@ LayoutMap FinalizeReducerV2OpNode::InferLayout(const LayoutInferArgs &args,
                                                InferLevel level) const {
   // dst is an ordinary fragment: producers/consumers may constrain it at any
   // level and finalize never overrules them. At kFree, when nothing has
-  // constrained it, propose the layout the reducer plan itself will pick
-  // (dst-steering): the update sites' induced layout when every narrow-plan
-  // site proof passes, participant-wide replication otherwise. The proofs
-  // are shared with ReducerPlanAndMaterialize (AnalyzeReducerUpdateSite), so
-  // the proposal is the planner's own verdict computed early — a steered dst
-  // can never make the plan worse, it only removes the arbitrary free-mode
-  // choice that used to break narrow containment or (wide) force a
-  // thread-indexed publish copy.
+  // constrained it, propose the post-collective reading of the reducer's
+  // solved partial layout (dst-steering). The partial IS the plan verdict:
+  // update nests propose the induced projection when every per-site narrow
+  // proof passes (AnalyzeReducerUpdateSite, shared with the planner), the
+  // engine widens on multi-site disagreement, and zero-update epochs are
+  // pre-seeded wide — so a steered dst can never make the plan worse, it
+  // only removes the arbitrary free-mode choice that used to break narrow
+  // containment or (wide) force a thread-indexed publish copy.
   if (level != InferLevel::kFree) {
     return {};
   }
   if (args.layout_map.count(dst)) {
     return {};
   }
-  if (args.reducer_update_sites == nullptr ||
-      args.reducer_update_sites->empty()) {
-    return {};
-  }
   if (!CanSteerDst(reducer, dst, args.thread_bounds, args.analyzer)) {
     return {};
   }
-  const int64_t *extent_ptr = as_const_int(args.thread_bounds->extent);
-  const int64_t *min_ptr = as_const_int(args.thread_bounds->min);
-  ICHECK(extent_ptr && min_ptr); // guaranteed by CanSteerDst
-  // Stay silent while any update nest is unsolved: a later call in this
-  // attempt (or another attempt ordering) sees the solved state.
-  for (const ReducerUpdateSiteHint &site : *args.reducer_update_sites) {
-    if (!site.loop_layout.defined()) {
-      return {};
-    }
+  // Stay silent while the reducer is unsolved: the nest's PartialFragment
+  // commit re-enqueues this op through use_list_.
+  auto partial_entry = args.layout_map.Get(reducer);
+  if (!partial_entry.has_value()) {
+    return {};
   }
-  bool steer_narrow = true;
-  Fragment induced;
-  std::vector<std::pair<int, int>> steps;
-  bool first = true;
-  for (const ReducerUpdateSiteHint &site : *args.reducer_update_sites) {
-    ReducerSiteAnalysis analysis = AnalyzeReducerUpdateSite(
-        site, reducer->shape, *extent_ptr, *min_ptr, args.analyzer);
-    // Mirror the planner's multi-site agreement check as well: sites that
-    // are individually eligible but induce different plans still fall back
-    // to the wide baseline.
-    if (!analysis.narrow_eligible) {
-      steer_narrow = false;
-      break;
-    }
-    if (first) {
-      induced = analysis.induced;
-      steps = std::move(analysis.steps);
-      first = false;
-    } else if (!StructuralEqual()(induced, analysis.induced) ||
-               steps != analysis.steps) {
-      steer_narrow = false;
-      break;
-    }
+  auto partial = partial_entry.value().as<PartialFragment>();
+  ICHECK(partial.has_value())
+      << "reducer " << reducer << " carries a non-partial layout: "
+      << partial_entry.value()->DebugOutput();
+  // After the finalize collective every replica of a partial holds the
+  // combined value, so the same algebraic map read as a plain Fragment is
+  // exactly the destination's natural placement. For the wide plan this is
+  // the fully replicated dst that keeps the publish copy a per-thread
+  // identity move instead of a thread-indexed gather.
+  Fragment dst_layout = partial.value().AsPostCollective();
+  if (!dst_layout->ThreadRange().defined()) {
+    // User-annotated partials carry no thread range; bind the epoch's
+    // participant range so downstream copy predicates stay well-formed.
+    dst_layout = dst_layout->BindThreadRange(args.thread_bounds);
   }
   LayoutMap result;
-  if (steer_narrow) {
-    result.Set(dst, induced);
-    return result;
-  }
-  // The epoch will take the wide plan: after its participant-wide AllReduce
-  // every thread holds every logical output, and a replicated dst keeps the
-  // publish copy (and any further fragment staging) a per-thread identity
-  // move instead of a thread-indexed gather from replicated registers.
-  result.Set(dst, FallbackDstLayout(dst, args.thread_bounds));
+  result.Set(dst, dst_layout);
   return result;
 }
 

@@ -141,12 +141,12 @@ struct LowerArgs {
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
 };
 
-/*! \brief One reducer_update site, as seen by layout inference: the update
+/*! \brief One reducer_update site, as seen by layout analysis: the update
  *  loop's solved layout (undefined Fragment while the loop is still
  *  unsolved), the parallel nest vars, the update target's logical indices
- *  and the contribution expression. The inference engine assembles these
- *  for FinalizeReducerV2Op so it can steer an unconstrained destination
- *  toward the reduction's natural placement (dst-steering). */
+ *  and the contribution expression. Assembled by ParallelOp for its own
+ *  partial-layout proposal and by ReducerPlanAndMaterialize for lowering
+ *  (both feed AnalyzeReducerUpdateSite). */
 struct ReducerUpdateSiteHint {
   Fragment loop_layout; // undefined while the update loop is unsolved
   ffi::Array<tirx::Var> loop_vars;
@@ -166,10 +166,12 @@ struct LayoutInferArgs {
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
-  // The reducer_update sites of the op's reducer, populated by the layout
-  // inference engine only when the op is a finalize_reducer_v2 (null
-  // otherwise, including at lowering-time re-inference call sites).
-  const std::vector<ReducerUpdateSiteHint> *reducer_update_sites = nullptr;
+  // Snapshot of the layouts fixed at kStrict (annotations included), taken
+  // by the inference engine after the strict pass. Ops use it to recognize
+  // authoritative constraints — e.g. an annotated reducer PartialFragment
+  // that update nests must satisfy rather than widen. Empty at
+  // lowering-time re-inference call sites.
+  LayoutMap strict_layout_map;
 };
 
 class TileOperator;

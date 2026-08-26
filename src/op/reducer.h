@@ -89,8 +89,13 @@ struct ReducerSiteAnalysis {
   /*! \brief The first failed check, for plan-rejection diagnostics. */
   std::string reason;
   /*! \brief The induced partial layout: the update loop's layout with the
-   *  reduction dims projected out, rebuilt over the reducer's dim order. */
+   *  reduction dims projected out, rebuilt over the reducer's dim order.
+   *  Its replication coordinate follows the low-bits convention:
+   *  `_rep % combine_size` are the addend lanes. */
   Fragment induced;
+  /*! \brief Width of the induced layout's combine coordinate: the number
+   *  of addend lanes per logical element (1 = LocalComplete). */
+  int64_t combine_size{1};
   /*! \brief Collective steps (reducing_threads, scale) the site requires. */
   std::vector<std::pair<int, int>> steps;
   /*! \brief Per nest dim: does it survive into the reducer shape? */

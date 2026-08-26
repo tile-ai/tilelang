@@ -36,8 +36,13 @@ namespace tl {
 
 /*! \brief Score of one complete free-mode layout assignment. Compared
  *  lexicographically: estimated memory cost first, total register count as
- *  the tiebreak. Models that do not estimate memory leave `mem` at 0, so
- *  their ordering degenerates to the register count. */
+ *  the tiebreak. `mem` includes the estimated local-memory traffic of
+ *  register-array spills (a thread-dependent register-array index demotes
+ *  the whole array to local memory), priced in bytes so it competes
+ *  honestly with the io-aware model's global traffic instead of vetoing
+ *  it. Models that do not estimate global memory leave the global part at
+ *  0, so their ordering is spill bytes, then register count — attempts
+ *  without spills keep the historical register-count ordering untouched. */
 struct AttemptCost {
   int64_t mem{0};
   int64_t regs{0};
