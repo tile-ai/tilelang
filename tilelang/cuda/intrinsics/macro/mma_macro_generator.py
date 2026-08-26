@@ -71,6 +71,10 @@ class TensorCoreIntrinEmitter:
         "float6_e3m2fn": "e3m2",
         "float4_e2m1fn": "e2m1",
         "custom[float4_e2m1_unpacked]8": "e2m1",
+        "float6_e2m3fn_unpacked": "e2m3",
+        "custom[float6_e2m3fn_unpacked]8": "e2m3",
+        "float6_e3m2fn_unpacked": "e3m2",
+        "custom[float6_e3m2fn_unpacked]8": "e3m2",
         "custom[tfloat32]": "tf32",
     }
 

@@ -171,6 +171,14 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
         val = "Float4E2M1Unpacked"
         if self.lanes > 1:
             val += f"x{self.lanes}"
+    elif self.is_float6_e2m3fn_unpacked():
+        val = "Float6E2M3FNUnpacked"
+        if self.lanes > 1:
+            val += f"x{self.lanes}"
+    elif self.is_float6_e3m2fn_unpacked():
+        val = "Float6E3M2FNUnpacked"
+        if self.lanes > 1:
+            val += f"x{self.lanes}"
     else:
         raise TypeError(f"Invalid type {self}")
     if "_" in val:
@@ -261,6 +269,9 @@ _FLOAT4_E2M1FN_BITS = 4
 _FLOAT4_E2M1FN_TYPE_CODE = 17
 _FLOAT4_E2M1_UNPACKED_BITS = 8
 _FLOAT4_E2M1_UNPACKED_TYPE_CODE = 131
+_FLOAT6_UNPACKED_BITS = 8
+_FLOAT6_E2M3FN_UNPACKED_TYPE_CODE = 132
+_FLOAT6_E3M2FN_UNPACKED_TYPE_CODE = 133
 
 
 def __dtype_is_float4_e2m1fn__(self: dtype) -> bool:
@@ -290,6 +301,21 @@ def __dtype_is_float4__(self: dtype) -> bool:
     return __dtype_is_float4_e2m1fn__(self) or __dtype_is_float4_e2m1_unpacked__(self)
 
 
+def __dtype_is_float6_e2m3fn_unpacked__(self: dtype) -> bool:
+    """8-bit FP6 E2M3 unpacked shared-memory storage (16U6_ALIGN16B)."""
+    return self.bits == _FLOAT6_UNPACKED_BITS and int(self.type_code) == _FLOAT6_E2M3FN_UNPACKED_TYPE_CODE
+
+
+def __dtype_is_float6_e3m2fn_unpacked__(self: dtype) -> bool:
+    """8-bit FP6 E3M2 unpacked shared-memory storage (16U6_ALIGN16B)."""
+    return self.bits == _FLOAT6_UNPACKED_BITS and int(self.type_code) == _FLOAT6_E3M2FN_UNPACKED_TYPE_CODE
+
+
+def __dtype_is_float6_unpacked__(self: dtype) -> bool:
+    """Whether this is any 8-bit unpacked FP6 storage variant."""
+    return __dtype_is_float6_e2m3fn_unpacked__(self) or __dtype_is_float6_e3m2fn_unpacked__(self)
+
+
 def is_float4_e2m1fn(value: AnyDType) -> bool:
     """Whether *value* is the packed 4-bit FP4 E2M1 variant."""
     return get_tvm_dtype(value).is_float4_e2m1fn()
@@ -305,12 +331,20 @@ def is_float4(value: AnyDType) -> bool:
     return get_tvm_dtype(value).is_float4()
 
 
+def is_float6_unpacked(value: AnyDType) -> bool:
+    """Whether *value* is an 8-bit unpacked FP6 shared-memory variant."""
+    return get_tvm_dtype(value).is_float6_unpacked()
+
+
 def is_f8f6f4_family(value: AnyDType) -> bool:
     """Whether *value* is a tcgen05 ``kind::f8f6f4`` / ``mxf8f6f4`` operand dtype."""
     dt = get_tvm_dtype(value)
-    if dt.is_float4():
+    if dt.is_float4() or dt.is_float6_unpacked():
         return True
     name = str(dt)
+    # Note: custom-registered dtypes stringify as ``custom[...]`` and never
+    # match the ``float8``/``float6`` prefixes - unpacked variants must be
+    # handled by predicate above, not by name.
     return (dt.bits == 8 and name.startswith("float8")) or (dt.bits == 6 and name.startswith("float6"))
 
 
@@ -342,6 +376,9 @@ dtype.bytes = property(__dtype_bytes__)
 dtype.is_float4_e2m1fn = __dtype_is_float4_e2m1fn__
 dtype.is_float4_e2m1_unpacked = __dtype_is_float4_e2m1_unpacked__
 dtype.is_float4 = __dtype_is_float4__
+dtype.is_float6_e2m3fn_unpacked = __dtype_is_float6_e2m3fn_unpacked__
+dtype.is_float6_e3m2fn_unpacked = __dtype_is_float6_e3m2fn_unpacked__
+dtype.is_float6_unpacked = __dtype_is_float6_unpacked__
 
 
 def get_tvm_dtype(value: AnyDType) -> dtype:
@@ -522,6 +559,8 @@ if TYPE_CHECKING:
     class float4_e2m1fnx32(dtype): ...
     class float4_e2m1fnx64(dtype): ...
     class float4_e2m1_unpacked(dtype): ...
+    class float6_e2m3fn_unpacked(dtype): ...
+    class float6_e3m2fn_unpacked(dtype): ...
     class bfloat16(dtype): ...
     class bfloat16x2(dtype): ...
     class tfloat32(dtype): ...
@@ -700,6 +739,9 @@ else:
     float4_e2m1fnx64 = dtype("float4_e2m1fnx64")
     # SMEM/TMA-only layout type; do not expose vectorized register/cast variants.
     float4_e2m1_unpacked = dtype("custom[float4_e2m1_unpacked]8")
+    # 8-bit unpacked FP6 smem storage (CUTLASS float_e2m3/e3m2_unpacksmem_t).
+    float6_e2m3fn_unpacked = dtype("custom[float6_e2m3fn_unpacked]8")
+    float6_e3m2fn_unpacked = dtype("custom[float6_e3m2fn_unpacked]8")
     bfloat16 = dtype("bfloat16")
     bfloat16x2 = dtype("bfloat16x2")
     tfloat32 = dtype("custom[tfloat32]")
@@ -875,6 +917,8 @@ _all_dtypes = [
     "float4_e2m1fnx32",
     "float4_e2m1fnx64",
     "float4_e2m1_unpacked",
+    "float6_e2m3fn_unpacked",
+    "float6_e3m2fn_unpacked",
     "bfloat16",
     "bfloat16x2",
     "tfloat32",

@@ -891,6 +891,18 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     enable_fp8_ = true;
     os << GetTileLangFP8Type(t);
     return;
+  } else if (t.is_float6_unpacked()) {
+    // 8-bit container storage (16U6_ALIGN16B smem form / mxf8f6f4 register
+    // containers): plain bytes in CUDA, mirroring the unpacked-fp4 case.
+    if (t.is_scalar()) {
+      os << "uchar";
+      return;
+    }
+    if (lanes <= 4) {
+      os << "uchar" << lanes;
+      return;
+    }
+    fail = true;
   } else if (t.is_float6()) {
     enable_fp6_ = true;
     if (t.lanes() <= 4) {
@@ -2349,7 +2361,8 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     if (!scope.empty() && IsScopePartOfType()) {
       PrintStorageScope(scope, ptr_os);
     }
-    if (pointed_to.is_float4_e2m1_unpacked() &&
+    if ((pointed_to.is_float4_e2m1_unpacked() ||
+         pointed_to.is_float6_unpacked()) &&
         (scope == "shared" || scope == "shared.dyn")) {
       ptr_os << "uint8_t";
     } else {
@@ -5160,7 +5173,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   std::string scope = GetPtrStorageScope(op->buffer->data);
   const VarNode *buffer = op->buffer->data.as<VarNode>();
   DataType alloc_dtype = op->buffer->dtype;
-  bool is_float4_unpacked_shared = alloc_dtype.is_float4_e2m1_unpacked() &&
+  bool is_float4_unpacked_shared = (alloc_dtype.is_float4_e2m1_unpacked() ||
+                                    alloc_dtype.is_float6_unpacked()) &&
                                    (scope == "shared" || scope == "shared.dyn");
   if (scope.find("wmma.") == 0) {
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
