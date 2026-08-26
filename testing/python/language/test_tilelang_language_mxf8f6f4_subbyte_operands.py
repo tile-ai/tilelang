@@ -121,6 +121,96 @@ def test_w4a8_mxf8f6f4_rowmajor_correctness(b_name, K, block_K):
 
 
 @simplify_prim_func
+def _make_w4a8_tma_matmul_kernel(M, N, K, b_dtype, num_stages=2, *, block_M=64, block_N=64, block_K=128):
+    """W4A8 with the TMA producer: A is a packed-fp4 GLOBAL tensor and the
+    16U4_ALIGN16B bulk-TMA path unpacks it into the padded smem form (the
+    same byte layout the SIMT producer writes - pinned by the equivalence
+    test below)."""
+    accum_dtype = T.float32
+    scale_words = block_K // 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float4_e2m1fn),
+        B: T.Tensor((N, K), b_dtype),
+        SFA: T.Tensor((M, K // 128), T.uint32),
+        SFB: T.Tensor((N, K // 128), T.uint32),
+        C: T.Tensor((M, N), accum_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), T.float4_e2m1_unpacked, scope="shared.dyn")
+            B_shared = T.alloc_shared((block_N, block_K), b_dtype, scope="shared.dyn")
+            SFA_shared = T.alloc_shared((block_M, scale_words), T.uint32, scope="shared.dyn")
+            SFB_shared = T.alloc_shared((block_N, scale_words), T.uint32, scope="shared.dyn")
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+
+            if K // block_K > 1:
+                T.clear(C_local)
+            for ko in T.Pipelined((K // block_K), num_stages=num_stages):
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
+                for i, w in T.Parallel(block_M, scale_words):
+                    SFA_shared[i, w] = SFA[by * block_M + i, ko * scale_words + w]
+                for j, w in T.Parallel(block_N, scale_words):
+                    SFB_shared[j, w] = SFB[bx * block_N + j, ko * scale_words + w]
+                T.mma_gemm_blockscaled(
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    SFA_shared,
+                    SFB_shared,
+                    transpose_B=True,
+                    clear_accum=(K // block_K == 1),
+                    k_start=0,
+                    sf_a_granularity_k=32,
+                    sf_b_granularity_k=32,
+                )
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w4a8_tma_producer_matches_simt_producer_bitwise():
+    """Producer-equivalence pin: the 16U4_ALIGN16B TMA unpack must stage
+    byte-identical smem to the SIMT padded-group producer, so the two
+    kernels' outputs must be bitwise equal on identical inputs."""
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 256
+    tma = tilelang.compile(_make_w4a8_tma_matmul_kernel(M, N, K, T.float8_e4m3fn), target="cuda", out_idx=[4])
+    simt = tilelang.compile(_make_w4a8_matmul_kernel(M, N, K, T.float8_e4m3fn), target="cuda", out_idx=[4])
+
+    # The TMA producer must actually engage - a silent SIMT fallback would
+    # make this test vacuous.
+    device_src = tma.get_kernel_source()
+    assert "tl::tma_load" in device_src
+    host_src = tma.get_host_source()
+    assert "__tvm_tensormap_create_tiled" in host_src
+
+    A_bytes = torch.randint(0, 256, (M, K // 2), device="cuda", dtype=torch.uint8)
+    B = torch.randint(-4, 5, (N, K), device="cuda", dtype=torch.float32).to(torch.float8_e4m3fn)
+    sfa_bytes = (torch.randint(-1, 2, (M, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    sfb_bytes = (torch.randint(-1, 2, (N, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    SFA = _pack_scale_words(sfa_bytes)
+    SFB = _pack_scale_words(sfb_bytes)
+
+    C_tma = tma(A_bytes.view(torch.int8), B, SFA, SFB)
+    C_simt = simt(A_bytes, B, SFA, SFB)
+    assert torch.equal(C_tma.view(torch.int32), C_simt.view(torch.int32))
+
+    # And both agree with the dequantized reference at atol=0.
+    sa = torch.pow(2.0, sfa_bytes.to(torch.int32).float() - 127).repeat_interleave(32, dim=1)
+    sb = torch.pow(2.0, sfb_bytes.to(torch.int32).float() - 127).repeat_interleave(32, dim=1)
+    ref = (_decode_packed_fp4(A_bytes, M, K) * sa) @ (B.to(torch.float32) * sb).T
+    torch.testing.assert_close(C_tma, ref, rtol=0.0, atol=0.0)
+
+
+@simplify_prim_func
 def _make_a8w4_matmul_kernel(M, N, K, a_dtype, *, block_M=64, block_N=64, block_K=128, a_is_fp4=False):
     """A fp8 (or fp4 when a_is_fp4) x B packed-fp4: exercises the B-side su4 path."""
     accum_dtype = T.float32
