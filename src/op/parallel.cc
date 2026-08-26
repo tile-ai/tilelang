@@ -81,34 +81,18 @@ struct PackedSubByteStoreAccess {
   std::vector<size_t> parallel_positions;
 };
 
-enum class PackedSubByteStoreKind { kPhysical, kFragment };
-
-bool RequiresPackedPair(const Buffer &buffer,
-                        const Array<Buffer> &pair_fragment_buffers) {
-  return std::any_of(pair_fragment_buffers.begin(), pair_fragment_buffers.end(),
-                     [&](const Buffer &required) {
-                       return required->data.same_as(buffer->data);
-                     });
-}
-
 // Collect every packed four-bit store together with its complete lexical loop
 // domain. Serial iterators participate in the address relation even though
 // only parallel iterators participate in CUDA thread ownership.
 class PackedSubByteStoreCollector : public StmtExprVisitor {
 public:
-  static std::vector<PackedSubByteStoreAccess>
-  Collect(const Stmt &stmt, PackedSubByteStoreKind kind,
-          const Array<Buffer> &pair_fragment_buffers = {}) {
-    PackedSubByteStoreCollector collector(kind, pair_fragment_buffers);
+  static std::vector<PackedSubByteStoreAccess> Collect(const Stmt &stmt) {
+    PackedSubByteStoreCollector collector;
     collector(stmt);
     return collector.stores_;
   }
 
 private:
-  explicit PackedSubByteStoreCollector(
-      PackedSubByteStoreKind kind, const Array<Buffer> &pair_fragment_buffers)
-      : kind_(kind), pair_fragment_buffers_(pair_fragment_buffers) {}
-
   void VisitStmt_(const ForNode *op) final {
     size_t position = iter_vars_.size();
     IterVarType iter_type = op->kind == ForKind::kParallel
@@ -127,16 +111,11 @@ private:
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    bool scope_matches =
-        kind_ == PackedSubByteStoreKind::kPhysical
-            ? IsGlobalBuffer(op->buffer) || IsSharedBuffer(op->buffer)
-            : IsFragmentBuffer(op->buffer);
-    bool needs_pair =
-        kind_ == PackedSubByteStoreKind::kPhysical
-            ? op->buffer->dtype.lanes() == 1 &&
-                  IsPacked4BitStorage(op->buffer->dtype)
-            : RequiresPackedPair(op->buffer, pair_fragment_buffers_);
-    if (needs_pair && !iter_vars_.empty() && scope_matches) {
+    bool is_packed_physical_store =
+        (IsGlobalBuffer(op->buffer) || IsSharedBuffer(op->buffer)) &&
+        op->buffer->dtype.lanes() == 1 &&
+        IsPacked4BitStorage(op->buffer->dtype);
+    if (is_packed_physical_store && !iter_vars_.empty()) {
       stores_.push_back({op->buffer, op->indices,
                          Array<IterVar>(iter_vars_.begin(), iter_vars_.end()),
                          parallel_positions_});
@@ -144,8 +123,6 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  PackedSubByteStoreKind kind_;
-  Array<Buffer> pair_fragment_buffers_;
   std::vector<IterVar> iter_vars_;
   std::vector<size_t> parallel_positions_;
   std::vector<PackedSubByteStoreAccess> stores_;
@@ -207,8 +184,7 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
                                       arith::Analyzer *analyzer,
                                       bool canonical_replica_guard_guaranteed,
                                       bool throw_on_error = false) {
-  auto stores = PackedSubByteStoreCollector::Collect(
-      stmt, PackedSubByteStoreKind::kPhysical);
+  auto stores = PackedSubByteStoreCollector::Collect(stmt);
   Var byte_var("__tl_packed_byte");
   std::vector<ProvenPackedStoreOwner> proven_store_owners;
   for (const auto &access : stores) {
@@ -338,86 +314,6 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
              "that share a writable byte may be assigned to different CUDA "
              "threads. Use a byte-owned layout or rewrite the access pattern. "
              "Buffer="
-          << access.buffer->name << ", candidate=" << candidate->DebugOutput();
-      throw LayoutConflictException(oss.str());
-    }
-    return false;
-  }
-  return true;
-}
-
-// Fragment stores do not update a shared physical byte, so replicas may write
-// their own register values independently. For bijective fragment accesses,
-// still keep the two logical nibbles of each future byte on the same thread;
-// this lets a later fragment-to-global/shared copy inherit a byte-safe layout.
-bool ProvePackedFragmentPairLayout(const Stmt &stmt, const Fragment &candidate,
-                                   arith::Analyzer *analyzer,
-                                   const Array<Buffer> &pair_fragment_buffers,
-                                   bool throw_on_error = false) {
-  auto stores = PackedSubByteStoreCollector::Collect(
-      stmt, PackedSubByteStoreKind::kFragment, pair_fragment_buffers);
-  Var byte_var("__tl_packed_fragment_byte");
-  Var replica_var("__tl_packed_fragment_replica");
-  for (const auto &access : stores) {
-    if (access.parallel_positions.size() != candidate->InputDim()) {
-      if (throw_on_error) {
-        throw LayoutConflictException(
-            "Cannot propagate packed fragment byte ownership: candidate "
-            "thread layout does not match the parallel loop domain.");
-      }
-      return false;
-    }
-
-    Optional<PrimExpr> maybe_elem_offset = GetPackedStoreElementOffset(access);
-    if (!maybe_elem_offset.defined()) {
-      if (throw_on_error) {
-        throw LayoutConflictException(
-            "Cannot propagate packed fragment byte ownership: buffer indices "
-            "cannot be flattened to one physical storage offset.");
-      }
-      return false;
-    }
-
-    try {
-      PrimExpr elem_offset = analyzer->Simplify(maybe_elem_offset.value());
-      Layout inverse = Layout(access.iter_vars, {elem_offset})->Inverse();
-      if (inverse->InputDim() != 1) {
-        continue;
-      }
-
-      PrimExpr two = make_const(byte_var.dtype(), 2);
-      Array<PrimExpr> low = inverse->Forward({byte_var * two});
-      Array<PrimExpr> high = inverse->Forward({byte_var * two + 1});
-      Array<PrimExpr> low_parallel;
-      Array<PrimExpr> high_parallel;
-      for (size_t position : access.parallel_positions) {
-        low_parallel.push_back(low[position]);
-        high_parallel.push_back(high[position]);
-      }
-
-      Optional<PrimExpr> replica;
-      if (!analyzer->CanProveEqual(candidate->ReplicateExtent(), Integer(1))) {
-        replica = replica_var;
-      }
-      PrimExpr low_owner =
-          analyzer->Simplify(candidate->ForwardThread(low_parallel, replica));
-      PrimExpr high_owner =
-          analyzer->Simplify(candidate->ForwardThread(high_parallel, replica));
-      if (analyzer->CanProveEqual(low_owner, high_owner)) {
-        continue;
-      }
-    } catch (const NormalizeIterException &) {
-      // Non-bijective fragment accesses may intentionally represent
-      // per-thread replicas. Existing fragment compatibility checks remain
-      // authoritative for those cases.
-      continue;
-    }
-
-    if (throw_on_error) {
-      std::ostringstream oss;
-      oss << "Cannot propagate a packed four-bit fragment layout: the two "
-             "logical nibbles of one byte would be assigned to different "
-             "CUDA threads. Buffer="
           << access.buffer->name << ", candidate=" << candidate->DebugOutput();
       throw LayoutConflictException(oss.str());
     }
@@ -962,9 +858,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                      layout_args.analyzer,
                                      canonical_replica_guard_guaranteed,
                                      /*throw_on_error=*/true);
-    ProvePackedFragmentPairLayout(root_, loop_layout_, layout_args.analyzer,
-                                  layout_args.packed_pair_fragment_buffers,
-                                  /*throw_on_error=*/true);
   }
 
   // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
@@ -1427,19 +1320,9 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
 
   bool has_fragment_access = !indice_map_.empty();
   bool enforce_packed_byte_ownership = TargetIsCuda(layout_args.target);
-  bool has_packed_physical_store =
-      enforce_packed_byte_ownership &&
-      !PackedSubByteStoreCollector::Collect(maybe_remapped_root,
-                                            PackedSubByteStoreKind::kPhysical)
-           .empty();
-  bool has_packed_fragment_store =
-      enforce_packed_byte_ownership &&
-      !PackedSubByteStoreCollector::Collect(
-           root_, PackedSubByteStoreKind::kFragment,
-           layout_args.packed_pair_fragment_buffers)
-           .empty();
   bool has_packed_store =
-      has_packed_physical_store || has_packed_fragment_store;
+      enforce_packed_byte_ownership &&
+      !PackedSubByteStoreCollector::Collect(maybe_remapped_root).empty();
   bool canonical_replica_guard_guaranteed = store_fragment_buffers_.empty();
 
   // Explicit widths are user constraints. Validate the resulting candidate
@@ -1457,12 +1340,9 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
     auto candidate =
         PlanLoopPartition(root_, expected, layout_args.thread_bounds);
     if (enforce_packed_byte_ownership &&
-        (!ProvePackedSubByteStoreOwnership(
-             maybe_remapped_root, candidate, layout_args.analyzer,
-             canonical_replica_guard_guaranteed) ||
-         !ProvePackedFragmentPairLayout(
-             root_, candidate, layout_args.analyzer,
-             layout_args.packed_pair_fragment_buffers))) {
+        !ProvePackedSubByteStoreOwnership(maybe_remapped_root, candidate,
+                                          layout_args.analyzer,
+                                          canonical_replica_guard_guaranteed)) {
       LOG(FATAL) << "coalesced_width=" << expected
                  << " would split a writable byte across threads for a "
                     "packed four-bit store.";
@@ -1496,9 +1376,6 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
     if (ProvePackedSubByteStoreOwnership(maybe_remapped_root, candidate,
                                          layout_args.analyzer,
                                          canonical_replica_guard_guaranteed) &&
-        ProvePackedFragmentPairLayout(
-            root_, candidate, layout_args.analyzer,
-            layout_args.packed_pair_fragment_buffers) &&
         ValidateCandidateAgainstFragments(candidate, layout_args)) {
       DLOG(INFO) << "[PlanLoopPartition] packed-store-safe vector_size = "
                  << candidate_width << '\n';
@@ -1590,12 +1467,9 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
 
   auto packed_ownership_is_valid = [&](const Fragment &candidate) {
     return !enforce_packed_byte_ownership ||
-           (ProvePackedSubByteStoreOwnership(
-                ownership_root, candidate, layout_args.analyzer,
-                canonical_replica_guard_guaranteed) &&
-            ProvePackedFragmentPairLayout(
-                root_, candidate, layout_args.analyzer,
-                layout_args.packed_pair_fragment_buffers));
+           ProvePackedSubByteStoreOwnership(ownership_root, candidate,
+                                            layout_args.analyzer,
+                                            canonical_replica_guard_guaranteed);
   };
 
   bool buf_ok =

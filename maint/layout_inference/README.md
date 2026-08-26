@@ -111,4 +111,4 @@ nest's `parallel_loop_layout` annotation (see `common.py`).
 | `reduce_broadcast` | Softmax-shaped row-reduce + broadcast consume: the most common real-kernel component. Both models agree, including the reduced fragment's canonical partial replication. |
 | `offset_region_copy` | Multi-block tiled copies whose region mins carry block indices (the model's "foreign vars"): offset regions must rank exactly like zero-offset ones. |
 | `shared_staging` | global→shared→fragment→global chain: the shared-side copy is outside the io model, so the fragment is decided by the copy-out alone; goldens would surface any change to that boundary. |
-| `packed_subbyte_copy` | `int4`/`uint4`/FP4 copies keep a two-element byte on one thread; the full-lowering anchor pins width 2. |
+| `packed_subbyte_copy` | An `int4` copy keeps both nibbles of each byte on one thread; the full-lowering anchor pins width 2. |
