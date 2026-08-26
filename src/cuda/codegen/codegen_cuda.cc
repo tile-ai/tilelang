@@ -2811,13 +2811,26 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatrix())) {
-    ICHECK_EQ(op->args.size(), 4U);
+    // 4 args: classic m8n8.b16 form. Optional 5th StringImm arg selects a
+    // sub-byte source variant ("su4"/"su6" -> m8n16.b8x16.b4x16_p64 /
+    // b6x16_p32), which unpacks 4-/6-bit elements into 8-bit register
+    // containers and has no trans flavor.
+    ICHECK(op->args.size() == 4U || op->args.size() == 5U);
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
-    if (trans == 1)
-      func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
+    std::string func_name;
+    if (op->args.size() == 5U) {
+      std::string variant = Downcast<StringImm>(op->args[4])->value;
+      ICHECK(variant == "su4" || variant == "su6")
+          << "Unsupported ptx_ldmatrix variant: " << variant;
+      ICHECK_EQ(trans, 0) << "sub-byte ldmatrix variants have no trans form";
+      func_name = "tl::ptx_ldmatrix_" + variant + "_x" + std::to_string(num);
+    } else {
+      func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
+      if (trans == 1)
+        func_name += "_trans";
+    }
+    print_extern_call_stmt(func_name, 2, op->args.size() == 5U ? 1 : 0);
   } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;

@@ -552,7 +552,7 @@ def mma_fill(dtype, local_size, local_ptr, offset):
 
 
 @_dtype_forward
-def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
+def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr, variant=None):
     """TileLang intrinsic for ptx load matrix from shared memory
 
     Uses `tl.ptx_ldmatrix` which expects access pointers created via
@@ -574,18 +574,26 @@ def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
     dst_access_ptr : PrimExpr
         A `tl.access_ptr` pointing to the destination (local/register) buffer.
 
+    variant : Optional[str]
+        Sub-byte source form: ``"su4"`` (``m8n16.b8x16.b4x16_p64``) or
+        ``"su6"`` (``m8n16.b8x16.b6x16_p32``), unpacking 4-/6-bit elements
+        into 8-bit register containers. These forms have no ``trans``
+        flavor. ``None`` keeps the classic ``m8n8.b16`` form.
+
     Returns
     -------
     call : PrimExpr
         The call expression (handle-typed).
     """
+    args = [trans, num, src_access_ptr, dst_access_ptr]
+    if variant is not None:
+        if variant not in ("su4", "su6"):
+            raise ValueError(f"ptx_ldmatrix variant must be 'su4' or 'su6', got {variant!r}")
+        args.append(tvm.tirx.StringImm(variant))
     return tvm.tirx.call_intrin(
         "handle",
         tvm.tirx.op.Op.get("tl.ptx_ldmatrix"),
-        trans,
-        num,
-        src_access_ptr,
-        dst_access_ptr,
+        *args,
     )
 
 
