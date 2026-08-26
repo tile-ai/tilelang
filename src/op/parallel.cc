@@ -1348,9 +1348,11 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
         !ProvePackedSubByteStoreOwnership(
             packed_ownership.remapped_root, candidate, layout_args.analyzer,
             packed_ownership.canonical_replica_guard_guaranteed)) {
-      LOG(FATAL) << "coalesced_width=" << expected
-                 << " would split a writable byte across threads for a "
-                    "packed four-bit store.";
+      std::ostringstream oss;
+      oss << "coalesced_width=" << expected
+          << " would split a writable byte across threads for a "
+             "packed four-bit store.";
+      throw LayoutConflictException(oss.str());
     }
     return candidate;
   }

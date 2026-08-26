@@ -1340,10 +1340,11 @@ private:
                 const LayoutMap &base_layout_map,
                 const LayoutMap &strict_layout_map,
                 const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-                const LayoutCostModel &cost_model, std::deque<int> &q,
-                std::vector<bool> &in_queue) {
+                const LayoutCostModel &cost_model) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
+    std::deque<int> q;
+    std::vector<bool> in_queue(infer_list_.size(), false);
     for (const auto &[buffer, fragment] : seed_layouts) {
       if (!tmp_layout_map.count(buffer)) {
         tmp_layout_map.Set(buffer, fragment);
@@ -1451,9 +1452,6 @@ private:
 
     // For each component, try each op as root, and determine the least
     // replicated one
-    std::deque<int> q;
-    std::vector<bool> in_queue(infer_list_.size(), false);
-
     std::unique_ptr<LayoutCostModel> cost_model =
         LayoutCostModel::Create(tl_config::LayoutCostModelName(), target_);
     DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
@@ -1478,9 +1476,9 @@ private:
       for (int attempt_infer_root : members) {
         DLOG(INFO) << "----------------------- try root " << attempt_infer_root
                    << " members " << members.size() << '\n';
-        auto outcome = RunOneAttempt(attempt_infer_root, members, layout_map,
-                                     strict_layout_map, /*seed_layouts=*/{},
-                                     *cost_model, q, in_queue);
+        auto outcome =
+            RunOneAttempt(attempt_infer_root, members, layout_map,
+                          strict_layout_map, /*seed_layouts=*/{}, *cost_model);
         if (!outcome) {
           continue;
         }
@@ -1512,9 +1510,8 @@ private:
         if (!seeds.empty()) {
           DLOG(INFO) << "[InferInFreeMode] all attempts failed; retrying with "
                      << "wide fallback dst layouts";
-          auto outcome =
-              RunOneAttempt(members.front(), members, layout_map,
-                            strict_layout_map, seeds, *cost_model, q, in_queue);
+          auto outcome = RunOneAttempt(members.front(), members, layout_map,
+                                       strict_layout_map, seeds, *cost_model);
           if (outcome) {
             adopt(std::move(*outcome), members.front());
           }

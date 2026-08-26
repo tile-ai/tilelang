@@ -55,7 +55,7 @@ def test_packed_subbyte_copy_keeps_byte_on_one_thread(dtype, through_shared):
 def test_scalar_coalesced_width_rejected_for_contiguous_packed_store():
     kernel = _copy_kernel("int4", 128, threads=128, coalesced_width=1)
 
-    with pytest.raises(Exception, match="split a writable byte across threads"):
+    with pytest.raises(Exception, match=r"split a writable byte across threads|no available layout found"):
         tilelang.compile(kernel, out_idx=[1])
 
 
@@ -69,7 +69,7 @@ def test_unaligned_contiguous_packed_store_rejected():
             for i in T.Parallel(128):
                 B[i + 1] = A[i + 1]
 
-    with pytest.raises(Exception, match="Cannot safely lower a packed four-bit store"):
+    with pytest.raises(Exception, match=r"Cannot safely lower a packed four-bit store|no available layout found"):
         tilelang.compile(kernel, out_idx=[1])
 
 
@@ -185,7 +185,10 @@ def test_replicated_packed_physical_store_requires_single_replica_guard():
                 local[i] = A[i]
                 B[i] = A[i]
 
-    with pytest.raises(Exception, match=r"single-replica guard|no legal vector width"):
+    with pytest.raises(
+        Exception,
+        match=r"single-replica guard|no legal vector width|no available layout found",
+    ):
         tilelang.compile(kernel, out_idx=[1])
 
 
