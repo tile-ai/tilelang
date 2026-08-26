@@ -3,6 +3,7 @@
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+import pytest
 from tilelang import tvm
 from tvm.tirx.stmt_functor import post_order_visit
 
@@ -107,6 +108,31 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
     assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tirx.ptx_commit_group", 0) == 0
     assert calls.get("tirx.ptx_wait_group", 0) == 0
+
+
+def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
+    """Reject #2948 instead of silently dropping a fragment index rotation."""
+    size = 128
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((size,), T.int32),
+        B: T.Tensor((size,), T.int32),
+    ):
+        with T.Kernel(1, threads=size):
+            fragment = T.alloc_fragment((size,), T.int32)
+            T.copy(A, fragment)
+            for i in T.Parallel(size):
+                B[i] = fragment[(i + 1) % size]
+
+    mod = tvm.IRModule.from_expr(before)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        with pytest.raises(Exception, match="non-round-tripping inverse"):
+            tl.transform.LowerTileOp()(mod)
 
 
 def test_lower_tile_op_preserves_ragged_parallel_padding_guard():
