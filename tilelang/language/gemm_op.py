@@ -38,6 +38,10 @@ def _gemm_impl(
 
     Returns a call_intrin handle for the given op key.
     """
+    if not isinstance(k_pack, int) or isinstance(k_pack, bool):
+        raise TypeError(f"T.gemm k_pack must be an int, got {type(k_pack).__name__}")
+    if k_pack not in (1, 2):
+        raise ValueError(f"T.gemm k_pack must be 1 or 2, got {k_pack}")
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
@@ -176,7 +180,7 @@ def gemm(
         transpose_B (bool): Whether to transpose B. Defaults to False.
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
-        k_pack (int): Numbers of packed matrix cores, for ROCm only. Defaults to 1.
+        k_pack (int): Number of packed matrix cores, for ROCm only. Must be 1 or 2. Defaults to 1.
         mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
             Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
         annotations (Optional[dict]): Additional annotations.
