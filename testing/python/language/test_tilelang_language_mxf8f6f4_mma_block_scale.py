@@ -221,7 +221,7 @@ def test_mxf8f6f4_unit_scale_matches_plain_fp8_gemm_bitwise(a_name, b_name):
     assert torch.equal(C_scaled.view(torch.int32), C_plain.view(torch.int32))
 
 
-def _example_kmajor_kernel(M, N, K, block_K, in_dtype_name, num_stages=2):
+def _example_kmajor_kernel(M, N, K, block_K, in_dtype_name, num_stages=2, b_dtype_name=None):
     import importlib.util
     from pathlib import Path
 
@@ -229,8 +229,35 @@ def _example_kmajor_kernel(M, N, K, block_K, in_dtype_name, num_stages=2):
     spec = importlib.util.spec_from_file_location("sm120_mxfp8_blockscaled_gemm_example", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    kernel = module.sm120_mxfp8_blockscaled_gemm(M, N, K, 128, 128, block_K, num_stages, in_dtype_name, T.float32)
+    kernel = module.sm120_mxfp8_blockscaled_gemm(M, N, K, 128, 128, block_K, num_stages, in_dtype_name, T.float32, b_dtype_name)
     return module, kernel
+
+
+def _make_codec_discriminating_inputs(M, N, K):
+    """A/B values exact in exactly one fp8 format each.
+
+    A holds {9, 11, 13, 15} * signs: their mantissas need e4m3's third bit,
+    so the same bytes decode to different values under the e5m2 codec.
+    B holds {1024, 1280, 1536, 1792} * signs: above e4m3's 448 max, exact
+    only in e5m2. Any A/B dtype-mnemonic swap changes the decode and the
+    result; the [-4, 4] controlled band is blind to that by construction
+    (its bytes decode identically under both codecs).
+    """
+    import torch
+
+    a_vals = torch.tensor([9.0, 11.0, 13.0, 15.0, -9.0, -11.0, -13.0, -15.0], device="cuda")
+    b_vals = torch.tensor([1024.0, 1280.0, 1536.0, 1792.0, -1024.0, -1280.0, -1536.0, -1792.0], device="cuda")
+    a_floats = a_vals[torch.randint(0, 8, (M, K), device="cuda")]
+    b_floats = b_vals[torch.randint(0, 8, (N, K), device="cuda")]
+    A = a_floats.to(torch.float8_e4m3fn)
+    B = b_floats.to(torch.float8_e5m2)
+    # The values must round-trip exactly in their own format...
+    assert torch.equal(A.to(torch.float32), a_floats)
+    assert torch.equal(B.to(torch.float32), b_floats)
+    # ...and the same bytes must decode differently under the swapped codec.
+    assert not torch.equal(A.view(torch.uint8).view(torch.float8_e5m2).to(torch.float32), a_floats)
+    assert not torch.equal(B.view(torch.uint8).view(torch.float8_e4m3fn).to(torch.float32), b_floats)
+    return A, B
 
 
 @tilelang.testing.requires_cuda
@@ -619,6 +646,48 @@ def test_mxf8f6f4_rejects_out_of_family_operand_pairs():
     for a_dtype, b_dtype, pattern, _layer in cases:
         with pytest.raises(Exception, match=re.escape(pattern)):
             tilelang.compile(_make_mxf8_matmul_kernel(128, 128, 128, a_dtype, b_dtype), target="cuda", out_idx=[4])
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("orientation", ["e4m3_x_e5m2", "e5m2_x_e4m3"])
+@pytest.mark.parametrize("path", ["rowmajor", "kmajor"])
+def test_mxf8f6f4_mixed_pair_codec_discrimination(orientation, path):
+    """Swap-mnemonic discrimination for the mixed fp8 pairs.
+
+    Scales stay in {1, 2} so every partial sum is an exact fp32 integer
+    (max |sum| ~ 13.8M < 2^24) and the python reference holds at atol=0.
+    """
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 256
+    K = 128
+    A, B = _make_codec_discriminating_inputs(M, N, K)
+    if orientation == "e5m2_x_e4m3":
+        # Swap roles: the e5m2-only values feed A, the e4m3-only values B.
+        A, B = B[:M].contiguous(), A[:N].contiguous()
+    a_name = "e4m3" if orientation == "e4m3_x_e5m2" else "e5m2"
+    b_name = "e5m2" if orientation == "e4m3_x_e5m2" else "e4m3"
+    sfa_bytes = (torch.randint(0, 2, (M, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    sfb_bytes = (torch.randint(0, 2, (N, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+
+    if path == "rowmajor":
+        kernel = tilelang.compile(
+            _make_mxf8_matmul_kernel(M, N, K, getattr(T, _FP8_TORCH_DTYPES[a_name]), getattr(T, _FP8_TORCH_DTYPES[b_name])),
+            target="cuda",
+            out_idx=[4],
+        )
+        C = kernel(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+    else:
+        module, kernel = _example_kmajor_kernel(M, N, K, 128, a_name, b_dtype_name=b_name)
+        SFA = module.swizzle_blockscaled_chunk_kmajor_scale_words(_pack_scale_words(sfa_bytes), block_words=1).reshape(-1, 1)
+        SFB = module.swizzle_blockscaled_chunk_kmajor_scale_words(_pack_scale_words(sfb_bytes), block_words=1).reshape(-1, 1)
+        C = torch.empty((M, N), device="cuda", dtype=torch.float32)
+        kernel(A, B, SFA, SFB, C)
+
+    ref = _reference_scaled_gemm(A, B, sfa_bytes, sfb_bytes)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
 
 
 if __name__ == "__main__":

@@ -72,6 +72,7 @@ def sm120_mxfp8_blockscaled_gemm(
     num_stages: int = 2,
     in_dtype_name: str = "e4m3",
     out_dtype=T.bfloat16,
+    b_dtype_name: str | None = None,
 ):
     assert N % 8 == 0, "N must be a multiple of 8 (16-byte aligned output rows)"
     if M % block_M != 0 and N % block_N != 0:
@@ -92,6 +93,9 @@ def sm120_mxfp8_blockscaled_gemm(
     assert num_stages >= 2
 
     in_dtype = getattr(T, _TILELANG_FP8[in_dtype_name])
+    # Any {e4m3, e5m2} A/B pairing is legal for kind::mxf8f6f4; B defaults
+    # to A's dtype.
+    b_dtype = getattr(T, _TILELANG_FP8[b_dtype_name or in_dtype_name])
     accum_dtype = T.float32
     sf_words_per_block_k = block_K // 128
     sf_granularity_k = 32
@@ -102,7 +106,7 @@ def sm120_mxfp8_blockscaled_gemm(
     @T.prim_func
     def main(
         A: T.Tensor((M, K), in_dtype),
-        B: T.Tensor((N, K), in_dtype),
+        B: T.Tensor((N, K), b_dtype),
         SFA: T.Tensor((M_pad * k_blocks, sf_words_per_block_k), T.uint32),
         SFB: T.Tensor((N_pad * k_blocks, sf_words_per_block_k), T.uint32),
         C: T.Tensor((M, N), out_dtype),
@@ -112,7 +116,7 @@ def sm120_mxfp8_blockscaled_gemm(
             by,
         ):
             A_shared = T.alloc_shared((block_M, block_K), in_dtype)
-            B_shared = T.alloc_shared((block_N, block_K), in_dtype)
+            B_shared = T.alloc_shared((block_N, block_K), b_dtype)
             SFA_shared = T.alloc_shared((block_M, sf_words_per_block_k), T.uint32)
             SFB_shared = T.alloc_shared((block_N, sf_words_per_block_k), T.uint32)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -217,6 +221,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         args.num_stages,
         args.in_dtype,
         out_tilelang_dtype,
+        args.b_dtype,
     )
 
     if args.dump_source:
@@ -240,13 +245,13 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
             x_a, dtype=args.in_dtype, block_words=sf_words_per_block_k, return_scale_bytes=True
         )
         B, SFB_packed, sfb_bytes = quantize_bf16_to_mxfp8_blockscaled(
-            x_b, dtype=args.in_dtype, block_words=sf_words_per_block_k, return_scale_bytes=True
+            x_b, dtype=args.b_dtype or args.in_dtype, block_words=sf_words_per_block_k, return_scale_bytes=True
         )
         SFA = SFA_packed.reshape(-1, sf_words_per_block_k)
         SFB = SFB_packed.reshape(-1, sf_words_per_block_k)
     else:
         A = _make_fp8(args.m, args.k, args.in_dtype, seed=args.seed)
-        B = _make_fp8(args.n, args.k, args.in_dtype, seed=args.seed + 1)
+        B = _make_fp8(args.n, args.k, args.b_dtype or args.in_dtype, seed=args.seed + 1)
         SFA_semantic = _make_pow2_scale_words(args.m, args.k, seed=args.seed + 100)
         SFB_semantic = _make_pow2_scale_words(args.n, args.k, seed=args.seed + 200)
 
@@ -292,6 +297,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--block-k", type=int, default=128)
     parser.add_argument("--num-stages", type=int, default=2)
     parser.add_argument("--in-dtype", choices=["e4m3", "e5m2"], default="e4m3")
+    parser.add_argument("--b-dtype", choices=["e4m3", "e5m2"], default=None, help="B operand dtype (defaults to --in-dtype)")
     parser.add_argument("--out-dtype", choices=["bfloat16", "float32"], default="bfloat16")
     parser.add_argument("--backend", choices=["event", "cupti", "cudagraph"], default="event")
     parser.add_argument("--return-mode", choices=["min", "max", "mean", "median"], default="mean")

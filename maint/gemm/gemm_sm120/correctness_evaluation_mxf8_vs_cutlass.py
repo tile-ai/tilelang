@@ -221,7 +221,7 @@ def _compare_one(ext, a_name, b_name, m, n, k, full_domain=False, block_K=None):
         )
 
 
-def _compare_quantized(ext, dtype_name, m, n, k):
+def _compare_quantized(ext, a_name, b_name, m, n, k):
     """The quantized band: real quantizer output, engine vs engine, bitwise.
 
     Feeding the SAME quantized tensors and scale bytes to both backends
@@ -234,10 +234,10 @@ def _compare_quantized(ext, dtype_name, m, n, k):
 
     x_a = (torch.randn(m, k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
     x_b = (torch.randn(n, k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
-    a, _, sfa_logical = quantize_bf16_to_mxfp8_blockscaled(x_a, dtype=dtype_name, return_scale_bytes=True)
-    b, _, sfb_logical = quantize_bf16_to_mxfp8_blockscaled(x_b, dtype=dtype_name, return_scale_bytes=True)
+    a, _, sfa_logical = quantize_bf16_to_mxfp8_blockscaled(x_a, dtype=a_name, return_scale_bytes=True)
+    b, _, sfb_logical = quantize_bf16_to_mxfp8_blockscaled(x_b, dtype=b_name, return_scale_bytes=True)
 
-    kernel = tilelang.compile(_make_tilelang_mxf8_kernel(m, n, k, dtype_name, dtype_name), target="cuda", out_idx=[4])
+    kernel = tilelang.compile(_make_tilelang_mxf8_kernel(m, n, k, a_name, b_name), target="cuda", out_idx=[4])
     C_tl = kernel(a, b, _pack_tilelang_sf_u32(sfa_logical), _pack_tilelang_sf_u32(sfb_logical))
 
     C_ref = torch.zeros((m, n), device="cuda", dtype=torch.float32)
@@ -252,11 +252,11 @@ def _compare_quantized(ext, dtype_name, m, n, k):
         m,
         n,
         k,
-        dtype_name == "e4m3",
-        dtype_name == "e4m3",
+        a_name == "e4m3",
+        b_name == "e4m3",
     )
-    assert torch.equal(C_tl.view(torch.int32), D_cutlass.view(torch.int32)), f"{dtype_name} quantized band not bitwise"
-    print(f"{dtype_name}x{dtype_name} [quantized bf16->mxfp8]: TileLang vs CUTLASS bitwise equal")
+    assert torch.equal(C_tl.view(torch.int32), D_cutlass.view(torch.int32)), f"{a_name}x{b_name} quantized band not bitwise"
+    print(f"{a_name}x{b_name} [quantized bf16->mxfp8]: TileLang vs CUTLASS bitwise equal")
 
 
 def run_compare() -> None:
@@ -280,8 +280,10 @@ def run_compare() -> None:
     _compare_one(ext, "e4m3", "e4m3", m, n, k, block_K=128)
     _compare_one(ext, "e5m2", "e5m2", m, n, k, full_domain=True, block_K=128)
     # Real quantizer output through both engines, bitwise (no tolerance).
-    _compare_quantized(ext, "e4m3", m, n, k)
-    _compare_quantized(ext, "e5m2", m, n, k)
+    _compare_quantized(ext, "e4m3", "e4m3", m, n, k)
+    _compare_quantized(ext, "e5m2", "e5m2", m, n, k)
+    # The fp8-training pairing: e4m3 activations x e5m2 gradients.
+    _compare_quantized(ext, "e4m3", "e5m2", m, n, k)
 
 
 if __name__ == "__main__":
