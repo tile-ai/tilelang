@@ -119,6 +119,30 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
   return best_vector_size;
 }
 
+void ValidateFragmentMapping(const Fragment &fragment,
+                             const Range &thread_bounds,
+                             arith::Analyzer *analyzer,
+                             const std::string &description,
+                             const Span &span = Span()) {
+  std::string range_error;
+  if (!ProveFragmentThreadRange(fragment, thread_bounds, *analyzer,
+                                &range_error)) {
+    TVM_FFI_THROW(ValueError)
+        << "Invalid " << description << ": " << range_error
+        << ". Layout: " << fragment->DebugOutput() << SpanHintSuffix(span);
+  }
+
+  arith::IterMapResult injectivity = fragment->DetectInjective();
+  if (!injectivity->errors.empty()) {
+    TVM_FFI_THROW(ValueError)
+        << "Invalid " << description
+        << ": (logical indices, replica) must map injectively to (thread, "
+           "local index). Details: "
+        << injectivity->errors << ". Layout: " << fragment->DebugOutput()
+        << SpanHintSuffix(span);
+  }
+}
+
 } // anonymous namespace
 
 /**
@@ -140,9 +164,27 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
   StmtExprVisitor::VisitStmt_(op);
 }
 
+void ParallelLoopNestVisitor::VisitStmt_(const AttrStmtNode *op) {
+  bool is_multiplicity_marker = op->attr_key == attr::kParallelMultiplicity;
+  if (is_multiplicity_marker) {
+    ++multiplicity_marker_depth_;
+  }
+  StmtExprVisitor::VisitStmt_(op);
+  if (is_multiplicity_marker) {
+    --multiplicity_marker_depth_;
+  }
+}
+
 void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
   if (IsFragmentBuffer(op->buffer)) {
     p->RecordBufferAccess(op->buffer, op->indices, /*is_write=*/true);
+    p->store_fragment_buffers_.push_back(op->buffer);
+  } else if (IsSharedBuffer(op->buffer) || IsGlobalBuffer(op->buffer)) {
+    p->has_cross_thread_access_ = true;
+    p->store_shared_global_buffers_.push_back(op->buffer);
+    if (multiplicity_marker_depth_ == 0) {
+      p->has_unmarked_shared_global_store_ = true;
+    }
   }
   StmtExprVisitor::VisitStmt_(op);
 }
@@ -150,6 +192,8 @@ void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
 void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   if (IsFragmentBuffer(op->buffer)) {
     p->RecordBufferAccess(op->buffer, op->indices, /*is_write=*/false);
+  } else if (IsSharedBuffer(op->buffer) || IsGlobalBuffer(op->buffer)) {
+    p->has_cross_thread_access_ = true;
   }
   StmtExprVisitor::VisitExpr_(op);
 }
@@ -180,22 +224,6 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
                    << ". Ignore override.";
     }
   }
-  // Collect cross-thread access info and buffer store info.
-  PostOrderVisit(root_, [&](const ObjectRef &obj) {
-    if (const auto *store = obj.as<BufferStoreNode>()) {
-      auto buffer = store->buffer;
-      if (IsSharedBuffer(buffer) || IsGlobalBuffer(buffer)) {
-        has_cross_thread_access_ = true;
-        store_shared_global_buffers_.emplace_back(buffer);
-      } else if (IsFragmentBuffer(buffer)) {
-        store_fragment_buffers_.emplace_back(buffer);
-      }
-    } else if (const auto *load = obj.as<BufferLoadNode>()) {
-      if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
-        has_cross_thread_access_ = true;
-      }
-    }
-  });
 }
 
 TileOperator ParallelOpNode::Clone() const {
@@ -296,6 +324,121 @@ Stmt ParallelOpNode::Lower(const LowerArgs &lower_args,
 bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(GetAccessInfo(buffer).indices, common_indice);
+}
+
+bool ParallelOpNode::IsFullBufferAccess(const Buffer &buffer) const {
+  const Array<PrimExpr> &access_indices = GetAccessInfo(buffer).indices;
+  if (access_indices.size() != buffer->shape.size()) {
+    return false;
+  }
+
+  Array<IterVar> access_vars;
+  auto append_if_used = [&](const IterVar &iter_var) {
+    for (const PrimExpr &index : access_indices) {
+      if (tirx::UsesVar(index, [&](const VarNode *var_node) {
+            return GetRef<Var>(var_node).same_as(iter_var->var);
+          })) {
+        access_vars.push_back(iter_var);
+        return;
+      }
+    }
+  };
+  for (const IterVar &loop_var : loop_vars_) {
+    append_if_used(loop_var);
+  }
+  // A serial loop nested inside T.Parallel is executed completely by every
+  // participating thread. Its induction variable therefore contributes to
+  // region coverage even though it must never contribute to thread ownership.
+  for (const auto &[_, inner_var] : inner_vars_) {
+    append_if_used(inner_var);
+  }
+
+  // Layout's IterVar constructor requires zero-based domains, which is also
+  // the common form emitted by T.Parallel and generated SIMT loops.
+  // Conservatively reject a non-zero-based access domain instead of
+  // normalizing it here.
+  for (const IterVar &loop_var : access_vars) {
+    if (!analyzer_.CanProveEqual(loop_var->dom->min, 0)) {
+      return false;
+    }
+  }
+
+  auto proves_full_domain = [&](const Layout &inverse,
+                                bool has_occurrence_axis) {
+    auto analyzer = analyzer_.Clone();
+    Array<PrimExpr> logical_indices;
+    logical_indices.reserve(buffer->shape.size());
+    for (size_t i = 0; i < buffer->shape.size(); ++i) {
+      Var logical_index("__tl_full_access_" + std::to_string(i),
+                        buffer->shape[i]->dtype);
+      analyzer->Bind(logical_index, Range(0, buffer->shape[i]), true);
+      logical_indices.push_back(logical_index);
+    }
+
+    Array<PrimExpr> inverse_inputs = logical_indices;
+    if (has_occurrence_axis) {
+      inverse_inputs.push_back(Integer(0));
+    }
+    Array<PrimExpr> recovered = inverse->Forward(inverse_inputs);
+    if (recovered.size() < access_vars.size()) {
+      return false;
+    }
+
+    Map<Var, PrimExpr> substitution;
+    for (size_t i = 0; i < access_vars.size(); ++i) {
+      const Range &domain = access_vars[i]->dom;
+      PrimExpr value = analyzer->Simplify(recovered[i]);
+      if (!analyzer->CanProve(value >= domain->min) ||
+          !analyzer->CanProve(value < domain->min + domain->extent)) {
+        return false;
+      }
+      substitution.Set(access_vars[i]->var, value);
+    }
+
+    // Bounds alone are insufficient for strided or correlated access maps.
+    // The round trip proves that every logical buffer coordinate has an actual
+    // preimage in the T.Parallel iteration domain.
+    for (size_t i = 0; i < access_indices.size(); ++i) {
+      PrimExpr round_trip =
+          analyzer->Simplify(Substitute(access_indices[i], substitution));
+      if (!analyzer->CanProveEqual(round_trip, logical_indices[i])) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  try {
+    arith::IterMapResult direct = arith::DetectIterMap(
+        access_indices, ToVMap(access_vars), 1, arith::IterMapLevel::Bijective,
+        const_cast<arith::Analyzer *>(&analyzer_));
+    if (direct->errors.empty()) {
+      Layout inverse = Layout(access_vars, access_indices)->Inverse();
+      return proves_full_domain(inverse, /*has_occurrence_axis=*/false);
+    }
+
+    // Repeated accesses can still cover a whole buffer. Complete the access
+    // map with an occurrence axis for the unused portions of loop iterators,
+    // then test one representative occurrence for every logical coordinate.
+    PrimExpr occurrence = MakeFlattenedExpression(
+        DivideUnusedIterators(access_indices, access_vars,
+                              const_cast<arith::Analyzer *>(&analyzer_)));
+    Array<PrimExpr> completed_indices = access_indices;
+    completed_indices.push_back(occurrence);
+    arith::IterMapResult completed =
+        arith::DetectIterMap(completed_indices, ToVMap(access_vars), 1,
+                             arith::IterMapLevel::Bijective,
+                             const_cast<arith::Analyzer *>(&analyzer_));
+    if (!completed->errors.empty()) {
+      return false;
+    }
+    Layout inverse = Layout(access_vars, completed_indices)->Inverse();
+    return proves_full_domain(inverse, /*has_occurrence_axis=*/true);
+  } catch (const NormalizeIterException &) {
+    return false;
+  } catch (const Error &) {
+    return false;
+  }
 }
 
 /*! \brief Infer the layout for parallel operations based on different inference
@@ -526,6 +669,48 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     throw LoopLayoutInjectiveException(oss.str());
   }
 
+  ValidateFragmentMapping(loop_layout_, layout_args.thread_bounds,
+                          layout_args.analyzer, "T.Parallel loop layout",
+                          root_->span);
+
+  for (const Buffer &buffer : access_order_) {
+    if (!layout_args.layout_map.count(buffer)) {
+      continue;
+    }
+    Optional<Fragment> fragment = layout_args.layout_map[buffer].as<Fragment>();
+    if (!fragment.defined()) {
+      TVM_FFI_THROW(ValueError)
+          << "Invalid layout for fragment buffer `" << buffer->name
+          << "`: expected a Fragment, but got "
+          << layout_args.layout_map[buffer]->GetTypeKey()
+          << SpanHintSuffix(buffer->span);
+    }
+    if (fragment.value()->InputShape().size() != buffer->shape.size()) {
+      TVM_FFI_THROW(ValueError)
+          << "Invalid layout for fragment buffer `" << buffer->name
+          << "`: layout shape " << fragment.value()->InputShape()
+          << " does not match buffer shape " << buffer->shape
+          << SpanHintSuffix(buffer->span);
+    }
+    for (size_t i = 0; i < buffer->shape.size(); ++i) {
+      if (!layout_args.analyzer->CanProveEqual(
+              fragment.value()->InputShape()[i], buffer->shape[i])) {
+        TVM_FFI_THROW(ValueError)
+            << "Invalid layout for fragment buffer `" << buffer->name
+            << "`: layout shape " << fragment.value()->InputShape()
+            << " does not match buffer shape " << buffer->shape
+            << SpanHintSuffix(buffer->span);
+      }
+    }
+    Range fragment_thread_bounds = fragment.value()->ThreadRange().defined()
+                                       ? fragment.value()->ThreadRange()
+                                       : layout_args.thread_bounds;
+    ValidateFragmentMapping(
+        fragment.value(), fragment_thread_bounds, layout_args.analyzer,
+        "layout for fragment buffer `" + std::string(buffer->name) + "`",
+        buffer->span);
+  }
+
   PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
 
   auto block_size = layout_args.thread_bounds->extent;
@@ -561,6 +746,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     if (!layout_args.layout_map.count(buffer)) {
       auto dst_layout = CompleteBufferFragment(buffer)->BindThreadRange(
           layout_args.thread_bounds);
+      ValidateFragmentMapping(dst_layout, layout_args.thread_bounds,
+                              layout_args.analyzer,
+                              "inferred layout for fragment buffer `" +
+                                  std::string(buffer->name) + "`",
+                              buffer->span);
       results.Set(buffer, dst_layout);
     }
   }
@@ -673,6 +863,15 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     const Fragment &candidate, const LayoutInferArgs &layout_args,
     bool throw_on_error, bool check_forward_index,
     const Buffer &source_buffer) const {
+  std::string range_error;
+  if (!ProveFragmentThreadRange(candidate, layout_args.thread_bounds, analyzer_,
+                                &range_error)) {
+    if (throw_on_error) {
+      throw LayoutConflictException("Invalid T.Parallel loop layout: " +
+                                    range_error);
+    }
+    return false;
+  }
   auto vars =
       loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
   for (const auto &buffer : access_order_) {
@@ -848,6 +1047,22 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     return;
 
   if (!store_fragment_buffers.empty()) {
+    // A loop-wide replica guard would suppress the writes to non-canonical
+    // fragment replicas, while omitting it would repeat an external store.
+    // The two effects may coexist only when each shared/global store carries a
+    // statement-local tl.parallel_multiplicity marker, which PartitionLoop
+    // lowers to its own replica == 0 guard.
+    if (!store_shared_global_buffers.empty() &&
+        has_unmarked_shared_global_store_) {
+      TVM_FFI_THROW(ValueError)
+          << "Invalid replicated T.Parallel: fragment writes require every "
+             "owner replica to execute, but an unguarded shared/global store "
+             "in the same loop must execute only once per logical iteration. "
+             "Split the fragment and shared/global side effects into separate "
+             "T.Parallel loops."
+          << SpanHintSuffix(root_->span);
+    }
+
     bool replicate_is_from_dynamic_index_fragment = false;
     for (const auto &fragment : store_fragment_buffers) {
       if (!layout_args.layout_map.count(fragment)) {
@@ -872,9 +1087,9 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     if (!replicate_is_from_dynamic_index_fragment)
       return;
 
-    ICHECK(store_shared_global_buffers.empty())
-        << "Invalid layout: cannot have both fragment and shared store buffers "
-           "in replicated loop layout.";
+    ICHECK(!has_unmarked_shared_global_store_)
+        << "Invalid layout: an unguarded shared/global store cannot coexist "
+           "with fragment writes in a replicated loop layout.";
     return;
   } else {
     auto inv = loop_layout_->Inverse();

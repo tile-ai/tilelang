@@ -377,6 +377,11 @@ public:
       strict_layout_map.Set(buffer, layout);
     }
 
+    // A partial fragment access cannot establish a layout for the untouched
+    // portion of the buffer. Only layouts fixed before common/free inference
+    // (annotations and strict operators such as GEMM/TMEM) may be sliced.
+    ValidateFragmentSlices(strict_layout_map);
+
     // step 2: infer common layout with BFS
     FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
                      in_queue);
@@ -489,6 +494,64 @@ public:
   }
 
 private:
+  static bool IsFullBufferRegion(const BufferRegion &region,
+                                 arith::Analyzer *analyzer) {
+    const Buffer &buffer = region->buffer;
+    if (region->region.size() != buffer->shape.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < buffer->shape.size(); ++i) {
+      if (!analyzer->CanProveEqual(region->region[i]->min, 0) ||
+          !analyzer->CanProveEqual(region->region[i]->extent,
+                                   buffer->shape[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[noreturn]] void ReportFreeFragmentSlice(int infer_id, const Buffer &buffer,
+                                            const ObjectRef &access) const {
+    TVM_FFI_THROW(ValueError)
+        << "Fragment buffer slicing is not supported for freely inferred "
+           "layouts. Buffer `"
+        << buffer->name << "` has shape " << buffer->shape << ", but "
+        << infer_list_stmt_[infer_id] << " accesses only " << access
+        << ". Define the fragment layout with T.annotate_layout, or establish "
+           "it through a strict operator such as GEMM/TMEM before slicing."
+        << SpanHintSuffix(buffer->span);
+  }
+
+  void ValidateFragmentSlices(const LayoutMap &strict_layout_map) const {
+    for (size_t i = 0; i < infer_list_.size(); ++i) {
+      const TileOperator &op = infer_list_[i];
+      if (const auto *parallel = op.as<ParallelOpNode>()) {
+        for (const Buffer &buffer : parallel->GetAccessOrder()) {
+          if (!strict_layout_map.count(buffer) &&
+              !parallel->IsFullBufferAccess(buffer)) {
+            ReportFreeFragmentSlice(
+                static_cast<int>(i), buffer,
+                parallel->GetIndiceMap().at(buffer).indices);
+          }
+        }
+        continue;
+      }
+
+      AccessRegions regions = op->GetAccessRegions();
+      auto validate_regions = [&](const Array<BufferRegion> &accesses) {
+        for (const BufferRegion &region : accesses) {
+          const Buffer &buffer = region->buffer;
+          if (IsFragmentBuffer(buffer) && !strict_layout_map.count(buffer) &&
+              !IsFullBufferRegion(region, analyzer_vec_[i].get())) {
+            ReportFreeFragmentSlice(static_cast<int>(i), buffer, region);
+          }
+        }
+      };
+      validate_regions(regions.reads);
+      validate_regions(regions.writes);
+    }
+  }
+
   Map<Var, Buffer> GetBufferMap() const {
     Map<Var, Buffer> buffer_map;
     for (const auto &[var, buffers] : buffer_data_to_buffers_) {

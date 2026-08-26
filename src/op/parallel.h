@@ -35,10 +35,12 @@ class ParallelLoopNestVisitor : public StmtExprVisitor {
 private:
   ParallelLoopNestVisitor(ParallelOpNode *op) : p(op) {};
   void VisitStmt_(const ForNode *op) override;
+  void VisitStmt_(const AttrStmtNode *op) override;
   void VisitStmt_(const BufferStoreNode *op) override;
   void VisitExpr_(const BufferLoadNode *op) override;
 
   ParallelOpNode *p;
+  int multiplicity_marker_depth_{0};
 
   friend class ParallelOpNode;
 };
@@ -124,6 +126,10 @@ public:
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.
   const std::vector<Buffer> &GetAccessOrder() const { return access_order_; }
+  // Return whether this loop's access covers the complete logical buffer.
+  // This is used by LayoutInference to distinguish a full-buffer inference
+  // constraint from a fragment slice that would require extrapolating a layout.
+  bool IsFullBufferAccess(const Buffer &buffer) const;
   // Get the predicate for a given logical thread index. GPU callers pass the
   // real threadIdx.x Var; callers without thread bindings (e.g. CPU) pass
   // constant 0.
@@ -210,6 +216,9 @@ private:
   std::vector<Buffer> store_shared_global_buffers_;
   // Fragment buffers that are stored to in the loop body.
   std::vector<Buffer> store_fragment_buffers_;
+  // Whether a shared/global store is not protected by a statement-local
+  // canonical-replica marker.
+  bool has_unmarked_shared_global_store_ = false;
 };
 
 class ParallelOp : public TileOperator {

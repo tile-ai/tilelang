@@ -1061,6 +1061,14 @@ def test_reject_finalize_in_extra_loop():
 # indices everywhere and a replica-zero guard on the global store.
 
 
+def _wide_source_layout(K, threads):
+    """Anchor row-at-a-time source access before slicing it in T.Parallel."""
+    return T.Fragment(
+        (4, K),
+        forward_fn=lambda i, k: (k % threads, i * (K // threads) + k // threads),
+    )
+
+
 def _assert_static_wide_publication(source, local_arrays):
     for name in local_arrays:
         assert not re.search(rf"\b{name}\[[^\]\n]*threadIdx", source), source
@@ -1079,6 +1087,12 @@ def _wide_plan_outer_product_kernel(K=256, threads=128):
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((4, K), T.float32)
             src2 = T.alloc_fragment((4, K), T.float32)
+            T.annotate_layout(
+                {
+                    src: _wide_source_layout(K, threads),
+                    src2: _wide_source_layout(K, threads),
+                }
+            )
             T.copy(A, src)
             T.copy(A2, src2)
             acc = T.alloc_reducer((4, 4), T.float32, op="sum")
@@ -1112,6 +1126,7 @@ def test_wide_plan_finalize_publication_static_indices_1d():
     def kernel(A: T.Tensor((4, K), T.float32), B: T.Tensor((4,), T.float32)):
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((4, K), T.float32)
+            T.annotate_layout({src: _wide_source_layout(K, threads)})
             T.copy(A, src)
             acc = T.alloc_reducer((4,), T.float32, op="sum")
             T.reducer_init(acc)
@@ -1144,6 +1159,12 @@ def test_wide_plan_finalize_publication_legacy_entry():
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((4, K), T.float32)
             src2 = T.alloc_fragment((4, K), T.float32)
+            T.annotate_layout(
+                {
+                    src: _wide_source_layout(K, threads),
+                    src2: _wide_source_layout(K, threads),
+                }
+            )
             T.copy(A, src)
             T.copy(A2, src2)
             acc = T.alloc_reducer((4, 4), T.float32, replication="all")
@@ -1179,6 +1200,12 @@ def test_wide_plan_finalize_staged_chain_override():
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((4, K), T.float32)
             src2 = T.alloc_fragment((4, K), T.float32)
+            T.annotate_layout(
+                {
+                    src: _wide_source_layout(K, threads),
+                    src2: _wide_source_layout(K, threads),
+                }
+            )
             T.copy(A, src)
             T.copy(A2, src2)
             acc = T.alloc_reducer((4, 4), T.float32, op="sum")
@@ -1217,6 +1244,12 @@ def test_wide_plan_dst_extra_consumer_not_overridden():
         with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((4, K), T.float32)
             src2 = T.alloc_fragment((4, K), T.float32)
+            T.annotate_layout(
+                {
+                    src: _wide_source_layout(K, threads),
+                    src2: _wide_source_layout(K, threads),
+                }
+            )
             T.copy(A, src)
             T.copy(A2, src2)
             acc = T.alloc_reducer((4, 4), T.float32, op="sum")

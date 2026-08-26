@@ -465,15 +465,15 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
                            Analyzer &analyzer, bool check_forward_index) {
+  if (small_frag_indices.size() != small_frag->InputDim() ||
+      large_frag_indices.size() != large_frag->InputDim()) {
+    return false;
+  }
+
   // When check_forward_index is true, verify that the physical indices
   // (forward index) of both fragments are equal. This is required when
   // validating loop layout against buffer fragment, as code generation
   // needs to correctly derive buffer physical indices from loop layout.
-  bool large_physical_is_fully_replicated = large_frag->IsCompletedReplicated();
-  if (large_physical_is_fully_replicated) {
-    return true; // fully replicated fragments are always compatible
-  }
-
   if (check_forward_index) {
     auto small_physical = small_frag->Forward(small_frag_indices);
     auto large_physical = large_frag->Forward(large_frag_indices);
@@ -490,18 +490,44 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
     }
   }
 
+  // Every thread owns every logical element in a fully replicated fragment.
+  // Once any requested physical-index equality has been established, thread
+  // containment is therefore immediate and does not require choosing a
+  // particular inverse replica.
+  if (large_frag->IsCompletedReplicated()) {
+    return true;
+  }
+
   Var rep_small("__checking_frag_contains_rep");
   analyzer.Bind(rep_small,
                 Range(IntImm(small_frag->ReplicateExtent()->dtype, 0),
                       small_frag->ReplicateExtent()),
                 true); // Bind the replicate extent of small_frag.
-  // Derive thread for small_frag.
-  auto thread = small_frag->ForwardThread(small_frag_indices, rep_small);
+  // Compare physical thread ids. Fragment::ForwardThread is normalized to the
+  // fragment's ThreadRange, while Fragment::Inverse consumes that normalized
+  // coordinate, so translate through the two range minima explicitly.
+  PrimExpr small_thread =
+      small_frag->ForwardThread(small_frag_indices, rep_small);
+  PrimExpr small_thread_min = small_frag->ThreadRange().defined()
+                                  ? small_frag->ThreadRange()->min
+                                  : Integer(0);
+  PrimExpr large_thread_min = large_frag->ThreadRange().defined()
+                                  ? large_frag->ThreadRange()->min
+                                  : Integer(0);
+  PrimExpr physical_thread = analyzer.Simplify(small_thread + small_thread_min);
+  PrimExpr large_normalized_thread =
+      analyzer.Simplify(physical_thread - large_thread_min);
+  if (large_frag->ThreadRange().defined() &&
+      (!analyzer.CanProve(large_normalized_thread >= 0) ||
+       !analyzer.CanProve(large_normalized_thread <
+                          large_frag->ThreadRange()->extent))) {
+    return false;
+  }
 
   // Get physical index and thread for large_frag.
   auto large_frag_physical_and_thread = large_frag->Forward(large_frag_indices);
   // Add small_frag's thread to the large fragment's thread info.
-  large_frag_physical_and_thread.push_back(thread);
+  large_frag_physical_and_thread.push_back(large_normalized_thread);
   // Get the inverse of the large fragment.
   auto inv_large_frag = large_frag->Inverse();
   // Compute logical index and replicate index using inverse layout.
@@ -513,13 +539,65 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
       inv_large_frag_logical_and_rep[inv_large_frag_logical_and_rep.size() - 1];
 
   // Calculate thread based on the logical index and replicate index.
-  auto check_thread =
-      large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep);
+  PrimExpr check_thread = analyzer.Simplify(
+      large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep) +
+      large_thread_min);
 
   // Simplify the difference between the threads.
-  auto diff = analyzer.Simplify(thread - check_thread);
+  auto diff = analyzer.Simplify(physical_thread - check_thread);
   // If the difference is zero, the threads match and the access is valid.
   return analyzer.CanProve(diff == 0);
+}
+
+bool ProveFragmentThreadRange(const Fragment &fragment,
+                              const Range &thread_bounds, Analyzer &analyzer,
+                              std::string *error) {
+  auto fail = [&](const std::string &message) {
+    if (error != nullptr) {
+      *error = message;
+    }
+    return false;
+  };
+
+  if (!fragment.defined() || !thread_bounds.defined()) {
+    return fail("the fragment or current thread range is undefined");
+  }
+
+  auto scoped_analyzer = analyzer.Clone();
+  for (size_t i = 0; i < fragment->InputDim(); ++i) {
+    scoped_analyzer->Bind(InputPlaceholder(i),
+                          Range(0, fragment->InputShape()[i]), true);
+  }
+  scoped_analyzer->Bind(ReplicationPlaceholder(),
+                        Range(0, fragment->ReplicateExtent()), true);
+
+  Range declared_range = fragment->ThreadRange().defined()
+                             ? fragment->ThreadRange()
+                             : thread_bounds;
+  if (!scoped_analyzer->CanProve(declared_range->extent > 0)) {
+    return fail("the declared thread range must have positive extent");
+  }
+  if (!scoped_analyzer->CanProve(declared_range->min >= thread_bounds->min) ||
+      !scoped_analyzer->CanProve(declared_range->min + declared_range->extent <=
+                                 thread_bounds->min + thread_bounds->extent)) {
+    std::ostringstream os;
+    os << "declared thread range " << declared_range
+       << " is outside the current participant range " << thread_bounds;
+    return fail(os.str());
+  }
+
+  arith::IntSet thread_set =
+      scoped_analyzer->int_set(fragment->GetForwardThread());
+  PrimExpr min_thread = scoped_analyzer->Simplify(thread_set.min());
+  PrimExpr max_thread = scoped_analyzer->Simplify(thread_set.max());
+  if (!scoped_analyzer->CanProve(min_thread >= 0) ||
+      !scoped_analyzer->CanProve(max_thread < declared_range->extent)) {
+    std::ostringstream os;
+    os << "normalized thread map has range [" << min_thread << ", "
+       << max_thread << "] outside [0, " << declared_range->extent << ")";
+    return fail(os.str());
+  }
+  return true;
 }
 
 } // namespace tl
