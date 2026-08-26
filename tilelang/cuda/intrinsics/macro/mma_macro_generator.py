@@ -158,6 +158,10 @@ class TensorCoreIntrinEmitter:
     def _get_dtype_abbrv(self, dtype: str) -> str:
         if "float4_e2m1_unpacked" in dtype:
             return "e2m1"
+        if "float6_e2m3fn_unpacked" in dtype:
+            return "e2m3"
+        if "float6_e3m2fn_unpacked" in dtype:
+            return "e3m2"
         if dtype not in self.dtype_abbrv:
             raise ValueError(f"Unsupported dtype: {dtype}")
         return self.dtype_abbrv[dtype]

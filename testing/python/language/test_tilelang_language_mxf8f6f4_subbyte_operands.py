@@ -634,3 +634,285 @@ def test_w4a8_extreme_scale_semantics(sfa_byte, sfb_byte, expected_bits):
     C = kernel(A_bytes, B, _pack_scale_words(sfa), _pack_scale_words(sfb))
     assert (C[0, 0].view(torch.int32).item() & 0xFFFFFFFF) == expected_bits
     assert bool((C.flatten()[1:] == 0).all())
+
+
+_FAMILY_SPECS = {
+    # name -> (tilelang smem dtype attr, global form, torch feed)
+    "e4m3": ("float8_e4m3fn", "fp8", None),
+    "e5m2": ("float8_e5m2", "fp8", None),
+    "e2m1": ("float4_e2m1_unpacked", "fp4_blob", None),
+    "e2m3": ("float6_e2m3fn_unpacked", "fp6_blob", None),
+    "e3m2": ("float6_e3m2fn_unpacked", "fp6_blob", None),
+}
+
+
+@simplify_prim_func
+def _make_family_matmul_kernel(M, N, K, a_spec, b_spec, *, block_M=64, block_N=64, block_K=128):
+    """Rowmajor kernel over any f8f6f4-family operand pair.
+
+    fp8 operands are normal fp8 tensors; fp4 is a packed uint8 blob (2
+    elems/byte -> 8-byte payload per 16-element smem group); fp6 is a packed
+    uint8 blob (LSB-first 6-bit stream, 4 elems/3 bytes -> 12-byte payload
+    per group). SIMT producers write the b4x16_p64 / b6x16_p32 padded forms.
+    """
+    accum_dtype = T.float32
+    scale_words = block_K // 128
+
+    def global_decl(name, rows, spec):
+        form = _FAMILY_SPECS[spec][1]
+        if form == "fp8":
+            return T.Tensor((rows, K), getattr(T, _FAMILY_SPECS[spec][0]))
+        if form == "fp4_blob":
+            return T.Tensor((rows, K // 2), T.uint8)
+        return T.Tensor((rows, K * 3 // 4), T.uint8)
+
+    a_smem_dtype = getattr(T, _FAMILY_SPECS[a_spec][0])
+    b_smem_dtype = getattr(T, _FAMILY_SPECS[b_spec][0])
+    a_form = _FAMILY_SPECS[a_spec][1]
+    b_form = _FAMILY_SPECS[b_spec][1]
+
+    @T.prim_func
+    def main(
+        A: global_decl("A", M, a_spec),
+        B: global_decl("B", N, b_spec),
+        SFA: T.Tensor((M, K // 128), T.uint32),
+        SFB: T.Tensor((N, K // 128), T.uint32),
+        C: T.Tensor((M, N), accum_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), a_smem_dtype, scope="shared.dyn")
+            B_shared = T.alloc_shared((block_N, block_K), b_smem_dtype, scope="shared.dyn")
+            SFA_shared = T.alloc_shared((block_M, scale_words), T.uint32, scope="shared.dyn")
+            SFB_shared = T.alloc_shared((block_N, scale_words), T.uint32, scope="shared.dyn")
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+
+            if K // block_K > 1:
+                T.clear(C_local)
+            for ko in T.Pipelined((K // block_K), num_stages=1):
+                if a_form == "fp8":
+                    for i, k in T.Parallel(block_M, block_K):
+                        A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
+                elif a_form == "fp4_blob":
+                    for i, g, j in T.Parallel(block_M, block_K // 16, 8):
+                        A_shared[i, 16 * g + j] = T.reinterpret(a_smem_dtype, A[by * block_M + i, ko * (block_K // 2) + 8 * g + j])
+                else:
+                    for i, g, j in T.Parallel(block_M, block_K // 16, 12):
+                        A_shared[i, 16 * g + j] = T.reinterpret(a_smem_dtype, A[by * block_M + i, ko * (block_K * 3 // 4) + 12 * g + j])
+                if b_form == "fp8":
+                    for i, k in T.Parallel(block_N, block_K):
+                        B_shared[i, k] = B[bx * block_N + i, ko * block_K + k]
+                elif b_form == "fp4_blob":
+                    for i, g, j in T.Parallel(block_N, block_K // 16, 8):
+                        B_shared[i, 16 * g + j] = T.reinterpret(b_smem_dtype, B[bx * block_N + i, ko * (block_K // 2) + 8 * g + j])
+                else:
+                    for i, g, j in T.Parallel(block_N, block_K // 16, 12):
+                        B_shared[i, 16 * g + j] = T.reinterpret(b_smem_dtype, B[bx * block_N + i, ko * (block_K * 3 // 4) + 12 * g + j])
+                for i, w in T.Parallel(block_M, scale_words):
+                    SFA_shared[i, w] = SFA[by * block_M + i, ko * scale_words + w]
+                for j, w in T.Parallel(block_N, scale_words):
+                    SFB_shared[j, w] = SFB[bx * block_N + j, ko * scale_words + w]
+                T.mma_gemm_blockscaled(
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    SFA_shared,
+                    SFB_shared,
+                    transpose_B=True,
+                    clear_accum=(K // block_K == 1),
+                    k_start=0,
+                    sf_a_granularity_k=32,
+                    sf_b_granularity_k=32,
+                )
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+def _family_data(spec, rows, K, controlled=True):
+    """Returns (feed_tensor, decoded_float32) for one operand."""
+    import torch
+
+    from examples.dequantize_gemm.quantize import decode_fp6_values, unpack_fp6_bytes
+
+    form = _FAMILY_SPECS[spec][1]
+    if form == "fp8":
+        tdt = {"e4m3": torch.float8_e4m3fn, "e5m2": torch.float8_e5m2}[spec]
+        t = torch.randint(-4, 5, (rows, K), device="cuda", dtype=torch.float32).to(tdt)
+        return t, t.to(torch.float32)
+    if form == "fp4_blob":
+        blob = torch.randint(0, 256, (rows, K // 2), device="cuda", dtype=torch.uint8)
+        return blob, _decode_packed_fp4(blob, rows, K)
+    blob = torch.randint(0, 256, (rows, K * 3 // 4), device="cuda", dtype=torch.uint8)
+    codes = unpack_fp6_bytes(blob.cpu(), K)
+    return blob, decode_fp6_values(codes, spec).cuda()
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize(
+    "a_spec,b_spec",
+    [
+        ("e4m3", "e2m3"),
+        ("e4m3", "e3m2"),
+        ("e5m2", "e3m2"),
+        ("e2m3", "e4m3"),
+        ("e3m2", "e3m2"),
+        ("e2m3", "e3m2"),
+        ("e3m2", "e2m1"),
+        ("e2m1", "e2m3"),
+    ],
+)
+def test_fp6_family_rowmajor_correctness(a_spec, b_spec):
+    """fp6 operands in every direction: vs fp8, fp6, and fp4 partners."""
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(_make_family_matmul_kernel(M, N, K, a_spec, b_spec), target="cuda", out_idx=[4])
+    src = kernel.get_kernel_source()
+    enum_of = {"e2m1": "kE2M1", "e2m3": "kE2M3", "e3m2": "kE3M2", "e4m3": "kE4M3", "e5m2": "kE5M2"}
+    assert f"tl::SM120MmaOperandType::{enum_of[a_spec]}, tl::SM120MmaOperandType::{enum_of[b_spec]}>" in src
+    if "e2m3" in (a_spec, b_spec) or "e3m2" in (a_spec, b_spec):
+        assert "tl::ptx_ldmatrix_su6_x" in src
+
+    A, a_dec = _family_data(a_spec, M, K)
+    B, b_dec = _family_data(b_spec, N, K)
+    sfa_bytes = (torch.randint(0, 2, (M, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    sfb_bytes = (torch.randint(0, 2, (N, K // 32), device="cuda", dtype=torch.int64) + 127).to(torch.uint8)
+    C = kernel(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+
+    sa = torch.pow(2.0, sfa_bytes.to(torch.int32).float() - 127).repeat_interleave(32, dim=1)
+    sb = torch.pow(2.0, sfb_bytes.to(torch.int32).float() - 127).repeat_interleave(32, dim=1)
+    ref = (a_dec * sa) @ (b_dec * sb).T
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_fp6_flavor_codec_discrimination():
+    """e2m3 x e3m2 with values exact in exactly one flavor.
+
+    A carries 7.5-family values (need e2m3's third mantissa bit; e3m2
+    rounds them), B carries 16..28 (beyond e2m3's 7.5 max). A swapped
+    flavor mnemonic changes the decode and fails the bitwise assert.
+    """
+    import torch
+
+    from examples.dequantize_gemm.quantize import decode_fp6_values, encode_fp6_values, pack_fp6_codes
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 128
+    a_vals = torch.tensor([7.5, 6.5, 5.5, -7.5, -6.5, -5.5, 3.75, -3.75], dtype=torch.float32)
+    b_vals = torch.tensor([16.0, 20.0, 24.0, 28.0, -16.0, -20.0, -24.0, -28.0], dtype=torch.float32)
+    # Self-check the discriminating power under the swapped codec.
+    assert not torch.equal(
+        decode_fp6_values(encode_fp6_values(a_vals, "e2m3"), "e2m3"), decode_fp6_values(encode_fp6_values(a_vals, "e2m3"), "e3m2")
+    )
+    assert torch.equal(decode_fp6_values(encode_fp6_values(a_vals, "e2m3"), "e2m3"), a_vals)
+    assert torch.equal(decode_fp6_values(encode_fp6_values(b_vals, "e3m2"), "e3m2"), b_vals)
+
+    a_floats = a_vals[torch.randint(0, 8, (M, K))]
+    b_floats = b_vals[torch.randint(0, 8, (N, K))]
+    A_blob = pack_fp6_codes(encode_fp6_values(a_floats, "e2m3")).cuda()
+    B_blob = pack_fp6_codes(encode_fp6_values(b_floats, "e3m2")).cuda()
+
+    kernel = tilelang.compile(_make_family_matmul_kernel(M, N, K, "e2m3", "e3m2"), target="cuda", out_idx=[4])
+    unit = torch.full((M, K // 128), 0x7F7F7F7F, device="cuda", dtype=torch.int64).to(torch.uint32)
+    C = kernel(A_blob, B_blob, unit, unit.clone())
+    ref = a_floats.cuda() @ b_floats.cuda().T
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+def _load_w6a8_example():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "examples/gemm_sm120/sm120_w6a8_mxf8f6f4_gemm.py"
+    spec = importlib.util.spec_from_file_location("sm120_w6a8_mxf8f6f4_gemm_example", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _w6a8_example_run(module, M, N, K, a_name="e4m3", b_flavor="e3m2", seed=0):
+    import torch
+
+    kernel = module.sm120_w6a8_mxf8f6f4_gemm(M, N, K, 128, 128, 128, 2, a_name, b_flavor, T.float32)
+    A = module._make_fp8(M, K, a_name, seed=seed)
+    B = module._make_packed_fp6(N, K, seed=seed + 1)
+    SFA_semantic = module._make_pow2_scale_words(M, K, seed=seed + 100)
+    SFB_semantic = module._make_pow2_scale_words(N, K, seed=seed + 200)
+    SFA = module.swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=1).reshape(-1, 1)
+    SFB = module.swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=1).reshape(-1, 1)
+    C = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    kernel(A, B, SFA, SFB, C)
+    return kernel, A, B, SFA_semantic, SFB_semantic, C
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("a_name,b_flavor", [("e4m3", "e3m2"), ("e5m2", "e3m2"), ("e4m3", "e2m3")])
+@pytest.mark.parametrize("shape", [(1024, 1024, 1024), (768, 1024, 1536)])
+def test_w6a8_example_synthetic_band_bitwise(a_name, b_flavor, shape):
+    """W6A8 acceptance A1: default band, square and non-square, atol=0."""
+    import torch
+
+    torch.manual_seed(0)
+    module = _load_w6a8_example()
+    M, N, K = shape
+    _, A, B, SFA_semantic, SFB_semantic, C = _w6a8_example_run(module, M, N, K, a_name, b_flavor)
+    module._verify(A, B, SFA_semantic, SFB_semantic, C, torch.float32, b_flavor)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w6a8_example_su6_engaged_and_compression():
+    """W6A8 acceptance A3 + A4: su6 path engaged (no shift call), 0.75 B/elem."""
+    module = _load_w6a8_example()
+    M = N = K = 256
+    kernel, A, B, _, _, _ = _w6a8_example_run(module, M, N, K)
+    src = kernel.get_kernel_source()
+    assert "tl::ptx_ldmatrix_su6_x" in src
+    assert "tl::fp4_e2m1_container_shift" not in src  # fp6 containers need no shift
+    assert ", tl::SM120MmaOperandType::kE3M2>" in src
+    assert B.element_size() * B.numel() == N * K * 3 // 4
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w6a8_example_rejects_non_multiple_of_128_k():
+    """W6A8 acceptance A5."""
+    module = _load_w6a8_example()
+    with pytest.raises(Exception, match="multiple of 128"):
+        module.sm120_w6a8_mxf8f6f4_gemm(128, 128, 192, 128, 128, 64, 2, "e4m3", "e3m2", T.float32)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w6a8_example_quantize_band():
+    """W6A8 acceptance A2: mxfp8 + mxfp6 quantizers end to end (CI form)."""
+    import torch
+
+    from examples.dequantize_gemm.quantize import (
+        quantize_bf16_to_mxfp6_blockscaled,
+        quantize_bf16_to_mxfp8_blockscaled,
+    )
+
+    torch.manual_seed(0)
+    module = _load_w6a8_example()
+    M = N = K = 512
+    kernel = module.sm120_w6a8_mxf8f6f4_gemm(M, N, K, 128, 128, 128, 2, "e4m3", "e3m2", T.float32)
+    x_a = (torch.randn(M, K, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+    x_b = torch.randn(N, K, dtype=torch.float32) * 2.0
+    A, SFA_packed, sfa_bytes = quantize_bf16_to_mxfp8_blockscaled(x_a, block_words=1, return_scale_bytes=True)
+    B_cpu, SFB_packed, sfb_bytes = quantize_bf16_to_mxfp6_blockscaled(x_b, dtype="e3m2", block_words=1, return_scale_bytes=True)
+    C = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    kernel(A, B_cpu.cuda(), SFA_packed.reshape(-1, 1), SFB_packed.cuda().reshape(-1, 1), C)
+
+    scale = lambda b: torch.pow(2.0, (b.to(torch.int32) - 127).to(torch.float32)).repeat_interleave(32, dim=1)  # noqa: E731
+    b_dec = module._decode_fp6_blob(B_cpu.cuda(), N, K, "e3m2")
+    ref = (A.to(torch.float32) * scale(sfa_bytes)) @ (b_dec * scale(sfb_bytes).cuda()).T
+    torch.testing.assert_close(C, ref, rtol=1e-5, atol=1e-3)
