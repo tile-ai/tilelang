@@ -1465,7 +1465,7 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       stream << ac << "=";
       // Do not read the first undef lane.
-      if (i != 0) {
+      if (i % 4 != 0) {
         stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
       }
       stream << "(" << value << " << " << i % 4 * 8 << ");\n";
@@ -1474,10 +1474,12 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
       std::string ac = vec + "." + access[i / 8];
       stream << ac << "=";
       // Do not read the first undef lane.
-      if (i != 0) {
-        stream << ac << " & ~(0x000000ff << " << i % 8 * 8 << ") |";
+      if (i % 8 != 0) {
+        stream << ac << " & ~(static_cast<unsigned long long>(0x000000ffu) << "
+               << i % 8 * 8 << ") |";
       }
-      stream << "(" << value << " << " << i % 8 * 8 << ");\n";
+      stream << "((static_cast<unsigned long long>(" << value
+             << ") & 0xffULL) << " << i % 8 * 8 << ");\n";
     }
   } else if (t.is_float16()) {
     if (t.lanes() <= 8) {
