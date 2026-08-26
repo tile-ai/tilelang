@@ -135,11 +135,10 @@ public:
 private:
   explicit OpIdNormalizer(Target target) : target_(std::move(target)) {}
 
-  // A simple wrapper around one call is a direct op (ClassifyStmt sees
-  // through it); only genuinely compound statements are opaque.
+  // The scheduler and the materializer treat only a bare Evaluate as a
+  // directly scheduled call, so a wrapped asynchronous op must decline.
   void CheckOpaqueOp(const Stmt &stmt) {
-    if (!GetEvaluateCallInSimpleWrapper(stmt).defined())
-      ok_ = ok_ && CheckHostsNoAsync(stmt, target_);
+    ok_ = ok_ && CheckHostsNoAsync(stmt, target_);
   }
 
   void CollectIds(const Stmt &stmt) {

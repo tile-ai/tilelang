@@ -207,15 +207,23 @@ static bool IsPtxWaitGroup(const Stmt &stmt) {
 }
 
 bool IsBarrierOrTmaControlCall(const CallNode *call) {
+  // TODO: support warp specialization for cluster kernels and for TMA
+  // gather4 / scatter4 (their raw intrinsics and hand protocols decline).
   return call->op.same_as(mbarrier_wait_parity()) ||
          call->op.same_as(mbarrier_expect_tx()) ||
          call->op.same_as(builtin::ptx_arrive_barrier()) ||
          call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
          call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+         call->op.same_as(tl::named_barrier_arrive()) ||
+         call->op.same_as(tl::ptx_fence_barrier_init()) ||
          call->op.same_as(builtin::ptx_cp_async_barrier()) ||
          call->op.same_as(tl::ptx_cp_async_barrier_noinc()) ||
          call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+         call->op.same_as(tma_load_multicast()) ||
+         call->op.same_as(tma_load_gather4()) ||
          call->op.same_as(tma_store()) ||
+         call->op.same_as(tma_store_scatter4()) ||
+         call->op.same_as(tma_store_cluster()) ||
          call->op.same_as(tma_store_arrive()) ||
          call->op.same_as(tma_store_wait()) ||
          call->op.same_as(builtin::tvm_storage_sync()) ||

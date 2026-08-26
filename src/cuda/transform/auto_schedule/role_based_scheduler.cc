@@ -461,14 +461,15 @@ private:
 
   // ---- classification -------------------------------------------------------
 
-  // A TMA-classified copy is a Load only when its destination's annotated
-  // layout (if any) is TMA-expressible; otherwise lowering falls back to
-  // a normal copy.
-  bool TmaDstLayoutCompatible(const SchedOp &op) const {
+  // A TMA-classified copy joins its one-warp role only when its shared
+  // side's annotated layout (if any) is TMA-expressible; otherwise
+  // lowering falls back to a normal copy, which one warp would serialize.
+  bool TmaSharedLayoutCompatible(const SchedOp &op, bool store) const {
     const auto *copy = op.tile_op.as<CopyNode>();
     if (copy == nullptr)
       return true; // Im2Col carries no annotated shared layout
-    auto it = layout_map_.find(copy->dst->data);
+    const Buffer &shared = store ? copy->src : copy->dst;
+    auto it = layout_map_.find(shared->data);
     if (it == layout_map_.end())
       return true;
     const auto &[buffer, layout] = it->second;
@@ -480,8 +481,22 @@ private:
       SchedOp &op = *op_ptr;
       switch (op.kind) {
       case TileStmtKind::kTmaProducer:
-        op.roles = RoleMask::Of(TmaDstLayoutCompatible(op) ? Role::kLoad
-                                                           : Role::kWorker);
+        // TODO: support warp specialization for cluster kernels — the
+        // materialized barriers are CTA-local, so cluster-wide multicast
+        // backpressure cannot be expressed yet.
+        if (const auto *copy = op.tile_op.as<CopyNode>()) {
+          if (auto mask = copy->annotations.Get("cluster_mask")) {
+            if (const auto *imm = mask.value().as<IntImmNode>();
+                imm == nullptr || imm->value != 0) {
+              LOG(WARNING) << "AutoSchedule skipped: op '" << op.id
+                           << "' is a cluster multicast copy";
+              return false;
+            }
+          }
+        }
+        op.roles = RoleMask::Of(TmaSharedLayoutCompatible(op, /*store=*/false)
+                                    ? Role::kLoad
+                                    : Role::kWorker);
         continue;
       case TileStmtKind::kCpAsyncProducer:
         // The pipeline commit arrives through a deferred
@@ -500,7 +515,9 @@ private:
         op.roles = RoleMask::Of(Role::kWorker);
         continue;
       case TileStmtKind::kTmaStore:
-        op.roles = RoleMask::Of(Role::kStore);
+        op.roles = RoleMask::Of(TmaSharedLayoutCompatible(op, /*store=*/true)
+                                    ? Role::kStore
+                                    : Role::kWorker);
         continue;
       case TileStmtKind::kTcgen05Mma:
         op.roles = RoleMask::Of(Role::kMma);

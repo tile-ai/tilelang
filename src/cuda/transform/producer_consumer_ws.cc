@@ -1505,7 +1505,8 @@ private:
         // commit+wait — the WS pass will emit its own commit+barrier_noinc.
         simt_producer_stmts.push_back(
             SimtProducerAnnotator::Annotate(flat_stmts[i], target_));
-      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer) {
+      } else if (kinds[i] == TileStmtKind::kCpAsyncProducer ||
+                 kinds[i] == TileStmtKind::kCpAsyncRaw) {
         simt_producer_stmts.push_back(flat_stmts[i]);
       }
     }

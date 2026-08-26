@@ -2737,8 +2737,12 @@ private:
           auto entry = layout_map.Get(orig->data);
           if (!entry.has_value())
             continue;
-          layout_map.Set(orig->data,
-                         entry.value()->Expand({versioned->shape[0]}));
+          // One leading dimension per binding.
+          Array<PrimExpr> prefix;
+          size_t n_bindings = buffer_pipeline_.at(orig->data).size();
+          for (size_t i = 0; i < n_bindings; ++i)
+            prefix.push_back(versioned->shape[i]);
+          layout_map.Set(orig->data, entry.value()->Expand(prefix));
           changed = true;
         }
         if (changed)
