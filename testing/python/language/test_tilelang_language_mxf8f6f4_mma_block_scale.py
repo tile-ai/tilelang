@@ -644,7 +644,10 @@ def test_mxf8f6f4_rejects_out_of_family_operand_pairs():
         # its unpacked smem form there (accepted, covered by the
         # subbyte-operands test file).
         (T.float8_e4m3fn, T.float4_e2m1fn, "packed float4_e2m1fn pair", "lowering kind inference"),
-        (T.int8, T.int8, "expects a_dtype in", "emitter operand whitelist"),
+        # Since the slice-2 kind-inference rework, same-width non-family
+        # pairs are rejected one layer earlier (the emitter whitelist is now
+        # fully shadowed by lowering inference).
+        (T.int8, T.int8, "packed float4_e2m1fn pair", "lowering kind inference"),
     ]
     for a_dtype, b_dtype, pattern, _layer in cases:
         with pytest.raises(Exception, match=re.escape(pattern)):
