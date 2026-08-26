@@ -169,7 +169,7 @@ def test_multiple_packed_store_sites_are_rejected_when_ownership_disagrees():
                 shifted = 2 * i + 3
                 B[shifted] = A[shifted]
 
-    with pytest.raises(Exception, match="no available layout found|no legal vector width"):
+    with pytest.raises(Exception, match=r"no available layout found|no legal vector width"):
         tilelang.compile(kernel, out_idx=[1])
 
 
@@ -185,7 +185,7 @@ def test_replicated_packed_physical_store_requires_single_replica_guard():
                 local[i] = A[i]
                 B[i] = A[i]
 
-    with pytest.raises(Exception, match="single-replica guard|no legal vector width"):
+    with pytest.raises(Exception, match=r"single-replica guard|no legal vector width"):
         tilelang.compile(kernel, out_idx=[1])
 
 

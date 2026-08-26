@@ -850,14 +850,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     return {};
   }
 
-  if (TargetIsCuda(layout_args.target)) {
-    auto ownership_root = IfBufferRemapLoopGenerator::run(
-        root_, layout_args.buffer_remap, layout_args.layout_map);
-    bool canonical_replica_guard_guaranteed = store_fragment_buffers_.empty();
-    ProvePackedSubByteStoreOwnership(ownership_root, loop_layout_,
-                                     layout_args.analyzer,
-                                     canonical_replica_guard_guaranteed,
-                                     /*throw_on_error=*/true);
+  auto packed_ownership = GetPackedOwnershipContext(layout_args);
+  if (packed_ownership.enforce_packed_byte_ownership) {
+    ProvePackedSubByteStoreOwnership(
+        packed_ownership.remapped_root, loop_layout_, layout_args.analyzer,
+        packed_ownership.canonical_replica_guard_guaranteed,
+        /*throw_on_error=*/true);
   }
 
   // Non-fragment SIMT loops may deliberately over-cover a ragged iteration
@@ -1301,14 +1299,22 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
   return result;
 }
 
+ParallelOpNode::PackedOwnershipContext
+ParallelOpNode::GetPackedOwnershipContext(
+    const LayoutInferArgs &layout_args) const {
+  return {IfBufferRemapLoopGenerator::run(root_, layout_args.buffer_remap,
+                                          layout_args.layout_map),
+          TargetIsCuda(layout_args.target), store_fragment_buffers_.empty()};
+}
+
 Fragment
 ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Vectorize Size must be aware of the buffer_remap
   // As the pass will do post processing to the layout
-  auto maybe_remapped_root = IfBufferRemapLoopGenerator::run(
-      root_, layout_args.buffer_remap, layout_args.layout_map);
-  int vector_size = GetVectorizeSize(maybe_remapped_root, layout_args.analyzer,
-                                     layout_args.layout_map);
+  auto packed_ownership = GetPackedOwnershipContext(layout_args);
+  int vector_size =
+      GetVectorizeSize(packed_ownership.remapped_root, layout_args.analyzer,
+                       layout_args.layout_map);
   int max_vector_size = vector_size;
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
@@ -1319,11 +1325,10 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
              << '\n';
 
   bool has_fragment_access = !indice_map_.empty();
-  bool enforce_packed_byte_ownership = TargetIsCuda(layout_args.target);
   bool has_packed_store =
-      enforce_packed_byte_ownership &&
-      !PackedSubByteStoreCollector::Collect(maybe_remapped_root).empty();
-  bool canonical_replica_guard_guaranteed = store_fragment_buffers_.empty();
+      packed_ownership.enforce_packed_byte_ownership &&
+      !PackedSubByteStoreCollector::Collect(packed_ownership.remapped_root)
+           .empty();
 
   // Explicit widths are user constraints. Validate the resulting candidate
   // instead of interpreting coalesced_width as a correctness property.
@@ -1339,10 +1344,10 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
     }
     auto candidate =
         PlanLoopPartition(root_, expected, layout_args.thread_bounds);
-    if (enforce_packed_byte_ownership &&
-        !ProvePackedSubByteStoreOwnership(maybe_remapped_root, candidate,
-                                          layout_args.analyzer,
-                                          canonical_replica_guard_guaranteed)) {
+    if (packed_ownership.enforce_packed_byte_ownership &&
+        !ProvePackedSubByteStoreOwnership(
+            packed_ownership.remapped_root, candidate, layout_args.analyzer,
+            packed_ownership.canonical_replica_guard_guaranteed)) {
       LOG(FATAL) << "coalesced_width=" << expected
                  << " would split a writable byte across threads for a "
                     "packed four-bit store.";
@@ -1373,9 +1378,9 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
            &analyzer_)) {
     auto candidate =
         PlanLoopPartition(root_, candidate_width, layout_args.thread_bounds);
-    if (ProvePackedSubByteStoreOwnership(maybe_remapped_root, candidate,
-                                         layout_args.analyzer,
-                                         canonical_replica_guard_guaranteed) &&
+    if (ProvePackedSubByteStoreOwnership(
+            packed_ownership.remapped_root, candidate, layout_args.analyzer,
+            packed_ownership.canonical_replica_guard_guaranteed) &&
         ValidateCandidateAgainstFragments(candidate, layout_args)) {
       DLOG(INFO) << "[PlanLoopPartition] packed-store-safe vector_size = "
                  << candidate_width << '\n';
@@ -1460,16 +1465,13 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
     return ProveFragmentContains(small, big, vars, vars, analyzer_);
   };
 
-  auto ownership_root = IfBufferRemapLoopGenerator::run(
-      root_, layout_args.buffer_remap, layout_args.layout_map);
-  bool canonical_replica_guard_guaranteed = store_fragment_buffers_.empty();
-  bool enforce_packed_byte_ownership = TargetIsCuda(layout_args.target);
+  auto packed_ownership = GetPackedOwnershipContext(layout_args);
 
   auto packed_ownership_is_valid = [&](const Fragment &candidate) {
-    return !enforce_packed_byte_ownership ||
-           ProvePackedSubByteStoreOwnership(ownership_root, candidate,
-                                            layout_args.analyzer,
-                                            canonical_replica_guard_guaranteed);
+    return !packed_ownership.enforce_packed_byte_ownership ||
+           ProvePackedSubByteStoreOwnership(
+               packed_ownership.remapped_root, candidate, layout_args.analyzer,
+               packed_ownership.canonical_replica_guard_guaranteed);
   };
 
   bool buf_ok =

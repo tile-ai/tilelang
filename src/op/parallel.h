@@ -197,6 +197,16 @@ public:
   TileOperator Clone() const override;
 
 private:
+  struct PackedOwnershipContext {
+    For remapped_root;
+    bool enforce_packed_byte_ownership;
+    bool canonical_replica_guard_guaranteed;
+  };
+
+  // Build the common remapping, target gate, and replica-guard context used by
+  // packed physical-store ownership checks.
+  PackedOwnershipContext
+  GetPackedOwnershipContext(const LayoutInferArgs &layout_args) const;
   // Complete the fragment layout for a given buffer.
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
   // Check if the buffer is accessed with common indices (i.e., loop variables).
