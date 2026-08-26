@@ -33,13 +33,13 @@ _TILELANG_FP8 = {"e4m3": "float8_e4m3fn", "e5m2": "float8_e5m2"}
 
 
 @simplify_prim_func
-def _make_tilelang_mxf8_kernel(m: int, n: int, k: int, a_name: str, b_name: str):
+def _make_tilelang_mxf8_kernel(m: int, n: int, k: int, a_name: str, b_name: str, block_K: int | None = None):
     a_dtype = getattr(T, _TILELANG_FP8[a_name])
     b_dtype = getattr(T, _TILELANG_FP8[b_name])
     accum_dtype = T.float32
 
     block_M = block_N = 128
-    block_K = k
+    block_K = k if block_K is None else block_K
     threads = 128
 
     @T.prim_func
@@ -57,6 +57,9 @@ def _make_tilelang_mxf8_kernel(m: int, n: int, k: int, a_name: str, b_name: str)
             SFB_shared = T.alloc_shared((block_N, block_K // _WORD_SPAN), T.uint32, scope="shared.dyn")
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
+            # clear_accum is a per-call clear; multi-ko loops hoist it.
+            if k // block_K > 1:
+                T.clear(C_local)
             for ko in T.Pipelined((k // block_K), num_stages=1):
                 for i, k_inner in T.Parallel(block_M, block_K):
                     A_shared[i, k_inner] = A[by * block_M + i, ko * block_K + k_inner]
@@ -73,7 +76,7 @@ def _make_tilelang_mxf8_kernel(m: int, n: int, k: int, a_name: str, b_name: str)
                     SFA_shared,
                     SFB_shared,
                     transpose_B=True,
-                    clear_accum=True,
+                    clear_accum=(k // block_K == 1),
                     k_start=0,
                     sf_a_granularity_k=_SF_VEC_SIZE,
                     sf_b_granularity_k=_SF_VEC_SIZE,
@@ -170,7 +173,7 @@ def _make_varying_scales(mn, k):
     return (127 + (row + col) % 3 - 1).to(torch.uint8)
 
 
-def _compare_one(ext, a_name, b_name, m, n, k, full_domain=False):
+def _compare_one(ext, a_name, b_name, m, n, k, full_domain=False, block_K=None):
     if full_domain:
         a = torch.randint(0, 256, (m, k), device="cuda", dtype=torch.uint8).view(_TORCH_FP8[a_name])
         b = torch.randint(0, 256, (n, k), device="cuda", dtype=torch.uint8).view(_TORCH_FP8[b_name])
@@ -179,7 +182,7 @@ def _compare_one(ext, a_name, b_name, m, n, k, full_domain=False):
     sfa_logical = _make_varying_scales(m, k)
     sfb_logical = _make_varying_scales(n, k)
 
-    kernel = tilelang.compile(_make_tilelang_mxf8_kernel(m, n, k, a_name, b_name), target="cuda", out_idx=[4])
+    kernel = tilelang.compile(_make_tilelang_mxf8_kernel(m, n, k, a_name, b_name, block_K=block_K), target="cuda", out_idx=[4])
     C_tl = kernel(a, b, _pack_tilelang_sf_u32(sfa_logical), _pack_tilelang_sf_u32(sfb_logical))
 
     C_ref = torch.zeros((m, n), device="cuda", dtype=torch.float32)
@@ -199,6 +202,7 @@ def _compare_one(ext, a_name, b_name, m, n, k, full_domain=False):
     )
 
     band = "full-domain" if full_domain else "controlled"
+    band += f" bK={k if block_K is None else block_K}"
     if full_domain:
         nan_tl = torch.isnan(C_tl)
         nan_cutlass = torch.isnan(D_cutlass)
@@ -227,7 +231,16 @@ def run_compare() -> None:
     for a_name in ("e4m3", "e5m2"):
         for b_name in ("e4m3", "e5m2"):
             _compare_one(ext, a_name, b_name, m, n, k)
-    _compare_one(ext, "e5m2", "e5m2", m, n, k, full_domain=True)
+    # Full code domain for every pairing: e5m2 contributes Inf/NaN bytes,
+    # e4m3 contributes its NaN encoding (0x7F); mixed pairs have no plain
+    # T.gemm oracle, so CUTLASS is their only full-domain pin.
+    for a_name in ("e4m3", "e5m2"):
+        for b_name in ("e4m3", "e5m2"):
+            _compare_one(ext, a_name, b_name, m, n, k, full_domain=True)
+    # chunk=128: the config that was once silently broken (kblock4 fast-path
+    # byte parity) stays pinned against CUTLASS forever.
+    _compare_one(ext, "e4m3", "e4m3", m, n, k, block_K=128)
+    _compare_one(ext, "e5m2", "e5m2", m, n, k, full_domain=True, block_K=128)
 
 
 if __name__ == "__main__":

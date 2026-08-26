@@ -55,6 +55,32 @@ def test_quantize_bf16_to_mxfp8_blockscaled_has_bounded_error():
     assert bool(((x_f32 - reconstructed).abs() <= bound).all())
 
 
+def test_quantize_bf16_to_mxfp8_e5m2_has_bounded_error():
+    rows, cols = 128, 512
+    generator = torch.Generator(device="cpu").manual_seed(12)
+    x = (torch.randn((rows, cols), generator=generator, dtype=torch.float32) * 3.0).to(torch.bfloat16)
+
+    fp8_data, _, scale_bytes = quantize_bf16_to_mxfp8_blockscaled(x, dtype="e5m2", return_scale_bytes=True)
+
+    scales = decode_ue8m0_scale_bytes(scale_bytes).repeat_interleave(32, dim=1)
+    reconstructed = fp8_data.to(torch.float32) * scales
+    x_f32 = x.to(torch.float32)
+    # e5m2 has 2 mantissa bits (0.5 ulp = |x| * 2^-3) and a 2^-16 subnormal
+    # quantum, giving the absolute scale * 2^-17 term.
+    bound = x_f32.abs() * 2.0**-2 + scales * 2.0**-17 + 1e-6
+    assert bool(((x_f32 - reconstructed).abs() <= bound).all())
+
+
+def test_quantize_mxfp8_all_zero_block():
+    # UE8M0 cannot encode a zero scale; an all-zero block must be written as
+    # zero data with scale byte 0x00 (= 2^-127), reconstructing to exact 0.
+    x = torch.randn(128, 256, dtype=torch.bfloat16)
+    x[0, :32] = 0.0
+    fp8_data, _, sbytes = quantize_bf16_to_mxfp8_blockscaled(x, return_scale_bytes=True)
+    assert int(sbytes[0, 0]) == 0
+    assert bool((fp8_data[0, :32].to(torch.float32) == 0).all())
+
+
 def test_quantize_mxfp8_nan_input_zeroes_its_block():
     x = torch.randn(128, 256, dtype=torch.bfloat16)
     x[0, 5] = float("nan")

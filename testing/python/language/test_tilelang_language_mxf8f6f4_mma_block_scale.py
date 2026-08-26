@@ -365,5 +365,233 @@ def test_mxf8f6f4_many_tiles_many_stages_correctness():
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_kmajor_matches_rowmajor_bitwise_full_domain():
+    """Order pin for the kmajor fulltile path.
+
+    Full-entropy e5m2 data makes every fp32 partial sum order-sensitive, so
+    bitwise agreement between the kmajor fulltile pipeline and the rowmajor
+    serial path pins their per-element K-atom accumulation order to be
+    identical. The rowmajor path is itself pinned bitwise against CUTLASS
+    on this band (see the maint evaluation), so the pin is transitive.
+    Exact-sum data (the other kmajor tests) is blind to any reordering by
+    construction - this test is the one that would catch it.
+    """
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 256
+    K = 512
+    block_K = 128
+
+    A = torch.randint(0, 256, (M, K), device="cuda", dtype=torch.uint8).view(torch.float8_e5m2)
+    B = torch.randint(0, 256, (N, K), device="cuda", dtype=torch.uint8).view(torch.float8_e5m2)
+    sfa_bytes = _make_varying_scale_bytes(M, K)
+    sfb_bytes = _make_varying_scale_bytes(N, K)
+
+    rowmajor = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e5m2, T.float8_e5m2, block_K=block_K),
+        target="cuda",
+        out_idx=[4],
+    )
+    C_row = rowmajor(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+
+    module, kmajor = _example_kmajor_kernel(M, N, K, block_K, "e5m2")
+    words = block_K // 128
+    SFA_km = module.swizzle_blockscaled_chunk_kmajor_scale_words(_pack_scale_words(sfa_bytes), block_words=words).reshape(-1, words)
+    SFB_km = module.swizzle_blockscaled_chunk_kmajor_scale_words(_pack_scale_words(sfb_bytes), block_words=words).reshape(-1, words)
+    C_km = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    kmajor(A, B, SFA_km, SFB_km, C_km)
+
+    # Strict integer-view equality: identical instruction and atom order
+    # must reproduce NaN payloads too.
+    assert torch.equal(C_row.view(torch.int32), C_km.view(torch.int32))
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize(
+    "sfa_byte,sfb_byte,expected_bits",
+    [
+        # scale product 2^127 * 2^127 = 2^254 overflows fp32 -> +Inf.
+        (0xFE, 0xFE, 0x7F800000),
+        # 2^127 * 1 stays at the top of the normal range, exact.
+        (0xFE, 0x7F, 0x7F000000),
+        # 2^-127 * 1 lands in the fp32 SUBNORMAL range and is preserved
+        # exactly - the datapath does NOT flush to zero.
+        (0x00, 0x7F, 0x00400000),
+        # 2^-127 * 2^-127 = 2^-254 underflows to +0.
+        (0x00, 0x00, 0x00000000),
+        # 2^-126 * 1: the smallest normal, exact.
+        (0x01, 0x7F, 0x00800000),
+    ],
+)
+def test_mxf8f6f4_extreme_scale_semantics(sfa_byte, sfb_byte, expected_bits):
+    """Recorded datapath behavior at the UE8M0 extremes.
+
+    A single a=1, b=1 product isolates the scale product itself. Every
+    expected bit pattern below was cross-checked bitwise against CUTLASS
+    4.7.0 on RTX PRO 6000 (full-matrix integer-view equality), including
+    the subnormal-preservation case. Note UE8M0 cannot encode zero: 0x00
+    is 2^-127, not 0.
+    """
+    import torch
+
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e4m3fn, T.float8_e4m3fn),
+        target="cuda",
+        out_idx=[4],
+    )
+    A = torch.zeros(M, K, device="cuda").to(torch.float8_e4m3fn)
+    B = torch.zeros(N, K, device="cuda").to(torch.float8_e4m3fn)
+    A[0, 0] = 1.0
+    B[0, 0] = 1.0
+    sfa = torch.full((M, K // 32), 127, device="cuda", dtype=torch.uint8)
+    sfb = torch.full((N, K // 32), 127, device="cuda", dtype=torch.uint8)
+    sfa[0, 0] = sfa_byte
+    sfb[0, 0] = sfb_byte
+    C = kernel(A, B, _pack_scale_words(sfa), _pack_scale_words(sfb))
+    assert (C[0, 0].view(torch.int32).item() & 0xFFFFFFFF) == expected_bits
+    assert bool((C.flatten()[1:] == 0).all())
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("a_name,min_subnormal", [("e4m3", 2.0**-9), ("e5m2", 2.0**-16)])
+def test_mxf8f6f4_subnormal_inputs_exact(a_name, min_subnormal):
+    """Deterministic fp8-subnormal coverage (only statistical before).
+
+    Subnormal x subnormal products land far below the fp8 normal range but
+    stay exact in fp32; with power-of-two scales every partial sum is exact
+    too, so the python reference holds at atol=0.
+    """
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 128
+    dtype = getattr(T, _FP8_TORCH_DTYPES[a_name])
+    kernel = tilelang.compile(_make_mxf8_matmul_kernel(M, N, K, dtype, dtype), target="cuda", out_idx=[4])
+    # Rows mixing subnormals (1x..3x the minimum) with small normals.
+    steps = torch.randint(1, 4, (M, K), device="cuda", dtype=torch.int64)
+    A = (steps.to(torch.float32) * min_subnormal).to(_torch_fp8(a_name))
+    B = torch.randint(-2, 3, (N, K), device="cuda", dtype=torch.int64).to(torch.float32).to(_torch_fp8(a_name))
+    sfa_bytes = _make_varying_scale_bytes(M, K)
+    sfb_bytes = _make_varying_scale_bytes(N, K)
+    C = kernel(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+    ref = _reference_scaled_gemm(A, B, sfa_bytes, sfb_bytes)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_scale_byte_0xff_on_b_side():
+    """The B-operand twin of the A-side 0xFF recording (distinct registers)."""
+    import torch
+
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e4m3fn, T.float8_e4m3fn),
+        target="cuda",
+        out_idx=[4],
+    )
+    A, B = _make_controlled_fp8_inputs(M, N, K, "e4m3", "e4m3")
+    sfa_bytes = torch.full((M, K // 32), 127, device="cuda", dtype=torch.uint8)
+    sfb_bytes = sfa_bytes.clone()
+    sfb_bytes[7, 2] = 0xFF
+    C = kernel(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+    assert bool(torch.isnan(C[:, 7]).all())
+    mask = torch.ones(N, dtype=torch.bool)
+    mask[7] = False
+    assert bool(torch.isfinite(C[:, mask]).all())
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_e4m3_nan_propagation():
+    """e4m3 has no Inf; its only special value (NaN, byte 0x7F) must poison."""
+    import torch
+
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e4m3fn, T.float8_e4m3fn),
+        target="cuda",
+        out_idx=[4],
+    )
+    A = torch.ones((M, K), device="cuda", dtype=torch.float32).to(torch.float8_e4m3fn)
+    B = torch.ones((N, K), device="cuda", dtype=torch.float32).to(torch.float8_e4m3fn)
+    A[2, 9] = float("nan")
+    unit = torch.full((M, K // 128), 0x7F7F7F7F, device="cuda", dtype=torch.int64).to(torch.uint32)
+    C = kernel(A, B, unit, unit.clone())
+    assert bool(torch.isnan(C[2]).all())
+    mask = torch.ones(M, dtype=torch.bool)
+    mask[2] = False
+    assert bool(torch.isfinite(C[mask]).all())
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_inf_minus_inf_yields_nan():
+    """Deterministic Inf + (-Inf) collision inside one accumulator chain."""
+    import torch
+
+    M = N = 128
+    K = 128
+    kernel = tilelang.compile(
+        _make_mxf8_matmul_kernel(M, N, K, T.float8_e5m2, T.float8_e5m2),
+        target="cuda",
+        out_idx=[4],
+    )
+    A = torch.ones((M, K), device="cuda", dtype=torch.float32).to(torch.float8_e5m2)
+    B = torch.ones((N, K), device="cuda", dtype=torch.float32).to(torch.float8_e5m2)
+    # Opposite-sign infinities in different k32 atoms of the same row.
+    A[0, 5] = float("inf")
+    A[0, 40] = float("-inf")
+    unit = torch.full((M, K // 128), 0x7F7F7F7F, device="cuda", dtype=torch.int64).to(torch.uint32)
+    C = kernel(A, B, unit, unit.clone())
+    assert bool(torch.isnan(C[0]).all())
+    assert bool(torch.isfinite(C[1:]).all())
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("dtype_name", ["e4m3", "e5m2"])
+def test_mxf8f6f4_quantize_roundtrip_gemm(dtype_name):
+    """End-to-end plumbing pin: bf16 -> quantizer -> packed scales -> GEMM.
+
+    This is a tolerance test by necessity: real quantized data has mixed
+    magnitudes, so fp32 partial sums are rounded and the python reference
+    (torch matmul) does not share the MMA's intra-atom summation tree. The
+    tolerance is set for fp32 rounding-order noise only (~K * 2^-24
+    relative); any packing/layout mistake produces O(1) errors and fails.
+    """
+    import torch
+
+    from examples.dequantize_gemm.quantize import quantize_bf16_to_mxfp8_blockscaled
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 256
+    dtype = getattr(T, _FP8_TORCH_DTYPES[dtype_name])
+    kernel = tilelang.compile(_make_mxf8_matmul_kernel(M, N, K, dtype, dtype, block_K=128), target="cuda", out_idx=[4])
+
+    x_a = (torch.randn(M, K, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+    x_b = (torch.randn(N, K, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+    A, _, sfa_bytes = quantize_bf16_to_mxfp8_blockscaled(x_a, dtype=dtype_name, return_scale_bytes=True)
+    B, _, sfb_bytes = quantize_bf16_to_mxfp8_blockscaled(x_b, dtype=dtype_name, return_scale_bytes=True)
+
+    C = kernel(A, B, _pack_scale_words(sfa_bytes), _pack_scale_words(sfb_bytes))
+    ref = _reference_scaled_gemm(A, B, sfa_bytes, sfb_bytes)
+    # Measured rounding-order noise at this size/seed: max abs 1.5e-5 with
+    # 3.5% of entries differing; 1e-3 keeps ~60x headroom while a swapped
+    # scale byte or packing mistake still fails by orders of magnitude.
+    torch.testing.assert_close(C, ref, rtol=1e-5, atol=1e-3)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
