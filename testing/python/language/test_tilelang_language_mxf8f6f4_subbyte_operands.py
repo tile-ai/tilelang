@@ -445,3 +445,121 @@ def test_fp4_unpack_copy_never_takes_the_1d_bulk_path():
         return  # loud failure is acceptable; silent 1D byte copy is not
     src = kernel.get_kernel_source()
     assert "tma_load_1d" not in src and "cp.async.bulk.global.shared" not in src
+
+
+def _load_w4a8_example():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[3] / "examples/gemm_sm120/sm120_w4a8_mxf8f6f4_gemm.py"
+    spec = importlib.util.spec_from_file_location("sm120_w4a8_mxf8f6f4_gemm_example", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _w4a8_example_run(module, M, N, K, b_name="e4m3", seed=0):
+    import torch
+
+    kernel = module.sm120_w4a8_mxf8f6f4_gemm(M, N, K, 128, 128, 128, 2, b_name, T.float32)
+    A = module._make_packed_fp4(M, K, seed=seed)
+    B = module._make_fp8(N, K, b_name, seed=seed + 1)
+    SFA_semantic = module._make_pow2_scale_words(M, K, seed=seed + 100)
+    SFB_semantic = module._make_pow2_scale_words(N, K, seed=seed + 200)
+    SFA = module.swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=1).reshape(-1, 1)
+    SFB = module.swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=1).reshape(-1, 1)
+    C = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    kernel(A, B, SFA, SFB, C)
+    return kernel, A, B, SFA_semantic, SFB_semantic, C
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("b_name", ["e4m3", "e5m2"])
+@pytest.mark.parametrize("shape", [(1024, 1024, 1024), (768, 1024, 1536)])
+def test_w4a8_example_synthetic_band_bitwise(b_name, shape):
+    """Acceptance A1: default band, square and non-square, atol=0."""
+    import torch
+
+    torch.manual_seed(0)
+    module = _load_w4a8_example()
+    M, N, K = shape
+    _, A, B, SFA_semantic, SFB_semantic, C = _w4a8_example_run(module, M, N, K, b_name)
+    module._verify(A, B, SFA_semantic, SFB_semantic, C, torch.float32)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w4a8_example_quantize_band():
+    """Acceptance A2: bf16 -> mxfp4/mxfp8 quantizers -> GEMM, tolerance form.
+
+    The bitwise (engine-vs-engine) version of this band is the maint CUTLASS
+    comparison; this pins the CI-runnable plumbing.
+    """
+    import torch
+
+    from examples.dequantize_gemm.quantize import (
+        quantize_bf16_to_mxfp4_blockscaled,
+        quantize_bf16_to_mxfp8_blockscaled,
+    )
+
+    torch.manual_seed(0)
+    module = _load_w4a8_example()
+    M = N = K = 512
+    kernel = module.sm120_w4a8_mxf8f6f4_gemm(M, N, K, 128, 128, 128, 2, "e4m3", T.float32)
+    x_a = (torch.randn(M, K, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+    x_b = (torch.randn(N, K, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+    A, SFA_packed, sfa_bytes = quantize_bf16_to_mxfp4_blockscaled(x_a, block_words=1, return_scale_bytes=True)
+    B, SFB_packed, sfb_bytes = quantize_bf16_to_mxfp8_blockscaled(x_b, block_words=1, return_scale_bytes=True)
+    C = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    kernel(A, B, SFA_packed.reshape(-1, 1), SFB_packed.reshape(-1, 1), C)
+
+    scale = lambda b: torch.pow(2.0, (b.to(torch.int32) - 127).to(torch.float32)).repeat_interleave(32, dim=1)  # noqa: E731
+    ref = (module._decode_rowmajor_fp4(A, M, K) * scale(sfa_bytes)) @ (B.to(torch.float32) * scale(sfb_bytes)).T
+    # f32 output: only summation rounding-order noise remains.
+    torch.testing.assert_close(C, ref, rtol=1e-5, atol=1e-3)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w4a8_example_tma_engaged_and_compression():
+    """Acceptance A3 + A4: TMA actually engaged; packed global compression."""
+    module = _load_w4a8_example()
+    M = N = K = 256
+    kernel, A, _, _, _, _ = _w4a8_example_run(module, M, N, K)
+    device_src = kernel.get_kernel_source()
+    assert "tl::tma_load" in device_src, "A staging silently fell back off the TMA path"
+    assert "tl::ptx_ldmatrix_su4_x4" in device_src
+    assert "tl::fp4_e2m1_container_shift" in device_src
+    host_src = kernel.get_host_source()
+    assert "__tvm_tensormap_create_tiled" in host_src
+    # A4: the weights the example materializes are exactly M*K/2 bytes.
+    assert A.element_size() * A.numel() == M * K // 2
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w4a8_example_rejects_non_multiple_of_128_k():
+    """Acceptance A5: the TMA legality rule surfaces as a friendly error."""
+    module = _load_w4a8_example()
+    with pytest.raises(Exception, match="multiple of 128"):
+        module.sm120_w4a8_mxf8f6f4_gemm(128, 128, 192, 128, 128, 64, 2, "e4m3", T.float32)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_w4a8_example_perf_smoke():
+    """Acceptance A6: the bench path runs and reports a sane number."""
+    import torch
+
+    from tilelang.profiler import do_bench
+
+    module = _load_w4a8_example()
+    M = N = K = 1024
+    kernel, A, B, _, _, C = _w4a8_example_run(module, M, N, K)
+    SFA = module.swizzle_blockscaled_chunk_kmajor_scale_words(module._make_pow2_scale_words(M, K, seed=100), block_words=1).reshape(-1, 1)
+    SFB = module.swizzle_blockscaled_chunk_kmajor_scale_words(module._make_pow2_scale_words(N, K, seed=200), block_words=1).reshape(-1, 1)
+    C = torch.empty((M, N), device="cuda", dtype=torch.float32)
+    ms = do_bench(lambda: kernel(A, B, SFA, SFB, C), warmup=10, rep=20)
+    tflops = 2.0 * M * N * K / (ms * 1e-3) / 1e12
+    assert tflops > 0
