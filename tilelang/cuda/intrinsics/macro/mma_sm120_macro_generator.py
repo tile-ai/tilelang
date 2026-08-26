@@ -12,6 +12,7 @@ from ..layout.mma_layout import (
     ldmatrix_32x32_to_shared_16x64_layout_a,
     ldmatrix_32x32_to_shared_16x64_layout_b,
 )
+from ..layout.utils import get_ldmatrix_offset
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 
 lift = convert
@@ -322,9 +323,11 @@ _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
         a_dtype_abbrv="e2m1",
         b_dtype_abbrv="e2m1",
     ),
-    # MXFP8: pure-fp8 {e4m3,e5m2}^2 at m16n8k32, one ue8m0 byte per 32 K
-    # elements (scale_vec::1X is the only legal vector size for this kind).
-    # A uint32 scale word still covers K=128, now as four one-byte atoms.
+    # kind::mxf8f6f4 at m16n8k32: any pairing from the f8f6f4 family, one
+    # ue8m0 byte per 32 K elements (scale_vec::1X is the only legal vector
+    # size for this kind). A uint32 scale word still covers K=128, now as
+    # four one-byte atoms. fp4/fp6 operands use unpacked 8-bit smem/register
+    # containers loaded by the sub-byte ldmatrix variants.
     ("mxf8f6f4", 1, "ue8m0"): BlockScaleMmaConfig(
         kind="mxf8f6f4",
         mma_prefix="m16n8k32",
@@ -334,9 +337,29 @@ _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
         scale_type="ue8m0",
         a_dtype_abbrv=None,
         b_dtype_abbrv=None,
-        operand_family=("e4m3", "e5m2"),
+        operand_family=("e2m1", "e2m3", "e3m2", "e4m3", "e5m2"),
     ),
 }
+
+
+# smem->register load category per mxf8f6f4 operand dtype: fp8 uses the
+# classic b16 ldmatrix; fp4/fp6 use the sub-byte variants (m8n16.b8x16),
+# which share the b16 lane addressing (byte-identical fragment layout).
+# The value is (ldmatrix variant | None, post-load register shift bits).
+_MXF8F6F4_OPERAND_LOAD = {
+    "float4_e2m1_unpacked": ("su4", 2),
+    "float6_e2m3fn_unpacked": ("su6", 0),
+    "float6_e3m2fn_unpacked": ("su6", 0),
+}
+
+
+def _canonical_dtype_name(name: str) -> str:
+    """Strip TVM's ``custom[...]`` wrapper from registered dtype names."""
+    return name[len("custom[") : -1] if name.startswith("custom[") and name.endswith("]") else name
+
+
+def _mxf8f6f4_operand_load(dtype) -> tuple[str, int] | None:
+    return _MXF8F6F4_OPERAND_LOAD.get(_canonical_dtype_name(str(dtype)))
 
 
 def _get_block_scale_mma_config(kind: str, scale_vec_size: int, scale_type: str) -> BlockScaleMmaConfig:
@@ -451,9 +474,70 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         else:
             super()._initialize_mma_prefix(k_dim)
 
+    def _ldmatrix_subbyte(self, side, local_buf, shared_buf, ki, rk, variant, shift_bits):
+        """su4/su6 fragment load for fp4/fp6 mxf8f6f4 operands.
+
+        The smem buffer models the 16U4/16U6_ALIGN16B padded-packed layout
+        (16 elements per 16-byte group), whose byte footprint equals the
+        8-bit path - so the classic 8-bit lane addressing is reused verbatim
+        and only the ldmatrix opcode (and the e2m1 <<2 container shift)
+        differ.
+        """
+        is_a = side == "A"
+        tiles = self.warp_row_tiles if is_a else self.warp_col_tiles
+        frags = self.warp_rows if is_a else self.warp_cols
+        micro_mn = self.micro_size_x if is_a else self.micro_size_y
+        chunk = self.chunk
+        micro_size_k = self.micro_size_k
+        local_size = self.local_size_a if is_a else self.local_size_b
+        transposed = self.a_transposed if is_a else self.b_transposed
+        if is_a and transposed:
+            raise ValueError("sub-byte ldmatrix variants have no trans form; A must be row-major (K-last)")
+        if not is_a and not transposed:
+            raise ValueError("sub-byte ldmatrix variants have no trans form; B must be transposed (K-last)")
+        num = 4 if is_a or self.n_dim == 16 else 2
+        shift_words = (local_size if num == 4 else local_size // 2) // 4
+
+        thread_binding = self.get_thread_binding()
+        region = self._legalize_to_buffer_region(shared_buf)
+        buf = region.buffer
+        base0 = region.region[-2].min
+        base1 = region.region[-1].min
+        other = [r.min for r in region.region[:-2]]
+        stride = buf.shape[-1]
+
+        @T.macro
+        def _warp_ldmatrix_subbyte(local_buf, shared_buf, ki, thread_binding, rk=0):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            for i in T.unroll(frags):
+                wi = (warp_m if is_a else warp_n) * tiles + i * micro_mn
+                wk = rk * chunk + ki * micro_size_k
+                # Byte-footprint identity with the 8-bit path lets us reuse
+                # its lane offsets (white-box pinned).
+                row_off, col_off = get_ldmatrix_offset(side, tx, 0, stride, "int8", transposed)
+                T.ptx_ldmatrix(
+                    T.bool(False),
+                    num,
+                    T.access_ptr(buf[tuple(other) + (base0 + wi + row_off, base1 + wk + col_off)], "r", extent=2 * num),
+                    T.access_ptr(local_buf[i * local_size], "w", extent=2 * num),
+                    variant=variant,
+                )
+                if shift_bits != 0:
+                    T.call_extern(
+                        "handle",
+                        "tl::fp4_e2m1_container_shift",
+                        T.access_ptr(local_buf[i * local_size], "rw", extent=2 * num),
+                        shift_words,
+                    )
+
+        return _warp_ldmatrix_subbyte(local_buf, region, ki, thread_binding, rk)
+
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         if not self.is_blockscaled:
             return super().ldmatrix_a(A_local_buf, A_shared_buf, ki, rk)
+        load = _mxf8f6f4_operand_load(self.a_dtype)
+        if load is not None:
+            return self._ldmatrix_subbyte("A", A_local_buf, A_shared_buf, ki, rk, load[0], load[1])
         if tvm.DataType(str(self.a_dtype)).bits == 8:
             # mxf8f6f4 operands use the standard 8-bit m16n8k32 fragment; the
             # base emitter's ldmatrix path produces it as-is.
@@ -508,6 +592,9 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         if not self.is_blockscaled:
             return super().ldmatrix_b(B_local_buf, B_shared_buf, ki, rk)
+        load = _mxf8f6f4_operand_load(self.b_dtype)
+        if load is not None:
+            return self._ldmatrix_subbyte("B", B_local_buf, B_shared_buf, ki, rk, load[0], load[1])
         if tvm.DataType(str(self.b_dtype)).bits == 8:
             # See ldmatrix_a: 8-bit fragments come from the base emitter.
             return super().ldmatrix_b(B_local_buf, B_shared_buf, ki, rk)

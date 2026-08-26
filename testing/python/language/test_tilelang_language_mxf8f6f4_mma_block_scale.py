@@ -640,7 +640,10 @@ def test_mxf8f6f4_rejects_out_of_family_operand_pairs():
         # (a_dtype, b_dtype, error pattern, rejecting layer)
         (T.float8_e4m3fn, T.bfloat16, "f8f6f4 family", "gemm-base family check"),
         (T.float8_e4m3fn, T.int8, "f8f6f4 family", "gemm-base family check"),
-        (T.float8_e4m3fn, T.float4_e2m1fn, "same operand width family", "lowering width check"),
+        # PACKED fp4 stays rejected as an mxf8f6f4 partner - fp4 must use
+        # its unpacked smem form there (accepted, covered by the
+        # subbyte-operands test file).
+        (T.float8_e4m3fn, T.float4_e2m1fn, "packed float4_e2m1fn pair", "lowering kind inference"),
         (T.int8, T.int8, "expects a_dtype in", "emitter operand whitelist"),
     ]
     for a_dtype, b_dtype, pattern, _layer in cases:

@@ -899,9 +899,17 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     }
     fail = true;
   } else if (t.is_float4_e2m1_unpacked()) {
-    LOG(FATAL) << "float4_e2m1_unpacked is a SMEM/TMA storage tag and must be "
-                  "lowered through shared-memory allocation";
-    return;
+    // 8-bit container storage: the 16U4_ALIGN16B padded-packed smem form
+    // and the SM120 mxf8f6f4 register containers are plain bytes in CUDA.
+    if (t.is_scalar()) {
+      os << "uchar";
+      return;
+    }
+    if (lanes <= 4) {
+      os << "uchar" << lanes;
+      return;
+    }
+    fail = true;
   } else if (t.is_float4_e2m1fn()) {
     enable_fp4_ = true;
     if (t.lanes() <= 64) {
@@ -3280,12 +3288,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                    (scale_vec_size == 2 && scale_type == "ue8m0") ||
                    (scale_vec_size == 4 && scale_type == "ue8m0"));
     } else if (kind == "mxf8f6f4") {
-      auto is_fp8 = [](const std::string &dtype) {
-        return dtype == "e4m3" || dtype == "e5m2";
+      auto in_family = [](const std::string &dtype) {
+        return dtype == "e2m1" || dtype == "e2m3" || dtype == "e3m2" ||
+               dtype == "e4m3" || dtype == "e5m2";
       };
-      supported = supported_common && shape == "m16n8k32" && is_fp8(A_dtype) &&
-                  is_fp8(B_dtype) && scale_vec_size == 1 &&
-                  scale_type == "ue8m0";
+      supported = supported_common && shape == "m16n8k32" &&
+                  in_family(A_dtype) && in_family(B_dtype) &&
+                  scale_vec_size == 1 && scale_type == "ue8m0";
     }
     ICHECK(supported)
         << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
@@ -3326,8 +3335,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string operand_args;
     if (kind == "mxf8f6f4") {
       auto operand_enum = [](const std::string &dtype) {
-        return dtype == "e4m3" ? "tl::SM120MmaOperandType::kE4M3"
-                               : "tl::SM120MmaOperandType::kE5M2";
+        if (dtype == "e2m1")
+          return "tl::SM120MmaOperandType::kE2M1";
+        if (dtype == "e2m3")
+          return "tl::SM120MmaOperandType::kE2M3";
+        if (dtype == "e3m2")
+          return "tl::SM120MmaOperandType::kE3M2";
+        if (dtype == "e4m3")
+          return "tl::SM120MmaOperandType::kE4M3";
+        return "tl::SM120MmaOperandType::kE5M2";
       };
       operand_args = std::string(", ") + operand_enum(A_dtype) + ", " +
                      operand_enum(B_dtype);

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from tilelang import language as T
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
+    _canonical_dtype_name,
+    _mxf8f6f4_operand_load,
     TensorCoreIntrinEmitterSM120 as TensorCoreIntrinEmitterBlockScaled,
 )
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
@@ -74,19 +76,31 @@ class GemmMMASm120BlockScaled(GemmMMA):
             GEMM_INST_MMA_BLOCK_SCALED,
         )
         granularity, sf_dtype = self._scale_mode()
-        # The MMA kind follows the operand dtype family: 4-bit e2m1 operands
-        # lower to kind::mxf4nvf4 (k64 atoms), 8-bit fp8 operands to
-        # kind::mxf8f6f4 (k32 atoms). One MMA atom consumes
-        # atom_k // granularity scale bytes; the emitter validates the
-        # resulting (kind, scale_vec_size, sf_dtype) combination.
-        a_bits = DataType(str(self.a_dtype)).bits
-        b_bits = DataType(str(self.b_dtype)).bits
-        if a_bits != b_bits:
+        # The MMA kind follows the operand dtypes: a packed-fp4 pair lowers
+        # to kind::mxf4nvf4 (k64 atoms, packed fragments); any other pairing
+        # from the f8f6f4 family - fp8, and fp4/fp6 in their unpacked
+        # 8-bit-container smem forms - lowers to kind::mxf8f6f4 (k32 atoms).
+        # One MMA atom consumes atom_k // granularity scale bytes; the
+        # emitter validates the resulting (kind, scale_vec, sf_dtype) combo.
+        a_name = _canonical_dtype_name(str(self.a_dtype))
+        b_name = _canonical_dtype_name(str(self.b_dtype))
+
+        def _mxf8f6f4_operand_ok(name: str) -> bool:
+            if _mxf8f6f4_operand_load(name) is not None:
+                return True
+            return name.startswith("float8") and DataType(name).bits == 8
+
+        if a_name == b_name == "float4_e2m1fn":
+            kind, atom_k = "mxf4nvf4", 64
+        elif _mxf8f6f4_operand_ok(a_name) and _mxf8f6f4_operand_ok(b_name):
+            kind, atom_k = "mxf8f6f4", 32
+        else:
             raise ValueError(
-                f"T.mma_gemm_blockscaled requires A and B from the same operand width family, "
+                "T.mma_gemm_blockscaled operands must be a packed float4_e2m1fn pair "
+                "(kind::mxf4nvf4) or any f8f6f4-family pairing with fp4/fp6 in their "
+                "unpacked smem forms (kind::mxf8f6f4); "
                 f"got a_dtype={self.a_dtype}, b_dtype={self.b_dtype}"
             )
-        kind, atom_k = ("mxf8f6f4", 32) if a_bits == 8 else ("mxf4nvf4", 64)
         if granularity > atom_k:
             raise ValueError(f"sf_granularity_k={granularity} exceeds the {kind} MMA atom K extent {atom_k}")
         return self.intrin_emitter_cls(
