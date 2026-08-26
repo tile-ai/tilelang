@@ -35,8 +35,9 @@ def test_gemm_rejects_unsupported_k_pack(k_pack):
 
 @pytest.mark.parametrize("k_pack", [True, 2.0, "2", None])
 def test_gemm_rejects_non_integer_k_pack(k_pack):
-    with pytest.raises(TypeError, match=r"T\.gemm k_pack must be an int"):
+    with pytest.raises(TypeError) as exc_info:
         _make_gemm(k_pack)
+    assert str(exc_info.value) == (f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r} ({type(k_pack).__name__})")
 
 
 if __name__ == "__main__":

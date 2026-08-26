@@ -39,7 +39,7 @@ def _gemm_impl(
     Returns a call_intrin handle for the given op key.
     """
     if not isinstance(k_pack, int) or isinstance(k_pack, bool):
-        raise TypeError(f"T.gemm k_pack must be an int, got {type(k_pack).__name__}")
+        raise TypeError(f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r} ({type(k_pack).__name__})")
     if k_pack not in (1, 2):
         raise ValueError(f"T.gemm k_pack must be 1 or 2, got {k_pack}")
 
