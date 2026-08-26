@@ -12,6 +12,8 @@ For TMA stores (shared -> global):
   No barrier argument is needed for stores.
 """
 
+import re
+
 import pytest
 
 from tilelang import tvm as tvm
@@ -253,6 +255,155 @@ def test_tma_copy_uses_descriptor_for_padded_multirow_region():
     torch.testing.assert_close(padded_destination[:, cols:], torch.full_like(padded_destination[:, cols:], -1.0))
 
 
+def _assert_two_box_tma_loop(source, instruction):
+    assert re.search(
+        rf"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{{\n\s*tl::{instruction}\(",
+        source,
+    )
+
+
+def _tma_descriptor_init_block(host_source, desc_name):
+    marker = f"[0].v_ptr) = {desc_name};"
+    start = host_source.find(marker)
+    assert start >= 0, f"Missing {desc_name} TensorMap initialization"
+    end = host_source.find("TVMFFIFunctionCall(__tvm_tensormap_create_tiled_packed", start)
+    assert end >= 0, f"Missing {desc_name} TensorMap creation call"
+    return host_source[start:end]
+
+
+def _tma_stack_int(block, index):
+    match = re.search(rf"\[{index}\]\.v_int64\)\s*=\s*\(\(int64_t\)(-?\d+)\);", block)
+    assert match, f"Missing stack[{index}] integer assignment in:\n{block}"
+    return int(match.group(1))
+
+
+def _assert_2d_f32_tma_descriptor(kernel, desc_name, rows, global_width):
+    block = _tma_descriptor_init_block(kernel.get_host_source(), desc_name)
+    assert _tma_stack_int(block, 2) == 2
+    assert _tma_stack_int(block, 4) == global_width
+    assert _tma_stack_int(block, 5) == rows
+    assert _tma_stack_int(block, 6) == 4
+    assert _tma_stack_int(block, 7) == global_width * 4
+    assert _tma_stack_int(block, 8) == 256
+    assert _tma_stack_int(block, 9) == rows
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_load_wide_linear_fixed_slice_with_unaligned_global_shape():
+    # The extent and coordinate are not 256-aligned; the byte stride and
+    # starting address still satisfy CUDA's 16-byte requirements.
+    rows, global_width, tile_width, col_offset = 16, 516, 512, 4
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((rows, global_width), T.float32),
+        B: T.Tensor((rows, tile_width), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((2, rows, tile_width), T.float32)
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(
+                A[:, col_offset : col_offset + tile_width],
+                A_shared[1, :, :],
+                barrier=mbar,
+            )
+            T.barrier_arrive(mbar)
+            T.barrier_wait(mbar, 0)
+            T.copy(A_shared[1, :, :], B, prefer_instruction="sync")
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "CUtensorMap" in source
+    _assert_two_box_tma_loop(source, "tma_load")
+    _assert_2d_f32_tma_descriptor(kernel, "A_desc", rows, global_width)
+
+    import torch
+
+    A = torch.arange(rows * global_width, dtype=torch.float32, device="cuda").reshape(rows, global_width)
+    B = kernel(A)
+    torch.testing.assert_close(B, A[:, col_offset : col_offset + tile_width])
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_store_wide_linear_fixed_slice_with_unaligned_global_shape():
+    # Fifteen rows select the unswizzled layout; 516 and 4 satisfy byte
+    # alignment without being aligned to the 256-element box.
+    rows, global_width, tile_width, col_offset = 15, 516, 512, 4
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((rows, tile_width), T.float32),
+        B: T.Tensor((rows, global_width), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            B_shared = T.alloc_shared((2, rows, tile_width), T.float32)
+            T.copy(A, B_shared[1, :, :], prefer_instruction="sync")
+            T.tma_copy(
+                B_shared[1, :, :],
+                B[:, col_offset : col_offset + tile_width],
+            )
+            T.tma_store_wait(read=False)
+
+    kernel = tilelang.compile(
+        main,
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "CUtensorMap" in source
+    _assert_two_box_tma_loop(source, "tma_store")
+    _assert_2d_f32_tma_descriptor(kernel, "B_desc", rows, global_width)
+
+    import torch
+
+    A = torch.arange(rows * tile_width, dtype=torch.float32, device="cuda").reshape(rows, tile_width)
+    B = torch.full((rows, global_width), -1.0, dtype=torch.float32, device="cuda")
+    kernel(A, B)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(B[:, col_offset : col_offset + tile_width], A)
+    assert torch.all(B[:, :col_offset] == -1)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_load_oob_fill_with_non_aligned_global_extent():
+    rows, global_width, row_stride, tile_width, col_offset = 2, 515, 516, 256, 512
+
+    @T.prim_func
+    def main(
+        A: T.StridedTensor((rows, global_width), (row_stride, 1), T.float32),
+        B: T.Tensor((rows, tile_width), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((rows, tile_width), T.float32)
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(A[:, col_offset : col_offset + tile_width], A_shared, barrier=mbar)
+            T.barrier_arrive(mbar)
+            T.barrier_wait(mbar, 0)
+            T.copy(A_shared, B, prefer_instruction="sync")
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    assert "tl::tma_load" in kernel.get_kernel_source()
+    block = _tma_descriptor_init_block(kernel.get_host_source(), "A_desc")
+    assert _tma_stack_int(block, 4) == global_width
+    assert _tma_stack_int(block, 7) == row_stride * 4
+
+    import torch
+
+    backing = torch.arange(rows * row_stride, dtype=torch.float32, device="cuda").reshape(rows, row_stride)
+    A = backing[:, :global_width]
+    B = kernel(A)
+    expected = torch.zeros_like(B)
+    expected[:, : global_width - col_offset] = A[:, col_offset:]
+    torch.testing.assert_close(B, expected)
+
+
 def matmul_tma_copy_store(
     M,
     N,
@@ -401,23 +552,6 @@ def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
     return main
 
 
-def _fp4_tma_descriptor_init_block(host_source, desc_name):
-    marker = f"[0].v_ptr) = {desc_name};"
-    start = host_source.find(marker)
-    assert start >= 0, f"Missing {desc_name} TensorMap initialization"
-    end = host_source.find("TVMFFIFunctionCall(__tvm_tensormap_create_tiled_packed", start)
-    assert end >= 0, f"Missing {desc_name} TensorMap creation call"
-    return host_source[start:end]
-
-
-def _fp4_tma_stack_int(block, index):
-    import re
-
-    match = re.search(rf"\[{index}\]\.v_int64\)\s*=\s*\(\(int64_t\)(-?\d+)\);", block)
-    assert match, f"Missing stack[{index}] integer assignment in:\n{block}"
-    return int(match.group(1))
-
-
 def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
     expected_tma_args = {
         1: 13,  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
@@ -435,17 +569,17 @@ def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
         14: 2,
         15: 0,
     }
-    block = _fp4_tma_descriptor_init_block(host_source, desc_name)
+    block = _tma_descriptor_init_block(host_source, desc_name)
     for index, expected in expected_tma_args.items():
-        assert _fp4_tma_stack_int(block, index) == expected
+        assert _tma_stack_int(block, index) == expected
 
 
 def _assert_fp4_unpacked_tma_descriptor(host_source, desc_name, *, expect_swizzle=None):
-    block = _fp4_tma_descriptor_init_block(host_source, desc_name)
-    assert _fp4_tma_stack_int(block, 1) == 14  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B
-    assert _fp4_tma_stack_int(block, 8) == 128  # 128-element inner box for 8-bit storage
+    block = _tma_descriptor_init_block(host_source, desc_name)
+    assert _tma_stack_int(block, 1) == 14  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B
+    assert _tma_stack_int(block, 8) == 128  # 128-element inner box for 8-bit storage
     if expect_swizzle is not None:
-        assert _fp4_tma_stack_int(block, 13) == expect_swizzle
+        assert _tma_stack_int(block, 13) == expect_swizzle
 
 
 def run_fp4_tma_copy_roundtrip():
