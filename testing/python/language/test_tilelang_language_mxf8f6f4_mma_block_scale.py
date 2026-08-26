@@ -596,5 +596,30 @@ def test_mxf8f6f4_quantize_roundtrip_gemm(dtype_name):
     torch.testing.assert_close(C, ref, rtol=1e-5, atol=1e-3)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_mxf8f6f4_rejects_out_of_family_operand_pairs():
+    """Negative pins for the mixed-dtype guards (three layers).
+
+    allow_f8f6f4_mixed_dtypes opens the door for {e4m3, e5m2} pairings
+    only in effect: out-of-family partners must still be rejected -
+    by the gemm-base family check (bf16, int8), by the lowering
+    same-width check (fp8 x fp4), or by the emitter operand whitelist
+    (same-width non-fp8 pairs).
+    """
+    import re
+
+    cases = [
+        # (a_dtype, b_dtype, error pattern, rejecting layer)
+        (T.float8_e4m3fn, T.bfloat16, "f8f6f4 family", "gemm-base family check"),
+        (T.float8_e4m3fn, T.int8, "f8f6f4 family", "gemm-base family check"),
+        (T.float8_e4m3fn, T.float4_e2m1fn, "same operand width family", "lowering width check"),
+        (T.int8, T.int8, "expects a_dtype in", "emitter operand whitelist"),
+    ]
+    for a_dtype, b_dtype, pattern, _layer in cases:
+        with pytest.raises(Exception, match=re.escape(pattern)):
+            tilelang.compile(_make_mxf8_matmul_kernel(128, 128, 128, a_dtype, b_dtype), target="cuda", out_idx=[4])
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
