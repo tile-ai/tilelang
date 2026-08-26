@@ -387,6 +387,12 @@ bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
                      const LayoutMap &layout_map, arith::Analyzer *analyzer,
                      bool emit_diagnostics) {
+  // The 1D bulk path is a descriptorless byte copy: it cannot perform the
+  // packed->unpacked FP4 expansion, so such copies must take the tiled
+  // (descriptor) path where 16U4_ALIGN16B does the unpacking.
+  if (IsFP4UnpackLoad(op.src, op.dst)) {
+    return false;
+  }
   if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics)) {
     return false;
   }

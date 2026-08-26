@@ -380,3 +380,68 @@ def test_w4a4_mxf8f6f4_rowmajor_correctness():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+@simplify_prim_func
+def _make_fp4_unpack_copy_kernel(rows, k_global, k_copy):
+    @T.prim_func
+    def main(
+        A: T.Tensor((rows, k_global), T.float4_e2m1fn),
+        OUT: T.Tensor((rows,), T.uint8),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((rows, k_copy), T.float4_e2m1_unpacked, scope="shared.dyn")
+            T.copy(A[0, 0], A_shared, prefer_instruction="tma")
+            for i in T.Parallel(rows):
+                OUT[i] = T.reinterpret(T.uint8, A_shared[i, 0])
+
+    return main
+
+
+@simplify_prim_func
+def _make_fp4_unpack_copy_1d_kernel(n):
+    @T.prim_func
+    def main(
+        A: T.Tensor((n,), T.float4_e2m1fn),
+        OUT: T.Tensor((1,), T.uint8),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((n,), T.float4_e2m1_unpacked, scope="shared.dyn")
+            T.copy(A, A_shared, prefer_instruction="tma")
+            OUT[0] = T.reinterpret(T.uint8, A_shared[0])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_fp4_unpack_tma_rejects_non_multiple_of_128_global_dim():
+    """The CUDA driver requires globalDim[0] % 128 == 0 for 16U4_ALIGN16B.
+
+    Before the guard this only exploded at kernel launch (runtime tensor-map
+    validation); now static shapes fail at compile time with a message
+    naming the rule.
+    """
+    with pytest.raises(Exception, match="multiple of 128 elements"):
+        tilelang.compile(_make_fp4_unpack_copy_kernel(128, 192, 128), target="cuda", out_idx=[1])
+    # Control: a 128-multiple global dim compiles.
+    tilelang.compile(_make_fp4_unpack_copy_kernel(128, 256, 128), target="cuda", out_idx=[1])
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_fp4_unpack_copy_never_takes_the_1d_bulk_path():
+    """The descriptorless 1D bulk path cannot unpack packed fp4.
+
+    Before the guard, a 1D-shaped unpack copy would classify as BulkLoad1D
+    and silently emit a raw byte copy (no unpacking, inconsistent sizing).
+    With the guard it is diverted off the 1D path; wherever it lands it
+    must either be a descriptor TMA (correct) or fail loudly - never a
+    silent 1D byte copy.
+    """
+    try:
+        kernel = tilelang.compile(_make_fp4_unpack_copy_1d_kernel(4096), target="cuda", out_idx=[1])
+    except Exception:
+        return  # loud failure is acceptable; silent 1D byte copy is not
+    src = kernel.get_kernel_source()
+    assert "tma_load_1d" not in src and "cp.async.bulk.global.shared" not in src

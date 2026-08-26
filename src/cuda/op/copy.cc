@@ -2056,6 +2056,23 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
 
     desc.global_shape.push_back(global_shape[tma_mode_to_gmode[i]]);
 
+    // Packed-align16 tensor map types (16U4/16U6_ALIGN16B) carry a CUDA
+    // driver rule: the innermost global dimension must be a whole number of
+    // 128-element groups. Enforce it at compile time when the extent is
+    // static; symbolic shapes still hit the runtime descriptor validation.
+    constexpr int kTensorMapDataType16U4Align16B = 14;
+    constexpr int kTensorMapDataType16U6Align16B = 15;
+    if (i == 0 && (desc.data_type == kTensorMapDataType16U4Align16B ||
+                   desc.data_type == kTensorMapDataType16U6Align16B)) {
+      if (auto inner = as_const_int(desc.global_shape[0])) {
+        ICHECK(*inner % 128 == 0)
+            << "packed-align16 TMA (16U4/16U6_ALIGN16B) requires the "
+               "innermost global dimension to be a multiple of 128 elements "
+               "(CUDA driver tensor-map rule); got "
+            << *inner << " for src: " << src->name << ", dst: " << dst->name;
+      }
+    }
+
     PrimExpr elem_stride = global_stride[tma_mode_to_gmode[i]];
     if (i == 0 && !is_one(elem_stride)) {
       DLOG(WARNING)
