@@ -171,3 +171,22 @@ def test_large_coefficient_boundary_invariant_index_remains_vectorizable():
     transformed = _run_vectorized_loop_legalizer(main)
 
     assert _vectorized_extents(transformed["main"]) == [vector_size]
+
+
+def test_overflow_promotion_preserves_atomic_vector_lanes():
+    """Widening a dynamic row offset must not break x4 atomic lanes."""
+    extent = 128
+    lanes = 4
+    row_size = 576
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((512, row_size), T.float32),
+        indices: T.Tensor((extent,), T.int32),
+        values: T.Tensor((extent, lanes), T.float32),
+    ):
+        with T.Kernel(1, threads=extent):
+            for i in T.Parallel(extent):
+                T.atomic_addx4(A[indices[i], i * lanes], values[i, 0])
+
+    _run_layout_inference(main)
