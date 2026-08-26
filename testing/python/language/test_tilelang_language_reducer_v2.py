@@ -1335,5 +1335,49 @@ def test_annotated_dst_not_steered():
     torch.testing.assert_close(C, ref * 2, atol=1e-2, rtol=1e-2)
 
 
+def test_narrow_steering_unsatisfiable_falls_back_wide():
+    """A reserved dst takes its layout from finalize's verdict, but honoring
+    can be genuinely unsatisfiable: here the consumer loop also reads a
+    fragment annotated to a layout that conflicts with the induced (narrow)
+    verdict, so every free-mode ordering dies on re-validation. The engine
+    must then retry with the universally readable wide fallback (replicated
+    dst) instead of failing with "no available layout found"."""
+    M, K, threads = 16, 64, 256
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((M, K), T.float32),
+        O: T.Tensor((M,), T.float32),
+        C: T.Tensor((M,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((M, K), T.float32)
+            T.copy(A, src)
+            acc = T.alloc_reducer((M,), T.float32, op="sum")
+            T.reducer_init(acc)
+            for i, k in T.Parallel(M, K):
+                T.reducer_update(acc[i], src[i, k])
+            result = T.alloc_fragment((M,), T.float32)
+            other = T.alloc_fragment((M,), T.float32)
+            T.annotate_layout({other: T.Fragment(other.shape, forward_fn=lambda a: (a, 0))})
+            T.copy(O, other)
+            T.finalize_reducer(acc, result)
+            out = T.alloc_fragment((M,), T.float32)
+            for i in T.Parallel(M):
+                out[i] = result[i] * T.float32(2.0) + other[i]
+            T.copy(out, C)
+
+    compiled = tl.compile(kernel, out_idx=-1)
+    source = compiled.get_kernel_source()
+    # Wide fallback signature: replicated dst, participant-wide collective.
+    assert f"float result[{M}];" in source, source
+    assert re.search(r"SumOp, 256", source), source
+
+    A = torch.randn(M, K, dtype=torch.float32, device="cuda")
+    O = torch.randn(M, dtype=torch.float32, device="cuda")
+    C = compiled(A, O)
+    torch.testing.assert_close(C, A.sum(dim=1) * 2 + O, atol=1e-2, rtol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

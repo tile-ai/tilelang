@@ -20,6 +20,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <unordered_set>
 
 #include "../../config.h"
 #include "../../layout/layout.h"
@@ -78,6 +79,36 @@ Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
     }
   }
   return Optional<Buffer>();
+}
+
+// A fragment layout published into the global layout map must be a closed
+// function of the layout placeholders (input indices + replication). Loop
+// completion can legitimately produce layouts referencing an enclosing serial
+// loop var (CompleteBufferFragment on `src[i, k]` bakes in `i`); such a
+// layout is meaningful only inside that loop's scope and would misdirect
+// every other consumer of the buffer. The placeholders are memoized
+// singletons, so pointer identity is the right membership test.
+bool FragmentReferencesForeignVars(const Fragment &fragment) {
+  std::unordered_set<const VarNode *> allowed;
+  allowed.insert(ReplicationPlaceholder().get());
+  for (int i = 0; i < static_cast<int>(fragment->InputDim()); ++i) {
+    allowed.insert(InputPlaceholder(i).get());
+  }
+  bool foreign = false;
+  auto scan = [&](const PrimExpr &expr) {
+    PostOrderVisit(expr, [&](const ObjectRef &obj) {
+      if (const auto *var = obj.as<VarNode>()) {
+        if (!allowed.count(var)) {
+          foreign = true;
+        }
+      }
+    });
+  };
+  for (const auto &expr : fragment->GetForwardIndex()) {
+    scan(expr);
+  }
+  scan(fragment->GetForwardThread());
+  return foreign;
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +220,22 @@ public:
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
+
+      // Only closed layouts may enter the global map (see
+      // FragmentReferencesForeignVars). Open completions are still valid for
+      // the op's own scope — LowerTileOp's local re-inference serves
+      // genuinely loop-local buffers — so the entry is dropped rather than
+      // rejected: a later proposer in program order (e.g. the copy feeding
+      // the buffer) supplies the closed form.
+      if (IsFragmentBuffer(buffer)) {
+        if (auto fragment = layout.as<Fragment>()) {
+          if (FragmentReferencesForeignVars(fragment.value())) {
+            DLOG(INFO) << "[RunInferStep] dropping open layout for buffer "
+                       << buffer << " from op " << cur_infer_id;
+            continue;
+          }
+        }
+      }
 
       // Helper: propagate inferred layout to alias buffers (same data Var)
       auto propagate_alias = [&](const Buffer &src_buffer,
@@ -302,6 +349,23 @@ public:
         // Ensure aliases are consistent too
         propagate_alias(buffer, layout);
       } else {
+        // A reserved finalize destination takes its first layout only from
+        // its own finalize op (see steered_dst_owners_). Strict-level
+        // deductions stay authoritative — e.g. constant indexing inside a
+        // parallel loop genuinely forces replication — but common/free
+        // completions from consumers are dropped so the finalize's verdict
+        // proposal lands instead; consumers re-validate against it when the
+        // engine re-enqueues them.
+        if (level != InferLevel::kStrict && IsFragmentBuffer(buffer)) {
+          auto reserved_it = steered_dst_owners_.find(buffer);
+          if (reserved_it != steered_dst_owners_.end() &&
+              !reserved_it->second.count(cur_infer_id)) {
+            DLOG(INFO) << "[RunInferStep] dropping layout for reserved "
+                       << "finalize dst " << buffer << " from op "
+                       << cur_infer_id;
+            continue;
+          }
+        }
         // Otherwise, update map
         layout_map.Set(buffer, layout);
         // Propagate to alias buffers (may enqueue their users)
@@ -350,6 +414,54 @@ public:
     }
   };
 
+  // Register every finalize destination whose finalize can actually propose
+  // a layout (mirrors the structural silence gates of
+  // FinalizeReducerV2OpNode::InferLayout: recorded update sites, matching
+  // per-dim extents, constant thread bounds wider than one thread). Only
+  // these buffers are reserved — when the gates fail, the finalize would
+  // stay silent forever and consumer completion must keep serving the
+  // buffer as before.
+  void ReserveSteeredDsts() {
+    for (int i = 0; i < static_cast<int>(infer_list_.size()); ++i) {
+      const auto *finalize = infer_list_[i].as<FinalizeReducerV2OpNode>();
+      if (finalize == nullptr) {
+        continue;
+      }
+      const Buffer &dst = finalize->dst;
+      if (!IsFragmentBuffer(dst) || annotated_layout_map_.count(dst)) {
+        continue;
+      }
+      auto site_it = reducer_update_sites_.find(finalize->reducer->data.get());
+      if (site_it == reducer_update_sites_.end() || site_it->second.empty()) {
+        continue;
+      }
+      if (finalize->reducer->shape.size() != dst->shape.size()) {
+        continue;
+      }
+      arith::Analyzer *analyzer = analyzer_vec_[i].get();
+      bool extents_match = true;
+      for (size_t d = 0; d < dst->shape.size(); ++d) {
+        if (!analyzer->CanProveEqual(finalize->reducer->shape[d],
+                                     dst->shape[d])) {
+          extents_match = false;
+          break;
+        }
+      }
+      if (!extents_match) {
+        continue;
+      }
+      const Range &bounds = thread_bounds_vec_[i];
+      const int64_t *extent_ptr = as_const_int(bounds->extent);
+      const int64_t *min_ptr = as_const_int(bounds->min);
+      if (!extent_ptr || !min_ptr || *extent_ptr <= 1) {
+        continue;
+      }
+      steered_dst_owners_[dst].insert(i);
+      DLOG(INFO) << "[ReserveSteeredDsts] buffer " << dst
+                 << " reserved for finalize op " << i;
+    }
+  }
+
   LayoutInferenceResult Run() {
     // Basic consistency check: infer_list_ and thread_index_vec_ should have
     // the same size
@@ -366,6 +478,8 @@ public:
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
       DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
     }
+
+    ReserveSteeredDsts();
 
     // If needed, you can also check that annotated_layout_map_ is not empty, or
     // anything else relevant to your setup.
@@ -1061,6 +1175,19 @@ private:
   // them explicitly: finalize's dst proposal has to compete in the same
   // attempt search as the update loop's layout choice.
   std::unordered_map<const VarNode *, std::vector<int>> reducer_use_list_;
+  // Finalize destinations reserved for dst-steering: such a buffer takes its
+  // first layout only from the finalize ops listed here. The finalize's
+  // proposal is the planner verdict computed early; letting a consumer
+  // complete the buffer first is exactly how that verdict used to get
+  // bypassed (and billed later as a thread-indexed publish copy). Built by
+  // ReserveSteeredDsts() from the same structural gates the proposal itself
+  // checks, so a reserved buffer always has a capable proposer; buffers that
+  // fail those gates keep the legacy first-completer behavior. Annotated
+  // destinations are seeded into the layout map before any level runs and
+  // never reach the reservation check.
+  std::unordered_map<Buffer, std::unordered_set<int>, ObjectPtrHash,
+                     ObjectPtrEqual>
+      steered_dst_owners_;
   // Per-op list of buffers it touches (fragment scope), used for prioritization
   std::unordered_map<int, std::vector<Buffer>> op_touched_buffers_;
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
@@ -1198,6 +1325,22 @@ private:
                                strict_layout_map, q, in_queue);
             }
           }
+          // A finalize that ran before its update nests were solved stayed
+          // silent; now every member has run, so give it a second pass. A
+          // completed attempt must not leave a reserved dst unset: absent
+          // buffers cost nothing under any cost model, so "nobody decided"
+          // would always outbid the honest attempts that carry the verdict's
+          // register bill. The pass is idempotent — finalize is silent when
+          // dst is already owned — and consumers frozen earlier re-validate
+          // through the queue when the late proposal lands.
+          for (int other_infer_root : members) {
+            if (infer_list_[other_infer_root].as<FinalizeReducerV2OpNode>()) {
+              RunInferStep(other_infer_root, InferLevel::kFree, true,
+                           tmp_layout_map, strict_layout_map, q, in_queue);
+              FinishInferQueue(InferLevel::kFree, tmp_layout_map,
+                               strict_layout_map, q, in_queue);
+            }
+          }
         } catch (const LayoutConflictException &e) {
           do_update = false;
           DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
@@ -1239,6 +1382,70 @@ private:
         }
         // Restore infer_list_ state for the next attempt
         infer_list_ = std::move(back_infer_list);
+      }
+      if (!has_best) {
+        // Reducer-only rescue path (dst-steering reservation). Components
+        // without a reserved finalize_reducer destination collect nothing
+        // below and fall through to the ICHECK unchanged — this block never
+        // alters behavior for ordinary layout conflicts.
+        //
+        // With reservation, "every ordering died" has one known benign
+        // cause: the verdict is an induced (narrow) layout that no consumer
+        // ordering can live with (e.g. the consumer also reads a
+        // strict-pinned conflicting source). Retry once with each reserved
+        // dst of this component pre-seeded to the universally readable wide
+        // layout — the finalize then stays silent (dst owned) and consumers
+        // adapt, trading the narrow plan for a compiling wide one. A
+        // component that fails even this is a genuine inference failure.
+        std::vector<std::pair<Buffer, int>> component_reserved_dsts;
+        for (int member : members) {
+          const auto *finalize =
+              infer_list_[member].as<FinalizeReducerV2OpNode>();
+          if (finalize == nullptr) {
+            continue;
+          }
+          auto reserved_it = steered_dst_owners_.find(finalize->dst);
+          if (reserved_it != steered_dst_owners_.end() &&
+              reserved_it->second.count(member)) {
+            component_reserved_dsts.emplace_back(finalize->dst, member);
+          }
+        }
+        if (!component_reserved_dsts.empty()) {
+          DLOG(INFO) << "[InferInFreeMode] all attempts failed; retrying with "
+                     << "wide fallback dst layouts";
+          auto back_infer_list = BackupInferList();
+          LayoutMap tmp_layout_map = layout_map;
+          for (const auto &[dst, finalize_idx] : component_reserved_dsts) {
+            if (!tmp_layout_map.count(dst)) {
+              tmp_layout_map.Set(dst,
+                                 FinalizeReducerV2OpNode::FallbackDstLayout(
+                                     dst, thread_bounds_vec_[finalize_idx]));
+            }
+          }
+          bool fallback_ok = true;
+          try {
+            for (int member : members) {
+              RunInferStep(member, InferLevel::kFree, true, tmp_layout_map,
+                           strict_layout_map, q, in_queue);
+              FinishInferQueue(InferLevel::kFree, tmp_layout_map,
+                               strict_layout_map, q, in_queue);
+            }
+          } catch (const LayoutConflictException &e) {
+            fallback_ok = false;
+          } catch (const NormalizeIterException &e) {
+            fallback_ok = false;
+          } catch (const LoopLayoutInjectiveException &e) {
+            fallback_ok = false;
+          }
+          if (fallback_ok) {
+            best_infer_list = BackupInferList();
+            best_layout_map = tmp_layout_map;
+            best_cost = cost_model->Score(members, infer_list_, tmp_layout_map);
+            has_best = true;
+            best_infer_root = members.empty() ? -1 : members[0];
+          }
+          infer_list_ = std::move(back_infer_list);
+        }
       }
       ICHECK(has_best) << "no available layout found" << '\n';
       // Apply the best plan for this component

@@ -191,6 +191,13 @@ public:
   TileOperator Clone() const override;
   static const Op &Get();
 
+  /*! \brief The universally-safe dst layout under the wide plan: every
+   *  participant holds every element, so any already-frozen consumer loop can
+   *  read it. Shared by the kFree steering proposal and the inference
+   *  engine's last-resort fallback attempt so the two can never diverge. */
+  static Fragment FallbackDstLayout(const Buffer &dst,
+                                    const Range &thread_bounds);
+
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<FinalizeReducerV2OpNode>()

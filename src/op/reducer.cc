@@ -507,11 +507,15 @@ LayoutMap FinalizeReducerV2OpNode::InferLayout(const LayoutInferArgs &args,
   // every thread holds every logical output, and a replicated dst keeps the
   // publish copy (and any further fragment staging) a per-thread identity
   // move instead of a thread-indexed gather from replicated registers.
-  Fragment replicated =
-      Fragment::FullyReplicated(dst->shape, args.thread_bounds->extent)
-          ->BindThreadRange(args.thread_bounds);
-  result.Set(dst, replicated);
+  result.Set(dst, FallbackDstLayout(dst, args.thread_bounds));
   return result;
+}
+
+Fragment
+FinalizeReducerV2OpNode::FallbackDstLayout(const Buffer &dst,
+                                           const Range &thread_bounds) {
+  return Fragment::FullyReplicated(dst->shape, thread_bounds->extent)
+      ->BindThreadRange(thread_bounds);
 }
 
 TileOperator FinalizeReducerV2OpNode::Clone() const {

@@ -318,8 +318,22 @@ bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
  */
 LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                       InferLevel level) const {
-  if (loop_layout_inferred_)
+  if (loop_layout_inferred_) {
+    // Fragments this loop touches can receive their layouts only after the
+    // loop itself was solved (the engine re-enqueues the loop when such a
+    // late layout lands; a reserved reducer destination always arrives
+    // late). The frozen loop layout must then be re-checked against the
+    // current fragment layouts: a mismatch means this attempt paired a
+    // solved loop with fragments it cannot address, and the thrown
+    // LayoutConflictException lets free mode discard the attempt. Strict and
+    // common levels have no discard channel, so they keep the early-out.
+    if (level == InferLevel::kFree && loop_layout_.defined()) {
+      ValidateCandidateAgainstFragments(loop_layout_, layout_args,
+                                        /*throw_on_error=*/true,
+                                        /*check_forward_index=*/false);
+    }
     return {};
+  }
   loop_layout_requires_padding_guard_ = false;
 
   // Expand Bind values to find fragment buffer accesses
