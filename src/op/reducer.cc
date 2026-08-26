@@ -444,29 +444,19 @@ LayoutMap FinalizeReducerV2OpNode::InferLayout(const LayoutInferArgs &args,
   if (level != InferLevel::kFree) {
     return {};
   }
-  if (!IsFragmentBuffer(dst) || args.layout_map.count(dst)) {
+  if (args.layout_map.count(dst)) {
     return {};
   }
   if (args.reducer_update_sites == nullptr ||
       args.reducer_update_sites->empty()) {
     return {};
   }
-  // The induced layout is expressed over the reducer's logical shape; it can
-  // be handed to dst verbatim only when the shapes match per dim (the ctor
-  // checks dtype and rank, not extents).
-  if (reducer->shape.size() != dst->shape.size()) {
+  if (!CanSteerDst(reducer, dst, args.thread_bounds, args.analyzer)) {
     return {};
-  }
-  for (size_t d = 0; d < reducer->shape.size(); ++d) {
-    if (!args.analyzer->CanProveEqual(reducer->shape[d], dst->shape[d])) {
-      return {};
-    }
   }
   const int64_t *extent_ptr = as_const_int(args.thread_bounds->extent);
   const int64_t *min_ptr = as_const_int(args.thread_bounds->min);
-  if (!extent_ptr || !min_ptr || *extent_ptr <= 1) {
-    return {};
-  }
+  ICHECK(extent_ptr && min_ptr); // guaranteed by CanSteerDst
   // Stay silent while any update nest is unsolved: a later call in this
   // attempt (or another attempt ordering) sees the solved state.
   for (const ReducerUpdateSiteHint &site : *args.reducer_update_sites) {
@@ -516,6 +506,29 @@ FinalizeReducerV2OpNode::FallbackDstLayout(const Buffer &dst,
                                            const Range &thread_bounds) {
   return Fragment::FullyReplicated(dst->shape, thread_bounds->extent)
       ->BindThreadRange(thread_bounds);
+}
+
+bool FinalizeReducerV2OpNode::CanSteerDst(const Buffer &reducer,
+                                          const Buffer &dst,
+                                          const Range &thread_bounds,
+                                          arith::Analyzer *analyzer) {
+  if (!IsFragmentBuffer(dst)) {
+    return false;
+  }
+  // The induced layout is expressed over the reducer's logical shape; it can
+  // be handed to dst verbatim only when the shapes match per dim (the ctor
+  // checks dtype and rank, not extents).
+  if (reducer->shape.size() != dst->shape.size()) {
+    return false;
+  }
+  for (size_t d = 0; d < reducer->shape.size(); ++d) {
+    if (!analyzer->CanProveEqual(reducer->shape[d], dst->shape[d])) {
+      return false;
+    }
+  }
+  const int64_t *extent_ptr = as_const_int(thread_bounds->extent);
+  const int64_t *min_ptr = as_const_int(thread_bounds->min);
+  return extent_ptr && min_ptr && *extent_ptr > 1;
 }
 
 TileOperator FinalizeReducerV2OpNode::Clone() const {

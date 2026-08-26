@@ -198,6 +198,16 @@ public:
   static Fragment FallbackDstLayout(const Buffer &dst,
                                     const Range &thread_bounds);
 
+  /*! \brief Structural gates of the dst-steering proposal: `dst` is a
+   *  fragment whose per-dim extents match the reducer's, over a constant
+   *  participant range wider than one thread. Shared by the kFree proposal's
+   *  silence checks and the inference engine's reservation registration so
+   *  the two can never drift ("reserved" must mean "has a capable
+   *  proposer"). */
+  static bool CanSteerDst(const Buffer &reducer, const Buffer &dst,
+                          const Range &thread_bounds,
+                          arith::Analyzer *analyzer);
+
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<FinalizeReducerV2OpNode>()
