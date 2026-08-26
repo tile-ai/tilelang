@@ -29,3 +29,10 @@ from .mxfp4 import (  # noqa: F401
     quantize_bf16_to_mxfp4_blockscaled,
 )
 from .mxfp8 import quantize_bf16_to_mxfp8_blockscaled  # noqa: F401
+from .mxfp6 import (  # noqa: F401
+    decode_fp6_values,
+    encode_fp6_values,
+    pack_fp6_codes,
+    quantize_bf16_to_mxfp6_blockscaled,
+    unpack_fp6_bytes,
+)
