@@ -11,7 +11,7 @@ scikit-build-core
 setuptools>=61
 wheel
 z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'
-z3-solver>=4.15.5,<4.15.6; platform_system == 'Windows' and platform_machine == 'ARM64'
+z3-solver>=4.15.8,<4.16; platform_system == 'Windows' and platform_machine == 'ARM64'
 
 auditwheel; platform_system == 'Linux'
 patchelf; platform_system == 'Linux'

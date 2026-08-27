@@ -42,9 +42,9 @@ dependencies = [
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
     "z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'",
-    # 4.15.5 is the first release with a Windows ARM64 wheel. Keep the newer
-    # release isolated to that platform while the general upper bound remains.
-    "z3-solver>=4.15.5,<4.15.6; platform_system == 'Windows' and platform_machine == 'ARM64'",
+    # 4.15.8 is the first non-yanked release with a Windows ARM64 wheel. Keep
+    # the newer release isolated while the general upper bound remains.
+    "z3-solver>=4.15.8,<4.16; platform_system == 'Windows' and platform_machine == 'ARM64'",
 ]
 
 [project.optional-dependencies]
@@ -84,7 +84,7 @@ requires = [
     "cython>=3.1.0",
     "scikit-build-core",
     "z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'",
-    "z3-solver>=4.15.5,<4.15.6; platform_system == 'Windows' and platform_machine == 'ARM64'",
+    "z3-solver>=4.15.8,<4.16; platform_system == 'Windows' and platform_machine == 'ARM64'",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",
