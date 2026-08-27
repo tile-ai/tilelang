@@ -147,6 +147,32 @@ def test_packed_fragment_pipeline_preserves_byte_ownership():
 
 
 @tilelang.testing.requires_cuda
+def test_fragment_candidate_fallback_preserves_byte_ownership():
+    n = 128
+
+    def permuted_replicated_byte_owner(i, replica):
+        byte = i // 2
+        return byte % 2 * (n // 4) + byte // 2 + replica * (n // 2), i % 2
+
+    fragment_layout = T.Fragment((n,), forward_fn=permuted_replicated_byte_owner, replicate=2)
+
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), "uint4"), B: T.Tensor((n,), "uint4")):
+        with T.Kernel(1, threads=128):
+            local = T.alloc_fragment((n,), "uint4")
+            T.annotate_layout({local: fragment_layout})
+            T.copy(A, local)
+            for i in T.Parallel(n):
+                B[i] = local[i]
+
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    source = torch.arange(n // 2, dtype=torch.uint8, device="cuda")
+    result = compiled(source)
+
+    assert torch.equal(result.view(torch.uint8), source)
+
+
+@tilelang.testing.requires_cuda
 def test_explicit_byte_safe_width_preserves_values():
     n = 128
     kernel = _copy_kernel("int4", n, threads=128, coalesced_width=2)

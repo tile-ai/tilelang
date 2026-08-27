@@ -203,10 +203,12 @@ private:
     bool canonical_replica_guard_guaranteed;
   };
 
-  // Build the common remapping, target gate, and replica-guard context used by
-  // packed physical-store ownership checks.
+  // Build the target gate and replica-guard context used by packed physical-
+  // store ownership checks. Remap the loop only when CUDA ownership analysis
+  // or another caller requires it.
   PackedOwnershipContext
-  GetPackedOwnershipContext(const LayoutInferArgs &layout_args) const;
+  GetPackedOwnershipContext(const LayoutInferArgs &layout_args,
+                            bool require_remapped_loop = false) const;
   // Complete the fragment layout for a given buffer.
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
   // Check if the buffer is accessed with common indices (i.e., loop variables).

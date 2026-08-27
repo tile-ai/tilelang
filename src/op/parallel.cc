@@ -153,6 +153,71 @@ GetPackedStoreByteOffset(const PackedSubByteStoreAccess &access) {
   return floordiv(elem_offset, make_const(elem_offset.dtype(), 2));
 }
 
+bool HasCompactRowMajorStrides(const Buffer &buffer,
+                               arith::Analyzer *analyzer) {
+  if (buffer->strides.empty()) {
+    return true;
+  }
+  if (buffer->strides.size() != buffer->shape.size()) {
+    return false;
+  }
+  PrimExpr expected_stride = make_const(buffer->strides.back().dtype(), 1);
+  for (size_t i = buffer->shape.size(); i-- > 0;) {
+    if (!analyzer->CanProveEqual(buffer->strides[i], expected_stride)) {
+      return false;
+    }
+    expected_stride = analyzer->Simplify(expected_stride * buffer->shape[i]);
+  }
+  return true;
+}
+
+struct PackedStoreOwnershipCoordinates {
+  Array<PrimExpr> relative;
+  Array<PrimExpr> origins;
+};
+
+PackedStoreOwnershipCoordinates
+GetPackedStoreOwnershipCoordinates(const PackedSubByteStoreAccess &access,
+                                   const PrimExpr &absolute_byte_offset,
+                                   arith::Analyzer *analyzer) {
+  Array<PrimExpr> coordinates;
+  bool use_shaped_coordinates =
+      HasCompactRowMajorStrides(access.buffer, analyzer) &&
+      !access.indices.empty() &&
+      access.indices.size() == access.buffer->shape.size() &&
+      analyzer->CanProveEqual(access.buffer->elem_offset,
+                              make_zero(access.buffer->elem_offset.dtype()));
+  if (use_shaped_coordinates) {
+    PrimExpr last_extent = access.buffer->shape.back();
+    PrimExpr two = make_const(last_extent.dtype(), 2);
+    use_shaped_coordinates = analyzer->CanProveEqual(
+        floormod(last_extent, two), make_zero(last_extent.dtype()));
+  }
+
+  if (use_shaped_coordinates) {
+    for (size_t i = 0; i + 1 < access.indices.size(); ++i) {
+      coordinates.push_back(access.indices[i]);
+    }
+    PrimExpr last = access.indices.back();
+    coordinates.push_back(floordiv(last, make_const(last.dtype(), 2)));
+  } else {
+    coordinates.push_back(absolute_byte_offset);
+  }
+
+  Map<Var, PrimExpr> loop_mins;
+  for (const IterVar &iter_var : access.iter_vars) {
+    loop_mins.Set(iter_var->var, iter_var->dom->min);
+  }
+  Array<PrimExpr> relative;
+  Array<PrimExpr> origins;
+  for (const PrimExpr &coordinate : coordinates) {
+    PrimExpr origin = analyzer->Simplify(Substitute(coordinate, loop_mins));
+    origins.push_back(origin);
+    relative.push_back(analyzer->Simplify(coordinate - origin));
+  }
+  return {relative, origins};
+}
+
 struct ProvenPackedStoreOwner {
   Var storage;
   PrimExpr owner;
@@ -185,7 +250,7 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
                                       bool canonical_replica_guard_guaranteed,
                                       bool throw_on_error = false) {
   auto stores = PackedSubByteStoreCollector::Collect(stmt);
-  Var byte_var("__tl_packed_byte");
+  std::vector<Var> byte_coordinate_vars;
   std::vector<ProvenPackedStoreOwner> proven_store_owners;
   for (const auto &access : stores) {
     if (access.parallel_positions.size() != candidate->InputDim()) {
@@ -208,17 +273,34 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
     }
 
     try {
-      PrimExpr byte_offset = analyzer->Simplify(maybe_byte_offset.value());
-      arith::IntSet byte_domain = GetPackedStoreByteDomain(access, byte_offset);
-      PrimExpr occurrence = MakeFlattenedExpression(
-          DivideUnusedIterators({byte_offset}, access.iter_vars, analyzer));
-      Layout inverse =
-          Layout(access.iter_vars, {byte_offset, occurrence})->Inverse();
+      PrimExpr absolute_byte_offset =
+          analyzer->Simplify(maybe_byte_offset.value());
+      arith::IntSet byte_domain =
+          GetPackedStoreByteDomain(access, absolute_byte_offset);
+      auto ownership_coordinates = GetPackedStoreOwnershipCoordinates(
+          access, absolute_byte_offset, analyzer);
+      PrimExpr occurrence = MakeFlattenedExpression(DivideUnusedIterators(
+          ownership_coordinates.relative, access.iter_vars, analyzer));
+      Array<PrimExpr> inverse_outputs = ownership_coordinates.relative;
+      inverse_outputs.push_back(occurrence);
+      Layout inverse = Layout(access.iter_vars, inverse_outputs)->Inverse();
 
       Var occurrence_var("__tl_packed_occurrence");
       auto inverse_shape = inverse->InputShape();
-      ICHECK_EQ(inverse_shape.size(), 2U);
-      Array<PrimExpr> recovered = inverse->Forward({byte_var, occurrence_var});
+      ICHECK_EQ(inverse_shape.size(),
+                ownership_coordinates.relative.size() + 1);
+      while (byte_coordinate_vars.size() <
+             ownership_coordinates.relative.size()) {
+        byte_coordinate_vars.emplace_back(
+            "__tl_packed_byte_" + std::to_string(byte_coordinate_vars.size()));
+      }
+      Array<PrimExpr> inverse_inputs;
+      for (size_t i = 0; i < ownership_coordinates.relative.size(); ++i) {
+        inverse_inputs.push_back(analyzer->Simplify(
+            byte_coordinate_vars[i] - ownership_coordinates.origins[i]));
+      }
+      inverse_inputs.push_back(occurrence_var);
+      Array<PrimExpr> recovered = inverse->Forward(inverse_inputs);
 
       Array<PrimExpr> parallel_indices;
       for (size_t position : access.parallel_positions) {
@@ -243,7 +325,7 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
       PrimExpr owner = analyzer->Simplify(
           candidate->ForwardThread(parallel_indices, replica));
       const int64_t *occurrence_extent =
-          as_const_int(analyzer->Simplify(inverse_shape[1]));
+          as_const_int(analyzer->Simplify(inverse_shape.back()));
       if (occurrence_extent == nullptr || *occurrence_extent <= 0) {
         if (throw_on_error) {
           std::ostringstream oss;
@@ -255,8 +337,12 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
         return false;
       }
       arith::Analyzer occurrence_analyzer;
-      occurrence_analyzer.Bind(
-          byte_var, Range::FromMinExtent(Integer(0), inverse_shape[0]));
+      for (size_t i = 0; i < ownership_coordinates.relative.size(); ++i) {
+        occurrence_analyzer.Bind(
+            byte_coordinate_vars[i],
+            Range::FromMinExtent(ownership_coordinates.origins[i],
+                                 inverse_shape[i]));
+      }
       occurrence_analyzer.Bind(
           occurrence_var,
           Range::FromMinExtent(Integer(0), Integer(*occurrence_extent)));
@@ -265,13 +351,22 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
       for (size_t i = 0; i < access.iter_vars.size(); ++i) {
         recovered_iter_vars.Set(access.iter_vars[i]->var, recovered[i]);
       }
-      PrimExpr roundtrip_byte = occurrence_analyzer.Simplify(
-          Substitute(byte_offset, recovered_iter_vars));
+      bool coordinates_roundtrip = true;
+      for (size_t i = 0; i < ownership_coordinates.relative.size(); ++i) {
+        PrimExpr roundtrip_coordinate = occurrence_analyzer.Simplify(
+            Substitute(ownership_coordinates.relative[i], recovered_iter_vars));
+        PrimExpr expected_coordinate = occurrence_analyzer.Simplify(
+            byte_coordinate_vars[i] - ownership_coordinates.origins[i]);
+        if (!occurrence_analyzer.CanProveEqual(roundtrip_coordinate,
+                                               expected_coordinate)) {
+          coordinates_roundtrip = false;
+          break;
+        }
+      }
       PrimExpr roundtrip_occurrence = occurrence_analyzer.Simplify(
           Substitute(occurrence, recovered_iter_vars));
-      if (!occurrence_analyzer.CanProveEqual(roundtrip_byte, byte_var) ||
-          !occurrence_analyzer.CanProveEqual(roundtrip_occurrence,
-                                             occurrence_var)) {
+      if (!coordinates_roundtrip || !occurrence_analyzer.CanProveEqual(
+                                        roundtrip_occurrence, occurrence_var)) {
         if (throw_on_error) {
           std::ostringstream oss;
           oss << "Cannot prove packed four-bit byte ownership: the recovered "
@@ -306,6 +401,8 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
       }
     } catch (const NormalizeIterException &) {
       // An unprovable inverse is unsafe for a non-atomic packed store.
+    } catch (const Error &) {
+      // Failed integer proof checks also make the ownership result unprovable.
     }
 
     if (throw_on_error) {
@@ -1300,18 +1397,24 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
 }
 
 ParallelOpNode::PackedOwnershipContext
-ParallelOpNode::GetPackedOwnershipContext(
-    const LayoutInferArgs &layout_args) const {
-  return {IfBufferRemapLoopGenerator::run(root_, layout_args.buffer_remap,
-                                          layout_args.layout_map),
-          TargetIsCuda(layout_args.target), store_fragment_buffers_.empty()};
+ParallelOpNode::GetPackedOwnershipContext(const LayoutInferArgs &layout_args,
+                                          bool require_remapped_loop) const {
+  bool enforce_packed_byte_ownership = TargetIsCuda(layout_args.target);
+  For remapped_root =
+      enforce_packed_byte_ownership || require_remapped_loop
+          ? IfBufferRemapLoopGenerator::run(root_, layout_args.buffer_remap,
+                                            layout_args.layout_map)
+          : root_;
+  return {remapped_root, enforce_packed_byte_ownership,
+          store_fragment_buffers_.empty()};
 }
 
 Fragment
 ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Vectorize Size must be aware of the buffer_remap
   // As the pass will do post processing to the layout
-  auto packed_ownership = GetPackedOwnershipContext(layout_args);
+  auto packed_ownership =
+      GetPackedOwnershipContext(layout_args, /*require_remapped_loop=*/true);
   int vector_size =
       GetVectorizeSize(packed_ownership.remapped_root, layout_args.analyzer,
                        layout_args.layout_map);
@@ -1375,19 +1478,27 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Rank widths by the existing padding heuristic, then accept the first
   // candidate whose completed thread map proves one owner per byte. Every
   // width in the planner's halving sequence is tested exactly once.
+  bool found_byte_owned_candidate = false;
   for (int candidate_width : RankVectorSizesByPadding(
            max_vector_size, loop_total_size, layout_args.thread_bounds->extent,
            &analyzer_)) {
     auto candidate =
         PlanLoopPartition(root_, candidate_width, layout_args.thread_bounds);
-    if (ProvePackedSubByteStoreOwnership(
+    if (!ProvePackedSubByteStoreOwnership(
             packed_ownership.remapped_root, candidate, layout_args.analyzer,
-            packed_ownership.canonical_replica_guard_guaranteed) &&
-        ValidateCandidateAgainstFragments(candidate, layout_args)) {
+            packed_ownership.canonical_replica_guard_guaranteed)) {
+      continue;
+    }
+    found_byte_owned_candidate = true;
+    if (ValidateCandidateAgainstFragments(candidate, layout_args)) {
       DLOG(INFO) << "[PlanLoopPartition] packed-store-safe vector_size = "
                  << candidate_width << '\n';
       return candidate;
     }
+  }
+
+  if (found_byte_owned_candidate) {
+    return Fragment();
   }
 
   throw LayoutConflictException(
