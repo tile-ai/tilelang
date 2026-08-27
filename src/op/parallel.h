@@ -29,6 +29,19 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+/**
+ * Validate that every physical byte written by scalar packed four-bit stores
+ * in `remapped_loop` is owned by one GPU thread under `loop_layout`.
+ *
+ * Throws LayoutConflictException when ownership cannot be proven. This must
+ * run before LowerParallelLoop removes the logical loop layout.
+ */
+void ValidatePacked4BitStoreOwnership(const For &remapped_loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate);
+
 class ParallelOpNode;
 
 /*!

@@ -22,8 +22,10 @@
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
+#include "../op/parallel.h"
 #include "../op/utils.h"
 #include "../span_utils.h"
+#include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
@@ -1358,6 +1360,11 @@ private:
     // fragment index is lowered to a physical per-thread slot, the logical loop
     // iteration has to be owned by the corresponding thread.
     bool parallel_loop = has_non_local_store || has_fragment_access;
+
+    if (TargetIsRocm(target_)) {
+      ValidatePacked4BitStoreOwnership(
+          for_node, loop_layout, CurrentThreadIndex(), analyzer_, predicate);
+    }
 
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
