@@ -76,9 +76,9 @@ def test_large_int32_affine_index_does_not_abort_layout_inference(access_kind):
     _run_layout_inference(main)
 
 
-def test_large_int32_affine_index_with_bounded_residual_does_not_abort():
+@pytest.mark.parametrize("extent", [4, 8])
+def test_large_int32_affine_index_with_bounded_residual_does_not_abort(extent):
     """The final index fits int32 even though canonical coefficients do not."""
-    extent = 8
     group_size = 4
     stride = 600_000_000
 
@@ -92,6 +92,90 @@ def test_large_int32_affine_index_with_bounded_residual_does_not_abort():
                 output[i] = A[(i - (i // group_size) * group_size) * stride]
 
     _run_layout_inference(main)
+
+
+def test_large_int32_bounded_residual_condition_does_not_abort():
+    """Conditions must be widened before their first canonical simplification."""
+    extent = 8
+    group_size = 4
+    stride = 600_000_000
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((extent,), T.float32),
+        output: T.Tensor((extent,), T.float32),
+    ):
+        with T.Kernel(1, threads=extent):
+            for i in T.Parallel(extent):
+                if (i - (i // group_size) * group_size) * stride != 0:
+                    output[i] = A[i]
+
+    _run_layout_inference(main)
+
+
+def test_large_int32_bounded_residual_access_ptr_does_not_abort():
+    """tvm_access_ptr offsets must be widened before simplification."""
+    extent = 8
+    group_size = 4
+    stride = 600_000_000
+
+    @T.prim_func
+    def main(A: T.Tensor((2_000_000_000,), T.float32)):
+        with T.Kernel(1, threads=extent):
+            for i in T.Parallel(extent):
+                T.evaluate(
+                    T.call_intrin(
+                        "float32",
+                        tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
+                        T.tvm_access_ptr(
+                            T.type_annotation("float32"),
+                            A.data,
+                            (i - (i // group_size) * group_size) * stride,
+                            1,
+                            3,
+                        ),
+                        T.float32(1),
+                        T.int32(0),
+                    )
+                )
+
+    _run_layout_inference(main)
+
+
+def test_overflow_promotion_preserves_let_var_binding():
+    """Promoted Let bodies must reference the rewritten binder."""
+    extent = 4
+    stride = 600_000_000
+    loop_var = tvm.tirx.Var("i", "int32")
+    let_var = tvm.tirx.Var("offset", "int32")
+    input_buffer = tvm.tirx.decl_buffer((2_000_000_000,), "float32", name="A")
+    output_buffer = tvm.tirx.decl_buffer((extent,), "float32", name="output")
+    scaled_offset = loop_var * stride
+    index = tvm.tirx.Let(let_var, scaled_offset, let_var - scaled_offset)
+    body = tvm.tirx.BufferStore(
+        output_buffer,
+        tvm.tirx.BufferLoad(input_buffer, [index]),
+        [loop_var],
+    )
+    loop = tvm.tirx.For(
+        loop_var,
+        0,
+        extent,
+        tvm.tirx.ForKind.VECTORIZED,
+        body,
+    )
+    func = tvm.tirx.PrimFunc(
+        [input_buffer.data, output_buffer.data],
+        loop,
+        buffer_map={
+            input_buffer.data: input_buffer,
+            output_buffer.data: output_buffer,
+        },
+    )
+
+    transformed = _run_vectorized_loop_legalizer(func)
+
+    assert _vectorized_extents(transformed["main"]) == [extent]
 
 
 def test_large_int32_affine_index_under_int64_cast_does_not_abort():

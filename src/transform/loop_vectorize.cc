@@ -49,6 +49,13 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+namespace {
+
+PrimExpr SimplifyExprForAnalyzer(const PrimExpr &expr, int scale,
+                                 arith::Analyzer *analyzer);
+
+} // namespace
+
 /*!
  * \brief Check if buffer strides represent a contiguous (row-major) layout.
  * \param buffer The buffer to check.
@@ -733,8 +740,12 @@ private:
     if (!inner_for_) {
       return;
     }
-    PrimExpr condition = analyzer_->Simplify(cond);
     int condition_vector_size = loop_extent_vector_size_;
+    PrimExpr condition = cond;
+    if (condition_vector_size > 1) {
+      condition =
+          SimplifyExprForAnalyzer(cond, condition_vector_size, analyzer_);
+    }
     while (condition_vector_size > 1 &&
            !IsExprInvariantInVectorBoundary(condition, inner_for_->loop_var,
                                             condition_vector_size, analyzer_)) {
@@ -808,7 +819,10 @@ private:
     // of the whole loop body. To avoid planning a vector size that will be
     // immediately scalarized (and to keep semantics sane for side-effectful
     // calls), require the offset to be invariant within the vector boundary.
-    PrimExpr offset_s = analyzer_->Simplify(offset);
+    PrimExpr offset_s = offset;
+    if (access_vec_size > 1) {
+      offset_s = SimplifyExprForAnalyzer(offset, access_vec_size, analyzer_);
+    }
     while (access_vec_size > 1 &&
            !IndicesCanVectorize(offset_s, inner_for_->loop_var,
                                 inner_for_->extent, access_vec_size,
@@ -1109,6 +1123,11 @@ PrimExpr PrepareExprForAnalyzer(const PrimExpr &expr, int scale,
   return promoter(expr);
 }
 
+PrimExpr SimplifyExprForAnalyzer(const PrimExpr &expr, int scale,
+                                 arith::Analyzer *analyzer) {
+  return analyzer->Simplify(PrepareExprForAnalyzer(expr, scale, analyzer));
+}
+
 } // namespace
 
 bool CanProveIndependent(const PrimExpr &expr, Var var,
@@ -1120,10 +1139,12 @@ bool CanProveIndependent(const PrimExpr &expr, Var var,
     return true;
   }
   // 2. if \forall v_1, v_2, f(v_1) == f(v_2), f is independent with v
-  PrimExpr analysis_expr = PrepareExprForAnalyzer(expr, 1, analyzer);
   Var var_1("_t", var.dtype());
-  PrimExpr expr_1 = Substitute(analysis_expr, {{var, var_1}});
-  if (analyzer->CanProveEqual(analysis_expr, expr_1)) {
+  PrimExpr expr_1 = Substitute(expr, {{var, var_1}});
+  PrimExpr equality = PrepareExprForAnalyzer(expr == expr_1, 1, analyzer);
+  const auto *equality_node = equality.as<EQNode>();
+  ICHECK(equality_node);
+  if (analyzer->CanProveEqual(equality_node->a, equality_node->b)) {
     return true;
   }
   return false;
