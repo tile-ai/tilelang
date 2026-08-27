@@ -376,6 +376,67 @@ def test_tma_atomic_add_uint64_runtime():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_atomic_add_wide_linear_layout_runtime():
+    rows, global_width, tile_width, col_offset = 8, 520, 512, 8
+
+    @tilelang.jit
+    def kernel(out):
+        out: T.Tensor[(rows, global_width), T.uint64]
+
+        with T.Kernel(1):
+            out_shared = T.alloc_shared((rows, tile_width), dtype=T.uint64)
+            T.fill(out_shared, 1)
+            T.atomic_add(
+                out[:, col_offset : col_offset + tile_width],
+                out_shared,
+                use_tma=True,
+            )
+
+    compiled = kernel.compile(out=T.Tensor[(rows, global_width), T.uint64])
+    source = compiled.get_kernel_source()
+    assert re.search(
+        r"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{\n\s*tl::tma_store_add\(",
+        source,
+    )
+
+    out = torch.zeros((rows, global_width), dtype=torch.uint64, device="cuda")
+    compiled(out)
+    torch.cuda.synchronize()
+    assert torch.all(out[:, :col_offset] == 0)
+    assert torch.all(out[:, col_offset:] == 1)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_atomic_add_versioned_smem_slice_runtime():
+    """A version slice of a wide linear buffer must stay contiguous under the
+    inferred layout, or the second TMA box silently reads the other version."""
+    rows, width = 8, 512
+
+    @tilelang.jit
+    def kernel(out):
+        out: T.Tensor[(rows, width), T.uint64]
+
+        with T.Kernel(1):
+            smem = T.alloc_shared((2, rows, width), dtype=T.uint64)
+            T.fill(smem, 7)  # decoy in version 0
+            for i, j in T.Parallel(rows, width):
+                smem[1, i, j] = 1
+            T.atomic_add(out, smem[1, :, :], use_tma=True)
+
+    compiled = kernel.compile(out=T.Tensor[(rows, width), T.uint64])
+    source = compiled.get_kernel_source()
+    assert re.search(
+        r"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{\n\s*tl::tma_store_add\(",
+        source,
+    )
+
+    out = torch.zeros((rows, width), dtype=torch.uint64, device="cuda")
+    compiled(out)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_atomic_add_32b_swizzle_runtime():
     out = torch.zeros((16, 24), dtype=torch.float32, device="cuda")
     tma_atomic_add_32b_swizzle_program(out)

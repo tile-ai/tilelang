@@ -39,22 +39,6 @@ namespace cuda {
 
 namespace {
 
-Layout ComputeLinearLayout(const Buffer &shared_tensor) {
-  Array<PrimExpr> input_size = shared_tensor->shape;
-  Array<PrimExpr> forward_vars;
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_vars.push_back(InputPlaceholder(i));
-  }
-  Array<PrimExpr> forward_index;
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorDiv(forward_vars[i], 256));
-  }
-  for (size_t i = 0; i < input_size.size(); i++) {
-    forward_index.push_back(FloorMod(forward_vars[i], 256));
-  }
-  return Layout(input_size, forward_index);
-}
-
 bool UseTMA(const AtomicAddNode &op) {
   if (auto val = op.annotations.Get("use_tma")) {
     if (auto int_val = val->as<IntImmNode>()) {
@@ -142,7 +126,8 @@ TMAAtomicAddAnalysis AnalyzeTMAAtomicAdd(const AtomicAddNode &op, Target target,
   return {std::move(plan), ""};
 }
 
-Layout MakeTMAAtomicAddSharedLayout(const Buffer &shared_tensor) {
+Layout MakeTMAAtomicAddSharedLayout(const Buffer &shared_tensor,
+                                    const Array<Range> &region) {
   ICHECK_GE(shared_tensor->shape.size(), 2U)
       << "TMA atomic add layout inference requires a rank-2+ shared buffer";
   int ndim = static_cast<int>(shared_tensor->shape.size());
@@ -153,7 +138,7 @@ Layout MakeTMAAtomicAddSharedLayout(const Buffer &shared_tensor) {
          "but got "
       << shared_tensor->shape;
 
-  Layout inferred_layout = ComputeLinearLayout(shared_tensor);
+  Layout inferred_layout = MakeTmaLinearLayout(shared_tensor->shape, region);
   int element_bits = shared_tensor->dtype.bits();
   if ((element_bits == 16 || element_bits == 32) && *mat_stride % 8 == 0) {
     int vector_size = 128 / element_bits;
@@ -382,7 +367,7 @@ struct AtomicAdd {
     if (level == InferLevel::kFree &&
         !layout_args.layout_map.count(shared_tensor)) {
       result_map.Set(shared_tensor,
-                     MakeTMAAtomicAddSharedLayout(shared_tensor));
+                     MakeTMAAtomicAddSharedLayout(shared_tensor, shared_range));
     }
 
     return result_map;
@@ -467,20 +452,13 @@ struct AtomicAdd {
         << " is not divisible by instruction_dim: " << instruction_dim;
     desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
-    Array<PrimExpr> shared_indices;
-    for (auto r : shared_range) {
-      shared_indices.push_back(r->min);
-    }
-    std::vector<PrimExpr> shared_strides;
-    PrimExpr shared_stride = 1;
-    for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
-      auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
-      shared_strides.insert(shared_strides.begin(), shared_stride);
-      shared_stride *= s;
-    }
+    // Physical offset of the region base under the shared layout.
+    Array<PrimExpr> shared_indices = shared_layout->Forward(
+        shared_range.Map([](const Range &r) { return r->min; }));
+    Array<PrimExpr> physical_shape = shared_layout->OutputShape();
     PrimExpr shared_offset = 0;
     for (size_t i = 0; i < shared_indices.size(); i++) {
-      shared_offset += shared_indices[i] * shared_strides[i];
+      shared_offset = shared_offset * physical_shape[i] + shared_indices[i];
     }
 
     Call create_descriptor = Call(DataType::Handle(), create_tma_descriptor(),

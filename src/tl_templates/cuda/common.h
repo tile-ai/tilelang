@@ -224,13 +224,104 @@ TL_PATCH TL_DEVICE bfloat16_t htan(const bfloat16_t x) {
   return bfloat16_t(tanf(float(x)));
 }
 
-// TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
-// cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
-// __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works
-// without pulling tl_templates/cuda/math.h and cutlass/fast_math.h into every
-// kernel.
+// TVM lowers 16-bit math ops to CUDA's half-style names (hexp, hlog, ...).
+// TileLang emits cutlass::half_t / bfloat16_t for scalar 16-bit values, while
+// CUDA overloads those names only for native __half / __nv_bfloat16. Kept here
+// so plain ops work without pulling cutlass/fast_math.h into every kernel.
+TL_PATCH TL_DEVICE half_t hexp(const half_t x) {
+  return half_t(hexp(x.to_half()));
+}
+
 TL_PATCH TL_DEVICE bfloat16_t hexp(const bfloat16_t x) {
   return bfloat16_t(hexp(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hexp2(const half_t x) {
+  return half_t(hexp2(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hexp2(const bfloat16_t x) {
+  return bfloat16_t(hexp2(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hexp10(const half_t x) {
+  return half_t(hexp10(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hexp10(const bfloat16_t x) {
+  return bfloat16_t(hexp10(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hlog(const half_t x) {
+  return half_t(hlog(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hlog(const bfloat16_t x) {
+  return bfloat16_t(hlog(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hlog2(const half_t x) {
+  return half_t(hlog2(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hlog2(const bfloat16_t x) {
+  return bfloat16_t(hlog2(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hlog10(const half_t x) {
+  return half_t(hlog10(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hlog10(const bfloat16_t x) {
+  return bfloat16_t(hlog10(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hsin(const half_t x) {
+  return half_t(hsin(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hsin(const bfloat16_t x) {
+  return bfloat16_t(hsin(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hcos(const half_t x) {
+  return half_t(hcos(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hcos(const bfloat16_t x) {
+  return bfloat16_t(hcos(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hfloor(const half_t x) {
+  return half_t(hfloor(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hfloor(const bfloat16_t x) {
+  return bfloat16_t(hfloor(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hceil(const half_t x) {
+  return half_t(hceil(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hceil(const bfloat16_t x) {
+  return bfloat16_t(hceil(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hrint(const half_t x) {
+  return half_t(hrint(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hrint(const bfloat16_t x) {
+  return bfloat16_t(hrint(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t htrunc(const half_t x) {
+  return half_t(htrunc(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t htrunc(const bfloat16_t x) {
+  return bfloat16_t(htrunc(x.to_nv_bfloat16()));
 }
 
 // CUDA has no __ldg overloads for CUTLASS's 16-bit wrappers. Forward through
@@ -382,11 +473,21 @@ TL_DEVICE uint4 make_uint4(unsigned short x0, unsigned short x1,
 // TileLang lowers scalar int4/uint4 storage through byte-packed buffers, where
 // each byte carries 2 logical 4-bit elements.
 
+TL_DEVICE int8_t tl_pack_int4x2(int low, int high) {
+  unsigned int packed = (static_cast<unsigned int>(low) & 0xF) |
+                        ((static_cast<unsigned int>(high) & 0xF) << 4);
+  return static_cast<int8_t>(packed);
+}
+
+TL_DEVICE uint8_t tl_pack_uint4x2(unsigned int low, unsigned int high) {
+  return static_cast<uint8_t>((low & 0xF) | ((high & 0xF) << 4));
+}
+
 TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
   unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
   unsigned int shift = (idx & 1) * 4;
   int value = static_cast<int>((byte >> shift) & 0xF);
-  return (value << 28) >> 28;
+  return (value ^ 8) - 8;
 }
 
 TL_DEVICE unsigned int tl_uint4_packed_load(const unsigned char *packed,

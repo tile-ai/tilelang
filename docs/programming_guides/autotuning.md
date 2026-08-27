@@ -192,7 +192,10 @@ them with a per‑config timeout. On CUDA, each worker sets the current device t
 avoid context issues.
 
 Notes
-- `timeout` uses POSIX signals; on non‑Unix systems, it may not take effect.
+- `timeout` is enforced portably by running each benchmark call in a daemon
+  thread and waiting for at most the configured duration. A timed-out native or
+  CUDA call cannot be forcibly stopped, so its daemon thread may continue until
+  the underlying call returns.
 - Logs are written to `autotuner.log` in the working directory.
 
 ## Caching

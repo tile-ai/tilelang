@@ -2,7 +2,7 @@
 
 An interactive, pass-by-pass **structure-tree** visualizer for TileLang kernels.
 
-This is a debugging complement to [`tilelang.utils.pass_diff`](../pass_diff.py).
+This is a debugging complement to [`tilelang.utils.pass_diff`](../../utils/pass_diff.py).
 Where `pass_diff` shows a line-level diff of the **TVMScript text**, this tool
 renders the IR as an **`SBlock` structure tree** — the block nesting plus
 `reads` / `writes` / `alloc_buffers` / `annotations` fields — and expands every
