@@ -367,5 +367,60 @@ def test_spill_pricing_no_false_positive_on_strided_fragment_layouts():
     torch.testing.assert_close(out, ref.reshape(1), rtol=1e-5, atol=1e-5)
 
 
+@tilelang.testing.requires_cuda
+def test_reducer_update_nest_plans_vectorized_shape():
+    """Distilled from TileKernels' mhc_post_bwd (a 1.11-1.14x production
+    regression): a bf16 shared->fragment copy feeding a reducer-update nest.
+
+    tl.reducer_update lives only between CanonicalizeLegacyReducer and
+    ReducerPlanAndMaterialize, so at layout-planning time the update nest's
+    body contains an opaque call. The generic opaque-call rule (all buffer
+    accesses lane-invariant) degrades the nest's planned vector width to 1,
+    i.e. a scalar-shaped mod-threads plan; when an attempt rooted at the
+    nest wins (a coin flip: such solutions tie with the vectorized ones on
+    every cost term), that shape is forced onto the fragments and the
+    feeding shared-memory copies scalarize (16-bit LDS instead of packed
+    32/64-bit). The planner must shape update nests by their contribution
+    loads instead: execution-side correctness (the reduction-axis store
+    hazard) is enforced at lowering, where the call has already been
+    materialized into a guarded ordinary store."""
+    threads = 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((4, 256), T.bfloat16), Out: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_sh = T.alloc_shared((4, 256), T.bfloat16)
+            a_fr = T.alloc_fragment((4, 256), T.float32)
+            acc = T.alloc_reducer((1,), T.float32, op="sum")
+            T.copy(A, a_sh)
+            T.copy(a_sh, a_fr)
+            T.reducer_init(acc)
+            for i, j in T.Parallel(4, 256):
+                T.reducer_update(acc[0], a_fr[i, j])
+            res = T.alloc_fragment((1,), T.float32)
+            T.finalize_reducer(acc, res)
+            if T.get_thread_binding() == 0:
+                Out[0] = res[0]
+
+    kern = tl.compile(
+        kernel,
+        out_idx=-1,
+        pass_configs={
+            tl.PassConfigKey.TL_DISABLE_VECTORIZE_256: True,
+            tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        },
+    )
+    src = kern.get_kernel_source()
+    # The shared->fragment copy must stay vectorized: packed bf16 pairs
+    # converted with __bfloat1622float2, never one scalar (float)(...) cast
+    # per element off a mod-threads distribution.
+    assert "__bfloat1622float2" in src, src
+
+    a = torch.randn(4, 256, dtype=torch.bfloat16, device="cuda")
+    out = kern(a)
+    torch.testing.assert_close(out, a.float().sum().reshape(1), rtol=1e-3, atol=1e-3)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

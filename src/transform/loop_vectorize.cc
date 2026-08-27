@@ -25,6 +25,7 @@
 #include "loop_vectorize.h"
 #include "../config.h"
 #include "../op/builtin.h"
+#include "../op/reducer.h"
 #include "../op/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -658,6 +659,21 @@ private:
                node->op == tl::access_ptr()) {
       // address_of and tl.access_ptr have buffer load value so we should
       // analysis the buffer load node to update vector_size_.
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(tl::reducer_update())) {
+      // The accumulate itself never loop-vectorizes: by the time execution
+      // vectorization runs (post ReducerPlanAndMaterialize) this call has
+      // been rewritten into an ordinary read-modify-write store, which the
+      // reduction-axis scalarization guard below keeps correct. During
+      // layout inference the call therefore only influences the LAYOUT
+      // SHAPE this nest plans. Shape it by the contribution loads (visit
+      // the args as ordinary expressions; the accumulator access is
+      // loop-invariant and adds no constraint) instead of the generic
+      // opaque-call rule, whose all-lanes-invariant test degrades every
+      // update nest to a scalar-shaped (elementwise mod-threads) plan and
+      // forces that shape onto the fragments feeding it — scalarizing
+      // their shared-memory copies (observed as a 1.1-1.3x latency
+      // regression on production kernels when such a plan wins).
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
 
