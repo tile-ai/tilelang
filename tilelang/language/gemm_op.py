@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from numbers import Integral
+
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
@@ -38,8 +40,9 @@ def _gemm_impl(
 
     Returns a call_intrin handle for the given op key.
     """
-    if not isinstance(k_pack, int) or isinstance(k_pack, bool):
+    if isinstance(k_pack, bool) or not isinstance(k_pack, Integral):
         raise TypeError(f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r} ({type(k_pack).__name__})")
+    k_pack = int(k_pack)
     if k_pack not in (1, 2):
         raise ValueError(f"T.gemm k_pack must be 1 or 2, got {k_pack}")
 

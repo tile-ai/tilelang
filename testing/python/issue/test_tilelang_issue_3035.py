@@ -1,5 +1,6 @@
 """Regression tests for T.gemm k_pack validation (issue #3035)."""
 
+import numpy as np
 import pytest
 
 import tilelang.language as T
@@ -22,7 +23,7 @@ def _make_gemm(k_pack):
     return main
 
 
-@pytest.mark.parametrize("k_pack", [1, 2])
+@pytest.mark.parametrize("k_pack", [1, 2, np.int64(1), np.int64(2)])
 def test_gemm_accepts_supported_k_pack(k_pack):
     assert _make_gemm(k_pack) is not None
 
