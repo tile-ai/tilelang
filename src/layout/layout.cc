@@ -356,7 +356,7 @@ Map<Var, Range> FragmentNode::GetVarMap() const {
 
 namespace {
 
-constexpr int64_t kMaxExactInjectivityDomain = 1 << 18;
+constexpr int64_t kMaxExactLayoutDomain = 1 << 18;
 
 struct IntTupleHash {
   size_t operator()(const std::vector<int64_t> &values) const {
@@ -414,10 +414,10 @@ CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
     if (*extent == 0) {
       return {ExactInjectivityStatus::kInjective, ""};
     }
-    if (*extent > kMaxExactInjectivityDomain / domain_size) {
+    if (*extent > kMaxExactLayoutDomain / domain_size) {
       return {ExactInjectivityStatus::kUnknown,
               "the logical input domain exceeds the exact-check limit of " +
-                  std::to_string(kMaxExactInjectivityDomain) + " points"};
+                  std::to_string(kMaxExactLayoutDomain) + " points"};
     }
     domain_size *= *extent;
     vars.push_back(var);
@@ -463,6 +463,200 @@ CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
     }
   }
   return {ExactInjectivityStatus::kInjective, ""};
+}
+
+enum class InverseRoundTripStatus { kValid, kInvalid, kUnknown };
+
+struct InverseRoundTripResult {
+  InverseRoundTripStatus status;
+  std::string detail;
+};
+
+bool GetStaticDomain(const Array<PrimExpr> &shape,
+                     std::vector<int64_t> *extents, int64_t *domain_size) {
+  arith::Analyzer analyzer;
+  *domain_size = 1;
+  extents->clear();
+  extents->reserve(shape.size());
+  for (const PrimExpr &dim : shape) {
+    const int64_t *extent = as_const_int(analyzer.Simplify(dim));
+    if (extent == nullptr || *extent < 0) {
+      return false;
+    }
+    if (*extent == 0) {
+      *domain_size = 0;
+    } else if (*domain_size != 0) {
+      if (*extent > kMaxExactLayoutDomain / *domain_size) {
+        return false;
+      }
+      *domain_size *= *extent;
+    }
+    extents->push_back(*extent);
+  }
+  return true;
+}
+
+std::vector<int64_t> UnflattenCoordinate(int64_t linear,
+                                         const std::vector<int64_t> &extents) {
+  std::vector<int64_t> coordinate(extents.size());
+  for (size_t rev = extents.size(); rev > 0; --rev) {
+    size_t i = rev - 1;
+    coordinate[i] = linear % extents[i];
+    linear /= extents[i];
+  }
+  return coordinate;
+}
+
+std::optional<std::vector<int64_t>>
+EvaluateStaticMap(const Array<PrimExpr> &indices,
+                  const std::vector<int64_t> &input) {
+  Map<Var, PrimExpr> substitution;
+  for (size_t i = 0; i < input.size(); ++i) {
+    Var placeholder = InputPlaceholder(i);
+    substitution.Set(placeholder, IntImm(placeholder->dtype,
+                                         static_cast<int64_t>(input[i])));
+  }
+
+  arith::Analyzer analyzer;
+  std::vector<int64_t> output;
+  output.reserve(indices.size());
+  for (const PrimExpr &index : indices) {
+    PrimExpr value = analyzer.Simplify(Substitute(index, substitution));
+    std::optional<int64_t> constant = EvaluateConstantInteger(value);
+    if (!constant) {
+      return std::nullopt;
+    }
+    output.push_back(*constant);
+  }
+  return output;
+}
+
+bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
+                              const Array<PrimExpr> &output_shape,
+                              const Array<PrimExpr> &forward_indices,
+                              const Array<PrimExpr> &backward_indices) {
+  arith::Analyzer analyzer;
+
+  Array<Var> logical_vars;
+  Map<Var, PrimExpr> logical_substitution;
+  for (size_t i = 0; i < input_shape.size(); ++i) {
+    Var var("__layout_logical_" + std::to_string(i), input_shape[i].dtype());
+    analyzer.Bind(var, Range(0, input_shape[i]));
+    logical_vars.push_back(var);
+    logical_substitution.Set(InputPlaceholder(i), var);
+  }
+  Array<PrimExpr> physical_from_logical =
+      Substitute(forward_indices, logical_substitution);
+  Map<Var, PrimExpr> inverse_substitution;
+  for (size_t i = 0; i < physical_from_logical.size(); ++i) {
+    inverse_substitution.Set(InputPlaceholder(i), physical_from_logical[i]);
+  }
+  Array<PrimExpr> recovered_logical =
+      Substitute(backward_indices, inverse_substitution);
+  for (size_t i = 0; i < logical_vars.size(); ++i) {
+    if (!analyzer.CanProveEqual(recovered_logical[i], logical_vars[i])) {
+      return false;
+    }
+  }
+
+  Array<Var> physical_vars;
+  Map<Var, PrimExpr> physical_substitution;
+  for (size_t i = 0; i < output_shape.size(); ++i) {
+    Var var("__layout_physical_" + std::to_string(i), output_shape[i].dtype());
+    analyzer.Bind(var, Range(0, output_shape[i]));
+    physical_vars.push_back(var);
+    physical_substitution.Set(InputPlaceholder(i), var);
+  }
+  Array<PrimExpr> logical_from_physical =
+      Substitute(backward_indices, physical_substitution);
+  Map<Var, PrimExpr> forward_substitution;
+  for (size_t i = 0; i < logical_from_physical.size(); ++i) {
+    forward_substitution.Set(InputPlaceholder(i), logical_from_physical[i]);
+  }
+  Array<PrimExpr> recovered_physical =
+      Substitute(forward_indices, forward_substitution);
+  for (size_t i = 0; i < physical_vars.size(); ++i) {
+    if (!analyzer.CanProveEqual(recovered_physical[i], physical_vars[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+InverseRoundTripResult
+CheckStaticInverseRoundTrip(const Array<PrimExpr> &input_shape,
+                            const Array<PrimExpr> &output_shape,
+                            const Array<PrimExpr> &forward_indices,
+                            const Array<PrimExpr> &backward_indices) {
+  if (CanProveInverseRoundTrip(input_shape, output_shape, forward_indices,
+                               backward_indices)) {
+    return {InverseRoundTripStatus::kValid, ""};
+  }
+
+  std::vector<int64_t> input_extents;
+  std::vector<int64_t> output_extents;
+  int64_t input_domain_size = 0;
+  int64_t output_domain_size = 0;
+  if (!GetStaticDomain(input_shape, &input_extents, &input_domain_size) ||
+      !GetStaticDomain(output_shape, &output_extents, &output_domain_size)) {
+    return {InverseRoundTripStatus::kUnknown,
+            "the layout domain is symbolic or exceeds the exact-check limit"};
+  }
+  if (input_domain_size != output_domain_size) {
+    return {InverseRoundTripStatus::kInvalid,
+            "the logical and physical domains have different sizes"};
+  }
+
+  for (int64_t linear = 0; linear < input_domain_size; ++linear) {
+    std::vector<int64_t> logical = UnflattenCoordinate(linear, input_extents);
+    auto physical = EvaluateStaticMap(forward_indices, logical);
+    if (!physical) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the forward map could not be evaluated exactly at logical "
+              "coordinate " +
+                  FormatIntTuple(logical)};
+    }
+    auto recovered = EvaluateStaticMap(backward_indices, *physical);
+    if (!recovered) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the inverse map could not be evaluated exactly at physical "
+              "coordinate " +
+                  FormatIntTuple(*physical)};
+    }
+    if (*recovered != logical) {
+      return {InverseRoundTripStatus::kInvalid,
+              "logical coordinate " + FormatIntTuple(logical) +
+                  " maps to physical coordinate " + FormatIntTuple(*physical) +
+                  ", but the inferred inverse maps it to " +
+                  FormatIntTuple(*recovered)};
+    }
+  }
+
+  for (int64_t linear = 0; linear < output_domain_size; ++linear) {
+    std::vector<int64_t> physical = UnflattenCoordinate(linear, output_extents);
+    auto logical = EvaluateStaticMap(backward_indices, physical);
+    if (!logical) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the inverse map could not be evaluated exactly at physical "
+              "coordinate " +
+                  FormatIntTuple(physical)};
+    }
+    auto recovered = EvaluateStaticMap(forward_indices, *logical);
+    if (!recovered) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the forward map could not be evaluated exactly at logical "
+              "coordinate " +
+                  FormatIntTuple(*logical)};
+    }
+    if (*recovered != physical) {
+      return {InverseRoundTripStatus::kInvalid,
+              "physical coordinate " + FormatIntTuple(physical) +
+                  " maps to logical coordinate " + FormatIntTuple(*logical) +
+                  ", but the forward map maps it back to " +
+                  FormatIntTuple(*recovered)};
+    }
+  }
+  return {InverseRoundTripStatus::kValid, ""};
 }
 
 bool CanProveInjective(const Array<PrimExpr> &forward_indices,
@@ -867,6 +1061,18 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
       backward_index.push_back(inv[InputPlaceholder(i)]);
     } else {
       backward_index.push_back(0);
+    }
+  }
+
+  if (level == arith::IterMapLevel::Bijective) {
+    InverseRoundTripResult round_trip = CheckStaticInverseRoundTrip(
+        input_size_, outputs_shape, forward_index_, backward_index);
+    if (round_trip.status == InverseRoundTripStatus::kInvalid) {
+      std::ostringstream msg;
+      msg << "Layout " << DebugOutput()
+          << " has a non-round-tripping inverse: " << round_trip.detail
+          << ". Refusing to use an inferred inverse that changes coordinates.";
+      throw NormalizeIterException(msg.str());
     }
   }
 
