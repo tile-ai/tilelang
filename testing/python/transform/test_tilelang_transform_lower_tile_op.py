@@ -110,6 +110,7 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
     assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
+@tilelang.testing.requires_cuda
 def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
     """Reject #2948 instead of silently dropping a fragment index rotation."""
     size = 128
