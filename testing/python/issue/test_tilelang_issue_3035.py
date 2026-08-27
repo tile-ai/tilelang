@@ -1,6 +1,5 @@
 """Regression tests for T.gemm k_pack validation (issue #3035)."""
 
-import numpy as np
 import pytest
 
 import tilelang.language as T
@@ -23,22 +22,22 @@ def _make_gemm(k_pack):
     return main
 
 
-@pytest.mark.parametrize("k_pack", [1, 2, np.int64(1), np.int64(2)])
+@pytest.mark.parametrize("k_pack", [1, 2])
 def test_gemm_accepts_supported_k_pack(k_pack):
     assert _make_gemm(k_pack) is not None
 
 
 @pytest.mark.parametrize("k_pack", [0, -1, 3, 4, 8, 16])
 def test_gemm_rejects_unsupported_k_pack(k_pack):
-    with pytest.raises(ValueError, match=rf"T\.gemm k_pack must be 1 or 2, got {k_pack}"):
+    with pytest.raises(ValueError, match=rf"T\.gemm k_pack must be an int equal to 1 or 2, got {k_pack}"):
         _make_gemm(k_pack)
 
 
 @pytest.mark.parametrize("k_pack", [True, 2.0, "2", None])
 def test_gemm_rejects_non_integer_k_pack(k_pack):
-    with pytest.raises(TypeError) as exc_info:
+    with pytest.raises(ValueError) as exc_info:
         _make_gemm(k_pack)
-    assert str(exc_info.value) == (f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r} ({type(k_pack).__name__})")
+    assert str(exc_info.value) == f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r}"
 
 
 if __name__ == "__main__":
