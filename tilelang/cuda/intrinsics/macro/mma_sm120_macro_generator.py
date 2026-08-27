@@ -184,10 +184,9 @@ class SM120BlockScaleTile:
             raise ValueError(f"scale row must be in [0, {tile_rows}), got {row}")
         if kblock < 0 or kblock >= self.words_per_stage:
             raise ValueError(f"kblock must be a word column in [0, {self.words_per_stage}), got {kblock}")
-        # The packer stacks 128-row K-major atoms vertically; inside one atom
-        # rows are stored as [word][row % 32][row // 32], regardless of the
-        # staged tile height.
-        return (row // 128) * (self.words_per_stage * 128) + kblock * 128 + (row % 32) * 4 + (row % 128) // 32
+        # Single source of truth for the packed K-major word order lives in
+        # TensorCoreIntrinEmitterSM120._tile_kmajor_scale_word.
+        return TensorCoreIntrinEmitterSM120._tile_kmajor_scale_word(row, kblock, self.words_per_stage)
 
     def compact_selector_scale_rows(self, lane: int, warp_m: int, warp_n: int) -> tuple[tuple[int, int], tuple[int, int]]:
         """Return SFA/SFB semantic rows loaded by the current compact TV package."""
@@ -496,7 +495,9 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         if not is_a and not transposed:
             raise ValueError("sub-byte ldmatrix variants have no trans form; B must be transposed (K-last)")
         num = 4 if is_a or self.n_dim == 16 else 2
-        shift_words = (local_size if num == 4 else local_size // 2) // 4
+        # The ldmatrix writes num uint32 registers; every written word holds
+        # containers and must be shifted (x2 writes 2 words, x4 writes 4).
+        shift_words = num
 
         thread_binding = self.get_thread_binding()
         region = self._legalize_to_buffer_region(shared_buf)

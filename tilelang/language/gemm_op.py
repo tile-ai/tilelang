@@ -498,13 +498,18 @@ def mma_gemm_blockscaled(
     - ``(16, "ue8m0")``: NVF4 granularity with power-of-two scales,
       ``scale_vec::4X`` (needs CUDA 13.1+ toolchains)
 
-    ``kind::mxf8f6f4`` (FP8 operands, ``m16n8k32``):
+    ``kind::mxf8f6f4`` (f8f6f4 operands, ``m16n8k32``):
 
-    - ``(32, "ue8m0")``: MXFP8, ``scale_vec::1X`` (the only legal scale
-      vector size for this kind); any {e4m3, e5m2} A/B pairing is accepted.
-      Mixed e4m3 x e5m2 targets fp8 training backward passes, though this
-      synchronous TN path currently covers inference-style forward GEMMs
-      only.
+    - ``(32, "ue8m0")``: ``scale_vec::1X`` (the only legal scale vector
+      size for this kind); any A/B pairing of {``float8_e4m3``,
+      ``float8_e5m2``, ``float4_e2m1fn_unpacked``,
+      ``float6_e2m3fn_unpacked``, ``float6_e3m2fn_unpacked``} is accepted.
+      The sub-byte operands use the unpacked shared-memory forms (one
+      8-bit container per element); a packed ``float4_e2m1fn`` A/B *pair*
+      selects ``kind::mxf4nvf4`` above instead. Mixed pairings target
+      weight-quantized inference (e.g. W4A8/W6A8) and fp8 training
+      backward passes, though this synchronous TN path currently covers
+      inference-style forward GEMMs only.
 
     ``scale_dtype=None`` infers ``"ue4m3"`` for granularity 16 and
     ``"ue8m0"`` for granularity 32.

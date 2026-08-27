@@ -378,10 +378,6 @@ def test_w4a4_mxf8f6f4_rowmajor_correctness():
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
 
 
-if __name__ == "__main__":
-    tilelang.testing.main()
-
-
 @simplify_prim_func
 def _make_fp4_unpack_copy_kernel(rows, k_global, k_copy):
     @T.prim_func
@@ -873,7 +869,7 @@ def test_w6a8_example_su6_engaged_and_compression():
     """W6A8 acceptance A3 + A4: TMA + su6 engaged (no shift), 0.75 B/elem."""
     module = _load_w6a8_example()
     M = N = K = 256
-    kernel, A, B, _, _, _ = _w6a8_example_run(module, M, N, K)
+    kernel, _, B, _, _, _ = _w6a8_example_run(module, M, N, K)
     src = kernel.get_kernel_source()
     assert "tl::tma_load" in src  # 16U6_ALIGN16B producer engaged
     assert "tl::ptx_ldmatrix_su6_x" in src
@@ -999,3 +995,7 @@ def test_a8w6_tma_producer_matches_simt_producer_bitwise():
     C_tma = tma(A, B_blob.view(torch.int8), SFA, SFB)
     C_simt = simt(A, B_blob, SFA, SFB)
     assert torch.equal(C_tma.view(torch.int32), C_simt.view(torch.int32))
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

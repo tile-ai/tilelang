@@ -89,11 +89,17 @@ def test_quantize_mxfp8_nan_input_zeroes_its_block():
     assert bool((fp8_data[0, :32].to(torch.float32) == 0).all())
 
 
-def test_quantize_mxfp8_inf_saturates_block_scale():
+@pytest.mark.parametrize("dtype,fmt_max", [("e4m3", 448.0), ("e5m2", 57344.0)])
+def test_quantize_mxfp8_inf_saturates_block_scale(dtype, fmt_max):
     x = torch.randn(128, 256, dtype=torch.bfloat16)
     x[0, 5] = float("inf")
-    _, _, sbytes = quantize_bf16_to_mxfp8_blockscaled(x, return_scale_bytes=True)
+    data, _, sbytes = quantize_bf16_to_mxfp8_blockscaled(x, dtype=dtype, return_scale_bytes=True)
     assert int(sbytes[0, 0]) == 0xFE
+    # The Inf element itself must be finite and equal to the format maximum
+    # (e4m3fn has no Inf: an unclamped cast would produce NaN; e5m2 would
+    # keep Inf).
+    v = data[0, 5].to(torch.float32)
+    assert bool(torch.isfinite(v)) and float(v) == fmt_max
 
 
 if __name__ == "__main__":

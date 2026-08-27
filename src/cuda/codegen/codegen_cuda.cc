@@ -3318,8 +3318,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
            "e2m1.e2m1 f32 with (scale_vec::4X, ue4m3), (scale_vec::2X, "
            "ue8m0), or (scale_vec::4X, ue8m0); f32 m16n8k32 row.col "
-           "kind::mxf8f6f4 {e4m3,e5m2}x{e4m3,e5m2} f32 with (scale_vec::1X, "
-           "ue8m0).";
+           "kind::mxf8f6f4 with any pairing of {e2m1, e2m3, e3m2, e4m3, "
+           "e5m2} and (scale_vec::1X, ue8m0).";
 
     auto resolve_fp4_packed_buffer =
         [&](const PrimExpr &var_expr, std::string &ref, std::string &offset) {

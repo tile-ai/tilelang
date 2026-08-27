@@ -157,12 +157,15 @@ bool GetIsTmaCopy(const CopyNode &op) {
   return GetBoolAnnotation(op, "is_tma_copy");
 }
 
+// Packed-align16 CUtensorMap data types (kept by CUDA's documented enum
+// order; shared by descriptor construction and compile-time validation).
+constexpr int kTensorMapDataType16U4Align16B = 14;
+constexpr int kTensorMapDataType16U6Align16B = 15;
+
 int TensorMapDataTypeForTMA(DataType global_dtype, DataType shared_dtype) {
   // 16U4_ALIGN16B: f8f6f4 / mxf8f6f4 unpacked FP4 SMEM
   // (float_e2m1_unpacksmem_t). 16U4_ALIGN8B: packed FP4 for mxf4 / mxf4nvf4
   // (float_e2m1_t).
-  constexpr int kTensorMapDataType16U4Align16B = 14;
-  constexpr int kTensorMapDataType16U6Align16B = 15;
   if (shared_dtype.is_float4_e2m1_unpacked()) {
     ICHECK(global_dtype.is_float4_e2m1fn())
         << "FP4 packed global tensor required for unpacked shared TMA copy";
@@ -2071,8 +2074,6 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     // driver rule: the innermost global dimension must be a whole number of
     // 128-element groups. Enforce it at compile time when the extent is
     // static; symbolic shapes still hit the runtime descriptor validation.
-    constexpr int kTensorMapDataType16U4Align16B = 14;
-    constexpr int kTensorMapDataType16U6Align16B = 15;
     if (i == 0 && (desc.data_type == kTensorMapDataType16U4Align16B ||
                    desc.data_type == kTensorMapDataType16U6Align16B)) {
       if (auto inner = as_const_int(desc.global_shape[0])) {

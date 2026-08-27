@@ -72,6 +72,10 @@ def quantize_bf16_to_mxfp8_blockscaled(
     scale_bytes = encode_ue8m0_scale_bytes(amax / _FP8_MAX[dtype], rounding="ceil")
     scale_values = decode_ue8m0_scale_bytes(scale_bytes)
     scaled_blocks = torch.where(amax[..., None] > 0, blocks / scale_values[..., None], torch.zeros_like(blocks))
+    # Saturate before the cast: a direct cast of Inf yields NaN for e4m3fn
+    # (which has no Inf encoding) and preserves Inf for e5m2; the contract
+    # is that Inf saturates to the format maximum (pinned by CPU tests).
+    scaled_blocks = scaled_blocks.clamp(min=-_FP8_MAX[dtype], max=_FP8_MAX[dtype])
     torch_fp8 = torch.float8_e4m3fn if dtype == "e4m3" else torch.float8_e5m2
     fp8_data = scaled_blocks.reshape(rows, cols).to(torch_fp8)
     packed_scales = pack_blockscaled_chunk_kmajor_ue8m0_scale_bytes(scale_bytes, block_rows=block_rows, block_words=block_words)
