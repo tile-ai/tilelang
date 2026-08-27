@@ -1,9 +1,9 @@
 """Tests for TileLang `LowerTileOp` copy annotations affecting cp.async sync."""
 
+import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-import pytest
 from tilelang import tvm
 from tvm.tirx.stmt_functor import post_order_visit
 
