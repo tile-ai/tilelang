@@ -4,10 +4,11 @@
 # to pip-installed packages (nvidia-cuda-nvcc, nvidia-cuda-cccl).
 #
 # CMakeLists.txt includes this module twice. The first include, before project(),
-# passes TILELANG_ACTIVATE_NINJA_ONLY and only locates Ninja; the second, after
-# project(), runs the CUDA detection (which needs an enabled language). See the note
-# next to the TILELANG_ACTIVATE_NINJA_ONLY check below. CMAKE_CUDA_COMPILER is set as
-# a cache entry, so it is still visible to subprojects configured afterwards.
+# passes TILELANG_PRE_PROJECT_ONLY and only activates the toolchain (MSVC environment,
+# Ninja lookup); the second, after project(), runs the CUDA detection, which needs an
+# enabled language. See the note next to the TILELANG_PRE_PROJECT_ONLY check below.
+# CMAKE_CUDA_COMPILER is set as a cache entry, so it is still visible to subprojects
+# configured afterwards.
 #
 # Detection order:
 #   1. Try find_package(CUDAToolkit QUIET) — succeeds if a host CUDA
@@ -426,8 +427,6 @@ function(_tilelang_activate_msvc_env)
   message(STATUS "FindPipCUDAToolkit: activated MSVC environment for Ninja via ${_tilelang_vsdevcmd_native}")
 endfunction()
 
-_tilelang_activate_msvc_env()
-
 function(_tilelang_activate_ninja)
   if(NOT CMAKE_GENERATOR MATCHES "Ninja")
     return()
@@ -467,20 +466,29 @@ function(_tilelang_activate_ninja)
   endif()
 endfunction()
 
-_tilelang_activate_ninja()
-
-# CMakeLists.txt includes this module twice: once before project() with
-# TILELANG_ACTIVATE_NINJA_ONLY set, so that CMAKE_MAKE_PROGRAM is in place when the
-# generator is resolved, and once after project() for the CUDA detection below.
+# CMakeLists.txt includes this module twice, because its two jobs want opposite sides
+# of project():
 #
-# The split is required because find_package(CUDAToolkit) sets up its imported
-# targets, and that path calls find_package(Threads REQUIRED) whenever
-# CMAKE_C_COMPILER or CMAKE_CXX_COMPILER is set. FindThreads aborts with
-# "FindThreads only works if either C or CXX language is enabled" unless a language
-# is enabled, which is not the case before project(). On a fresh configure those two
-# variables are still empty, so the branch is skipped and nothing fails; on a
-# reconfigure they are restored from the cache, so the pre-project include aborted.
-if(TILELANG_ACTIVATE_NINJA_ONLY)
+#   * Toolchain activation (MSVC environment, Ninja lookup) must run *before*
+#     project(), since that is where the generator resolves CMAKE_MAKE_PROGRAM and
+#     where the compilers are probed.
+#   * CUDA detection must run *after* project(). find_package(CUDAToolkit) sets up its
+#     imported targets, and that path calls find_package(Threads REQUIRED) whenever
+#     CMAKE_C_COMPILER or CMAKE_CXX_COMPILER is set. FindThreads aborts with
+#     "FindThreads only works if either C or CXX language is enabled" unless a
+#     language is enabled. On a fresh configure those two variables are still empty,
+#     so the branch is skipped and nothing fails; on a reconfigure they are restored
+#     from the cache, so a pre-project include aborts.
+#
+# The activation helpers stay inside the first phase on purpose:
+# _tilelang_activate_msvc_env() is not idempotent. Its early-out tests
+# ENV{VSCMD_VER}, which VsDevCmd.bat's output does not carry back, so a second call
+# in the same configure re-runs the whole probe and prepends another copy of the
+# /LIBPATH flags to the cached CMAKE_*_LINKER_FLAGS entries, which then grow on every
+# reconfigure.
+if(TILELANG_PRE_PROJECT_ONLY)
+  _tilelang_activate_msvc_env()
+  _tilelang_activate_ninja()
   return()
 endif()
 

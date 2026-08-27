@@ -3,12 +3,13 @@
 
 cmake_minimum_required(VERSION 3.26)
 
-# Locate Ninja before project(): that is where the generator resolves
-# CMAKE_MAKE_PROGRAM. CUDA detection lives in the same module but must run after
-# project() instead -- see the second include below.
-set(TILELANG_ACTIVATE_NINJA_ONLY ON)
+# Activate the build toolchain before project(): the MSVC environment has to be in
+# place when the compilers are probed, and the generator resolves CMAKE_MAKE_PROGRAM
+# there. CUDA detection lives in the same module but must run after project() instead
+# -- see the second include below.
+set(TILELANG_PRE_PROJECT_ONLY ON)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
-unset(TILELANG_ACTIVATE_NINJA_ONLY)
+unset(TILELANG_PRE_PROJECT_ONLY)
 
 # Capture this CMakeLists.txt's directory once so `function()` bodies below
 # can reference files shipped with the project. CMake 4.x resolves
