@@ -453,6 +453,43 @@ void CodeGenTileLangC::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
 }
 
+void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
+  if (op->kind == ForKind::kParallel && omp_parallel_chain_depth_ == 0) {
+    // Head of a parallel chain: count the perfectly-nested kParallel body
+    // loops for the collapse(n) clause, then print serially via the base
+    // class while suppressing pragma re-emission on the chain members.
+    int depth = 1;
+    for (const ForNode *child = op->body.as<ForNode>();
+         child && child->kind == ForKind::kParallel;
+         child = child->body.as<ForNode>()) {
+      ++depth;
+    }
+    this->PrintIndent();
+    stream << "#pragma omp parallel for";
+    if (depth > 1) {
+      stream << " collapse(" << depth << ")";
+    }
+    if (auto num_threads = op->annotations.Get(tl::kCPUNumThreads)) {
+      if (const auto *imm = num_threads->as<IntImmNode>()) {
+        stream << " num_threads(" << imm->value << ")";
+      }
+    }
+    stream << "\n";
+    omp_parallel_chain_depth_ = depth;
+    CodeGenC::VisitStmt_(op);
+    omp_parallel_chain_depth_ = 0;
+    return;
+  }
+  if (op->kind == ForKind::kParallel) {
+    // Continuation of an already-annotated chain: print serially.
+    --omp_parallel_chain_depth_;
+    CodeGenC::VisitStmt_(op);
+    ++omp_parallel_chain_depth_;
+    return;
+  }
+  CodeGenC::VisitStmt_(op);
+}
+
 void CodeGenTileLangC::VisitExpr_(const MinNode *op,
                                   std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, "<", os);

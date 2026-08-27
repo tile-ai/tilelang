@@ -22,6 +22,7 @@
  */
 
 #include "common/attr.h"
+#include "op/builtin.h"
 #include "support/check.h"
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
@@ -34,6 +35,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace tvm::ffi;
 
 namespace {
 
@@ -57,8 +59,10 @@ bool IsLaunchBinding(const ForNode *op) {
 
 class KernelLaunchMaterializer : public StmtMutator {
 public:
-  explicit KernelLaunchMaterializer(bool lower_thread_binding)
-      : lower_thread_binding_(lower_thread_binding) {}
+  explicit KernelLaunchMaterializer(bool lower_thread_binding,
+                                    bool annotate_grid)
+      : lower_thread_binding_(lower_thread_binding),
+        annotate_grid_(annotate_grid) {}
 
   Stmt VisitStmt_(const ForNode *op) final {
     if (IsLaunchBinding(op)) {
@@ -87,16 +91,29 @@ private:
     }
     // No SIMT: grid dims run as plain serial loops; thread dims are ignored
     // (a unit loop keeps the loop variable defined and pinned to 0).
-    PrimExpr extent = IsThreadBinding(op)
-                          ? PrimExpr(IntImm(op->extent.dtype(), 1))
-                          : op->extent;
+    bool is_block = IsBlockBinding(op);
+    PrimExpr extent =
+        is_block ? op->extent : PrimExpr(IntImm(op->extent.dtype(), 1));
+    Map<ffi::String, ffi::Any> annotations = op->annotations;
+    if (annotate_grid_ && is_block && !annotations.count(attr::kCPUGridDim)) {
+      // Annotate every grid dim, including unit-extent ones: the consumer
+      // treats the annotated nest as one contiguous chain, and skipping a
+      // middle dim would cut the deeper dims off from parallelization (the
+      // llvm side skips unit dims itself when picking the loop to mark).
+      annotations.Set(attr::kCPUGridDim, IntImm(DataType::Int(32), block_dim_));
+    }
+    if (is_block) {
+      ++block_dim_;
+    }
     return For(op->loop_var, op->min, std::move(extent), ForKind::kSerial,
                std::move(body),
-               /*thread_binding=*/std::nullopt, op->annotations, op->step,
-               op->span);
+               /*thread_binding=*/std::nullopt, std::move(annotations),
+               op->step, op->span);
   }
 
   bool lower_thread_binding_;
+  bool annotate_grid_;
+  int block_dim_ = 0;
 };
 
 } // namespace
@@ -106,7 +123,11 @@ tvm::transform::Pass MaterializeKernelLaunch(bool lower_thread_binding) {
   auto pass_func = [lower_thread_binding](
                        PrimFunc func, const IRModule &mod,
                        const tvm::transform::PassContext &ctx) -> PrimFunc {
-    KernelLaunchMaterializer mutator(lower_thread_binding);
+    bool annotate_grid = false;
+    if (!lower_thread_binding) {
+      annotate_grid = ctx->GetConfig<Bool>(kCPUParallel, Bool(false)).value();
+    }
+    KernelLaunchMaterializer mutator(lower_thread_binding, annotate_grid);
     func.CopyOnWrite()->body = mutator(func->body);
     return func;
   };

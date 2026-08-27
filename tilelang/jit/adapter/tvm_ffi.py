@@ -12,6 +12,7 @@ from typing import Any
 from collections.abc import Callable
 import sys
 import threading
+import warnings
 
 import torch
 from tilelang import tvm
@@ -20,6 +21,7 @@ from tvm.target import Target
 from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.transform import PassConfigKey
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
@@ -123,10 +125,39 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if self.rt_mod is None:
             raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
         executable = runtime.Executable(self.rt_mod)
-        if COMPILE_ARGS:
-            # Precompile jit module with extra arguments.
-            executable.jit(**COMPILE_ARGS)
+        compile_args = dict(COMPILE_ARGS)
+        openmp_flags = self._cpu_openmp_flags()
+        if openmp_flags:
+            options = list(compile_args.get("options", []))
+            options += openmp_flags
+            compile_args["options"] = options
+        if compile_args:
+            # Precompile jit module with extra arguments. On the ``c`` target
+            # this is also where the OpenMP-pragmed kernel source is compiled,
+            # so the options above carry the -fopenmp flag family.
+            executable.jit(**compile_args)
         return executable
+
+    def _cpu_openmp_flags(self) -> list[str]:
+        """OpenMP compile flags when the ``c``-target kernel enables them.
+
+        The ``llvm`` target lowers kParallel to TVMBackendParallelLaunch (own
+        thread pool) and needs no OpenMP runtime, so only the ``c`` target
+        injects flags here.
+        """
+        if not self.pass_configs or not self.pass_configs.get(PassConfigKey.TL_CPU_PARALLEL, False):
+            return []
+        if self.target.kind.name != "c":
+            return []
+        if sys.platform == "win32":
+            warnings.warn(
+                "tl.cpu_parallel: OpenMP flag injection for the tvm_ffi backend is not supported on Windows yet; compiling serially.",
+                stacklevel=2,
+            )
+            return []
+        from tilelang.contrib.openmp import get_openmp_compile_flags
+
+        return get_openmp_compile_flags()
 
     def _get_executable(self) -> tvm.runtime.Executable:
         executable = self.executable

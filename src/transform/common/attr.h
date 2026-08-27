@@ -42,6 +42,13 @@ constexpr const char *kAssumeRequiresRuntimeCheck =
 constexpr const char *kCodeBlockSource = "code_block_source";
 constexpr const char *kCodeBlockEntryName = "code_block_entry_name";
 
+// Marks a grid (blockIdx) loop lowered by MaterializeKernelLaunch on a CPU
+// target, valued by its grid dimension index. Consumed (and removed) by
+// MaterializeCPUParallelGrid late in the CPU pipeline to convert the loop
+// nest to ForKind::kParallel. Only added when the tl.cpu_parallel pass
+// config is enabled.
+constexpr const char *kCPUGridDim = "tl.cpu_grid_dim";
+
 /*!
  * \brief Check if attr_key is a code block key extension
  * \param attr_key The attr key to be compared

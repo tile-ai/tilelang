@@ -7,6 +7,7 @@ import tilelang
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    should_enable_cpu_parallel,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -70,6 +71,15 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.Simplify()(mod)
     mod = tirx.transform.RemoveNoOp()(mod)
     mod = s_tir.transform.HoistIfThenElse()(mod)
+
+    # Opt-in OpenMP lowering of the grid nest (tl.cpu_parallel). Loop
+    # structure is final here (UnrollLoop / LoopUnswitching / HoistIfThenElse
+    # have run, StorageRewrite is past) and no later pass rewrites loop
+    # kinds. Atomics are already plain RMW BufferStores at this point, so the
+    # re-run race check below sees the stores that cross-block atomics
+    # produce and can flag them.
+    if should_enable_cpu_parallel():
+        mod = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
