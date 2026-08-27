@@ -93,8 +93,8 @@ def test_tma_load_pipeline():
         T.WSSchedule(
             num_warps=8,
             roles=[
-                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
-                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
+                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=104),
+                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=24),
             ],
             pipelines=[T.WSPipeline("S", [bufs["S"]], depth=2)],
             scopes=[
@@ -158,8 +158,8 @@ def test_two_cycles_on_one_buffer_and_root_depth():
         T.WSSchedule(
             num_warps=8,
             roles=[
-                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
-                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
+                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=104),
+                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=24),
             ],
             pipelines=[T.WSPipeline("S", [bufs["S"]], depth=1)],
             scopes=[
@@ -345,8 +345,8 @@ def test_worker_gemm_topology_materializes():
         T.WSSchedule(
             num_warps=8,
             roles=[
-                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
-                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
+                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=104),
+                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=24),
             ],
             pipelines=[
                 T.WSPipeline("A_shared", [bufs["A_shared"]], depth=2),
@@ -435,10 +435,10 @@ def test_tmem_gemm_four_role_topology():
         T.WSSchedule(
             num_warps=8,
             roles=[
-                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
-                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
-                T.WSRole("MMA", warps_lo=5, warps_hi=6, max_nreg=32),
-                T.WSRole("Store", warps_lo=6, warps_hi=7, max_nreg=32),
+                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=232),
+                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=24),
+                T.WSRole("MMA", warps_lo=5, warps_hi=6, max_nreg=24),
+                T.WSRole("Store", warps_lo=6, warps_hi=7, max_nreg=24),
             ],
             pipelines=[
                 T.WSPipeline("A_shared", [bufs["A_shared"]], depth=2),
@@ -676,9 +676,9 @@ def test_rmw_accumulator_nested_pipelines():
         T.WSSchedule(
             num_warps=8,
             roles=[
-                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
-                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
-                T.WSRole("MMA", warps_lo=5, warps_hi=6, max_nreg=32),
+                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=104),
+                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=24),
+                T.WSRole("MMA", warps_lo=5, warps_hi=6, max_nreg=24),
             ],
             pipelines=[
                 T.WSPipeline("A_shared", [bufs["A_shared"]], depth=2),
@@ -803,8 +803,8 @@ def test_post_loop_read_forms_outer_pipeline():
         T.WSSchedule(
             num_warps=8,
             roles=[
-                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
-                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
+                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=104),
+                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=24),
             ],
             pipelines=[
                 T.WSPipeline("S", [bufs["S"]], depth=2),
@@ -955,8 +955,8 @@ def test_while_scope_is_scheduled():
         T.WSSchedule(
             num_warps=8,
             roles=[
-                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
-                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
+                T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=104),
+                T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=24),
             ],
             pipelines=[T.WSPipeline("S", [bufs["S"]], depth=1)],
             scopes=[

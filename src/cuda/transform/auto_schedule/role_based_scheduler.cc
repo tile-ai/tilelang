@@ -31,8 +31,8 @@
  * cycle (producer_consumer_ws's positional criterion; merging is then
  * free by construction). Software-pipeline stage offsets (every sync is
  * stage 0); if-else branches; sibling-pipeline chaining; multi-consumer
- * fan-out; a multi-warp copy role; delayed wgmma waits (wg_wait != 0
- * declines).
+ * fan-out; a multi-warp role for register-staged SIMT copies; delayed
+ * wgmma waits (wg_wait != 0 declines).
  */
 
 #include "./role_based_scheduler.h"
@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "./memory_detector.h"
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ws_analysis.h"
 #include "op/copy.h"
@@ -73,6 +74,37 @@ enum class Role : uint8_t { kWorker = 0, kLoad = 1, kMma = 2, kStore = 3 };
 constexpr int kNumRoles = 4;
 constexpr std::array<Role, kNumRoles> kAllRoles = {Role::kWorker, Role::kLoad,
                                                    Role::kMma, Role::kStore};
+
+constexpr int kAuxiliaryRoleNumRegisters = 24;
+
+// Registers for a widened cp.async Load warpgroup's addressing work.
+constexpr int kCpAsyncLoadNumRegisters = 48;
+
+// Occupancy estimate cap, and the per-SM capacities bounding it.
+constexpr int kHeuristicBlocksPerSM = 4;
+constexpr int kMaxThreadsPerSM = 2048;
+constexpr int kSmemBytesPerSM = 228 * 1024; // sm90 / sm100
+constexpr int kTmemBytesPerSM = 256 * 1024; // 512 b32 columns of 128 rows
+
+// The occupancy annotation from the T.annotate_min_blocks_per_sm
+// wrapper, 0 when absent.
+int AnnotatedMinBlocksPerSM(const Stmt &body) {
+  int min_blocks = 0;
+  PostOrderVisit(body, [&](const ObjectRef &node) {
+    if (const auto *attr = node.as<AttrStmtNode>()) {
+      if (attr->attr_key == attr::kMinBlocksPerSM) {
+        if (const auto *imm = attr->value.as<IntImmNode>()) {
+          if (imm->value <= 0) {
+            LOG(FATAL) << "min_blocks_per_sm must be positive, got: "
+                       << imm->value;
+          }
+          min_blocks = static_cast<int>(imm->value);
+        }
+      }
+    }
+  });
+  return min_blocks;
+}
 
 // A SET of roles: an op is replicated into several roles when roleless,
 // and a scope's participants span its ops' roles. Single-role facts use
@@ -426,6 +458,8 @@ public:
       return std::nullopt;
     }
     CollectAnnotatedLayouts(block, layout_map_);
+    annotated_min_blocks_ = AnnotatedMinBlocksPerSM(body);
+    alloc_buffers_ = block->alloc_buffers;
     if (!BuildStructure(body) || !ClassifyOps())
       return std::nullopt;
     IndexBufferUses();
@@ -1006,25 +1040,124 @@ private:
 
   // ---- emission -------------------------------------------------------------
 
+  struct RolePlan {
+    Role role;
+    int warp_lo;
+    int warp_hi;
+    int nreg;
+  };
+
+  // Use more threads if async producer is cp.async.
+  bool HasCpAsyncLoad() const {
+    for (const auto &op : ops_)
+      if (op->kind == TileStmtKind::kCpAsyncProducer &&
+          op->PlacedIn(Role::kLoad))
+        return true;
+    return false;
+  }
+
+  // The occupancy-target average minus the auxiliary requests, split
+  // over the worker warpgroups. 0 = emit no setmaxnreg anywhere: the
+  // split fell below the average or outside setmaxnreg's [24, 256].
+  int WorkerNreg(const std::vector<RolePlan> &plans, int num_warps,
+                 int avg) const {
+    int worker_warps = worker_threads_ / 32;
+    if (worker_warps % 4 != 0 || num_warps == worker_warps)
+      return 0;
+    int budget = num_warps / 4 * avg;
+    for (int wg = worker_warps / 4; wg < num_warps / 4; ++wg) {
+      int nreg = kAuxiliaryRoleNumRegisters; // idle warps donate too
+      for (const RolePlan &p : plans)
+        if (p.role != Role::kWorker && p.warp_lo < (wg + 1) * 4 &&
+            wg * 4 < p.warp_hi)
+          nreg = std::max(nreg, p.nreg);
+      budget -= nreg;
+    }
+    int nreg = budget / (worker_warps / 4) / 8 * 8;
+    if (nreg < std::max(avg, 24) || nreg > 256)
+      return 0;
+    return nreg;
+  }
+
+  // Occupancy estimate from the scheduled resource usage: shared and
+  // tensor memory.
+  int EstimateBlocksPerSM(int num_threads) const {
+    if (annotated_min_blocks_ > 0)
+      return annotated_min_blocks_;
+    int64_t smem_bytes = 0;
+    int64_t tmem_bytes = 0;
+    for (const Buffer &buf : alloc_buffers_) {
+      if (!IsPipelineBuffer(buf))
+        continue;
+      int64_t bytes = (buf->dtype.bits() * buf->dtype.lanes() + 7) / 8;
+      for (const PrimExpr &extent : buf->shape) {
+        const auto *imm = extent.as<IntImmNode>();
+        if (imm == nullptr)
+          return 1;
+        bytes *= imm->value;
+      }
+      int64_t versions = 1;
+      for (const Pipeline &pipeline : pipelines_)
+        if (pipeline.allocation.same_as(buf))
+          versions = std::max<int64_t>(versions, pipeline.depth);
+      if (IsSharedBuffer(buf))
+        smem_bytes += bytes * versions;
+      else
+        tmem_bytes += bytes * versions;
+    }
+    int64_t blocks = std::min<int64_t>(kHeuristicBlocksPerSM,
+                                       kMaxThreadsPerSM / num_threads);
+    if (smem_bytes > 0)
+      blocks = std::min<int64_t>(blocks, kSmemBytesPerSM / smem_bytes);
+    if (tmem_bytes > 0)
+      blocks = std::min<int64_t>(blocks, kTmemBytesPerSM / tmem_bytes);
+    return std::max<int64_t>(1, blocks);
+  }
+
+  // Plan the active roles in warp order: worker low, one warp per
+  // auxiliary role, a cp.async Load widened to a full warpgroup.
+  std::vector<RolePlan> PlanRoles(RoleMask active) const {
+    int worker_warps = worker_threads_ / 32;
+    std::vector<RolePlan> plans;
+    int cursor = active.Contains(Role::kWorker) ? worker_warps : 0;
+    for (Role role : kAllRoles) {
+      if (!active.Contains(role))
+        continue;
+      if (role == Role::kWorker) {
+        plans.push_back({role, 0, worker_warps, 0});
+        continue;
+      }
+      bool wide = role == Role::kLoad && HasCpAsyncLoad();
+      plans.push_back(
+          {role, cursor, cursor + (wide ? 4 : 1),
+           wide ? kCpAsyncLoadNumRegisters : kAuxiliaryRoleNumRegisters});
+      cursor = plans.back().warp_hi;
+    }
+    int num_warps = (cursor + 3) / 4 * 4;
+    // Registers per thread at the occupancy target.
+    int num_threads = num_warps * 32;
+    int avg = 65536 / (EstimateBlocksPerSM(num_threads) * num_threads) / 8 * 8;
+    int worker_nreg = 0;
+    for (RolePlan &p : plans)
+      if (p.role == Role::kWorker)
+        p.nreg = worker_nreg = WorkerNreg(plans, num_warps, avg);
+    // Donations pay off only when the worker receives.
+    if (worker_nreg == 0)
+      for (RolePlan &p : plans)
+        p.nreg = 0;
+    return plans;
+  }
+
   Optional<WSSchedule> Emit() const {
     RoleMask active;
     for (const auto &op : ops_)
       active.Add(op->roles);
 
-    Array<WSRole> roles;
-    int worker_warps = worker_threads_ / 32;
-    int cursor = 0;
-    if (active.Contains(Role::kWorker)) {
-      roles.push_back(WSRole(RoleName(Role::kWorker), 0, worker_warps, 0));
-      cursor = worker_warps;
-    }
-    for (Role role : {Role::kLoad, Role::kMma, Role::kStore}) {
-      if (active.Contains(role)) {
-        roles.push_back(WSRole(RoleName(role), cursor, cursor + 1, 32));
-        ++cursor;
-      }
-    }
-    int num_warps = (cursor + 3) / 4 * 4;
+    std::vector<RolePlan> plans = PlanRoles(active);
+    int num_warps = 0;
+    for (const RolePlan &p : plans)
+      num_warps = std::max(num_warps, p.warp_hi);
+    num_warps = (num_warps + 3) / 4 * 4;
     int max_threads = static_cast<int>(
         target_->GetAttr<Integer>("max_num_threads").value_or(1024)->value);
     if (num_warps * 32 > max_threads) {
@@ -1033,6 +1166,10 @@ private:
                    << "-thread block limit";
       return std::nullopt;
     }
+
+    Array<WSRole> roles;
+    for (const RolePlan &p : plans)
+      roles.push_back(WSRole(RoleName(p.role), p.warp_lo, p.warp_hi, p.nreg));
 
     Array<WSPipeline> ws_pipelines;
     for (const Pipeline &pipeline : pipelines_) {
@@ -1100,6 +1237,8 @@ private:
 
   Target target_;
   int worker_threads_;
+  int annotated_min_blocks_ = 0;
+  Array<Buffer> alloc_buffers_;
   BufferLayoutMap layout_map_;
   std::vector<std::unique_ptr<SchedOp>> ops_;
   std::vector<std::unique_ptr<SchedScope>> scopes_; // [0] is the root

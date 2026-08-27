@@ -103,10 +103,6 @@ using namespace ffi;
 
 namespace {
 
-// Below this register budget a role donates registers (setmaxnreg.dec);
-// at or above it the role receives (setmaxnreg.inc).
-constexpr int kNregIncThreshold = 128;
-
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -167,7 +163,7 @@ struct RoleSpec {
   int nreg = 0;                 // 0 = absent
   int index = -1;               // position in the sorted role list
   int NumThreads() const { return (warp_hi - warp_lo) * 32; }
-  int NregAction() const { return nreg >= kNregIncThreshold ? 1 : 0; }
+  int NregAction(int avg_nreg) const { return nreg >= avg_nreg ? 1 : 0; }
 };
 
 // Identity-keyed maps on Buffer handles. Iteration order is hash order
@@ -512,7 +508,7 @@ public:
     BuildUseChains();
     PlanArriveCounts();
     VerifySchedule();
-    return RebuildBlock(EmitRoleBranches());
+    return RebuildBlock(MarkCustomWS(EmitRoleBranches()));
   }
 
 private:
@@ -605,13 +601,18 @@ private:
     }
     int donor = 0;
     for (const auto &r : roles_) {
-      if (r->nreg > 0 && r->NregAction() == 0)
+      if (r->nreg > 0)
         donor = donor == 0 ? r->nreg : std::min(donor, r->nreg);
     }
     for (int &v : warpgroup_nreg_) {
       if (v == -1)
         v = donor;
     }
+    // setmaxnreg keeps the block's register total constant
+    avg_nreg_ = 0;
+    for (int v : warpgroup_nreg_)
+      avg_nreg_ += v;
+    avg_nreg_ /= static_cast<int>(warpgroup_nreg_.size());
 
     // Pipelines.
     for (const WSPipeline &p : sched->pipelines) {
@@ -2602,10 +2603,10 @@ private:
 
     Array<Stmt> stmts;
     if (role.nreg > 0) {
-      stmts.push_back(
-          Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                        {IntImm(DataType::Int(32), role.nreg),
-                         IntImm(DataType::Int(32), role.NregAction())})));
+      stmts.push_back(Evaluate(
+          Call(DataType::Handle(), set_max_nreg(),
+               {IntImm(DataType::Int(32), role.nreg),
+                IntImm(DataType::Int(32), role.NregAction(avg_nreg_))})));
     }
 
     // Runtime phase counters where linearization is unsound.
@@ -2643,7 +2644,7 @@ private:
     return Evaluate(
         Call(DataType::Handle(), set_max_nreg(),
              {IntImm(DataType::Int(32), nreg),
-              IntImm(DataType::Int(32), nreg >= kNregIncThreshold ? 1 : 0)}));
+              IntImm(DataType::Int(32), nreg >= avg_nreg_ ? 1 : 0)}));
   }
 
   // Emit the `if (tx < ...)` role branches ordered by warp range,
@@ -2665,8 +2666,6 @@ private:
     };
     int cursor = 0;
     for (const auto &role : roles_) {
-      ICHECK_GE(role->warp_lo, cursor)
-          << "ws_schedule: overlapping role warp ranges";
       fill_idle(cursor, role->warp_lo);
       conds.push_back(thread_var_ <
                       IntImm(DataType::Int(32), role->warp_hi * 32));
@@ -2678,6 +2677,14 @@ private:
     for (int i = static_cast<int>(branches.size()) - 2; i >= 0; --i)
       body = IfThenElse(conds[i], branches[i], std::move(body));
     return body;
+  }
+
+  // The roles carry their own setmaxnreg calls: mark the kernel as
+  // custom warp specialization so AnnotateWarpGroupRegAlloc stays out.
+  Stmt MarkCustomWS(Stmt body) const {
+    return AttrStmt(IntImm(DataType::Int(32), 0),
+                    attr::kCustomWarpSpecialization,
+                    IntImm(DataType::Int(32), 1), std::move(body));
   }
 
   // Rebuild the block: versioned buffers, barrier allocations with
@@ -2759,6 +2766,7 @@ private:
   Var thread_var_;
   Target target_;
   int num_warps_ = 0;
+  int avg_nreg_ = 0;
   std::vector<std::unique_ptr<RoleSpec>> roles_;
   std::vector<std::unique_ptr<PipelineSpec>> pipelines_;
   std::vector<std::shared_ptr<Scope>> scopes_;

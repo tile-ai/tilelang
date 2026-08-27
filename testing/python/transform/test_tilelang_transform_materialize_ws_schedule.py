@@ -124,6 +124,9 @@ def test_basic_two_role_transform():
     assert "if tx < 32:" in script
     assert "T.set_max_nreg(40, 0)" in script
     assert "T.set_max_nreg(224, 1)" in script
+    # The roles carry their own setmaxnreg: marked custom WS so the late
+    # reg-alloc pass stays out.
+    assert 'T.attr(0, "kCustomWarpSpecialization", 1)' in script
     # The schedule annotation is consumed.
     assert "ws_schedule" not in script
     # Every scheduling marker is stripped.
@@ -2780,8 +2783,7 @@ def test_idle_warps_adopt_warpgroup_nreg():
 
     func = _materialize(kernel)
     script = str(func)
-    # Producer branch + idle warps 1..3 of warpgroup 0: both request 80.
-    assert script.count("T.set_max_nreg(80, 0)") == 2
+    assert script.count("T.set_max_nreg(80, 1)") == 2
     assert script.count("T.set_max_nreg(40, 0)") == 1  # consumer warpgroup
 
 
