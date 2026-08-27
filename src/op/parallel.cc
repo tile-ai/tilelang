@@ -368,11 +368,24 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
 
 } // anonymous namespace
 
-void ValidatePacked4BitStoreOwnership(const For &remapped_loop,
+void ValidatePacked4BitStoreOwnership(const For &loop,
                                       const Fragment &loop_layout,
                                       PrimExpr thread_index,
                                       arith::Analyzer *analyzer,
                                       const Optional<PrimExpr> &predicate) {
+  ValidatePacked4BitStoreOwnership(loop, loop_layout, thread_index, analyzer,
+                                   predicate, {}, {});
+}
+
+void ValidatePacked4BitStoreOwnership(const For &loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate,
+                                      const Map<Buffer, Buffer> &buffer_remap,
+                                      const Map<Buffer, Layout> &layout_map) {
+  For remapped_loop =
+      IfBufferRemapLoopGenerator::run(loop, buffer_remap, layout_map);
   bool canonical_replica_guard_guaranteed =
       analyzer->CanProveEqual(loop_layout->ReplicateExtent(), Integer(1));
   if (!canonical_replica_guard_guaranteed && predicate.defined()) {

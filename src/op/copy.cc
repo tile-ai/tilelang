@@ -8,6 +8,7 @@
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "backend/common/target_utils.h"
 #include "span_utils.h"
 #include "support/check.h"
 #include "utils.h"
@@ -83,10 +84,16 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
+  Optional<PrimExpr> predicate = par_op->GetPredicate(lower_args.thread_index);
+  if (TargetIsRocm(lower_args.target)) {
+    ValidatePacked4BitStoreOwnership(
+        par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+        predicate, lower_args.buffer_remap, lower_args.layout_map);
+  }
   return LowerParallelLoop(
       par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-      /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+      lower_args.layout_map, predicate, /*parallel_loop=*/true,
+      par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 namespace {

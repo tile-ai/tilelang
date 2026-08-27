@@ -31,16 +31,29 @@ using namespace ffi;
 
 /**
  * Validate that every physical byte written by scalar packed four-bit stores
- * in `remapped_loop` is owned by one GPU thread under `loop_layout`.
+ * in `loop` is owned by one GPU thread under `loop_layout`.
  *
  * Throws LayoutConflictException when ownership cannot be proven. This must
  * run before LowerParallelLoop removes the logical loop layout.
  */
-void ValidatePacked4BitStoreOwnership(const For &remapped_loop,
+void ValidatePacked4BitStoreOwnership(const For &loop,
                                       const Fragment &loop_layout,
                                       PrimExpr thread_index,
                                       arith::Analyzer *analyzer,
                                       const Optional<PrimExpr> &predicate);
+
+/**
+ * Apply the physical buffer layouts, then validate packed four-bit ownership.
+ * This overload is used by tile operators whose generated SIMT loops have not
+ * yet passed through LowerTileOp's buffer visitors.
+ */
+void ValidatePacked4BitStoreOwnership(const For &loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate,
+                                      const Map<Buffer, Buffer> &buffer_remap,
+                                      const Map<Buffer, Layout> &layout_map);
 
 class ParallelOpNode;
 

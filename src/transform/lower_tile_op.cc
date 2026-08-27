@@ -1362,9 +1362,9 @@ private:
     bool parallel_loop = has_non_local_store || has_fragment_access;
 
     if (TargetIsRocm(target_)) {
-      // Validate only after visiting the loop body, when buffer layouts have
-      // been applied to `for_node`. Logical indices seen during layout
-      // inference do not necessarily identify neighboring physical nibbles.
+      // Direct BufferStores have their physical layouts applied while visiting
+      // the loop body. Tile operators validate their generated SIMT loops in
+      // their LowerTileOp-time lowering before thread partitioning.
       ValidatePacked4BitStoreOwnership(
           for_node, loop_layout, CurrentThreadIndex(), analyzer_, predicate);
     }
