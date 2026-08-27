@@ -6,6 +6,7 @@
 
 #include "copy.h"
 #include "../transform/common/loop_fusion_utils.h"
+#include "../transform/common/storage_size.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "backend/common/target_utils.h"
@@ -31,6 +32,33 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+namespace {
+
+bool IsPacked4BitNonLocalBuffer(const Buffer &buffer) {
+  return (IsGlobalBuffer(buffer) || IsSharedBuffer(buffer)) &&
+         buffer->dtype.lanes() == 1 && IsPacked4BitStorage(buffer->dtype);
+}
+
+ParallelOp InferGeneratedParallelOp(const For &loop,
+                                    const LowerArgs &lower_args,
+                                    arith::Analyzer *analyzer) {
+  auto par_op = ParallelOp(loop);
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op->InferLayout({lower_args.target,
+                         lower_args.thread_bounds,
+                         lower_args.layout_map,
+                         analyzer,
+                         lower_args.buffer_remap,
+                         {}},
+                        level);
+  }
+  return par_op;
+}
+
+} // namespace
+
 Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) {
   bool is_cpu_target = lower_args.target->GetTargetDeviceType() == kDLCPU;
@@ -38,7 +66,6 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
   For vectorized_thread_loop;
-  auto par_op = ParallelOp(fused_loop);
 
   if (is_cpu_target || IsLocalBuffer(op.src) || IsLocalBuffer(op.dst)) {
     if (IsLocalBuffer(op.src) && !IsLocalBuffer(op.dst)) {
@@ -68,21 +95,16 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                       << "` may cause conflicted write.";
       }
     }
+    if (TargetIsRocm(lower_args.target) && IsPacked4BitNonLocalBuffer(op.dst)) {
+      ValidatePacked4BitStoreOwnership(
+          fused_loop, lower_args.thread_index, lower_args.thread_bounds,
+          analyzer, lower_args.buffer_remap, lower_args.layout_map);
+    }
     vectorized_thread_loop = VectorizeLoop(fused_loop, lower_args.layout_map);
     return vectorized_thread_loop;
   }
 
-  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                    InferLevel::kFree};
-  for (auto level : levels) {
-    par_op->InferLayout({lower_args.target,
-                         lower_args.thread_bounds,
-                         lower_args.layout_map,
-                         analyzer,
-                         lower_args.buffer_remap,
-                         {}},
-                        level);
-  }
+  auto par_op = InferGeneratedParallelOp(fused_loop, lower_args, analyzer);
   auto loop_layout = par_op->GetLoopLayout();
   Optional<PrimExpr> predicate = par_op->GetPredicate(lower_args.thread_index);
   if (TargetIsRocm(lower_args.target)) {
@@ -252,23 +274,18 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
   body = For(i, make_zero(i.dtype()), block_m, ForKind::kParallel, body);
 
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(Downcast<For>(body)));
-  auto par_op = ParallelOp(fused_loop);
-  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                    InferLevel::kFree};
-  for (auto level : levels) {
-    par_op->InferLayout({lower_args.target,
-                         lower_args.thread_bounds,
-                         lower_args.layout_map,
-                         analyzer,
-                         lower_args.buffer_remap,
-                         {}},
-                        level);
-  }
+  auto par_op = InferGeneratedParallelOp(fused_loop, lower_args, analyzer);
   auto loop_layout = par_op->GetLoopLayout();
+  Optional<PrimExpr> predicate = par_op->GetPredicate(lower_args.thread_index);
+  if (TargetIsRocm(lower_args.target) && IsPacked4BitNonLocalBuffer(dst)) {
+    ValidatePacked4BitStoreOwnership(
+        par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+        predicate, lower_args.buffer_remap, lower_args.layout_map);
+  }
   return LowerParallelLoop(
       par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
-      lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-      /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+      lower_args.layout_map, predicate, /*parallel_loop=*/true,
+      par_op->LoopLayoutRequiresPaddingGuard());
 }
 
 bool RegisterDefaultIm2Col() {

@@ -55,6 +55,19 @@ void ValidatePacked4BitStoreOwnership(const For &loop,
                                       const Map<Buffer, Buffer> &buffer_remap,
                                       const Map<Buffer, Layout> &layout_map);
 
+/**
+ * Validate a generated loop that is executed independently by every thread,
+ * rather than partitioned by `LowerParallelLoop`.
+ *
+ * This is used by local-buffer copy lowering, where the destination indices
+ * may contain the hardware thread index directly.
+ */
+void ValidatePacked4BitStoreOwnership(const For &loop, PrimExpr thread_index,
+                                      const Range &thread_bounds,
+                                      arith::Analyzer *analyzer,
+                                      const Map<Buffer, Buffer> &buffer_remap,
+                                      const Map<Buffer, Layout> &layout_map);
+
 class ParallelOpNode;
 
 /*!
