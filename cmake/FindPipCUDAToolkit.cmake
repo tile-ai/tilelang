@@ -303,9 +303,28 @@ function(_tilelang_activate_msvc_env)
     set(CMAKE_EXE_LINKER_FLAGS_INIT "${_tilelang_libpath_flags} ${CMAKE_EXE_LINKER_FLAGS_INIT}")
     set(CMAKE_SHARED_LINKER_FLAGS_INIT "${_tilelang_libpath_flags} ${CMAKE_SHARED_LINKER_FLAGS_INIT}")
     set(CMAKE_MODULE_LINKER_FLAGS_INIT "${_tilelang_libpath_flags} ${CMAKE_MODULE_LINKER_FLAGS_INIT}")
-    set(CMAKE_EXE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_EXE_LINKER_FLAGS}" CACHE STRING "Executable linker flags" FORCE)
-    set(CMAKE_SHARED_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_SHARED_LINKER_FLAGS}" CACHE STRING "Shared linker flags" FORCE)
-    set(CMAKE_MODULE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_MODULE_LINKER_FLAGS}" CACHE STRING "Module linker flags" FORCE)
+
+    # The three variables below are cached with FORCE, unlike the *_INIT ones above,
+    # which are plain variables recomputed on every configure. A bare prepend would
+    # therefore stack another copy of the same flags each time this function runs: the
+    # early-out at the top of the function tests ENV{VSCMD_VER}, which a fresh cmake
+    # process does not inherit unless it was launched from a developer prompt, so a
+    # reconfigure re-runs the whole probe and prepends again. Only prepend when this
+    # module's prefix is not already present (literal substring, since the paths
+    # contain characters that would need regex escaping).
+    string(FIND "${CMAKE_EXE_LINKER_FLAGS}" "${_tilelang_libpath_flags}" _tilelang_libpath_pos)
+    if(_tilelang_libpath_pos EQUAL -1)
+      set(CMAKE_EXE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_EXE_LINKER_FLAGS}" CACHE STRING "Executable linker flags" FORCE)
+    endif()
+    string(FIND "${CMAKE_SHARED_LINKER_FLAGS}" "${_tilelang_libpath_flags}" _tilelang_libpath_pos)
+    if(_tilelang_libpath_pos EQUAL -1)
+      set(CMAKE_SHARED_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_SHARED_LINKER_FLAGS}" CACHE STRING "Shared linker flags" FORCE)
+    endif()
+    string(FIND "${CMAKE_MODULE_LINKER_FLAGS}" "${_tilelang_libpath_flags}" _tilelang_libpath_pos)
+    if(_tilelang_libpath_pos EQUAL -1)
+      set(CMAKE_MODULE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_MODULE_LINKER_FLAGS}" CACHE STRING "Module linker flags" FORCE)
+    endif()
+    unset(_tilelang_libpath_pos)
   endif()
   if(EXISTS "${_tilelang_sdk_bin}/rc.exe")
     set(CMAKE_RC_COMPILER "${_tilelang_sdk_bin}/rc.exe")
