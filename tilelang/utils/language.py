@@ -119,6 +119,20 @@ def is_fragment(buffer: BufferLikeType) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
+def is_reducer(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is a reducer v2 accumulator (scope local.reducer).
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is a reducer accumulator, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "local.reducer"
+
+
 def is_local_var(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the local.var memory scope.
