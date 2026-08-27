@@ -36,6 +36,19 @@ def get_nvcc_subprocess_env() -> dict[str, str] | None:
     return get_msvc_subprocess_env()
 
 
+def _get_nvcc_host_compiler() -> str | None:
+    explicit = os.environ.get("CXX") or os.environ.get("CC")
+    if explicit:
+        return explicit
+    if os.name == "nt":
+        from tilelang.contrib.msvc import get_env_path
+
+        compiler_env = get_nvcc_subprocess_env() or {}
+        if compiler := shutil.which("cl.exe", path=get_env_path(compiler_env)):
+            return compiler
+    return get_cplus_compiler()
+
+
 def _get_compile_timeout_seconds() -> float | None:
     return env.get_compile_timeout_seconds()
 
@@ -147,8 +160,12 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
         out_file.write(code)
 
     file_target = path_target if path_target else temp_target
+    host_compiler = _get_nvcc_host_compiler()
+    if host_compiler is None:
+        raise RuntimeError("Cannot find a C++ host compiler for NVCC")
+
     cmd = [get_nvcc_compiler()]
-    cmd += [f"-ccbin={get_cplus_compiler()}"]
+    cmd += [f"-ccbin={host_compiler}"]
     cmd += [f"--{target_format}", "-O3"]
     # Always include line info for better profiling and mapping
     cmd += ["-lineinfo"]

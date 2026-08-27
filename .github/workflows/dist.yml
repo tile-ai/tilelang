@@ -16,9 +16,11 @@ on:
       - pyproject.toml
       - MANIFEST.in
       - CMakeLists.txt
+      - cmake/**
       - VERSION
       - version_provider.py
       - .github/workflows/dist.yml
+      - .github/scripts/**
       # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
   release:
@@ -119,6 +121,8 @@ jobs:
           - { runner: ubuntu-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
           - { runner: windows-latest, toolkit: "CUDA-13.0", test_backends: "cu130", python_version: "3.10" }
+          # CUDA 13.4 and its Windows ARM64 PyTorch wheel are developer previews.
+          - { runner: windows-11-arm, toolkit: "CUDA-13.4", test_backends: "cu134", torch_backend: "cu134", torch_package: "torch==2.14.0.dev20260728+cu134", torch_index_url: "https://pypi.nvidia.com/nvtorch_oot_nightly/", python_version: "3.13" }
           - { runner: macos-latest, toolkit: "Metal", python_version: "3.10" }
           # - "3.14t"  # let user to build from source for now
           # TODO: Add cp315-abi3.abi3t after PEP 803
@@ -153,6 +157,11 @@ jobs:
             wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc') }}
             wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}
             wheel-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install CUDA Toolkit (Windows ARM64)
+        if: runner.os == 'Windows' && runner.arch == 'ARM64' && contains(matrix.target.toolkit, 'CUDA')
+        shell: pwsh
+        run: .\.github\scripts\install-cuda-windows-arm64.ps1
 
       - name: Set CIBW_BUILD
         if: runner.os != 'Windows'
@@ -190,14 +199,26 @@ jobs:
           "CIBW_BUILD=cp${pythonVersionMajMinNoDot}-*" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           "CIBW_CONFIG_SETTINGS=cmake.build-type=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           "CMAKE_BUILD_TYPE=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          if ("${{ runner.arch }}" -eq "ARM64") {
+            "CIBW_ARCHS_WINDOWS=ARM64" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          }
 
           if ("${{ matrix.target.toolkit }}" -like "*CUDA*") {
             $cudaVersion = "${{ matrix.target.toolkit }}".Split('-')[-1]
             $cudaVersionMajMin = ($cudaVersion -split '\.')[0..1] -join '.'
             $cudaVersionMajMinNoDot = $cudaVersionMajMin -replace '\.', ''
+            "USE_CUDA=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
             "CUDA_VERSION=$cudaVersion" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-            "UV_TORCH_BACKEND=cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-            "PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            if ("${{ matrix.target.torch_index_url }}") {
+              "PIP_EXTRA_INDEX_URL=${{ matrix.target.torch_index_url }}" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            } else {
+              "UV_TORCH_BACKEND=cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+              "PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            }
+          } else {
+            "USE_CUDA=OFF" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            "UV_TORCH_BACKEND=cpu" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            "PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
           if ("${{ env.IS_RELEASE }}" -eq "true") {
@@ -243,7 +264,7 @@ jobs:
           done
 
       - name: Test built wheels (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && !matrix.target.torch_package
         shell: pwsh
         run: |
           Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
@@ -299,29 +320,48 @@ jobs:
         if: contains(matrix.target.toolkit, 'CUDA') && runner.os == 'Windows'
         shell: pwsh
         run: |
-          $env:UV_PYTHON = "3.12"
+          $torchPackage = "${{ matrix.target.torch_package }}"
+          $torchIndex = "${{ matrix.target.torch_index_url }}"
+          if ($torchPackage) {
+            $env:UV_PYTHON = "${{ matrix.target.python_version }}"
+            $backends = @("${{ matrix.target.torch_backend }}")
+          } else {
+            $env:UV_PYTHON = "3.12"
+            $backends = "${{ matrix.target.test_backends }}" -split '\s+'
+          }
           $versionLog = Join-Path $env:RUNNER_TEMP "tilelang-wheel-versions.txt"
           if (Test-Path $versionLog) {
             Remove-Item -Force $versionLog
           }
 
-          foreach ($backend in ("${{ matrix.target.test_backends }}" -split '\s+')) {
+          foreach ($backend in $backends) {
             if ($backend -eq "") {
               continue
             }
-            $env:UV_TORCH_BACKEND = $backend
+            if (-not $torchPackage) {
+              $env:UV_TORCH_BACKEND = $backend
+            }
             Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
               $wheel = $_.FullName
               Write-Host "Testing wheel: $wheel"
+              if ($_.Name -like "*abi3*") {
+                uvx abi3audit --verbose --strict $wheel
+              }
               if (Test-Path test-venv) {
                 Remove-Item -Recurse -Force test-venv
               }
               uv venv test-venv
               $python = Join-Path (Resolve-Path test-venv).Path "Scripts\python.exe"
 
+              if ($torchPackage) {
+                uv pip install -v --python $python $torchPackage --index $torchIndex
+              }
               uv pip install -v --python $python $wheel
               Push-Location $env:RUNNER_TEMP
               try {
+                if ($torchPackage) {
+                  & $python -c "import torch; assert torch.version.cuda == '13.4', torch.version.cuda"
+                }
                 & $python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" | Out-File -Append -FilePath $versionLog -Encoding utf8
               } finally {
                 Pop-Location
