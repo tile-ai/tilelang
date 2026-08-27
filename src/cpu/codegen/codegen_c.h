@@ -55,6 +55,10 @@ public:
 
   void VisitStmt_(const AssertStmtNode *op) final;  // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final; // NOLINT(*)
+  /*! \brief Emit `#pragma omp parallel for [collapse(n)] [num_threads(m)]`
+   * for kParallel loops (CPU OpenMP lowering); other kinds go to the base
+   * printer, which is kind-agnostic. */
+  void VisitStmt_(const ForNode *op) final; // NOLINT(*)
 
   void GenerateForwardFunctionDeclarations(ffi::String global_symbol,
                                            const ffi::Array<Type> &arg_types,
@@ -81,6 +85,10 @@ private:
   /*! \brief whether to emit forward function declarations in the resulting C
    * code */
   bool emit_fwd_func_decl_;
+  /*! \brief While >0, kParallel loops are the body-continuation of an
+   * already-printed `#pragma omp parallel for` chain and must not re-emit
+   * the pragma. */
+  int omp_parallel_chain_depth_ = 0;
 
   FunctionInfo GetFunctionInfo(const CallNode *op, bool has_resource_handle);
   std::string GetPackedName(const CallNode *op);
