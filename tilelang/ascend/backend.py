@@ -21,7 +21,6 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
     target_arch = bisheng.get_target_npu_arch(target)
 
     compile_options = bisheng.get_bisheng_compile_options(target_arch, options)
-    linker_options = bisheng.get_aibin_linker_options()
 
     from tilelang.cache.ascend_binary_cache import AscendBinaryCache
 
@@ -32,7 +31,6 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
         target_arch=target_arch,
         compile_format=compile_format,
         options=compile_options,
-        linker_options=linker_options,
     )
     cached_binary = AscendBinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
@@ -40,7 +38,6 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
 
     aibin = bisheng.compile_ascend(
         code,
-        target_format=compile_format,
         npu_arch=target_arch,
         options=options,
         verbose=env.get_default_verbose(),
