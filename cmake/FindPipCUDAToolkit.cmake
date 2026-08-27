@@ -3,8 +3,11 @@
 # Locate CUDA toolkit — first trying the host system, then falling back
 # to pip-installed packages (nvidia-cuda-nvcc, nvidia-cuda-cccl).
 #
-# This module should be included BEFORE project() to set CMAKE_CUDA_COMPILER
-# when pip CUDA is used.
+# CMakeLists.txt includes this module twice. The first include, before project(),
+# passes TILELANG_ACTIVATE_NINJA_ONLY and only locates Ninja; the second, after
+# project(), runs the CUDA detection (which needs an enabled language). See the note
+# next to the TILELANG_ACTIVATE_NINJA_ONLY check below. CMAKE_CUDA_COMPILER is set as
+# a cache entry, so it is still visible to subprojects configured afterwards.
 #
 # Detection order:
 #   1. Try find_package(CUDAToolkit QUIET) — succeeds if a host CUDA
@@ -465,6 +468,21 @@ function(_tilelang_activate_ninja)
 endfunction()
 
 _tilelang_activate_ninja()
+
+# CMakeLists.txt includes this module twice: once before project() with
+# TILELANG_ACTIVATE_NINJA_ONLY set, so that CMAKE_MAKE_PROGRAM is in place when the
+# generator is resolved, and once after project() for the CUDA detection below.
+#
+# The split is required because find_package(CUDAToolkit) sets up its imported
+# targets, and that path calls find_package(Threads REQUIRED) whenever
+# CMAKE_C_COMPILER or CMAKE_CXX_COMPILER is set. FindThreads aborts with
+# "FindThreads only works if either C or CXX language is enabled" unless a language
+# is enabled, which is not the case before project(). On a fresh configure those two
+# variables are still empty, so the branch is skipped and nothing fails; on a
+# reconfigure they are restored from the cache, so the pre-project include aborted.
+if(TILELANG_ACTIVATE_NINJA_ONLY)
+  return()
+endif()
 
 # --- Try host CUDA first ---
 find_package(CUDAToolkit QUIET)

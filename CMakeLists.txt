@@ -3,10 +3,12 @@
 
 cmake_minimum_required(VERSION 3.26)
 
-# Detect CUDA toolkit: tries host installation first, then falls back to
-# pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect).
-# Must be included before project() so CMAKE_CUDA_COMPILER is set.
+# Locate Ninja before project(): that is where the generator resolves
+# CMAKE_MAKE_PROGRAM. CUDA detection lives in the same module but must run after
+# project() instead -- see the second include below.
+set(TILELANG_ACTIVATE_NINJA_ONLY ON)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
+unset(TILELANG_ACTIVATE_NINJA_ONLY)
 
 # Capture this CMakeLists.txt's directory once so `function()` bodies below
 # can reference files shipped with the project. CMake 4.x resolves
@@ -16,6 +18,14 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 project(TILE_LANG C CXX)
+
+# Detect CUDA toolkit: tries host installation first, then falls back to
+# pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect). This has to
+# run after project() so that an enabled language is available -- FindCUDAToolkit's
+# imported-target setup calls find_package(Threads REQUIRED), which hard-errors
+# otherwise. CMAKE_CUDA_COMPILER is published as a cache entry, so subprojects
+# configured further down (add_subdirectory(${TVM_SOURCE}) below) still see it.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 
 # MSVC-specific build configuration. Must run after project() so MSVC is
 # defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
