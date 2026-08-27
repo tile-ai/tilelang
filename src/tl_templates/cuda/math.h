@@ -13,9 +13,36 @@
 #define hpow powf
 
 namespace cutlass {
-// Mirror cutlass's own half_t fast_exp (fast_math.h): route through float.
-// A direct `return ::hexp(x)` recurses, since `hexp` is #define'd to this
-// same cutlass::fast_exp and x is already bfloat16_t.
+// CUTLASS lacks 16-bit overloads for these functions except fast_exp and
+// fast_tanh on half_t. Evaluate through float and convert back, matching its
+// fast_exp fallback. Use fast_* here because the h* aliases would recurse.
 TL_DEVICE
 bfloat16_t fast_exp(bfloat16_t x) { return bfloat16_t(fast_exp(float(x))); }
+
+TL_DEVICE
+half_t fast_log(half_t x) { return half_t(fast_log(float(x))); }
+
+TL_DEVICE
+bfloat16_t fast_log(bfloat16_t x) { return bfloat16_t(fast_log(float(x))); }
+
+TL_DEVICE
+half_t fast_sqrt(half_t x) { return half_t(fast_sqrt(float(x))); }
+
+TL_DEVICE
+bfloat16_t fast_sqrt(bfloat16_t x) { return bfloat16_t(fast_sqrt(float(x))); }
+
+TL_DEVICE
+half_t fast_sin(half_t x) { return half_t(fast_sin(float(x))); }
+
+TL_DEVICE
+bfloat16_t fast_sin(bfloat16_t x) { return bfloat16_t(fast_sin(float(x))); }
+
+TL_DEVICE
+half_t fast_cos(half_t x) { return half_t(fast_cos(float(x))); }
+
+TL_DEVICE
+bfloat16_t fast_cos(bfloat16_t x) { return bfloat16_t(fast_cos(float(x))); }
+
+TL_DEVICE
+bfloat16_t fast_tanh(bfloat16_t x) { return bfloat16_t(fast_tanh(float(x))); }
 } // namespace cutlass
