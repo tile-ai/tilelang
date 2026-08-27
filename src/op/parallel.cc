@@ -932,22 +932,9 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     return;
 
   if (!store_fragment_buffers.empty()) {
-    // A loop-wide replica guard would suppress the writes to non-canonical
-    // fragment replicas, while omitting it would repeat an external store.
-    // The two effects may coexist only when each shared/global store carries a
-    // statement-local tl.parallel_multiplicity marker, which PartitionLoop
-    // lowers to its own replica == 0 guard.
-    if (!store_shared_global_buffers.empty() &&
-        has_unmarked_shared_global_store_) {
-      TVM_FFI_THROW(ValueError)
-          << "Invalid replicated T.Parallel: fragment writes require every "
-             "owner replica to execute, but an unguarded shared/global store "
-             "in the same loop must execute only once per logical iteration. "
-             "Split the fragment and shared/global side effects into separate "
-             "T.Parallel loops."
-          << SpanHintSuffix(root_->span);
-    }
-
+    // Fragment writes require every replica to execute. Any coexisting
+    // shared/global stores therefore execute once per replica as well;
+    // duplicate same-value stores are permitted by CUDA instruction semantics.
     bool replicate_is_from_dynamic_index_fragment = false;
     for (const auto &fragment : store_fragment_buffers) {
       if (!layout_args.layout_map.count(fragment)) {

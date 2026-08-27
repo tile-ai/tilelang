@@ -230,7 +230,7 @@ def test_noninjective_fragment_layout_is_rejected():
 
 
 @tilelang.testing.requires_cuda
-def test_replicated_parallel_rejects_mixed_fragment_and_global_writes():
+def test_replicated_parallel_allows_same_value_global_writes():
     replicated_layout = T.Fragment(
         (1,),
         forward_fn=lambda i, rep: (rep, 0),
@@ -250,8 +250,7 @@ def test_replicated_parallel_rejects_mixed_fragment_and_global_writes():
 
         return main
 
-    with pytest.raises(ValueError, match="Invalid replicated T.Parallel"):
-        prog()
+    prog()
 
 
 if __name__ == "__main__":

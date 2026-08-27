@@ -128,8 +128,6 @@ def flashattn_fwd(batch, total_q, total_kv, N_CTX, heads, max_seq_len, dim_qk, d
 
             for i in T.Parallel(block_M):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-
-            for i in T.Parallel(block_M):
                 # NOTE(varlen): explicitly write 0 to padding positions; otherwise
                 # `lse` is auto-allocated via `out_idx` (torch.empty) and may
                 # contain NaN/Inf at padding rows, which later contaminates the
