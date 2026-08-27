@@ -62,7 +62,13 @@ def test_non_broadcast_8bit_small_vector_add_is_packed(lanes, dtype, torch_dtype
 )
 def test_non_broadcast_8bit_wide_vector_add_is_packed(dtype, torch_dtype, expected_vector_type):
     source = _run_non_broadcast_8bit_vector_add(32, dtype, torch_dtype)
-    assert expected_vector_type in source
+    packed = re.search(rf"\b{expected_vector_type}\s+(__\w+);", source)
+    assert packed is not None
+    vector = packed.group(1)
+    for field in "xyzw":
+        writes = [line for line in source.splitlines() if f"{vector}.{field}=" in line]
+        assert writes
+        assert not re.search(rf"=\s*{re.escape(vector)}\.{field}\s*&", writes[0])
     for shift in range(8, 64, 8):
         assert f"static_cast<unsigned long long>(0x000000ffu) << {shift}" in source
         assert f"& 0xffULL) << {shift}" in source
