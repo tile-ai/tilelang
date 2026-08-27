@@ -1202,9 +1202,25 @@ FragmentThreadIndexProbe::FragmentThreadIndexProbe(
   }
   Array<PrimExpr> partition_vars;
   for (size_t i = 0; i < loop_layout->OutputDim(); ++i) {
-    partition_vars.push_back(Var("__tl_candidate_i" + std::to_string(i)));
+    Var coord("__tl_candidate_i" + std::to_string(i));
+    // Bind every symbolic coordinate's range: the thread-cancellation proofs
+    // below are range-dependent (e.g. `(o0*512 + t*4 + o1) // 512 -> o0`
+    // only holds for t*4 + o1 < 512), and an unbound var makes Simplify
+    // keep the thread term, flagging clean strided layouts as spilling.
+    analyzer->Bind(coord, Range::FromMinExtent(make_zero(DataType::Int(32)),
+                                               loop_layout->OutputShape()[i]));
+    partition_vars.push_back(coord);
   }
   partition_vars.push_back(thread_var_);
+  if (loop_layout->ThreadRange().defined()) {
+    analyzer->Bind(thread_var_,
+                   Range::FromMinExtent(loop_layout->ThreadRange()->min,
+                                        loop_layout->ThreadRange()->extent));
+  } else {
+    analyzer->Bind(thread_var_,
+                   Range::FromMinExtent(make_zero(DataType::Int(32)),
+                                        loop_layout->ThreadExtent()));
+  }
 
   Array<PrimExpr> recovered_indices;
   try {
