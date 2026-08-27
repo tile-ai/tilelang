@@ -33,8 +33,9 @@ public:
                          std::ostream &os) final; // NOLINT(*)
   void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
                         PrimExpr rhs,
-                        std::ostream &os) final;      // NOLINT(*)
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
+                        std::ostream &os) final;                // NOLINT(*)
+  void PrintType(DataType t, std::ostream &os) final;           // NOLINT(*)
+  void PrintVecConstructor(DataType t, std::ostream &os) final; // NOLINT(*)
   void PrintVecElemLoad(const std::string &vec, DataType t, int i,
                         std::ostream &os) final; // NOLINT(*)
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
@@ -53,6 +54,7 @@ public:
   void VisitExpr_(const NotNode *op, std::ostream &os) final;
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const BufferStoreNode *op) final;

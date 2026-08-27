@@ -181,6 +181,50 @@ __device__ __forceinline__ float16_t __habs(float16_t a) {
   return result;
 }
 
+// TileLang lowers scalar int4/uint4 storage through byte-packed buffers, where
+// each byte carries two logical 4-bit elements.
+TL_DEVICE int8_t tl_pack_int4x2(int low, int high) {
+  unsigned int packed = (static_cast<unsigned int>(low) & 0xFu) |
+                        ((static_cast<unsigned int>(high) & 0xFu) << 4);
+  return static_cast<int8_t>(packed);
+}
+
+TL_DEVICE uint8_t tl_pack_uint4x2(unsigned int low, unsigned int high) {
+  return static_cast<uint8_t>((low & 0xFu) | ((high & 0xFu) << 4));
+}
+
+TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
+  unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
+  unsigned int shift = (idx & 1) * 4;
+  int value = static_cast<int>((byte >> shift) & 0xFu);
+  return (value ^ 8) - 8;
+}
+
+TL_DEVICE unsigned int tl_uint4_packed_load(const unsigned char *packed,
+                                            int idx) {
+  unsigned char byte = packed[idx >> 1];
+  unsigned int shift = (idx & 1) * 4;
+  return (byte >> shift) & 0xFu;
+}
+
+TL_DEVICE void tl_int4_packed_store(signed char *packed, int idx, int val) {
+  unsigned int shift = (idx & 1) * 4;
+  unsigned char mask = static_cast<unsigned char>(0xFu << shift);
+  unsigned char nibble = static_cast<unsigned char>(
+      (static_cast<unsigned int>(val) & 0xFu) << shift);
+  unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
+  packed[idx >> 1] = static_cast<signed char>((byte & ~mask) | nibble);
+}
+
+TL_DEVICE void tl_uint4_packed_store(unsigned char *packed, int idx,
+                                     unsigned int val) {
+  unsigned int shift = (idx & 1) * 4;
+  unsigned char mask = static_cast<unsigned char>(0xFu << shift);
+  unsigned char nibble = static_cast<unsigned char>((val & 0xFu) << shift);
+  unsigned char byte = packed[idx >> 1];
+  packed[idx >> 1] = static_cast<unsigned char>((byte & ~mask) | nibble);
+}
+
 namespace tl {
 
 // Scalar max/min. The float/double overloads use the fmax/fmin builtins so
