@@ -29,7 +29,6 @@ class AscendBinaryCache(BinaryCache):
         target_arch: str,
         compile_format: str,
         options: list[str] | None = None,
-        linker_options: list[str] | None = None,
         toolchain: Mapping[str, str] | None = None,
     ) -> str:
         key_data: dict[str, Any] = {
@@ -39,7 +38,6 @@ class AscendBinaryCache(BinaryCache):
             "target_arch": target_arch,
             "compile_format": compile_format,
             "options": tuple(options or []),
-            "linker_options": tuple(linker_options or []),
             # Equivalent device source can produce different CCE ELFs across
             # Bisheng, ptoas, or CANN releases; upgrades must miss the cache.
             "toolchain": dict(toolchain or {}),
