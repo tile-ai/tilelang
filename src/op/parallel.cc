@@ -939,6 +939,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
       DLOG(INFO)
           << "[FreeInfer] only compute_from_buffer available, choose it.";
     }
+    if (!loop_layout_.defined()) {
+      throw LayoutConflictException(
+          "No compatible loop layout candidate is available.");
+    }
     loop_layout_requires_padding_guard_ =
         selected_plan_candidate && indice_map_.empty();
   } else if (!loop_layout_.defined()) {

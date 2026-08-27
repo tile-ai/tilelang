@@ -173,6 +173,28 @@ def test_fragment_candidate_fallback_preserves_byte_ownership():
 
 
 @tilelang.testing.requires_cuda
+def test_missing_fragment_and_buffer_candidates_report_layout_conflict():
+    n = 128
+
+    def single_thread_owner(i):
+        return 0, i
+
+    fragment_layout = T.Fragment((1,), forward_fn=single_thread_owner)
+
+    @T.prim_func
+    def kernel(A: T.Tensor((1,), "uint4"), B: T.Tensor((n,), "uint4")):
+        with T.Kernel(1, threads=128):
+            local = T.alloc_fragment((1,), "uint4")
+            T.annotate_layout({local: fragment_layout})
+            local[0] = A[0]
+            for i in T.Parallel(n):
+                B[i] = local[0]
+
+    with pytest.raises(Exception, match=r"no available layout found|No compatible loop layout"):
+        tilelang.compile(kernel, out_idx=[1])
+
+
+@tilelang.testing.requires_cuda
 def test_explicit_byte_safe_width_preserves_values():
     n = 128
     kernel = _copy_kernel("int4", n, threads=128, coalesced_width=2)
