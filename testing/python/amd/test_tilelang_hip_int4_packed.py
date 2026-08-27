@@ -93,6 +93,19 @@ def _packed_vector_store_source(dtype, base, stride, lanes=2):
     return _build_source(name, func)
 
 
+def _packed_ldg_source(dtype, index, index_dtype="int32"):
+    name = f"packed_{dtype}_ldg"
+    buffer = tirx.decl_buffer((index + 1,), dtype=dtype, name="input")
+    load = tirx.BufferLoad(buffer, [tirx.const(index, index_dtype)])
+    body = tirx.call_intrin(dtype, tirx.op.Op.get("tl.__ldg"), load)
+    func = tirx.PrimFunc(
+        [buffer.data],
+        tirx.Evaluate(body),
+        buffer_map={buffer.data: buffer},
+    )
+    return _build_source(name, func)
+
+
 def _packed_x2_broadcast_kernel(dtype, value):
     @T.prim_func
     def kernel(output: T.Tensor((2,), dtype)):
@@ -150,6 +163,19 @@ def _packed_scalar_load_kernel():
     return kernel
 
 
+def _packed_ldg_kernel(dtype):
+    @T.prim_func
+    def kernel(
+        source: T.Tensor((4,), dtype),
+        output: T.Tensor((4,), "int32"),
+    ):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(4):
+                output[i] = T.cast(T.__ldg(source[i]), "int32")
+
+    return kernel
+
+
 @tilelang.testing.requires_rocm
 @pytest.mark.parametrize("dtype", ["int4", "uint4"])
 def test_packed_int4_scalar_load_codegen(dtype):
@@ -163,6 +189,45 @@ def test_packed_int4_scalar_load_codegen(dtype):
 
     assert _generated_call_count(source, f"tl_{dtype}_packed_load") == 1
     assert " + 3 / 8" not in source
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+def test_packed_int4_ldg_codegen_preserves_int64_index(dtype):
+    index = 2**31 + 1
+    source = _packed_ldg_source(dtype, index, "int64")
+    calls = _generated_call_lines(source, f"tl_{dtype}_packed_load")
+
+    assert len(calls) == 1
+    assert str(index) in calls[0]
+
+
+@tilelang.testing.requires_rocm
+def test_packed_int4_helper_index_types():
+    from tilelang.contrib import hipcc
+    from tilelang.env import TILELANG_TEMPLATE_PATH
+
+    source = r"""
+#include <stdint.h>
+#include <type_traits>
+#include <tl_templates/hip/common.h>
+
+static_assert(std::is_same_v<decltype(tl_int4_packed_load),
+                             int(const signed char *, int64_t)>);
+static_assert(std::is_same_v<decltype(tl_uint4_packed_load),
+                             unsigned int(const unsigned char *, int64_t)>);
+static_assert(std::is_same_v<decltype(tl_int4_packed_store),
+                             void(signed char *, int64_t, int)>);
+static_assert(std::is_same_v<decltype(tl_uint4_packed_store),
+                             void(unsigned char *, int64_t, unsigned int)>);
+
+extern "C" __global__ void main_kernel() {}
+"""
+    binary = hipcc.compile_hip(
+        source,
+        options=["-std=c++17", f"-I{TILELANG_TEMPLATE_PATH}"],
+    )
+    assert binary
 
 
 @tilelang.testing.requires_rocm
@@ -242,6 +307,29 @@ def test_packed_int4_scalar_load_sign_extension():
     expected = torch.tensor([-8, -1, 0, 7], dtype=torch.int32, device="cuda")
 
     assert torch.equal(result, expected)
+
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize(
+    ("dtype", "expected"),
+    [
+        ("int4", [-8, -1, 0, 7]),
+        ("uint4", [8, 15, 0, 7]),
+    ],
+)
+def test_packed_int4_ldg_runtime(dtype, expected):
+    compiled = tilelang.compile(
+        _packed_ldg_kernel(dtype),
+        out_idx=[1],
+        target="hip",
+    )
+    source = torch.tensor([0xF8, 0x70], dtype=torch.uint8, device="cuda")
+    if dtype == "int4":
+        source = source.view(torch.int8)
+
+    result = compiled(source)
+
+    assert torch.equal(result, torch.tensor(expected, dtype=torch.int32, device="cuda"))
 
 
 @tilelang.testing.requires_rocm

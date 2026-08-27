@@ -21,7 +21,6 @@
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "arith/int_operator.h"
-#include "backend/common/target_utils.h"
 #include "builtin.h"
 #include "reducer.h"
 #include "span_utils.h"
@@ -831,16 +830,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     // In non-free mode without a source buffer, if we don't have any layout
     // yet (e.g., no annotation), we have nothing to infer here.
     return {};
-  }
-
-  if (TargetIsRocm(layout_args.target)) {
-    For remapped_root = IfBufferRemapLoopGenerator::run(
-        root_, layout_args.buffer_remap, layout_args.layout_map);
-    ProvePackedSubByteStoreOwnership(remapped_root, loop_layout_,
-                                     layout_args.analyzer,
-                                     /*canonical_replica_guard_guaranteed=*/
-                                     store_fragment_buffers_.empty(),
-                                     /*throw_on_error=*/true);
   }
 
   // Non-fragment SIMT loops may deliberately over-cover a ragged iteration

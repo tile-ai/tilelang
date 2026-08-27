@@ -760,13 +760,14 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   LOG(FATAL) << "Cannot convert type " << t << " to CUDA type";
 }
 
-void CodeGenTileLangHIP::PrintVecConstructor(DataType t,
+void CodeGenTileLangHIP::PrintVecConstructor(DataType data_type,
                                              std::ostream &os) { // NOLINT(*)
-  if ((t.is_int() || t.is_uint()) && t.bits() == 4 && t.lanes() == 2) {
-    os << (t.is_uint() ? "tl_pack_uint4x2" : "tl_pack_int4x2");
+  if ((data_type.is_int() || data_type.is_uint()) && data_type.bits() == 4 &&
+      data_type.lanes() == 2) {
+    os << (data_type.is_uint() ? "tl_pack_uint4x2" : "tl_pack_int4x2");
     return;
   }
-  CodeGenC::PrintVecConstructor(t, os);
+  CodeGenC::PrintVecConstructor(data_type, os);
 }
 
 void CodeGenTileLangHIP::PrintVecBinaryOp(const std::string &op, DataType t,
@@ -1435,6 +1436,22 @@ void CodeGenTileLangHIP::PrintCallExtern(Type ret_type, String global_symbol,
   }
 }
 
+void CodeGenTileLangHIP::PrintPackedInt4Load(const BufferNode *buffer,
+                                             const std::string &index,
+                                             std::ostream &os) { // NOLINT(*)
+  DataType element_dtype = buffer->dtype;
+  ICHECK(element_dtype == DataType::Int(4) ||
+         element_dtype == DataType::UInt(4));
+  std::string vid = GetVarID(buffer->data.get());
+  if (element_dtype.is_uint()) {
+    os << "tl_uint4_packed_load((const unsigned char*)" << vid << ", " << index
+       << ")";
+  } else {
+    os << "tl_int4_packed_load((const signed char*)" << vid << ", " << index
+       << ")";
+  }
+}
+
 // Print a reference expression to a buffer.
 std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
                                              const BufferNode *buffer,
@@ -1735,8 +1752,15 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "T.__ldg currently supports flattened 1D buffer accesses.";
     const BufferNode *buffer = bl->buffer.get();
     PrimExpr base = bl->indices[0];
-    auto buffer_ref = this->GetBufferRef(op->dtype, buffer, base);
-    os << buffer_ref;
+    DataType element_dtype = buffer->dtype;
+    bool is_scalar_packed_int4 =
+        op->dtype.is_scalar() && (element_dtype == DataType::Int(4) ||
+                                  element_dtype == DataType::UInt(4));
+    if (is_scalar_packed_int4) {
+      PrintPackedInt4Load(buffer, PrintExpr(base), os);
+    } else {
+      os << this->GetBufferRef(op->dtype, buffer, base);
+    }
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);
@@ -2239,13 +2263,7 @@ void CodeGenTileLangHIP::VisitExpr_(const BufferLoadNode *op,
   std::string vid = GetVarID(buffer_var.get());
   auto print_packed_int4_load = [&](const std::string &idx_str,
                                     std::ostream &stream) {
-    if (element_dtype.is_uint()) {
-      stream << "tl_uint4_packed_load((const unsigned char*)" << vid << ", "
-             << idx_str << ")";
-    } else {
-      stream << "tl_int4_packed_load((const signed char*)" << vid << ", "
-             << idx_str << ")";
-    }
+    PrintPackedInt4Load(op->buffer.get(), idx_str, stream);
   };
 
   if (is_packed_int4_buffer && value_dtype.is_scalar()) {

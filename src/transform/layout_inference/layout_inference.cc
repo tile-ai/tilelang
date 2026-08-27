@@ -1340,8 +1340,7 @@ private:
                 const LayoutMap &base_layout_map,
                 const LayoutMap &strict_layout_map,
                 const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-                const LayoutCostModel &cost_model,
-                std::optional<std::string> *last_layout_conflict) {
+                const LayoutCostModel &cost_model) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
     std::deque<int> q;
@@ -1369,9 +1368,6 @@ private:
     } catch (const LayoutConflictException &e) {
       ok = false;
       failure = e.what();
-      if (last_layout_conflict != nullptr) {
-        *last_layout_conflict = failure;
-      }
     } catch (const NormalizeIterException &e) {
       ok = false;
       failure = e.what();
@@ -1467,7 +1463,6 @@ private:
       AttemptCost best_cost;
       bool has_best = false;
       int best_infer_root = -1;
-      std::optional<std::string> last_layout_conflict;
 
       auto adopt = [&](AttemptOutcome &&outcome, int attempt_root) {
         best_infer_list = std::move(outcome.infer_list);
@@ -1481,9 +1476,9 @@ private:
       for (int attempt_infer_root : members) {
         DLOG(INFO) << "----------------------- try root " << attempt_infer_root
                    << " members " << members.size() << '\n';
-        auto outcome = RunOneAttempt(attempt_infer_root, members, layout_map,
-                                     strict_layout_map, /*seed_layouts=*/{},
-                                     *cost_model, &last_layout_conflict);
+        auto outcome =
+            RunOneAttempt(attempt_infer_root, members, layout_map,
+                          strict_layout_map, /*seed_layouts=*/{}, *cost_model);
         if (!outcome) {
           continue;
         }
@@ -1516,15 +1511,11 @@ private:
           DLOG(INFO) << "[InferInFreeMode] all attempts failed; retrying with "
                      << "wide fallback dst layouts";
           auto outcome = RunOneAttempt(members.front(), members, layout_map,
-                                       strict_layout_map, seeds, *cost_model,
-                                       &last_layout_conflict);
+                                       strict_layout_map, seeds, *cost_model);
           if (outcome) {
             adopt(std::move(*outcome), members.front());
           }
         }
-      }
-      if (!has_best && last_layout_conflict.has_value()) {
-        throw LayoutConflictException(*last_layout_conflict);
       }
       ICHECK(has_best) << "no available layout found" << '\n';
       // Apply the best plan for this component

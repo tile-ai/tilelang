@@ -193,7 +193,7 @@ TL_DEVICE uint8_t tl_pack_uint4x2(unsigned int low, unsigned int high) {
   return static_cast<uint8_t>((low & 0xFu) | ((high & 0xFu) << 4));
 }
 
-TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
+TL_DEVICE int tl_int4_packed_load(const signed char *packed, int64_t idx) {
   unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
   unsigned int shift = (idx & 1) * 4;
   int value = static_cast<int>((byte >> shift) & 0xFu);
@@ -201,13 +201,13 @@ TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
 }
 
 TL_DEVICE unsigned int tl_uint4_packed_load(const unsigned char *packed,
-                                            int idx) {
+                                            int64_t idx) {
   unsigned char byte = packed[idx >> 1];
   unsigned int shift = (idx & 1) * 4;
   return (byte >> shift) & 0xFu;
 }
 
-TL_DEVICE void tl_int4_packed_store(signed char *packed, int idx, int val) {
+TL_DEVICE void tl_int4_packed_store(signed char *packed, int64_t idx, int val) {
   unsigned int shift = (idx & 1) * 4;
   unsigned char mask = static_cast<unsigned char>(0xFu << shift);
   unsigned char nibble = static_cast<unsigned char>(
@@ -216,7 +216,7 @@ TL_DEVICE void tl_int4_packed_store(signed char *packed, int idx, int val) {
   packed[idx >> 1] = static_cast<signed char>((byte & ~mask) | nibble);
 }
 
-TL_DEVICE void tl_uint4_packed_store(unsigned char *packed, int idx,
+TL_DEVICE void tl_uint4_packed_store(unsigned char *packed, int64_t idx,
                                      unsigned int val) {
   unsigned int shift = (idx & 1) * 4;
   unsigned char mask = static_cast<unsigned char>(0xFu << shift);
