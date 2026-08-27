@@ -377,10 +377,11 @@ public:
       strict_layout_map.Set(buffer, layout);
     }
 
-    // A partial fragment access cannot establish a layout for the untouched
-    // portion of the buffer. Only layouts fixed before common/free inference
-    // (annotations and strict operators such as GEMM/TMEM) may be sliced.
-    ValidateFragmentSlices(strict_layout_map);
+    // A partial fragment region TileOp cannot establish a layout for the
+    // untouched portion of the buffer. Only layouts fixed before common/free
+    // inference (annotations and strict operators such as GEMM/TMEM) may be
+    // sliced.
+    ValidateFragmentTileOpSlices(strict_layout_map);
 
     // step 2: infer common layout with BFS
     FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
@@ -522,18 +523,14 @@ private:
         << SpanHintSuffix(buffer->span);
   }
 
-  void ValidateFragmentSlices(const LayoutMap &strict_layout_map) const {
+  void ValidateFragmentTileOpSlices(const LayoutMap &strict_layout_map) const {
     for (size_t i = 0; i < infer_list_.size(); ++i) {
       const TileOperator &op = infer_list_[i];
-      if (const auto *parallel = op.as<ParallelOpNode>()) {
-        for (const Buffer &buffer : parallel->GetAccessOrder()) {
-          if (!strict_layout_map.count(buffer) &&
-              !parallel->IsFullBufferAccess(buffer)) {
-            ReportFreeFragmentSlice(
-                static_cast<int>(i), buffer,
-                parallel->GetIndiceMap().at(buffer).indices);
-          }
-        }
+      if (op.as<ParallelOpNode>()) {
+        // A raw T.Parallel describes exact pointwise accesses, not a region
+        // TileOp whose smaller logical shape could seed an incomplete fragment
+        // layout. Its inferred loop layout is checked against every fragment
+        // access by ParallelOpNode::InferLayout.
         continue;
       }
 

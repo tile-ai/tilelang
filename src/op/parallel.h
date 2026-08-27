@@ -126,10 +126,6 @@ public:
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.
   const std::vector<Buffer> &GetAccessOrder() const { return access_order_; }
-  // Return whether this loop's access covers the complete logical buffer.
-  // This is used by LayoutInference to distinguish a full-buffer inference
-  // constraint from a fragment slice that would require extrapolating a layout.
-  bool IsFullBufferAccess(const Buffer &buffer) const;
   // Get the predicate for a given logical thread index. GPU callers pass the
   // real threadIdx.x Var; callers without thread bindings (e.g. CPU) pass
   // constant 0.

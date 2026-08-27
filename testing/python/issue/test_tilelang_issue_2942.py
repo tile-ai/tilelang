@@ -60,7 +60,7 @@ def test_fragment_copy_slice_without_layout_anchor_is_rejected():
 
 
 @tilelang.testing.requires_cuda
-def test_explicit_parallel_fragment_slice_without_layout_anchor_is_rejected():
+def test_explicit_parallel_fragment_slice_is_checked_by_layout_validation():
     @tilelang.jit(out_idx=[-1])
     def prog():
         @T.prim_func
@@ -76,7 +76,7 @@ def test_explicit_parallel_fragment_slice_without_layout_anchor_is_rejected():
 
         return main
 
-    with pytest.raises(ValueError, match="Fragment buffer slicing is not supported"):
+    with pytest.raises(ValueError, match="normalized thread map"):
         prog()
 
 
@@ -152,6 +152,32 @@ def test_parallel_with_complete_inner_serial_access_is_allowed():
                     for j in T.serial(N):
                         f[i, j] = A[i, j]
                 T.copy(f, C)
+
+        return main
+
+    prog()
+
+
+@tilelang.testing.requires_cuda
+def test_parallel_with_complete_outer_serial_access_is_allowed():
+    rows, cols = 4, 256
+
+    @tilelang.jit(out_idx=[-1])
+    def prog():
+        @T.prim_func
+        def main(
+            A: T.Tensor((rows, cols), "float32"),
+            C: T.Tensor((cols,), "float32"),
+        ):
+            with T.Kernel(1, threads=64):
+                f = T.alloc_fragment((rows, cols), "float32")
+                out = T.alloc_fragment((cols,), "float32")
+                T.copy(A, f)
+                T.clear(out)
+                for i in T.serial(rows):
+                    for j in T.Parallel(cols):
+                        out[j] += f[i, j]
+                T.copy(out, C)
 
         return main
 
