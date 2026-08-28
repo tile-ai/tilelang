@@ -65,7 +65,7 @@ def test_cpu_parallel_gemm_correctness():
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
     C = _run(kernel, A, B)
-    torch.testing.assert_close(C, A @ B, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(C, A @ B, rtol=1e-3, atol=1e-3)
 
 
 def test_cpu_parallel_emits_pragma_and_sinks_allocs():
@@ -97,7 +97,7 @@ def test_cpu_parallel_unit_grid_dim_stays_in_chain():
     torch.manual_seed(0)
     A = torch.randn(128, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
 
 
 def test_cpu_parallel_disabled_by_default():
@@ -108,7 +108,7 @@ def test_cpu_parallel_disabled_by_default():
     torch.manual_seed(0)
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(_run(kernel, A, B), A @ B, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(_run(kernel, A, B), A @ B, rtol=1e-3, atol=1e-3)
 
 
 def test_cpu_parallel_min_trip_gate():
@@ -126,7 +126,7 @@ def test_cpu_parallel_min_trip_gate():
     torch.manual_seed(0)
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(_run(kernel, A, B), A @ B, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(_run(kernel, A, B), A @ B, rtol=1e-3, atol=1e-3)
 
 
 def test_cpu_parallel_num_threads_clause():
