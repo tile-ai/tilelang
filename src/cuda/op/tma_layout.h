@@ -32,17 +32,6 @@ struct TMASharedLayoutAnalysis {
 TMASharedLayoutAnalysis AnalyzeTMASharedLayout(const Layout &layout,
                                                DataType dtype);
 
-// Try to re-encode `layout` with its swizzle widened to at least `mode`.
-// Recovery returns the narrowest observed swizzle; a wider TensorMap mode
-// describes the same layout iff the extra XOR source bits never contradict
-// it within the buffer — the recovery proof gates this. A passing proof
-// implies those bits never fire in-domain, so the plain layout is unchanged
-// and any box decomposition computed from the original encoding stays valid.
-std::optional<TMASharedLayoutEncoding>
-WidenTMASharedLayout(const Layout &layout, DataType dtype,
-                     const TMASharedLayoutEncoding &encoding,
-                     const SwizzleMode &mode);
-
 // Record the shared-memory base alignment required by the selected TensorMap
 // swizzle so later allocation merging cannot shift the swizzle phase.
 void RequireTMASmemAlignment(const LowerArgs &lower_args,
@@ -51,6 +40,9 @@ void RequireTMASmemAlignment(const LowerArgs &lower_args,
 
 // A TensorMap box dimension holds at most 256 elements.
 inline constexpr int64_t kTmaMaxBoxDim = 256;
+
+// Every tile-mode TMA instruction requires a 128-byte-aligned SMEM address.
+inline constexpr int64_t kTmaSmemAddrAlign = 128;
 
 // An im2col TensorMap accesses up to 1024 pixels per column; its
 // channels-per-pixel stays under the ordinary box limit.

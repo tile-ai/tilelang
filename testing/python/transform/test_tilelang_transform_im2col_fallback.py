@@ -87,6 +87,29 @@ def test_im2col_tall_pixel_block_uses_single_box():
 
 
 @tilelang.testing.requires_cuda
+def test_im2col_single_channel_rejects_pixel_inner_pairing():
+    """With channels == 1 the pixel mode can pair as TMA mode 0; the channel
+    dim then sits at a one-element global stride, which the non-innermost
+    16-byte stride rule rejects before any descriptor is built — never a
+    silently swapped channel/pixel encoding."""
+    N, C, H, W, K = 1, 1, 8, 8, 3
+    block_M, block_K = 16, 1
+
+    @T.prim_func
+    def kern(
+        data: T.Tensor((N, H, W, C), T.float16),
+        out: T.Tensor((block_M, block_K), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            sh = T.alloc_shared((block_M, block_K), T.float16)
+            T.im2col(data, sh, 0, 0, K, 1, 1, 1)
+            T.copy(sh, out)
+
+    with pytest.raises(Exception, match="im2col cannot lower.*16-byte multiple"):
+        _lower_to_cuda_source(kern, "sm_90")
+
+
+@tilelang.testing.requires_cuda
 def test_c2d_im2col_alias_warns_and_uses_new_tileop():
     with pytest.warns(DeprecationWarning, match="T.c2d_im2col is deprecated"):
         func = _make_im2col_kernel(use_deprecated_alias=True)

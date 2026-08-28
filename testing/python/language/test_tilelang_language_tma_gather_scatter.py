@@ -238,9 +238,10 @@ def test_gather_blocked_layout_multi_instruction():
 def test_gather_position_independent_swizzle_is_rejected():
     """The truncated half-bank atom restarts its XOR pattern per 32-column
     block, which is not one global hardware swizzle: recovery keeps the 32B
-    mode, whose span truncates the box before the gathered rows."""
+    mode, whose 16-element span admits no box split with 128-byte-aligned
+    instruction steps."""
     program = gather_readback_program(N=64, K=64, swizzle_kind="64B")
-    with pytest.raises(Exception, match="4 gathered rows"):
+    with pytest.raises(Exception, match="cannot be cleanly split"):
         tilelang.compile(
             program,
             target="cuda",

@@ -1897,6 +1897,7 @@ AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
   // We have some hardware restrictions on tile_gbasis. But we can shrink it to
   // meet some requirements if we need to. This is the modified tile_gbasis.
   Array<cute::IntTuple> box_shape, box_stride;
+  int64_t box_elems = 1; // running product of the accepted box dims
   for (int64_t i = 0; i < smem_rank; i++) {
     // Collect the global mode information.
     auto basis = cute::BasisPath(tile_gbasis->stride[i]);
@@ -1910,26 +1911,21 @@ AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
       // A TensorMap requires the innermost box bytes to fit within the
       // swizzle span. Recovery reports the narrowest pattern observable in
       // the buffer; a wider mode describes the same layout iff its extra XOR
-      // source bits lie beyond the buffer, so when the contiguous run wants
-      // more than the span, ask the decoder to prove the widest useful mode
-      // first (failure is monotone in the width: wider sources are a
-      // superset).
+      // source bits lie beyond the buffer (then it also recovers the same
+      // plain layout, so the pairing above stays valid). Widen one mode at a
+      // time while the contiguous run wants more than the span; the recovery
+      // proof gates each step. b_bits is recast-invariant, so the byte-space
+      // width binds the element-space recovery directly.
       int64_t run_bytes =
-          std::min(box_dim, cap) * elem_bits / 8; // 16B-multiple check below
-      int64_t want_bytes = 32;
-      while (want_bytes < run_bytes && want_bytes < 128)
-        want_bytes *= 2;
-      for (int64_t bytes = want_bytes; bytes > swizzle_mode.ByteWidth();
-           bytes /= 2) {
-        SwizzleMode wider =
-            SwizzleMode::FromOrdinal(__builtin_ctzll(bytes) - 4);
-        if (auto widened = WidenTMASharedLayout(
-                shared_layout, shared_tensor->dtype, layout_encoding, wider)) {
-          // Widening preserves the plain layout, so the pairing above stays
-          // valid; only the descriptor mode (and base alignment) changes.
-          swizzle_mode = widened->swizzle_mode;
+          TMABytesFromElements(std::min(box_dim, cap), shared_tensor->dtype);
+      while (swizzle_mode.ByteWidth() < 128 &&
+             run_bytes > swizzle_mode.ByteWidth()) {
+        int b_bits = swizzle_mode.BBits() + 1;
+        if (!cute::ComposedLayoutFromTileLang(shared_layout, b_bits)
+                 .defined()) {
           break;
         }
+        swizzle_mode = SwizzleMode::FromBBits(b_bits);
       }
       int64_t span_elems =
           std::max<int64_t>(1, swizzle_mode.ByteWidth() * 8 / elem_bits);
@@ -1939,10 +1935,15 @@ AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
     if (box_dim > cap) {
       // Cap the mode at its largest clean divisor. The leftover and every
       // slower mode fall to the rest loop: the capped mode becomes the box's
-      // outermost, so the shared prefix stays contiguous.
+      // outermost, so the shared prefix stays contiguous. Rest instructions
+      // step the shared tile by the box size, so the divisor must also keep
+      // the box a whole kTmaSmemAddrAlign multiple.
       int64_t inner = -1;
       for (int64_t d = cap; d > 1; --d) {
-        if (box_dim % d == 0) {
+        if (box_dim % d == 0 &&
+            TMABytesFromElements(box_elems * d, shared_tensor->dtype) %
+                    kTmaSmemAddrAlign ==
+                0) {
           inner = d;
           break;
         }
@@ -2029,6 +2030,18 @@ AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
   // E.g., rest_size = 8
   plan.rest_size =
       cute::AsConst(cute::Size(tile_to_shared_logical)) / plan.box_size;
+
+  // Rest instructions step the shared tile by the box size; the divisor
+  // search above keeps split boxes aligned, but a box formed from unpaired
+  // slower modes may still violate the instruction address alignment.
+  int64_t box_bytes = TMABytesFromElements(plan.box_size, shared_tensor->dtype);
+  if (plan.rest_size > 1 && box_bytes % kTmaSmemAddrAlign != 0) {
+    std::ostringstream oss;
+    oss << "TMA rest instructions step the shared tile by " << box_bytes
+        << " bytes, which is not a whole " << kTmaSmemAddrAlign
+        << "-byte multiple";
+    return unsupported(oss.str());
+  }
 
   // Physical shared offset of the tile base.
   plan.shared_offset = smem_plain(shared_logical_offset);
