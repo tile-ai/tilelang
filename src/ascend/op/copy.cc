@@ -571,6 +571,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
 
     int dual_dst_ctl = op.dual_dst_ctl;
+    int quant_pre = GetCCQuantPre(op.src->dtype, op.dst->dtype);
     PrimExpr copy_inner = src_inner.size;
     PrimExpr copy_rows = src_row.size;
     if (dual_dst_ctl == 0) {
@@ -588,33 +589,88 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     PrimExpr dual_dst_ctl_val = I(dual_dst_ctl);
     PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.unit_flag_ctl);
     PrimExpr sub_blockid_val = cast(DataType::Int(32), op.sub_blockid);
-    call = Call(DataType::Void(), ascend_copy_matrix_cc_to_ub(),
-                {dst_ptr,
-                 src_ptr,
-                 sid,
-                 copy_inner,
-                 copy_rows,
-                 dst_row_stride,
-                 loop_src_stride,
-                 dual_dst_ctl_val,
-                 sub_blockid_val,   // sub_blockid
-                 zero,              // clip_relu_pre
-                 unit_flag_ctl_val, // unit_flag_ctl
-                 I(GetCCQuantPre(op.src->dtype, op.dst->dtype)), // quant_pre
-                 zero,                                           // relu_pre
-                 zero,                                           // split_en
-                 I(1),                                           // NZ2ND_en
-                 zero,                                           // quant_post
-                 zero,                                           // relu_post
-                 zero,   // clip_relu_post
-                 zero,   // loop_enhance_en
-                 zero,   // eltwise_op
-                 zero,   // eltwise_antq_en
-                 zero,   // loop_enhance_merge_en
-                 zero,   // C0_pad_en
-                 zero,   // wino_post_en
-                 zero,   // broadcast_en
-                 zero}); // NZ2DN_en
+    // Shared FixPipe args are captured; only src / dual / sub_blockid /
+    // unit_flag vary.
+    auto make_cc_to_ub = [&](const PrimExpr &src_p, const PrimExpr &dual_ctl,
+                             const PrimExpr &sub_id,
+                             const PrimExpr &unit_flag) {
+      return Call(DataType::Void(), ascend_copy_matrix_cc_to_ub(),
+                  {dst_ptr,
+                   src_p,
+                   sid,
+                   copy_inner,
+                   copy_rows,
+                   dst_row_stride,
+                   loop_src_stride,
+                   dual_ctl,
+                   sub_id,
+                   zero, // clip_relu_pre
+                   unit_flag,
+                   I(quant_pre),
+                   zero,   // relu_pre
+                   zero,   // split_en
+                   I(1),   // NZ2ND_en
+                   zero,   // quant_post
+                   zero,   // relu_post
+                   zero,   // clip_relu_post
+                   zero,   // loop_enhance_en
+                   zero,   // eltwise_op
+                   zero,   // eltwise_antq_en
+                   zero,   // loop_enhance_merge_en
+                   zero,   // C0_pad_en
+                   zero,   // wino_post_en
+                   zero,   // broadcast_en
+                   zero}); // NZ2DN_en
+    };
+
+    // Dual-destination and quant_pre cannot be set together; split into two
+    // non-dual FixPipes (sub_blockid 0 then 1) instead of one hardware dual.
+    bool onpath_quant_dual = (dual_dst_ctl == 1 || dual_dst_ctl == 2) &&
+                             (quant_pre == 1 || quant_pre == 16);
+    if (onpath_quant_dual) {
+      // Each pipe copies exactly the (smaller) destination half block.
+      copy_inner = dst_inner.size;
+      copy_rows = dst_row.size;
+      // Logical ND offset of the second half; access-ptr remap turns it into
+      // NZ.
+      PrimExpr pipe1_offset =
+          dual_dst_ctl == 1 ? FloorDiv(src_row.size, I(2)) * src_inner.size
+                            : FloorDiv(src_inner.size, I(2));
+      pipe1_offset = analyzer->Simplify(pipe1_offset);
+      // Constant extents only; symbolic sizes are not rejected.
+      if (dual_dst_ctl == 1) {
+        if (const auto *imm = src_row.size.as<IntImmNode>()) {
+          ICHECK_EQ(imm->value % 2, 0)
+              << "Ascend M-split on-path quant dual_copy needs an even M, got "
+              << imm->value;
+        }
+      } else {
+        if (const auto *imm = src_inner.size.as<IntImmNode>()) {
+          ICHECK_EQ(imm->value % 32, 0) << "Ascend N-split on-path quant "
+                                           "dual_copy needs N % 32 == 0, got "
+                                        << imm->value;
+        }
+      }
+      PrimExpr pipe_extent = analyzer->Simplify(copy_rows * copy_inner);
+      PrimExpr pipe0_src_ptr =
+          make_access_ptr(op.src, src_region.offset, pipe_extent, 1);
+      PrimExpr pipe1_src_ptr = make_access_ptr(
+          op.src, src_region.offset + pipe1_offset, pipe_extent, 1);
+      // Demote unit_flag 3 to 2 on the first pipe; clear L0C only after the
+      // second.
+      PrimExpr first_unit_flag = analyzer->Simplify(
+          Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val));
+      Stmt copy_stmt = SeqStmt(
+          {Evaluate(make_cc_to_ub(pipe0_src_ptr, I(0), I(0), first_unit_flag)),
+           Evaluate(
+               make_cc_to_ub(pipe1_src_ptr, I(0), I(1), unit_flag_ctl_val))});
+      if (!is_one(has_data) && !analyzer->CanProve(has_data)) {
+        copy_stmt = IfThenElse(has_data, copy_stmt);
+      }
+      return copy_stmt;
+    }
+    call = make_cc_to_ub(src_ptr, dual_dst_ctl_val, sub_blockid_val,
+                         unit_flag_ctl_val);
   } else if (dma_path == DMAPath::kUBToL1) {
     ICHECK(!op.nd2nz)
         << "Ascend nd2nz UB->L1 copy must be emitted directly from the Python "

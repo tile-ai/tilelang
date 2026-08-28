@@ -138,17 +138,14 @@ def dual_copy(
     src_region = to_buffer_region(src)
     dst_region = to_buffer_region(dst)
 
-    # WARNING: dav-950 does NOT support quant_pre (type conversion) with
-    # fixpipe (cc->ub) dual-destination copies. If src and dst dtypes differ, the hardware may
-    # silently produce incorrect results.
     src_dtype = src_region.buffer.dtype
     dst_dtype = dst_region.buffer.dtype
-    if src_dtype != dst_dtype and src_region.buffer.scope() == "shared.l0c":
-        raise ValueError(
-            f"dual_copy: src dtype ({src_dtype}) != dst dtype ({dst_dtype}). "
-            "Type conversion during cc->ub dual-destination copy is NOT supported on dav-950. "
-            "Use a separate copy or cast inside a VF block instead."
-        )
+    # Quant + dual-destination is illegal in hardware, so the lowering splits the
+    # copy into two consecutive non-dual FixPipe commands. That path only exists
+    # for fp32 -> f16/bf16; every other cross-dtype L0C->UB split is rejected.
+    onpath_cast = str(src_dtype) == "float32" and str(dst_dtype) in ("float16", "bfloat16")
+    if src_dtype != dst_dtype and src_region.buffer.scope() == "shared.l0c" and not onpath_cast:
+        raise ValueError(f"dual_copy: L0C->UB type conversion only supports fp32 -> f16/bf16, got src {src_dtype} -> dst {dst_dtype}.")
 
     annotations = {"dual_dst_ctl": dual_dst_ctl}
     if _is_half(dst_shape[split_axis], src_shape[split_axis]) or _is_half(alloc_dst_shape[split_axis], alloc_src_shape[split_axis]):
