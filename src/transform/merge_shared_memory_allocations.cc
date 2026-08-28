@@ -77,12 +77,20 @@ static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
+// Anonymous namespace: lower_thread_allreduce.cc defines a different
+// tvm::tl::AllocateCollector; without internal linkage the two classes'
+// implicit inline members are vague-linkage symbols the linker dedups
+// across translation units, which is an ODR violation that corrupts
+// whichever layout loses the coin toss.
+namespace {
 class AllocateCollector : public StmtExprVisitor {
 public:
   void VisitStmt_(const AllocBufferNode *op) final {
     if (IsDynamicSharedMemory(op->buffer->data)) {
+      alloc_order_.emplace(op->buffer->data.get(), next_order_++);
       dyn_shmem_allocs_[op->buffer->data.get()] = op;
     } else if (IsStaticSharedMemory(op->buffer->data)) {
+      alloc_order_.emplace(op->buffer->data.get(), next_order_++);
       static_shmem_allocs_[op->buffer->data.get()] = op;
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -93,7 +101,18 @@ public:
   // The static mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocBufferNode *>
       static_shmem_allocs_;
+  // IR-visit discovery index of every collected allocation. This is the only
+  // per-buffer key that is both unique and stable across runs: name_hint is
+  // not unique (every AllReduce scratch buffer is literally named
+  // "workspace", double-buffered stages share their buffer's name), and
+  // VarNode pointers vary with heap layout / ASLR. The planner uses it to
+  // break every sorting tie so arena offsets come out deterministic.
+  std::unordered_map<const VarNode *, int> alloc_order_;
+
+private:
+  int next_order_{0};
 };
+} // namespace
 
 // Find a linear pattern of storage access
 // Used for liveness analysis.
@@ -455,9 +474,11 @@ public:
   explicit SharedMemoryRewriter(
       const std::unordered_map<const VarNode *, const AllocBufferNode *>
           &shmem_allocs,
+      const std::unordered_map<const VarNode *, int> &alloc_order,
       bool is_dynamic = true, bool verbose = false, int align_bytes = 0,
       bool preserve_aliases = true)
-      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
+      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs},
+        alloc_order_{alloc_order}, verbose_{verbose},
         align_bytes_{align_bytes}, preserve_aliases_{preserve_aliases} {
     if (!is_dynamic) {
       merged_buf_var_ =
@@ -505,10 +526,21 @@ public:
   }
 
 private:
+  // Deterministic discovery index of a collected allocation; every var in
+  // shmem_allocs_ has one.
+  int AllocOrder(const VarNode *var) const {
+    auto it = alloc_order_.find(var);
+    ICHECK(it != alloc_order_.end())
+        << "no discovery order recorded for shared allocation "
+        << var->name_hint;
+    return it->second;
+  }
+
   std::vector<Stmt> MakeAliasBindings() const {
     struct AliasInfo {
       const VarNode *var{nullptr};
       PrimExpr byte_offset;
+      int order{0};
     };
 
     std::vector<AliasInfo> aliases;
@@ -517,7 +549,8 @@ private:
       if (shmem_allocs_.count(pair.first) == 0) {
         continue;
       }
-      aliases.push_back(AliasInfo{pair.first, pair.second});
+      aliases.push_back(
+          AliasInfo{pair.first, pair.second, AllocOrder(pair.first)});
     }
 
     std::sort(aliases.begin(), aliases.end(),
@@ -528,7 +561,13 @@ private:
                     lhs_offset->value != rhs_offset->value) {
                   return lhs_offset->value < rhs_offset->value;
                 }
-                return lhs.var->name_hint < rhs.var->name_hint;
+                if (lhs.var->name_hint != rhs.var->name_hint) {
+                  return lhs.var->name_hint < rhs.var->name_hint;
+                }
+                // Same offset and same name (aliased slots named e.g.
+                // "workspace"): fall back to the discovery index so the
+                // binding order does not depend on unordered_map iteration.
+                return lhs.order < rhs.order;
               });
 
     std::vector<Stmt> bindings;
@@ -555,15 +594,16 @@ private:
       return;
     }
 
-    // Sort allocations deterministically by name.
+    // Sort allocations deterministically by their IR discovery order (names
+    // are not unique, so they cannot order same-named buffers).
     std::vector<const VarNode *> sorted_vars;
     sorted_vars.reserve(shmem_allocs_.size());
     for (const auto &kv : shmem_allocs_) {
       sorted_vars.push_back(kv.first);
     }
     std::sort(sorted_vars.begin(), sorted_vars.end(),
-              [](const VarNode *a, const VarNode *b) {
-                return a->name_hint < b->name_hint;
+              [this](const VarNode *a, const VarNode *b) {
+                return AllocOrder(a) < AllocOrder(b);
               });
 
     DataType offset_dtype = DataType::Int(32);
@@ -826,6 +866,7 @@ private:
     int alignment{0};                        // required byte alignment.
     int start{0}; // first statement index touching the buf.
     int end{0};   // one-past-last statement index.
+    int order{0}; // IR discovery index; unique deterministic tie-break.
     DataType size_dtype{DataType::Int(32)};
   };
 
@@ -835,6 +876,7 @@ private:
     int end{0};
     size_t size_bytes{0};
     int alignment{0};
+    int order{0}; // IR discovery index; unique deterministic tie-break.
     const VarNode *var{nullptr};
   };
 
@@ -982,7 +1024,11 @@ private:
 
   static ArenaPlan LinearScanPack(std::vector<Interval> intervals) {
     // Process intervals in program order so lifetimes correspond to the
-    // linearised CFG.
+    // linearised CFG. The final tie-break must be the unique discovery
+    // index: same-named equal-sized buffers born at the same statement
+    // (e.g. several AllReduce "workspace" scratches) would otherwise keep
+    // the unordered_map pointer order they arrived in, and which free slot
+    // each of them grabs below would change from run to run.
     std::sort(intervals.begin(), intervals.end(),
               [](const Interval &lhs, const Interval &rhs) {
                 if (lhs.start != rhs.start) {
@@ -991,7 +1037,7 @@ private:
                 if (lhs.size_bytes != rhs.size_bytes) {
                   return lhs.size_bytes > rhs.size_bytes;
                 }
-                return lhs.var->name_hint < rhs.var->name_hint;
+                return lhs.order < rhs.order;
               });
 
     std::priority_queue<ActiveInterval, std::vector<ActiveInterval>,
@@ -1177,9 +1223,22 @@ private:
     std::vector<std::pair<const Object *, const VarNode *>>
         pending_kill_inserts;
 
-    for (auto &event_pair : event_map_) {
-      const Object *stmt = event_pair.first;
-      EventEntry &event = event_pair.second;
+    // Walk statements in linear-sequence order, not over the pointer-keyed
+    // ``event_map_``: unordered_map iteration follows the heap addresses of
+    // the statement objects, which change run to run under ASLR (and with
+    // any allocation-history change). The traversal order decides the order
+    // in which moved kill points are appended to their target statements,
+    // which in turn decides which free arena slot PlanMemory hands to each
+    // later allocation — a pointer-ordered walk therefore makes shared
+    // memory offset assignment (and the generated code) nondeterministic.
+    // ``gen_kill_seq`` can carry a scoped statement twice (its before/after
+    // entries share the stmt pointer), so dedup to visit each event once.
+    std::unordered_set<const Object *> reorder_visited;
+    for (const StmtEntry &seq_entry : gen_kill_seq) {
+      const Object *stmt = seq_entry.stmt;
+      if (!reorder_visited.insert(stmt).second)
+        continue;
+      EventEntry &event = event_map_[stmt];
 
       // Skip if no kill points to process
       if (event.kill.empty())
@@ -1237,9 +1296,9 @@ private:
             }
           }
           if (last_stmt_at_level) {
-            // Defer: pushing into event.kill (the vector ``it`` iterates) or
-            // into any other event.kill while the outer ``event_map_`` range
-            // loop is live can invalidate iterators / dangling references.
+            // Defer: ``last_stmt_at_level`` may be the statement currently
+            // being processed, and pushing into ``event.kill`` (the vector
+            // ``it`` iterates) can reallocate it and invalidate ``it``.
             pending_kill_inserts.emplace_back(last_stmt_at_level, buffer);
             visited_buffers.insert(buffer);
           }
@@ -1357,15 +1416,15 @@ private:
     }
 
     // Create a sorted vector of keys from shmem_allocs_ for deterministic
-    // iteration
+    // iteration (by discovery order: names are not unique).
     std::vector<const VarNode *> sorted_vars;
     sorted_vars.reserve(shmem_allocs_.size());
     for (const auto &kv : shmem_allocs_) {
       sorted_vars.push_back(kv.first);
     }
     std::sort(sorted_vars.begin(), sorted_vars.end(),
-              [](const VarNode *a, const VarNode *b) {
-                return a->name_hint < b->name_hint;
+              [this](const VarNode *a, const VarNode *b) {
+                return AllocOrder(a) < AllocOrder(b);
               });
 
     std::vector<BufInfo> buf_infos;
@@ -1382,6 +1441,7 @@ private:
       info.name = var->name_hint;
       info.start = start_it->second;
       info.end = std::max(end_index[var], info.start + 1);
+      info.order = AllocOrder(var);
       info.alignment = align_bytes_;
       auto align_it = shmem_alignment_map_.find(var);
       if (align_it != shmem_alignment_map_.end()) {
@@ -1402,14 +1462,15 @@ private:
       buf_infos.push_back(std::move(info));
     }
 
-    // Stable order so the later passes have deterministic behaviour.
+    // Stable order so the later passes have deterministic behaviour. Names
+    // are not unique, so the unique discovery index is the final tie-break.
     std::sort(buf_infos.begin(), buf_infos.end(),
               [](const BufInfo &a, const BufInfo &b) {
                 if (a.start != b.start)
                   return a.start < b.start;
                 if (a.end != b.end)
                   return a.end < b.end;
-                return a.name < b.name;
+                return a.order < b.order;
               });
 
     std::vector<Interval> intervals;
@@ -1425,6 +1486,7 @@ private:
       interval.size_bytes = static_cast<size_t>(
           std::max<int64_t>(0, info.const_size_bytes.value()));
       interval.alignment = info.alignment;
+      interval.order = info.order;
       interval.var = info.var;
       intervals.push_back(interval);
     }
@@ -1554,6 +1616,12 @@ private:
                       PointerType(PrimType(DataType::UInt(8)), "shared.dyn")};
   // The mapping from the original buffer var to its allocate
   std::unordered_map<const VarNode *, const AllocBufferNode *> shmem_allocs_;
+  // IR-visit discovery index per allocation (see AllocateCollector): the
+  // unique, run-stable sorting tie-break. name_hint alone is not usable for
+  // that -- e.g. every AllReduce scratch buffer is named "workspace" -- and
+  // ties resolved by unordered_map iteration follow heap pointer order,
+  // which changes with ASLR and makes offset assignment nondeterministic.
+  std::unordered_map<const VarNode *, int> alloc_order_;
   // The size of the merged buffer
   PrimExpr merged_alloc_size_{0};
   // The mapping from the original buffer var to its offset in the merged buffer
@@ -1601,7 +1669,8 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
         return resolved;
       };
   if (collector.dyn_shmem_allocs_.size() > 1) {
-    SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
+    SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_,
+                                  collector.alloc_order_, true, verbose,
                                   align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, true,
                        disable_reuse ? false : enable_aggressive_merge, false,
@@ -1609,8 +1678,9 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
-    SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false,
-                                  verbose, align_bytes, preserve_aliases);
+    SharedMemoryRewriter rewriter(collector.static_shmem_allocs_,
+                                  collector.alloc_order_, false, verbose,
+                                  align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, false,
                        disable_reuse ? false : enable_aggressive_merge, false,
                        disable_reuse, resolve(collector.static_shmem_allocs_));
