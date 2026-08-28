@@ -39,6 +39,27 @@ TMASharedLayoutAnalysis AnalyzeTMASharedLayout(const Layout &layout,
   return {std::move(encoding), ""};
 }
 
+std::optional<TMASharedLayoutEncoding>
+WidenTMASharedLayout(const Layout &layout, DataType dtype,
+                     const TMASharedLayoutEncoding &encoding,
+                     const SwizzleMode &mode) {
+  // TensorMap modes are Sw<b,4,3> on byte addresses with b = the mode
+  // ordinal; Recast keeps b, so require the same least width in element
+  // space.
+  ffi::Optional<cute::ComposedLayout> composed =
+      cute::ComposedLayoutFromTileLang(layout, mode.CanonicalOrdinal());
+  if (!composed.defined())
+    return std::nullopt;
+  ICHECK(ffi::StructuralEqual()(composed.value()->layout,
+                                encoding.composed->layout))
+      << "widening the swizzle of " << layout << " to " << mode
+      << " changed the plain layout";
+  cute::ComposedLayout composed_bytes =
+      composed.value().Recast(dtype.bits(), /*new_bits=*/8);
+  return TMASharedLayoutEncoding{composed.value(), composed_bytes,
+                                 composed_bytes->swizzle->ToSwizzleMode()};
+}
+
 void RequireTMASmemAlignment(const LowerArgs &lower_args,
                              const tirx::Buffer &shared_tensor,
                              const SwizzleMode &swizzle_mode) {

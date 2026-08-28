@@ -1975,7 +1975,8 @@ Optional<Layout> LayoutFromTileLangHierarchical(const tvm::tl::Layout &layout) {
 //
 // Then recover the plain layout and prove equivalence via RecoverPlainLayout.
 Optional<ComposedLayout>
-ComposedLayoutFromTileLang(const tvm::tl::Layout &layout) {
+ComposedLayoutFromTileLang(const tvm::tl::Layout &layout,
+                           std::optional<int> least_b_bits) {
   AddrProbe A(layout);
   if (A.shape().empty())
     return std::nullopt;
@@ -1987,17 +1988,13 @@ ComposedLayoutFromTileLang(const tvm::tl::Layout &layout) {
   if (!A0)
     return std::nullopt;
 
-  // Collect the image column of every power-of-two bit-atom. Probe bit p of dim
-  // k (one-hot 1 << p) for p < ctz(shape[k]): only then does 2^(p+1) divide the
-  // extent, so bit p toggles cleanly within the dim and the one-hot isolates a
-  // single mode. A non-pow2 extent still contributes its low bits (192 = 64*3
-  // -> p < 6); an odd extent contributes none.
+  // Collect the image column of every power-of-two bit-atom.
   std::vector<uint64_t> cols;
   uint64_t weight1 = 0; // bit positions that are some atom's identity image.
   for (int64_t k = 0; k < n; ++k) {
     ICHECK_GT(shape[k], 0); // ctz is undefined at 0; extents are >= 1.
-    int max_p = __builtin_ctz(static_cast<uint32_t>(shape[k]));
-    for (int p = 0; p < max_p; ++p) {
+    int clean_p = __builtin_ctz(static_cast<uint32_t>(shape[k]));
+    for (int p = 0; (int64_t(1) << p) < shape[k]; ++p) {
       std::vector<int32_t> x(n, 0);
       x[k] = int32_t(1) << p;
       std::optional<int32_t> a = A(x);
@@ -2005,7 +2002,7 @@ ComposedLayoutFromTileLang(const tvm::tl::Layout &layout) {
         return std::nullopt;
       uint64_t col = static_cast<uint64_t>(*a ^ *A0);
       cols.push_back(col);
-      if (__builtin_popcountll(col) == 1)
+      if (p < clean_p && __builtin_popcountll(col) == 1)
         weight1 |= col;
     }
   }
@@ -2031,6 +2028,8 @@ ComposedLayoutFromTileLang(const tvm::tl::Layout &layout) {
          it != s_at.end() && it->second == s_shift;
          it = s_at.find(m_base + b_bits))
       ++b_bits;
+    if (least_b_bits.has_value())
+      b_bits = std::max(b_bits, *least_b_bits);
     if (s_shift < b_bits)
       return std::nullopt; // source and target bit regions must not overlap.
     swizzle = Swizzle(b_bits, m_base, s_shift);
@@ -2288,8 +2287,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return LayoutFromTileLangHierarchical(layout);
            })
       .def("tl.cute.composed_layout_from_tilelang",
-           [](const tvm::tl::Layout &layout) {
-             return ComposedLayoutFromTileLang(layout);
+           [](const tvm::tl::Layout &layout, Optional<int64_t> least_b_bits) {
+             return ComposedLayoutFromTileLang(
+                 layout, least_b_bits ? std::optional<int>(
+                                            static_cast<int>(*least_b_bits))
+                                      : std::nullopt);
            })
       .def("tl.cute.restrict",
            [](const Layout &layout, const Array<Range> &range) {
