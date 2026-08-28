@@ -36,8 +36,8 @@ def compile_grouped_unit_tvm_ffi(
 
     Flow:
     1. Elaborate each config into a PrimFunc.
-    2. Lower each PrimFunc and build its host module in a fresh Z3 context.
-    3. Merge all device IR and compile it once in a separate fresh Z3 context.
+    2. Lower each PrimFunc and build its host module.
+    3. Merge all device IR and compile it once.
     4. Import the shared device module into each host runtime module.
     5. Construct per-config JITKernel objects that share the grouped device module.
     """
@@ -71,26 +71,25 @@ def compile_grouped_unit_tvm_ffi(
                     *create_pass_instruments(context=lower_context),
                     *base_pass_instruments,
                 ]
-                with tvm.arith.Z3ContextScope():
-                    with (
-                        tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
-                        compile_args.target,
-                    ):
-                        host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
-                            program,
-                            backend_context,
-                        )
+                with (
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
+                    compile_args.target,
+                ):
+                    host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
+                        program,
+                        backend_context,
+                    )
 
-                    host_context = f"stage=grouped-host, config={idx}, kernel={unique_symbol}"
-                    host_instruments = [
-                        *create_pass_instruments(context=host_context),
-                        *base_pass_instruments,
-                    ]
-                    with (
-                        tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
-                        normalized_target,
-                    ):
-                        host_rt_mod = host_codegen(host_mod, backend_context)
+                host_context = f"stage=grouped-host, config={idx}, kernel={unique_symbol}"
+                host_instruments = [
+                    *create_pass_instruments(context=host_context),
+                    *base_pass_instruments,
+                ]
+                with (
+                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
+                    normalized_target,
+                ):
+                    host_rt_mod = host_codegen(host_mod, backend_context)
 
                 lowered_items.append(
                     {
@@ -136,7 +135,6 @@ def compile_grouped_unit_tvm_ffi(
                 *base_pass_instruments,
             ]
             with (
-                tvm.arith.Z3ContextScope(),
                 tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
                 reference_target,
             ):
