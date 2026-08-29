@@ -85,10 +85,12 @@ private:
   /*! \brief whether to emit forward function declarations in the resulting C
    * code */
   bool emit_fwd_func_decl_;
-  /*! \brief While >0, kParallel loops are the body-continuation of an
-   * already-printed `#pragma omp parallel for` chain and must not re-emit
-   * the pragma. */
-  int omp_parallel_chain_depth_ = 0;
+  /*! \brief For-node identities of the kParallel loops that are members of
+   * the `#pragma omp parallel for [collapse(n)]` chain currently being
+   * printed; they must not re-emit the pragma. Identity-based so that a
+   * different kParallel loop reached through wrapper statements inside the
+   * chain body still gets its own pragma. */
+  std::unordered_set<const ForNode *> omp_chain_members_;
 
   FunctionInfo GetFunctionInfo(const CallNode *op, bool has_resource_handle);
   std::string GetPackedName(const CallNode *op);

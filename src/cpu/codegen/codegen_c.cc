@@ -454,14 +454,19 @@ void CodeGenTileLangC::VisitStmt_(const AllocBufferNode *op) {
 }
 
 void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
-  if (op->kind == ForKind::kParallel && omp_parallel_chain_depth_ == 0) {
+  if (op->kind == ForKind::kParallel && omp_chain_members_.count(op) == 0) {
     // Head of a parallel chain: count the perfectly-nested kParallel body
     // loops for the collapse(n) clause, then print serially via the base
-    // class while suppressing pragma re-emission on the chain members.
+    // class. Chain members are remembered by node identity so that a
+    // *different* kParallel loop reached through wrapper statements
+    // (IfThenElse / AttrStmt / SeqStmt) inside the chain body still gets
+    // its own pragma instead of being mistaken for a member.
+    auto saved_members = omp_chain_members_;
     int depth = 1;
     for (const ForNode *child = op->body.as<ForNode>();
          child && child->kind == ForKind::kParallel;
          child = child->body.as<ForNode>()) {
+      omp_chain_members_.insert(child);
       ++depth;
     }
     this->PrintIndent();
@@ -475,16 +480,13 @@ void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
       }
     }
     stream << "\n";
-    omp_parallel_chain_depth_ = depth;
     CodeGenC::VisitStmt_(op);
-    omp_parallel_chain_depth_ = 0;
+    omp_chain_members_ = std::move(saved_members);
     return;
   }
   if (op->kind == ForKind::kParallel) {
     // Continuation of an already-annotated chain: print serially.
-    --omp_parallel_chain_depth_;
     CodeGenC::VisitStmt_(op);
-    ++omp_parallel_chain_depth_;
     return;
   }
   CodeGenC::VisitStmt_(op);
