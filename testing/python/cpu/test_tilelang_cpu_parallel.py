@@ -19,6 +19,10 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 
+import tvm
+from tvm import tirx
+from tvm.target import Target
+
 M = N = K = 512
 BLOCK_M = BLOCK_N = 128
 BLOCK_K = 32
@@ -158,6 +162,32 @@ def test_cpu_parallel_default_off_injects_no_flags():
 
     if sys.platform != "win32" and (sys.platform != "darwin" or _find_libomp() is not None):
         assert "-fopenmp" in enabled
+
+
+def test_cpu_parallel_codegen_nested_parallel_keeps_pragma():
+    # A kParallel loop reached through an IfThenElse inside another parallel
+    # chain's body is NOT a collapse member and must keep its own pragma.
+    # Regression for the chain-depth-counter bug where any kParallel seen
+    # while printing a chain was wrongly suppressed.
+    code = """
+@I.ir_module
+class Module:
+    @T.prim_func
+    def main():
+        A = T.alloc_buffer((64,), "float32", scope="local")
+        for bx in T.parallel(4):
+            if bx == 0:
+                for i in T.parallel(64):
+                    A[bx * 16 + i] = 1.0
+            for j in range(16):
+                A[bx * 16 + j] = 2.0
+"""
+    from tilelang.cpu.codegen import build_c
+
+    mod = tvm.script.from_source(code)
+    mod = tirx.transform.BindTarget(Target("c"))(mod)
+    source = build_c(mod, Target("c")).inspect_source()
+    assert source.count("#pragma omp parallel for") == 2
 
 
 if __name__ == "__main__":
