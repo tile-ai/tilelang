@@ -178,7 +178,9 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     """Allocate a barrier buffer.
 
     Args:
-        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier.
+            Every count must be at least 1: an mbarrier arrive count of 0 has no defined meaning,
+            and a negative count would be reinterpreted as a garbage unsigned value at init.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
@@ -188,6 +190,9 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     >>> mbar = alloc_barrier(128)  # allocate a barrier with arrive count 128
     >>> mbars = alloc_barrier([128] * n)  # allocate n barriers with the same arrive count 128
     """
+    counts = [arrive_count] if isinstance(arrive_count, int) else list(arrive_count)
+    if any(count <= 0 for count in counts):
+        raise ValueError(f"alloc_barrier: arrive_count must be at least 1, got {counts}")
     # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]
@@ -206,11 +211,15 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
     """Allocate a cluster barrier buffer.
 
     Args:
-        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier
+        arrive_count (int | list[int]): The number of threads that need to arrive at each barrier.
+            Every count must be at least 1, as for `alloc_barrier`.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a cluster barrier
     """
+    counts = [arrive_count] if isinstance(arrive_count, int) else list(arrive_count)
+    if any(count <= 0 for count in counts):
+        raise ValueError(f"alloc_cluster_barrier: arrive_count must be at least 1, got {counts}")
     # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]
