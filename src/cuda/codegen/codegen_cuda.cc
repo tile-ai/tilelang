@@ -5791,49 +5791,52 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // Note that packed 4-bit broadcast cannot trivially fallback to the
+  // generic make_<Type>(v, ...) path, as it can emit malformed make_int16_t()
+  // calls that cause nvcc compilation errors when lanes==4.
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
-    bool fail = false;
     const int64_t *p = as_const_int(op->value);
-    ICHECK(p) << "BroadcastNode " << op << " value: " << op->value
-              << " is not a constant";
-    int64_t v = *p & 0xF;
 
-    if (lanes == 4) {
-      v = (v << 12) | (v << 8) | (v << 4) | v;
-      if (op->dtype.is_uint()) {
-        os << "(uint16_t)" << v;
-      } else {
-        os << "(int16_t)" << v;
-      }
-    } else {
-      v = (v << 28) | (v << 24) | (v << 20) | (v << 16) | (v << 12) | (v << 8) |
-          (v << 4) | v;
-      if (lanes == 8) {
-        if (op->dtype.is_uint()) {
-          os << "(uint)" << v;
-        } else {
-          os << "(int)" << v;
+    auto emit_packed_field = [&](int nibbles_per_field) {
+      if (p) {
+        int64_t v = *p & 0xF;
+        int64_t packed = 0;
+        for (int i = 0; i < nibbles_per_field; ++i) {
+          packed |= v << (i * 4);
         }
-      } else if (lanes == 16 || lanes == 32) {
-        os << "make_";
-        PrintType(op->dtype, os);
+        os << packed;
+      } else {
+        std::string v = PrintExpr(op->value);
         os << '(';
-        for (int i = 0; i < lanes / 8; ++i) {
+        for (int i = 0; i < nibbles_per_field; ++i) {
           if (i != 0)
-            os << ", ";
-          if (op->dtype.is_uint()) {
-            os << "(uint)" << v;
-          } else {
-            os << "(int)" << v;
-          }
+            os << " | ";
+          os << "((static_cast<unsigned int>(" << v << ") & 0x0fu) << "
+             << (i * 4) << ")";
         }
         os << ')';
-      } else {
-        fail = true;
       }
-    }
+    };
 
-    if (!fail) {
+    if (lanes == 4) {
+      os << (op->dtype.is_uint() ? "(uint16_t)" : "(int16_t)");
+      emit_packed_field(4);
+      return;
+    } else if (lanes == 8) {
+      os << (op->dtype.is_uint() ? "(uint)" : "(int)");
+      emit_packed_field(8);
+      return;
+    } else if (lanes == 16 || lanes == 32) {
+      os << "make_";
+      PrintType(op->dtype, os);
+      os << '(';
+      for (int i = 0; i < lanes / 8; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << (op->dtype.is_uint() ? "(uint)" : "(int)");
+        emit_packed_field(8);
+      }
+      os << ')';
       return;
     }
   }
