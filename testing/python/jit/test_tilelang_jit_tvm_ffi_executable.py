@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from tilelang import tvm
+from tilelang.jit.kernel import JITKernel
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
 
@@ -97,6 +98,36 @@ def test_preloaded_executable_is_reused():
     assert adapter._get_executable() is preloaded_executable
     assert adapter.get_exportable_executable() is preloaded_executable
     assert created == []
+
+
+def test_disk_cached_library_can_be_exported(tmp_path):
+    cached_library = tmp_path / "cache" / "kernel_lib.so"
+    cached_library.parent.mkdir()
+    cached_library.write_bytes(b"cached-library")
+
+    kernel = JITKernel.__new__(JITKernel)
+    kernel.artifact = None
+    kernel.adapter = SimpleNamespace(libpath=str(cached_library))
+    kernel.execution_backend = "tvm_ffi"
+
+    exported_library = tmp_path / "export" / "kernel.so"
+    kernel.export_library(str(exported_library))
+
+    assert exported_library.read_bytes() == cached_library.read_bytes()
+
+
+def test_exporting_disk_cached_library_to_its_own_path_succeeds(tmp_path):
+    cached_library = tmp_path / "kernel_lib.so"
+    cached_library.write_bytes(b"cached-library")
+
+    kernel = JITKernel.__new__(JITKernel)
+    kernel.artifact = None
+    kernel.adapter = SimpleNamespace(libpath=str(cached_library))
+    kernel.execution_backend = "tvm_ffi"
+
+    kernel.export_library(str(cached_library))
+
+    assert cached_library.read_bytes() == b"cached-library"
 
 
 def test_callee_allocated_output_dispatch_uses_single_main_entry():
