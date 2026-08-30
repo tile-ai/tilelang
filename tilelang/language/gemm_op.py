@@ -93,6 +93,10 @@ def _gemm_impl(
     else:
         assert prim_expr_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
 
+    for name, dim in (("M", M), ("N", N), ("K", K)):
+        if not isinstance(dim, tirx.IntImm):
+            raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
+
     # Deprecated: every lowering consumes the complete operand BufferRegions,
     # so the serialized per-axis strides and final-axis offsets below are no
     # longer read in-tree and are NOT validated (the historic
