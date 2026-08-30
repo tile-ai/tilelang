@@ -12,7 +12,7 @@ struct ScanSumOp {
 
 struct ScanMaxOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
-    return ck_tile::max(x, y);
+    return tl::max(x, y);
   }
 };
 

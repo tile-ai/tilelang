@@ -197,7 +197,7 @@ T.gemm(A_shared, B_shared, C_local)
 ```
 
 - A single call that performs a tile-level matrix multiplication using the specified buffers.
-- Under the hood, for NVIDIA targets, it can use CUTLASS/Cute or WMMA instructions. On AMD GPUs, TileLang uses a separate HIP or composable kernel approach.
+- Under the hood, for NVIDIA targets, it can use CUTLASS/Cute or WMMA instructions. On AMD GPUs, TileLang emits HIP code built on MFMA compiler intrinsics.
 
 6. **Copying Back Results**:
 
