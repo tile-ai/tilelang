@@ -241,6 +241,17 @@ filterwarnings = ["always"]
 markers = [
     "perf: benchmark and performance API tests skipped by default",
     "slow: long-running correctness sweeps",
+    # Feature markers emitted by vendored TVM's tvm.testing.utils requires_*
+    # decorators (see 3rdparty/tvm/python/tvm/testing/utils.py). TVM registers
+    # these via its own conftest, but tilelang only imports the decorators, so
+    # they must be registered here to avoid PytestUnknownMarkWarning.
+    "cpu: Mark a test as running on CPU",
+    "gpu: Mark a test as using a GPU",
+    "multi_gpu: Mark a test as using multiple GPUs",
+    "cuda: Mark a test as using CUDA",
+    "llvm: Mark a test as using LLVM",
+    "metal: Mark a test as using Metal",
+    "rocm: Mark a test as using ROCm",
 ]
 
 [tool.cibuildwheel]
