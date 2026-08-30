@@ -325,7 +325,7 @@ def _tir_packed_to_unsigned_convert_with_zeros(storage_type="uint", storage_nbit
                   dtype: str):
         assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
         mask = tvm.tirx.const((1 << nbit) - 1, storage_dtype)
-        return (((val >> (pos * nbit).astype(storage_dtype)) & mask) - zero).astype(dtype)
+        return (((val >> (pos * nbit).astype(storage_dtype)) & mask).astype(dtype) - zero.astype(dtype))
 
     return f_convert
 
