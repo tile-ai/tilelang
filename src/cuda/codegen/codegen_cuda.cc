@@ -5797,6 +5797,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 4) {
     const int64_t *p = as_const_int(op->value);
 
+    // Materialize for reuse to avoid side-effects.
+    std::string sval;
+    if (!p) {
+      sval = SSAGetID(PrintExpr(op->value), op->value.dtype());
+    }
+
     auto emit_packed_field = [&](int nibbles_per_field) {
       if (p) {
         int64_t v = *p & 0xF;
@@ -5806,12 +5812,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
         }
         os << packed;
       } else {
-        std::string v = PrintExpr(op->value);
         os << '(';
         for (int i = 0; i < nibbles_per_field; ++i) {
           if (i != 0)
             os << " | ";
-          os << "((static_cast<unsigned int>(" << v << ") & 0x0fu) << "
+          os << "((static_cast<unsigned int>(" << sval << ") & 0x0fu) << "
              << (i * 4) << ")";
         }
         os << ')';
