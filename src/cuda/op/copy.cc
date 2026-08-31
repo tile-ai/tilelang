@@ -917,8 +917,8 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
   const Array<Range> &src_range = op.src_range;
   const Array<Range> &dst_range = op.dst_range;
   ICHECK(op.dst_block.defined());
-  ICHECK(src.scope() == "shared" || src.scope() == "shared.dyn");
-  ICHECK(dst.scope() == "shared" || dst.scope() == "shared.dyn");
+  ICHECK(IsSharedBuffer(src));
+  ICHECK(IsSharedBuffer(dst));
 
   if (auto barrier_opt = GetBarrier(op)) {
     bool src_contiguous = IsContiguousRegion(src, src_range, analyzer);
@@ -1357,7 +1357,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
     is_ld = true;
   } else if (IsFragmentBuffer(src) && IsTmemBuffer(dst)) {
     is_st = true;
-  } else if (src.scope() == "shared.dyn" && IsTmemBuffer(dst)) {
+  } else if (IsSharedBuffer(src) && IsTmemBuffer(dst)) {
     is_cp = true;
   } else {
     LOG(FATAL) << "Unsupported tensor memory copy: " << "src scope = "

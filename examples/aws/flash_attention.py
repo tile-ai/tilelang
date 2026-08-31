@@ -130,9 +130,8 @@ def flash_attention(
                         )
 
                 # Affine first (packed f32x2 FMA), exp2 separately.
-                for i in T.Parallel(block_M):
-                    for j in T.vectorized(block_N):
-                        S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
+                for i, j in T.Parallel(block_M, block_N):
+                    S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
                 for i, j in T.Parallel(block_M, block_N):
                     S_reg[i, j] = T.exp2(S_reg[i, j])
 
@@ -523,9 +522,8 @@ def flash_attention_manual(
                             )
 
                     # Affine first (packed f32x2 FMA), exp2 separately.
-                    for i in T.Parallel(block_M, annotations={T.WSID: "exp_scale"}):
-                        for j in T.vectorized(block_N):
-                            S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
+                    for i, j in T.Parallel(block_M, block_N, annotations={T.WSID: "exp_scale"}):
+                        S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
                     for i, j in T.Parallel(block_M, block_N, annotations={T.WSID: "softmax_exp"}):
                         S_reg[i, j] = T.exp2(S_reg[i, j])
 
@@ -731,9 +729,8 @@ def flash_attention_ws(
                     T.mbarrier_arrive(scale_full[0])
 
                     # Affine first (packed f32x2 FMA), exp2 separately.
-                    for i in T.Parallel(block_M):
-                        for j in T.vectorized(block_N):
-                            S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
+                    for i, j in T.Parallel(block_M, block_N):
+                        S_reg[i, j] = S_reg[i, j] * scale + (-scores_max[i] * scale)
                     for i, j in T.Parallel(block_M, block_N):
                         S_reg[i, j] = T.exp2(S_reg[i, j])
 
@@ -800,9 +797,8 @@ def flash_attention_ws(
                     T.mbarrier_arrive(scale_full[1])
 
                     # Affine first (packed f32x2 FMA), exp2 separately.
-                    for i in T.Parallel(block_M):
-                        for j in T.vectorized(block_N):
-                            S_reg_1[i, j] = S_reg_1[i, j] * scale + (-scores_max_1[i] * scale)
+                    for i, j in T.Parallel(block_M, block_N):
+                        S_reg_1[i, j] = S_reg_1[i, j] * scale + (-scores_max_1[i] * scale)
                     for i, j in T.Parallel(block_M, block_N):
                         S_reg_1[i, j] = T.exp2(S_reg_1[i, j])
 
