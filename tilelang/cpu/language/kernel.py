@@ -13,6 +13,7 @@ __all__ = ["Kernel"]
 def Kernel(
     *blocks: int | tirx.PrimExpr,
     prelude: str | None = None,
+    cpu_num_threads: int | None = None,
 ) -> KernelLaunchFrame:
     """Construct a kernel launch frame for CPU: a grid of tile programs.
 
@@ -29,6 +30,14 @@ def Kernel(
     prelude : str, optional
         C source injected before the generated kernel, e.g. ``#include`` lines
         or helper functions.
+    cpu_num_threads : int, optional
+        OpenMP thread count for the grid parallel region when the
+        ``tl.cpu_parallel`` pass config is enabled: emitted as the
+        ``num_threads(n)`` clause. ``None`` (default) omits the clause and
+        lets the OpenMP runtime pick the thread count (e.g. from
+        ``OMP_NUM_THREADS``). Only the ``c`` target consumes it — on the
+        ``llvm`` target it has no effect, since that path lowers to
+        ``TVMBackendParallelLaunch`` and uses TVM's own thread pool.
 
     Examples
     --------
@@ -38,4 +47,4 @@ def Kernel(
             for i in T.Parallel(128):
                 ...
     """
-    return launch_kernel(blocks, prelude=prelude)
+    return launch_kernel(blocks, prelude=prelude, cpu_num_threads=cpu_num_threads)

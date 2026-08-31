@@ -42,7 +42,8 @@ using namespace ffi;
 // known at compile time.
 ForFrame MakeThreadBindingFrame(const std::string &name,
                                 const String &thread_tag,
-                                const PrimExpr &extent);
+                                const PrimExpr &extent,
+                                const Map<String, Any> &annotations = {});
 
 // Build a frame whose exit prefixes the body with
 // `tx = tl.launch_thread_idx(0); ty = ...; tz = ...` Bind statements. The

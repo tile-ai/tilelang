@@ -15,6 +15,7 @@ def Kernel(
     threads: int | list[int] | tuple[int, ...] | None = None,
     prelude: str | None = None,
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+    cpu_num_threads: int | None = None,
 ) -> KernelLaunchFrame:
     """Construct a kernel launch frame for CUDA: a grid of thread blocks.
 
@@ -40,6 +41,14 @@ def Kernel(
         Thread block cluster shape (SM90+). ``2`` or ``(2, 1, 1)`` launches
         2-CTA clusters via ``cudaLaunchKernelEx``. ``T.ClusterKernel`` is the
         same launch with a required ``cluster_dims``.
+    cpu_num_threads : int, optional
+        OpenMP thread count for CPU targets: emitted as the
+        ``num_threads(n)`` clause on the grid parallel region when the
+        ``tl.cpu_parallel`` pass config is enabled. ``None`` (default) omits
+        the clause and lets the OpenMP runtime pick the thread count (e.g.
+        from ``OMP_NUM_THREADS``). Only the ``c`` target consumes it — on the
+        ``llvm`` target it has no effect, since that path lowers to
+        ``TVMBackendParallelLaunch`` and uses TVM's own thread pool.
 
     Examples
     --------
@@ -52,4 +61,10 @@ def Kernel(
             tx, ty = T.get_thread_bindings()
             ...
     """
-    return launch_kernel(blocks, threads=threads, prelude=prelude, cluster_dims=cluster_dims)
+    return launch_kernel(
+        blocks,
+        threads=threads,
+        prelude=prelude,
+        cluster_dims=cluster_dims,
+        cpu_num_threads=cpu_num_threads,
+    )
