@@ -66,13 +66,17 @@ For PragmaUnrollLoop(For stmt);
  * \param parallel_loop Whether this is a true parallel loop requiring thread
  *        partitioning. False for loops that only operate on local/register
  *        buffers. (default true)
+ * \param should_vectorize Whether to vectorize the loop. False when reducer
+ *        combine stores (execution-multiplicity markers) are present or when
+ *        there are no non-local buffer accesses. (default true)
  * \return The lowered statement.
  */
 Stmt LowerParallelLoop(
     For loop, const Fragment &loop_layout, PrimExpr thread_index,
     arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
     ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
-    bool parallel_loop = true, bool require_padding_guard = false);
+    bool parallel_loop = true, bool should_vectorize = true,
+    bool require_padding_guard = false);
 
 } // namespace tl
 } // namespace tvm
