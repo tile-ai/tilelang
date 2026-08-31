@@ -110,9 +110,11 @@ See [all releases](https://github.com/tile-ai/tilelang/releases) for complete ch
 
 ## Platform and Backend Support
 
-TileLang requires Python 3.10 or newer. The default `auto` target detects CUDA, HIP, and Metal devices; select an explicit target when compiling for another backend or architecture. Hardware-specific instructions and optimizations remain subject to the selected architecture.
+TileLang is evolving into a multi-backend compiler built around a modular backend abstraction known as TileLang-X. See the [backend architecture](tilelang/backend/README.md) for the design, or ask a coding agent to use the [backend integration skill](.agents/skills/tilelang-backend/SKILL.md) when porting TileLang to a new backend.
 
-For details on how these targets share frontend semantics while owning target-specific lowering and code generation, see the [multi-backend architecture design](tilelang/backend/README.md), including `BackendContext`, pass pipelines, and reusable execution backends.
+The currently supported backends are listed below. `Primary` identifies TileLang's core backend, while `Supported` and `Experimental` backends are implemented in the main repository. `Ecosystem` adapters live in separate repositories, are not included in TileLang release wheels, and may follow independent compatibility schedules. Prebuilt wheels are available for Linux x86-64/AArch64, Windows x86-64, and macOS arm64.
+
+TileLang uses `Target` objects to represent compilation targets. The default `auto` target detects CUDA, HIP, and Metal devices; select an explicit target when compiling for another backend or architecture. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
 
 | Backend | Target | Platforms and hardware | Support level | Notes |
 | --- | --- | --- | --- | --- |
@@ -127,8 +129,6 @@ For details on how these targets share frontend semantics while owning target-sp
 | Moore Threads MUSA | `musa` | S5000, S4000, and M1000 | Ecosystem | Developed in [tilelang-musa](https://github.com/tile-ai/tilelang-musa) and released independently. |
 | HYGON | `hcu` | Linux; BW1000, BW1100, BW150 and K100_AI | Ecosystem | Developed in [tilelang-hygon](https://github.com/tile-ai/tilelang-hygon); requires the DTK software stack. |
 | Sunrise-AI TANG | `tang` | Sunrise S2 and S3 | Ecosystem | Developed in [tilelang-sunrise](https://github.com/tile-ai/tilelang-sunrise). The TANG software stack is required. |
-
-Prebuilt wheels are published for Linux x86-64/AArch64, Windows x86-64, and macOS arm64. Ecosystem adapters live in separate repositories, are not included in the main TileLang release wheels, and may follow different compatibility schedules. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
 
 ## Installation
 
