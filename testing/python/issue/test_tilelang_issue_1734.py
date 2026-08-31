@@ -32,12 +32,15 @@ def test_issue_1734():
 
     mod = kernel.compile()
     source = mod.get_kernel_source()
-    # Verify that the if statement is hoisted outside the for loop
-    # After hoisting, we should see "if" before "for" pattern
+    # Verify that the if statement is hoisted outside the for loop: the
+    # guarded loop must sit inside the if block (a "for (" before the
+    # first "}" after the if). Positions relative to the whole source
+    # would be broken by the copy loops that precede the guarded region.
     if_pos = source.find("if (")
-    for_pos = source.find("for (")
-    assert if_pos != -1 and for_pos != -1
-    assert if_pos < for_pos, "Loop-invariant if should be hoisted outside the loop"
+    assert if_pos != -1, "Guard should survive lowering"
+    after_if = source[if_pos:]
+    for_pos = after_if.find("for (")
+    assert for_pos != -1 and for_pos < after_if.find("}"), "Loop-invariant if should be hoisted outside the loop"
 
 
 if __name__ == "__main__":
