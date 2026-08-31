@@ -1064,8 +1064,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
                                              let_var_properties_);
       auto validate_sync_condition = [&](const PrimExpr &branch_condition,
-                                         const char *branch_name,
-                                         const Stmt &branch_body) {
+                                         const char *branch_name) {
         auto condition_prop = checker.AnalyzeExpr(branch_condition);
         bool proven_block_uniform = !condition_prop.is_block_uniform &&
                                     IsBlockUniformCondition(branch_condition);
@@ -1090,16 +1089,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                "barrier lowering. Hoisting the barrier before the if would "
                "not order the conflicting accesses inside the branch. "
                "Condition: "
-            << branch_condition << "\nBranch IR:\n"
-            << branch_body;
+            << branch_condition;
       };
 
       if (has_sync_in_then) {
-        validate_sync_condition(op->condition, "then", op->then_case);
+        validate_sync_condition(op->condition, "then");
       }
       if (has_sync_in_else) {
-        validate_sync_condition(tirx::Not(op->condition), "else",
-                                op->else_case.value());
+        validate_sync_condition(tirx::Not(op->condition), "else");
       }
     }
 
@@ -2187,6 +2184,35 @@ private:
         ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
         provably_disjoint =
             analyzer.CanProve(tirx::NE(prev_indice_bytes, curr_indice_bytes));
+        // 对短小展开循环逐次代入迭代值，避免 div/mod 组合让符号证明返回
+        // unknown。
+        if (!provably_disjoint && loop != nullptr &&
+            loop->kind == ForKind::kUnrolled) {
+          const auto *loop_min = loop->min.as<IntImmNode>();
+          const auto *loop_extent = loop->extent.as<IntImmNode>();
+          constexpr int64_t kMaxEnumeratedUnrollExtent = 64;
+          if (loop_min != nullptr && loop_extent != nullptr &&
+              loop_extent->value > 1 &&
+              loop_extent->value <= kMaxEnumeratedUnrollExtent) {
+            provably_disjoint = true;
+            for (int64_t offset = 0; offset < loop_extent->value - 1;
+                 ++offset) {
+              Map<Var, PrimExpr> iteration_sub;
+              iteration_sub.Set(
+                  loop->loop_var,
+                  make_const(loop->loop_var.dtype(), loop_min->value + offset));
+              PrimExpr prev_at_iteration =
+                  Substitute(prev_indice_bytes, iteration_sub);
+              PrimExpr curr_at_iteration =
+                  Substitute(curr_indice_bytes, iteration_sub);
+              if (!analyzer.CanProve(
+                      tirx::NE(prev_at_iteration, curr_at_iteration))) {
+                provably_disjoint = false;
+                break;
+              }
+            }
+          }
+        }
       } else {
         try {
           auto prev_min = analyzer.Simplify(

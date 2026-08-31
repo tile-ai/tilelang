@@ -377,6 +377,47 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
     assert s.index('T.tvm_storage_sync("shared.dyn")') < s.index("for i in T.unroll(8)")
 
 
+def test_unrolled_inplace_vector_update_has_no_loop_carry_sync():
+    """展开循环中互不重叠的原地向量更新不需要跨线程 barrier。"""
+
+    @T.prim_func(private=True)
+    def func():
+        S_shared = T.alloc_buffer((4096,), scope="shared.dyn")
+        scores_max = T.alloc_buffer((2,), scope="local")
+        logsum = T.alloc_buffer((2,), scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx % 4 == 0:
+            for i in T.unroll(32):
+                S_shared[
+                    T.Ramp(
+                        tx // 32 * 1024 + i // 16 * 512 + tx % 32 // 4 * 64 + i % 16 * 4 - 4096,
+                        1,
+                        4,
+                    )
+                ] = T.exp2(
+                    S_shared[
+                        T.Ramp(
+                            tx // 32 * 1024 + i // 16 * 512 + tx % 32 // 4 * 64 + i % 16 * 4 - 4096,
+                            1,
+                            4,
+                        )
+                    ]
+                    - T.Broadcast(scores_max[i // 16], 4)
+                ) / T.Broadcast(logsum[i // 16], 4)
+
+    target = tvm.target.Target(
+        {"kind": "cuda", "arch": "sm_90", "thread_warp_size": 32, "max_num_threads": 1024},
+        host="llvm",
+    )
+    mod = tvm.IRModule({"main": func.with_attr({"global_symbol": "test", "target": target})})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod.script())
+    assert 'T.tvm_storage_sync("shared.dyn")' not in s, f"Unexpected loop-carried sync:\n{s}"
+
+
 @tilelang.testing.requires_cuda
 def test_loop_carry_no_dependency_same_index():
     """Test that A[i] write followed by A[i] read in a loop does NOT need barrier.
