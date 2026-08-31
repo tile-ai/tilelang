@@ -28,14 +28,14 @@ BLOCK_M = BLOCK_N = 128
 BLOCK_K = 32
 
 
-def make_gemm(M, N, K, BM, BN, BK):
+def make_gemm(M, N, K, BM, BN, BK, cpu_num_threads=None):
     @T.prim_func
     def gemm(
         A: T.Tensor((M, K), dtype="float32"),
         B: T.Tensor((K, N), dtype="float32"),
         C: T.Tensor((M, N), dtype="float32"),
     ):
-        with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=1) as (bx, by):
+        with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), cpu_num_threads=cpu_num_threads) as (bx, by):
             A_shared = T.alloc_buffer((BM, BK), dtype="float32", scope="shared")
             B_shared = T.alloc_buffer((BK, BN), dtype="float32", scope="shared")
             C_local = T.alloc_buffer((BM, BN), dtype="float32", scope="local")
@@ -49,9 +49,9 @@ def make_gemm(M, N, K, BM, BN, BK):
     return gemm
 
 
-def _compile(pass_configs):
+def _compile(pass_configs, cpu_num_threads=None):
     return tilelang.compile(
-        make_gemm(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K),
+        make_gemm(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, cpu_num_threads=cpu_num_threads),
         target="c",
         out_idx=-1,
         execution_backend="cython",
@@ -134,12 +134,7 @@ def test_cpu_parallel_min_trip_gate():
 
 
 def test_cpu_parallel_num_threads_clause():
-    kernel = _compile(
-        {
-            PassConfigKey.TL_CPU_PARALLEL: True,
-            PassConfigKey.TL_CPU_NUM_THREADS: 4,
-        }
-    )
+    kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True}, cpu_num_threads=4)
     source = kernel.get_kernel_source()
     assert "num_threads(4)" in source
 

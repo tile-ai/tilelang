@@ -250,13 +250,10 @@ class PassConfigKey(str, Enum):
     flags (plus ``-O2``) are injected into the kernel library build. When
     disabled, no annotation is added, no extra pass runs and no extra compile
     flags are injected — the compilation output matches the serial baseline.
-    """
 
-    TL_CPU_NUM_THREADS = "tl.cpu_num_threads"
-    """Hardcoded ``num_threads(n)`` for the OpenMP parallel region on CPU.
-
-    Default 0 (dynamic): the ``num_threads`` clause is omitted and the OpenMP
-    runtime picks the thread count (e.g. from ``OMP_NUM_THREADS``).
+    The thread count is a per-kernel property instead: pass
+    ``cpu_num_threads`` to ``T.Kernel`` (default: omit the num_threads
+    clause and let the OpenMP runtime decide, e.g. via ``OMP_NUM_THREADS``).
     """
 
     TL_CPU_PARALLEL_MIN_TRIP = "tl.cpu_parallel_min_trip"

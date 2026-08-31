@@ -49,6 +49,13 @@ constexpr const char *kCodeBlockEntryName = "code_block_entry_name";
 // config is enabled.
 constexpr const char *kCPUGridDim = "tl.cpu_grid_dim";
 
+// Requested OpenMP thread count for the CPU grid parallel region, stamped
+// by T.Kernel(cpu_num_threads=...) on the outermost grid loop and carried
+// through the pipeline as a loop annotation. Consumed by the C codegen as
+// the num_threads(n) clause; absent means dynamic (the OpenMP runtime picks
+// the thread count, e.g. from OMP_NUM_THREADS).
+constexpr const char *kCPUNumThreads = "tl.cpu_num_threads";
+
 /*!
  * \brief Check if attr_key is a code block key extension
  * \param attr_key The attr key to be compared

@@ -119,7 +119,6 @@ static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
 static constexpr const char *kForceLetInline = "tl.force_let_inline";
 static constexpr const char *kCPUParallel = "tl.cpu_parallel";
-static constexpr const char *kCPUNumThreads = "tl.cpu_num_threads";
 static constexpr const char *kCPUParallelMinTrip = "tl.cpu_parallel_min_trip";
 static constexpr const char *kDisableOutOfBoundWarning =
     "tl.disable_out_of_bound_warning";

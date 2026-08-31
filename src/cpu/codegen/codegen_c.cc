@@ -16,6 +16,7 @@
 #include "support/str_escape.h"
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"
+#include "transform/common/attr.h"
 
 #include <cmath>
 #include <sstream>
@@ -474,7 +475,7 @@ void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
     if (depth > 1) {
       stream << " collapse(" << depth << ")";
     }
-    if (auto num_threads = op->annotations.Get(tl::kCPUNumThreads)) {
+    if (auto num_threads = op->annotations.Get(tl::attr::kCPUNumThreads)) {
       if (const auto *imm = num_threads->as<IntImmNode>()) {
         stream << " num_threads(" << imm->value << ")";
       }
