@@ -134,8 +134,7 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
 
-    Temporarily re-enabled for backward compatibility. Will be removed in
-    v0.1.10.
+    Temporarily re-enabled for backward compatibility.
     """
 
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"

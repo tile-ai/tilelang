@@ -5,9 +5,8 @@ import re
 from tvm import tirx
 
 from tilelang._typing import DType
-from tilelang.utils import deprecated
 
-__all__ = ["dynamic", "symbolic"]
+__all__ = ["dynamic"]
 
 
 def dynamic(name: str, dtype: DType = "int32") -> tuple[tirx.Var, ...] | tirx.Var:
@@ -28,9 +27,3 @@ def dynamic(name: str, dtype: DType = "int32") -> tuple[tirx.Var, ...] | tirx.Va
         names = re.split(r"\s+", name)
         return tuple(tirx.Var(n, dtype) for n in names)
     return tirx.Var(name, dtype)
-
-
-@deprecated("T.symbolic(...)", "T.dynamic(...)")
-def symbolic(name: str, dtype: DType = "int32") -> tuple[tirx.Var, ...] | tirx.Var:
-    """Deprecated alias for `T.dynamic`."""
-    return dynamic(name, dtype)

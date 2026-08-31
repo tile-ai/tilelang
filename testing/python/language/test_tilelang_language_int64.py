@@ -66,7 +66,7 @@ def _select_int64_stress_n(
 
 @tilelang.jit
 def fill_symbolic(value: float, dtype=T.bfloat16):
-    n = T.symbolic("n", "int64")
+    n = T.dynamic("n", "int64")
     block_n = 512
 
     @T.prim_func
