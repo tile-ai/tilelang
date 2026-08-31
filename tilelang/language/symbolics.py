@@ -30,7 +30,7 @@ def dynamic(name: str, dtype: DType = "int32") -> tuple[tirx.Var, ...] | tirx.Va
     return tirx.Var(name, dtype)
 
 
-@deprecated("T.symbolic(...)", "T.dynamic(...)", "v0.1.9")
+@deprecated("T.symbolic(...)", "T.dynamic(...)")
 def symbolic(name: str, dtype: DType = "int32") -> tuple[tirx.Var, ...] | tirx.Var:
     """Deprecated alias for `T.dynamic`."""
     return dynamic(name, dtype)

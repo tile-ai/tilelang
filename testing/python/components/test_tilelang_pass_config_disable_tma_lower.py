@@ -23,7 +23,10 @@ def test_disable_tma_lower_warns_in_jit_entry():
             pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True},
         )
 
-    assert any("tl.disable_tma_lower" in str(item.message) and "v0.1.10" in str(item.message) for item in caught)
+    messages = [str(item.message) for item in caught if "tl.disable_tma_lower" in str(item.message)]
+    assert messages
+    assert "T.copy(..., disable_tma=True)" in messages[0]
+    assert "v0.1.10" not in messages[0]
 
 
 if __name__ == "__main__":
