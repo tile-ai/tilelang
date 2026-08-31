@@ -14,7 +14,6 @@
 #include "layout/layout.h"
 #include "oob_padding.h"
 #include "op/utils.h"
-#include "support/check.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
@@ -131,6 +130,19 @@ static int GetCCQuantPre(DataType src_dtype, DataType dst_dtype) {
   return 0; // NoQuant
 }
 
+// FIXPIPE src_stride is the stored L0C NZ M-pitch, not the copied row count.
+// A row prefix of a full-width GEMM still walks the allocation M; a compact
+// MAD whose N is also sliced uses the compact region M.
+PrimExpr GetL0CFixPipeSrcStride(const AscendFractalLayoutInfo &info,
+                                const AscendFractalRegionInfo &region,
+                                const PrimExpr &copied_cols,
+                                arith::Analyzer *analyzer) {
+  if (analyzer->CanProveEqual(copied_cols, info.cols)) {
+    return info.outer1 * info.row_frac;
+  }
+  return region.outer1->extent * info.row_frac;
+}
+
 void CheckCompactL0Region(const Buffer &buffer, const Array<Range> &ranges,
                           arith::Analyzer *analyzer,
                           const std::string &description) {
@@ -184,6 +196,19 @@ PrimExpr MakeCopyHasDataPredicate(const Array<Range> &src_ranges,
   add_ranges(src_ranges);
   add_ranges(dst_ranges);
   return analyzer->Simplify(has_data);
+}
+
+void CheckSplitExtentDivisible(const PrimExpr &extent, int64_t divisor,
+                               const std::string &description,
+                               arith::Analyzer *analyzer) {
+  PrimExpr divisor_expr = make_const(extent.dtype(), divisor);
+  PrimExpr zero = make_const(extent.dtype(), 0);
+  if (const auto *imm = extent.as<IntImmNode>()) {
+    ICHECK_EQ(imm->value % divisor, 0) << description << ", got " << imm->value;
+    return;
+  }
+  ICHECK(analyzer->CanProveEqual(FloorMod(extent, divisor_expr), zero))
+      << description << ", got symbolic extent " << extent;
 }
 
 Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
@@ -568,7 +593,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                                          &compact_src_region))
         << "Failed to map L0C->UB source region through layout for buffer "
         << op.src->name;
-    loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
+    loop_src_stride = GetL0CFixPipeSrcStride(info, compact_src_region,
+                                             src_inner.size, analyzer);
 
     int dual_dst_ctl = op.dual_dst_ctl;
     int quant_pre = GetCCQuantPre(op.src->dtype, op.dst->dtype);
@@ -592,14 +618,14 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     // Shared FixPipe args are captured; only src / dual / sub_blockid /
     // unit_flag vary.
     auto make_cc_to_ub = [&](const PrimExpr &src_p, const PrimExpr &dual_ctl,
-                             const PrimExpr &sub_id,
-                             const PrimExpr &unit_flag) {
+                             const PrimExpr &sub_id, const PrimExpr &unit_flag,
+                             const PrimExpr &inner, const PrimExpr &rows) {
       return Call(DataType::Void(), ascend_copy_matrix_cc_to_ub(),
                   {dst_ptr,
                    src_p,
                    sid,
-                   copy_inner,
-                   copy_rows,
+                   inner,
+                   rows,
                    dst_row_stride,
                    loop_src_stride,
                    dual_ctl,
@@ -628,49 +654,93 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
     bool onpath_quant_dual = (dual_dst_ctl == 1 || dual_dst_ctl == 2) &&
                              (quant_pre == 1 || quant_pre == 16);
     if (onpath_quant_dual) {
-      // Each pipe copies exactly the (smaller) destination half block.
-      copy_inner = dst_inner.size;
-      copy_rows = dst_row.size;
-      // Logical ND offset of the second half; access-ptr remap turns it into
-      // NZ.
-      PrimExpr pipe1_offset =
-          dual_dst_ctl == 1 ? FloorDiv(src_row.size, I(2)) * src_inner.size
-                            : FloorDiv(src_inner.size, I(2));
-      pipe1_offset = analyzer->Simplify(pipe1_offset);
-      // Constant extents only; symbolic sizes are not rejected.
-      if (dual_dst_ctl == 1) {
-        if (const auto *imm = src_row.size.as<IntImmNode>()) {
-          ICHECK_EQ(imm->value % 2, 0)
-              << "Ascend M-split on-path quant dual_copy needs an even M, got "
-              << imm->value;
-        }
+      const bool m_split = dual_dst_ctl == 1;
+      ICHECK_GE(op.dst->shape.size(), 2);
+      DataType split_dtype =
+          m_split ? src_row.size.dtype() : src_inner.size.dtype();
+      PrimExpr tile_half =
+          cast(split_dtype, m_split ? op.dst->shape[op.dst->shape.size() - 2]
+                                    : op.dst->shape[op.dst->shape.size() - 1]);
+      PrimExpr src_extent = m_split ? src_row.size : src_inner.size;
+      PrimExpr pipe0_split = analyzer->Simplify(Min(src_extent, tile_half));
+      PrimExpr pipe1_split = analyzer->Simplify(
+          Max(src_extent - tile_half, make_const(split_dtype, 0)));
+      PrimExpr pipe0_rows = m_split ? pipe0_split : src_row.size;
+      PrimExpr pipe0_inner = m_split ? src_inner.size : pipe0_split;
+      PrimExpr pipe1_rows = m_split ? pipe1_split : src_row.size;
+      PrimExpr pipe1_inner = m_split ? src_inner.size : pipe1_split;
+      if (m_split) {
+        CheckSplitExtentDivisible(
+            src_row.size, 2,
+            "Ascend M-split on-path quant dual_copy needs an even M", analyzer);
+      } else if (analyzer->CanProve(src_extent > tile_half,
+                                    arith::ProofStrength::kSymbolicBound)) {
+        CheckSplitExtentDivisible(
+            src_inner.size, 32,
+            "Ascend N-split on-path quant dual_copy needs N % 32 == 0",
+            analyzer);
       } else {
-        if (const auto *imm = src_inner.size.as<IntImmNode>()) {
-          ICHECK_EQ(imm->value % 32, 0) << "Ascend N-split on-path quant "
-                                           "dual_copy needs N % 32 == 0, got "
-                                        << imm->value;
-        }
+        CheckSplitExtentDivisible(
+            src_inner.size, 16,
+            "Ascend N-split on-path quant dual_copy needs N % 16 == 0",
+            analyzer);
       }
-      PrimExpr pipe_extent = analyzer->Simplify(copy_rows * copy_inner);
+      bool source_half_exceeds_destination =
+          analyzer->CanProve(pipe0_rows > dst_row.size) ||
+          analyzer->CanProve(pipe0_inner > dst_inner.size) ||
+          analyzer->CanProve(pipe1_rows > dst_row.size) ||
+          analyzer->CanProve(pipe1_inner > dst_inner.size);
+      ICHECK(!source_half_exceeds_destination)
+          << "Ascend on-path quant dual_copy source half must fit in the "
+             "destination region, got per-pipe "
+          << pipe0_rows << "x" << pipe0_inner << " / " << pipe1_rows << "x"
+          << pipe1_inner << " and destination " << dst_row.size << "x"
+          << dst_inner.size << ".";
+      bool only_pipe0 = analyzer->CanProve(
+          src_extent <= tile_half, arith::ProofStrength::kSymbolicBound);
+      bool both_pipes = analyzer->CanProve(
+          src_extent > tile_half, arith::ProofStrength::kSymbolicBound);
+      PrimExpr first_unit_flag = unit_flag_ctl_val;
+      if (both_pipes) {
+        first_unit_flag = analyzer->Simplify(
+            Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val));
+      } else if (!only_pipe0) {
+        first_unit_flag = analyzer->Simplify(
+            Select(src_extent > tile_half,
+                   Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val),
+                   unit_flag_ctl_val));
+      }
+      PrimExpr pipe0_extent = analyzer->Simplify(pipe0_rows * pipe0_inner);
       PrimExpr pipe0_src_ptr =
-          make_access_ptr(op.src, src_region.offset, pipe_extent, 1);
-      PrimExpr pipe1_src_ptr = make_access_ptr(
-          op.src, src_region.offset + pipe1_offset, pipe_extent, 1);
-      // Demote unit_flag 3 to 2 on the first pipe; clear L0C only after the
-      // second.
-      PrimExpr first_unit_flag = analyzer->Simplify(
-          Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val));
-      Stmt copy_stmt = SeqStmt(
-          {Evaluate(make_cc_to_ub(pipe0_src_ptr, I(0), I(0), first_unit_flag)),
-           Evaluate(
-               make_cc_to_ub(pipe1_src_ptr, I(0), I(1), unit_flag_ctl_val))});
+          make_access_ptr(op.src, src_region.offset, pipe0_extent, 1);
+      Stmt copy_stmt = Evaluate(make_cc_to_ub(
+          pipe0_src_ptr, I(0), I(0), first_unit_flag, pipe0_inner, pipe0_rows));
+      if (!only_pipe0) {
+        // Logical ND offset of the second tile half; access-ptr remap turns
+        // it into NZ. M-split uses the source row pitch, not the region inner
+        // extent.
+        PrimExpr pipe1_offset =
+            m_split ? tile_half * cast(DataType::Int(32), src_row.stride)
+                    : tile_half;
+        pipe1_offset = analyzer->Simplify(pipe1_offset);
+        PrimExpr pipe1_extent = analyzer->Simplify(pipe1_rows * pipe1_inner);
+        PrimExpr pipe1_src_ptr = make_access_ptr(
+            op.src, src_region.offset + pipe1_offset, pipe1_extent, 1);
+        Stmt pipe1 =
+            Evaluate(make_cc_to_ub(pipe1_src_ptr, I(0), I(1), unit_flag_ctl_val,
+                                   pipe1_inner, pipe1_rows));
+        if (!both_pipes) {
+          pipe1 = IfThenElse(src_extent > tile_half, pipe1);
+        }
+        copy_stmt = SeqStmt({copy_stmt, pipe1});
+      }
       if (!is_one(has_data) && !analyzer->CanProve(has_data)) {
         copy_stmt = IfThenElse(has_data, copy_stmt);
       }
       return copy_stmt;
     }
     call = make_cc_to_ub(src_ptr, dual_dst_ctl_val, sub_blockid_val,
-                         unit_flag_ctl_val);
+                         unit_flag_ctl_val, copy_inner, copy_rows);
   } else if (dma_path == DMAPath::kUBToL1) {
     ICHECK(!op.nd2nz)
         << "Ascend nd2nz UB->L1 copy must be emitted directly from the Python "

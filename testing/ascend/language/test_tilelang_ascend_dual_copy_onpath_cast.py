@@ -1,8 +1,7 @@
 """Codegen tests for L0C fp32 -> UB f16/bf16 ``dual_copy`` on-path cast.
 
-Dual + ``quant_pre`` is illegal, so lowering emits two non-dual FixPipes
-(``sub_blockid`` 0 then 1). Same-dtype dual stays one hardware-dual pipe.
-Unsupported casts fail in the frontend; N-split alignment is checked in C++.
+Quant dual lowers to two non-dual FixPipes; same-dtype stays hardware dual.
+Frontend rejects unsupported casts; RewriteDualCopy enforces a 2:1 split.
 """
 
 import pytest
@@ -10,7 +9,6 @@ import pytest
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tilelang import tvm
 from tilelang.engine.lower import lower
 
 # quant_pre mode for the on-path cast: 1 == F322F16, 16 == F322BF16.
@@ -37,7 +35,14 @@ def gemm_dual_copy(dst_dtype, split, M=256, N=256, K=256, unit_flag_ctrl=None):
 
             T.copy(A, a_l1)
             T.copy(B, b_l1)
-            T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+            T.gemm(
+                a_l1,
+                b_l1,
+                acc,
+                transpose_B=True,
+                clear_accum=True,
+                unit_flag_ctrl=unit_flag_ctrl,
+            )
             T.dual_copy(acc, tmp, unit_flag_ctrl=unit_flag_ctrl)
             T.copy(tmp, C)
 
@@ -91,7 +96,16 @@ def _split_top_level_commas(text):
 
 def _cc_to_ub_tails(source):
     """Return the fixed integer-argument tails of every emitted cc_to_ub call."""
-    return [args[-19:] for args in _cc_to_ub_argument_lists(source)]
+    tails = []
+    for args in _cc_to_ub_argument_lists(source):
+        assert len(args) == 26, args
+        tails.append(args[-19:])
+    return tails
+
+
+def _cc_to_ub_sizes(source):
+    """Return (copy_inner, copy_rows) for every emitted cc_to_ub call."""
+    return [(args[3], args[4]) for args in _cc_to_ub_argument_lists(source)]
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
@@ -176,11 +190,431 @@ def test_frontend_rejects_int_cast():
         gemm_dual_copy("int32", "M")
 
 
+def test_frontend_rejects_l0c_to_gm_onpath_cast():
+    # Build inside the raises() so the eager prim_func decorator is covered.
+    TILE_M, TILE_N, TILE_K = 256, 256, 256
+
+    def build():
+        @T.prim_func
+        def main(
+            A: T.Buffer((TILE_M, TILE_K), "float16"),
+            B: T.Buffer((TILE_N, TILE_K), "float16"),
+            C: T.Buffer((TILE_M // 2, TILE_N), "float16"),
+        ):
+            with T.Kernel(1):
+                a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+                b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+                acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+
+                T.copy(A, a_l1)
+                T.copy(B, b_l1)
+                T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+                T.dual_copy(acc, C)
+
+        return main
+
+    with pytest.raises(ValueError, match="only supports L0C -> UB"):
+        build()
+
+
+def test_frontend_rejects_fp8_dual_copy():
+    with pytest.raises(ValueError, match="fp8/int8 quant is not supported"):
+        gemm_dual_copy("float8_e4m3fn", "M")
+
+
+def compact_column_slice_dual_copy(split, alloc=64, region_n=32):
+    """Compact MAD into ``acc[:, :region_n]`` on an ``alloc x alloc`` L0C."""
+    region_m = alloc
+    dst_shape = (region_m // 2, region_n) if split == "M" else (region_m, region_n // 2)
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((alloc, alloc), "float16"),
+        B: T.Buffer((alloc, alloc), "float16"),
+        C: T.Buffer(dst_shape, "float16"),
+    ):
+        with T.Kernel(1):
+            a_l1 = T.alloc_l1((alloc, alloc), "float16")
+            b_l1 = T.alloc_l1((alloc, alloc), "float16")
+            a_l0 = T.alloc_l0a((alloc, alloc), "float16")
+            b_l0 = T.alloc_l0b((alloc, alloc), "float16")
+            acc = T.alloc_l0c((alloc, alloc), "float32")
+            tmp = T.alloc_shared(dst_shape, "float16")
+
+            T.copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.copy(a_l1[0:region_m, 0:region_n], a_l0[0:region_m, 0:region_n])
+            T.copy(b_l1[0:region_n, 0:region_n], b_l0[0:region_n, 0:region_n])
+            T.gemm(
+                a_l0[0:region_m, 0:region_n],
+                b_l0[0:region_n, 0:region_n],
+                acc[0:region_m, 0:region_n],
+                transpose_B=True,
+                clear_accum=True,
+            )
+            T.dual_copy(acc[0:region_m, 0:region_n], tmp)
+            T.copy(tmp, C)
+
+    return main
+
+
+def test_onpath_dual_tail_uses_src_half_rows():
+    TILE_M, TILE_N, TILE_K = 256, 256, 256
+    tail_m = 192
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((TILE_M, TILE_K), "float16"),
+        B: T.Buffer((TILE_N, TILE_K), "float16"),
+        C: T.Buffer((TILE_M // 2, TILE_N), "float16"),
+    ):
+        with T.Kernel(1):
+            a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+            b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+            acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+            tmp = T.alloc_shared((TILE_M // 2, TILE_N), "float16")
+
+            T.copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+            T.dual_copy(acc[0:tail_m, 0:TILE_N], tmp)
+            T.copy(tmp, C)
+
+    with pytest.raises(ValueError, match="exact 2:1 extent ratio"):
+        _kernel_source(main)
+
+
+def dynamic_prefix_onpath_dual_copy(split, max_units, unit):
+    TILE_M = TILE_N = TILE_K = 256
+    dst_shape = (TILE_M // 2, TILE_N) if split == "M" else (TILE_M, TILE_N // 2)
+
+    if split == "M":
+
+        @T.prim_func
+        def main(
+            A: T.Buffer((TILE_M, TILE_K), "float16"),
+            B: T.Buffer((TILE_N, TILE_K), "float16"),
+            C: T.Buffer(dst_shape, "float16"),
+            sizes: T.Buffer((1,), "int32"),
+        ):
+            with T.Kernel(1):
+                a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+                b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+                acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+                tmp = T.alloc_shared(dst_shape, "float16")
+                T.copy(A, a_l1)
+                T.copy(B, b_l1)
+                T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+                T.dual_copy(
+                    acc[0 : T.max(T.min(T.int32(sizes[0]), max_units), 0) * unit, 0:TILE_N],
+                    tmp,
+                )
+                T.copy(tmp, C)
+
+        return main
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((TILE_M, TILE_K), "float16"),
+        B: T.Buffer((TILE_N, TILE_K), "float16"),
+        C: T.Buffer(dst_shape, "float16"),
+        sizes: T.Buffer((1,), "int32"),
+    ):
+        with T.Kernel(1):
+            a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+            b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+            acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+            tmp = T.alloc_shared(dst_shape, "float16")
+            T.copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+            T.dual_copy(
+                acc[0:TILE_M, 0 : T.max(T.min(T.int32(sizes[0]), max_units), 0) * unit],
+                tmp,
+            )
+            T.copy(tmp, C)
+
+    return main
+
+
+def dynamic_tail_onpath_dual_copy(split):
+    if split == "M":
+        return dynamic_prefix_onpath_dual_copy(split, max_units=128, unit=2)
+    return dynamic_prefix_onpath_dual_copy(split, max_units=8, unit=32)
+
+
+@pytest.mark.parametrize("split", ["M", "N"])
+def test_onpath_dual_dynamic_tail_uses_src_half(split):
+    source = _kernel_source(dynamic_tail_onpath_dual_copy(split))
+    sizes = _cc_to_ub_sizes(source)
+    assert len(sizes) == 2, source
+    tile_half = "128"
+    pipe0_inner, pipe0_rows = sizes[0]
+    pipe1_inner, pipe1_rows = sizes[1]
+    if split == "M":
+        assert pipe0_inner == "256" and pipe1_inner == "256", source
+        assert "min" in pipe0_rows and tile_half in pipe0_rows, (pipe0_rows, source)
+        assert tile_half in pipe1_rows, (pipe1_rows, source)
+    else:
+        assert pipe0_rows == "256" and pipe1_rows == "256", source
+        assert "min" in pipe0_inner and pipe0_inner != tile_half, (pipe0_inner, source)
+        assert tile_half in pipe1_inner, (pipe1_inner, source)
+
+
+def dynamic_over_half_onpath_dual_copy(split, unit_flag_ctrl=3):
+    TILE_M = TILE_N = TILE_K = 256
+    tile_half = TILE_M // 2
+    dst_shape = (tile_half, TILE_N) if split == "M" else (TILE_M, TILE_N // 2)
+    extra_units, unit = (32, 2) if split == "M" else (2, 32)
+
+    if split == "M":
+
+        @T.prim_func
+        def main(
+            A: T.Buffer((TILE_M, TILE_K), "float16"),
+            B: T.Buffer((TILE_N, TILE_K), "float16"),
+            C: T.Buffer(dst_shape, "float16"),
+            sizes: T.Buffer((1,), "int32"),
+        ):
+            with T.Kernel(1):
+                a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+                b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+                acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+                tmp = T.alloc_shared(dst_shape, "float16")
+                T.copy(A, a_l1)
+                T.copy(B, b_l1)
+                T.gemm(
+                    a_l1,
+                    b_l1,
+                    acc,
+                    transpose_B=True,
+                    clear_accum=True,
+                    unit_flag_ctrl=unit_flag_ctrl,
+                )
+                T.dual_copy(
+                    acc[
+                        0 : tile_half + T.max(T.min(T.int32(sizes[0]), extra_units), 1) * unit,
+                        0:TILE_N,
+                    ],
+                    tmp,
+                    unit_flag_ctrl=unit_flag_ctrl,
+                )
+                T.copy(tmp, C)
+
+        return main
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((TILE_M, TILE_K), "float16"),
+        B: T.Buffer((TILE_N, TILE_K), "float16"),
+        C: T.Buffer(dst_shape, "float16"),
+        sizes: T.Buffer((1,), "int32"),
+    ):
+        with T.Kernel(1):
+            a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+            b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+            acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+            tmp = T.alloc_shared(dst_shape, "float16")
+            T.copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.gemm(
+                a_l1,
+                b_l1,
+                acc,
+                transpose_B=True,
+                clear_accum=True,
+                unit_flag_ctrl=unit_flag_ctrl,
+            )
+            T.dual_copy(
+                acc[
+                    0:TILE_M,
+                    0 : tile_half + T.max(T.min(T.int32(sizes[0]), extra_units), 1) * unit,
+                ],
+                tmp,
+                unit_flag_ctrl=unit_flag_ctrl,
+            )
+            T.copy(tmp, C)
+
+    return main
+
+
+@pytest.mark.parametrize("split", ["M", "N"])
+def test_onpath_dual_dynamic_over_half_tail_uses_tile_half(split):
+    source = _kernel_source(dynamic_over_half_onpath_dual_copy(split))
+    args = _cc_to_ub_argument_lists(source)
+    sizes = _cc_to_ub_sizes(source)
+    tails = _cc_to_ub_tails(source)
+    assert len(sizes) == 2, source
+    tile_half = "128"
+    pipe0_inner, pipe0_rows = sizes[0]
+    pipe1_inner, pipe1_rows = sizes[1]
+    if split == "M":
+        assert pipe0_inner == "256" and pipe1_inner == "256", source
+        assert pipe0_rows == tile_half, (pipe0_rows, source)
+        assert pipe1_rows != tile_half and "max" in pipe1_rows, (pipe1_rows, source)
+    else:
+        assert pipe0_rows == "256" and pipe1_rows == "256", source
+        assert pipe0_inner == tile_half, (pipe0_inner, source)
+        assert pipe1_inner != tile_half and "max" in pipe1_inner, (pipe1_inner, source)
+    assert tails[0][1] == "0" and tails[1][1] == "1", tails
+    assert tails[0][3] == "2" and tails[1][3] == "3", tails
+    assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
+    assert "+" in args[1][1], (args[1][1], source)
+    # Full-width M-prefix still walks the 256-row L0C NZ pitch, not the copied 192.
+    for call_args in args:
+        assert call_args[6] == "256", (call_args[6], source)
+
+
+@pytest.mark.parametrize("split", ["M", "N"])
+def test_onpath_dual_dynamic_single_pipe_when_src_fits_tile_half(split):
+    if split == "M":
+        func = dynamic_prefix_onpath_dual_copy(split, max_units=64, unit=2)
+    else:
+        func = dynamic_prefix_onpath_dual_copy(split, max_units=3, unit=16)
+    source = _kernel_source(func)
+    sizes = _cc_to_ub_sizes(source)
+    assert len(sizes) == 1, source
+    tails = _cc_to_ub_tails(source)
+    assert tails[0][1] == "0", tails
+    copy_inner, copy_rows = sizes[0]
+    if split == "M":
+        assert copy_inner == "256", (copy_inner, source)
+        assert copy_rows != "128", (copy_rows, source)
+    else:
+        assert copy_rows == "256", (copy_rows, source)
+        assert copy_inner != "128", (copy_inner, source)
+        assert "16" in copy_inner, (copy_inner, source)
+
+
+@pytest.mark.parametrize("split", ["M", "N"])
+def test_column_slice_second_pipe_offset(split):
+    # acc[:, :32] on a 64-wide L0C; second pipe src ptr must be offset.
+    alloc, region_n = 64, 32
+    region_m = alloc
+    source = _kernel_source(compact_column_slice_dual_copy(split, alloc, region_n))
+    args = _cc_to_ub_argument_lists(source)
+    assert len(args) == 2, source
+    if split == "M":
+        expected_inner, expected_rows = str(region_n), str(region_m // 2)
+    else:
+        expected_inner, expected_rows = str(region_n // 2), str(region_m)
+    for copy_inner, copy_rows in _cc_to_ub_sizes(source):
+        assert copy_inner == expected_inner, (copy_inner, expected_inner, source)
+        assert copy_rows == expected_rows, (copy_rows, expected_rows, source)
+    for call_args in args:
+        assert call_args[6] == str(alloc), (call_args[6], alloc, source)
+    assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
+    assert "+" in args[1][1], (args[1][1], source)
+
+
+def test_m_split_compact_2d_uses_alloc_row_stride():
+    # Compact 32x32 MAD in a 64x64 L0C; M-split offset uses row stride 64.
+    # loop_src_stride stays the compact region M because N is also sliced.
+    alloc, region_m, region_n = 64, 32, 32
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((alloc, alloc), "float16"),
+        B: T.Buffer((alloc, alloc), "float16"),
+        C: T.Buffer((region_m // 2, region_n), "float16"),
+    ):
+        with T.Kernel(1):
+            a_l1 = T.alloc_l1((alloc, alloc), "float16")
+            b_l1 = T.alloc_l1((alloc, alloc), "float16")
+            a_l0 = T.alloc_l0a((alloc, alloc), "float16")
+            b_l0 = T.alloc_l0b((alloc, alloc), "float16")
+            acc = T.alloc_l0c((alloc, alloc), "float32")
+            tmp = T.alloc_shared((region_m // 2, region_n), "float16")
+
+            T.copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.copy(a_l1[0:region_m, 0:region_n], a_l0[0:region_m, 0:region_n])
+            T.copy(b_l1[0:region_n, 0:region_n], b_l0[0:region_n, 0:region_n])
+            T.gemm(
+                a_l0[0:region_m, 0:region_n],
+                b_l0[0:region_n, 0:region_n],
+                acc[0:region_m, 0:region_n],
+                transpose_B=True,
+                clear_accum=True,
+            )
+            T.dual_copy(acc[0:region_m, 0:region_n], tmp)
+            T.copy(tmp, C)
+
+    source = _kernel_source(main)
+    args = _cc_to_ub_argument_lists(source)
+    assert len(args) == 2, source
+    expected_inner, expected_rows = str(region_n), str(region_m // 2)
+    for copy_inner, copy_rows in _cc_to_ub_sizes(source):
+        assert copy_inner == expected_inner, (copy_inner, expected_inner, source)
+        assert copy_rows == expected_rows, (copy_rows, expected_rows, source)
+    for call_args in args:
+        assert call_args[6] == str(region_m), (call_args[6], region_m, source)
+    assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
+    assert "+" in args[1][1], (args[1][1], source)
+
+
+def test_lowering_rejects_odd_m():
+    TILE_M, TILE_N, TILE_K = 16, 32, 32
+    odd_m = 15
+
+    def build():
+        @T.prim_func
+        def main(
+            A: T.Buffer((TILE_M, TILE_K), "float16"),
+            B: T.Buffer((TILE_N, TILE_K), "float16"),
+            C: T.Buffer((odd_m // 2, TILE_N), "float16"),
+        ):
+            with T.Kernel(1):
+                a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+                b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+                acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+                tmp = T.alloc_shared((odd_m // 2, TILE_N), "float16")
+
+                T.copy(A, a_l1)
+                T.copy(B, b_l1)
+                T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+                T.dual_copy(acc[0:odd_m, 0:TILE_N], tmp)
+                T.copy(tmp, C)
+
+        return main
+
+    with pytest.raises(ValueError, match="Cannot infer dual_copy split direction"):
+        build()
+
+
 def test_lowering_rejects_n_not_multiple_of_32():
-    # N=16 is C0-aligned but not 32-aligned, so the N-split on-path path is
-    # rejected by the C++ ICHECK rather than the Python frontend.
-    with pytest.raises(tvm.error.InternalError, match="N % 32 == 0"):
+    with pytest.raises(ValueError, match="multiple of 32"):
         _kernel_source(gemm_dual_copy("float16", "N", N=16))
+
+
+@pytest.mark.parametrize("split", ["M", "N"])
+def test_lowering_rejects_dst_smaller_than_src_half(split):
+    TILE_M, TILE_N, TILE_K = 256, 256, 256
+    dst_rows = TILE_M // 2 if split == "M" else TILE_M
+    dst_cols = TILE_N if split == "M" else TILE_N // 2
+    region_rows = 64 if split == "M" else TILE_M
+    region_cols = TILE_N if split == "M" else 64
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((TILE_M, TILE_K), "float16"),
+        B: T.Buffer((TILE_N, TILE_K), "float16"),
+        C: T.Buffer((dst_rows, dst_cols), "float16"),
+    ):
+        with T.Kernel(1):
+            a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
+            b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
+            acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
+            tmp = T.alloc_shared((dst_rows, dst_cols), "float16")
+
+            T.copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
+            T.dual_copy(acc, tmp[0:region_rows, 0:region_cols])
+            T.copy(tmp, C)
+
+    with pytest.raises(ValueError, match="exact 2:1 extent ratio"):
+        _kernel_source(main)
 
 
 def gemm_dual_copy_with_vf(dst_dtype, split, epilogue, M=256, N=256, K=256):
