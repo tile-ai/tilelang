@@ -1359,47 +1359,9 @@ private:
     // iteration has to be owned by the corresponding thread.
     bool parallel_loop = has_non_local_store || has_fragment_access;
 
-    // Check if there are non-local buffer accesses (for vectorization decision)
-    bool has_non_local = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (!IsLocalBuffer(load->buffer, /*allow_var*/ true) &&
-            !IsFragmentBuffer(load->buffer)) {
-          has_non_local = true;
-        }
-      } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (!IsLocalBuffer(store->buffer, /*allow_var*/ true) &&
-            !IsFragmentBuffer(store->buffer)) {
-          has_non_local = true;
-        }
-      }
-    });
-
-    // Check if vectorizable cast operations exist
-    bool has_cast_operations = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *cast = obj.as<CastNode>()) {
-        DataType from_ty = cast->value.dtype();
-        DataType target_ty = cast->dtype;
-        if (IsCudaVectorizableCast(from_ty, target_ty) &&
-            TargetIsCuda(Target::Current())) {
-          has_cast_operations = true;
-        }
-      }
-    });
-
-    // Decide whether to vectorize: only if there are non-local buffers or
-    // vectorizable casts. Reducer combine stores (multiplicity markers were
-    // already lowered by PartitionLoop) need no special exclusion: the
-    // vectorizer's planner keeps stores whose indices do not advance with
-    // the vectorized loop var scalar, which is exactly the reduction-axis
-    // hazard; output-axis contiguous combine stores vectorize like any
-    // other read-modify-write.
-    bool should_vectorize = has_non_local || has_cast_operations;
-    // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
-        predicate, parallel_loop, should_vectorize, require_padding_guard);
+        predicate, parallel_loop, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
