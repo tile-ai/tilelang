@@ -221,6 +221,35 @@ def test_multiple_packed_store_sites_are_rejected_when_ownership_disagrees():
         tilelang.compile(kernel, out_idx=[1])
 
 
+def test_reshape_alias_rejects_incomparable_packed_byte_owners():
+    def by_row(i, j):
+        return i, j
+
+    loop_layout = T.Fragment((2, 2), forward_fn=by_row)
+
+    @T.prim_func
+    def kernel(
+        low: T.Tensor((2, 2), "uint4"),
+        high: T.Tensor((2,), "uint4"),
+        out: T.Tensor((2, 4), "uint4"),
+    ):
+        with T.Kernel(1, threads=2):
+            flat = T.reshape(out, (8,))
+            for i, j in T.Parallel(2, 2, loop_layout=loop_layout):
+                out[i, 2 * j] = low[i, j]
+                if j == 0:
+                    flat[2 * i + 1] = high[i]
+
+    target = tvm.target.Target("cuda")
+    with target:
+        context = create_backend_context(target, None, "auto")
+        with pytest.raises(
+            tvm.TVMError,
+            match=r"logical elements that share a writable byte",
+        ):
+            lower_to_host_device_ir(kernel, context)
+
+
 @tilelang.testing.requires_cuda
 def test_replicated_packed_physical_store_requires_single_replica_guard():
     n = 64

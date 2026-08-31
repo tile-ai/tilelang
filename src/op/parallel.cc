@@ -174,6 +174,7 @@ bool HasCompactRowMajorStrides(const Buffer &buffer,
 struct PackedStoreOwnershipCoordinates {
   Array<PrimExpr> relative;
   Array<PrimExpr> origins;
+  bool uses_absolute_byte_offset;
 };
 
 PackedStoreOwnershipCoordinates
@@ -215,13 +216,15 @@ GetPackedStoreOwnershipCoordinates(const PackedSubByteStoreAccess &access,
     origins.push_back(origin);
     relative.push_back(analyzer->Simplify(coordinate - origin));
   }
-  return {relative, origins};
+  return {relative, origins, !use_shaped_coordinates};
 }
 
 struct ProvenPackedStoreOwner {
+  Buffer buffer;
   Var storage;
   PrimExpr owner;
   arith::IntSet byte_domain;
+  bool uses_absolute_byte_offset;
 };
 
 arith::IntSet GetPackedStoreByteDomain(const PackedSubByteStoreAccess &access,
@@ -385,17 +388,27 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
       if (!occurrence_changes_owner) {
         bool agrees_with_other_store_sites = true;
         for (const auto &previous : proven_store_owners) {
-          if (previous.storage.same_as(access.buffer->data) &&
-              !PackedStoreDomainsAreProvablyDisjoint(previous.byte_domain,
-                                                     byte_domain, analyzer) &&
-              !analyzer->CanProveEqual(previous.owner, owner)) {
+          bool same_storage = previous.storage.same_as(access.buffer->data);
+          bool byte_domains_overlap = !PackedStoreDomainsAreProvablyDisjoint(
+              previous.byte_domain, byte_domain, analyzer);
+          // Shaped owner expressions are comparable only within the same
+          // buffer view. Distinct aliases are comparable only when both use
+          // the canonical absolute-byte coordinate.
+          bool coordinate_bases_are_comparable =
+              previous.buffer.same_as(access.buffer) ||
+              (previous.uses_absolute_byte_offset &&
+               ownership_coordinates.uses_absolute_byte_offset);
+          if (same_storage && byte_domains_overlap &&
+              (!coordinate_bases_are_comparable ||
+               !analyzer->CanProveEqual(previous.owner, owner))) {
             agrees_with_other_store_sites = false;
             break;
           }
         }
         if (agrees_with_other_store_sites) {
           proven_store_owners.push_back(
-              {access.buffer->data, owner, byte_domain});
+              {access.buffer, access.buffer->data, owner, byte_domain,
+               ownership_coordinates.uses_absolute_byte_offset});
           continue;
         }
       }
