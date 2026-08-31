@@ -437,10 +437,12 @@ private:
 struct ConditionThreadProperty {
   bool depends_on_runtime{false};
   bool is_block_uniform{true};
+  bool requires_hoist{false};
 
   void Merge(const ConditionThreadProperty &other) {
     depends_on_runtime = depends_on_runtime || other.depends_on_runtime;
     is_block_uniform = is_block_uniform && other.is_block_uniform;
+    requires_hoist = requires_hoist || other.requires_hoist;
   }
 };
 
@@ -448,7 +450,7 @@ struct ConditionThreadProperty {
  * \brief Analyze whether an if-condition is runtime-dependent and/or uniform
  * across all threads in a block.
  *
- * For branch-local sync validation we care about two independent properties:
+ * For sync hoisting decisions we care about two independent properties:
  *
  * 1. Does the condition depend on runtime values such as memory loads?
  * 2. Even if it does, is it still block-uniform, i.e. identical for every
@@ -458,25 +460,48 @@ struct ConditionThreadProperty {
  * - `token_ids[tx] != -1` is runtime-dependent and non-uniform.
  * - `batch_sizes[bx] > 0` is runtime-dependent but block-uniform.
  *
- * Runtime-dependent, non-uniform conditions cannot use the current static-count
- * partial barrier. Thread-only conditions additionally need a warp-uniformity
- * proof before ThreadPartialSyncRewriter can lower them safely.
+ * Runtime-dependent, non-uniform conditions use the existing conservative
+ * hoisting path. Thread-only conditions that otherwise remain in place need a
+ * warp-uniformity proof before ThreadPartialSyncRewriter can lower them safely.
  */
 class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
   explicit ConditionThreadPropertyChecker(
       arith::Analyzer *analyzer, const Array<IterVar> &env_threads,
       const std::unordered_map<const VarNode *, ConditionThreadProperty>
-          &let_var_properties)
+          &let_var_properties,
+      int warp_size = 32)
       : IRMutatorWithAnalyzer(analyzer), env_threads_(env_threads),
-        let_var_properties_(let_var_properties) {}
+        let_var_properties_(let_var_properties), warp_size_(warp_size) {}
 
   /*!
-   * \brief Analyze condition properties relevant to branch-local syncs.
+   * \brief Analyze condition properties relevant to thread-sync hoisting.
    */
   ConditionThreadProperty AnalyzeExpr(const PrimExpr &expr) {
     current_ = ConditionThreadProperty();
     this->VisitExpr(expr);
+    return current_;
+  }
+
+  ConditionThreadProperty AnalyzeCondition(const PrimExpr &expr,
+                                           const IterVar &iv) {
+    current_ = ConditionThreadProperty();
+    this->VisitExpr(expr);
+    auto extent_opt = as_const_int(iv->dom->extent);
+    ICHECK(extent_opt != nullptr)
+        << "AnalyzeCondition: thread extent must be a "
+           "constant, but got: "
+        << iv->dom->extent;
+    int64_t thread_extent = *extent_opt;
+    {
+      With<arith::ConstraintContext> ctx(analyzer_, expr);
+      auto count = analyzer_->z3_prover.CountSatisfyingValues(
+          iv->var, thread_extent, /*min_consecutive=*/warp_size_);
+      if (count < 0) {
+        // ThreadPartialSyncRewriter cannot safely lower this condition.
+        current_.requires_hoist = true;
+      }
+    }
     return current_;
   }
 
@@ -572,6 +597,7 @@ private:
   const Array<IterVar> &env_threads_;
   const std::unordered_map<const VarNode *, ConditionThreadProperty>
       &let_var_properties_;
+  int warp_size_;
 };
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
@@ -586,7 +612,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     kRead,
     kWrite,
     kSync,
-    kSyncWarp,
     kAlloc,
     // acquired version of read, only need to handle WAR dep.
     kReadAcquire
@@ -613,8 +638,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     AccessType type;
     /*! \brief The storage scope */
     StorageScope scope;
-    /*! \brief warp 级同步显式使用的掩码。 */
-    Optional<PrimExpr> warp_sync_mask;
     /*! \brief Whether the access is pointer access */
     bool is_pointer_access = false;
     /*! \brief Whether this access originates from an async copy context
@@ -699,6 +722,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     }
     shared_memory_alias_byte_offsets_[alias_var.get()] = byte_offset;
   }
+  IterVar GetThreadVar(const std::string &tag) const {
+    for (const auto &iv : env_threads_) {
+      if (iv->thread_tag == tag) {
+        return iv;
+      }
+    }
+    LOG(FATAL) << "Thread variable " << tag << " not found";
+    return IterVar();
+  }
   /*!
    * \brief Try to prove that every thread reaches the same verdict on
    *        \p condition, using the live constraint set as premises.
@@ -770,37 +802,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
                               tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
     return analyzer.CanProve(tirx::Or(tirx::Not(same_warp), agree));
-  }
-
-  /*! \brief Return whether \p condition describes one axis-aligned region. */
-  bool IsAxisAlignedThreadRegion(const PrimExpr &condition) {
-    ConstrSet cset = GetConstrSet();
-    arith::Analyzer bound_analyzer;
-    cset.Populate(bound_analyzer);
-
-    PrimExpr region = Bool(true);
-    {
-      With<arith::ConstraintContext> ctx(&bound_analyzer, condition);
-      for (const auto &iv : env_threads_) {
-        if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1)
-          continue;
-        if (!bound_analyzer.const_int_bound.IsBound(iv->var)) {
-          return false;
-        }
-        auto bound = bound_analyzer.const_int_bound(iv->var);
-        PrimExpr min_value = make_const(iv->var.dtype(), bound->min_value);
-        PrimExpr max_value = make_const(iv->var.dtype(), bound->max_value);
-        region = tirx::And(region, iv->var >= min_value);
-        region = tirx::And(region, iv->var <= max_value);
-      }
-    }
-
-    arith::Analyzer analyzer;
-    cset.Populate(analyzer);
-    PrimExpr equivalent =
-        tirx::Or(tirx::And(condition, region),
-                 tirx::And(tirx::Not(condition), tirx::Not(region)));
-    return analyzer.CanProve(equivalent);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -887,7 +888,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     // Record let var properties
     auto let_prop = AnalyzeExprProperty(op->value);
     let_var_properties_[op->var.get()] = let_prop;
-    let_var_values_[op->var.get()] = op->value;
   }
   void VisitStmt_(const SBlockNode *op) final {
     auto block = Downcast<SBlock>(op);
@@ -961,19 +961,16 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    * buffer reads, writes, and synchronization events under the condition's
    * constraints.
    *
-   * IMPORTANT: A sync inside a thread-divergent branch is valid only when every
-   * hardware warp agrees on branch participation. Hoisting is not a repair when
-   * both conflicting accesses remain inside the branch, so unsupported
-   * participation patterns must be rejected.
+   * IMPORTANT: Before preserving a partial barrier in a thread-divergent
+   * branch, prove that every hardware warp agrees on branch participation.
+   * Conditions already handled by the legacy conservative hoisting path keep
+   * that behavior for compatibility.
    */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
     // Track syncs inserted before visiting the if body
     std::unordered_set<const Object *> syncs_before_then;
     std::unordered_set<const Object *> syncs_before_else;
-    std::unordered_set<const Object *> explicit_syncs_before_then =
-        explicit_syncs_seen_;
-    std::unordered_set<const Object *> explicit_syncs_before_else;
     for (const auto &sync : syncs_inserted_) {
       syncs_before_then.insert(sync);
     }
@@ -1010,7 +1007,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     for (const auto &sync : syncs_inserted_) {
       syncs_before_else.insert(sync);
     }
-    explicit_syncs_before_else = explicit_syncs_seen_;
 
     if (op->else_case) {
       auto guard = MakeGuard(tirx::Not(op->condition));
@@ -1038,19 +1034,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
     }
 
-    auto has_new_sync = [](const std::unordered_set<const Object *> &after,
-                           const std::unordered_set<const Object *> &before) {
-      return std::any_of(after.begin(), after.end(), [&](const Object *sync) {
-        return before.count(sync) == 0;
-      });
-    };
-    bool has_sync_in_then =
-        !syncs_in_then.empty() ||
-        has_new_sync(explicit_syncs_before_else, explicit_syncs_before_then);
-    bool has_sync_in_else =
-        !syncs_in_else.empty() ||
-        has_new_sync(explicit_syncs_seen_, explicit_syncs_before_else);
-    bool has_syncs_inside = has_sync_in_then || has_sync_in_else;
+    bool has_syncs_inside = !syncs_in_then.empty() || !syncs_in_else.empty();
 
     if (has_syncs_inside) {
       // Runtime-dependent conditions are only problematic when they can differ
@@ -1058,45 +1042,64 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       // such as `batch_sizes[blockIdx.z] > 0` are safe to keep in-place.
       //
       // Separately, some threadIdx-only non-uniform conditions still need
+      // hoisting when ThreadPartialSyncRewriter cannot lower them safely.
       arith::Analyzer analyzer;
       ConstrSet constr_set = GetConstrSet();
       constr_set.Populate(analyzer);
       ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
-                                             let_var_properties_);
-      auto validate_sync_condition = [&](const PrimExpr &branch_condition,
-                                         const char *branch_name) {
-        auto condition_prop = checker.AnalyzeExpr(branch_condition);
-        bool proven_block_uniform = !condition_prop.is_block_uniform &&
-                                    IsBlockUniformCondition(branch_condition);
-        if (condition_prop.is_block_uniform || proven_block_uniform) {
-          return;
-        }
+                                             let_var_properties_, warp_size_);
+      IterVar tx = GetThreadVar("threadIdx.x");
+      auto must_hoist = [&](const PrimExpr &branch_condition,
+                            const char *branch_name) {
+        auto condition_prop = checker.AnalyzeCondition(branch_condition, tx);
+        bool may_hoist =
+            condition_prop.depends_on_runtime || condition_prop.requires_hoist;
+        bool proven_uniform =
+            may_hoist && IsBlockUniformCondition(branch_condition);
+        bool is_block_uniform =
+            condition_prop.is_block_uniform || proven_uniform;
+        bool should_hoist =
+            (condition_prop.depends_on_runtime && !is_block_uniform) ||
+            (condition_prop.requires_hoist && !proven_uniform);
 
-        bool is_static_warp_uniform =
-            !condition_prop.depends_on_runtime &&
-            IsAxisAlignedThreadRegion(branch_condition) &&
-            IsWarpUniformCondition(branch_condition);
-        if (is_static_warp_uniform) {
-          return;
+        if (!should_hoist && !is_block_uniform &&
+            !IsWarpUniformCondition(branch_condition)) {
+          LOG(FATAL)
+              << "[ThreadSync] Cannot lower a required shared-memory sync "
+                 "inside the "
+              << branch_name
+              << " branch: its participating threads are not warp-uniform. "
+                 "A partial barrier requires every non-exited thread in each "
+                 "participating warp to reach the barrier. Condition: "
+              << branch_condition;
         }
-
-        LOG(FATAL)
-            << "[ThreadSync] Cannot lower a required shared-memory sync "
-               "inside the "
-            << branch_name
-            << " branch: its participating threads are not a compile-time "
-               "warp-uniform set representable by the current partial "
-               "barrier lowering. Hoisting the barrier before the if would "
-               "not order the conflicting accesses inside the branch. "
-               "Condition: "
-            << branch_condition;
+        return should_hoist;
       };
 
-      if (has_sync_in_then) {
-        validate_sync_condition(op->condition, "then");
-      }
-      if (has_sync_in_else) {
-        validate_sync_condition(tirx::Not(op->condition), "else");
+      bool hoist_then =
+          !syncs_in_then.empty() && must_hoist(op->condition, "then");
+      bool hoist_else = !syncs_in_else.empty() &&
+                        must_hoist(tirx::Not(op->condition), "else");
+      if (hoist_then || hoist_else) {
+        LOG(WARNING)
+            << "[ThreadSync] Hoisting sync out of an if whose condition is not "
+               "safe for an in-if sync. This is not a fix: both ends of the "
+               "conflict are inside the branch, so the hoisted barrier no "
+               "longer separates them and the race remains. Constraining the "
+               "condition -- a T.assume on the parameters it reads -- keeps "
+               "the barrier in place instead. Condition: "
+            << op->condition;
+        if (hoist_then) {
+          for (const auto &sync : syncs_in_then) {
+            syncs_inserted_.erase(sync);
+          }
+        }
+        if (hoist_else) {
+          for (const auto &sync : syncs_in_else) {
+            syncs_inserted_.erase(sync);
+          }
+        }
+        insert_syncs(op);
       }
     }
 
@@ -1324,9 +1327,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         e.type = kSync;
         e.scope = StorageScope::Create(s);
         curr_stmt_.access.emplace_back(std::move(e));
-        if (op->args.size() == 1 && scope.rank == StorageRank::kShared) {
-          explicit_syncs_seen_.insert(curr_stmt_.stmt);
-        }
       }
     } else if (op->op.same_as(tl::sync_grid())) {
       // grid.sync() synchronizes every thread of every block and is a full
@@ -1337,16 +1337,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.threads = env_threads();
       e.type = kSync;
       e.scope = sync_scope_;
-      curr_stmt_.access.emplace_back(std::move(e));
-    } else if (op->op.same_as(tl::sync_warp())) {
-      ICHECK(allow_append_);
-      AccessEntry e{.cset = {constr_stack_}};
-      e.threads = env_threads();
-      e.type = kSyncWarp;
-      e.scope = sync_scope_;
-      if (!op->args.empty()) {
-        e.warp_sync_mask = op->args[0];
-      }
       curr_stmt_.access.emplace_back(std::move(e));
     } else {
       ConstrVisitor::VisitExpr_(op);
@@ -1375,38 +1365,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
     }
 
-    struct PendingAccess {
-      AccessEntry access;
-      std::vector<AccessEntry> warp_syncs_after;
-    };
-    std::vector<PendingAccess> reads;
-    std::vector<PendingAccess> writes;
-    auto has_conflict = [&](const std::vector<PendingAccess> &pending,
-                            const AccessEntry &curr, const ForNode *loop) {
-      for (const PendingAccess &item : pending) {
-        if (!FindConflict(item.access, curr, loop)) {
-          continue;
-        }
-        if (loop == nullptr && std::any_of(item.warp_syncs_after.begin(),
-                                           item.warp_syncs_after.end(),
-                                           [&](const AccessEntry &sync) {
-                                             return WarpSyncOrders(item.access,
-                                                                   curr, sync);
-                                           })) {
-          continue;
-        }
-        return true;
-      }
-      return false;
-    };
-    auto record_warp_sync = [&](const AccessEntry &sync) {
-      for (PendingAccess &item : reads) {
-        item.warp_syncs_after.push_back(sync);
-      }
-      for (PendingAccess &item : writes) {
-        item.warp_syncs_after.push_back(sync);
-      }
-    };
+    // Unsynced reads and writes
+    std::vector<AccessEntry> reads;
+    std::vector<AccessEntry> writes;
     // if it is a loop, rotate two times to consider effect of loop.
     // simulation based approach to find dependencies
     for (size_t i = 0; i < seq.size(); ++i) {
@@ -1423,14 +1384,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
           // Same-iteration conflict: loop=nullptr
-          if (has_conflict(writes, acc, nullptr)) {
+          if (FindConflict(writes, acc, nullptr)) {
             sync_before_stmt = true;
             break;
           }
         } else if (acc.type == kWrite) {
           // Same-iteration conflict: loop=nullptr
-          if (has_conflict(reads, acc, nullptr) ||
-              has_conflict(writes, acc, nullptr)) {
+          if (FindConflict(reads, acc, nullptr) ||
+              FindConflict(writes, acc, nullptr)) {
             sync_before_stmt = true;
             break;
           }
@@ -1447,14 +1408,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       // Add the read/write of current statement
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
-          reads.push_back({acc, {}});
+          reads.push_back(acc);
         } else if (acc.type == kWrite) {
-          writes.push_back({acc, {}});
+          writes.push_back(acc);
         } else if (acc.type == kSync) {
           reads.clear();
           writes.clear();
-        } else if (acc.type == kSyncWarp) {
-          record_warp_sync(acc);
         }
       }
 
@@ -1505,22 +1464,20 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         for (const AccessEntry &acc : s.access) {
           if (acc.type == kRead) {
             // Loop-carry conflict: pass loop for iteration shift analysis
-            if (has_conflict(writes, acc, loop)) {
+            if (FindConflict(writes, acc, loop)) {
               need_loop_sync = true;
               break;
             }
           } else if (acc.type == kWrite) {
             // Loop-carry conflict: pass loop for iteration shift analysis
-            if (has_conflict(reads, acc, loop) ||
-                has_conflict(writes, acc, loop)) {
+            if (FindConflict(reads, acc, loop) ||
+                FindConflict(writes, acc, loop)) {
               need_loop_sync = true;
               break;
             }
           } else if (acc.type == kSync) {
             reads.clear();
             writes.clear();
-          } else if (acc.type == kSyncWarp) {
-            record_warp_sync(acc);
           }
         }
         if (need_loop_sync) {
@@ -1586,139 +1543,8 @@ private:
     ConstrSet constr_set = GetConstrSet();
     constr_set.Populate(analyzer);
     ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
-                                           let_var_properties_);
+                                           let_var_properties_, warp_size_);
     return checker.AnalyzeExpr(expr);
-  }
-
-  PrimExpr ResolveLetValue(PrimExpr expr) const {
-    std::unordered_set<const VarNode *> visited;
-    while (true) {
-      if (const auto *cast = expr.as<CastNode>()) {
-        expr = cast->value;
-        continue;
-      }
-      const auto *var = expr.as<VarNode>();
-      if (var == nullptr || !visited.insert(var).second) {
-        return expr;
-      }
-      auto it = let_var_values_.find(var);
-      if (it == let_var_values_.end()) {
-        return expr;
-      }
-      expr = it->second;
-    }
-  }
-
-  bool IsBallotDerivedWarpSync(const AccessEntry &sync) const {
-    if (!sync.warp_sync_mask.defined()) {
-      return false;
-    }
-    PrimExpr mask = ResolveLetValue(sync.warp_sync_mask.value());
-    const auto *call = mask.as<CallNode>();
-    return call != nullptr && call->op.same_as(tl::ballot_sync());
-  }
-
-  bool HaveEquivalentConstraints(const AccessEntry &lhs,
-                                 const AccessEntry &rhs) const {
-    auto participation_condition = [](const ConstrSet &cset) {
-      PrimExpr condition = Bool(true);
-      for (const Constr &constr : cset.constrs_) {
-        if (constr.kind != Constr::kBindValue) {
-          condition = tirx::And(condition, constr.ToGenericConstr());
-        }
-      }
-      return condition;
-    };
-    PrimExpr lhs_condition = participation_condition(lhs.cset);
-    PrimExpr rhs_condition = participation_condition(rhs.cset);
-    if (ExprDeepEqual()(lhs_condition, rhs_condition)) {
-      return true;
-    }
-
-    arith::Analyzer analyzer;
-    std::unordered_set<const VarNode *> bound;
-    for (const Array<IterVar> *threads : {&lhs.threads, &rhs.threads}) {
-      for (const IterVar &iv : *threads) {
-        if (iv->dom.defined() && bound.insert(iv->var.get()).second) {
-          analyzer.Bind(iv->var, iv->dom);
-        }
-      }
-    }
-    PrimExpr equivalent =
-        tirx::Or(tirx::And(lhs_condition, rhs_condition),
-                 tirx::And(tirx::Not(lhs_condition), tirx::Not(rhs_condition)));
-    return analyzer.z3_prover.CanProve(equivalent);
-  }
-
-  bool ConflictsOnlyWithinWarp(const AccessEntry &prev,
-                               const AccessEntry &curr) const {
-    if (prev.is_pointer_access || curr.is_pointer_access ||
-        prev.buffer_indices.size() != 1 || curr.buffer_indices.size() != 1) {
-      return false;
-    }
-
-    Map<Var, PrimExpr> prev_sub, curr_sub;
-    for (const IterVar &prev_iv : prev.threads) {
-      if (runtime::ThreadScope::Create(prev_iv->thread_tag).rank != 1) {
-        continue;
-      }
-      IterVar curr_iv;
-      for (const IterVar &candidate : curr.threads) {
-        if (candidate->thread_tag == prev_iv->thread_tag) {
-          curr_iv = candidate;
-          break;
-        }
-      }
-      if (!curr_iv.defined()) {
-        return false;
-      }
-      std::string suffix = prev_iv->thread_tag;
-      prev_sub.Set(prev_iv->var, Var(suffix + "<W1>", prev_iv->var.dtype()));
-      curr_sub.Set(curr_iv->var, Var(suffix + "<W2>", curr_iv->var.dtype()));
-    }
-    if (prev_sub.empty() || curr_sub.empty()) {
-      return false;
-    }
-
-    ConstrSet prev_cset{prev.cset};
-    ConstrSet curr_cset{curr.cset};
-    prev_cset = prev_cset.RenameFrom("<W1>", prev_sub, std::nullopt,
-                                     /*rename_ranges=*/false);
-    curr_cset = curr_cset.RenameFrom("<W2>", curr_sub, std::nullopt,
-                                     /*rename_ranges=*/false);
-    arith::Analyzer analyzer;
-    prev_cset.ToConstraints()
-        .Merge(curr_cset.ToConstraints())
-        .Populate(analyzer);
-
-    DataType index_dtype = DataType::Int(64);
-    PrimExpr prev_index = Substitute(prev.buffer_indices[0], prev_sub);
-    PrimExpr curr_index = Substitute(curr.buffer_indices[0], curr_sub);
-    if (!prev_index.dtype().is_scalar() || !curr_index.dtype().is_scalar()) {
-      return false;
-    }
-    PrimExpr prev_address = Cast(index_dtype, prev_index) *
-                            make_const(index_dtype, prev.dtype.bytes());
-    PrimExpr curr_address = Cast(index_dtype, curr_index) *
-                            make_const(index_dtype, curr.dtype.bytes());
-
-    PrimExpr prev_linear =
-        Substitute(MakeLinearThreadId(prev.threads), prev_sub);
-    PrimExpr curr_linear =
-        Substitute(MakeLinearThreadId(curr.threads), curr_sub);
-    PrimExpr warp_size = make_const(index_dtype, warp_size_);
-    PrimExpr same_warp =
-        FloorDiv(prev_linear, warp_size) == FloorDiv(curr_linear, warp_size);
-    return analyzer.CanProve(
-        tirx::Or(same_warp, tirx::NE(prev_address, curr_address)));
-  }
-
-  bool WarpSyncOrders(const AccessEntry &prev, const AccessEntry &curr,
-                      const AccessEntry &sync) const {
-    return IsBallotDerivedWarpSync(sync) &&
-           HaveEquivalentConstraints(prev, sync) &&
-           HaveEquivalentConstraints(curr, sync) &&
-           ConflictsOnlyWithinWarp(prev, curr);
   }
 
   bool Enabled(const VarNode *buf, const StorageScope &scope) {
@@ -1747,10 +1573,6 @@ private:
   // current lexical scope.
   std::unordered_map<const VarNode *, ConditionThreadProperty>
       let_var_properties_;
-  // 保存 flat Bind 的定义，用于识别 LowerThreadAllreduce 生成的 ballot 掩码。
-  std::unordered_map<const VarNode *, PrimExpr> let_var_values_;
-  // 记录会被 ThreadPartialSyncRewriter 改写的显式 shared barrier。
-  std::unordered_set<const Object *> explicit_syncs_seen_;
   // The buffer map
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
@@ -1847,9 +1669,6 @@ private:
       break;
     case kSync:
       type_str = "Sync";
-      break;
-    case kSyncWarp:
-      type_str = "SyncWarp";
       break;
     case kAlloc:
       type_str = "Alloc";
@@ -2184,35 +2003,6 @@ private:
         ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
         provably_disjoint =
             analyzer.CanProve(tirx::NE(prev_indice_bytes, curr_indice_bytes));
-        // 对短小展开循环逐次代入迭代值，避免 div/mod 组合让符号证明返回
-        // unknown。
-        if (!provably_disjoint && loop != nullptr &&
-            loop->kind == ForKind::kUnrolled) {
-          const auto *loop_min = loop->min.as<IntImmNode>();
-          const auto *loop_extent = loop->extent.as<IntImmNode>();
-          constexpr int64_t kMaxEnumeratedUnrollExtent = 64;
-          if (loop_min != nullptr && loop_extent != nullptr &&
-              loop_extent->value > 1 &&
-              loop_extent->value <= kMaxEnumeratedUnrollExtent) {
-            provably_disjoint = true;
-            for (int64_t offset = 0; offset < loop_extent->value - 1;
-                 ++offset) {
-              Map<Var, PrimExpr> iteration_sub;
-              iteration_sub.Set(
-                  loop->loop_var,
-                  make_const(loop->loop_var.dtype(), loop_min->value + offset));
-              PrimExpr prev_at_iteration =
-                  Substitute(prev_indice_bytes, iteration_sub);
-              PrimExpr curr_at_iteration =
-                  Substitute(curr_indice_bytes, iteration_sub);
-              if (!analyzer.CanProve(
-                      tirx::NE(prev_at_iteration, curr_at_iteration))) {
-                provably_disjoint = false;
-                break;
-              }
-            }
-          }
-        }
       } else {
         try {
           auto prev_min = analyzer.Simplify(

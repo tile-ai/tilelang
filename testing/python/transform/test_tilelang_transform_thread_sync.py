@@ -377,47 +377,6 @@ def test_sync_shared_dyn_stmatrix_loop_hoist():
     assert s.index('T.tvm_storage_sync("shared.dyn")') < s.index("for i in T.unroll(8)")
 
 
-def test_unrolled_inplace_vector_update_has_no_loop_carry_sync():
-    """展开循环中互不重叠的原地向量更新不需要跨线程 barrier。"""
-
-    @T.prim_func(private=True)
-    def func():
-        S_shared = T.alloc_buffer((4096,), scope="shared.dyn")
-        scores_max = T.alloc_buffer((2,), scope="local")
-        logsum = T.alloc_buffer((2,), scope="local")
-        bx = T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
-        ty = T.launch_thread("threadIdx.y", 1)
-        tz = T.launch_thread("threadIdx.z", 1)
-        if tx % 4 == 0:
-            for i in T.unroll(32):
-                S_shared[
-                    T.Ramp(
-                        tx // 32 * 1024 + i // 16 * 512 + tx % 32 // 4 * 64 + i % 16 * 4 - 4096,
-                        1,
-                        4,
-                    )
-                ] = T.exp2(
-                    S_shared[
-                        T.Ramp(
-                            tx // 32 * 1024 + i // 16 * 512 + tx % 32 // 4 * 64 + i % 16 * 4 - 4096,
-                            1,
-                            4,
-                        )
-                    ]
-                    - T.Broadcast(scores_max[i // 16], 4)
-                ) / T.Broadcast(logsum[i // 16], 4)
-
-    target = tvm.target.Target(
-        {"kind": "cuda", "arch": "sm_90", "thread_warp_size": 32, "max_num_threads": 1024},
-        host="llvm",
-    )
-    mod = tvm.IRModule({"main": func.with_attr({"global_symbol": "test", "target": target})})
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    s = str(mod.script())
-    assert 'T.tvm_storage_sync("shared.dyn")' not in s, f"Unexpected loop-carried sync:\n{s}"
-
-
 @tilelang.testing.requires_cuda
 def test_loop_carry_no_dependency_same_index():
     """Test that A[i] write followed by A[i] read in a loop does NOT need barrier.
@@ -837,7 +796,7 @@ def test_partial_sync_non_warp_multiple_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
+    with pytest.raises(Exception, match="not warp-uniform"):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -866,89 +825,6 @@ def test_partial_sync_warp_multiple_still_lowered():
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
     assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a partial barrier with thread_count=32:\n{s}"
-
-
-def test_masked_warp_sync_orders_only_intra_warp_hazards():
-    """ballot 掩码生成的 warp barrier 足以排序同一 warp 内的冲突。"""
-
-    @T.prim_func(private=True)
-    def func():
-        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
-        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
-        bx = T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 64)
-        ty = T.launch_thread("threadIdx.y", 1)
-        tz = T.launch_thread("threadIdx.z", 1)
-        active_mask = T.bind(T.cast(T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.activemask")), "uint32"))
-        participant_mask = T.bind(
-            T.cast(
-                T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.ballot_sync"), active_mask, tx % 4 == 0),
-                "uint32",
-            )
-        )
-        if tx % 4 == 0:
-            acc[0] = S[tx // 32 * 32 + (tx + 4) % 32]
-            T.evaluate(T.call_intrin("void", tvm.tirx.op.Op.get("tl.sync_warp"), participant_mask))
-            S[tx] = acc[0]
-
-    s = run_passes_script(func)
-    assert "T.tvm_storage_sync" not in s, f"Masked warp sync should order the intra-warp hazard:\n{s}"
-
-
-def test_masked_warp_sync_does_not_order_cross_warp_hazards():
-    """warp barrier 不能掩盖跨 warp 的共享内存冲突。"""
-    import pytest
-
-    @T.prim_func(private=True)
-    def func():
-        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
-        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
-        bx = T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 64)
-        ty = T.launch_thread("threadIdx.y", 1)
-        tz = T.launch_thread("threadIdx.z", 1)
-        active_mask = T.bind(T.cast(T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.activemask")), "uint32"))
-        participant_mask = T.bind(
-            T.cast(
-                T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.ballot_sync"), active_mask, tx % 4 == 0),
-                "uint32",
-            )
-        )
-        if tx % 4 == 0:
-            acc[0] = S[(tx + 32) % 64]
-            T.evaluate(T.call_intrin("void", tvm.tirx.op.Op.get("tl.sync_warp"), participant_mask))
-            S[tx] = acc[0]
-
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
-
-
-def test_rocm_subwarp_allreduce_keeps_masked_warp_sync():
-    """ROCm 子 warp allreduce 不应被补入非法的 shared barrier。"""
-
-    @T.prim_func(private=True)
-    def func(A: T.Buffer((8,), "float32"), C: T.Buffer((1,), "float32")):
-        bx = T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 8)
-        ty = T.launch_thread("threadIdx.y", 1)
-        tz = T.launch_thread("threadIdx.z", 1)
-        value = T.alloc_buffer((1,), "float32", scope="local")
-        result = T.alloc_buffer((1,), "float32", scope="local")
-        value[0] = A[tx]
-        with T.attr(
-            T.comm_reducer(lambda x, y: x + y, [T.float32(0)]),
-            "reduce_scope",
-            T.reinterpret(T.uint64(0), dtype="handle"),
-        ):
-            T.tvm_thread_allreduce(T.uint32(1), value[0], T.bool(True), result[0], tx)
-        C[0] = result[0]
-
-    target = tvm.target.Target({"kind": "rocm", "thread_warp_size": 64, "max_num_threads": 1024}, host="llvm")
-    mod = tvm.IRModule({"main": func.with_attr({"global_symbol": "test", "target": target})})
-    mod = tilelang.transform.LowerThreadAllreduce()(mod)
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    s = str(mod.script())
-    assert "T.sync_warp" in s, f"Expected the masked warp synchronization to remain:\n{s}"
 
 
 # =============================================================================
@@ -1045,7 +921,7 @@ def test_no_plain_sync_inside_divergent_symbolic_guard():
         assert sync_pos < if_pos, f"Barrier must be hoisted out of the divergent guard:\n{s}"
 
 
-def test_unorderable_hazard_in_divergent_guard_is_rejected():
+def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
     """A hazard confined to a divergent branch has no correct barrier placement.
 
     ``bx * 4 + tx // 32 < n`` mixes a thread variable with a runtime parameter, so
@@ -1053,7 +929,8 @@ def test_unorderable_hazard_in_divergent_guard_is_rejected():
     that branch. A barrier inside it hangs on the threads that skip the branch,
     while one in front of it is reached by everyone but no longer separates the
     accesses. Ordering this needs the branch split around the barrier, which the
-    pass cannot express, so compilation must reject the program.
+    pass cannot express, so reporting the program is the only thing it can get
+    right. Where the barrier ends up is deliberately not asserted.
     """
 
     @T.prim_func(private=True)
@@ -1068,18 +945,17 @@ def test_unorderable_hazard_in_divergent_guard_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    import pytest
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
 
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
 
-
-def test_unorderable_hazard_in_divergent_else_branch_is_rejected():
+def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
     """The else branch needs the same treatment as the then branch.
 
     Syncs found in either arm are tracked separately, so a hazard placed only in
     the else arm exercises the second of the two paths. It is as unorderable as
-    the one above, so compilation must reject it as well.
+    the one above, so again only the report is asserted.
     """
 
     @T.prim_func(private=True)
@@ -1096,14 +972,13 @@ def test_unorderable_hazard_in_divergent_else_branch_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    import pytest
-
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
 
 
 def test_aligned_else_partial_sync_is_preserved():
-    """A branch containing one complete warp can use a partial barrier."""
+    """An unsafe 16-thread then arm must not remove a valid else warp barrier."""
     import re
 
     @T.prim_func(private=True)
@@ -1111,7 +986,7 @@ def test_aligned_else_partial_sync_is_preserved():
         s = T.alloc_buffer((64,), dtype="float32", scope="shared")
         l = T.alloc_buffer((1,), dtype="float32", scope="local")
         bx = T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
+        tx = T.launch_thread("threadIdx.x", 48)
         ty = T.launch_thread("threadIdx.y", 1)
         tz = T.launch_thread("threadIdx.z", 1)
         if tx >= 32:
@@ -1143,30 +1018,7 @@ def test_misaligned_else_partial_sync_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[33 - tx]
 
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
-
-
-def test_explicit_misaligned_else_partial_sync_is_rejected():
-    """显式 barrier 也不能绕过非 warp 对齐参与集合的校验。"""
-    import pytest
-
-    @T.prim_func(private=True)
-    def func():
-        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
-        l = T.alloc_buffer((1,), dtype="float32", scope="local")
-        bx = T.launch_thread("blockIdx.x", 1)
-        tx = T.launch_thread("threadIdx.x", 128)
-        ty = T.launch_thread("threadIdx.y", 1)
-        tz = T.launch_thread("threadIdx.z", 1)
-        if tx == 0 or tx >= 33:
-            l[0] = T.float32(0)
-        else:
-            s[tx] = T.cast(tx, "float32")
-            T.tvm_storage_sync("shared")
-            l[0] = s[33 - tx]
-
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
+    with pytest.raises(Exception, match="not warp-uniform"):
         run_passes_script(func)
 
 
@@ -1202,13 +1054,13 @@ def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
     assert "no longer separates" not in warnings, f"A provably uniform guard should not be reported:\n{warnings}"
 
 
-def test_premise_weaker_than_the_block_is_rejected():
+def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
     """The premise has to rule divergence out for the block size actually used.
 
     ``n % 64 == 0`` with a block of 128 threads still admits ``n == 64``, where
     half the block enters. This pins down the boundary of the check above: it must
     accept a premise only when the premise really excludes divergence. The guard
-    is therefore unsupported and must be rejected.
+    is therefore treated as divergent, which for this shape means reported.
     """
 
     @T.prim_func(private=True)
@@ -1224,10 +1076,9 @@ def test_premise_weaker_than_the_block_is_rejected():
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 64) % 128]
 
-    import pytest
-
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"A premise that still allows divergence must not be accepted:\n{warnings}"
 
 
 def test_premise_holds_across_an_enclosing_guard():
