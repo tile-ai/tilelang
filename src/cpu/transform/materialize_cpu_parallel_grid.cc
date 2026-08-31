@@ -157,10 +157,10 @@ private:
 };
 
 struct GridRewriter {
-  GridRewriter(bool collapse_all_dims, int64_t min_trip, int64_t num_threads,
+  GridRewriter(bool collapse_all_dims, int64_t min_trip,
                const GridAccessAnalysis &analysis)
       : collapse_all_dims_(collapse_all_dims), min_trip_(min_trip),
-        num_threads_(num_threads), analysis_(analysis) {}
+        analysis_(analysis) {}
 
   Stmt Rewrite(const Stmt &stmt) {
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
@@ -337,15 +337,6 @@ private:
               : ForKind::kSerial;
       Map<ffi::String, ffi::Any> annotations =
           StripGridAnnotation(op->annotations);
-      // The num_threads clause is read off the chain head by the C codegen;
-      // on llvm the single marked loop is the head of its own chain.
-      bool is_clause_head =
-          collapse_all_dims_ ? i == 0 : static_cast<size_t>(i) == parallel_idx;
-      if (kind == ForKind::kParallel && is_clause_head && num_threads_ > 0) {
-        // Consumed by the C codegen to emit the num_threads(n) clause.
-        annotations.Set(kCPUNumThreads,
-                        IntImm(DataType::Int(32), num_threads_));
-      }
       PrimExpr step = NormalizedStep(op);
       body =
           For(op->loop_var, op->min, op->extent, kind, std::move(body),
@@ -364,7 +355,6 @@ private:
 
   bool collapse_all_dims_;
   int64_t min_trip_;
-  int64_t num_threads_;
   const GridAccessAnalysis &analysis_;
   bool converted_ = false;
 };
@@ -398,12 +388,8 @@ tvm::transform::Pass MaterializeCPUParallelGrid() {
                                               IntImm(DataType::Int(64), 0))
                            .value()
                            ->value;
-    int64_t num_threads =
-        ctx->GetConfig<IntImm>(kCPUNumThreads, IntImm(DataType::Int(64), 0))
-            .value()
-            ->value;
 
-    GridRewriter rewriter(collapse_all_dims, min_trip, num_threads, analysis);
+    GridRewriter rewriter(collapse_all_dims, min_trip, analysis);
     Stmt new_body = rewriter.Rewrite(func->body);
     GridAnnotationFinder residual;
     residual(new_body);
