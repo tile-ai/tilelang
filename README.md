@@ -112,6 +112,8 @@ See [all releases](https://github.com/tile-ai/tilelang/releases) for complete ch
 
 TileLang requires Python 3.10 or newer. The default `auto` target detects CUDA, HIP, and Metal devices; select an explicit target when compiling for another backend or architecture. Hardware-specific instructions and optimizations remain subject to the selected architecture.
 
+For details on how these targets share frontend semantics while owning target-specific lowering and code generation, see the [multi-backend architecture design](tilelang/backend/README.md), including `BackendContext`, pass pipelines, and reusable execution backends.
+
 | Backend | Target | Platforms and hardware | Support level | Notes |
 | --- | --- | --- | --- | --- |
 | NVIDIA CUDA | `cuda` | Linux x86-64/AArch64, Windows x86-64; code paths from SM70 through SM120 | Primary | Release wheels and CI coverage; TMA, WGMMA, and TMEM features require the corresponding GPU architecture. |
