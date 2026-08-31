@@ -128,7 +128,11 @@ def test_fragment_slice_with_gemm_layout_anchor_is_allowed():
                 T.copy(B, b_shared)
                 T.clear(f)
                 T.gemm(a_shared, b_shared, f, transpose_B=True)
-                T.copy(f[3:11, :], partial_shared)
+                # Keep the partial slice aligned with the GEMM accumulator's
+                # 8-row ownership period. A shifted slice such as 3:11 also
+                # exercises cyclic-layout inversion, which is independent of
+                # whether GEMM established a strict layout for the fragment.
+                T.copy(f[8:16, :], partial_shared)
                 T.copy(partial_shared, C)
 
         return main
