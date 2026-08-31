@@ -796,7 +796,7 @@ def test_partial_sync_non_warp_multiple_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
+    with pytest.raises(Exception, match="not warp-uniform"):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -921,7 +921,7 @@ def test_no_plain_sync_inside_divergent_symbolic_guard():
         assert sync_pos < if_pos, f"Barrier must be hoisted out of the divergent guard:\n{s}"
 
 
-def test_unorderable_hazard_in_divergent_guard_is_rejected():
+def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
     """A hazard confined to a divergent branch has no correct barrier placement.
 
     ``bx * 4 + tx // 32 < n`` mixes a thread variable with a runtime parameter, so
@@ -929,7 +929,8 @@ def test_unorderable_hazard_in_divergent_guard_is_rejected():
     that branch. A barrier inside it hangs on the threads that skip the branch,
     while one in front of it is reached by everyone but no longer separates the
     accesses. Ordering this needs the branch split around the barrier, which the
-    pass cannot express, so compilation must reject the program.
+    pass cannot express, so reporting the program is the only thing it can get
+    right. Where the barrier ends up is deliberately not asserted.
     """
 
     @T.prim_func(private=True)
@@ -944,18 +945,17 @@ def test_unorderable_hazard_in_divergent_guard_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    import pytest
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
 
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
 
-
-def test_unorderable_hazard_in_divergent_else_branch_is_rejected():
+def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
     """The else branch needs the same treatment as the then branch.
 
     Syncs found in either arm are tracked separately, so a hazard placed only in
     the else arm exercises the second of the two paths. It is as unorderable as
-    the one above, so compilation must reject it as well.
+    the one above, so again only the report is asserted.
     """
 
     @T.prim_func(private=True)
@@ -972,10 +972,9 @@ def test_unorderable_hazard_in_divergent_else_branch_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    import pytest
-
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
 
 
 def test_aligned_else_partial_sync_is_preserved():
@@ -1019,7 +1018,7 @@ def test_misaligned_else_partial_sync_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[33 - tx]
 
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
+    with pytest.raises(Exception, match="not warp-uniform"):
         run_passes_script(func)
 
 
@@ -1055,13 +1054,13 @@ def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
     assert "no longer separates" not in warnings, f"A provably uniform guard should not be reported:\n{warnings}"
 
 
-def test_premise_weaker_than_the_block_is_rejected():
+def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
     """The premise has to rule divergence out for the block size actually used.
 
     ``n % 64 == 0`` with a block of 128 threads still admits ``n == 64``, where
     half the block enters. This pins down the boundary of the check above: it must
     accept a premise only when the premise really excludes divergence. The guard
-    is therefore unsupported and must be rejected.
+    is therefore treated as divergent, which for this shape means reported.
     """
 
     @T.prim_func(private=True)
@@ -1077,10 +1076,9 @@ def test_premise_weaker_than_the_block_is_rejected():
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 64) % 128]
 
-    import pytest
-
-    with pytest.raises(Exception, match="compile-time warp-uniform"):
-        run_passes_script(func)
+    run_passes_script(func)
+    warnings = capfd.readouterr().err
+    assert "no longer separates" in warnings, f"A premise that still allows divergence must not be accepted:\n{warnings}"
 
 
 def test_premise_holds_across_an_enclosing_guard():

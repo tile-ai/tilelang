@@ -437,10 +437,12 @@ private:
 struct ConditionThreadProperty {
   bool depends_on_runtime{false};
   bool is_block_uniform{true};
+  bool requires_hoist{false};
 
   void Merge(const ConditionThreadProperty &other) {
     depends_on_runtime = depends_on_runtime || other.depends_on_runtime;
     is_block_uniform = is_block_uniform && other.is_block_uniform;
+    requires_hoist = requires_hoist || other.requires_hoist;
   }
 };
 
@@ -448,7 +450,7 @@ struct ConditionThreadProperty {
  * \brief Analyze whether an if-condition is runtime-dependent and/or uniform
  * across all threads in a block.
  *
- * For branch-local sync validation we care about two independent properties:
+ * For sync hoisting decisions we care about two independent properties:
  *
  * 1. Does the condition depend on runtime values such as memory loads?
  * 2. Even if it does, is it still block-uniform, i.e. identical for every
@@ -458,25 +460,48 @@ struct ConditionThreadProperty {
  * - `token_ids[tx] != -1` is runtime-dependent and non-uniform.
  * - `batch_sizes[bx] > 0` is runtime-dependent but block-uniform.
  *
- * Runtime-dependent, non-uniform conditions cannot use the current static-count
- * partial barrier. Thread-only conditions additionally need a warp-uniformity
- * proof before ThreadPartialSyncRewriter can lower them safely.
+ * Runtime-dependent, non-uniform conditions use the existing conservative
+ * hoisting path. Thread-only conditions that otherwise remain in place need a
+ * warp-uniformity proof before ThreadPartialSyncRewriter can lower them safely.
  */
 class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
   explicit ConditionThreadPropertyChecker(
       arith::Analyzer *analyzer, const Array<IterVar> &env_threads,
       const std::unordered_map<const VarNode *, ConditionThreadProperty>
-          &let_var_properties)
+          &let_var_properties,
+      int warp_size = 32)
       : IRMutatorWithAnalyzer(analyzer), env_threads_(env_threads),
-        let_var_properties_(let_var_properties) {}
+        let_var_properties_(let_var_properties), warp_size_(warp_size) {}
 
   /*!
-   * \brief Analyze condition properties relevant to branch-local syncs.
+   * \brief Analyze condition properties relevant to thread-sync hoisting.
    */
   ConditionThreadProperty AnalyzeExpr(const PrimExpr &expr) {
     current_ = ConditionThreadProperty();
     this->VisitExpr(expr);
+    return current_;
+  }
+
+  ConditionThreadProperty AnalyzeCondition(const PrimExpr &expr,
+                                           const IterVar &iv) {
+    current_ = ConditionThreadProperty();
+    this->VisitExpr(expr);
+    auto extent_opt = as_const_int(iv->dom->extent);
+    ICHECK(extent_opt != nullptr)
+        << "AnalyzeCondition: thread extent must be a "
+           "constant, but got: "
+        << iv->dom->extent;
+    int64_t thread_extent = *extent_opt;
+    {
+      With<arith::ConstraintContext> ctx(analyzer_, expr);
+      auto count = analyzer_->z3_prover.CountSatisfyingValues(
+          iv->var, thread_extent, /*min_consecutive=*/warp_size_);
+      if (count < 0) {
+        // ThreadPartialSyncRewriter cannot safely lower this condition.
+        current_.requires_hoist = true;
+      }
+    }
     return current_;
   }
 
@@ -572,6 +597,7 @@ private:
   const Array<IterVar> &env_threads_;
   const std::unordered_map<const VarNode *, ConditionThreadProperty>
       &let_var_properties_;
+  int warp_size_;
 };
 
 struct TileLangThreadSyncPlanner : public ConstrVisitor {
@@ -696,6 +722,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     }
     shared_memory_alias_byte_offsets_[alias_var.get()] = byte_offset;
   }
+  IterVar GetThreadVar(const std::string &tag) const {
+    for (const auto &iv : env_threads_) {
+      if (iv->thread_tag == tag) {
+        return iv;
+      }
+    }
+    LOG(FATAL) << "Thread variable " << tag << " not found";
+    return IterVar();
+  }
   /*!
    * \brief Try to prove that every thread reaches the same verdict on
    *        \p condition, using the live constraint set as premises.
@@ -767,37 +802,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
                               tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
     return analyzer.CanProve(tirx::Or(tirx::Not(same_warp), agree));
-  }
-
-  /*! \brief Return whether \p condition describes one axis-aligned region. */
-  bool IsAxisAlignedThreadRegion(const PrimExpr &condition) {
-    ConstrSet cset = GetConstrSet();
-    arith::Analyzer bound_analyzer;
-    cset.Populate(bound_analyzer);
-
-    PrimExpr region = Bool(true);
-    {
-      With<arith::ConstraintContext> ctx(&bound_analyzer, condition);
-      for (const auto &iv : env_threads_) {
-        if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1)
-          continue;
-        if (!bound_analyzer.const_int_bound.IsBound(iv->var)) {
-          return false;
-        }
-        auto bound = bound_analyzer.const_int_bound(iv->var);
-        PrimExpr min_value = make_const(iv->var.dtype(), bound->min_value);
-        PrimExpr max_value = make_const(iv->var.dtype(), bound->max_value);
-        region = tirx::And(region, iv->var >= min_value);
-        region = tirx::And(region, iv->var <= max_value);
-      }
-    }
-
-    arith::Analyzer analyzer;
-    cset.Populate(analyzer);
-    PrimExpr equivalent =
-        tirx::Or(tirx::And(condition, region),
-                 tirx::And(tirx::Not(condition), tirx::Not(region)));
-    return analyzer.CanProve(equivalent);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -957,10 +961,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    * buffer reads, writes, and synchronization events under the condition's
    * constraints.
    *
-   * IMPORTANT: A sync inside a thread-divergent branch is valid only when every
-   * hardware warp agrees on branch participation. Hoisting is not a repair when
-   * both conflicting accesses remain inside the branch, so unsupported
-   * participation patterns must be rejected.
+   * IMPORTANT: Before preserving a partial barrier in a thread-divergent
+   * branch, prove that every hardware warp agrees on branch participation.
+   * Conditions already handled by the legacy conservative hoisting path keep
+   * that behavior for compatibility.
    */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
@@ -1043,41 +1047,59 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ConstrSet constr_set = GetConstrSet();
       constr_set.Populate(analyzer);
       ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
-                                             let_var_properties_);
-      auto validate_sync_condition = [&](const PrimExpr &branch_condition,
-                                         const char *branch_name) {
-        auto condition_prop = checker.AnalyzeExpr(branch_condition);
-        bool proven_block_uniform = !condition_prop.is_block_uniform &&
-                                    IsBlockUniformCondition(branch_condition);
-        if (condition_prop.is_block_uniform || proven_block_uniform) {
-          return;
-        }
+                                             let_var_properties_, warp_size_);
+      IterVar tx = GetThreadVar("threadIdx.x");
+      auto must_hoist = [&](const PrimExpr &branch_condition,
+                            const char *branch_name) {
+        auto condition_prop = checker.AnalyzeCondition(branch_condition, tx);
+        bool may_hoist =
+            condition_prop.depends_on_runtime || condition_prop.requires_hoist;
+        bool proven_uniform =
+            may_hoist && IsBlockUniformCondition(branch_condition);
+        bool is_block_uniform =
+            condition_prop.is_block_uniform || proven_uniform;
+        bool should_hoist =
+            (condition_prop.depends_on_runtime && !is_block_uniform) ||
+            (condition_prop.requires_hoist && !proven_uniform);
 
-        bool is_static_warp_uniform =
-            !condition_prop.depends_on_runtime &&
-            IsAxisAlignedThreadRegion(branch_condition) &&
-            IsWarpUniformCondition(branch_condition);
-        if (is_static_warp_uniform) {
-          return;
+        if (!should_hoist && !is_block_uniform &&
+            !IsWarpUniformCondition(branch_condition)) {
+          LOG(FATAL)
+              << "[ThreadSync] Cannot lower a required shared-memory sync "
+                 "inside the "
+              << branch_name
+              << " branch: its participating threads are not warp-uniform. "
+                 "A partial barrier requires every non-exited thread in each "
+                 "participating warp to reach the barrier. Condition: "
+              << branch_condition;
         }
-
-        LOG(FATAL)
-            << "[ThreadSync] Cannot lower a required shared-memory sync "
-               "inside the "
-            << branch_name
-            << " branch: its participating threads are not a compile-time "
-               "warp-uniform set representable by the current partial "
-               "barrier lowering. Hoisting the barrier before the if would "
-               "not order the conflicting accesses inside the branch. "
-               "Condition: "
-            << branch_condition;
+        return should_hoist;
       };
 
-      if (!syncs_in_then.empty()) {
-        validate_sync_condition(op->condition, "then");
-      }
-      if (!syncs_in_else.empty()) {
-        validate_sync_condition(tirx::Not(op->condition), "else");
+      bool hoist_then =
+          !syncs_in_then.empty() && must_hoist(op->condition, "then");
+      bool hoist_else = !syncs_in_else.empty() &&
+                        must_hoist(tirx::Not(op->condition), "else");
+      if (hoist_then || hoist_else) {
+        LOG(WARNING)
+            << "[ThreadSync] Hoisting sync out of an if whose condition is not "
+               "safe for an in-if sync. This is not a fix: both ends of the "
+               "conflict are inside the branch, so the hoisted barrier no "
+               "longer separates them and the race remains. Constraining the "
+               "condition -- a T.assume on the parameters it reads -- keeps "
+               "the barrier in place instead. Condition: "
+            << op->condition;
+        if (hoist_then) {
+          for (const auto &sync : syncs_in_then) {
+            syncs_inserted_.erase(sync);
+          }
+        }
+        if (hoist_else) {
+          for (const auto &sync : syncs_in_else) {
+            syncs_inserted_.erase(sync);
+          }
+        }
+        insert_syncs(op);
       }
     }
 
@@ -1521,7 +1543,7 @@ private:
     ConstrSet constr_set = GetConstrSet();
     constr_set.Populate(analyzer);
     ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
-                                           let_var_properties_);
+                                           let_var_properties_, warp_size_);
     return checker.AnalyzeExpr(expr);
   }
 
