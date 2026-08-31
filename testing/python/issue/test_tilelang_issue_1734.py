@@ -10,20 +10,20 @@ def test_issue_1734():
     def kernel():
         @T.prim_func
         def main(
-            A: T.Tensor[(2, 512), T.float32],
-            B: T.Tensor[(2, 512), T.float32],
+            A: T.Tensor[(2, 4096), T.float32],
+            B: T.Tensor[(2, 4096), T.float32],
             C: T.Tensor[(2,), T.float32],
         ):
             with T.Kernel(1, threads=256):
-                A_local = T.alloc_fragment((2, 512), T.float32)
-                B_local = T.alloc_fragment((2, 512), T.float32)
+                A_local = T.alloc_fragment((2, 4096), T.float32)
+                B_local = T.alloc_fragment((2, 4096), T.float32)
                 C_local = T.alloc_fragment((2,), T.float32)
 
                 T.copy(A, A_local)
                 T.copy(C, C_local)
 
-                for i, j in T.Parallel(2, 512):
-                    if C_local[i] >= 0:
+                for i, j in T.Parallel(2, 4096):
+                    if C_local[0] >= 0:
                         B_local[i, j] = A_local[i, j]
 
                 T.copy(B_local, B)
@@ -32,11 +32,15 @@ def test_issue_1734():
 
     mod = kernel.compile()
     source = mod.get_kernel_source()
-    # Verify that the if statement is hoisted outside the for loop
-    # After hoisting, we should see "if" before "for" pattern
+    # Verify that the if statement is hoisted outside the for loop: the
+    # guarded loop must sit inside the if block (a "for (" before the
+    # first "}" after the if). Positions relative to the whole source
+    # would be broken by the copy loops that precede the guarded region.
     if_pos = source.find("if (")
-    for_pos = source.find("for (")
-    assert if_pos < for_pos, "Loop-invariant if should be hoisted outside the loop"
+    assert if_pos != -1, "Guard should survive lowering"
+    after_if = source[if_pos:]
+    for_pos = after_if.find("for (")
+    assert for_pos != -1 and for_pos < after_if.find("}"), "Loop-invariant if should be hoisted outside the loop"
 
 
 if __name__ == "__main__":

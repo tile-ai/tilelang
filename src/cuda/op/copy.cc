@@ -865,8 +865,7 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
   Stmt lowered_loop = LowerParallelLoop(
       par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
       lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-      /*parallel_loop=*/true, /*should_vectorize=*/true,
-      par_op->LoopLayoutRequiresPaddingGuard());
+      /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
   auto inject_result =
       InjectPTXAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/

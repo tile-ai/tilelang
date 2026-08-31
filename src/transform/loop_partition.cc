@@ -317,7 +317,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
                        PrimExpr thread_index, arith::Analyzer *analyzer,
                        const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool should_vectorize, bool require_padding_guard) {
+                       bool require_padding_guard) {
   // Save analyzer state to prevent conflicted bindings during vectorization
   auto saved_analyzer = analyzer->Clone();
 
@@ -339,10 +339,9 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
                                 loop_layout, require_padding_guard);
   }
 
-  // Step 2: Vectorize the loop (if requested)
-  if (should_vectorize) {
-    result_loop = VectorizeLoop(result_loop, saved_analyzer.get(), layout_map);
-  }
+  // Step 2: Vectorize the loop; the planner picks the size per loop
+  // (1 = scalar) from its access analysis.
+  result_loop = VectorizeLoop(result_loop, saved_analyzer.get(), layout_map);
 
   result_loop = PragmaUnrollLoop(result_loop);
 
