@@ -51,6 +51,7 @@ from .allocate import (
     alloc_global,  # noqa: F401
     alloc_barrier,  # noqa: F401
     alloc_reducer,  # noqa: F401
+    auto_alloc,  # noqa: F401
     empty,  # noqa: F401
 )
 from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
@@ -241,6 +242,7 @@ _LOCAL_EXPORTS = (
     "atomic_min",
     "atomic_or",
     "atomic_store",
+    "auto_alloc",
     "ballot",
     "ballot_sync",
     "barrier_arrive",

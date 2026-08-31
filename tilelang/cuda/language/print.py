@@ -191,6 +191,11 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             condition = True
             print_global_buffer_with_condition(condition, buffer, elems, msg)
         else:
+            if buffer.scope() == "auto":
+                raise ValueError(
+                    'T.print does not support buffers with the virtual scope "auto"; '
+                    "use explicit T.alloc_shared / T.alloc_fragment instead of T.auto_alloc"
+                )
             raise ValueError(f"Unsupported buffer scope: {buffer.scope()}")
 
     elif isinstance(obj, tirx.PrimExpr):

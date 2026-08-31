@@ -11,6 +11,7 @@
 #include "support/check.h"
 #include "tvm/runtime/base.h"
 #include <tvm/tirx/buffer.h>
+#include <tvm/tirx/function.h>
 #include <tvm/tirx/op.h>
 
 namespace tvm {
@@ -112,6 +113,9 @@ inline bool IsLocalBuffer(const Buffer &buffer, bool allow_var = false) {
 inline bool IsLocalVarBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.var";
 }
+
+TVM_DLL void CheckNoAutoScopeBuffers(const tirx::PrimFunc &func,
+                                     const char *pass_name);
 
 // True when global packed FP4 is copied into f8f6f4/mxf8f6f4 unpacked FP4 SMEM.
 inline bool IsFP4PackedToUnpackedStorageCopy(DataType global_dtype,

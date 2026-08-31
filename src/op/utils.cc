@@ -9,6 +9,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/tirx/builtin.h>
 
@@ -126,6 +127,27 @@ AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
     }
   }
   return {NormalizeToBufferRegion(arg), default_access_mask};
+}
+
+void CheckNoAutoScopeBuffers(const PrimFunc &func, const char *pass_name) {
+  struct Visitor : StmtExprVisitor {
+    const char *pass_name;
+    void VisitStmt_(const SBlockNode *op) final {
+      for (const Buffer &buffer : op->alloc_buffers) {
+        ICHECK(buffer.scope() != "auto")
+            << pass_name << ": buffer '" << buffer->name
+            << "' still has the virtual scope \"auto\" (T.auto_alloc). The "
+               "tl.transform.InferMemoryScope pass must run before this pass "
+               "to resolve it; it is currently registered for the "
+               "cuda/rocm/cpu pipelines only. Use an explicit T.alloc_* "
+               "scope for this backend.";
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    }
+  };
+  Visitor visitor;
+  visitor.pass_name = pass_name;
+  visitor(func->body);
 }
 
 PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
