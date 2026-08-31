@@ -201,6 +201,39 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
 
 
 @tilelang.testing.requires_cuda
+def test_tvm_ffi_export_library_after_disk_cache_hit(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "tilelang_cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
+
+    cache = _dispatch_map["tvm_ffi"]
+    cache._memory_cache.clear()
+
+    @T.prim_func
+    def vector_add(
+        A: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+    ):
+        with T.Kernel(128, threads=128) as i:
+            B[i] = A[i] + 1.0
+
+    kernel_func = vector_add.with_attr("global_symbol", f"export_library_{uuid.uuid4().hex[:8]}")
+    cold_kernel = tilelang.compile(kernel_func, out_idx=[1], execution_backend="tvm_ffi")
+    cold_library = tmp_path / "cold.so"
+    cold_kernel.export_library(str(cold_library))
+
+    cache._memory_cache.clear()
+    cached_kernel = tilelang.compile(kernel_func, out_idx=[1], execution_backend="tvm_ffi")
+    cached_library = tmp_path / "cached.so"
+    cached_kernel.export_library(str(cached_library))
+
+    assert cold_library.is_file()
+    assert cached_kernel.artifact is None
+    assert cached_library.read_bytes() == Path(cached_kernel.adapter.libpath).read_bytes()
+    assert tilelang.tvm.runtime.load_module(str(cached_library)) is not None
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_cache_miss_detection(clean_cache_env, backend):
     """Verify cache correctly misses when function changes.
