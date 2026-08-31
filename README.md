@@ -110,7 +110,7 @@ See [all releases](https://github.com/tile-ai/tilelang/releases) for complete ch
 
 ## Platform and Backend Support
 
-TileLang is evolving into a multi-backend compiler built around a modular backend abstraction known as TileLang-X. See the [backend architecture](tilelang/backend/README.md) for the design, or ask a coding agent to use the [backend integration skill](.agents/skills/tilelang-backend/SKILL.md) when porting TileLang to a new backend.
+TileLang is evolving into a multi-backend compiler (**TileLang-X**) built around a modular backend abstraction. See the [backend architecture](tilelang/backend/README.md) for the design, or ask a coding agent to use the [backend integration skill](.agents/skills/tilelang-backend/SKILL.md) when porting TileLang to a new backend.
 
 The currently supported backends are listed below. `Primary` identifies TileLang's core backend, while `Supported` and `Experimental` backends are implemented in the main repository. `Ecosystem` adapters live in separate repositories, are not included in TileLang release wheels, and may follow independent compatibility schedules. Prebuilt wheels are available for Linux x86-64/AArch64, Windows x86-64, and macOS arm64.
 
