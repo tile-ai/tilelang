@@ -827,6 +827,61 @@ def test_partial_sync_warp_multiple_still_lowered():
     assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a partial barrier with thread_count=32:\n{s}"
 
 
+def test_masked_warp_sync_orders_only_intra_warp_hazards():
+    """ballot 掩码生成的 warp barrier 足以排序同一 warp 内的冲突。"""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        active_mask = T.bind(T.cast(T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.activemask")), "uint32"))
+        participant_mask = T.bind(
+            T.cast(
+                T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.ballot_sync"), active_mask, tx % 4 == 0),
+                "uint32",
+            )
+        )
+        if tx % 4 == 0:
+            acc[0] = S[tx // 32 * 32 + (tx + 4) % 32]
+            T.evaluate(T.call_intrin("void", tvm.tirx.op.Op.get("tl.sync_warp"), participant_mask))
+            S[tx] = acc[0]
+
+    s = run_passes_script(func)
+    assert "T.tvm_storage_sync" not in s, f"Masked warp sync should order the intra-warp hazard:\n{s}"
+
+
+def test_masked_warp_sync_does_not_order_cross_warp_hazards():
+    """warp barrier 不能掩盖跨 warp 的共享内存冲突。"""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        active_mask = T.bind(T.cast(T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.activemask")), "uint32"))
+        participant_mask = T.bind(
+            T.cast(
+                T.call_intrin("uint64", tvm.tirx.op.Op.get("tl.ballot_sync"), active_mask, tx % 4 == 0),
+                "uint32",
+            )
+        )
+        if tx % 4 == 0:
+            acc[0] = S[(tx + 32) % 64]
+            T.evaluate(T.call_intrin("void", tvm.tirx.op.Op.get("tl.sync_warp"), participant_mask))
+            S[tx] = acc[0]
+
+    with pytest.raises(Exception, match="compile-time warp-uniform"):
+        run_passes_script(func)
+
+
 # =============================================================================
 # Tests for flat Bind definitions inside the recorded constraint sets
 #
@@ -1017,6 +1072,29 @@ def test_misaligned_else_partial_sync_is_rejected():
             l[0] = T.float32(0)
         else:
             s[tx] = T.cast(tx, "float32")
+            l[0] = s[33 - tx]
+
+    with pytest.raises(Exception, match="compile-time warp-uniform"):
+        run_passes_script(func)
+
+
+def test_explicit_misaligned_else_partial_sync_is_rejected():
+    """显式 barrier 也不能绕过非 warp 对齐参与集合的校验。"""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0 or tx >= 33:
+            l[0] = T.float32(0)
+        else:
+            s[tx] = T.cast(tx, "float32")
+            T.tvm_storage_sync("shared")
             l[0] = s[33 - tx]
 
     with pytest.raises(Exception, match="compile-time warp-uniform"):
