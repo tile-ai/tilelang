@@ -9,7 +9,6 @@
 
 #include <cstdint>
 #include <optional>
-#include <string>
 
 #include "support/check.h"
 #include <tvm/arith/iter_affine_map.h>
@@ -103,23 +102,6 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> large_frag_indices,
                            arith::Analyzer &analyzer,
                            bool check_forward_index = false);
-
-/*!
- * \brief Prove that a fragment's normalized thread map stays inside its
- *        declared participant range and that this range belongs to the current
- *        thread scope.
- *
- * \param fragment The fragment layout to validate.
- * \param thread_bounds The current kernel or warp-specialized thread range.
- * \param analyzer The analyzer carrying surrounding symbolic constraints.
- * \param error Optional diagnostic populated when validation fails.
- * \return true when both the forward thread map and its declared range are
- *         valid.
- */
-bool ProveFragmentThreadRange(const Fragment &fragment,
-                              const Range &thread_bounds,
-                              arith::Analyzer &analyzer,
-                              std::string *error = nullptr);
 
 } // namespace tl
 } // namespace tvm

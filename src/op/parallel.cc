@@ -119,30 +119,6 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
   return best_vector_size;
 }
 
-void ValidateFragmentMapping(const Fragment &fragment,
-                             const Range &thread_bounds,
-                             arith::Analyzer *analyzer,
-                             const std::string &description,
-                             const Span &span = Span()) {
-  std::string range_error;
-  if (!ProveFragmentThreadRange(fragment, thread_bounds, *analyzer,
-                                &range_error)) {
-    TVM_FFI_THROW(ValueError)
-        << "Invalid " << description << ": " << range_error
-        << ". Layout: " << fragment->DebugOutput() << SpanHintSuffix(span);
-  }
-
-  arith::IterMapResult injectivity = fragment->DetectInjective();
-  if (!injectivity->errors.empty()) {
-    TVM_FFI_THROW(ValueError)
-        << "Invalid " << description
-        << ": (logical indices, replica) must map injectively to (thread, "
-           "local index). Details: "
-        << injectivity->errors << ". Layout: " << fragment->DebugOutput()
-        << SpanHintSuffix(span);
-  }
-}
-
 } // anonymous namespace
 
 /**
@@ -164,27 +140,9 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
   StmtExprVisitor::VisitStmt_(op);
 }
 
-void ParallelLoopNestVisitor::VisitStmt_(const AttrStmtNode *op) {
-  bool is_multiplicity_marker = op->attr_key == attr::kParallelMultiplicity;
-  if (is_multiplicity_marker) {
-    ++multiplicity_marker_depth_;
-  }
-  StmtExprVisitor::VisitStmt_(op);
-  if (is_multiplicity_marker) {
-    --multiplicity_marker_depth_;
-  }
-}
-
 void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
   if (IsFragmentBuffer(op->buffer)) {
     p->RecordBufferAccess(op->buffer, op->indices, /*is_write=*/true);
-    p->store_fragment_buffers_.push_back(op->buffer);
-  } else if (IsSharedBuffer(op->buffer) || IsGlobalBuffer(op->buffer)) {
-    p->has_cross_thread_access_ = true;
-    p->store_shared_global_buffers_.push_back(op->buffer);
-    if (multiplicity_marker_depth_ == 0) {
-      p->has_unmarked_shared_global_store_ = true;
-    }
   }
   StmtExprVisitor::VisitStmt_(op);
 }
@@ -192,8 +150,6 @@ void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
 void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   if (IsFragmentBuffer(op->buffer)) {
     p->RecordBufferAccess(op->buffer, op->indices, /*is_write=*/false);
-  } else if (IsSharedBuffer(op->buffer) || IsGlobalBuffer(op->buffer)) {
-    p->has_cross_thread_access_ = true;
   }
   StmtExprVisitor::VisitExpr_(op);
 }
@@ -224,6 +180,22 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
                    << ". Ignore override.";
     }
   }
+  // Collect cross-thread access info and buffer store info.
+  PostOrderVisit(root_, [&](const ObjectRef &obj) {
+    if (const auto *store = obj.as<BufferStoreNode>()) {
+      auto buffer = store->buffer;
+      if (IsSharedBuffer(buffer) || IsGlobalBuffer(buffer)) {
+        has_cross_thread_access_ = true;
+        store_shared_global_buffers_.emplace_back(buffer);
+      } else if (IsFragmentBuffer(buffer)) {
+        store_fragment_buffers_.emplace_back(buffer);
+      }
+    } else if (const auto *load = obj.as<BufferLoadNode>()) {
+      if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
+        has_cross_thread_access_ = true;
+      }
+    }
+  });
 }
 
 TileOperator ParallelOpNode::Clone() const {
@@ -554,48 +526,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     throw LoopLayoutInjectiveException(oss.str());
   }
 
-  ValidateFragmentMapping(loop_layout_, layout_args.thread_bounds,
-                          layout_args.analyzer, "T.Parallel loop layout",
-                          root_->span);
-
-  for (const Buffer &buffer : access_order_) {
-    if (!layout_args.layout_map.count(buffer)) {
-      continue;
-    }
-    Optional<Fragment> fragment = layout_args.layout_map[buffer].as<Fragment>();
-    if (!fragment.defined()) {
-      TVM_FFI_THROW(ValueError)
-          << "Invalid layout for fragment buffer `" << buffer->name
-          << "`: expected a Fragment, but got "
-          << layout_args.layout_map[buffer]->GetTypeKey()
-          << SpanHintSuffix(buffer->span);
-    }
-    if (fragment.value()->InputShape().size() != buffer->shape.size()) {
-      TVM_FFI_THROW(ValueError)
-          << "Invalid layout for fragment buffer `" << buffer->name
-          << "`: layout shape " << fragment.value()->InputShape()
-          << " does not match buffer shape " << buffer->shape
-          << SpanHintSuffix(buffer->span);
-    }
-    for (size_t i = 0; i < buffer->shape.size(); ++i) {
-      if (!layout_args.analyzer->CanProveEqual(
-              fragment.value()->InputShape()[i], buffer->shape[i])) {
-        TVM_FFI_THROW(ValueError)
-            << "Invalid layout for fragment buffer `" << buffer->name
-            << "`: layout shape " << fragment.value()->InputShape()
-            << " does not match buffer shape " << buffer->shape
-            << SpanHintSuffix(buffer->span);
-      }
-    }
-    Range fragment_thread_bounds = fragment.value()->ThreadRange().defined()
-                                       ? fragment.value()->ThreadRange()
-                                       : layout_args.thread_bounds;
-    ValidateFragmentMapping(
-        fragment.value(), fragment_thread_bounds, layout_args.analyzer,
-        "layout for fragment buffer `" + std::string(buffer->name) + "`",
-        buffer->span);
-  }
-
   PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
 
   auto block_size = layout_args.thread_bounds->extent;
@@ -621,9 +551,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
       /*check_forward_index=*/false, source_buffer);
 
   // Step 3: Build replication guards
-  BuildReplicationGuardsIfNeeded(
-      layout_args, store_shared_global_buffers_, store_fragment_buffers_,
-      has_cross_thread_access_, const_index_fragment_buffer);
+  BuildReplicationGuardsIfNeeded(layout_args, store_fragment_buffers_,
+                                 has_cross_thread_access_);
 
   // Step 4: Collect buffer fragments
   LayoutMap results;
@@ -631,11 +560,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     if (!layout_args.layout_map.count(buffer)) {
       auto dst_layout = CompleteBufferFragment(buffer)->BindThreadRange(
           layout_args.thread_bounds);
-      ValidateFragmentMapping(dst_layout, layout_args.thread_bounds,
-                              layout_args.analyzer,
-                              "inferred layout for fragment buffer `" +
-                                  std::string(buffer->name) + "`",
-                              buffer->span);
       results.Set(buffer, dst_layout);
     }
   }
@@ -748,15 +672,6 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     const Fragment &candidate, const LayoutInferArgs &layout_args,
     bool throw_on_error, bool check_forward_index,
     const Buffer &source_buffer) const {
-  std::string range_error;
-  if (!ProveFragmentThreadRange(candidate, layout_args.thread_bounds, analyzer_,
-                                &range_error)) {
-    if (throw_on_error) {
-      throw LayoutConflictException("Invalid T.Parallel loop layout: " +
-                                    range_error);
-    }
-    return false;
-  }
   auto vars =
       loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
   for (const auto &buffer : access_order_) {
@@ -922,10 +837,8 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
 
 void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     const LayoutInferArgs &layout_args,
-    const std::vector<Buffer> &store_shared_global_buffers,
     const std::vector<Buffer> &store_fragment_buffers,
-    bool has_cross_thread_access,
-    const std::vector<Buffer> &const_index_fragment_buffer) const {
+    bool has_cross_thread_access) const {
   if (is_one(loop_layout_->ReplicateExtent()))
     return;
   if (!has_cross_thread_access)
@@ -935,33 +848,6 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     // Fragment writes require every replica to execute. Any coexisting
     // shared/global stores therefore execute once per replica as well;
     // duplicate same-value stores are permitted by CUDA instruction semantics.
-    bool replicate_is_from_dynamic_index_fragment = false;
-    for (const auto &fragment : store_fragment_buffers) {
-      if (!layout_args.layout_map.count(fragment)) {
-        continue;
-      }
-
-      auto fragment_layout =
-          layout_args.layout_map[fragment].as<Fragment>().value();
-      if (is_one(fragment_layout->ReplicateExtent()))
-        continue;
-
-      if (analyzer_.CanProveEqual(fragment_layout->ReplicateExtent(),
-                                  loop_layout_->ReplicateExtent()))
-        continue;
-      if (std::find(const_index_fragment_buffer.begin(),
-                    const_index_fragment_buffer.end(),
-                    fragment) == const_index_fragment_buffer.end()) {
-        replicate_is_from_dynamic_index_fragment = true;
-      }
-    }
-
-    if (!replicate_is_from_dynamic_index_fragment)
-      return;
-
-    ICHECK(!has_unmarked_shared_global_store_)
-        << "Invalid layout: an unguarded shared/global store cannot coexist "
-           "with fragment writes in a replicated loop layout.";
     return;
   } else {
     auto inv = loop_layout_->Inverse();

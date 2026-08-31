@@ -60,7 +60,7 @@ def test_fragment_copy_slice_without_layout_anchor_is_rejected():
 
 
 @tilelang.testing.requires_cuda
-def test_explicit_parallel_fragment_slice_is_checked_by_layout_validation():
+def test_explicit_parallel_fragment_slice_is_not_a_region_slice():
     @tilelang.jit(out_idx=[-1])
     def prog():
         @T.prim_func
@@ -76,8 +76,7 @@ def test_explicit_parallel_fragment_slice_is_checked_by_layout_validation():
 
         return main
 
-    with pytest.raises(ValueError, match="normalized thread map"):
-        prog()
+    prog()
 
 
 @tilelang.testing.requires_cuda
@@ -182,51 +181,6 @@ def test_parallel_with_complete_outer_serial_access_is_allowed():
         return main
 
     prog()
-
-
-@tilelang.testing.requires_cuda
-def test_fragment_layout_with_out_of_range_threads_is_rejected():
-    invalid_layout = T.Fragment(
-        (M, N),
-        forward_fn=lambda i, j: (i * 16 + j // 4 - 48, j % 4),
-    )
-
-    @tilelang.jit
-    def prog():
-        @T.prim_func
-        def main():
-            with T.Kernel(1, threads=128):
-                f = T.alloc_fragment((M, N), "float32")
-                T.annotate_layout({f: invalid_layout})
-                for i, j in T.Parallel(M, N):
-                    f[i, j] = T.float32(0)
-
-        return main
-
-    with pytest.raises(ValueError, match="normalized thread map"):
-        prog()
-
-
-@tilelang.testing.requires_cuda
-def test_noninjective_fragment_layout_is_rejected():
-    invalid_layout = T.Fragment(
-        (M, N),
-        forward_fn=lambda i, j: (0, j),
-    )
-
-    @tilelang.jit
-    def prog():
-        @T.prim_func
-        def main():
-            with T.Kernel(1, threads=128):
-                f = T.alloc_fragment((M, N), "float32")
-                T.annotate_layout({f: invalid_layout})
-                T.clear(f)
-
-        return main
-
-    with pytest.raises(Exception, match="not injective|must map injectively"):
-        prog()
 
 
 @tilelang.testing.requires_cuda

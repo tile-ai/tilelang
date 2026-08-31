@@ -35,12 +35,10 @@ class ParallelLoopNestVisitor : public StmtExprVisitor {
 private:
   ParallelLoopNestVisitor(ParallelOpNode *op) : p(op) {};
   void VisitStmt_(const ForNode *op) override;
-  void VisitStmt_(const AttrStmtNode *op) override;
   void VisitStmt_(const BufferStoreNode *op) override;
   void VisitExpr_(const BufferLoadNode *op) override;
 
   ParallelOpNode *p;
-  int multiplicity_marker_depth_{0};
 
   friend class ParallelOpNode;
 };
@@ -177,10 +175,8 @@ private:
   // Add replication guard predicates when needed for cross-thread stores.
   void BuildReplicationGuardsIfNeeded(
       const LayoutInferArgs &layout_args,
-      const std::vector<Buffer> &store_shared_global_buffers,
       const std::vector<Buffer> &store_fragment_buffers,
-      bool has_cross_thread_access,
-      const std::vector<Buffer> &const_index_fragment_buffer) const;
+      bool has_cross_thread_access) const;
   // Add a predicate to the current predicate expression.
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
@@ -212,9 +208,6 @@ private:
   std::vector<Buffer> store_shared_global_buffers_;
   // Fragment buffers that are stored to in the loop body.
   std::vector<Buffer> store_fragment_buffers_;
-  // Whether a shared/global store is not protected by a statement-local
-  // canonical-replica marker.
-  bool has_unmarked_shared_global_store_ = false;
 };
 
 class ParallelOp : public TileOperator {
