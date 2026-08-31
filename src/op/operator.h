@@ -110,6 +110,10 @@ struct LowerArgs {
   // a thread_extent AttrStmt), while targets without thread bindings (e.g.
   // CPU) pass constant 0. It must never be an unbound synthetic Var.
   PrimExpr thread_index;
+  // Enclosing launch-grid bindings. Lowering helpers that synthesize a
+  // ParallelOp propagate these into layout inference so global packed stores
+  // are checked across CTAs as well as threads.
+  ffi::Array<tirx::IterVar> block_bindings;
   LayoutMap layout_map;
   ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
@@ -172,6 +176,14 @@ struct LayoutInferArgs {
   // that update nests must satisfy rather than widen. Empty at
   // lowering-time re-inference call sites.
   LayoutMap strict_layout_map;
+  // Enclosing CUDA block bindings at this operator's lexical position.
+  // Keep launch-context fields trailing so backend-local aggregate
+  // construction that omits them remains source-compatible.
+  ffi::Array<tirx::IterVar> block_bindings;
+  // Enclosing CUDA thread binding expression at this operator's position.
+  // Packed-store ownership substitutes this with a candidate's assigned
+  // thread before proving the post-partition physical byte mapping.
+  PrimExpr thread_index;
 };
 
 class TileOperator;

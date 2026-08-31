@@ -256,6 +256,7 @@ public:
     auto &next = infer_list_[cur_infer_id];
     auto thread_index = thread_index_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
+    const auto &block_bindings = block_bindings_vec_[cur_infer_id];
     arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
@@ -282,7 +283,9 @@ public:
                                                   {},
                                                   bind_var_to_expr_,
                                                   false,
-                                                  strict_layout_map},
+                                                  strict_layout_map,
+                                                  block_bindings,
+                                                  thread_index},
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
@@ -541,6 +544,9 @@ public:
            "length.";
     ICHECK_EQ(thread_bounds_vec_.size(), infer_list_.size())
         << "Size mismatch: thread_bounds_vec_ and infer_list_ must match in "
+           "length.";
+    ICHECK_EQ(block_bindings_vec_.size(), infer_list_.size())
+        << "Size mismatch: block_bindings_vec_ and infer_list_ must match in "
            "length.";
     ICHECK_EQ(analyzer_vec_.size(), infer_list_.size())
         << "Size mismatch: analyzer_vec_ and infer_list_ must match in "
@@ -802,6 +808,8 @@ private:
       // Compute thread_index and thread_bounds
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
+      block_bindings_vec_.push_back(
+          Array<IterVar>(block_bindings_.begin(), block_bindings_.end()));
       analyzer_vec_.push_back(analyzer_.Clone());
 
       // Add the tile operator to infer_list_
@@ -959,6 +967,8 @@ private:
       infer_list_.push_back(std::move(infer));
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
+      block_bindings_vec_.push_back(
+          Array<IterVar>(block_bindings_.begin(), block_bindings_.end()));
       analyzer_vec_.push_back(analyzer_.Clone());
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
@@ -1061,14 +1071,23 @@ private:
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
+    bool pushed_block_binding = false;
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_binding_ = iv;
       }
+      std::string thread_tag = iv->thread_tag;
+      if (thread_tag.rfind("blockIdx.", 0) == 0) {
+        block_bindings_.push_back(iv);
+        pushed_block_binding = true;
+      }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
+    if (pushed_block_binding) {
+      block_bindings_.pop_back();
+    }
   }
 
   void VisitStmt_(const BindNode *op) final {
@@ -1306,8 +1325,10 @@ private:
   // where the logical thread index is the constant 0 and thread bounds are
   // [0, 1) — no synthetic fallback Var is ever created.
   IterVar thread_binding_;
+  std::vector<IterVar> block_bindings_;
   std::vector<PrimExpr> thread_index_vec_;
   std::vector<Range> thread_bounds_vec_;
+  std::vector<Array<IterVar>> block_bindings_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;

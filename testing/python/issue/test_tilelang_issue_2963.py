@@ -52,10 +52,34 @@ def test_packed_subbyte_copy_keeps_byte_on_one_thread(dtype, through_shared):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "threads,carrier",
+    [
+        (32, "uint16_t"),
+        (128, "uint8_t"),
+    ],
+)
+def test_packed_copy_selects_byte_owned_codegen_carrier(threads, carrier):
+    kernel = _copy_kernel("uint4", 128, threads=threads)
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    kernel_source = compiled.get_kernel_source()
+
+    assert f"(({carrier}*)B)" in kernel_source
+    assert "tl_uint4_packed_store" not in kernel_source
+
+    source = _packed_input("uint4", 128)
+    result = compiled(source)
+    assert torch.equal(result.view(torch.uint8), source)
+
+
+@tilelang.testing.requires_cuda
 def test_scalar_coalesced_width_rejected_for_contiguous_packed_store():
     kernel = _copy_kernel("int4", 128, threads=128, coalesced_width=1)
 
-    with pytest.raises(Exception, match=r"split a writable byte across threads|no available layout found"):
+    with pytest.raises(
+        Exception,
+        match=r"split a writable byte across CUDA blocks or threads|no available layout found",
+    ):
         tilelang.compile(kernel, out_idx=[1])
 
 
@@ -182,7 +206,7 @@ def test_missing_fragment_and_buffer_candidates_report_layout_conflict():
     fragment_layout = T.Fragment((1,), forward_fn=single_thread_owner)
 
     @T.prim_func
-    def kernel(A: T.Tensor((1,), "uint4"), B: T.Tensor((n,), "uint4")):
+    def kernel(A: T.Tensor((2,), "uint4"), B: T.Tensor((n,), "uint4")):
         with T.Kernel(1, threads=128):
             local = T.alloc_fragment((1,), "uint4")
             T.annotate_layout({local: fragment_layout})
@@ -396,3 +420,157 @@ def test_annotated_one_nibble_per_thread_layout_is_rejected():
 
     with pytest.raises(Exception, match="logical elements that share a writable byte"):
         tilelang.compile(kernel, out_idx=[1])
+
+
+@tilelang.testing.requires_cuda
+def test_thread_binding_in_packed_address_is_checked_after_partitioning():
+    @T.prim_func
+    def kernel(A: T.Tensor((2,), "uint4"), B: T.Tensor((2,), "uint4")):
+        with T.Kernel(1, threads=2):
+            tx = T.get_thread_binding()
+            for i in T.Parallel(2):
+                B[2 * i - tx] = A[2 * i - tx]
+
+    with pytest.raises(
+        Exception,
+        match=r"different CUDA blocks or threads|no available layout found",
+    ):
+        tilelang.compile(kernel, out_idx=[1])
+
+
+@tilelang.testing.requires_cuda
+def test_thread_binding_in_byte_disjoint_packed_address_remains_legal():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "uint4"), B: T.Tensor((4,), "uint4")):
+        with T.Kernel(1, threads=2):
+            tx = T.get_thread_binding()
+            for i in T.Parallel(2):
+                B[2 * i + tx] = A[2 * i + tx]
+
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    source = torch.tensor([0x21, 0x43], dtype=torch.uint8, device="cuda")
+    result = compiled(source).view(torch.uint8)
+
+    assert result[0] & 0x0F == source[0] & 0x0F
+    assert result[1] & 0xF0 == source[1] & 0xF0
+
+
+@tilelang.testing.requires_cuda
+def test_global_packed_byte_cannot_be_split_across_blocks():
+    @T.prim_func
+    def kernel(A: T.Tensor((2,), "uint4"), B: T.Tensor((2,), "uint4")):
+        with T.Kernel(2, threads=1) as bx:
+            for _ in T.Parallel(1):
+                B[bx] = A[bx]
+
+    with pytest.raises(
+        Exception,
+        match=r"different CUDA blocks or threads|no available layout found",
+    ):
+        tilelang.compile(kernel, out_idx=[1])
+
+
+@tilelang.testing.requires_cuda
+def test_global_packed_copy_cannot_overlap_a_byte_across_blocks():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "uint4"), B: T.Tensor((4,), "uint4")):
+        with T.Kernel(2, threads=1) as bx:
+            T.copy(A[bx : bx + 1], B[bx : bx + 1])
+
+    target = tvm.target.Target("cuda")
+    with target:
+        context = create_backend_context(target, None, "auto")
+        with pytest.raises(
+            Exception,
+            match=r"different CUDA blocks or threads|no available layout found",
+        ):
+            lower_to_host_device_ir(kernel, context)
+
+
+@tilelang.testing.requires_cuda
+def test_global_packed_copy_owned_by_distinct_blocks_remains_legal():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "uint4"), B: T.Tensor((4,), "uint4")):
+        with T.Kernel(2, threads=1) as bx:
+            T.copy(A[2 * bx : 2 * bx + 2], B[2 * bx : 2 * bx + 2])
+
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    source = torch.tensor([0x21, 0x43], dtype=torch.uint8, device="cuda")
+    result = compiled(source)
+
+    assert torch.equal(result.view(torch.uint8), source)
+
+
+@tilelang.testing.requires_cuda
+def test_global_packed_byte_cannot_be_split_across_block_y():
+    @T.prim_func
+    def kernel(A: T.Tensor((2,), "uint4"), B: T.Tensor((2,), "uint4")):
+        with T.Kernel(1, 2, threads=1) as (_, by):
+            for _ in T.Parallel(1):
+                B[by] = A[by]
+
+    with pytest.raises(
+        Exception,
+        match=r"different CUDA blocks or threads|no available layout found",
+    ):
+        tilelang.compile(kernel, out_idx=[1])
+
+
+@tilelang.testing.requires_cuda
+def test_global_packed_bytes_owned_by_distinct_blocks_remain_legal():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "uint4"), B: T.Tensor((4,), "uint4")):
+        with T.Kernel(2, threads=1) as bx:
+            for i in T.Parallel(2):
+                B[2 * bx + i] = A[2 * bx + i]
+
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    source = torch.tensor([0x21, 0x43], dtype=torch.uint8, device="cuda")
+    result = compiled(source)
+
+    assert torch.equal(result.view(torch.uint8), source)
+
+
+@tilelang.testing.requires_cuda
+def test_shared_packed_byte_is_private_to_each_block():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "uint4"), B: T.Tensor((4,), "uint4")):
+        with T.Kernel(2, threads=1) as bx:
+            shared = T.alloc_shared((2,), "uint4")
+            for i in T.Parallel(2):
+                shared[i] = A[2 * bx + i]
+            T.sync_threads()
+            for i in T.Parallel(2):
+                B[2 * bx + i] = shared[i]
+
+    compiled = tilelang.compile(kernel, out_idx=[1])
+    source = torch.tensor([0x21, 0x43], dtype=torch.uint8, device="cuda")
+    result = compiled(source)
+
+    assert torch.equal(result.view(torch.uint8), source)
+
+
+def test_absolute_aliases_with_the_same_packed_byte_owner_remain_legal():
+    def by_row(i):
+        return 0, i
+
+    loop_layout = T.Fragment((2,), forward_fn=by_row)
+
+    @T.prim_func
+    def kernel(
+        low: T.Tensor((2,), "uint4"),
+        high: T.Tensor((2,), "uint4"),
+        out: T.Tensor((2, 1), "uint4"),
+    ):
+        with T.Kernel(1, threads=1):
+            alias = T.reshape(out, (2, 1))
+            for i in T.Parallel(2, loop_layout=loop_layout):
+                out[i, 0] = low[i]
+                alias[i, 0] = high[i]
+
+    target = tvm.target.Target("cuda")
+    mod = tvm.IRModule({"main": kernel})
+    with target:
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+        tilelang.transform.LayoutInference()(mod)

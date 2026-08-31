@@ -1137,6 +1137,8 @@ private:
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
     lower_args.thread_index = CurrentThreadIndex();
+    lower_args.block_bindings =
+        Array<IterVar>(block_bindings_.begin(), block_bindings_.end());
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
     lower_args.bind_var_to_expr = bind_var_to_expr;
@@ -1159,6 +1161,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    bool pushed_block_binding = false;
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -1167,8 +1170,17 @@ private:
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
       }
+      std::string thread_tag = iv->thread_tag;
+      if (thread_tag.rfind("blockIdx.", 0) == 0) {
+        block_bindings_.push_back(iv);
+        pushed_block_binding = true;
+      }
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt result = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (pushed_block_binding) {
+      block_bindings_.pop_back();
+    }
+    return result;
   }
 
   /**
@@ -1362,7 +1374,9 @@ private:
 
     if (TargetIsCuda(target_)) {
       ValidatePacked4BitStoreOwnership(
-          for_node, loop_layout, CurrentThreadIndex(), analyzer_, predicate);
+          for_node, loop_layout, CurrentThreadIndex(),
+          Array<IterVar>(block_bindings_.begin(), block_bindings_.end()),
+          analyzer_, predicate);
     }
 
     Stmt lowered = LowerParallelLoop(
@@ -1425,6 +1439,9 @@ private:
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
   // exists. Stays undefined for targets without thread bindings (e.g. CPU).
   IterVar thread_binding_;
+  // Enclosing blockIdx.* bindings are scoped because global packed-store
+  // ownership must distinguish CTAs while shared storage remains CTA-private.
+  std::vector<IterVar> block_bindings_;
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;

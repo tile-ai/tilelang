@@ -31,7 +31,9 @@ using namespace ffi;
 
 /**
  * Validate that every physical byte written by scalar packed four-bit stores in
- * `remapped_loop` is owned by one CUDA thread under `loop_layout`.
+ * `remapped_loop` is owned by one CUDA execution context under `loop_layout`.
+ * Global stores include the enclosing CTA coordinates in that owner; shared
+ * stores are CTA-private and only require a unique thread owner.
  *
  * Throws LayoutConflictException when ownership cannot be proven.
  * Must run before LowerParallelLoop removes the logical loop layout.
@@ -39,6 +41,7 @@ using namespace ffi;
 void ValidatePacked4BitStoreOwnership(const For &remapped_loop,
                                       const Fragment &loop_layout,
                                       PrimExpr thread_index,
+                                      const Array<IterVar> &block_bindings,
                                       arith::Analyzer *analyzer,
                                       const Optional<PrimExpr> &predicate);
 
@@ -199,6 +202,8 @@ public:
 private:
   struct PackedOwnershipContext {
     For remapped_root;
+    Array<IterVar> block_bindings;
+    PrimExpr thread_index;
     bool enforce_packed_byte_ownership;
     bool canonical_replica_guard_guaranteed;
   };

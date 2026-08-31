@@ -347,7 +347,7 @@ def test_cast_rs_fp8_lanes(M, threads, expected):
     ],
 )
 def test_cast_rs_fp4_lanes(M, threads, expected):
-    """Test FP4 rs codegen across lanes=1,2,4,8."""
+    """Test packed FP4 rs codegen at its physical x2 minimum and wider lanes."""
     kernel = _make_rs_kernel(M, threads, "float4_e2m1fn")
     code = kernel.get_kernel_source()
     assert expected in code, f"Expected '{expected}' in generated code for M={M}, threads={threads}.\nGenerated code:\n{code}"

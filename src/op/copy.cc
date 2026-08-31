@@ -79,7 +79,11 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
                          lower_args.layout_map,
                          analyzer,
                          lower_args.buffer_remap,
-                         {}},
+                         {},
+                         false,
+                         {},
+                         lower_args.block_bindings,
+                         lower_args.thread_index},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
@@ -254,7 +258,11 @@ Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
                          lower_args.layout_map,
                          analyzer,
                          lower_args.buffer_remap,
-                         {}},
+                         {},
+                         false,
+                         {},
+                         lower_args.block_bindings,
+                         lower_args.thread_index},
                         level);
   }
   auto loop_layout = par_op->GetLoopLayout();
