@@ -775,8 +775,8 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
 @tilelang.testing.requires_cuda
 def test_partial_sync_non_warp_multiple_rejected():
     """Regression test for issue #2556: a required barrier inside a divergent
-    region whose participating thread count is not a multiple of the warp size
-    must be a compile-time error, not silently dropped (data race)."""
+    region that splits a warp must be a compile-time error, not silently
+    dropped or lowered to an invalid partial barrier."""
     import pytest
 
     @T.prim_func(private=True)
@@ -796,7 +796,7 @@ def test_partial_sync_non_warp_multiple_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(Exception, match="not a multiple of 32"):
+    with pytest.raises(Exception, match="compile-time warp-uniform"):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -921,7 +921,7 @@ def test_no_plain_sync_inside_divergent_symbolic_guard():
         assert sync_pos < if_pos, f"Barrier must be hoisted out of the divergent guard:\n{s}"
 
 
-def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
+def test_unorderable_hazard_in_divergent_guard_is_rejected():
     """A hazard confined to a divergent branch has no correct barrier placement.
 
     ``bx * 4 + tx // 32 < n`` mixes a thread variable with a runtime parameter, so
@@ -929,8 +929,7 @@ def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
     that branch. A barrier inside it hangs on the threads that skip the branch,
     while one in front of it is reached by everyone but no longer separates the
     accesses. Ordering this needs the branch split around the barrier, which the
-    pass cannot express, so reporting the program is the only thing it can get
-    right. Where the barrier ends up is deliberately not asserted.
+    pass cannot express, so compilation must reject the program.
     """
 
     @T.prim_func(private=True)
@@ -945,17 +944,18 @@ def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    run_passes_script(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+    import pytest
+
+    with pytest.raises(Exception, match="compile-time warp-uniform"):
+        run_passes_script(func)
 
 
-def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
+def test_unorderable_hazard_in_divergent_else_branch_is_rejected():
     """The else branch needs the same treatment as the then branch.
 
     Syncs found in either arm are tracked separately, so a hazard placed only in
     the else arm exercises the second of the two paths. It is as unorderable as
-    the one above, so again only the report is asserted.
+    the one above, so compilation must reject it as well.
     """
 
     @T.prim_func(private=True)
@@ -972,14 +972,38 @@ def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    run_passes_script(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+    import pytest
+
+    with pytest.raises(Exception, match="compile-time warp-uniform"):
+        run_passes_script(func)
 
 
-def test_safe_else_sync_survives_unsafe_then_condition(capfd):
-    """An unsafe then condition must not remove a valid else partial barrier."""
+def test_aligned_else_partial_sync_is_preserved():
+    """A branch containing one complete warp can use a partial barrier."""
     import re
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx >= 32:
+            l[0] = T.float32(0)
+        else:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[31 - tx]
+
+    s = run_passes_script(func)
+    assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a 32-thread barrier:\n{s}"
+    assert s.index('T.tvm_storage_sync("shared"') > s.index("else:"), f"Barrier must stay in else branch:\n{s}"
+
+
+def test_misaligned_else_partial_sync_is_rejected():
+    """Consecutive threads spanning two partial warps cannot use bar.sync."""
+    import pytest
 
     @T.prim_func(private=True)
     def func():
@@ -995,11 +1019,8 @@ def test_safe_else_sync_survives_unsafe_then_condition(capfd):
             s[tx] = T.cast(tx, "float32")
             l[0] = s[33 - tx]
 
-    s = run_passes_script(func)
-    warnings = capfd.readouterr().err
-    assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a 32-thread barrier:\n{s}"
-    assert s.index('T.tvm_storage_sync("shared"') > s.index("else:"), f"Barrier must stay in else branch:\n{s}"
-    assert "no longer separates" not in warnings, f"Safe else branch should not be hoisted:\n{warnings}"
+    with pytest.raises(Exception, match="compile-time warp-uniform"):
+        run_passes_script(func)
 
 
 def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
@@ -1034,13 +1055,13 @@ def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
     assert "no longer separates" not in warnings, f"A provably uniform guard should not be reported:\n{warnings}"
 
 
-def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
+def test_premise_weaker_than_the_block_is_rejected():
     """The premise has to rule divergence out for the block size actually used.
 
     ``n % 64 == 0`` with a block of 128 threads still admits ``n == 64``, where
     half the block enters. This pins down the boundary of the check above: it must
     accept a premise only when the premise really excludes divergence. The guard
-    is therefore treated as divergent, which for this shape means reported.
+    is therefore unsupported and must be rejected.
     """
 
     @T.prim_func(private=True)
@@ -1056,9 +1077,10 @@ def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 64) % 128]
 
-    run_passes_script(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"A premise that still allows divergence must not be accepted:\n{warnings}"
+    import pytest
+
+    with pytest.raises(Exception, match="compile-time warp-uniform"):
+        run_passes_script(func)
 
 
 def test_premise_holds_across_an_enclosing_guard():
