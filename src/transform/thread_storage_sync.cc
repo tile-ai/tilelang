@@ -1064,7 +1064,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
                                              let_var_properties_);
       auto validate_sync_condition = [&](const PrimExpr &branch_condition,
-                                         const char *branch_name) {
+                                         const char *branch_name,
+                                         const Stmt &branch_body) {
         auto condition_prop = checker.AnalyzeExpr(branch_condition);
         bool proven_block_uniform = !condition_prop.is_block_uniform &&
                                     IsBlockUniformCondition(branch_condition);
@@ -1089,14 +1090,16 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                "barrier lowering. Hoisting the barrier before the if would "
                "not order the conflicting accesses inside the branch. "
                "Condition: "
-            << branch_condition;
+            << branch_condition << "\nBranch IR:\n"
+            << branch_body;
       };
 
       if (has_sync_in_then) {
-        validate_sync_condition(op->condition, "then");
+        validate_sync_condition(op->condition, "then", op->then_case);
       }
       if (has_sync_in_else) {
-        validate_sync_condition(tirx::Not(op->condition), "else");
+        validate_sync_condition(tirx::Not(op->condition), "else",
+                                op->else_case.value());
       }
     }
 
