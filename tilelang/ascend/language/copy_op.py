@@ -64,6 +64,9 @@ def dual_copy(
     turn an otherwise pure Vector kernel into a two-AIV launch; the compiler
     assumes this contract and does not synthesize Cube-side work.
 
+    L0C on-path cast (fp32 → f16/bf16) is restricted to L0C → UB; use
+    ``T.copy(l0c, gm)`` or L0C→UB then UB ``dual_copy`` for GM output.
+
     With auto-scheduling disabled, write a manual mixed kernel as ``T.Kernel``
     containing explicit ``T.Cube()`` and ``T.Vector()`` blocks, and place each
     software dual copy inside the ``T.Vector()`` block. The rewrite pass reuses
@@ -142,10 +145,25 @@ def dual_copy(
     dst_dtype = dst_region.buffer.dtype
     # Quant + dual-destination is illegal in hardware, so the lowering splits the
     # copy into two consecutive non-dual FixPipe commands. That path only exists
-    # for fp32 -> f16/bf16; every other cross-dtype L0C->UB split is rejected.
-    onpath_cast = str(src_dtype) == "float32" and str(dst_dtype) in ("float16", "bfloat16")
-    if src_dtype != dst_dtype and src_region.buffer.scope() == "shared.l0c" and not onpath_cast:
-        raise ValueError(f"dual_copy: L0C->UB type conversion only supports fp32 -> f16/bf16, got src {src_dtype} -> dst {dst_dtype}.")
+    # for fp32 -> f16/bf16 on L0C -> UB; every other cross-dtype L0C split is rejected.
+    src_scope = src_region.buffer.scope()
+    dst_scope = dst_region.buffer.scope()
+    is_l0c = src_scope in ("shared.l0c", "shared.l0c.dyn")
+    is_l0c_to_ub = is_l0c and dst_scope in ("shared", "shared.dyn", "ub")
+    onpath_cast = is_l0c_to_ub and str(src_dtype) == "float32" and str(dst_dtype) in ("float16", "bfloat16")
+    if src_dtype != dst_dtype and is_l0c:
+        if str(dst_dtype) in ("float8_e4m3", "float8_e4m3fn") or (str(src_dtype) == "float32" and str(dst_dtype) in ("int8", "uint8")):
+            raise ValueError(
+                "dual_copy: on-path fp8/int8 quant is not supported with dual_copy; "
+                "use T.copy(l0c, ub/gm, quant_scale=...) or L0C->UB cast then UB dual_copy."
+            )
+        if not is_l0c_to_ub:
+            raise ValueError(
+                "dual_copy: L0C on-path cast (fp32 -> f16/bf16) only supports L0C -> UB; "
+                f"got dst scope {dst_scope!r}. Use T.copy(l0c, gm) or dual_copy to UB first."
+            )
+        if not onpath_cast:
+            raise ValueError(f"dual_copy: L0C->UB type conversion only supports fp32 -> f16/bf16, got src {src_dtype} -> dst {dst_dtype}.")
 
     annotations = {"dual_dst_ctl": dual_dst_ctl}
     if _is_half(dst_shape[split_axis], src_shape[split_axis]) or _is_half(alloc_dst_shape[split_axis], alloc_src_shape[split_axis]):
