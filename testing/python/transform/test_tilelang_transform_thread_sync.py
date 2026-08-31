@@ -882,6 +882,34 @@ def test_masked_warp_sync_does_not_order_cross_warp_hazards():
         run_passes_script(func)
 
 
+def test_rocm_subwarp_allreduce_keeps_masked_warp_sync():
+    """ROCm 子 warp allreduce 不应被补入非法的 shared barrier。"""
+
+    @T.prim_func(private=True)
+    def func(A: T.Buffer((8,), "float32"), C: T.Buffer((1,), "float32")):
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 8)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        value = T.alloc_buffer((1,), "float32", scope="local")
+        result = T.alloc_buffer((1,), "float32", scope="local")
+        value[0] = A[tx]
+        with T.attr(
+            T.comm_reducer(lambda x, y: x + y, [T.float32(0)]),
+            "reduce_scope",
+            T.reinterpret(T.uint64(0), dtype="handle"),
+        ):
+            T.tvm_thread_allreduce(T.uint32(1), value[0], T.bool(True), result[0], tx)
+        C[0] = result[0]
+
+    target = tvm.target.Target({"kind": "rocm", "thread_warp_size": 64, "max_num_threads": 1024}, host="llvm")
+    mod = tvm.IRModule({"main": func.with_attr({"global_symbol": "test", "target": target})})
+    mod = tilelang.transform.LowerThreadAllreduce()(mod)
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod.script())
+    assert "T.sync_warp" in s, f"Expected the masked warp synchronization to remain:\n{s}"
+
+
 # =============================================================================
 # Tests for flat Bind definitions inside the recorded constraint sets
 #

@@ -1620,8 +1620,17 @@ private:
 
   bool HaveEquivalentConstraints(const AccessEntry &lhs,
                                  const AccessEntry &rhs) const {
-    PrimExpr lhs_condition = lhs.cset.ToConjunction();
-    PrimExpr rhs_condition = rhs.cset.ToConjunction();
+    auto participation_condition = [](const ConstrSet &cset) {
+      PrimExpr condition = Bool(true);
+      for (const Constr &constr : cset.constrs_) {
+        if (constr.kind != Constr::kBindValue) {
+          condition = tirx::And(condition, constr.ToGenericConstr());
+        }
+      }
+      return condition;
+    };
+    PrimExpr lhs_condition = participation_condition(lhs.cset);
+    PrimExpr rhs_condition = participation_condition(rhs.cset);
     if (ExprDeepEqual()(lhs_condition, rhs_condition)) {
       return true;
     }
