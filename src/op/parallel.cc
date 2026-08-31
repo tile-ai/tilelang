@@ -11,8 +11,11 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "../layout/layout.h"
@@ -275,6 +278,159 @@ bool PackedStoreDomainsAreProvablyDisjoint(const arith::IntSet &lhs,
          analyzer->CanProve(rhs.max() < lhs.min());
 }
 
+struct PackedPhysicalByteKey {
+  const VarNode *storage;
+  int64_t byte_offset;
+
+  bool operator==(const PackedPhysicalByteKey &other) const {
+    return storage == other.storage && byte_offset == other.byte_offset;
+  }
+};
+
+struct PackedPhysicalByteKeyHash {
+  size_t operator()(const PackedPhysicalByteKey &key) const {
+    size_t storage_hash = std::hash<const VarNode *>{}(key.storage);
+    size_t offset_hash = std::hash<int64_t>{}(key.byte_offset);
+    return storage_hash ^ (offset_hash + 0x9e3779b9 + (storage_hash << 6) +
+                           (storage_hash >> 2));
+  }
+};
+
+// The symbolic inverse below is the fast path, but some injective shared
+// layouts contain xor-like floor-div/mod swizzles that NormalizeIter cannot
+// invert. For small static domains, prove the same invariant exactly: every
+// physical byte must map to one CUDA execution owner. Predicates remain
+// intentionally ignored, matching the conservative symbolic proof.
+bool ProvePackedSubByteStoreOwnershipByEnumeration(
+    const std::vector<PackedSubByteStoreAccess> &stores,
+    const Fragment &candidate, const PrimExpr &thread_index,
+    arith::Analyzer *analyzer, bool canonical_replica_guard_guaranteed) {
+  // This covers the 64x64 SM75 swizzle while bounding repeated candidate
+  // searches to 65,536 visited points per proof.
+  constexpr int64_t kMaxExactOwnershipPoints = 1 << 16;
+
+  bool is_replicated =
+      !analyzer->CanProveEqual(candidate->ReplicateExtent(), Integer(1));
+  if (is_replicated && !canonical_replica_guard_guaranteed) {
+    return false;
+  }
+  Optional<PrimExpr> replica =
+      is_replicated ? Optional<PrimExpr>(Integer(0)) : Optional<PrimExpr>();
+
+  std::unordered_map<PackedPhysicalByteKey, std::vector<int64_t>,
+                     PackedPhysicalByteKeyHash>
+      owners;
+  int64_t total_points = 0;
+
+  for (auto access : stores) {
+    if (access.parallel_positions.size() != candidate->InputDim()) {
+      return false;
+    }
+
+    std::vector<int64_t> mins;
+    std::vector<int64_t> extents;
+    int64_t access_points = 1;
+    for (const IterVar &iter_var : access.iter_vars) {
+      const int64_t *min = as_const_int(analyzer->Simplify(iter_var->dom->min));
+      const int64_t *extent =
+          as_const_int(analyzer->Simplify(iter_var->dom->extent));
+      if (min == nullptr || extent == nullptr || *extent < 0) {
+        return false;
+      }
+      if (*extent > 0 &&
+          *min > std::numeric_limits<int64_t>::max() - (*extent - 1)) {
+        return false;
+      }
+      if (*extent > 0 && access_points > kMaxExactOwnershipPoints / *extent) {
+        return false;
+      }
+      access_points *= *extent;
+      mins.push_back(*min);
+      extents.push_back(*extent);
+    }
+    if (total_points > kMaxExactOwnershipPoints - access_points) {
+      return false;
+    }
+    total_points += access_points;
+
+    Array<PrimExpr> logical_parallel_indices;
+    for (size_t position : access.parallel_positions) {
+      logical_parallel_indices.push_back(access.iter_vars[position]->var);
+    }
+    PrimExpr assigned_thread = analyzer->Simplify(
+        candidate->ForwardThread(logical_parallel_indices, replica));
+    if (candidate->ThreadRange().defined()) {
+      assigned_thread =
+          analyzer->Simplify(assigned_thread + candidate->ThreadRange()->min);
+    }
+
+    Map<Var, PrimExpr> thread_substitution;
+    if (const auto *thread_var = thread_index.as<VarNode>()) {
+      thread_substitution.Set(GetRef<Var>(thread_var), assigned_thread);
+      access.indices = access.indices.Map([&](const PrimExpr &index) {
+        return analyzer->Simplify(Substitute(index, thread_substitution));
+      });
+    }
+
+    Optional<PrimExpr> maybe_byte_offset = GetPackedStoreByteOffset(access);
+    if (!maybe_byte_offset.defined()) {
+      return false;
+    }
+    PrimExpr byte_offset = analyzer->Simplify(
+        Substitute(maybe_byte_offset.value(), thread_substitution));
+
+    Array<PrimExpr> owner;
+    for (size_t position : access.block_positions) {
+      owner.push_back(access.iter_vars[position]->var);
+    }
+    owner.push_back(assigned_thread);
+
+    Map<Var, PrimExpr> point_substitution;
+    std::vector<int64_t> offsets(access.iter_vars.size(), 0);
+    for (int64_t point = 0; point < access_points; ++point) {
+      for (size_t axis = 0; axis < access.iter_vars.size(); ++axis) {
+        const IterVar &iter_var = access.iter_vars[axis];
+        point_substitution.Set(
+            iter_var->var,
+            make_const(iter_var->var.dtype(), mins[axis] + offsets[axis]));
+      }
+
+      PrimExpr concrete_byte =
+          analyzer->Simplify(Substitute(byte_offset, point_substitution));
+      const int64_t *byte = as_const_int(concrete_byte);
+      if (byte == nullptr) {
+        return false;
+      }
+
+      std::vector<int64_t> concrete_owner;
+      concrete_owner.reserve(owner.size());
+      for (const PrimExpr &component : owner) {
+        const int64_t *value = as_const_int(
+            analyzer->Simplify(Substitute(component, point_substitution)));
+        if (value == nullptr) {
+          return false;
+        }
+        concrete_owner.push_back(*value);
+      }
+
+      PackedPhysicalByteKey key{access.buffer->data.get(), *byte};
+      auto [it, inserted] = owners.emplace(key, concrete_owner);
+      if (!inserted && it->second != concrete_owner) {
+        return false;
+      }
+
+      for (size_t axis = offsets.size(); axis > 0; --axis) {
+        size_t index = axis - 1;
+        if (++offsets[index] < extents[index]) {
+          break;
+        }
+        offsets[index] = 0;
+      }
+    }
+  }
+  return true;
+}
+
 bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
                                       const Fragment &candidate,
                                       const Array<IterVar> &block_bindings,
@@ -488,6 +644,12 @@ bool ProvePackedSubByteStoreOwnership(const Stmt &stmt,
       // An unprovable inverse is unsafe for a non-atomic packed store.
     } catch (const Error &) {
       // Failed integer proof checks also make the ownership result unprovable.
+    }
+
+    if (ProvePackedSubByteStoreOwnershipByEnumeration(
+            stores, candidate, thread_index, analyzer,
+            canonical_replica_guard_guaranteed)) {
+      return true;
     }
 
     if (throw_on_error) {

@@ -265,13 +265,15 @@ def test_reshape_alias_rejects_incomparable_packed_byte_owners():
                     flat[2 * i + 1] = high[i]
 
     target = tvm.target.Target("cuda")
+    mod = tvm.IRModule({"main": kernel})
     with target:
-        context = create_backend_context(target, None, "auto")
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tilelang.transform.MaterializeKernelLaunch()(mod)
         with pytest.raises(
             tvm.TVMError,
             match=r"logical elements that share a writable byte",
         ):
-            lower_to_host_device_ir(kernel, context)
+            tilelang.transform.LayoutInference()(mod)
 
 
 @tilelang.testing.requires_cuda
