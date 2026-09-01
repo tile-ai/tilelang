@@ -70,7 +70,7 @@ def test_fp32_shared_atomic_stays_scalar_on_sm90():
     transformed = _run_vectorize_loop(main)
 
     assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
-    assert tvm.tirx.ForKind.SERIAL in _loop_kinds(transformed["main"])
+    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.SERIAL]
     assert not _undefined_local_vars(transformed["main"])
 
 
@@ -83,7 +83,7 @@ def test_fp32_atomic_stays_scalar_on_sm89():
     transformed = _run_vectorize_loop(main, _SM89_TARGET)
 
     assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
-    assert tvm.tirx.ForKind.SERIAL in _loop_kinds(transformed["main"])
+    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.SERIAL]
     assert not _undefined_local_vars(transformed["main"])
 
 
