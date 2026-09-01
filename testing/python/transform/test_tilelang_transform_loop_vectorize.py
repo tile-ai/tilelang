@@ -7,6 +7,8 @@ from tvm.tirx.stmt_functor import post_order_visit
 
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+_SM89_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
+_SM90_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
 
 
 def _run_layout_inference(func):
@@ -21,6 +23,91 @@ def _run_vectorized_loop_legalizer(func):
     mod = tvm.IRModule({"main": func})
     with _TARGET:
         return tl.transform.LegalizeVectorizedLoop()(mod)
+
+
+def _run_vectorize_loop(func, target=_SM90_TARGET):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    with target:
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.FlattenBuffer()(mod)
+        return tl.transform.VectorizeLoop()(mod)
+
+
+def _atomic_op_names(func):
+    names = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.Call) and hasattr(node.op, "name") and node.op.name.startswith("tl.atomic_add"):
+            names.append(node.op.name)
+
+    post_order_visit(func.body, collect)
+    return names
+
+
+def _loop_kinds(func):
+    kinds = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.For):
+            kinds.append(node.kind)
+
+    post_order_visit(func.body, collect)
+    return kinds
+
+
+def _undefined_local_vars(func):
+    defined_vars = [*func.params, *(buffer.data for buffer in func.buffer_map.values())]
+    return tvm.tirx.analysis.undefined_vars(func.body, defined_vars)
+
+
+def test_fp32_shared_atomic_stays_scalar_on_sm90():
+    @T.prim_func
+    def main(A: T.Tensor((4,), T.float32)):
+        shared = T.alloc_buffer((4,), "float32", scope="shared")
+        for i in T.vectorized(4):
+            T.atomic_add(shared[i], A[i])
+
+    transformed = _run_vectorize_loop(main)
+
+    assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
+    assert tvm.tirx.ForKind.SERIAL in _loop_kinds(transformed["main"])
+    assert not _undefined_local_vars(transformed["main"])
+
+
+def test_fp32_atomic_stays_scalar_on_sm89():
+    @T.prim_func
+    def main(A: T.Tensor((4,), T.float32), output: T.Tensor((4,), T.float32)):
+        for i in T.vectorized(4):
+            T.atomic_add(output[i], A[i])
+
+    transformed = _run_vectorize_loop(main, _SM89_TARGET)
+
+    assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
+    assert tvm.tirx.ForKind.SERIAL in _loop_kinds(transformed["main"])
+    assert not _undefined_local_vars(transformed["main"])
+
+
+def test_fp32_global_atomic_keeps_x4_vectorization_on_sm90():
+    @T.prim_func
+    def main(A: T.Tensor((4,), T.float32), output: T.Tensor((4,), T.float32)):
+        for i in T.vectorized(4):
+            T.atomic_add(output[i], A[i])
+
+    transformed = _run_vectorize_loop(main)
+
+    assert _atomic_op_names(transformed["main"]) == ["tl.atomic_addx4_elem_op"]
+
+
+def test_fp16_shared_atomic_keeps_x2_vectorization_on_sm90():
+    @T.prim_func
+    def main(A: T.Tensor((2,), T.float16)):
+        shared = T.alloc_buffer((2,), "float16", scope="shared")
+        for i in T.vectorized(2):
+            T.atomic_add(shared[i], A[i])
+
+    transformed = _run_vectorize_loop(main)
+
+    assert _atomic_op_names(transformed["main"]) == ["tl.atomic_addx2_elem_op"]
 
 
 def _vectorized_extents(func):
