@@ -133,11 +133,11 @@ def ref_program(x: torch.Tensor):
     return (x.double() @ H.T).to(x.dtype)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=64, help="Batch size")
     parser.add_argument("--dim", type=int, default=32768, help="Dimension")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     B, D = args.batch, args.dim
     x = torch.randn((B, D), device="cuda")
