@@ -29,6 +29,7 @@ def _run_vectorize_loop(func, target=_SM90_TARGET):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
         mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.LowerAccessPtr()(mod)
         mod = tl.transform.FlattenBuffer()(mod)
         return tl.transform.VectorizeLoop()(mod)
 
