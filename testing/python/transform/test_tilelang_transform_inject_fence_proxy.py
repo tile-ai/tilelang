@@ -404,15 +404,19 @@ def test_sparse_mma_intrinsics_marked_async():
         order = []
 
         def visit(node):
-            if isinstance(node, tirx.Evaluate):
+            if isinstance(node, tirx.BufferStore):
+                order.append("shared_store")
+            elif isinstance(node, tirx.Evaluate):
                 call = node.value
                 if isinstance(call, tirx.Call):
                     order.append(getattr(call.op, "name", ""))
 
         tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
 
+        assert order.count("shared_store") == 1
+        assert order.count("tl.fence_proxy_async") == 1
+        assert order.index("shared_store") < order.index("tl.fence_proxy_async")
         assert op_name in order
-        assert "tl.fence_proxy_async" in order
         assert order.index("tl.fence_proxy_async") < order.index(op_name)
 
 
