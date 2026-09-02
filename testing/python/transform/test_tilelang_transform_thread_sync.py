@@ -517,7 +517,7 @@ def test_loop_carry_different_indices():
 
 
 # =============================================================================
-# Tests for non-uniform if condition sync hoisting
+# 非 uniform if 条件下的同步测试
 # =============================================================================
 
 
@@ -772,11 +772,8 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
-@tilelang.testing.requires_cuda
-def test_partial_sync_non_warp_multiple_rejected():
-    """Regression test for issue #2556: a required barrier inside a divergent
-    region that splits a warp must be a compile-time error, not silently
-    dropped or lowered to an invalid partial barrier."""
+def test_nested_non_warp_uniform_sync_is_rejected():
+    """分支内循环尚不能安全拆分，必须拒绝而不是生成错误 barrier。"""
     import pytest
 
     @T.prim_func(private=True)
@@ -796,7 +793,9 @@ def test_partial_sync_non_warp_multiple_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(Exception, match="not warp-uniform"):
+    with pytest.raises(
+        Exception, match="nested inside another control-flow statement"
+    ):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -894,14 +893,7 @@ def test_no_sync_for_thread_private_pair_read_modify_write():
 
 
 def test_no_plain_sync_inside_divergent_symbolic_guard():
-    """A barrier must never be emitted inside a thread-divergent guard.
-
-    ``bx * 4 + tx // 32 < n`` mixes a thread variable with a runtime parameter,
-    so for a tail block only some warps enter. A block-wide barrier inside the
-    branch is then waited on by a subset of the block, which hangs. Whether or
-    not the pass considers the guarded update a hazard, any barrier it emits has
-    to sit outside the guard.
-    """
+    """若保守分析插入 barrier，它必须位于拆开的两个 guard 之间。"""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
@@ -917,21 +909,13 @@ def test_no_plain_sync_inside_divergent_symbolic_guard():
     s = run_passes_script(func)
     if 'T.tvm_storage_sync("shared")' in s:
         sync_pos = s.index('T.tvm_storage_sync("shared")')
-        if_pos = s.index("if ")
-        assert sync_pos < if_pos, f"Barrier must be hoisted out of the divergent guard:\n{s}"
+        first_if = s.index("if thread_sync_condition")
+        second_if = s.index("if thread_sync_condition", first_if + 1)
+        assert first_if < sync_pos < second_if, f"Barrier must separate the guarded phases:\n{s}"
 
 
-def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
-    """A hazard confined to a divergent branch has no correct barrier placement.
-
-    ``bx * 4 + tx // 32 < n`` mixes a thread variable with a runtime parameter, so
-    for a tail block only some warps enter, and both ends of the hazard are inside
-    that branch. A barrier inside it hangs on the threads that skip the branch,
-    while one in front of it is reached by everyone but no longer separates the
-    accesses. Ordering this needs the branch split around the barrier, which the
-    pass cannot express, so reporting the program is the only thing it can get
-    right. Where the barrier ends up is deliberately not asserted.
-    """
+def test_hazard_in_divergent_guard_is_split():
+    """动态分支被拆成写、整块同步、读三个阶段。"""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
@@ -945,18 +929,17 @@ def test_unorderable_hazard_in_divergent_guard_is_reported(capfd):
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    run_passes_script(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+    s = run_passes_script(func)
+    sync = 'T.tvm_storage_sync("shared")'
+    assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
+    assert s.count("if thread_sync_condition") == 2, f"Expected a split branch:\n{s}"
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
+        f"Barrier does not order the hazard:\n{s}"
+    )
 
 
-def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
-    """The else branch needs the same treatment as the then branch.
-
-    Syncs found in either arm are tracked separately, so a hazard placed only in
-    the else arm exercises the second of the two paths. It is as unorderable as
-    the one above, so again only the report is asserted.
-    """
+def test_hazard_in_divergent_else_branch_is_split():
+    """else 中的 hazard 也要拆到整块同步的两侧。"""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
@@ -972,9 +955,83 @@ def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    run_passes_script(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+    s = run_passes_script(func)
+    sync = 'T.tvm_storage_sync("shared")'
+    assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
+        f"Barrier does not order the else hazard:\n{s}"
+    )
+
+
+def test_non_warp_uniform_if_else_is_split():
+    """tx % 4 会拆散每个 warp，必须改写为所有线程都执行的 barrier。"""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx % 4 == 0:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[(tx + 4) % 64]
+        else:
+            l[0] = T.float32(-1)
+
+    s = run_passes_script(func)
+    sync = 'T.tvm_storage_sync("shared")'
+    assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
+    assert s.count("if thread_sync_condition") == 2, f"Expected a split branch:\n{s}"
+    assert s.count("tx % 4 == 0") == 1, f"The condition must be evaluated once:\n{s}"
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
+        f"Barrier does not order the hazard:\n{s}"
+    )
+
+
+def test_divergent_split_rejects_binding_crossing_barrier():
+    """拆分不能让分支内定义的标量越过原有作用域。"""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx % 4 == 0:
+            read_index: T.int32 = (tx + 4) % 64
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[read_index]
+
+    with pytest.raises(Exception, match="scalar binding crosses"):
+        run_passes_script(func)
+
+
+def test_nested_divergent_branch_split_is_rejected():
+    """外层分支已让部分线程退出时，内层不能直接插入 full-block barrier。"""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 48:
+            if tx % 4 == 0:
+                s[tx] = T.cast(tx, "float32")
+                l[0] = s[(tx + 4) % 64]
+
+    with pytest.raises(
+        Exception, match="nested under another thread-divergent branch"
+    ):
+        run_passes_script(func)
 
 
 def test_aligned_else_partial_sync_is_preserved():
@@ -1000,9 +1057,8 @@ def test_aligned_else_partial_sync_is_preserved():
     assert s.index('T.tvm_storage_sync("shared"') > s.index("else:"), f"Barrier must stay in else branch:\n{s}"
 
 
-def test_misaligned_else_partial_sync_is_rejected():
-    """Consecutive threads spanning two partial warps cannot use bar.sync."""
-    import pytest
+def test_misaligned_else_partial_sync_is_split():
+    """跨越两个 warp 的 tx=1..32 不能用 partial bar.sync，要拆分分支。"""
 
     @T.prim_func(private=True)
     def func():
@@ -1018,8 +1074,12 @@ def test_misaligned_else_partial_sync_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[33 - tx]
 
-    with pytest.raises(Exception, match="not warp-uniform"):
-        run_passes_script(func)
+    s = run_passes_script(func)
+    sync = 'T.tvm_storage_sync("shared")'
+    assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
+        f"Barrier does not order the else hazard:\n{s}"
+    )
 
 
 def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
@@ -1054,14 +1114,8 @@ def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
     assert "no longer separates" not in warnings, f"A provably uniform guard should not be reported:\n{warnings}"
 
 
-def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
-    """The premise has to rule divergence out for the block size actually used.
-
-    ``n % 64 == 0`` with a block of 128 threads still admits ``n == 64``, where
-    half the block enters. This pins down the boundary of the check above: it must
-    accept a premise only when the premise really excludes divergence. The guard
-    is therefore treated as divergent, which for this shape means reported.
-    """
+def test_premise_weaker_than_the_block_is_split():
+    """n % 64 == 0 仍允许半个 block 进入，因此需要拆分分支。"""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
@@ -1076,9 +1130,12 @@ def test_premise_weaker_than_the_block_is_not_taken_as_uniform(capfd):
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 64) % 128]
 
-    run_passes_script(func)
-    warnings = capfd.readouterr().err
-    assert "no longer separates" in warnings, f"A premise that still allows divergence must not be accepted:\n{warnings}"
+    s = run_passes_script(func)
+    sync = 'T.tvm_storage_sync("shared")'
+    assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
+        f"Barrier does not order the hazard:\n{s}"
+    )
 
 
 def test_premise_holds_across_an_enclosing_guard():
