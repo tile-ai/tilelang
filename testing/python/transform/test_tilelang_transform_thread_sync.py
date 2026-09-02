@@ -1029,9 +1029,78 @@ def test_nested_divergent_branch_split_is_rejected():
                 l[0] = s[(tx + 4) % 64]
 
     with pytest.raises(
-        Exception, match="nested under another thread-divergent branch"
+        Exception, match="nested under another thread-divergent control-flow"
     ):
         run_passes_script(func)
+
+
+def test_divergent_split_inside_non_uniform_loop_is_rejected():
+    """循环次数在线程间不一致时，不能在循环体中插入 full-block barrier。"""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for i in T.serial(0, tx % 2 + 1):
+            if tx % 4 == 0:
+                s[tx] = T.cast(tx, "float32")
+                l[0] = s[(tx + 4) % 64]
+
+    with pytest.raises(
+        Exception, match="nested under another thread-divergent control-flow"
+    ):
+        run_passes_script(func)
+
+
+def test_sync_inside_non_uniform_loop_is_rejected():
+    """即使没有内层 if，线程间循环次数不同也不能执行 barrier。"""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for i in T.serial(0, tx % 2 + 1):
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[63 - tx]
+
+    with pytest.raises(Exception, match="loop whose trip count differs"):
+        run_passes_script(func)
+
+
+def test_divergent_split_inside_uniform_loop_is_allowed():
+    """循环次数相同时，每轮拆分后的 barrier 都由整个 block 执行。"""
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for i in T.serial(0, 2):
+            if tx % 4 == 0:
+                s[tx] = T.cast(tx + i, "float32")
+                l[0] = s[(tx + 4) % 64]
+
+    s = run_passes_script(func)
+    sync = 'T.tvm_storage_sync("shared")'
+    assert s.count("if thread_sync_condition") == 2, f"Expected a split branch:\n{s}"
+    loop_pos = s.index("for i in range(2)")
+    first_if = s.index("if thread_sync_condition", loop_pos)
+    second_if = s.index("if thread_sync_condition", first_if + 1)
+    sync_pos = s.index(sync, first_if)
+    assert first_if < sync_pos < second_if, f"Barrier must separate the loop phases:\n{s}"
 
 
 def test_aligned_else_partial_sync_is_preserved():

@@ -210,6 +210,7 @@ private:
 };
 
 using StmtIdentitySet = std::unordered_set<Stmt, ObjectPtrHash, ObjectPtrEqual>;
+using VarIdentitySet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 
 struct DivergentBranchSyncPlan {
   StmtIdentitySet then_syncs;
@@ -289,11 +290,11 @@ private:
              "write and read phases.";
     }
 
-    std::unordered_set<const VarNode *> prior_phase_bindings;
+    VarIdentitySet prior_phase_bindings;
     for (const Array<Stmt> &phase : phases) {
       for (const Stmt &statement : phase) {
         if (UsesVar(statement, [&](const VarNode *var) {
-              return prior_phase_bindings.count(var) != 0;
+              return prior_phase_bindings.count(GetRef<Var>(var)) != 0;
             })) {
           LOG(FATAL) << "[ThreadSync] Cannot split a divergent branch because "
                         "a scalar binding crosses the required shared-memory "
@@ -302,7 +303,7 @@ private:
       }
       for (const Stmt &statement : phase) {
         if (const auto *bind = statement.as<BindNode>()) {
-          prior_phase_bindings.insert(bind->var.get());
+          prior_phase_bindings.insert(bind->var);
         }
       }
     }
@@ -573,6 +574,9 @@ struct ConditionThreadProperty {
   }
 };
 
+using VarPropertyMap = std::unordered_map<Var, ConditionThreadProperty,
+                                          ObjectPtrHash, ObjectPtrEqual>;
+
 /*!
  * \brief 分析条件是否依赖运行时数据，以及 block 内线程是否得到相同结果。
  *
@@ -583,9 +587,7 @@ class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
   explicit ConditionThreadPropertyChecker(
       arith::Analyzer *analyzer, const Array<IterVar> &env_threads,
-      const std::unordered_map<const VarNode *, ConditionThreadProperty>
-          &let_var_properties,
-      int warp_size = 32)
+      const VarPropertyMap &let_var_properties, int warp_size = 32)
       : IRMutatorWithAnalyzer(analyzer), env_threads_(env_threads),
         let_var_properties_(let_var_properties), warp_size_(warp_size) {}
 
@@ -661,7 +663,7 @@ private:
       current_.is_block_uniform = false;
       return GetRef<Var>(op);
     }
-    auto it = let_var_properties_.find(op);
+    auto it = let_var_properties_.find(GetRef<Var>(op));
     if (it != let_var_properties_.end()) {
       current_.Merge(it->second);
     } else {
@@ -710,8 +712,7 @@ private:
 private:
   ConditionThreadProperty current_;
   const Array<IterVar> &env_threads_;
-  const std::unordered_map<const VarNode *, ConditionThreadProperty>
-      &let_var_properties_;
+  const VarPropertyMap &let_var_properties_;
   int warp_size_;
 };
 
@@ -846,6 +847,44 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     LOG(FATAL) << "Thread variable " << tag << " not found";
     return IterVar();
   }
+
+  void AddThreadVaryingSubstitutions(Map<Var, PrimExpr> &sub1,
+                                     Map<Var, PrimExpr> &sub2) const {
+    auto add_var = [&](const Var &var) {
+      if (!sub1.count(var)) {
+        sub1.Set(var, Var(var->name_hint + "<T1>", var.dtype()));
+        sub2.Set(var, Var(var->name_hint + "<T2>", var.dtype()));
+      }
+    };
+    for (const IterVar &iv : env_threads_) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank == 1) {
+        add_var(iv->var);
+      }
+    }
+    for (const auto &[var, property] : let_var_properties_) {
+      if (!property.is_block_uniform) {
+        add_var(var);
+      }
+    }
+  }
+
+  bool IsBlockUniformValue(const PrimExpr &value) {
+    Map<Var, PrimExpr> sub1, sub2;
+    AddThreadVaryingSubstitutions(sub1, sub2);
+    if (sub1.empty()) {
+      return true;
+    }
+    ConstrSet cset = GetConstrSet();
+    ConstrSet c1 =
+        cset.RenameFrom("<T1>", sub1, std::nullopt, /*rename_ranges=*/false);
+    ConstrSet c2 =
+        cset.RenameFrom("<T2>", sub2, std::nullopt, /*rename_ranges=*/false);
+    arith::Analyzer analyzer;
+    c1.ToConstraints().Merge(c2.ToConstraints()).Populate(analyzer);
+    return analyzer.CanProveEqual(Substitute(value, sub1),
+                                  Substitute(value, sub2));
+  }
+
   /*!
    * \brief Try to prove that every thread reaches the same verdict on
    *        \p condition, using the live constraint set as premises.
@@ -858,12 +897,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    */
   bool IsBlockUniformCondition(const PrimExpr &condition) {
     Map<Var, PrimExpr> sub1, sub2;
-    for (const auto &iv : env_threads_) {
-      if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1)
-        continue;
-      sub1.Set(iv->var, Var(iv->var->name_hint + "<T1>", iv->var.dtype()));
-      sub2.Set(iv->var, Var(iv->var->name_hint + "<T2>", iv->var.dtype()));
-    }
+    AddThreadVaryingSubstitutions(sub1, sub2);
     if (sub1.empty()) {
       // Nothing is indexed by a thread, so the condition cannot diverge.
       return true;
@@ -886,12 +920,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   /*! \brief Return whether every hardware warp agrees on \p condition. */
   bool IsWarpUniformCondition(const PrimExpr &condition) {
     Map<Var, PrimExpr> sub1, sub2;
-    for (const auto &iv : env_threads_) {
-      if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1)
-        continue;
-      sub1.Set(iv->var, Var(iv->var->name_hint + "<T1>", iv->var.dtype()));
-      sub2.Set(iv->var, Var(iv->var->name_hint + "<T2>", iv->var.dtype()));
-    }
+    AddThreadVaryingSubstitutions(sub1, sub2);
     if (sub1.empty()) {
       return true;
     }
@@ -1002,7 +1031,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     allow_append_ = false;
     // Record let var properties
     auto let_prop = AnalyzeExprProperty(op->value);
-    let_var_properties_[op->var.get()] = let_prop;
+    let_var_properties_[op->var] = let_prop;
   }
   void VisitStmt_(const SBlockNode *op) final {
     auto block = Downcast<SBlock>(op);
@@ -1041,8 +1070,26 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   }
 
   void VisitStmt_(const ForNode *op) final {
+    ConditionThreadProperty loop_var_property = AnalyzeExprProperty(op->min);
+    if (!loop_var_property.is_block_uniform && IsBlockUniformValue(op->min)) {
+      loop_var_property.is_block_uniform = true;
+    }
+    ConditionThreadProperty extent_property = AnalyzeExprProperty(op->extent);
+    bool extent_is_block_uniform =
+        extent_property.is_block_uniform || IsBlockUniformValue(op->extent);
+    auto [loop_var_it, inserted] =
+        let_var_properties_.emplace(op->loop_var, loop_var_property);
+    ICHECK(inserted);
+
+    std::unordered_set<const Object *> syncs_before_loop = syncs_inserted_;
+    if (!extent_is_block_uniform) {
+      ++non_uniform_control_flow_depth_;
+    }
     scope_.push_back(std::vector<StmtEntry>());
     ConstrVisitor::VisitStmt_(op);
+    if (!extent_is_block_uniform) {
+      --non_uniform_control_flow_depth_;
+    }
     StmtEntry s;
     s.stmt = op;
     s.access = Summarize(std::move(scope_.back()), op);
@@ -1066,6 +1113,19 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     if (!s.access.empty()) {
       scope_.back().emplace_back(std::move(s));
     }
+
+    if (!extent_is_block_uniform) {
+      for (const Object *sync : syncs_inserted_) {
+        if (syncs_before_loop.count(sync) == 0 && sync != op) {
+          LOG(FATAL) << "[ThreadSync] Cannot insert a required shared-memory "
+                        "sync inside a loop whose trip count differs across "
+                        "threads. Rewrite the kernel into uniform phases. "
+                        "Loop extent: "
+                     << op->extent;
+        }
+      }
+    }
+    let_var_properties_.erase(loop_var_it);
   }
 
   /*! \brief 汇总 if 两侧的访存，并为不安全的分支内 barrier 制定拆分计划。 */
@@ -1094,11 +1154,11 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       scope_.push_back(std::vector<StmtEntry>());
       {
         if (!condition_is_block_uniform) {
-          ++divergent_if_depth_;
+          ++non_uniform_control_flow_depth_;
         }
         this->VisitStmt(op->then_case);
         if (!condition_is_block_uniform) {
-          --divergent_if_depth_;
+          --non_uniform_control_flow_depth_;
         }
       }
 
@@ -1123,11 +1183,11 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       scope_.push_back(std::vector<StmtEntry>());
       {
         if (!condition_is_block_uniform) {
-          ++divergent_if_depth_;
+          ++non_uniform_control_flow_depth_;
         }
         this->VisitStmt(op->else_case.value());
         if (!condition_is_block_uniform) {
-          --divergent_if_depth_;
+          --non_uniform_control_flow_depth_;
         }
       }
       auto v = Summarize(std::move(scope_.back()), nullptr);
@@ -1178,9 +1238,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       bool split_else =
           !syncs_in_else.empty() && requires_split(tirx::Not(op->condition));
       if (split_then || split_else) {
-        if (divergent_if_depth_ != 0) {
+        if (non_uniform_control_flow_depth_ != 0) {
           LOG(FATAL) << "[ThreadSync] Cannot split a required shared-memory "
-                        "sync nested under another thread-divergent branch. "
+                        "sync nested under another thread-divergent control-"
+                        "flow statement. "
                         "Rewrite the kernel into explicit write and read "
                         "phases. Condition: "
                      << op->condition;
@@ -1206,6 +1267,11 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
   void VisitStmt_(const WhileNode *op) final {
     StmtEntry s;
+    ConditionThreadProperty condition_property =
+        AnalyzeExprProperty(op->condition);
+    bool condition_is_block_uniform = condition_property.is_block_uniform ||
+                                      IsBlockUniformCondition(op->condition);
+    std::unordered_set<const Object *> syncs_before_loop = syncs_inserted_;
     {
       auto guard = MakeGuard(op->condition);
       allow_append_ = true;
@@ -1215,7 +1281,13 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
       scope_.push_back(std::vector<StmtEntry>());
       {
+        if (!condition_is_block_uniform) {
+          ++non_uniform_control_flow_depth_;
+        }
         this->VisitStmt(op->body);
+        if (!condition_is_block_uniform) {
+          --non_uniform_control_flow_depth_;
+        }
       }
       s.stmt = op;
       s.access = Summarize(std::move(scope_.back()), nullptr);
@@ -1223,6 +1295,17 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if (!cond_access.empty()) {
         s.access.insert(s.access.begin(), cond_access.begin(),
                         cond_access.end());
+      }
+    }
+    if (!condition_is_block_uniform) {
+      for (const Object *sync : syncs_inserted_) {
+        if (syncs_before_loop.count(sync) == 0) {
+          LOG(FATAL) << "[ThreadSync] Cannot insert a required shared-memory "
+                        "sync inside a while loop whose execution count may "
+                        "differ across threads. Rewrite the kernel into "
+                        "uniform phases. Condition: "
+                     << op->condition;
+        }
       }
     }
     scope_.back().emplace_back(std::move(s));
@@ -1671,15 +1754,14 @@ private:
   Array<IterVar> env_threads_;
   // Thread-uniform/runtime properties for let-bound vars visible in the
   // current lexical scope.
-  std::unordered_map<const VarNode *, ConditionThreadProperty>
-      let_var_properties_;
+  VarPropertyMap let_var_properties_;
   // The buffer map
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
   StorageScope sync_scope_;
   // warp size from target
   int warp_size_;
-  int divergent_if_depth_{0};
+  int non_uniform_control_flow_depth_{0};
 
   void insert_syncs(const Object *obj) {
     if (syncs_inserted_.count(obj))
