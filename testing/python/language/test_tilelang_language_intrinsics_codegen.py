@@ -67,6 +67,12 @@ HALF_MATH_OPS = (
     ("ceil", "hceil", torch.ceil, 1),
     ("round", "hrint", torch.round, 1),
     ("trunc", "htrunc", torch.trunc, 1),
+    ("sinh", "hsinh", torch.sinh, 1),
+    ("cosh", "hcosh", torch.cosh, 1),
+    ("tanh", "htanh", torch.tanh, 1),
+    ("atan", "hatan", torch.atan, 1),
+    ("erf", "herf", torch.erf, 1),
+    ("nearbyint", "hnearbyint", torch.round, 1),
 )
 
 
@@ -92,6 +98,12 @@ def half_math_kernel(dtype, N):
             ceil_value = T.ceil(C[i])
             round_value = T.round(C[i])
             trunc_value = T.trunc(C[i])
+            sinh_value = T.sinh(C[i])
+            cosh_value = T.cosh(C[i])
+            tanh_value = T.tanh(C[i])
+            atan_value = T.atan(C[i])
+            erf_value = T.erf(C[i])
+            nearbyint_value = T.nearbyint(C[i])
             B[0, i] = exp_value
             B[1, i] = exp2_value
             B[2, i] = exp10_value
@@ -104,6 +116,12 @@ def half_math_kernel(dtype, N):
             B[9, i] = ceil_value
             B[10, i] = round_value
             B[11, i] = trunc_value
+            B[12, i] = sinh_value
+            B[13, i] = cosh_value
+            B[14, i] = tanh_value
+            B[15, i] = atan_value
+            B[16, i] = erf_value
+            B[17, i] = nearbyint_value
 
     return main
 
