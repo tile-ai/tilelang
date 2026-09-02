@@ -52,7 +52,8 @@ def reduce(
         annotations (dict, optional): Additional lowering controls. On CUDA
             SM100+, FP32 sum/abssum reductions accept
             ``{"enable_fadd2": False}`` to keep the reducer scalar. Packed
-            FP32x2 reduction remains enabled by default.
+            FP32x2 reduction remains enabled by default, and can be disabled
+            globally with the ``tl.enable_fp32x2_reduction`` pass config.
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
@@ -243,7 +244,8 @@ def reduce_sum(
         batch (int): Number of output elements per batched AllReduce call (default 1).
         annotations (dict, optional): On CUDA SM100+, set
             ``{"enable_fadd2": False}`` to disable packed FP32x2 accumulation
-            for this reduction. It is enabled by default.
+            for this reduction. It is enabled by default, unless the
+            ``tl.enable_fp32x2_reduction`` pass config is False.
     Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because
           during warp reduction, the same value would be accumulated multiple times (number of threads
           in the warp). Therefore, the implementation with clear=True follows these steps:
@@ -269,7 +271,8 @@ def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: i
         batch (int): Number of output elements per batched AllReduce call (default 1).
         annotations (dict, optional): On CUDA SM100+, set
             ``{"enable_fadd2": False}`` to disable packed FP32x2 accumulation
-            for this reduction. It is enabled by default.
+            for this reduction. It is enabled by default, unless the
+            ``tl.enable_fp32x2_reduction`` pass config is False.
 
     Returns:
         tirx.Call: Handle to the reduction operation
