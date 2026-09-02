@@ -84,6 +84,19 @@ if(MSVC)
       $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-command-line-argument>
       $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unknown-attributes>
       $<$<COMPILE_LANGUAGE:CXX>:-fdelayed-template-parsing>)
+
+    # Recent clang (VS 2026 bundles 22.x) warns on every C++20 TU that
+    # -fdelayed-template-parsing is deprecated; the flag still takes effect,
+    # and the warning floods CI logs. Feature-check the suppression so older
+    # LLVM without this diagnostic group doesn't emit
+    # -Wunknown-warning-option noise instead.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-Wno-delayed-template-parsing-in-cxx20"
+                            TILELANG_HAS_WNO_DELAYED_TEMPLATE_PARSING_IN_CXX20)
+    if(TILELANG_HAS_WNO_DELAYED_TEMPLATE_PARSING_IN_CXX20)
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-delayed-template-parsing-in-cxx20>)
+    endif()
   endif()
 endif()
 
