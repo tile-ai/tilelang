@@ -141,10 +141,35 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.target.python_version }}
+          activate-environment: true
+
+      # CMakeLists.txt only plugs cmake/ccache_strip_pep517.py (normalizes the
+      # random PEP 517 build-env paths before ccache hashes the preprocessed
+      # output) in front of the preprocessor when a stable interpreter exists
+      # at .venv/Scripts/python.exe. Without it ccache misses on ~99% of
+      # lookups and the Windows wheel build recompiles all of TVM + TileLang
+      # from scratch (~40 min).
+      - name: Create stable .venv for ccache wrapper (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path ".venv\Scripts\python.exe")) {
+            uv venv .venv
+          }
+          & ".venv\Scripts\python.exe" --version
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          max-size: "200MB"
+          # One full Windows build writes >200MB of compressed objects; a
+          # smaller cap makes ccache evict entries mid-build (522 cleanups
+          # observed at 200MB) so the cache never converges.
+          max-size: "2GB"
           create-symlink: ${{ runner.os != 'Windows' }}
           evict-old-files: "7d"
           append-timestamp: false
@@ -210,13 +235,6 @@ jobs:
           package-dir: .
           output-dir: wheelhouse
           config-file: "{package}/pyproject.toml"
-
-      - name: Setup Python and uv with caching
-        id: setup-uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          python-version: ${{ matrix.target.python_version }}
-          activate-environment: true
 
       - name: Test built wheels
         if: runner.os != 'Windows'
