@@ -731,6 +731,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     kRead,
     kWrite,
     kSync,
+    kSyncWarp,
     kAlloc,
     // acquired version of read, only need to handle WAR dep.
     kReadAcquire
@@ -757,6 +758,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     AccessType type;
     /*! \brief The storage scope */
     StorageScope scope;
+    /*! \brief The mask used by an explicit warp-level synchronization. */
+    Optional<PrimExpr> warp_sync_mask;
     /*! \brief Whether the access is pointer access */
     bool is_pointer_access = false;
     /*! \brief Whether this access originates from an async copy context
@@ -771,6 +774,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
      * return values).
      */
     bool is_atomic = false;
+  };
+  struct LetBindingInfo {
+    PrimExpr value;
+    ConstrSet cset;
   };
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
@@ -1035,6 +1042,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     // Record let var properties
     auto let_prop = AnalyzeExprProperty(op->value);
     let_var_properties_[op->var] = let_prop;
+    let_bindings_.insert_or_assign(
+        op->var, LetBindingInfo{op->value, ConstrSet{constr_stack_}});
   }
   void VisitStmt_(const SBlockNode *op) final {
     auto block = Downcast<SBlock>(op);
@@ -1523,6 +1532,16 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.type = kSync;
       e.scope = sync_scope_;
       curr_stmt_.access.emplace_back(std::move(e));
+    } else if (op->op.same_as(tl::sync_warp())) {
+      ICHECK(allow_append_);
+      AccessEntry e{.cset = {constr_stack_}};
+      e.threads = env_threads();
+      e.type = kSyncWarp;
+      e.scope = sync_scope_;
+      if (!op->args.empty()) {
+        e.warp_sync_mask = op->args[0];
+      }
+      curr_stmt_.access.emplace_back(std::move(e));
     } else {
       ConstrVisitor::VisitExpr_(op);
     }
@@ -1550,9 +1569,38 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
     }
 
-    // Unsynced reads and writes
-    std::vector<AccessEntry> reads;
-    std::vector<AccessEntry> writes;
+    struct PendingAccess {
+      AccessEntry access;
+      std::vector<AccessEntry> warp_syncs_after;
+    };
+    std::vector<PendingAccess> reads;
+    std::vector<PendingAccess> writes;
+    auto has_conflict = [&](const std::vector<PendingAccess> &pending,
+                            const AccessEntry &curr, const ForNode *loop) {
+      for (const PendingAccess &item : pending) {
+        if (!FindConflict(item.access, curr, loop)) {
+          continue;
+        }
+        if (loop == nullptr && std::any_of(item.warp_syncs_after.begin(),
+                                           item.warp_syncs_after.end(),
+                                           [&](const AccessEntry &sync) {
+                                             return WarpSyncOrders(item.access,
+                                                                   curr, sync);
+                                           })) {
+          continue;
+        }
+        return true;
+      }
+      return false;
+    };
+    auto record_warp_sync = [&](const AccessEntry &sync) {
+      for (PendingAccess &item : reads) {
+        item.warp_syncs_after.push_back(sync);
+      }
+      for (PendingAccess &item : writes) {
+        item.warp_syncs_after.push_back(sync);
+      }
+    };
     // if it is a loop, rotate two times to consider effect of loop.
     // simulation based approach to find dependencies
     for (size_t i = 0; i < seq.size(); ++i) {
@@ -1569,14 +1617,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
           // Same-iteration conflict: loop=nullptr
-          if (FindConflict(writes, acc, nullptr)) {
+          if (has_conflict(writes, acc, nullptr)) {
             sync_before_stmt = true;
             break;
           }
         } else if (acc.type == kWrite) {
           // Same-iteration conflict: loop=nullptr
-          if (FindConflict(reads, acc, nullptr) ||
-              FindConflict(writes, acc, nullptr)) {
+          if (has_conflict(reads, acc, nullptr) ||
+              has_conflict(writes, acc, nullptr)) {
             sync_before_stmt = true;
             break;
           }
@@ -1593,12 +1641,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       // Add the read/write of current statement
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
-          reads.push_back(acc);
+          reads.push_back({acc, {}});
         } else if (acc.type == kWrite) {
-          writes.push_back(acc);
+          writes.push_back({acc, {}});
         } else if (acc.type == kSync) {
           reads.clear();
           writes.clear();
+        } else if (acc.type == kSyncWarp) {
+          record_warp_sync(acc);
         }
       }
 
@@ -1649,20 +1699,22 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         for (const AccessEntry &acc : s.access) {
           if (acc.type == kRead) {
             // Loop-carry conflict: pass loop for iteration shift analysis
-            if (FindConflict(writes, acc, loop)) {
+            if (has_conflict(writes, acc, loop)) {
               need_loop_sync = true;
               break;
             }
           } else if (acc.type == kWrite) {
             // Loop-carry conflict: pass loop for iteration shift analysis
-            if (FindConflict(reads, acc, loop) ||
-                FindConflict(writes, acc, loop)) {
+            if (has_conflict(reads, acc, loop) ||
+                has_conflict(writes, acc, loop)) {
               need_loop_sync = true;
               break;
             }
           } else if (acc.type == kSync) {
             reads.clear();
             writes.clear();
+          } else if (acc.type == kSyncWarp) {
+            record_warp_sync(acc);
           }
         }
         if (need_loop_sync) {
@@ -1733,6 +1785,193 @@ private:
     return checker.AnalyzeExpr(expr);
   }
 
+  PrimExpr StripCasts(PrimExpr expr) const {
+    while (const auto *cast = expr.as<CastNode>()) {
+      expr = cast->value;
+    }
+    return expr;
+  }
+
+  const LetBindingInfo *FindLetBinding(const PrimExpr &expr) const {
+    const auto *var = StripCasts(expr).as<VarNode>();
+    if (var == nullptr) {
+      return nullptr;
+    }
+    auto it = let_bindings_.find(GetRef<Var>(var));
+    return it == let_bindings_.end() ? nullptr : &it->second;
+  }
+
+  PrimExpr ResolveLetValue(PrimExpr expr) const {
+    VarIdentitySet visited;
+    while (true) {
+      expr = StripCasts(expr);
+      const auto *var = expr.as<VarNode>();
+      if (var == nullptr) {
+        return expr;
+      }
+      Var var_ref = GetRef<Var>(var);
+      if (!visited.insert(var_ref).second) {
+        return expr;
+      }
+      auto it = let_bindings_.find(var_ref);
+      if (it == let_bindings_.end()) {
+        return expr;
+      }
+      expr = it->second.value;
+    }
+  }
+
+  PrimExpr ParticipationCondition(const ConstrSet &cset) const {
+    PrimExpr condition = Bool(true);
+    for (const Constr &constr : cset.constrs_) {
+      if (constr.kind != Constr::kBindValue) {
+        condition = tirx::And(condition, constr.ToGenericConstr());
+      }
+    }
+    return condition;
+  }
+
+  bool HaveEquivalentParticipation(const PrimExpr &lhs, const PrimExpr &rhs,
+                                   const Array<IterVar> &lhs_threads,
+                                   const Array<IterVar> &rhs_threads) const {
+    if (ExprDeepEqual()(lhs, rhs)) {
+      return true;
+    }
+
+    arith::Analyzer analyzer;
+    VarIdentitySet bound;
+    for (const Array<IterVar> *threads : {&lhs_threads, &rhs_threads}) {
+      for (const IterVar &iv : *threads) {
+        if (iv->dom.defined() && bound.insert(iv->var).second) {
+          analyzer.Bind(iv->var, iv->dom);
+        }
+      }
+    }
+    PrimExpr equivalent = tirx::Or(tirx::And(lhs, rhs),
+                                   tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
+    return analyzer.z3_prover.CanProve(equivalent);
+  }
+
+  bool HaveEquivalentParticipation(const AccessEntry &lhs,
+                                   const AccessEntry &rhs) const {
+    return HaveEquivalentParticipation(ParticipationCondition(lhs.cset),
+                                       ParticipationCondition(rhs.cset),
+                                       lhs.threads, rhs.threads);
+  }
+
+  bool IsExactBallotWarpSync(const AccessEntry &sync) const {
+    if (!sync.warp_sync_mask.defined()) {
+      return false;
+    }
+
+    const LetBindingInfo *participant_binding =
+        FindLetBinding(sync.warp_sync_mask.value());
+    if (participant_binding == nullptr) {
+      return false;
+    }
+    const auto *ballot =
+        ResolveLetValue(participant_binding->value).as<CallNode>();
+    if (ballot == nullptr || !ballot->op.same_as(tl::ballot_sync()) ||
+        ballot->args.size() != 2U) {
+      return false;
+    }
+
+    const LetBindingInfo *active_binding = FindLetBinding(ballot->args[0]);
+    if (active_binding == nullptr) {
+      return false;
+    }
+    const auto *active_mask =
+        ResolveLetValue(active_binding->value).as<CallNode>();
+    if (active_mask == nullptr || !active_mask->op.same_as(tl::activemask()) ||
+        !active_mask->args.empty()) {
+      return false;
+    }
+
+    PrimExpr active_participation =
+        ParticipationCondition(active_binding->cset);
+    PrimExpr ballot_participation =
+        ParticipationCondition(participant_binding->cset);
+    if (!HaveEquivalentParticipation(active_participation, ballot_participation,
+                                     sync.threads, sync.threads)) {
+      return false;
+    }
+
+    PrimExpr expected_participation =
+        tirx::And(ballot_participation, ResolveLetValue(ballot->args[1]));
+    return HaveEquivalentParticipation(ParticipationCondition(sync.cset),
+                                       expected_participation, sync.threads,
+                                       sync.threads);
+  }
+
+  bool ConflictsOnlyWithinWarp(const AccessEntry &prev,
+                               const AccessEntry &curr) const {
+    if (prev.is_pointer_access || curr.is_pointer_access ||
+        prev.buffer_indices.size() != 1U || curr.buffer_indices.size() != 1U) {
+      return false;
+    }
+
+    Map<Var, PrimExpr> prev_sub, curr_sub;
+    for (const IterVar &prev_iv : prev.threads) {
+      if (runtime::ThreadScope::Create(prev_iv->thread_tag).rank != 1) {
+        continue;
+      }
+      IterVar curr_iv;
+      for (const IterVar &candidate : curr.threads) {
+        if (candidate->thread_tag == prev_iv->thread_tag) {
+          curr_iv = candidate;
+          break;
+        }
+      }
+      if (!curr_iv.defined()) {
+        return false;
+      }
+      const std::string suffix = prev_iv->thread_tag;
+      prev_sub.Set(prev_iv->var, Var(suffix + "<W1>", prev_iv->var.dtype()));
+      curr_sub.Set(curr_iv->var, Var(suffix + "<W2>", curr_iv->var.dtype()));
+    }
+    if (prev_sub.empty() || curr_sub.empty()) {
+      return false;
+    }
+
+    ConstrSet prev_cset = prev.cset.RenameFrom("<W1>", prev_sub, std::nullopt,
+                                               /*rename_ranges=*/false);
+    ConstrSet curr_cset = curr.cset.RenameFrom("<W2>", curr_sub, std::nullopt,
+                                               /*rename_ranges=*/false);
+    arith::Analyzer analyzer;
+    prev_cset.ToConstraints()
+        .Merge(curr_cset.ToConstraints())
+        .Populate(analyzer);
+
+    DataType index_dtype = DataType::Int(64);
+    PrimExpr prev_index = Substitute(prev.buffer_indices[0], prev_sub);
+    PrimExpr curr_index = Substitute(curr.buffer_indices[0], curr_sub);
+    if (!prev_index.dtype().is_scalar() || !curr_index.dtype().is_scalar()) {
+      return false;
+    }
+    PrimExpr prev_address = Cast(index_dtype, prev_index) *
+                            make_const(index_dtype, prev.dtype.bytes());
+    PrimExpr curr_address = Cast(index_dtype, curr_index) *
+                            make_const(index_dtype, curr.dtype.bytes());
+
+    PrimExpr prev_linear =
+        Substitute(MakeLinearThreadId(prev.threads), prev_sub);
+    PrimExpr curr_linear =
+        Substitute(MakeLinearThreadId(curr.threads), curr_sub);
+    PrimExpr warp_size = make_const(index_dtype, warp_size_);
+    PrimExpr same_warp =
+        FloorDiv(prev_linear, warp_size) == FloorDiv(curr_linear, warp_size);
+    return analyzer.CanProve(
+        tirx::Or(same_warp, tirx::NE(prev_address, curr_address)));
+  }
+
+  bool WarpSyncOrders(const AccessEntry &prev, const AccessEntry &curr,
+                      const AccessEntry &sync) const {
+    return IsExactBallotWarpSync(sync) &&
+           HaveEquivalentParticipation(prev, sync) &&
+           HaveEquivalentParticipation(curr, sync) &&
+           ConflictsOnlyWithinWarp(prev, curr);
+  }
+
   bool Enabled(const VarNode *buf, const StorageScope &scope) {
     return in_device_env() && scope == sync_scope_;
   }
@@ -1758,6 +1997,9 @@ private:
   // Thread-uniform/runtime properties for let-bound vars visible in the
   // current lexical scope.
   VarPropertyMap let_var_properties_;
+  // Flat Bind definitions and their participation context.
+  std::unordered_map<Var, LetBindingInfo, ObjectPtrHash, ObjectPtrEqual>
+      let_bindings_;
   // The buffer map
   Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
@@ -1855,6 +2097,9 @@ private:
       break;
     case kSync:
       type_str = "Sync";
+      break;
+    case kSyncWarp:
+      type_str = "SyncWarp";
       break;
     case kAlloc:
       type_str = "Alloc";
@@ -2189,6 +2434,35 @@ private:
         ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
         provably_disjoint =
             analyzer.CanProve(tirx::NE(prev_indice_bytes, curr_indice_bytes));
+        // Enumerate short static unrolls when div/mod expressions are beyond
+        // the symbolic prover but each adjacent iteration is still disjoint.
+        if (!provably_disjoint && loop != nullptr &&
+            loop->kind == ForKind::kUnrolled) {
+          const auto *loop_min = loop->min.as<IntImmNode>();
+          const auto *loop_extent = loop->extent.as<IntImmNode>();
+          constexpr int64_t kMaxEnumeratedUnrollExtent = 64;
+          if (loop_min != nullptr && loop_extent != nullptr &&
+              loop_extent->value > 1 &&
+              loop_extent->value <= kMaxEnumeratedUnrollExtent) {
+            provably_disjoint = true;
+            for (int64_t offset = 0; offset < loop_extent->value - 1;
+                 ++offset) {
+              Map<Var, PrimExpr> iteration_sub;
+              iteration_sub.Set(
+                  loop->loop_var,
+                  make_const(loop->loop_var.dtype(), loop_min->value + offset));
+              PrimExpr prev_at_iteration =
+                  Substitute(prev_indice_bytes, iteration_sub);
+              PrimExpr curr_at_iteration =
+                  Substitute(curr_indice_bytes, iteration_sub);
+              if (!analyzer.CanProve(
+                      tirx::NE(prev_at_iteration, curr_at_iteration))) {
+                provably_disjoint = false;
+                break;
+              }
+            }
+          }
+        }
       } else {
         try {
           auto prev_min = analyzer.Simplify(
@@ -2227,16 +2501,6 @@ private:
     }
 
     return range_is_overlap;
-  }
-
-  bool FindConflict(const std::vector<AccessEntry> &prev,
-                    const AccessEntry &curr, const ForNode *loop) {
-    for (const AccessEntry &x : prev) {
-      if (FindConflict(x, curr, loop)) {
-        return true;
-      }
-    }
-    return false;
   }
 };
 
