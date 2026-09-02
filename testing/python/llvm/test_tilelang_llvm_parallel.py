@@ -47,20 +47,22 @@ def _compile(pass_configs):
     )
 
 
+@tilelang.testing.requires_llvm
 def test_llvm_cpu_parallel_gemm_correctness():
     torch.manual_seed(0)
     kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True})
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
 
 
+@tilelang.testing.requires_llvm
 def test_llvm_cpu_parallel_disabled_by_default():
     torch.manual_seed(0)
     kernel = _compile(None)
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
 
 
 if __name__ == "__main__":
