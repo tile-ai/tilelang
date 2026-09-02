@@ -213,15 +213,63 @@ TL_PATCH TL_DEVICE bfloat16_t __hfma(const bfloat16_t x, const bfloat16_t y,
 #endif
 }
 
-// CUDA has no half-precision tangent intrinsic, but tangent lowering uses the
-// half-style `htan` name for 16-bit inputs. Evaluate in float32 and convert the
-// result back to the source type.
+// 16-bit lowering emits these h* names, but CUDA has no overload of them
+// that accepts the CUTLASS wrapper types. Evaluate in float32 and convert
+// the result back to the source type.
 TL_PATCH TL_DEVICE half_t htan(const half_t x) {
   return half_t(tanf(float(x)));
 }
 
 TL_PATCH TL_DEVICE bfloat16_t htan(const bfloat16_t x) {
   return bfloat16_t(tanf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hsinh(const half_t x) {
+  return half_t(sinhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hsinh(const bfloat16_t x) {
+  return bfloat16_t(sinhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hcosh(const half_t x) {
+  return half_t(coshf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hcosh(const bfloat16_t x) {
+  return bfloat16_t(coshf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t htanh(const half_t x) {
+  return half_t(tanhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t htanh(const bfloat16_t x) {
+  return bfloat16_t(tanhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hatan(const half_t x) {
+  return half_t(atanf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hatan(const bfloat16_t x) {
+  return bfloat16_t(atanf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t herf(const half_t x) {
+  return half_t(erff(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t herf(const bfloat16_t x) {
+  return bfloat16_t(erff(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hnearbyint(const half_t x) {
+  return half_t(nearbyintf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hnearbyint(const bfloat16_t x) {
+  return bfloat16_t(nearbyintf(float(x)));
 }
 
 // TVM lowers 16-bit math ops to CUDA's half-style names (hexp, hlog, ...).
