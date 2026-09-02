@@ -1218,8 +1218,34 @@ def test_sync_inside_non_uniform_loop_is_rejected():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[63 - tx]
 
-    with pytest.raises(Exception, match="loop whose trip count differs"):
+    with pytest.raises(Exception, match="participant set or trip count can differ"):
         run_passes_script(func)
+
+
+def test_partial_sync_inside_non_uniform_loop_is_allowed():
+    """Allow a fixed warp whose participating threads have equal trip counts."""
+    import re
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for i in T.serial(0, tx // 32 + 1):
+            if tx >= 32:
+                s[i * 64 + tx] = T.cast(tx + i, "float32")
+                l[0] = s[i * 64 + 95 - tx]
+
+    s = run_passes_script(func)
+    sync_match = re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s)
+    assert sync_match, f"Expected a 32-thread barrier:\n{s}"
+    assert s.count('T.tvm_storage_sync("shared"') == 1, f"Expected exactly one partial barrier:\n{s}"
+    loop_pos = s.index("for i in range(tx // 32 + 1)")
+    if_pos = s.index("if tx >= 32", loop_pos)
+    assert sync_match.start() > if_pos, f"Barrier must remain inside the guarded loop body:\n{s}"
 
 
 def test_divergent_split_inside_uniform_loop_is_allowed():

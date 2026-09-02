@@ -783,6 +783,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   struct StmtEntry {
     /*! \brief The statement */
     const Object *stmt{};
+    /*! \brief The lexical constraints under which the statement executes */
+    ConstrSet cset;
     /*! \brief access patterns in the statement */
     std::vector<AccessEntry> access;
   };
@@ -987,6 +989,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     allow_append_ = true;
     ICHECK_EQ(curr_stmt_.access.size(), 0U);
     curr_stmt_.stmt = op;
+    curr_stmt_.cset = GetConstrSet();
 
     Var buf = op->buffer->data;
     buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), op->buffer);
@@ -1019,6 +1022,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     allow_append_ = true;
     ICHECK_EQ(curr_stmt_.access.size(), 0U);
     curr_stmt_.stmt = op;
+    curr_stmt_.cset = GetConstrSet();
     ConstrVisitor::VisitStmt_(op);
     // push to the scope
     if (!curr_stmt_.access.empty()) {
@@ -1032,6 +1036,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     allow_append_ = true;
     ICHECK_EQ(curr_stmt_.access.size(), 0U);
     curr_stmt_.stmt = op;
+    curr_stmt_.cset = GetConstrSet();
     RecordSharedMemoryAlias(op->var, op->value);
     this->VisitExpr(op->value);
     // push to the scope
@@ -1082,6 +1087,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   }
 
   void VisitStmt_(const ForNode *op) final {
+    StmtEntry s;
+    s.cset = GetConstrSet();
     ConditionThreadProperty loop_var_property = AnalyzeExprProperty(op->min);
     if (!loop_var_property.is_block_uniform && IsBlockUniformValue(op->min)) {
       loop_var_property.is_block_uniform = true;
@@ -1102,7 +1109,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     if (!extent_is_block_uniform) {
       --non_uniform_control_flow_depth_;
     }
-    StmtEntry s;
     s.stmt = op;
     s.access = Summarize(std::move(scope_.back()), op);
     scope_.pop_back();
@@ -1128,10 +1134,12 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
     if (!extent_is_block_uniform) {
       for (const Object *sync : syncs_inserted_) {
-        if (syncs_before_loop.count(sync) == 0 && sync != op) {
+        if (syncs_before_loop.count(sync) == 0 && sync != op &&
+            !IsSafeSyncInNonUniformLoop(sync, op)) {
           LOG(FATAL) << "[ThreadSync] Cannot insert a required shared-memory "
-                        "sync inside a loop whose trip count differs across "
-                        "threads. Rewrite the kernel into uniform phases. "
+                        "sync inside a loop when its participant set or trip "
+                        "count can differ across threads. Rewrite the kernel "
+                        "into uniform phases. "
                         "Loop extent: "
                      << op->extent;
         }
@@ -1143,6 +1151,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   /*! \brief Summarize both branches and plan splits for unsafe barriers. */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
+    s.cset = GetConstrSet();
     bool condition_is_block_uniform = IsBlockUniformCondition(op->condition);
     // Track syncs inserted before visiting the if body
     std::unordered_set<const Object *> syncs_before_then;
@@ -1264,11 +1273,13 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           plan.then_syncs.insert(
               GetRef<Stmt>(static_cast<const StmtNode *>(sync)));
           syncs_inserted_.erase(sync);
+          sync_participation_.erase(sync);
         }
         for (const Object *sync : syncs_in_else) {
           plan.else_syncs.insert(
               GetRef<Stmt>(static_cast<const StmtNode *>(sync)));
           syncs_inserted_.erase(sync);
+          sync_participation_.erase(sync);
         }
         branch_sync_plans_.emplace(GetRef<IfThenElse>(op), std::move(plan));
       }
@@ -1279,6 +1290,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
   void VisitStmt_(const WhileNode *op) final {
     StmtEntry s;
+    s.cset = GetConstrSet();
     ConditionThreadProperty condition_property =
         AnalyzeExprProperty(op->condition);
     bool condition_is_block_uniform = condition_property.is_block_uniform ||
@@ -1653,7 +1665,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
 
       if (sync_before_stmt) {
-        insert_syncs(s.stmt);
+        insert_syncs(s.stmt, &s.cset);
       }
     }
     if (loop != nullptr) {
@@ -1726,7 +1738,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           } else {
             // Fall back to inserting before the first conflicting statement
             // inside the loop to maintain correctness when reads are present.
-            insert_syncs(s.stmt);
+            insert_syncs(s.stmt, &s.cset);
           }
           break;
         }
@@ -2007,11 +2019,58 @@ private:
   // warp size from target
   int warp_size_;
   int non_uniform_control_flow_depth_{0};
+  std::unordered_map<const Object *, ConstrSet> sync_participation_;
 
-  void insert_syncs(const Object *obj) {
+  void insert_syncs(const Object *obj,
+                    const ConstrSet *participation = nullptr) {
     if (syncs_inserted_.count(obj))
       return;
     syncs_inserted_.insert(obj);
+    sync_participation_.emplace(obj, participation == nullptr ? GetConstrSet()
+                                                              : *participation);
+  }
+
+  /*! \brief Check whether a partial sync is safe in a non-uniform loop. */
+  bool IsSafeSyncInNonUniformLoop(const Object *sync,
+                                  const ForNode *loop) const {
+    auto participation_it = sync_participation_.find(sync);
+    if (participation_it == sync_participation_.end()) {
+      return false;
+    }
+    const ConstrSet &participation = participation_it->second;
+
+    for (const Constr &constr : participation.constrs_) {
+      if (constr.kind == Constr::kBindRange &&
+          constr.var.same_as(loop->loop_var)) {
+        continue;
+      }
+      if (UsesVar(constr.ToGenericConstr(), [&](const VarNode *var) {
+            return var == loop->loop_var.get();
+          })) {
+        return false;
+      }
+    }
+
+    Map<Var, PrimExpr> sub1, sub2;
+    for (const IterVar &iv : env_threads_) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1) {
+        continue;
+      }
+      sub1.Set(iv->var, Var(iv->var->name_hint + "<L1>", iv->var.dtype()));
+      sub2.Set(iv->var, Var(iv->var->name_hint + "<L2>", iv->var.dtype()));
+    }
+    if (sub1.empty()) {
+      return true;
+    }
+
+    ConstrSet c1 = participation.RenameFrom("<L1>", sub1, std::nullopt,
+                                            /*rename_ranges=*/false);
+    ConstrSet c2 = participation.RenameFrom("<L2>", sub2, std::nullopt,
+                                            /*rename_ranges=*/false);
+    arith::Analyzer analyzer;
+    c1.ToConstraints().Merge(c2.ToConstraints()).Populate(analyzer);
+    return analyzer.z3_prover.CanProve(Substitute(loop->extent, sub1) ==
+                                       Substitute(loop->extent, sub2));
   }
   bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
     if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
