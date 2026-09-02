@@ -383,6 +383,40 @@ def test_wgmma_marked_async():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_sparse_mma_intrinsics_marked_async():
+    for op_name in (
+        "tl.ptx_wgmma_sp_ss",
+        "tl.ptx_wgmma_sp_rs",
+        "tl.ptx_tcgen05_mma_blockscaled_ss",
+    ):
+        target_op = tirx.op.Op.get(op_name)
+
+        @T.prim_func
+        def before():
+            with T.Kernel(1):
+                smem = T.decl_buffer((1,), T.float16, scope="shared")
+                smem[0] = T.float16(0)
+                T.evaluate(T.call_intrin("handle", target_op))
+
+        mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+        mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+        mod = tl.cuda.transform.InjectFenceProxy()(mod)
+        order = []
+
+        def visit(node):
+            if isinstance(node, tirx.Evaluate):
+                call = node.value
+                if isinstance(call, tirx.Call):
+                    order.append(getattr(call.op, "name", ""))
+
+        tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
+
+        assert op_name in order
+        assert "tl.fence_proxy_async" in order
+        assert order.index("tl.fence_proxy_async") < order.index(op_name)
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_shared_barrier_ops_do_not_trigger_fence_proxy():
     @T.prim_func
     def before(A_desc: T.handle("uint8x128", "grid_constant")):
