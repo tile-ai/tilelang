@@ -208,7 +208,7 @@ The autotuner caches best artifacts both in‑memory (per process) and on disk u
 Disk cache contents (per key)
 - Best config and latency: `best_config.json`, `latency.json`
 - Kernel sources and library: `device_kernel.cu`, `host_kernel.cu`, `kernel_lib.so` (or `kernel.cubin`/`executable.so` depending on backend)
-- Function and params: `function.pkl`, `params.pkl`
+- Function and params: `function.pkl`, `params.json`
 
 Control via env vars (tilelang.env)
 - `TILELANG_CACHE_DIR` (default `~/.tilelang/cache`)
