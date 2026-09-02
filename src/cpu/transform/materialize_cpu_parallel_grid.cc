@@ -21,9 +21,10 @@
  *  4. Sinks AllocBuffers into the parallel body (per-worker private copies;
  *     on ``c`` at the innermost parallelized dim to keep collapse(n) perfect
  *     nesting). Only allocs whose uses are all plain load/store inside this
- *     nest sink; opaque (call_extern/address_of/access_ptr), cross-level,
- *     cross-nest, or outside uses stay shared with a warning. A nest whose
- *     buffer cannot be privatized is refused rather than raced.
+ *     nest sink; load-only buffers (e.g. a table initialized before the
+ *     nest) may stay shared. A nest whose buffer is mutated inside but
+ *     cannot be privatized (opaque/cross-level/cross-nest/outside uses) is
+ *     refused with a warning rather than raced.
  *
  * Opt-in only: without the annotation this pass is not even in the pipeline.
  */
@@ -73,8 +74,11 @@ class GridAccessAnalysis : public StmtExprVisitor {
 public:
   struct AccessInfo {
     int min_depth = 0;
-    bool inside = false;
-    bool opaque = false;
+    bool inside = false;        // plain load/store inside a nest
+    bool outside = false;       // plain load/store outside every nest
+    bool opaque = false;        // data var in a Call argument, anywhere
+    bool opaque_inside = false; // opaque use inside a nest
+    bool store_inside = false;  // plain store inside a nest
     std::unordered_set<const ForNode *> nests;
   };
 
@@ -115,6 +119,9 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const BufferStoreNode *op) override {
+    if (grid_depth_ > 0) {
+      info_[op->buffer->data].store_inside = true;
+    }
     Touch(op->buffer);
     StmtExprVisitor::VisitStmt_(op);
   }
@@ -128,6 +135,7 @@ private:
       entry.opaque = true;
       entry.min_depth = 0;
       if (grid_depth_ > 0) {
+        entry.opaque_inside = true;
         entry.inside = true;
         entry.nests.insert(current_nest_);
       }
@@ -138,6 +146,7 @@ private:
     AccessInfo &entry = info_[buffer->data];
     if (grid_depth_ == 0) {
       entry.min_depth = 0;
+      entry.outside = true;
     } else {
       entry.min_depth =
           entry.inside ? std::min(entry.min_depth, grid_depth_) : grid_depth_;
@@ -299,11 +308,18 @@ private:
   //! True when every use is a plain load/store inside the `head` nest.
   static bool FullyOwnedBy(const GridAccessAnalysis::AccessInfo &info,
                            const ForNode *head) {
-    return !info.opaque && info.inside && info.nests.size() == 1 &&
-           *info.nests.begin() == head;
+    return !info.opaque && !info.outside && info.inside &&
+           info.nests.size() == 1 && *info.nests.begin() == head;
   }
 
-  //! Move sinkable allocations out of `out` and return them.
+  //! True when the buffer may be sunk into the `head` nest.
+  static bool SinkableAlloc(const GridAccessAnalysis::AccessInfo &info,
+                            const ForNode *head, int sink_depth) {
+    return FullyOwnedBy(info, head) && info.min_depth >= sink_depth;
+  }
+
+  //! Move sinkable allocations out of `out` and return them; kept buffers
+  //! are reconsidered when their own nest converts.
   std::vector<Stmt> CollectSinkableAllocs(Array<Stmt> &out,
                                           const ForNode *grid_head) {
     if (out.empty()) {
@@ -317,40 +333,10 @@ private:
     Array<Stmt> kept;
     for (const Stmt &elem : out) {
       const auto *alloc = elem.as<AllocBufferNode>();
-      if (!alloc) {
-        kept.push_back(elem);
-        continue;
-      }
-      GridAccessAnalysis::AccessInfo info =
-          analysis_.Lookup(alloc->buffer->data);
-      if (info.min_depth >= sink_depth && FullyOwnedBy(info, grid_head)) {
+      if (alloc != nullptr &&
+          SinkableAlloc(analysis_.Lookup(alloc->buffer->data), grid_head,
+                        sink_depth)) {
         sunk.push_back(elem);
-      } else if (info.opaque && info.inside) {
-        LOG(WARNING)
-            << "tl.cpu_parallel: buffer `" << alloc->buffer->name
-            << "` is referenced through opaque accesses (call_extern / "
-               "address_of / access_ptr) inside the parallel region; it "
-               "stays shared across workers and may race";
-        kept.push_back(elem);
-      } else if (info.inside && info.nests.size() > 1) {
-        LOG(WARNING) << "tl.cpu_parallel: buffer `" << alloc->buffer->name
-                     << "` is shared by multiple grid nests; it stays shared "
-                        "across workers and may race";
-        kept.push_back(elem);
-      } else if (info.inside && !FullyOwnedBy(info, grid_head)) {
-        // Owned by one other nest: sinks when that nest converts (or stays
-        // shared next to a serial one — safe either way); don't warn here.
-        kept.push_back(elem);
-      } else if (info.min_depth >= 1) {
-        LOG(WARNING) << "tl.cpu_parallel: buffer `" << alloc->buffer->name
-                     << "` is used across grid levels; it stays shared "
-                        "across workers and may race";
-        kept.push_back(elem);
-      } else if (info.inside) {
-        LOG(WARNING) << "tl.cpu_parallel: buffer `" << alloc->buffer->name
-                     << "` is used both inside and outside the parallel "
-                        "region; it stays shared across workers and may race";
-        kept.push_back(elem);
       } else {
         kept.push_back(elem);
       }
@@ -383,33 +369,6 @@ private:
       }
       return body;
     };
-
-    // A function-scope alloc that belongs to this nest but was not adjacent
-    // enough to sink would stay shared: refuse rather than race.
-    for (const auto &kv : analysis_.AllocDepths()) {
-      const Var &data = kv.first;
-      if (kv.second != 0) {
-        continue;
-      }
-      GridAccessAnalysis::AccessInfo info = analysis_.Lookup(data);
-      if (info.min_depth >= sink_depth && FullyOwnedBy(info, head)) {
-        bool was_sunk = false;
-        for (const Stmt &s : sunk) {
-          if (s.as<AllocBufferNode>() &&
-              s.as<AllocBufferNode>()->buffer->data.same_as(data)) {
-            was_sunk = true;
-            break;
-          }
-        }
-        if (!was_sunk) {
-          LOG(WARNING) << "tl.cpu_parallel: buffer `" << data->name_hint
-                       << "` is used only inside the grid nest but its "
-                          "allocation is not adjacent to it, so it cannot be "
-                          "privatized; the nest stays serial";
-          return rebuild_serial();
-        }
-      }
-    }
 
     int64_t trip = 1;
     bool dynamic_extents = false;
@@ -462,6 +421,53 @@ private:
         LOG(WARNING) << "tl.cpu_parallel: the grid nest already contains a "
                         "parallel loop, which the llvm backend rejects; the "
                         "nest stays serial";
+        return rebuild_serial();
+      }
+    }
+
+    // Refuse to parallelize when a function-scope buffer is mutated (or
+    // opaquely used) inside the nest but cannot be privatized into it —
+    // running it shared across workers would be a data race. Load-only
+    // sharing (e.g. a table initialized before the nest) is race-free.
+    for (const auto &kv : analysis_.AllocDepths()) {
+      const Var &data = kv.first;
+      if (kv.second != 0) {
+        continue;
+      }
+      GridAccessAnalysis::AccessInfo info = analysis_.Lookup(data);
+      if (!info.nests.count(head)) {
+        continue; // not used inside this nest
+      }
+      if (SinkableAlloc(info, head, sink_depth)) {
+        bool was_sunk = false;
+        for (const Stmt &s : sunk) {
+          if (s.as<AllocBufferNode>() &&
+              s.as<AllocBufferNode>()->buffer->data.same_as(data)) {
+            was_sunk = true;
+            break;
+          }
+        }
+        if (!was_sunk) {
+          LOG(WARNING) << "tl.cpu_parallel: buffer `" << data->name_hint
+                       << "` is used only inside the grid nest but its "
+                          "allocation is not adjacent to it, so it cannot be "
+                          "privatized; the nest stays serial";
+          return rebuild_serial();
+        }
+        continue;
+      }
+      if (info.store_inside || info.opaque_inside) {
+        const char *reason =
+            info.opaque_inside
+                ? "it is referenced through opaque accesses (call_extern / "
+                  "address_of / access_ptr)"
+            : info.outside          ? "it is also used outside the nest"
+            : info.nests.size() > 1 ? "it is shared by multiple grid nests"
+                                    : "it is used across grid levels";
+        LOG(WARNING) << "tl.cpu_parallel: buffer `" << data->name_hint
+                     << "` is mutated inside the grid nest but cannot be "
+                        "privatized ("
+                     << reason << "); the nest stays serial";
         return rebuild_serial();
       }
     }

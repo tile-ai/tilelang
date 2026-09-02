@@ -258,10 +258,10 @@ def test_cpu_parallel_dynamic_extent():
     torch.testing.assert_close(kernel(A), A * 2.0, rtol=1e-6, atol=1e-6)
 
 
-def test_cpu_parallel_opaque_use_stays_shared():
-    # A buffer whose only in-nest use is opaque (call_extern on its data
-    # var) cannot be proven iteration-private: it must stay function-scope
-    # (shared) rather than being sunk.
+def test_cpu_parallel_opaque_use_stays_serial():
+    # A buffer whose in-nest use is opaque (call_extern on its data var)
+    # cannot be proven iteration-private; parallelizing with it shared would
+    # race (my_sink mutates it), so the nest must stay serial.
     TILE = 128
 
     @T.prim_func
@@ -273,7 +273,7 @@ def test_cpu_parallel_opaque_use_stays_shared():
             M // TILE,
             M // TILE,
             threads=1,
-            prelude="static void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] += 1.0f; }\n",
+            prelude='extern "C" void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] += 1.0f; }\n',
         ) as (bx, by):
             buf = T.alloc_buffer((TILE,), "float32", scope="local")
             T.call_extern("void", "my_sink", buf.data, TILE)
@@ -288,19 +288,18 @@ def test_cpu_parallel_opaque_use_stays_shared():
         pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
     )
     source = kernel.get_kernel_source()
-    assert "#pragma omp parallel for" in source
-    # Not sunk: the declaration stays ahead of the parallel region.
-    assert source.index("float buf") < source.index("#pragma omp")
+    assert "#pragma omp" not in source
 
     torch.manual_seed(0)
     A = torch.randn(M, dtype=torch.float32)
     torch.testing.assert_close(kernel(A), A, rtol=1e-6, atol=1e-6)
 
 
-def test_cpu_parallel_opaque_use_outside_nest_compiles():
+def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
     # Mixed case: a normal store inside the nest plus an opaque use outside
-    # it. The opaque use must pin the buffer shared (sinking it used to
-    # break the C compile with an undeclared identifier).
+    # it. The buffer cannot be privatized (the outside use would dangle), and
+    # sharing it across workers would race — the nest must stay serial.
+    # (Sinking it used to break the C compile with an undeclared identifier.)
     TILE = 128
 
     @T.prim_func
@@ -313,7 +312,7 @@ def test_cpu_parallel_opaque_use_outside_nest_compiles():
             M // TILE,
             M // TILE,
             threads=1,
-            prelude="static void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] = 0.0f; }\n",
+            prelude='extern "C" void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] = 0.0f; }\n',
         ) as (bx, by):
             for i in T.serial(TILE):
                 buf[i] = A[bx * TILE + i]
@@ -329,11 +328,78 @@ def test_cpu_parallel_opaque_use_outside_nest_compiles():
         pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
     )
     source = kernel.get_kernel_source()
-    assert source.index("float buf") < source.index("#pragma omp")
+    assert "#pragma omp" not in source
 
     torch.manual_seed(0)
     A = torch.randn(M, dtype=torch.float32)
     torch.testing.assert_close(kernel(A), A, rtol=1e-6, atol=1e-6)
+
+
+def test_cpu_parallel_outside_first_access_stays_serial():
+    # Regression: an outside access that comes *before* the first in-nest
+    # access used to leave no trace (min_depth got overwritten), so the
+    # buffer was sunk into the nest and the outside store crashed the
+    # pipeline with "used before definition". The nest must stay serial.
+    TILE = 128
+
+    @T.prim_func
+    def outside_first(
+        A: T.Tensor((M,), "float32"),
+        B: T.Tensor((M,), "float32"),
+    ):
+        buf = T.alloc_buffer((TILE,), "float32", scope="local")
+        buf[0] = 0.0  # outside access before the kernel nest
+        with T.Kernel(M // TILE, M // TILE, threads=1) as (bx, by):
+            for i in T.serial(TILE):
+                buf[i] = A[bx * TILE + i]
+            for i in T.serial(TILE):
+                B[bx * TILE + i] = buf[i] + by * 0.0
+
+    kernel = tilelang.compile(
+        outside_first,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "#pragma omp" not in source
+
+    torch.manual_seed(0)
+    A = torch.randn(M, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), A, rtol=1e-6, atol=1e-6)
+
+
+def test_cpu_parallel_readonly_shared_table_still_parallelizes():
+    # Load-only sharing is race-free: a buffer initialized before the nest
+    # and only read inside it must not block parallelization.
+    TILE = 128
+
+    @T.prim_func
+    def table_read(
+        A: T.Tensor((M,), "float32"),
+        B: T.Tensor((M,), "float32"),
+    ):
+        tbl = T.alloc_buffer((TILE,), "float32", scope="local")
+        for i in T.serial(TILE):
+            tbl[i] = 2.0
+        with T.Kernel(M // TILE, M // TILE, threads=1) as (bx, by):
+            for i in T.serial(TILE):
+                B[bx * TILE + i] = A[bx * TILE + i] * tbl[i] + by * 0.0
+
+    kernel = tilelang.compile(
+        table_read,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "#pragma omp parallel for" in source
+
+    torch.manual_seed(0)
+    A = torch.randn(M, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), A * 2.0, rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":
