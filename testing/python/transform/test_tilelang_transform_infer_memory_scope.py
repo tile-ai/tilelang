@@ -337,8 +337,6 @@ def test_auto_check_not_gated_by_init_check_optout():
 
 
 def test_reduce_rejects_auto_scope():
-    """A 类禁区: reduce macros dispatch on scope at trace time; auto buffers
-    must get an actionable error instead of a generic scope failure."""
 
     def build():
         @T.prim_func
@@ -357,7 +355,6 @@ def test_reduce_rejects_auto_scope():
 
 
 def test_print_rejects_auto_scope():
-    """A 类禁区: T.print dispatches on scope at trace time."""
 
     def build():
         @T.prim_func
@@ -394,7 +391,7 @@ def test_verify_buffer_init_checks_inferred_buffer(capfd):
 
 
 # ---------------------------------------------------------------------------
-# pipeline-level equivalence and codegen tests (GPU-free)
+# pipeline-level equivalence and codegen tests
 # ---------------------------------------------------------------------------
 
 _PASS_CONFIGS = {
@@ -410,6 +407,7 @@ def _lower_source(func, target: str) -> str:
     return artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_auto_gemm_matches_explicit_gemm_cuda():
     """The auto-scope kernel must lower to the same CUDA source as the
     hand-written alloc_shared/alloc_fragment version."""
@@ -418,6 +416,7 @@ def test_auto_gemm_matches_explicit_gemm_cuda():
     assert auto_src == explicit_src
 
 
+@tilelang.testing.requires_cuda
 def test_auto_gemm_codegen_form():
     """A/B land in dynamic shared memory; C is a plain local array."""
     src = _lower_source(_gemm_auto(), "cuda")
@@ -429,6 +428,7 @@ def test_auto_gemm_codegen_form():
     assert re.search(r"half_t\s+C_buf\[\d+\];", src), src
 
 
+@tilelang.testing.requires_cuda
 def test_elementwise_fragment_full_pipeline():
     """R6's local.fragment decision must survive LayoutInference and lower to a
     per-thread local array (vectorized), not shared memory."""
