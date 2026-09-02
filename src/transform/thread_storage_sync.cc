@@ -1080,8 +1080,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     ConditionThreadProperty extent_property = AnalyzeExprProperty(op->extent);
     bool extent_is_block_uniform =
         extent_property.is_block_uniform || IsBlockUniformValue(op->extent);
-    auto [loop_var_it, inserted] =
-        let_var_properties_.emplace(op->loop_var, loop_var_property);
+    bool inserted =
+        let_var_properties_.emplace(op->loop_var, loop_var_property).second;
     ICHECK(inserted);
 
     std::unordered_set<const Object *> syncs_before_loop = syncs_inserted_;
@@ -1128,7 +1128,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         }
       }
     }
-    let_var_properties_.erase(loop_var_it);
+    let_var_properties_.erase(op->loop_var);
   }
 
   /*! \brief Summarize both branches and plan splits for unsafe barriers. */
