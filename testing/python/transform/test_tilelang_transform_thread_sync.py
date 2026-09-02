@@ -793,9 +793,7 @@ def test_nested_non_warp_uniform_sync_is_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(
-        Exception, match="nested inside another control-flow statement"
-    ):
+    with pytest.raises(Exception, match="nested inside another control-flow statement"):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -933,9 +931,7 @@ def test_hazard_in_divergent_guard_is_split():
     sync = 'T.tvm_storage_sync("shared")'
     assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
     assert s.count("if thread_sync_condition") == 2, f"Expected a split branch:\n{s}"
-    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
-        f"Barrier does not order the hazard:\n{s}"
-    )
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), f"Barrier does not order the hazard:\n{s}"
 
 
 def test_hazard_in_divergent_else_branch_is_split():
@@ -958,9 +954,7 @@ def test_hazard_in_divergent_else_branch_is_split():
     s = run_passes_script(func)
     sync = 'T.tvm_storage_sync("shared")'
     assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
-    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
-        f"Barrier does not order the else hazard:\n{s}"
-    )
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), f"Barrier does not order the else hazard:\n{s}"
 
 
 def test_non_warp_uniform_if_else_is_split():
@@ -985,9 +979,7 @@ def test_non_warp_uniform_if_else_is_split():
     assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
     assert s.count("if thread_sync_condition") == 2, f"Expected a split branch:\n{s}"
     assert s.count("tx % 4 == 0") == 1, f"The condition must be evaluated once:\n{s}"
-    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
-        f"Barrier does not order the hazard:\n{s}"
-    )
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), f"Barrier does not order the hazard:\n{s}"
 
 
 def test_divergent_split_rejects_binding_crossing_barrier():
@@ -1028,9 +1020,7 @@ def test_nested_divergent_branch_split_is_rejected():
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 4) % 64]
 
-    with pytest.raises(
-        Exception, match="nested under another thread-divergent control-flow"
-    ):
+    with pytest.raises(Exception, match="nested under another thread-divergent control-flow"):
         run_passes_script(func)
 
 
@@ -1051,9 +1041,7 @@ def test_divergent_split_inside_non_uniform_loop_is_rejected():
                 s[tx] = T.cast(tx, "float32")
                 l[0] = s[(tx + 4) % 64]
 
-    with pytest.raises(
-        Exception, match="nested under another thread-divergent control-flow"
-    ):
+    with pytest.raises(Exception, match="nested under another thread-divergent control-flow"):
         run_passes_script(func)
 
 
@@ -1146,9 +1134,7 @@ def test_misaligned_else_partial_sync_is_split():
     s = run_passes_script(func)
     sync = 'T.tvm_storage_sync("shared")'
     assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
-    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
-        f"Barrier does not order the else hazard:\n{s}"
-    )
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), f"Barrier does not order the else hazard:\n{s}"
 
 
 def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
@@ -1202,9 +1188,7 @@ def test_premise_weaker_than_the_block_is_split():
     s = run_passes_script(func)
     sync = 'T.tvm_storage_sync("shared")'
     assert s.count(sync) == 1, f"Expected one full-block barrier:\n{s}"
-    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), (
-        f"Barrier does not order the hazard:\n{s}"
-    )
+    assert s.index("s_1[tx] =") < s.index(sync) < s.index("l_1[0] = s_1["), f"Barrier does not order the hazard:\n{s}"
 
 
 def test_premise_holds_across_an_enclosing_guard():
