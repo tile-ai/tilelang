@@ -4,7 +4,7 @@
  * Infer concrete memory scopes for buffers allocated with the virtual scope
  * "auto" (T.auto_alloc, issue #277).
  *
- * The pass runs early: after VerifyBufferInit and before warp specialization,
+ * The pass runs early: before VerifyBufferInit, warp specialization,
  * pipeline planning and layout inference, so that downstream passes that
  * branch on IsSharedBuffer (multi-versioning, cp.async/TMA staging, layout
  * inference) already see the final scope.
