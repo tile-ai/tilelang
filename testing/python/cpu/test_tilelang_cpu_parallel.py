@@ -185,5 +185,156 @@ class Module:
     assert source.count("#pragma omp parallel for") == 2
 
 
+def test_cpu_parallel_two_sequential_kernels():
+    # Regression: alloc sinking must attribute uses to the nest they belong
+    # to — the second kernel's scratch buffer used to be sunk into the first
+    # nest, failing the C compile with "use of undeclared identifier". Both
+    # sibling nests are parallelized independently.
+    TILE = 128
+
+    @T.prim_func
+    def two_kernels(
+        A: T.Tensor((M,), "float32"),
+        B: T.Tensor((M,), "float32"),
+        C: T.Tensor((M,), "float32"),
+    ):
+        with T.Kernel(M // TILE, M // TILE, threads=1) as (bx, by):
+            buf1 = T.alloc_buffer((TILE,), "float32", scope="local")
+            for i in T.serial(TILE):
+                buf1[i] = A[bx * TILE + i] + 1.0
+            for i in T.serial(TILE):
+                B[bx * TILE + i] = buf1[i] + by * 0.0
+        with T.Kernel(M // TILE, M // TILE, threads=1) as (bx2, by2):
+            buf2 = T.alloc_buffer((TILE,), "float32", scope="local")
+            for i in T.serial(TILE):
+                buf2[i] = A[bx2 * TILE + i] * 2.0
+            for i in T.serial(TILE):
+                C[bx2 * TILE + i] = buf2[i] + by2 * 0.0
+
+    kernel = tilelang.compile(
+        two_kernels,
+        target="c",
+        out_idx=[-2, -1],
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    source = kernel.get_kernel_source()
+    # Each nest becomes its own parallel region.
+    assert source.count("#pragma omp parallel for") == 2
+
+    torch.manual_seed(0)
+    A = torch.randn(M, dtype=torch.float32)
+    B, C = kernel(A)
+    torch.testing.assert_close(B, A + 1.0, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(C, A * 2.0, rtol=1e-6, atol=1e-6)
+
+
+def test_cpu_parallel_dynamic_extent():
+    # Symbolic grid extents are parallelized too: the assume AttrStmt that
+    # InjectAssumes wraps around symbolic-shape kernels is transparent to the
+    # pass, and OpenMP handles runtime trip counts (the min_trip gate is off
+    # by default).
+    m = T.symbolic("m")
+
+    @T.prim_func
+    def dyn(A: T.Tensor((m,), "float32"), B: T.Tensor((m,), "float32")):
+        with T.Kernel(T.ceildiv(m, 128), threads=1) as bx:
+            for i in T.serial(128):
+                if bx * 128 + i < m:
+                    B[bx * 128 + i] = A[bx * 128 + i] * 2.0
+
+    kernel = tilelang.compile(
+        dyn,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "#pragma omp parallel for" in source
+
+    torch.manual_seed(0)
+    A = torch.randn(1000, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), A * 2.0, rtol=1e-6, atol=1e-6)
+
+
+def test_cpu_parallel_opaque_use_stays_shared():
+    # A buffer whose only in-nest use is opaque (call_extern on its data
+    # var) cannot be proven iteration-private: it must stay function-scope
+    # (shared) rather than being sunk.
+    TILE = 128
+
+    @T.prim_func
+    def opaque_only(
+        A: T.Tensor((M,), "float32"),
+        B: T.Tensor((M,), "float32"),
+    ):
+        with T.Kernel(
+            M // TILE,
+            M // TILE,
+            threads=1,
+            prelude="static void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] += 1.0f; }\n",
+        ) as (bx, by):
+            buf = T.alloc_buffer((TILE,), "float32", scope="local")
+            T.call_extern("void", "my_sink", buf.data, TILE)
+            for i in T.serial(TILE):
+                B[bx * TILE + i] = A[bx * TILE + i] + by * 0.0
+
+    kernel = tilelang.compile(
+        opaque_only,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "#pragma omp parallel for" in source
+    # Not sunk: the declaration stays ahead of the parallel region.
+    assert source.index("float buf") < source.index("#pragma omp")
+
+    torch.manual_seed(0)
+    A = torch.randn(M, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), A, rtol=1e-6, atol=1e-6)
+
+
+def test_cpu_parallel_opaque_use_outside_nest_compiles():
+    # Mixed case: a normal store inside the nest plus an opaque use outside
+    # it. The opaque use must pin the buffer shared (sinking it used to
+    # break the C compile with an undeclared identifier).
+    TILE = 128
+
+    @T.prim_func
+    def mixed_use(
+        A: T.Tensor((M,), "float32"),
+        B: T.Tensor((M,), "float32"),
+    ):
+        buf = T.alloc_buffer((TILE,), "float32", scope="local")
+        with T.Kernel(
+            M // TILE,
+            M // TILE,
+            threads=1,
+            prelude="static void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] = 0.0f; }\n",
+        ) as (bx, by):
+            for i in T.serial(TILE):
+                buf[i] = A[bx * TILE + i]
+            for i in T.serial(TILE):
+                B[bx * TILE + i] = buf[i] + by * 0.0
+        T.call_extern("void", "my_sink", buf.data, TILE)
+
+    kernel = tilelang.compile(
+        mixed_use,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    source = kernel.get_kernel_source()
+    assert source.index("float buf") < source.index("#pragma omp")
+
+    torch.manual_seed(0)
+    A = torch.randn(M, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), A, rtol=1e-6, atol=1e-6)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
