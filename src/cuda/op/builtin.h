@@ -88,6 +88,18 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// Round-to-nearest arithmetic with guaranteed instruction selection.
+// Unlike the ieee_* ops these are vectorizable: the backend may lower them
+// to packed x2 instructions (tl::mul2 / tl::fma2) when profitable.
+//
+// fma(x, y, z) - fused multiply-add; the fusion (single rounding) is
+// guaranteed regardless of compiler contraction settings.
+TVM_DLL const Op &fma();
+// fmul(x, y) - multiply with an explicit boundary that is never contracted
+// into a neighbouring FMA.
+TVM_DLL const Op &fmul();
+
 TVM_DLL const Op &max2_nan();
 TVM_DLL const Op &min2_nan();
 
