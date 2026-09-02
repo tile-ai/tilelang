@@ -578,10 +578,13 @@ using VarPropertyMap = std::unordered_map<Var, ConditionThreadProperty,
                                           ObjectPtrHash, ObjectPtrEqual>;
 
 /*!
- * \brief 分析条件是否依赖运行时数据，以及 block 内线程是否得到相同结果。
+ * \brief Analyze whether a condition depends on runtime data and whether all
+ *        threads in a block produce the same result.
  *
- * 运行时且非 block-uniform 的条件需要拆分分支。仅依赖线程编号的条件若要
- * 保留分支内 partial barrier，还必须证明参与线程按完整 warp 对齐。
+ * Runtime conditions that are not block-uniform require branch splitting.
+ * Conditions that depend only on thread indices may retain an in-branch
+ * partial barrier only when participating threads form complete, warp-aligned
+ * groups.
  */
 class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
@@ -592,7 +595,7 @@ public:
         let_var_properties_(let_var_properties), warp_size_(warp_size) {}
 
   /*!
-   * \brief 分析与分支同步变换有关的条件属性。
+   * \brief Analyze condition properties relevant to branch synchronization.
    */
   ConditionThreadProperty AnalyzeExpr(const PrimExpr &expr) {
     current_ = ConditionThreadProperty();
@@ -1128,7 +1131,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     let_var_properties_.erase(loop_var_it);
   }
 
-  /*! \brief 汇总 if 两侧的访存，并为不安全的分支内 barrier 制定拆分计划。 */
+  /*! \brief Summarize both branches and plan splits for unsafe barriers. */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
     bool condition_is_block_uniform = IsBlockUniformCondition(op->condition);

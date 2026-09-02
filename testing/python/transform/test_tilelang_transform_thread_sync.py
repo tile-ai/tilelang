@@ -517,7 +517,7 @@ def test_loop_carry_different_indices():
 
 
 # =============================================================================
-# 非 uniform if 条件下的同步测试
+# Synchronization tests for non-uniform if conditions.
 # =============================================================================
 
 
@@ -773,7 +773,7 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
 
 
 def test_nested_non_warp_uniform_sync_is_rejected():
-    """分支内循环尚不能安全拆分，必须拒绝而不是生成错误 barrier。"""
+    """Reject nested loops that cannot be split without an invalid barrier."""
     import pytest
 
     @T.prim_func(private=True)
@@ -893,7 +893,7 @@ def test_no_sync_for_thread_private_pair_read_modify_write():
 
 
 def test_no_plain_sync_inside_divergent_symbolic_guard():
-    """若保守分析插入 barrier，它必须位于拆开的两个 guard 之间。"""
+    """Keep a conservatively inserted barrier between the split guards."""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
@@ -915,7 +915,7 @@ def test_no_plain_sync_inside_divergent_symbolic_guard():
 
 
 def test_hazard_in_divergent_guard_is_split():
-    """动态分支被拆成写、整块同步、读三个阶段。"""
+    """Split a dynamic branch into write, full-block sync, and read phases."""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
@@ -939,7 +939,7 @@ def test_hazard_in_divergent_guard_is_split():
 
 
 def test_hazard_in_divergent_else_branch_is_split():
-    """else 中的 hazard 也要拆到整块同步的两侧。"""
+    """Split an else-branch hazard around a full-block barrier."""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
@@ -964,7 +964,7 @@ def test_hazard_in_divergent_else_branch_is_split():
 
 
 def test_non_warp_uniform_if_else_is_split():
-    """tx % 4 会拆散每个 warp，必须改写为所有线程都执行的 barrier。"""
+    """Rewrite tx % 4 around a barrier reached by every thread."""
 
     @T.prim_func(private=True)
     def func():
@@ -991,7 +991,7 @@ def test_non_warp_uniform_if_else_is_split():
 
 
 def test_divergent_split_rejects_binding_crossing_barrier():
-    """拆分不能让分支内定义的标量越过原有作用域。"""
+    """Reject a split when a branch-local binding would cross the barrier."""
     import pytest
 
     @T.prim_func(private=True)
@@ -1012,7 +1012,7 @@ def test_divergent_split_rejects_binding_crossing_barrier():
 
 
 def test_nested_divergent_branch_split_is_rejected():
-    """外层分支已让部分线程退出时，内层不能直接插入 full-block barrier。"""
+    """Reject a full-block barrier nested under an outer divergent branch."""
     import pytest
 
     @T.prim_func(private=True)
@@ -1035,7 +1035,7 @@ def test_nested_divergent_branch_split_is_rejected():
 
 
 def test_divergent_split_inside_non_uniform_loop_is_rejected():
-    """循环次数在线程间不一致时，不能在循环体中插入 full-block barrier。"""
+    """Reject a full-block barrier in a loop with non-uniform trip counts."""
     import pytest
 
     @T.prim_func(private=True)
@@ -1058,7 +1058,7 @@ def test_divergent_split_inside_non_uniform_loop_is_rejected():
 
 
 def test_sync_inside_non_uniform_loop_is_rejected():
-    """即使没有内层 if，线程间循环次数不同也不能执行 barrier。"""
+    """Reject barriers in non-uniform loops without an inner conditional."""
     import pytest
 
     @T.prim_func(private=True)
@@ -1078,7 +1078,7 @@ def test_sync_inside_non_uniform_loop_is_rejected():
 
 
 def test_divergent_split_inside_uniform_loop_is_allowed():
-    """循环次数相同时，每轮拆分后的 barrier 都由整个 block 执行。"""
+    """Allow split barriers when every block thread has the same trip count."""
 
     @T.prim_func(private=True)
     def func():
@@ -1127,7 +1127,7 @@ def test_aligned_else_partial_sync_is_preserved():
 
 
 def test_misaligned_else_partial_sync_is_split():
-    """跨越两个 warp 的 tx=1..32 不能用 partial bar.sync，要拆分分支。"""
+    """Split tx=1..32 across two warps instead of using partial bar.sync."""
 
     @T.prim_func(private=True)
     def func():
@@ -1184,7 +1184,7 @@ def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
 
 
 def test_premise_weaker_than_the_block_is_split():
-    """n % 64 == 0 仍允许半个 block 进入，因此需要拆分分支。"""
+    """Split the branch when n % 64 == 0 still allows half-block entry."""
 
     @T.prim_func(private=True)
     def func(n: T.int32):
