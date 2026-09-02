@@ -81,12 +81,7 @@ def _find_libomp() -> _LibompLocation | None:
 
 
 def get_openmp_compile_flags() -> list[str]:
-    """Compile flags for OpenMP CPU kernels: ``-O2`` plus OpenMP flags.
-
-    ``-O2`` is unconditional: the default CPU library build has no
-    optimization level at all, which alone costs ~8.6x on dense kernels and
-    would swamp the parallel speedup.
-    """
+    """Compile flags for OpenMP CPU kernels: ``-O2`` plus OpenMP flags."""
     flags = ["-O2"]
 
     if sys.platform == "darwin":
