@@ -1,36 +1,31 @@
 /*!
  * \file materialize_cpu_parallel_grid.cc
- * \brief Convert the annotated CPU grid loop nest to parallel loops.
+ * \brief Convert the annotated CPU grid loop nests to parallel loops.
  *
- * When the ``tl.cpu_parallel`` pass config is enabled, the CPU branch of
- * MaterializeKernelLaunch tags each grid (blockIdx) loop with the
- * ``tl.cpu_grid_dim`` annotation (value = grid dimension index). The
- * annotation rides through the whole pipeline without semantic effect —
- * every mid-pipeline conflict site (LayoutInference, LowerTileOp, the
- * vectorizer) only reacts to ForKind::kParallel, never to this annotation.
- * This pass runs at the tail of the CPU pipeline (after UnrollLoop /
- * LoopUnswitching / HoistIfThenElse, before AnnotateDeviceRegions), where
- * loop structure is final, and:
+ * When the ``tl.cpu_parallel`` pass config is enabled, MaterializeKernelLaunch
+ * tags each grid (blockIdx) loop with the ``tl.cpu_grid_dim`` annotation. It
+ * rides through the pipeline inertly — the mid-pipeline conflict sites
+ * (LayoutInference, LowerTileOp, the vectorizer) only react to
+ * ForKind::kParallel — until this tail pass (after HoistIfThenElse, before
+ * AnnotateDeviceRegions, where loop structure is final):
  *
- *  1. Finds the outermost contiguous chain of annotated grid loops.
- *  2. Gates on total trip count (``tl.cpu_parallel_min_trip``, default 0 —
- *     the master switch itself is the gate).
- *  3. Converts the chain to ForKind::kParallel:
- *     - target ``c``: every grid dim, so the C codegen can emit
- *       ``#pragma omp parallel for collapse(n)``;
- *     - target ``llvm``: a single dim — the first non-unit dim (TVM's LLVM
- *       codegen lowers kParallel to TVMBackendParallelLaunch and
- *       hard-rejects nesting).
- *  4. Sinks AllocBuffer statements whose uses all lie inside the parallel
- *     region into the parallel loop body, giving each worker a private copy
- *     (a C declaration inside the loop body / an alloca in the llvm closure
- *     is thread-private by construction). For the ``c`` target the sink
- *     level is the innermost parallelized loop so collapse(n) perfect
- *     nesting is preserved; uses spanning grid levels keep the allocation
- *     hoisted (with a warning) instead of risking a wrong sink position.
+ *  1. Finds every annotated nest, looking through transparent wrappers
+ *     (assume AttrStmt, hoisted IfThenElse). Sibling nests convert
+ *     independently; a nest inside an already-parallel one stays serial.
+ *  2. Gates on total trip count (``tl.cpu_parallel_min_trip``, default 0).
+ *     Dynamic extents skip the gate: both OpenMP and TVM's parallel launch
+ *     handle runtime trip counts.
+ *  3. Converts the chain to kParallel: every dim on ``c`` (for
+ *     ``collapse(n)``), the first non-unit dim on ``llvm`` (its codegen
+ *     rejects nested parallel loops).
+ *  4. Sinks AllocBuffers into the parallel body (per-worker private copies;
+ *     on ``c`` at the innermost parallelized dim to keep collapse(n) perfect
+ *     nesting). Only allocs whose uses are all plain load/store inside this
+ *     nest sink; opaque (call_extern/address_of/access_ptr), cross-level,
+ *     cross-nest, or outside uses stay shared with a warning. A nest whose
+ *     buffer cannot be privatized is refused rather than raced.
  *
- * Everything is opt-in: without the annotation (config off) this pass leaves
- * the IR untouched, and the pass is not even inserted into the pipeline.
+ * Opt-in only: without the annotation this pass is not even in the pipeline.
  */
 
 #include "op/builtin.h"
@@ -43,6 +38,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -69,30 +65,54 @@ StripGridAnnotation(const Map<ffi::String, ffi::Any> &annotations) {
   return out;
 }
 
-/*! \brief For each buffer (keyed by its data Var): the shallowest grid-nest
- * depth of any access (0 = accessed outside the nest) and whether it is
- * accessed inside the nest at all. */
+/*! \brief Per-buffer access census: shallowest in-nest depth of plain
+ * loads/stores (0 = accessed outside every nest), owning annotated nest(s),
+ * and an opaque-use flag (data var in a Call argument — provably not
+ * iteration-private, pins the buffer shared). */
 class GridAccessAnalysis : public StmtExprVisitor {
 public:
   struct AccessInfo {
     int min_depth = 0;
     bool inside = false;
+    bool opaque = false;
+    std::unordered_set<const ForNode *> nests;
   };
 
   AccessInfo Lookup(const Var &data) const {
-    static const AccessInfo kNone{0, false};
+    static const AccessInfo kNone{};
     auto it = info_.find(data);
     return it == info_.end() ? kNone : it->second;
+  }
+
+  /*! \brief AllocBuffer data vars with grid-nest depth at declaration
+   * (0 = function scope; only those may sink). */
+  const std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> &
+  AllocDepths() const {
+    return alloc_depths_;
   }
 
 private:
   void VisitStmt_(const ForNode *op) override {
     bool grid = HasGridAnnotation(op);
-    if (grid)
+    if (grid) {
+      if (grid_depth_ == 0) {
+        current_nest_ = op; // chain head of this annotated nest
+      }
       ++grid_depth_;
+    }
     StmtExprVisitor::VisitStmt_(op);
-    if (grid)
+    if (grid) {
       --grid_depth_;
+      if (grid_depth_ == 0) {
+        current_nest_ = nullptr;
+      }
+    }
+  }
+  void VisitStmt_(const AllocBufferNode *op) override {
+    // A declaration is not a use.
+    known_alloc_vars_.insert(op->buffer->data.get());
+    alloc_depths_[op->buffer->data] = grid_depth_;
+    StmtExprVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const BufferStoreNode *op) override {
     Touch(op->buffer);
@@ -102,24 +122,39 @@ private:
     Touch(op->buffer);
     StmtExprVisitor::VisitExpr_(op);
   }
+  void VisitExpr_(const VarNode *op) override {
+    if (known_alloc_vars_.count(op)) {
+      AccessInfo &entry = info_[GetRef<Var>(op)];
+      entry.opaque = true;
+      entry.min_depth = 0;
+      if (grid_depth_ > 0) {
+        entry.inside = true;
+        entry.nests.insert(current_nest_);
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
   void Touch(const Buffer &buffer) {
     AccessInfo &entry = info_[buffer->data];
     if (grid_depth_ == 0) {
       entry.min_depth = 0;
     } else {
-      // First inside access records its depth; later ones take the minimum.
       entry.min_depth =
           entry.inside ? std::min(entry.min_depth, grid_depth_) : grid_depth_;
       entry.inside = true;
+      entry.nests.insert(current_nest_);
     }
   }
 
   std::unordered_map<Var, AccessInfo, ObjectPtrHash, ObjectPtrEqual> info_;
+  std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> alloc_depths_;
+  std::unordered_set<const VarNode *> known_alloc_vars_;
+  const ForNode *current_nest_ = nullptr;
   int grid_depth_ = 0;
 };
 
 /*! \brief A missing For step is the implicit default of 1; materialize it so
- * downstream checks (e.g. TVM's llvm parallel-loop lowering) see a literal. */
+ * downstream checks (e.g. llvm's parallel lowering) see a literal. */
 PrimExpr NormalizedStep(const ForNode *op) {
   if (op->step.defined()) {
     return op->step.value();
@@ -127,8 +162,7 @@ PrimExpr NormalizedStep(const ForNode *op) {
   return IntImm(op->loop_var.dtype(), 1);
 }
 
-/*! \brief True if the subtree contains a kParallel loop (the llvm backend
- * hard-rejects nested parallel loops). */
+//! True if the subtree contains a kParallel loop.
 class ParallelLoopFinder : public StmtVisitor {
 public:
   bool found = false;
@@ -141,9 +175,7 @@ private:
   }
 };
 
-/*! \brief True if the subtree still carries a grid annotation — i.e. a nest
- * this pass did not convert (wrapped in an unrecognized construct, or a
- * second T.Kernel launch nest). */
+//! True if the subtree still carries a grid annotation (unconverted nest).
 class GridAnnotationFinder : public StmtVisitor {
 public:
   bool found = false;
@@ -162,32 +194,82 @@ struct GridRewriter {
       : collapse_all_dims_(collapse_all_dims), min_trip_(min_trip),
         analysis_(analysis) {}
 
-  Stmt Rewrite(const Stmt &stmt) {
+  Stmt Rewrite(const Stmt &stmt) { return Rewrite(stmt, false); }
+
+private:
+  //! The annotated chain head reachable through transparent wrappers, if any.
+  static const ForNode *TransparentNestHead(const Stmt &stmt) {
+    if (const auto *f = stmt.as<ForNode>()) {
+      return HasGridAnnotation(f) ? f : nullptr;
+    }
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      return TransparentNestHead(attr->body);
+    }
+    return nullptr;
+  }
+
+  Stmt Rewrite(const Stmt &stmt, bool in_parallel) {
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
       Array<Stmt> out;
       for (const Stmt &elem : seq->seq) {
-        if (!converted_ && elem->IsInstance<ForNode>() &&
-            HasGridAnnotation(elem.as<ForNode>())) {
-          std::vector<Stmt> sunk =
-              CollectSinkableAllocs(out, elem.as<ForNode>());
-          out.push_back(ConvertGridNest(elem.as<ForNode>(), std::move(sunk)));
+        const ForNode *head = in_parallel ? nullptr : TransparentNestHead(elem);
+        if (head != nullptr) {
+          // Collect sibling allocations here even for a wrapped nest.
+          std::vector<Stmt> sunk = CollectSinkableAllocs(out, head);
+          out.push_back(ConvertNestElement(elem, head, std::move(sunk)));
           continue;
         }
-        out.push_back(Rewrite(elem));
+        out.push_back(Rewrite(elem, in_parallel));
       }
       if (out.size() == 1) {
         return out[0];
       }
       return SeqStmt(std::move(out));
     }
-    if (!converted_ && stmt->IsInstance<ForNode>() &&
+    if (const auto *attr = stmt.as<AttrStmtNode>()) {
+      Stmt body = Rewrite(attr->body, in_parallel);
+      if (body.same_as(attr->body)) {
+        return stmt;
+      }
+      return AttrStmt(attr->node, attr->attr_key, attr->value, std::move(body),
+                      attr->span);
+    }
+    if (const auto *ite = stmt.as<IfThenElseNode>()) {
+      Stmt then_case = Rewrite(ite->then_case, in_parallel);
+      Optional<Stmt> else_case = ite->else_case;
+      if (else_case.defined()) {
+        Stmt new_else = Rewrite(else_case.value(), in_parallel);
+        if (!new_else.same_as(else_case)) {
+          else_case = new_else;
+        }
+      }
+      if (then_case.same_as(ite->then_case) &&
+          else_case.same_as(ite->else_case)) {
+        return stmt;
+      }
+      return IfThenElse(ite->condition, std::move(then_case),
+                        std::move(else_case), ite->span);
+    }
+    if (!in_parallel && stmt->IsInstance<ForNode>() &&
         HasGridAnnotation(stmt.as<ForNode>())) {
       return ConvertGridNest(stmt.as<ForNode>(), {});
     }
+    // An annotated nest inside an already-parallel region stays serial; its
+    // annotation is kept so the residual-annotation warning fires.
     return stmt;
   }
 
-private:
+  //! Convert the nest headed by `head`, rebuilding transparent wrappers.
+  Stmt ConvertNestElement(const Stmt &elem, const ForNode *head,
+                          std::vector<Stmt> sunk) {
+    if (const auto *attr = elem.as<AttrStmtNode>()) {
+      return AttrStmt(attr->node, attr->attr_key, attr->value,
+                      ConvertNestElement(attr->body, head, std::move(sunk)),
+                      attr->span);
+    }
+    return ConvertGridNest(head, std::move(sunk));
+  }
+
   static std::vector<const ForNode *> CollectChain(const ForNode *head) {
     std::vector<const ForNode *> loops;
     const ForNode *cur = head;
@@ -198,9 +280,8 @@ private:
     return loops;
   }
 
-  /*! \brief Index of the chain member whose body is the allocation sink
-   * target: the innermost dim on ``c`` (keeps collapse(n) perfect nesting),
-   * the single parallelized dim on ``llvm``. */
+  /*! \brief Sink target within the chain: the innermost dim on ``c`` (keeps
+   * collapse(n) perfect nesting), the single parallelized dim on ``llvm``. */
   static size_t SinkIndex(const std::vector<const ForNode *> &loops,
                           bool collapse_all_dims) {
     if (collapse_all_dims) {
@@ -215,13 +296,19 @@ private:
     return 0;
   }
 
-  /*! \brief Among the already-emitted sequence elements, decide which
-   * function-scope allocations sink into the parallel region, remove them
-   * from `out` and return them. */
+  //! True when every use is a plain load/store inside the `head` nest.
+  static bool FullyOwnedBy(const GridAccessAnalysis::AccessInfo &info,
+                           const ForNode *head) {
+    return !info.opaque && info.inside && info.nests.size() == 1 &&
+           *info.nests.begin() == head;
+  }
+
+  //! Move sinkable allocations out of `out` and return them.
   std::vector<Stmt> CollectSinkableAllocs(Array<Stmt> &out,
                                           const ForNode *grid_head) {
-    if (out.empty())
+    if (out.empty()) {
       return {};
+    }
 
     int sink_depth = static_cast<int>(SinkIndex(CollectChain(grid_head),
                                                 collapse_all_dims_)) +
@@ -236,10 +323,24 @@ private:
       }
       GridAccessAnalysis::AccessInfo info =
           analysis_.Lookup(alloc->buffer->data);
-      if (info.min_depth >= sink_depth) {
-        // All uses are deep enough: private per-worker copy is safe and
-        // collapse-perfect.
+      if (info.min_depth >= sink_depth && FullyOwnedBy(info, grid_head)) {
         sunk.push_back(elem);
+      } else if (info.opaque && info.inside) {
+        LOG(WARNING)
+            << "tl.cpu_parallel: buffer `" << alloc->buffer->name
+            << "` is referenced through opaque accesses (call_extern / "
+               "address_of / access_ptr) inside the parallel region; it "
+               "stays shared across workers and may race";
+        kept.push_back(elem);
+      } else if (info.inside && info.nests.size() > 1) {
+        LOG(WARNING) << "tl.cpu_parallel: buffer `" << alloc->buffer->name
+                     << "` is shared by multiple grid nests; it stays shared "
+                        "across workers and may race";
+        kept.push_back(elem);
+      } else if (info.inside && !FullyOwnedBy(info, grid_head)) {
+        // Owned by one other nest: sinks when that nest converts (or stays
+        // shared next to a serial one — safe either way); don't warn here.
+        kept.push_back(elem);
       } else if (info.min_depth >= 1) {
         LOG(WARNING) << "tl.cpu_parallel: buffer `" << alloc->buffer->name
                      << "` is used across grid levels; it stays shared "
@@ -251,7 +352,6 @@ private:
                         "region; it stays shared across workers and may race";
         kept.push_back(elem);
       } else {
-        // Only used outside the nest (or dead): nothing to do.
         kept.push_back(elem);
       }
     }
@@ -259,15 +359,13 @@ private:
     return sunk;
   }
 
-  /*! \brief Rewrite the outermost annotated grid nest `head`. */
+  //! Rewrite the outermost annotated grid nest `head`.
   Stmt ConvertGridNest(const ForNode *head, std::vector<Stmt> sunk) {
-    converted_ = true;
-
     std::vector<const ForNode *> loops = CollectChain(head);
+    int sink_depth = static_cast<int>(SinkIndex(loops, collapse_all_dims_)) + 1;
 
-    // Rebuild with annotations stripped; failure paths return this with the
-    // sunk allocations re-attached in front of the nest (they were removed
-    // from their original position by the caller already).
+    // Failure paths: rebuild serial, annotations stripped, sunk allocations
+    // re-attached in front of the nest.
     auto rebuild_serial = [&loops, &sunk]() -> Stmt {
       Stmt body = loops.back()->body;
       for (int i = static_cast<int>(loops.size()) - 1; i >= 0; --i) {
@@ -286,43 +384,88 @@ private:
       return body;
     };
 
-    // Total trip count must be statically known and above the threshold.
-    int64_t trip = 1;
-    for (const ForNode *op : loops) {
-      const auto *extent = op->extent.as<IntImmNode>();
-      if (!extent || extent->value <= 0)
-        return rebuild_serial();
-      trip *= extent->value;
-    }
-    if (trip < min_trip_)
-      return rebuild_serial();
-
-    // Which chain members become kParallel: all of them on ``c`` (for
-    // collapse(n)); exactly one — the first non-unit dim — on ``llvm``.
-    size_t parallel_idx = SinkIndex(loops, collapse_all_dims_);
-
-    if (!collapse_all_dims_) {
-      // TVM's llvm codegen requires min=0 / step=1 on the parallel loop.
-      // A missing step is the implicit default of 1 and is normalized to a
-      // literal during the rebuild below.
-      const ForNode *marked = loops[parallel_idx];
-      const auto *min = marked->min.as<IntImmNode>();
-      ICHECK(min && min->value == 0)
-          << "tl.cpu_parallel: the parallelized grid loop must start at 0 on "
-             "the llvm target, got min="
-          << marked->min;
-      if (marked->step.defined()) {
-        const auto *step = marked->step.as<IntImmNode>();
-        ICHECK(step && step->value == 1)
-            << "tl.cpu_parallel: the parallelized grid loop must have step 1 "
-               "on the llvm target, got step="
-            << marked->step;
+    // A function-scope alloc that belongs to this nest but was not adjacent
+    // enough to sink would stay shared: refuse rather than race.
+    for (const auto &kv : analysis_.AllocDepths()) {
+      const Var &data = kv.first;
+      if (kv.second != 0) {
+        continue;
+      }
+      GridAccessAnalysis::AccessInfo info = analysis_.Lookup(data);
+      if (info.min_depth >= sink_depth && FullyOwnedBy(info, head)) {
+        bool was_sunk = false;
+        for (const Stmt &s : sunk) {
+          if (s.as<AllocBufferNode>() &&
+              s.as<AllocBufferNode>()->buffer->data.same_as(data)) {
+            was_sunk = true;
+            break;
+          }
+        }
+        if (!was_sunk) {
+          LOG(WARNING) << "tl.cpu_parallel: buffer `" << data->name_hint
+                       << "` is used only inside the grid nest but its "
+                          "allocation is not adjacent to it, so it cannot be "
+                          "privatized; the nest stays serial";
+          return rebuild_serial();
+        }
       }
     }
 
-    // Sunk allocations become per-worker private copies at the head of the
-    // sink loop's body (c: innermost grid dim, keeps collapse(n) perfect
-    // nesting; llvm: the single parallel dim).
+    int64_t trip = 1;
+    bool dynamic_extents = false;
+    for (const ForNode *op : loops) {
+      const auto *extent = op->extent.as<IntImmNode>();
+      if (!extent) {
+        dynamic_extents = true;
+        break;
+      }
+      if (extent->value <= 0) {
+        return rebuild_serial();
+      }
+      trip *= extent->value;
+    }
+    if (dynamic_extents && min_trip_ > 0) {
+      LOG(WARNING) << "tl.cpu_parallel: cannot evaluate "
+                      "tl.cpu_parallel_min_trip against a dynamic grid "
+                      "extent; the nest stays serial";
+      return rebuild_serial();
+    }
+    if (!dynamic_extents && trip < min_trip_) {
+      return rebuild_serial();
+    }
+
+    size_t parallel_idx = SinkIndex(loops, collapse_all_dims_);
+
+    if (!collapse_all_dims_) {
+      // The llvm parallel launch requires min=0 / step=1 and no nesting;
+      // fall back to serial instead of failing the compile.
+      const ForNode *marked = loops[parallel_idx];
+      const auto *min = marked->min.as<IntImmNode>();
+      if (!min || min->value != 0) {
+        LOG(WARNING) << "tl.cpu_parallel: the grid loop does not start at 0, "
+                        "which the llvm parallel launch requires; the nest "
+                        "stays serial";
+        return rebuild_serial();
+      }
+      if (marked->step.defined()) {
+        const auto *step = marked->step.as<IntImmNode>();
+        if (!step || step->value != 1) {
+          LOG(WARNING) << "tl.cpu_parallel: the grid loop has a non-unit "
+                          "step, which the llvm parallel launch requires to "
+                          "be 1; the nest stays serial";
+          return rebuild_serial();
+        }
+      }
+      ParallelLoopFinder finder;
+      finder(loops[parallel_idx]->body);
+      if (finder.found) {
+        LOG(WARNING) << "tl.cpu_parallel: the grid nest already contains a "
+                        "parallel loop, which the llvm backend rejects; the "
+                        "nest stays serial";
+        return rebuild_serial();
+      }
+    }
+
     Stmt body = loops[parallel_idx]->body;
     if (!sunk.empty()) {
       Array<Stmt> elements(sunk.begin(), sunk.end());
@@ -343,20 +486,12 @@ private:
               std::nullopt, std::move(annotations), std::move(step), op->span);
     }
 
-    if (!collapse_all_dims_) {
-      ParallelLoopFinder finder;
-      finder(loops[parallel_idx]->body);
-      ICHECK(!finder.found) << "tl.cpu_parallel: nested parallel loops are "
-                               "not supported on the llvm target";
-    }
-
     return body;
   }
 
   bool collapse_all_dims_;
   int64_t min_trip_;
   const GridAccessAnalysis &analysis_;
-  bool converted_ = false;
 };
 
 } // namespace
@@ -394,12 +529,9 @@ tvm::transform::Pass MaterializeCPUParallelGrid() {
     GridAnnotationFinder residual;
     residual(new_body);
     if (residual.found) {
-      // A nest this pass did not convert: wrapped in an unrecognized
-      // construct, or a second launch nest. Surface the silent serial
-      // fallback instead of leaving the user wondering why nothing sped up.
       LOG(WARNING) << "tl.cpu_parallel: a grid nest could not be converted "
-                      "(wrapped in an unrecognized construct, or not the "
-                      "first launch nest); it stays serial";
+                      "(nested inside another parallelized nest, or wrapped "
+                      "in an unrecognized construct); it stays serial";
     }
     func.CopyOnWrite()->body = std::move(new_body);
     return func;
