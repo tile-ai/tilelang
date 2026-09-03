@@ -23,12 +23,12 @@ def warp_shfl(local, buf, thread_elem, warp_size, round):
         sign = (tx >> i) & 1  # get i-th lowest bit of tx, which determines the operation type for shared[tx, :]
         for j in T.Pipelined(thread_elem, num_stages=1):
             buf[j] = T.shfl_sync(
-                # CUDA uses this 32-bit active mask. HIP ignores the mask and
-                # emits __shfl(value, src_lane, width).
-                0xFFFFFFFF,
                 local[j],
                 another_tx % warp_size,
                 warp_size,
+                # CUDA uses this 32-bit active mask. HIP ignores the mask and
+                # emits __shfl(value, src_lane, width).
+                0xFFFFFFFF,
             )
             local[j] = T.if_then_else(sign == 0, local[j] + buf[j], buf[j] - local[j])
 
