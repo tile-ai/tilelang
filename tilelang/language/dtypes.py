@@ -1,5 +1,6 @@
 from tilelang import tvm
 from tvm import ir
+import functools
 import torch
 import tvm_ffi
 from typing import Generic, TypeVar, TYPE_CHECKING
@@ -182,6 +183,11 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
     return call(expr, is_size_var)
 
 
+@functools.cache
+def _log_storage_dtype_fallback_once(msg: str) -> None:
+    logger.debug(msg)
+
+
 def __dtype_as_torch__(self: dtype) -> torch.dtype:
     """Convert TileLang dtype to PyTorch dtype."""
     dtype_str = str(self)
@@ -219,15 +225,15 @@ def __dtype_as_torch__(self: dtype) -> torch.dtype:
         )
         return torch.float4_e2m1fn_x2
     elif dtype_str == "float4_e2m1fn":
-        logger.debug("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
+        _log_storage_dtype_fallback_once("torch doesn't support float4_e2m1fn, using float4_e2m1fnx2 as storage dtype.")
         return torch.float4_e2m1fn_x2 if hasattr(torch, "float4_e2m1fn_x2") else torch.int8
     elif dtype_str == "custom[tfloat32]":
         return torch.float32
     elif dtype_str == "int4":
-        logger.debug("torch doesn't support int4, using int8 as storage dtype.")
+        _log_storage_dtype_fallback_once("torch doesn't support int4, using int8 as storage dtype.")
         return torch.int8
     elif dtype_str == "uint4":
-        logger.debug("torch doesn't support uint4, using uint8 as storage dtype.")
+        _log_storage_dtype_fallback_once("torch doesn't support uint4, using uint8 as storage dtype.")
         return torch.uint8
     elif dtype_str == "handle":
         return None
