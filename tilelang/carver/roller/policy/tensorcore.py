@@ -344,7 +344,7 @@ class TensorCorePolicy(DefaultPolicy):
         # only support single node for now
         conditions.append(len(self.ordered_nodes) > 1)
         # only on Ampere+ arch
-        conditions.append(self.arch.compute_capability < "80")
+        conditions.append(is_cuda_arch(self.arch) and self.arch.sm_version < 80)
 
         def _check_memory_size():
             overall_gmem_size_in_bytes: int = 0
