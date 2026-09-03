@@ -239,17 +239,21 @@ def test_sparse_mla_fwd(
     block_I=64,
     num_stages=2,
     threads=256,
+    profile=True,
+    indices=None,
 ):
+    """Validate and optionally benchmark sparse MLA forward."""
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
 
-    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
-    for b in range(B):
-        for t in range(S):
-            for h in range(HKV):
-                i_i = torch.randperm(max(1, t))[:topk]
-                indices[b, t, h, : len(i_i)] = i_i
+    if indices is None:
+        indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
+        for b in range(B):
+            for t in range(S):
+                for h in range(HKV):
+                    i_i = torch.randperm(max(1, t))[:topk]
+                    indices[b, t, h, : len(i_i)] = i_i
 
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
 
@@ -259,15 +263,17 @@ def test_sparse_mla_fwd(
         assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
         print("assert_tensors_similar passed")
 
-    def fn():
-        return sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+    if profile:
 
-    from tilelang.profiler import do_bench
+        def fn():
+            return sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
 
-    ms = do_bench(fn, warmup=100, rep=250)
-    print(f"Average time: {ms:.3f} ms")
-    print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
-    print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+        from tilelang.profiler import do_bench
+
+        ms = do_bench(fn, warmup=100, rep=250)
+        print(f"Average time: {ms:.3f} ms")
+        print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
+        print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
 def run_regression_perf(
