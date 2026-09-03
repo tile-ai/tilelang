@@ -338,12 +338,23 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         return quote("if __tb.ctx_break(): break", span=node)
 
-    def _emit_assign_target(self, target: ast.expr, rval: ast.expr, annot: ast.expr | None = None) -> list[ast.stmt]:
+    def _emit_assign_target(
+        self,
+        target: ast.expr,
+        rval: ast.expr,
+        annot: ast.expr | None = None,
+    ) -> list[ast.stmt]:
         if isinstance(target, ast.Name):
             if annot is None:
                 return quote(f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
             else:
-                return quote(f'name = __tb.bind("{target.id}", value, annot)', name=target, value=rval, annot=annot, span=target)
+                return quote(
+                    f'name = __tb.bind("{target.id}", value, annot)',
+                    name=target,
+                    value=rval,
+                    annot=annot,
+                    span=target,
+                )
         elif isinstance(target, ast.Attribute):
             s = ast.unparse(target)
             raise NotImplementedError(f"Attribute assignment not supported yet, `{s}`")
@@ -475,6 +486,12 @@ class DSLMutator(ast.NodeTransformer):
             return node
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
+        # Tensor annotations are exact declarations. A shape
+        # dimension that happens to reference a scalar function parameter is
+        # still an exact declaration unless the author explicitly declares it
+        # as a capacity dimension via ``T.annotate_capacity_dims(...)`` in the
+        # kernel body; syntactic auto-inference could otherwise exempt ordinary
+        # exact dims from adapter validation.
         node = self.generic_visit(node)
         rval = node.value or quote_expr("__tb.empty", span=node, annot=node)
         return self._emit_assign_target(node.target, rval, annot=node.annotation)
