@@ -165,6 +165,62 @@ def test_fill_int4_nonzero_numeric(fill_value):
     assert (dst == expected).all()
 
 
+def _fill_var_kernel(dtype):
+    @tilelang.jit
+    def factory():
+        @T.prim_func
+        def kern(scalar: T.Tensor((2,), dtype), dst: T.Tensor((128, 128), dtype)):
+            with T.Kernel(1, threads=256):
+                for row, col in T.Parallel(128, 128):
+                    dst[row, col] = scalar[0]
+
+        return kern
+
+    return factory()
+
+
+@tilelang.testing.requires_cuda
+def test_fill_scalar_var_fp8_numeric():
+    """fp8 fill from a runtime scalar: a non-constant broadcast replicated
+    across the 256-bit carrier (tl::broadcast byte replication)."""
+    kernel = _fill_var_kernel("float8_e4m3fn")
+    scalar = torch.full((2,), 1.5, device="cuda").to(torch.float8_e4m3fn)
+    dst = torch.zeros((128, 128), device="cuda").to(torch.float8_e4m3fn)
+    kernel(scalar, dst)
+    torch.cuda.synchronize()
+    assert (dst.view(torch.uint8) == scalar.view(torch.uint8)[0]).all()
+
+
+@tilelang.testing.requires_cuda
+def test_fill_scalar_var_int8_numeric():
+    """int8 fill from a runtime scalar (non-constant byte broadcast)."""
+    kernel = _fill_var_kernel("int8")
+    scalar = torch.full((2,), -42, dtype=torch.int8, device="cuda")
+    dst = torch.zeros((128, 128), dtype=torch.int8, device="cuda")
+    kernel(scalar, dst)
+    torch.cuda.synchronize()
+    assert (dst == -42).all()
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.skipif(
+    not hasattr(torch, "float4_e2m1fn_x2"),
+    reason="PyTorch float4_e2m1fn_x2 dtype is unavailable",
+)
+def test_fill_scalar_var_fp4_numeric():
+    """fp4 fill from a runtime scalar: packed nibble read, then a
+    non-constant nibble-pair broadcast."""
+    kernel = _fill_var_kernel("float4_e2m1fn")
+    # Both nibbles hold 0x4 (fp4 e2m1 value 2.0), so every destination byte
+    # must equal 0x44.
+    scalar = torch.full((1,), 0x44, dtype=torch.uint8, device="cuda")
+    dst = torch.zeros((128, 64), dtype=torch.uint8, device="cuda")
+    packed = torch.float4_e2m1fn_x2
+    kernel(scalar.view(packed), dst.view(packed))
+    torch.cuda.synchronize()
+    assert (dst == 0x44).all()
+
+
 @tilelang.testing.requires_cuda
 def test_fill_fp16_numeric():
     """fp16 constant fill: at 16 lanes (256 bits) the broadcast goes through

@@ -433,6 +433,25 @@ template <typename V, typename U> TL_DEVICE V broadcast(const U unit) {
   }
   return result;
 }
+
+// Build a vector struct from its scalar elements, one per lane (byte-sized
+// or larger; fp4 uses tl::make_fp4_vec). The element type is deduced from
+// the first argument; one variadic definition replaces a make_<type>
+// constructor per lane count.
+template <typename V, typename E, typename... Ts>
+TL_DEVICE V make_vec(const E first, const Ts... rest) {
+  constexpr int kN = 1 + static_cast<int>(sizeof...(rest));
+  static_assert(sizeof(V) == kN * sizeof(E),
+                "tl::make_vec element count does not match the vector size");
+  const E vals[] = {first, static_cast<E>(rest)...};
+  V result;
+  E *parts = reinterpret_cast<E *>(&result);
+#pragma unroll
+  for (int i = 0; i < kN; ++i) {
+    parts[i] = vals[i];
+  }
+  return result;
+}
 } // namespace tl
 
 // Pack four char values. Build the 32-bit pattern from unsigned bytes: a
