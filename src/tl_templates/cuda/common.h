@@ -272,6 +272,22 @@ TL_PATCH TL_DEVICE bfloat16_t hnearbyint(const bfloat16_t x) {
   return bfloat16_t(nearbyintf(float(x)));
 }
 
+TL_PATCH TL_DEVICE half_t hpow(const half_t x, const half_t y) {
+  return half_t(powf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hpow(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(powf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE half_t hfmod(const half_t x, const half_t y) {
+  return half_t(fmodf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hfmod(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(fmodf(float(x), float(y)));
+}
+
 // TVM lowers 16-bit math ops to CUDA's half-style names (hexp, hlog, ...).
 // TileLang emits cutlass::half_t / bfloat16_t for scalar 16-bit values, while
 // CUDA overloads those names only for native __half / __nv_bfloat16. Kept here

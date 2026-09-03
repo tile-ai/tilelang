@@ -155,5 +155,69 @@ def test_half_math_intrinsics(dtype):
         )
 
 
+# (op, lowered h* intrinsic, torch reference, dtypes it can reach codegen on).
+# bfloat16 T.pow is rejected before codegen by an upstream dtype check, so its
+# bridge is not reachable yet (tile-ai/tilelang#2571).
+BINARY_MATH_OPS = (
+    ("fmod", "hfmod", torch.fmod, (T.float16, T.bfloat16)),
+    ("pow", "hpow", torch.pow, (T.float16,)),
+)
+
+
+def binary_math_kernel(op, dtype, N):
+    fn = getattr(T, op)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        C: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(1, threads=N):
+            i = T.get_thread_binding()
+            # Keep the temporary: it copy-initializes, a store only assigns.
+            value = fn(A[i], C[i])
+            B[i] = value
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "name, intrinsic, ref_fn, dtype",
+    [(n, h, f, d) for n, h, f, dtypes in BINARY_MATH_OPS for d in dtypes],
+)
+def test_binary_math_intrinsics(name, intrinsic, ref_fn, dtype):
+    N = 128
+    kernel = tilelang.compile(binary_math_kernel(name, dtype, N), target="cuda")
+    body = kernel.get_kernel_source()
+    body = body[body.rindex("__global__") :]
+    assert body.count(f"{intrinsic}(") == 1
+
+    torch_dtype = dtype.as_torch()
+    idx = torch.arange(N, device="cuda", dtype=torch.float32)
+    if name == "fmod":
+        # Both operands take both signs and |A| usually exceeds |C|, so the
+        # remainder is non-trivial and the dividend's sign is exercised. Every
+        # value is exact in float16 and bfloat16.
+        a = ((idx - 64) * 0.25).to(torch_dtype)
+        c = (((idx % 5) - 2.5) * 1.5).to(torch_dtype)
+    else:
+        # [0.5, 1.5) base and [0.5, 2.5) exponent keep pow finite in float16.
+        a = (idx * 0.0078125 + 0.5).to(torch_dtype)
+        c = (idx * 0.015625 + 0.5).to(torch_dtype)
+    b = torch.empty(N, device="cuda", dtype=torch_dtype)
+    kernel(a, c, b)
+
+    ref = ref_fn(a.float(), c.float()).to(torch_dtype)
+    torch.testing.assert_close(
+        b.float(),
+        ref.float(),
+        atol=2e-2,
+        rtol=2e-2,
+        msg=lambda base: f"T.{name} mismatch\n{base}",
+    )
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
