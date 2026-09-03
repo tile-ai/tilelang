@@ -9,12 +9,12 @@ import tilelang.testing
 _EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "examples" / "deepseek_v32"
 sys.path.insert(0, str(_EXAMPLE_DIR))
 
-import sparse_mla_fwd  # noqa: E402
-
 
 @tilelang.testing.requires_rocm
 def test_deepseek_v32_sparse_mla_forward():
     """Validate the portable sparse MLA forward kernel on CDNA."""
+    import sparse_mla_fwd
+
     torch.manual_seed(0)
     batch, sequence_length, heads, kv_heads = 1, 32, 16, 1
     query_key_dim, value_dim, topk = 576, 512, 32
@@ -49,7 +49,7 @@ def test_deepseek_v32_sparse_mla_forward():
         d_v=value_dim,
         block_I=32,
         num_stages=2,
-        threads=256,
+        threads=64,
     )
     reference = sparse_mla_fwd.ref_sparse_mla_fwd_interface(query, key_value, indices)
 
