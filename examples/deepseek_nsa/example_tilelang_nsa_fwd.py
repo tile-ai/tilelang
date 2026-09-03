@@ -42,7 +42,7 @@ def native_sparse_attention(Q, K, V, BlockIndices, dim, is_causal, scale=None, b
     BS = block_S
     BK = BV = block_T
     num_stages = 2
-    threads = 32
+    threads = 64 if torch.version.hip is not None else 32
 
     Q: T.Tensor(q_shape, dtype)
     K: T.Tensor(kv_shape, dtype)
