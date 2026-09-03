@@ -14,12 +14,14 @@ import example_topk  # noqa: E402
 
 @tilelang.testing.requires_rocm
 def test_topk():
-    """Validate the generic Top-K kernel and its autotuned launch on gfx942."""
+    """Validate every generic Top-K thread candidate on gfx942."""
     torch.manual_seed(0)
     logits = torch.rand((64, 64), device="cuda", dtype=torch.float32)
 
-    actual_values, actual_indices = example_topk.tl_topk(logits, 4, blk_m=64)
     expected_values, expected_indices = example_topk.ref_program(logits, 4)
 
-    torch.testing.assert_close(actual_values, expected_values)
-    torch.testing.assert_close(actual_indices, expected_indices)
+    for threads in (128, 256, 512):
+        actual_values, actual_indices = example_topk.tl_topk(logits, 4, blk_m=64, threads=threads)
+
+        torch.testing.assert_close(actual_values, expected_values)
+        torch.testing.assert_close(actual_indices, expected_indices)
