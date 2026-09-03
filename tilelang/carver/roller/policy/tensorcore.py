@@ -39,7 +39,7 @@ class TensorCorePolicy(DefaultPolicy):
             else:
                 self.pipeline_stage = 1
         use_async_copy = self.prim_func_node.get_tag("use_async_copy")
-        if use_async_copy:
+        if use_async_copy is not None:
             self.use_async_copy = use_async_copy
         else:
             # `compute_capability` is the bare "80"/"90" string, so it could
