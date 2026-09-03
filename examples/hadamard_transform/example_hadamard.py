@@ -1,5 +1,6 @@
 import tilelang
 import tilelang.language as T
+from tilelang.backend.target import determine_target
 from tilelang.cuda.intrinsics import make_mma_swizzle_layout
 
 import math
@@ -8,11 +9,13 @@ import torch
 
 
 def is_pow_of_2(n):
+    """Return whether ``n`` is a positive power of two."""
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
 
 
 @T.macro
 def warp_shfl(local, buf, thread_elem, warp_size, round):
+    """Apply the Hadamard butterfly rounds handled by one hardware warp."""
     tx = T.get_thread_binding(0)
     for i in T.serial(round):
         tx_stride = 1 << i
@@ -31,6 +34,7 @@ def warp_shfl(local, buf, thread_elem, warp_size, round):
 
 @tilelang.jit
 def hadamard(A, n, dtype):
+    """Build a Hadamard transform specialized for the active accelerator."""
     b = T.const("b")
 
     A: T.Tensor((b, n), dtype)
@@ -43,8 +47,9 @@ def hadamard(A, n, dtype):
 
     logN = int(math.log2(n))
     threads = [0, 1, 1, 1, 2, 4, 8, 16, 32, 32, 128, 256, 256, 256, 256, 256][logN]
-    is_hip = torch.version.hip is not None
-    hardware_warp_size = 64 if is_hip else 32
+    target = determine_target("auto", return_object=True)
+    is_hip = target.kind.name == "hip"
+    hardware_warp_size = int(target.attrs.get("thread_warp_size", 32))
     if is_hip:
         threads = max(threads, hardware_warp_size)
     thread_elem = max(1, n // threads)  # Each active thread is responsible for a chunk of elements
@@ -136,6 +141,7 @@ def hadamard(A, n, dtype):
 
 
 def ref_program(x: torch.Tensor):
+    """Compute a matrix-free float64 Hadamard reference."""
     assert x.ndim == 2
     dim = x.shape[-1]
     assert is_pow_of_2(dim)
