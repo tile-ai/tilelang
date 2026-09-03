@@ -9,7 +9,7 @@ from ..node import PrimFuncNode
 from .common import coalesced_factor, factorize, get_all_factors
 from .default import DefaultPolicy
 from ..rasterization import NoRasterization, Rasterization2DColumn
-from ...arch import is_rdna_arch
+from ...arch import is_cuda_arch, is_rdna_arch
 
 logger = logging.getLogger(__name__)
 
@@ -34,18 +34,18 @@ class TensorCorePolicy(DefaultPolicy):
         else:
             if is_rdna_arch(self.arch):
                 self.pipeline_stage = self.arch.tuning.pipeline_stage
-            elif self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
+            elif is_cuda_arch(self.arch) and self.arch.sm_version in {80, 90}:
                 self.pipeline_stage = 2
             else:
                 self.pipeline_stage = 1
         use_async_copy = self.prim_func_node.get_tag("use_async_copy")
-        if use_async_copy:
+        if use_async_copy is not None:
             self.use_async_copy = use_async_copy
         else:
-            if self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
-                self.use_async_copy = True
-            else:
-                self.use_async_copy = False
+            # `compute_capability` is the bare "80"/"90" string, so it could
+            # never match an "sm_80"-style literal.  Gate on `sm_version` with
+            # the same {80, 90} set the tag path uses (matmul_analysis).
+            self.use_async_copy = is_cuda_arch(self.arch) and self.arch.sm_version in {80, 90}
         # TODO: block reduction depth is not used for now.
         # As there still exists some performance issues for block reduction.
         block_reduction_depth = self.prim_func_node.get_tag("block_reduction_depth")
