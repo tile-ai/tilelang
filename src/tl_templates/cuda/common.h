@@ -416,6 +416,42 @@ TL_DEVICE float fast_rcp(float x) {
   asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(ret) : "f"(x));
   return ret;
 }
+
+// Replicate a small repeating unit across a wider vector type, e.g. one
+// packed fp4x2 byte across fp4_e2_64_t. Works for any (V, U) with
+// sizeof(V) % sizeof(U) == 0, so codegen does not need a make_<type>
+// constructor for every lane count.
+template <typename V, typename U> TL_DEVICE V broadcast(const U unit) {
+  static_assert(sizeof(V) % sizeof(U) == 0,
+                "tl::broadcast requires the vector size to be a multiple of "
+                "the unit size");
+  V result;
+  U *parts = reinterpret_cast<U *>(&result);
+#pragma unroll
+  for (int i = 0; i < static_cast<int>(sizeof(V) / sizeof(U)); ++i) {
+    parts[i] = unit;
+  }
+  return result;
+}
+
+// Build a vector struct from its scalar elements, one per lane (byte-sized
+// or larger; fp4 uses tl::make_fp4_vec). The element type is deduced from
+// the first argument; one variadic definition replaces a make_<type>
+// constructor per lane count.
+template <typename V, typename E, typename... Ts>
+TL_DEVICE V make_vec(const E first, const Ts... rest) {
+  constexpr int kN = 1 + static_cast<int>(sizeof...(rest));
+  static_assert(sizeof(V) == kN * sizeof(E),
+                "tl::make_vec element count does not match the vector size");
+  const E vals[] = {first, static_cast<E>(rest)...};
+  V result;
+  E *parts = reinterpret_cast<E *>(&result);
+#pragma unroll
+  for (int i = 0; i < kN; ++i) {
+    parts[i] = vals[i];
+  }
+  return result;
+}
 } // namespace tl
 
 // Pack four char values. Build the 32-bit pattern from unsigned bytes: a

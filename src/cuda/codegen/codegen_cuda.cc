@@ -9,6 +9,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/s_tir/stmt.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -985,7 +986,9 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         os << "int4";
         return;
       } else if (t.lanes() == 64) {
-        os << "int8";
+        // 256 bits; CUDA has no (u)int8 vector type, use (u)longlong4 like
+        // int8x32.
+        os << "longlong4";
         return;
       } else {
         LOG(FATAL) << "Cannot convert type " << t << " to CUDA type!";
@@ -1107,6 +1110,20 @@ void CodeGenTileLangCUDA::PrintVecConstructor(DataType t,
                                               std::ostream &os) { // NOLINT(*)
   if ((t.is_int() || t.is_uint()) && t.bits() == 4 && t.lanes() == 2) {
     os << (t.is_uint() ? "tl_pack_uint4x2" : "tl_pack_int4x2");
+    return;
+  }
+  // fp4/fp8 vector structs have no per-lane-count constructor; a variadic
+  // packer builds them from one scalar element per lane.
+  if (t.is_float4_e2m1fn() && t.lanes() >= 2) {
+    os << "tl::make_fp4_vec<";
+    PrintType(t, os);
+    os << ">";
+    return;
+  }
+  if (t.is_float8() && t.lanes() >= 2) {
+    os << "tl::make_vec<";
+    PrintType(t, os);
+    os << ">";
     return;
   }
   CodeGenC::PrintVecConstructor(t, os);
@@ -4277,16 +4294,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ldg256())) {
     need_copy_sm100_h_ = true;
     // Explicit 256-bit global memory load: load_global_256(ptr) or
-    // load_global_256_conditional(ptr, pred)
+    // load_global_256_conditional(ptr, pred). The builtin's result dtype is
+    // uint32x8 (ulonglong4), while the pointer argument carries the buffer's
+    // element type, so route through the exact ulonglong4 overload instead of
+    // letting the generic template deduce (and return) the element type.
     ICHECK(!op->args.empty()) << "T.ldg256 expects a pointer argument.";
     if (op->args.size() > 1) {
-      os << "tl::load_global_256_conditional(";
+      os << "tl::load_global_256_conditional((const ulonglong4*)(";
       this->PrintExpr(op->args[0], os);
-      os << ", ";
+      os << "), ";
       this->PrintExpr(op->args[1], os);
     } else {
-      os << "tl::load_global_256(";
+      os << "tl::load_global_256((const ulonglong4*)(";
       this->PrintExpr(op->args[0], os);
+      os << ")";
     }
     os << ")";
   } else if (op->op.same_as(tl::stg32())) {
@@ -5766,25 +5787,28 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   }
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
     const int64_t *p = as_const_int(op->value);
-    if (p) {
-      if (lanes == 4) {
-        // make_int8x4
-        ICHECK(p);
-        int64_t v = *p & 0xFF;
-        v = (v << 24) | (v << 16) | (v << 8) | v;
-        if (op->dtype.is_uint()) {
-          os << "(uint)" << v;
-        } else {
-          os << "(int)" << v;
-        }
-        return;
+    if (p && lanes == 4) {
+      // make_int8x4
+      int64_t v = *p & 0xFF;
+      v = (v << 24) | (v << 16) | (v << 8) | v;
+      if (op->dtype.is_uint()) {
+        os << "(uint)" << v;
+      } else {
+        os << "(int)" << v;
       }
-      // lanes == 32 (int8x32, stored as (u)longlong4) is handled by the generic
-      // path below, which emits make_(u)longlong4 with 32 scalar args. That
-      // resolves to the 32-arg packing overloads in common.h, which fill all
-      // 64 bits of each field. Do NOT special-case it here with a 4-arg
-      // make_(u)longlong4: a 4-arg call binds the built-in overload and only
-      // fills the low 32 bits of each field, zeroing the upper half.
+      return;
+    }
+    // Replicate the byte across the carrier type (int/int2/int4/longlong4).
+    // Restricted to side-effect-free values: an impure value (e.g. a cast of
+    // an rng call) must be re-evaluated per lane, which the generic fallback
+    // below preserves via the per-lane packing overloads in common.h.
+    if ((lanes == 4 || lanes == 8 || lanes == 16 || lanes == 32) &&
+        tirx::SideEffect(op->value) <= tirx::CallEffectKind::kReadState) {
+      std::string sval = SSAGetID(PrintExpr(op->value), op->value.dtype());
+      os << "tl::broadcast<";
+      PrintType(op->dtype, os);
+      os << ">(" << sval << ")";
+      return;
     }
   }
 
@@ -5875,6 +5899,36 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // fp4 vectors are nibble-packed structs: pack one fp4x2 byte and replicate
+  // it, which covers every lane count uniformly (including 64 lanes for
+  // 256-bit vectorization on sm_100+). Side-effecting values fall through to
+  // the generic path, which re-evaluates the expression once per lane.
+  if (op->dtype.is_float4_e2m1fn() && lanes % 2 == 0 &&
+      tirx::SideEffect(op->value) <= tirx::CallEffectKind::kReadState) {
+    std::string sval = SSAGetID(PrintExpr(op->value), op->value.dtype());
+    if (lanes == 2) {
+      os << "tl::make_fp4_vec<fp4_e2_2_t>(" << sval << ", " << sval << ")";
+    } else {
+      os << "tl::broadcast<";
+      PrintType(op->dtype, os);
+      os << ">(tl::make_fp4_vec<fp4_e2_2_t>(" << sval << ", " << sval << "))";
+    }
+    return;
+  }
+
+  // fp8 scalars are single bytes: replicate the byte across the vector.
+  // Restricted to side-effect-free values -- an impure value (e.g. an rng
+  // call) must be re-evaluated per lane, which the generic fallback below
+  // preserves by passing one argument per lane to tl::make_vec.
+  if (op->dtype.is_float8() && lanes >= 2 &&
+      tirx::SideEffect(op->value) <= tirx::CallEffectKind::kReadState) {
+    std::string sval = SSAGetID(PrintExpr(op->value), op->value.dtype());
+    os << "tl::broadcast<";
+    PrintType(op->dtype, os);
+    os << ">(" << sval << ")";
+    return;
+  }
+
   // Note that packed 4-bit broadcast cannot trivially fallback to the
   // generic make_<Type>(v, ...) path, as it can emit malformed make_int16_t()
   // calls that cause nvcc compilation errors when lanes==4.
@@ -5915,17 +5969,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
       os << (op->dtype.is_uint() ? "(uint)" : "(int)");
       emit_packed_field(8);
       return;
-    } else if (lanes == 16 || lanes == 32) {
-      os << "make_";
+    } else if (lanes == 16 || lanes == 32 || lanes == 64) {
+      // Carrier types are (u)int2/(u)int4/(u)longlong4: replicate one packed
+      // 32-bit field (8 nibbles) across the vector.
+      os << "tl::broadcast<";
       PrintType(op->dtype, os);
-      os << '(';
-      for (int i = 0; i < lanes / 8; ++i) {
-        if (i != 0)
-          os << ", ";
-        os << (op->dtype.is_uint() ? "(uint)" : "(int)");
-        emit_packed_field(8);
-      }
-      os << ')';
+      os << ">(" << (op->dtype.is_uint() ? "(uint)" : "(int)");
+      emit_packed_field(8);
+      os << ")";
       return;
     }
   }
@@ -5984,8 +6035,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   }
 
   std::string v = PrintExpr(op->value);
-  os << "make_";
-  PrintType(op->dtype, os);
+  if (op->dtype.is_float4_e2m1fn() || op->dtype.is_float8()) {
+    // Only side-effecting fp4/fp8 values reach here (pure ones take the
+    // tl::broadcast branches above); the variadic packer takes one argument
+    // per lane, so the expression is re-evaluated per lane as required.
+    PrintVecConstructor(op->dtype, os);
+  } else {
+    os << "make_";
+    PrintType(op->dtype, os);
+  }
   os << '(';
   for (int i = 0; i < lanes; ++i) {
     if (i != 0)
@@ -6231,8 +6289,14 @@ void CodeGenTileLangCUDA::PrintVecElemLoadExpr(DataType t, int i,
   }
 
   if (i == 0) {
-    os << "make_";
-    PrintType(t, os);
+    if (t.is_float4_e2m1fn() || t.is_float8()) {
+      // Emits the variadic tl::make_(fp4_)vec packer; the make_<type>
+      // constructors do not exist for these struct types.
+      PrintVecConstructor(t, os);
+    } else {
+      os << "make_";
+      PrintType(t, os);
+    }
     os << "(";
   }
   os << value;
