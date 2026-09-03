@@ -9,7 +9,7 @@ from ..node import PrimFuncNode
 from .common import coalesced_factor, factorize, get_all_factors
 from .default import DefaultPolicy
 from ..rasterization import NoRasterization, Rasterization2DColumn
-from ...arch import is_rdna_arch
+from ...arch import is_cuda_arch, is_rdna_arch
 
 logger = logging.getLogger(__name__)
 
@@ -344,7 +344,7 @@ class TensorCorePolicy(DefaultPolicy):
         # only support single node for now
         conditions.append(len(self.ordered_nodes) > 1)
         # only on Ampere+ arch
-        conditions.append(self.arch.compute_capability < "80")
+        conditions.append(is_cuda_arch(self.arch) and self.arch.sm_version < 80)
 
         def _check_memory_size():
             overall_gmem_size_in_bytes: int = 0
