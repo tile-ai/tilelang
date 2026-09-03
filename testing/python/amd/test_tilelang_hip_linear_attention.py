@@ -1,4 +1,5 @@
 import sys
+from math import prod
 from pathlib import Path
 
 import torch
@@ -19,19 +20,25 @@ import example_linear_attn_bwd as linear_attention_bwd  # noqa: E402
 def _assert_launchable(kernel):
     """Report generated HIP resource overflows before the runtime launch."""
     arch = get_arch(kernel.target)
-    dynamic_smem = max(
-        (int(size) for size in kernel.adapter.dynamic_smem_buf.values() if size is not None),
-        default=0,
-    )
-    assert dynamic_smem <= arch.smem_cap, f"dynamic shared memory {dynamic_smem} exceeds device limit {arch.smem_cap}"
+    resource_usage = kernel.resource_usage
 
-    for name, usage in kernel.resource_usage.items():
-        block_size = 1
-        for extent in kernel.adapter.block_info[name]:
-            block_size *= int(extent)
-        assert not usage.n_regs or usage.n_regs * block_size < arch.reg_cap, (
-            f"{name} uses {usage.n_regs} VGPRs per thread at the device register-file limit"
+    for global_var, func in kernel.artifact.device_mod.functions.items():
+        name = global_var.name_hint
+        attrs = func.attrs
+        dynamic_smem = int(attrs["dyn_shared_memory_buf"]) if "dyn_shared_memory_buf" in attrs else 0
+        thread_extent = attrs.get("thread_extent", {})
+        block_size = prod(int(extent) for tag, extent in thread_extent.items() if str(tag).startswith("threadIdx"))
+        usage = resource_usage.get(name)
+
+        assert dynamic_smem <= arch.smem_cap, (
+            f"{name} uses {dynamic_smem} bytes of dynamic shared memory, exceeding the device limit of {arch.smem_cap} bytes"
         )
+        if usage is not None and usage.n_regs:
+            assert usage.n_regs * block_size <= arch.reg_cap, (
+                f"{name} uses {usage.n_regs} VGPRs per thread across {block_size} threads "
+                f"({usage.n_regs * block_size} total), exceeding the device register-file "
+                f"limit of {arch.reg_cap}"
+            )
 
 
 @tilelang.testing.requires_rocm
@@ -88,14 +95,14 @@ def test_fused_chunk_linear_attention_backward():
     _assert_launchable(kernel)
     actual = tuple(torch.zeros_like(query, dtype=torch.float32) for _ in range(3))
     kernel(query, key, value, grad_output, *actual)
-    actual = tuple(grad.to(torch.float16) for grad in actual)
 
-    query_ref = query.detach().clone().requires_grad_(True)
-    key_ref = key.detach().clone().requires_grad_(True)
-    value_ref = value.detach().clone().requires_grad_(True)
+    query_ref = query.float().detach().requires_grad_(True)
+    key_ref = key.float().detach().requires_grad_(True)
+    value_ref = value.float().detach().requires_grad_(True)
     output_ref, _ = linear_attention_bwd.ref_program(query_ref, key_ref, value_ref)
-    output_ref.backward(grad_output)
+    output_ref.backward(grad_output.float())
     expected = (query_ref.grad, key_ref.grad, value_ref.grad)
 
+    assert len(actual) == len(expected) == 3
     for actual_grad, expected_grad in zip(actual, expected):
         torch.testing.assert_close(actual_grad, expected_grad, rtol=1e-2, atol=1e-2)
