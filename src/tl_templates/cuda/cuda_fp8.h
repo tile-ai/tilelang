@@ -45,14 +45,6 @@ struct __CUDA_ALIGN__(16) fp8_e4_16_t {
 struct __CUDA_ALIGN__(32) fp8_e4_32_t {
   fp8_e4_16_t x;
   fp8_e4_16_t y;
-
-  TL_DEVICE fp8_e4_32_t &operator=(const ulonglong4 &rhs) {
-    x.x = *(fp8_e4_8_t *)&rhs.x;
-    x.y = *(fp8_e4_8_t *)&rhs.y;
-    y.x = *(fp8_e4_8_t *)&rhs.z;
-    y.y = *(fp8_e4_8_t *)&rhs.w;
-    return *this;
-  }
 };
 
 struct __CUDA_ALIGN__(2) fp8_e5_2_t {
@@ -80,14 +72,6 @@ struct __CUDA_ALIGN__(16) fp8_e5_16_t {
 struct __CUDA_ALIGN__(32) fp8_e5_32_t {
   fp8_e5_16_t x;
   fp8_e5_16_t y;
-
-  TL_DEVICE fp8_e5_32_t &operator=(const ulonglong4 &rhs) {
-    x.x = *(fp8_e5_8_t *)&rhs.x;
-    x.y = *(fp8_e5_8_t *)&rhs.y;
-    y.x = *(fp8_e5_8_t *)&rhs.z;
-    y.y = *(fp8_e5_8_t *)&rhs.w;
-    return *this;
-  }
 };
 
 struct __CUDA_ALIGN__(2) fp8_e8_2_t {
@@ -115,14 +99,6 @@ struct __CUDA_ALIGN__(16) fp8_e8_16_t {
 struct __CUDA_ALIGN__(32) fp8_e8_32_t {
   fp8_e8_16_t x;
   fp8_e8_16_t y;
-
-  TL_DEVICE fp8_e8_32_t &operator=(const ulonglong4 &rhs) {
-    x.x = *(fp8_e8_8_t *)&rhs.x;
-    x.y = *(fp8_e8_8_t *)&rhs.y;
-    y.x = *(fp8_e8_8_t *)&rhs.z;
-    y.y = *(fp8_e8_8_t *)&rhs.w;
-    return *this;
-  }
 };
 
 // Pack two fp8_e4_t values.

@@ -97,14 +97,6 @@ struct __CUDA_ALIGN__(8) fp4_e2_16_t {
 struct __CUDA_ALIGN__(16) fp4_e2_32_t {
   fp4_e2_16_t x;
   fp4_e2_16_t y;
-
-  TL_DEVICE fp4_e2_32_t &operator=(const ulonglong4 &rhs) {
-    x.x = *(fp4_e2_8_t *)&rhs.x;
-    x.y = *(fp4_e2_8_t *)&rhs.y;
-    y.x = *(fp4_e2_8_t *)&rhs.z;
-    y.y = *(fp4_e2_8_t *)&rhs.w;
-    return *this;
-  }
 };
 
 struct __CUDA_ALIGN__(32) fp4_e2_64_t {

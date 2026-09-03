@@ -985,7 +985,9 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         os << "int4";
         return;
       } else if (t.lanes() == 64) {
-        os << "int8";
+        // 256 bits; CUDA has no (u)int8 vector type, use (u)longlong4 like
+        // int8x32.
+        os << "longlong4";
         return;
       } else {
         LOG(FATAL) << "Cannot convert type " << t << " to CUDA type!";
@@ -4277,16 +4279,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ldg256())) {
     need_copy_sm100_h_ = true;
     // Explicit 256-bit global memory load: load_global_256(ptr) or
-    // load_global_256_conditional(ptr, pred)
+    // load_global_256_conditional(ptr, pred). The builtin's result dtype is
+    // uint32x8 (ulonglong4), while the pointer argument carries the buffer's
+    // element type, so route through the exact ulonglong4 overload instead of
+    // letting the generic template deduce (and return) the element type.
     ICHECK(!op->args.empty()) << "T.ldg256 expects a pointer argument.";
     if (op->args.size() > 1) {
-      os << "tl::load_global_256_conditional(";
+      os << "tl::load_global_256_conditional((const ulonglong4*)(";
       this->PrintExpr(op->args[0], os);
-      os << ", ";
+      os << "), ";
       this->PrintExpr(op->args[1], os);
     } else {
-      os << "tl::load_global_256(";
+      os << "tl::load_global_256((const ulonglong4*)(";
       this->PrintExpr(op->args[0], os);
+      os << ")";
     }
     os << ")";
   } else if (op->op.same_as(tl::stg32())) {
@@ -5875,6 +5881,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // fp4 vectors are nibble-packed structs; make_fp4_e2_<N>_t constructors
+  // only exist up to 32 lanes. Pack one fp4x2 byte and replicate it, which
+  // covers every lane count uniformly (including 64 lanes for 256-bit
+  // vectorization on sm_100+).
+  if (op->dtype.is_float4_e2m1fn() && lanes % 2 == 0) {
+    std::string sval = SSAGetID(PrintExpr(op->value), op->value.dtype());
+    if (lanes == 2) {
+      os << "make_fp4_e2_2_t(" << sval << ", " << sval << ")";
+    } else {
+      os << "tl::broadcast<";
+      PrintType(op->dtype, os);
+      os << ">(make_fp4_e2_2_t(" << sval << ", " << sval << "))";
+    }
+    return;
+  }
+
   // Note that packed 4-bit broadcast cannot trivially fallback to the
   // generic make_<Type>(v, ...) path, as it can emit malformed make_int16_t()
   // calls that cause nvcc compilation errors when lanes==4.
@@ -5924,6 +5946,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
           os << ", ";
         os << (op->dtype.is_uint() ? "(uint)" : "(int)");
         emit_packed_field(8);
+      }
+      os << ')';
+      return;
+    } else if (lanes == 64) {
+      // 256-bit carrier is (u)longlong4: combine two 8-nibble 32-bit fields
+      // per 64-bit component. emit_packed_field only works on 32-bit fields
+      // (its non-constant path shifts within an unsigned int).
+      os << "make_";
+      PrintType(op->dtype, os);
+      os << '(';
+      for (int i = 0; i < 4; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "(unsigned long long)(";
+        emit_packed_field(8);
+        os << ") | ((unsigned long long)(";
+        emit_packed_field(8);
+        os << ") << 32)";
       }
       os << ')';
       return;
