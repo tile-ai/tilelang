@@ -21,6 +21,7 @@ def test_mhc_pre():
     actual = example_mhc_pre.mhc_pre(**test_data)
     expected = example_mhc_pre.mhc_pre_ref(**test_data)
 
+    assert len(actual) == len(expected) == 3
     for actual_tensor, expected_tensor in zip(actual, expected):
         torch.testing.assert_close(actual_tensor, expected_tensor, rtol=1e-2, atol=1e-2)
 
