@@ -49,7 +49,13 @@ def hadamard(A, n, dtype):
     threads = [0, 1, 1, 1, 2, 4, 8, 16, 32, 32, 128, 256, 256, 256, 256, 256][logN]
     target = determine_target("auto", return_object=True)
     is_hip = target.kind.name == "hip"
-    hardware_warp_size = int(target.attrs.get("thread_warp_size", 32))
+    if is_hip:
+        target_warp_size = target.attrs.get("thread_warp_size")
+        if target_warp_size is None:
+            raise RuntimeError(f"Cannot determine the HIP wavefront size for target {target}")
+        hardware_warp_size = int(target_warp_size)
+    else:
+        hardware_warp_size = 32
     if is_hip:
         threads = max(threads, hardware_warp_size)
     thread_elem = max(1, n // threads)  # Each active thread is responsible for a chunk of elements
