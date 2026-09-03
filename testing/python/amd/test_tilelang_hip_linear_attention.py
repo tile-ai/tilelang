@@ -33,7 +33,8 @@ def _assert_launchable(kernel):
         assert dynamic_smem <= arch.smem_cap, (
             f"{name} uses {dynamic_smem} bytes of dynamic shared memory, exceeding the device limit of {arch.smem_cap} bytes"
         )
-        if usage is not None and usage.n_regs:
+        assert usage is not None, f"{name} is missing HIP compiler resource metadata"
+        if usage.n_regs:
             assert usage.n_regs * block_size <= arch.reg_cap, (
                 f"{name} uses {usage.n_regs} VGPRs per thread across {block_size} threads "
                 f"({usage.n_regs * block_size} total), exceeding the device register-file "
