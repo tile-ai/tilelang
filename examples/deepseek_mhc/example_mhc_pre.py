@@ -171,6 +171,17 @@ def mhc_pre_gemm_sqrsum_tilelang(
     with T.Kernel(T.ceildiv(num_tokens, token_block)) as px:
         out_frag = T.alloc_fragment((token_block, 32), T.float32)
         sqrsum_part = T.alloc_fragment((token_block, 4), T.float32)
+        if is_hip:
+            # The MFMA A fragment is replicated across the two output waves,
+            # so it cannot uniquely determine ownership for sqrsum_part.
+            T.annotate_layout(
+                {
+                    sqrsum_part: T.Fragment(
+                        sqrsum_part.shape,
+                        forward_fn=lambda i, j: (i * 4 + j, 0),
+                    )
+                }
+            )
         T.clear(out_frag)
         T.clear(sqrsum_part)
         for pz in T.Pipelined(hc_hidden_size // hidden_block, num_stages=2):
@@ -189,7 +200,11 @@ def mhc_pre_gemm_sqrsum_tilelang(
 
             for jj in T.serial(hidden_block // 4):
                 for i, j in T.Parallel(token_block, 4):
-                    sqrsum_part[i, j] += x_frag[i, jj * 4 + j] * x_frag[i, jj * 4 + j]
+                    if is_hip:
+                        x_value = T.cast(x_smem_16[i, jj * 4 + j], T.float32)
+                    else:
+                        x_value = x_frag[i, jj * 4 + j]
+                    sqrsum_part[i, j] += x_value * x_value
 
             # should be TF32 gemm
             T.gemm(
