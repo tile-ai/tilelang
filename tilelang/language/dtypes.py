@@ -183,7 +183,7 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
     return call(expr, is_size_var)
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _log_storage_dtype_fallback_once(msg: str) -> None:
     logger.debug(msg)
 
