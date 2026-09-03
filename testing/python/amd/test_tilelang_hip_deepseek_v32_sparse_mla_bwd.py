@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 import tilelang.testing
@@ -87,3 +88,15 @@ def test_deepseek_v32_sparse_mla_backward():
 
     sparse_mla_bwd.assert_tensors_similar(actual_dq, expected_dq, eps=1e-4, name="dq")
     sparse_mla_bwd.assert_tensors_similar(actual_dkv, expected_dkv, eps=1e-4, name="dkv")
+
+    with pytest.raises(ValueError, match="positive even integer"):
+        sparse_mla_bwd.sparse_mla_bwd(
+            query,
+            key_value,
+            output,
+            output_gradient,
+            indices,
+            logsumexp,
+            block_size=15,
+            threads=64,
+        )

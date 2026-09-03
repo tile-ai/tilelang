@@ -262,6 +262,10 @@ def sparse_mla_bwd(
     block_size=32,
     threads=None,
 ):
+    """Run sparse MLA backward with a block size compatible with split dKV stores."""
+    if block_size <= 0 or block_size % 2 != 0:
+        raise ValueError("block_size must be a positive even integer")
+
     assert q.is_contiguous()
     assert kv.is_contiguous()
     assert indices.is_contiguous()
