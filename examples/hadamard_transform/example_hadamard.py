@@ -5,7 +5,6 @@ from tilelang.cuda.intrinsics import make_mma_swizzle_layout
 import math
 import argparse
 import torch
-import scipy
 
 
 def is_pow_of_2(n):
@@ -44,12 +43,16 @@ def hadamard(A, n, dtype):
 
     logN = int(math.log2(n))
     threads = [0, 1, 1, 1, 2, 4, 8, 16, 32, 32, 128, 256, 256, 256, 256, 256][logN]
-    thread_elem = n // threads  # Each thread is responsible for a chunk of elements
+    is_hip = torch.version.hip is not None
+    hardware_warp_size = 64 if is_hip else 32
+    if is_hip:
+        threads = max(threads, hardware_warp_size)
+    thread_elem = max(1, n // threads)  # Each active thread is responsible for a chunk of elements
     thread_round = int(math.log2(thread_elem))
 
-    warps = 1 if threads <= 32 else threads // 32
-    warp_round = int(math.log2(threads / warps))
-    warp_size = threads // warps
+    warps = 1 if threads <= hardware_warp_size else threads // hardware_warp_size
+    warp_size = n if is_hip and n < hardware_warp_size else threads // warps
+    warp_round = int(math.log2(warp_size))
 
     block_round = int(math.log2(warps))
 
@@ -59,12 +62,20 @@ def hadamard(A, n, dtype):
     with T.Kernel(b, threads=threads) as bx:
         local = T.alloc_local((thread_elem,), dtype)
         shared = T.alloc_shared((threads, thread_elem_in_smem), dtype)
-        T.annotate_layout({shared: make_mma_swizzle_layout(shared)})
+        if is_hip:
+            T.annotate_layout({shared: tilelang.layout.make_swizzled_layout(shared)})
+        else:
+            T.annotate_layout({shared: make_mma_swizzle_layout(shared)})
         tx = T.get_thread_binding(0)
 
         # 1. Load from HBM to register
-        for i in T.vectorized(thread_elem):
-            local[i] = A[bx, tx * thread_elem + i]
+        if is_hip and n < hardware_warp_size:
+            T.fill(local, 0)
+            if tx < n:
+                local[0] = A[bx, tx]
+        else:
+            for i in T.vectorized(thread_elem):
+                local[i] = A[bx, tx * thread_elem + i]
 
         # 2. Hadamard inside thread, n<=8
         for i in T.serial(thread_round):
@@ -114,8 +125,12 @@ def hadamard(A, n, dtype):
                     local[exchange_base + j] = shared[src_tx, j]
 
         # 5. Write back to HBM
-        for i in T.vectorized(thread_elem):
-            B[bx, tx * thread_elem + i] = local[i]
+        if is_hip and n < hardware_warp_size:
+            if tx < n:
+                B[bx, tx] = local[0]
+        else:
+            for i in T.vectorized(thread_elem):
+                B[bx, tx * thread_elem + i] = local[i]
 
     return B
 
@@ -124,13 +139,17 @@ def ref_program(x: torch.Tensor):
     assert x.ndim == 2
     dim = x.shape[-1]
     assert is_pow_of_2(dim)
-    # Compute the reference in float64: an fp32 matmul may run in reduced
-    # precision depending on the environment (e.g. TF32 is enabled by default
-    # in NGC torch builds). For dim=32768 such a reference deviates from the
-    # exact result by ~1e-1, which exceeds the 1e-2 tolerance below and makes
-    # a correct kernel "fail".
-    H = torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=torch.float64, device=x.device)
-    return (x.double() @ H.T).to(x.dtype)
+    # Compute a matrix-free float64 reference. Materializing the 32768-square
+    # Hadamard matrix would require 8 GiB before accounting for the matmul.
+    result = x.double()
+    half = 1
+    while half < dim:
+        pairs = result.reshape(*x.shape[:-1], -1, 2, half)
+        left = pairs[..., 0, :]
+        right = pairs[..., 1, :]
+        result = torch.cat((left + right, left - right), dim=-1)
+        half *= 2
+    return result.reshape_as(x).to(x.dtype)
 
 
 def main(argv=None):
