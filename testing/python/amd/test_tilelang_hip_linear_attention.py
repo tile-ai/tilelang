@@ -2,12 +2,17 @@ import sys
 from math import prod
 from pathlib import Path
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 import tilelang
 import tilelang.testing
 from tilelang.carver.arch import get_arch
+
+
+if torch.version.hip is None:
+    pytest.skip("DeepSeek linear-attention ROCm tests require HIP", allow_module_level=True)
 
 
 _EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "examples" / "linear_attention"
