@@ -73,6 +73,8 @@ def test_deepseek_v32_sparse_mla_backward():
         output_gradient,
         indices,
         logsumexp,
+        block_size=16,
+        threads=64,
     )
     expected_dq, expected_dkv = sparse_mla_bwd.ref_sparse_mla_bwd_interface(
         query,

@@ -248,7 +248,20 @@ def bwd(
     return dQ
 
 
-def sparse_mla_bwd(q, kv, o, do, indices, lse, sm_scale=None, is_casual=True, return_kernel=False, delta=None):
+def sparse_mla_bwd(
+    q,
+    kv,
+    o,
+    do,
+    indices,
+    lse,
+    sm_scale=None,
+    is_casual=True,
+    return_kernel=False,
+    delta=None,
+    block_size=32,
+    threads=None,
+):
     assert q.is_contiguous()
     assert kv.is_contiguous()
     assert indices.is_contiguous()
@@ -268,7 +281,24 @@ def sparse_mla_bwd(q, kv, o, do, indices, lse, sm_scale=None, is_casual=True, re
     if delta is None:
         delta = preprocess(o, do)
     dkv = torch.zeros_like(kv, dtype=torch.float32)
-    dq = bwd(q, kv, do, indices, lse, delta, dkv, H, D, D_tail, topk, kv_group, sm_scale, is_casual)
+    dq = bwd(
+        q,
+        kv,
+        do,
+        indices,
+        lse,
+        delta,
+        dkv,
+        H,
+        D,
+        D_tail,
+        topk,
+        kv_group,
+        sm_scale,
+        is_casual,
+        block_size=block_size,
+        threads=threads,
+    )
     dkv = postprocess(dkv, D, D_tail, kv_group)
 
     return dq, dkv
