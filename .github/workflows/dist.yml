@@ -19,6 +19,8 @@ on:
       - VERSION
       - version_provider.py
       - .github/workflows/dist.yml
+      # Exercised by the GPU wheel-test job below.
+      - maint/scripts/smoke_test_wheel.py
       # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
   release:
@@ -357,6 +359,153 @@ jobs:
           name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
           path: wheelhouse/*.whl
           if-no-files-found: error
+
+  test-wheels-gpu:
+    name: Test built wheels with ${{ matrix.target.toolkit }} (on ${{ matrix.target.name }})
+    # The build runners have no GPU, so nothing above proves the built wheels
+    # actually launch kernels: the Linux wheels are fat CUDA+ROCm builds and
+    # neither half was ever executed. This job installs the built wheel on
+    # self-hosted GPU runners and runs a real kernel on each backend. Wheel
+    # artifacts are only uploaded outside PRs (or for [Release] PRs), so gate
+    # this job the same way as the "Upload wheels" step. It is deliberately
+    # not in the needs-chain of publish-pypi: an offline self-hosted runner
+    # must not be able to block a release.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
+    needs: [build-wheels]
+    strategy:
+      matrix:
+        target:
+          # Both consume the Linux x86_64 wheel built by the CUDA-13.0 leg above.
+          - { tags: [self-hosted, nvidia], name: self-hosted-nvidia, toolkit: CUDA-13.0, python_version: "3.12" }
+          - { tags: [self-hosted, amd, gfx942], name: self-hosted-amd-gfx942, toolkit: ROCm-7.2, python_version: "3.12" }
+      fail-fast: false
+    timeout-minutes: 60
+    runs-on: ${{ matrix.target.tags }}
+
+    steps:
+      - name: Checkout repository
+        # Only needed for maint/scripts/smoke_test_wheel.py; the wheel under
+        # test comes from the build-wheels artifact.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Set environment (self-hosted runners)
+        run: |
+          # Hide sensitive data in logs for self-hosted runners
+          if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
+            echo "::add-mask::${{ secrets.SECRET_PATH_PREFIXES }}"
+            # Colon separated list of secrets to mask
+            for secret in $(echo "${{ secrets.SECRET_PATH_PREFIXES }}" | tr ':' '\n'); do
+              echo "::add-mask::${secret}"
+            done
+          fi
+
+      - name: Set environment (CUDA)
+        if: contains(matrix.target.toolkit, 'CUDA')
+        run: |
+          TOOLKIT="${{ matrix.target.toolkit }}"
+          CUDA_VERSION="${TOOLKIT##*-}"
+          CUDA_VERSION_MAJMIN="$(echo "${CUDA_VERSION}" | cut -d '.' -f-2)"
+          CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          else
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          fi
+          echo "TORCH_INDEX_URL=${TORCH_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+
+          # The wheel JIT-compiles kernels with the host nvcc at runtime.
+          if [[ -x "$(command -v nvcc)" ]]; then
+            echo "\$ $(command -v nvcc) --version" && nvcc --version
+            NVCC_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)"
+            if [[ -n "${NVCC_VERSION}" && "${NVCC_VERSION%%.*}" != "${CUDA_VERSION%%.*}" ]]; then
+              echo "::warning::nvcc CUDA ${NVCC_VERSION} does not match requested ${TOOLKIT}."
+            fi
+          else
+            echo "::warning::nvcc not found in PATH!"
+          fi
+
+      - name: Set environment (ROCm)
+        if: contains(matrix.target.toolkit, 'ROCm')
+        run: |
+          TOOLKIT="${{ matrix.target.toolkit }}"
+          ROCM_VERSION="${TOOLKIT##*-}"
+          ROCM_VERSION_MAJMIN="$(echo "${ROCM_VERSION}" | cut -d '.' -f-2)"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/nightly/rocm${ROCM_VERSION_MAJMIN}"
+          else
+            TORCH_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
+          fi
+          echo "TORCH_INDEX_URL=${TORCH_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+
+          if [[ ! -x "$(command -v hipcc)" ]]; then
+            export PATH="/opt/rocm/bin:${PATH}"
+            export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
+          fi
+          if [[ -x "$(command -v hipcc)" ]]; then
+            echo "\$ $(command -v hipcc) --version" && hipcc --version
+          else
+            echo "::warning::hipcc not found in PATH!"
+          fi
+
+      - name: Setup Python and uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.target.python_version }}
+          activate-environment: true
+          # Do not use cache upload/download for self-hosted runners, as it is
+          # slow; the local cache directory persists on the runner instead.
+          enable-cache: false
+          prune-cache: false
+          cache-local-path: ${{ env.UV_CACHE_DIR }}
+          ignore-nothing-to-cache: true
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          # Matches the wheels built for this runner's os/arch (Linux-X64).
+          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Test built wheels on GPU
+        run: |
+          # Always exercise real kernel compilation: a warm kernel cache on a
+          # persistent self-hosted runner must not mask a broken wheel.
+          export TILELANG_DISABLE_CACHE=1
+
+          ls -lh wheelhouse/
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
+            (
+              set -e
+              uv venv test-venv
+              source test-venv/bin/activate
+
+              # Install torch from the toolkit-matched channel only, before the
+              # wheel, so the resolver cannot substitute a mismatched build
+              # from PyPI (e.g. the CUDA torch on a ROCm host).
+              uv pip install -v --index-url "${TORCH_INDEX_URL}" torch
+              uv pip install -v "${WHEEL}"
+              # Run from RUNNER_TEMP so `import tilelang` resolves to the
+              # installed wheel rather than the repository source tree.
+              cp maint/scripts/smoke_test_wheel.py "${RUNNER_TEMP}/"
+              (
+                set -e
+                cd "${RUNNER_TEMP}"
+                uv run --no-project -- python smoke_test_wheel.py
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
 
   list-artifacts:
     name: List artifacts
