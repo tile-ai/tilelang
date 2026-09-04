@@ -29,6 +29,22 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+/**
+ * Validate that every physical byte written by scalar packed four-bit stores in
+ * `remapped_loop` is owned by one CUDA execution context under `loop_layout`.
+ * Global stores include the enclosing CTA coordinates in that owner; shared
+ * stores are CTA-private and only require a unique thread owner.
+ *
+ * Throws LayoutConflictException when ownership cannot be proven.
+ * Must run before LowerParallelLoop removes the logical loop layout.
+ */
+void ValidatePacked4BitStoreOwnership(const For &remapped_loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      const Array<IterVar> &block_bindings,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate);
+
 class ParallelOpNode;
 
 /*!
@@ -184,6 +200,20 @@ public:
   TileOperator Clone() const override;
 
 private:
+  struct PackedOwnershipContext {
+    For remapped_root;
+    Array<IterVar> block_bindings;
+    PrimExpr thread_index;
+    bool enforce_packed_byte_ownership;
+    bool canonical_replica_guard_guaranteed;
+  };
+
+  // Build the target gate and replica-guard context used by packed physical-
+  // store ownership checks. Remap the loop only when CUDA ownership analysis
+  // or another caller requires it.
+  PackedOwnershipContext
+  GetPackedOwnershipContext(const LayoutInferArgs &layout_args,
+                            bool require_remapped_loop = false) const;
   // Complete the fragment layout for a given buffer.
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
   // Check if the buffer is accessed with common indices (i.e., loop variables).
