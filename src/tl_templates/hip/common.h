@@ -310,6 +310,16 @@ template <typename T> TL_DEVICE bool Any(T *a, int size) {
   return false;
 }
 
+template <typename T> TL_DEVICE bool AnyWarp(T *a, int size) {
+  const auto lane_id = __lane_id();
+
+  bool result = false;
+  for (int i = lane_id; i < size; i += 64) {
+    result |= a[i];
+  }
+  return __any(result) == 1;
+}
+
 // All
 template <typename T> TL_DEVICE bool All(T *a, int size) {
   for (int i = 0; i < size; i++) {
@@ -318,6 +328,16 @@ template <typename T> TL_DEVICE bool All(T *a, int size) {
     }
   }
   return true;
+}
+
+template <typename T> TL_DEVICE bool AllWarp(T *a, int size) {
+  const auto lane_id = __lane_id();
+
+  bool result = true;
+  for (int i = lane_id; i < size; i += 64) {
+    result &= a[i];
+  }
+  return __all(result) == 1;
 }
 
 // TODO(gong): support shfl_sync(rocm 7.1.1 provide shfl_sync)
