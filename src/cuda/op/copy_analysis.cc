@@ -415,13 +415,13 @@ bool CheckSTSMCopy(const CopyNode &op, Target target) {
 }
 
 bool CheckTMemLoad(const CopyNode &op, Target target) {
-  return TargetHasTmem(target) && op.src.scope() == "shared.tmem" &&
+  return TargetHasTmem(target) && IsTmemBuffer(op.src) &&
          IsFragmentBuffer(op.dst);
 }
 
 bool CheckTMemStore(const CopyNode &op, Target target) {
   return TargetHasTmem(target) && IsFragmentBuffer(op.src) &&
-         op.dst.scope() == "shared.tmem";
+         IsTmemBuffer(op.dst);
 }
 
 bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
@@ -477,9 +477,12 @@ const char *CopyInstToString(CopyInst inst) {
   }
 }
 
-bool CopyInstIsTMA(CopyInst inst) {
-  return inst == CopyInst::kBulkLoad || inst == CopyInst::kBulkStore ||
-         inst == CopyInst::kBulkLoad1D || inst == CopyInst::kBulkStore1D;
+bool CopyInstIsTMALoad(CopyInst inst) {
+  return inst == CopyInst::kBulkLoad || inst == CopyInst::kBulkLoad1D;
+}
+
+bool CopyInstIsTMAStore(CopyInst inst) {
+  return inst == CopyInst::kBulkStore || inst == CopyInst::kBulkStore1D;
 }
 
 bool CopyInstIsCPAsync(CopyInst inst) { return inst == CopyInst::kCPAsync; }
@@ -804,10 +807,15 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target) {
+CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
+                                              Target target) {
   CopyAnalysisContext ctx;
   ctx.target = target;
+
+  if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
+    return SelectCopyInstForLowering(op, ctx);
+  }
+
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);
