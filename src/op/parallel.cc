@@ -120,6 +120,50 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
   return best_vector_size;
 }
 
+/**
+ * @brief Smallest dtype bit-width among the loop's global->shared copies.
+ *
+ * Returns the minimum element bit-width (dtype bits times lanes) of the
+ * copied dtypes when every buffer store in `stmt` is a raw global->shared
+ * copy with matching source/destination dtypes, and 0 otherwise. cp.async
+ * (4/8/16 bytes) only applies to
+ * global->shared transfers, so loops with other side effects (global stores,
+ * atomics, mixed compute) must be left untouched: re-coalescing them changes
+ * their codegen (or even their semantics, e.g. atomics) without enabling
+ * cp.async.
+ */
+int MinGlobalToSharedCopyDtypeBits(const Stmt &stmt) {
+  int min_bits = 0;
+  bool saw_copy = false;
+  bool saw_other = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (saw_other) {
+      return;
+    }
+    if (const auto *store = node.as<BufferStoreNode>()) {
+      const auto *load = store->value.as<BufferLoadNode>();
+      if (load != nullptr && IsGlobalBuffer(load->buffer) &&
+          IsSharedBuffer(store->buffer) &&
+          load->buffer->dtype == store->buffer->dtype) {
+        // Measure the full element width (bits * lanes) so vector-typed
+        // buffers are not underreported and over-widened.
+        int bits = load->buffer->dtype.bits() * load->buffer->dtype.lanes();
+        min_bits = min_bits == 0 ? bits : std::min(min_bits, bits);
+        saw_copy = true;
+      } else {
+        saw_other = true;
+      }
+      return;
+    }
+    if (node.as<CallNode>()) {
+      // Calls may carry side effects (atomic_add, intrinsics, ...); keep the
+      // loop's original per-thread distribution in that case.
+      saw_other = true;
+    }
+  });
+  return (saw_copy && !saw_other) ? min_bits : 0;
+}
+
 } // anonymous namespace
 
 /**
@@ -996,6 +1040,16 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
   return result;
 }
 
+/**
+ * @brief Compute the plan-based loop layout candidate.
+ *
+ * Determines a vectorized loop layout candidate from the maximum legal
+ * vectorize size, then adjusts it to the smallest-padding width for
+ * non-fragment loops. Pure global->shared copies with sub-32-bit dtypes are
+ * additionally coalesced to keep each active thread's chunk at or above
+ * 4 bytes, so the copy stays compatible with the cp.async minimum transfer
+ * width instead of silently falling back to a synchronous load.
+ */
 Fragment
 ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Vectorize Size must be aware of the buffer_remap
@@ -1020,9 +1074,25 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
       vector_size /= 2;
     }
   } else if (!root_->annotations.count(attr::kCoalescedWidth)) {
+    int max_vector_size = vector_size;
     vector_size = SelectMinPaddingVectorSize(vector_size, loop_total_size,
                                              layout_args.thread_bounds->extent,
                                              &analyzer_);
+    // Coalesce sub-32-bit elements before distributing them to threads: for
+    // global->shared copies, keep each active thread's chunk at or above
+    // 4 bytes. Sub-4B per-thread global accesses are memory-inefficient and
+    // fall below the cp.async minimum transfer width (4/8/16 bytes), which
+    // would silently force the synchronous copy fallback. Threads left idle
+    // by the wider chunk are covered by the partition predicate (and by
+    // predicated cp.async after the rewrite pass).
+    int min_global_bits = MinGlobalToSharedCopyDtypeBits(maybe_remapped_root_);
+    if (min_global_bits > 0 && min_global_bits < 32 &&
+        32 % min_global_bits == 0) {
+      int min_lanes = 32 / min_global_bits;
+      if (vector_size < min_lanes && max_vector_size >= min_lanes) {
+        vector_size = min_lanes;
+      }
+    }
   }
   DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
              << vector_size << '\n';
