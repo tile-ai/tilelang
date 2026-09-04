@@ -48,7 +48,14 @@ programming_guides/overview
 programming_guides/language_basics
 programming_guides/instructions
 programming_guides/control_flow
+programming_guides/advanced_semantics
+programming_guides/fragment_layout
+programming_guides/reducer
 programming_guides/software_pipeline
+programming_guides/warp_specialization
+programming_guides/tma
+programming_guides/cluster_tma
+programming_guides/synchronization
 programming_guides/python_compatibility
 programming_guides/autotuning
 programming_guides/type_system

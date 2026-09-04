@@ -125,6 +125,10 @@ TileLang exposes key software‑managed scopes:
 - Fragment and scalars: per‑thread fragments and scalar vars but in Shared View
   (`T.alloc_fragment`, `T.alloc_var`)
 
+Fragment storage is distributed according to an inferred or explicit mapping;
+it is not simply a private dense array with the full logical shape. See
+[Fragment Layouts and Replication](fragment_layout.md).
+
 ```python
 A_shared = T.alloc_shared((BM, BK), 'float16')
 B_shared = T.alloc_shared((BK, BN), 'float16')
