@@ -137,7 +137,7 @@ from .builtin import (  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 
-from .symbolics import dynamic, symbolic  # noqa: F401
+from .symbolics import dynamic  # noqa: F401
 from .annotations import (  # noqa: F401
     WSID,
     use_swizzle,
@@ -301,7 +301,6 @@ _LOCAL_EXPORTS = (
     "shfl_sync",
     "shfl_up",
     "shfl_xor",
-    "symbolic",
     "sync_global",
     "sync_grid",
     "sync_threads",
