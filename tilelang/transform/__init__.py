@@ -105,6 +105,22 @@ def VerifyBufferInit():
     return _ffi_api.VerifyBufferInit()  # type: ignore
 
 
+def InferMemoryScope():
+    """Infer concrete memory scopes for buffers allocated with T.auto_alloc.
+
+    Buffers allocated via ``T.auto_alloc`` carry the virtual scope ``"auto"``;
+    this pass rewrites them to ``shared.dyn`` / ``local.fragment`` / ``local``
+    based on their access patterns. It must run before warp specialization,
+    pipeline planning and layout inference, which branch on the scope.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InferMemoryScope()  # type: ignore
+
+
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 

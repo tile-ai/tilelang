@@ -19,6 +19,7 @@
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
+#include "../op/utils.h"
 #include "span_utils.h"
 #include <exception>
 #include <sstream>
@@ -399,6 +400,13 @@ using namespace tirx::transform;
 
 tvm::transform::Pass VerifyBufferInit() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    // The virtual "auto" scope (T.auto_alloc) must have been resolved by
+    // InferMemoryScope already, which runs right before this pass on the
+    // cuda/rocm/cpu pipelines. Any residual auto buffer is a hard error here:
+    // on pipelines without InferMemoryScope (metal/webgpu) it is unsupported,
+    // otherwise it indicates an internal bug. This is the single gate; later
+    // passes do not re-check. Not gated by the warning opt-out below.
+    CheckNoAutoScopeBuffers(f, "VerifyBufferInit");
     // Enabled by default. The analysis reports buffers that nothing writes at
     // all, plus order-sensitive cases in per-thread storage where the only
     // write comes after the read, which keeps false positives rare enough to
