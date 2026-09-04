@@ -1,12 +1,3 @@
-"""llvm-target CPU parallelization (``tl.cpu_parallel``) tests.
-
-The CPU pipeline is shared by the ``c`` and ``llvm`` targets; with
-``tl.cpu_parallel`` enabled the llvm side marks only the first non-unit
-grid dim as kParallel, which TVM's LLVM codegen lowers to
-``TVMBackendParallelLaunch`` (its own thread pool — no OpenMP flags are
-injected on this target). These tests lock in correctness of that path.
-"""
-
 import torch
 
 import tilelang
