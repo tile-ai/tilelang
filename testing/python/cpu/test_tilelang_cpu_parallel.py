@@ -402,5 +402,48 @@ def test_cpu_parallel_readonly_shared_table_still_parallelizes():
     torch.testing.assert_close(kernel(A), A * 2.0, rtol=1e-6, atol=1e-6)
 
 
+def test_cpu_parallel_address_of_use_stays_serial():
+    # address_of wraps a BufferLoad, which would otherwise hide the
+    # callee-mutated buffer from the opaque-use check; the nest must stay
+    # serial.
+    TILE = 128
+
+    @T.prim_func
+    def addr_of_use(
+        A: T.Tensor((M,), "float32"),
+        B: T.Tensor((M,), "float32"),
+    ):
+        buf = T.alloc_buffer((TILE,), "float32", scope="local")
+        for i in T.serial(TILE):
+            buf[i] = 0.0
+        with T.Kernel(
+            M // TILE,
+            M // TILE,
+            threads=1,
+            prelude='extern "C" void writer(float* p) { p[0] += 1.0f; }\n',
+        ) as (bx, by):
+            T.call_extern("void", "writer", T.address_of(buf[0]))
+            for i in T.serial(TILE):
+                B[bx * TILE + i] = A[bx * TILE + i] + by * 0.0
+        for i in T.serial(TILE):
+            B[i] = B[i] + buf[i]
+
+    kernel = tilelang.compile(
+        addr_of_use,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "#pragma omp" not in source
+
+    torch.manual_seed(0)
+    A = torch.randn(M, dtype=torch.float32)
+    expected = A.clone()
+    expected[0] += 16.0  # writer increments buf[0] once per grid iteration
+    torch.testing.assert_close(kernel(A), expected, rtol=1e-6, atol=1e-6)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
