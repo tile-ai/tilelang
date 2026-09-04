@@ -10,7 +10,6 @@
 #define hsin cutlass::fast_sin
 #define hcos cutlass::fast_cos
 #define htanh cutlass::fast_tanh
-#define hpow powf
 
 namespace cutlass {
 // CUTLASS lacks 16-bit overloads for these functions except fast_exp and

@@ -5,7 +5,6 @@ from tilelang.cuda.intrinsics import make_mma_swizzle_layout
 import math
 import argparse
 import torch
-from torch.nn import functional as F
 import scipy
 
 
@@ -125,14 +124,20 @@ def ref_program(x: torch.Tensor):
     assert x.ndim == 2
     dim = x.shape[-1]
     assert is_pow_of_2(dim)
-    return F.linear(x, torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=x.dtype, device=x.device))
+    # Compute the reference in float64: an fp32 matmul may run in reduced
+    # precision depending on the environment (e.g. TF32 is enabled by default
+    # in NGC torch builds). For dim=32768 such a reference deviates from the
+    # exact result by ~1e-1, which exceeds the 1e-2 tolerance below and makes
+    # a correct kernel "fail".
+    H = torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=torch.float64, device=x.device)
+    return (x.double() @ H.T).to(x.dtype)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch", type=int, default=64, help="Batch size")
     parser.add_argument("--dim", type=int, default=32768, help="Dimension")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     B, D = args.batch, args.dim
     x = torch.randn((B, D), device="cuda")

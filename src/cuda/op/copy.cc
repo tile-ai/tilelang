@@ -865,8 +865,7 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
   Stmt lowered_loop = LowerParallelLoop(
       par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
       lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-      /*parallel_loop=*/true, /*should_vectorize=*/true,
-      par_op->LoopLayoutRequiresPaddingGuard());
+      /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
 
   auto inject_result =
       InjectPTXAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/
@@ -917,8 +916,8 @@ Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
   const Array<Range> &src_range = op.src_range;
   const Array<Range> &dst_range = op.dst_range;
   ICHECK(op.dst_block.defined());
-  ICHECK(src.scope() == "shared" || src.scope() == "shared.dyn");
-  ICHECK(dst.scope() == "shared" || dst.scope() == "shared.dyn");
+  ICHECK(IsSharedBuffer(src));
+  ICHECK(IsSharedBuffer(dst));
 
   if (auto barrier_opt = GetBarrier(op)) {
     bool src_contiguous = IsContiguousRegion(src, src_range, analyzer);
@@ -1340,7 +1339,7 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   const Buffer &src = op.src;
   const Buffer &dst = op.dst;
 
-  if (src.scope() != "shared.tmem" && dst.scope() != "shared.tmem") {
+  if (!IsTmemBuffer(src) && !IsTmemBuffer(dst)) {
     return Stmt();
   }
   ICHECK(TargetHasTmem(lower_args.target))
@@ -1353,11 +1352,11 @@ Stmt Copy::LowerTmem(const CopyNode &op, const LowerArgs &lower_args,
   bool src_needs_pack = 16 == src->dtype.bits();
   bool dst_needs_unpack = 16 == dst->dtype.bits();
 
-  if (src.scope() == "shared.tmem" && IsFragmentBuffer(dst)) {
+  if (IsTmemBuffer(src) && IsFragmentBuffer(dst)) {
     is_ld = true;
-  } else if (IsFragmentBuffer(src) && dst.scope() == "shared.tmem") {
+  } else if (IsFragmentBuffer(src) && IsTmemBuffer(dst)) {
     is_st = true;
-  } else if (src.scope() == "shared.dyn" && dst.scope() == "shared.tmem") {
+  } else if (IsSharedBuffer(src) && IsTmemBuffer(dst)) {
     is_cp = true;
   } else {
     LOG(FATAL) << "Unsupported tensor memory copy: " << "src scope = "

@@ -147,16 +147,26 @@ def _find_cuda_home() -> str:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
         if nvcc_path is not None:
-            # Standard CUDA pattern
-            if "cuda" in nvcc_path.lower():
-                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
-            # NVIDIA HPC SDK pattern
-            elif "hpc_sdk" in nvcc_path.lower():
-                # Navigate to the root directory of nvhpc
-                cuda_home = os.path.dirname(os.path.dirname(os.path.dirname(nvcc_path)))
-            # Generic fallback for non-standard or symlinked installs
+
+            def cuda_home_from_nvcc(path: str) -> str:
+                # NVIDIA HPC SDK keeps nvcc an extra level down (e.g.
+                # .../hpc_sdk/Linux_x86_64/25.7/compilers/bin/nvcc), so step up
+                # three levels to reach the SDK root. Its bundled toolkit
+                # (.../25.7/cuda/12.9/bin/nvcc) instead follows the standard
+                # <cuda_home>/bin/nvcc layout, hence the "cuda" exclusion.
+                if "hpc_sdk" in path.lower() and "cuda" not in path.lower():
+                    return os.path.dirname(os.path.dirname(os.path.dirname(path)))
+                return os.path.dirname(os.path.dirname(path))
+
+            visible_cuda_home = cuda_home_from_nvcc(nvcc_path)
+            # Keep a composed toolkit prefix when it supplies the headers and
+            # libraries around a compiler symlink. Pip CUDA shims instead
+            # resolve into the package root, because their visible prefix does
+            # not contain a usable toolkit.
+            if os.path.exists(os.path.join(visible_cuda_home, "include", "cuda_runtime.h")):
+                cuda_home = visible_cuda_home
             else:
-                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+                cuda_home = cuda_home_from_nvcc(os.path.realpath(nvcc_path))
 
         elif _get_package_version("nvidia-cuda-nvcc") is not None:
             # Guess #3
@@ -194,8 +204,13 @@ def _find_rocm_home() -> str:
     if rocm_home is None:
         rocmcc_path = shutil.which("hipcc")
         if rocmcc_path is not None:
-            rocm_home = os.path.dirname(os.path.dirname(rocmcc_path))
-        else:
+            candidate = os.path.dirname(os.path.dirname(os.path.realpath(rocmcc_path)))
+            # Only trust a PATH-derived prefix when it carries the public HIP
+            # headers; partial toolchains without them exist in the wild (e.g.
+            # the preview compiler some ROCm 7 installs prepend to PATH).
+            if os.path.exists(os.path.join(candidate, "include", "hip", "hip_runtime.h")):
+                rocm_home = candidate
+        if rocm_home is None:
             rocm_home = "/opt/rocm"
             if not os.path.exists(rocm_home):
                 rocm_home = None

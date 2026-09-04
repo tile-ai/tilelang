@@ -95,20 +95,28 @@ load_global_256_conditional(const ulonglong4 *ptr, bool pred) {
   return ret;
 }
 
-// Generic 256-bit load for FP8 and other types (returns ulonglong4)
+// Generic 256-bit load: returns the pointee type so that assignments to
+// vector structs (fp8_e4_32_t, fp4_e2_64_t, ...) type-check without a
+// hand-written operator= from ulonglong4 on every such type. The load is
+// performed as ulonglong4 and bit-cast back.
 template <typename T>
-__device__ __forceinline__ ulonglong4 load_global_256(const T *ptr) {
+__device__ __forceinline__ T load_global_256(const T *ptr) {
+  static_assert(sizeof(T) == 32,
+                "tl::load_global_256 requires a 32-byte vector type");
   ulonglong4 ret{};
   global_load_256(ret, ptr, true);
-  return ret;
+  return *reinterpret_cast<T *>(&ret);
 }
 
 template <typename T>
-__device__ __forceinline__ ulonglong4 load_global_256_conditional(const T *ptr,
-                                                                  bool pred) {
+__device__ __forceinline__ T load_global_256_conditional(const T *ptr,
+                                                         bool pred) {
+  static_assert(sizeof(T) == 32,
+                "tl::load_global_256_conditional requires a 32-byte vector "
+                "type");
   ulonglong4 ret{};
   global_load_256(ret, ptr, pred);
-  return ret;
+  return *reinterpret_cast<T *>(&ret);
 }
 
 // 256-bit store specialization for ulonglong4
@@ -166,8 +174,11 @@ pack_bfloat16x4(const bfloat16_t x, const bfloat16_t y, const bfloat16_t z,
   return (v0 | (v1 << 16) | (v2 << 32) | (v3 << 48));
 }
 
+// Takes half_t (cutlass::half_t) like __pack_half2 and pack_bfloat16x4:
+// codegen prints fp16 scalars as half_t, which does not implicitly convert
+// to __half.
 __device__ __forceinline__ unsigned long long
-pack_float16x4(const half x, const half y, const half z, const half w) {
+pack_float16x4(const half_t x, const half_t y, const half_t z, const half_t w) {
   unsigned long long v0 = *((unsigned short *)&x);
   unsigned long long v1 = *((unsigned short *)&y);
   unsigned long long v2 = *((unsigned short *)&z);

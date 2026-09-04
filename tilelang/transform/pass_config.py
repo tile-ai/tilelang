@@ -73,6 +73,10 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
+    TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
+    """Name of the automatic warp-specialization scheduler to run (e.g.
+    "role_based"). Default: unset (disabled)."""
+
     TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
     """
         Enable fast math optimization. Default: False
@@ -142,6 +146,12 @@ class PassConfigKey(str, Enum):
 
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
+
+    TL_ENABLE_FP32X2_REDUCTION = "tl.enable_fp32x2_reduction"
+    """Enable packed FP32x2 accumulation for CUDA sum and absolute-sum
+    reductions on SM100 and newer GPUs. Per-reduction annotations can still
+    disable the optimization. Setting this to False disables it globally.
+    Default: True"""
 
     TL_ENABLE_ASYNC_COPY = "tl.enable_async_copy"
     """Enable lowering eligible global->shared copies to PTX `cp.async`.
