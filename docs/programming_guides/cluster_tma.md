@@ -5,6 +5,10 @@ NVIDIA Hopper (SM90) and later: **TMA multicast** and **SM-to-SM cluster
 copy**. Both features are exposed through extensions to the existing `T.copy`
 operator and require a kernel launched with `T.ClusterKernel`, i.e., with `cluster_dims != (1, 1, 1)`.
 
+Read [Tensor Memory Accelerator](tma.md) for the base copy contracts and
+[Synchronization and Memory Ordering](synchronization.md) for mbarrier and
+cluster-barrier semantics.
+
 Requirements:
 - CUDA Compute Capability ≥ 9.0 (Hopper / Blackwell / RTX 5090)
 
@@ -287,7 +291,7 @@ mbarrier without any API change.
 | `T.cluster_wait()` | — | Wait for all cluster CTAs to arrive |
 | `T.alloc_cluster_barrier([count])` | `Buffer` | Allocate and initialise an mbarrier for `count` arrivals |
 | `T.mbarrier_arrive(bar)` | — | Signal one arrival on an mbarrier |
-| `T.mbarrier_wait_parity(bar, parity)` | — | Wait until `bar` flips to `parity` |
+| `T.mbarrier_wait_parity(bar, parity)` | — | Wait through the epoch identified by `parity` |
 
 ---
 
