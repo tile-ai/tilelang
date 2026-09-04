@@ -149,9 +149,12 @@ def _find_cuda_home() -> str:
         if nvcc_path is not None:
 
             def cuda_home_from_nvcc(path: str) -> str:
-                if "cuda" in path.lower():
-                    return os.path.dirname(os.path.dirname(path))
-                if "hpc_sdk" in path.lower():
+                # NVIDIA HPC SDK keeps nvcc an extra level down (e.g.
+                # .../hpc_sdk/Linux_x86_64/25.7/compilers/bin/nvcc), so step up
+                # three levels to reach the SDK root. Its bundled toolkit
+                # (.../25.7/cuda/12.9/bin/nvcc) instead follows the standard
+                # <cuda_home>/bin/nvcc layout, hence the "cuda" exclusion.
+                if "hpc_sdk" in path.lower() and "cuda" not in path.lower():
                     return os.path.dirname(os.path.dirname(os.path.dirname(path)))
                 return os.path.dirname(os.path.dirname(path))
 
