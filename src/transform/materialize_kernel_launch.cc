@@ -204,7 +204,7 @@ private:
         // tl.cpu_parallel pass config is enabled; the value is the grid
         // dimension index within this launch (see
         // src/cpu/transform/materialize_cpu_parallel_grid.cc).
-        Map<ffi::String, ffi::Any> annotations = loop->annotations;
+        ffi::Map<ffi::String, ffi::Any> annotations = loop->annotations;
         if (annotate_grid_ && !annotations.count(attr::kCPUGridDim)) {
           annotations.Set(attr::kCPUGridDim,
                           IntImm(DataType::Int(32), static_cast<int64_t>(i)));
@@ -333,8 +333,7 @@ MaterializeKernelLaunch(bool lower_grid_binding, bool lower_thread_binding,
     }
     bool annotate_grid = false;
     if (!lower_grid_binding) {
-      annotate_grid =
-          ctx->GetConfig<ffi::Bool>(kCPUParallel, ffi::Bool(false)).value();
+      annotate_grid = ctx->GetConfig<Bool>(kCPUParallel, Bool(false)).value();
     }
     KernelLaunchMaterializer mutator(lower_grid_binding, lower_thread_binding,
                                      default_threads, unsupported, dim_tags,
