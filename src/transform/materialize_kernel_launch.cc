@@ -66,6 +66,7 @@ public:
 
   Stmt VisitStmt_(const ForNode *op) final {
     if (IsLaunchBinding(op)) {
+      block_dim_ = 0; // annotation values are per-launch grid dim indices
       return ConvertNest(op);
     }
     return StmtMutator::VisitStmt_(op);

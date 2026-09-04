@@ -304,7 +304,11 @@ def Kernel(
         ``num_threads(n)`` clause on the grid parallel region when the
         ``tl.cpu_parallel`` pass config is enabled. ``None`` (default)
         omits the clause and lets the OpenMP runtime pick the thread
-        count (e.g. from ``OMP_NUM_THREADS``). Ignored on non-CPU targets.
+        count (e.g. from ``OMP_NUM_THREADS``). Only the ``c`` target
+        consumes it — on the ``llvm`` target it has no effect, since
+        that path lowers to ``TVMBackendParallelLaunch`` and uses TVM's
+        own thread pool (controlled via ``TVM_NUM_THREADS`` /
+        ``OMP_NUM_THREADS``). Ignored on non-CPU targets.
 
     Returns
     -------
