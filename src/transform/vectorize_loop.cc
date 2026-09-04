@@ -149,14 +149,16 @@ inline Op GetVectorizedAtomicOp(int vector_size) {
 }
 
 /*!
- * \brief Get the max vector size supported by the given dtype for atomic ops.
+ * \brief Get the max vector size supported by the destination for atomic ops.
  */
-inline int GetMaxAtomicVectorSize(DataType dtype, Target target) {
+inline int GetMaxAtomicVectorSize(const Buffer &destination, Target target) {
+  DataType dtype = destination->dtype;
   if (dtype.is_float16() || dtype.is_bfloat16()) {
     return 2;
   }
   if (dtype.is_float() && dtype.bits() == 32 &&
-      TargetHasSMVersionGE(target, 90)) {
+      TargetHasSMVersionGE(target, 90) && IsGlobalBuffer(destination)) {
+    // CUDA's float2/float4 atomicAdd overloads support global memory only.
     return 4;
   }
   return 1;
@@ -635,9 +637,10 @@ public:
     auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
     Target target = Target::Current(false);
     int max_vec_size =
-        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer->dtype, target);
+        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer, target);
     if (vector_size > max_vec_size) {
-      // Vector size not supported for this dtype, cannot vectorize
+      // Keep the loop binder when this atomic requires scalar lanes.
+      need_scalarize_ = true;
       return GetRef<PrimExpr>(op);
     }
 
