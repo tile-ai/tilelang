@@ -401,6 +401,20 @@ jobs:
           "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
             ./python
 
+      - name: Run portable examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: contains(matrix.runner.toolkit, 'ROCm')
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=1 \
+            ../examples/seer_attention/test_block_sparse_attn_tilelang.py::test_block_sparse_attn_tilelang_rocm \
+            ../examples/topk/test_topk_tilelang.py::test_topk_tilelang_rocm \
+            ../examples/deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_fwd_rocm \
+            ../examples/grouped_gemm/test_example_grouped_gemm.py::test_example_grouped_gemm_rocm
+
       # Apple Metal tests
       - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: metal-tests
