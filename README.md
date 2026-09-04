@@ -150,6 +150,8 @@ Nightly wheels provide recent features and fixes before the next stable release:
 pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 ```
 
+On AMD GPUs the same Linux wheels work out of the box: install a ROCm build of PyTorch first (e.g. `pip install torch --index-url https://download.pytorch.org/whl/rocm7.0`), then `pip install tilelang`. A host ROCm installation is required at runtime; see the [ROCm notes](https://tilelang.com/get_started/Installation.html#installing-on-amd-gpus-rocm) in the installation guide.
+
 Nightly builds may be less stable than official releases. For source builds, editable installs, Docker, ROCm setup, pip-provided CUDA toolchains, or a custom TVM checkout, follow the complete [installation guide](https://tilelang.com/get_started/Installation.html).
 
 ## Quick Start
