@@ -7,6 +7,8 @@
 
 #include "backend/common/target_utils.h"
 
+#include <tvm/ir/transform.h>
+
 #include <sstream>
 
 namespace tvm {
@@ -17,16 +19,44 @@ using namespace tirx;
 namespace cuda {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
+  static bool IsFAdd2Enabled(const ReduceOpNode &op) {
+    auto pass_ctx = tvm::transform::PassContext::Current();
+    bool globally_enabled =
+        pass_ctx->GetConfig<Bool>(kEnableFP32x2Reduction, Bool(true)).value();
+    if (!globally_enabled) {
+      return false;
+    }
+
+    constexpr const char *kEnableFAdd2 = "enable_fadd2";
+    if (auto value = op.annotations.Get(kEnableFAdd2)) {
+      if (auto enabled = value.value().as<Bool>()) {
+        return enabled.value();
+      }
+      if (auto enabled = value.value().as<IntImm>()) {
+        return enabled.value()->value != 0;
+      }
+      LOG(FATAL) << "CUDA ReduceOp annotation `" << kEnableFAdd2
+                 << "` must be a boolean";
+    }
+    return true;
+  }
+
   static bool SupportsFp16Bf16NanReduce(Target target) {
     return TargetIsCuda(target);
   }
 
-  static int GetPreferedVectorizedSize(DataType dt, Target target) {
+  static int GetPreferredVectorizedSize(const ReduceOpNode &op, Target target) {
     if (!TargetIsCuda(target)) {
       return 1;
     }
     bool supports_fp32x2 = TargetHasSMVersionGE(target, 100);
-    return backend::reduce::GetPreferedVectorizedSize(dt, supports_fp32x2);
+    int vsize = backend::reduce::GetPreferredVectorizedSize(op.dst->dtype,
+                                                            supports_fp32x2);
+    if (vsize == 2 && op.dst->dtype.is_float() && op.dst->dtype.bits() == 32 &&
+        (op.type->IsSum() || op.type->IsAbsSum()) && !IsFAdd2Enabled(op)) {
+      return 1;
+    }
+    return vsize;
   }
 
   static std::string MakeBatchAllReduce(std::string reducer,

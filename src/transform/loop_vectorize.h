@@ -26,8 +26,8 @@
 #define TVM_TL_LOOP_VECTORIZE_H_
 
 #include "../op/operator.h"
-#include "layout_reducer.h"
 #include <tvm/arith/analyzer.h>
+#include <tvm/target/target.h>
 #include <tvm/tirx/op.h>
 
 namespace tvm {
@@ -35,12 +35,18 @@ namespace tl {
 
 using namespace tirx;
 
-int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {},
-                     const ffi::Map<Var, ReducerInfo> &reducer_info_map = {});
+// Widest vector memory access, in bits, that the vectorize planner will
+// consider for code whose memory-access mix is described by
+// `global_only_access` (touches global memory and no shared memory).
+// Single source of truth for the width-cap policy: the layout-inference
+// cost model calls this too, so a candidate layout is scored under exactly
+// the cap the vectorizer will later enforce on it.
+int MaxVectorLoadBits(const Target &target, bool global_only_access);
+
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 
 int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map = {},
-                     const ffi::Map<Var, ReducerInfo> &reducer_info_map = {});
+                     const LayoutMap &layout_map = {});
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
                   int vectorize_hint = -1);

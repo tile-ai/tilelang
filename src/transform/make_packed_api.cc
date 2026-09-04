@@ -1,27 +1,9 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file make_packed_api.cc Lower PrimFunc to use the packed function API.
  */
 #include "support/check.h"
 #include <tvm/ffi/extra/module.h>
+#include <tvm/ffi/function.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/logging.h>
@@ -35,6 +17,8 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -51,6 +35,66 @@ using namespace tirx;
 using namespace ffi;
 
 namespace {
+constexpr const char *kTileLangOutIdx = "tilelang_out_idx";
+constexpr const char *kOutputStorageDTypeResolver =
+    "tl.tvm_ffi.resolve_output_storage_dtype";
+
+struct OutputStorageInfo {
+  DataType dtype;
+  Array<PrimExpr> shape;
+  Optional<PrimExpr> packing_condition;
+};
+
+OutputStorageInfo ResolveOutputStorage(const Buffer &buffer) {
+  auto resolver = Function::GetGlobal(kOutputStorageDTypeResolver);
+  ICHECK(resolver.has_value())
+      << "Callee-allocated TVM-FFI outputs require global function `"
+      << kOutputStorageDTypeResolver << "` to be registered";
+
+  Any storage_dtype_result = (*resolver)(buffer->dtype);
+  DataType storage_dtype = storage_dtype_result.cast<DataType>();
+  const int logical_bits = buffer->dtype.bits() * buffer->dtype.lanes();
+  const int storage_bits = storage_dtype.bits() * storage_dtype.lanes();
+  ICHECK_GT(logical_bits, 0) << "Invalid logical dtype " << buffer->dtype
+                             << " for output buffer " << buffer->name;
+  ICHECK_GE(storage_bits, logical_bits)
+      << "Torch storage dtype " << storage_dtype << " for logical dtype "
+      << buffer->dtype << " cannot use fewer bits per storage element";
+  ICHECK_EQ(storage_bits % logical_bits, 0)
+      << "Torch storage dtype " << storage_dtype << " for logical dtype "
+      << buffer->dtype << " must contain an integral number of logical values";
+
+  Array<PrimExpr> storage_shape = buffer->shape;
+  Optional<PrimExpr> packing_condition;
+  const int packing_factor = storage_bits / logical_bits;
+  if (packing_factor > 1) {
+    ICHECK(!storage_shape.empty()) << "Packed output dtype " << buffer->dtype
+                                   << " requires at least one shape dimension";
+    PrimExpr logical_extent = storage_shape.back();
+    PrimExpr factor = make_const(logical_extent.dtype(), packing_factor);
+    packing_condition = floormod(logical_extent, factor) == 0;
+    storage_shape.Set(storage_shape.size() - 1,
+                      floordiv(logical_extent, factor));
+  }
+  return {storage_dtype, storage_shape, packing_condition};
+}
+
+Stmt StoreFFIAny(PrimExpr result, int type_index, PrimExpr value) {
+  return SeqStmt(
+      {Evaluate(Call(DataType::Int(32), builtin::tvm_struct_set(),
+                     {result, IntImm(DataType::Int(32), 0),
+                      IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex),
+                      IntImm(DataType::Int(32), type_index)})),
+       Evaluate(Call(DataType::Int(32), builtin::tvm_struct_set(),
+                     {result, IntImm(DataType::Int(32), 0),
+                      IntImm(DataType::Int(32), builtin::kTVMFFIAnyZeroPadding),
+                      IntImm(DataType::Int(32), 0)})),
+       Evaluate(Call(DataType::Int(32), builtin::tvm_struct_set(),
+                     {result, IntImm(DataType::Int(32), 0),
+                      IntImm(DataType::Int(32), builtin::kTVMFFIAnyUnionValue),
+                      std::move(value)}))});
+}
+
 class ReturnRewriter : public StmtMutator {
 public:
   explicit ReturnRewriter(Var ret_var) : ret_var_(ret_var) {}
@@ -293,11 +337,61 @@ Optional<String> RequiresPackedAPI(const PrimFunc &func) {
   return global_symbol;
 }
 
-PrimFunc MakePackedAPI(PrimFunc func) {
+std::vector<int> GetCalleeAllocatedOutputIndices(const PrimFunc &func) {
+  auto output_attr = func->GetAttr<Array<Integer>>(kTileLangOutIdx);
+  if (!output_attr || output_attr.value().empty() ||
+      !func->HasNonzeroAttr(tirx::attr::kIsEntryFunc)) {
+    return {};
+  }
+
+  auto target = func->GetAttr<Target>(tvm::attr::kTarget);
+  if (!target || target.value()->kind->name != "cuda") {
+    return {};
+  }
+  auto target_host = target.value()->GetHost();
+  if (!target_host || target_host.value()->kind->name != "c") {
+    return {};
+  }
+
+  std::vector<int> indices;
+  std::unordered_set<int> seen;
+  const int num_params = static_cast<int>(func->params.size());
+  for (const Integer &raw_index : output_attr.value()) {
+    int index = raw_index.IntValue();
+    if (index < 0) {
+      index += num_params;
+    }
+    ICHECK_GE(index, 0) << kTileLangOutIdx << " index " << raw_index
+                        << " is out of range for a function with " << num_params
+                        << " parameters";
+    ICHECK_LT(index, num_params) << kTileLangOutIdx << " index " << raw_index
+                                 << " is out of range for a function with "
+                                 << num_params << " parameters";
+    ICHECK(seen.insert(index).second)
+        << kTileLangOutIdx << " contains duplicate index " << raw_index;
+
+    const Var &param = func->params[index];
+    auto buffer_it = func->buffer_map.find(param);
+    ICHECK(buffer_it != func->buffer_map.end())
+        << kTileLangOutIdx << " index " << raw_index
+        << " does not refer to a buffer parameter";
+    indices.push_back(index);
+  }
+  return indices;
+}
+
+PrimFunc
+MakePackedAPI(PrimFunc func,
+              const std::vector<int> &callee_allocated_output_indices) {
   auto global_symbol = RequiresPackedAPI(func);
   if (!global_symbol) {
     return func;
   }
+  const bool use_callee_allocated_output_abi =
+      !callee_allocated_output_indices.empty();
+  std::unordered_set<int> callee_allocated_output_index_set(
+      callee_allocated_output_indices.begin(),
+      callee_allocated_output_indices.end());
   std::string name_hint = global_symbol.value();
 
   Target target = [&]() {
@@ -325,6 +419,14 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // set the global symbol to the packed function name
   const Stmt nop = Evaluate(0);
   int num_args = static_cast<int>(func_ptr->params.size());
+  if (use_callee_allocated_output_abi) {
+    // The callee-allocated entry omits result buffers and appends one tensor
+    // anchor.
+    // The anchor supplies both the target device and the EnvTensorAllocator
+    // context, including for otherwise scalar-only kernels.
+    num_args -= static_cast<int>(callee_allocated_output_indices.size());
+    num_args += 1;
+  }
 
   // Data field definitions
   // The packed fields
@@ -341,6 +443,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   std::vector<Stmt> seq_init, seq_check, arg_buffer_declarations;
   std::unordered_map<const VarNode *, PrimExpr> vmap;
   TVMFFIABIBuilder binder(&vmap);
+  TVMFFIABIBuilder output_binder(&vmap);
 
   // ---------------------------
   // local function definitions
@@ -454,6 +557,26 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   UsedBufferDetector detector(data_var2param, shape_var2params);
   detector(func_ptr->body);
 
+  // Output shapes are evaluated by the callee-allocated entry itself, so every
+  // symbol they reference must be treated as a runtime-required shape symbol
+  // even if the original kernel body does not otherwise mention it.
+  if (use_callee_allocated_output_abi) {
+    for (int output_index : callee_allocated_output_indices) {
+      const Var &param = func_ptr->params[output_index];
+      auto it = func_ptr->buffer_map.find(param);
+      ICHECK(it != func_ptr->buffer_map.end())
+          << "Callee-allocated output parameter " << output_index << " of "
+          << name_hint << " must be a buffer";
+      for (const PrimExpr &shape : (*it).second->shape) {
+        PostOrderVisit(shape, [&](const ObjectRef &node) {
+          if (const auto *var = node.as<VarNode>()) {
+            detector.used_shape_vars.insert(var);
+          }
+        });
+      }
+    }
+  }
+
   // Build the packed argument handling. While doing so, keep track of whether
   // each parameter buffer is actually used. Unused input buffers can be
   // nullable and do not require DLTensor field dereferences.
@@ -487,17 +610,22 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     // }
   }
 
+  int packed_arg_index = 0;
   for (int i = 0; i < static_cast<int>(func_ptr->params.size()); ++i) {
+    if (callee_allocated_output_index_set.count(i)) {
+      continue;
+    }
     Var param = func_ptr->params[i];
     PrimExpr arg_value;
     // type index checks
     Var type_index(param->name_hint + ".type_index", DataType::Int(32));
     seq_init.push_back(SeqStmt(
-        {tirx::Bind(type_index,
-                    tirx::Call(DataType::Int(32), builtin::tvm_struct_get(),
-                               {v_packed_args, IntImm(DataType::Int(32), i),
-                                IntImm(DataType::Int(32),
-                                       builtin::kTVMFFIAnyTypeIndex)})),
+        {tirx::Bind(
+             type_index,
+             tirx::Call(
+                 DataType::Int(32), builtin::tvm_struct_get(),
+                 {v_packed_args, IntImm(DataType::Int(32), packed_arg_index),
+                  IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})),
          nop}));
     DataType dtype = param.dtype();
     if (dtype.is_handle()) {
@@ -531,7 +659,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       // shows up as a DLTensor*
       const int64_t object_cell_offset = sizeof(TVMFFIObject);
       static_assert(object_cell_offset == 24);
-      arg_value = f_load_arg_value(param.dtype(), i);
+      arg_value = f_load_arg_value(param.dtype(), packed_arg_index);
       PrimExpr handle_from_tensor =
           Call(DataType::Handle(), tirx::builtin::handle_add_byte_offset(),
                {arg_value, IntImm(DataType::Int(32), object_cell_offset)});
@@ -546,8 +674,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
               type_index == TypeIndex::kTVMFFIInt,
           tvm::tirx::StringImm("RuntimeError"),
           Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
-      arg_value =
-          Cast(DataType::Bool(), f_load_arg_value(DataType::Int(64), i));
+      arg_value = Cast(DataType::Bool(),
+                       f_load_arg_value(DataType::Int(64), packed_arg_index));
 
     } else if (dtype.is_int() || dtype.is_uint()) {
       std::ostringstream msg;
@@ -558,7 +686,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
               type_index == TypeIndex::kTVMFFIBool,
           tvm::tirx::StringImm("RuntimeError"),
           Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
-      arg_value = f_load_arg_value(param.dtype(), i);
+      arg_value = f_load_arg_value(param.dtype(), packed_arg_index);
     } else {
       ICHECK(dtype.is_float());
       std::ostringstream msg;
@@ -571,11 +699,13 @@ PrimFunc MakePackedAPI(PrimFunc func) {
           tvm::tirx::StringImm("RuntimeError"),
           Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       // use select so we can also handle int conversion to bool
-      arg_value = tirx::Select(
-          type_index == TypeIndex::kTVMFFIFloat,
-          /* true_value = */ f_load_arg_value(param.dtype(), i),
-          /* false_value = */
-          Cast(param.dtype(), f_load_arg_value(DataType::Int(64), i)));
+      arg_value =
+          tirx::Select(type_index == TypeIndex::kTVMFFIFloat,
+                       /* true_value = */
+                       f_load_arg_value(param.dtype(), packed_arg_index),
+                       /* false_value = */
+                       Cast(param.dtype(), f_load_arg_value(DataType::Int(64),
+                                                            packed_arg_index)));
     }
     var_def.emplace_back(arg_value, param);
     if (func_ptr->buffer_map.count(param)) {
@@ -583,7 +713,49 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       // if the index is Tensor handle, we need to offset to get the DLTensor*
       buffer_def.emplace_back(param, func_ptr->buffer_map[param]);
     }
+    ++packed_arg_index;
   }
+
+  if (use_callee_allocated_output_abi) {
+    const int anchor_index = packed_arg_index++;
+    Var anchor_type_index("allocator_anchor.type_index", DataType::Int(32));
+    seq_init.push_back(SeqStmt(
+        {tirx::Bind(
+             anchor_type_index,
+             tirx::Call(
+                 DataType::Int(32), builtin::tvm_struct_get(),
+                 {v_packed_args, IntImm(DataType::Int(32), anchor_index),
+                  IntImm(DataType::Int(32), builtin::kTVMFFIAnyTypeIndex)})),
+         nop}));
+    seq_init.emplace_back(AssertStmt(
+        anchor_type_index == TypeIndex::kTVMFFITensor,
+        StringImm("RuntimeError"),
+        Array<StringImm>(
+            {StringImm(name_hint + ": allocator anchor must be a Tensor")})));
+
+    PrimExpr anchor_object = f_load_arg_value(DataType::Handle(), anchor_index);
+    seq_init.push_back(MakeAssertNotNull(
+        anchor_object, name_hint + ": allocator anchor is NULL"));
+    PrimExpr anchor_tensor = Call(
+        DataType::Handle(), builtin::handle_add_byte_offset(),
+        {anchor_object, IntImm(DataType::Int(64),
+                               static_cast<int64_t>(sizeof(TVMFFIObject)))});
+    PrimExpr anchor_device_type =
+        Call(DataType::Int(32), builtin::tvm_struct_get(),
+             {anchor_tensor, IntImm(DataType::Int(32), 0),
+              IntImm(DataType::Int(32), builtin::kDLTensorDeviceType)});
+    seq_init.push_back(MakeAssertEQ(
+        anchor_device_type, IntImm(DataType::Int(32), device_type.IntValue()),
+        name_hint + ": allocator anchor has the wrong device type"));
+    PrimExpr anchor_device_id =
+        Call(DataType::Int(32), builtin::tvm_struct_get(),
+             {anchor_tensor, IntImm(DataType::Int(32), 0),
+              IntImm(DataType::Int(32), builtin::kDLTensorDeviceId)});
+    binder.Bind(device_id, anchor_device_id,
+                name_hint + ".allocator_anchor.device_id", true);
+  }
+
+  ICHECK_EQ(packed_arg_index, num_args);
 
   // signature: (void* handle, TVMFFIAny* packed_args, int num_args, TVMFFIAny*
   // v_result)
@@ -606,6 +778,224 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars
     arg_buffer_declarations.push_back(DeclBuffer(buffer));
+  }
+
+  std::vector<Stmt> output_allocation;
+  std::vector<Stmt> callee_allocated_output_return;
+  std::vector<std::pair<Var, Buffer>> output_buffer_def;
+  std::vector<PrimExpr> output_object_handles;
+  Var output_storage("callee_allocated_output_storage", DataType::Handle());
+  Var output_shape_storage("callee_allocated_output_shape_storage",
+                           DataType::Handle());
+  Var output_prototype_storage("callee_allocated_output_prototype_storage",
+                               DataType::Handle());
+
+  if (use_callee_allocated_output_abi) {
+    const int num_outputs =
+        static_cast<int>(callee_allocated_output_indices.size());
+    std::vector<OutputStorageInfo> output_storage_info;
+    output_storage_info.reserve(num_outputs);
+    const int num_storage_cells =
+        num_outputs == 1 ? num_outputs : 2 * num_outputs;
+    int num_output_dims = 0;
+    for (int param_index : callee_allocated_output_indices) {
+      Buffer buffer = func_ptr->buffer_map[func_ptr->params[param_index]];
+      output_storage_info.push_back(ResolveOutputStorage(buffer));
+      num_output_dims +=
+          static_cast<int>(output_storage_info.back().shape.size());
+    }
+    output_allocation.push_back(SeqStmt(
+        {tirx::Bind(output_storage,
+                    Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                         {StringImm("tvm_ffi_any"),
+                          IntImm(DataType::Int(32), num_storage_cells)})),
+         nop}));
+    output_allocation.push_back(SeqStmt(
+        {tirx::Bind(
+             output_shape_storage,
+             Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                  {StringImm("shape"),
+                   IntImm(DataType::Int(32), std::max(1, num_output_dims))})),
+         nop}));
+    output_allocation.push_back(SeqStmt(
+        {tirx::Bind(output_prototype_storage,
+                    Call(DataType::Handle(), builtin::tvm_stack_alloca(),
+                         {StringImm("array"),
+                          IntImm(DataType::Int(32), num_outputs)})),
+         nop}));
+
+    for (int output_ordinal = 0; output_ordinal < num_outputs;
+         ++output_ordinal) {
+      const Optional<PrimExpr> &packing_condition =
+          output_storage_info[output_ordinal].packing_condition;
+      if (packing_condition) {
+        int param_index = callee_allocated_output_indices[output_ordinal];
+        Buffer buffer = func_ptr->buffer_map[func_ptr->params[param_index]];
+        output_allocation.emplace_back(AssertStmt(
+            packing_condition.value(), StringImm("RuntimeError"),
+            Array<StringImm>({StringImm(
+                name_hint + ": packed output " + buffer->name +
+                " has a final dimension that is not storage-aligned")})));
+      }
+    }
+
+    std::unordered_set<const VarNode *> used_output_buffers;
+    std::unordered_set<const VarNode *> output_shape_vars;
+    constexpr int64_t kAnySize = sizeof(TVMFFIAny);
+    constexpr int64_t kAnyValueOffset = offsetof(TVMFFIAny, v_ptr);
+    static_assert(kAnySize == 16);
+    static_assert(kAnyValueOffset == 8);
+    int shape_offset = 0;
+
+    for (int output_ordinal = 0; output_ordinal < num_outputs;
+         ++output_ordinal) {
+      int param_index = callee_allocated_output_indices[output_ordinal];
+      Var param = func_ptr->params[param_index];
+      auto buffer_it = func_ptr->buffer_map.find(param);
+      ICHECK(buffer_it != func_ptr->buffer_map.end());
+      Buffer buffer = (*buffer_it).second;
+      const OutputStorageInfo &storage_info =
+          output_storage_info[output_ordinal];
+
+      for (const PrimExpr &shape : buffer->shape) {
+        PostOrderVisit(shape, [&](const ObjectRef &node) {
+          if (const auto *var = node.as<VarNode>()) {
+            output_shape_vars.insert(var);
+            ICHECK(vmap.count(var))
+                << "Cannot infer symbolic variable " << GetRef<Var>(var)
+                << " required by callee-allocated output buffer "
+                << buffer->name << " in " << name_hint
+                << "; bind it from an input tensor or scalar parameter";
+          }
+        });
+      }
+
+      for (size_t dim = 0; dim < storage_info.shape.size(); ++dim) {
+        output_allocation.push_back(
+            Evaluate(Call(DataType::Int(32), builtin::tvm_struct_set(),
+                          {output_shape_storage,
+                           IntImm(DataType::Int(32), shape_offset + dim),
+                           IntImm(DataType::Int(32), builtin::kInt64ArrayElem),
+                           Cast(DataType::Int(64), storage_info.shape[dim])})));
+      }
+      PrimExpr shape_ptr =
+          Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+               {output_shape_storage,
+                IntImm(DataType::Int(64),
+                       shape_offset * static_cast<int64_t>(sizeof(int64_t)))});
+      shape_offset += static_cast<int>(storage_info.shape.size());
+
+      auto set_prototype_field = [&](builtin::TVMStructFieldKind field,
+                                     PrimExpr value) {
+        output_allocation.push_back(Evaluate(
+            Call(DataType::Int(32), builtin::tvm_struct_set(),
+                 {output_prototype_storage,
+                  IntImm(DataType::Int(32), output_ordinal),
+                  IntImm(DataType::Int(32), field), std::move(value)})));
+      };
+      set_prototype_field(builtin::kDLTensorData,
+                          make_zero(DataType::Handle()));
+      set_prototype_field(builtin::kDLTensorShape, shape_ptr);
+      set_prototype_field(builtin::kDLTensorStrides,
+                          make_zero(DataType::Handle()));
+      set_prototype_field(builtin::kDLTensorNDim,
+                          IntImm(DataType::Int(32), storage_info.shape.size()));
+      set_prototype_field(builtin::kDLTensorTypeCode,
+                          IntImm(DataType::UInt(8), storage_info.dtype.code()));
+      set_prototype_field(builtin::kDLTensorTypeBits,
+                          IntImm(DataType::UInt(8), storage_info.dtype.bits()));
+      set_prototype_field(
+          builtin::kDLTensorTypeLanes,
+          IntImm(DataType::UInt(16), storage_info.dtype.lanes()));
+      set_prototype_field(builtin::kDLTensorByteOffset,
+                          IntImm(DataType::UInt(64), 0));
+      set_prototype_field(builtin::kDLTensorDeviceId, device_id);
+      set_prototype_field(builtin::kDLTensorDeviceType, device_type);
+      PrimExpr prototype = Call(
+          DataType::Handle(), builtin::tvm_struct_get(),
+          {output_prototype_storage, IntImm(DataType::Int(32), output_ordinal),
+           IntImm(DataType::Int(32), builtin::kDLTensorAddr)});
+      PrimExpr output_slot = Call(
+          DataType::Handle(), builtin::handle_add_byte_offset(),
+          {output_storage, IntImm(DataType::Int(64), output_ordinal * kAnySize +
+                                                         kAnyValueOffset)});
+      Var allocation_status(buffer->name + ".allocation_status",
+                            DataType::Int(32));
+      output_allocation.push_back(
+          SeqStmt({tirx::Bind(allocation_status,
+                              Call(DataType::Int(32), builtin::call_extern(),
+                                   {StringImm("TVMFFIEnvTensorAlloc"),
+                                    prototype, output_slot})),
+                   nop}));
+
+      std::vector<Stmt> allocation_failure_cleanup;
+      for (int previous = 0; previous < output_ordinal; ++previous) {
+        PrimExpr previous_handle =
+            Call(DataType::Handle(), builtin::tvm_struct_get(),
+                 {output_storage, IntImm(DataType::Int(32), previous),
+                  IntImm(DataType::Int(32), builtin::kTVMFFIAnyUnionValue)});
+        allocation_failure_cleanup.push_back(
+            Evaluate(Call(DataType::Int(32), builtin::call_extern(),
+                          {StringImm("TVMFFIObjectDecRef"), previous_handle})));
+      }
+      allocation_failure_cleanup.push_back(Evaluate(ret(allocation_status)));
+      output_allocation.push_back(
+          IfThenElse(allocation_status != 0,
+                     SeqStmt::Flatten(allocation_failure_cleanup)));
+
+      PrimExpr output_object =
+          Call(DataType::Handle(), builtin::tvm_struct_get(),
+               {output_storage, IntImm(DataType::Int(32), output_ordinal),
+                IntImm(DataType::Int(32), builtin::kTVMFFIAnyUnionValue)});
+      output_object_handles.push_back(output_object);
+      PrimExpr output_tensor = Call(
+          DataType::Handle(), builtin::handle_add_byte_offset(),
+          {output_object, IntImm(DataType::Int(64),
+                                 static_cast<int64_t>(sizeof(TVMFFIObject)))});
+      output_binder.Bind(param, output_tensor,
+                         name_hint + "." + param->name_hint, true);
+      output_buffer_def.emplace_back(param, buffer);
+      used_output_buffers.insert(param.get());
+      arg_buffer_declarations.push_back(DeclBuffer(buffer));
+    }
+
+    output_binder.BindDLTensors(output_buffer_def, device_type, device_id,
+                                name_hint, used_output_buffers,
+                                output_shape_vars);
+
+    if (num_outputs == 1) {
+      callee_allocated_output_return.push_back(StoreFFIAny(
+          v_result, TypeIndex::kTVMFFITensor, output_object_handles[0]));
+    } else {
+      PrimExpr array_args = Call(
+          DataType::Handle(), builtin::handle_add_byte_offset(),
+          {output_storage, IntImm(DataType::Int(64), num_outputs * kAnySize)});
+      for (int i = 0; i < num_outputs; ++i) {
+        PrimExpr arg_cell =
+            Call(DataType::Handle(), builtin::handle_add_byte_offset(),
+                 {array_args, IntImm(DataType::Int(64), i * kAnySize)});
+        callee_allocated_output_return.push_back(StoreFFIAny(
+            arg_cell, TypeIndex::kTVMFFITensor, output_object_handles[i]));
+      }
+
+      Var array_status("callee_allocated_output_array_status",
+                       DataType::Int(32));
+      callee_allocated_output_return.push_back(SeqStmt(
+          {tirx::Bind(array_status,
+                      Call(DataType::Int(32),
+                           ::tvm::tl::tvm_ffi_call_with_result(),
+                           {StringImm("ffi.Array"), array_args,
+                            IntImm(DataType::Int(32), num_outputs), v_result})),
+           nop}));
+      for (const PrimExpr &output_object : output_object_handles) {
+        callee_allocated_output_return.push_back(
+            Evaluate(Call(DataType::Int(32), builtin::call_extern(),
+                          {StringImm("TVMFFIObjectDecRef"), output_object})));
+      }
+      callee_allocated_output_return.push_back(
+          IfThenElse(array_status != 0, Evaluate(ret(array_status))));
+    }
+    callee_allocated_output_return.push_back(Evaluate(ret(Integer(0))));
   }
 
   // reset global symbol to attach prefix
@@ -641,11 +1031,26 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     }
   }
 
-  // Return error code of zero on success
-  body = SeqStmt({body, Evaluate(ret(Integer(0)))});
+  if (use_callee_allocated_output_abi) {
+    std::vector<Stmt> body_and_return{body};
+    body_and_return.insert(body_and_return.end(),
+                           callee_allocated_output_return.begin(),
+                           callee_allocated_output_return.end());
+    body = SeqStmt::Flatten(body_and_return);
+  } else {
+    // Return error code of zero on success.
+    body = SeqStmt({body, Evaluate(ret(Integer(0)))});
+  }
 
-  body = MergeNest({seq_init, binder.InitNest(), seq_check, binder.Asserts(),
+  body = MergeNest({output_binder.InitNest(), output_binder.Asserts(),
                     arg_buffer_declarations},
+                   body);
+  if (!output_allocation.empty()) {
+    std::vector<Stmt> allocation_and_body = output_allocation;
+    allocation_and_body.push_back(body);
+    body = SeqStmt::Flatten(allocation_and_body);
+  }
+  body = MergeNest({seq_init, binder.InitNest(), seq_check, binder.Asserts()},
                    body);
   func_ptr->body = body;
   func_ptr->params = args;
@@ -687,7 +1092,10 @@ tvm::transform::Pass MakePackedAPI() {
                                                       func->body)) {
           func.CopyOnWrite()->body = body.value();
         }
-        func = MakePackedAPI(std::move(func));
+
+        std::vector<int> callee_allocated_output_indices =
+            GetCalleeAllocatedOutputIndices(func);
+        func = MakePackedAPI(std::move(func), callee_allocated_output_indices);
         func = MergeIfStmtSubstitute(func);
 
         if (!func.same_as(orig_func)) {

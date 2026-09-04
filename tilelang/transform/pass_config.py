@@ -49,14 +49,33 @@ class PassConfigKey(str, Enum):
     TL_SIMPLIFY_ENABLE_LET_INLINE = "enable_simplify_let_inline"
     """Enable inlining of let statements during simplification. Default: True"""
 
+    TL_DISABLE_BUFFER_INIT_CHECK = "tl.disable_buffer_init_check"
+    """Disable the buffer-initialization check. Default: False
+
+    The check warns when a non-global-scope buffer is read before anything
+    writes it. It is enabled by default; set this config to True to silence
+    it.
+    """
+
     TL_DISABLE_DATA_RACE_CHECK = "tl.disable_data_race_check"
-    """Disable data race check in TileLang. Default: False"""
+    """Disable data race check in TileLang. Default: True
+
+    The data race check is disabled by default because it can report false
+    positives (e.g. shared buffer stores whose per-thread addresses cannot be
+    proven distinct). To enable it, set this config to False in pass configs,
+    or set the ``TILELANG_ENABLE_DATA_RACE_CHECK`` environment variable to a
+    truthy value (e.g. ``1``).
+    """
 
     TL_DISABLE_PRELOWER_SEMANTIC_CHECK = "tl.disable_prelower_semantic_check"
     """Disable Python-side pre-lower semantic checks. Default: False"""
 
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
+
+    TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
+    """Name of the automatic warp-specialization scheduler to run (e.g.
+    "role_based"). Default: unset (disabled)."""
 
     TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
     """
@@ -82,8 +101,39 @@ class PassConfigKey(str, Enum):
     CUDA compile callback. Default: None
     """
 
+    TL_EMIT_LINE_DIRECTIVES = "tl.emit_line_directives"
+    """Emit ``#line`` directives in generated C-family source from TIR spans,
+    mapping generated statements back to their Python source lines. Combined
+    with the always-on ``-lineinfo`` for nvcc, PTX ``.loc`` entries then point
+    at the Python source. Default: False
+    """
+
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
+
+    TL_ENABLE_REDUCER_PLAN_VERBOSE = "tl.enable_reducer_plan_verbose"
+    """Log each reducer epoch's chosen physical plan (and narrow-plan
+    rejection reason) at INFO level during ReducerPlanAndMaterialize.
+    Default: False"""
+
+    TL_LAYOUT_COST_MODEL = "tl.layout_cost_model"
+    """The cost model that ranks free-mode layout attempts, by name:
+    "io-aware" scores estimated global-memory access cost (vector width /
+    warp coalescing of every fragment<->global copy, weighted by bytes
+    moved) with register count as the tiebreak; "register-count" is the
+    total-register-slots-only ordering. When unset, the
+    ``TILELANG_LAYOUT_COST_MODEL`` environment variable supplies the
+    default. Default: 'register-count'"""
+
+    TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
+    """Force the canonical FullParticipant baseline for every reducer epoch,
+    disabling narrow physical plans (compact storage / sub-block collectives).
+
+    Not a workaround for expected narrow-plan bugs: the baseline is the
+    reducer design's always-available reference lowering. Use it for
+    differential testing (forced baseline and auto plan selection must agree
+    numerically), as a field escape hatch if a narrow plan ever miscompiles,
+    and for plan-choice A/B measurement. Default: False"""
 
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
@@ -97,6 +147,12 @@ class PassConfigKey(str, Enum):
 
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
+
+    TL_ENABLE_FP32X2_REDUCTION = "tl.enable_fp32x2_reduction"
+    """Enable packed FP32x2 accumulation for CUDA sum and absolute-sum
+    reductions on SM100 and newer GPUs. Per-reduction annotations can still
+    disable the optimization. Setting this to False disables it globally.
+    Default: True"""
 
     TL_ENABLE_ASYNC_COPY = "tl.enable_async_copy"
     """Enable lowering eligible global->shared copies to PTX `cp.async`.
@@ -298,14 +354,14 @@ _DEPRECATED_PASS_CONFIG_MESSAGES = {
 
 
 def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) -> dict[str, Any]:
-    """Canonicalize known pass-config keys and emit compatibility warnings."""
-    if pass_configs is None:
-        return {}
+    """Canonicalize known pass-config keys, apply environment-variable
+    defaults, and emit compatibility warnings."""
+    from tilelang.env import env
 
     normalized: dict[str, Any] = {}
     warned_keys: set[str] = set()
 
-    for key, value in pass_configs.items():
+    for key, value in (pass_configs or {}).items():
         normalized_key = key.value if isinstance(key, PassConfigKey) else key
 
         normalized[normalized_key] = value
@@ -313,5 +369,10 @@ def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) 
         if normalized_key in _DEPRECATED_PASS_CONFIG_MESSAGES and normalized_key not in warned_keys:
             warnings.warn(_DEPRECATED_PASS_CONFIG_MESSAGES[normalized_key], DeprecationWarning, stacklevel=3)
             warned_keys.add(normalized_key)
+
+    # Environment-derived defaults; an explicit pass_configs entry wins.
+    layout_cost_model = env.get_default_layout_cost_model()
+    if layout_cost_model is not None:
+        normalized.setdefault(PassConfigKey.TL_LAYOUT_COST_MODEL.value, layout_cost_model)
 
     return normalized

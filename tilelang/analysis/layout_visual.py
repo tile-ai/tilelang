@@ -4,6 +4,7 @@ from collections.abc import Sequence
 import warnings
 
 import tilelang.language as T
+from tilelang.layout import PartialFragment
 from tvm import tirx
 from tvm.tirx import PyStmtExprVisitor
 
@@ -28,11 +29,14 @@ def print_fragment_format(layout: T.Fragment) -> None:
     if isinstance(layout, T.Fragment):
         input_shape = layout.get_input_shape()
         output_shape = layout.get_output_shape()
+        # A reducer partial's replicas are addends awaiting the finalize
+        # collective, not equal copies — label them to avoid misreading.
+        rep_suffix = " (partials)" if isinstance(layout, PartialFragment) else ""
         lines = [
             f"  Shape: {input_shape} -> {output_shape}",
             f"  Thread: {layout.forward_thread}",
             f"  Index:  {layout.forward_index}",
-            f"  Replicate:  {layout.replicate_size}",
+            f"  Replicate:  {layout.replicate_size}{rep_suffix}",
         ]
         print("\n".join(lines))
     else:
@@ -105,4 +109,4 @@ def LayoutVisual(formats: str | Sequence[str] = ""):
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return prim_func_pass(pass_fn, opt_level=0, name="tl.LayoutVisual")

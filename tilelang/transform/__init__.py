@@ -16,17 +16,6 @@ def get_pass_context():
     return PassContext.current()
 
 
-def ClusterPlanning():
-    """ClusterPlanning
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.ClusterPlanning()  # type: ignore
-
-
 def PipelinePlanning():
     """infer the fragment/shared memory layout
 
@@ -103,6 +92,17 @@ def VerifyParallelLoop():
         The result pass
     """
     return _ffi_api.VerifyParallelLoop()  # type: ignore
+
+
+def VerifyBufferInit():
+    """Warn when a non-global-scope buffer is read before anything writes it.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The registered pass. It inspects the IR and returns it unchanged.
+    """
+    return _ffi_api.VerifyBufferInit()  # type: ignore
 
 
 def ThreadSync(storage_scope: str):
@@ -367,16 +367,54 @@ def LowerDeviceKernelLaunch():
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
 
-def LayoutReducer():
-    """
-    Return a TVM transform pass that performs layout reduction/normalization.
+def CanonicalizeLegacyReducer():
+    """Rewrite legacy (v1) reducer syntax into first-class reducer v2 ops.
 
-    This wrapper delegates to the underlying FFI implementation and returns a pass object suitable for use in a PassContext or pass pipeline. The pass is intended to simplify or reduce tensor/layout-related representations during relay/tile transformations.
+    Deprecation shim: ``T.clear`` + read-modify-write stores + in-place
+    ``T.finalize_reducer(acc)`` become ``reducer_init``/``reducer_update``/
+    out-of-place finalize with a fresh destination fragment. Unrecognized
+    access patterns are compile errors, never silently accepted.
 
     Returns:
-        The transform pass object produced by the FFI backend.
+        tvm.transform.Pass: The canonicalization pass.
     """
-    return _ffi_api.LayoutReducer()  # type: ignore
+    return _ffi_api.CanonicalizeLegacyReducer()  # type: ignore
+
+
+def VerifyReducerEpoch():
+    """Verify lifecycle and access rules of reducer v2 epochs.
+
+    Enforces that every ``T.alloc_reducer`` has exactly one
+    ``T.reducer_init``, updates only inside ``T.Parallel`` between init and
+    finalize, exactly one out-of-place ``T.finalize_reducer(acc, dst)``, and
+    no ordinary reads/writes/aliasing of the reducer handle.
+
+    Returns:
+        tvm.transform.Pass: The verification pass.
+    """
+    return _ffi_api.VerifyReducerEpoch()  # type: ignore
+
+
+def ReducerPlanAndMaterialize():
+    """Plan physical storage/communication for reducer v2 epochs.
+
+    Runs after LayoutInference (loop layouts are read-only inputs) and
+    materializes the first-class reducer ops into ordinary fragment storage,
+    guarded read-modify-write updates, and an explicit finalize plan.
+
+    Returns:
+        tvm.transform.Pass: The planning/materialization pass.
+    """
+    return _ffi_api.ReducerPlanAndMaterialize()  # type: ignore
+
+
+def VerifyReducerConsumed():
+    """Assert no reducer v2 construct survives past materialization.
+
+    Returns:
+        tvm.transform.Pass: The verification pass.
+    """
+    return _ffi_api.VerifyReducerConsumed()  # type: ignore
 
 
 def UnrollLoop():

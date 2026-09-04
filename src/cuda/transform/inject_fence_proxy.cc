@@ -21,7 +21,7 @@
 #include "tir/transforms/ir_utils.h"
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -99,8 +99,13 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   // TileLang async intrinsics
   if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
       call->op.same_as(tma_load_multicast()) || call->op.same_as(tma_store()) ||
+      call->op.same_as(tma_load_gather4()) ||
+      call->op.same_as(tma_store_scatter4()) ||
       call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs()) ||
+      call->op.same_as(ptx_wgmma_sp_ss()) ||
+      call->op.same_as(ptx_wgmma_sp_rs()) ||
       call->op.same_as(ptx_tcgen05_mma_ss()) ||
+      call->op.same_as(ptx_tcgen05_mma_blockscaled_ss()) ||
       call->op.same_as(ptx_tcgen05_mma_ts())) {
     return true;
   }

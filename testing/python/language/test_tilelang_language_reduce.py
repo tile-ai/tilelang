@@ -502,6 +502,7 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
     torch.testing.assert_close(B, _ref(A, op), atol=tol, rtol=tol)
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -523,6 +524,7 @@ def test_reduce_local_packed_codegen(op, packed_op):
     assert f"tl::{packed_op}" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -546,6 +548,7 @@ def test_reduce_local_noncontiguous_dim_packed_codegen(op, packed_op):
     assert f"tl::{packed_op}" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
     [("sum", "add2"), ("max", "max2"), ("min", "min2")],
@@ -694,12 +697,19 @@ def _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch):
     ids=[f"{op}-{dtype}-{bM}x{bN}-b{batch}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CASES],
 )
 def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
-    """batch=1 → scalar run; batch>1 → run_batch with correct template arg."""
+    """batch=1 → scalar run; batch>1 → run_batch with correct template arg.
+
+    Forces the FullParticipant baseline: this test verifies the batched
+    AllReduce plumbing of the wide plan. Under automatic plan selection
+    these kernels take a narrow plan whose collective fits in a warp, where
+    batching (which amortizes block-wide barriers) has nothing to amortize
+    and run_batch is legitimately absent.
+    """
 
     src = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
         out_idx=-1,
-        pass_configs=_COMPILE_FLAGS,
+        pass_configs={**_COMPILE_FLAGS, "tl.reducer_force_baseline": True},
     ).get_kernel_source()
 
     if batch == 1:
@@ -737,6 +747,170 @@ def test_finalize_reducer_correctness(op, dtype, block_M, block_N, batch):
         pass_configs=_COMPILE_FLAGS,
     )(A)
     torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
+
+
+def test_finalize_reducer_short_parallel_extent():
+    extent = 8
+    threads = 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((extent,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            src = T.alloc_fragment((extent,), T.float32)
+            T.copy(A, src)
+            total = T.alloc_reducer((1,), T.float32, replication="all")
+            T.clear(total)
+            for i in T.Parallel(extent):
+                total[0] += src[i]
+            T.finalize_reducer(total)
+            if T.get_thread_binding() == 0:
+                B[0] = total[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(A)
+    torch.testing.assert_close(B, A.sum().reshape(1), atol=0, rtol=0)
+
+
+def test_finalize_reducer_mixed_parallel_extents():
+    extent = 8
+    threads = 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((extent,), T.float32),
+        B: T.Tensor((2 * extent,), T.float32),
+        C: T.Tensor((1,), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            a_frag = T.alloc_fragment((extent,), T.float32)
+            b_frag = T.alloc_fragment((2 * extent,), T.float32)
+            T.copy(A, a_frag)
+            T.copy(B, b_frag)
+            total = T.alloc_reducer((1,), T.float32, replication="all")
+            T.clear(total)
+            for i in T.Parallel(extent):
+                total[0] += a_frag[i]
+            for j in T.Parallel(2 * extent):
+                total[0] += b_frag[j]
+            T.finalize_reducer(total)
+            if T.get_thread_binding() == 0:
+                C[0] = total[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    B = torch.arange(1, 2 * extent + 1, dtype=torch.float32, device="cuda")
+    C = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(A, B)
+    torch.testing.assert_close(C, (A.sum() + B.sum()).reshape(1), atol=0, rtol=0)
+
+
+def test_finalize_reducer_epoch_inside_pipelined_loop():
+    """Legacy online-softmax: a full v1 epoch (fill / RMW updates / in-place
+    finalize / direct reads) reopens once per iteration of a T.Pipelined
+    tile loop, seeding the max from the running maximum."""
+    K, BLOCK_K, threads = 512, 128, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((K,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            a_shared = T.alloc_shared((BLOCK_K,), T.float32)
+            a_frag = T.alloc_fragment((BLOCK_K,), T.float32)
+            running_max = T.alloc_fragment((1,), T.float32)
+            running_sum = T.alloc_fragment((1,), T.float32)
+            running_max[0] = -T.infinity(T.float32)
+            running_sum[0] = 0.0
+            for k_tile in T.Pipelined(T.ceildiv(K, BLOCK_K), num_stages=2):
+                T.copy(A[k_tile * BLOCK_K], a_shared)
+                T.copy(a_shared, a_frag)
+
+                new_max = T.alloc_reducer((1,), T.float32, op="max", replication="all")
+                T.fill(new_max, running_max[0])
+                for i in T.Parallel(BLOCK_K):
+                    new_max[0] = T.max(new_max[0], a_frag[i])
+                T.finalize_reducer(new_max)
+
+                new_sum = T.alloc_reducer((1,), T.float32, replication="all")
+                T.fill(new_sum, 0.0)
+                for i in T.Parallel(BLOCK_K):
+                    new_sum[0] += T.exp(a_frag[i] - new_max[0])
+                T.finalize_reducer(new_sum)
+
+                running_sum[0] = T.exp(running_max[0] - new_max[0]) * running_sum[0] + new_sum[0]
+                running_max[0] = new_max[0]
+            if T.get_thread_binding() == 0:
+                B[0] = T.log(running_sum[0]) + running_max[0]
+
+    A = torch.randn(K, dtype=torch.float32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(A)
+    torch.testing.assert_close(B, torch.logsumexp(A, dim=0).reshape(1), atol=1e-4, rtol=1e-4)
+
+
+def test_finalize_reducer_default_alloc_v1_syntax():
+    """Pre-v2 default: T.alloc_reducer without `replication` used with v1
+    syntax (T.clear / `acc[i] +=` / in-place finalize / direct reads) must
+    keep compiling — the buffer is v2-allocated but never touched by a v2
+    op, so the legacy shim canonicalizes it."""
+    BLOCK, K, threads = 64, 8, 128
+
+    @T.prim_func
+    def kernel(
+        G: T.Tensor((BLOCK, K), T.float32),
+        Y: T.Tensor((BLOCK, K), T.float32),
+        O: T.Tensor((BLOCK, K), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            g_frag = T.alloc_fragment((BLOCK, K), T.float32)
+            y_frag = T.alloc_fragment((BLOCK, K), T.float32)
+            out_frag = T.alloc_fragment((BLOCK, K), T.float32)
+            reducer = T.alloc_reducer((BLOCK,), T.float32)
+            T.copy(G, g_frag)
+            T.copy(Y, y_frag)
+            T.clear(reducer)
+            for i, j in T.Parallel(BLOCK, K):
+                reducer[i] += g_frag[i, j] * y_frag[i, j]
+            T.finalize_reducer(reducer)
+            for i, j in T.Parallel(BLOCK, K):
+                out_frag[i, j] = g_frag[i, j] - reducer[i]
+            T.copy(out_frag, O)
+
+    G = torch.randn(BLOCK, K, dtype=torch.float32, device="cuda")
+    Y = torch.randn(BLOCK, K, dtype=torch.float32, device="cuda")
+    O = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(G, Y)
+    ref = G - (G * Y).sum(dim=1, keepdim=True)
+    torch.testing.assert_close(O, ref, atol=1e-4, rtol=1e-4)
+
+
+def test_finalize_reducer_conditional_finalize():
+    """Legacy epoch opened at block scope, updated and finalized inside one
+    arm of a block-uniform conditional (the vllm sum_smaller_probs pattern):
+    the finalize runs 0 or 1 times per init, and skipped blocks never read
+    the reducer."""
+    extent, threads = 8, 128
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((extent,), T.float32),
+        S: T.Tensor((2,), T.int32),
+        B: T.Tensor((2,), T.float32),
+    ):
+        with T.Kernel(2, threads=threads) as bx:
+            src = T.alloc_fragment((extent,), T.float32)
+            T.copy(A, src)
+            total = T.alloc_reducer((1,), T.float32, replication="all")
+            T.fill(total, 0.0)
+            if S[bx] < 0:
+                if T.get_thread_binding() == 0:
+                    B[bx] = 0.0
+            else:
+                for i in T.Parallel(extent):
+                    total[0] += src[i]
+                T.finalize_reducer(total)
+                if T.get_thread_binding() == 0:
+                    B[bx] = total[0]
+
+    A = torch.arange(1, extent + 1, dtype=torch.float32, device="cuda")
+    S = torch.tensor([-1, 1], dtype=torch.int32, device="cuda")
+    B = tl.compile(kernel, out_idx=-1, pass_configs=_COMPILE_FLAGS)(A, S)
+    expected = torch.stack([torch.zeros((), device="cuda"), A.sum()])
+    torch.testing.assert_close(B, expected, atol=0, rtol=0)
 
 
 # (batch, exc_type, match)

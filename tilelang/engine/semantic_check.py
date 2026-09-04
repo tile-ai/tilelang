@@ -27,4 +27,5 @@ def PreLowerSemanticCheck(mod: IRModule) -> None:
     if should_enable_ast_print():
         tilelang.analysis.ASTPrinter()(mod)
     tilelang.analysis.NestedLoopChecker()(mod)
+    tilelang.analysis.ParallelLocalIndexChecker()(mod)
     tilelang.analysis.FragmentLoopChecker()(mod)

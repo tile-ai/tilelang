@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import cloudpickle
-import importlib
 import os
 
 import tilelang
 import tilelang.cache.kernel_cache as kernel_cache_mod
+from tilelang.backend import create_backend_context
 from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.env import env
@@ -14,11 +14,8 @@ from tvm.target import Target
 
 def _set_cache_dirs(monkeypatch, tmp_path):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
     tilelang.enable_cache()
     KernelCache._get_cache_namespace.cache_clear()
@@ -37,7 +34,8 @@ def test_kernel_cache_namespace_includes_host_platform(monkeypatch):
 
 def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
-    lower = importlib.import_module("tilelang.engine.lower")
+    from tilelang.cuda import backend as cuda_backend
+
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
 
     compile_calls = []
@@ -46,7 +44,7 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
         compile_calls.append((code, target_format, tuple(arch), tuple(options or ())))
         return bytearray(b"fake-cubin")
 
-    monkeypatch.setattr(lower.nvcc, "compile_cuda", fake_compile_cuda)
+    monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_compile_cuda)
 
     target = Target({"kind": "cuda", "arch": "sm_90a"})
     source = 'extern "C" __global__ void kernel() {}'
@@ -56,12 +54,12 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
         tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ["--extra-device-vectorization"],
     }
 
-    first = lower.tilelang_callback_cuda_compile(source, target)
-    second = lower.tilelang_callback_cuda_compile(source, target)
+    first = cuda_backend.tilelang_callback_cuda_compile(source, target)
+    second = cuda_backend.tilelang_callback_cuda_compile(source, target)
     # Different compiler options (e.g. --use_fast_math) change the generated
     # SASS without changing the source, so they must NOT share a cache entry.
-    third = lower.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
-    fourth = lower.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
+    third = cuda_backend.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
+    fourth = cuda_backend.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
 
     assert bytes(first) == b"fake-cubin"
     assert bytes(second) == b"fake-cubin"
@@ -72,6 +70,52 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
     assert compile_calls[0][3] != compile_calls[1][3]
     cache_files = list((tmp_path / "cache").glob("*/cuda-binaries/*.cubin"))
     assert len(cache_files) == 2
+
+
+def test_cuda_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+    from tilelang.cuda import backend as cuda_backend
+
+    monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+
+    compile_calls = []
+
+    def fake_compile_cuda(code, target_format, arch, options=None, verbose=False):
+        compile_calls.append(code)
+        return bytearray(b"fake-cubin")
+
+    monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_compile_cuda)
+
+    target = Target({"kind": "cuda", "arch": "sm_90a"})
+    source = 'extern "C" __global__ void kernel() {}'
+
+    cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert len(compile_calls) == 1
+
+    [cache_file] = (tmp_path / "cache").glob("*/cuda-binaries/*.cubin")
+    assert cache_file.with_name(cache_file.name + ".sha256").exists()
+    # Same-size corruption, as left behind by a crashed writer/filesystem client.
+    cache_file.write_bytes(b"\x00" * len(b"fake-cubin"))
+
+    recompiled = cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert bytes(recompiled) == b"fake-cubin"
+    assert len(compile_calls) == 2
+
+    # The corrupted entry was rewritten, so the next call hits the cache again.
+    cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert len(compile_calls) == 2
+
+
+def test_cuda_binary_cache_accepts_legacy_entry_without_sidecar(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+
+    key = "legacy-key"
+    path = CUDABinaryCache.get_path(key, "cubin")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"legacy-cubin")
+
+    assert CUDABinaryCache.load(key, "cubin") == b"legacy-cubin"
 
 
 def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
@@ -85,6 +129,7 @@ def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
     (cache_path / cache.kernel_lib_path).write_bytes(b"not-loadable")
     with (cache_path / cache.params_path).open("wb") as f:
         cloudpickle.dump(["param"], f)
+    cache._write_manifest(str(cache_path))
 
     def fail_from_database(*args, **kwargs):
         raise RuntimeError("bad host executable")
@@ -93,10 +138,8 @@ def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
 
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,

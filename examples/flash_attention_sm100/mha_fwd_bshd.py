@@ -200,10 +200,8 @@ def flashattn_wasp(
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
-            K_shared_0 = T.alloc_shared([block_N, dim], dtype)
-            K_shared_1 = T.alloc_shared([block_N, dim], dtype)
-            V_shared_0 = T.alloc_shared([block_N, dim], dtype)
-            V_shared_1 = T.alloc_shared([block_N, dim], dtype)
+            K_shared = T.alloc_shared([num_stages, block_N, dim], dtype)
+            V_shared = T.alloc_shared([num_stages, block_N, dim], dtype)
             O_shared = T.alloc_shared([block_M, dim], dtype)
 
             S_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
@@ -260,18 +258,12 @@ def flashattn_wasp(
                     if k == 0:
                         T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
 
-                    if stage_id == 0:
-                        T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_0)
-                    else:
-                        T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared_1)
+                    T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared[stage_id, :, :])
                     T.mbarrier_arrive(mbar_dma1_full[stage_id])
 
                     T.mbarrier_wait_parity(mbar_dma2_empty[stage_id], parity_inv)
 
-                    if stage_id == 0:
-                        T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_0)
-                    else:
-                        T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared_1)
+                    T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared[stage_id, :, :])
 
                     T.mbarrier_arrive(mbar_dma2_full[stage_id])
 
@@ -279,45 +271,26 @@ def flashattn_wasp(
                     T.mbarrier_wait_parity(mbar_dma1_full[stage_id], parity)
                     T.mbarrier_wait_parity(mbar_bmm1_empty[stage_id], parity_inv)
 
-                    if stage_id == 0:
-                        T.tcgen05_gemm(
-                            Q_shared,
-                            K_shared_0,
-                            S_tmem,
-                            transpose_B=True,
-                            mbar=mbar_bmm1_full[stage_id],
-                            clear_accum=True,
-                        )
-                    else:
-                        T.tcgen05_gemm(
-                            Q_shared,
-                            K_shared_1,
-                            S_tmem,
-                            transpose_B=True,
-                            mbar=mbar_bmm1_full[stage_id],
-                            clear_accum=True,
-                        )
+                    T.tcgen05_gemm(
+                        Q_shared,
+                        K_shared[stage_id, :, :],
+                        S_tmem,
+                        transpose_B=True,
+                        mbar=mbar_bmm1_full[stage_id],
+                        clear_accum=True,
+                    )
                     T.mbarrier_arrive(mbar_dma1_empty[stage_id])
 
                     T.mbarrier_wait_parity(mbar_softmax_full[stage_id], parity)
                     T.mbarrier_wait_parity(mbar_dma2_full[stage_id], parity)
 
-                    if stage_id == 0:
-                        T.tcgen05_gemm(
-                            P_tmem,
-                            V_shared_0,
-                            O_tmem,
-                            mbar=mbar_bmm2_full[stage_id],
-                            clear_accum=is_clear_accum,
-                        )
-                    else:
-                        T.tcgen05_gemm(
-                            P_tmem,
-                            V_shared_1,
-                            O_tmem,
-                            mbar=mbar_bmm2_full[stage_id],
-                            clear_accum=is_clear_accum,
-                        )
+                    T.tcgen05_gemm(
+                        P_tmem,
+                        V_shared[stage_id, :, :],
+                        O_tmem,
+                        mbar=mbar_bmm2_full[stage_id],
+                        clear_accum=is_clear_accum,
+                    )
 
                     T.mbarrier_arrive(mbar_softmax_empty[stage_id])
                     T.mbarrier_arrive(mbar_dma2_empty[stage_id])

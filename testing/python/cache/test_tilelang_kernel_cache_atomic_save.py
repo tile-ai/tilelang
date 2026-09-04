@@ -7,6 +7,7 @@ import cloudpickle
 import pytest
 
 import tilelang.cache.kernel_cache as kernel_cache_mod
+from tilelang.backend import create_backend_context
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.env import env
 from tilelang.jit.adapter.base import CachedTextSource
@@ -32,11 +33,8 @@ class _FakeKernel:
 @pytest.fixture
 def cache_dirs(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     return cache_dir
 
 
@@ -66,6 +64,7 @@ def _write_complete_kernel_cache_entry(
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
     with (cache_path / cache.params_path).open("wb") as f:
         cloudpickle.dump(["param"], f)
+    cache._write_manifest(str(cache_path))
     return cache_path
 
 
@@ -87,12 +86,11 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     monkeypatch.setattr(cache, "_load_kernel_source", fail_source_load)
     monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fake_from_database))
 
+    backend_context = create_backend_context("cuda", execution_backend="tvm_ffi")
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=backend_context,
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -103,6 +101,7 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
     assert captured["kernel_lib_path"] == str(cache_path / cache.kernel_lib_path)
     assert captured["params"] == ["param"]
+    assert captured["backend_context"] is backend_context
 
 
 def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, monkeypatch):
@@ -144,10 +143,8 @@ def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, mo
 
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -214,10 +211,8 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
 
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,

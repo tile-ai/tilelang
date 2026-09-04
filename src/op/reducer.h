@@ -1,0 +1,310 @@
+/*!
+ * \file tl/op/reducer.h
+ * \brief Reducer v2 first-class ops: reducer_init / reducer_update /
+ *        finalize_reducer_v2.
+ *
+ * A v2 reducer is allocated in the virtual storage scope `local.reducer` and
+ * may only be accessed through these three ops. They carry no lowering of
+ * their own: the ReducerPlanAndMaterialize pass consumes them (after
+ * LayoutInference) and rewrites them into ordinary fragment storage, plain
+ * read-modify-write stores guarded by a generic execution-multiplicity
+ * marker, and an explicit finalize plan. Backend codegen must never see
+ * these ops (enforced by VerifyReducerConsumed).
+ */
+
+#ifndef TVM_TL_OP_REDUCER_H_
+#define TVM_TL_OP_REDUCER_H_
+
+#include "operator.h"
+#include "support/check.h"
+#include <tvm/arith/iter_affine_map.h>
+
+namespace tvm {
+namespace tl {
+
+using namespace tirx;
+
+namespace attr {
+/*! \brief SBlock annotation: Map<Var, Map<String, Any>> with the key
+ *  "op" (String: sum/max/min/bitand/bitor/bitxor). */
+constexpr const char *kReducerInfoV2 = "reducer_info_v2";
+/*! \brief Legacy (v1) SBlock annotation emitted by
+ *  `alloc_reducer(replication=...)`: Map<Var, Map<String, String>> with keys
+ *  "op" and "rep". Consumed (and erased) by CanonicalizeLegacyReducer; the
+ *  data-race verifier also reads it to exempt legacy reducer stores. Removed
+ *  together with the legacy syntax. */
+constexpr const char *kReducerInfo = "reducer_info";
+/*! \brief Statement marker on a combine store inside a T.Parallel loop:
+ *  the side effect must execute once per logical iteration. PartitionLoop
+ *  lowers it to a `REP == 0` guard (or strips it when the loop layout has
+ *  no replication). The marker is generic: it only describes execution
+ *  multiplicity, not reducer semantics. */
+constexpr const char *kParallelMultiplicity = "tl.parallel_multiplicity";
+} // namespace attr
+
+/*! \brief Combine op kinds supported by reducer v2. The bitwise ops require
+ *  an integer dtype (checked when their identity is materialized). */
+enum class ReducerV2OpType : int {
+  kSum = 0,
+  kMax = 1,
+  kMin = 2,
+  kBitAnd = 3,
+  kBitOr = 4,
+  kBitXor = 5,
+};
+
+/*! \brief Parse a reducer combine-op string
+ *  ("sum"/"max"/"min"/"bitand"/"bitor"/"bitxor"). */
+ReducerV2OpType ParseReducerV2OpType(const ffi::String &op_str);
+
+/*! \brief Identity element of a combine op for the given dtype. */
+PrimExpr ReducerV2Identity(ReducerV2OpType op, DataType dtype);
+
+/*! \brief combine(lhs, rhs) expression for a combine op. */
+PrimExpr ReducerV2Combine(ReducerV2OpType op, const PrimExpr &lhs,
+                          const PrimExpr &rhs);
+
+/*! \brief True if `buffer` lives in the virtual `local.reducer` scope. */
+inline bool IsReducerV2Buffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "local.reducer";
+}
+
+/*! \brief A contribution is replica-safe when every physical execution of
+ *  the same logical iteration computes the same value: pure expressions of
+ *  loop vars plus loads from buffers whose replicas are value-equal by
+ *  contract (fragments) or uniform by address (shared/global). */
+bool ValueIsReplicaSafe(const PrimExpr &value);
+
+/*! \brief Result of analyzing one reducer_update site against the reducer's
+ *  logical shape and participant thread space. Shared by the narrow-plan
+ *  proofs in ReducerPlanAndMaterialize and by finalize's dst-steering layout
+ *  proposal, so the proposal is by construction the plan's own verdict. */
+struct ReducerSiteAnalysis {
+  /*! \brief True when every narrow-plan site proof passed: well-defined
+   *  index-to-dim ownership, full participant coverage, replica-safe
+   *  contribution, power-of-two in-bounds collective steps. When false, a
+   *  narrow plan is impossible for this site and only `reason` is
+   *  meaningful (the other fields stop at the first failed check). */
+  bool narrow_eligible = false;
+  /*! \brief The first failed check, for plan-rejection diagnostics. */
+  std::string reason;
+  /*! \brief The induced partial layout: the update loop's layout with the
+   *  reduction dims projected out, rebuilt over the reducer's dim order.
+   *  Its replication coordinate follows the low-bits convention:
+   *  `_rep % combine_size` are the addend lanes. */
+  Fragment induced;
+  /*! \brief Width of the induced layout's combine coordinate: the number
+   *  of addend lanes per logical element (1 = LocalComplete). */
+  int64_t combine_size{1};
+  /*! \brief Collective steps (reducing_threads, scale) the site requires. */
+  std::vector<std::pair<int, int>> steps;
+  /*! \brief Per nest dim: does it survive into the reducer shape? */
+  std::vector<bool> is_output_dim;
+  /*! \brief The loop's forward-thread expression in iter-sum form (reused
+   *  by the packed-accumulation lane analysis). */
+  arith::IterSumExpr iter_sum;
+};
+
+/*! \brief Analyze one reducer_update site: derive the induced partial
+ *  layout and run every per-site narrow-plan proof, in the plan's own
+ *  check order (so `reason` matches the planner's rejection diagnostics).
+ *  `thread_extent`/`thread_min` describe the epoch's participant range. */
+ReducerSiteAnalysis
+AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
+                         const ffi::Array<PrimExpr> &reducer_shape,
+                         int64_t thread_extent, int64_t thread_min,
+                         arith::Analyzer *analyzer);
+
+/// T.reducer_init(acc, init=None): open the epoch. The physical partials
+/// always start from the combine identity; the optional `init` value is a
+/// logical starting value, evaluated (captured) at the init site and
+/// combined exactly once per logical output at finalize time (so physical
+/// replication can never multiply it, and a loop-variant init expression
+/// keeps the value the epoch opened with).
+/// args[0] = tl.region(acc, "w"), optional args[1] = init value.
+class ReducerInitOpNode : public TileOperatorNode {
+public:
+  Buffer reducer;
+  ffi::Optional<PrimExpr> seed; ///< logical starting value (args[1])
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerInitOp", ReducerInitOpNode,
+                                    TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const override;
+  TileOperator Clone() const override;
+  static const Op &Get();
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ReducerInitOpNode>()
+        .def_ro("reducer", &ReducerInitOpNode::reducer)
+        .def_ro("seed", &ReducerInitOpNode::seed);
+  }
+};
+
+class ReducerInitOp : public TileOperator {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReducerInitOp, TileOperator,
+                                             ReducerInitOpNode);
+  TVM_DLL ReducerInitOp(ffi::Array<PrimExpr> args,
+                        ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                            ffi::Map<ffi::String, ffi::ObjectRef>());
+  static const Op &Get();
+};
+
+/// tl.reducer_update(acc[indices], value): contribute `value` to the logical
+/// output selected by `indices`, exactly once per dynamic logical iteration.
+///
+/// Unlike the other epoch ops this is a plain builtin INTRINSIC, not a tile
+/// op: it executes once per iteration inside T.Parallel,
+/// owns no layout (the enclosing loop and the planner decide physics), and
+/// never lowers on its own (ReducerPlanAndMaterialize rewrites it; leftovers
+/// are caught by VerifyReducerConsumed). args[0] is a plain BufferLoad
+/// `acc[indices]` — an update-target descriptor whose multi-dim indices the
+/// planner reads directly, not a read of the reducer (analyses may treat it
+/// as a read; updates commute, and VerifyReducerEpoch pins init/finalize to
+/// straight-line code, so no cross-statement write ordering is lost).
+TVM_DLL const Op &reducer_update();
+
+/*! \brief Parsed form of a tl.reducer_update call. */
+struct ReducerUpdateArgs {
+  Buffer reducer;
+  ffi::Array<PrimExpr> indices; ///< logical output indices
+  PrimExpr value;               ///< contribution expression
+};
+
+/*! \brief Parse and validate a tl.reducer_update call. */
+ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call);
+
+/// T.finalize_reducer(acc, dst): complete the epoch's cross-participant
+/// communication and write the logical result into the independent
+/// destination fragment. args[0] = tl.region(acc, "rw"),
+/// args[1] = tl.region(dst, "w").
+class FinalizeReducerV2OpNode : public TileOperatorNode {
+public:
+  Buffer reducer;
+  Buffer dst;
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerV2Op",
+                                    FinalizeReducerV2OpNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const override;
+  TileOperator Clone() const override;
+  static const Op &Get();
+
+  /*! \brief The universally-safe dst layout under the wide plan: every
+   *  participant holds every element, so any already-frozen consumer loop can
+   *  read it. Shared by the kFree steering proposal and the inference
+   *  engine's last-resort fallback attempt so the two can never diverge. */
+  static Fragment FallbackDstLayout(const Buffer &dst,
+                                    const Range &thread_bounds);
+
+  /*! \brief Structural gates of the dst-steering proposal: `dst` is a
+   *  fragment whose per-dim extents match the reducer's, over a constant
+   *  participant range wider than one thread. Shared by the kFree proposal's
+   *  silence checks and the inference engine's reservation registration so
+   *  the two can never drift ("reserved" must mean "has a capable
+   *  proposer"). */
+  static bool CanSteerDst(const Buffer &reducer, const Buffer &dst,
+                          const Range &thread_bounds,
+                          arith::Analyzer *analyzer);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<FinalizeReducerV2OpNode>()
+        .def_ro("reducer", &FinalizeReducerV2OpNode::reducer)
+        .def_ro("dst", &FinalizeReducerV2OpNode::dst);
+  }
+};
+
+class FinalizeReducerV2Op : public TileOperator {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerV2Op, TileOperator,
+                                             FinalizeReducerV2OpNode);
+  TVM_DLL
+  FinalizeReducerV2Op(ffi::Array<PrimExpr> args,
+                      ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                          ffi::Map<ffi::String, ffi::ObjectRef>());
+  static const Op &Get();
+};
+
+/// tl.finalize_reducer: the MATERIALIZED collective emitted by
+/// ReducerPlanAndMaterialize (not user-facing). Performs the plan's
+/// cross-participant combine on the reducer's physical partial storage.
+/// args[0] = tl.region(storage, "rw"), args[1] = combine op enum; optional
+/// args[2] = reducing_threads, args[3] = scale select an explicit narrow
+/// collective (default: participant-wide AllReduce derived from the
+/// storage layout's replicate extent). Lowering is target-specific via
+/// RegisterFinalizeReducerImpl (CUDA/ROCm share the plan contract).
+class FinalizeReducerOpNode : public TileOperatorNode {
+public:
+  tirx::Buffer reducer;
+  ReducerV2OpType op;
+  // Batch size for batched AllReduce (1 = scalar path, same as T.reduce
+  // default).
+  int batch{1};
+  // Explicit collective plan (reducer v2 narrow plans): flattened
+  // (reducing_threads, scale) pairs, one per reduction step. Each step's
+  // AllReduce combines `reducing_threads / scale` lanes at stride `scale`.
+  // `explicit_plan` distinguishes an explicit empty plan (LocalComplete: no
+  // communication) from the legacy wide plan (width derived from the
+  // storage layout's ReplicateExtent).
+  bool explicit_plan{false};
+  ffi::Array<Integer> plan_steps;
+  // Optional logical seed, combined into every physical slot exactly once
+  // after the collective (all replicas hold the final value by then, so a
+  // uniform per-slot combine applies the seed once per logical output).
+  ffi::Optional<PrimExpr> seed;
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerOp",
+                                    FinalizeReducerOpNode, TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<FinalizeReducerOpNode>()
+        .def_ro("reducer", &FinalizeReducerOpNode::reducer)
+        .def_ro("op", &FinalizeReducerOpNode::op)
+        .def_ro("batch", &FinalizeReducerOpNode::batch)
+        .def_ro("explicit_plan", &FinalizeReducerOpNode::explicit_plan)
+        .def_ro("plan_steps", &FinalizeReducerOpNode::plan_steps)
+        .def_ro("seed", &FinalizeReducerOpNode::seed);
+  }
+
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
+                        InferLevel level) const override;
+  static const Op &Get();
+  TileOperator Clone() const;
+};
+
+using FinalizeReducerTargetPredicate = bool (*)(Target target);
+
+struct FinalizeReducerImpl {
+  const char *name;
+  FinalizeReducerTargetPredicate match_target;
+
+  Stmt (*lower)(const FinalizeReducerOpNode &op, const LowerArgs &lower_args,
+                arith::Analyzer *analyzer);
+};
+
+void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl);
+
+class FinalizeReducerOp : public TileOperator {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerOp, TileOperator,
+                                             FinalizeReducerOpNode);
+  TVM_DLL FinalizeReducerOp(ffi::Array<PrimExpr> args,
+                            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
+                                ffi::Map<ffi::String, ffi::ObjectRef>());
+  static const Op &Get();
+};
+
+} // namespace tl
+} // namespace tvm
+
+#endif // TVM_TL_OP_REDUCER_H_

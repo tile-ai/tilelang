@@ -4,7 +4,6 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
-from tilelang.backend.pass_pipeline import PassPipeline, register_pipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -28,7 +27,14 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.VerifyParallelLoop()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.LayoutReducer()(mod)
+    mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
+    mod = tilelang.transform.VerifyReducerEpoch()(mod)
+    # Warn on buffers that are read before anything writes them.
+    # Runs after the reducer passes above, so legacy reducers have been
+    # canonicalized, and before PipelinePlanning and LowerTileOp, while
+    # loop bodies are still in source order and tile ops still declare
+    # their access regions.
+    mod = tilelang.transform.VerifyBufferInit()(mod)
 
     mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
@@ -36,8 +42,10 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
 
     mod = tilelang.transform.LayoutInference()(mod)
+    mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     LayoutVisual(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
+    mod = tilelang.transform.VerifyReducerConsumed()(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
@@ -83,8 +91,3 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
     return mod
-
-
-rocm_pipeline = PassPipeline("hip", ROCMPassPipelineBody)
-
-register_pipeline(rocm_pipeline)

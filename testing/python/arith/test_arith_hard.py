@@ -10,6 +10,21 @@ def implies(x, y):
     return Or(Not(x), y)
 
 
+def test_cloned_analyzer_outlives_source():
+    x = T.Var("x", T.int32)
+
+    analyzer = Analyzer()
+    analyzer.bind(x, Range.from_min_extent(0, 16))
+
+    # CopyFrom must keep the clone's Z3 handles valid on their own context
+    # even after the source Analyzer is destroyed.
+    cloned = analyzer.clone()
+
+    del analyzer
+    assert cloned.can_prove(x >= 0)
+    assert cloned.can_prove(x < 16)
+
+
 def test_hard_prove():
     a = T.Var("a", T.int32)
     b = T.Var("b", T.int32)

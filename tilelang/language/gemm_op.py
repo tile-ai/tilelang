@@ -15,6 +15,7 @@ from tilelang.utils.language import (
     prim_expr_equal,
 )
 from tilelang.language.utils import (
+    _normalize_annotations,
     buffer_region_to_tile_region,
 )
 
@@ -37,6 +38,8 @@ def _gemm_impl(
 
     Returns a call_intrin handle for the given op key.
     """
+    if not (isinstance(k_pack, int) and not isinstance(k_pack, bool) and k_pack in (1, 2)):
+        raise ValueError(f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r}")
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
@@ -50,6 +53,8 @@ def _gemm_impl(
         if isinstance(arg, tirx.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
+
+    annotations = _normalize_annotations(annotations)
 
     A = legalize_arguments(A)
     B = legalize_arguments(B)
@@ -81,12 +86,16 @@ def _gemm_impl(
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(M_A, M), f"T.gemm M shape check failed: M_A = {M_A}, M_C = {M}"
     assert prim_expr_equal(K, K_B), f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
-    use_2cta = annotations is not None and annotations.get("use_2cta", 0)
+    use_2cta = annotations.get("use_2cta", 0)
     if use_2cta:
         # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
         assert prim_expr_equal(N_B * 2, N), f"T.gemm N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
     else:
         assert prim_expr_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
+
+    for name, dim in (("M", M), ("N", N), ("K", K)):
+        if not isinstance(dim, tirx.IntImm):
+            raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
     # Deprecated: every lowering consumes the complete operand BufferRegions,
     # so the serialized per-axis strides and final-axis offsets below are no
@@ -152,6 +161,7 @@ def gemm(
     clear_accum: bool = False,
     k_pack: int = 1,
     mbar: BarrierType | None = None,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator.
 
@@ -172,9 +182,10 @@ def gemm(
         transpose_B (bool): Whether to transpose B. Defaults to False.
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
-        k_pack (int): Numbers of packed matrix cores, for ROCm only. Defaults to 1.
+        k_pack (int): Number of packed matrix cores, for ROCm only. Must be 1 or 2. Defaults to 1.
         mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
             Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
+        annotations (Optional[dict]): Additional annotations.
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
@@ -191,6 +202,7 @@ def gemm(
         k_pack,
         0,
         mbar,
+        annotations=annotations,
     )
 
 
@@ -202,6 +214,7 @@ def wgmma_gemm(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Explicit Hopper WGMMA GEMM without an implicit wait.
 
@@ -226,6 +239,7 @@ def wgmma_gemm(
         1,
         -1,
         None,
+        annotations=annotations,
     )
 
 
@@ -240,6 +254,7 @@ def tcgen05_gemm(
     *,
     mbar: BarrierType | None,
     use_2cta: bool = False,
+    annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
 
@@ -259,7 +274,8 @@ def tcgen05_gemm(
     compilation fails instead of silently falling back to another GEMM path.
     """
 
-    ann = {"is_tcgen05": 1}
+    ann = _normalize_annotations(annotations)
+    ann["is_tcgen05"] = 1
     if use_2cta:
         ann["use_2cta"] = 1
     return _gemm_impl(

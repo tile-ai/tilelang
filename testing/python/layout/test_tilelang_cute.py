@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 import tilelang.testing
@@ -915,6 +917,43 @@ def test_swizzle_with_nonzero_base_offset(OFFSET):
     assert mode.offset == OFFSET
 
 
+def test_decoder_nonpow2_quotient_keeps_linear_layout():
+    # Splitting a 768-wide dim at 256 gives the version dim stride 768 =
+    # 256 + 512, a two-bit column. The probe past the non-pow2 quotient
+    # (j = 256) lands on bit 8 of the serialization too, and must not vouch
+    # it as an identity image, or the plain version stride would masquerade
+    # as a swizzle (regression: three-stage wide-linear WS kernels).
+    L = Layout((3, 768), lambda v, j: [v, j // 256, j % 256])
+    mode = cute.ComposedLayout.from_tilelang(L)
+    assert mode is not None and not mode.swizzle.is_swizzled
+
+
+def test_decoder_observes_swizzle_through_odd_extent():
+    # An odd extent (5) has no pow2 sub-mode, but its in-range one-hot probes
+    # (1, 2, 4) still expose the XOR source bits living in that dim: the exact
+    # Sw<2,3,3> over (5,2,64) sources bit 7 from the odd dim and is recovered.
+    mode = cute.ComposedLayout.from_tilelang(_build_swizzled_layout((5, 2, 64), lambda a, b, j: a * 128 + b * 64 + j, 2, 3, 3))
+    assert mode is not None and _swizzle(mode) == (2, 3, 3)
+
+
+def test_decoder_least_width():
+    # (4,64) under an exact Sw<2,3,3> keeps every wider source bit beyond its
+    # 256-element domain: the observed recovery is the minimal width, and
+    # raising the least width to 3 proves (and preserves the plain layout).
+    # A least width at or below the observed one is a no-op; on (8,64) bit 8
+    # is a real, unswizzled row bit, so the wider pattern contradicts the
+    # layout.
+    small = _build_swizzled_layout((4, 64), lambda i, j: i * 64 + j, 2, 3, 3)
+    observed = cute.ComposedLayout.from_tilelang(small)
+    assert _swizzle(observed) == (2, 3, 3)
+    widened = cute.ComposedLayout.from_tilelang(small, least_b_bits=3)
+    assert widened is not None and _swizzle(widened) == (3, 3, 3)
+    assert tvm.ir.structural_equal(widened.layout, observed.layout)
+    assert _swizzle(cute.ComposedLayout.from_tilelang(small, least_b_bits=1)) == (2, 3, 3)
+    big = _build_swizzled_layout((8, 64), lambda i, j: i * 64 + j, 2, 3, 3)
+    assert cute.ComposedLayout.from_tilelang(big, least_b_bits=3) is None
+
+
 @pytest.mark.parametrize(
     "b_bits,m_base,s_shift",
     [(b, m, s) for b in (1, 2, 3) for m in (0, 2, 4) for s in (1, 3, 4) if s >= b],
@@ -1008,7 +1047,7 @@ def test_decoder_preserves_input_shape():
 #   (j % 8) + ((i % 8) ^ ((j // 8) % 8)) * 8 + i * 64 + (j // 64) * 4096
 # ToCuteComposedLayout decodes it to Sw<3,4,3> and LowerBulk drives a swizzled
 # TMA load; the box truncates at the first non-contiguous global mode so the
-# rest replays as 8 unrolled tma_load calls.
+# rest replays as an 8-iteration tma_load loop.
 # ---------------------------------------------------------------------------
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
@@ -1039,7 +1078,88 @@ def test_tma_load_with_explicit_swizzled_layout():
 
     kernel = tilelang.compile(copy_swizzled, out_idx=[1])
     src = kernel.get_kernel_source()
-    assert src.count("tma_load(") == 8, "expected 8 (unrolled) TMA loads"
+    assert re.search(r"for \(int \w+ = 0; \w+ < 8; \+\+\w+\) \{\n\s*tl::tma_load\(", src), "expected an 8-iteration TMA load loop"
+
+    ii = torch.arange(M, device="cuda").view(M, 1)
+    jj = torch.arange(N, device="cuda").view(1, N)
+    X = ((ii * N + jj) % 2048).to(torch.float16)
+    ok = kernel(X)
+    assert int(ok.min()) == 1, f"{(ok == 0).sum().item()} shared elements mismatched"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end TMA load through a position-dependent swizzle: the XOR phase
+# advances across the two column blocks, so the second box (at half the
+# pattern period) must land phase-shifted — which the hardware does for free.
+# ---------------------------------------------------------------------------
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_load_with_position_dependent_swizzle():
+    import torch
+    import tilelang
+    import tilelang.language as T
+
+    M, N = 4, 64
+
+    def posdep_halfbank(i, j):
+        c = (j // 8) % 4
+        s = 2 * (j // 32) + i // 2
+        return (j // 32) * 128 + i * 32 + (j % 8) + (c ^ s) * 8
+
+    @T.prim_func
+    def copy_posdep(X: T.Tensor((M, N), "float16"), ok: T.Tensor((M, N), "int32")):
+        with T.Kernel(1, threads=128) as _:
+            S = T.alloc_shared((M, N), "float16")
+            T.annotate_layout({S: Layout((M, N), posdep_halfbank)})
+            T.copy(X, S, prefer_instruction="tma")
+            for i, j in T.Parallel(M, N):
+                ok[i, j] = T.if_then_else(S[i, j] == T.cast((i * N + j) % 2048, "float16"), 1, 0)
+
+    kernel = tilelang.compile(copy_posdep, out_idx=[1])
+    src = kernel.get_kernel_source()
+    assert re.search(r"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
+
+    ii = torch.arange(M, device="cuda").view(M, 1)
+    jj = torch.arange(N, device="cuda").view(1, N)
+    X = ((ii * N + jj) % 2048).to(torch.float16)
+    ok = kernel(X)
+    assert int(ok.min()) == 1, f"{(ok == 0).sum().item()} shared elements mismatched"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_widened_full_tile_and_narrow_slice():
+    """One buffer, two descriptors. (4,64) fp16 under an exact Sw<2,3,3>
+    (64B span): the full-tile load carries a 128-byte contiguous run, so the
+    planner widens the descriptor to the 128B mode (the extra XOR source bit
+    lies beyond the buffer) and issues one box instead of an 8-step rest
+    loop. The 32-column slice load is narrower than even the 64B span, which
+    is legal (PTX bounds the inner box bytes by the span from above only)."""
+    import torch
+    import tilelang
+    import tilelang.language as T
+
+    M, N = 4, 64
+
+    def sw233(i, j):
+        addr = i * N + j
+        return addr ^ ((addr & (3 << 6)) >> 3)
+
+    @T.prim_func
+    def copy_slices(X: T.Tensor((M, N), "float16"), ok: T.Tensor((M, N), "int32")):
+        with T.Kernel(1, threads=128) as _:
+            S = T.alloc_shared((M, N), "float16")
+            T.annotate_layout({S: Layout((M, N), sw233)})
+            T.copy(X, S, prefer_instruction="tma")
+            T.copy(X[0, 0:32], S[1, 0:32], prefer_instruction="tma")
+            for i, j in T.Parallel(M, N):
+                ref = T.if_then_else((i == 1) and (j < 32), X[0, j], X[i, j])
+                ok[i, j] = T.if_then_else(S[i, j] == ref, 1, 0)
+
+    kernel = tilelang.compile(copy_slices, out_idx=[1])
+    src = kernel.get_kernel_source()
+    assert src.count("tl::tma_load(") == 2
+    assert not re.search(r"for [^\n]*\{\n\s*tl::tma_load\(", src)
 
     ii = torch.arange(M, device="cuda").view(M, 1)
     jj = torch.arange(N, device="cuda").view(1, N)

@@ -17,8 +17,8 @@
 #include <optional>
 #include <vector>
 
+#include "cuda/op/builtin.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "tir/ir/buffer_common.h"
 

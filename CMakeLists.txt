@@ -3,10 +3,13 @@
 
 cmake_minimum_required(VERSION 3.26)
 
-# Detect CUDA toolkit: tries host installation first, then falls back to
-# pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect).
-# Must be included before project() so CMAKE_CUDA_COMPILER is set.
+# Activate the build toolchain before project(): the MSVC environment has to be in
+# place when the compilers are probed, and the generator resolves CMAKE_MAKE_PROGRAM
+# there. CUDA detection lives in the same module but must run after project() instead
+# -- see the second include below.
+set(TILELANG_PRE_PROJECT_ONLY ON)
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
+unset(TILELANG_PRE_PROJECT_ONLY)
 
 # Capture this CMakeLists.txt's directory once so `function()` bodies below
 # can reference files shipped with the project. CMake 4.x resolves
@@ -16,6 +19,14 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 project(TILE_LANG C CXX)
+
+# Detect CUDA toolkit: tries host installation first, then falls back to
+# pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect). This has to
+# run after project() so that an enabled language is available -- FindCUDAToolkit's
+# imported-target setup calls find_package(Threads REQUIRED), which hard-errors
+# otherwise. CMAKE_CUDA_COMPILER is published as a cache entry, so subprojects
+# configured further down (add_subdirectory(${TVM_SOURCE}) below) still see it.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
 
 # MSVC-specific build configuration. Must run after project() so MSVC is
 # defined, but before add_subdirectory(${TVM_SOURCE}) below so subprojects
@@ -73,6 +84,19 @@ if(MSVC)
       $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unused-command-line-argument>
       $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unknown-attributes>
       $<$<COMPILE_LANGUAGE:CXX>:-fdelayed-template-parsing>)
+
+    # Recent clang (VS 2026 bundles 22.x) warns on every C++20 TU that
+    # -fdelayed-template-parsing is deprecated; the flag still takes effect,
+    # and the warning floods CI logs. Feature-check the suppression so older
+    # LLVM without this diagnostic group doesn't emit
+    # -Wunknown-warning-option noise instead.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-Wno-delayed-template-parsing-in-cxx20"
+                            TILELANG_HAS_WNO_DELAYED_TEMPLATE_PARSING_IN_CXX20)
+    if(TILELANG_HAS_WNO_DELAYED_TEMPLATE_PARSING_IN_CXX20)
+      add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-delayed-template-parsing-in-cxx20>)
+    endif()
   endif()
 endif()
 
@@ -367,6 +391,7 @@ file(GLOB TILE_LANG_SRCS
   src/layout/*.cc
   src/transform/*.cc
   src/transform/common/*.cc
+  src/transform/layout_inference/*.cc
   src/transform/pipeline/*.cc
   src/op/*.cc
   src/backend/common/target_utils.cc

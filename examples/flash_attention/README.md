@@ -66,7 +66,7 @@ def flash_attention(
 
             # Copy V block into shared memory
             T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
-            for i, j in T.Parallel(block_M, dim):
+            for i, j in T.Parallel(block_M, block_N):
                 acc_s[i, j] *= scale
 
             # Save old scores_max, then reset scores_max

@@ -151,5 +151,51 @@ def test_annotated_layout_on_dtype_changing_view_compile():
     assert kernel.get_kernel_source()
 
 
+def shared_reinterpret_view_test(shape, dtype, new_shape, new_dtype, swizzled):
+    """Write through the shared allocation, read through its reinterpreting
+    view: the view's derived layout must induce the same storage-bit map as
+    the allocation's. The swizzled variant additionally covers the widening
+    contiguity proof and the TMA descriptor encoding of the derived layout."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor(shape, dtype),
+        B: T.Tensor(new_shape, new_dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(shape, dtype)
+            A_view = T.view(A_shared, new_shape, dtype=new_dtype)
+            if swizzled:
+                T.annotate_layout({A_shared: tilelang.layout.make_swizzled_layout(A_shared)})
+            T.copy(A, A_shared)
+            T.copy(A_view, B)
+
+    return main
+
+
+def run_shared_reinterpret_view(shape, dtype, new_shape, new_dtype, swizzled):
+    program = shared_reinterpret_view_test(shape, dtype, new_shape, new_dtype, swizzled)
+    jit_kernel = tl.compile(program, out_idx=-1)
+
+    torch_dtype = T.dtype(dtype).as_torch()
+    lanes = torch.randn(shape[0], shape[1] * torch_dtype.itemsize // 2, device="cuda", dtype=torch.bfloat16)
+    a = lanes.view(dtype=torch_dtype)
+    d = jit_kernel(a)
+    ref = a.view(dtype=T.dtype(new_dtype).as_torch()).view(new_shape)
+    torch.testing.assert_close(d.view(torch.int16), ref.view(torch.int16), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("swizzled", [False, True], ids=["linear", "swizzled"])
+def test_shared_view_narrowing_numeric(swizzled):
+    run_shared_reinterpret_view((64, 64), T.float32, (64, 128), T.bfloat16, swizzled)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("swizzled", [False, True], ids=["linear", "swizzled"])
+def test_shared_view_widening_numeric(swizzled):
+    run_shared_reinterpret_view((64, 128), T.bfloat16, (64, 64), T.float32, swizzled)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

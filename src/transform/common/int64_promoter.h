@@ -24,10 +24,11 @@ public:
   using Parent = tirx::IndexDataTypeRewriter;
 
   PrimExpr VisitExpr_(const tirx::VarNode *op) final {
-    if (op->dtype.is_int() && op->dtype.bits() < 64) {
-      return tvm::cast(DataType::Int(64), ffi::GetRef<tirx::Var>(op));
+    PrimExpr var = Parent::VisitExpr_(op);
+    if (var.dtype().is_int() && var.dtype().bits() < 64) {
+      return tvm::cast(DataType::Int(64), var);
     }
-    return ffi::GetRef<PrimExpr>(op);
+    return var;
   }
 
   PrimExpr VisitExpr_(const tirx::IntImmNode *op) final {

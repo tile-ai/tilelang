@@ -285,12 +285,12 @@ def test_mathops_generate_no_fastmath(name, func):
 
 
 @tilelang.testing.requires_cuda
-def test_round_ties_away_from_zero_uses_roundf():
+def test_round_ties_away_from_zero_uses_helper():
     run_single_arg_mathop_test(
         "round",
         lambda x: T.round(x, "ties-away-from-zero"),
         dtype=T.float32,
-        cuda_mathop_name="round",
+        cuda_mathop_name="RoundTiesAwayFromZero",
     )
 
 

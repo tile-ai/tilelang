@@ -27,7 +27,6 @@ import os
 import sys
 import json
 import hashlib
-import signal
 import threading
 import traceback
 from pathlib import Path
@@ -35,8 +34,8 @@ from pathlib import Path
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
+from tilelang.utils.device import get_available_cpu_count
 from tilelang.autotuner.capture import get_autotune_inputs
-from tilelang.backend.target import determine_target
 from tilelang import __version__
 
 TargetLike = str | dict[str, object] | Target
@@ -52,129 +51,6 @@ _RESERVED_CONFIG_KEYS = frozenset({"pass_configs"})
 
 # Internal key used to pass per-config pass_configs through config_arg dicts
 _PASS_CONFIGS_KEY = "__pass_configs__"
-
-
-class TimeoutException(Exception):
-    pass
-
-
-def _timeout_handler(signum, frame):  # pragma: no cover - signal handler
-    raise TimeoutException("Operation timed out")
-
-
-def _run_with_sigalrm(func, timeout, *args, **kwargs):
-    """POSIX path: ``SIGALRM`` interrupts ``func`` synchronously inside the
-    same thread. The runaway call actually stops, releasing CPU/GPU resources
-    held by e.g. a stuck CUDA benchmark.
-    """
-    prev_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-    signal.alarm(int(timeout))
-    try:
-        return func(*args, **kwargs)
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, prev_handler)
-
-
-def _async_raise_in_thread(tid: int, exc_type: type) -> bool:
-    """Asynchronously raise ``exc_type`` in the thread identified by ``tid``.
-
-    Uses CPython's :c:func:`PyThreadState_SetAsyncExc` — the same primitive the
-    interpreter itself uses to deliver ``KeyboardInterrupt`` to the main thread,
-    and the Python-level analogue of POSIX ``SIGALRM``. This is the strongest
-    cross-thread cancellation available without breaking process invariants:
-
-    * ``TerminateThread`` (WINAPI) is rejected on purpose — Microsoft's own
-      documentation labels it dangerous because it leaves CRT locks, DLL
-      thread-detach callbacks, and (relevant here) CUDA driver state in an
-      inconsistent state, which can corrupt subsequent kernels.
-    * ``PyThreadState_SetAsyncExc`` only fires at Python bytecode boundaries,
-      so a thread stuck in a C call (e.g. ``cudaStreamSynchronize``) won't
-      respond until it returns to Python. POSIX ``SIGALRM`` has the same
-      practical limitation.
-
-    Returns ``True`` when the exception was queued, ``False`` otherwise.
-    """
-    import ctypes
-
-    set_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
-    set_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
-    set_exc.restype = ctypes.c_int
-
-    affected = set_exc(ctypes.c_ulong(tid), ctypes.py_object(exc_type))
-    if affected == 0:
-        return False
-    if affected > 1:
-        # If more than one thread was affected (should not happen with a
-        # single tid), undo the side-effect to avoid leaving threads with a
-        # pending async exception.
-        set_exc(ctypes.c_ulong(tid), None)
-        return False
-    return True
-
-
-def _run_with_thread(func, timeout, *args, **kwargs):
-    """Cross-platform fallback when ``SIGALRM`` is unavailable (Windows) or
-    when called outside the main thread (``signal.signal`` is restricted to
-    the main thread on POSIX).
-
-    Mirrors POSIX ``SIGALRM`` semantics as closely as Python allows by running
-    ``func`` **on the current thread** while a daemon watchdog thread sleeps
-    until the deadline. On timeout the watchdog uses
-    ``PyThreadState_SetAsyncExc`` to inject :class:`TimeoutException` back into
-    the caller, which surfaces at the next Python bytecode boundary.
-
-    Crucially, this preserves ``threading.local()``-backed state (e.g.
-    ``set_autotune_inputs``'s capture stack) — moving ``func`` onto a worker
-    thread would silently zero out that state and break callers that read it.
-    """
-    target_tid = threading.get_ident()
-    cancel = threading.Event()
-    fired = threading.Event()
-
-    def _watchdog():
-        if cancel.wait(timeout):
-            # ``func`` finished before the deadline — nothing to do.
-            return
-        if _async_raise_in_thread(target_tid, TimeoutException):
-            fired.set()
-
-    watchdog = threading.Thread(target=_watchdog, daemon=True, name="tl-tuner-watchdog")
-    watchdog.start()
-    try:
-        return func(*args, **kwargs)
-    except TimeoutException:
-        # Re-raise with the standard message regardless of whether the async
-        # exception we injected won the race against an in-flight Python
-        # exception in ``func``.
-        raise TimeoutException(f"Operation timed out after {timeout}s") from None
-    finally:
-        # Stop the watchdog. If we got here without timing out the watchdog is
-        # blocked in ``cancel.wait`` and will exit immediately. If the watchdog
-        # already fired, ``func`` raised TimeoutException above (caught and
-        # re-raised) — but a stray async exception may still be queued, so
-        # clear it defensively before the caller continues running Python code.
-        cancel.set()
-        if fired.is_set():
-            import ctypes
-
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(target_tid), ctypes.py_object(0))
-
-
-def run_with_timeout(func, timeout, *args, **kwargs):
-    """Run ``func`` under a deadline, raising :class:`TimeoutException` if exceeded.
-
-    Picks the strongest available primitive:
-
-    * **POSIX, main thread**: ``SIGALRM``. The deadline truly interrupts
-      ``func`` mid-execution and frees its resources.
-    * **Otherwise** (Windows, or POSIX off the main thread): a daemon
-      ``ThreadPoolExecutor``. The deadline only unblocks the caller; the
-      runaway worker keeps running until it returns on its own.
-    """
-    if hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread():
-        return _run_with_sigalrm(func, timeout, *args, **kwargs)
-    return _run_with_thread(func, timeout, *args, **kwargs)
 
 
 # Configure logging for the autotuner module
@@ -201,16 +77,6 @@ def _init_logger_handlers():
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     _logger_handlers_initialized = True
-
-
-def get_available_cpu_count() -> int:
-    """Gets the number of CPU cores available to the current process."""
-    try:
-        cpu_count = len(os.sched_getaffinity(0))
-    except AttributeError:
-        cpu_count = os.cpu_count()
-
-    return cpu_count or 1
 
 
 def _normalize_value(value, sort_dict_items: bool = False):
@@ -327,17 +193,15 @@ class AutoTuner:
         if verbose is None:
             verbose = env.get_default_verbose()
 
-        # Normalize target to a concrete TVM Target and resolve execution backend
-        t = Target(determine_target(target))
-        from tilelang.backend.execution_backend import resolve_execution_backend
+        from tilelang.backend.module import create_backend_context
 
-        resolved_backend = resolve_execution_backend(execution_backend, t)
+        backend_context = create_backend_context(target, target_host, execution_backend)
 
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=t,
-            execution_backend=resolved_backend,
-            target_host=target_host,
+            target=backend_context.target,
+            execution_backend=backend_context.execution_backend.name,
+            target_host=backend_context.target_host,
             verbose=verbose,
             pass_configs=pass_configs,
         )
@@ -732,8 +596,6 @@ class AutoTuner:
                         try:
                             latency, worker_ref_latency = _call_benchmark_target(_jit_kernel, _worker_state)
                             _call_result_queue.put(("ok", latency, worker_ref_latency, ""))
-                        except TimeoutException:
-                            _call_result_queue.put(("timeout", None, None, ""))
                         except Exception:
                             _call_result_queue.put(("error", None, None, traceback.format_exc()))
 
@@ -772,8 +634,6 @@ class AutoTuner:
                 else:
                     latency, worker_ref_latency = _call_benchmark_target(jit_kernel, worker_state)
                     result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
-            except TimeoutException:
-                result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
             except Exception:
                 result_queue.put((idx, config, jit_kernel, None, None, "error", traceback.format_exc()))
 

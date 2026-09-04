@@ -7,8 +7,8 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
-#include "op/builtin.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
 #include "span_utils.h"
@@ -78,12 +78,11 @@ bool CheckWgmma(const GemmNode &op) {
 }
 
 bool AllowTcgen5Mma(const GemmNode &op, Target target) {
-  bool scope_ok = (IsSharedBuffer(op.a_) || op.a_.scope() == "shared.tmem") &&
-                  IsSharedBuffer(op.b_) && op.c_.scope() == "shared.tmem";
+  bool scope_ok = (IsSharedBuffer(op.a_) || IsTmemBuffer(op.a_)) &&
+                  IsSharedBuffer(op.b_) && IsTmemBuffer(op.c_);
   if (!TargetIsSm100(target) || !scope_ok)
     return false;
-  DataType ab_dtype =
-      (op.a_.scope() == "shared.tmem") ? op.b_->dtype : op.a_->dtype;
+  DataType ab_dtype = IsTmemBuffer(op.a_) ? op.b_->dtype : op.a_->dtype;
   return GetTCGEN5MMAMeta(op.m_, op.n_, op.k_, ab_dtype, op.c_->dtype).first;
 }
 

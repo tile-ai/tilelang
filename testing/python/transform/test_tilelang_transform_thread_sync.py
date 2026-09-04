@@ -775,8 +775,8 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
 @tilelang.testing.requires_cuda
 def test_partial_sync_non_warp_multiple_rejected():
     """Regression test for issue #2556: a required barrier inside a divergent
-    region whose participating thread count is not a multiple of the warp size
-    must be a compile-time error, not silently dropped (data race)."""
+    region that splits a warp must be a compile-time error, not silently
+    dropped or lowered to an invalid partial barrier."""
     import pytest
 
     @T.prim_func(private=True)
@@ -796,7 +796,7 @@ def test_partial_sync_non_warp_multiple_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(Exception, match="not a multiple of 32"):
+    with pytest.raises(Exception, match="not warp-uniform"):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -975,6 +975,51 @@ def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
     run_passes_script(func)
     warnings = capfd.readouterr().err
     assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+
+
+def test_aligned_else_partial_sync_is_preserved():
+    """An unsafe 16-thread then arm must not remove a valid else warp barrier."""
+    import re
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 48)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx >= 32:
+            l[0] = T.float32(0)
+        else:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[31 - tx]
+
+    s = run_passes_script(func)
+    assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a 32-thread barrier:\n{s}"
+    assert s.index('T.tvm_storage_sync("shared"') > s.index("else:"), f"Barrier must stay in else branch:\n{s}"
+
+
+def test_misaligned_else_partial_sync_is_rejected():
+    """Consecutive threads spanning two partial warps cannot use bar.sync."""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0 or tx >= 33:
+            l[0] = T.float32(0)
+        else:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[33 - tx]
+
+    with pytest.raises(Exception, match="not warp-uniform"):
+        run_passes_script(func)
 
 
 def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):
@@ -1283,6 +1328,90 @@ def test_sync_may_stay_inside_block_uniform_guard():
 
     s = run_passes_script(func)
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected a barrier for a cross-thread hazard:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_unbounded_atomic_touched_range_stays_conservative():
+    """Regression: an atomic whose address is data-dependent relaxes its
+    touched interval to (-inf, +inf), and those symbolic infinity sentinels
+    are handle-typed. Comparing them against a bounded pointer access inside
+    PointerAccessIsDisjoint threw `Cannot match type int32 vs handle`; the
+    planner must instead answer "not disjoint" and keep the sync."""
+
+    @T.prim_func(private=True)
+    def func():
+        A_shared = T.alloc_buffer((256,), dtype="float32", scope="shared")
+        idx = T.alloc_buffer((16,), dtype="int32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        # Bounded pointer access covering the whole buffer (fill-style).
+        T.evaluate(
+            T.call_extern(
+                "handle",
+                "fake_fill",
+                T.tvm_access_ptr(T.type_annotation("float32"), A_shared.data, 0, 256, 2),
+            )
+        )
+        # Data-dependent atomic destination: the touched interval relaxes to
+        # everything once the enclosing loop is summarized.
+        for i in range(16):
+            T.evaluate(
+                T.call_intrin(
+                    "float32",
+                    tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
+                    T.address_of(A_shared[idx[i]]),
+                    T.float32(1),
+                    T.int32(0),
+                )
+            )
+
+    mod = tvm.IRModule({"main": func})
+    # Must not throw; the unprovable pair keeps its conservative barrier.
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod.script())
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected a conservative barrier:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_sync_grid_acts_as_shared_barrier():
+    """grid.sync() synchronizes every thread of every block, so the planner
+    must treat it as a block-level barrier too: accesses on the two sides of
+    a sync_grid need no extra __syncthreads(), and (regression) the
+    unprovable fill-vs-data-dependent-atomic pair is never even compared."""
+
+    @T.prim_func(private=True)
+    def func():
+        A_shared = T.alloc_buffer((256,), dtype="float32", scope="shared")
+        idx = T.alloc_buffer((16,), dtype="int32", scope="shared")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        T.evaluate(
+            T.call_extern(
+                "handle",
+                "fake_fill",
+                T.tvm_access_ptr(T.type_annotation("float32"), A_shared.data, 0, 256, 2),
+            )
+        )
+        T.evaluate(T.call_intrin("handle", tvm.tirx.op.Op.get("tl.sync_grid")))
+        for i in range(16):
+            T.evaluate(
+                T.call_intrin(
+                    "float32",
+                    tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
+                    T.address_of(A_shared[idx[i]]),
+                    T.float32(1),
+                    T.int32(0),
+                )
+            )
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod.script())
+    assert 'T.tvm_storage_sync("shared")' not in s, f"sync_grid already covers the barrier:\n{s}"
 
 
 if __name__ == "__main__":

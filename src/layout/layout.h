@@ -42,6 +42,7 @@ private:
 
 class Layout;
 class Fragment;
+class PartialFragment;
 
 class LayoutNode : public ffi::Object {
 public:
@@ -101,9 +102,9 @@ public:
   //   new_num_elems = old_num_elems * factor
   // For example, f32->i8 (32b -> 8b) uses rescale_num=32, rescale_den=8.
   // i8->f32 (8b -> 32b) uses rescale_num=8, rescale_den=32.
-  // For sub-byte subtype views, the output layout may temporarily gain or drop
-  // a trailing "pack lane" dimension so that the layout still describes how
-  // multiple logical elements share the same physical storage slot.
+  // Reinterpreting views rescale the last (stride-1) output mode, keeping
+  // the output in the view dtype's element units; widening requires storage
+  // to be contiguous and aligned at the new element width.
   virtual Layout Reshape(const ffi::Array<PrimExpr> &shape,
                          arith::Analyzer *analyzer = nullptr,
                          const PrimExpr rescale_num = Integer(1),
@@ -189,13 +190,19 @@ public:
 
   Fragment CondenseReplicateVar() const;
 
-  std::string DebugOutput() const final;
+  std::string DebugOutput() const override;
 
   Fragment BindThreadRange(Range thread_range) const;
 
   Range ThreadRange() const { return thread_range_; }
 
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
+
+  /*! \brief Kind guard on the base signature: a plain Fragment never equals a
+   *  reducer partial (the reverse direction lives in
+   *  PartialFragmentNode::IsEqual); all other comparisons keep the historical
+   *  LayoutNode behavior. */
+  bool IsEqual(const LayoutNode *other, bool skip_index = false) const override;
 
   bool IsCompletedReplicated() const;
 
@@ -204,7 +211,7 @@ public:
 
   static void RegisterReflection();
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fragment", FragmentNode, LayoutNode);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.Fragment", FragmentNode, LayoutNode);
   static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
       kTVMFFISEqHashKindTreeNode;
 
@@ -245,6 +252,119 @@ public:
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
+
+/*!
+ * \brief Layout of a reducer's per-thread partials.
+ *
+ * Shares Fragment's algebra, but the replication coordinate is NOT uniform
+ * copies of a finished value: under the low-bits convention enforced at
+ * construction, `_rep % combine_size` enumerates addend lanes the finalize
+ * collective must reduce, and `_rep / combine_size` enumerates equal-value
+ * copy groups (from loop replication) that must never be combined. The pair
+ * (storage algebra, combine_size) therefore determines the complete
+ * physical plan: `combine_size == ReplicateExtent()` is the FullParticipant
+ * wide plan, `combine_size == 1` is the communication-free LocalComplete
+ * plan, and the collective steps are derivable from the node alone
+ * (CombineSteps).
+ *
+ * A partial never compares equal to a plain Fragment and must not flow
+ * through replica-equality shortcuts (ProveFragmentContains,
+ * canonical-replica predicates). Instances live only between
+ * LayoutInference and ReducerPlanAndMaterialize, keyed by `local.reducer`
+ * buffers.
+ *
+ * Fragment methods returning new Fragment copies (Repeat/Replicate/
+ * BindThreadRange/...) degrade the result to a plain Fragment; the thread
+ * range is set at construction instead.
+ */
+class PartialFragmentNode : public FragmentNode {
+public:
+  PartialFragmentNode() = default;
+  PartialFragmentNode(ffi::Array<PrimExpr> input_size,
+                      ffi::Array<PrimExpr> forward_index,
+                      PrimExpr forward_thread, PrimExpr replicate_size,
+                      PrimExpr combine_size, ffi::Optional<Range> thread_range);
+
+  /*! \brief Width of the combine coordinate: `_rep % CombineSize()` are
+   *  addend lanes, `_rep / CombineSize()` are equal-value copy groups. */
+  PrimExpr CombineSize() const { return combine_size_; }
+
+  /*! \brief The collective steps (reducing_threads, scale) the finalize
+   *  needs, derived from this node alone: normalize the thread expression
+   *  with `_rep = lo + CombineSize() * hi` and collect the splits sourced
+   *  from `lo`. Requires constant extents. */
+  std::vector<std::pair<int, int>> CombineSteps() const;
+
+  std::string DebugOutput() const override;
+
+  /*! \brief Kind-aware equality on the base signature: a partial is never
+   *  equal to a plain Fragment (dispatch through a Layout reference would
+   *  otherwise fall back to LayoutNode::IsEqual, which ignores the thread
+   *  mapping entirely); partial-vs-partial compares the full Fragment
+   *  algebra plus the combine decomposition. */
+  bool IsEqual(const LayoutNode *other, bool skip_index = false) const override;
+
+  static void RegisterReflection();
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.PartialFragment", PartialFragmentNode,
+                                    FragmentNode);
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
+
+protected:
+  PrimExpr combine_size_;
+};
+
+/*!
+ * \brief PartialFragment reference class.
+ */
+class PartialFragment : public Fragment {
+public:
+  TVM_DLL PartialFragment(ffi::Array<PrimExpr> input_size,
+                          ffi::Array<PrimExpr> forward_index,
+                          PrimExpr forward_thread, PrimExpr replicate_size,
+                          PrimExpr combine_size,
+                          ffi::Optional<tirx::Var> replicate_var,
+                          ffi::Optional<Range> thread_range = std::nullopt);
+
+  /*! \brief Reinterpret a solved Fragment as per-thread partials whose
+   *  ENTIRE replication coordinate is addend lanes (combine ==
+   *  ReplicateExtent). This is the annotation semantics: the user declares
+   *  W combine lanes, copy groups come only from loop replication. */
+  TVM_DLL static PartialFragment FromFragment(const Fragment &fragment);
+
+  /*! \brief Reinterpret an induced projection (built under the low-bits
+   *  convention) as per-thread partials with `combine_size` addend lanes in
+   *  the low bits of the replication coordinate. */
+  TVM_DLL static PartialFragment FromInduced(const Fragment &fragment,
+                                             PrimExpr combine_size);
+
+  /*! \brief The wide plan: every participant holds one full-shape partial
+   *  (combine == thread_extent, no copy groups). */
+  TVM_DLL static PartialFragment
+  FullyReplicated(ffi::Array<PrimExpr> shape, PrimExpr thread_extent,
+                  ffi::Optional<Range> thread_range = std::nullopt);
+
+  /*! \brief The same algebraic map read as a plain Fragment: after the
+   *  finalize collective every replica holds the combined value. */
+  TVM_DLL Fragment AsPostCollective() const;
+
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(PartialFragment, Fragment,
+                                             PartialFragmentNode);
+};
+
+/*!
+ * \brief CondenseReplicateVar variant that preserves the combine/copy
+ * boundary of a reducer projection. The input fragment's replication
+ * coordinate must follow the low-bits convention (`_rep % combine_size` =
+ * addend lanes); the two halves are compressed independently and recomposed
+ * with the compressed combine part back in the low bits, so the convention
+ * survives condensation. Returns the condensed fragment (thread range
+ * preserved) and the compressed combine width.
+ */
+std::pair<Fragment, PrimExpr>
+CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
+                                    const PrimExpr &combine_size);
 
 tirx::Var InputPlaceholder(size_t idx);
 tirx::Var ReplicationPlaceholder();

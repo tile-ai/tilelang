@@ -163,6 +163,7 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
+  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
 
   TileOperator Clone() const;
 

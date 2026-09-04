@@ -119,6 +119,20 @@ def is_fragment(buffer: BufferLikeType) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
+def is_reducer(buffer: BufferLikeType) -> bool:
+    """
+    Check if the buffer is a reducer v2 accumulator (scope local.reducer).
+
+    Args:
+        buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
+
+    Returns:
+        bool: True if the buffer is a reducer accumulator, False otherwise.
+    """
+    buffer = _get_buffer(buffer)
+    return buffer.scope() == "local.reducer"
+
+
 def is_local_var(buffer: BufferLikeType) -> bool:
     """
     Check if the buffer is in the local.var memory scope.
@@ -181,7 +195,6 @@ def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list
 
     - Buffer/BufferLoad/BufferRegion -> returns BufferRegion when extents is None
     - Buffer/BufferLoad/BufferRegion -> returns a tl.region call when extents is provided
-    - tl.region Call -> returns the decoded BufferRegion for analysis
     """
     from tilelang.language.frame import has_let_value, get_let_value
 
@@ -252,23 +265,25 @@ def retrieve_shape(obj: BufferLikeType) -> list:
 
 def retrieve_stride(obj: BufferLikeType) -> list:
     """
-    Retrieve row-major strides for a buffer-like object based on its buffer.shape.
+    Retrieve strides for a buffer-like object.
 
-    For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
+    For BufferRegion and BufferLoad, uses the underlying buffer. Declared
+    strides take precedence, with compact row-major strides as the fallback.
     """
+    # Imported lazily to avoid a cycle: `tilelang.language` imports this module.
+    from tilelang.language.eager.utils import construct_strides
+
     if isinstance(obj, tirx.Buffer):
-        shape = obj.shape
+        buffer = obj
     elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
-        shape = obj.buffer.shape
+        buffer = obj.buffer
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
 
-    strides = []
-    stride = 1
-    for s in reversed(shape):
-        strides.insert(0, stride)
-        stride *= s
-    return strides
+    if len(buffer.strides) == len(buffer.shape) and len(buffer.strides) > 0:
+        return list(buffer.strides)
+
+    return list(construct_strides(buffer.shape))
 
 
 def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, access_type: str = "r") -> PrimExpr:

@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file tvm_ffi_binder.h
  * \brief Helper utility to match and bind packed function arguments.
@@ -136,12 +117,12 @@ public:
    * bound.  For example, `binder.Bind(var, expr_1)` will produce an
    * entry mapping `var` to `expr_1` in the `binder.Defs()`.  If
    * `binder.Bind(var, expr_2)` is called later, then this will
-   * produce an assert statemtn that `expr_1 == expr_2`.
+   * produce an assert statement that `expr_1 == expr_2`.
    *
    * Note: Some assert statements produced by BindDLTensor are located
    * in `binder.InitNest()`, not within `binder.Asserts()`.  This is
    * deliberate, as some values may require checks prior to
-   * initialization.  (e.g. Intializing `m = dl_tensor->shape[3]`
+   * initialization.  (e.g. Initializing `m = dl_tensor->shape[3]`
    * requires first asserting that `3 < dl_tensor->ndim`.)
    */
   const std::vector<Stmt> &Asserts() const { return asserts_; }
@@ -194,7 +175,7 @@ private:
   std::vector<Var> defs_;
   /*! \brief Initialize nest */
   std::vector<Stmt> init_nest_;
-  /*! \brief handle data type in the defintiions */
+  /*! \brief handle data type in the definitions */
   ffi::Map<Var, PrimExpr> def_handle_dtype_;
   /*! \brief asserts generated */
   std::vector<Stmt> asserts_;

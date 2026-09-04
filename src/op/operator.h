@@ -117,8 +117,7 @@ struct LowerArgs {
   ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
-  // nearest enclosing serial loop so non-pipelined TMA loops still alternate
-  // barrier phase correctly.
+  // zero-based epoch of the nearest enclosing serial loop.
   PrimExpr mbar_phase_expr = IntImm(DataType::Int(32), 0);
   // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
@@ -142,6 +141,19 @@ struct LowerArgs {
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
 };
 
+/*! \brief One reducer_update site, as seen by layout analysis: the update
+ *  loop's solved layout (undefined Fragment while the loop is still
+ *  unsolved), the parallel nest vars, the update target's logical indices
+ *  and the contribution expression. Assembled by ParallelOp for its own
+ *  partial-layout proposal and by ReducerPlanAndMaterialize for lowering
+ *  (both feed AnalyzeReducerUpdateSite). */
+struct ReducerUpdateSiteHint {
+  Fragment loop_layout; // undefined while the update loop is unsolved
+  ffi::Array<tirx::Var> loop_vars;
+  ffi::Array<PrimExpr> indices;
+  PrimExpr value;
+};
+
 struct LayoutInferArgs {
   Target target;
   Range thread_bounds;
@@ -154,6 +166,12 @@ struct LayoutInferArgs {
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
+  // Snapshot of the layouts fixed at kStrict (annotations included), taken
+  // by the inference engine after the strict pass. Ops use it to recognize
+  // authoritative constraints — e.g. an annotated reducer PartialFragment
+  // that update nests must satisfy rather than widen. Empty at
+  // lowering-time re-inference call sites.
+  LayoutMap strict_layout_map;
 };
 
 class TileOperator;
@@ -174,6 +192,19 @@ public:
       AppendAccessRegionByMask(access, &result.reads, &result.writes);
     }
     return result;
+  }
+
+  /*!
+   * \brief Regions whose preexisting contents this op consumes before
+   *        establishing a value of its own.
+   *
+   * A subset of GetAccessRegions().reads, which answers the weaker may-read
+   * question ("could this op read this region?") and is deliberately
+   * conservative for dependency analysis. Ops whose read set depends on an
+   * argument value narrow it here; the default reports every read.
+   */
+  virtual ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const {
+    return GetAccessRegions().reads;
   }
 
   void SetAccessRegions(std::vector<AccessRegion> access_regions) {

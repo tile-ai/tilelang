@@ -18,11 +18,11 @@
 #include <utility>
 #include <vector>
 
+#include "cuda/op/builtin.h"
 #include "layout/layout.h"
 #include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
 #include "op/operator.h"
-#include "op/region.h"
 #include "op/utils.h"
 #include "transform/common/pipeline_utils.h"
 
@@ -380,10 +380,10 @@ private:
 
       // Supplement with tile-op analysis.
       // GetSBlockAccessRegion misses buffer references that are encoded as
-      // tl.tileop.region Call args or as plain BufferLoad args whose
+      // tl.region Call args or as plain BufferLoad args whose
       // semantic role (read vs write) is only known to the tile-op.
       // Let the tile-op report its own access regions, and fall back to
-      // RegionOp scanning for any ops that still do not expose them.
+      // decoding tl.region args for any ops that still do not expose them.
       if (auto *eval = stmt.as<EvaluateNode>()) {
         if (auto *call = eval->value.as<CallNode>()) {
           auto tile_op = ParseOperator(GetRef<Call>(call));
@@ -395,21 +395,13 @@ private:
               stmt_writes.insert(stmt_writes.end(), access.writes.begin(),
                                  access.writes.end());
             } else {
-              // Fallback: scan RegionOp-encoded args.
+              // Fallback: decode tl.region-encoded args.
               for (const auto &arg : call->args) {
                 if (auto *region_call = arg.as<CallNode>()) {
-                  if (region_call->op.same_as(RegionOp::Get())) {
-                    auto region_op = ParseOperator(GetRef<Call>(region_call));
-                    if (auto *rn = region_op.as<RegionOpNode>()) {
-                      int mask = rn->GetAccessMask();
-                      auto br = BufferRegion(rn->GetBuffer(), rn->GetRanges());
-                      if (mask & 1) { // read
-                        stmt_reads.push_back(br);
-                      }
-                      if (mask & 2) { // write
-                        stmt_writes.push_back(br);
-                      }
-                    }
+                  if (region_call->op.same_as(region())) {
+                    AppendAccessRegionByMask(
+                        NormalizeToAccessRegion(arg, kAccessReadWrite),
+                        &stmt_reads, &stmt_writes);
                   }
                 }
               }
@@ -811,19 +803,19 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
-    // Rewrite tl.tileop.region Calls for versioned buffers.
+    // Rewrite tl.region Calls for versioned buffers.
     // The region encoding is:
     //   region(BufferLoad(buf, [min_0, ..., min_N]), access_mask, ext_0, ...,
     //   ext_N)
     // After the recursive visit, VisitExpr_(BufferLoadNode*) prepends a
     // version_index to the BufferLoad indices, yielding [version_index,
     // min_0, ..., min_N].  We must also insert a matching extent (1) for the
-    // new leading dimension so that RegionOp's ndim == indices.size()
+    // new leading dimension so that the region's ndim == indices.size()
     // invariant is preserved.
     //
     // Detection: if the BufferLoad has more indices than the number of extent
     // args (args.size() - 2), a version index was prepended.
-    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+    if (call->op.same_as(region()) && call->args.size() >= 2) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         size_t num_extents =
             call->args.size() - 2; // args = [load, mask, ext...]

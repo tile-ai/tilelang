@@ -148,6 +148,42 @@ def _make_sync_sliced_ts_tmem_kernel():
     return main
 
 
+def _make_ts_gemm_through_punned_view_kernel():
+    """A bf16 operand overlaying the upper half of an f32 TMEM buffer.
+
+    The FA4-style P-in-S overlay: the dtype-punned view's layout must
+    preserve the sub-element position (pack lane) of the base buffer, and
+    its addresses must resolve through the base's tcgen05.alloc word.
+    """
+
+    @T.prim_func
+    def main(
+        P: T.Tensor((128, 128), T.bfloat16),
+        V: T.Tensor((128, 128), T.bfloat16),
+        D: T.Tensor((128, 128), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            P_shared = T.alloc_shared((128, 128), T.bfloat16)
+            V_shared = T.alloc_shared((128, 128), T.bfloat16)
+            P_frag = T.alloc_fragment((128, 128), T.bfloat16)
+            O_frag = T.alloc_fragment((128, 128), T.float32)
+            S_tmem = T.alloc_tmem((128, 128), T.float32)
+            O_tmem = T.alloc_tmem((128, 128), T.float32)
+            P_view = T.view(S_tmem, shape=(128, 256), dtype=T.bfloat16)
+            done = T.alloc_barrier(1)
+
+            T.copy(P, P_shared)
+            T.copy(P_shared, P_frag)
+            T.copy(P_frag, P_view[:, 128:256])
+            T.copy(V, V_shared)
+            T.gemm(P_view[:, 128:256], V_shared, O_tmem, mbar=done, clear_accum=True)
+            T.mbarrier_wait_parity(done, 0)
+            T.copy(O_tmem, O_frag)
+            T.copy(O_frag, D)
+
+    return main
+
+
 def _make_explicit_2cta_gemm_kernel():
     """Explicit two-CTA GEMM: user-scheduled operand publish and completion.
 
@@ -316,7 +352,22 @@ def test_tcgen05_gemm_can_omit_intermediate_completion_event():
 def test_sync_gemm_preserves_sliced_ts_operands_for_sm100_selection():
     source = tilelang.compile(_make_sync_sliced_ts_tmem_kernel(), target="cuda").get_kernel_source()
     assert source.count("tl::tcgen05mma_ts") == 4
-    assert "increase_descriptor_offset" in source
+    assert source.count("initialize_tcgen05_descriptor") == 4
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_ts_gemm_through_dtype_punned_view():
+    import torch
+
+    kernel = tilelang.compile(_make_ts_gemm_through_punned_view_kernel(), target="cuda")
+    torch.manual_seed(0)
+    p = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    d = torch.empty(128, 128, device="cuda", dtype=torch.float32)
+    kernel(p, v, d)
+    torch.testing.assert_close(d, p.float() @ v.float(), rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_cuda
@@ -684,3 +735,129 @@ def test_tcgen05_gemm_batched_correctness():
     kernel(a, b, d)
     ref = (a.float() @ b.float().transpose(1, 2)).to(torch.bfloat16)
     torch.testing.assert_close(d, ref, rtol=1e-2, atol=1e-2)
+
+
+def _make_m64_ts_kernel(M, N, K):
+    """A TS GEMM whose A operand reaches TMEM through registers.
+
+    At M=64 the A fragment is PTX Layout F -- the low 16 datapaths of each
+    sub-partition -- so both the register->TMEM store and the MMA's read of it
+    have to agree on a half-subpartition layout.
+    """
+    from tilelang.cuda.intrinsics import make_mma_swizzle_layout
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.bfloat16),
+        B: T.Tensor((N, K), T.bfloat16),
+        C: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            a_shared = T.alloc_shared((M, K), T.bfloat16)
+            b_shared = T.alloc_shared((N, K), T.bfloat16)
+            T.annotate_layout({a_shared: make_mma_swizzle_layout(a_shared)})
+            T.copy(A, a_shared)
+            T.copy(B, b_shared)
+            with T.sblock():
+                T.reads()
+                T.writes()
+                a_tmem = T.alloc_tmem((M, K), T.bfloat16)
+                c_tmem = T.alloc_tmem((M, N), T.float32)
+                a_frag = T.alloc_fragment((M, K), T.bfloat16)
+                c_frag = T.alloc_fragment((M, N), T.float32)
+                done = T.alloc_barrier(1)
+                T.copy(a_shared, a_frag)
+                T.copy(a_frag, a_tmem)
+                if T.get_warp_idx_sync() == 0:
+                    T.tcgen05_gemm(a_tmem, b_shared, c_tmem, transpose_B=True, clear_accum=True, mbar=done)
+                T.mbarrier_wait_parity(done, 0)
+                T.copy(c_tmem, c_frag)
+                T.copy(c_frag, C)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize(
+    ("M", "K"),
+    # K=512 puts the wrapper's .xN at 128, exactly 16dp64b's max_chunks.  M=128
+    # is the untouched path, so one shape guards it -- and it cannot reach
+    # K=512 anyway: two bf16 stagings would need 256 KB of shared memory.
+    [(64, 64), (64, 128), (64, 512), (128, 128)],
+    ids=["m64k64", "m64k128", "m64k512", "m128k128"],
+)
+def test_tcgen05_ts_gemm_tmem_a_correctness(M, K):
+    import torch
+
+    N = 128
+    kernel = tilelang.compile(
+        _make_m64_ts_kernel(M, N, K),
+        out_idx=[2],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    # M=64 must go through the half-subpartition wrappers, M=128 must not.
+    source = kernel.get_kernel_source()
+    want = "tcgen05_st_16dp" if M == 64 else "tcgen05_st_32dp"
+    assert want in source, f"M={M} expected {want} in the emitted source"
+
+    torch.manual_seed(0)
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+    ref = a.float() @ b.float().T
+    torch.testing.assert_close(kernel(a, b), ref, rtol=2e-2, atol=2e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_sync_tcgen05_gemm_pipelined_wait_parity(num_stages):
+    """A synchronous T.gemm(mbar=...) inside T.Pipelined uses a single user
+    barrier that flips once per iteration, so the auto-emitted wait parity is
+    k % 2 regardless of num_stages. The old ring parity was wrong for every
+    num_stages > 1 and could let a later copy overwrite shared memory while an
+    MMA was still reading it.
+    """
+    import torch
+
+    M = N = K = 2048
+    block_M = block_N = 128
+    block_K = 64
+    dtype, accum_dtype = T.bfloat16, T.float32
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_N, block_K), dtype)
+            C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            mbar = T.alloc_barrier(1)
+
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                T.copy(A[bx * block_M, k * block_K], A_shared)
+                T.copy(B[by * block_N, k * block_K], B_shared)
+                T.gemm(A_shared, B_shared, C_tmem, transpose_B=True, clear_accum=k == 0, mbar=mbar)
+
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, C[bx * block_M, by * block_N])
+
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    torch.manual_seed(0)
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+    c = torch.zeros(M, N, device="cuda", dtype=torch.bfloat16)
+    kernel(a, b, c)
+    ref = a.float() @ b.float().T
+    torch.testing.assert_close(c.float(), ref, rtol=2e-2, atol=2e-2)

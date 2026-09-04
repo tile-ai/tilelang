@@ -5,6 +5,7 @@ import tilelang.language as T
 import tilelang.testing
 
 
+@tilelang.testing.requires_cuda
 def test_runtime_unknown_sign_vector_negative_index_load():
     @T.prim_func
     def main(A: T.Tensor((1024,), T.float32), B: T.Tensor((4, 4), T.float32)):
@@ -30,6 +31,7 @@ def test_runtime_unknown_sign_vector_negative_index_load():
     torch.testing.assert_close(b, expected)
 
 
+@tilelang.testing.requires_cuda
 def test_runtime_unknown_sign_vector_negative_index_store():
     @T.prim_func
     def main(B: T.Tensor((4, 4), T.float32), A: T.Tensor((1024,), T.float32)):

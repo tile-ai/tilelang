@@ -7,8 +7,8 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
+#include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 
 #include <tvm/tirx/transform.h>
@@ -415,13 +415,13 @@ bool CheckSTSMCopy(const CopyNode &op, Target target) {
 }
 
 bool CheckTMemLoad(const CopyNode &op, Target target) {
-  return TargetHasTmem(target) && op.src.scope() == "shared.tmem" &&
+  return TargetHasTmem(target) && IsTmemBuffer(op.src) &&
          IsFragmentBuffer(op.dst);
 }
 
 bool CheckTMemStore(const CopyNode &op, Target target) {
   return TargetHasTmem(target) && IsFragmentBuffer(op.src) &&
-         op.dst.scope() == "shared.tmem";
+         IsTmemBuffer(op.dst);
 }
 
 bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
@@ -477,9 +477,12 @@ const char *CopyInstToString(CopyInst inst) {
   }
 }
 
-bool CopyInstIsTMA(CopyInst inst) {
-  return inst == CopyInst::kBulkLoad || inst == CopyInst::kBulkStore ||
-         inst == CopyInst::kBulkLoad1D || inst == CopyInst::kBulkStore1D;
+bool CopyInstIsTMALoad(CopyInst inst) {
+  return inst == CopyInst::kBulkLoad || inst == CopyInst::kBulkLoad1D;
+}
+
+bool CopyInstIsTMAStore(CopyInst inst) {
+  return inst == CopyInst::kBulkStore || inst == CopyInst::kBulkStore1D;
 }
 
 bool CopyInstIsCPAsync(CopyInst inst) { return inst == CopyInst::kCPAsync; }
@@ -804,10 +807,15 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
-                                                      Target target) {
+CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
+                                              Target target) {
   CopyAnalysisContext ctx;
   ctx.target = target;
+
+  if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
+    return SelectCopyInstForLowering(op, ctx);
+  }
+
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);
   if (!facts.cuda_like_target) {
     return Supported(CopyInst::kNormal);
@@ -830,6 +838,44 @@ CopyInstSelection ClassifyWarpSpecializedProducerCopy(const CopyNode &op,
   if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
     return facts.can_cp_async ? Supported(CopyInst::kCPAsync)
                               : Unsupported(facts.async_unavailable_reason);
+  }
+
+  // Honor prefer_instruction like SelectCopyInstForLowering, restricted to
+  // producer-side loads.
+  if (facts.prefer_instruction == PreferredCopyInstruction::kTMA) {
+    if (facts.disable_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "disable_tma=true.");
+    }
+    if (facts.pass_context_disables_tma) {
+      return Unsupported("T.copy prefer_instruction=\"tma\" conflicts with "
+                         "pass config tl.disable_tma_lower=true.");
+    }
+    CopyInst inst =
+        SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/false,
+                      /*check_last_dim=*/true);
+    return inst == CopyInst::kInvalid
+               ? Unsupported("T.copy prefer_instruction=\"tma\" could not be "
+                             "honored: " +
+                             facts.tma_unavailable_reason)
+               : Supported(inst);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kCPAsync) {
+    if (!IsAutoAsyncCopyEnabled(/*default_enabled=*/true)) {
+      return Unsupported(
+          "T.copy prefer_instruction=\"cp_async\" conflicts with "
+          "pass config tl.enable_async_copy=false.");
+    }
+    return facts.can_cp_async
+               ? Supported(CopyInst::kCPAsync)
+               : Unsupported("T.copy prefer_instruction="
+                             "\"cp_async\" could not be honored: " +
+                             facts.async_unavailable_reason);
+  }
+
+  if (facts.prefer_instruction == PreferredCopyInstruction::kSync) {
+    return Supported(SelectSyncLikeInst(facts));
   }
 
   if (!facts.disable_tma) {

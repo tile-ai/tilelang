@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
+#include <unordered_set>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -19,6 +20,8 @@
 #include "../transform/loop_vectorize.h"
 #include "arith/int_operator.h"
 #include "backend/common/target_utils.h"
+#include "builtin.h"
+#include "reducer.h"
 #include "span_utils.h"
 #include "utils.h"
 
@@ -123,9 +126,8 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
  * @brief Handle a parallel For node during traversal, collecting loop metadata.
  *
  * Visits a parallel loop, asserts the loop is parallel, records a data-parallel
- * IterVar for the loop, binds the loop variable range into the analyzer scope,
- * and extracts any reducer information from the loop's annotations into the
- * visitor's reducer_info_map_. Continues traversal into the loop body.
+ * IterVar for the loop, and binds the loop variable range into the analyzer
+ * scope. Continues traversal into the loop body.
  */
 void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
   if (op->kind == ForKind::kParallel)
@@ -136,13 +138,6 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
                        IterVar(Range(op->min, op->extent), op->loop_var,
                                IterVarType::kOrdered));
   p->analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-  if (auto reducer_info_ref = op->annotations.Get(attr::kReducerInfo)) {
-    if (auto reducer_info_map =
-            reducer_info_ref.value().as<Map<Var, ReducerInfo>>()) {
-      for (auto &&[buffer, info] : reducer_info_map.value())
-        p->reducer_info_map_.Set(buffer, info);
-    }
-  }
   StmtExprVisitor::VisitStmt_(op);
 }
 
@@ -157,6 +152,17 @@ void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   if (IsFragmentBuffer(op->buffer)) {
     p->RecordBufferAccess(op->buffer, op->indices, /*is_write=*/false);
   }
+  StmtExprVisitor::VisitExpr_(op);
+}
+
+void ParallelLoopNestVisitor::VisitExpr_(const CallNode *op) {
+  if (op->op.same_as(reducer_update())) {
+    ReducerUpdateArgs update = ParseReducerUpdate(op);
+    p->reducer_updates_.push_back(ParallelOpNode::ReducerUpdateRecord{
+        update.reducer, update.indices, update.value});
+  }
+  // Recurse into the args: the contribution's fragment loads must still be
+  // recorded (the reducer's own BufferLoad descriptor is scope-filtered out).
   StmtExprVisitor::VisitExpr_(op);
 }
 
@@ -324,8 +330,22 @@ bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
  */
 LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                       InferLevel level) const {
-  if (loop_layout_inferred_)
+  if (loop_layout_inferred_) {
+    // Fragments this loop touches can receive their layouts only after the
+    // loop itself was solved (the engine re-enqueues the loop when such a
+    // late layout lands; a reserved reducer destination always arrives
+    // late). The frozen loop layout must then be re-checked against the
+    // current fragment layouts: a mismatch means this attempt paired a
+    // solved loop with fragments it cannot address, and the thrown
+    // LayoutConflictException lets free mode discard the attempt. Strict and
+    // common levels have no discard channel, so they keep the early-out.
+    if (level == InferLevel::kFree && loop_layout_.defined()) {
+      ValidateCandidateAgainstFragments(loop_layout_, layout_args,
+                                        /*throw_on_error=*/true,
+                                        /*check_forward_index=*/false);
+    }
     return {};
+  }
   loop_layout_requires_padding_guard_ = false;
 
   // Expand Bind values to find fragment buffer accesses
@@ -427,18 +447,15 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
   bool source_buffer_is_write = false;
-  Buffer replicated_write_buffer; // Backup: fully replicated write buffer
 
   for (const auto &buffer : access_order_) {
     const auto &access = GetAccessInfo(buffer);
     if (layout_args.layout_map.count(buffer)) {
-      // skip reducers with rep=ALL
-      if (auto info = reducer_info_map_.Get(buffer->data);
-          info && info.value()->rep == ReducerRepType::ALL)
-        continue;
-
-      bool is_fully_replicated =
-          IsBufferCompletelyReplicated(buffer, layout_args.layout_map);
+      // Validation side effect only (fatals on constant non-zero fragment
+      // indices); the replication status itself does not steer source
+      // selection — replicated reads are down-ranked by the ReplicateExtent
+      // check below and by ChooseBestCandidate's heuristics.
+      (void)IsBufferCompletelyReplicated(buffer, layout_args.layout_map);
 
       if (access.is_write) {
         source_buffer = buffer;
@@ -468,13 +485,26 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   }
   // moved to ComputeLoopLayoutFromBuffer
 
+  // A strict (user-annotated) reducer partial pins this nest's placement:
+  // derive the loop layout from it ahead of any source-buffer heuristic.
+  // Free mode only — a candidate that conflicts with already-solved
+  // fragments throws in Step 2, and the attempt search may find an ordering
+  // (this nest first, fragments completed from it) that satisfies the
+  // annotation.
+  Fragment pinned_reducer_candidate;
+  if (!loop_layout_.defined() && level == InferLevel::kFree &&
+      !reducer_updates_.empty()) {
+    pinned_reducer_candidate = ComputeReducerPinnedCandidate(layout_args);
+  }
+
   // Try to infer loop layout from buffers in order of preference only if we
   // don't already have a layout (e.g., from annotations):
   // 1. Annotated loop layout
-  // 2. Non-replicated write buffer (most reliable)
-  // 3. Non-replicated read buffer
-  // 4. Fully replicated write buffer (backup, may cause issues)
-  // 5. Free inference mode (no source buffer)
+  // 2. Loop layout pinned by an annotated reducer partial
+  // 3. Non-replicated write buffer (most reliable)
+  // 4. Non-replicated read buffer
+  // 5. Fully replicated write buffer (backup, may cause issues)
+  // 6. Free inference mode (no source buffer)
   if (!loop_layout_.defined() && annotated_layout_unbound_.defined()) {
     loop_layout_ = annotated_layout_unbound_.value()->BindThreadRange(
         layout_args.thread_bounds);
@@ -482,6 +512,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     if (annotated_predicate_.defined()) {
       predicate_ = annotated_predicate_.value();
     }
+  } else if (!loop_layout_.defined() && pinned_reducer_candidate.defined()) {
+    loop_layout_ = pinned_reducer_candidate;
   } else if (!loop_layout_.defined() && source_buffer.defined() &&
              (allow_layout_propgate || source_buffer_is_write)) {
     loop_layout_ = ComputeLoopLayoutFromBuffer(source_buffer, layout_args);
@@ -499,16 +531,13 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
       candidate_from_buffer =
           ComputeLoopLayoutFromBuffer(read_source_buffer, layout_args);
     }
-
-    // try to infer loop layout with two mechanisms and choose the best one
-    {
-      candidate_from_plan = ComputePlanCandidate(layout_args);
-    }
+    candidate_from_plan = ComputePlanCandidate(layout_args);
 
     // Choose the best candidate:
     if (candidate_from_buffer.defined() && candidate_from_plan.defined()) {
       loop_layout_ = ChooseBestCandidate(candidate_from_buffer,
                                          candidate_from_plan, layout_args);
+      selected_plan_candidate = loop_layout_.same_as(candidate_from_plan);
     } else if (candidate_from_plan.defined()) {
       loop_layout_ = candidate_from_plan;
       selected_plan_candidate = true;
@@ -578,8 +607,179 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
       results.Set(buffer, dst_layout);
     }
   }
+
+  // Step 5: propose the partial layout of every reducer this nest updates.
+  // Deliberately proposed even when the reducer is already mapped: the
+  // engine's widen-on-conflict commit rule arbitrates between update sites
+  // whose induced layouts disagree.
+  for (const auto &update : reducer_updates_) {
+    results.Set(update.buffer, ProposeReducerPartial(update, layout_args));
+  }
+
   loop_layout_inferred_ = true;
   return results;
+}
+
+PartialFragment ParallelOpNode::ProposeReducerPartial(
+    const ReducerUpdateRecord &update,
+    const LayoutInferArgs &layout_args) const {
+  const Range &thread_bounds = layout_args.thread_bounds;
+  auto wide = [&]() {
+    return PartialFragment::FullyReplicated(
+        update.buffer->shape, thread_bounds->extent, thread_bounds);
+  };
+  PartialFragment proposal;
+  std::string narrow_reject;
+  const int64_t *extent_ptr = as_const_int(thread_bounds->extent);
+  const int64_t *min_ptr = as_const_int(thread_bounds->min);
+  if (extent_ptr == nullptr || min_ptr == nullptr) {
+    narrow_reject = "non-constant thread bounds";
+    proposal = wide();
+  } else if (tvm::transform::PassContext::Current()
+                 ->GetConfig<Bool>(kReducerForceBaseline, Bool(false))
+                 .value()) {
+    // tl.reducer_force_baseline pins the whole epoch to the wide plan; the
+    // decision now lives in the solved partial layout, so the pin applies at
+    // the proposal, and the materializer just reads it back.
+    narrow_reject = "forced baseline (tl.reducer_force_baseline)";
+    proposal = wide();
+  } else {
+    ReducerUpdateSiteHint hint;
+    hint.loop_layout = loop_layout_;
+    hint.loop_vars = loop_vars_.Map([](const IterVar &iv) { return iv->var; });
+    hint.indices = update.indices;
+    hint.value = update.value;
+    ReducerSiteAnalysis analysis = AnalyzeReducerUpdateSite(
+        hint, update.buffer->shape, *extent_ptr, *min_ptr, &analyzer_);
+    if (analysis.narrow_eligible) {
+      proposal = PartialFragment::FromInduced(
+          analysis.induced, IntImm(DataType::Int(32), analysis.combine_size));
+    } else {
+      narrow_reject = analysis.reason;
+      proposal = wide();
+    }
+  }
+  // A strict partial (user annotation) is authoritative. Failing here, at
+  // the site, carries the narrow-rejection reason — far more actionable
+  // than the commit point's bare layout mismatch.
+  if (layout_args.strict_layout_map.count(update.buffer)) {
+    const auto *pinned =
+        layout_args.strict_layout_map[update.buffer].as<PartialFragmentNode>();
+    if (pinned != nullptr && !proposal->IsEqual(pinned)) {
+      std::ostringstream oss;
+      oss << "Layout infer conflict for reducer `" << update.buffer->name
+          << "`: this update site cannot realize the annotated "
+          << "PartialFragment.\n  annotated: " << pinned->DebugOutput()
+          << "\n  site's verdict: " << proposal->DebugOutput();
+      if (!narrow_reject.empty()) {
+        oss << "\n  narrow plan rejected because: " << narrow_reject;
+      }
+      oss << "\nAdjust the T.annotate_layout PartialFragment or the update "
+          << "loop structure so they agree.";
+      throw LayoutConflictException(oss.str());
+    }
+  }
+  return proposal;
+}
+
+Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
+    const LayoutInferArgs &layout_args) const {
+  for (const auto &update : reducer_updates_) {
+    if (!layout_args.strict_layout_map.count(update.buffer)) {
+      continue;
+    }
+    auto pinned =
+        layout_args.strict_layout_map[update.buffer].as<PartialFragmentNode>();
+    if (pinned == nullptr) {
+      continue;
+    }
+    // Map each reducer dim to the loop var driving it (const-zero on unit
+    // dims), and mark the surviving loop dims; the rest are reduction dims.
+    std::vector<bool> is_output_dim(loop_vars_.size(), false);
+    Array<PrimExpr> acc_args;
+    bool mappable = true;
+    for (const PrimExpr &index : update.indices) {
+      if (const auto *var = index.as<VarNode>()) {
+        int pos = -1;
+        for (size_t i = 0; i < loop_vars_.size(); ++i) {
+          if (loop_vars_[i]->var.get() == var) {
+            pos = static_cast<int>(i);
+            break;
+          }
+        }
+        if (pos < 0 || is_output_dim[pos]) {
+          mappable = false;
+          break;
+        }
+        is_output_dim[pos] = true;
+        acc_args.push_back(loop_vars_[pos]->var);
+      } else if (is_zero(index)) {
+        acc_args.push_back(make_zero(DataType::Int(32)));
+      } else {
+        mappable = false;
+        break;
+      }
+    }
+    if (!mappable || acc_args.size() != pinned->InputShape().size()) {
+      continue;
+    }
+    // Flatten the reduction space and split it into the partial's combine
+    // lanes in contiguous chunks (chunk-contiguous k per lane keeps the
+    // per-thread reduction slice vectorizable).
+    DataType dtype =
+        loop_vars_.empty() ? DataType::Int(32) : loop_vars_[0]->var.dtype();
+    PrimExpr flat = make_zero(dtype);
+    int64_t flat_extent = 1;
+    for (size_t i = 0; i < loop_vars_.size(); ++i) {
+      if (is_output_dim[i]) {
+        continue;
+      }
+      const int64_t *ext = as_const_int(loop_vars_[i]->dom->extent);
+      if (ext == nullptr) {
+        mappable = false;
+        break;
+      }
+      flat = flat * loop_vars_[i]->dom->extent + loop_vars_[i]->var;
+      flat_extent *= *ext;
+    }
+    const int64_t *lanes_ptr = as_const_int(pinned->CombineSize());
+    const int64_t *rep_ptr = as_const_int(pinned->ReplicateExtent());
+    if (!mappable || lanes_ptr == nullptr || rep_ptr == nullptr) {
+      continue;
+    }
+    int64_t lanes = *lanes_ptr;
+    int64_t copies = *rep_ptr / lanes; // ctor guarantees divisibility
+    PrimExpr lane_expr;
+    if (lanes <= 1) {
+      lane_expr = make_zero(dtype);
+    } else if (flat_extent % lanes != 0) {
+      // Cannot split evenly; the annotation conflict (if any) is reported
+      // by ProposeReducerPartial once the loop layout is solved elsewhere.
+      continue;
+    } else {
+      lane_expr = FloorDiv(flat, make_const(dtype, flat_extent / lanes));
+    }
+    // Copy groups (annotated combine < replicate) come from the loop's own
+    // replication: give the candidate a replicate var on the high side of
+    // the pinned partial's `_rep = lane + combine * copy` coordinate, so
+    // the projection at the update site reproduces the annotation.
+    IterVar loop_rep; // stays null when the partial has no copy groups
+    PrimExpr rep_expr = lane_expr;
+    if (copies > 1) {
+      loop_rep = IterVar(Range(make_zero(dtype), make_const(dtype, copies)),
+                         Var("rep", dtype), IterVarType::kDataPar);
+      rep_expr = lane_expr + make_const(dtype, lanes) * loop_rep->var;
+    }
+    PrimExpr loop_var_to_thread =
+        analyzer_.Simplify(pinned->ForwardThread(acc_args, rep_expr));
+    try {
+      return Fragment(loop_vars_, {}, loop_var_to_thread, loop_rep)
+          ->BindThreadRange(layout_args.thread_bounds);
+    } catch (const Error &) {
+      continue;
+    }
+  }
+  return Fragment();
 }
 
 Optional<PrimExpr> ParallelOpNode::GetPredicate(PrimExpr thread_index) const {
@@ -640,9 +840,45 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   PrimExpr thd_b = loop_layout_->ForwardThread(
       ind_inv->Forward(fwd),
       FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-  return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent,
-                  std::nullopt)
-      ->CondenseReplicateVar();
+  Fragment completed =
+      Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, std::nullopt)
+          ->CondenseReplicateVar();
+  // Broadcast reads touched many times per thread produce an
+  // occurrence-indexed replication whose (logical, replica) -> physical map
+  // wraps around the thread extent and stops being injective; every
+  // consumer that partitions by such a fragment throws.
+  //
+  // Example (issue #1729): a (2,) fragment read as `src[i]` inside a
+  // coalesced `T.Parallel(2, 2560)` over 256 threads. The unused iterator
+  // j becomes the replicate axis (2560 occurrences per element, condensed
+  // to 640), yielding
+  //   Fragment((2,) -> (2,), replicate: 640,
+  //            thread: (_i * 640 + _rep) % 256, index: (_i,))
+  // 2 x 640 (logical, replica) points cannot fit 256 x 2 physical cells:
+  // replicas 0 / 256 / 512 of element 0 all land on (thread 0, slot 0).
+  //
+  // The thread OWNERSHIP the map describes is still sound -- the wrap
+  // covering the whole thread extent means every thread reads the element
+  // -- so for a buffer this loop only READS, fall back to the injective
+  // canonical form of exactly that ownership:
+  //   Fragment((2,) -> (2,), replicate: 256, thread: _rep, index: (_i,))
+  // i.e. full replication. (For written buffers replication changes
+  // execution multiplicity, so those keep the exact form and fail loudly
+  // downstream.)
+  if (!GetAccessInfo(buffer).is_write &&
+      !completed->DetectInjective()->errors.empty()) {
+    PrimExpr thread_extent = loop_layout_->ThreadExtent();
+    const int64_t *extent_ptr = as_const_int(thread_extent);
+    if (extent_ptr != nullptr) {
+      Fragment replicated = Fragment::FullyReplicated(
+          buffer->shape, static_cast<int>(*extent_ptr));
+      if (loop_layout_->ThreadRange().defined()) {
+        replicated = replicated->BindThreadRange(loop_layout_->ThreadRange());
+      }
+      return replicated;
+    }
+  }
+  return completed;
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() { ParallelOpNode::RegisterReflection(); }
@@ -656,9 +892,6 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
   for (const auto &buffer : access_order_) {
     const auto &access = GetAccessInfo(buffer);
     if (!layout_args.layout_map.count(buffer))
-      continue;
-    if (auto info = reducer_info_map_.Get(buffer->data);
-        info && info.value()->rep == ReducerRepType::ALL)
       continue;
     auto fragment = layout_args.layout_map[buffer].as<Fragment>().value();
     std::ostringstream oss;
@@ -770,7 +1003,7 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   auto maybe_remapped_root_ = IfBufferRemapLoopGenerator::run(
       root_, layout_args.buffer_remap, layout_args.layout_map);
   int vector_size = GetVectorizeSize(maybe_remapped_root_, layout_args.analyzer,
-                                     layout_args.layout_map, reducer_info_map_);
+                                     layout_args.layout_map);
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
   PrimExpr loop_total_size = 1;
@@ -915,15 +1148,16 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
   // assigning one logical element to each CUDA thread, but that can turn a
   // register fragment access into `fragment[threadIdx.x]`.  CUDA cannot keep a
   // register array with runtime indexing in scalar registers, so this shape
-  // spills the whole fragment to local memory before the final store.
-  //
-  // When this parallel loop publishes data to shared/global memory, prefer the
-  // valid candidate that keeps fragment physical indices independent of the
-  // thread variable.  For a fully replicated readback this selects the
-  // fragment-derived layout, and BuildReplicationGuardsIfNeeded then emits the
-  // single-replica guard (e.g. `threadIdx.x == 0`) to avoid duplicate stores.
-  // Fragment-only loops keep the old containment/replication heuristic below.
-  if (!store_shared_global_buffers_.empty()) {
+  // spills the whole fragment to local memory — a catastrophe regardless of
+  // where the loop's stores go (a fragment->fragment publication copy spills
+  // exactly the same way as a fragment->global one), so the preference is
+  // unconditional: when exactly one valid candidate keeps every fragment
+  // physical index independent of the thread variable, choose it.  For a
+  // fully replicated readback this selects the fragment-derived layout;
+  // BuildReplicationGuardsIfNeeded then emits the single-replica guard for
+  // shared/global stores, and fragment stores legitimately execute on every
+  // replica.
+  {
     bool buf_thread_index =
         HasThreadDependentFragmentIndex(candidate_from_buffer, layout_args);
     bool plan_thread_index =
@@ -955,55 +1189,92 @@ ParallelOpNode::ChooseBestCandidate(const Fragment &candidate_from_buffer,
   return candidate_from_buffer;
 }
 
+FragmentThreadIndexProbe::FragmentThreadIndexProbe(
+    const Fragment &loop_layout, const Array<IterVar> &loop_vars,
+    arith::Analyzer *analyzer)
+    : thread_var_("__tl_candidate_thread"), analyzer_(analyzer) {
+  // Mirror the index substitution that PartitionLoop would apply for this
+  // loop layout without actually rebuilding the loop: symbolic per-thread
+  // output coordinates plus a symbolic thread variable, inverted back to
+  // the original loop variables.
+  if (!loop_layout.defined() || loop_layout->InputDim() != loop_vars.size()) {
+    return;
+  }
+  Array<PrimExpr> partition_vars;
+  for (size_t i = 0; i < loop_layout->OutputDim(); ++i) {
+    Var coord("__tl_candidate_i" + std::to_string(i));
+    // Bind every symbolic coordinate's range: the thread-cancellation proofs
+    // below are range-dependent (e.g. `(o0*512 + t*4 + o1) // 512 -> o0`
+    // only holds for t*4 + o1 < 512), and an unbound var makes Simplify
+    // keep the thread term, flagging clean strided layouts as spilling.
+    analyzer->Bind(coord, Range::FromMinExtent(make_zero(DataType::Int(32)),
+                                               loop_layout->OutputShape()[i]));
+    partition_vars.push_back(coord);
+  }
+  partition_vars.push_back(thread_var_);
+  if (loop_layout->ThreadRange().defined()) {
+    analyzer->Bind(thread_var_,
+                   Range::FromMinExtent(loop_layout->ThreadRange()->min,
+                                        loop_layout->ThreadRange()->extent));
+  } else {
+    analyzer->Bind(thread_var_,
+                   Range::FromMinExtent(make_zero(DataType::Int(32)),
+                                        loop_layout->ThreadExtent()));
+  }
+
+  Array<PrimExpr> recovered_indices;
+  try {
+    auto inv_loop = loop_layout->InverseWithLevel().first;
+    recovered_indices = inv_loop->Forward(partition_vars);
+  } catch (const std::exception &) {
+    // Non-invertible layout: leave the probe invalid — callers must treat
+    // this as "unknown", never as "clean".
+    return;
+  }
+
+  for (size_t i = 0; i < loop_vars.size(); ++i) {
+    loop_var_map_.Set(loop_vars[i]->var, recovered_indices[i]);
+  }
+  if (loop_layout->ThreadRange().defined()) {
+    auto range = loop_layout->ThreadRange();
+    thread_offset_map_.Set(thread_var_, thread_var_ - range->min);
+    has_thread_offset_ = true;
+  }
+  valid_ = true;
+}
+
+bool FragmentThreadIndexProbe::AccessUsesThread(
+    const Array<PrimExpr> &access_indices,
+    const Fragment &fragment_layout) const {
+  if (!valid_ || !fragment_layout.defined()) {
+    return false;
+  }
+  Array<PrimExpr> indices = access_indices.Map(
+      [&](const PrimExpr &index) { return Substitute(index, loop_var_map_); });
+  if (has_thread_offset_) {
+    indices = Substitute(indices, thread_offset_map_);
+  }
+  Array<PrimExpr> physical_indices = fragment_layout->Forward(indices);
+  for (const auto &index : physical_indices) {
+    PrimExpr simplified = analyzer_->Simplify(index);
+    if (tirx::UsesVar(simplified, [&](const VarNode *var_node) {
+          return GetRef<Var>(var_node).same_as(thread_var_);
+        })) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool ParallelOpNode::HasThreadDependentFragmentIndex(
     const Fragment &candidate, const LayoutInferArgs &layout_args) const {
-  // Mirror the index substitution that PartitionLoop would apply for this
-  // candidate without actually rebuilding the loop.  We create symbolic output
-  // coordinates plus a symbolic thread variable, invert the candidate layout
-  // back to the original loop variables, and then apply each known fragment
-  // layout's Forward() map.  If any resulting physical fragment index still
-  // contains the symbolic thread variable, lowering this candidate would emit a
-  // runtime-thread-indexed register array access such as
-  // `fragment[threadIdx.x]`.
-  if (!candidate.defined()) {
+  // If any physical fragment index still contains the symbolic thread
+  // variable, lowering this candidate would emit a runtime-thread-indexed
+  // register array access such as `fragment[threadIdx.x]`.
+  FragmentThreadIndexProbe probe(candidate, loop_vars_, &analyzer_);
+  if (!probe.valid()) {
     return false;
   }
-
-  int old_loop_depth = static_cast<int>(loop_vars_.size());
-  if (candidate->InputDim() != static_cast<size_t>(old_loop_depth)) {
-    return false;
-  }
-
-  Var thread_var("__tl_candidate_thread");
-  Array<PrimExpr> partition_vars;
-  for (size_t i = 0; i < candidate->OutputDim(); ++i) {
-    partition_vars.push_back(Var("__tl_candidate_i" + std::to_string(i)));
-  }
-  partition_vars.push_back(thread_var);
-
-  auto inv_loop = candidate->InverseWithLevel().first;
-  Array<PrimExpr> recovered_indices = inv_loop->Forward(partition_vars);
-
-  Map<Var, PrimExpr> loop_var_map;
-  for (int i = 0; i < old_loop_depth; ++i) {
-    loop_var_map.Set(loop_vars_[i]->var, recovered_indices[i]);
-  }
-
-  Map<Var, PrimExpr> thread_offset_map;
-  bool has_thread_offset = false;
-  if (candidate->ThreadRange().defined()) {
-    auto range = candidate->ThreadRange();
-    thread_offset_map.Set(thread_var, thread_var - range->min);
-    has_thread_offset = true;
-  }
-
-  auto uses_thread_var = [&](const PrimExpr &expr) {
-    PrimExpr simplified = analyzer_.Simplify(expr);
-    return tirx::UsesVar(simplified, [&](const VarNode *var_node) {
-      return GetRef<Var>(var_node).same_as(thread_var);
-    });
-  };
-
   for (const auto &buffer : access_order_) {
     if (!IsFragmentBuffer(buffer) || !layout_args.layout_map.count(buffer)) {
       continue;
@@ -1012,22 +1283,11 @@ bool ParallelOpNode::HasThreadDependentFragmentIndex(
     if (!fragment_layout.has_value()) {
       continue;
     }
-
-    Array<PrimExpr> indices = GetAccessInfo(buffer).indices.Map(
-        [&](const PrimExpr &index) { return Substitute(index, loop_var_map); });
-    if (has_thread_offset) {
-      indices = Substitute(indices, thread_offset_map);
-    }
-
-    Array<PrimExpr> physical_indices =
-        fragment_layout.value()->Forward(indices);
-    for (const auto &index : physical_indices) {
-      if (uses_thread_var(index)) {
-        return true;
-      }
+    if (probe.AccessUsesThread(GetAccessInfo(buffer).indices,
+                               fragment_layout.value())) {
+      return true;
     }
   }
-
   return false;
 }
 

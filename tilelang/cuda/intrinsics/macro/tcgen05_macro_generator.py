@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import tilelang.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
+from .wgmma_macro_generator import decode_k_panel_elems
 from ..layout.mma_sm100_layout import (
     TCGEN05Meta,
     make_tmem_frg_a,
@@ -9,7 +10,7 @@ from ..layout.mma_sm100_layout import (
     validate_tcgen05_ts_instruction,
 )
 from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tilelang.language.dtypes import get_tvm_dtype
@@ -58,6 +59,24 @@ class TCGEN05DescriptorParams:
     buffer; passed to ``T.increase_descriptor_offset`` after building the
     descriptor from the buffer base. ``0`` for a whole-buffer / base-origin
     operand. Computed by :func:`compute_umma_descriptor` from the CuTe layout."""
+    k_panel_elems: int | None = None
+    """Element stride between consecutive K swizzle-atom panels (K-major only),
+    read off the decoded layout by :func:`decode_k_panel_elems`. ``None`` only
+    when no panel step is needed -- see :meth:`k_panel_stride`, which is how
+    callers should read it."""
+
+    def k_panel_stride(self, mn_extent: int) -> int:
+        """K-panel step for the atom offset formulas.
+
+        ``mn_extent`` is the operand's own MN extent, used only for the
+        single-panel / MN-major case where the ``ki // k_atom_size`` factor is
+        always zero and any value works. Never reconstruct the multi-panel step
+        from it: for a slice of a wider buffer the panels stay spaced by the
+        *buffer's* MN extent, not the operand's.
+        """
+        if self.k_panel_elems is not None:
+            return self.k_panel_elems
+        return mn_extent * self.swizzle_atom_elems
 
 
 @dataclass(frozen=True)
@@ -164,8 +183,9 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     slice_byte_offset = 0
     if region is not None:
         slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
-        if slice_off_elems != 0:
-            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_off_elems * elem_bits // 8)
+        slice_byte_offset = slice_off_elems * elem_bits // 8
+        if not isinstance(slice_byte_offset, int):
+            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"UMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
     # Present in UMMA (MN, K) order, then recast the swizzled element layout to
     # uint128_t (exactly CuTe's recast<uint128_t const>(tensor)).
@@ -226,6 +246,8 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     # Elements per swizzle atom along the non-K (MN) dimension; the unswizzled
     # case spans the whole MN tile (bit-based so sub-byte dtypes stay packed).
     swizzle_atom_elems = mn_dim if swizzle_mode.is_none() else _bytes_to_elements(swizzle_mode.swizzle_byte_size(), elem_bits)
+
+    k_panel_elems = decode_k_panel_elems(tile[k_idx], k_major, swizzle_mode, swizzle_atom_elems, "UMMA")
     return TCGEN05DescriptorParams(
         swizzle_mode=swizzle_mode,
         leading_byte_offset=int(lbo),
@@ -235,6 +257,7 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         elem_bits=elem_bits,
         is_k_major=k_major,
         slice_byte_offset=slice_byte_offset,
+        k_panel_elems=k_panel_elems,
     )
 
 
@@ -817,12 +840,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = b_params.stride_byte_offset
         swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = b_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         B_base_ptr = self._as_buffer(B_buf).access_ptr("r")
+        if not isinstance(slice_byte_offset, int):
+            # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            # A static slice. Add to the pointer directly to avoid an excessive `increase_descriptor_offset`.
+            is_sliced = False
+            B_base_ptr = handle_add_byte_offset(B_base_ptr, slice_byte_offset)
+        else:
+            # Non-sliced.
+            is_sliced = False
 
         @T.macro
         def _init_b(desc_b, B_base_ptr):
-            # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_b, B_base_ptr, lbo, sbo, 0, False, swizzle_mode)
             if is_sliced:
                 T.increase_descriptor_offset(desc_b, slice_byte_offset)
@@ -845,12 +876,17 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = a_params.stride_byte_offset
         swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = a_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
         A_base_ptr = self._as_buffer(A_buf).access_ptr("r")
+        if not isinstance(slice_byte_offset, int):
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            is_sliced = False
+            A_base_ptr = handle_add_byte_offset(A_base_ptr, slice_byte_offset)
+        else:
+            is_sliced = False
 
         @T.macro
         def _init_a(desc_a, A_base_ptr):
-            # Build from the buffer base (uniform cvta), then advance to the slice origin.
             T.initialize_tcgen05_descriptor(desc_a, A_base_ptr, lbo, sbo, 0, False, swizzle_mode)
             if is_sliced:
                 T.increase_descriptor_offset(desc_a, slice_byte_offset)
@@ -937,6 +973,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        a_k_panel_elems = a_params.k_panel_stride(m_dim)
+        b_k_panel_elems = b_params.k_panel_stride(n_dim_per_cta)
         mask_zero = T.cast(0, T.int32)
 
         # Pre-compute offsets
@@ -944,16 +982,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             A_elem_offset = (
                 (ki % ak_atom_size) * micro_size_k
                 + inst_m_idx * atom_m_per_cta * a_swizzle_atom_elems
-                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                + (ki // ak_atom_size) * a_k_panel_elems
             )
         else:
             A_elem_offset = inst_m_idx * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
 
         if b_params.is_k_major:
             B_elem_offset = (
-                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + inst_n_idx * atom_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
             B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (
@@ -1038,15 +1074,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         b_elem_bits = b_params.elem_bits
         bk_atom_size = b_params.k_atom_size
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_stride(n_dim_per_cta)
         mask_zero = T.cast(0, T.int32)
 
         A_tmem_offset = a_params.atom_offset(inst_m_idx * atom_m_per_cta, ki * meta.atom_k)
 
         if b_params.is_k_major:
             B_elem_offset = (
-                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + inst_n_idx * atom_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
             B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (
@@ -1130,21 +1165,21 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        a_k_panel_elems = a_params.k_panel_stride(m_dim)
+        b_k_panel_elems = b_params.k_panel_stride(n_dim_per_cta)
 
         if a_params.is_k_major:
             A_elem_offset = (
                 (ki % ak_atom_size) * micro_size_k
                 + inst_m_idx * atom_m_per_cta * a_swizzle_atom_elems
-                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                + (ki // ak_atom_size) * a_k_panel_elems
             )
         else:
             A_elem_offset = inst_m_idx * atom_m_per_cta * k_dim + ki * a_swizzle_atom_elems * micro_size_k
 
         if b_params.is_k_major:
             B_elem_offset = (
-                (ki // bk_atom_size) * n_dim_per_cta * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + inst_n_idx * atom_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + inst_n_idx * atom_n * b_swizzle_atom_elems
             )
         else:
             B_elem_offset = ki * b_swizzle_atom_elems * micro_size_k + inst_n_idx * atom_n * (

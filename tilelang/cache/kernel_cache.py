@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import logging
@@ -20,12 +21,14 @@ import cloudpickle
 from tvm.target import Target
 from tvm.tirx import PrimFunc
 from tvm.runtime import Executable
+from tilelang.backend.module import BackendContext, create_backend_context
 from tilelang.engine.param import KernelParam
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.diagnostics import jit_phase
+from tilelang.transform.pass_config import normalize_pass_configs
 from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 
@@ -51,6 +54,7 @@ class KernelCache:
     kernel_lib_path = "kernel_lib.so"
     params_path = "params.pkl"
     resource_usage_path = "resource_usage.json"
+    manifest_path = "manifest.json"
     cache_root_dir = "kernels"
     staging_root_dir = ".staging"
 
@@ -191,7 +195,6 @@ class KernelCache:
     @staticmethod
     def _create_dirs():
         os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
-        os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
         os.makedirs(KernelCache._get_namespace_root(), exist_ok=True)
         os.makedirs(KernelCache._get_cache_root(), exist_ok=True)
         os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
@@ -286,12 +289,13 @@ class KernelCache:
         func: PrimFunc = None,
         out_idx: list[int] = None,
         *args,
-        target: str | Target,
+        target: str | Target | None = None,
         target_host: str | Target | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
         verbose: bool,
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
+        backend_context: BackendContext | None = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -306,6 +310,7 @@ class KernelCache:
                 Use a dict for target attributes, for example {"kind": "cuda", "arch": "sm_90"}.
             target_host: Host target platform
             execution_backend: Execution backend (None = read from TILELANG_EXECUTION_BACKEND)
+            backend_context: Pre-resolved context supplied by compiler infrastructure.
             verbose: Enable verbose output (None = read from TILELANG_VERBOSE)
             *args: Arguments passed to func
 
@@ -321,7 +326,24 @@ class KernelCache:
             Default execution backend. Defaults to "auto".
         TILELANG_VERBOSE : str
             Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
+        TILELANG_LAYOUT_COST_MODEL : str
+            Default value for the `tl.layout_cost_model` pass config when it is
+            not set explicitly in `pass_configs`. Unset keeps the built-in default.
         """
+
+        # Resolve env-var-derived pass-config defaults up front so they are
+        # reflected in the cache key.
+        pass_configs = normalize_pass_configs(pass_configs)
+
+        if backend_context is None:
+            if target is None:
+                target = env.get_default_target()
+            if execution_backend is None:
+                execution_backend = env.get_default_execution_backend()
+            backend_context = create_backend_context(target, target_host, execution_backend)
+        target = backend_context.target
+        target_host = backend_context.target_host
+        execution_backend = backend_context.execution_backend.name
 
         if not env.is_cache_enabled():
             if verbose:
@@ -335,6 +357,7 @@ class KernelCache:
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+                backend_context=backend_context,
             )
 
         key = self._generate_key(
@@ -363,11 +386,22 @@ class KernelCache:
         if verbose:
             self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
 
-        # Disk loads can be expensive for large kernel sets; keep them outside
-        # the global cache lock so independent cache hits can proceed in parallel.
-        kernel = self._load_kernel_from_disk(
-            key, target, target_host, out_idx, execution_backend, pass_configs, compile_flags, func, verbose
-        )
+        if execution_backend == "torch":
+            # Metal's torch backend does not support cache yet
+            env.disable_cache()
+            kernel = None
+        else:
+            # Disk loads can be expensive for large kernel sets; keep them outside
+            # the global cache lock so independent cache hits can proceed in parallel.
+            kernel = self._load_kernel_from_disk(
+                key,
+                backend_context,
+                out_idx,
+                pass_configs,
+                compile_flags,
+                func,
+                verbose,
+            )
         if kernel is not None:
             if verbose:
                 self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
@@ -400,13 +434,15 @@ class KernelCache:
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+                backend_context=backend_context,
             )
-        with self._lock:
-            if env.is_cache_enabled():
-                cache_path = self._get_cache_path(key)
-                self._save_kernel_to_disk(key, kernel, func, verbose)
-                # Set cache path on adapter so it can save cubin after first execution
-                self._set_adapter_cache_path(kernel, cache_path)
+        # Save outside the lock: staging+rename is atomic and idempotent (like the
+        # disk load above). Holding the lock here serialized every worker's save.
+        if env.is_cache_enabled():
+            cache_path = self._get_cache_path(key)
+            self._save_kernel_to_disk(key, kernel, func, verbose)
+            # Set cache path on adapter so it can save cubin after first execution
+            self._set_adapter_cache_path(kernel, cache_path)
 
         # Store in memory cache after compilation
         self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
@@ -457,20 +493,62 @@ class KernelCache:
         return binary
 
     @staticmethod
-    def _safe_write_file(path: str, mode: str, operation: Callable):
-        # Random a temporary file within the same FS as the cache directory
-        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}")
-        with open(temp_path, mode) as temp_file:
-            operation(temp_file)
+    def _fsync_file_contents(path: str):
+        """Flush a written file's data to stable storage before publishing it."""
+        with open(path, "rb+") as file:
+            os.fsync(file.fileno())
 
-        # Use atomic POSIX replace, so other processes cannot see a partial write
-        os.replace(temp_path, path)
+    @staticmethod
+    def _fsync_dir(path: str):
+        """Best-effort directory fsync; unsupported on some platforms/filesystems."""
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            with contextlib.suppress(OSError):
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _hash_file(path: str) -> str:
+        file_hash = sha256()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(1 << 20), b""):
+                file_hash.update(chunk)
+        return file_hash.hexdigest()
+
+    @staticmethod
+    def _safe_write_file(path: str, mode: str, operation: Callable):
+        """Atomically write a cache file through a temporary sibling."""
+        directory, filename = os.path.split(path)
+        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
+        try:
+            with open(temp_path, mode) as temp_file:
+                operation(temp_file)
+                # Without this barrier a crash can persist the rename below
+                # before the file data, publishing a truncated file.
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str, export_kwargs: dict | None = None):
-        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}.so")
-        executable.export_library(temp_path, **(export_kwargs or {}))
-        os.replace(temp_path, path)
+        """Atomically export an executable through a temporary sibling."""
+        directory, filename = os.path.split(path)
+        stem, suffix = os.path.splitext(filename)
+        temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
+        try:
+            executable.export_library(temp_path, **(export_kwargs or {}))
+            KernelCache._fsync_file_contents(temp_path)
+            os.replace(temp_path, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False):
         """
@@ -526,10 +604,23 @@ class KernelCache:
             if usage:
                 dump_to_file(usage, os.path.join(staging_path, self.resource_usage_path))
 
+            # Record every staged file's size and content hash so loads can
+            # detect corrupted entries and treat them as cache misses.
+            self._write_manifest(staging_path)
+
             missing_files = self._get_missing_complete_cache_files(staging_path)
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
                 raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
+
+            # Durability barrier: a node or filesystem-client crash may otherwise
+            # persist the rename below before the staged file data, publishing a
+            # truncated entry (surfaces as CUDA_ERROR_INVALID_IMAGE at launch,
+            # notably on shared network caches).
+            for entry in os.scandir(staging_path):
+                if entry.is_file(follow_symlinks=False):
+                    KernelCache._fsync_file_contents(entry.path)
+            KernelCache._fsync_dir(staging_path)
 
             # Repair stale/incomplete entries before making the new directory visible.
             self._remove_incomplete_cache_dir(cache_path)
@@ -542,6 +633,8 @@ class KernelCache:
                     raise
                 # Another process won the race with a complete cache entry.
                 shutil.rmtree(staging_path, ignore_errors=True)
+            else:
+                KernelCache._fsync_dir(self._get_cache_root())
         except Exception:
             shutil.rmtree(staging_path, ignore_errors=True)
             self.logger.exception("Error during atomic cache save")
@@ -549,10 +642,8 @@ class KernelCache:
     def _load_kernel_from_disk(
         self,
         key: str,
-        target: str | Target = "auto",
-        target_host: str | Target | None = None,
+        backend_context: BackendContext,
         out_idx: list[int] | None = None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,
         func: Callable | None = None,
@@ -563,10 +654,8 @@ class KernelCache:
 
         Args:
             key (str): The hash key identifying the kernel.
-            target (Union[str, dict, Target]): Compilation target platform. Defaults to "auto".
-            target_host (Union[str, dict, Target], optional): Host target platform.
+            backend_context: Resolved target and execution policy for this compilation.
             out_idx (List[int], optional): Indices specifying which outputs to return.
-            execution_backend (Literal): Backend type for execution. Defaults to "tvm_ffi".
             pass_configs (dict, optional): Configuration for compiler passes.
             func (Callable, optional): The original function.
             verbose (bool): Enable verbose log messages.
@@ -586,6 +675,18 @@ class KernelCache:
                 self.logger.debug("Disk cache entry is incomplete; missing files: %s", missing_files)
             return None
 
+        if not self._verify_cache_dir_integrity(cache_path):
+            # A crashed writer (or crashed filesystem client) can publish a
+            # truncated kernel_lib.so that dlopens fine but fails only at first
+            # launch (CUDA_ERROR_INVALID_IMAGE), where nothing repairs the
+            # entry. Catch it here and self-heal by recompiling.
+            self.logger.warning(
+                "Disk cache entry at %s failed integrity verification (corrupted or partially written); removing it and recompiling.",
+                cache_path,
+            )
+            shutil.rmtree(cache_path, ignore_errors=True)
+            return None
+
         # Load kernel parameters
         kernel_params: list[KernelParam] | None = None
         try:
@@ -603,10 +704,8 @@ class KernelCache:
                 device_kernel_source=CachedTextSource(path=device_kernel_path),
                 kernel_lib_path=kernel_lib_path,
                 kernel_params=kernel_params,
-                target=target,
-                target_host=target_host,
+                backend_context=backend_context,
                 out_idx=out_idx,
-                execution_backend=execution_backend,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
             )
@@ -663,7 +762,8 @@ class KernelCache:
 
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
-        src_lib_path = kernel.adapter.libpath
+        if (src_lib_path := getattr(kernel.adapter, "libpath", None)) is None:
+            return
         if verbose:
             self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
         KernelCache._safe_write_file(kernel_lib_path, "wb", lambda file: file.write(KernelCache._load_binary(src_lib_path)))
@@ -679,6 +779,7 @@ class KernelCache:
                 [
                     os.path.join(cache_path, self.device_kernel_path),
                     os.path.join(cache_path, self.host_kernel_path),
+                    os.path.join(cache_path, self.manifest_path),
                     *self._get_required_files(cache_path),
                 ]
             )
@@ -686,6 +787,54 @@ class KernelCache:
 
     def _get_missing_complete_cache_files(self, cache_path: str) -> list[str]:
         return [file for file in self._get_complete_cache_files(cache_path) if not os.path.exists(file)]
+
+    def _write_manifest(self, cache_path: str):
+        """Record size and content hash of every cache file for load-time verification."""
+        files: dict[str, dict] = {}
+        for entry in sorted(os.scandir(cache_path), key=lambda item: item.name):
+            if not entry.is_file(follow_symlinks=False) or entry.name == self.manifest_path:
+                continue
+            files[entry.name] = {
+                "size": entry.stat().st_size,
+                "sha256": KernelCache._hash_file(entry.path),
+            }
+        manifest = {"version": 1, "files": files}
+        KernelCache._safe_write_file(
+            os.path.join(cache_path, self.manifest_path),
+            "w",
+            lambda file: json.dump(manifest, file, indent=2, sort_keys=True),
+        )
+
+    def _verify_cache_dir_integrity(self, cache_path: str) -> bool:
+        """Check a cache entry against its manifest.
+
+        Every listed file must match its recorded size; the required binary
+        artifacts (e.g. kernel_lib.so, params.pkl) must also match their
+        recorded content hash. Source files are size-checked only so disk
+        cache hits keep deferring source reads. Returns False for entries
+        whose manifest is unreadable or that do not cover the required files.
+        """
+        manifest_file = os.path.join(cache_path, self.manifest_path)
+        try:
+            with open(manifest_file) as file:
+                files = json.load(file)["files"]
+            entries = list(files.items())
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return False
+        required_names = {os.path.basename(path) for path in self._get_required_files(cache_path)}
+        if not required_names.issubset(files):
+            return False
+        verify_hash = env.should_verify_cache_hash()
+        for name, meta in entries:
+            path = os.path.join(cache_path, name)
+            try:
+                if os.path.getsize(path) != meta["size"]:
+                    return False
+                if verify_hash and name in required_names and KernelCache._hash_file(path) != meta["sha256"]:
+                    return False
+            except (OSError, KeyError, TypeError):
+                return False
+        return True
 
     def _is_complete_cache_dir(self, cache_path: str) -> bool:
         return os.path.isdir(cache_path) and not self._get_missing_complete_cache_files(cache_path)
@@ -729,10 +878,8 @@ class KernelCache:
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
         kernel_params: list[KernelParam] | None,
-        target: str | Target,
-        target_host: str | Target | None,
+        backend_context: BackendContext,
         out_idx: list[int] | None,
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"],
         pass_configs: dict | None,
         compile_flags: list[str] | str | None,
     ) -> JITKernel | None:
@@ -751,10 +898,11 @@ class KernelCache:
             device_kernel_source=device_kernel_source,
             kernel_lib_path=kernel_lib_path,
             params=kernel_params,
-            target=target,
-            target_host=target_host,
+            target=backend_context.target,
+            target_host=backend_context.target_host,
             out_idx=out_idx,
-            execution_backend=execution_backend,
+            execution_backend=backend_context.execution_backend.name,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
+            backend_context=backend_context,
         )

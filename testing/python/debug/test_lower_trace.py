@@ -121,7 +121,7 @@ def test_lower_trace_api_chain():
 
 
 def test_enable_disable():
-    """enable()/disable() round-trip installs and removes tracing hooks cleanly."""
+    """enable()/disable() round-trip installs and removes instrumentation cleanly."""
     from tilelang.tools.lower_trace import enable, disable
 
     enable()
@@ -147,18 +147,6 @@ def test_lower_trace_html():
         os.unlink(html_path)
 
 
-def test_discover_passes():
-    """_discover_passes() extracts the ordered pass names from a pipeline class."""
-    from tilelang.tools.lower_trace.core import _discover_passes
-    from tilelang.cpu.pipeline import CPUPassPipelineBody
-
-    pass_names = _discover_passes(CPUPassPipelineBody)
-    assert len(pass_names) > 10, f"Expected >10 passes, got {len(pass_names)}"
-    assert "Simplify" in pass_names
-    assert "LayoutInference" in pass_names
-    assert "BindTarget" in pass_names
-
-
 def test_lower_trace_dark_theme():
     """The HTML report embeds theme toggle CSS/JS and a localStorage key."""
     from tilelang.tools.lower_trace import lower_trace
@@ -182,11 +170,12 @@ def test_lower_trace_dark_theme():
         os.unlink(html_path)
 
 
-def test_multi_run_accumulation(monkeypatch, tmp_path):
-    """Repeated pipeline.lower() calls accumulate records under run2_/run3_ phases."""
+def test_multiple_pipelines_share_one_compile_session(monkeypatch, tmp_path):
+    """Multiple PassContexts in one compile share state without leaking globally."""
     from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
-    from tilelang.backend.pass_pipeline import resolve_pipeline
+    from tilelang.backend import create_backend_context
+    from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
@@ -202,22 +191,24 @@ def test_multi_run_accumulation(monkeypatch, tmp_path):
             B[tid] = A[tid] + 1.0
 
     mod = tvm.IRModule({"main": tiny})
-    target = tvm.target.Target("c")
-    pipeline = resolve_pipeline(target)
+    context = create_backend_context("c", "c", "cython")
 
-    assert _core._run_counter == 0, f"Expected run_counter=0 before enable, got {_core._run_counter}"
+    with compile_pass_instrumentation(name="two-pipelines") as compile_session:
+        trace = compile_session.find_tool(_core.LowerTraceSession)
+        assert trace is not None
+        assert trace.pipeline_count == 0
+        with tvm.transform.PassContext(instruments=create_pass_instruments()):
+            context.lower(mod)
+        run1_count = len(trace.records)
+        assert trace.pipeline_count == 1
+        assert run1_count > 0
 
-    pipeline.lower(mod, target)
-    run1_count = len(_core._records)
-    assert _core._run_counter == 1, f"Expected run_counter=1 after first run, got {_core._run_counter}"
-    assert run1_count > 0, "First run should produce records"
+        with tvm.transform.PassContext(instruments=create_pass_instruments()):
+            context.lower(mod)
+        assert trace.pipeline_count == 2
+        assert len(trace.records) > run1_count
 
-    pipeline.lower(mod, target)
-    total_count = len(_core._records)
-    assert _core._run_counter == 2, f"Expected run_counter=2 after second run, got {_core._run_counter}"
-    assert total_count > run1_count, f"Second run should accumulate records: total={total_count}, run1={run1_count}"
-
-    phases = {rec.phase for rec in _core._records}
+    phases = {record.phase for record in trace.records}
     assert "pipeline_c" in phases, "First run should have phase 'pipeline_c'"
     assert "run2_pipeline_c" in phases, "Second run should have phase 'run2_pipeline_c'"
 
@@ -278,7 +269,6 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
     from tilelang.tools.lower_trace import enable, disable
     from tilelang.tools.lower_trace import core as _core
     from tilelang.tools.lower_trace.core import STATUS_SKIPPED
-    from tilelang.backend.pass_pipeline import resolve_pipeline
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "both")
@@ -293,22 +283,22 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
             tid = T.get_thread_binding()
             B[tid] = A[tid] + 1.0
 
-    mod = tvm.IRModule({"main": tiny})
-    target = tvm.target.Target("c")
-    pipeline = resolve_pipeline(target)
-    pipeline.lower(mod, target)
+    tilelang.lower(tiny, target="c")
+
+    trace = _core.get_last_session()
+    assert trace is not None
 
     # No phantom/skipped records remain — every record is COMPLETED or FAILED
-    skipped = [r for r in _core._records if r.status == STATUS_SKIPPED]
+    skipped = [r for r in trace.records if r.status == STATUS_SKIPPED]
     assert not skipped, f"Found {len(skipped)} SKIPPED records (pre-registration not removed)"
 
     # Indices are strictly increasing across all records (global-monotonic)
-    indices = [r.index for r in _core._records]
+    indices = [r.index for r in trace.records]
     assert indices == sorted(indices), f"Indices not ascending: {indices}"
     assert len(indices) == len(set(indices)), f"Duplicate indices: {indices}"
 
     # No phantom LetInline slot when should_force_let_inline() is False
-    letinline = [r for r in _core._records if "LetInline" in r.name]
+    letinline = [r for r in trace.records if "LetInline" in r.name]
     assert not letinline, f"Phantom LetInline records found: {letinline}"
 
     disable()
@@ -317,14 +307,12 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
 
 
 def test_terminal_mode_no_html(monkeypatch, tmp_path):
-    """TL_LOWER_TRACE=terminal must not produce an HTML report at process exit.
+    """TL_LOWER_TRACE=terminal must not produce an HTML report on finalization.
 
-    Regression guard for the ``_final_report()`` hook: ``_save_raw_files()``
-    populates ``_run_dir`` even in terminal-only mode, so without an explicit
-    ``_should_gen_html()`` check the atexit hook would still emit ``report.html``.
+    Raw snapshot persistence creates a run directory even in terminal-only
+    mode; finalizing that compile session must still not emit ``report.html``.
     """
     from tilelang.tools.lower_trace import enable, disable
-    from tilelang.backend.pass_pipeline import resolve_pipeline
     import tilelang.language as T
 
     monkeypatch.setenv("TL_LOWER_TRACE", "terminal")
@@ -341,20 +329,17 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
                 tid = T.get_thread_binding()
                 B[tid] = A[tid] + 1.0
 
-        mod = tvm.IRModule({"main": tiny})
-        target = tvm.target.Target("c")
-        pipeline = resolve_pipeline(target)
-        pipeline.lower(mod, target)
+        tilelang.lower(tiny, target="c")
 
-        # Simulate the atexit hook that fires at process exit.
-        _core._final_report()
-
-        script_dir = _core._script_dir
+        trace = _core.get_last_session()
+        assert trace is not None
+        trace.flush_html()
+        script_dir = trace.script_dir
         assert script_dir is not None, "script_dir should be set after a run"
         symlink_report = os.path.join(script_dir, "report.html")
         assert not os.path.exists(symlink_report), f"terminal mode must not write report.html symlink at {symlink_report}"
-        if _core._run_dir is not None:
-            run_report = os.path.join(_core._run_dir, "report.html")
+        if trace.run_dir is not None:
+            run_report = os.path.join(trace.run_dir, "report.html")
             assert not os.path.exists(run_report), f"terminal mode must not write report.html at {run_report}"
     finally:
         disable()
@@ -445,24 +430,97 @@ def _patched_module_factory(original_module, patched_source):
     return _MockPatchedModule(patched_source)
 
 
-def _setup_trace_overrides(tmp_path, mode="terminal"):
-    """Set lower_trace overrides for unit testing.
-
-    The autouse ``_isolate_env`` fixture calls ``disable()`` before each test,
-    so overrides can be set safely inside the test body.
-    """
-    _core._mode_override = mode
-    _core._trace_dir_override = str(tmp_path)
-    _core._codegen_output_path_override = str(tmp_path / "codegen.cpp")
-    _core.reset()
+def _make_trace_session(tmp_path, mode="terminal"):
+    """Create isolated lower-trace state for one unit-test compilation."""
+    return _core.LowerTraceSession(
+        mode=mode,
+        trace_dir=str(tmp_path),
+        codegen_output=str(tmp_path / "codegen.cpp"),
+    )
 
 
-def _clear_trace_overrides():
-    """Reset overrides (also done by the autouse fixture's ``disable()``)."""
-    _core._mode_override = _core._UNSET
-    _core._trace_dir_override = _core._UNSET
-    _core._codegen_output_path_override = _core._UNSET
-    _core.reset()
+def _run_codegen(session, build, ffi_name, mod="fake_mod", target=None):
+    """Exercise the same explicit codegen middleware used by backend registries."""
+    from tilelang.instrumentation import CodegenEvent
+
+    return session.run_codegen(
+        CodegenEvent(name=ffi_name, mod=mod, target=target),
+        lambda: build(mod) if target is None else build(mod, target),
+    )
+
+
+def test_pass_instrument_captures_nested_tvm_passes(tmp_path):
+    """The instrument backend records C++-nested passes with parent metadata."""
+
+    @tvm.transform.module_pass(opt_level=0, name="test.Outer")
+    def outer_pass(mod, _ctx):
+        return tvm.tirx.transform.Simplify()(mod)
+
+    program = _simple_program()
+    mod = tvm.IRModule({"main": program})
+    trace = _make_trace_session(tmp_path, mode="html")
+    instrument = trace.create_pass_instrument()
+    assert instrument is not None
+    with tvm.transform.PassContext(instruments=[instrument]):
+        outer_pass(mod)
+
+    records = [record for record in trace.records if record.name in ("Outer", "Simplify")]
+    assert [record.name for record in records] == ["Outer", "Simplify"]
+    assert [(record.depth, record.parent_index) for record in records] == [(0, None), (1, records[0].index)]
+
+    assert trace.run_dir is not None
+    report_path = os.path.join(trace.run_dir, "report.html")
+    with open(report_path) as report_file:
+        report = report_file.read()
+    assert 'data-depth="1"' in report
+    assert f'data-parent-index="{records[0].index}"' in report
+
+
+def test_direct_tilelang_lower_owns_an_instrumentation_session(tmp_path):
+    """Programmatic enable traces direct lower() without mutating a global context."""
+    from tilelang.tools.lower_trace import enable
+
+    enable(mode="terminal", trace_dir=str(tmp_path), codegen_output=None)
+    artifact = tilelang.lower(_simple_program(), target="c")
+
+    assert artifact.kernel_source
+    trace = _core.get_last_session()
+    assert trace is not None
+    assert any(record.phase == "pipeline_c" for record in trace.records)
+    assert any(record.status == _core.STATUS_CODEGEN for record in trace.records)
+
+
+def test_concurrent_sessions_serialize_a_shared_codegen_path(tmp_path):
+    """An explicit shared edit path is transactional across compile sessions."""
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    output_path = tmp_path / "shared.cpp"
+    barrier = threading.Barrier(2)
+    source = "// identical generated source\n"
+
+    def run_one(label):
+        trace = _core.LowerTraceSession(
+            mode="terminal",
+            trace_dir=str(tmp_path / label),
+            codegen_output=str(output_path),
+        )
+
+        def build(_mod):
+            barrier.wait()
+            return _MockCodegenModule(source)
+
+        _run_codegen(trace, build, "target.build.tilelang_c")
+        return trace
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        left, right = pool.map(run_one, ("left", "right"))
+
+    assert output_path.read_text() == source
+    assert (tmp_path / "shared.cpp.original").read_text() == source
+    assert (tmp_path / "shared.cpp.latest").read_text() == source
+    assert [record.index for record in left.records] == [0]
+    assert [record.index for record in right.records] == [0]
 
 
 @contextlib.contextmanager
@@ -476,195 +534,129 @@ def _patch_make_patched_source_module():
 
 def test_codegen_proxy_for_without_compile(tmp_path):
     """*_without_compile FFIs return a patched module when user edits codegen.cpp."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
-
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
-
-    _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    ffi_name = "target.build.tilelang_cuda_without_compile"
+    trace = _make_trace_session(tmp_path)
+    codegen_path = trace.get_codegen_output_path()
+    assert codegen_path is not None
 
     with _patch_make_patched_source_module() as mock_factory:
-        try:
-            # Run 1: initializes codegen.cpp + .original from codegen output
-            result1 = wrapper("fake_mod")
-            assert result1.inspect_source() == source_v1
+        result1 = _run_codegen(trace, mock_build, ffi_name)
+        assert result1.inspect_source() == source_v1
+        edited = "// edited by user\n"
+        with open(codegen_path, "w") as f:
+            f.write(edited)
 
-            # Edit codegen.cpp (user edit)
-            edited = "// edited by user\n"
-            with open(codegen_path, "w") as f:
-                f.write(edited)
-
-            # Run 2: user edited, codegen unchanged → PATCHED → patched module returned
-            result2 = wrapper("fake_mod")
-            assert mock_factory.called, "_make_patched_source_module should be called for _without_compile FFI"
-            assert result2.get_source() == edited, "Patched module should return the user-edited source"
-        finally:
-            _clear_trace_overrides()
+        result2 = _run_codegen(trace, mock_build, ffi_name)
+        assert mock_factory.called, "_make_patched_source_module should be called for _without_compile FFI"
+        assert result2.get_source() == edited, "Patched module should return the user-edited source"
 
 
 def test_codegen_proxy_for_source_only_ffi(tmp_path):
     """Source-only FFIs without a _without_compile suffix (tilelang_c, webgpu) also return patched module."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
-
     source_v1 = "// generated C kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_c")
-
-    _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    ffi_name = "target.build.tilelang_c"
+    trace = _make_trace_session(tmp_path)
+    codegen_path = trace.get_codegen_output_path()
+    assert codegen_path is not None
 
     with _patch_make_patched_source_module() as mock_factory:
-        try:
-            # Run 1: initializes codegen.cpp + .original
-            wrapper("fake_mod")
+        _run_codegen(trace, mock_build, ffi_name)
+        edited = "// edited C kernel\n"
+        with open(codegen_path, "w") as f:
+            f.write(edited)
 
-            # Edit codegen.cpp
-            edited = "// edited C kernel\n"
-            with open(codegen_path, "w") as f:
-                f.write(edited)
-
-            # Run 2: PATCHED → patched module returned (tilelang_c is in _SOURCE_ONLY_CODEGEN_FFIS)
-            result2 = wrapper("fake_mod")
-            assert mock_factory.called, "Expected patched module for source-only FFI tilelang_c"
-            assert result2.get_source() == edited
-        finally:
-            _clear_trace_overrides()
+        result2 = _run_codegen(trace, mock_build, ffi_name)
+        assert mock_factory.called, "Expected patched module for source-only FFI tilelang_c"
+        assert result2.get_source() == edited
 
 
 def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
     """Full-compile FFIs return the real module (not patched) + NOTE when user edits codegen.cpp."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
-
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda")
-
-    _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    ffi_name = "target.build.tilelang_cuda"
+    trace = _make_trace_session(tmp_path)
+    codegen_path = trace.get_codegen_output_path()
+    assert codegen_path is not None
     target = tvm.target.Target("cuda")
 
     with _patch_make_patched_source_module() as mock_factory:
-        try:
-            # Run 1: initializes codegen.cpp + .original
-            result1 = wrapper("fake_mod", target)
-            assert result1.inspect_source() == source_v1
+        result1 = _run_codegen(trace, mock_build, ffi_name, target=target)
+        assert result1.inspect_source() == source_v1
+        edited = "// edited by user\n"
+        with open(codegen_path, "w") as f:
+            f.write(edited)
 
-            # Edit codegen.cpp
-            edited = "// edited by user\n"
-            with open(codegen_path, "w") as f:
-                f.write(edited)
-
-            # Run 2: user edited, codegen unchanged → PATCHED
-            # But full-compile FFI → return real module, NOT patched
-            capsys.readouterr()  # clear prior output
-            result2 = wrapper("fake_mod", target)
-            assert not mock_factory.called, "Full-compile FFI must NOT call _make_patched_source_module (would crash tvm_ffi backend)"
-            assert result2.inspect_source() == source_v1, "Full-compile FFI should return original (unpatched) module"
-
-            captured = capsys.readouterr()
-            assert "NOT recompiled" in captured.out
-            assert "nvrtc" in captured.out  # backend hint
-        finally:
-            _clear_trace_overrides()
+        capsys.readouterr()
+        result2 = _run_codegen(trace, mock_build, ffi_name, target=target)
+        assert not mock_factory.called
+        assert result2.inspect_source() == source_v1
+        captured = capsys.readouterr()
+        assert "NOT recompiled" in captured.out
+        assert "nvrtc" in captured.out
 
 
 def test_codegen_conflict_backup(tmp_path):
     """CONFLICT: both user edited and codegen changed → backup + regenerate."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
-
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
-
-    _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    ffi_name = "target.build.tilelang_cuda_without_compile"
+    trace = _make_trace_session(tmp_path)
+    codegen_path = trace.get_codegen_output_path()
+    assert codegen_path is not None
     original_path = codegen_path + ".original"
 
     with _patch_make_patched_source_module() as mock_factory:
-        try:
-            # Run 1: init
-            wrapper("fake_mod")
+        _run_codegen(trace, mock_build, ffi_name)
+        with open(codegen_path, "w") as f:
+            f.write("// user edit\n")
 
-            # Edit codegen.cpp (user edit)
-            with open(codegen_path, "w") as f:
-                f.write("// user edit\n")
-
-            # Change codegen output (new wrapper with different source)
-            source_v2 = "// new codegen output v2\n"
-            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
-
-            # Run 2: CONFLICT — working != current
-            result2 = wrapper("fake_mod")
-
-            # .bak files created
-            assert os.path.exists(codegen_path + ".bak"), "User working copy not backed up"
-            assert os.path.exists(original_path + ".bak"), "Old baseline not backed up"
-
-            # codegen.cpp regenerated from new codegen
-            with open(codegen_path) as f:
-                assert f.read() == source_v2
-
-            # .original advanced to new codegen
-            with open(original_path) as f:
-                assert f.read() == source_v2
-
-            # No patched module returned (regenerated from new codegen, patched_text=None)
-            assert not mock_factory.called, "CONFLICT must not call _make_patched_source_module"
-            assert result2.inspect_source() == source_v2
-        finally:
-            _clear_trace_overrides()
+        source_v2 = "// new codegen output v2\n"
+        result2 = _run_codegen(trace, _make_mock_build(source_v2), ffi_name)
+        assert os.path.exists(codegen_path + ".bak"), "User working copy not backed up"
+        assert os.path.exists(original_path + ".bak"), "Old baseline not backed up"
+        with open(codegen_path) as f:
+            assert f.read() == source_v2
+        with open(original_path) as f:
+            assert f.read() == source_v2
+        assert not mock_factory.called, "CONFLICT must not call _make_patched_source_module"
+        assert result2.inspect_source() == source_v2
 
 
 def test_codegen_synced(tmp_path):
     """SYNCED: user edits match new codegen output → baseline advances, patched module returned."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
-
     source_v1 = "// generated kernel v1\n"
     mock_build = _make_mock_build(source_v1)
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
-
-    _setup_trace_overrides(tmp_path)
-    codegen_path = _core._codegen_output_path_override
+    ffi_name = "target.build.tilelang_cuda_without_compile"
+    trace = _make_trace_session(tmp_path)
+    codegen_path = trace.get_codegen_output_path()
+    assert codegen_path is not None
     original_path = codegen_path + ".original"
 
     with _patch_make_patched_source_module() as mock_factory:
-        try:
-            # Run 1: init
-            wrapper("fake_mod")
+        _run_codegen(trace, mock_build, ffi_name)
+        source_v2 = "// new codegen output v2\n"
+        with open(codegen_path, "w") as f:
+            f.write(source_v2)
 
-            # Edit codegen.cpp to match what the new codegen will produce
-            source_v2 = "// new codegen output v2\n"
-            with open(codegen_path, "w") as f:
-                f.write(source_v2)
-
-            # Change codegen output to the same value
-            wrapper = _wrap_codegen_ffi(_make_mock_build(source_v2), "target.build.tilelang_cuda_without_compile")
-
-            # Run 2: SYNCED
-            result2 = wrapper("fake_mod")
-
-            # .original advanced to new codegen
-            with open(original_path) as f:
-                assert f.read() == source_v2
-
-            # Patched module returned (patched_text = working_text = source_v2)
-            assert mock_factory.called, "SYNCED should call _make_patched_source_module for _without_compile FFI"
-            assert result2.get_source() == source_v2
-        finally:
-            _clear_trace_overrides()
+        result2 = _run_codegen(trace, _make_mock_build(source_v2), ffi_name)
+        with open(original_path) as f:
+            assert f.read() == source_v2
+        assert mock_factory.called, "SYNCED should call _make_patched_source_module for _without_compile FFI"
+        assert result2.get_source() == source_v2
 
 
 def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
-    """_current_phase must be reset even if post-codegen tracing raises.
+    """The context-local phase must reset even if post-codegen tracing raises.
 
     Regression guard: previously an exception in the codegen post-processing
-    (inspect_source / file I/O / diff) left _current_phase stuck at "codegen",
+    (inspect_source / file I/O / diff) left the phase stuck at "codegen",
     misattributing later records.  The exception is now caught and warned
-    (does not propagate), but _current_phase must still be restored.
+    (does not propagate), but the phase must still be restored.
     """
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
 
     class _ExplodingModule:
         def inspect_source(self):
@@ -675,33 +667,23 @@ def test_codegen_phase_reset_on_inspect_source_failure(tmp_path):
         """Return an _ExplodingModule to trigger the inspect_source failure path."""
         return _ExplodingModule()
 
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
+    trace = _make_trace_session(tmp_path)
+    _run_codegen(trace, mock_build, "target.build.tilelang_cuda_without_compile")
 
-    _setup_trace_overrides(tmp_path)
-    try:
-        # The post-codegen tracing exception is caught + warned (not re-raised).
-        wrapper("fake_mod")
+    from tilelang.instrumentation import current_pass_phase
 
-        assert _core._current_phase is None, "_current_phase must be reset after inspect_source failure"
-    finally:
-        _clear_trace_overrides()
+    assert current_pass_phase() is None, "phase must be reset after inspect_source failure"
 
 
 def test_codegen_restores_outer_phase(tmp_path):
     """codegen nested in an active pipeline phase must restore it, not clear to None."""
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi
+    from tilelang.instrumentation import current_pass_phase, pass_phase
 
     source_v1 = "// generated kernel v1\n"
-    wrapper = _wrap_codegen_ffi(_make_mock_build(source_v1), "target.build.tilelang_cuda_without_compile")
-
-    _setup_trace_overrides(tmp_path)
-    try:
-        _core._current_phase = "pipeline_test"
-        wrapper("fake_mod")
-        assert _core._current_phase == "pipeline_test", "outer phase must be restored after codegen"
-    finally:
-        _core._current_phase = None
-        _clear_trace_overrides()
+    trace = _make_trace_session(tmp_path)
+    with pass_phase("pipeline_test"):
+        _run_codegen(trace, _make_mock_build(source_v1), "target.build.tilelang_cuda_without_compile")
+        assert current_pass_phase() == "pipeline_test", "outer phase must be restored after codegen"
 
 
 def test_codegen_record_index_after_nested_pass(tmp_path):
@@ -712,44 +694,36 @@ def test_codegen_record_index_after_nested_pass(tmp_path):
     index, so records could appear as N+1 before N.  The idx is now allocated
     immediately before appending the codegen record.
     """
-    from tilelang.tools.lower_trace.core import _wrap_codegen_ffi, LowerRecord, STATUS_COMPLETED
+    from tilelang.tools.lower_trace.core import LowerRecord, STATUS_COMPLETED
 
     nested_idx = []
+    trace = _make_trace_session(tmp_path)
 
     def mock_build(*args, **kwargs):
         """Append an internal traced pass then return a normal mock module."""
-        with _core._lock:
-            nested_idx.append(_core._pass_index)
-            _core._pass_index += 1
-            _core._records.append(
-                LowerRecord(
-                    phase="codegen",
-                    name="internal_simplify",
-                    index=nested_idx[0],
-                    before_text="",
-                    after_text="",
-                    changed=False,
-                    add_lines=0,
-                    del_lines=0,
-                    status=STATUS_COMPLETED,
-                )
+        nested_idx.append(trace.allocate_index())
+        trace.append_record(
+            LowerRecord(
+                phase="codegen",
+                name="internal_simplify",
+                index=nested_idx[0],
+                before_text="",
+                after_text="",
+                changed=False,
+                add_lines=0,
+                del_lines=0,
+                status=STATUS_COMPLETED,
             )
+        )
         return _MockCodegenModule("// generated\n")
 
-    wrapper = _wrap_codegen_ffi(mock_build, "target.build.tilelang_cuda_without_compile")
+    _run_codegen(trace, mock_build, "target.build.tilelang_cuda_without_compile")
 
-    _setup_trace_overrides(tmp_path)
-    try:
-        wrapper("fake_mod")
-
-        codegen_records = [r for r in _core._records if r.name == "codegen"]
-        assert codegen_records, "no codegen record found"
-        assert codegen_records[-1].index > nested_idx[0], "codegen index not after nested pass"
-
-        indices = [r.index for r in _core._records]
-        assert indices == sorted(indices), f"records not in ascending index order: {indices}"
-    finally:
-        _clear_trace_overrides()
+    codegen_records = [record for record in trace.records if record.name == "codegen"]
+    assert codegen_records, "no codegen record found"
+    assert codegen_records[-1].index > nested_idx[0], "codegen index not after nested pass"
+    indices = [record.index for record in trace.records]
+    assert indices == sorted(indices), f"records not in ascending index order: {indices}"
 
 
 def test_import_time_activation(tmp_path):

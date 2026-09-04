@@ -6,8 +6,8 @@ structure tree for the selected pass, with lines added by that pass highlighted
 green and lines it removed shown ghosted red — so switching between passes makes
 "what this pass changed" obvious.
 
-Reuses the tree-rendering logic from core.py verbatim; this file only adds
-per-pass capture, line-level diffing (difflib), and HTML emission.
+The canonical CUDA prologue runs under a ``PassInstrument`` from ``core.py``;
+this file converts its before/after snapshots into line diffs and emits HTML.
 
 Run with::
 
@@ -21,15 +21,18 @@ Run with::
 from __future__ import annotations
 
 import argparse
-import contextlib
 import difflib
 import html
-import io
 import json
 import os
 import re
 
+from tilelang import tvm
+from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
+from tilelang.jit import JITImpl
+from tilelang.transform.pass_config import normalize_pass_configs
+from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
 
 from . import core as M
 
@@ -65,8 +68,7 @@ _STY_TY = "color:#c586c0"
 # 1) Tile ops — the authoritative set: every operator registered in C++ via
 #    TIR_REGISTER_TL_TILE_OP ("tl.tileop.*") in src/op/*.cc. These are the
 #    high-level tile/fragment operators LowerTileOp consumes. ('region' is a
-#    TileOperator too but appears as an argument everywhere, so we leave it plain
-#    to avoid noise.)
+#    plain builtin argument bridge, not a TileOperator, so it stays unhighlighted.)
 _TILE_OPS = (
     "gemm",
     "gemm_sp",
@@ -114,14 +116,6 @@ def _highlight(line: str) -> str:
     return s
 
 
-def _capture_tree(mod) -> list[str]:
-    """Render core.inspect_structure(mod) into a list of text lines."""
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        M.inspect_structure(mod)
-    return buf.getvalue().splitlines()
-
-
 def _diff_rows(prev: list[str], cur: list[str]) -> list[dict]:
     """Merge prev->cur into display rows tagged equal / add / del.
 
@@ -155,7 +149,7 @@ def _diff_rows(prev: list[str], cur: list[str]) -> list[dict]:
 
 
 def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[str, object], source: str) -> tuple[str, list[dict]]:
-    """Run the pipeline pass-by-pass, capturing a tree + diff for each stage.
+    """Observe the real CUDA prologue, capturing a tree + diff for each pass.
 
     Returns (kernel_name, stages) where each stage is:
         {name, flag, rows}
@@ -177,9 +171,43 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
     name, kernel = next(iter(kernels.items()))
     func = M.kernel_to_tir(kernel, **kwargs)
     mod, resolved_target = M.build_module(func, target=target)
+    if resolved_target.kind.name != "cuda":
+        raise ValueError(f"Pass Visualizer currently supports only CUDA targets, got {resolved_target.kind.name!r}.")
 
-    PreLowerSemanticCheck(mod)
-    stages = M.build_pass_stages(resolved_target)
+    # Match JIT compilation's pass-config precedence: PrimFunc-level configs
+    # first, then explicit @tilelang.jit configs. Normalize enum keys before
+    # handing them to TVM's PassContext.
+    pass_configs = {}
+    if func.attrs and "tilelang_pass_configs" in func.attrs:
+        pass_configs.update(dict(func.attrs["tilelang_pass_configs"]))
+    if isinstance(kernel, JITImpl) and kernel.pass_configs:
+        pass_configs.update(kernel.pass_configs)
+    pass_configs = normalize_pass_configs(pass_configs)
+
+    # Use the shared compile-session lifecycle, but keep the viewer isolated
+    # from globally enabled tools such as LowerTrace. Semantic checks are part
+    # of the real pre-lower path but are intentionally not browser stages.
+    visualizer_tool = M.StructureTreePassTool()
+    with compile_pass_instrumentation(
+        name=f"pass-visualizer:{name}",
+        tools=[visualizer_tool],
+        include_default_tools=False,
+        reuse_existing=False,
+    ):
+        with tvm.transform.PassContext(opt_level=3, config=pass_configs), resolved_target:
+            PreLowerSemanticCheck(mod)
+        with (
+            tvm.transform.PassContext(
+                opt_level=3,
+                config=pass_configs,
+                instruments=create_pass_instruments(),
+            ),
+            resolved_target,
+        ):
+            mod = CUDAPassPipelineBodyPrologue(mod, resolved_target)
+
+    instrument = visualizer_tool.instrument
+    assert instrument is not None
 
     captured: list[dict] = []
 
@@ -188,8 +216,7 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
     src_rows = [{"t": "equal", "s": ln, "h": _highlight(ln), "op": bool(_TILEOP_RE.search(ln))} for ln in source.split("\n")]
     captured.append({"name": "source code", "flag": "source", "rows": src_rows})
 
-    prev_lines: list[str] = []
-    input_lines = _capture_tree(mod)
+    input_lines = instrument.input_lines if instrument.input_lines is not None else M.capture_structure(mod)
     captured.append(
         {
             "name": "(input)",
@@ -197,24 +224,18 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
             "rows": _diff_rows([], input_lines),
         }
     )
-    prev_lines = input_lines
 
-    for idx, (pname, transform) in enumerate(stages, start=1):
-        before = str(mod)
-        with resolved_target:  # post-LayoutInference passes need Target.Current()
-            mod = transform(mod)
-        after = str(mod)
-        changed = before != after
-
-        cur_lines = _capture_tree(mod)
+    for idx, record in enumerate(instrument.ordered_records(), start=1):
+        # PassInfo names carry a namespace (tirx.BindTarget, tl.LowerTileOp).
+        # Keep the compact names used by the existing browser UI.
+        pname = record.name.rsplit(".", 1)[-1]
         captured.append(
             {
                 "name": f"[{idx:02d}] {pname}",
-                "flag": "changed" if changed else "no-op",
-                "rows": _diff_rows(prev_lines, cur_lines),
+                "flag": "changed" if record.changed else "no-op",
+                "rows": _diff_rows(record.before_lines, record.after_lines),
             }
         )
-        prev_lines = cur_lines
 
     return name, captured
 
@@ -437,10 +458,10 @@ def _write_outputs(name: str, stages: list[dict], html_path: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build an interactive HTML pass browser for a TileLang kernel.")
+    parser = argparse.ArgumentParser(description="Build an interactive HTML CUDA-pass browser for a TileLang kernel.")
     parser.add_argument("path", help="Path to a Python file containing a @tilelang.jit kernel.")
     parser.add_argument("--factory", default=None, help="Name of the kernel to analyze (default: first discovered).")
-    parser.add_argument("--target", default="auto", help="Compilation target (default: auto).")
+    parser.add_argument("--target", default="auto", help="CUDA compilation target (default: auto).")
     parser.add_argument(
         "--set",
         dest="kwargs",

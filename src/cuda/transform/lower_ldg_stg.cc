@@ -30,7 +30,7 @@
 #include <tvm/tirx/transform.h>
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 #include "op/utils.h"
 #include "tir/ir/buffer_common.h"
 
@@ -38,6 +38,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 
 class LowerLDGSTGRewriter : public StmtExprMutator {
 public:

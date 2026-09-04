@@ -11,6 +11,7 @@
 #include "tcgen_05.h"
 #include "tcgen_05_ld.h"
 #include "tcgen_05_st.h"
+#include <cute/arch/config.hpp>
 
 namespace tl {
 
@@ -94,20 +95,28 @@ load_global_256_conditional(const ulonglong4 *ptr, bool pred) {
   return ret;
 }
 
-// Generic 256-bit load for FP8 and other types (returns ulonglong4)
+// Generic 256-bit load: returns the pointee type so that assignments to
+// vector structs (fp8_e4_32_t, fp4_e2_64_t, ...) type-check without a
+// hand-written operator= from ulonglong4 on every such type. The load is
+// performed as ulonglong4 and bit-cast back.
 template <typename T>
-__device__ __forceinline__ ulonglong4 load_global_256(const T *ptr) {
+__device__ __forceinline__ T load_global_256(const T *ptr) {
+  static_assert(sizeof(T) == 32,
+                "tl::load_global_256 requires a 32-byte vector type");
   ulonglong4 ret{};
   global_load_256(ret, ptr, true);
-  return ret;
+  return *reinterpret_cast<T *>(&ret);
 }
 
 template <typename T>
-__device__ __forceinline__ ulonglong4 load_global_256_conditional(const T *ptr,
-                                                                  bool pred) {
+__device__ __forceinline__ T load_global_256_conditional(const T *ptr,
+                                                         bool pred) {
+  static_assert(sizeof(T) == 32,
+                "tl::load_global_256_conditional requires a 32-byte vector "
+                "type");
   ulonglong4 ret{};
   global_load_256(ret, ptr, pred);
-  return ret;
+  return *reinterpret_cast<T *>(&ret);
 }
 
 // 256-bit store specialization for ulonglong4
@@ -165,8 +174,11 @@ pack_bfloat16x4(const bfloat16_t x, const bfloat16_t y, const bfloat16_t z,
   return (v0 | (v1 << 16) | (v2 << 32) | (v3 << 48));
 }
 
+// Takes half_t (cutlass::half_t) like __pack_half2 and pack_bfloat16x4:
+// codegen prints fp16 scalars as half_t, which does not implicitly convert
+// to __half.
 __device__ __forceinline__ unsigned long long
-pack_float16x4(const half x, const half y, const half z, const half w) {
+pack_float16x4(const half_t x, const half_t y, const half_t z, const half_t w) {
   unsigned long long v0 = *((unsigned short *)&x);
   unsigned long long v1 = *((unsigned short *)&y);
   unsigned long long v2 = *((unsigned short *)&z);
@@ -194,7 +206,8 @@ __device__ __forceinline__ void tcgen05_ld_core(uint32_t const &tmem_start_col,
   target_call_cls::copy<CUR_SEGMENT_LEN>(tmem_start_col, (uint32_t *)dst_ptr);
   if constexpr (N - CUR_SEGMENT_LEN > 0) {
     tcgen05_ld_core<target_call_cls, MAX_LOGN, N - CUR_SEGMENT_LEN>(
-        tmem_start_col + CUR_SEGMENT_LEN, dst_ptr + CUR_SEGMENT_LEN);
+        tmem_start_col + CUR_SEGMENT_LEN,
+        dst_ptr + CUR_SEGMENT_LEN * sizeof(uint32_t) / sizeof(dst_t));
   }
 }
 
@@ -258,6 +271,55 @@ tcgen05_ld_32dp256bNx(uint32_t const &tmem_start_col,
 #endif
 }
 
+// Half-subpartition (16 datapath) variants. The 32dp wrappers above
+// issue these twice, once per half; PTX Layout F (1SM M=64) occupies only
+// the low 16 datapaths of each sub-partition and needs a single issue.
+
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_ld_16dp64bNx(uint32_t const &tmem_start_col,
+                     uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_ld_core<tl::tmem_ld_16dp64bNx<pack16>, 7, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_16dp64bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_ld_16dp128bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_ld_core<tl::tmem_ld_16dp128bNx<pack16>, 6, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_16dp128bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool pack16, typename dst_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_ld_16dp256bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, dst_t *dst_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_ld_core<tl::tmem_ld_16dp256bNx<pack16>, 5, N>(
+      tmem_start_col + tmem_col_offset, dst_ptr);
+  tl::fence_view_async_tmem_load();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_ld_16dp256bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
 // NOTE: The column offset increment (CUR_SEGMENT_LEN) assumes each register
 // maps to exactly one TMEM column (i.e. unpack::16b is NOT active). If
 // unpack::16b were used, each register would expand to 2 columns, requiring
@@ -274,7 +336,8 @@ __device__ __forceinline__ void tcgen05_st_core(uint32_t const &tmem_start_col,
                                                   (uint32_t const *)src_ptr);
   if constexpr (N - CUR_SEGMENT_LEN > 0) {
     tcgen05_st_core<target_call_cls, MAX_LOGN, N - CUR_SEGMENT_LEN>(
-        tmem_start_col + CUR_SEGMENT_LEN, src_ptr + CUR_SEGMENT_LEN);
+        tmem_start_col + CUR_SEGMENT_LEN,
+        src_ptr + CUR_SEGMENT_LEN * sizeof(uint32_t) / sizeof(src_t));
   }
 }
 
@@ -334,6 +397,55 @@ tcgen05_st_32dp256bNx(uint32_t const &tmem_start_col,
 #else
   static_assert(kDependentFalse,
                 "tl::tcgen05_st_32dp256bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+// Half-subpartition (16 datapath) variants. The 32dp wrappers above
+// issue these twice, once per half; PTX Layout F (1SM M=64) occupies only
+// the low 16 datapaths of each sub-partition and needs a single issue.
+
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_st_16dp64bNx(uint32_t const &tmem_start_col,
+                     uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_st_core<tl::tmem_st_16dp64bNx<unpack16>, 7, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_16dp64bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_st_16dp128bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_st_core<tl::tmem_st_16dp128bNx<unpack16>, 6, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_16dp128bNx requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <int N, bool unpack16, typename src_t, bool kDependentFalse = false>
+__device__ __forceinline__ void
+tcgen05_st_16dp256bNx(uint32_t const &tmem_start_col,
+                      uint32_t const &tmem_col_offset, src_t const *src_ptr) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  tcgen05_st_core<tl::tmem_st_16dp256bNx<unpack16>, 5, N>(
+      tmem_start_col + tmem_col_offset, src_ptr);
+  tl::fence_view_async_tmem_store();
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05_st_16dp256bNx requires sm_100a or a compatible "
                 "architecture-specific target");
 #endif
 }
@@ -479,7 +591,8 @@ TL_DEVICE void tma_load_2sm(const CUtensorMap &descriptor,
 }
 
 // cp.async.bulk.tensor.2d.tile::{gather4,scatter4} (PTX 8.6).
-// The shared::cta gather4 form requires sm_100; scatter4 requires sm_100a.
+// The shared::cta gather4 form requires sm_100; scatter4 requires an
+// arch-/family-specific target, same set as CuTe's SM100 TMA atoms.
 // Five coordinate operands: {col, r0, r1, r2, r3}; the 4-row pack is implicit.
 // CacheHintSm90 reused from copy_sm90.h (always included alongside this file).
 #if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
@@ -519,7 +632,7 @@ TL_DEVICE void
 tma_store_scatter4(const CUtensorMap &descriptor, void const *const smem_ptr,
                    int32_t const &col, int32_t const &r0, int32_t const &r1,
                    int32_t const &r2, int32_t const &r3) {
-#if defined(__CUDA_ARCH_FEAT_SM100_ALL)
+#if defined(CUTE_ARCH_TMA_SM100_ENABLED)
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile(
@@ -530,7 +643,9 @@ tma_store_scatter4(const CUtensorMap &descriptor, void const *const smem_ptr,
         "r"(r2), "r"(r3), "l"(cache_hint)
       : "memory");
 #else
-  static_assert(kDependentFalse, "tl::tma_store_scatter4 requires sm_100a");
+  static_assert(kDependentFalse,
+                "tl::tma_store_scatter4 requires sm_100a or a compatible "
+                "architecture-specific target");
 #endif
 }
 #endif // CUDA 12.8+

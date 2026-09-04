@@ -68,5 +68,28 @@ def test_data_race_diagnostic_includes_span(capfd):
     assert "--> kernel.py:22:1" in err
 
 
+def test_race_check_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("TILELANG_ENABLE_DATA_RACE_CHECK", raising=False)
+    from tilelang.backend.pass_pipeline import pipeline_utils
+
+    assert pipeline_utils.should_enable_race_check() is False
+
+
+def test_race_check_enabled_via_env_var(monkeypatch):
+    monkeypatch.setenv("TILELANG_ENABLE_DATA_RACE_CHECK", "1")
+    from tilelang.backend.pass_pipeline import pipeline_utils
+
+    assert pipeline_utils.should_enable_race_check() is True
+
+
+def test_race_check_pass_config_overrides_env_var(monkeypatch):
+    monkeypatch.setenv("TILELANG_ENABLE_DATA_RACE_CHECK", "1")
+    from tilelang.backend.pass_pipeline import pipeline_utils
+    from tilelang.transform import PassContext
+
+    with PassContext(config={"tl.disable_data_race_check": True}):
+        assert pipeline_utils.should_enable_race_check() is False
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

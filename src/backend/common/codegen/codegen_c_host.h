@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file codegen_c_host.h
  * \brief Generate C host code with TVM FFI when Host CodeGen is enabled.
@@ -81,6 +62,8 @@ public:
   void VisitExpr_(const tvm::tirx::MaxNode *op,
                   std::ostream &os) final; // NOLINT(*)
 
+  void VisitStmt_(const tvm::tirx::EvaluateNode *op) final; // NOLINT(*)
+
   void VisitStmt_(const tvm::tirx::AssertStmtNode *op) final; // NOLINT(*)
 
   void VisitStmt_(const tvm::tirx::AttrStmtNode *op) final; // NOLINT(*)
@@ -98,7 +81,7 @@ private:
   Array<String> function_names_;
   /*! \brief whether to emit asserts in the resulting C code */
   bool emit_asserts_;
-  /*! \brief whether to emit forwared function declarations in the resulting C
+  /*! \brief whether to emit forwarded function declarations in the resulting C
    * code */
   bool emit_fwd_func_decl_;
   /*! \brief whether to generate the entry function if encountered */

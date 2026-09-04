@@ -1,5 +1,6 @@
-"""Tests for TileLang `LowerTileOp` copy annotations affecting cp.async sync."""
+"""Tests for TileLang `LowerTileOp` synchronization and copy lowering."""
 
+import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -19,6 +20,30 @@ def _count_calls(func: tvm.tirx.PrimFunc):
     return counts
 
 
+def _collect_calls(root, op_name: str):
+    calls = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name).endswith(op_name):
+            calls.append(node)
+
+    post_order_visit(root.body if hasattr(root, "body") else root, _visit)
+    return calls
+
+
+def _find_loop_with_annotation(func: tvm.tirx.PrimFunc, annotation: str):
+    loops = []
+
+    def _visit(node):
+        if isinstance(node, tvm.tirx.For) and annotation in node.annotations:
+            loops.append(node)
+
+    post_order_visit(func.body, _visit)
+    assert len(loops) == 1, f"Expected one loop with {annotation}, got {len(loops)}"
+    return loops[0]
+
+
+@tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
@@ -48,6 +73,7 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     assert calls.get("tirx.ptx_wait_group", 0) == 0
 
 
+@tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
@@ -75,6 +101,108 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
     assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tirx.ptx_commit_group", 0) == 0
     assert calls.get("tirx.ptx_wait_group", 0) == 0
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(num_stages):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((9, 16), T.float16),
+        B: T.Tensor((9, 16), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((16,), T.float16)
+            for i in T.serial(
+                3,
+                9,
+                annotations={
+                    "software_pipeline_stage": [0, num_stages - 1],
+                    "software_pipeline_order": [0, 1],
+                    "tl_pipelined_num_stages": T.int32(num_stages),
+                },
+            ):
+                T.copy(A[i, 0:16], shared, prefer_instruction="tma")
+                T.copy(shared, B[i, 0:16], prefer_instruction="sync")
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    with target:
+        mod = tl.transform.InjectSoftwarePipeline()(mod)
+        copy_calls = _collect_calls(mod["main"], "tileop.copy")
+        assert all("tl.pipeline_mbar_phase_expr" not in call.annotations for call in copy_calls)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    waits = _collect_calls(func, "mbarrier_wait_parity")
+    loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
+    loop_waits = _collect_calls(loop, "mbarrier_wait_parity")
+
+    assert len(waits) == num_stages
+    assert len(loop_waits) == 1
+    barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
+    assert sorted(barrier_indices) == list(range(num_stages))
+    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
+    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
+    assert constant_phases == [0] * (num_stages - 1)
+    expected = (loop.loop_var - loop.min) % 2
+    assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((9, 16), T.float16),
+        B: T.Tensor((9, 16), T.float16),
+    ):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((16,), T.float16)
+            mbar = T.alloc_barrier(1)
+            for i in T.serial(
+                3,
+                9,
+                annotations={
+                    "software_pipeline_stage": [0, num_stages - 1],
+                    "software_pipeline_order": [0, 1],
+                    "tl_pipelined_num_stages": T.int32(num_stages),
+                },
+            ):
+                T.copy(
+                    A[i, 0:16],
+                    shared,
+                    prefer_instruction="tma",
+                    annotations={"barrier": mbar[0]},
+                )
+                T.copy(shared, B[i, 0:16], prefer_instruction="sync")
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    with target:
+        mod = tl.transform.InjectSoftwarePipeline()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    waits = _collect_calls(func, "mbarrier_wait_parity")
+    loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
+    loop_waits = _collect_calls(loop, "mbarrier_wait_parity")
+
+    assert len(waits) == num_stages
+    assert len(loop_waits) == 1
+    barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
+    assert barrier_indices == [0] * num_stages
+    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
+    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
+    assert constant_phases == [i % 2 for i in range(num_stages - 1)]
+    logical_epoch = loop.loop_var - loop.min + num_stages - 1
+    assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], logical_epoch % 2)
 
 
 def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_context():
@@ -105,6 +233,32 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
     assert calls.get("tl.ptx_cp_async", 0) > 0
     assert calls.get("tirx.ptx_commit_group", 0) == 0
     assert calls.get("tirx.ptx_wait_group", 0) == 0
+
+
+@tilelang.testing.requires_cuda
+def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
+    """Reject #2948 instead of silently dropping a fragment index rotation."""
+    size = 128
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((size,), T.int32),
+        B: T.Tensor((size,), T.int32),
+    ):
+        with T.Kernel(1, threads=size):
+            fragment = T.alloc_fragment((size,), T.int32)
+            T.copy(A, fragment)
+            for i in T.Parallel(size):
+                B[i] = fragment[(i + 1) % size]
+
+    mod = tvm.IRModule.from_expr(before)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    with target:
+        mod = tl.transform.LayoutInference()(mod)
+        with pytest.raises(Exception, match="non-round-tripping inverse"):
+            tl.transform.LowerTileOp()(mod)
 
 
 def test_lower_tile_op_preserves_ragged_parallel_padding_guard():

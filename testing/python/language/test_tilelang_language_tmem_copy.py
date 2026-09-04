@@ -32,6 +32,12 @@ LAYOUT_CASES = [
     ("interleaved_4d", (3, 32, 64, 4), lambda a, i, j, k: [i + 32 * k, a * 64 + j], 128),
     # (128,128):(1@0,1@1) spread across two warpgroups.
     ("std_2d_2wg", (128, 128), lambda i, j: [i, j], 256),
+    # ((16,4),128):((1@0,32@0),1@1) -- PTX Layout F, the 1SM M=64 fragment:
+    # only the LOW 16 datapaths of each 32-datapath sub-partition are
+    # occupied, so the four warps sit a whole sub-partition apart and the
+    # atom is issued once per warp instead of duplicated onto the high 16.
+    ("layout_f_m64", (64, 128), lambda i, j: [i % 16 + 32 * (i // 16), j], 128),
+    ("layout_f_m64_2wg", (64, 256), lambda i, j: [i % 16 + 32 * (i // 16), j], 256),
 ]
 
 
@@ -199,6 +205,113 @@ def _make_16bit_roundtrip_kernel(shape, forward, dtype):
     return main
 
 
+def _make_16bit_split_kernel(shape, dtype, nsplit, split_store):
+    """One whole-buffer copy against sliced copies on the other side.
+
+    A 16-bit buffer whose b32-column count is not a power of two (e.g. 96
+    bf16 values = 48 columns) decomposes into multiple instruction segments
+    inside ONE tcgen05 call (x32 + x16); the segment recursion must advance
+    the register pointer in b32 columns, not in dst_t elements.  A symmetric
+    whole-store/whole-load roundtrip cancels a unit error, so exactly one
+    side is split into power-of-two (single-segment) slices.
+    """
+    last = shape[-1]
+    assert last % nsplit == 0
+    step = last // nsplit
+    rank = len(shape)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor(shape, dtype),
+        D: T.Tensor(shape, dtype),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(shape, dtype)
+            A_frag = T.alloc_fragment(shape, dtype)
+            tmem = T.alloc_tmem(shape, dtype)
+            B_frag = T.alloc_fragment(shape, dtype)
+            B_shared = T.alloc_shared(shape, dtype)
+
+            T.annotate_layout({tmem: T.Layout(shape, lambda i, j: [i, j])})
+            T.copy(A, A_shared)
+            T.copy(A_shared, A_frag)
+            if split_store:
+                for s in range(nsplit):
+                    T.copy(
+                        _last_dim_slice(A_frag, rank, s * step, (s + 1) * step),
+                        _last_dim_slice(tmem, rank, s * step, (s + 1) * step),
+                    )
+            else:
+                T.copy(A_frag, tmem)
+            T.fill(A_frag, -1.0)
+            T.fill(B_frag, -2.0)
+            if split_store:
+                T.copy(tmem, B_frag)
+            else:
+                for s in range(nsplit):
+                    T.copy(
+                        _last_dim_slice(tmem, rank, s * step, (s + 1) * step),
+                        _last_dim_slice(B_frag, rank, s * step, (s + 1) * step),
+                    )
+            T.copy(B_frag, B_shared)
+            T.copy(B_shared, D)
+
+    return main
+
+
+def _make_shared_allocation_roundtrip_kernel(wide_cols, narrow_cols):
+    """Roundtrip two TMEM buffers that share one physical tcgen05.alloc.
+
+    LowerSharedTmem packs the narrow buffer at column ``wide_cols`` of the
+    allocation both use, because rounding their columns up to a power of two
+    together costs nothing.  The *wide* roundtrip is what catches a dropped
+    column offset: the narrow buffer would still round-trip if its store and its
+    load dropped the offset together, but its store would land on the wide
+    buffer's first columns.
+    """
+    wide_shape = (128, wide_cols)
+    narrow_shape = (128, narrow_cols)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor(wide_shape, T.float32),
+        B: T.Tensor(narrow_shape, T.float32),
+        DA: T.Tensor(wide_shape, T.float32),
+        DB: T.Tensor(narrow_shape, T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            a_shared = T.alloc_shared(wide_shape, T.float32)
+            a_in_frag = T.alloc_fragment(wide_shape, T.float32)
+            a_out_frag = T.alloc_fragment(wide_shape, T.float32)
+            b_shared = T.alloc_shared(narrow_shape, T.float32)
+            b_in_frag = T.alloc_fragment(narrow_shape, T.float32)
+            b_out_frag = T.alloc_fragment(narrow_shape, T.float32)
+            wide_tmem = T.alloc_tmem(wide_shape, T.float32)
+            narrow_tmem = T.alloc_tmem(narrow_shape, T.float32)
+
+            T.annotate_layout(
+                {
+                    wide_tmem: T.Layout(wide_shape, lambda i, j: [i, j]),
+                    narrow_tmem: T.Layout(narrow_shape, lambda i, j: [i, j]),
+                }
+            )
+            T.copy(A, a_shared)
+            T.copy(a_shared, a_in_frag)
+            T.copy(a_in_frag, wide_tmem)
+            T.copy(B, b_shared)
+            T.copy(b_shared, b_in_frag)
+            T.copy(b_in_frag, narrow_tmem)
+
+            T.copy(wide_tmem, a_out_frag)
+            T.copy(a_out_frag, a_shared)
+            T.copy(a_shared, DA)
+            T.copy(narrow_tmem, b_out_frag)
+            T.copy(b_out_frag, b_shared)
+            T.copy(b_shared, DB)
+
+    return main
+
+
 def _run_roundtrip(kernel_func, shape):
     kernel = tilelang.compile(kernel_func, target="cuda", pass_configs=PASS_CONFIGS)
     source = kernel.get_kernel_source()
@@ -235,8 +348,13 @@ def test_tmem_copy_roundtrip(name, shape, forward, threads):
         # Two 16-bit values packed per b32 column move as whole columns with
         # the plain instruction.
         ("packed_pair", (128, 128), lambda i, j: [i, j], False),
+        # Layout F leaves gaps on the DATAPATH axis, not inside the columns:
+        # its columns are perfectly full, so it must move with the plain
+        # instruction too.  (Judging pack::16b by "does the fragment cover
+        # its codomain" reads those datapath gaps as half-filled columns.)
+        ("layout_f_packed_pair", (64, 128), lambda i, j: [i % 16 + 32 * (i // 16), j], False),
     ],
-    ids=["pack16b", "packed_pair"],
+    ids=["pack16b", "packed_pair", "layout_f_packed_pair"],
 )
 def test_tmem_copy_roundtrip_16bit(name, shape, forward, modifier):
     kernel = tilelang.compile(
@@ -261,8 +379,8 @@ def test_tmem_copy_roundtrip_16bit(name, shape, forward, modifier):
     # A batched layout sliced along its column mode leaves per-batch column
     # gaps in TMEM; the copy iterates the contiguous chunks, one tcgen05
     # issue per batch entry (rest iteration).
-    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "std_2d_2wg", "batched_3d")],
-    ids=["std_2d", "std_2d_2wg", "batched_3d"],
+    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "std_2d_2wg", "batched_3d", "layout_f_m64")],
+    ids=["std_2d", "std_2d_2wg", "batched_3d", "layout_f_m64"],
 )
 def test_tmem_copy_roundtrip_sliced_last_dim(name, shape, forward, threads):
     _run_roundtrip(_make_sliced_roundtrip_kernel(shape, forward, threads, nsplit=2), shape)
@@ -273,8 +391,8 @@ def test_tmem_copy_roundtrip_sliced_last_dim(name, shape, forward, threads):
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 @pytest.mark.parametrize(
     ("name", "shape", "forward", "threads"),
-    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "batched_3d")],
-    ids=["std_2d", "batched_3d"],
+    [case for case in LAYOUT_CASES if case[0] in ("std_2d", "batched_3d", "layout_f_m64")],
+    ids=["std_2d", "batched_3d", "layout_f_m64"],
 )
 def test_tmem_copy_sliced_store_whole_load(name, shape, forward, threads):
     _run_roundtrip(_make_asymmetric_roundtrip_kernel(shape, forward, threads, nsplit=2), shape)
@@ -290,6 +408,84 @@ def test_tmem_copy_sliced_store_whole_load(name, shape, forward, threads):
 )
 def test_tmem_copy_roundtrip_sliced_batch(name, shape, forward, threads):
     _run_roundtrip(_make_batch_sliced_roundtrip_kernel(shape, forward, threads), shape)
+
+
+def _make_widening_view_of_interleaved_layout_kernel():
+    """pack::16b keeps each bf16 in its own b32 slot (column stride 2), so
+    bf16 pairs are not stored contiguously and a float32 view of the buffer
+    has no compatible layout."""
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            frag16 = T.alloc_fragment((128, 64), T.bfloat16)
+            frag32 = T.alloc_fragment((128, 32), T.float32)
+            tmem = T.alloc_tmem((128, 64), T.bfloat16)
+            view = T.view(tmem, shape=(128, 32), dtype=T.float32)
+
+            T.annotate_layout({tmem: T.Layout((128, 64), lambda i, j: [i, 2 * j])})
+            T.copy(frag16, tmem)
+            T.copy(view, frag32)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_widening_view_of_interleaved_layout_is_rejected():
+    with pytest.raises(Exception, match="cannot reinterpret"):
+        tilelang.compile(
+            _make_widening_view_of_interleaved_layout_kernel(),
+            target="cuda",
+            pass_configs=PASS_CONFIGS,
+        )
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize("split_store", [True, False], ids=["whole_load", "whole_store"])
+def test_tmem_copy_16bit_multi_segment(split_store):
+    shape = (128, 96)
+    kernel = tilelang.compile(
+        _make_16bit_split_kernel(shape, T.bfloat16, nsplit=3, split_store=split_store),
+        target="cuda",
+        pass_configs=PASS_CONFIGS,
+    )
+    source = kernel.get_kernel_source()
+    # The whole-buffer side must be one multi-segment call (48 b32 columns).
+    assert "tcgen05_st_32dp32bNx<48," in source or "tcgen05_ld_32dp32bNx<48," in source
+    a = torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+    d = torch.empty(*shape, device="cuda", dtype=torch.bfloat16)
+    kernel(a, d)
+    torch.testing.assert_close(d, a, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_tmem_copy_roundtrip_across_a_shared_allocation():
+    wide_cols, narrow_cols = 96, 32
+    kernel = tilelang.compile(
+        _make_shared_allocation_roundtrip_kernel(wide_cols, narrow_cols),
+        target="cuda",
+        pass_configs=PASS_CONFIGS,
+    )
+    source = kernel.get_kernel_source()
+    # 96 + 32 columns round up to the same 128 the wide buffer needs alone, so
+    # the two buffers share a single allocation.
+    assert source.count("tl::tmem_allocate") == 1
+    assert "tl::tmem_allocate((&(wide_tmem[0])), 128)" in source
+    assert "tcgen05_st_" in source and "tcgen05_ld_" in source
+
+    a = torch.randn(128, wide_cols, device="cuda", dtype=torch.float32)
+    b = torch.randn(128, narrow_cols, device="cuda", dtype=torch.float32)
+    da = torch.empty_like(a)
+    db = torch.empty_like(b)
+    kernel(a, b, da, db)
+    torch.testing.assert_close(da, a, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(db, b, rtol=0.0, atol=0.0)
 
 
 if __name__ == "__main__":

@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file cpu/codegen/codegen_c.cc
  */
@@ -35,6 +16,9 @@
 #include "support/str_escape.h"
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"
+
+#include <cmath>
+#include <sstream>
 
 namespace tvm {
 namespace codegen {
@@ -477,6 +461,36 @@ void CodeGenTileLangC::VisitExpr_(const MinNode *op,
 void CodeGenTileLangC::VisitExpr_(const MaxNode *op,
                                   std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, ">", os);
+}
+
+void CodeGenTileLangC::VisitExpr_(const FloatImmNode *op,
+                                  std::ostream &os) { // NOLINT(*)
+  // Only intercept inf/nan: the TVM base class prints the IEEE text ("-inf")
+  // then appends the float suffix ('f'), producing "-inff" / "nanf", which
+  // C/C++ compilers reject (no inf/nan literal with a float suffix). Emit the
+  // C99 macros INFINITY / NAN for those two cases.
+  //
+  // Finite values delegate to the base class so its per-bit-width formatting
+  // is preserved. In particular fp16 keeps the legal cast form
+  // `(half)1.5e+00f`. The 'h' suffix copied from Metal (codegen_metal.cc)
+  // is MSL-only and invalid in C/C++ (g++: "no matching literal operator
+  // ... operator""h"), so it must not be replicated here. The base class
+  // default branch also throws InternalError on bad bit-widths, which a
+  // hand-rolled else would silently drop.
+  if (std::isinf(op->value)) {
+    std::ostringstream temp;
+    if (op->value < 0) {
+      temp << "-";
+    }
+    temp << "INFINITY";
+    MarkConst(temp.str());
+    os << temp.str();
+  } else if (std::isnan(op->value)) {
+    MarkConst("NAN");
+    os << "NAN";
+  } else {
+    CodeGenC::VisitExpr_(op, os);
+  }
 }
 
 template <typename T>

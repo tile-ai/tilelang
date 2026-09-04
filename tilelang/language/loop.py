@@ -117,6 +117,7 @@ def Pipelined(
     stage: list[int] | None = None,
     sync: list[list[int]] | None = None,
     group: list[list[int]] | None = None,
+    annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct pipelined for loop.
 
@@ -144,6 +145,8 @@ def Pipelined(
         Optional synchronization metadata for manual pipeline lowering.
     group : Optional[List[List[int]]]
         Optional producer grouping metadata for manual pipeline lowering.
+    annotations : Optional[Dict[str, Any]]
+        Additional loop annotations.
 
     Notes
     -----
@@ -187,8 +190,10 @@ def Pipelined(
         sync = []
     if group is None:
         group = []
+    if annotations is None:
+        annotations = {}
     # type: ignore[attr-defined] # pylint: disable=no-member
-    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group)
+    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group, annotations)
 
 
 def serial(
@@ -277,19 +282,23 @@ def unroll(
         else:
             start = 0
 
-    # Ensure annotations has {"pragma_unroll_explicit": True} by default
     if annotations is None:
-        annotations = {"pragma_unroll_explicit": explicit}
+        annotations = dict()
     else:
-        # Add "pragma_unroll_explicit": True if not already present
         annotations = dict(annotations)
-        annotations.setdefault("pragma_unroll_explicit", explicit)
+
+    if explicit:
+        annotations["pragma_unroll_explicit"] = True
+    else:
+        explicit = annotations.get("pragma_unroll_explicit", False)
 
     if unroll_factor is not None:
-        # check pragma_unroll_explicit must be False
-        if annotations.get("pragma_unroll_explicit", True):
-            raise ValueError("pragma_unroll_explicit must be True when unroll_factor is not None")
-        annotations.update({"pragma_unroll_factor": unroll_factor})
+        annotations["pragma_unroll_factor"] = unroll_factor
+    else:
+        unroll_factor = annotations.get("pragma_unroll_factor")
+
+    if explicit and unroll_factor is not None:
+        raise ValueError("T.unroll's explicit and unroll_factor params are mutually exclusive.")
 
     if step is None or step_is_one:
         return tb_tir.unroll(start, stop, annotations=annotations)

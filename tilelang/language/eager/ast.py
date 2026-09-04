@@ -83,6 +83,7 @@ def quote_expr(expr: str, **kws: QuoteReplacement) -> ast.expr:
 
 Operator = Literal["Add", "Sub", "Mult", "MatMult", "Div", "Mod", "Pow", "LShift", "RShift", "BitOr", "BitXor", "BitAnd", "FloorDiv"]
 BoolOp = Literal["And", "Or", "Not"]
+UnaryOp = Literal["UAdd"]
 
 
 def get_operator_name(operator: ast.operator) -> Operator:
@@ -177,8 +178,17 @@ class BaseBuilder:
 
     def get_parent_locals(self):
         frame = inspect.currentframe()
-        assert frame is not None and frame.f_back is not None and frame.f_back.f_back is not None
-        return frame.f_back.f_back.f_locals
+        try:
+            assert frame is not None and frame.f_back is not None and frame.f_back.f_back is not None
+            return frame.f_back.f_back.f_locals
+        finally:
+            # Do NOT remove the `del frame` below: `frame` references this frame
+            # itself through its own f_locals. Keeping it alive past return forms a
+            # reference cycle (frame -> f_locals -> frame) that refcounting can never
+            # break, pinning this frame and its entire f_back call chain (including
+            # large local tensors) until gc.collect() runs, which would cause memory
+            # leak. The `finally` ensures it also runs on the assert-failure path.
+            del frame
 
     def ctx_if(self, cond) -> Iterable[_T]:
         yield cond
@@ -232,6 +242,11 @@ class BaseBuilder:
         if op == "Not":
             return not left
         raise ValueError(f"Unknown boolop: {op}")
+
+    def unaryop(self, op: UnaryOp, operand: Any) -> Any:
+        if op == "UAdd":
+            return +operand
+        raise ValueError(f"Unknown unaryop: {op}")
 
     def ifexp(self, cond: Any, then: Callable[[], Any], otherwise: Callable[[], Any]) -> Any:
         return then() if cond else otherwise()
@@ -306,7 +321,16 @@ class DSLMutator(ast.NodeTransformer):
             s = ast.unparse(target)
             raise NotImplementedError(f"Unsupported for target `{s}`")
 
+    def _reject_loop_else(self, node: ast.For | ast.While):
+        if node.orelse:
+            loop = "for" if isinstance(node, ast.For) else "while"
+            raise NotImplementedError(
+                f"`{loop} ... else` is not supported in TileLang kernels (line {node.lineno}); "
+                "the `else` body would be silently dropped. Move it after the loop instead."
+            )
+
     def visit_For(self, node: ast.For):
+        self._reject_loop_else(node)
         node = self.generic_visit(node)
         tmp = self.get_tmp()
         # names = self._parse_names(node.target)
@@ -471,6 +495,7 @@ class DSLMutator(ast.NodeTransformer):
         return self._emit_assign_target(node.target, rval, annot=node.annotation)
 
     def visit_While(self, node):
+        self._reject_loop_else(node)
         node = self.generic_visit(node)
         return quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
 
@@ -564,6 +589,8 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         if isinstance(node.op, ast.Not):
             return quote_expr("__tb.boolop('Not', operand)", operand=node.operand, span=node)
+        if isinstance(node.op, ast.UAdd):
+            return quote_expr("__tb.unaryop('UAdd', operand)", operand=node.operand, span=node)
         return node
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:

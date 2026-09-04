@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion
+from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
 from tilelang.utils import is_fragment, is_full_region
 from math import gcd
@@ -28,6 +28,75 @@ def _min_leaf_stride(stride) -> int:
     if isinstance(stride, tuple):
         return min(_min_leaf_stride(s) for s in stride)
     return int(stride)
+
+
+def decode_k_panel_elems(k_mode, k_major: bool, swizzle_mode, swizzle_atom_elems: int, kind: str) -> int | None:
+    """Element stride between consecutive K swizzle-atom panels, off the layout.
+
+    Shared by the WGMMA and UMMA descriptor builders. A K-major operand wider
+    than one swizzle atom decodes with its K mode split into ``(atom, panels)``,
+    and that panel sub-mode's stride is the step the atom offset formulas need.
+    It cannot be reconstructed as ``mn_extent * swizzle_atom_elems``, which only
+    holds when the operand covers its whole buffer -- for a slice the MN extent
+    shrinks while the panel spacing does not.
+
+    ``k_mode`` is the operand tile's K mode in element space (post-``restrict``).
+    Returns ``None`` only when no panel step is needed: an MN-major operand, or a
+    layout with a single K panel, where the ``ki // k_atom_size`` factor the step
+    is multiplied by is always zero.
+
+    A swizzled multi-panel layout whose K mode is not the canonical
+    ``(atom, panels):(1, panel_stride)`` asserts rather than falling back to the
+    extent-based reconstruction: that fallback is precisely the defect this
+    decode exists to remove, so re-entering it silently would reintroduce a
+    wrong-code path.
+    """
+    if not k_major:
+        return None
+    shape, stride = k_mode.shape, k_mode.stride
+    if isinstance(shape, tuple) and len(shape) == 2:
+        # Only read the trailing stride as the panel step once the leading
+        # sub-mode is confirmed to be the contiguous atom -- on a panels-first
+        # ordering the trailing stride would be the atom's, i.e. silently wrong.
+        panel_stride = stride[-1]
+        if stride[0] == 1 and shape[0] == swizzle_atom_elems and isinstance(panel_stride, int):
+            return panel_stride
+    if swizzle_mode.is_none():
+        # Panels are a swizzle concept; an unswizzled operand has none.
+        return None
+    # Round up: a K extent that is not a whole number of atoms still spans two
+    # panels, and must not slip through as "single panel".
+    n_panels = -(-int(cute.size(k_mode)) // swizzle_atom_elems)
+    assert n_panels <= 1, (
+        f"{kind} K-major operand spans {n_panels} swizzle-atom panels but its decoded K mode "
+        f"{shape}:{stride} is not the canonical (atom, panels):(1, panel_stride); the atom "
+        f"offset cannot be formed without a constant panel stride."
+    )
+    return None
+
+
+def select_wgmma_inst_n(warp_col_tiles: int) -> int:
+    """Widest legal WGMMA ``N`` that tiles ``warp_col_tiles`` exactly.
+
+    Hopper WGMMA accepts ``N`` in ``[8, 256]`` with ``N % 8 == 0``, so an extent
+    such as 96 or 160 is a single legal instruction.  Selecting
+    ``gcd(warp_col_tiles, 256)`` instead splits those into n32 / n16 atoms and
+    gives up most of the tensor-core throughput.
+
+    Widening is restricted to multiples of 16 for two independent reasons:
+    ``N % 16 == 8`` already miscomputes for ``warp_cols > 1`` (issue #2593), and
+    the integer instruction tables in ``wgmma.h`` / ``wgmma_sp.h`` only
+    instantiate multiples of 16 (plus 8 and 24), so a wider ``N % 16 == 8``
+    would not even compile for the s8 path.
+    """
+    # gcd is always a legal width, so it is the floor of the search.
+    fallback = gcd(warp_col_tiles, 256)
+    if warp_col_tiles % 16 != 0:
+        return fallback
+    for cand in range(256, fallback, -16):
+        if warp_col_tiles % cand == 0:
+            return cand
+    return fallback
 
 
 @dataclass(frozen=True)
@@ -56,6 +125,24 @@ class WGMMADescriptorParams:
     buffer; passed to ``T.increase_descriptor_offset`` after building the
     descriptor from the buffer base. ``0`` for a whole-buffer / base-origin
     operand. Computed by :func:`compute_gmma_descriptor` from the CuTe layout."""
+    k_panel_elems: int | None = None
+    """Element stride between consecutive K swizzle-atom panels (K-major only),
+    read off the decoded layout by :func:`decode_k_panel_elems`. ``None`` only
+    when no panel step is needed -- see :meth:`k_panel_stride`, which is how
+    callers should read it."""
+
+    def k_panel_stride(self, mn_extent: int) -> int:
+        """K-panel step for the atom offset formulas.
+
+        ``mn_extent`` is the operand's own MN extent, used only for the
+        single-panel / MN-major case where the ``ki // k_atom_size`` factor is
+        always zero and any value works. Never reconstruct the multi-panel step
+        from it: for a slice of a wider buffer the panels stay spaced by the
+        *buffer's* MN extent, not the operand's.
+        """
+        if self.k_panel_elems is not None:
+            return self.k_panel_elems
+        return mn_extent * self.swizzle_atom_elems
 
 
 def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: int = 16, region=None) -> WGMMADescriptorParams:
@@ -101,8 +188,9 @@ def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     if region is not None:
         slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
         # A statically-zero origin is a plain int 0; a runtime origin is a PrimExpr.
-        if slice_off_elems != 0:
-            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_off_elems * bits // 8)
+        slice_byte_offset = slice_off_elems * bits // 8
+        if not isinstance(slice_byte_offset, int):
+            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"WGMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
 
     # Present in GMMA (MN, K) order, then recast the swizzled element layout to
@@ -169,6 +257,8 @@ def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     # Elements per swizzle atom along the non-K (MN) dimension; the unswizzled
     # case spans the whole MN tile.
     swizzle_atom_elems = mn_dim if swizzle_mode.is_none() else swizzle_mode.swizzle_byte_size() // elems_in_bytes
+
+    k_panel_elems = decode_k_panel_elems(tile[k_idx], k_major, swizzle_mode, swizzle_atom_elems, "WGMMA")
     return WGMMADescriptorParams(
         swizzle_mode=swizzle_mode,
         leading_byte_offset=int(lbo),
@@ -178,6 +268,7 @@ def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         elems_in_bytes=elems_in_bytes,
         is_k_major=k_major,
         slice_byte_offset=slice_byte_offset,
+        k_panel_elems=k_panel_elems,
     )
 
 
@@ -242,7 +333,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         return self
 
     def _initialize_wgmma_prefix(self, n_dim: int = 16):
-        inst_m, inst_n = 64, gcd(self.warp_col_tiles, 256)
+        inst_m, inst_n = 64, select_wgmma_inst_n(self.warp_col_tiles)
         assert inst_n % 8 == 0, (
             f"inst_n must be a multiple of 8, got {inst_n} (block_col_warps={self.block_col_warps}, warp_col_tiles={self.warp_col_tiles})"
         )
@@ -443,7 +534,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
         B_base_ptr = B_buf.access_ptr("r")
         slice_byte_offset = b_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        if not isinstance(slice_byte_offset, int):
+            # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            # A static slice. Add to the pointer directly to avoid an excessive `increase_descriptor_offset`.
+            is_sliced = False
+            B_base_ptr = handle_add_byte_offset(B_base_ptr, slice_byte_offset)
+        else:
+            # Non-sliced.
+            is_sliced = False
         swizzle_mode = b_params.swizzle_mode.wgmma_layout_type()
         lbo = b_params.leading_byte_offset
         sbo = b_params.stride_byte_offset
@@ -480,7 +580,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
         A_base_ptr = A_buf.access_ptr("r")
         slice_byte_offset = a_params.slice_byte_offset
-        is_sliced = not isinstance(slice_byte_offset, int) or slice_byte_offset != 0
+        if not isinstance(slice_byte_offset, int):
+            is_sliced = True
+        elif slice_byte_offset != 0:
+            is_sliced = False
+            A_base_ptr = handle_add_byte_offset(A_base_ptr, slice_byte_offset)
+        else:
+            is_sliced = False
         swizzle_mode = a_params.swizzle_mode.wgmma_layout_type()
         lbo = a_params.leading_byte_offset
         sbo = a_params.stride_byte_offset
@@ -603,6 +709,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         elems_in_bytes = b_params.elems_in_bytes
         bk_atom_size = b_params.k_atom_size
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        b_k_panel_elems = b_params.k_panel_stride(n_dim)
 
         thread_binding = self.get_thread_binding()
 
@@ -616,9 +723,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             scale_out = T.Select(ki != 0, 1, T.Select(clear_accum, 0, 1))
 
             B_offset = (
-                (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
-                + warp_j * wgmma_inst_n * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
+                (ki // bk_atom_size) * b_k_panel_elems + warp_j * wgmma_inst_n * b_swizzle_atom_elems + (ki % bk_atom_size) * micro_size_k
                 if b_params.is_k_major
                 else (
                     ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
@@ -704,6 +809,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         bk_atom_size = b_params.k_atom_size
         a_swizzle_atom_elems = a_params.swizzle_atom_elems
         b_swizzle_atom_elems = b_params.swizzle_atom_elems
+        a_k_panel_elems = a_params.k_panel_stride(m_dim)
+        b_k_panel_elems = b_params.k_panel_stride(n_dim)
 
         thread_binding = self.get_thread_binding()
 
@@ -717,16 +824,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             warp_j = warp_n * num_inst_n + inst_n_idx
 
             A_offset = (
-                (ki % ak_atom_size) * micro_size_k
-                + warp_i * 64 * a_swizzle_atom_elems
-                + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                (ki % ak_atom_size) * micro_size_k + warp_i * 64 * a_swizzle_atom_elems + (ki // ak_atom_size) * a_k_panel_elems
                 if a_is_k_major
                 else warp_i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
             )
             B_offset = (
-                (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
-                + (ki % bk_atom_size) * micro_size_k
-                + warp_j * wgmma_inst_n * b_swizzle_atom_elems
+                (ki // bk_atom_size) * b_k_panel_elems + (ki % bk_atom_size) * micro_size_k + warp_j * wgmma_inst_n * b_swizzle_atom_elems
                 if b_is_k_major
                 else (
                     ki * b_swizzle_atom_elems * micro_size_k + warp_j * wgmma_inst_n * (k_dim if n_dim // b_swizzle_atom_elems > 1 else 1)
