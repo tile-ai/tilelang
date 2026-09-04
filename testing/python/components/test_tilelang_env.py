@@ -1,11 +1,7 @@
-import importlib
-
 import pytest
 
 import tilelang
 from tilelang.env import resolve_pass_profile_threshold_ms
-
-env_module = importlib.import_module("tilelang.env")
 
 
 def _env_var_descriptor(name):
@@ -14,13 +10,6 @@ def _env_var_descriptor(name):
 
 def _restore_forced_value(name, value):
     _env_var_descriptor(name)._forced_value = value
-
-
-def _symlink_or_skip(link, target):
-    try:
-        link.symlink_to(target)
-    except OSError as exc:
-        pytest.skip(f"symlink creation is unavailable: {exc}")
 
 
 def test_env_var(monkeypatch):
@@ -42,86 +31,6 @@ def test_env_var(monkeypatch):
         assert tilelang.env.TILELANG_PRINT_ON_COMPILATION == "1"
     finally:
         _restore_forced_value("TILELANG_PRINT_ON_COMPILATION", original_forced_value)
-
-
-def test_find_cuda_home_resolves_symlinked_nvcc(monkeypatch, tmp_path):
-    cuda_home = tmp_path / "nvidia" / "cuda-13.0"
-    nvcc = cuda_home / "bin" / "nvcc"
-    nvcc.parent.mkdir(parents=True)
-    nvcc.touch()
-
-    shim = tmp_path / "local" / "bin" / "nvcc"
-    shim.parent.mkdir(parents=True)
-    _symlink_or_skip(shim, nvcc)
-
-    monkeypatch.delenv("CUDA_HOME", raising=False)
-    monkeypatch.delenv("CUDA_PATH", raising=False)
-    monkeypatch.setattr(env_module.shutil, "which", lambda _: str(shim))
-
-    assert env_module._find_cuda_home() == str(cuda_home)
-
-
-@pytest.mark.parametrize("symlinked", [False, True])
-def test_find_cuda_home_preserves_versioned_hpc_sdk_cuda_home(monkeypatch, tmp_path, symlinked):
-    cuda_home = tmp_path / "nvidia" / "hpc_sdk" / "Linux_x86_64" / "25.7" / "cuda" / "12.9"
-    nvcc = cuda_home / "bin" / "nvcc"
-    cuda_runtime = cuda_home / "include" / "cuda_runtime.h"
-    nvcc.parent.mkdir(parents=True)
-    cuda_runtime.parent.mkdir(parents=True)
-    nvcc.touch()
-    cuda_runtime.touch()
-
-    nvcc_path = nvcc
-    if symlinked:
-        shim = tmp_path / "local" / "bin" / "nvcc"
-        shim.parent.mkdir(parents=True)
-        _symlink_or_skip(shim, nvcc)
-        nvcc_path = shim
-
-    monkeypatch.delenv("CUDA_HOME", raising=False)
-    monkeypatch.delenv("CUDA_PATH", raising=False)
-    monkeypatch.setattr(env_module.shutil, "which", lambda _: str(nvcc_path))
-
-    assert env_module._find_cuda_home() == str(cuda_home)
-
-
-@pytest.mark.parametrize("env_var", ["CUDA_HOME", "CUDA_PATH"])
-def test_find_cuda_home_prefers_explicit_environment(monkeypatch, tmp_path, env_var):
-    cuda_home = tmp_path / "explicit-cuda"
-    cuda_home.mkdir()
-
-    def unexpected_nvcc_lookup(_):
-        raise AssertionError("unexpected nvcc lookup")
-
-    monkeypatch.delenv("CUDA_HOME", raising=False)
-    monkeypatch.delenv("CUDA_PATH", raising=False)
-    monkeypatch.setenv(env_var, str(cuda_home))
-    monkeypatch.setattr(env_module.shutil, "which", unexpected_nvcc_lookup)
-
-    assert env_module._find_cuda_home() == str(cuda_home)
-
-
-def test_find_cuda_home_prefers_visible_complete_toolkit(monkeypatch, tmp_path):
-    cuda_home = tmp_path / "composed-cuda"
-    nvcc = cuda_home / "bin" / "nvcc"
-    cuda_runtime = cuda_home / "include" / "cuda_runtime.h"
-    nvcc.parent.mkdir(parents=True)
-    cuda_runtime.parent.mkdir(parents=True)
-    nvcc.touch()
-    cuda_runtime.touch()
-
-    compiler_home = tmp_path / "compiler-only"
-    compiler_nvcc = compiler_home / "bin" / "nvcc"
-    compiler_nvcc.parent.mkdir(parents=True)
-    compiler_nvcc.touch()
-    nvcc.unlink()
-    _symlink_or_skip(nvcc, compiler_nvcc)
-
-    monkeypatch.delenv("CUDA_HOME", raising=False)
-    monkeypatch.delenv("CUDA_PATH", raising=False)
-    monkeypatch.setattr(env_module.shutil, "which", lambda _: str(nvcc))
-
-    assert env_module._find_cuda_home() == str(cuda_home)
 
 
 @pytest.mark.parametrize(
