@@ -1,5 +1,7 @@
 from tilelang import tvm as tvm
+import pytest
 import tilelang as tl
+import tilelang.testing
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 from tvm.tirx.stmt_functor import post_order_visit
@@ -838,3 +840,119 @@ def test_pipeline_planning_keeps_bind_that_reads_atomic_target():
     assert stages == [0, 0, 1, 1]
     assert orders == [0, 1, 2, 3]
     assert "software_pipeline_replayable_scalar_binds" not in anno
+
+
+def _conditional_copy_gemm_kernel(num_stages):
+    """Pipelined GEMM whose copy+gemm body is guarded by a runtime condition.
+
+    Before the fix, PipelineStageAnalyzer rejected conditionally executed copy
+    stages from async, so the copies stayed synchronous. The copies should be
+    eligible for cp.async: commit is emitted outside the user branch, so group
+    counting stays consistent for skipped iterations.
+    """
+    M = N = K = 256
+    BM, BN, BK = 64, 64, 32
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((K, N), T.float16),
+        C: T.Tensor((M, N), T.float16),
+        limit: T.int32,
+    ):
+        with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=128) as (bx, by):
+            a_sh = T.alloc_shared((BM, BK), T.float16)
+            b_sh = T.alloc_shared((BK, BN), T.float16)
+            c_loc = T.alloc_fragment((BM, BN), T.float32)
+            T.clear(c_loc)
+            for k in T.Pipelined(T.ceildiv(K, BK), num_stages=num_stages):
+                if k < limit:
+                    T.copy(A[by * BM : (by + 1) * BM, k * BK : (k + 1) * BK], a_sh)
+                    T.copy(B[k * BK : (k + 1) * BK, bx * BN : (bx + 1) * BN], b_sh)
+                    T.gemm(a_sh, b_sh, c_loc)
+            T.copy(c_loc, C[by * BM : (by + 1) * BM, bx * BN : (bx + 1) * BN])
+
+    return kernel
+
+
+def _line_after_matching_brace(src, needle):
+    """Return the first statement line after the closing brace of the if block
+    that starts with `needle`."""
+    start = src.index(needle)
+    depth = 0
+    i = src.index("{", start)
+    while True:
+        ch = src[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    for line in src[i + 1 :].splitlines():
+        line = line.strip()
+        if line and not line.startswith("#line"):
+            return line
+    raise AssertionError("no statement found after " + needle)
+
+
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_pipeline_planning_conditional_copy_emits_cp_async(num_stages):
+    from tilelang.tools.compile_only import compile_kernel_source
+
+    kernel = _conditional_copy_gemm_kernel(num_stages)
+    src = compile_kernel_source(kernel, {"kind": "cuda", "arch": "sm_80"})
+
+    # The conditional copy stage must lower to cp.async instead of falling
+    # back to a synchronous vector copy.
+    assert "tl::cp_async" in src
+    assert "tl::cp_async_commit();" in src
+    # Steady-state wait depth and the final drain.
+    assert f"tl::cp_async_wait<{num_stages - 1}>();" in src
+    assert "tl::cp_async_wait<0>();" in src
+
+    # Commit must be emitted outside the producer branch: the statement right
+    # after the steady-state `if ((k + n) < limit) { ... }` block is the
+    # commit, so every iteration commits exactly one (possibly empty) group
+    # and wait<N> group counting stays consistent for skipped iterations.
+    producer_if = f"if ((k + {num_stages - 1}) < limit)"
+    next_stmt = _line_after_matching_brace(src, producer_if)
+    assert next_stmt == "tl::cp_async_commit();", next_stmt
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_pipeline_planning_conditional_copy_cp_async_numerics():
+    """Device-side numerics for the conditional async pipeline.
+
+    Sweeps the runtime limit so skipped iterations exercise the empty-commit
+    path, on the cp.async pipeline (warp specialization disabled so Hopper
+    does not reroute the copies through WS/TMA, which is classified
+    independently of this change).
+    """
+    import torch
+
+    M = N = K = 256
+    BK = 32
+    num_iters = K // BK
+
+    kernel = tilelang.compile(
+        _conditional_copy_gemm_kernel(num_stages=2),
+        out_idx=[2],
+        pass_configs={tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+
+    for limit in (0, 1, 3, num_iters, num_iters + 2):
+        c = kernel(a, b, limit)
+        ref = torch.zeros(M, N, device="cuda", dtype=torch.float32)
+        for k in range(min(limit, num_iters)):
+            ref += a[:, k * BK : (k + 1) * BK].float() @ b[k * BK : (k + 1) * BK, :].float()
+        torch.testing.assert_close(c.float(), ref, rtol=1e-2, atol=1e-2)
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()
