@@ -83,6 +83,7 @@ def quote_expr(expr: str, **kws: QuoteReplacement) -> ast.expr:
 
 Operator = Literal["Add", "Sub", "Mult", "MatMult", "Div", "Mod", "Pow", "LShift", "RShift", "BitOr", "BitXor", "BitAnd", "FloorDiv"]
 BoolOp = Literal["And", "Or", "Not"]
+UnaryOp = Literal["UAdd"]
 
 
 def get_operator_name(operator: ast.operator) -> Operator:
@@ -241,6 +242,11 @@ class BaseBuilder:
         if op == "Not":
             return not left
         raise ValueError(f"Unknown boolop: {op}")
+
+    def unaryop(self, op: UnaryOp, operand: Any) -> Any:
+        if op == "UAdd":
+            return +operand
+        raise ValueError(f"Unknown unaryop: {op}")
 
     def ifexp(self, cond: Any, then: Callable[[], Any], otherwise: Callable[[], Any]) -> Any:
         return then() if cond else otherwise()
@@ -583,6 +589,8 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         if isinstance(node.op, ast.Not):
             return quote_expr("__tb.boolop('Not', operand)", operand=node.operand, span=node)
+        if isinstance(node.op, ast.UAdd):
+            return quote_expr("__tb.unaryop('UAdd', operand)", operand=node.operand, span=node)
         return node
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
