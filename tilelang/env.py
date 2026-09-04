@@ -194,8 +194,13 @@ def _find_rocm_home() -> str:
     if rocm_home is None:
         rocmcc_path = shutil.which("hipcc")
         if rocmcc_path is not None:
-            rocm_home = os.path.dirname(os.path.dirname(rocmcc_path))
-        else:
+            candidate = os.path.dirname(os.path.dirname(os.path.realpath(rocmcc_path)))
+            # Only trust a PATH-derived prefix when it carries the public HIP
+            # headers; partial toolchains without them exist in the wild (e.g.
+            # the preview compiler some ROCm 7 installs prepend to PATH).
+            if os.path.exists(os.path.join(candidate, "include", "hip", "hip_runtime.h")):
+                rocm_home = candidate
+        if rocm_home is None:
             rocm_home = "/opt/rocm"
             if not os.path.exists(rocm_home):
                 rocm_home = None
