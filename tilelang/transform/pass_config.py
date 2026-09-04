@@ -240,6 +240,31 @@ class PassConfigKey(str, Enum):
     optimization in cases where manual synchronization is preferred or when
     synchronization is not needed. Default: False"""
 
+    TL_CPU_PARALLEL = "tl.cpu_parallel"
+    """Enable OpenMP parallelization of grid loops for CPU targets.
+
+    Opt-in; default False. When enabled, the grid (blockIdx) loops of a
+    T.Kernel launch are lowered to OpenMP parallel loops on the ``c`` target
+    (``#pragma omp parallel for [collapse(n)]``) or to
+    ``TVMBackendParallelLaunch`` on the ``llvm`` target, and OpenMP compiler
+    flags (plus ``-O2``) are injected into the kernel library build. When
+    disabled, no annotation is added, no extra pass runs and no extra compile
+    flags are injected — the compilation output matches the serial baseline.
+
+    The thread count is a per-kernel property instead: pass
+    ``cpu_num_threads`` to ``T.Kernel`` (default: omit the num_threads
+    clause and let the OpenMP runtime decide, e.g. via ``OMP_NUM_THREADS``).
+    """
+
+    TL_CPU_PARALLEL_MIN_TRIP = "tl.cpu_parallel_min_trip"
+    """Minimum total grid trip count for CPU OpenMP parallelization.
+
+    Grids whose total iteration count (product of grid extents) is below this
+    threshold stay serial. Default 0 (parallelize whenever ``tl.cpu_parallel``
+    is enabled — the master switch itself is the gate); raise it to keep very
+    small grids serial.
+    """
+
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
 

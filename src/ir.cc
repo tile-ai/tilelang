@@ -33,15 +33,17 @@ using namespace ffi;
 // time.
 static ForFrame MakeThreadBindingFrame(const std::string &name,
                                        const String &thread_tag,
-                                       const PrimExpr &extent) {
+                                       const PrimExpr &extent,
+                                       const Map<String, Any> &annotations) {
   using namespace tvm::tirx;
   Var var = Var(name, extent->dtype);
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   n->vars.push_back(var);
   n->doms.push_back(Range(make_const(extent->dtype, 0), extent));
-  n->f_make_for_loop =
-      [thread_tag](const Array<Var> &vars, const Array<Range> &doms,
-                   const Array<Optional<PrimExpr>> &steps, Stmt body) -> Stmt {
+  n->f_make_for_loop = [thread_tag, annotations](
+                           const Array<Var> &vars, const Array<Range> &doms,
+                           const Array<Optional<PrimExpr>> &steps,
+                           Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), 1);
     ICHECK_EQ(doms.size(), 1);
     IterVar iter_var(Range{nullptr}, Var(thread_tag, vars[0]->dtype),
@@ -51,7 +53,7 @@ static ForFrame MakeThreadBindingFrame(const std::string &name,
     return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kThreadBinding,
                body,
                /*thread_binding=*/iter_var,
-               /*annotations=*/Map<String, Any>{},
+               /*annotations=*/annotations,
                /*step=*/step);
   };
   return ForFrame(n);
@@ -280,20 +282,36 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   static const char *kThreadTags[3] = {"threadIdx.x", "threadIdx.y",
                                        "threadIdx.z"};
 
+  Map<String, Any> block_annotations =
+      attrs.defined() ? attrs : Map<String, Any>{};
+  Map<String, Any> grid_annotations;
+  if (auto num_threads = block_annotations.Get(attr::kCPUNumThreads)) {
+    // The value arrives as a POD int64 through the ffi attrs dict; accept an
+    // IntImm too so manually constructed IR keeps working.
+    int64_t num_threads_value;
+    if (const auto *imm = num_threads->as<IntImmNode>()) {
+      num_threads_value = imm->value;
+    } else {
+      num_threads_value = num_threads->cast<int64_t>();
+    }
+    grid_annotations.Set(attr::kCPUNumThreads,
+                         IntImm(DataType::Int(32), num_threads_value));
+    block_annotations.erase(attr::kCPUNumThreads);
+  }
+
   for (size_t i = 0; i < grid_size.size(); i++) {
-    n->frames.push_back(
-        MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]));
+    n->frames.push_back(MakeThreadBindingFrame(
+        kBlockVarNames[i], kBlockTags[i], grid_size[i],
+        i == 0 ? std::move(grid_annotations) : Map<String, Any>{}));
   }
   for (size_t i = 0; i < block_size.size(); i++) {
-    n->frames.push_back(MakeThreadBindingFrame(kThreadVarNames[i],
-                                               kThreadTags[i], block_size[i]));
+    n->frames.push_back(MakeThreadBindingFrame(
+        kThreadVarNames[i], kThreadTags[i], block_size[i], Map<String, Any>{}));
   }
 
   auto empty_block = tvm::script::ir_builder::tirx::Block(DeviceMainBlockName);
   empty_block->reads = Array<tvm::tirx::BufferRegion>();
   empty_block->writes = Array<tvm::tirx::BufferRegion>();
-  Map<String, Any> block_annotations =
-      attrs.defined() ? attrs : Map<String, Any>{};
   empty_block->annotations = block_annotations;
   n->frames.push_back(empty_block);
 

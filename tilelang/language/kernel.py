@@ -278,6 +278,7 @@ def Kernel(
     *blocks: int | tirx.PrimExpr,
     threads: int | list[int] | tuple | None = None,
     prelude: str | None = None,
+    cpu_num_threads: int | None = None,
 ):
     """Tools to quickly construct a kernel launch frame.
 
@@ -298,6 +299,16 @@ def Kernel(
     prelude : str
         The import c code of the kernel,
         will be injected before the generated kernel code.
+    cpu_num_threads : int
+        OpenMP thread count for CPU targets: emitted as the
+        ``num_threads(n)`` clause on the grid parallel region when the
+        ``tl.cpu_parallel`` pass config is enabled. ``None`` (default)
+        omits the clause and lets the OpenMP runtime pick the thread
+        count (e.g. from ``OMP_NUM_THREADS``). Only the ``c`` target
+        consumes it — on the ``llvm`` target it has no effect, since
+        that path lowers to ``TVMBackendParallelLaunch`` and uses TVM's
+        own thread pool (controlled via ``TVM_NUM_THREADS`` /
+        ``OMP_NUM_THREADS``). Ignored on non-CPU targets.
 
     Returns
     -------
@@ -336,6 +347,11 @@ def Kernel(
 
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
+
+    if cpu_num_threads is not None:
+        if isinstance(cpu_num_threads, bool) or not isinstance(cpu_num_threads, int) or cpu_num_threads <= 0:
+            raise ValueError(f"cpu_num_threads must be a positive integer, got {cpu_num_threads}")
+        attrs["tl.cpu_num_threads"] = cpu_num_threads
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
 

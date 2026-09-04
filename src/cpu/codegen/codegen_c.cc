@@ -16,6 +16,7 @@
 #include "support/str_escape.h"
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"
+#include "transform/common/attr.h"
 
 #include <cmath>
 #include <sstream>
@@ -451,6 +452,45 @@ void CodeGenTileLangC::VisitStmt_(const AllocBufferNode *op) {
   stream << ' ' << vid << '[' << constant_size << "];\n";
 
   RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
+}
+
+void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
+  if (op->kind == ForKind::kParallel && omp_chain_members_.count(op) == 0) {
+    // Head of a parallel chain: count the perfectly-nested kParallel body
+    // loops for the collapse(n) clause, then print serially via the base
+    // class. Chain members are remembered by node identity so that a
+    // *different* kParallel loop reached through wrapper statements
+    // (IfThenElse / AttrStmt / SeqStmt) inside the chain body still gets
+    // its own pragma instead of being mistaken for a member.
+    auto saved_members = omp_chain_members_;
+    int depth = 1;
+    for (const ForNode *child = op->body.as<ForNode>();
+         child && child->kind == ForKind::kParallel;
+         child = child->body.as<ForNode>()) {
+      omp_chain_members_.insert(child);
+      ++depth;
+    }
+    this->PrintIndent();
+    stream << "#pragma omp parallel for";
+    if (depth > 1) {
+      stream << " collapse(" << depth << ")";
+    }
+    if (auto num_threads = op->annotations.Get(tl::attr::kCPUNumThreads)) {
+      if (const auto *imm = num_threads->as<IntImmNode>()) {
+        stream << " num_threads(" << imm->value << ")";
+      }
+    }
+    stream << "\n";
+    CodeGenC::VisitStmt_(op);
+    omp_chain_members_ = std::move(saved_members);
+    return;
+  }
+  if (op->kind == ForKind::kParallel) {
+    // Continuation of an already-annotated chain: print serially.
+    CodeGenC::VisitStmt_(op);
+    return;
+  }
+  CodeGenC::VisitStmt_(op);
 }
 
 void CodeGenTileLangC::VisitExpr_(const MinNode *op,
