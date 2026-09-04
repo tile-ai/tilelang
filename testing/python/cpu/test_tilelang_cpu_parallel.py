@@ -234,7 +234,7 @@ def test_cpu_parallel_dynamic_extent():
     # InjectAssumes wraps around symbolic-shape kernels is transparent to the
     # pass, and OpenMP handles runtime trip counts (the min_trip gate is off
     # by default).
-    m = T.symbolic("m")
+    m = T.dynamic("m")
 
     @T.prim_func
     def dyn(A: T.Tensor((m,), "float32"), B: T.Tensor((m,), "float32")):
