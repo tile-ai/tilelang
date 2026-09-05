@@ -17,12 +17,11 @@ from hashlib import sha256
 from typing import Literal
 from collections.abc import Callable
 
-import cloudpickle
 from tvm.target import Target
 from tvm.tirx import PrimFunc
 from tvm.runtime import Executable
 from tilelang.backend.module import BackendContext, create_backend_context
-from tilelang.engine.param import KernelParam
+from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
 from tilelang.utils.language import get_prim_func_name
 from tilelang import env
 from tilelang.jit import JITKernel
@@ -40,7 +39,7 @@ class KernelCache:
         kernel.cu: The compiled kernel source code
         wrapped_kernel.cu: The compiled wrapped kernel source code
         kernel_lib.so: The compiled kernel library
-        params.pkl: The compiled kernel parameters
+        params.json: The compiled kernel parameters
     """
 
     _instance = None  # For implementing singleton pattern
@@ -52,7 +51,7 @@ class KernelCache:
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
-    params_path = "params.pkl"
+    params_path = "params.json"
     resource_usage_path = "resource_usage.json"
     manifest_path = "manifest.json"
     cache_root_dir = "kernels"
@@ -597,7 +596,7 @@ class KernelCache:
             params_path = os.path.join(staging_path, self.params_path)
             if verbose:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
-            KernelCache._safe_write_file(params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file))
+            KernelCache._safe_write_file(params_path, "w", lambda file: file.write(dump_kernel_params(kernel.params)))
 
             # Persist HIP kernel-resource-usage remarks
             usage = getattr(kernel, "_resource_usage", None) or {}
@@ -692,8 +691,8 @@ class KernelCache:
         try:
             if verbose:
                 self.logger.debug(f"Loading kernel parameters from file: {params_path}")
-            with open(params_path, "rb") as f:
-                kernel_params = cloudpickle.load(f)
+            with open(params_path) as f:
+                kernel_params = load_kernel_params(f.read())
         except Exception:
             self.logger.exception("Error loading kernel parameters from disk")
 
@@ -809,7 +808,7 @@ class KernelCache:
         """Check a cache entry against its manifest.
 
         Every listed file must match its recorded size; the required binary
-        artifacts (e.g. kernel_lib.so, params.pkl) must also match their
+        artifacts (e.g. kernel_lib.so, params.json) must also match their
         recorded content hash. Source files are size-checked only so disk
         cache hits keep deferring source reads. Returns False for entries
         whose manifest is unreadable or that do not cover the required files.

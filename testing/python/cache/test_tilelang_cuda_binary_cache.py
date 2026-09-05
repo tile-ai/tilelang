@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import cloudpickle
 import os
 
 import tilelang
+from tilelang import tvm
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.backend import create_backend_context
 from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 from tilelang.cache.kernel_cache import KernelCache
+from tilelang.engine.param import KernelParam, dump_kernel_params
 from tilelang.env import env
 from tvm.target import Target
 
@@ -127,8 +128,7 @@ def test_disk_cache_load_failure_is_cache_miss(monkeypatch, tmp_path):
     (cache_path / cache.device_kernel_path).write_text("// device")
     (cache_path / cache.host_kernel_path).write_text("// host")
     (cache_path / cache.kernel_lib_path).write_bytes(b"not-loadable")
-    with (cache_path / cache.params_path).open("wb") as f:
-        cloudpickle.dump(["param"], f)
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
     cache._write_manifest(str(cache_path))
 
     def fail_from_database(*args, **kwargs):
