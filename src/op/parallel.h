@@ -29,6 +29,45 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+/**
+ * Validate that every physical byte written by scalar packed four-bit stores
+ * in `loop` is owned by one GPU thread under `loop_layout`.
+ *
+ * Throws LayoutConflictException when ownership cannot be proven. This must
+ * run before LowerParallelLoop removes the logical loop layout.
+ */
+void ValidatePacked4BitStoreOwnership(const For &loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate);
+
+/**
+ * Apply the physical buffer layouts, then validate packed four-bit ownership.
+ * This overload is used by tile operators whose generated SIMT loops have not
+ * yet passed through LowerTileOp's buffer visitors.
+ */
+void ValidatePacked4BitStoreOwnership(const For &loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate,
+                                      const Map<Buffer, Buffer> &buffer_remap,
+                                      const Map<Buffer, Layout> &layout_map);
+
+/**
+ * Validate a generated loop that is executed independently by every thread,
+ * rather than partitioned by `LowerParallelLoop`.
+ *
+ * This is used by local-buffer copy lowering, where the destination indices
+ * may contain the hardware thread index directly.
+ */
+void ValidatePacked4BitStoreOwnership(const For &loop, PrimExpr thread_index,
+                                      const Range &thread_bounds,
+                                      arith::Analyzer *analyzer,
+                                      const Map<Buffer, Buffer> &buffer_remap,
+                                      const Map<Buffer, Layout> &layout_map);
+
 class ParallelOpNode;
 
 /*!

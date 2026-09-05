@@ -128,10 +128,15 @@ private:
                           level);
     }
     auto loop_layout = par_op->GetLoopLayout();
+    Optional<PrimExpr> predicate =
+        par_op->GetPredicate(lower_args.thread_index);
+    ValidatePacked4BitStoreOwnership(
+        par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
+        predicate, lower_args.buffer_remap, lower_args.layout_map);
     Stmt lowered_loop = LowerParallelLoop(
         par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
-        lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+        lower_args.layout_map, predicate, /*parallel_loop=*/true,
+        par_op->LoopLayoutRequiresPaddingGuard());
 
     auto inject_result =
         InjectROCmAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/
