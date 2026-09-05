@@ -594,9 +594,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
       /*check_forward_index=*/false, source_buffer);
 
   // Step 3: Build replication guards
-  BuildReplicationGuardsIfNeeded(
-      layout_args, store_shared_global_buffers_, store_fragment_buffers_,
-      has_cross_thread_access_, const_index_fragment_buffer);
+  BuildReplicationGuardsIfNeeded(layout_args, store_fragment_buffers_,
+                                 has_cross_thread_access_);
 
   // Step 4: Collect buffer fragments
   LayoutMap results;
@@ -1052,43 +1051,17 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
 
 void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     const LayoutInferArgs &layout_args,
-    const std::vector<Buffer> &store_shared_global_buffers,
     const std::vector<Buffer> &store_fragment_buffers,
-    bool has_cross_thread_access,
-    const std::vector<Buffer> &const_index_fragment_buffer) const {
+    bool has_cross_thread_access) const {
   if (is_one(loop_layout_->ReplicateExtent()))
     return;
   if (!has_cross_thread_access)
     return;
 
   if (!store_fragment_buffers.empty()) {
-    bool replicate_is_from_dynamic_index_fragment = false;
-    for (const auto &fragment : store_fragment_buffers) {
-      if (!layout_args.layout_map.count(fragment)) {
-        continue;
-      }
-
-      auto fragment_layout =
-          layout_args.layout_map[fragment].as<Fragment>().value();
-      if (is_one(fragment_layout->ReplicateExtent()))
-        continue;
-
-      if (analyzer_.CanProveEqual(fragment_layout->ReplicateExtent(),
-                                  loop_layout_->ReplicateExtent()))
-        continue;
-      if (std::find(const_index_fragment_buffer.begin(),
-                    const_index_fragment_buffer.end(),
-                    fragment) == const_index_fragment_buffer.end()) {
-        replicate_is_from_dynamic_index_fragment = true;
-      }
-    }
-
-    if (!replicate_is_from_dynamic_index_fragment)
-      return;
-
-    ICHECK(store_shared_global_buffers.empty())
-        << "Invalid layout: cannot have both fragment and shared store buffers "
-           "in replicated loop layout.";
+    // Fragment writes require every replica to execute. Any coexisting
+    // shared/global stores therefore execute once per replica as well;
+    // duplicate same-value stores are permitted by CUDA instruction semantics.
     return;
   } else {
     auto inv = loop_layout_->Inverse();

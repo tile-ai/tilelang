@@ -240,10 +240,8 @@ private:
   // Add replication guard predicates when needed for cross-thread stores.
   void BuildReplicationGuardsIfNeeded(
       const LayoutInferArgs &layout_args,
-      const std::vector<Buffer> &store_shared_global_buffers,
       const std::vector<Buffer> &store_fragment_buffers,
-      bool has_cross_thread_access,
-      const std::vector<Buffer> &const_index_fragment_buffer) const;
+      bool has_cross_thread_access) const;
   // Add a predicate to the current predicate expression.
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
