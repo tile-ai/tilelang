@@ -8,9 +8,7 @@ from tvm.tirx.stmt_functor import post_order_visit
 
 
 _CUDA_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
-_ROCM_TARGET = tvm.target.Target(
-    {"kind": "hip", "mcpu": "gfx90a", "thread_warp_size": 64}
-)
+_ROCM_TARGET = tvm.target.Target({"kind": "hip", "mcpu": "gfx90a", "thread_warp_size": 64})
 
 
 def _make_any_of_kernel(condition_kind, scope="auto"):
