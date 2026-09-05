@@ -54,22 +54,38 @@ inline Array<PrimExpr> InputPlaceholders(size_t n) {
   return result;
 }
 
-inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
+// NOTE: duplicated in src/op/reduce.cc; keep both in sync.
+// With `keepdim`, the reduced axis is retained as an extent-1 dummy axis so
+// that the layout rank matches a keep-dim destination buffer. The physical
+// thread mapping is unchanged; only the number of accepted logical indices
+// differs.
+inline Fragment ComputeReducerLayout(const Fragment &src_layout, int dim,
+                                     bool keepdim = false) {
   PrimExpr src_rep_extent = src_layout->ReplicateExtent();
   PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
   PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
 
-  auto fwd = InputPlaceholders(src_layout->InputDim() - 1);
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  Array<PrimExpr> fwd;
+  if (keepdim) {
+    fwd = InputPlaceholders(src_layout->InputDim());
+    fwd.Set(dim, FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  } else {
+    fwd = InputPlaceholders(src_layout->InputDim() - 1);
+    fwd.insert(fwd.begin() + dim,
+               FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  }
 
   auto thd = src_layout->ForwardThread(
       fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
 
   auto reducer_shape = src_layout->InputShape();
-  reducer_shape.erase(reducer_shape.begin() + dim);
-  if (reducer_shape.empty()) {
-    reducer_shape.push_back(1);
+  if (keepdim) {
+    reducer_shape.Set(dim, 1);
+  } else {
+    reducer_shape.erase(reducer_shape.begin() + dim);
+    if (reducer_shape.empty()) {
+      reducer_shape.push_back(1);
+    }
   }
 
   return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt)
@@ -763,7 +779,16 @@ template <typename Impl> struct ReduceLowerer {
       auto dst_buffer = get_buffer(op.dst);
       auto src_layout = lower_args.layout_map[op.src].as<Fragment>().value();
       auto dst_layout = lower_args.layout_map[op.dst].as<Fragment>().value();
-      auto red_layout = reduce::ComputeReducerLayout(src_layout, op.dim);
+      // Same keep-dim criterion as ReduceOpNode::InferLayout, so that
+      // `red_layout` and `dst_layout` always agree on rank. Rank-1 sources are
+      // excluded: dropping their only axis already degenerates to extent 1.
+      // A same-rank destination with a non-unit reduced axis is already
+      // diagnosed by ReduceOpNode::InferLayout, which runs before lowering.
+      bool keepdim = src_layout->InputDim() > 1 &&
+                     op.dst->shape.size() == src_layout->InputDim() &&
+                     is_one(op.dst->shape[op.dim]);
+      auto red_layout =
+          reduce::ComputeReducerLayout(src_layout, op.dim, keepdim);
       auto src_dim = src_layout->InputDim();
       auto dst_dim = dst_layout->InputDim();
 
@@ -772,6 +797,11 @@ template <typename Impl> struct ReduceLowerer {
       if (is_1d_reduce) {
         ICHECK(is_one(dst_layout->OutputShape().back()))
             << "Reduce for scalar not implemented.";
+      } else if (keepdim) {
+        ICHECK_EQ(src_dim, dst_dim) << "Reduce dimension mismatch.";
+        ICHECK(is_one(dst_layout->InputShape()[op.dim]))
+            << "Reduce for keep-dim requires the reduced axis to have extent 1 "
+               "in the destination layout.";
       } else {
         ICHECK_EQ(src_dim, dst_dim + 1) << "Reduce dimension mismatch.";
       }
@@ -789,7 +819,13 @@ template <typename Impl> struct ReduceLowerer {
       }
       Range reduce_dom(0, src_layout->InputShape()[op.dim]);
       IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
-      src_vars.insert(src_vars.begin() + op.dim, reduce_iv);
+      if (keepdim) {
+        // `dst_vars` already carries the extent-1 dummy axis at `op.dim`;
+        // replace it instead of inserting, to keep `src_vars` at src rank.
+        src_vars.Set(op.dim, reduce_iv);
+      } else {
+        src_vars.insert(src_vars.begin() + op.dim, reduce_iv);
+      }
 
       auto src_indices = src_layout->Forward(
           src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
