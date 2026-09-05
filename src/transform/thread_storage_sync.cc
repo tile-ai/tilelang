@@ -1906,15 +1906,16 @@ private:
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
 
-      // For WAW (Write-after-Write) and RAR (Read-after-Read), we should use
-      // the same thread variables because:
-      // - WAW: doesn't create true data dependency, only need to check if the
-      //   same thread overwrites its own data across iterations
-      // - RAR: no dependency at all
-      // For RAW (Read-after-Write) and WAR (Write-after-Read), we need to use
-      // different thread variables to check cross-thread dependencies.
-      bool same_access_type = (prev.type == kWrite && curr.type == kWrite) ||
-                              (prev.type == kRead && curr.type == kRead);
+      // A same-iteration WAW must model two distinct threads: program order
+      // already orders writes from one thread, while writes from different
+      // threads may target the same address and require a barrier. Keep the
+      // existing loop-carried WAW model unchanged; correctly extending that
+      // case also requires shifting its constraints and placing the barrier
+      // inside the loop.
+      bool is_same_iteration_waw =
+          loop == nullptr && prev.type == kWrite && curr.type == kWrite;
+      bool use_distinct_threads =
+          prev.type != curr.type || is_same_iteration_waw;
 
       PrimExpr thread_condition = Bool(false);
       Map<Var, PrimExpr> prev_sub, curr_sub;
@@ -1924,14 +1925,7 @@ private:
         Var old_prev_var = prev.threads[prev.threads.size() + idx - 3]->var;
         Var old_curr_var = curr.threads[curr.threads.size() + idx - 3]->var;
 
-        if (same_access_type) {
-          // For WAW/RAR: use a single shared Var object for both prev and curr
-          // This allows the analyzer to see they reference the same thread
-          Var shared_var(thread_names[idx], old_prev_var.dtype());
-          prev_sub.Set(old_prev_var, shared_var);
-          curr_sub.Set(old_curr_var, shared_var);
-        } else {
-          // For RAW/WAR: use different Var objects to model cross-thread access
+        if (use_distinct_threads) {
           Var prev_var(std::string(thread_names[idx]) + "1",
                        old_prev_var.dtype());
           Var curr_var(std::string(thread_names[idx]) + "2",
@@ -1940,17 +1934,20 @@ private:
               tirx::Or(thread_condition, tirx::NE(prev_var, curr_var));
           prev_sub.Set(old_prev_var, prev_var);
           curr_sub.Set(old_curr_var, curr_var);
+        } else {
+          Var shared_var(thread_names[idx], old_prev_var.dtype());
+          prev_sub.Set(old_prev_var, shared_var);
+          curr_sub.Set(old_curr_var, shared_var);
         }
       }
-      if (!same_access_type) {
+      if (use_distinct_threads) {
         analyzer.EnterConstraint(thread_condition);
       }
       // Two instances in one analyzer, so per-instance binds need their own
-      // copy; see ConstrSet::RenameFrom. They differ when they are two threads
-      // (RAW/WAR) or two iterations of one thread (loop carry); a same-type
-      // pair within one iteration is one execution, where renaming would only
-      // lose the bind.
-      if (!same_access_type || loop != nullptr) {
+      // copy; see ConstrSet::RenameFrom. They differ for cross-thread proofs
+      // (RAW/WAR/same-iteration WAW) or for two loop iterations. Otherwise the
+      // pair represents one execution, where renaming would only lose the bind.
+      if (use_distinct_threads || loop != nullptr) {
         prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
                                          /*rename_ranges=*/false);
         curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,
