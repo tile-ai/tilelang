@@ -1029,17 +1029,28 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
 
   // Check if coalesced_width is defined
   if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
-    if (const auto *imm = coalesced_width->as<IntImmNode>()) {
-      int expected = imm->value;
-      // Verify that vector_size is divisible by expected
-      if (vector_size % expected != 0) {
-        LOG(FATAL) << "Vector size " << vector_size
-                   << " is not divisible by coalesced width " << expected;
-      }
-      vector_size = expected;
+    int64_t expected;
+    const auto &value = coalesced_width.value();
+    if (const auto *imm = value.as<IntImmNode>()) {
+      expected = imm->value;
+    } else if (auto raw_int = value.as<int64_t>()) {
+      expected = raw_int.value();
     } else {
-      LOG(FATAL) << "coalesced_width should be an IntImmNode.";
+      TVM_FFI_THROW(TypeError)
+          << "Loop annotation `" << attr::kCoalescedWidth
+          << "` expects an integer, but got " << value.GetTypeKey();
     }
+    if (expected <= 0) {
+      TVM_FFI_THROW(ValueError)
+          << "Loop annotation `" << attr::kCoalescedWidth
+          << "` expects a positive integer, but got " << expected;
+    }
+    // Verify that vector_size is divisible by expected
+    if (vector_size % expected != 0) {
+      LOG(FATAL) << "Vector size " << vector_size
+                 << " is not divisible by coalesced width " << expected;
+    }
+    vector_size = static_cast<int>(expected);
   }
   DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
              << " ############# vector_size = " << vector_size
