@@ -25,7 +25,7 @@ def shared_all_of(size, threads, scope=None):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("scope", [None, "thread", "warp"])
+@pytest.mark.parametrize("scope", [None, "auto", "thread", "warp"])
 def test_all_of_shared_scope(scope):
     size, threads = 70, 32
     kernel = tilelang.compile(shared_all_of(size, threads, scope), target="cuda", out_idx=-1)
@@ -54,6 +54,18 @@ def test_all_of_shared_warp_scope_rocm():
         torch.testing.assert_close(result, expected)
 
     assert "tl::AllWarp" in kernel.get_kernel_source()
+
+
+def test_all_of_rejects_invalid_scope():
+    with pytest.raises(
+        ValueError,
+        match="scope must be 'auto', 'thread' or 'warp'",
+    ):
+
+        @T.prim_func
+        def main(source: T.Tensor((1,), "int32")):
+            with T.Kernel(1, threads=1):
+                T.evaluate(T.all_of(source, scope="block"))
 
 
 def ref_program(A, B, BlockMask, block_M, block_N, block_K):

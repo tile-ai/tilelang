@@ -25,7 +25,7 @@ def shared_any_of(size, threads, scope=None):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("scope", [None, "thread", "warp"])
+@pytest.mark.parametrize("scope", [None, "auto", "thread", "warp"])
 def test_any_of_shared_scope(scope):
     size, threads = 70, 32
     kernel = tilelang.compile(shared_any_of(size, threads, scope), target="cuda", out_idx=-1)
@@ -57,7 +57,7 @@ def test_any_of_shared_warp_scope_rocm():
 
 
 def test_any_of_rejects_invalid_scope():
-    with pytest.raises(ValueError, match="scope must be 'thread' or 'warp'"):
+    with pytest.raises(ValueError, match="scope must be 'auto', 'thread' or 'warp'"):
 
         @T.prim_func
         def main(source: T.Tensor((1,), "int32")):
