@@ -196,6 +196,10 @@ private:
   // Check if a buffer is completely replicated (all threads hold same data).
   bool IsBufferCompletelyReplicated(const Buffer &buffer,
                                     const LayoutMap &layout_map) const;
+  // Return true only when every candidate axis is proven to cover the
+  // corresponding parallel loop axis. Optionally throw a detailed conflict.
+  bool ValidateCandidateCoversLoop(const Fragment &candidate,
+                                   bool throw_on_error = false) const;
   // Validate a candidate loop layout against all source fragments in
   // T.layout_map. Returns true if compatible with all fragments; otherwise
   // false. When throw_on_error is true, throws LayoutConflictException with
