@@ -433,3 +433,14 @@ def UnrollLoop():
         The result pass
     """
     return _ffi_api.UnrollLoop()  # type: ignore
+
+
+def ResolveLogicalScope():
+    """Resolve automatic scopes for logical reductions.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The resulting pass.
+    """
+    return _ffi_api.ResolveLogicalScope()  # type: ignore

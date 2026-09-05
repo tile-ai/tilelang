@@ -1,7 +1,71 @@
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+import pytest
 import torch
+
+
+def shared_all_of(size, threads, scope=None):
+    @T.prim_func
+    def main(
+        source: T.Tensor((size,), "int32"),
+        result: T.Tensor((threads,), "bool"),
+    ):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared((size,), "int32")
+            tx = T.get_thread_binding()
+            T.copy(source, shared)
+            T.sync_threads()
+            if scope is None:
+                result[tx] = T.all_of(shared)
+            else:
+                result[tx] = T.all_of(shared, scope=scope)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("scope", [None, "auto", "thread", "warp"])
+def test_all_of_shared_scope(scope):
+    size, threads = 70, 32
+    kernel = tilelang.compile(shared_all_of(size, threads, scope), target="cuda", out_idx=-1)
+    for false_index in (None, 0, threads - 1, size - 1):
+        source = torch.ones(size, dtype=torch.int32, device="cuda")
+        if false_index is not None:
+            source[false_index] = 0
+        result = kernel(source)
+        expected = torch.full((threads,), false_index is None, dtype=torch.bool, device="cuda")
+        torch.testing.assert_close(result, expected)
+
+    helper = "tl::AllWarp" if scope == "warp" else "tl::All"
+    assert helper in kernel.get_kernel_source()
+
+
+@tilelang.testing.requires_rocm
+def test_all_of_shared_warp_scope_rocm():
+    size, threads = 134, 64
+    kernel = tilelang.compile(shared_all_of(size, threads, "warp"), target="hip", out_idx=-1)
+    for false_index in (None, size - 1):
+        source = torch.ones(size, dtype=torch.int32, device="cuda")
+        if false_index is not None:
+            source[false_index] = 0
+        result = kernel(source)
+        expected = torch.full((threads,), false_index is None, dtype=torch.bool, device="cuda")
+        torch.testing.assert_close(result, expected)
+
+    assert "tl::AllWarp" in kernel.get_kernel_source()
+
+
+def test_all_of_rejects_invalid_scope():
+    with pytest.raises(
+        ValueError,
+        match="scope must be 'auto', 'thread' or 'warp'",
+    ):
+
+        @T.prim_func
+        def main(source: T.Tensor((1,), "int32")):
+            with T.Kernel(1, threads=1):
+                T.evaluate(T.all_of(source, scope="block"))
 
 
 def ref_program(A, B, BlockMask, block_M, block_N, block_K):
