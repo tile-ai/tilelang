@@ -36,10 +36,9 @@ def _infer_coalesced_width_layout(coalesced_width=None, *, use_annotations=False
                 for i in T.Parallel(length):
                     B[i] = A[i]
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    with target:
+    with tvm.target.Target(auto_target):
         mod = tvm.IRModule({"main": main})
-        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         mod = tl.transform.LayoutInference()(mod)
 
