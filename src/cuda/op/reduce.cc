@@ -7,6 +7,8 @@
 
 #include "backend/common/target_utils.h"
 
+#include <tvm/ir/transform.h>
+
 #include <sstream>
 
 namespace tvm {
@@ -18,6 +20,13 @@ namespace cuda {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
   static bool IsFAdd2Enabled(const ReduceOpNode &op) {
+    auto pass_ctx = tvm::transform::PassContext::Current();
+    bool globally_enabled =
+        pass_ctx->GetConfig<Bool>(kEnableFP32x2Reduction, Bool(true)).value();
+    if (!globally_enabled) {
+      return false;
+    }
+
     constexpr const char *kEnableFAdd2 = "enable_fadd2";
     if (auto value = op.annotations.Get(kEnableFAdd2)) {
       if (auto enabled = value.value().as<Bool>()) {

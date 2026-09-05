@@ -5,7 +5,7 @@ from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.module import BackendModule, register_backend
 from tilelang.contrib import hipcc
-from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.rocm.target import target_get_mcpu
 
 from . import codegen, execution_backend, pipeline
@@ -21,7 +21,6 @@ def tilelang_callback_hip_compile(code, target):
         options=[
             "-std=c++17",
             "-I" + TILELANG_TEMPLATE_PATH,
-            "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
         ],
         verbose=False,
     )

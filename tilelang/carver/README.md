@@ -202,4 +202,4 @@ You can also create your own specialized templates if you have unique loop struc
 
 ## TODO Items
 
-- [ ] **Adapt to tile language**: Provide ready-made scheduling calls or wrappers for [tilelang](https://github.com/LeiYanggh/tilelang) to streamline end-to-end integration.
+- [ ] **Adapt to tile language**: Provide ready-made scheduling calls or wrappers for [tilelang](https://github.com/tile-ai/tilelang) to streamline end-to-end integration.

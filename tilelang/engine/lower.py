@@ -161,7 +161,7 @@ def lower_with_context(
     has_session = current_compile_pass_instrumentation() is not None
     with compile_pass_instrumentation(name="lower-with-context"):
         attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
-        with attach_instruments, tvm.arith.Z3ContextScope():
+        with attach_instruments:
             return _lower_with_context_impl(
                 func_or_mod,
                 context,

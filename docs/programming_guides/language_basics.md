@@ -75,7 +75,6 @@ def bar(A: T.Tensor((K,), 'float32')):
 ```
 
 Notes
-- `T.symbolic(name, dtype)` is a deprecated alias of `T.dynamic`; prefer `T.dynamic`.
 - Under `@jit`, concrete sizes come from the actual tensor arguments at the first call.
 - Symbols in annotations do not need to be separate kernel arguments; TileLang binds them from argument shapes.
 

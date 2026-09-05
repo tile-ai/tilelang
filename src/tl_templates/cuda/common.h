@@ -213,9 +213,9 @@ TL_PATCH TL_DEVICE bfloat16_t __hfma(const bfloat16_t x, const bfloat16_t y,
 #endif
 }
 
-// CUDA has no half-precision tangent intrinsic, but tangent lowering uses the
-// half-style `htan` name for 16-bit inputs. Evaluate in float32 and convert the
-// result back to the source type.
+// 16-bit lowering emits these h* names, but CUDA has no overload of them
+// that accepts the CUTLASS wrapper types. Evaluate in float32 and convert
+// the result back to the source type.
 TL_PATCH TL_DEVICE half_t htan(const half_t x) {
   return half_t(tanf(float(x)));
 }
@@ -224,13 +224,168 @@ TL_PATCH TL_DEVICE bfloat16_t htan(const bfloat16_t x) {
   return bfloat16_t(tanf(float(x)));
 }
 
-// TVM lowers T.exp(bfloat16) to the CUDA half-style `hexp` name. TileLang uses
-// cutlass::bfloat16_t for scalar bf16, while CUDA only overloads hexp for
-// __nv_bfloat16. Keep this narrow bridge in common.h so plain T.exp works
-// without pulling tl_templates/cuda/math.h and cutlass/fast_math.h into every
-// kernel.
+TL_PATCH TL_DEVICE half_t hsinh(const half_t x) {
+  return half_t(sinhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hsinh(const bfloat16_t x) {
+  return bfloat16_t(sinhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hcosh(const half_t x) {
+  return half_t(coshf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hcosh(const bfloat16_t x) {
+  return bfloat16_t(coshf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t htanh(const half_t x) {
+  return half_t(tanhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t htanh(const bfloat16_t x) {
+  return bfloat16_t(tanhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hatan(const half_t x) {
+  return half_t(atanf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hatan(const bfloat16_t x) {
+  return bfloat16_t(atanf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t herf(const half_t x) {
+  return half_t(erff(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t herf(const bfloat16_t x) {
+  return bfloat16_t(erff(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hnearbyint(const half_t x) {
+  return half_t(nearbyintf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hnearbyint(const bfloat16_t x) {
+  return bfloat16_t(nearbyintf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hpow(const half_t x, const half_t y) {
+  return half_t(powf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hpow(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(powf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE half_t hfmod(const half_t x, const half_t y) {
+  return half_t(fmodf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hfmod(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(fmodf(float(x), float(y)));
+}
+
+// TVM lowers 16-bit math ops to CUDA's half-style names (hexp, hlog, ...).
+// TileLang emits cutlass::half_t / bfloat16_t for scalar 16-bit values, while
+// CUDA overloads those names only for native __half / __nv_bfloat16. Kept here
+// so plain ops work without pulling cutlass/fast_math.h into every kernel.
+TL_PATCH TL_DEVICE half_t hexp(const half_t x) {
+  return half_t(hexp(x.to_half()));
+}
+
 TL_PATCH TL_DEVICE bfloat16_t hexp(const bfloat16_t x) {
   return bfloat16_t(hexp(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hexp2(const half_t x) {
+  return half_t(hexp2(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hexp2(const bfloat16_t x) {
+  return bfloat16_t(hexp2(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hexp10(const half_t x) {
+  return half_t(hexp10(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hexp10(const bfloat16_t x) {
+  return bfloat16_t(hexp10(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hlog(const half_t x) {
+  return half_t(hlog(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hlog(const bfloat16_t x) {
+  return bfloat16_t(hlog(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hlog2(const half_t x) {
+  return half_t(hlog2(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hlog2(const bfloat16_t x) {
+  return bfloat16_t(hlog2(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hlog10(const half_t x) {
+  return half_t(hlog10(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hlog10(const bfloat16_t x) {
+  return bfloat16_t(hlog10(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hsin(const half_t x) {
+  return half_t(hsin(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hsin(const bfloat16_t x) {
+  return bfloat16_t(hsin(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hcos(const half_t x) {
+  return half_t(hcos(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hcos(const bfloat16_t x) {
+  return bfloat16_t(hcos(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hfloor(const half_t x) {
+  return half_t(hfloor(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hfloor(const bfloat16_t x) {
+  return bfloat16_t(hfloor(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hceil(const half_t x) {
+  return half_t(hceil(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hceil(const bfloat16_t x) {
+  return bfloat16_t(hceil(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t hrint(const half_t x) {
+  return half_t(hrint(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hrint(const bfloat16_t x) {
+  return bfloat16_t(hrint(x.to_nv_bfloat16()));
+}
+
+TL_PATCH TL_DEVICE half_t htrunc(const half_t x) {
+  return half_t(htrunc(x.to_half()));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t htrunc(const bfloat16_t x) {
+  return bfloat16_t(htrunc(x.to_nv_bfloat16()));
 }
 
 // CUDA has no __ldg overloads for CUTLASS's 16-bit wrappers. Forward through
@@ -276,6 +431,42 @@ TL_DEVICE float fast_rcp(float x) {
   float ret;
   asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(ret) : "f"(x));
   return ret;
+}
+
+// Replicate a small repeating unit across a wider vector type, e.g. one
+// packed fp4x2 byte across fp4_e2_64_t. Works for any (V, U) with
+// sizeof(V) % sizeof(U) == 0, so codegen does not need a make_<type>
+// constructor for every lane count.
+template <typename V, typename U> TL_DEVICE V broadcast(const U unit) {
+  static_assert(sizeof(V) % sizeof(U) == 0,
+                "tl::broadcast requires the vector size to be a multiple of "
+                "the unit size");
+  V result;
+  U *parts = reinterpret_cast<U *>(&result);
+#pragma unroll
+  for (int i = 0; i < static_cast<int>(sizeof(V) / sizeof(U)); ++i) {
+    parts[i] = unit;
+  }
+  return result;
+}
+
+// Build a vector struct from its scalar elements, one per lane (byte-sized
+// or larger; fp4 uses tl::make_fp4_vec). The element type is deduced from
+// the first argument; one variadic definition replaces a make_<type>
+// constructor per lane count.
+template <typename V, typename E, typename... Ts>
+TL_DEVICE V make_vec(const E first, const Ts... rest) {
+  constexpr int kN = 1 + static_cast<int>(sizeof...(rest));
+  static_assert(sizeof(V) == kN * sizeof(E),
+                "tl::make_vec element count does not match the vector size");
+  const E vals[] = {first, static_cast<E>(rest)...};
+  V result;
+  E *parts = reinterpret_cast<E *>(&result);
+#pragma unroll
+  for (int i = 0; i < kN; ++i) {
+    parts[i] = vals[i];
+  }
+  return result;
 }
 } // namespace tl
 
@@ -382,11 +573,21 @@ TL_DEVICE uint4 make_uint4(unsigned short x0, unsigned short x1,
 // TileLang lowers scalar int4/uint4 storage through byte-packed buffers, where
 // each byte carries 2 logical 4-bit elements.
 
+TL_DEVICE int8_t tl_pack_int4x2(int low, int high) {
+  unsigned int packed = (static_cast<unsigned int>(low) & 0xF) |
+                        ((static_cast<unsigned int>(high) & 0xF) << 4);
+  return static_cast<int8_t>(packed);
+}
+
+TL_DEVICE uint8_t tl_pack_uint4x2(unsigned int low, unsigned int high) {
+  return static_cast<uint8_t>((low & 0xF) | ((high & 0xF) << 4));
+}
+
 TL_DEVICE int tl_int4_packed_load(const signed char *packed, int idx) {
   unsigned char byte = static_cast<unsigned char>(packed[idx >> 1]);
   unsigned int shift = (idx & 1) * 4;
   int value = static_cast<int>((byte >> shift) & 0xF);
-  return (value << 28) >> 28;
+  return (value ^ 8) - 8;
 }
 
 TL_DEVICE unsigned int tl_uint4_packed_load(const unsigned char *packed,
@@ -1259,6 +1460,49 @@ TL_DEVICE __half2 abs2(__half2 a) {
 } // namespace tl
 
 using tl::tfloat32_t;
+
+// CUDA declares __shfl_*_sync only for its native arithmetic types, so
+// shuffling a CUTLASS sub-32-bit float wrapper either binds to the `float`
+// overload or is ambiguous, and fails to compile. Carry the raw bits through
+// the native 32-bit unsigned overload instead, as the tl::shfl_*_sync helpers
+// below do. The warpSize default also lets their three-argument generic
+// template resolve for these types.
+#define TL_DEFINE_SHFL_SYNC_OVERLOADS(TYPE, RAW)                               \
+  TL_PATCH TL_DEVICE TYPE __shfl_sync(unsigned mask, TYPE val, int src_lane,   \
+                                      int width = warpSize) {                  \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_sync(mask, static_cast<uint32_t>(raw), src_lane, width));       \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }                                                                            \
+  TL_PATCH TL_DEVICE TYPE __shfl_xor_sync(                                     \
+      unsigned mask, TYPE val, int lane_mask, int width = warpSize) {          \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_xor_sync(mask, static_cast<uint32_t>(raw), lane_mask, width));  \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }                                                                            \
+  TL_PATCH TL_DEVICE TYPE __shfl_down_sync(unsigned mask, TYPE val, int delta, \
+                                           int width = warpSize) {             \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_down_sync(mask, static_cast<uint32_t>(raw), delta, width));     \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }                                                                            \
+  TL_PATCH TL_DEVICE TYPE __shfl_up_sync(unsigned mask, TYPE val, int delta,   \
+                                         int width = warpSize) {               \
+    RAW raw = reinterpret_cast<RAW &>(val);                                    \
+    RAW ret = static_cast<RAW>(                                                \
+        __shfl_up_sync(mask, static_cast<uint32_t>(raw), delta, width));       \
+    return reinterpret_cast<TYPE &>(ret);                                      \
+  }
+
+TL_DEFINE_SHFL_SYNC_OVERLOADS(half_t, uint16_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(bfloat16_t, uint16_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e4m3_t, uint8_t)
+TL_DEFINE_SHFL_SYNC_OVERLOADS(tl::float_e5m2_t, uint8_t)
+
+#undef TL_DEFINE_SHFL_SYNC_OVERLOADS
 
 //
 // Optimized type-punned warp shuffle helpers for 16-bit types

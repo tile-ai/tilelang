@@ -154,18 +154,14 @@ class TensorProxy(BaseTensorProxy):
     the tensor should be by default contiguous.
     """
 
-    @staticmethod
-    def _construct_strides(shape: tuple[Any]):
-        s, strides = 1, [1]
-        for dim in shape[:0:-1]:
-            s *= dim
-            strides.append(s)
-        return tuple(reversed(strides))
-
     def __call__(self, shape: ShapeType | PrimExpr | int, dtype: DType = "float32", data=None, scope=None) -> tirx.Buffer:
+        # Imported lazily: `tilelang.language.eager` pulls in the builder, which
+        # imports this module transitively.
+        from tilelang.language.eager.utils import construct_strides
+
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
-        return super().__call__(shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data, scope=scope)
+        return super().__call__(shape, dtype=dtype, strides=construct_strides(shape), data=data, scope=scope)
 
 
 class StridedTensorProxy(BaseTensorProxy):

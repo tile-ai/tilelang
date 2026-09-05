@@ -9,7 +9,7 @@ import tilelang.testing
 @tilelang.jit
 def dynamic_smem_kernel():
     # Symbolic length to drive dynamic shared memory allocation
-    length = T.symbolic("len", dtype=T.int32)  # noqa: F821
+    length = T.dynamic("len", dtype=T.int32)  # noqa: F821
 
     @T.prim_func
     def main(global_tensor: T.Tensor[(length,), T.int32]):  # noqa: F821

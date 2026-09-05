@@ -59,7 +59,6 @@ static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
 static constexpr const char *kDisableSharedMemoryReuse =
     "tl.disable_shared_memory_reuse";
-static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
 static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
 static constexpr const char *kEnableAsyncCopy = "tl.enable_async_copy";
 // Force the canonical FullParticipant baseline for every reducer epoch,

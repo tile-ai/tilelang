@@ -16,7 +16,7 @@ from . import overrides as _overrides  # noqa: F401
 
 from .eager import *  # noqa: F401,F403
 from .tir.ir import *  # noqa: F401,F403
-from tilelang.layout import Layout, Fragment  # noqa: F401
+from tilelang.layout import Layout, Fragment, PartialFragment  # noqa: F401
 from .proxy import ptr, make_tensor, make_tensor_from_addr, Buffer, Tensor, StridedTensor, FragmentBuffer, SharedBuffer, LocalBuffer  # noqa: F401
 from .loop import (
     Parallel,  # noqa: F401
@@ -137,18 +137,19 @@ from .builtin import (  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
 
-from .symbolics import dynamic, symbolic  # noqa: F401
+from .symbolics import dynamic  # noqa: F401
 from .annotations import (  # noqa: F401
     WSID,
     use_swizzle,
     annotate_layout,
     annotate_safe_value,
     annotate_restrict_buffers,
+    annotate_ws_pipeline_depth,
     annotate_ws_schedule,
     ws_op,
 )
 
-from .ws_schedule import (  # noqa: F401
+from .warp_specialize import (  # noqa: F401
     WSRole,
     WSPipeline,
     WSInstr,
@@ -188,6 +189,7 @@ _LOCAL_EXPORTS = (
     "BaseTileScheduler",
     "Fragment",
     "FragmentBuffer",
+    "PartialFragment",
     "GemmWarpPolicy",
     "Kernel",
     "KernelLaunchFrame",
@@ -227,6 +229,7 @@ _LOCAL_EXPORTS = (
     "annotate_layout",
     "annotate_restrict_buffers",
     "annotate_safe_value",
+    "annotate_ws_pipeline_depth",
     "annotate_ws_schedule",
     "ws_op",
     "any_of",
@@ -298,7 +301,6 @@ _LOCAL_EXPORTS = (
     "shfl_sync",
     "shfl_up",
     "shfl_xor",
-    "symbolic",
     "sync_global",
     "sync_grid",
     "sync_threads",

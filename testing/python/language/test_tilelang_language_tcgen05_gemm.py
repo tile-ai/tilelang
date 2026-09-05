@@ -808,3 +808,56 @@ def test_tcgen05_ts_gemm_tmem_a_correctness(M, K):
     b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
     ref = a.float() @ b.float().T
     torch.testing.assert_close(kernel(a, b), ref, rtol=2e-2, atol=2e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_sync_tcgen05_gemm_pipelined_wait_parity(num_stages):
+    """A synchronous T.gemm(mbar=...) inside T.Pipelined uses a single user
+    barrier that flips once per iteration, so the auto-emitted wait parity is
+    k % 2 regardless of num_stages. The old ring parity was wrong for every
+    num_stages > 1 and could let a later copy overwrite shared memory while an
+    MMA was still reading it.
+    """
+    import torch
+
+    M = N = K = 2048
+    block_M = block_N = 128
+    block_K = 64
+    dtype, accum_dtype = T.bfloat16, T.float32
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_N, block_K), dtype)
+            C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            mbar = T.alloc_barrier(1)
+
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                T.copy(A[bx * block_M, k * block_K], A_shared)
+                T.copy(B[by * block_N, k * block_K], B_shared)
+                T.gemm(A_shared, B_shared, C_tmem, transpose_B=True, clear_accum=k == 0, mbar=mbar)
+
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, C[bx * block_M, by * block_N])
+
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+    )
+    torch.manual_seed(0)
+    a = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    b = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+    c = torch.zeros(M, N, device="cuda", dtype=torch.bfloat16)
+    kernel(a, b, c)
+    ref = a.float() @ b.float().T
+    torch.testing.assert_close(c.float(), ref, rtol=2e-2, atol=2e-2)

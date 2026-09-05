@@ -1,7 +1,6 @@
 #pragma once
 
 #include "atomic.h"
-#include <ck_tile/core.hpp>
 #include <hip/amd_detail/amd_warp_functions.h>
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
@@ -183,6 +182,16 @@ __device__ __forceinline__ float16_t __habs(float16_t a) {
 }
 
 namespace tl {
+
+// Scalar max/min. The float/double overloads use the fmax/fmin builtins so
+// that NaN inputs follow IEEE semantics (and the compiler can fuse v_max3).
+template <typename T> TL_DEVICE T max(T x, T y) { return x > y ? x : y; }
+TL_DEVICE float max(float x, float y) { return __builtin_fmaxf(x, y); }
+TL_DEVICE double max(double x, double y) { return __builtin_fmax(x, y); }
+
+template <typename T> TL_DEVICE T min(T x, T y) { return x < y ? x : y; }
+TL_DEVICE float min(float x, float y) { return __builtin_fminf(x, y); }
+TL_DEVICE double min(double x, double y) { return __builtin_fmin(x, y); }
 
 // Packed x2 element-wise math helpers (HIP scalar fallbacks)
 //

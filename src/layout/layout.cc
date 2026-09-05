@@ -356,7 +356,7 @@ Map<Var, Range> FragmentNode::GetVarMap() const {
 
 namespace {
 
-constexpr int64_t kMaxExactInjectivityDomain = 1 << 18;
+constexpr int64_t kMaxExactLayoutDomain = 1 << 18;
 
 struct IntTupleHash {
   size_t operator()(const std::vector<int64_t> &values) const {
@@ -414,10 +414,10 @@ CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
     if (*extent == 0) {
       return {ExactInjectivityStatus::kInjective, ""};
     }
-    if (*extent > kMaxExactInjectivityDomain / domain_size) {
+    if (*extent > kMaxExactLayoutDomain / domain_size) {
       return {ExactInjectivityStatus::kUnknown,
               "the logical input domain exceeds the exact-check limit of " +
-                  std::to_string(kMaxExactInjectivityDomain) + " points"};
+                  std::to_string(kMaxExactLayoutDomain) + " points"};
     }
     domain_size *= *extent;
     vars.push_back(var);
@@ -463,6 +463,200 @@ CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
     }
   }
   return {ExactInjectivityStatus::kInjective, ""};
+}
+
+enum class InverseRoundTripStatus { kValid, kInvalid, kUnknown };
+
+struct InverseRoundTripResult {
+  InverseRoundTripStatus status;
+  std::string detail;
+};
+
+bool GetStaticDomain(const Array<PrimExpr> &shape,
+                     std::vector<int64_t> *extents, int64_t *domain_size) {
+  arith::Analyzer analyzer;
+  *domain_size = 1;
+  extents->clear();
+  extents->reserve(shape.size());
+  for (const PrimExpr &dim : shape) {
+    const int64_t *extent = as_const_int(analyzer.Simplify(dim));
+    if (extent == nullptr || *extent < 0) {
+      return false;
+    }
+    if (*extent == 0) {
+      *domain_size = 0;
+    } else if (*domain_size != 0) {
+      if (*extent > kMaxExactLayoutDomain / *domain_size) {
+        return false;
+      }
+      *domain_size *= *extent;
+    }
+    extents->push_back(*extent);
+  }
+  return true;
+}
+
+std::vector<int64_t> UnflattenCoordinate(int64_t linear,
+                                         const std::vector<int64_t> &extents) {
+  std::vector<int64_t> coordinate(extents.size());
+  for (size_t rev = extents.size(); rev > 0; --rev) {
+    size_t i = rev - 1;
+    coordinate[i] = linear % extents[i];
+    linear /= extents[i];
+  }
+  return coordinate;
+}
+
+std::optional<std::vector<int64_t>>
+EvaluateStaticMap(const Array<PrimExpr> &indices,
+                  const std::vector<int64_t> &input) {
+  Map<Var, PrimExpr> substitution;
+  for (size_t i = 0; i < input.size(); ++i) {
+    Var placeholder = InputPlaceholder(i);
+    substitution.Set(placeholder, IntImm(placeholder->dtype,
+                                         static_cast<int64_t>(input[i])));
+  }
+
+  arith::Analyzer analyzer;
+  std::vector<int64_t> output;
+  output.reserve(indices.size());
+  for (const PrimExpr &index : indices) {
+    PrimExpr value = analyzer.Simplify(Substitute(index, substitution));
+    std::optional<int64_t> constant = EvaluateConstantInteger(value);
+    if (!constant) {
+      return std::nullopt;
+    }
+    output.push_back(*constant);
+  }
+  return output;
+}
+
+bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
+                              const Array<PrimExpr> &output_shape,
+                              const Array<PrimExpr> &forward_indices,
+                              const Array<PrimExpr> &backward_indices) {
+  arith::Analyzer analyzer;
+
+  Array<Var> logical_vars;
+  Map<Var, PrimExpr> logical_substitution;
+  for (size_t i = 0; i < input_shape.size(); ++i) {
+    Var var("__layout_logical_" + std::to_string(i), input_shape[i].dtype());
+    analyzer.Bind(var, Range(0, input_shape[i]));
+    logical_vars.push_back(var);
+    logical_substitution.Set(InputPlaceholder(i), var);
+  }
+  Array<PrimExpr> physical_from_logical =
+      Substitute(forward_indices, logical_substitution);
+  Map<Var, PrimExpr> inverse_substitution;
+  for (size_t i = 0; i < physical_from_logical.size(); ++i) {
+    inverse_substitution.Set(InputPlaceholder(i), physical_from_logical[i]);
+  }
+  Array<PrimExpr> recovered_logical =
+      Substitute(backward_indices, inverse_substitution);
+  for (size_t i = 0; i < logical_vars.size(); ++i) {
+    if (!analyzer.CanProveEqual(recovered_logical[i], logical_vars[i])) {
+      return false;
+    }
+  }
+
+  Array<Var> physical_vars;
+  Map<Var, PrimExpr> physical_substitution;
+  for (size_t i = 0; i < output_shape.size(); ++i) {
+    Var var("__layout_physical_" + std::to_string(i), output_shape[i].dtype());
+    analyzer.Bind(var, Range(0, output_shape[i]));
+    physical_vars.push_back(var);
+    physical_substitution.Set(InputPlaceholder(i), var);
+  }
+  Array<PrimExpr> logical_from_physical =
+      Substitute(backward_indices, physical_substitution);
+  Map<Var, PrimExpr> forward_substitution;
+  for (size_t i = 0; i < logical_from_physical.size(); ++i) {
+    forward_substitution.Set(InputPlaceholder(i), logical_from_physical[i]);
+  }
+  Array<PrimExpr> recovered_physical =
+      Substitute(forward_indices, forward_substitution);
+  for (size_t i = 0; i < physical_vars.size(); ++i) {
+    if (!analyzer.CanProveEqual(recovered_physical[i], physical_vars[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+InverseRoundTripResult
+CheckStaticInverseRoundTrip(const Array<PrimExpr> &input_shape,
+                            const Array<PrimExpr> &output_shape,
+                            const Array<PrimExpr> &forward_indices,
+                            const Array<PrimExpr> &backward_indices) {
+  if (CanProveInverseRoundTrip(input_shape, output_shape, forward_indices,
+                               backward_indices)) {
+    return {InverseRoundTripStatus::kValid, ""};
+  }
+
+  std::vector<int64_t> input_extents;
+  std::vector<int64_t> output_extents;
+  int64_t input_domain_size = 0;
+  int64_t output_domain_size = 0;
+  if (!GetStaticDomain(input_shape, &input_extents, &input_domain_size) ||
+      !GetStaticDomain(output_shape, &output_extents, &output_domain_size)) {
+    return {InverseRoundTripStatus::kUnknown,
+            "the layout domain is symbolic or exceeds the exact-check limit"};
+  }
+  if (input_domain_size != output_domain_size) {
+    return {InverseRoundTripStatus::kInvalid,
+            "the logical and physical domains have different sizes"};
+  }
+
+  for (int64_t linear = 0; linear < input_domain_size; ++linear) {
+    std::vector<int64_t> logical = UnflattenCoordinate(linear, input_extents);
+    auto physical = EvaluateStaticMap(forward_indices, logical);
+    if (!physical) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the forward map could not be evaluated exactly at logical "
+              "coordinate " +
+                  FormatIntTuple(logical)};
+    }
+    auto recovered = EvaluateStaticMap(backward_indices, *physical);
+    if (!recovered) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the inverse map could not be evaluated exactly at physical "
+              "coordinate " +
+                  FormatIntTuple(*physical)};
+    }
+    if (*recovered != logical) {
+      return {InverseRoundTripStatus::kInvalid,
+              "logical coordinate " + FormatIntTuple(logical) +
+                  " maps to physical coordinate " + FormatIntTuple(*physical) +
+                  ", but the inferred inverse maps it to " +
+                  FormatIntTuple(*recovered)};
+    }
+  }
+
+  for (int64_t linear = 0; linear < output_domain_size; ++linear) {
+    std::vector<int64_t> physical = UnflattenCoordinate(linear, output_extents);
+    auto logical = EvaluateStaticMap(backward_indices, physical);
+    if (!logical) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the inverse map could not be evaluated exactly at physical "
+              "coordinate " +
+                  FormatIntTuple(physical)};
+    }
+    auto recovered = EvaluateStaticMap(forward_indices, *logical);
+    if (!recovered) {
+      return {InverseRoundTripStatus::kUnknown,
+              "the forward map could not be evaluated exactly at logical "
+              "coordinate " +
+                  FormatIntTuple(*logical)};
+    }
+    if (*recovered != physical) {
+      return {InverseRoundTripStatus::kInvalid,
+              "physical coordinate " + FormatIntTuple(physical) +
+                  " maps to logical coordinate " + FormatIntTuple(*logical) +
+                  ", but the forward map maps it back to " +
+                  FormatIntTuple(*recovered)};
+    }
+  }
+  return {InverseRoundTripStatus::kValid, ""};
 }
 
 bool CanProveInjective(const Array<PrimExpr> &forward_indices,
@@ -870,6 +1064,18 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
     }
   }
 
+  if (level == arith::IterMapLevel::Bijective) {
+    InverseRoundTripResult round_trip = CheckStaticInverseRoundTrip(
+        input_size_, outputs_shape, forward_index_, backward_index);
+    if (round_trip.status == InverseRoundTripStatus::kInvalid) {
+      std::ostringstream msg;
+      msg << "Layout " << DebugOutput()
+          << " has a non-round-tripping inverse: " << round_trip.detail
+          << ". Refusing to use an inferred inverse that changes coordinates.";
+      throw NormalizeIterException(msg.str());
+    }
+  }
+
   return {Layout(outputs_shape, backward_index), level};
 }
 
@@ -1070,6 +1276,168 @@ Fragment Fragment::FullyReplicated(Array<PrimExpr> shape,
       ->BindThreadRange(Range(0, thread_extent));
 }
 
+PartialFragmentNode::PartialFragmentNode(Array<PrimExpr> input_size,
+                                         Array<PrimExpr> forward_index,
+                                         PrimExpr forward_thread,
+                                         PrimExpr replicate_size,
+                                         PrimExpr combine_size,
+                                         Optional<Range> thread_range)
+    : FragmentNode(std::move(input_size), std::move(forward_index),
+                   std::move(forward_thread), std::move(replicate_size)) {
+  arith::Analyzer analyzer;
+  combine_size_ = analyzer.Simplify(combine_size);
+  // The low-bits convention only makes sense when the combine width evenly
+  // tiles the replication coordinate.
+  const int64_t *rep = as_const_int(replicate_size_);
+  const int64_t *comb = as_const_int(combine_size_);
+  if (rep != nullptr && comb != nullptr) {
+    ICHECK(*comb >= 1 && *rep % *comb == 0)
+        << "PartialFragment: combine width " << *comb
+        << " must evenly divide the replication extent " << *rep;
+  }
+  // BindThreadRange copies into a plain FragmentNode and would drop the
+  // partial kind, so the range is fixed at construction.
+  if (thread_range.defined()) {
+    thread_range_ = thread_range.value();
+  }
+}
+
+PartialFragment::PartialFragment(Array<PrimExpr> input_size,
+                                 Array<PrimExpr> forward_index,
+                                 PrimExpr forward_thread,
+                                 PrimExpr replicate_size, PrimExpr combine_size,
+                                 Optional<Var> replicate_var,
+                                 Optional<Range> thread_range) {
+  if (replicate_var.defined()) {
+    forward_thread = Substitute(
+        forward_thread, {{replicate_var.value(), ReplicationPlaceholder()}});
+  }
+  data_ = make_object<PartialFragmentNode>(input_size, forward_index,
+                                           forward_thread, replicate_size,
+                                           combine_size, thread_range);
+}
+
+PartialFragment PartialFragment::FromFragment(const Fragment &fragment) {
+  // Annotation semantics: every declared replica is an addend lane; copy
+  // groups only ever come from loop replication, which a user-constructed
+  // partial does not carry.
+  const FragmentNode *node = fragment.get();
+  ICHECK(node != nullptr) << "PartialFragment::FromFragment: null fragment";
+  return PartialFragment::FromInduced(fragment, node->ReplicateExtent());
+}
+
+PartialFragment PartialFragment::FromInduced(const Fragment &fragment,
+                                             PrimExpr combine_size) {
+  const FragmentNode *node = fragment.get();
+  ICHECK(node != nullptr) << "PartialFragment::FromInduced: null fragment";
+  Optional<Range> thread_range;
+  if (node->ThreadRange().defined()) {
+    thread_range = node->ThreadRange();
+  }
+  return PartialFragment(node->InputShape(), node->GetForwardIndex(),
+                         node->GetForwardThread(), node->ReplicateExtent(),
+                         combine_size, std::nullopt, thread_range);
+}
+
+PartialFragment PartialFragment::FullyReplicated(Array<PrimExpr> shape,
+                                                 PrimExpr thread_extent,
+                                                 Optional<Range> thread_range) {
+  if (!thread_range.defined()) {
+    thread_range = Range(0, thread_extent);
+  }
+  return PartialFragment(shape, {}, ReplicationPlaceholder(), thread_extent,
+                         /*combine_size=*/thread_extent, std::nullopt,
+                         thread_range);
+}
+
+Fragment PartialFragment::AsPostCollective() const {
+  const PartialFragmentNode *node = get();
+  ICHECK(node != nullptr) << "PartialFragment::AsPostCollective: null partial";
+  Fragment ret(node->InputShape(), node->GetForwardIndex(),
+               node->GetForwardThread(), node->ReplicateExtent(), std::nullopt);
+  if (node->ThreadRange().defined()) {
+    ret = ret->BindThreadRange(node->ThreadRange());
+  }
+  return ret;
+}
+
+std::string PartialFragmentNode::DebugOutput() const {
+  std::stringstream ss;
+  arith::Analyzer analyzer;
+  ss << "PartialFragment(" << InputShape() << " -> " << OutputShape()
+     << ", replicate: " << ReplicateExtent() << " (combine " << combine_size_
+     << " x copy "
+     << analyzer.Simplify(FloorDiv(ReplicateExtent(), combine_size_)) << ")"
+     << ", thread: " << ThreadExtent()
+     << ", forward_thread: " << forward_thread_
+     << ", forward_index: " << GetForwardIndex();
+  if (thread_range_.defined()) {
+    ss << ", thread_range: " << thread_range_;
+  }
+  ss << ")";
+  return ss.str();
+}
+
+bool PartialFragmentNode::IsEqual(const LayoutNode *other,
+                                  bool skip_index) const {
+  if (other == nullptr || !other->IsInstance<PartialFragmentNode>()) {
+    return false;
+  }
+  const auto *partial = static_cast<const PartialFragmentNode *>(other);
+  // Same storage algebra with a different combine decomposition is a
+  // DIFFERENT physical plan (e.g. 8 addend lanes x 16 copy groups vs the
+  // FullParticipant 128): the decomposition is part of the identity.
+  if (!StructuralEqual()(combine_size_, partial->combine_size_)) {
+    return false;
+  }
+  return FragmentNode::IsEqual(partial, skip_index);
+}
+
+std::vector<std::pair<int, int>> PartialFragmentNode::CombineSteps() const {
+  // Split `_rep = lo + combine_size * hi` and collect the thread-expression
+  // splits sourced from `lo`: each one is a butterfly of `extent` lanes at
+  // thread stride `scale` — the complete communication spec of the finalize
+  // collective. Mirrors backend CollectThreadReduceSteps, which cannot be
+  // used here for layering reasons.
+  arith::Analyzer analyzer;
+  PrimExpr rep_extent = ReplicateExtent();
+  PrimExpr copy_extent = analyzer.Simplify(FloorDiv(rep_extent, combine_size_));
+  Var lo("_rep_lo", ReplicationPlaceholder().dtype());
+  Var hi("_rep_hi", ReplicationPlaceholder().dtype());
+  PrimExpr thread = Substitute(
+      forward_thread_, {{ReplicationPlaceholder(), lo + combine_size_ * hi}});
+  Map<Var, Range> vmap;
+  for (size_t i = 0; i < InputDim(); ++i) {
+    vmap.Set(
+        InputPlaceholder(i),
+        Range::FromMinExtent(make_zero(DataType::Int(32)), InputShape()[i]));
+  }
+  vmap.Set(lo,
+           Range::FromMinExtent(make_zero(DataType::Int(32)), combine_size_));
+  vmap.Set(hi, Range::FromMinExtent(make_zero(DataType::Int(32)), copy_extent));
+  arith::IterSumExpr sum = arith::NormalizeToIterSum(thread, vmap, &analyzer);
+  std::vector<std::pair<int, int>> steps;
+  for (const auto &split : sum->args) {
+    auto mark = split->source->source.as<Var>();
+    if (!mark || !mark.value().same_as(lo)) {
+      continue;
+    }
+    const int64_t *scale = as_const_int(split->scale);
+    const int64_t *extent = as_const_int(split->extent);
+    ICHECK(scale != nullptr && extent != nullptr)
+        << "PartialFragment::CombineSteps requires constant extents: "
+        << DebugOutput();
+    if (*extent == 1) {
+      continue;
+    }
+    // (reducing_threads, scale), matching AnalyzeReducerUpdateSite's
+    // convention: reducing_threads = extent * scale.
+    steps.emplace_back(static_cast<int>(*extent * *scale),
+                       static_cast<int>(*scale));
+  }
+  return steps;
+}
+
 // which means the forward_thread is rep_var -> lambda i, rep: rep
 bool FragmentNode::IsCompletedReplicated() const {
   arith::Analyzer analyzer;
@@ -1154,6 +1522,59 @@ Fragment FragmentNode::CondenseReplicateVar() const {
                   new_thread_replicate->dom->extent, new_thread_replicate->var);
 }
 
+std::pair<Fragment, PrimExpr>
+CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
+                                    const PrimExpr &combine_size) {
+  arith::Analyzer analyzer;
+  const FragmentNode *node = fragment.get();
+  ICHECK(node != nullptr);
+  PrimExpr rep_extent = node->ReplicateExtent();
+  PrimExpr copy_extent = analyzer.Simplify(FloorDiv(rep_extent, combine_size));
+  Var lo("_rep_lo", ReplicationPlaceholder().dtype());
+  Var hi("_rep_hi", ReplicationPlaceholder().dtype());
+  PrimExpr thread =
+      Substitute(node->GetForwardThread(),
+                 {{ReplicationPlaceholder(), lo + combine_size * hi}});
+  Map<Var, Range> vmap;
+  for (size_t i = 0; i < node->InputDim(); ++i) {
+    vmap.Set(InputPlaceholder(i),
+             Range::FromMinExtent(make_zero(DataType::Int(32)),
+                                  node->InputShape()[i]));
+  }
+  vmap.Set(lo,
+           Range::FromMinExtent(make_zero(DataType::Int(32)), combine_size));
+  vmap.Set(hi, Range::FromMinExtent(make_zero(DataType::Int(32)), copy_extent));
+  // The projection may have collapsed the two halves into a single
+  // expression over `_rep` (e.g. `(lo + W*hi) // c` from a per-thread
+  // serial run under loop replication). Re-simplify with the ranges bound
+  // so the halves separate again; otherwise NormalizeToIterSum fuses
+  // `lo + W*hi` into one iterator and CompressIterator, which attributes
+  // splits per source var, cannot compress either half.
+  for (const auto &[var, range] : vmap) {
+    analyzer.Bind(var, range);
+  }
+  thread = analyzer.Simplify(thread);
+  // Compress the combine half first, then the copy half; each keeps only
+  // the sub-iterators that actually reach the thread expression.
+  auto [expr_lo, lo_iv] =
+      CompressIterator(thread, ToIterVars(vmap), lo, &analyzer);
+  vmap.erase(lo);
+  vmap.Set(lo_iv->var, lo_iv->dom);
+  auto [expr_hi, hi_iv] =
+      CompressIterator(expr_lo, ToIterVars(vmap), hi, &analyzer);
+  PrimExpr w = analyzer.Simplify(lo_iv->dom->extent);
+  PrimExpr c = analyzer.Simplify(hi_iv->dom->extent);
+  PrimExpr new_thread = Substitute(
+      expr_hi, {{lo_iv->var, FloorMod(ReplicationPlaceholder(), w)},
+                {hi_iv->var, FloorDiv(ReplicationPlaceholder(), w)}});
+  Fragment out(node->InputShape(), node->GetForwardIndex(), new_thread,
+               analyzer.Simplify(w * c), std::nullopt);
+  if (node->ThreadRange().defined()) {
+    out = out->BindThreadRange(node->ThreadRange());
+  }
+  return {out, w};
+}
+
 std::string LayoutNode::DebugOutput() const {
   std::stringstream ss;
   ss << "Layout(" << InputShape() << " -> " << OutputShape()
@@ -1198,6 +1619,13 @@ bool LayoutNode::IsEqual(const LayoutNode *other, bool skip_index) const {
     }
   }
   return ret;
+}
+
+bool FragmentNode::IsEqual(const LayoutNode *other, bool skip_index) const {
+  if (other != nullptr && other->IsInstance<PartialFragmentNode>()) {
+    return false;
+  }
+  return LayoutNode::IsEqual(other, skip_index);
 }
 
 bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
@@ -1253,6 +1681,14 @@ void FragmentNode::RegisterReflection() {
       .def_ro("replicate_size", &FragmentNode::replicate_size_)
       .def_ro("thread_range", &FragmentNode::thread_range_)
       .def("_DebugOutput", &FragmentNode::DebugOutput);
+}
+
+void PartialFragmentNode::RegisterReflection() {
+  namespace refl = reflection;
+  // Base fields and _DebugOutput are inherited from FragmentNode's
+  // reflection (DebugOutput dispatches virtually).
+  refl::ObjectDef<PartialFragmentNode>().def_ro(
+      "combine_size", &PartialFragmentNode::combine_size_);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -1357,6 +1793,56 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.make_fully_replicated_layout_fragment",
            [](Array<PrimExpr> shape, PrimExpr thread_extent) {
              return Fragment::FullyReplicated(shape, thread_extent);
+           })
+      .def_packed(
+          "tl.PartialFragment",
+          [](PackedArgs args, Any *rv) {
+            // Same argument shape as tl.Fragment plus a trailing
+            // combine width; the IterVar-form Fragment ctor does the
+            // placeholder substitution, then the result is
+            // reinterpreted as per-thread partials. `combine` is the
+            // number of addend lanes in the low bits of the
+            // replication coordinate; when absent, every declared
+            // replica is an addend lane.
+            Fragment fragment(
+                /*forward_var=*/args[0].cast<Array<IterVar>>(),
+                /*forward_index=*/args[1].cast<Array<PrimExpr>>(),
+                /*forward_thread=*/args[2].cast<PrimExpr>(),
+                /*thread_replicate=*/args[3].cast<IterVar>());
+            if (args.size() <= 4) {
+              *rv = PartialFragment::FromFragment(fragment);
+              return;
+            }
+            int64_t combine = args[4].cast<int64_t>();
+            const int64_t *rep = as_const_int(fragment->ReplicateExtent());
+            if (combine < 1 || (rep != nullptr && *rep % combine != 0)) {
+              TVM_FFI_THROW(ValueError)
+                  << "PartialFragment: combine (" << combine
+                  << ") must be >= 1 and evenly divide replicate ("
+                  << fragment->ReplicateExtent() << ")";
+            }
+            *rv = PartialFragment::FromInduced(
+                fragment, IntImm(DataType::Int(32), combine));
+          })
+      .def("tl.PartialFragment_from_fragment",
+           [](Fragment fragment) {
+             return PartialFragment::FromFragment(fragment);
+           })
+      .def("tl.PartialFragment_as_post_collective",
+           [](PartialFragment partial) { return partial.AsPostCollective(); })
+      .def("tl.PartialFragment_combine_steps",
+           [](PartialFragment partial) {
+             Array<Array<IntImm>> result;
+             for (const auto &[reducing_threads, scale] :
+                  partial->CombineSteps()) {
+               result.push_back({IntImm(DataType::Int(32), reducing_threads),
+                                 IntImm(DataType::Int(32), scale)});
+             }
+             return result;
+           })
+      .def("tl.make_fully_replicated_partial_fragment",
+           [](Array<PrimExpr> shape, PrimExpr thread_extent) {
+             return PartialFragment::FullyReplicated(shape, thread_extent);
            });
 }
 
@@ -1364,6 +1850,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   LayoutNode::RegisterReflection();
   FragmentNode::RegisterReflection();
+  PartialFragmentNode::RegisterReflection();
 }
 
 } // namespace tl

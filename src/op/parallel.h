@@ -31,12 +31,50 @@ using namespace ffi;
 
 class ParallelOpNode;
 
+/*!
+ * \brief Detector for loop-layout-induced thread-dependent fragment
+ * physical indices — the shape that forces ptxas to spill a register array
+ * to local memory (`fragment[f(threadIdx.x)]`).
+ *
+ * Construction mirrors the index substitution PartitionLoop would apply for
+ * the given loop layout (symbolic per-thread coordinates plus a symbolic
+ * thread variable, inverted back to the logical loop vars); each
+ * AccessUsesThread query then pushes one fragment access through its
+ * layout's Forward map and checks whether the physical slot still depends
+ * on the thread. Invalid construction (undefined/rank-mismatched/
+ * non-invertible loop layout) yields a probe that reports no dependence —
+ * callers charging costs must treat that as "unknown", not "clean".
+ */
+class FragmentThreadIndexProbe {
+public:
+  FragmentThreadIndexProbe(const Fragment &loop_layout,
+                           const Array<tirx::IterVar> &loop_vars,
+                           arith::Analyzer *analyzer);
+
+  bool valid() const { return valid_; }
+
+  /*! \brief True iff accessing a fragment laid out as `fragment_layout` at
+   *  `access_indices` (written in the loop vars) addresses a physical slot
+   *  that varies with the thread. */
+  bool AccessUsesThread(const Array<PrimExpr> &access_indices,
+                        const Fragment &fragment_layout) const;
+
+private:
+  bool valid_{false};
+  tirx::Var thread_var_;
+  Map<tirx::Var, PrimExpr> loop_var_map_;
+  Map<tirx::Var, PrimExpr> thread_offset_map_;
+  bool has_thread_offset_{false};
+  arith::Analyzer *analyzer_;
+};
+
 class ParallelLoopNestVisitor : public StmtExprVisitor {
 private:
   ParallelLoopNestVisitor(ParallelOpNode *op) : p(op) {};
   void VisitStmt_(const ForNode *op) override;
   void VisitStmt_(const BufferStoreNode *op) override;
   void VisitExpr_(const BufferLoadNode *op) override;
+  void VisitExpr_(const CallNode *op) override;
 
   ParallelOpNode *p;
 
@@ -56,6 +94,16 @@ public:
 
   using BufferIndiceMap = std::unordered_map<Buffer, BufferAccessInfo,
                                              ObjectPtrHash, ObjectPtrEqual>;
+
+  // One tl.reducer_update site inside this nest. The reducer stays out of
+  // indice_map_/access_order_ (it has partial-value semantics, so it must not
+  // act as a layout source or be validated as a fragment); its layout is
+  // proposed separately once the loop layout is solved.
+  struct ReducerUpdateRecord {
+    Buffer buffer;
+    Array<PrimExpr> indices;
+    PrimExpr value;
+  };
 
   // The root For loop node.
   For root_;
@@ -120,6 +168,9 @@ public:
   }
   // Get the root For loop.
   For GetRoot() const { return root_; }
+  // Get the parallel nest loop vars (visit order, outermost first) — the
+  // input dims of GetLoopLayout().
+  const Array<IterVar> &GetLoopVars() const { return loop_vars_; }
   // Get the mapping from buffer to access indices + access type.
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.
@@ -172,6 +223,20 @@ private:
   // Compute plan-based loop layout candidate using vectorization and thread
   // bounds.
   Fragment ComputePlanCandidate(const LayoutInferArgs &layout_args) const;
+  // Propose the partial layout of a reducer this nest updates, from the
+  // solved loop layout: the induced projection when every narrow-plan proof
+  // passes, participant-wide replication otherwise.
+  PartialFragment
+  ProposeReducerPartial(const ReducerUpdateRecord &update,
+                        const LayoutInferArgs &layout_args) const;
+  // Derive a loop-layout candidate from a strict (user-annotated) partial
+  // layout of a reducer this nest updates: acc dims map through the
+  // partial's thread expression, the flattened reduction space fills the
+  // combine lanes in contiguous chunks. Undefined when no strict partial
+  // exists, the update indices are not plain loop vars, or the reduction
+  // extent does not evenly split into the lanes.
+  Fragment
+  ComputeReducerPinnedCandidate(const LayoutInferArgs &layout_args) const;
   // Add replication guard predicates when needed for cross-thread stores.
   void BuildReplicationGuardsIfNeeded(
       const LayoutInferArgs &layout_args,
@@ -200,6 +265,9 @@ private:
   std::vector<Buffer> access_order_;
   // The loop variables for the parallel loop nest.
   Array<IterVar> loop_vars_;
+  // tl.reducer_update sites in this nest, in body order (re-derived from
+  // root_ by the visitor, so the copy constructor need not copy it).
+  std::vector<ReducerUpdateRecord> reducer_updates_;
   // The inner_vars_
   Map<Var, IterVar> inner_vars_;
   // Analyzer for simplifying and analyzing expressions, mutable for lazy use.

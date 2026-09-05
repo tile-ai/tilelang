@@ -229,10 +229,9 @@ public:
     }
     fptr = f.CopyOnWrite();
 
-    // If any TMA copies allocated mbarriers, inject the barrier buffer
-    // into the tilelang_root block with a barrier_init annotation.
-    // Pipeline buffer versioning expands it for pipelining, and
-    // LowerSharedBarrier will process it into ptx_init_barrier_thread_count.
+    // If any tile ops allocated mbarriers, inject their barrier buffer into
+    // the tilelang_root block. Each lowered tile-op site owns one slot;
+    // LowerSharedBarrier emits the corresponding initialization.
     if (substituter.mbarrier_count_ > 0) {
       ICHECK(substituter.mbarrier_buffer_.defined())
           << "mbarrier_buffer_ must have been created by alloc_mbarrier "
@@ -726,7 +725,9 @@ private:
     if (op->op.same_as(tl::tma_load()) ||
         op->op.same_as(tl::tma_load_im2col()) ||
         op->op.same_as(tl::tma_load_multicast()) ||
-        op->op.same_as(tl::tma_store())) {
+        op->op.same_as(tl::tma_store()) ||
+        op->op.same_as(tl::tma_load_gather4()) ||
+        op->op.same_as(tl::tma_store_scatter4())) {
       // skip tma related calls, as they were transformed implicitly.
       has_tma_ = true;
       in_tma_context_ = true;
@@ -1193,24 +1194,16 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     bool pushed_loop_mbar_phase = false;
     if (op->kind == ForKind::kSerial) {
-      int num_stages = 1;
-      if (auto ns_anno = op->annotations.Get("num_stages")) {
-        if (const auto *ns_int = ns_anno.value().as<IntImmNode>()) {
-          if (ns_int->value > 1) {
-            num_stages = static_cast<int>(ns_int->value);
-          }
-        }
-      }
-      PrimExpr phase_expr;
+      // Compiler-generated barriers are allocated per lowered tile-op site, so
+      // their phase follows this loop's invocation count, not pipeline depth.
       DataType loop_dtype = op->loop_var.dtype();
-      PrimExpr two = make_const(loop_dtype, 2);
-      if (num_stages > 1) {
-        PrimExpr num_stages_expr = make_const(loop_dtype, num_stages);
-        phase_expr = FloorMod(FloorDiv(op->loop_var, num_stages_expr), two);
-      } else {
-        phase_expr = FloorMod(op->loop_var, two);
-      }
-      loop_mbar_phase_stack_.push_back(analyzer_->Simplify(phase_expr));
+      PrimExpr step = op->step.defined() ? op->step.value()
+                                         : PrimExpr(make_const(loop_dtype, 1));
+      PrimExpr loop_epoch =
+          analyzer_->Simplify(FloorDiv(op->loop_var - op->min, step));
+      PrimExpr phase =
+          analyzer_->Simplify(FloorMod(loop_epoch, make_const(loop_dtype, 2)));
+      loop_mbar_phase_stack_.push_back(phase);
       pushed_loop_mbar_phase = true;
     }
 
@@ -1366,56 +1359,9 @@ private:
     // iteration has to be owned by the corresponding thread.
     bool parallel_loop = has_non_local_store || has_fragment_access;
 
-    // Check if there are non-local buffer accesses (for vectorization decision)
-    bool has_non_local = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (!IsLocalBuffer(load->buffer, /*allow_var*/ true) &&
-            !IsFragmentBuffer(load->buffer)) {
-          has_non_local = true;
-        }
-      } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (!IsLocalBuffer(store->buffer, /*allow_var*/ true) &&
-            !IsFragmentBuffer(store->buffer)) {
-          has_non_local = true;
-        }
-      }
-    });
-
-    // Reducer combine stores carry an execution-multiplicity marker; loops
-    // containing one are excluded from vectorization until the reduction
-    // axis can be isolated from the vectorized dimension.
-    bool has_reducer = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *attr_stmt = obj.as<AttrStmtNode>()) {
-        if (attr_stmt->attr_key == attr::kParallelMultiplicity) {
-          has_reducer = true;
-        }
-      }
-    });
-
-    // Check if vectorizable cast operations exist
-    bool has_cast_operations = false;
-    PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-      if (const auto *cast = obj.as<CastNode>()) {
-        DataType from_ty = cast->value.dtype();
-        DataType target_ty = cast->dtype;
-        if (IsCudaVectorizableCast(from_ty, target_ty) &&
-            TargetIsCuda(Target::Current())) {
-          has_cast_operations = true;
-        }
-      }
-    });
-
-    // Decide whether to vectorize:
-    // - Only if there are non-local buffers or vectorizable casts
-    // - AND no reducers are present
-    bool should_vectorize =
-        (has_non_local || has_cast_operations) && !has_reducer;
-    // Lower the parallel loop using the common function
     Stmt lowered = LowerParallelLoop(
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
-        predicate, parallel_loop, should_vectorize, require_padding_guard);
+        predicate, parallel_loop, require_padding_guard);
 
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
@@ -1485,7 +1431,7 @@ private:
   std::vector<int> mbarrier_arrive_counts_;
   // The shared.barrier scope buffer created lazily by alloc_mbarrier callback.
   Optional<Buffer> mbarrier_buffer_;
-  // Fallback mbarrier parity derived from the nearest enclosing serial loop.
+  // Fallback phase for a tile-op barrier local to the nearest serial loop.
   std::vector<PrimExpr> loop_mbar_phase_stack_;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.

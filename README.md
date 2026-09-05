@@ -110,7 +110,11 @@ See [all releases](https://github.com/tile-ai/tilelang/releases) for complete ch
 
 ## Platform and Backend Support
 
-TileLang requires Python 3.10 or newer. The default `auto` target detects CUDA, HIP, and Metal devices; select an explicit target when compiling for another backend or architecture. Hardware-specific instructions and optimizations remain subject to the selected architecture.
+TileLang is evolving into a multi-backend compiler (**TileLang-X**) built around a modular backend abstraction. See the [backend architecture](tilelang/backend/README.md) for the design, or ask a coding agent to use the [backend integration skill](.agents/skills/tilelang-backend/SKILL.md) when porting TileLang to a new backend.
+
+The currently supported backends are listed below. `Primary` identifies TileLang's core backend, while `Supported` and `Experimental` backends are implemented in the main repository. `Ecosystem` adapters live in separate repositories, are not included in TileLang release wheels, and may follow independent compatibility schedules. Prebuilt wheels are available for Linux x86-64/AArch64, Windows x86-64, and macOS arm64.
+
+TileLang uses `Target` objects to represent compilation targets. The default `auto` target detects CUDA, HIP, and Metal devices; select an explicit target when compiling for another backend or architecture. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
 
 | Backend | Target | Platforms and hardware | Support level | Notes |
 | --- | --- | --- | --- | --- |
@@ -121,10 +125,10 @@ TileLang requires Python 3.10 or newer. The default `auto` target detects CUDA, 
 | NVIDIA CuTe DSL | `cutedsl` | NVIDIA GPUs | Experimental | Requires `nvidia-cutlass-dsl`. |
 | WebGPU | `webgpu` | WebGPU runtimes | Experimental | Code generation and runtime integration are still evolving. |
 | Huawei Ascend | Ascend C / NPU IR | Ascend A2 and A3 | Ecosystem | Developed in [tilelang-ascend](https://github.com/tile-ai/tilelang-ascend) and the MLIR-based [tilelang-mlir-ascend](https://github.com/tile-ai/tilelang-mlir-ascend). |
-| MetaX MACA | MACA adapter | MetaX C500 | Ecosystem | Developed in [tilelang-metax](https://github.com/tile-ai/tilelang-metax); requires the MACA software stack. |
+| MetaX MACA | `maca` | MetaX C500 and C600 | Ecosystem | Developed in [tilelang-metax](https://github.com/tile-ai/tilelang-metax); requires the MACA software stack. |
 | Moore Threads MUSA | `musa` | S5000, S4000, and M1000 | Ecosystem | Developed in [tilelang-musa](https://github.com/tile-ai/tilelang-musa) and released independently. |
-
-Prebuilt wheels are published for Linux x86-64/AArch64, Windows x86-64, and macOS arm64. Ecosystem adapters live in separate repositories, are not included in the main TileLang release wheels, and may follow different compatibility schedules. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
+| HYGON | `hcu` | Linux; BW1000, BW1100, BW150 and K100_AI | Ecosystem | Developed in [tilelang-hygon](https://github.com/tile-ai/tilelang-hygon); requires the DTK software stack. |
+| Sunrise-AI TANG | `tang` | Sunrise S2 and S3 | Ecosystem | Developed in [tilelang-sunrise](https://github.com/tile-ai/tilelang-sunrise). The TANG software stack is required. |
 
 ## Installation
 
@@ -145,6 +149,8 @@ Nightly wheels provide recent features and fixes before the next stable release:
 ```bash
 pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 ```
+
+On AMD GPUs the same Linux wheels work out of the box: install a ROCm build of PyTorch first (e.g. `pip install torch --index-url https://download.pytorch.org/whl/rocm7.0`), then `pip install tilelang`. A host ROCm installation is required at runtime; see the [ROCm notes](https://tilelang.com/get_started/Installation.html#installing-on-amd-gpus-rocm) in the installation guide.
 
 Nightly builds may be less stable than official releases. For source builds, editable installs, Docker, ROCm setup, pip-provided CUDA toolchains, or a custom TVM checkout, follow the complete [installation guide](https://tilelang.com/get_started/Installation.html).
 
