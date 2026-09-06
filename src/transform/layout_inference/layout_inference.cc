@@ -243,7 +243,7 @@ public:
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
                     std::deque<int> &q, std::vector<bool> &in_queue,
-                    int plan_vector_size_limit = 0) {
+                    int candidate_vector_size_limit = 0) {
     auto num_infer = infer_list_.size();
 
     // Range check for cur_infer_id
@@ -284,7 +284,7 @@ public:
                                                   bind_var_to_expr_,
                                                   false,
                                                   strict_layout_map,
-                                                  plan_vector_size_limit},
+                                                  candidate_vector_size_limit},
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
@@ -1337,15 +1337,17 @@ private:
     LayoutMap layout_map;
     AttemptCost cost;
   };
-  std::optional<AttemptOutcome>
-  RunOneAttempt(int attempt_root, const std::vector<int> &members,
-                const LayoutMap &base_layout_map,
-                const LayoutMap &strict_layout_map,
-                const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-                const LayoutCostModel &cost_model, std::deque<int> &q,
-                std::vector<bool> &in_queue, bool scalar_reducer_root = false) {
+  std::optional<AttemptOutcome> RunOneAttempt(
+      int attempt_root, const std::vector<int> &members,
+      const LayoutMap &base_layout_map, const LayoutMap &strict_layout_map,
+      const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
+      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
+    // A failed attempt can leave pending propagation work. Keep both the
+    // queue and its membership flags local so no later attempt inherits it.
+    std::deque<int> q;
+    std::vector<bool> in_queue(infer_list_.size(), false);
     for (const auto &[buffer, fragment] : seed_layouts) {
       if (!tmp_layout_map.count(buffer)) {
         tmp_layout_map.Set(buffer, fragment);
@@ -1354,11 +1356,10 @@ private:
     bool ok = true;
     std::string failure;
     try {
-      // Only the root's first inference receives the scalar-plan cap. Its
+      // Only the root's first inference receives the candidate cap. Its
       // solved layout is frozen; propagation and later visits use normal args.
       RunInferStep(attempt_root, InferLevel::kFree, true, tmp_layout_map,
-                   strict_layout_map, q, in_queue,
-                   /*plan_vector_size_limit=*/scalar_reducer_root ? 1 : 0);
+                   strict_layout_map, q, in_queue, candidate_vector_size_limit);
       FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map, q,
                        in_queue);
       for (int other : members) {
@@ -1456,9 +1457,6 @@ private:
 
     // For each component, try each op as root, and determine the least
     // replicated one
-    std::deque<int> q;
-    std::vector<bool> in_queue(infer_list_.size(), false);
-
     std::unique_ptr<LayoutCostModel> cost_model =
         LayoutCostModel::Create(tl_config::LayoutCostModelName(), target_);
     DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
@@ -1489,16 +1487,17 @@ private:
             loop->HasReducerUpdates() && !loop->GetLoopLayout().defined() &&
             !loop->annotated_layout_unbound_.defined() &&
             !loop->GetRoot()->annotations.count(attr::kCoalescedWidth);
-        for (bool scalar_root : {false, true}) {
-          if (scalar_root && !try_scalar) {
+        for (int candidate_vector_size_limit : {0, 1}) {
+          if (candidate_vector_size_limit != 0 && !try_scalar) {
             continue;
           }
           DLOG(INFO) << "----------------------- try root "
                      << attempt_infer_root << " members " << members.size()
-                     << " scalar_reducer_root=" << scalar_root << '\n';
-          auto outcome = RunOneAttempt(attempt_infer_root, members, layout_map,
-                                       strict_layout_map, /*seed_layouts=*/{},
-                                       *cost_model, q, in_queue, scalar_root);
+                     << " candidate_vector_size_limit="
+                     << candidate_vector_size_limit << '\n';
+          auto outcome = RunOneAttempt(
+              attempt_infer_root, members, layout_map, strict_layout_map,
+              /*seed_layouts=*/{}, *cost_model, candidate_vector_size_limit);
           if (!outcome) {
             continue;
           }
@@ -1530,9 +1529,8 @@ private:
         if (!seeds.empty()) {
           DLOG(INFO) << "[InferInFreeMode] all attempts failed; retrying with "
                      << "wide fallback dst layouts";
-          auto outcome =
-              RunOneAttempt(members.front(), members, layout_map,
-                            strict_layout_map, seeds, *cost_model, q, in_queue);
+          auto outcome = RunOneAttempt(members.front(), members, layout_map,
+                                       strict_layout_map, seeds, *cost_model);
           if (outcome) {
             adopt(std::move(*outcome), members.front());
           }

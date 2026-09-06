@@ -67,12 +67,72 @@ def test_explicit_layout_constraints_win(kwargs):
 
 
 @tilelang.testing.requires_cuda
-def test_scalar_plan_cap_does_not_leak():
+def test_candidate_vector_size_limit_does_not_leak():
     before = infer_reducer(total=True)
     infer_reducer()
     after = infer_reducer(total=True)
     assert before["values"].is_equal(after["values"])
     assert before["acc"].is_equal(after["acc"])
+
+
+def make_reducer_with_pinned_consumer(width=None):
+    width = None if width is None else T.int32(width)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((8, 128), T.float32),
+        O: T.Tensor((128,), T.float32),
+        B: T.Tensor((128,), T.float32),
+        C: T.Tensor((128,), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((8, 128), T.float32)
+            values = T.alloc_fragment((8, 128), T.float32)
+            T.copy(A, shared)
+            T.copy(shared, values)
+            acc = T.alloc_reducer((128,), T.float32)
+            T.reducer_init(acc)
+            for i, j in T.Parallel(8, 128, coalesced_width=width):
+                T.reducer_update(acc[j], values[i, j])
+            result = T.alloc_fragment((128,), T.float32)
+            other = T.alloc_fragment((128,), T.float32)
+            T.annotate_layout({other: T.Fragment((128,), forward_fn=lambda a: (a, 0))})
+            T.copy(O, other)
+            T.finalize_reducer(acc, result)
+            out = T.alloc_fragment((128,), T.float32)
+            for j in T.Parallel(128):
+                out[j] = result[j] + other[j]
+            T.copy(out, B)
+            T.copy(result, C)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("width", [None, 4])
+def test_failed_reducer_attempt_can_retry(width):
+    # The native column layout conflicts with the pinned consumer when
+    # finalize publishes its narrow result. Its other consumer leaves pending
+    # propagation work. A later attempt must still find scalar ownership, or
+    # the wide fallback if an explicit width prevents the scalar candidate.
+    layouts = infer_reducer(factory=make_reducer_with_pinned_consumer, width=width)
+    assert int(layouts["result"].replicate_size) == (1 if width is None else 128)
+    if width is None:
+        assert int(layouts["acc"].combine_size) == 1
+
+    kernel = tl.compile(
+        make_reducer_with_pinned_consumer(width),
+        target="cuda",
+        pass_configs={"tl.layout_cost_model": "register-count"},
+    )
+    inputs = torch.randn((8, 128), device="cuda")
+    other = torch.randn((128,), device="cuda")
+    output = torch.empty_like(other)
+    copied = torch.empty_like(other)
+    kernel(inputs, other, output, copied)
+    expected = inputs.sum(dim=0)
+    torch.testing.assert_close(output, expected + other, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(copied, expected, rtol=1e-4, atol=1e-4)
 
 
 @tilelang.testing.requires_cuda
