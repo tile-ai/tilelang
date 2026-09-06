@@ -116,6 +116,9 @@ public:
   // Whether the inferred loop layout intentionally over-covers a ragged
   // non-fragment iteration space and therefore needs guarded inverse lowering.
   mutable bool loop_layout_requires_padding_guard_ = false;
+  // Attempt-local cap for exploring a scalar reducer layout. Zero preserves
+  // the vectorizer's plan; explicit user annotations always take precedence.
+  int plan_vector_size_limit_ = 0;
   // The predicate expression for the loop, if any, mutable for lazy
   // construction.
   mutable Optional<PrimExpr> predicate_;
@@ -156,6 +159,7 @@ public:
     loop_layout_inferred_ = other.loop_layout_inferred_;
     loop_layout_requires_padding_guard_ =
         other.loop_layout_requires_padding_guard_;
+    plan_vector_size_limit_ = other.plan_vector_size_limit_;
     annotated_layout_unbound_ = other.annotated_layout_unbound_;
     annotated_predicate_ = other.annotated_predicate_;
     annotated_requires_padding_guard_ = other.annotated_requires_padding_guard_;
@@ -171,6 +175,7 @@ public:
   // Get the parallel nest loop vars (visit order, outermost first) — the
   // input dims of GetLoopLayout().
   const Array<IterVar> &GetLoopVars() const { return loop_vars_; }
+  bool HasReducerUpdates() const { return !reducer_updates_.empty(); }
   // Get the mapping from buffer to access indices + access type.
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.

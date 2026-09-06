@@ -1341,8 +1341,14 @@ private:
                 const LayoutMap &strict_layout_map,
                 const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
                 const LayoutCostModel &cost_model, std::deque<int> &q,
-                std::vector<bool> &in_queue) {
+                std::vector<bool> &in_queue, bool scalar_reducer_root = false) {
     auto back_infer_list = BackupInferList();
+    if (scalar_reducer_root) {
+      auto loop = make_object<ParallelOpNode>(
+          *infer_list_[attempt_root].as<ParallelOpNode>());
+      loop->plan_vector_size_limit_ = 1;
+      infer_list_[attempt_root] = TileOperator(loop);
+    }
     LayoutMap tmp_layout_map = base_layout_map;
     for (const auto &[buffer, fragment] : seed_layouts) {
       if (!tmp_layout_map.count(buffer)) {
@@ -1474,27 +1480,40 @@ private:
         best_infer_root = attempt_root;
       };
 
-      // Try each member as the root of inference for this component.
+      // Try the native plan first, then a scalar alternative at eligible
+      // reducer roots. Scalar ownership can avoid replicated accumulator
+      // slots; the existing cost model decides whether that is worthwhile.
       for (int attempt_infer_root : members) {
-        DLOG(INFO) << "----------------------- try root " << attempt_infer_root
-                   << " members " << members.size() << '\n';
-        auto outcome = RunOneAttempt(attempt_infer_root, members, layout_map,
-                                     strict_layout_map, /*seed_layouts=*/{},
-                                     *cost_model, q, in_queue);
-        if (!outcome) {
-          continue;
-        }
-        DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
-                   << " cost model " << cost_model->Name()
-                   << " output: mem=" << outcome->cost.mem
-                   << " regs=" << outcome->cost.regs;
-        // Keep the cheapest attempt; ties resolve to the earliest root so
-        // the selection stays deterministic (and, with the cost model
-        // disabled, byte-identical to the legacy register ordering).
-        if (!has_best || outcome->cost.BetterThan(best_cost) ||
-            (!best_cost.BetterThan(outcome->cost) &&
-             attempt_infer_root < best_infer_root)) {
-          adopt(std::move(*outcome), attempt_infer_root);
+        const auto *loop = infer_list_[attempt_infer_root].as<ParallelOpNode>();
+        bool try_scalar =
+            cost_model->ExploreReducerScalarLayouts() && loop &&
+            loop->HasReducerUpdates() && !loop->GetLoopLayout().defined() &&
+            !loop->annotated_layout_unbound_.defined() &&
+            !loop->GetRoot()->annotations.count(attr::kCoalescedWidth);
+        for (bool scalar_root : {false, true}) {
+          if (scalar_root && !try_scalar) {
+            continue;
+          }
+          DLOG(INFO) << "----------------------- try root "
+                     << attempt_infer_root << " members " << members.size()
+                     << " scalar_reducer_root=" << scalar_root << '\n';
+          auto outcome = RunOneAttempt(attempt_infer_root, members, layout_map,
+                                       strict_layout_map, /*seed_layouts=*/{},
+                                       *cost_model, q, in_queue, scalar_root);
+          if (!outcome) {
+            continue;
+          }
+          DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
+                     << " cost model " << cost_model->Name()
+                     << " output: mem=" << outcome->cost.mem
+                     << " regs=" << outcome->cost.regs;
+          // Ties keep the earliest root and its native plan. The scalar
+          // alternative must improve the score to replace the same root.
+          if (!has_best || outcome->cost.BetterThan(best_cost) ||
+              (!best_cost.BetterThan(outcome->cost) &&
+               attempt_infer_root < best_infer_root)) {
+            adopt(std::move(*outcome), attempt_infer_root);
+          }
         }
       }
       if (!has_best) {
