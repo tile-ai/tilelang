@@ -242,7 +242,8 @@ public:
 
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
-                    std::deque<int> &q, std::vector<bool> &in_queue) {
+                    std::deque<int> &q, std::vector<bool> &in_queue,
+                    int plan_vector_size_limit = 0) {
     auto num_infer = infer_list_.size();
 
     // Range check for cur_infer_id
@@ -282,7 +283,8 @@ public:
                                                   {},
                                                   bind_var_to_expr_,
                                                   false,
-                                                  strict_layout_map},
+                                                  strict_layout_map,
+                                                  plan_vector_size_limit},
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
@@ -1343,12 +1345,6 @@ private:
                 const LayoutCostModel &cost_model, std::deque<int> &q,
                 std::vector<bool> &in_queue, bool scalar_reducer_root = false) {
     auto back_infer_list = BackupInferList();
-    if (scalar_reducer_root) {
-      auto loop = make_object<ParallelOpNode>(
-          *infer_list_[attempt_root].as<ParallelOpNode>());
-      loop->plan_vector_size_limit_ = 1;
-      infer_list_[attempt_root] = TileOperator(loop);
-    }
     LayoutMap tmp_layout_map = base_layout_map;
     for (const auto &[buffer, fragment] : seed_layouts) {
       if (!tmp_layout_map.count(buffer)) {
@@ -1358,8 +1354,11 @@ private:
     bool ok = true;
     std::string failure;
     try {
+      // Only the root's first inference receives the scalar-plan cap. Its
+      // solved layout is frozen; propagation and later visits use normal args.
       RunInferStep(attempt_root, InferLevel::kFree, true, tmp_layout_map,
-                   strict_layout_map, q, in_queue);
+                   strict_layout_map, q, in_queue,
+                   /*plan_vector_size_limit=*/scalar_reducer_root ? 1 : 0);
       FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map, q,
                        in_queue);
       for (int other : members) {

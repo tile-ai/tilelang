@@ -1004,8 +1004,8 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
       root_, layout_args.buffer_remap, layout_args.layout_map);
   int vector_size = GetVectorizeSize(maybe_remapped_root_, layout_args.analyzer,
                                      layout_args.layout_map);
-  if (plan_vector_size_limit_ > 0) {
-    vector_size = std::min(vector_size, plan_vector_size_limit_);
+  if (layout_args.plan_vector_size_limit > 0) {
+    vector_size = std::min(vector_size, layout_args.plan_vector_size_limit);
   }
   DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
 
