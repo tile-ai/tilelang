@@ -3,6 +3,7 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
+import pytest
 
 
 @tilelang.testing.requires_cuda
@@ -55,6 +56,24 @@ def test_cython_pdl():
     tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
 
     print("pdl test passed!")
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.uint8, T.uint16, T.uint32, T.uint64])
+def test_cython_unsigned_scalar_param(dtype):
+    """An unsigned scalar parameter must marshal like its signed counterpart."""
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.int32), s: dtype, B: T.Tensor((128,), T.int32)):
+        with T.Kernel(1, threads=128):
+            i = T.get_thread_binding()
+            B[i] = A[i] + s
+
+    kernel = tilelang.compile(main, execution_backend="cython")
+    a = torch.arange(128, dtype=torch.int32, device="cuda")
+    b = torch.empty(128, dtype=torch.int32, device="cuda")
+    kernel(a, 5, b)
+    tilelang.testing.torch_assert_close(b, a + 5, atol=0, rtol=0)
 
 
 if __name__ == "__main__":
