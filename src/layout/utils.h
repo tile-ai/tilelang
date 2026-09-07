@@ -76,6 +76,31 @@ PrimExpr MakeFlattenedExpression(const Array<arith::IterSplitExpr> &splits);
 Map<Var, Range> ToVMap(const Array<IterVar> &ivs);
 
 /*!
+ * \brief Check whether a forward map is a bijection onto one rectangular
+ *        physical image.
+ *
+ * The logical domain may contain parameters that are not listed in
+ * `logical_domain`; those are treated as fixed for one invocation.  The
+ * returned string describes the first failed proof, while std::nullopt means
+ * that rectangularity and injectivity were both proved.
+ */
+std::optional<std::string> GetForwardMapBijectionError(
+    const Array<PrimExpr> &physical_coordinates,
+    const Array<IterVar> &logical_domain, arith::Analyzer *analyzer,
+    const std::string &description, bool require_zero_based = false);
+
+/*!
+ * \brief Check the canonical Fragment mapping
+ *        `(logical coordinates, replica) -> (thread, local indices)`.
+ *
+ * A valid freely inferred fragment must be a bijection onto a zero-based
+ * physical rectangle.  ThreadRange is an external participant-range offset
+ * and is intentionally not part of this normalized mapping.
+ */
+std::optional<std::string> GetFragmentBijectionError(const Fragment &fragment,
+                                                     arith::Analyzer *analyzer);
+
+/*!
  * \brief Convert a Map object to an Array of IterVar
  *
  */

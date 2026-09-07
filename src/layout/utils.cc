@@ -11,6 +11,7 @@
 #include <tvm/ffi/extra/structural_hash.h>
 
 #include <sstream>
+#include <string>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -440,6 +441,119 @@ Map<Var, Range> ToVMap(const Array<IterVar> &ivs) {
   return result;
 }
 
+std::optional<std::string> GetForwardMapBijectionError(
+    const Array<PrimExpr> &physical_coordinates,
+    const Array<IterVar> &logical_domain, arith::Analyzer *analyzer,
+    const std::string &description, bool require_zero_based) {
+  ICHECK(analyzer != nullptr);
+
+  // Only variables in logical_domain vary during this check.  Other symbols
+  // (for example an enclosing serial-loop iterator) are parameters fixed for
+  // one invocation of the Parallel operation.
+  auto scoped_analyzer = analyzer->Clone();
+  PrimExpr domain_volume = Integer(1);
+  for (const IterVar &iter_var : logical_domain) {
+    scoped_analyzer->Bind(iter_var->var, iter_var->dom, true);
+    PrimExpr extent = analyzer->Simplify(iter_var->dom->extent);
+    if (!analyzer->CanProve(extent > 0)) {
+      std::ostringstream os;
+      os << description << " has a logical dimension whose positive extent "
+         << "cannot be proved: " << iter_var->dom;
+      return os.str();
+    }
+    domain_volume = analyzer->Simplify(domain_volume * extent);
+  }
+
+  PrimExpr bounding_volume = Integer(1);
+  std::ostringstream ranges;
+  for (size_t i = 0; i < physical_coordinates.size(); ++i) {
+    PrimExpr coordinate = analyzer->Simplify(physical_coordinates[i]);
+    arith::IntSet coordinate_set = scoped_analyzer->int_set(coordinate);
+    if (coordinate_set.IsEverything()) {
+      std::ostringstream os;
+      os << description << " does not form a rectangle: physical coordinate "
+         << i << " has an unbounded range " << coordinate_set;
+      return os.str();
+    }
+    PrimExpr min_value = analyzer->Simplify(coordinate_set.min());
+    PrimExpr max_value = analyzer->Simplify(coordinate_set.max());
+    if (require_zero_based && !analyzer->CanProveEqual(min_value, 0)) {
+      std::ostringstream os;
+      os << description << " is not zero-based in physical dimension " << i
+         << ": minimum is " << min_value;
+      return os.str();
+    }
+    PrimExpr extent = analyzer->Simplify(max_value - min_value + 1);
+    bounding_volume = analyzer->Simplify(bounding_volume * extent);
+    if (i != 0) {
+      ranges << ", ";
+    }
+    ranges << '[' << min_value << ", " << max_value << ']';
+  }
+
+  domain_volume = analyzer->Simplify(domain_volume);
+  bounding_volume = analyzer->Simplify(bounding_volume);
+  if (!analyzer->CanProveEqual(domain_volume, bounding_volume)) {
+    std::ostringstream os;
+    os << description << " does not form a rectangle: " << domain_volume
+       << " logical points map inside bounding ranges " << ranges.str()
+       << " with volume " << bounding_volume;
+    return os.str();
+  }
+
+  // Layout's constructor requires zero-based domains.  Normalize nonzero loop
+  // minima before using the common injectivity checker; foreign symbols remain
+  // untouched and therefore act as fixed parameters.
+  Array<IterVar> normalized_domain;
+  Map<Var, PrimExpr> normalization;
+  for (size_t i = 0; i < logical_domain.size(); ++i) {
+    const IterVar &iter_var = logical_domain[i];
+    Var normalized_var("__tl_bijection_i" + std::to_string(i),
+                       iter_var->var.dtype());
+    normalized_domain.push_back(IterVar(Range(0, iter_var->dom->extent),
+                                        normalized_var, IterVarType::kDataPar));
+    normalization.Set(iter_var->var, normalized_var + iter_var->dom->min);
+  }
+  Array<PrimExpr> normalized_coordinates =
+      Substitute(physical_coordinates, normalization);
+  arith::IterMapResult injectivity =
+      Layout(normalized_domain, normalized_coordinates)->DetectInjective();
+  if (!injectivity->errors.empty()) {
+    std::ostringstream os;
+    os << description
+       << " does not form a rectangle: the forward map is not provably "
+          "one-to-one. Details: "
+       << injectivity->errors;
+    return os.str();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string>
+GetFragmentBijectionError(const Fragment &fragment, arith::Analyzer *analyzer) {
+  ICHECK(fragment.defined());
+  ICHECK(analyzer != nullptr);
+
+  Array<IterVar> logical_domain;
+  for (size_t i = 0; i < fragment->InputDim(); ++i) {
+    Range domain(0, fragment->InputShape()[i]);
+    logical_domain.push_back(
+        IterVar(domain, InputPlaceholder(i), IterVarType::kDataPar));
+  }
+  Range replicate_domain(0, fragment->ReplicateExtent());
+  logical_domain.push_back(IterVar(replicate_domain, ReplicationPlaceholder(),
+                                   IterVarType::kDataPar));
+
+  Array<PrimExpr> physical_coordinates{fragment->GetForwardThread()};
+  Array<PrimExpr> forward_indices = fragment->GetForwardIndex();
+  physical_coordinates.insert(physical_coordinates.end(),
+                              forward_indices.begin(), forward_indices.end());
+
+  return GetForwardMapBijectionError(physical_coordinates, logical_domain,
+                                     analyzer, "the fragment forward map",
+                                     /*require_zero_based=*/true);
+}
+
 // ProveFragmentContains checks whether the threads that access elements of a
 // smaller fragment (small_frag) are a subset of the threads that access
 // elements of a larger fragment (large_frag) for any given loop index. This
@@ -495,13 +609,25 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                 Range(IntImm(small_frag->ReplicateExtent()->dtype, 0),
                       small_frag->ReplicateExtent()),
                 true); // Bind the replicate extent of small_frag.
-  // Derive thread for small_frag.
-  auto thread = small_frag->ForwardThread(small_frag_indices, rep_small);
+  PrimExpr small_thread_base =
+      small_frag->ThreadRange().defined()
+          ? small_frag->ThreadRange()->min
+          : make_zero(small_frag->GetForwardThread()->dtype);
+  PrimExpr large_thread_base =
+      large_frag->ThreadRange().defined()
+          ? large_frag->ThreadRange()->min
+          : make_zero(large_frag->GetForwardThread()->dtype);
+  // Compare physical participant ids.  Fragment forward-thread expressions are
+  // normalized to their own ThreadRange, whose minimum may differ for a sliced
+  // Parallel operation.
+  auto thread = small_frag->ForwardThread(small_frag_indices, rep_small) +
+                small_thread_base;
 
   // Get physical index and thread for large_frag.
   auto large_frag_physical_and_thread = large_frag->Forward(large_frag_indices);
-  // Add small_frag's thread to the large fragment's thread info.
-  large_frag_physical_and_thread.push_back(thread);
+  // The large fragment inverse consumes a thread coordinate normalized to its
+  // own participant range.
+  large_frag_physical_and_thread.push_back(thread - large_thread_base);
   // Get the inverse of the large fragment.
   auto inv_large_frag = large_frag->Inverse();
   // Compute logical index and replicate index using inverse layout.
@@ -514,7 +640,8 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
 
   // Calculate thread based on the logical index and replicate index.
   auto check_thread =
-      large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep);
+      large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep) +
+      large_thread_base;
 
   // Simplify the difference between the threads.
   auto diff = analyzer.Simplify(thread - check_thread);

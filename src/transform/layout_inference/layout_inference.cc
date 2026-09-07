@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <sstream>
 #include <unordered_set>
 
 #include "../../config.h"
@@ -28,6 +29,7 @@
 #include "../../layout/utils.h"
 #include "../../op/builtin.h"
 #include "../../op/copy.h"
+#include "../../op/fill.h"
 #include "../../op/parallel.h"
 #include "../../op/reducer.h"
 #include "../../op/utils.h"
@@ -1337,11 +1339,15 @@ private:
     LayoutMap layout_map;
     AttemptCost cost;
   };
-  std::optional<AttemptOutcome> RunOneAttempt(
-      int attempt_root, const std::vector<int> &members,
-      const LayoutMap &base_layout_map, const LayoutMap &strict_layout_map,
-      const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0) {
+  std::optional<AttemptOutcome>
+  RunOneAttempt(int attempt_root, const std::vector<int> &members,
+                const std::vector<Buffer> &buffers,
+                const LayoutMap &base_layout_map,
+                const LayoutMap &strict_layout_map,
+                const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
+                const LayoutCostModel &cost_model,
+                std::optional<std::string> *last_failure,
+                int candidate_vector_size_limit = 0) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
     // A failed attempt can leave pending propagation work. Keep both the
@@ -1370,6 +1376,7 @@ private:
                            q, in_queue);
         }
       }
+      ValidateFreeInferenceAttempt(members, buffers, tmp_layout_map);
     } catch (const LayoutConflictException &e) {
       ok = false;
       failure = e.what();
@@ -1379,6 +1386,9 @@ private:
     } catch (const LoopLayoutInjectiveException &e) {
       ok = false;
       failure = e.what();
+    } catch (const Error &e) {
+      ok = false;
+      failure = e.what();
     }
     std::optional<AttemptOutcome> outcome;
     if (ok) {
@@ -1386,11 +1396,82 @@ private:
       outcome =
           AttemptOutcome{BackupInferList(), std::move(tmp_layout_map), cost};
     } else {
+      if (last_failure != nullptr) {
+        *last_failure = failure;
+      }
       DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_root
                  << " discarded: " << failure;
     }
     infer_list_ = std::move(back_infer_list);
     return outcome;
+  }
+
+  void ValidateFreeInferenceAttempt(const std::vector<int> &members,
+                                    const std::vector<Buffer> &buffers,
+                                    const LayoutMap &layout_map) const {
+    auto fragment_analyzer = analyzer_.Clone();
+    // Free fragment layouts are storage assignments, not merely ownership
+    // hints.  Their complete `(logical coordinates, replica)` domain must map
+    // bijectively onto a rectangular `(thread, local indices)` allocation.
+    for (const Buffer &buffer : buffers) {
+      // Reducer buffers carry PartialFragment values whose replicas are
+      // addends, not duplicate storage. Their injectivity is checked by the
+      // reducer-specific commit path.
+      if (!IsFragmentBuffer(buffer) || IsReducerV2Buffer(buffer)) {
+        continue;
+      }
+      if (!layout_map.count(buffer)) {
+        std::ostringstream os;
+        os << "Free layout inference did not produce a layout for fragment "
+              "buffer `"
+           << buffer->name << "`.";
+        throw LayoutConflictException(os.str());
+      }
+      Optional<Fragment> fragment = layout_map[buffer].as<Fragment>();
+      if (!fragment.defined()) {
+        std::ostringstream os;
+        os << "Free layout inference produced a non-fragment layout for "
+              "fragment buffer `"
+           << buffer->name << "`.";
+        throw LayoutConflictException(os.str());
+      }
+      if (auto error = GetFragmentBijectionError(fragment.value(),
+                                                 fragment_analyzer.get())) {
+        std::ostringstream os;
+        os << "Free layout inference produced an invalid layout for fragment "
+              "buffer `"
+           << buffer->name << "`: " << *error
+           << ". Layout: " << fragment.value()->DebugOutput();
+        throw LayoutConflictException(os.str());
+      }
+    }
+
+    // Recheck every explicit or generated Parallel after the entire component
+    // has propagated. An earlier per-op check may not have seen fragment
+    // layouts inferred by a later member of the same attempt.
+    for (int member : members) {
+      LayoutInferArgs layout_args{target_,    thread_bounds_vec_[member],
+                                  layout_map, analyzer_vec_[member].get(),
+                                  {},         bind_var_to_expr_,
+                                  false,      {}};
+      const auto *parallel = infer_list_[member].as<ParallelOpNode>();
+      if (parallel != nullptr) {
+        parallel->ValidateInferredLayout(layout_args);
+        continue;
+      }
+
+      const auto *copy = infer_list_[member].as<CopyNode>();
+      if (copy != nullptr && copy->par_op_.defined()) {
+        copy->par_op_->ValidateInferredLayout(layout_args);
+        continue;
+      }
+
+      const auto *fill = infer_list_[member].as<FillNode>();
+      if (fill != nullptr && IsFragmentBuffer(fill->dst)) {
+        ParallelOp fill_parallel(fill->MakeSIMTLoop(layout_args.analyzer));
+        fill_parallel->InferLayout(layout_args, InferLevel::kFree);
+      }
+    }
   }
 
   void InferInFreeMode(LayoutMap &layout_map,
@@ -1452,9 +1533,6 @@ private:
       int root = uf.Find(infer_indices[0]);
       components_buffers[root].push_back(buffer);
     }
-    // Keep components_buffers for debug purpose
-    (void)components_buffers;
-
     // For each component, try each op as root, and determine the least
     // replicated one
     std::unique_ptr<LayoutCostModel> cost_model =
@@ -1468,6 +1546,7 @@ private:
       AttemptCost best_cost;
       bool has_best = false;
       int best_infer_root = -1;
+      std::optional<std::string> last_failure;
 
       auto adopt = [&](AttemptOutcome &&outcome, int attempt_root) {
         best_infer_list = std::move(outcome.infer_list);
@@ -1496,8 +1575,9 @@ private:
                      << " candidate_vector_size_limit="
                      << candidate_vector_size_limit << '\n';
           auto outcome = RunOneAttempt(
-              attempt_infer_root, members, layout_map, strict_layout_map,
-              /*seed_layouts=*/{}, *cost_model, candidate_vector_size_limit);
+              attempt_infer_root, members, components_buffers[root], layout_map,
+              strict_layout_map, /*seed_layouts=*/{}, *cost_model,
+              &last_failure, candidate_vector_size_limit);
           if (!outcome) {
             continue;
           }
@@ -1529,14 +1609,20 @@ private:
         if (!seeds.empty()) {
           DLOG(INFO) << "[InferInFreeMode] all attempts failed; retrying with "
                      << "wide fallback dst layouts";
-          auto outcome = RunOneAttempt(members.front(), members, layout_map,
-                                       strict_layout_map, seeds, *cost_model);
+          auto outcome = RunOneAttempt(
+              members.front(), members, components_buffers[root], layout_map,
+              strict_layout_map, seeds, *cost_model, &last_failure);
           if (outcome) {
             adopt(std::move(*outcome), members.front());
           }
         }
       }
-      ICHECK(has_best) << "no available layout found" << '\n';
+      if (!has_best) {
+        TVM_FFI_THROW(ValueError)
+            << "No valid layout was found for a connected layout-inference "
+               "component. Last failure: "
+            << last_failure.value_or("unknown layout inference failure");
+      }
       // Apply the best plan for this component
       infer_list_ = std::move(best_infer_list);
       layout_map = best_layout_map;

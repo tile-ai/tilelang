@@ -122,6 +122,14 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             lse_logsum_local = T.alloc_fragment([block_M], accum_dtype)
             lse_max_local = T.alloc_fragment([block_M], accum_dtype)
             scale_local = T.alloc_fragment([block_M], accum_dtype)
+            T.annotate_layout(
+                {
+                    lse_local: T.Fragment(
+                        [num_split, block_M],
+                        forward_fn=lambda split, row: (row, split),
+                    )
+                }
+            )
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
