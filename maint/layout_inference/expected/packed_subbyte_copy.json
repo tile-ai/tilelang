@@ -1,0 +1,12 @@
+{
+  "int4_n128_t128": {
+    "io-aware": {
+      "buffers": {},
+      "loops": {}
+    },
+    "register-count": {
+      "buffers": {},
+      "loops": {}
+    }
+  }
+}

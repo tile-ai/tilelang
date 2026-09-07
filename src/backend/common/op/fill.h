@@ -29,7 +29,11 @@ struct Fill {
                            lower_args.layout_map,
                            analyzer,
                            lower_args.buffer_remap,
-                           {}},
+                           {},
+                           false,
+                           {},
+                           lower_args.block_bindings,
+                           lower_args.thread_index},
                           InferLevel::kFree);
       auto thread_loop =
           PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
@@ -59,7 +63,11 @@ struct Fill {
                            lower_args.layout_map,
                            analyzer,
                            lower_args.buffer_remap,
-                           {}},
+                           {},
+                           false,
+                           {},
+                           lower_args.block_bindings,
+                           lower_args.thread_index},
                           InferLevel::kFree);
       auto thread_loop =
           PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
