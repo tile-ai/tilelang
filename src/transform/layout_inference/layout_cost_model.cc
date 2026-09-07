@@ -990,6 +990,7 @@ public:
     return cost;
   }
   const char *Name() const final { return "register-count"; }
+  bool ExploreReducerScalarLayouts() const final { return true; }
 };
 
 /*! \brief IO-aware policy (layout RFC, design B2): every global-touching
