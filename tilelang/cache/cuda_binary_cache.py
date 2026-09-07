@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import json
 import os
+import shutil
 import sys
 import uuid
 from hashlib import sha256
@@ -15,9 +17,14 @@ from tilelang import __version__
 from tilelang.env import env
 
 
+_CACHE_FORMAT = "tilelang.cuda-binary-cache.v1"
+
+
 class CUDABinaryCache:
     """Cache cubin/fatbin bytes independently from host executable artifacts."""
 
+    # Each key is an immutable directory containing metadata.json and a raw
+    # kernel binary. Legacy `<key>.<format>` files and sidecars are ignored.
     cache_root_dir = "cuda-binaries"
 
     @staticmethod
@@ -43,6 +50,10 @@ class CUDABinaryCache:
     @classmethod
     def _get_cache_root(cls) -> str:
         return os.path.join(cls._get_namespace_root(), cls.cache_root_dir)
+
+    @classmethod
+    def _get_staging_root(cls) -> str:
+        return os.path.join(cls._get_namespace_root(), ".staging", cls.cache_root_dir)
 
     @staticmethod
     @functools.cache
@@ -120,12 +131,7 @@ class CUDABinaryCache:
 
     @classmethod
     def get_path(cls, key: str, compile_format: str) -> str:
-        filename = f"{key}.{compile_format}"
-        return os.path.join(cls._get_cache_root(), filename)
-
-    @classmethod
-    def _sidecar_path(cls, path: str) -> str:
-        return path + ".sha256"
+        return os.path.join(cls._get_cache_root(), key, f"kernel.{compile_format}")
 
     @classmethod
     def load(cls, key: str, compile_format: str) -> bytes | None:
@@ -135,55 +141,82 @@ class CUDABinaryCache:
         try:
             with open(path, "rb") as f:
                 data = f.read()
-        except FileNotFoundError:
+            with open(os.path.join(os.path.dirname(path), "metadata.json"), encoding="utf-8") as f:
+                metadata = json.load(f)
+        except (OSError, ValueError):
             return None
-        if not env.should_verify_cache_hash():
-            return data
-        try:
-            with open(cls._sidecar_path(path)) as f:
-                expected_hash = f.read().strip()
-        except OSError:
-            # Entries written before content hashes were recorded.
-            return data
-        if sha256(data).hexdigest() == expected_hash:
-            return data
-        # Corrupted entry (e.g. truncated by a crashed writer): feeding it to
-        # cuModuleLoadData would fail with CUDA_ERROR_INVALID_IMAGE on every
-        # future run. Drop it so the caller recompiles and rewrites it.
-        for stale in (path, cls._sidecar_path(path)):
-            with contextlib.suppress(OSError):
-                os.remove(stale)
-        return None
+        if not isinstance(metadata, dict) or metadata.get("format") != _CACHE_FORMAT:
+            return None
+
+        # Empty/short reads and missing metadata are always misses. Never delete
+        # shared cache entries: on 3FS, unlinking a binary can invalidate another
+        # reader's open fd.
+        payload_size = metadata.get("size")
+        if type(payload_size) is not int or payload_size <= 0 or len(data) != payload_size:
+            return None
+        if sha256(data).hexdigest() != metadata.get("sha256"):
+            return None
+        return data
 
     @classmethod
     def save(cls, key: str, compile_format: str, data: bytes) -> None:
+        if not data:
+            raise ValueError("Cannot cache an empty CUDA binary")
         if not env.is_cache_enabled():
             return
 
         cache_root = cls._get_cache_root()
         os.makedirs(cache_root, exist_ok=True)
         path = cls.get_path(key, compile_format)
-        # Sidecar first: a crash between the two renames then leaves a hash
-        # without a payload (a plain cache miss) instead of an unverifiable
-        # payload.
-        cls._write_atomic(cls._sidecar_path(path), sha256(data).hexdigest().encode())
-        cls._write_atomic(path, data)
+        cache_path = os.path.dirname(path)
+        # Published directories are immutable, even if a load found corruption.
+        # The caller can use its fresh compilation; repairing shared entries
+        # requires offline cleanup to avoid invalidating concurrent readers.
+        if os.path.lexists(cache_path):
+            return
 
-    @classmethod
-    def _write_atomic(cls, path: str, data: bytes) -> None:
-        directory, filename = os.path.split(path)
-        # Atomic replacement requires the temporary file and destination to be
-        # on the same filesystem, so keep the temporary file next to the cache
-        # entry.
-        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
+        staging_root = cls._get_staging_root()
+        os.makedirs(staging_root, exist_ok=True)
+        staging_path = os.path.join(staging_root, f"{key}.{os.getpid()}.{uuid.uuid4().hex}")
+        os.mkdir(staging_path)
         try:
-            with open(temp_path, "wb") as f:
+            data = bytes(data)
+            metadata = {"format": _CACHE_FORMAT, "size": len(data), "sha256": sha256(data).hexdigest()}
+            with open(os.path.join(staging_path, os.path.basename(path)), "wb") as f:
                 f.write(data)
-                # Without this barrier a crash can persist the rename below
-                # before the file data, publishing a truncated binary.
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temp_path, path)
+            with open(os.path.join(staging_path, "metadata.json"), "w", encoding="utf-8") as f:
+                json.dump(metadata, f, indent=2, sort_keys=True)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            cls._fsync_dir(staging_path)
+
+            try:
+                # Both roots live in the same namespace/filesystem. Rename
+                # publishes both files together and cannot overwrite another
+                # writer's nonempty directory: the first publication wins.
+                os.rename(staging_path, cache_path)
+            except OSError as exc:
+                if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+            else:
+                cls._fsync_dir(cache_root)
+                cls._fsync_dir(staging_root)
         finally:
+            # Only remove this writer's private staging directory.
+            shutil.rmtree(staging_path, ignore_errors=True)
+
+    @staticmethod
+    def _fsync_dir(path: str) -> None:
+        """Best-effort durability barrier for the published directory entry."""
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            return
+        try:
             with contextlib.suppress(OSError):
-                os.remove(temp_path)
+                os.fsync(fd)
+        finally:
+            os.close(fd)
