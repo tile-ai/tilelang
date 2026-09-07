@@ -7,7 +7,6 @@ from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, D
 from tilelang import tvm as tvm
 from tilelang.language.common import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
-from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import DataType, DataTypeCode, tirx
 from tvm.runtime import convert
 from tvm.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
@@ -1180,12 +1179,11 @@ def match_all_sync(
 
 
 def sync_global():
-    """Synchronize all threads in the entire grid."""
-    tx, ty, tz = get_thread_bindings()
-    ex, ey, ez = get_block_extents()
-    print(tx, ty, tz, ex, ey, ez)
-    args = ["global", tx == 0 and ty == 0 and tz == 0, ex * ey * ez]
-    return evaluate(tirx.Call("handle", "tirx.tvm_storage_sync", args))
+    """Synchronize all threads in the entire grid.
+
+    Alias of :func:`sync_grid`.
+    """
+    return sync_grid()
 
 
 def sync_grid():
