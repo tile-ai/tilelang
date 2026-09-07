@@ -200,7 +200,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           activate-environment: true
-          # Do not use cache for self-hosted runners, as it will download/upload caches which is slow.
+          # Keep the local cache on self-hosted runners; disable only remote
+          # cache upload/download and pruning. Setup failures can be caused by
+          # transient downloads or compilation, not cache corruption. Retain
+          # downloaded dependencies so retries do not start from a cold cache.
           enable-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
           prune-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
           # Use runner tool_cache for self-hosted runners
@@ -246,17 +249,6 @@ jobs:
           if command -v ccache >/dev/null 2>&1; then
             ccache -s || true
           fi
-
-      - name: Clear uv cache for self-hosted runners (if setup failed)
-        if: >-
-          ${{
-            failure() &&
-            startsWith(matrix.runner.name, 'self-hosted') &&
-            (steps.setup-uv.conclusion == 'failure' || steps.setup-venv.conclusion == 'failure')
-          }}
-        run: |
-          echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
-          uv cache clean
 
       - name: Enable core dump generation (Linux / GitHub-hosted runners)
         if: ${{ runner.os == 'Linux' && !startsWith(matrix.runner.name, 'self-hosted') }}
