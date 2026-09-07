@@ -24,28 +24,51 @@
 namespace tvm::tl {
 
 /*!
- * \brief Replace every mutable read in an expression with a fresh, independent
- *        variable.
+ * \brief Replace mutable reads with unknown variables.
  *
  * `Analyzer::Bind` installs a rewrite `var -> value`, so a definition reading
  * mutable state would outlive a store this does not track, and would make two
  * instances agree where two threads read two different registers.
+ *
+ * By default, every occurrence gets an independent variable. Snapshot mode
+ * reuses variables for structurally equal reads within this mutator instance.
+ * Use it only when repeated expressions describe the same captured value, such
+ * as the bounds of one access region, and use separate instances for distinct
+ * access points. This models a snapshot; it does not capture values at runtime.
  */
 class FreshenMutableReads : public tirx::ExprMutator {
 public:
   using tirx::ExprMutator::operator();
 
+  /*! \brief Whether repeated reads denote separate evaluations or one snapshot.
+   */
+  enum class Mode {
+    kPerOccurrence,
+    kSnapshot,
+  };
+
+  explicit FreshenMutableReads(Mode mode = Mode::kPerOccurrence)
+      : mode_(mode) {}
+
 private:
   /*!
-   * \brief A fresh variable for one occurrence of \p e, never reused for a
-   *        structurally equal one.
+   * \brief Replace \p e according to the caller's evaluation model.
    *
    * An opaque call need not return the same value twice (`f() - f()` is not
    * zero), and two reads of one location may be separated by a store. Sharing
-   * would assert an equality that need not hold.
+   * would assert an equality that need not hold, so reuse requires explicit
+   * snapshot mode.
    */
   PrimExpr Fresh(const PrimExpr &e) {
-    return tirx::Var("free" + std::to_string(count_++), e.dtype());
+    if (mode_ == Mode::kSnapshot) {
+      auto it = memo_.find(e);
+      if (it != memo_.end())
+        return it->second;
+    }
+    tirx::Var fresh("free" + std::to_string(count_++), e.dtype());
+    if (mode_ == Mode::kSnapshot)
+      memo_.emplace(e, fresh);
+    return fresh;
   }
 
   PrimExpr VisitExpr_(const tirx::BufferLoadNode *op) override {
@@ -67,7 +90,11 @@ private:
     return tirx::ExprMutator::VisitExpr_(op);
   }
 
+  Mode mode_;
   int count_{0};
+  std::unordered_map<PrimExpr, PrimExpr, ffi::StructuralHash,
+                     tirx::ExprDeepEqual>
+      memo_;
 };
 
 struct Constr {
