@@ -823,13 +823,12 @@ class KernelCache:
         required_names = {os.path.basename(path) for path in self._get_required_files(cache_path)}
         if not required_names.issubset(files):
             return False
-        verify_hash = env.should_verify_cache_hash()
         for name, meta in entries:
             path = os.path.join(cache_path, name)
             try:
                 if os.path.getsize(path) != meta["size"]:
                     return False
-                if verify_hash and name in required_names and KernelCache._hash_file(path) != meta["sha256"]:
+                if name in required_names and KernelCache._hash_file(path) != meta["sha256"]:
                     return False
             except (OSError, KeyError, TypeError):
                 return False
