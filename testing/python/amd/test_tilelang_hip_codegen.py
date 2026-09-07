@@ -754,14 +754,14 @@ def test_pipelined_multi_stage_fp16_gemm(num_stages):
 
 # ---------------------------------------------------------------------------
 # Fix 7 — src/rocm/codegen/codegen_hip.cc
-#   Packed scalar int4/uint4 use one int32 storage word per eight elements.
+#   Packed scalar int4/uint4 use one byte per two logical elements.
 # ---------------------------------------------------------------------------
 
 
 @tilelang.testing.requires_rocm
 @pytest.mark.parametrize(
     "dtype,storage_type",
-    [(T.int4, "int"), (T.dtype("uint4"), "uint")],
+    [(T.int4, "signed char"), (T.dtype("uint4"), "uchar")],
 )
 def test_static_packed_int4_shared_allocation_rounds_up(dtype, storage_type):
     @T.prim_func
@@ -772,7 +772,7 @@ def test_static_packed_int4_shared_allocation_rounds_up(dtype, storage_type):
 
     artifact = tilelang.lower(kernel, target="hip")
 
-    assert f"{storage_type} A_shared[16];" in artifact.kernel_source
+    assert f"{storage_type} A_shared[64];" in artifact.kernel_source
 
 
 # ---------------------------------------------------------------------------

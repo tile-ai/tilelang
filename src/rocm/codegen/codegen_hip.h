@@ -35,6 +35,8 @@ public:
                         PrimExpr rhs,
                         std::ostream &os) final;      // NOLINT(*)
   void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
+  void PrintVecConstructor(DataType data_type,
+                           std::ostream &os) final; // NOLINT(*)
   void PrintVecElemLoad(const std::string &vec, DataType t, int i,
                         std::ostream &os) final; // NOLINT(*)
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
@@ -53,6 +55,7 @@ public:
   void VisitExpr_(const NotNode *op, std::ostream &os) final;
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitStmt_(const BufferStoreNode *op) final;
@@ -68,6 +71,9 @@ protected:
                        std::ostream &os) final; // NOLINT(*)
 
 private:
+  void PrintPackedInt4Load(const BufferNode *buffer, const std::string &index,
+                           std::ostream &os); // NOLINT(*)
+
   // Handle volatile loads
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;

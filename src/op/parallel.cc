@@ -5,6 +5,7 @@
 
 #include "parallel.h"
 #include "support/check.h"
+#include <tvm/arith/int_set.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -16,10 +17,10 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../transform/common/storage_size.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "arith/int_operator.h"
-#include "backend/common/target_utils.h"
 #include "builtin.h"
 #include "reducer.h"
 #include "span_utils.h"
@@ -72,6 +73,265 @@ private:
   Map<Buffer, Layout> layout_map_;
 };
 
+struct PackedSubByteStoreAccess {
+  Buffer buffer;
+  Array<PrimExpr> indices;
+  Array<IterVar> iter_vars;
+  std::vector<size_t> parallel_positions;
+};
+
+class PackedSubByteStoreCollector : public StmtExprVisitor {
+public:
+  static std::vector<PackedSubByteStoreAccess>
+  Collect(const Stmt &stmt,
+          const Optional<IterVar> &execution_thread = Optional<IterVar>()) {
+    PackedSubByteStoreCollector collector;
+    if (execution_thread.defined()) {
+      collector.iter_vars_.push_back(execution_thread.value());
+    }
+    collector(stmt);
+    return collector.stores_;
+  }
+
+private:
+  void VisitStmt_(const ForNode *op) final {
+    size_t position = iter_vars_.size();
+    IterVarType iter_type = op->kind == ForKind::kParallel
+                                ? IterVarType::kDataPar
+                                : IterVarType::kOrdered;
+    iter_vars_.push_back(IterVar(Range::FromMinExtent(op->min, op->extent),
+                                 op->loop_var, iter_type));
+    if (op->kind == ForKind::kParallel) {
+      parallel_positions_.push_back(position);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+    if (op->kind == ForKind::kParallel) {
+      parallel_positions_.pop_back();
+    }
+    iter_vars_.pop_back();
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    bool is_packed_physical_store =
+        (IsGlobalBuffer(op->buffer) || IsSharedBuffer(op->buffer)) &&
+        op->buffer->dtype.lanes() == 1 &&
+        IsPacked4BitStorage(op->buffer->dtype);
+    if (is_packed_physical_store && !iter_vars_.empty()) {
+      stores_.push_back({op->buffer, op->indices,
+                         Array<IterVar>(iter_vars_.begin(), iter_vars_.end()),
+                         parallel_positions_});
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  std::vector<IterVar> iter_vars_;
+  std::vector<size_t> parallel_positions_;
+  std::vector<PackedSubByteStoreAccess> stores_;
+};
+
+Optional<PrimExpr>
+GetPackedStoreElementOffset(const PackedSubByteStoreAccess &access) {
+  Array<PrimExpr> physical = access.buffer.OffsetOf(access.indices);
+  Buffer flattened = access.buffer.GetFlattenedBuffer();
+  if (physical.empty() || physical.size() != flattened->shape.size()) {
+    return Optional<PrimExpr>();
+  }
+
+  PrimExpr linear = physical[0];
+  for (size_t i = 1; i < physical.size(); ++i) {
+    linear = linear * flattened->shape[i] + physical[i];
+  }
+  return linear;
+}
+
+Optional<PrimExpr>
+GetPackedStoreByteOffset(const PackedSubByteStoreAccess &access) {
+  Optional<PrimExpr> maybe_elem_offset = GetPackedStoreElementOffset(access);
+  if (!maybe_elem_offset.defined()) {
+    return Optional<PrimExpr>();
+  }
+  PrimExpr elem_offset = maybe_elem_offset.value();
+  return floordiv(elem_offset, make_const(elem_offset.dtype(), 2));
+}
+
+struct ProvenPackedStoreOwner {
+  Var storage;
+  PrimExpr owner;
+  arith::IntSet byte_domain;
+};
+
+arith::IntSet GetPackedStoreByteDomain(const PackedSubByteStoreAccess &access,
+                                       const PrimExpr &byte_offset) {
+  Map<IterVar, arith::IntSet> iter_domains;
+  for (const IterVar &iter_var : access.iter_vars) {
+    iter_domains.Set(iter_var, arith::IntSet::FromRange(iter_var->dom));
+  }
+  return arith::EvalSet(byte_offset, iter_domains);
+}
+
+bool PackedStoreDomainsAreProvablyDisjoint(const arith::IntSet &lhs,
+                                           const arith::IntSet &rhs,
+                                           arith::Analyzer *analyzer) {
+  if (!lhs.HasLowerBound() || !lhs.HasUpperBound() || !rhs.HasLowerBound() ||
+      !rhs.HasUpperBound()) {
+    return false;
+  }
+  return analyzer->CanProve(lhs.max() < rhs.min()) ||
+         analyzer->CanProve(rhs.max() < lhs.min());
+}
+
+bool ProvePackedSubByteStoreOwnership(
+    const Stmt &stmt, const Fragment &candidate, arith::Analyzer *analyzer,
+    bool canonical_replica_guard_guaranteed, bool throw_on_error = false,
+    const Optional<IterVar> &execution_thread = Optional<IterVar>(),
+    const Optional<PrimExpr> &execution_owner = Optional<PrimExpr>()) {
+  auto stores = PackedSubByteStoreCollector::Collect(stmt, execution_thread);
+  Var byte_var("__tl_packed_byte");
+  std::vector<ProvenPackedStoreOwner> proven_store_owners;
+  for (const auto &access : stores) {
+    if (!execution_owner.defined() &&
+        access.parallel_positions.size() != candidate->InputDim()) {
+      if (throw_on_error) {
+        throw LayoutConflictException(
+            "Cannot prove packed four-bit byte ownership: candidate thread "
+            "layout does not match the parallel loop domain.");
+      }
+      return false;
+    }
+
+    Optional<PrimExpr> maybe_byte_offset = GetPackedStoreByteOffset(access);
+    if (!maybe_byte_offset.defined()) {
+      if (throw_on_error) {
+        throw LayoutConflictException(
+            "Cannot prove packed four-bit byte ownership: buffer indices "
+            "cannot be flattened to one physical storage offset.");
+      }
+      return false;
+    }
+
+    try {
+      PrimExpr byte_offset = analyzer->Simplify(maybe_byte_offset.value());
+      arith::IntSet byte_domain = GetPackedStoreByteDomain(access, byte_offset);
+      PrimExpr occurrence = MakeFlattenedExpression(
+          DivideUnusedIterators({byte_offset}, access.iter_vars, analyzer));
+      Layout inverse =
+          Layout(access.iter_vars, {byte_offset, occurrence})->Inverse();
+
+      Var occurrence_var("__tl_packed_occurrence");
+      auto inverse_shape = inverse->InputShape();
+      ICHECK_EQ(inverse_shape.size(), 2U);
+      Array<PrimExpr> recovered = inverse->Forward({byte_var, occurrence_var});
+
+      PrimExpr owner;
+      if (execution_owner.defined()) {
+        owner = execution_owner.value();
+      } else {
+        Array<PrimExpr> parallel_indices;
+        for (size_t position : access.parallel_positions) {
+          parallel_indices.push_back(recovered[position]);
+        }
+        bool is_replicated =
+            !analyzer->CanProveEqual(candidate->ReplicateExtent(), Integer(1));
+        if (is_replicated && !canonical_replica_guard_guaranteed) {
+          if (throw_on_error) {
+            std::ostringstream oss;
+            oss << "Cannot safely lower a replicated packed four-bit physical "
+                   "store without a proven single-replica guard. Buffer="
+                << access.buffer->name;
+            throw LayoutConflictException(oss.str());
+          }
+          return false;
+        }
+        Optional<PrimExpr> replica = is_replicated
+                                         ? Optional<PrimExpr>(Integer(0))
+                                         : Optional<PrimExpr>();
+        owner = analyzer->Simplify(
+            candidate->ForwardThread(parallel_indices, replica));
+      }
+      const int64_t *occurrence_extent =
+          as_const_int(analyzer->Simplify(inverse_shape[1]));
+      if (occurrence_extent == nullptr || *occurrence_extent <= 0) {
+        if (throw_on_error) {
+          std::ostringstream oss;
+          oss << "Cannot prove packed four-bit byte ownership: the byte "
+                 "occurrence domain is not statically bounded. Buffer="
+              << access.buffer->name;
+          throw LayoutConflictException(oss.str());
+        }
+        return false;
+      }
+      arith::Analyzer occurrence_analyzer;
+      occurrence_analyzer.Bind(
+          byte_var, Range::FromMinExtent(Integer(0), inverse_shape[0]));
+      occurrence_analyzer.Bind(
+          occurrence_var,
+          Range::FromMinExtent(Integer(0), Integer(*occurrence_extent)));
+
+      Map<Var, PrimExpr> recovered_iter_vars;
+      for (size_t i = 0; i < access.iter_vars.size(); ++i) {
+        recovered_iter_vars.Set(access.iter_vars[i]->var, recovered[i]);
+      }
+      owner =
+          occurrence_analyzer.Simplify(Substitute(owner, recovered_iter_vars));
+      PrimExpr roundtrip_byte = occurrence_analyzer.Simplify(
+          Substitute(byte_offset, recovered_iter_vars));
+      PrimExpr roundtrip_occurrence = occurrence_analyzer.Simplify(
+          Substitute(occurrence, recovered_iter_vars));
+      if (!occurrence_analyzer.CanProveEqual(roundtrip_byte, byte_var) ||
+          !occurrence_analyzer.CanProveEqual(roundtrip_occurrence,
+                                             occurrence_var)) {
+        if (throw_on_error) {
+          std::ostringstream oss;
+          oss << "Cannot prove packed four-bit byte ownership: the recovered "
+                 "ownership inverse does not round-trip the physical byte "
+                 "mapping. Buffer="
+              << access.buffer->name;
+          throw LayoutConflictException(oss.str());
+        }
+        return false;
+      }
+
+      bool occurrence_changes_owner = UsesVar(owner, [&](const VarNode *var) {
+        return var == occurrence_var.get();
+      });
+      if (!occurrence_changes_owner) {
+        bool agrees_with_other_store_sites = true;
+        for (const auto &previous : proven_store_owners) {
+          if (previous.storage.same_as(access.buffer->data) &&
+              !PackedStoreDomainsAreProvablyDisjoint(previous.byte_domain,
+                                                     byte_domain, analyzer) &&
+              !analyzer->CanProveEqual(previous.owner, owner)) {
+            agrees_with_other_store_sites = false;
+            break;
+          }
+        }
+        if (agrees_with_other_store_sites) {
+          proven_store_owners.push_back(
+              {access.buffer->data, owner, byte_domain});
+          continue;
+        }
+      }
+    } catch (const NormalizeIterException &) {
+      // An unprovable inverse is unsafe for a non-atomic packed store.
+    }
+
+    if (throw_on_error) {
+      std::ostringstream oss;
+      oss << "Cannot safely lower a packed four-bit store: logical elements "
+             "that share a writable byte may be assigned to different GPU "
+             "threads. Use a byte-owned layout or rewrite the access pattern. "
+             "Buffer="
+          << access.buffer->name;
+      if (candidate.defined()) {
+        oss << ", candidate=" << candidate->DebugOutput();
+      }
+      throw LayoutConflictException(oss.str());
+    }
+    return false;
+  }
+  return true;
+}
+
 // Choose a vector width for non-fragment SIMT loops while keeping the full
 // thread extent active.  The loop partitioner covers work in chunks of
 // `thread_extent * vector_size`; when the logical loop size is ragged, the
@@ -121,6 +381,72 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
 }
 
 } // anonymous namespace
+
+void ValidatePacked4BitStoreOwnership(const For &loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate) {
+  ValidatePacked4BitStoreOwnership(loop, loop_layout, thread_index, analyzer,
+                                   predicate, {}, {});
+}
+
+void ValidatePacked4BitStoreOwnership(const For &loop,
+                                      const Fragment &loop_layout,
+                                      PrimExpr thread_index,
+                                      arith::Analyzer *analyzer,
+                                      const Optional<PrimExpr> &predicate,
+                                      const Map<Buffer, Buffer> &buffer_remap,
+                                      const Map<Buffer, Layout> &layout_map) {
+  For remapped_loop =
+      IfBufferRemapLoopGenerator::run(loop, buffer_remap, layout_map);
+  bool canonical_replica_guard_guaranteed =
+      analyzer->CanProveEqual(loop_layout->ReplicateExtent(), Integer(1));
+  if (!canonical_replica_guard_guaranteed && predicate.defined()) {
+    try {
+      Layout inverse = loop_layout->Inverse();
+      Array<PrimExpr> outputs;
+      for (size_t i = 0; i < loop_layout->OutputDim(); ++i) {
+        outputs.push_back(Integer(0));
+      }
+      PrimExpr normalized_thread = thread_index;
+      if (loop_layout->ThreadRange().defined()) {
+        normalized_thread = normalized_thread - loop_layout->ThreadRange()->min;
+      }
+      outputs.push_back(normalized_thread);
+      PrimExpr replica = analyzer->Simplify(inverse->Forward(outputs).back());
+      canonical_replica_guard_guaranteed = analyzer->CanProve(Or(
+          Not(predicate.value()), EQ(replica, make_const(replica.dtype(), 0))));
+    } catch (const NormalizeIterException &) {
+      // Fail closed below when the final layout cannot be inverted.
+    }
+  }
+  ProvePackedSubByteStoreOwnership(remapped_loop, loop_layout, analyzer,
+                                   canonical_replica_guard_guaranteed,
+                                   /*throw_on_error=*/true);
+}
+
+void ValidatePacked4BitStoreOwnership(const For &loop, PrimExpr thread_index,
+                                      const Range &thread_bounds,
+                                      arith::Analyzer *analyzer,
+                                      const Map<Buffer, Buffer> &buffer_remap,
+                                      const Map<Buffer, Layout> &layout_map) {
+  For remapped_loop =
+      IfBufferRemapLoopGenerator::run(loop, buffer_remap, layout_map);
+  Optional<IterVar> execution_thread;
+  if (const auto *thread_var = thread_index.as<VarNode>()) {
+    execution_thread =
+        IterVar(thread_bounds, GetRef<Var>(thread_var), IterVarType::kDataPar);
+  } else if (!analyzer->CanProveEqual(thread_bounds->extent, Integer(1))) {
+    throw LayoutConflictException(
+        "Cannot prove packed four-bit byte ownership: the hardware thread "
+        "index is not a single variable.");
+  }
+  ProvePackedSubByteStoreOwnership(remapped_loop, Fragment(), analyzer,
+                                   /*canonical_replica_guard_guaranteed=*/true,
+                                   /*throw_on_error=*/true, execution_thread,
+                                   thread_index);
+}
 
 /**
  * @brief Handle a parallel For node during traversal, collecting loop metadata.
