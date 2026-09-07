@@ -9,11 +9,15 @@
 #include "tvm/arith/iter_affine_map.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/expr_functor.h>
 
+#include <limits>
 #include <sstream>
 #include <string>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
+#include <vector>
 
 namespace tvm {
 namespace tl {
@@ -22,82 +26,268 @@ using namespace tirx;
 using namespace ffi;
 using namespace arith;
 
-std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr) {
-  if (const int64_t *constant = as_const_int(expr)) {
-    return *constant;
+namespace {
+
+class IntegerExpressionEvaluator final
+    : public ExprFunctor<std::optional<int64_t>(const PrimExpr &)> {
+public:
+  IntegerExpressionEvaluator() = default;
+
+  IntegerExpressionEvaluator(const std::vector<Var> *variables,
+                             const std::vector<int64_t> *values)
+      : variables_(variables), values_(values) {
+    ICHECK_EQ(variables_->size(), values_->size());
   }
 
+private:
+  using Result = std::optional<int64_t>;
+
   // Floored division/modulo (rounds toward -inf), matching FloorDiv/FloorMod.
-  auto floor_div = [](int64_t lhs, int64_t rhs) {
+  static int64_t FloorDiv(int64_t lhs, int64_t rhs) {
     int64_t quotient = lhs / rhs;
     int64_t remainder = lhs % rhs;
     return quotient -
            ((remainder != 0) && ((remainder < 0) != (rhs < 0)) ? 1 : 0);
-  };
-  auto floor_mod = [&](int64_t lhs, int64_t rhs) {
-    return lhs - floor_div(lhs, rhs) * rhs;
-  };
+  }
 
-  if (const auto *op = expr.as<AddNode>()) {
-    auto lhs = EvaluateConstantInteger(op->a);
-    auto rhs = EvaluateConstantInteger(op->b);
-    if (lhs && rhs) {
-      return *lhs + *rhs;
+  static int64_t FloorMod(int64_t lhs, int64_t rhs) {
+    int64_t remainder = lhs % rhs;
+    return remainder != 0 && ((remainder < 0) != (rhs < 0)) ? remainder + rhs
+                                                            : remainder;
+  }
+
+  static bool IsInvalidDivision(int64_t lhs, int64_t rhs) {
+    return rhs == 0 ||
+           (lhs == std::numeric_limits<int64_t>::min() && rhs == -1);
+  }
+
+  static Result ExactCast(int64_t value, DataType dtype) {
+    if (!dtype.is_scalar()) {
+      return std::nullopt;
     }
-  } else if (const auto *op = expr.as<SubNode>()) {
-    auto lhs = EvaluateConstantInteger(op->a);
-    auto rhs = EvaluateConstantInteger(op->b);
-    if (lhs && rhs) {
-      return *lhs - *rhs;
+    if (dtype.is_bool()) {
+      return value != 0;
     }
-  } else if (const auto *op = expr.as<MulNode>()) {
-    auto lhs = EvaluateConstantInteger(op->a);
-    auto rhs = EvaluateConstantInteger(op->b);
-    if (lhs && rhs) {
-      return *lhs * *rhs;
+    if (dtype.is_int()) {
+      int bits = dtype.bits();
+      if (bits <= 0 || bits > 64) {
+        return std::nullopt;
+      }
+      if (bits == 64) {
+        return value;
+      }
+      int64_t limit = int64_t{1} << (bits - 1);
+      if (value < -limit || value >= limit) {
+        return std::nullopt;
+      }
+      return value;
     }
-  } else if (const auto *op = expr.as<FloorDivNode>()) {
-    auto lhs = EvaluateConstantInteger(op->a);
-    auto rhs = EvaluateConstantInteger(op->b);
-    if (lhs && rhs && *rhs != 0) {
-      return floor_div(*lhs, *rhs);
+    if (dtype.is_uint()) {
+      int bits = dtype.bits();
+      if (bits <= 0 || bits > 64 || value < 0) {
+        return std::nullopt;
+      }
+      if (bits < 63 && value >= (int64_t{1} << bits)) {
+        return std::nullopt;
+      }
+      return value;
     }
-  } else if (const auto *op = expr.as<FloorModNode>()) {
-    auto lhs = EvaluateConstantInteger(op->a);
-    auto rhs = EvaluateConstantInteger(op->b);
-    if (lhs && rhs && *rhs != 0) {
-      return floor_mod(*lhs, *rhs);
+    return std::nullopt;
+  }
+
+  template <typename Node, typename F>
+  Result EvaluateBinary(const Node *op, F &&combine) {
+    Result lhs = VisitExpr(op->a);
+    Result rhs = VisitExpr(op->b);
+    if (!lhs || !rhs) {
+      return std::nullopt;
     }
-  } else if (const auto *op = expr.as<CallNode>()) {
+    return combine(*lhs, *rhs);
+  }
+
+  Result VisitExpr_(const IntImmNode *op) final { return op->value; }
+
+  Result VisitExpr_(const VarNode *op) final {
+    if (variables_ == nullptr || values_ == nullptr) {
+      return std::nullopt;
+    }
+    Var var = GetRef<Var>(op);
+    for (size_t i = 0; i < variables_->size(); ++i) {
+      if ((*variables_)[i].same_as(var)) {
+        return (*values_)[i];
+      }
+    }
+    return std::nullopt;
+  }
+
+  Result VisitExpr_(const AddNode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs + rhs; });
+  }
+
+  Result VisitExpr_(const SubNode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs - rhs; });
+  }
+
+  Result VisitExpr_(const MulNode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs * rhs; });
+  }
+
+  Result VisitExpr_(const DivNode *op) final {
+    return EvaluateBinary(op, [](int64_t lhs, int64_t rhs) -> Result {
+      if (IsInvalidDivision(lhs, rhs)) {
+        return std::nullopt;
+      }
+      return lhs / rhs;
+    });
+  }
+
+  Result VisitExpr_(const ModNode *op) final {
+    return EvaluateBinary(op, [](int64_t lhs, int64_t rhs) -> Result {
+      if (IsInvalidDivision(lhs, rhs)) {
+        return std::nullopt;
+      }
+      return lhs % rhs;
+    });
+  }
+
+  Result VisitExpr_(const FloorDivNode *op) final {
+    return EvaluateBinary(op, [](int64_t lhs, int64_t rhs) -> Result {
+      if (IsInvalidDivision(lhs, rhs)) {
+        return std::nullopt;
+      }
+      return FloorDiv(lhs, rhs);
+    });
+  }
+
+  Result VisitExpr_(const FloorModNode *op) final {
+    return EvaluateBinary(op, [](int64_t lhs, int64_t rhs) -> Result {
+      if (IsInvalidDivision(lhs, rhs)) {
+        return std::nullopt;
+      }
+      return FloorMod(lhs, rhs);
+    });
+  }
+
+  Result VisitExpr_(const MinNode *op) final {
+    return EvaluateBinary(
+        op, [](int64_t lhs, int64_t rhs) { return lhs < rhs ? lhs : rhs; });
+  }
+
+  Result VisitExpr_(const MaxNode *op) final {
+    return EvaluateBinary(
+        op, [](int64_t lhs, int64_t rhs) { return lhs > rhs ? lhs : rhs; });
+  }
+
+  Result VisitExpr_(const EQNode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs == rhs; });
+  }
+
+  Result VisitExpr_(const NENode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs != rhs; });
+  }
+
+  Result VisitExpr_(const LTNode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs < rhs; });
+  }
+
+  Result VisitExpr_(const LENode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs <= rhs; });
+  }
+
+  Result VisitExpr_(const GTNode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs > rhs; });
+  }
+
+  Result VisitExpr_(const GENode *op) final {
+    return EvaluateBinary(op,
+                          [](int64_t lhs, int64_t rhs) { return lhs >= rhs; });
+  }
+
+  Result VisitExpr_(const AndNode *op) final {
+    return EvaluateBinary(op, [](int64_t lhs, int64_t rhs) {
+      return static_cast<bool>(lhs) && static_cast<bool>(rhs);
+    });
+  }
+
+  Result VisitExpr_(const OrNode *op) final {
+    return EvaluateBinary(op, [](int64_t lhs, int64_t rhs) {
+      return static_cast<bool>(lhs) || static_cast<bool>(rhs);
+    });
+  }
+
+  Result VisitExpr_(const CastNode *op) final {
+    Result value = VisitExpr(op->value);
+    return value ? ExactCast(*value, op->dtype) : std::nullopt;
+  }
+
+  Result VisitExpr_(const NotNode *op) final {
+    Result value = VisitExpr(op->a);
+    return value ? Result(!static_cast<bool>(*value)) : std::nullopt;
+  }
+
+  Result VisitExpr_(const SelectNode *op) final {
+    Result condition = VisitExpr(op->condition);
+    if (!condition) {
+      return std::nullopt;
+    }
+    return VisitExpr(*condition ? op->true_value : op->false_value);
+  }
+
+  Result VisitExpr_(const CallNode *op) final {
     if (op->args.size() == 2) {
-      auto lhs = EvaluateConstantInteger(op->args[0]);
-      auto rhs = EvaluateConstantInteger(op->args[1]);
-      if (lhs && rhs) {
-        if (op->op.same_as(builtin::bitwise_xor())) {
-          return *lhs ^ *rhs;
+      Result lhs = VisitExpr(op->args[0]);
+      Result rhs = VisitExpr(op->args[1]);
+      if (!lhs || !rhs) {
+        return std::nullopt;
+      }
+      if (op->op.same_as(builtin::bitwise_xor())) {
+        return *lhs ^ *rhs;
+      }
+      if (op->op.same_as(builtin::bitwise_and())) {
+        return *lhs & *rhs;
+      }
+      if (op->op.same_as(builtin::bitwise_or())) {
+        return *lhs | *rhs;
+      }
+      if (op->op.same_as(builtin::shift_left())) {
+        if (*lhs < 0 || *rhs < 0 || *rhs >= 64 ||
+            *lhs > (std::numeric_limits<int64_t>::max() >> *rhs)) {
+          return std::nullopt;
         }
-        if (op->op.same_as(builtin::bitwise_and())) {
-          return *lhs & *rhs;
+        return *lhs << *rhs;
+      }
+      if (op->op.same_as(builtin::shift_right())) {
+        if (*lhs < 0 || *rhs < 0 || *rhs >= 64) {
+          return std::nullopt;
         }
-        if (op->op.same_as(builtin::bitwise_or())) {
-          return *lhs | *rhs;
-        }
-        if (op->op.same_as(builtin::shift_left())) {
-          ICHECK(*rhs >= 0 && *rhs < 64);
-          return *lhs << *rhs;
-        }
-        if (op->op.same_as(builtin::shift_right())) {
-          ICHECK(*rhs >= 0 && *rhs < 64);
-          return *lhs >> *rhs;
-        }
+        return *lhs >> *rhs;
       }
     } else if (op->args.size() == 1 && op->op.same_as(builtin::bitwise_not())) {
-      if (auto value = EvaluateConstantInteger(op->args[0])) {
+      if (Result value = VisitExpr(op->args[0])) {
         return ~*value;
       }
     }
+    return std::nullopt;
   }
-  return std::nullopt;
+
+  Result VisitExprDefault_(const ffi::Object *op) final { return std::nullopt; }
+
+  const std::vector<Var> *variables_{nullptr};
+  const std::vector<int64_t> *values_{nullptr};
+};
+
+} // namespace
+
+std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr) {
+  return IntegerExpressionEvaluator()(expr);
 }
 
 bool CanProveDivisible(const PrimExpr &lhs, const PrimExpr &rhs) {
@@ -529,10 +719,162 @@ std::optional<std::string> GetForwardMapBijectionError(
   return std::nullopt;
 }
 
+namespace {
+
+constexpr int64_t kMaxEnumeratedFragmentPoints = int64_t{1} << 30;
+
+enum class FragmentBijectionStatus { kValid, kInvalid, kUnavailable };
+
+struct FragmentBijectionResult {
+  FragmentBijectionStatus status;
+  std::string detail;
+};
+
+FragmentBijectionResult EnumerateFragmentBijection(const Fragment &fragment,
+                                                   arith::Analyzer *analyzer) {
+  Array<PrimExpr> logical_shape = fragment->InputShape();
+  logical_shape.push_back(fragment->ReplicateExtent());
+  Array<PrimExpr> physical_shape{fragment->ThreadExtent()};
+  Array<PrimExpr> output_shape = fragment->OutputShape();
+  physical_shape.insert(physical_shape.end(), output_shape.begin(),
+                        output_shape.end());
+
+  bool unavailable = false;
+  bool exceeds_limit = false;
+  std::string invalid_extent;
+  auto collect_extents = [&](const Array<PrimExpr> &shape,
+                             const char *domain_name,
+                             std::vector<int64_t> *extents, int64_t *volume) {
+    *volume = 1;
+    extents->reserve(shape.size());
+    for (size_t i = 0; i < shape.size(); ++i) {
+      PrimExpr simplified = analyzer->Simplify(shape[i]);
+      std::optional<int64_t> extent = EvaluateConstantInteger(simplified);
+      if (!extent) {
+        unavailable = true;
+        return;
+      }
+      if (*extent <= 0) {
+        std::ostringstream os;
+        os << "the fragment forward map has a non-positive " << domain_name
+           << " extent in dimension " << i << ": " << *extent;
+        invalid_extent = os.str();
+        return;
+      }
+      if (*extent > kMaxEnumeratedFragmentPoints / *volume) {
+        exceeds_limit = true;
+        return;
+      }
+      *volume *= *extent;
+      extents->push_back(*extent);
+    }
+  };
+
+  std::vector<int64_t> logical_extents;
+  std::vector<int64_t> physical_extents;
+  int64_t logical_volume = 1;
+  int64_t physical_volume = 1;
+  collect_extents(logical_shape, "logical", &logical_extents, &logical_volume);
+  if (!invalid_extent.empty()) {
+    return {FragmentBijectionStatus::kInvalid, invalid_extent};
+  }
+  if (!unavailable && !exceeds_limit) {
+    collect_extents(physical_shape, "physical", &physical_extents,
+                    &physical_volume);
+  }
+  if (!invalid_extent.empty()) {
+    return {FragmentBijectionStatus::kInvalid, invalid_extent};
+  }
+  if (exceeds_limit) {
+    LOG(WARNING) << "Skipping exhaustive fragment-bijection enumeration above "
+                    "the limit of "
+                 << kMaxEnumeratedFragmentPoints
+                 << " points; falling back to symbolic proof. Fragment: "
+                 << fragment->DebugOutput();
+    return {FragmentBijectionStatus::kUnavailable, ""};
+  }
+  if (unavailable) {
+    return {FragmentBijectionStatus::kUnavailable, ""};
+  }
+  if (logical_volume != physical_volume) {
+    std::ostringstream os;
+    os << "the fragment forward map does not form a rectangle: "
+       << logical_volume << " logical points map into a physical rectangle "
+       << "with volume " << physical_volume;
+    return {FragmentBijectionStatus::kInvalid, os.str()};
+  }
+
+  Array<PrimExpr> forward_coordinates{fragment->GetForwardThread()};
+  Array<PrimExpr> forward_indices = fragment->GetForwardIndex();
+  forward_coordinates.insert(forward_coordinates.end(), forward_indices.begin(),
+                             forward_indices.end());
+  std::vector<uint64_t> occupied(
+      static_cast<size_t>((physical_volume + 63) / 64), uint64_t{0});
+  std::vector<int64_t> logical_coordinate(logical_extents.size());
+  std::vector<Var> logical_variables;
+  logical_variables.reserve(logical_extents.size());
+  for (size_t i = 0; i < fragment->InputDim(); ++i) {
+    logical_variables.push_back(InputPlaceholder(i));
+  }
+  logical_variables.push_back(ReplicationPlaceholder());
+  IntegerExpressionEvaluator evaluator(&logical_variables, &logical_coordinate);
+
+  for (int64_t linear = 0; linear < logical_volume; ++linear) {
+    int64_t residual = linear;
+    for (size_t rev = logical_extents.size(); rev > 0; --rev) {
+      size_t i = rev - 1;
+      logical_coordinate[i] = residual % logical_extents[i];
+      residual /= logical_extents[i];
+    }
+
+    int64_t physical_linear = 0;
+    for (size_t i = 0; i < forward_coordinates.size(); ++i) {
+      std::optional<int64_t> coordinate = evaluator(forward_coordinates[i]);
+      if (!coordinate) {
+        return {FragmentBijectionStatus::kUnavailable, ""};
+      }
+      if (*coordinate < 0 || *coordinate >= physical_extents[i]) {
+        std::ostringstream os;
+        os << "the fragment forward map does not form a rectangle: physical "
+              "coordinate "
+           << i << " evaluates to " << *coordinate << " outside [0, "
+           << physical_extents[i] << ')';
+        return {FragmentBijectionStatus::kInvalid, os.str()};
+      }
+      physical_linear = physical_linear * physical_extents[i] + *coordinate;
+    }
+
+    uint64_t mask = uint64_t{1} << (physical_linear % 64);
+    uint64_t &word = occupied[static_cast<size_t>(physical_linear / 64)];
+    if ((word & mask) != 0) {
+      std::ostringstream os;
+      os << "the fragment forward map does not form a rectangle: multiple "
+            "logical points map to physical cell "
+         << physical_linear;
+      return {FragmentBijectionStatus::kInvalid, os.str()};
+    }
+    word |= mask;
+  }
+  // The logical and physical volumes are equal, so an injective in-bounds map
+  // also visits every cell in the physical rectangle exactly once.
+  return {FragmentBijectionStatus::kValid, ""};
+}
+
+} // namespace
+
 std::optional<std::string>
 GetFragmentBijectionError(const Fragment &fragment, arith::Analyzer *analyzer) {
   ICHECK(fragment.defined());
   ICHECK(analyzer != nullptr);
+
+  FragmentBijectionResult enumeration =
+      EnumerateFragmentBijection(fragment, analyzer);
+  if (enumeration.status == FragmentBijectionStatus::kValid) {
+    return std::nullopt;
+  }
+  if (enumeration.status == FragmentBijectionStatus::kInvalid) {
+    return enumeration.detail;
+  }
 
   Array<IterVar> logical_domain;
   for (size_t i = 0; i < fragment->InputDim(); ++i) {
