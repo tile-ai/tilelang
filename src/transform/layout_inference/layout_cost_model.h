@@ -16,6 +16,10 @@
  *    tentative layouts; registers remain the lexicographic tiebreak.
  *    Available through `tl.layout_cost_model="io-aware"` for opt-in use
  *    and A/B comparisons.
+ *  - ReductionAwareCostModel (opt-in, CUDA): enumerates reducer vector
+ *    widths and orders complete attempts by spills, issue-equivalent
+ *    execution cost, and registers. Physical reducer plans are analyzed
+ *    with the materializer's own narrow/wide and packed decisions.
  *
  * Concrete models live in the .cc; callers go through Create().
  */
@@ -29,31 +33,43 @@
 #include <vector>
 
 #include <tvm/target/target.h>
+#include <tvm/tirx/function.h>
 
 #include "../../op/operator.h"
 
 namespace tvm {
 namespace tl {
 
-/*! \brief Score of one complete free-mode layout assignment. Compared
- *  lexicographically: estimated memory cost first, total register count as
- *  the tiebreak. `mem` includes the estimated local-memory traffic of
- *  register-array spills (a thread-dependent register-array index demotes
- *  the whole array to local memory), priced in bytes so it competes
- *  honestly with the io-aware model's global traffic instead of vetoing
- *  it. Models that do not estimate global memory leave the global part at
- *  0, so their ordering is spill bytes, then register count — attempts
- *  without spills keep the historical register-count ordering untouched. */
+/*! \brief Score of one complete free-mode layout assignment. Known scores
+ *  precede unmeasurable attempts, then compare mem, execution, and regs.
+ *  Legacy policies leave execution at zero. `mem` includes the estimated
+ * local-memory traffic of register-array spills (a thread-dependent
+ * register-array index demotes the whole array to local memory), priced in
+ * bytes so it competes honestly with the io-aware model's global traffic
+ * instead of vetoing it. Models that do not estimate global memory leave the
+ * global part at 0, so their ordering is spill bytes, then register count —
+ * attempts without spills keep the historical register-count ordering
+ * untouched. */
 struct AttemptCost {
   int64_t mem{0};
+  int64_t execution{0};
   int64_t regs{0};
+  bool known{true};
   bool BetterThan(const AttemptCost &other) const {
+    if (known != other.known) {
+      return known;
+    }
     if (mem != other.mem) {
       return mem < other.mem;
+    }
+    if (execution != other.execution) {
+      return execution < other.execution;
     }
     return regs < other.regs;
   }
 };
+
+enum class ReducerVectorSearch { kNative, kScalar, kAll };
 
 /*! \brief Policy interface: rank one attempt of a component.
  *
@@ -71,17 +87,21 @@ public:
   /*! \brief Model name for diagnostics. */
   virtual const char *Name() const = 0;
 
-  /*! \brief Whether to also try a scalar plan at unannotated reducer roots.
-   *  Adds one attempt per eligible root, not a Cartesian width search. */
-  virtual bool ExploreReducerScalarLayouts() const { return false; }
+  /*! \brief Width search at unannotated reducer roots. Alternatives cap
+   *  only the root's first inference, never a Cartesian width search. */
+  virtual ReducerVectorSearch GetReducerVectorSearch() const {
+    return ReducerVectorSearch::kNative;
+  }
 
   /*! \brief Instantiate the model selected by `tl.layout_cost_model`
-   *  by name ("io-aware" or "register-count" — each model's Name());
+   *  by name ("io-aware", "register-count", or "reduction-aware");
    *  unknown names are a hard error listing the valid values. `target`
    *  feeds the vectorizer's shared width-cap policy (MaxVectorLoadBits);
    *  the legacy model ignores it. */
-  static std::unique_ptr<LayoutCostModel> Create(const std::string &name,
-                                                 Target target);
+  static std::unique_ptr<LayoutCostModel>
+  Create(const std::string &name, Target target,
+         const tirx::PrimFunc &function = tirx::PrimFunc(),
+         const std::vector<ffi::ObjectRef> &statements = {});
 };
 
 } // namespace tl

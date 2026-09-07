@@ -23,8 +23,8 @@ from tilelang.backend.target import determine_target
 from tilelang.layout import Fragment
 from tvm.tirx.stmt_functor import post_order_visit
 
-# The two selection policies behind `tl.layout_cost_model`, by name.
-COST_MODELS = ("register-count", "io-aware")
+# The selection policies behind `tl.layout_cost_model`, by name.
+COST_MODELS = ("register-count", "io-aware", "reduction-aware")
 
 
 def _run_passes(prim_func, cost_model: str, target=None):

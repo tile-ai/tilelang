@@ -996,8 +996,8 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
   return result;
 }
 
-Fragment
-ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
+int ParallelOpNode::GetPlanVectorSize(
+    const LayoutInferArgs &layout_args) const {
   // Vectorize Size must be aware of the buffer_remap
   // As the pass will do post processing to the layout
   auto maybe_remapped_root_ = IfBufferRemapLoopGenerator::run(
@@ -1048,6 +1048,12 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
              << " ############# vector_size = " << vector_size
              << ", thread_bounds = " << layout_args.thread_bounds << '\n';
+  return vector_size;
+}
+
+Fragment
+ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
+  int vector_size = GetPlanVectorSize(layout_args);
   auto plan = PlanLoopPartition(root_, vector_size, layout_args.thread_bounds);
   DLOG(INFO) << "[PlanLoopPartition] candidate = " << plan->DebugOutput()
              << '\n';

@@ -3,7 +3,8 @@
 Constructed IR cases with reviewed expected layouts, for validating the
 free-mode layout search — in particular the selection policy behind
 `tl.layout_cost_model` ("register-count" = the default ordering,
-"io-aware" = the opt-in global-memory model in
+"io-aware" = the opt-in global-memory model, "reduction-aware" = opt-in
+CUDA local-work/communication ranking in
 `src/transform/layout_inference/layout_cost_model.cc`).
 
 Why this exists:
@@ -12,7 +13,7 @@ Why this exists:
   the model (or a future fast-path/slow-path split inside it) can silently
   flip the winner. Golden layouts pin the current answers so a flip shows
   up as a reviewable diff, not a runtime perf mystery.
-- Cases where the two policies **disagree** are the calibration corpus:
+- Cases where the policies **disagree** are the calibration corpus:
   each disagreement is a concrete claim ("the io-aware pick is faster on
   hardware") that can be benchmarked.
 
@@ -24,6 +25,13 @@ spill/register-slot score; native plans win same-root ties. This can remove
 replicated column accumulators without forcing scalar layouts for full
 reductions. Explicit widths and layouts remain authoritative. The opt-in
 `io-aware` model retains its existing candidate search and scoring.
+
+The `reduction-aware` model also tries intermediate widths at reducer roots.
+It scores the actual materialization plan, including narrow-to-wide fallback,
+batched collectives, local arithmetic, and shared-memory issues. See
+`docs/developer_guide/reduction_aware_layout.md` for cost units and limitations.
+The `reduction_aware` cases include a column reduction whose intermediate
+width avoids communication without giving up two-element memory accesses.
 
 ```bash
 python run.py                # verify all cases against expected/
@@ -66,7 +74,8 @@ io-aware scorer on the in-tree CuTe layout algebra
   exactly. `CUTE_STATEMENTS` in a case supplies real enclosing-buffer
   shapes where they differ from the fragment shape (offset_region_copy).
 
-Current status: 112/112 statements match with a 100% conversion hit rate.
+The driver reports the parity count and conversion hit rate for the current
+case set.
 The production scorer in `layout_cost_model.cc` uses this formulation; its
 mode arithmetic was additionally audited once, in-tree, against a full
 exact-enumeration oracle across the layout-relevant test corpus (~264

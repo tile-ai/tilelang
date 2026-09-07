@@ -80,6 +80,7 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "backend/common/op/reduce.h"
+#include "reducer_plan.h"
 
 namespace tvm {
 namespace tl {
@@ -111,17 +112,7 @@ PrimExpr MakeFullRegion(const Buffer &buffer, int access_mask) {
 // Phase A: epoch collection
 // ---------------------------------------------------------------------------
 
-struct UpdateSite {
-  Fragment loop_layout;    // solved layout of the enclosing parallel nest
-  Array<Var> loop_vars;    // nest loop vars in order
-  Array<PrimExpr> indices; // logical output indices of the update target
-  PrimExpr value;          // contribution expression
-  // Serial loops between the parallel nest and the update (outermost
-  // first). They accumulate on one thread; the packed-accumulation
-  // optimization uses the innermost one as its lane source.
-  Array<Var> serial_vars;
-  Array<PrimExpr> serial_extents;
-};
+using UpdateSite = ReducerUpdatePlanSite;
 
 struct EpochInfo {
   Buffer buffer;
@@ -132,6 +123,7 @@ struct EpochInfo {
   std::vector<UpdateSite> updates;
   Buffer dst;
   int64_t batch{1};
+  PrimExpr finalize_count{0};
   // False when some structural prerequisite for plan analysis is missing
   // (e.g. an update site without a solved loop layout).
   bool analyzable{true};
@@ -139,6 +131,9 @@ struct EpochInfo {
 
 class ReducerEpochCollector : public IRVisitorWithAnalyzer {
 public:
+  explicit ReducerEpochCollector(bool collect_unresolved_loops = false)
+      : collect_unresolved_loops_(collect_unresolved_loops) {}
+
   std::unordered_map<const VarNode *, EpochInfo> epochs_;
 
   void Collect(const PrimFunc &f) { VisitStmt(f->body); }
@@ -175,11 +170,17 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel &&
-        op->annotations.count(tl::attr::kParallelLoopLayout)) {
+        (op->annotations.count(tl::attr::kParallelLoopLayout) ||
+         (collect_unresolved_loops_ && !cur_loop_.defined()))) {
       auto prev_layout = cur_loop_layout_;
       auto prev_vars = cur_loop_vars_;
-      cur_loop_layout_ = Downcast<Fragment>(
-          op->annotations.Get(tl::attr::kParallelLoopLayout).value());
+      auto prev_loop = cur_loop_;
+      cur_loop_ = GetRef<For>(op);
+      if (auto layout = op->annotations.Get(tl::attr::kParallelLoopLayout)) {
+        cur_loop_layout_ = Downcast<Fragment>(layout.value());
+      } else {
+        cur_loop_layout_ = std::nullopt;
+      }
       // Gather the consecutive parallel nest the annotation covers.
       Array<Var> vars;
       const ForNode *cur = op;
@@ -200,16 +201,28 @@ private:
       IRVisitorWithAnalyzer::VisitStmt_(op);
       cur_loop_layout_ = prev_layout;
       cur_loop_vars_ = prev_vars;
+      cur_loop_ = prev_loop;
       cur_serial_vars_ = prev_serial_vars;
       cur_serial_extents_ = prev_serial_extents;
       return;
     }
-    if (op->kind == ForKind::kSerial && cur_loop_layout_.defined()) {
+    if (op->kind != ForKind::kParallel) {
+      PrimExpr previous_count = execution_count_;
+      if (collect_unresolved_loops_) {
+        execution_count_ = analyzer_.Simplify(
+            execution_count_ * cast(DataType::Int(64), op->extent));
+      }
+      if (op->kind != ForKind::kSerial || !cur_loop_.defined()) {
+        IRVisitorWithAnalyzer::VisitStmt_(op);
+        execution_count_ = previous_count;
+        return;
+      }
       cur_serial_vars_.push_back(op->loop_var);
       cur_serial_extents_.push_back(op->extent);
       IRVisitorWithAnalyzer::VisitStmt_(op);
       cur_serial_vars_.pop_back();
       cur_serial_extents_.pop_back();
+      execution_count_ = previous_count;
       return;
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
@@ -238,11 +251,13 @@ private:
                                 : epochs_.end();
       if (it != epochs_.end()) {
         EpochInfo *epoch = &it->second;
-        if (cur_loop_layout_.defined()) {
+        if (cur_loop_layout_.defined() ||
+            (collect_unresolved_loops_ && cur_loop_.defined())) {
           ReducerUpdateArgs update = ParseReducerUpdate(op);
-          epoch->updates.push_back(UpdateSite{
-              cur_loop_layout_.value(), cur_loop_vars_, update.indices,
-              update.value, cur_serial_vars_, cur_serial_extents_});
+          epoch->updates.push_back(
+              UpdateSite{cur_loop_layout_.value_or(Fragment()), cur_loop_vars_,
+                         update.indices, update.value, cur_serial_vars_,
+                         cur_serial_extents_, cur_loop_, execution_count_});
         } else {
           epoch->analyzable = false;
         }
@@ -251,6 +266,8 @@ private:
     }
     if (op->op.same_as(FinalizeReducerV2Op::Get())) {
       if (EpochInfo *epoch = FindEpoch(op->args[0])) {
+        epoch->finalize_count =
+            analyzer_.Simplify(epoch->finalize_count + execution_count_);
         if (auto call2 = op->args[1].as<CallNode>()) {
           if (call2->op.same_as(region())) {
             if (auto load = call2->args[0].as<BufferLoadNode>()) {
@@ -284,6 +301,9 @@ private:
   }
 
   IterVar thread_var_;
+  bool collect_unresolved_loops_{false};
+  For cur_loop_;
+  PrimExpr execution_count_{IntImm(DataType::Int(64), 1)};
   Optional<Fragment> cur_loop_layout_;
   Array<Var> cur_loop_vars_;
   Array<Var> cur_serial_vars_;
@@ -346,6 +366,45 @@ struct UseGraph {
   std::unordered_map<const VarNode *, BufferUseCensus> census;
   std::vector<CopyEdge> copies;
 };
+
+UseGraph CollectReducerUseGraph(const Stmt &stmt) {
+  UseGraph graph;
+  PostOrderVisit(stmt, [&](const ObjectRef &object) {
+    if (const auto *load = object.as<BufferLoadNode>()) {
+      graph.census[load->buffer->data.get()].loads++;
+    } else if (const auto *store = object.as<BufferStoreNode>()) {
+      graph.census[store->buffer->data.get()].stores++;
+    } else if (const auto *call = object.as<CallNode>()) {
+      auto region_buffer = [](const PrimExpr &arg) -> Buffer {
+        if (auto region_call = arg.as<CallNode>()) {
+          if (region_call->op.same_as(region())) {
+            if (auto load = region_call->args[0].as<BufferLoadNode>()) {
+              return load->buffer;
+            }
+          }
+        }
+        return Buffer();
+      };
+      if (call->op.same_as(Copy::Get()) && call->args.size() >= 2) {
+        Buffer src = region_buffer(call->args[0]);
+        Buffer dst = region_buffer(call->args[1]);
+        if (src.defined() && dst.defined()) {
+          graph.census[src->data.get()].copy_src++;
+          graph.census[dst->data.get()].copy_dst++;
+          graph.copies.push_back(CopyEdge{src->data.get(), dst->data.get(),
+                                          IsGlobalBuffer(dst),
+                                          IsFragmentBuffer(dst), dst});
+        }
+      } else if (call->op.same_as(FinalizeReducerV2Op::Get())) {
+        Buffer dst = region_buffer(call->args[1]);
+        if (dst.defined()) {
+          graph.census[dst->data.get()].finalize_dst++;
+        }
+      }
+    }
+  });
+  return graph;
+}
 
 /*! \brief Check the destination override chain rooted at `root` and collect
  *  the downstream fragments (excluding the root) that must be overridden
@@ -593,6 +652,31 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
   return decision;
 }
 
+std::optional<NarrowDecision>
+SelectNarrowReducerPlan(const EpochInfo &epoch, const LayoutMap &known_layouts,
+                        const UseGraph &use_graph, arith::Analyzer *analyzer,
+                        std::string *reason) {
+  auto entry = known_layouts.Get(epoch.buffer);
+  if (!entry.has_value()) {
+    *reason = "no solved partial layout for this epoch";
+    return std::nullopt;
+  }
+  PartialFragment partial = Downcast<PartialFragment>(entry.value());
+  const int64_t *combine = as_const_int(partial->CombineSize());
+  const int64_t *replicate = as_const_int(partial->ReplicateExtent());
+  ICHECK(combine != nullptr && replicate != nullptr)
+      << "reducer `" << epoch.buffer->name
+      << "` carries a non-constant partial decomposition: "
+      << partial->DebugOutput();
+  if (*combine == *replicate && *replicate == epoch.thread_extent &&
+      partial->IsCompletedReplicated()) {
+    *reason = "FullParticipant partial (wide fallback)";
+    return std::nullopt;
+  }
+  return DeriveNarrowLowering(epoch, partial, known_layouts, use_graph,
+                              analyzer, reason);
+}
+
 // ---------------------------------------------------------------------------
 // Phase C: materialization
 // ---------------------------------------------------------------------------
@@ -611,7 +695,7 @@ public:
     // partial layout; the per-buffer use census decides whether an inferred
     // destination layout may be replaced.
     Map<Buffer, Layout> known_layouts;
-    UseGraph use_graph;
+    UseGraph use_graph = CollectReducerUseGraph(f->body);
     PostOrderVisit(f->body, [&](const ObjectRef &obj) {
       if (const auto *block = obj.as<SBlockNode>()) {
         if (auto anno = block->annotations.Get(tl::attr::kLayoutMap)) {
@@ -619,37 +703,6 @@ public:
             for (const auto &[buffer, layout] : as_map.value()) {
               known_layouts.Set(buffer, layout);
             }
-          }
-        }
-      } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        use_graph.census[load->buffer->data.get()].loads++;
-      } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        use_graph.census[store->buffer->data.get()].stores++;
-      } else if (const auto *call = obj.as<CallNode>()) {
-        auto region_buffer = [](const PrimExpr &arg) -> Buffer {
-          if (auto region_call = arg.as<CallNode>()) {
-            if (region_call->op.same_as(region())) {
-              if (auto ld = region_call->args[0].as<BufferLoadNode>()) {
-                return ld->buffer;
-              }
-            }
-          }
-          return Buffer();
-        };
-        if (call->op.same_as(Copy::Get()) && call->args.size() >= 2) {
-          Buffer src = region_buffer(call->args[0]);
-          Buffer dst = region_buffer(call->args[1]);
-          if (src.defined() && dst.defined()) {
-            use_graph.census[src->data.get()].copy_src++;
-            use_graph.census[dst->data.get()].copy_dst++;
-            use_graph.copies.push_back(
-                CopyEdge{src->data.get(), dst->data.get(), IsGlobalBuffer(dst),
-                         IsFragmentBuffer(dst), dst});
-          }
-        } else if (call->op.same_as(FinalizeReducerV2Op::Get())) {
-          Buffer dst = region_buffer(call->args[1]);
-          if (dst.defined()) {
-            use_graph.census[dst->data.get()].finalize_dst++;
           }
         }
       }
@@ -675,47 +728,8 @@ public:
       // unguarded updates. Only the destination-containment lowerability
       // gate can still demote a narrow node at materialize.
       std::string reason;
-      std::optional<NarrowDecision> decision;
-      const PartialFragmentNode *partial = nullptr;
-      Optional<PartialFragment> partial_ref;
-      if (auto partial_entry = known_layouts.Get(epoch.buffer)) {
-        partial_ref = Downcast<PartialFragment>(partial_entry.value());
-        partial = partial_ref.value().get();
-        ICHECK(partial != nullptr) << "reducer `" << epoch.buffer->name
-                                   << "` carries a non-partial layout: "
-                                   << partial_entry.value()->DebugOutput();
-      }
-      bool node_narrow = false;
-      if (partial == nullptr) {
-        reason = "no solved partial layout for this epoch";
-      } else {
-        const int64_t *combine = as_const_int(partial->CombineSize());
-        const int64_t *rep = as_const_int(partial->ReplicateExtent());
-        ICHECK(combine != nullptr && rep != nullptr)
-            << "reducer `" << epoch.buffer->name
-            << "` carries a non-constant partial decomposition: "
-            << partial->DebugOutput();
-        bool full_participant = (*combine == *rep) &&
-                                (*rep == epoch.thread_extent) &&
-                                partial->IsCompletedReplicated();
-        node_narrow = !full_participant;
-        if (!node_narrow) {
-          reason = "FullParticipant partial (wide fallback)";
-        }
-      }
-      if (node_narrow) {
-        decision =
-            DeriveNarrowLowering(epoch, partial_ref.value(), known_layouts,
-                                 use_graph, &analyzer, &reason);
-        if (!decision.has_value()) {
-          // Destination containment demoted the epoch: the node keeps its
-          // narrow decomposition for cost accounting; the physical plan
-          // falls back to FullParticipant.
-          DLOG(INFO) << "[ReducerPlan] narrow partial of `"
-                     << epoch.buffer->name
-                     << "` demoted to the wide plan: " << reason;
-        }
-      }
+      std::optional<NarrowDecision> decision = SelectNarrowReducerPlan(
+          epoch, known_layouts, use_graph, &analyzer, &reason);
       bool verbose = tl_config::ReducerPlanVerboseEnabled();
       if (decision.has_value()) {
         std::string msg = "[ReducerPlan] `" + std::string(epoch.buffer->name) +
@@ -1260,6 +1274,91 @@ private:
 };
 
 } // namespace
+
+struct ReducerPlanAnalyzer::Impl {
+  std::unordered_map<Var, EpochInfo, ObjectPtrHash, ObjectPtrEqual> epochs;
+  UseGraph use_graph;
+};
+
+ReducerPlanAnalyzer::ReducerPlanAnalyzer(const PrimFunc &function) {
+  auto impl = std::make_shared<Impl>();
+  ReducerEpochCollector collector(true);
+  collector.Collect(function);
+  for (auto &[variable, epoch] : collector.epochs_) {
+    impl->epochs.emplace(GetRef<Var>(variable), std::move(epoch));
+  }
+  impl->use_graph = CollectReducerUseGraph(function->body);
+  impl_ = std::move(impl);
+}
+
+std::optional<std::vector<ReducerPlanInfo>>
+ReducerPlanAnalyzer::Analyze(const LayoutMap &layouts,
+                             const Map<For, Fragment> &loop_layouts,
+                             const Array<Buffer> &reducers) const {
+  std::vector<ReducerPlanInfo> result;
+  for (const Buffer &buffer : reducers) {
+    auto found = impl_->epochs.find(buffer->data);
+    if (found == impl_->epochs.end() || !layouts.count(buffer)) {
+      return std::nullopt;
+    }
+    EpochInfo epoch = found->second;
+    if (!epoch.analyzable || epoch.thread_extent <= 0 || !epoch.dst.defined()) {
+      return std::nullopt;
+    }
+    for (UpdateSite &site : epoch.updates) {
+      if (auto layout = loop_layouts.Get(site.loop)) {
+        site.loop_layout = layout.value();
+      }
+      if (!site.loop_layout.defined()) {
+        return std::nullopt;
+      }
+    }
+    ReducerPlanInfo info;
+    info.reducer = buffer;
+    info.dst = epoch.dst;
+    info.op = epoch.op;
+    info.thread_bounds = Range::FromMinExtent(Integer(epoch.thread_min),
+                                              Integer(epoch.thread_extent));
+    info.batch = epoch.batch;
+    info.finalize_count = epoch.finalize_count;
+    info.has_seed = epoch.seed.defined();
+    arith::Analyzer analyzer;
+    auto decision = SelectNarrowReducerPlan(epoch, layouts, impl_->use_graph,
+                                            &analyzer, &info.reason);
+    if (decision.has_value()) {
+      info.narrow = true;
+      info.storage_layout = decision->storage_layout;
+      info.steps = decision->steps;
+      if (decision->packed) {
+        info.packed_layout = decision->packed_layout;
+        info.pack_lane_var = decision->pack_lane_var;
+      }
+      if (decision->override_dst_layout) {
+        info.layout_overrides.Set(epoch.dst, decision->storage_layout);
+        for (const Buffer &staged : decision->override_chain) {
+          info.layout_overrides.Set(staged, decision->storage_layout);
+        }
+      }
+    } else {
+      info.storage_layout =
+          Fragment::FullyReplicated(buffer->shape, Integer(epoch.thread_extent))
+              ->BindThreadRange(info.thread_bounds);
+      if (epoch.thread_extent > 1) {
+        info.steps.emplace_back(static_cast<int>(epoch.thread_extent), 1);
+      }
+      auto overrides =
+          TryWideFinalizeDstOverride(epoch, layouts, impl_->use_graph);
+      if (overrides.has_value()) {
+        for (const auto &[destination, layout] : overrides.value()) {
+          info.layout_overrides.Set(destination, layout);
+        }
+      }
+    }
+    info.updates = std::move(epoch.updates);
+    result.push_back(std::move(info));
+  }
+  return result;
+}
 
 using namespace tirx::transform;
 

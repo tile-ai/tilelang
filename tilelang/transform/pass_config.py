@@ -114,14 +114,19 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_REDUCER_PLAN_VERBOSE = "tl.enable_reducer_plan_verbose"
     """Log each reducer epoch's chosen physical plan (and narrow-plan
     rejection reason) at INFO level during ReducerPlanAndMaterialize.
+    The reduction-aware layout policy also logs candidate costs and widths.
     Default: False"""
 
     TL_LAYOUT_COST_MODEL = "tl.layout_cost_model"
     """The cost model that ranks free-mode layout attempts, by name:
     "io-aware" scores estimated global-memory access cost (vector width /
     warp coalescing of every fragment<->global copy, weighted by bytes
-    moved) with register count as the tiebreak; "register-count" is the
-    total-register-slots-only ordering. When unset, the
+    moved) with register count as the tiebreak; "register-count" orders by
+    estimated spills and register slots. "reduction-aware" additionally
+    searches intermediate reducer vector widths and scores local work,
+    memory issues, and the actual finalize communication plan on CUDA.
+    Other targets and unknown serial trip counts retain register-count.
+    When unset, the
     ``TILELANG_LAYOUT_COST_MODEL`` environment variable supplies the
     default. Default: 'register-count'"""
 
