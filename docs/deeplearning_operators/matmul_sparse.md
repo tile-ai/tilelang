@@ -42,8 +42,9 @@ A compressor is provided with the sparse GEMM example in `examples/gemm_sp/spars
 
 ```python
 from examples.gemm_sp.sparse_utils import compress
-A_sparse, E = compress(A)                        # default: int16 metadata for fp16/bf16
-A_sparse, E = compress(A.t().contiguous())       # compress the transposed layout
+
+A_sparse, E = compress(A)  # default: int16 metadata for fp16/bf16
+A_sparse, E = compress(A.t().contiguous())  # compress the transposed layout
 ```
 
 Here, `A_sparse` contains all the non-zero elements of `A`, while `E` stores the corresponding metadata (indexing information) required to reconstruct the original sparse pattern. The metadata uses a natural row-major layout that `T.gemm_sp` consumes directly — no additional layout annotation is needed.
@@ -58,11 +59,19 @@ The default metadata dtype for fp16/bf16 is `int16` with an E-factor of 16 (one 
 import tilelang.language as T
 from examples.gemm_sp.sparse_utils import get_e_factor
 
+
 def matmul_sp(
-    M, N, K,
-    block_M, block_N, block_K,
-    in_dtype, accum_dtype, e_dtype,
-    num_stages, threads,
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    in_dtype,
+    accum_dtype,
+    e_dtype,
+    num_stages,
+    threads,
     policy=T.GemmWarpPolicy.Square,
 ):
     e_factor = get_e_factor(in_dtype, e_dtype)
@@ -85,9 +94,7 @@ def matmul_sp(
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local,
-                          transpose_A=False, transpose_E=False, transpose_B=False,
-                          policy=policy)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, transpose_A=False, transpose_E=False, transpose_B=False, policy=policy)
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 

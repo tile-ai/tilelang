@@ -114,9 +114,11 @@ One common strategy to address bank conflicts is shared memory swizzling. This t
 Similarly, TileLang also supports shared memory swizzling. Users only need to add a single line of Python code:
 
 ```python
-T.annotate_layout({
-    S_shared: TileLang.layout.make_swizzled_layout(S_shared),
-})
+T.annotate_layout(
+    {
+        S_shared: TileLang.layout.make_swizzled_layout(S_shared),
+    }
+)
 ```
 
 Here, `T.annotate_layout` allows users to specify any desired layout for a buffer. For convenience, TileLang provides the `make_swizzled_layout` primitive to automatically generate a swizzled layout.

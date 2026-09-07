@@ -174,7 +174,7 @@ freely compose that surface with extensions under
 `tilelang/<backend>/language`:
 
 ```python
-from tilelang import language as T       # common + CUDA compatibility facade
+from tilelang import language as T  # common + CUDA compatibility facade
 from tilelang.cuda import language as T  # common + CUDA extensions
 from tilelang.rocm import language as T  # common + ROCm extensions
 ```

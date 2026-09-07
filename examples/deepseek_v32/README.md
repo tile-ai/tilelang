@@ -45,9 +45,7 @@ After the matmul, we apply ReLU and aggregate across heads with learned weights:
 
 ```python
 for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
-    s_reshaped[bn_i, bq_i, h_i] = (
-        T.max(s[bn_i, bq_i * heads + h_i], 0) * weights[bq_i, h_i]
-    ) * index_k_scale_fragment[bn_i]
+    s_reshaped[bn_i, bq_i, h_i] = (T.max(s[bn_i, bq_i * heads + h_i], 0) * weights[bq_i, h_i]) * index_k_scale_fragment[bn_i]
 
 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 ```
@@ -71,7 +69,7 @@ The implementation uses a radix-sort-based approach that processes floats as uns
 
 ```python
 for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE)):
-    input_idx = s*BLOCK_SIZE+tx
+    input_idx = s * BLOCK_SIZE + tx
     if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
         inval_int16 = convert_to_uint16(input[bx, input_idx])
         T.atomic_add(s_histogram[inval_int16], 1)
@@ -88,7 +86,7 @@ Elements above the threshold go directly to the output. Elements in the threshol
 
 ```python
 if l_bin_id32 > l_threshold_bin_id:
-    pos = T.atomic_add(s_histogram[l_bin_id32+1], 1, return_prev=True)
+    pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
     index[bx, pos] = input_idx
 elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
     pos = T.atomic_add(s_num_input[0], 1, return_prev=True)
@@ -107,7 +105,7 @@ Turning dense MLA into sparse MLA requires surprisingly few changes - essentiall
 # Dense MLA: iterate over full sequence
 loop_range = T.ceildiv(seqlen_kv, block_N)
 for k in T.Pipelined(loop_range, num_stages=2):
-    T.copy(KV[bid, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
+    T.copy(KV[bid, k * block_N : (k + 1) * block_N, cur_kv_head, :], KV_shared)
     # ... compute attention over this block
 ```
 
@@ -178,8 +176,8 @@ The backward pass consists of three main stages:
 
 ```python
 for k in T.Pipelined(T.ceildiv(D, block_ND), num_stages=num_stages):
-    T.copy(O[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND], o)
-    T.copy(dO[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND], do)
+    T.copy(O[bz, by * block_ND : (by + 1) * block_ND, bx, k * block_ND : (k + 1) * block_ND], o)
+    T.copy(dO[bz, by * block_ND : (by + 1) * block_ND, bx, k * block_ND : (k + 1) * block_ND], do)
     for i, j in T.Parallel(block_ND, block_ND):
         acc[i, j] += o[i, j] * do[i, j]
 T.reduce_sum(acc, delta, 1)
@@ -212,8 +210,7 @@ The key gradient computations are:
 ```python
 # Atomically update dKV at selected indices
 for bi_i, d_i in T.Parallel(BI // split_store, D // 4):
-    T.atomic_addx4(dKV[by, Indices[by, s_i, bz, i_i * BI + bi_i + s * (BI // split_store)], bz, d_i * 4],
-                   acc_dkv_shared[bi_i, d_i * 4])
+    T.atomic_addx4(dKV[by, Indices[by, s_i, bz, i_i * BI + bi_i + s * (BI // split_store)], bz, d_i * 4], acc_dkv_shared[bi_i, d_i * 4])
 ```
 
 **Performance**: The sparse MLA backward achieves excellent performance:

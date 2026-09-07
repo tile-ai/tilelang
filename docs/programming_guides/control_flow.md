@@ -21,13 +21,13 @@ treated as compile‑time constants and will be folded.
 
 ```python
 for i in T.serial(N):
-    if i < N:            # TIR condition
+    if i < N:  # TIR condition
         C[i] = A[i] + B[i]
     else:
         pass
 
 # Ternary
-x = (A[i] if i < N else 0)
+x = A[i] if i < N else 0
 ```
 
 Short‑circuit boolean ops are supported. For multi‑dimensional bounds, use
@@ -52,10 +52,10 @@ Boundary handling note
 
 ```python
 for i in T.serial(N):
-    ...                     # 0..N-1
+    ...  # 0..N-1
 
 for i in T.serial(0, N, 2):
-    ...                     # 0, 2, 4, ...
+    ...  # 0, 2, 4, ...
 ```
 
 ### Unroll
@@ -96,7 +96,7 @@ pipelines.
 for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
     T.copy(A[by * BM, ko * BK], A_s)  # stage: copy A tile
     T.copy(B[ko * BK, bx * BN], B_s)  # stage: copy B tile
-    T.gemm(A_s, B_s, C_f)             # stage: compute
+    T.gemm(A_s, B_s, C_f)  # stage: compute
 ```
 
 For manual `stage` / `order` annotations and the rule that scalar `Bind`
@@ -138,7 +138,7 @@ the explicit guard can be omitted when you don’t need a custom edge path.
 for i, j in T.Parallel(M, N):
     gi = by * BM + i
     gj = bx * BN + j
-    if T.all_of(gi < M, gj < N):     # optional in many cases
+    if T.all_of(gi < M, gj < N):  # optional in many cases
         C[gi, gj] = A[gi, gj] + B[gi, gj]
 ```
 
@@ -149,5 +149,5 @@ from a single thread to avoid duplicate outputs.
 
 ```python
 if i == 0:
-    T.print(C, msg='C tile:')
+    T.print(C, msg="C tile:")
 ```

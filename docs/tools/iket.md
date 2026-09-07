@@ -309,10 +309,7 @@ launch = data["launches"][0]
 names = data["stringTable"]
 
 store_indices = [
-    marker["payloadVal"]
-    for marker in launch["markers"]
-    if names[marker["markerNameIdx"]] == "store_index"
-    and "payloadVal" in marker
+    marker["payloadVal"] for marker in launch["markers"] if names[marker["markerNameIdx"]] == "store_index" and "payloadVal" in marker
 ]
 print(store_indices[:8])
 ```
