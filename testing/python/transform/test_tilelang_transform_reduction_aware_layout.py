@@ -22,9 +22,12 @@ def make_reducer(**kwargs):
     return load_factory("maint/layout_inference/cases/reduction_aware.py")(**kwargs)
 
 
-def infer(factory=make_reducer, model="reduction-aware", target=None, pass_configs=None, **kwargs):
+def infer(factory=make_reducer, model=None, target=None, pass_configs=None, **kwargs):
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"} if target is None else target)
-    with target, tl.transform.PassContext(config={"tl.layout_cost_model": model, **(pass_configs or {})}):
+    configs = dict(pass_configs or {})
+    if model is not None:
+        configs["tl.layout_cost_model"] = model
+    with target, tl.transform.PassContext(config=configs):
         module = tvm.IRModule({"main": factory(**kwargs)})
         module = tvm.tirx.transform.BindTarget(target)(module)
         module = tl.transform.MaterializeKernelLaunch()(module)
@@ -55,7 +58,7 @@ def test_column_reduction_avoids_communication():
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
-def test_intermediate_width_beats_both_endpoints():
+def test_default_intermediate_width_beats_both_endpoints():
     _, automatic = infer(rows=4, columns=256)
     _, intermediate = infer(rows=4, columns=256, width=2)
     _, scalar = infer(rows=4, columns=256, width=1)
@@ -134,7 +137,7 @@ def test_predicted_update_width_matches_lowering(kwargs, expected):
     function, _ = infer(**kwargs)
     assert list(map(int, reducer_cost(function)["acc"]["vector_widths"])) == [expected]
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
-    with target, tl.transform.PassContext(config={"tl.layout_cost_model": "reduction-aware"}):
+    with target, tl.transform.PassContext():
         artifact = tl.lower(make_reducer(**kwargs), target=target, enable_device_compile=False)
     widths = []
 
@@ -154,33 +157,33 @@ def test_predicted_update_width_matches_lowering(kwargs, expected):
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
-def test_existing_policies_keep_their_winners():
+def test_default_policy_is_reduction_aware_with_or_without_its_existing_name():
     _, register_count = infer(model="register-count", rows=4, columns=256)
     _, io_aware = infer(model="io-aware", rows=4, columns=256)
-    _, scalar = infer(rows=4, columns=256, width=1)
+    _, automatic = infer(rows=4, columns=256)
     _, native = infer(rows=4, columns=256, width=4)
-    assert register_count["values"].is_equal(scalar["values"])
+    assert register_count["values"].is_equal(automatic["values"])
     assert io_aware["values"].is_equal(native["values"])
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
 def test_unknown_serial_extent_retains_register_count_search():
     @T.prim_func
-    def kernel(inputs: T.Tensor((8, 128), "float32"), output: T.Tensor((128,), "float32"), count: T.int32):
+    def kernel(inputs: T.Tensor((4, 256), "float32"), output: T.Tensor((256,), "float32"), count: T.int32):
         with T.Kernel(1, threads=128):
-            values = T.alloc_fragment((8, 128), "float32")
-            acc = T.alloc_reducer((128,), "float32")
-            result = T.alloc_fragment((128,), "float32")
+            values = T.alloc_fragment((4, 256), "float32")
+            acc = T.alloc_reducer((256,), "float32")
+            result = T.alloc_fragment((256,), "float32")
             T.copy(inputs, values)
             T.reducer_init(acc)
             for _repeat in T.serial(count):
-                for row, column in T.Parallel(8, 128):
+                for row, column in T.Parallel(4, 256):
                     T.reducer_update(acc[column], values[row, column])
             T.finalize_reducer(acc, result)
             T.copy(result, output)
 
     _, automatic = infer(factory=lambda: kernel)
-    _, fallback = infer(factory=lambda: kernel, model="register-count")
+    _, fallback = infer(rows=4, columns=256, width=1)
     assert automatic["values"].is_equal(fallback["values"])
     assert automatic["acc"].is_equal(fallback["acc"])
 
@@ -190,7 +193,7 @@ def test_unknown_serial_extent_retains_register_count_search():
 def test_explicit_constraints_are_preserved(constraints):
     factory = load_factory("maint/layout_inference/cases/reducer_scalar_candidates.py")
     _, automatic = infer(factory=factory, **constraints)
-    _, pinned = infer(factory=factory, model="register-count", width=4)
+    _, pinned = infer(factory=factory, width=4)
     assert int(automatic["acc"].combine_size) == 4
     assert automatic["values"].is_equal(pinned["values"])
 
@@ -311,7 +314,7 @@ def test_direct_memory_reducer_updates(staged, total):
     assert cost["local_issues"] == 8
     if total:
         assert list(map(int, cost["vector_widths"])) == [1]
-    kernel = tl.compile(program, out_idx=-1, target="cuda", pass_configs={"tl.layout_cost_model": "reduction-aware"})
+    kernel = tl.compile(program, out_idx=-1, target="cuda")
     inputs = torch.randn((4, 256), device="cuda")
     expected = inputs.sum().reshape(1) if total else inputs.sum(dim=0)
     torch.testing.assert_close(kernel(inputs), expected, atol=1e-4, rtol=1e-4)
@@ -320,8 +323,8 @@ def test_direct_memory_reducer_updates(staged, total):
 @tilelang.testing.requires_rocm(support_required="compile-only")
 def test_non_cuda_target_retains_register_count():
     target = {"kind": "hip", "mcpu": "gfx90a"}
-    _, automatic = infer(target=target)
-    _, baseline = infer(target=target, model="register-count")
+    _, automatic = infer(target=target, rows=4, columns=256)
+    _, baseline = infer(target=target, rows=4, columns=256, width=1)
     assert automatic["values"].is_equal(baseline["values"])
 
 
@@ -337,7 +340,7 @@ def test_non_cuda_target_retains_register_count():
     ],
 )
 def test_seeded_repeated_and_batched_reductions(kwargs):
-    kernel = tl.compile(make_reducer(**kwargs), out_idx=-1, target="cuda", pass_configs={"tl.layout_cost_model": "reduction-aware"})
+    kernel = tl.compile(make_reducer(**kwargs), out_idx=-1, target="cuda")
     inputs = torch.randn((kwargs.get("rows", 8), 128), device="cuda")
     expected = inputs.sum(dim=0) * kwargs.get("updates", 1) * kwargs.get("repeats", 1) + kwargs.get("seed", 0)
     torch.testing.assert_close(kernel(inputs), expected, atol=1e-4, rtol=1e-4)
@@ -348,7 +351,6 @@ def check_reduction_aware_kernel(columns, dtype, op):
         make_reducer(columns=columns, dtype=dtype, op=op),
         out_idx=-1,
         target="cuda",
-        pass_configs={"tl.layout_cost_model": "reduction-aware"},
     )
     inputs = torch.randn((8, columns), dtype=getattr(torch, dtype), device="cuda")
     expected = {"sum": torch.sum, "max": torch.amax, "min": torch.amin}[op](inputs, dim=0)
@@ -375,7 +377,7 @@ def test_reduction_aware_bfloat16_kernel_correctness(columns, op):
 @tilelang.testing.requires_cuda_compute_version_ge(8)
 def test_full_reduction_kernel_correctness():
     factory = load_factory("maint/layout_inference/cases/reducer_scalar_candidates.py")
-    kernel = tl.compile(factory(total=True), out_idx=-1, target="cuda", pass_configs={"tl.layout_cost_model": "reduction-aware"})
+    kernel = tl.compile(factory(total=True), out_idx=-1, target="cuda")
     inputs = torch.randn((4, 256), device="cuda", dtype=torch.bfloat16)
     torch.testing.assert_close(kernel(inputs), inputs.float().sum().reshape(1), atol=1e-4, rtol=1e-4)
     assert "tl::AllReduce<" in kernel.get_kernel_source()

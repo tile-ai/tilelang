@@ -6,7 +6,7 @@
  * connected component and keeps the cheapest complete layout assignment.
  * What "cheapest" means is a pluggable policy behind LayoutCostModel:
  *
- *  - RegisterCountCostModel (default): total fragment register slots.
+ *  - RegisterCountCostModel (fallback): total fragment register slots.
  *    Also considers scalar plans at unannotated reducer-update roots,
  *    scored with the same spill/register ordering as native plans.
  *  - IOAwareCostModel (layout RFC, design B2): walks the component's
@@ -16,7 +16,7 @@
  *    tentative layouts; registers remain the lexicographic tiebreak.
  *    Available through `tl.layout_cost_model="io-aware"` for opt-in use
  *    and A/B comparisons.
- *  - ReductionAwareCostModel (opt-in, CUDA): enumerates reducer vector
+ *  - ReductionAwareCostModel (default for CUDA reducers): enumerates vector
  *    widths and orders complete attempts by spills, issue-equivalent
  *    execution cost, and registers. Physical reducer plans are analyzed
  *    with the materializer's own narrow/wide and packed decisions.
@@ -93,11 +93,11 @@ public:
     return ReducerVectorSearch::kNative;
   }
 
-  /*! \brief Instantiate the model selected by `tl.layout_cost_model`
-   *  by name ("io-aware", "register-count", or "reduction-aware");
-   *  unknown names are a hard error listing the valid values. `target`
-   *  feeds the vectorizer's shared width-cap policy (MaxVectorLoadBits);
-   *  the legacy model ignores it. */
+  /*! \brief Instantiate the existing "register-count" or "io-aware" policy.
+   *  The default register-count policy automatically uses reduction-aware
+   *  scoring for CUDA reducers; there is no separate configuration switch.
+   *  Unknown names are a hard error. `target` feeds the vectorizer's shared
+   *  width-cap policy (MaxVectorLoadBits); the fallback model ignores it. */
   static std::unique_ptr<LayoutCostModel>
   Create(const std::string &name, Target target,
          const tirx::PrimFunc &function = tirx::PrimFunc(),

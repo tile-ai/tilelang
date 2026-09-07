@@ -97,6 +97,13 @@ annotation contract.
 
 "Cheapest" is a pluggable policy (`layout_cost_model.{h,cc}`):
 
+- The default `register-count` policy automatically uses reduction-aware scoring
+  for CUDA reducers:
+  search native, intermediate, and scalar vector widths, then rank spills,
+  weighted execution cost, and register slots. Physical reducer planning is
+  shared with materialization. Non-reducer components, non-CUDA targets, and
+  unknown serial trip counts fall back to register-count. No new pass-config
+  value is needed; see `docs/developer_guide/reduction_aware_layout.md`.
 - `tl.layout_cost_model="io-aware"` (opt-in): every
   fragment<->global copy and global-touching parallel loop is charged
   `max(bandwidth bytes, issue bytes)` under the attempt's layouts, scored
@@ -105,8 +112,8 @@ annotation contract.
   segments counted at warp/step granularity). Registers are the tiebreak.
   Statements outside the model are charged a conservative worst case — an
   attempt must never profit from opacity.
-- `tl.layout_cost_model="register-count"` (default): register-slots-only
-  ordering.
+- Explicitly naming `tl.layout_cost_model="register-count"` uses the same
+  default strategy; it does not disable reduction awareness.
 - The scoring formulas are guarded by the Python parity check
   `maint/layout_inference/run.py --cute` (symbolic scorer vs an
   independent NumPy enumeration oracle); keep `cute_model.py` in lockstep

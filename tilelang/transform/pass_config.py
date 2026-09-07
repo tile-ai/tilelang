@@ -118,17 +118,17 @@ class PassConfigKey(str, Enum):
     Default: False"""
 
     TL_LAYOUT_COST_MODEL = "tl.layout_cost_model"
-    """The cost model that ranks free-mode layout attempts, by name:
+    """The cost model ranking free-mode layout attempts, by name:
     "io-aware" scores estimated global-memory access cost (vector width /
     warp coalescing of every fragment<->global copy, weighted by bytes
-    moved) with register count as the tiebreak; "register-count" orders by
-    estimated spills and register slots. "reduction-aware" additionally
-    searches intermediate reducer vector widths and scores local work,
-    memory issues, and the actual finalize communication plan on CUDA.
-    Other targets and unknown serial trip counts retain register-count.
-    When unset, the
-    ``TILELANG_LAYOUT_COST_MODEL`` environment variable supplies the
-    default. Default: 'register-count'"""
+    moved) with register count as the tiebreak. The default "register-count"
+    policy automatically searches intermediate vector widths for CUDA
+    reducers and scores spills, local work, memory issues, actual finalize
+    communication, and registers. Other targets, non-reducer components, and
+    unknown serial trip counts retain spill/register ordering. There is no
+    separate reduction-aware switch. When unset, the
+    ``TILELANG_LAYOUT_COST_MODEL`` environment variable supplies the policy.
+    Default: 'register-count'"""
 
     TL_REDUCER_FORCE_BASELINE = "tl.reducer_force_baseline"
     """Force the canonical FullParticipant baseline for every reducer epoch,

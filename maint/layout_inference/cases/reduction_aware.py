@@ -39,5 +39,5 @@ VARIANTS = {
 def check(variant, model, result):
     if variant == "full":
         assert result["buffers"]["acc"]["replicate"] == 128
-    elif model == "reduction-aware":
+    elif model == "register-count":
         assert result["buffers"]["acc"]["replicate"] == 1

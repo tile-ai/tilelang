@@ -13,6 +13,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -1567,6 +1568,73 @@ public:
   }
 
 private:
+  std::optional<int64_t>
+  SharedBankConflictFactor(const LoopMemoryAccessCollector::RawAccess &access,
+                           const Var &thread, const Range &bounds,
+                           int64_t threads, int width, const LayoutMap &layouts,
+                           arith::Analyzer *analyzer) const {
+    constexpr int64_t kBankCount = 32;
+    constexpr int64_t kBankBytes = 4;
+    int64_t element_bits =
+        access.buffer->dtype.bits() * access.buffer->dtype.lanes();
+    if (element_bits < 8 || element_bits % 8 != 0) {
+      return std::nullopt;
+    }
+    int64_t element_bytes = element_bits / 8;
+    PrimExpr address = make_zero(DataType::Int(32));
+    if (auto shared_layout = layouts.Get(access.buffer)) {
+      Array<PrimExpr> indices = shared_layout.value()->Forward(access.indices);
+      Array<PrimExpr> shape = shared_layout.value()->OutputShape();
+      for (size_t axis = 0; axis < indices.size(); ++axis) {
+        address = address * shape[axis] + indices[axis];
+      }
+    } else {
+      auto strides = RowMajorStrides(access.buffer);
+      if (!strides.has_value() || strides->size() != access.indices.size()) {
+        return std::nullopt;
+      }
+      for (size_t axis = 0; axis < access.indices.size(); ++axis) {
+        address = address +
+                  access.indices[axis] *
+                      IntImm(access.indices[axis].dtype(), (*strides)[axis]);
+      }
+    }
+    address =
+        analyzer->Simplify(address * IntImm(address.dtype(), element_bytes));
+    PrimExpr origin = Substitute(address, {{thread, bounds->min}});
+    PrimExpr next = Substitute(address, {{thread, bounds->min + 1}});
+    PrimExpr stride = analyzer->Simplify(next - origin);
+    const int64_t *stride_bytes = as_const_int(stride);
+    if (stride_bytes == nullptr || *stride_bytes < 0 ||
+        !analyzer->CanProveEqual(address,
+                                 origin + (thread - bounds->min) * stride)) {
+      return std::nullopt;
+    }
+    int64_t vector_bytes = std::min<int64_t>(
+        width * element_bytes, MaxVectorLoadBits(target_, false) / 8);
+    int64_t warp_size =
+        target_->GetAttr<Integer>("thread_warp_size").value_or(32)->value;
+    int64_t lanes = std::min(
+        {threads, warp_size,
+         kBankCount * kBankBytes / std::max(kBankBytes, vector_bytes)});
+    int64_t alignments = vector_bytes >= kBankBytes ? 1 : kBankBytes;
+    int64_t conflicts = 1;
+    for (int64_t alignment = 0; alignment < alignments; ++alignment) {
+      std::array<std::unordered_set<int64_t>, kBankCount> bank_words;
+      for (int64_t lane = 0; lane < lanes; ++lane) {
+        int64_t first = (alignment + lane * *stride_bytes) / kBankBytes;
+        int64_t last =
+            (alignment + lane * *stride_bytes + vector_bytes - 1) / kBankBytes;
+        for (int64_t word = first; word <= last; ++word) {
+          auto &words = bank_words[word % kBankCount];
+          words.insert(word);
+          conflicts = std::max(conflicts, static_cast<int64_t>(words.size()));
+        }
+      }
+    }
+    return conflicts;
+  }
+
   std::optional<int64_t> LoopMemoryIssueCost(const ParallelOp &loop,
                                              const LayoutMap &layouts,
                                              const Map<For, Integer> &widths,
@@ -1596,6 +1664,41 @@ private:
     int width = solved_width.has_value()
                     ? static_cast<int>(solved_width.value()->value)
                     : PartitionedVectorWidth(loop->GetRoot(), layout, layouts);
+    if (shared) {
+      arith::Analyzer analyzer;
+      Var thread("shared_cost_thread", DataType::Int(32));
+      Range bounds = layout->ThreadRange();
+      if (!bounds.defined()) {
+        bounds = Range::FromMinExtent(0, layout->ThreadExtent());
+      }
+      analyzer.Bind(thread, bounds);
+      For partitioned =
+          PartitionLoop(loop->GetRoot(), thread, &analyzer, layout);
+      PostOrderVisit(partitioned, [&](const ObjectRef &object) {
+        if (auto serial = object.as<For>()) {
+          analyzer.Bind(serial.value()->loop_var,
+                        Range::FromMinExtent(serial.value()->min,
+                                             serial.value()->extent));
+        }
+      });
+      LoopMemoryAccessCollector physical(true);
+      physical.Collect(partitioned);
+      if (physical.accesses.size() != collector.accesses.size()) {
+        return std::nullopt;
+      }
+      accesses = 0;
+      for (size_t index = 0; index < physical.accesses.size(); ++index) {
+        auto conflicts = SharedBankConflictFactor(
+            physical.accesses[index], thread, bounds, threads.value(), width,
+            layouts, &analyzer);
+        if (!conflicts.has_value()) {
+          return std::nullopt;
+        }
+        accesses =
+            AddCost(accesses, MultiplyCost(collector.accesses[index].repeat,
+                                           conflicts.value()));
+      }
+    }
     return MultiplyCost(
         MultiplyCost(CeilDiv(slots.value(), width), accesses),
         MultiplyCost(threads.value(), MaxVectorLoadBits(target_, !shared) / 8));
@@ -1690,44 +1793,38 @@ LayoutCostModel::Create(const std::string &name, Target target,
   if (name == "io-aware") {
     return std::make_unique<IOAwareCostModel>(std::move(target));
   }
-  if (name == "register-count") {
+  if (name != "register-count") {
+    LOG(FATAL) << "Unknown layout cost model \"" << name
+               << "\" for pass config `tl.layout_cost_model`; valid values "
+                  "are \"register-count\" (default) and \"io-aware\".";
+  }
+  bool has_reducer = std::any_of(
+      statements.begin(), statements.end(), [](const ObjectRef &statement) {
+        const auto *call = statement.as<CallNode>();
+        return call != nullptr && call->op.same_as(FinalizeReducerV2Op::Get());
+      });
+  if (!TargetIsCuda(target) || !has_reducer) {
     return std::make_unique<RegisterCountCostModel>();
   }
-  if (name == "reduction-aware") {
-    bool has_reducer = std::any_of(
-        statements.begin(), statements.end(), [](const ObjectRef &statement) {
-          const auto *call = statement.as<CallNode>();
-          return call != nullptr &&
-                 call->op.same_as(FinalizeReducerV2Op::Get());
-        });
-    if (!TargetIsCuda(target) || !has_reducer) {
-      return std::make_unique<RegisterCountCostModel>();
-    }
-    ICHECK(function.defined()) << "reduction-aware scoring requires a PrimFunc";
-    ExecutionCountCollector collector;
-    collector.Collect(function);
-    if (!collector.known) {
-      return std::make_unique<RegisterCountCostModel>();
-    }
-    std::vector<int64_t> counts;
-    for (const ObjectRef &statement : statements) {
-      auto found = collector.counts.find(statement);
-      if (found == collector.counts.end() || found->second < 0 ||
-          found->second >= kUnknownReductionCost) {
-        DLOG(INFO)
-            << "[ReducerCost] unknown execution count; using register-count";
-        return std::make_unique<RegisterCountCostModel>();
-      }
-      counts.push_back(found->second);
-    }
-    return std::make_unique<ReductionAwareCostModel>(
-        std::move(target), function, std::move(counts));
+  ICHECK(function.defined()) << "reduction-aware scoring requires a PrimFunc";
+  ExecutionCountCollector collector;
+  collector.Collect(function);
+  if (!collector.known) {
+    return std::make_unique<RegisterCountCostModel>();
   }
-  LOG(FATAL) << "Unknown layout cost model \"" << name
-             << "\" for pass config `tl.layout_cost_model`; valid values "
-                "are \"register-count\" (default), \"io-aware\" and "
-                "\"reduction-aware\".";
-  return nullptr; // unreachable
+  std::vector<int64_t> counts;
+  for (const ObjectRef &statement : statements) {
+    auto found = collector.counts.find(statement);
+    if (found == collector.counts.end() || found->second < 0 ||
+        found->second >= kUnknownReductionCost) {
+      DLOG(INFO)
+          << "[ReducerCost] unknown execution count; using register-count";
+      return std::make_unique<RegisterCountCostModel>();
+    }
+    counts.push_back(found->second);
+  }
+  return std::make_unique<ReductionAwareCostModel>(std::move(target), function,
+                                                   std::move(counts));
 }
 
 } // namespace tl

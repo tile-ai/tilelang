@@ -1,11 +1,12 @@
 # Layout inference verification harness
 
 Constructed IR cases with reviewed expected layouts, for validating the
-free-mode layout search — in particular the selection policy behind
-`tl.layout_cost_model` ("register-count" = the default ordering,
-"io-aware" = the opt-in global-memory model, "reduction-aware" = opt-in
-CUDA local-work/communication ranking in
-`src/transform/layout_inference/layout_cost_model.cc`).
+free-mode layout search in
+`src/transform/layout_inference/layout_cost_model.cc`. The harness compares
+the existing default `register-count` policy (automatically reduction-aware
+for CUDA reducers) with the experimental `io-aware` policy. The
+`register-count` snapshots exercise the unconfigured default path; there is
+no additional policy or pass-config switch for reduction awareness.
 
 Why this exists:
 
@@ -19,19 +20,18 @@ Why this exists:
 
 ## Usage
 
-The default `register-count` model also tries one scalar plan at each
-unannotated reducer-update root. Both native and scalar plans use the unchanged
-spill/register-slot score; native plans win same-root ties. This can remove
-replicated column accumulators without forcing scalar layouts for full
-reductions. Explicit widths and layouts remain authoritative. The opt-in
-`io-aware` model retains its existing candidate search and scoring.
-
-The `reduction-aware` model also tries intermediate widths at reducer roots.
-It scores the actual materialization plan, including narrow-to-wide fallback,
-batched collectives, local arithmetic, and shared-memory issues. See
+The default automatically tries native, intermediate, and scalar widths at
+unannotated CUDA reducer-update roots. It scores the actual materialization
+plan, including narrow-to-wide fallback, batched collectives, local arithmetic,
+and shared-memory issues. Non-reducer components, unsupported targets, and
+unknown serial trip counts retain register-count scoring. See
 `docs/developer_guide/reduction_aware_layout.md` for cost units and limitations.
 The `reduction_aware` cases include a column reduction whose intermediate
 width avoids communication without giving up two-element memory accesses.
+
+The existing `io-aware` policy retains its candidate search and scoring.
+Native plans win same-root ties, and equal-cost roots retain program order.
+Explicit widths and layouts remain authoritative for every policy.
 
 ```bash
 python run.py                # verify all cases against expected/

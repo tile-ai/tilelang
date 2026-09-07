@@ -1,27 +1,27 @@
 # Reduction-aware layout selection
 
-The opt-in `reduction-aware` policy searches vector widths at reducer-update
-roots and accounts for the communication their layouts introduce:
+CUDA reducer components use reduction-aware vector-size selection by default.
+It searches vector widths at reducer-update roots and accounts for the
+communication their layouts introduce, without an additional pass config:
 
 ```python
-kernel = tilelang.compile(
-    program,
-    target="cuda",
-    pass_configs={"tl.layout_cost_model": "reduction-aware"},
-)
+kernel = tilelang.compile(program, target="cuda")
 ```
 
-The default remains `register-count`. The `io-aware` policy is unchanged.
 Components without reducer finalization retain register-count scoring.
 Non-CUDA targets and functions with unknown serial trip counts also fall
 back to register-count, rather than applying CUDA synchronization costs.
+This is part of the existing default `register-count` policy: leaving the
+policy unset and explicitly naming `register-count` take the same path.
+There is no separate `reduction-aware` config value or enable/disable switch.
+The existing experimental `io-aware` policy is unchanged.
 
-The default already explores native and scalar reducer plans. This policy
-adds intermediate widths and communication-sensitive scoring; it does not
-assume that avoiding communication always improves on the default. For
-example, a `[4, 256]` column reduction with 128 threads can use width two
-without a collective, rather than choosing between width four with a
-collective and width one without one.
+The earlier register-count policy explores native and scalar reducer plans.
+The default adds intermediate widths and communication-sensitive scoring;
+it does not assume that avoiding communication always improves performance.
+For example, a `[4, 256]` column reduction with 128 threads can use width two
+without a collective, rather than choosing between width four with a collective
+and width one without one.
 
 ## Search and constraints
 
@@ -70,7 +70,10 @@ still provides a deterministic fallback.
 
 The memory term reuses the io-aware global-memory model, bounded below by
 the actual update loop's memory issues, and includes shared load/store issue
-estimates. The execution score is:
+estimates. Proven affine shared-memory lane strides are charged for bank
+conflicts at the legal vector width, including same-word broadcasts. Accesses
+outside that model are unmeasurable rather than assumed conflict-free.
+The execution score is:
 
 ```text
 reducer_issues = local_issues + collective_shared_issues + combine_issues
@@ -95,10 +98,11 @@ The initial CUDA weights prioritize a barrier over a shuffle over a local
 issue, while still allowing memory savings to offset communication costs.
 They are deliberately weighted rather than a strict lexicographic ordering
 of instruction counts. These are uncalibrated ranking heuristics, **not
-cycle predictions or measured hardware latency ratios**. Shared-memory bank
-conflicts, occupancy, instruction overlap, and expensive contribution
-expressions are not modeled precisely. Keep the policy opt-in and benchmark
-representative workloads before relying on its ranking.
+cycle predictions or measured hardware latency ratios**. Non-affine shared
+accesses, occupancy, instruction overlap, and expensive contribution
+expressions are not modeled precisely. Benchmark representative workloads
+with explicit native, scalar, and intermediate-width controls rather than
+treating the heuristic as a guarantee of better performance.
 
 ## Diagnostics and validation
 
