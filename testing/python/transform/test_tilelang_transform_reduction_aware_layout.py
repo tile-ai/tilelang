@@ -1,4 +1,5 @@
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,20 @@ def load_factory(relative_path, name="make_reducer"):
 
 def make_reducer(**kwargs):
     return load_factory("maint/layout_inference/cases/reduction_aware.py")(**kwargs)
+
+
+def make_shared_reducer(**kwargs):
+    return load_factory("maint/layout_inference/cases/reduction_aware_shared.py")(**kwargs)
+
+
+def reducer_candidate_costs(diagnostics):
+    """Exclude unrelated register-count components with zero execution cost."""
+    costs = [
+        {name: int(value) for name, value in re.findall(r"(\w+)=(-?\d+)", line)}
+        for line in diagnostics.splitlines()
+        if "[ReducerVectorPlan]" in line
+    ]
+    return [cost for cost in costs if cost["execution"] > 0]
 
 
 def infer(factory=make_reducer, model=None, target=None, pass_configs=None, **kwargs):
@@ -246,6 +261,71 @@ def test_full_reduction_keeps_native_input_vectorization():
     _, native = infer(factory=factory, total=True, pinned=True)
     assert int(automatic["acc"].combine_size) == 128
     assert automatic["values"].is_equal(native["values"])
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+def test_bank_conflict_free_precedes_combined_cost(capfd):
+    _, automatic = infer(factory=make_shared_reducer, pass_configs={"tl.enable_reducer_plan_verbose": True})
+    costs = reducer_candidate_costs(capfd.readouterr().err)
+    _, conflict_free = infer(factory=make_shared_reducer, width=4)
+    _, conflicting = infer(factory=make_shared_reducer, width=16)
+    assert automatic["values"].is_equal(conflict_free["values"])
+    assert not automatic["values"].is_equal(conflicting["values"])
+    measurable = [cost for cost in costs if cost["known"]]
+    assert measurable and all(cost["spill"] == 0 for cost in measurable)
+    free_costs = [cost["total"] for cost in measurable if cost["bank_conflict_free"]]
+    conflicting_costs = [cost["total"] for cost in measurable if not cost["bank_conflict_free"]]
+    assert free_costs and conflicting_costs
+    assert min(conflicting_costs) < min(free_costs)
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize("kwargs", [{}, {"repeats": 3}, {"width": 4, "batch": 4}])
+def test_spill_execution_registers_share_total_cost(capfd, kwargs):
+    infer(pass_configs={"tl.enable_reducer_plan_verbose": True}, **kwargs)
+    costs = reducer_candidate_costs(capfd.readouterr().err)
+    assert costs and all(cost["known"] for cost in costs)
+    for cost in costs:
+        assert cost["total"] == cost["spill"] + cost["execution"] + cost["regs"] * 128 * 4
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize("width", [4, 16])
+def test_bank_conflict_priority_preserves_explicit_layouts(capfd, width):
+    _, layouts = infer(factory=make_shared_reducer, width=width, pass_configs={"tl.enable_reducer_plan_verbose": True})
+    costs = reducer_candidate_costs(capfd.readouterr().err)
+    expected = T.Fragment(
+        (2048,),
+        forward_thread_fn=lambda element: element // width % 128,
+        forward_index_fn=lambda element: element // (128 * width) * width + element % width,
+    )
+    assert layouts["values"].is_equal(expected)
+    assert costs and all(cost["known"] for cost in costs)
+    assert all(cost["bank_conflict_free"] == (width == 4) for cost in costs)
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+def test_unknown_shared_geometry_is_not_conflict_free(capfd):
+    infer(factory=make_shared_reducer, swizzle=True, pass_configs={"tl.enable_reducer_plan_verbose": True})
+    costs = reducer_candidate_costs(capfd.readouterr().err)
+    assert costs
+    assert all(not cost["known"] and not cost["bank_conflict_free"] for cost in costs)
+    assert all(cost["total"] == -1 for cost in costs)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("width", [None, 4, 16])
+def test_mixed_dtype_shared_reduction(width):
+    kernel = tl.compile(
+        make_shared_reducer(width=width),
+        out_idx=-1,
+        target="cuda",
+        pass_configs={"tl.disable_vectorize_256": True},
+    )
+    inputs = torch.randn((2048,), device="cuda")
+    masks = torch.randint(0, 2, (8, 2048), dtype=torch.int8, device="cuda")
+    expected = (inputs * masks.to(torch.float32)).sum().reshape(1)
+    torch.testing.assert_close(kernel(inputs, masks), expected, atol=1e-4, rtol=1e-4)
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")

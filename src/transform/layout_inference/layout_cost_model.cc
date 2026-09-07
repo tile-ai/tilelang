@@ -1485,12 +1485,15 @@ public:
       Map<For, Integer> widths =
           ReducerVectorWidths(plans.value(), physical_layouts);
       int64_t execution = 0;
+      int64_t register_threads = 1;
+      bool bank_conflict_free = true;
       for (const ReducerPlanInfo &plan : plans.value()) {
         auto features = ExtractReducerCost(plan, widths, target_);
         if (!features.has_value()) {
           return cost;
         }
         int64_t participants = *as_const_int(plan.thread_bounds->extent);
+        register_threads = std::max(register_threads, participants);
         int64_t issue_bytes =
             MultiplyCost(participants, MaxVectorLoadBits(target_, false) / 8);
         execution = AddCost(
@@ -1539,21 +1542,31 @@ public:
             cost.execution = kUnknownReductionCost;
             return cost;
           }
-          execution = AddCost(execution, MultiplyCost(shared.value(), repeats));
+          bank_conflict_free &= repeats == 0 || shared->bank_conflict_free;
+          execution =
+              AddCost(execution, MultiplyCost(shared->execution, repeats));
           if (widths.count(loop.value()->GetRoot())) {
             auto issue = LoopMemoryIssueCost(loop.value(), physical_layouts,
                                              widths, false);
             if (!issue.has_value()) {
               return cost;
             }
-            global = std::max(global, issue.value());
+            global = std::max(global, issue->execution);
           }
         }
         execution = AddCost(execution, MultiplyCost(global, repeats));
       }
       cost.mem = spilled;
       cost.execution = execution;
-      cost.known = execution < kUnknownReductionCost;
+      constexpr int64_t kRegisterSlotBytes = 4;
+      int64_t register_cost = MultiplyCost(
+          cost.regs, MultiplyCost(register_threads, kRegisterSlotBytes));
+      int64_t total_cost = AddCost(AddCost(spilled, execution), register_cost);
+      cost.known = total_cost < kUnknownReductionCost;
+      if (cost.known) {
+        cost.total_cost = total_cost;
+      }
+      cost.bank_conflict_free = cost.known && bank_conflict_free;
     } catch (const std::exception &error) {
       DLOG(INFO) << "[ReducerCost] unmeasurable attempt: " << error.what();
       cost.execution = kUnknownReductionCost;
@@ -1568,6 +1581,11 @@ public:
   }
 
 private:
+  struct MemoryIssueCost {
+    int64_t execution{0};
+    bool bank_conflict_free{true};
+  };
+
   std::optional<int64_t>
   SharedBankConflictFactor(const LoopMemoryAccessCollector::RawAccess &access,
                            const Var &thread, const Range &bounds,
@@ -1635,14 +1653,14 @@ private:
     return conflicts;
   }
 
-  std::optional<int64_t> LoopMemoryIssueCost(const ParallelOp &loop,
-                                             const LayoutMap &layouts,
-                                             const Map<For, Integer> &widths,
-                                             bool shared) const {
+  std::optional<MemoryIssueCost>
+  LoopMemoryIssueCost(const ParallelOp &loop, const LayoutMap &layouts,
+                      const Map<For, Integer> &widths, bool shared) const {
+    MemoryIssueCost cost;
     LoopMemoryAccessCollector collector(shared);
     collector.Collect(loop->GetRoot());
     if (collector.accesses.empty()) {
-      return 0;
+      return cost;
     }
     int64_t accesses = 0;
     for (const auto &access : collector.accesses) {
@@ -1694,14 +1712,17 @@ private:
         if (!conflicts.has_value()) {
           return std::nullopt;
         }
+        cost.bank_conflict_free &=
+            collector.accesses[index].repeat == 0 || conflicts.value() == 1;
         accesses =
             AddCost(accesses, MultiplyCost(collector.accesses[index].repeat,
                                            conflicts.value()));
       }
     }
-    return MultiplyCost(
+    cost.execution = MultiplyCost(
         MultiplyCost(CeilDiv(slots.value(), width), accesses),
         MultiplyCost(threads.value(), MaxVectorLoadBits(target_, !shared) / 8));
+    return cost;
   }
 
   Target target_;

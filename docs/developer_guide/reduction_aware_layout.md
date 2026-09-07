@@ -60,9 +60,15 @@ finalize operation; a seedless, local-complete plan removes that operation.
 
 Measurable attempts are ordered by:
 
-1. Estimated register-array spill traffic.
-2. Execution cost in issue-equivalent bytes.
-3. Per-thread register slots.
+1. Proven bank-conflict-free shared-memory accesses before conflicting accesses.
+2. The combined spill, execution, and normalized register cost.
+
+Bank-conflict freedom is a strict preference, not a large numeric penalty:
+a conflicting attempt cannot win by saving memory issues, communication,
+register slots, or estimated spills. If no measurable conflict-free attempt
+is available, the combined cost chooses among the remaining attempts.
+Explicit layout constraints still take precedence. Equal totals retain the
+earlier root and its native plan; they are not broken by the individual costs.
 
 Unmeasurable attempts never beat measurable ones merely because an estimate
 is unavailable. If every estimate is unavailable, spill/register ordering
@@ -71,8 +77,13 @@ still provides a deterministic fallback.
 The memory term reuses the io-aware global-memory model, bounded below by
 the actual update loop's memory issues, and includes shared load/store issue
 estimates. Proven affine shared-memory lane strides are charged for bank
-conflicts at the legal vector width, including same-word broadcasts. Accesses
-outside that model are unmeasurable rather than assumed conflict-free.
+conflicts at the legal vector width, including same-word broadcasts. The strict
+preference covers these ordinary per-thread shared accesses, separately from
+the reducer's collective workspace traffic. An attempt is marked conflict-free
+only after all these executed accesses are proven conflict-free and its execution
+estimate is measurable. Accesses outside the affine model are unmeasurable rather
+than assumed conflict-free. The conflict multiplier remains in the execution
+score to distinguish attempts when none is conflict-free.
 The execution score is:
 
 ```text
@@ -80,13 +91,21 @@ reducer_issues = local_issues + collective_shared_issues + combine_issues
                  + 4 * shuffle_issues + 32 * barriers
 execution = sum(participants * issue_lane_bytes * reducer_issues)
               + sum(operator_repeats * (global_cost + shared_cost))
+register_threads = max(reducer participant counts)
+register_cost = per_thread_register_slots * register_threads * 4
+total_cost = spill_bytes + execution + register_cost
 ```
 
 `issue_lane_bytes` is `MaxVectorLoadBits(target, false) / 8`, currently 16.
 This is a normalization against the memory model, not actual bytes moved by
-arithmetic instructions. Spill traffic remains a separate, higher-priority
-score field. Update and finalize repetition counts are already included in
-`reducer_issues`; operator repetition weights the ordinary memory accesses.
+arithmetic instructions. Register slots are normalized at four bytes per slot
+across the largest participating thread group in the component. This is a
+static heuristic penalty, charged once per attempt, not a prediction of PTX
+register allocation, packing, or occupancy. The normalized spill, execution,
+and register terms are added with equal weights; no term has lexicographic
+priority over another. The original fields remain available for diagnostics.
+Update and finalize repetition counts are already included in `reducer_issues`;
+operator repetition weights the ordinary memory accesses.
 
 Local updates are analyzed as materialized read-modify-write stores after
 loop partitioning. Their legal vector width is distinct from arithmetic
@@ -106,8 +125,10 @@ treating the heuristic as a guarantee of better performance.
 
 ## Diagnostics and validation
 
-Enable `tl.enable_reducer_plan_verbose` to print candidate limits, spill,
-execution and register costs, update widths, and collective statistics.
+Enable `tl.enable_reducer_plan_verbose` to print candidate limits, the proven
+`bank_conflict_free` flag, the combined `total`, individual spill, execution and
+register costs, update widths, and collective statistics. `total=-1` denotes a
+legacy or unmeasurable attempt without a combined estimate.
 For a CUDA PrimFunc after `LayoutInference`, the read-only diagnostic
 `tvm.get_global_func("tl.analysis.ReducerCost")(func)` returns per-reducer
 plan and issue summaries, including actual wide fallback decisions.

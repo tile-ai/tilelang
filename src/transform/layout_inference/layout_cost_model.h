@@ -17,9 +17,9 @@
  *    Available through `tl.layout_cost_model="io-aware"` for opt-in use
  *    and A/B comparisons.
  *  - ReductionAwareCostModel (default for CUDA reducers): enumerates vector
- *    widths and orders complete attempts by spills, issue-equivalent
- *    execution cost, and registers. Physical reducer plans are analyzed
- *    with the materializer's own narrow/wide and packed decisions.
+ *    widths and prefers bank-conflict-free attempts before comparing the sum
+ *    of spill, execution, and normalized register costs. Physical reducer plans
+ *    are analyzed with the materializer's own narrow/wide and packed decisions.
  *
  * Concrete models live in the .cc; callers go through Create().
  */
@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -41,8 +42,11 @@ namespace tvm {
 namespace tl {
 
 /*! \brief Score of one complete free-mode layout assignment. Known scores
- *  precede unmeasurable attempts, then compare mem, execution, and regs.
- *  Legacy policies leave execution at zero. `mem` includes the estimated
+ *  precede unmeasurable attempts, then prefer bank-conflict-free attempts and
+ *  compare their combined total_cost. Legacy policies and unmeasurable attempts
+ *  leave total_cost unset and retain the mem/execution/regs ordering. Legacy
+ *  policies also leave bank_conflict_free false and execution at zero.
+ *  `mem` includes the estimated
  * local-memory traffic of register-array spills (a thread-dependent
  * register-array index demotes the whole array to local memory), priced in
  * bytes so it competes honestly with the io-aware model's global traffic
@@ -55,9 +59,20 @@ struct AttemptCost {
   int64_t execution{0};
   int64_t regs{0};
   bool known{true};
+  bool bank_conflict_free{false};
+  std::optional<int64_t> total_cost;
   bool BetterThan(const AttemptCost &other) const {
     if (known != other.known) {
       return known;
+    }
+    if (bank_conflict_free != other.bank_conflict_free) {
+      return bank_conflict_free;
+    }
+    if (total_cost.has_value() != other.total_cost.has_value()) {
+      return total_cost.has_value();
+    }
+    if (total_cost.has_value()) {
+      return total_cost.value() < other.total_cost.value();
     }
     if (mem != other.mem) {
       return mem < other.mem;
