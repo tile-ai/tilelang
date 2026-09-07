@@ -163,7 +163,7 @@ The same functionality is available in Python:
 ```python
 from tilelang.tools.compile_only import compile_kernel_source
 
-source = compile_kernel_source(add.get_tir())              # default target "c"
+source = compile_kernel_source(add.get_tir())  # default target "c"
 cuda_source = compile_kernel_source(add.get_tir(), "cuda")  # pinned to sm_80
 ```
 

@@ -21,6 +21,7 @@ values from your config space.
 import tilelang
 import tilelang.language as T
 
+
 def matmul_configs(M, N, K):
     # Example space — tailor to your target
     tiles = [64, 128]
@@ -35,17 +36,24 @@ def matmul_configs(M, N, K):
         for TH in threads
     ]
 
+
 @tilelang.autotune(configs=matmul_configs, warmup=25, rep=100, timeout=60)
 @tilelang.jit(out_idx=[-1])
-def matmul(M: int, N: int, K: int,
-           block_M: int = 128, block_N: int = 128, block_K: int = 32,
-           threads: int = 128, num_stages: int = 3,
-           dtype: str = 'float16', accum_dtype: str = 'float32'):
+def matmul(
+    M: int,
+    N: int,
+    K: int,
+    block_M: int = 128,
+    block_N: int = 128,
+    block_K: int = 32,
+    threads: int = 128,
+    num_stages: int = 3,
+    dtype: str = "float16",
+    accum_dtype: str = "float32",
+):
 
     @T.prim_func
-    def kernel(A: T.Tensor((M, K), dtype),
-               B: T.Tensor((K, N), dtype),
-               C: T.Tensor((M, N), dtype)):
+    def kernel(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype), C: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_s = T.alloc_shared((block_M, block_K), dtype)
             B_s = T.alloc_shared((block_K, block_N), dtype)
@@ -61,18 +69,21 @@ def matmul(M: int, N: int, K: int,
 
     return kernel
 
+
 # Usage
 # Provide inputs via context (recommended for reproducibility across configs)
 import torch
+
 M = N = K = 1024
-A = torch.randn(M, K, device='cuda', dtype=torch.float16)
-B = torch.randn(K, N, device='cuda', dtype=torch.float16)
-C = torch.empty(M, N, device='cuda', dtype=torch.float16)
+A = torch.randn(M, K, device="cuda", dtype=torch.float16)
+B = torch.randn(K, N, device="cuda", dtype=torch.float16)
+C = torch.empty(M, N, device="cuda", dtype=torch.float16)
 
 from tilelang.autotuner import set_autotune_inputs
+
 with set_autotune_inputs(A, B, C):
-    tuned_kernel = matmul(M, N, K)   # compiles, tunes, returns best kernel
-    tuned_kernel(A, B, C)            # run best kernel
+    tuned_kernel = matmul(M, N, K)  # compiles, tunes, returns best kernel
+    tuned_kernel(A, B, C)  # run best kernel
 ```
 
 Notes
@@ -94,22 +105,24 @@ kernel_factory = matmul  # the function above (already @tilelang.jit)
 tuner = AutoTuner.from_kernel(kernel_factory(M, N, K), configs=matmul_configs(M, N, K))
 
 tuner.set_profile_args(
-    warmup=25, rep=100, timeout=60,
+    warmup=25,
+    rep=100,
+    timeout=60,
     supply_type=tilelang.TensorSupplyType.Auto,  # or provide supply_prog/ref_prog
     ref_prog=lambda A, B, C: torch.allclose(C, (A @ B).to(C.dtype), rtol=1e-2, atol=1e-2),
 )
 
 tuner.set_compile_args(
-    target='auto',                  # or 'cuda'/'hip'/'metal'
-    execution_backend='auto',       # resolves per-target
-    out_idx=[-1],                   # which outputs to return if multiple
-    pass_configs={                  # optional TVM passes/flags
+    target="auto",  # or 'cuda'/'hip'/'metal'
+    execution_backend="auto",  # resolves per-target
+    out_idx=[-1],  # which outputs to return if multiple
+    pass_configs={  # optional TVM passes/flags
         # tilelang.PassConfigKey.EXAMPLE_KEY: value,
     },
 )
 
-artifact = tuner.run()             # compiles + runs + validates all configs
-best_kernel = artifact.kernel      # JITKernel
+artifact = tuner.run()  # compiles + runs + validates all configs
+best_kernel = artifact.kernel  # JITKernel
 best_latency = artifact.latency
 best_config = artifact.config
 
@@ -144,6 +157,7 @@ def supply_prog(signature):
     # signature holds KernelParam objects describing shapes/dtypes
     # Return a list of torch tensors matching the kernel’s arguments
     return [A, B, C]
+
 
 tuner.set_profile_args(supply_prog=supply_prog)
 ```
@@ -234,11 +248,10 @@ configs and drive your own benchmarking:
 @tilelang.jit
 def factory(M, N, K, block_M=128, block_N=128, block_K=32):
     @T.prim_func
-    def k(A: T.Tensor((M, K), 'float16'),
-           B: T.Tensor((K, N), 'float16'),
-           C: T.Tensor((M, N), 'float16')):
-        ...
+    def k(A: T.Tensor((M, K), "float16"), B: T.Tensor((K, N), "float16"), C: T.Tensor((M, N), "float16")): ...
+
     return k
+
 
 impl = factory  # JITImpl
 cfgs = [
@@ -259,11 +272,13 @@ artifact = tuner.run()  # AutotuneResult
 
 # Save to disk
 from pathlib import Path
-save_dir = Path('out/best/matmul_1024')
+
+save_dir = Path("out/best/matmul_1024")
 artifact.save_to_disk(save_dir, verbose=True)
 
 # Reload later
 from tilelang.autotuner.param import AutotuneResult, CompileArgs
+
 restored = AutotuneResult.load_from_disk(save_dir, CompileArgs())
 best = restored.kernel
 best(A, B, C)
@@ -287,8 +302,7 @@ def matmul_configs(M, N, K):
             for BK in [32, 64]:
                 for S in [2, 3]:
                     for TH in [128, 256]:
-                        yield dict(block_M=BM, block_N=BN, block_K=BK,
-                                    num_stages=S, threads=TH)
+                        yield dict(block_M=BM, block_N=BN, block_K=BK, num_stages=S, threads=TH)
 ```
 
 ## Device and Backend Selection
