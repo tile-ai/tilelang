@@ -15,9 +15,11 @@ namespace tl {
 using namespace tirx;
 
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoSchedule, ffi::String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kPtxasRegisterUsageLevel, Integer);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableVectorize256, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableFP32x2Reduction, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWGMMA, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableShuffleElect, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableLowerLDGSTG, Bool);
@@ -85,6 +87,18 @@ TIR_DEFINE_TL_BUILTIN(ieee_frsqrt)
 
 TIR_DEFINE_TL_BUILTIN(ieee_fdiv).set_num_inputs(3).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(fma)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TVectorizable>("TVectorizable", true);
+
+TIR_DEFINE_TL_BUILTIN(fmul)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TVectorizable>("TVectorizable", true);
 
 TIR_DEFINE_TL_BUILTIN(max2_nan).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));

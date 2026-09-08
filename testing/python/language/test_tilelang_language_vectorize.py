@@ -216,6 +216,64 @@ def test_vectorize_broadcast_int8(vec_num):
     vectorize_broadcast_int8.compile(vec_num=vec_num)
 
 
+def vectorize_broadcast_int4(dtype, vec_num):
+    @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_BUFFER_INIT_CHECK: True})
+    def kernel():
+        with T.Kernel(1, threads=128):
+            a = T.alloc_local((64,), dtype)
+            b = T.alloc_var(dtype)
+
+            for i in T.vectorized(vec_num):
+                a[i] = b
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+@pytest.mark.parametrize("vec_num", [4, 8, 16, 32])
+def test_vectorize_broadcast_int4(dtype, vec_num):
+    """Broadcasting a non-constant 4-bit value to a vectorized store must emit
+    the packed-nibble carrier rather than aborting (see issue #2997). The int4
+    branch used to ICHECK on a non-constant value; the int8 branch already
+    handled it. Every packed lane count (16/32-bit carriers and make_(u)int{N})
+    is exercised here."""
+    vectorize_broadcast_int4(dtype, vec_num).compile()
+
+
+def fill_int4_buffer(dtype, fill_value):
+    M, N = 16, 64
+
+    @T.prim_func
+    def func(B: T.Tensor((M, N), dtype)):
+        with T.Kernel(1, threads=128):
+            sh = T.alloc_shared((M, N), dtype)
+            T.fill(sh, fill_value)
+            T.copy(sh, B)
+
+    return func
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int4", "uint4"])
+@pytest.mark.parametrize("fill_value", [0, 1, 7])
+def test_fill_int4_buffer(dtype, fill_value):
+    """End-to-end reproduction of issue #2997: T.fill/T.clear of an int4 buffer.
+    HoistBroadcastValues rebinds the constant fill value to a Var, so the CUDA
+    Broadcast codegen sees a non-constant value. Verify it both compiles and
+    produces the correct packed nibbles."""
+    M, N = 16, 64
+    kernel = tilelang.compile(fill_int4_buffer(dtype, fill_value))
+    # int4 buffer packs two nibbles per byte, so N columns -> N // 2 bytes.
+    out = torch.empty(M, N // 2, dtype=torch.int8, device="cuda")
+    kernel(out)
+    expected = fill_value & 0x0F
+    low = out & 0x0F
+    high = (out >> 4) & 0x0F
+    assert bool((low == expected).all()), f"low nibble mismatch for {dtype}={fill_value}"
+    assert bool((high == expected).all()), f"high nibble mismatch for {dtype}={fill_value}"
+
+
 @tilelang.jit
 def vectorize_test_call_infinity():
     A = T.empty((4,), dtype=T.float32)

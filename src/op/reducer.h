@@ -17,6 +17,7 @@
 
 #include "operator.h"
 #include "support/check.h"
+#include <tvm/arith/iter_affine_map.h>
 
 namespace tvm {
 namespace tl {
@@ -67,6 +68,52 @@ PrimExpr ReducerV2Combine(ReducerV2OpType op, const PrimExpr &lhs,
 inline bool IsReducerV2Buffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "local.reducer";
 }
+
+/*! \brief A contribution is replica-safe when every physical execution of
+ *  the same logical iteration computes the same value: pure expressions of
+ *  loop vars plus loads from buffers whose replicas are value-equal by
+ *  contract (fragments) or uniform by address (shared/global). */
+bool ValueIsReplicaSafe(const PrimExpr &value);
+
+/*! \brief Result of analyzing one reducer_update site against the reducer's
+ *  logical shape and participant thread space. Shared by the narrow-plan
+ *  proofs in ReducerPlanAndMaterialize and by finalize's dst-steering layout
+ *  proposal, so the proposal is by construction the plan's own verdict. */
+struct ReducerSiteAnalysis {
+  /*! \brief True when every narrow-plan site proof passed: well-defined
+   *  index-to-dim ownership, full participant coverage, replica-safe
+   *  contribution, power-of-two in-bounds collective steps. When false, a
+   *  narrow plan is impossible for this site and only `reason` is
+   *  meaningful (the other fields stop at the first failed check). */
+  bool narrow_eligible = false;
+  /*! \brief The first failed check, for plan-rejection diagnostics. */
+  std::string reason;
+  /*! \brief The induced partial layout: the update loop's layout with the
+   *  reduction dims projected out, rebuilt over the reducer's dim order.
+   *  Its replication coordinate follows the low-bits convention:
+   *  `_rep % combine_size` are the addend lanes. */
+  Fragment induced;
+  /*! \brief Width of the induced layout's combine coordinate: the number
+   *  of addend lanes per logical element (1 = LocalComplete). */
+  int64_t combine_size{1};
+  /*! \brief Collective steps (reducing_threads, scale) the site requires. */
+  std::vector<std::pair<int, int>> steps;
+  /*! \brief Per nest dim: does it survive into the reducer shape? */
+  std::vector<bool> is_output_dim;
+  /*! \brief The loop's forward-thread expression in iter-sum form (reused
+   *  by the packed-accumulation lane analysis). */
+  arith::IterSumExpr iter_sum;
+};
+
+/*! \brief Analyze one reducer_update site: derive the induced partial
+ *  layout and run every per-site narrow-plan proof, in the plan's own
+ *  check order (so `reason` matches the planner's rejection diagnostics).
+ *  `thread_extent`/`thread_min` describe the epoch's participant range. */
+ReducerSiteAnalysis
+AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
+                         const ffi::Array<PrimExpr> &reducer_shape,
+                         int64_t thread_extent, int64_t thread_min,
+                         arith::Analyzer *analyzer);
 
 /// T.reducer_init(acc, init=None): open the epoch. The physical partials
 /// always start from the combine identity; the optional `init` value is a
@@ -148,6 +195,23 @@ public:
                         InferLevel level) const override;
   TileOperator Clone() const override;
   static const Op &Get();
+
+  /*! \brief The universally-safe dst layout under the wide plan: every
+   *  participant holds every element, so any already-frozen consumer loop can
+   *  read it. Shared by the kFree steering proposal and the inference
+   *  engine's last-resort fallback attempt so the two can never diverge. */
+  static Fragment FallbackDstLayout(const Buffer &dst,
+                                    const Range &thread_bounds);
+
+  /*! \brief Structural gates of the dst-steering proposal: `dst` is a
+   *  fragment whose per-dim extents match the reducer's, over a constant
+   *  participant range wider than one thread. Shared by the kFree proposal's
+   *  silence checks and the inference engine's reservation registration so
+   *  the two can never drift ("reserved" must mean "has a capable
+   *  proposer"). */
+  static bool CanSteerDst(const Buffer &reducer, const Buffer &dst,
+                          const Range &thread_bounds,
+                          arith::Analyzer *analyzer);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;

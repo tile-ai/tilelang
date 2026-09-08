@@ -58,6 +58,7 @@ public:
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;
   void VisitExpr_(const MinNode *op, std::ostream &os) final;
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;
+  void VisitExpr_(const NotNode *op, std::ostream &os) final;
   void VisitStmt_(const EvaluateNode *op) final;
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
@@ -83,6 +84,15 @@ private:
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
   bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
+  // Emit a vector op of dtype t as lanes/2 packed x2 calls (tl::mul2,
+  // tl::fma2, ...). All args must already have dtype t; requires
+  // CanEmitPackedX2Math(t).
+  void EmitPackedX2Call(const std::string &tl_func, DataType t,
+                        const std::vector<PrimExpr> &args, std::ostream &os);
+  // Emit a vector op of dtype t as one scalar call per lane.
+  void EmitPerLaneScalarCall(const std::string &func_name, DataType t,
+                             const std::vector<PrimExpr> &args,
+                             std::ostream &os);
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }

@@ -18,7 +18,7 @@ from tilelang.jit.adapter.base import CachedTextSource
 import cloudpickle
 import os
 import shutil
-from tilelang.engine.param import KernelParam
+from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
 from tilelang import logger
 import json
 import hashlib
@@ -40,7 +40,7 @@ EXECUTABLE_PATH = "executable.so"
 KERNEL_LIB_PATH = "kernel_lib.so"
 KERNEL_CUBIN_PATH = "kernel.cubin"
 KERNEL_PY_PATH = "kernel.py"
-PARAMS_PATH = "params.pkl"
+PARAMS_PATH = "params.json"
 TargetLike = str | dict[str, object] | Target
 
 
@@ -225,7 +225,7 @@ class AutotuneResult:
             - kernel.cu: The compiled kernel source code
             - wrapped_kernel.cu: The wrapped kernel source code
             - kernel_lib.so: The compiled kernel library
-            - params.pkl: The serialized kernel parameters
+            - params.json: The serialized kernel parameters
         """
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists.
 
@@ -311,7 +311,7 @@ class AutotuneResult:
         params_path = os.path.join(cache_path, PARAMS_PATH)
         if verbose:
             logger.debug(f"Saving kernel parameters to disk: {params_path}")
-        self._safe_write_file(params_path, "wb", lambda f: cloudpickle.dump(kernel.params, f))
+        self._safe_write_file(params_path, "w", lambda f: f.write(dump_kernel_params(kernel.params)))
 
     def _load_kernel_from_disk(
         self,
@@ -380,8 +380,8 @@ class AutotuneResult:
         try:
             if verbose:
                 logger.debug(f"Loading kernel parameters from file: {params_path}")
-            with open(params_path, "rb") as f:
-                kernel_params = cloudpickle.load(f)
+            with open(params_path) as f:
+                kernel_params = load_kernel_params(f.read())
         except Exception as e:
             logger.error(f"Error loading kernel parameters from disk: {e}")
 

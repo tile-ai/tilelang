@@ -11,7 +11,26 @@ using u32 = std::uint32_t;
 
 using index_t = u32;
 
-using ck_tile::int32x4_t;
+using int32x4_t = int32_t __attribute__((ext_vector_type(4)));
+
+// Third dword of the AMD buffer resource descriptor (V#): data format /
+// config bits, which differ per architecture generation.
+#ifndef __HIP_DEVICE_COMPILE__ // host pass
+#define TL_BUFFER_RESOURCE_3RD_DWORD 0xffffffff
+#elif defined(__gfx803__) || defined(__gfx900__) || defined(__gfx906__) ||     \
+    defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) ||       \
+    defined(__gfx950__) || defined(__gfx9_4_generic__)
+#define TL_BUFFER_RESOURCE_3RD_DWORD 0x00020000
+#elif defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) ||  \
+    defined(__gfx1034__) || defined(__gfx1035__) || defined(__gfx1036__) ||    \
+    defined(__gfx10_3_generic__)
+#define TL_BUFFER_RESOURCE_3RD_DWORD 0x31014000
+#elif defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) ||  \
+    defined(__gfx1103__) || defined(__gfx1150__) || defined(__gfx1151__) ||    \
+    defined(__gfx1152__) || defined(__gfx11_generic__) ||                      \
+    defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx12_generic__)
+#define TL_BUFFER_RESOURCE_3RD_DWORD 0x31004000
+#endif
 
 struct __attribute__((packed)) buffer_resource {
   const void *ptr;
@@ -19,9 +38,9 @@ struct __attribute__((packed)) buffer_resource {
   uint32_t config;
 };
 
-CK_TILE_DEVICE int32x4_t make_wave_buffer_resource(const void *ptr,
-                                                   uint32_t size = 0xffffffff) {
-  buffer_resource res{ptr, size, CK_TILE_BUFFER_RESOURCE_3RD_DWORD};
+TL_DEVICE int32x4_t make_wave_buffer_resource(const void *ptr,
+                                              uint32_t size = 0xffffffff) {
+  buffer_resource res{ptr, size, TL_BUFFER_RESOURCE_3RD_DWORD};
   int32x4_t r = __builtin_bit_cast(int32x4_t, res);
   r.x = __builtin_amdgcn_readfirstlane(r.x);
   r.y = __builtin_amdgcn_readfirstlane(r.y);
@@ -62,8 +81,8 @@ template <int N = 0> TL_DEVICE void cp_async_wait() {
 }
 
 template <bool pre_nop = false>
-CK_TILE_DEVICE void async_buffer_load_dword_v(void *smem, int32x4_t rsrc,
-                                              index_t voffset) {
+TL_DEVICE void async_buffer_load_dword_v(void *smem, int32x4_t rsrc,
+                                         index_t voffset) {
   auto const lds_ptr_sgpr =
       __builtin_amdgcn_readfirstlane((reinterpret_cast<uintptr_t>(smem)));
   asm volatile("s_mov_b32 m0, %0; \n\t"
@@ -76,8 +95,8 @@ CK_TILE_DEVICE void async_buffer_load_dword_v(void *smem, int32x4_t rsrc,
 // buffer_load_dwordx4 ... lds bypasses VGPRs entirely, giving 4x the
 // bandwidth of the 32-bit path and overlapping with MFMA computation.
 #if defined(__gfx950__)
-CK_TILE_DEVICE void async_buffer_load_dwordx4_v(void *smem, int32x4_t rsrc,
-                                                index_t voffset) {
+TL_DEVICE void async_buffer_load_dwordx4_v(void *smem, int32x4_t rsrc,
+                                           index_t voffset) {
   auto const lds_ptr_sgpr =
       __builtin_amdgcn_readfirstlane((reinterpret_cast<uintptr_t>(smem)));
   asm volatile(

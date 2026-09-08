@@ -13,6 +13,7 @@
 
 #include <unordered_set>
 
+#include "../op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -78,6 +79,40 @@ public:
 private:
   std::unordered_set<Var> *var_touched_local_;
 };
+
+namespace {
+
+class TargetedLoopBreakDetector : public StmtExprVisitor {
+public:
+  static bool Contains(const Stmt &body) {
+    TargetedLoopBreakDetector detector;
+    detector(body);
+    return detector.found_;
+  }
+
+private:
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::loop_break()) ||
+        op->op.same_as(builtin::break_loop())) {
+      found_ = true;
+      return;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const ForNode *) final {
+    // A break inside a nested loop targets that loop, not the loop being
+    // considered for full expansion.
+  }
+
+  void VisitStmt_(const WhileNode *) final {
+    // As above, do not attribute a nested while-loop's break to its parent.
+  }
+
+  bool found_{false};
+};
+
+} // namespace
 
 // The Visitor is used to check whether var is used as write index in a local
 // memory If a loop var is used as indices to a local memory, it must be
@@ -267,6 +302,11 @@ public:
   }
 
   Stmt Unroll(const ForNode *op) {
+    CHECK(!TargetedLoopBreakDetector::Contains(op->body), ValueError)
+        << "[TileLang Semantic Check] A loop containing T.loop_break() that "
+           "targets that loop cannot be fully expanded. Use "
+           "T.unroll(..., explicit=False) or T.serial(...) to preserve the "
+           "loop.";
     int value = GetTripCount(op);
     // For loop must have a constant integer extent
     ICHECK_GE(value, 0) << "loop doesn't have a constant integer extent";

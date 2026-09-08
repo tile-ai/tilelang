@@ -3,8 +3,12 @@
 # Locate CUDA toolkit — first trying the host system, then falling back
 # to pip-installed packages (nvidia-cuda-nvcc, nvidia-cuda-cccl).
 #
-# This module should be included BEFORE project() to set CMAKE_CUDA_COMPILER
-# when pip CUDA is used.
+# CMakeLists.txt includes this module twice. The first include, before project(),
+# passes TILELANG_PRE_PROJECT_ONLY and only activates the toolchain (MSVC environment,
+# Ninja lookup); the second, after project(), runs the CUDA detection, which needs an
+# enabled language. See the note next to the TILELANG_PRE_PROJECT_ONLY check below.
+# CMAKE_CUDA_COMPILER is set as a cache entry, so it is still visible to subprojects
+# configured afterwards.
 #
 # Detection order:
 #   1. Try find_package(CUDAToolkit QUIET) — succeeds if a host CUDA
@@ -30,6 +34,21 @@ function(_tilelang_get_native_windows_arch OUTPUT_VAR)
   set(${OUTPUT_VAR} "${_tilelang_native_arch}" PARENT_SCOPE)
 endfunction()
 
+function(_tilelang_get_windows_process_arch OUTPUT_VAR)
+  string(TOLOWER "$ENV{PROCESSOR_ARCHITECTURE}" _tilelang_process_processor)
+  if(_tilelang_process_processor STREQUAL "")
+    string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _tilelang_process_processor)
+  endif()
+
+  set(_tilelang_process_arch "x64")
+  if(_tilelang_process_processor MATCHES "^(arm64|aarch64)$")
+    set(_tilelang_process_arch "arm64")
+  elseif(_tilelang_process_processor MATCHES "^(x86|i[3-6]86)$")
+    set(_tilelang_process_arch "x86")
+  endif()
+  set(${OUTPUT_VAR} "${_tilelang_process_arch}" PARENT_SCOPE)
+endfunction()
+
 function(_tilelang_activate_msvc_env)
   if(NOT WIN32)
     return()
@@ -44,6 +63,7 @@ function(_tilelang_activate_msvc_env)
   endif()
 
   _tilelang_get_native_windows_arch(_tilelang_native_arch)
+  _tilelang_get_windows_process_arch(_tilelang_host_arch)
 
   set(_tilelang_target_arch "${_tilelang_native_arch}")
   if(CMAKE_GENERATOR_PLATFORM STREQUAL "Win32")
@@ -53,7 +73,6 @@ function(_tilelang_activate_msvc_env)
   elseif(NOT CMAKE_GENERATOR_PLATFORM STREQUAL "")
     set(_tilelang_target_arch "x64")
   endif()
-  set(_tilelang_host_arch "${_tilelang_native_arch}")
 
   set(_tilelang_vc_tools_component "Microsoft.VisualStudio.Component.VC.Tools.x86.x64")
   if(_tilelang_target_arch STREQUAL "arm64")
@@ -325,9 +344,28 @@ function(_tilelang_activate_msvc_env)
     set(CMAKE_EXE_LINKER_FLAGS_INIT "${_tilelang_libpath_flags} ${CMAKE_EXE_LINKER_FLAGS_INIT}")
     set(CMAKE_SHARED_LINKER_FLAGS_INIT "${_tilelang_libpath_flags} ${CMAKE_SHARED_LINKER_FLAGS_INIT}")
     set(CMAKE_MODULE_LINKER_FLAGS_INIT "${_tilelang_libpath_flags} ${CMAKE_MODULE_LINKER_FLAGS_INIT}")
-    set(CMAKE_EXE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_EXE_LINKER_FLAGS}" CACHE STRING "Executable linker flags" FORCE)
-    set(CMAKE_SHARED_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_SHARED_LINKER_FLAGS}" CACHE STRING "Shared linker flags" FORCE)
-    set(CMAKE_MODULE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_MODULE_LINKER_FLAGS}" CACHE STRING "Module linker flags" FORCE)
+
+    # The three variables below are cached with FORCE, unlike the *_INIT ones above,
+    # which are plain variables recomputed on every configure. A bare prepend would
+    # therefore stack another copy of the same flags each time this function runs: the
+    # early-out at the top of the function tests ENV{VSCMD_VER}, which a fresh cmake
+    # process does not inherit unless it was launched from a developer prompt, so a
+    # reconfigure re-runs the whole probe and prepends again. Only prepend when this
+    # module's prefix is not already present (literal substring, since the paths
+    # contain characters that would need regex escaping).
+    string(FIND "${CMAKE_EXE_LINKER_FLAGS}" "${_tilelang_libpath_flags}" _tilelang_libpath_pos)
+    if(_tilelang_libpath_pos EQUAL -1)
+      set(CMAKE_EXE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_EXE_LINKER_FLAGS}" CACHE STRING "Executable linker flags" FORCE)
+    endif()
+    string(FIND "${CMAKE_SHARED_LINKER_FLAGS}" "${_tilelang_libpath_flags}" _tilelang_libpath_pos)
+    if(_tilelang_libpath_pos EQUAL -1)
+      set(CMAKE_SHARED_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_SHARED_LINKER_FLAGS}" CACHE STRING "Shared linker flags" FORCE)
+    endif()
+    string(FIND "${CMAKE_MODULE_LINKER_FLAGS}" "${_tilelang_libpath_flags}" _tilelang_libpath_pos)
+    if(_tilelang_libpath_pos EQUAL -1)
+      set(CMAKE_MODULE_LINKER_FLAGS "${_tilelang_libpath_flags} ${CMAKE_MODULE_LINKER_FLAGS}" CACHE STRING "Module linker flags" FORCE)
+    endif()
+    unset(_tilelang_libpath_pos)
   endif()
   if(EXISTS "${_tilelang_sdk_bin}/rc.exe")
     set(CMAKE_RC_COMPILER "${_tilelang_sdk_bin}/rc.exe")
@@ -449,8 +487,6 @@ function(_tilelang_activate_msvc_env)
   message(STATUS "FindPipCUDAToolkit: activated MSVC environment for Ninja via ${_tilelang_vsdevcmd_native}")
 endfunction()
 
-_tilelang_activate_msvc_env()
-
 function(_tilelang_activate_ninja)
   if(NOT CMAKE_GENERATOR MATCHES "Ninja")
     return()
@@ -490,7 +526,31 @@ function(_tilelang_activate_ninja)
   endif()
 endfunction()
 
-_tilelang_activate_ninja()
+# CMakeLists.txt includes this module twice, because its two jobs want opposite sides
+# of project():
+#
+#   * Toolchain activation (MSVC environment, Ninja lookup) must run *before*
+#     project(), since that is where the generator resolves CMAKE_MAKE_PROGRAM and
+#     where the compilers are probed.
+#   * CUDA detection must run *after* project(). find_package(CUDAToolkit) sets up its
+#     imported targets, and that path calls find_package(Threads REQUIRED) whenever
+#     CMAKE_C_COMPILER or CMAKE_CXX_COMPILER is set. FindThreads aborts with
+#     "FindThreads only works if either C or CXX language is enabled" unless a
+#     language is enabled. On a fresh configure those two variables are still empty,
+#     so the branch is skipped and nothing fails; on a reconfigure they are restored
+#     from the cache, so a pre-project include aborts.
+#
+# The activation helpers stay inside the first phase on purpose:
+# _tilelang_activate_msvc_env() is not idempotent. Its early-out tests
+# ENV{VSCMD_VER}, which VsDevCmd.bat's output does not carry back, so a second call
+# in the same configure re-runs the whole probe and prepends another copy of the
+# /LIBPATH flags to the cached CMAKE_*_LINKER_FLAGS entries, which then grow on every
+# reconfigure.
+if(TILELANG_PRE_PROJECT_ONLY)
+  _tilelang_activate_msvc_env()
+  _tilelang_activate_ninja()
+  return()
+endif()
 
 # --- Try host CUDA first ---
 find_package(CUDAToolkit QUIET)

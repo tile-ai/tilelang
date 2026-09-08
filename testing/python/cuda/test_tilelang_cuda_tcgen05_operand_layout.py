@@ -367,3 +367,33 @@ def test_tcgen05_descriptor_pins_leading_stage_mode():
         reference.is_k_major,
     )
     assert staged.slice_byte_offset - reference.slice_byte_offset == 2 * m_extent * k_extent * 2
+
+
+def test_tcgen05_descriptor_k_panel_stride_follows_the_buffer():
+    """An MN slice keeps the buffer's K-panel spacing, not the slice's.
+
+    ``block_K`` past one swizzle atom stores the operand as (MN, (atom, panels)),
+    so stepping to the next K panel moves by ``buffer_MN * atom`` elements. That
+    step must be read off the layout: reconstructing it from the operand extent
+    (``mn_extent * atom``) halves the stride for a half-height slice and makes
+    every K atom past the first read the wrong panel.
+    """
+
+    # Two M atoms tall so the slice origin stays on the 128-row atom grid that
+    # validate_tcgen05_operand_regions requires, and two K panels wide.
+    m_extent, k_extent = 256, 128
+    atom_elems = 64  # 128B swizzle atom over bfloat16
+
+    def plain_2d(m, k):
+        return m * atom_elems + k % atom_elems + (k // atom_elems) * m_extent * atom_elems
+
+    layout = _swizzle_128b((m_extent, k_extent), plain_2d)
+    buffer = tvm.tirx.decl_buffer((m_extent, k_extent), "bfloat16", scope="shared")
+
+    whole = compute_umma_descriptor(layout, buffer, False, region=_ranges((0, 0), (m_extent, k_extent)))
+    sliced = compute_umma_descriptor(layout, buffer, False, region=_ranges((128, 0), (128, k_extent)))
+
+    assert whole.k_panel_elems == m_extent * atom_elems
+    # Same spacing for the slice, even though its MN extent is half as large.
+    assert sliced.k_panel_elems == m_extent * atom_elems
+    assert sliced.slice_byte_offset == 128 * atom_elems * 2

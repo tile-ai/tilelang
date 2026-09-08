@@ -617,7 +617,8 @@ Optional<Layout> LayoutFromTileLangHierarchical(const tvm::tl::Layout &layout);
 /// @note Addresses are element-offset positions; recast with
 ///       `.Recast(dtype.bits(), 8)` for the byte-address uses.
 Optional<ComposedLayout>
-ComposedLayoutFromTileLang(const tvm::tl::Layout &layout);
+ComposedLayoutFromTileLang(const tvm::tl::Layout &layout,
+                           std::optional<int> least_b_bits = std::nullopt);
 
 /// Restrict the layout to a sublayout defined by a region.
 /// @return result.sublayout(coords_in_region) + result.offset

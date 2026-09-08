@@ -507,8 +507,7 @@ public:
     Array<PrimExpr> indices = op->indices.Map(fmutate);
 
     if (!indices.same_as(op->indices)) {
-      auto writer = load.CopyOnWrite();
-      writer->indices = indices;
+      return BufferLoad(op->buffer, indices, op->predicate, op->span);
     }
 
     return std::move(load);

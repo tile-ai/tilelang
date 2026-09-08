@@ -1,6 +1,6 @@
 import tilelang.testing
 import tilelang.language as T
-from tvm.arith import Analyzer, Z3ContextScope
+from tvm.arith import Analyzer
 from tvm.ir.expr import Range
 from tvm.tirx.expr import Not, Or
 from tvm import tirx
@@ -10,17 +10,15 @@ def implies(x, y):
     return Or(Not(x), y)
 
 
-def test_z3_context_scope_clone_outlives_scope():
+def test_cloned_analyzer_outlives_source():
     x = T.Var("x", T.int32)
 
-    with Z3ContextScope():
-        analyzer = Analyzer()
-        analyzer.bind(x, Range.from_min_extent(0, 16))
+    analyzer = Analyzer()
+    analyzer.bind(x, Range.from_min_extent(0, 16))
 
-    # Clone while a different compile scope is active. CopyFrom must retain
-    # the source Analyzer's context rather than mixing Z3 handles.
-    with Z3ContextScope():
-        cloned = analyzer.clone()
+    # CopyFrom must keep the clone's Z3 handles valid on their own context
+    # even after the source Analyzer is destroyed.
+    cloned = analyzer.clone()
 
     del analyzer
     assert cloned.can_prove(x >= 0)

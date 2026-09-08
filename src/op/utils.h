@@ -91,6 +91,13 @@ inline bool IsSharedBuffer(const Buffer &buffer, bool allow_dynamic = true) {
   return buffer.scope() == "shared";
 }
 
+inline bool IsTmemBuffer(const Buffer &buffer) {
+  if (!buffer.defined()) {
+    return false;
+  }
+  return buffer.scope() == "shared.tmem";
+}
+
 inline bool IsGlobalBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "global";
 }

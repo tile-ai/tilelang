@@ -47,8 +47,10 @@ class GemmScalar(GemmBase):
                 T.clear(C_buf)
             for i, j, k in T.grid(M, N, K):
                 C_buf[c0 + i, c1 + j] += T.cast(
-                    A_buf[a0 + (k if trans_A else i), a1 + (i if trans_A else k)]
-                    * B_buf[b0 + (j if trans_B else k), b1 + (k if trans_B else j)],
+                    A_buf[a0 + (k if trans_A else i), a1 + (i if trans_A else k)],
+                    accum_dtype,
+                ) * T.cast(
+                    B_buf[b0 + (j if trans_B else k), b1 + (k if trans_B else j)],
                     accum_dtype,
                 )
 

@@ -108,12 +108,13 @@ def _layout_fields(obj) -> list[tuple[str, object]] | None:
     cls = type(obj).__name__
     if cls == "Layout":
         return [("input_size", obj.input_size), ("forward_index", obj.forward_index)]
-    if cls == "Fragment":
+    if cls in ("Fragment", "PartialFragment"):
+        rep_field = "replicate_size (partials)" if cls == "PartialFragment" else "replicate_size"
         return [
             ("input_size", obj.input_size),
             ("forward_index", obj.forward_index),
             ("forward_thread", obj.forward_thread),
-            ("replicate_size", obj.replicate_size),
+            (rep_field, obj.replicate_size),
             ("thread_range", obj.thread_range),
         ]
     if cls == "Target":

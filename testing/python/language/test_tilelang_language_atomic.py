@@ -1342,6 +1342,40 @@ def test_atomic_add_contended_bf16():
     run_atomic_add_contended(128, 128, T.bfloat16)
 
 
+@tilelang.jit
+def atomic_add_fp32_shared_sm90_program(N, threads):
+    @T.prim_func
+    def atomic_add_fp32_shared_sm90(A: T.Tensor((N,), T.float32), Out: T.Tensor((N,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared((N,), T.float32)
+            for i in T.Parallel(N):
+                shared[i] = T.float32(0)
+            for i in T.Parallel(N):
+                T.atomic_add(shared[i], A[i])
+            for i in T.Parallel(N):
+                Out[i] = shared[i]
+
+    return atomic_add_fp32_shared_sm90
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_atomic_add_fp32_shared_stays_scalar_on_sm90():
+    n = 256
+    kernel = atomic_add_fp32_shared_sm90_program(n, 128)
+    source = kernel.get_kernel_source()
+
+    assert "AtomicAdd(" in source
+    assert "AtomicAddx2(" not in source
+    assert "AtomicAddx4(" not in source
+
+    a = torch.arange(n, dtype=torch.float32, device="cuda")
+    out = torch.empty_like(a)
+    kernel(a, out)
+
+    torch.testing.assert_close(out, a, atol=0, rtol=0)
+
+
 @tilelang.jit(target={"kind": "cuda", "arch": "sm_75"})
 def atomic_add_bf16_sm75_program(N):
     @T.prim_func

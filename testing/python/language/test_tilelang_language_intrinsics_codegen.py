@@ -67,6 +67,12 @@ HALF_MATH_OPS = (
     ("ceil", "hceil", torch.ceil, 1),
     ("round", "hrint", torch.round, 1),
     ("trunc", "htrunc", torch.trunc, 1),
+    ("sinh", "hsinh", torch.sinh, 1),
+    ("cosh", "hcosh", torch.cosh, 1),
+    ("tanh", "htanh", torch.tanh, 1),
+    ("atan", "hatan", torch.atan, 1),
+    ("erf", "herf", torch.erf, 1),
+    ("nearbyint", "hnearbyint", torch.round, 1),
 )
 
 
@@ -92,6 +98,12 @@ def half_math_kernel(dtype, N):
             ceil_value = T.ceil(C[i])
             round_value = T.round(C[i])
             trunc_value = T.trunc(C[i])
+            sinh_value = T.sinh(C[i])
+            cosh_value = T.cosh(C[i])
+            tanh_value = T.tanh(C[i])
+            atan_value = T.atan(C[i])
+            erf_value = T.erf(C[i])
+            nearbyint_value = T.nearbyint(C[i])
             B[0, i] = exp_value
             B[1, i] = exp2_value
             B[2, i] = exp10_value
@@ -104,6 +116,12 @@ def half_math_kernel(dtype, N):
             B[9, i] = ceil_value
             B[10, i] = round_value
             B[11, i] = trunc_value
+            B[12, i] = sinh_value
+            B[13, i] = cosh_value
+            B[14, i] = tanh_value
+            B[15, i] = atan_value
+            B[16, i] = erf_value
+            B[17, i] = nearbyint_value
 
     return main
 
@@ -135,6 +153,70 @@ def test_half_math_intrinsics(dtype):
             rtol=2e-2,
             msg=lambda base, name=name: f"T.{name} mismatch\n{base}",
         )
+
+
+# (op, lowered h* intrinsic, torch reference, dtypes it can reach codegen on).
+# bfloat16 T.pow is rejected before codegen by an upstream dtype check, so its
+# bridge is not reachable yet (tile-ai/tilelang#2571).
+BINARY_MATH_OPS = (
+    ("fmod", "hfmod", torch.fmod, (T.float16, T.bfloat16)),
+    ("pow", "hpow", torch.pow, (T.float16,)),
+)
+
+
+def binary_math_kernel(op, dtype, N):
+    fn = getattr(T, op)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        C: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(1, threads=N):
+            i = T.get_thread_binding()
+            # Keep the temporary: it copy-initializes, a store only assigns.
+            value = fn(A[i], C[i])
+            B[i] = value
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "name, intrinsic, ref_fn, dtype",
+    [(n, h, f, d) for n, h, f, dtypes in BINARY_MATH_OPS for d in dtypes],
+)
+def test_binary_math_intrinsics(name, intrinsic, ref_fn, dtype):
+    N = 128
+    kernel = tilelang.compile(binary_math_kernel(name, dtype, N), target="cuda")
+    body = kernel.get_kernel_source()
+    body = body[body.rindex("__global__") :]
+    assert body.count(f"{intrinsic}(") == 1
+
+    torch_dtype = dtype.as_torch()
+    idx = torch.arange(N, device="cuda", dtype=torch.float32)
+    if name == "fmod":
+        # Both operands take both signs and |A| usually exceeds |C|, so the
+        # remainder is non-trivial and the dividend's sign is exercised. Every
+        # value is exact in float16 and bfloat16.
+        a = ((idx - 64) * 0.25).to(torch_dtype)
+        c = (((idx % 5) - 2.5) * 1.5).to(torch_dtype)
+    else:
+        # [0.5, 1.5) base and [0.5, 2.5) exponent keep pow finite in float16.
+        a = (idx * 0.0078125 + 0.5).to(torch_dtype)
+        c = (idx * 0.015625 + 0.5).to(torch_dtype)
+    b = torch.empty(N, device="cuda", dtype=torch_dtype)
+    kernel(a, c, b)
+
+    ref = ref_fn(a.float(), c.float()).to(torch_dtype)
+    torch.testing.assert_close(
+        b.float(),
+        ref.float(),
+        atol=2e-2,
+        rtol=2e-2,
+        msg=lambda base: f"T.{name} mismatch\n{base}",
+    )
 
 
 if __name__ == "__main__":

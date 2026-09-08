@@ -2,12 +2,13 @@
  * \file layout_cost_model.h
  * \brief Cost models that rank free-mode layout attempts.
  *
- * The inference engine enumerates one attempt per candidate root inside a
+ * The inference engine enumerates attempts per candidate root inside a
  * connected component and keeps the cheapest complete layout assignment.
  * What "cheapest" means is a pluggable policy behind LayoutCostModel:
  *
- *  - RegisterCountCostModel (default): total fragment register slots,
- *    nothing else.
+ *  - RegisterCountCostModel (default): total fragment register slots.
+ *    Also considers scalar plans at unannotated reducer-update roots,
+ *    scored with the same spill/register ordering as native plans.
  *  - IOAwareCostModel (layout RFC, design B2): walks the component's
  *    global-memory-touching statements (fragment<->global copies and
  *    parallel loops with direct global accesses) and charges each one
@@ -36,8 +37,13 @@ namespace tl {
 
 /*! \brief Score of one complete free-mode layout assignment. Compared
  *  lexicographically: estimated memory cost first, total register count as
- *  the tiebreak. Models that do not estimate memory leave `mem` at 0, so
- *  their ordering degenerates to the register count. */
+ *  the tiebreak. `mem` includes the estimated local-memory traffic of
+ *  register-array spills (a thread-dependent register-array index demotes
+ *  the whole array to local memory), priced in bytes so it competes
+ *  honestly with the io-aware model's global traffic instead of vetoing
+ *  it. Models that do not estimate global memory leave the global part at
+ *  0, so their ordering is spill bytes, then register count — attempts
+ *  without spills keep the historical register-count ordering untouched. */
 struct AttemptCost {
   int64_t mem{0};
   int64_t regs{0};
@@ -64,6 +70,10 @@ public:
 
   /*! \brief Model name for diagnostics. */
   virtual const char *Name() const = 0;
+
+  /*! \brief Whether to also try a scalar plan at unannotated reducer roots.
+   *  Adds one attempt per eligible root, not a Cartesian width search. */
+  virtual bool ExploreReducerScalarLayouts() const { return false; }
 
   /*! \brief Instantiate the model selected by `tl.layout_cost_model`
    *  by name ("io-aware" or "register-count" — each model's Name());

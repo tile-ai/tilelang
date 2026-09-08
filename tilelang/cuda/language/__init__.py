@@ -50,6 +50,8 @@ from .cluster import *  # noqa: F401,F403
 from .cluster import __all__ as _CLUSTER_ALL
 from .intrinsics import *  # noqa: F401,F403
 from .intrinsics import __all__ as _INTRINSICS_ALL
+from .math import *  # noqa: F401,F403
+from .math import __all__ as _MATH_ALL
 from .pdl import *  # noqa: F401,F403
 from .pdl import __all__ as _PDL_ALL
 from .print import *  # noqa: F401,F403
@@ -119,6 +121,7 @@ __all__ = tuple(
             *_CUDA_API_ALL,
             *_CLUSTER_ALL,
             *_INTRINSICS_ALL,
+            *_MATH_ALL,
             *_PDL_ALL,
             *_PRINT_ALL,
             *_RANDOM_ALL,
@@ -128,4 +131,4 @@ __all__ = tuple(
     )
 )
 
-del _CLUSTER_ALL, _COMMON_ALL, _CUDA_API_ALL, _INTRINSICS_ALL, _PDL_ALL, _PRINT_ALL, _RANDOM_ALL, _TIR_ALL, _WARPGROUP_ALL
+del _CLUSTER_ALL, _COMMON_ALL, _CUDA_API_ALL, _INTRINSICS_ALL, _MATH_ALL, _PDL_ALL, _PRINT_ALL, _RANDOM_ALL, _TIR_ALL, _WARPGROUP_ALL

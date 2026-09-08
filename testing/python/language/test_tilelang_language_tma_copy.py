@@ -255,6 +255,46 @@ def test_tma_copy_uses_descriptor_for_padded_multirow_region():
     torch.testing.assert_close(padded_destination[:, cols:], torch.full_like(padded_destination[:, cols:], -1.0))
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tma_copy_box_split_respects_smem_alignment():
+    """Rest instructions step the shared tile by the box size, and the TMA
+    unit requires every instruction's shared address to be 128-byte aligned.
+    A 384-element int8 run therefore splits into 128-byte boxes (6
+    instructions), not the 16-byte-clean but misaligned 192; a 464-element
+    run has no 128-byte divisor at all and falls back to a normal copy."""
+    import torch
+
+    def make_load(cols, row_stride=512, rows=2):
+
+        @T.prim_func
+        def load(
+            A: T.StridedTensor((rows, cols), (row_stride, 1), T.int8),
+            B: T.Tensor((rows, cols), T.int8),
+        ):
+            with T.Kernel(1, threads=32):
+                a_shared = T.alloc_shared((rows, cols), T.int8)
+                T.copy(A, a_shared, prefer_instruction="tma")
+                T.copy(a_shared, B, prefer_instruction="sync")
+
+        return load
+
+    def run(cols, kernel):
+        padded = torch.randint(-128, 127, (2, 512), dtype=torch.int8, device="cuda")
+        strided = padded[:, :cols]
+        torch.testing.assert_close(kernel(strided), strided)
+
+    split_kernel = tilelang.compile(make_load(384), out_idx=[1])
+    src = split_kernel.get_kernel_source()
+    assert "CUtensorMap" in src
+    assert re.search(r"for \(int \w+ = 0; \w+ < 6; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
+    run(384, split_kernel)
+
+    fallback_kernel = tilelang.compile(make_load(464), out_idx=[1])
+    assert "CUtensorMap" not in fallback_kernel.get_kernel_source()
+    run(464, fallback_kernel)
+
+
 def _assert_two_box_tma_loop(source, instruction):
     assert re.search(
         rf"for \(int \w+ = 0; \w+ < 2; \+\+\w+\) \{{\n\s*tl::{instruction}\(",

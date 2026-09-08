@@ -87,7 +87,7 @@ def check_hip_availability() -> bool:
         bool: True if HIP is available, False otherwise.
     """
     try:
-        from tvm.contrib import rocm
+        from tilelang.contrib import rocm
 
         rocm.find_rocm_path()
         return True

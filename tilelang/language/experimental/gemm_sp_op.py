@@ -82,6 +82,10 @@ def _gemm_sp_impl(
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(K, K_B), f"T.gemm_sp K shape check failed: K_A (wo sparse) = {K}, K_B = {K_B}"
 
+    for name, dim in (("M", M), ("N", N), ("K", K)):
+        if not isinstance(dim, tirx.IntImm):
+            raise ValueError(f"T.gemm_sp requires static tile dimensions, but {name} is symbolic: {dim}")
+
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 

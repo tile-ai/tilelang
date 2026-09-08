@@ -18,6 +18,13 @@ Why this exists:
 
 ## Usage
 
+The default `register-count` model also tries one scalar plan at each
+unannotated reducer-update root. Both native and scalar plans use the unchanged
+spill/register-slot score; native plans win same-root ties. This can remove
+replicated column accumulators without forcing scalar layouts for full
+reductions. Explicit widths and layouts remain authoritative. The opt-in
+`io-aware` model retains its existing candidate search and scoring.
+
 ```bash
 python run.py                # verify all cases against expected/
 python run.py --case NAME    # substring filter
@@ -59,7 +66,7 @@ io-aware scorer on the in-tree CuTe layout algebra
   exactly. `CUTE_STATEMENTS` in a case supplies real enclosing-buffer
   shapes where they differ from the fragment shape (offset_region_copy).
 
-Current status: 88/88 statements match with a 100% conversion hit rate.
+Current status: 112/112 statements match with a 100% conversion hit rate.
 The production scorer in `layout_cost_model.cc` uses this formulation; its
 mode arithmetic was additionally audited once, in-tree, against a full
 exact-enumeration oracle across the layout-relevant test corpus (~264
@@ -111,3 +118,4 @@ nest's `parallel_loop_layout` annotation (see `common.py`).
 | `reduce_broadcast` | Softmax-shaped row-reduce + broadcast consume: the most common real-kernel component. Both models agree, including the reduced fragment's canonical partial replication. |
 | `offset_region_copy` | Multi-block tiled copies whose region mins carry block indices (the model's "foreign vars"): offset regions must rank exactly like zero-offset ones. |
 | `shared_staging` | global→shared→fragment→global chain: the shared-side copy is outside the io model, so the fragment is decided by the copy-out alone; goldens would surface any change to that boundary. |
+| `reducer_scalar_candidates` | Register-count can choose scalar column ownership while preserving native packed layouts for a full reduction; io-aware keeps its existing search. |

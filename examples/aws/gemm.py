@@ -7,8 +7,67 @@ from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
 
-@tilelang.jit
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: "role_based"})
 def gemm(
+    A,
+    B,
+    block_M,
+    block_N,
+    store_block_N,
+    block_K,
+    dtype,
+    accum_dtype,
+    num_stages,
+    num_persistent_stages,
+):
+    M, N, K = T.const("M, N, K")
+
+    A: T.Tensor((M, K), dtype)
+    B: T.Tensor((N, K), dtype)
+    C = T.empty((M, N), dtype)
+
+    m_blocks = T.ceildiv(M, block_M)
+    n_blocks = T.ceildiv(N, block_N)
+    k_blocks = T.ceildiv(K, block_K)
+    sm_num = driver.get_num_sms()
+    group_size = 8
+    assert n_blocks % (2 * group_size) == 0
+    assert K % (2 * block_K) == 0
+    assert block_N % store_block_N == 0
+
+    with T.Kernel(sm_num, threads=128) as block_id:
+        A_shared = T.alloc_shared((block_M, block_K), dtype)
+        B_shared = T.alloc_shared((block_N, block_K), dtype)
+        C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
+        C_local = T.alloc_fragment((block_M, store_block_N), accum_dtype)
+        C_shared = T.alloc_shared((block_M, store_block_N), dtype)
+
+        sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, name="sched")
+        sched.init(block_id)
+
+        while sched.valid():
+            T.annotate_ws_pipeline_depth({C_tmem: num_persistent_stages})
+
+            bx = sched.m_idx
+            by = sched.n_idx
+
+            for k in T.Pipelined(k_blocks, num_stages=num_stages):
+                T.copy(A[bx * block_M, k * block_K], A_shared)
+                T.copy(B[by * block_N, k * block_K], B_shared)
+                T.gemm(A_shared, B_shared, C_tmem, transpose_B=True, clear_accum=k == 0)
+
+            for i in T.unroll(T.ceildiv(block_N, store_block_N)):
+                T.copy(C_tmem[:, i * store_block_N : (i + 1) * store_block_N], C_local)
+                T.copy(C_local, C_shared)
+                T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
+
+            sched.next_tile()
+
+    return C
+
+
+@tilelang.jit
+def gemm_manual(
     A,
     B,
     block_M,
@@ -45,7 +104,7 @@ def gemm(
 
         sched = T.PersistentTileScheduler(m_blocks, n_blocks, swizzle_size=group_size, name="sched")
 
-        # The complete, unambiguous schedule to transform `gemm` to `gemm_ws`.
+        # The complete, unambiguous schedule to transform `gemm_manual` to `gemm_ws`.
         #
         # Ops and loops carry stable ids (a T.WSID entry in their
         # annotations); the schedule refers to those ids. Data
@@ -128,6 +187,19 @@ def gemm(
                             "Epilogue": [],
                         },
                     ),
+                    # The epilogue loop.
+                    T.WSScope(
+                        "loop_i",
+                        {
+                            "TMA": [],
+                            "MMA": [],
+                            "Epilogue": [
+                                "copy_O_t2r",
+                                "copy_O_r2s",
+                                "copy_O_s2g",
+                            ],
+                        },
+                    ),
                     # This is the persistent loop.
                     T.WSScope(
                         "loop_wave",
@@ -146,8 +218,8 @@ def gemm(
                             "Epilogue": [
                                 "tile_idx",
                                 T.WSSync.consumer_wait("tmem", stage=0),
-                                # The unrolled loop is one op; it reads the
-                                # acquired version of C_tmem.
+                                # The epilogue scope reads the acquired
+                                # version of C_tmem.
                                 "loop_i",
                                 T.WSSync.consumer_release("tmem", stage=0),
                                 "sched_next",
@@ -207,9 +279,17 @@ def gemm(
                     T.ceildiv(block_N, store_block_N),
                     annotations={T.WSID: "loop_i"},
                 ):
-                    T.copy(C_tmem[:, i * store_block_N : (i + 1) * store_block_N], C_local)
-                    T.copy(C_local, C_shared)
-                    T.copy(C_shared, C[bx * block_M, by * block_N + i * store_block_N])
+                    T.copy(
+                        C_tmem[:, i * store_block_N : (i + 1) * store_block_N],
+                        C_local,
+                        annotations={T.WSID: "copy_O_t2r"},
+                    )
+                    T.copy(C_local, C_shared, annotations={T.WSID: "copy_O_r2s"})
+                    T.copy(
+                        C_shared,
+                        C[bx * block_M, by * block_N + i * store_block_N],
+                        annotations={T.WSID: "copy_O_s2g"},
+                    )
 
                 with T.ws_op("sched_next"):
                     sched.next_tile()
@@ -350,7 +430,7 @@ def gemm_ws(
     return C
 
 
-KERNELS = {"gemm": gemm, "gemm_ws": gemm_ws}
+KERNELS = {"gemm": gemm, "gemm_manual": gemm_manual, "gemm_ws": gemm_ws}
 
 
 def main(

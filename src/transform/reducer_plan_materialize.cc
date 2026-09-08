@@ -10,9 +10,19 @@
  * communicate (finalize plan), and how many times each update executes
  * (multiplicity markers).
  *
- * Two physical plans exist, chosen per epoch:
+ * Two physical plans exist. The reducer's solved PartialFragment IS the
+ * plan (LayoutInference is the authority: update nests propose the induced
+ * projection when every per-site proof passes, the engine widens on
+ * multi-site disagreement, zero-update epochs are seeded wide,
+ * tl.reducer_force_baseline pins the proposal): its algebra is the
+ * storage, CombineSize/CombineSteps the communication, and the
+ * FullParticipant object (combine == replicate == participants,
+ * thread == _rep) marks the wide fallback. This pass only derives the
+ * lowering details that live outside the layout — packed lanes from the
+ * update site's serial structure and the destination-containment
+ * lowerability gate (the one remaining materialize-time demotion).
  *
- * Narrow plan (optimization; every proof failure falls back to wide):
+ * Narrow plan (per-site proofs live in the inference-side proposal):
  *   The reduction axes of an update site are the parallel loop vars that do
  *   not appear in the update indices, plus the loop's replication. Projecting
  *   them out of the site's loop layout yields the induced partial layout:
@@ -22,10 +32,11 @@
  *   the thread-expression splits sourced from reduction axes (extracted with
  *   the same machinery T.reduce uses); splits from loop replication become
  *   value replication and are not reduced. Zero splits means zero
- *   collectives (the LocalComplete case). Proof obligations: direct
+ *   collectives (the LocalComplete case). The per-site proofs (direct
  *   var-to-dim update indices, replica-safe contribution values, full-block
- *   thread coverage, a single power-of-two reduce step, structurally equal
- *   plans across all update sites, and destination-layout containment.
+ *   thread coverage, power-of-two reduce steps) and the multi-site
+ *   agreement rule run at proposal/commit time in LayoutInference; only
+ *   destination-layout containment is checked here.
  *
  * Wide plan (canonical FullParticipant baseline; always available):
  *   One full logical-shape partial per participant (FullyReplicated
@@ -51,6 +62,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <functional>
 #include <optional>
 #include <unordered_map>
@@ -382,8 +394,6 @@ bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
   return visit(root);
 }
 
-bool IsPowerOfTwo(int64_t x) { return x > 0 && (x & (x - 1)) == 0; }
-
 /*! \brief Wide-plan destination override. The wide finalize publishes through
  *  an `accumulator -> dst` copy. When LayoutInference gave dst a distributed
  *  free-level layout (picked only to serve the later `dst -> global` copy),
@@ -445,292 +455,98 @@ TryWideFinalizeDstOverride(const EpochInfo &epoch,
   return entries;
 }
 
-/*! \brief A contribution is replica-safe when every physical execution of
- *  the same logical iteration computes the same value: pure expressions of
- *  loop vars plus loads from buffers whose replicas are value-equal by
- *  contract (fragments, validated against the loop layout by inference) or
- *  uniform by address (shared/global). Plain local reads and side effects
- *  disqualify the site. */
-bool ValueIsReplicaSafe(const PrimExpr &value) {
-  if (SideEffect(value) > CallEffectKind::kReadState) {
-    return false;
-  }
-  bool safe = true;
-  PostOrderVisit(value, [&](const ObjectRef &obj) {
-    if (const auto *load = obj.as<BufferLoadNode>()) {
-      const Buffer &buffer = load->buffer;
-      if (!IsFragmentBuffer(buffer) && !IsSharedBuffer(buffer) &&
-          !IsGlobalBuffer(buffer)) {
-        safe = false;
-      }
-    }
-  });
-  return safe;
-}
-
 std::optional<NarrowDecision>
-TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
-              const UseGraph &use_graph, arith::Analyzer *analyzer,
-              std::string *reason) {
+DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
+                     const Map<Buffer, Layout> &known_layouts,
+                     const UseGraph &use_graph, arith::Analyzer *analyzer,
+                     std::string *reason) {
   auto fail = [&](const std::string &why) -> std::optional<NarrowDecision> {
     *reason = why;
     return std::nullopt;
   };
-  if (!epoch.analyzable) {
-    return fail("incomplete epoch structure");
-  }
-  if (epoch.updates.empty()) {
-    return fail("no update sites");
-  }
-  if (epoch.thread_extent <= 0) {
-    return fail("unknown participant extent");
-  }
   const Buffer &buffer = epoch.buffer;
 
+  // The solved partial IS the plan: storage and collective steps are read
+  // off the node (LayoutInference proved them at the update sites and
+  // resolved every failure to the FullParticipant partial, so a narrow node
+  // reaching this pass is authoritative). Only lowering details that live
+  // outside the layout are derived here: the packed-lane heuristic (serial
+  // loop structure) and the destination-containment lowerability gate.
   NarrowDecision decision;
-  bool first_site = true;
-  for (const UpdateSite &site : epoch.updates) {
+  decision.storage_layout = partial.AsPostCollective();
+  decision.steps = partial->CombineSteps();
+
+  // Packed partial accumulation (single-site 16-bit epochs only): pick a
+  // lane source whose iterations accumulate serially on one thread. Prefer
+  // an enclosing serial loop; otherwise the innermost parallel reduction
+  // dim when the layout leaves it an even on-thread run. Lane assignment
+  // never changes which thread a contribution lands on, so this is
+  // profit-only: any layout keeps the plan correct.
+  const Fragment &storage = decision.storage_layout;
+  if (epoch.updates.size() == 1 && epoch.analyzable &&
+      (buffer->dtype.is_float16() || buffer->dtype.is_bfloat16()) &&
+      storage->OutputDim() == 1) {
+    const UpdateSite &site = epoch.updates.front();
     size_t ndim = site.loop_vars.size();
-    if (site.loop_layout->InputDim() != ndim) {
-      return fail("loop layout rank does not match the parallel nest");
-    }
-    if (site.indices.size() != buffer->shape.size()) {
-      return fail("update index rank does not match the reducer shape");
-    }
-
-    // Map update indices to loop dims: each index must be a distinct nest
-    // var (in any order — direct identity ownership up to permutation), or
-    // a constant zero on a unit reducer dim.
-    std::vector<bool> is_output_dim(ndim, false);
-    // acc dim -> loop dim it is driven by, or -1 for a constant unit dim.
-    std::vector<int> acc_dim_to_loop_dim(site.indices.size(), -1);
-    for (size_t d = 0; d < site.indices.size(); ++d) {
-      const PrimExpr &index = site.indices[d];
-      if (const auto *var = index.as<VarNode>()) {
-        int pos = -1;
-        for (size_t i = 0; i < ndim; ++i) {
-          if (site.loop_vars[i].get() == var) {
-            pos = static_cast<int>(i);
-            break;
-          }
-        }
-        if (pos < 0 || is_output_dim[pos]) {
-          return fail("update index is not a distinct parallel loop var");
-        }
-        const int64_t *loop_extent =
-            as_const_int(site.loop_layout->InputShape()[pos]);
-        const int64_t *dim_extent = as_const_int(buffer->shape[d]);
-        if (!loop_extent || !dim_extent || *loop_extent != *dim_extent) {
-          return fail("loop extent does not match the reducer dim extent");
-        }
-        is_output_dim[pos] = true;
-        acc_dim_to_loop_dim[d] = pos;
-      } else if (is_zero(index)) {
-        const int64_t *dim_extent = as_const_int(buffer->shape[d]);
-        if (!dim_extent || *dim_extent != 1) {
-          return fail("constant update index on a non-unit reducer dim");
-        }
-      } else {
-        return fail("unsupported update index expression");
+    // NOTE: `tirx::Var()` default-constructs a REAL variable named "v",
+    // not a null ref; use Optional to represent "no lane source found".
+    Optional<Var> lane_var;
+    if (!site.serial_vars.empty()) {
+      const int64_t *extent =
+          as_const_int(site.serial_extents[site.serial_extents.size() - 1]);
+      if (extent && *extent >= 2 && *extent % 2 == 0) {
+        lane_var = site.serial_vars[site.serial_vars.size() - 1];
       }
     }
-
-    // Full-block coverage keeps the collective groups and any garbage
-    // threads self-contained and the barrier uniform.
-    const int64_t *layout_threads =
-        as_const_int(site.loop_layout->ThreadExtent());
-    if (!layout_threads || *layout_threads != epoch.thread_extent) {
-      return fail("loop layout does not cover the full participant extent");
-    }
-    if (site.loop_layout->ThreadRange().defined()) {
-      const int64_t *range_min =
-          as_const_int(site.loop_layout->ThreadRange()->min);
-      if (!range_min || *range_min != epoch.thread_min) {
-        return fail("loop layout thread range mismatch");
-      }
-    } else if (epoch.thread_min != 0) {
-      return fail("loop layout thread range mismatch");
-    }
-
-    if (!ValueIsReplicaSafe(site.value)) {
-      return fail("contribution value is not replica-safe");
-    }
-
-    // Induced partial layout: project every reduction dim (descending, so
-    // dim numbers stay stable while dims are removed). Its input dims are
-    // the surviving loop dims in NEST order.
-    Fragment induced = site.loop_layout;
-    for (int dim = static_cast<int>(ndim) - 1; dim >= 0; --dim) {
-      if (!is_output_dim[dim]) {
-        induced = backend::reduce::ComputeReducerLayout(induced, dim);
-      }
-    }
-    // Rebuild the fragment over the reducer's own dim order: permuted
-    // indices reorder the inputs, and constant unit dims insert inputs the
-    // forward expressions never reference. `nest_rank[p]` is the position
-    // of loop dim p among the surviving dims (= its input slot in
-    // `induced`); feed each such slot the placeholder of the acc dim it
-    // drives.
-    {
-      std::vector<int> nest_rank(ndim, -1);
-      int rank = 0;
-      for (size_t p = 0; p < ndim; ++p) {
-        if (is_output_dim[p]) {
-          nest_rank[p] = rank++;
-        }
-      }
-      // When every dim is projected (all-constant indices),
-      // ComputeReducerLayout keeps one synthetic unit input.
-      bool synthetic_unit = (rank == 0);
-      size_t expected_rank = synthetic_unit ? 1 : static_cast<size_t>(rank);
-      if (expected_rank != induced->InputShape().size()) {
-        return fail("induced layout rank mismatch");
-      }
-      std::vector<PrimExpr> slot_placeholders(expected_rank, PrimExpr());
-      bool identity = (expected_rank == buffer->shape.size());
-      if (synthetic_unit) {
-        // The synthetic slot is never referenced by the forward exprs; feed
-        // it the first reducer-dim placeholder for the (rare) rebuild.
-        slot_placeholders[0] = InputPlaceholder(0);
-      }
-      for (size_t d = 0; d < acc_dim_to_loop_dim.size(); ++d) {
-        int p = acc_dim_to_loop_dim[d];
-        if (p < 0) {
-          continue; // constant unit dim: no slot to feed
-        }
-        slot_placeholders[nest_rank[p]] = InputPlaceholder(d);
-        if (nest_rank[p] != static_cast<int>(d)) {
-          identity = false;
-        }
-      }
-      if (!identity) {
-        Array<PrimExpr> slot_args(slot_placeholders.begin(),
-                                  slot_placeholders.end());
-        Array<PrimExpr> fwd_index = induced->Forward(slot_args);
-        PrimExpr fwd_thread =
-            induced->ForwardThread(slot_args, ReplicationPlaceholder());
-        induced = Fragment(buffer->shape, fwd_index, fwd_thread,
-                           induced->ReplicateExtent(), std::nullopt)
-                      ->BindThreadRange(site.loop_layout->ThreadRange());
-      }
-    }
-    if (induced->InputShape().size() != buffer->shape.size()) {
-      return fail("induced layout rank mismatch");
-    }
-    for (size_t d = 0; d < buffer->shape.size(); ++d) {
-      if (!analyzer->CanProveEqual(induced->InputShape()[d],
-                                   buffer->shape[d])) {
-        return fail("induced layout shape mismatch");
-      }
-    }
-
-    // Collective steps: only thread-expression splits sourced from
-    // reduction vars are reduced. Splits from loop replication become value
-    // replication; reduction vars absent from the thread expression
-    // accumulate serially on one thread and need no communication.
-    Map<Var, Range> var_ranges;
-    for (size_t i = 0; i < ndim; ++i) {
-      var_ranges.Set(InputPlaceholder(i),
-                     Range::FromMinExtent(make_zero(DataType::Int(32)),
-                                          site.loop_layout->InputShape()[i]));
-    }
-    var_ranges.Set(ReplicationPlaceholder(),
-                   Range::FromMinExtent(make_zero(DataType::Int(32)),
-                                        site.loop_layout->ReplicateExtent()));
-    auto iter_sum = arith::NormalizeToIterSum(
-        site.loop_layout->GetForwardThread(), var_ranges, analyzer);
-    std::vector<backend::reduce::ThreadReduceStep> steps;
-    for (size_t i = 0; i < ndim; ++i) {
-      if (is_output_dim[i]) {
-        continue;
-      }
-      auto var_steps = backend::reduce::CollectThreadReduceSteps(
-          iter_sum, Downcast<Var>(InputPlaceholder(i)));
-      steps.insert(steps.end(), var_steps.begin(), var_steps.end());
-    }
-    std::vector<std::pair<int, int>> site_steps;
-    for (const auto &step : steps) {
-      if (!IsPowerOfTwo(step.extent)) {
-        return fail("collective width is not a power of two");
-      }
-      int reducing_threads = step.ReducingThreads();
-      if (reducing_threads > epoch.thread_extent) {
-        return fail("collective width exceeds the participant extent");
-      }
-      site_steps.emplace_back(reducing_threads, step.scale);
-    }
-
-    if (first_site) {
-      decision.storage_layout = induced;
-      decision.steps = std::move(site_steps);
-      first_site = false;
-
-      // Packed partial accumulation (single-site 16-bit epochs only): pick
-      // a lane source whose iterations accumulate serially on one thread.
-      // Prefer an enclosing serial loop; otherwise the innermost parallel
-      // reduction dim when the layout leaves it an even on-thread run.
-      // Lane assignment never changes which thread a contribution lands
-      // on, so this is profit-only: any layout keeps the plan correct.
-      if (epoch.updates.size() == 1 &&
-          (buffer->dtype.is_float16() || buffer->dtype.is_bfloat16()) &&
-          induced->OutputDim() == 1) {
-        // NOTE: `tirx::Var()` default-constructs a REAL variable named "v",
-        // not a null ref; use Optional to represent "no lane source found".
-        Optional<Var> lane_var;
-        if (!site.serial_vars.empty()) {
-          const int64_t *extent =
-              as_const_int(site.serial_extents[site.serial_extents.size() - 1]);
-          if (extent && *extent >= 2 && *extent % 2 == 0) {
-            lane_var = site.serial_vars[site.serial_vars.size() - 1];
-          }
-        }
-        if (!lane_var.has_value() && ndim > 0 && !is_output_dim[ndim - 1]) {
-          const int64_t *extent =
-              as_const_int(site.loop_layout->InputShape()[ndim - 1]);
-          if (extent) {
-            int64_t thread_multiplicity = 1;
-            // Packing pays off only when the dim's LOW BIT stays on one
-            // thread: a thread-expression split at an odd lower_factor
-            // pins the lane parity per thread, leaving one lane idle.
-            bool bit0_serial = true;
-            auto inner_steps = backend::reduce::CollectThreadReduceSteps(
-                iter_sum, Downcast<Var>(InputPlaceholder(ndim - 1)));
-            for (const auto &step : inner_steps) {
-              thread_multiplicity *= step.extent;
-              if (step.lower_factor % 2 != 0) {
-                bit0_serial = false;
-              }
-            }
-            int64_t run = *extent / thread_multiplicity;
-            if (bit0_serial && run >= 2 && run % 2 == 0) {
-              lane_var = site.loop_vars[ndim - 1];
+    if (!lane_var.has_value() && ndim > 0) {
+      // The site analysis provides the loop-level facts the lane heuristic
+      // needs (thread splits of the innermost dim, dim survivorship); the
+      // plan itself no longer depends on it.
+      ReducerUpdateSiteHint hint{site.loop_layout, site.loop_vars, site.indices,
+                                 site.value};
+      ReducerSiteAnalysis analysis = AnalyzeReducerUpdateSite(
+          hint, buffer->shape, epoch.thread_extent, epoch.thread_min, analyzer);
+      if (analysis.narrow_eligible && !analysis.is_output_dim[ndim - 1]) {
+        const int64_t *extent =
+            as_const_int(site.loop_layout->InputShape()[ndim - 1]);
+        if (extent) {
+          int64_t thread_multiplicity = 1;
+          // Packing pays off only when the dim's LOW BIT stays on one
+          // thread: a thread-expression split at an odd lower_factor
+          // pins the lane parity per thread, leaving one lane idle.
+          bool bit0_serial = true;
+          auto inner_steps = backend::reduce::CollectThreadReduceSteps(
+              analysis.iter_sum, Downcast<Var>(InputPlaceholder(ndim - 1)));
+          for (const auto &step : inner_steps) {
+            thread_multiplicity *= step.extent;
+            if (step.lower_factor % 2 != 0) {
+              bit0_serial = false;
             }
           }
-        }
-        if (lane_var.has_value()) {
-          Array<PrimExpr> slot_args;
-          for (size_t d = 0; d < buffer->shape.size(); ++d) {
-            slot_args.push_back(InputPlaceholder(d));
+          int64_t run = *extent / thread_multiplicity;
+          if (bit0_serial && run >= 2 && run % 2 == 0) {
+            lane_var = site.loop_vars[ndim - 1];
           }
-          Array<PrimExpr> fwd_index = induced->Forward(slot_args);
-          PrimExpr fwd_thread =
-              induced->ForwardThread(slot_args, ReplicationPlaceholder());
-          PrimExpr lane = InputPlaceholder(buffer->shape.size());
-          Array<PrimExpr> packed_shape = buffer->shape;
-          packed_shape.push_back(IntImm(DataType::Int(32), 2));
-          decision.packed_layout =
-              Fragment(packed_shape, {fwd_index[0] * 2 + lane}, fwd_thread,
-                       induced->ReplicateExtent(), std::nullopt)
-                  ->BindThreadRange(site.loop_layout->ThreadRange());
-          decision.packed = true;
-          decision.pack_lane_var = lane_var.value();
         }
       }
-    } else {
-      if (!StructuralEqual()(decision.storage_layout, induced) ||
-          decision.steps != site_steps) {
-        return fail("update sites induce incompatible plans");
+    }
+    if (lane_var.has_value()) {
+      Array<PrimExpr> slot_args;
+      for (size_t d = 0; d < buffer->shape.size(); ++d) {
+        slot_args.push_back(InputPlaceholder(d));
       }
+      Array<PrimExpr> fwd_index = storage->Forward(slot_args);
+      PrimExpr fwd_thread =
+          storage->ForwardThread(slot_args, ReplicationPlaceholder());
+      PrimExpr lane = InputPlaceholder(buffer->shape.size());
+      Array<PrimExpr> packed_shape = buffer->shape;
+      packed_shape.push_back(IntImm(DataType::Int(32), 2));
+      decision.packed_layout =
+          Fragment(packed_shape, {fwd_index[0] * 2 + lane}, fwd_thread,
+                   storage->ReplicateExtent(), std::nullopt)
+              ->BindThreadRange(storage->ThreadRange());
+      decision.packed = true;
+      decision.pack_lane_var = lane_var.value();
     }
   }
 
@@ -783,7 +599,7 @@ TryNarrowPlan(const EpochInfo &epoch, const Map<Buffer, Layout> &known_layouts,
 
 class ReducerPlanAndMaterializeRewriter : public IRMutatorWithAnalyzer {
 public:
-  static PrimFunc Substitute(PrimFunc f, bool force_baseline) {
+  static PrimFunc Substitute(PrimFunc f) {
     // Phase A: collect epochs.
     ReducerEpochCollector collector;
     collector.Collect(f);
@@ -791,8 +607,9 @@ public:
       return f;
     }
     // The inferred layout map (identical on every block) feeds the
-    // destination-containment proof; the per-buffer use census decides
-    // whether an inferred destination layout may be replaced.
+    // destination-containment proof and carries each reducer's solved
+    // partial layout; the per-buffer use census decides whether an inferred
+    // destination layout may be replaced.
     Map<Buffer, Layout> known_layouts;
     UseGraph use_graph;
     PostOrderVisit(f->body, [&](const ObjectRef &obj) {
@@ -846,11 +663,58 @@ public:
       if (!epoch.buffer.defined()) {
         continue;
       }
-      std::string reason = "forced baseline (tl.reducer_force_baseline)";
+      // The decision is read directly off the solved PartialFragment — the
+      // node IS the plan (its algebra is the storage, CombineSize/
+      // CombineSteps the communication). The FullParticipant object
+      // (combine == replicate == participant extent, thread == _rep) is the
+      // wide fallback: engine-widened multi-site disagreement, zero-update
+      // seeds, per-site proof rejections and tl.reducer_force_baseline all
+      // resolve to it at proposal/commit time. Anything else is a proven
+      // narrow plan — including all-combine nodes with no copy groups
+      // (W == rep < participants), which keep compact storage and
+      // unguarded updates. Only the destination-containment lowerability
+      // gate can still demote a narrow node at materialize.
+      std::string reason;
       std::optional<NarrowDecision> decision;
-      if (!force_baseline) {
+      const PartialFragmentNode *partial = nullptr;
+      Optional<PartialFragment> partial_ref;
+      if (auto partial_entry = known_layouts.Get(epoch.buffer)) {
+        partial_ref = Downcast<PartialFragment>(partial_entry.value());
+        partial = partial_ref.value().get();
+        ICHECK(partial != nullptr) << "reducer `" << epoch.buffer->name
+                                   << "` carries a non-partial layout: "
+                                   << partial_entry.value()->DebugOutput();
+      }
+      bool node_narrow = false;
+      if (partial == nullptr) {
+        reason = "no solved partial layout for this epoch";
+      } else {
+        const int64_t *combine = as_const_int(partial->CombineSize());
+        const int64_t *rep = as_const_int(partial->ReplicateExtent());
+        ICHECK(combine != nullptr && rep != nullptr)
+            << "reducer `" << epoch.buffer->name
+            << "` carries a non-constant partial decomposition: "
+            << partial->DebugOutput();
+        bool full_participant = (*combine == *rep) &&
+                                (*rep == epoch.thread_extent) &&
+                                partial->IsCompletedReplicated();
+        node_narrow = !full_participant;
+        if (!node_narrow) {
+          reason = "FullParticipant partial (wide fallback)";
+        }
+      }
+      if (node_narrow) {
         decision =
-            TryNarrowPlan(epoch, known_layouts, use_graph, &analyzer, &reason);
+            DeriveNarrowLowering(epoch, partial_ref.value(), known_layouts,
+                                 use_graph, &analyzer, &reason);
+        if (!decision.has_value()) {
+          // Destination containment demoted the epoch: the node keeps its
+          // narrow decomposition for cost accounting; the physical plan
+          // falls back to FullParticipant.
+          DLOG(INFO) << "[ReducerPlan] narrow partial of `"
+                     << epoch.buffer->name
+                     << "` demoted to the wide plan: " << reason;
+        }
       }
       bool verbose = tl_config::ReducerPlanVerboseEnabled();
       if (decision.has_value()) {
@@ -880,6 +744,12 @@ public:
         // keep the stale entry and shadow the override in LowerTileOp's
         // block-by-block annotation accumulation.
         if (decision->override_dst_layout) {
+          // Retirement telemetry: with spill priced in the layout cost model
+          // this rewrite should stay silent — a hit means inference still
+          // chose a placement the plan must correct (verify cache-disabled).
+          DLOG(INFO) << "[ReducerOverride] narrow dst chain of `"
+                     << epoch.buffer->name << "` re-layouted ("
+                     << decision->override_chain.size() + 1 << " buffer(s))";
           rewriter.extra_layout_entries_.Set(epoch.dst,
                                              decision->storage_layout);
           for (const Buffer &staged : decision->override_chain) {
@@ -895,6 +765,18 @@ public:
             TryWideFinalizeDstOverride(epoch, known_layouts, use_graph);
         if (wide_override.has_value()) {
           for (const auto &[buffer, layout] : *wide_override) {
+            // Retirement telemetry: only actual changes are logged (the
+            // steered finalize dst is usually already participant-wide);
+            // with spill priced in the cost model the whole chain should
+            // arrive replicated and this stays silent (verify
+            // cache-disabled).
+            auto existing = known_layouts.Get(buffer);
+            if (!existing.has_value() ||
+                !layout->IsEqual(existing.value().get())) {
+              DLOG(INFO) << "[ReducerOverride] wide dst chain member `"
+                         << buffer->name << "` re-layouted to "
+                         << layout->DebugOutput();
+            }
             rewriter.extra_layout_entries_.Set(buffer, layout);
           }
         }
@@ -1012,6 +894,22 @@ private:
     for (const auto &[buffer, layout] : extra_layout_entries_) {
       if (layout_map.count(buffer) && !layout_map[buffer].same_as(layout)) {
         layout_map.Set(buffer, layout);
+        changed = true;
+      }
+    }
+    // The inferred PartialFragment entries are consumed by this pass and
+    // must not flow past it: downstream consumers (LowerTileOp's buffer
+    // remap) know only value-replication semantics. Also on EVERY block —
+    // LayoutInference publishes the full map on each one.
+    {
+      Array<Buffer> consumed;
+      for (const auto &[buffer, layout] : layout_map) {
+        if (IsReducerV2Buffer(buffer)) {
+          consumed.push_back(buffer);
+        }
+      }
+      for (const auto &buffer : consumed) {
+        layout_map.erase(buffer);
         changed = true;
       }
     }
@@ -1367,10 +1265,10 @@ using namespace tirx::transform;
 
 tvm::transform::Pass ReducerPlanAndMaterialize() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    bool force_baseline =
-        ctx->GetConfig<Bool>(kReducerForceBaseline, Bool(false)).value();
-    return ReducerPlanAndMaterializeRewriter::Substitute(std::move(f),
-                                                         force_baseline);
+    // tl.reducer_force_baseline acts at the proposal side (ParallelOp pins
+    // the partial to FullParticipant), so the node this pass reads back
+    // already reflects it.
+    return ReducerPlanAndMaterializeRewriter::Substitute(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ReducerPlanAndMaterialize", {});
 }

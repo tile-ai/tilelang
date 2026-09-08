@@ -71,8 +71,10 @@ class WSPipeline(Node):
 
     The producer waits for the empty barrier and signals the full barrier;
     the consumer waits for the full barrier and signals the empty barrier.
-    ``depth`` is the number of buffer versions; multiple buffers can share
-    one pipeline.
+    A pipeline synchronizes exactly one scope, between exactly two roles.
+    Multiple buffers can share one pipeline; conversely, a buffer may be
+    bound to several pipelines whose scopes are strictly nested — its
+    version count is then the product of their depths (outer-major slots).
 
     Parameters
     ----------
@@ -81,7 +83,7 @@ class WSPipeline(Node):
     buffers : list[tirx.Buffer]
         The on-chip buffers this pipeline protects (and multi-versions).
     depth : int
-        The number of versions of each buffer.
+        The number of versions this pipeline contributes to each buffer.
     """
 
     def __init__(self, name: str, buffers: list[tirx.Buffer], depth: int):

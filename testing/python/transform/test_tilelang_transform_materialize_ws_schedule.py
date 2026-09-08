@@ -124,6 +124,9 @@ def test_basic_two_role_transform():
     assert "if tx < 32:" in script
     assert "T.set_max_nreg(40, 0)" in script
     assert "T.set_max_nreg(224, 1)" in script
+    # The roles carry their own setmaxnreg: marked custom WS so the late
+    # reg-alloc pass stays out.
+    assert 'T.attr(0, "kCustomWarpSpecialization", 1)' in script
     # The schedule annotation is consumed.
     assert "ws_schedule" not in script
     # Every scheduling marker is stripped.
@@ -180,9 +183,9 @@ def test_buffer_multi_versioning():
 def test_barrier_counts_tma_and_threads():
     func = _materialize(_smem_pipeline_kernel())
     script = str(func)
-    # Producer side: the TMA data rides the tx-count; the per-thread
-    # arrive of the producer warp (32 threads) closes the arrival count.
-    assert "buf_full: [32, 32]" in script
+    # Producer side: the TMA data rides the tx-count and one elected
+    # arrive fused into the copy closes the arrival count.
+    assert "buf_full: [1, 1]" in script
     # Consumer side: synchronous fragment reads -> all 128 consumer threads.
     assert "buf_empty: [128, 128]" in script
 
@@ -192,11 +195,13 @@ def test_tma_copy_conversion_carries_barrier():
     func = _materialize(_smem_pipeline_kernel())
     script = str(func)
     # The producer copy is converted to tma_copy with the full barrier
-    # attached; the commit is a plain per-thread arrive.
+    # attached; as the last copy of a pure-TMA commit cycle it also
+    # carries the cycle's single elected arrive, so the commit entry
+    # emits no arrive of its own.
     assert "T.tma_copy(" in script
     assert "barrier=buf_full" in script
-    assert "emit_arrive" not in script
-    assert "T.ptx_arrive_barrier(buf_full" in script
+    assert "emit_arrive=1" in script
+    assert "T.ptx_arrive_barrier(buf_full" not in script
 
 
 @tilelang.testing.requires_cuda
@@ -596,6 +601,7 @@ def test_empty_defs_op_duplicated_across_roles():
         with T.Kernel(1, threads=128) as _:
             A_shared = T.alloc_shared((64, 64), T.float16)
             A_frag = T.alloc_fragment((64, 64), T.float16)
+            probe = T.alloc_fragment((64,), T.float16)
 
             T.annotate_ws_schedule(
                 T.WSSchedule(
@@ -634,12 +640,12 @@ def test_empty_defs_op_duplicated_across_roles():
                 )
             )
 
-            T.fill(A_frag, 0, annotations={T.WSID: "init_frag"})
+            T.fill(probe, 0, annotations={T.WSID: "init_frag"})
             for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
                 T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
                 T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
-                for r, c in T.Parallel(64, 64, annotations={T.WSID: "step_frag"}):
-                    A_frag[r, c] = A_frag[r, c] + T.float16(1.0)
+                for r in T.Parallel(64, annotations={T.WSID: "step_frag"}):
+                    probe[r] = probe[r] + T.float16(1.0)
             T.copy(A_frag, B[0, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
@@ -647,7 +653,7 @@ def test_empty_defs_op_duplicated_across_roles():
     # Both roles run their own copy: once in the producer branch, once in
     # the consumer branch — at the root and inside the loop scope alike.
     assert script.count("T.fill(") == 2
-    assert script.count("A_frag[r, c] + T.float16(1.0)") == 2
+    assert script.count("probe[r] + T.float16(1.0)") == 2
     # Scheduling metadata is fully consumed.
     assert "ws_op_id" not in script
 
@@ -1096,6 +1102,361 @@ def test_unannotated_global_store_rejected():
         _materialize(_smem_pipeline_kernel(kernel_edit="unannotated_global_store"))
 
 
+def _bind_guard_kernel(bind_in_consumer):
+    """Producer binds a scalar read from global memory; the consumer guards
+    its pipeline read with that scalar."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            consumer_body = [
+                T.WSSync.consumer_wait("buf"),
+                "copy_frag",
+                T.WSSync.consumer_release("buf"),
+                "copy_out",
+            ]
+            if bind_in_consumer:
+                consumer_body.insert(0, "bind_lim")
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[T.WSPipeline("buf", [A_shared], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    "bind_lim",
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Consumer": consumer_body,
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
+                    ],
+                )
+            )
+            for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
+                with T.ws_op("bind_lim"):
+                    lim = A[i, 0]
+                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
+                if lim > T.float16(0):
+                    T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+                T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+def test_var_use_requires_defining_op_in_role():
+    """A guard using a var whose defining Bind op runs only in the other
+    role would reference an undefined variable in the emitted branch."""
+    with pytest.raises(Exception, match="does not run earlier in that role"):
+        _materialize(_bind_guard_kernel(bind_in_consumer=False))
+    # Placing the Bind in both roles (it has no pipeline operands) is legal.
+    script = str(_materialize(_bind_guard_kernel(bind_in_consumer=True)))
+    assert script.count("lim") >= 2
+
+
+@tilelang.testing.requires_cuda
+def test_bind_under_stage_shift_freshens_per_slice():
+    """A Bind op inside a stage-shifted scope is emitted once per unrolled
+    prologue/epilogue step and once in the steady-state loop; every emitted
+    copy must define a fresh variable (SSA)."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((32, 64), T.float16)
+            C_shared = T.alloc_shared((32, 64), T.float16)
+            A_frag = T.alloc_fragment((32, 64), T.float16)
+            C_frag = T.alloc_fragment((32, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("a", [A_shared], depth=2),
+                        T.WSPipeline("c", [C_shared], depth=2),
+                    ],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    "bind_v",
+                                    T.WSSync.producer_acquire("a", stage=0),
+                                    "copy_a",
+                                    T.WSSync.producer_commit("a", stage=0),
+                                    T.WSSync.producer_acquire("c", stage=1),
+                                    "copy_c",
+                                    T.WSSync.producer_commit("c", stage=1),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("a", stage=0),
+                                    "read_a",
+                                    T.WSSync.consumer_release("a", stage=0),
+                                    T.WSSync.consumer_wait("c", stage=0),
+                                    "read_c",
+                                    T.WSSync.consumer_release("c", stage=0),
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
+                    ],
+                )
+            )
+            for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
+                with T.ws_op("bind_v"):
+                    v = A[i, 0]
+                if v > T.float16(0):
+                    T.copy(A[i * 32, 0], A_shared, annotations={T.WSID: "copy_a"})
+                T.copy(A[i * 32, 0], C_shared, annotations={T.WSID: "copy_c"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "read_a"})
+                T.copy(C_shared, C_frag, annotations={T.WSID: "read_c"})
+
+    func = _materialize(kernel)
+    assert tvm.tirx.analysis.verify_ssa(func)
+    script = str(func)
+    # Prologue and steady state each bind their own copy of `v`.
+    assert len(set(re.findall(r"v_ws\d+", script))) >= 2
+
+
+@tilelang.testing.requires_cuda
+def test_var_def_use_stage_mismatch_rejected():
+    """Under a stage shift, a definition and its use at different deltas
+    would be split apart by the unrolled prologue/epilogue steps."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((32, 64), T.float16)
+            C_shared = T.alloc_shared((32, 64), T.float16)
+            A_frag = T.alloc_fragment((32, 64), T.float16)
+            C_frag = T.alloc_fragment((32, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("a", [A_shared], depth=2),
+                        T.WSPipeline("c", [C_shared], depth=2),
+                    ],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    "bind_v",
+                                    T.WSSync.producer_acquire("a", stage=0),
+                                    "copy_a",
+                                    T.WSSync.producer_commit("a", stage=0),
+                                    T.WSSync.producer_acquire("c", stage=1),
+                                    "copy_c",
+                                    T.WSSync.producer_commit("c", stage=1),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("a", stage=0),
+                                    "read_a",
+                                    T.WSSync.consumer_release("a", stage=0),
+                                    T.WSSync.consumer_wait("c", stage=0),
+                                    "read_c",
+                                    T.WSSync.consumer_release("c", stage=0),
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
+                    ],
+                )
+            )
+            for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
+                with T.ws_op("bind_v"):
+                    v = A[i, 0]
+                T.copy(A[i * 32, 0], A_shared, annotations={T.WSID: "copy_a"})
+                if v > T.float16(0):
+                    T.copy(A[i * 32, 0], C_shared, annotations={T.WSID: "copy_c"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "read_a"})
+                T.copy(C_shared, C_frag, annotations={T.WSID: "read_c"})
+
+    with pytest.raises(Exception, match="at a different stage"):
+        _materialize(kernel)
+
+
+def _alias_pipeline_kernel(use_view):
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((4, 64), T.float16),
+        B: T.Tensor((4, 64), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((64,), T.float16)
+            alias = T.view(shared, (8, 8)) if use_view else T.reshape(shared, (8, 8))
+            fragment = T.alloc_fragment((8, 8), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Load", warps_lo=4, warps_hi=5, max_nreg=32),
+                        T.WSRole("Worker", warps_lo=0, warps_hi=4, max_nreg=0),
+                    ],
+                    pipelines=[T.WSPipeline("shared_pipe", [shared], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            "loop",
+                            {
+                                "Load": [
+                                    T.WSSync.producer_acquire("shared_pipe"),
+                                    "load",
+                                    T.WSSync.producer_commit("shared_pipe"),
+                                ],
+                                "Worker": [
+                                    T.WSSync.consumer_wait("shared_pipe", stage=1),
+                                    "consume_alias",
+                                    T.WSSync.consumer_release("shared_pipe", stage=1),
+                                    "store",
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Load": ["loop"], "Worker": ["loop"]}),
+                    ],
+                )
+            )
+            for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop"}):
+                T.copy(A[i, 0], shared, annotations={T.WSID: "load"})
+                T.copy(alias, fragment, annotations={T.WSID: "consume_alias"})
+                T.copy(fragment, B[i, 0], annotations={T.WSID: "store"})
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+def test_versions_reshape_and_view_aliases_by_storage():
+    """T.view / T.reshape aliases share their allocation's storage, so they
+    join its pipeline and index the same acquired version."""
+    for use_view in (False, True):
+        script = str(_materialize(_alias_pipeline_kernel(use_view)))
+        assert "ws_schedule" not in script
+        assert "shared_pipe_full" in script
+        assert "shared = T.sblock_alloc_buffer((2, 64)" in script
+
+
+@tilelang.testing.requires_cuda
+def test_duplicated_op_global_write_rejected():
+    """A multi-role op runs once per role; a non-local write would repeat
+    the side effect."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[T.WSPipeline("buf", [A_shared], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in",
+                                    T.WSSync.producer_commit("buf"),
+                                    "mark_global",
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "copy_frag",
+                                    T.WSSync.consumer_release("buf"),
+                                    "copy_out",
+                                    "mark_global",
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
+                    ],
+                )
+            )
+            for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
+                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+                T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
+                with T.ws_op("mark_global"):
+                    B[0, 0] = T.float16(1)
+
+    with pytest.raises(Exception, match="every role would repeat the write"):
+        _materialize(kernel)
+
+
+@tilelang.testing.requires_cuda
+def test_async_copy_in_consumer_role_rejected():
+    """A TMA copy writing a pipeline buffer must run in the role that
+    commits the pipeline's full side, or its transaction bytes are never
+    accounted."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[T.WSPipeline("buf", [A_shared], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "fill_in",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "copy_in",
+                                    "copy_frag",
+                                    T.WSSync.consumer_release("buf"),
+                                    "copy_out",
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
+                    ],
+                )
+            )
+            for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
+                T.fill(A_shared, T.float16(0), annotations={T.WSID: "fill_in"})
+                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+                T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
+
+    with pytest.raises(Exception, match="never observes it finishing"):
+        _materialize(kernel)
+
+
 @tilelang.testing.requires_cuda
 def test_kernel_metadata_attrs_preserved():
     """Kernel-level metadata AttrStmts (T.use_swizzle,
@@ -1439,19 +1800,23 @@ def _scope_kind_kernel(loop_ctor):
 
 
 @tilelang.testing.requires_cuda
-def test_serial_scope_loop_and_unrolled_rejected():
-    """Any serial loop can be a schedule scope (T.Pipelined is a serial
-    loop whose num_stages this pass consumes); T.unroll / T.Parallel loops
-    cannot."""
+def test_sequential_scope_loop_kinds():
+    """Any sequential loop can be a schedule scope (T.Pipelined is a serial
+    loop whose num_stages this pass consumes; a T.unroll scope keeps its
+    unroll kind); T.Parallel loops cannot."""
     # A plain T.serial scope materializes like a T.Pipelined one.
-    func = _materialize(_scope_kind_kernel(T.serial))
-    script = str(func)
+    script = str(_materialize(_scope_kind_kernel(T.serial)))
     assert "T.mbarrier_wait_parity(" in script
     assert '"num_stages"' not in script
 
-    # T.unroll cannot be a scope.
-    with pytest.raises(Exception, match="must be a serial loop"):
-        _materialize(_scope_kind_kernel(T.unroll))
+    # A T.unroll scope materializes the same, keeping the unroll kind.
+    script = str(_materialize(_scope_kind_kernel(T.unroll)))
+    assert "T.mbarrier_wait_parity(" in script
+    assert "T.unroll(4)" in script
+
+    # A T.Parallel loop cannot be a scope.
+    with pytest.raises(Exception, match="must be a sequential loop"):
+        _materialize(_scope_kind_kernel(T.Parallel))
 
 
 @tilelang.testing.requires_cuda
@@ -1632,9 +1997,70 @@ def test_tcgen05_async_arrive_count():
 
 
 @tilelang.testing.requires_cuda
-def test_runtime_phase_counter_for_multi_depth_spans():
-    """A pipeline synchronized at two loop depths by one role needs a
-    runtime phase counter instead of the linearized iteration."""
+def test_runtime_phase_counter_for_multi_cycle_body():
+    """A pipeline cycled twice per iteration of its scope needs a runtime
+    phase counter instead of the linearized iteration."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[T.WSPipeline("buf", [A_shared], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in",
+                                    T.WSSync.producer_commit("buf"),
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in2",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "copy_frag",
+                                    T.WSSync.consumer_release("buf"),
+                                    "copy_out",
+                                    T.WSSync.consumer_wait("buf"),
+                                    "copy_frag2",
+                                    T.WSSync.consumer_release("buf"),
+                                    "copy_out2",
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
+                    ],
+                )
+            )
+
+            for i in T.Pipelined(2, num_stages=2, annotations={T.WSID: "loop_k"}):
+                T.copy(A[i * 128, 0], A_shared, annotations={T.WSID: "copy_in"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+                T.copy(A_frag, B[i * 128, 0], annotations={T.WSID: "copy_out"})
+                T.copy(A[i * 128 + 64, 0], A_shared, annotations={T.WSID: "copy_in2"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag2"})
+                T.copy(A_frag, B[i * 128 + 64, 0], annotations={T.WSID: "copy_out2"})
+
+    func = _materialize(kernel)
+    script = str(func)
+    # Both roles track their buf phase with a local counter.
+    assert "buf_phase" in script
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_synced_in_two_scopes_rejected():
+    """A pipeline synchronizes exactly one scope; syncing buf at the root
+    AND inside loop_k must be split into two (nested) pipelines."""
 
     @T.prim_func
     def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
@@ -1670,8 +2096,6 @@ def test_runtime_phase_counter_for_multi_depth_spans():
                             T.WSScope.ROOT,
                             {
                                 "Producer": [
-                                    # An extra root-level cycle: the producer
-                                    # now syncs buf at two loop depths.
                                     T.WSSync.producer_acquire("buf"),
                                     "copy_head",
                                     T.WSSync.producer_commit("buf"),
@@ -1698,10 +2122,382 @@ def test_runtime_phase_counter_for_multi_depth_spans():
                 T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
                 T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
 
-    func = _materialize(kernel)
+    with pytest.raises(Exception, match="synchronizes exactly one scope"):
+        _materialize(kernel)
+
+
+def _nested_pipeline_kernel(accum_brackets_loop=True):
+    """An rmw-shaped nested binding: inside loop_k the Rescale role writes
+    A_shared and the Accum role read-modify-writes it (pipeline `buf`); at
+    the root, Accum producer-brackets the whole loop and Rescale reads the
+    final value (pipeline `buf_outer`)."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            B_frag = T.alloc_fragment((64, 64), T.float16)
+
+            accum_root = (
+                [
+                    T.WSSync.producer_acquire("buf_outer"),
+                    "loop_k",
+                    T.WSSync.producer_commit("buf_outer"),
+                ]
+                if accum_brackets_loop
+                # The bracket misses the loop: Accum's writes inside loop_k
+                # would not publish through the outer commit.
+                else [
+                    "loop_k",
+                    T.WSSync.producer_acquire("buf_outer"),
+                    T.WSSync.producer_commit("buf_outer"),
+                ]
+            )
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Rescale", warps_lo=0, warps_hi=4, max_nreg=224),
+                        T.WSRole("Accum", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("buf", [A_shared], depth=1),
+                        T.WSPipeline("buf_outer", [A_shared], depth=1),
+                    ],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Rescale": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "produce",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Accum": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "acc_load",
+                                    "acc_store",
+                                    T.WSSync.consumer_release("buf"),
+                                ],
+                            },
+                        ),
+                        T.WSScope(
+                            T.WSScope.ROOT,
+                            {
+                                "Rescale": [
+                                    "loop_k",
+                                    T.WSSync.consumer_wait("buf_outer"),
+                                    "read_back",
+                                    T.WSSync.consumer_release("buf_outer"),
+                                    "store_out",
+                                ],
+                                "Accum": accum_root,
+                            },
+                        ),
+                    ],
+                )
+            )
+
+            for i in T.serial(4, annotations={T.WSID: "loop_k"}):
+                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "produce"})
+                T.copy(A_shared, B_frag, annotations={T.WSID: "acc_load"})
+                T.copy(B_frag, A_shared, annotations={T.WSID: "acc_store"})
+            T.copy(A_shared, A_frag, annotations={T.WSID: "read_back"})
+            T.copy(A_frag, B[0, 0], annotations={T.WSID: "store_out"})
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+def test_nested_pipelines_on_one_storage():
+    """A buffer bound to two pipelines in strictly nested scopes
+    materializes: each pipeline gets its own barrier pair, and every
+    access resolves against the innermost binding whose scope contains
+    it."""
+    func = _materialize(_nested_pipeline_kernel())
     script = str(func)
-    # Both roles track their buf phase with a local counter.
-    assert "buf_phase" in script
+    assert "buf_full" in script and "buf_empty" in script
+    assert "buf_outer_full" in script and "buf_outer_empty" in script
+
+
+@tilelang.testing.requires_cuda
+def test_nested_pipeline_producer_must_bracket_scope():
+    """The outer pipeline's producer must hold its span across the nested
+    scope: its writes inside publish through the outer commit."""
+    with pytest.raises(Exception, match="enclosing pipeline"):
+        _materialize(_nested_pipeline_kernel(accum_brackets_loop=False))
+
+
+@tilelang.testing.requires_cuda
+def test_sibling_pipelines_on_one_storage_rejected():
+    """Two pipelines on one buffer whose scopes are siblings are rejected:
+    nothing chains their barriers, so the second loop's pre-armed acquire
+    could overwrite data the first loop's consumer still reads."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("buf_a", [A_shared], depth=2),
+                        T.WSPipeline("buf_b", [A_shared], depth=2),
+                    ],
+                    scopes=[
+                        T.WSScope(
+                            "loop_a",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("buf_a"),
+                                    "copy_in_a",
+                                    T.WSSync.producer_commit("buf_a"),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("buf_a"),
+                                    "copy_frag_a",
+                                    T.WSSync.consumer_release("buf_a"),
+                                    "copy_out_a",
+                                ],
+                            },
+                        ),
+                        T.WSScope(
+                            "loop_b",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("buf_b"),
+                                    "copy_in_b",
+                                    T.WSSync.producer_commit("buf_b"),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("buf_b"),
+                                    "copy_frag_b",
+                                    T.WSSync.consumer_release("buf_b"),
+                                    "copy_out_b",
+                                ],
+                            },
+                        ),
+                        T.WSScope(
+                            T.WSScope.ROOT,
+                            {
+                                "Producer": ["loop_a", "loop_b"],
+                                "Consumer": ["loop_a", "loop_b"],
+                            },
+                        ),
+                    ],
+                )
+            )
+
+            for i in T.serial(2, annotations={T.WSID: "loop_a"}):
+                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in_a"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag_a"})
+                T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out_a"})
+            for i in T.serial(2, annotations={T.WSID: "loop_b"}):
+                T.copy(A[128 + i * 64, 0], A_shared, annotations={T.WSID: "copy_in_b"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag_b"})
+                T.copy(A_frag, B[128 + i * 64, 0], annotations={T.WSID: "copy_out_b"})
+
+    with pytest.raises(Exception, match="strictly nested"):
+        _materialize(kernel)
+
+
+def _nested_ring_kernel(rescale_syncs_before_loop=False):
+    """The rmw shape under an outer FOR loop with a depth-2 outer pipeline:
+    O-style storage double-buffers across outer iterations (versions
+    1 x 2). Rescale's in-loop produce holds only the inner span and derives
+    the outer slot from its own phase (the linearized outer iteration)."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((512, 64), T.float16), B: T.Tensor((128, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            B_frag = T.alloc_fragment((64, 64), T.float16)
+
+            rescale_wave = (
+                # The syncs run before the loop reference: Rescale's phase
+                # then names the NEXT cycle when produce runs — rejected.
+                [
+                    T.WSSync.consumer_wait("buf_outer"),
+                    "read_back",
+                    T.WSSync.consumer_release("buf_outer"),
+                    "loop_k",
+                    "store_out",
+                ]
+                if rescale_syncs_before_loop
+                else [
+                    "loop_k",
+                    T.WSSync.consumer_wait("buf_outer"),
+                    "read_back",
+                    T.WSSync.consumer_release("buf_outer"),
+                    "store_out",
+                ]
+            )
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Rescale", warps_lo=0, warps_hi=4, max_nreg=224),
+                        T.WSRole("Accum", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("buf", [A_shared], depth=1),
+                        T.WSPipeline("buf_outer", [A_shared], depth=2),
+                    ],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Rescale": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "produce",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Accum": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "acc_load",
+                                    "acc_store",
+                                    T.WSSync.consumer_release("buf"),
+                                ],
+                            },
+                        ),
+                        T.WSScope(
+                            "loop_w",
+                            {
+                                "Rescale": rescale_wave,
+                                "Accum": [
+                                    T.WSSync.producer_acquire("buf_outer"),
+                                    "loop_k",
+                                    T.WSSync.producer_commit("buf_outer"),
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Rescale": ["loop_w"], "Accum": ["loop_w"]}),
+                    ],
+                )
+            )
+
+            for w in T.serial(2, annotations={T.WSID: "loop_w"}):
+                for i in T.serial(4, annotations={T.WSID: "loop_k"}):
+                    T.copy(A[(w * 4 + i) * 64, 0], A_shared, annotations={T.WSID: "produce"})
+                    T.copy(A_shared, B_frag, annotations={T.WSID: "acc_load"})
+                    T.copy(B_frag, A_shared, annotations={T.WSID: "acc_store"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "read_back"})
+                T.copy(A_frag, B[w * 64, 0], annotations={T.WSID: "store_out"})
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+def test_nested_pipeline_outer_ring():
+    """A depth-2 outer binding over a depth-1 inner one gives the buffer
+    two slots cycling with the outer loop; every access resolves the outer
+    slot — from its span, or (the joint-role produce) from the role's own
+    phase."""
+    func = _materialize(_nested_ring_kernel())
+    script = str(func)
+    assert "buf_outer_full" in script and "buf_outer_empty" in script
+    # One version dimension per binding, outermost first: the outer
+    # ring's 2 slots and the inner binding's pinned 1.
+    assert "(2, 1, 64, 64)" in script
+
+
+@tilelang.testing.requires_cuda
+def test_nested_pipeline_access_after_sync_rejected():
+    """Once the role's sync entries of the outer pipeline have run, its
+    phase names the next cycle, so a later unheld access can no longer
+    derive the in-production slot."""
+    with pytest.raises(Exception, match="after this role's sync"):
+        _materialize(_nested_ring_kernel(rescale_syncs_before_loop=True))
+
+
+def _observer_producer_kernel():
+    """Nested bindings where the outer producer never writes the storage:
+    the Load role TMA-fills A_shared inside loop_k, the Worker observes it
+    through the inner handshake and hands the whole loop's result to the
+    Out role. The collapsed scope use is what the Worker's outer commit
+    publishes."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((64, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Load", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Out", warps_lo=1, warps_hi=2, max_nreg=40),
+                        T.WSRole("Worker", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("buf", [A_shared], depth=1),
+                        T.WSPipeline("buf_outer", [A_shared], depth=1),
+                    ],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Load": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Worker": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "copy_frag",
+                                    T.WSSync.consumer_release("buf"),
+                                ],
+                            },
+                        ),
+                        T.WSScope(
+                            T.WSScope.ROOT,
+                            {
+                                "Load": ["loop_k"],
+                                "Worker": [
+                                    T.WSSync.producer_acquire("buf_outer"),
+                                    "loop_k",
+                                    T.WSSync.producer_commit("buf_outer"),
+                                ],
+                                "Out": [
+                                    T.WSSync.consumer_wait("buf_outer"),
+                                    "copy_out",
+                                    T.WSSync.consumer_release("buf_outer"),
+                                ],
+                            },
+                        ),
+                    ],
+                )
+            )
+
+            for i in T.serial(4, annotations={T.WSID: "loop_k"}):
+                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+            T.copy(A_shared, B[0, 0], annotations={T.WSID: "copy_out"})
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+def test_scope_use_publishes_observed_writes():
+    """The Worker writes nothing, yet its commit validly publishes the
+    scope's TMA-filled data — its thread observed every inner handoff
+    before leaving the loop, so a plain per-thread arrive suffices (the
+    collapsed scope use is synchronous)."""
+    func = _materialize(_observer_producer_kernel())
+    script = str(func)
+    # Full side: the Worker's 128 per-thread arrives; empty side: Out's 32.
+    assert "buf_outer_full: [128]" in script
+    assert "buf_outer_empty: [32]" in script
 
 
 @tilelang.testing.requires_cuda
@@ -1795,10 +2591,10 @@ def test_guard_read_outside_span_rejected():
 
 
 @tilelang.testing.requires_cuda
-def test_one_sided_scope_cycles_rejected():
-    """A pipeline cycling on one side only inside a loop scope (its
-    counterpart cycles in the root here) diverges with the loop extent;
-    every pipeline must cycle both sides equally often per iteration."""
+def test_unbalanced_scope_cycles_rejected():
+    """A pipeline cycling twice on the producer side but once on the
+    consumer side per iteration diverges with the loop extent; every
+    pipeline must cycle both sides equally often within its scope."""
 
     @T.prim_func
     def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
@@ -1822,13 +2618,10 @@ def test_one_sided_scope_cycles_rejected():
                                     T.WSSync.producer_acquire("buf"),
                                     "copy_in",
                                     T.WSSync.producer_commit("buf"),
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in2",
+                                    T.WSSync.producer_commit("buf"),
                                 ],
-                            },
-                        ),
-                        T.WSScope(
-                            T.WSScope.ROOT,
-                            {
-                                "Producer": ["loop_k"],
                                 "Consumer": [
                                     T.WSSync.consumer_wait("buf"),
                                     "copy_frag",
@@ -1837,14 +2630,16 @@ def test_one_sided_scope_cycles_rejected():
                                 ],
                             },
                         ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
                     ],
                 )
             )
 
             for _i in T.serial(4, annotations={T.WSID: "loop_k"}):
                 T.copy(A[0, 0], A_shared, annotations={T.WSID: "copy_in"})
-            T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
-            T.copy(A_frag, B[0, 0], annotations={T.WSID: "copy_out"})
+                T.copy(A[64, 0], A_shared, annotations={T.WSID: "copy_in2"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+                T.copy(A_frag, B[0, 0], annotations={T.WSID: "copy_out"})
 
     with pytest.raises(Exception, match="parity diverges"):
         _materialize(kernel)
@@ -1988,8 +2783,7 @@ def test_idle_warps_adopt_warpgroup_nreg():
 
     func = _materialize(kernel)
     script = str(func)
-    # Producer branch + idle warps 1..3 of warpgroup 0: both request 80.
-    assert script.count("T.set_max_nreg(80, 0)") == 2
+    assert script.count("T.set_max_nreg(80, 1)") == 2
     assert script.count("T.set_max_nreg(40, 0)") == 1  # consumer warpgroup
 
 
@@ -2069,6 +2863,254 @@ def test_negative_warp_range_rejected():
             T.copy(A, B, annotations={T.WSID: "cp"})
 
     with pytest.raises(Exception, match="negative warp range"):
+        _materialize(kernel)
+
+
+@tilelang.testing.requires_cuda
+def test_capacity_deadlock_rejected():
+    """Two roles produce into sibling scopes in opposite orders: each
+    fills its pipeline's depth and blocks on an acquire that only the
+    other's never-reached consumer scope would release. Surfaces only
+    when loops are modeled past two iterations."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            S1 = T.alloc_shared((64, 64), T.float16)
+            S2 = T.alloc_shared((64, 64), T.float16)
+            F1 = T.alloc_fragment((64, 64), T.float16)
+            F2 = T.alloc_fragment((64, 64), T.float16)
+
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("s1", [S1], depth=2),
+                        T.WSPipeline("s2", [S2], depth=2),
+                    ],
+                    scopes=[
+                        T.WSScope(
+                            "loop_a",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("s1"),
+                                    "copy_in1",
+                                    T.WSSync.producer_commit("s1"),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("s1"),
+                                    "copy_frag1",
+                                    T.WSSync.consumer_release("s1"),
+                                    "copy_out1",
+                                ],
+                            },
+                        ),
+                        T.WSScope(
+                            "loop_b",
+                            {
+                                "Consumer": [
+                                    T.WSSync.producer_acquire("s2"),
+                                    "copy_in2",
+                                    T.WSSync.producer_commit("s2"),
+                                ],
+                                "Producer": [
+                                    T.WSSync.consumer_wait("s2"),
+                                    "copy_frag2",
+                                    T.WSSync.consumer_release("s2"),
+                                    "copy_out2",
+                                ],
+                            },
+                        ),
+                        T.WSScope(
+                            T.WSScope.ROOT,
+                            {
+                                "Producer": ["loop_a", "loop_b"],
+                                "Consumer": ["loop_b", "loop_a"],
+                            },
+                        ),
+                    ],
+                )
+            )
+
+            for _i in T.serial(4, annotations={T.WSID: "loop_a"}):
+                T.copy(A[0, 0], S1, annotations={T.WSID: "copy_in1"})
+                T.copy(S1, F1, annotations={T.WSID: "copy_frag1"})
+                T.copy(F1, B[0, 0], annotations={T.WSID: "copy_out1"})
+            for _i in T.serial(4, annotations={T.WSID: "loop_b"}):
+                T.copy(A[64, 0], S2, annotations={T.WSID: "copy_in2"})
+                T.copy(S2, F2, annotations={T.WSID: "copy_frag2"})
+                T.copy(F2, B[64, 0], annotations={T.WSID: "copy_out2"})
+
+    with pytest.raises(Exception, match="deadlocks"):
+        _materialize(kernel)
+
+
+@tilelang.testing.requires_cuda
+def test_guarded_scope_syncs_use_phase_counter():
+    """A guard-skipped iteration produces no cycle but would still
+    advance a linearized phase; sync entries inside a guarded scope must
+    fall back to runtime phase counters."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(2, threads=128) as bx:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[T.WSPipeline("buf", [A_shared], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "copy_frag",
+                                    T.WSSync.consumer_release("buf"),
+                                    "copy_out",
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": ["loop_k"]}),
+                    ],
+                )
+            )
+
+            if bx == 0:
+                for i in T.serial(4, annotations={T.WSID: "loop_k"}):
+                    T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
+                    T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+                    T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
+
+    func = _materialize(kernel)
+    script = str(func)
+    assert "buf_phase" in script
+
+
+@tilelang.testing.requires_cuda
+def test_pipeline_on_private_storage_rejected():
+    """Each role has its own physical instance of fragment storage, so a
+    pipeline over it could never hand a value across roles."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[T.WSPipeline("buf", [A_frag], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            T.WSScope.ROOT,
+                            {"Producer": ["cp_in"], "Consumer": ["cp_out"]},
+                        ),
+                    ],
+                )
+            )
+            T.copy(A[0, 0], A_frag, annotations={T.WSID: "cp_in"})
+            T.copy(A_frag, B[0, 0], annotations={T.WSID: "cp_out"})
+
+    with pytest.raises(Exception, match="must live in shared or tensor memory"):
+        _materialize(kernel)
+
+
+@tilelang.testing.requires_cuda
+def test_duplicate_pipeline_name_rejected():
+    """Sync entries reference pipelines by name; two pipelines sharing a
+    name would bind both sync streams to the first."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            S1 = T.alloc_shared((64, 64), T.float16)
+            S2 = T.alloc_shared((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[
+                        T.WSPipeline("buf", [S1], depth=2),
+                        T.WSPipeline("buf", [S2], depth=2),
+                    ],
+                    scopes=[
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["cp"], "Consumer": []}),
+                    ],
+                )
+            )
+            T.copy(A[0, 0], B[0, 0], annotations={T.WSID: "cp"})
+
+    with pytest.raises(Exception, match="duplicate pipeline name"):
+        _materialize(kernel)
+
+
+@tilelang.testing.requires_cuda
+def test_scope_body_role_never_entering_rejected():
+    """A role's body in a scope its parent never enters for that role
+    would plan barrier arrivals that are never emitted."""
+
+    @T.prim_func
+    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((64, 64), T.float16)
+            A_frag = T.alloc_fragment((64, 64), T.float16)
+            T.annotate_ws_schedule(
+                T.WSSchedule(
+                    num_warps=8,
+                    roles=[
+                        T.WSRole("Producer", warps_lo=0, warps_hi=1, max_nreg=40),
+                        T.WSRole("Consumer", warps_lo=4, warps_hi=8, max_nreg=224),
+                    ],
+                    pipelines=[T.WSPipeline("buf", [A_shared], depth=2)],
+                    scopes=[
+                        T.WSScope(
+                            "loop_k",
+                            {
+                                "Producer": [
+                                    T.WSSync.producer_acquire("buf"),
+                                    "copy_in",
+                                    T.WSSync.producer_commit("buf"),
+                                ],
+                                "Consumer": [
+                                    T.WSSync.consumer_wait("buf"),
+                                    "copy_frag",
+                                    T.WSSync.consumer_release("buf"),
+                                    "copy_out",
+                                ],
+                            },
+                        ),
+                        T.WSScope(T.WSScope.ROOT, {"Producer": ["loop_k"], "Consumer": []}),
+                    ],
+                )
+            )
+
+            for i in T.serial(4, annotations={T.WSID: "loop_k"}):
+                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
+                T.copy(A_shared, A_frag, annotations={T.WSID: "copy_frag"})
+                T.copy(A_frag, B[i * 64, 0], annotations={T.WSID: "copy_out"})
+
+    with pytest.raises(Exception, match="never enters it from the parent scope"):
         _materialize(kernel)
 
 

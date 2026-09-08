@@ -775,8 +775,8 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
 @tilelang.testing.requires_cuda
 def test_partial_sync_non_warp_multiple_rejected():
     """Regression test for issue #2556: a required barrier inside a divergent
-    region whose participating thread count is not a multiple of the warp size
-    must be a compile-time error, not silently dropped (data race)."""
+    region that splits a warp must be a compile-time error, not silently
+    dropped or lowered to an invalid partial barrier."""
     import pytest
 
     @T.prim_func(private=True)
@@ -796,7 +796,7 @@ def test_partial_sync_non_warp_multiple_rejected():
                 acc[0] += S[47 - tx]
 
     mod = tvm.IRModule({"main": func})
-    with pytest.raises(Exception, match="not a multiple of 32"):
+    with pytest.raises(Exception, match="not warp-uniform"):
         tilelang.transform.ThreadSync("shared")(mod)
 
 
@@ -975,6 +975,51 @@ def test_unorderable_hazard_in_divergent_else_branch_is_reported(capfd):
     run_passes_script(func)
     warnings = capfd.readouterr().err
     assert "no longer separates" in warnings, f"Expected the pass to report the hazard:\n{warnings}"
+
+
+def test_aligned_else_partial_sync_is_preserved():
+    """An unsafe 16-thread then arm must not remove a valid else warp barrier."""
+    import re
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 48)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx >= 32:
+            l[0] = T.float32(0)
+        else:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[31 - tx]
+
+    s = run_passes_script(func)
+    assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a 32-thread barrier:\n{s}"
+    assert s.index('T.tvm_storage_sync("shared"') > s.index("else:"), f"Barrier must stay in else branch:\n{s}"
+
+
+def test_misaligned_else_partial_sync_is_rejected():
+    """Consecutive threads spanning two partial warps cannot use bar.sync."""
+    import pytest
+
+    @T.prim_func(private=True)
+    def func():
+        s = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        l = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx == 0 or tx >= 33:
+            l[0] = T.float32(0)
+        else:
+            s[tx] = T.cast(tx, "float32")
+            l[0] = s[33 - tx]
+
+    with pytest.raises(Exception, match="not warp-uniform"):
+        run_passes_script(func)
 
 
 def test_sync_stays_inside_guard_proven_uniform_by_premise(capfd):

@@ -119,8 +119,8 @@ results = lt.lower_trace(func, transform.Simplify(), mode="terminal")
 results = lt.lower_trace(
     func,
     [
-        ("Annotate",   tvm.tirx.transform.AnnotateDeviceRegions()),
-        ("Split",      tvm.tirx.transform.SplitHostDevice()),
+        ("Annotate", tvm.tirx.transform.AnnotateDeviceRegions()),
+        ("Split", tvm.tirx.transform.SplitHostDevice()),
         ("ThreadSync", transform.ThreadSync("shared")),
     ],
     mode="both",

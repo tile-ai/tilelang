@@ -64,6 +64,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.cuda.intrinsics import make_mma_swizzle_layout
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     @T.prim_func
     def main(
@@ -75,7 +76,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local  = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             # Optional layout hints (commented out by default)
             # T.annotate_layout({
@@ -104,6 +105,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
+
 
 # 1. Create the TileLang function
 func = matmul(1024, 1024, 1024, 128, 128, 32)
@@ -158,7 +160,7 @@ with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx,
 ```python
 A_shared = T.alloc_shared((block_M, block_K), dtype)
 B_shared = T.alloc_shared((block_K, block_N), dtype)
-C_local  = T.alloc_fragment((block_M, block_N), accum_dtype)
+C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 ```
 
 - `T.alloc_shared` allocates shared memory across the entire thread block.
@@ -197,7 +199,7 @@ T.gemm(A_shared, B_shared, C_local)
 ```
 
 - A single call that performs a tile-level matrix multiplication using the specified buffers.
-- Under the hood, for NVIDIA targets, it can use CUTLASS/Cute or WMMA instructions. On AMD GPUs, TileLang uses a separate HIP or composable kernel approach.
+- Under the hood, for NVIDIA targets, it can use CUTLASS/Cute or WMMA instructions. On AMD GPUs, TileLang emits HIP code built on MFMA compiler intrinsics.
 
 6. **Copying Back Results**:
 

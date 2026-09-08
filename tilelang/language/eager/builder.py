@@ -743,6 +743,13 @@ class Builder(BaseBuilder):
         else:
             return super().boolop(op, left, right)
 
+    def unaryop(self, op, operand):
+        if op == "UAdd" and isinstance(operand, PrimExpr):
+            # PrimExpr overloads unary minus and invert but not unary plus.
+            # Unary plus is the identity on numbers, so hand back the operand.
+            return operand
+        return super().unaryop(op, operand)
+
     def ifexp(self, cond, then, otherwise):
         cond = unwrap_cond(cond)
         if isinstance(cond, PrimExpr):

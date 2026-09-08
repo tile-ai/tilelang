@@ -22,7 +22,7 @@ def test_windows_arch_prefers_native_architecture(monkeypatch):
     assert msvc._windows_arch() == "arm64"
 
 
-def test_vsdevcmd_uses_native_architecture(monkeypatch):
+def test_vsdevcmd_supports_different_target_and_host_architectures(monkeypatch):
     command_lines = []
 
     class CompletedProcess:
@@ -33,10 +33,11 @@ def test_vsdevcmd_uses_native_architecture(monkeypatch):
         command_lines.append(command_line)
         return CompletedProcess()
 
-    monkeypatch.setattr(msvc, "_windows_arch", lambda: "arm64")
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "ARM64")
     monkeypatch.setattr(msvc.subprocess, "run", run)
 
     compiler_env = msvc._import_vsdevcmd_environment("C:\\VS\\VsDevCmd.bat")
 
     assert compiler_env is not None
-    assert "-arch=arm64 -host_arch=arm64" in command_lines[0]
+    assert "-arch=arm64 -host_arch=x64" in command_lines[0]

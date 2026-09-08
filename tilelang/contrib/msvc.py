@@ -29,13 +29,26 @@ def _clang_cl_disabled() -> bool:
     return val not in ("", "0", "OFF", "off", "false", "False")
 
 
-def _windows_arch() -> str:
-    machine = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine()).lower()
+def _normalize_windows_arch(machine: str) -> str:
+    """Normalize Windows architecture names for Visual Studio tools."""
+    machine = machine.lower()
     if machine in ("arm64", "aarch64"):
         return "arm64"
     if machine in ("x86", "i386", "i686"):
         return "x86"
     return "x64"
+
+
+def _windows_arch() -> str:
+    """Return the native target architecture, including under emulation."""
+    machine = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine()
+    return _normalize_windows_arch(machine)
+
+
+def _windows_host_arch() -> str:
+    """Return the architecture of the process that launches Visual Studio."""
+    machine = os.environ.get("PROCESSOR_ARCHITECTURE") or platform.machine()
+    return _normalize_windows_arch(machine)
 
 
 def _vs_install_roots() -> list[str]:
@@ -194,7 +207,8 @@ def _import_vsdevcmd_environment(vsdevcmd: str) -> dict[str, str] | None:
         cmd_exe = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "cmd.exe")
 
     target_arch = _windows_arch()
-    command = f'call "{vsdevcmd}" -no_logo -arch={target_arch} -host_arch={target_arch} >nul && set'
+    host_arch = _windows_host_arch()
+    command = f'call "{vsdevcmd}" -no_logo -arch={target_arch} -host_arch={host_arch} >nul && set'
     command_line = f'"{cmd_exe}" /d /s /c "{command}"'
     try:
         proc = subprocess.run(

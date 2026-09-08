@@ -26,11 +26,10 @@ Note on dtypes
 ```python
 @T.prim_func
 def add_kernel(
-    A: T.Tensor((N,), dtype),    # dtype could be 'float32' | T.float32 | torch.float32
+    A: T.Tensor((N,), dtype),  # dtype could be 'float32' | T.float32 | torch.float32
     B: T.Tensor((N,), dtype),
     C: T.Tensor((N,), dtype),
-):
-    ...  # kernel body
+): ...  # kernel body
 ```
 
 - Shapes may be concrete integers or symbolic. For symbolic, you can pass
@@ -39,10 +38,11 @@ def add_kernel(
 
 ```python
 # Named symbolic dimension (optional)
-K = T.dyn['K']
+K = T.dyn["K"]
+
+
 @T.prim_func
-def uses_dyn(A: T.Tensor((K,), 'float32')):
-    ...
+def uses_dyn(A: T.Tensor((K,), "float32")): ...
 ```
 
 ### Dynamic symbolic dimensions: two ways
@@ -59,23 +59,27 @@ TileLang supports two complementary ways to introduce symbolic (dynamic) dims:
 
 ```python
 # 1) Annotation-only symbol; read the bound size via shape
-K = T.dyn['K']  # dtype defaults to int32
+K = T.dyn["K"]  # dtype defaults to int32
+
+
 @T.prim_func
-def foo(A: T.Tensor((K,), 'float32')):
+def foo(A: T.Tensor((K,), "float32")):
     N = A.shape[0]
     for i in T.serial(N):
         ...
 
+
 # 2) Explicit Var symbol usable in the body
-K = T.dynamic('K', 'int32')   # or T.dynamic('K') defaults to int32
+K = T.dynamic("K", "int32")  # or T.dynamic('K') defaults to int32
+
+
 @T.prim_func
-def bar(A: T.Tensor((K,), 'float32')):
+def bar(A: T.Tensor((K,), "float32")):
     for i in T.serial(K):
         ...
 ```
 
 Notes
-- `T.symbolic(name, dtype)` is a deprecated alias of `T.dynamic`; prefer `T.dynamic`.
 - Under `@jit`, concrete sizes come from the actual tensor arguments at the first call.
 - Symbols in annotations do not need to be separate kernel arguments; TileLang binds them from argument shapes.
 
@@ -126,9 +130,9 @@ TileLang exposes key software‑managed scopes:
   (`T.alloc_fragment`, `T.alloc_var`)
 
 ```python
-A_shared = T.alloc_shared((BM, BK), 'float16')
-B_shared = T.alloc_shared((BK, BN), 'float16')
-C_local  = T.alloc_fragment((BM, BN), 'float32')
+A_shared = T.alloc_shared((BM, BK), "float16")
+B_shared = T.alloc_shared((BK, BN), "float16")
+C_local = T.alloc_fragment((BM, BN), "float32")
 T.clear(C_local)  # zero accumulators
 ```
 
@@ -163,8 +167,9 @@ import tilelang
 import tilelang.language as T
 from tilelang import jit
 
+
 @jit  # infers target from tensors at first call
-def add(N: int, block: int = 256, dtype: str = 'float32'):
+def add(N: int, block: int = 256, dtype: str = "float32"):
 
     @T.prim_func
     def add_kernel(
@@ -180,12 +185,14 @@ def add(N: int, block: int = 256, dtype: str = 'float32'):
 
     return add_kernel
 
+
 # Host side (PyTorch shown; NumPy/DLPack also supported)
 import torch
+
 N = 1 << 20
-A = torch.randn(N, device='cuda', dtype=torch.float32)
-B = torch.randn(N, device='cuda', dtype=torch.float32)
-C = torch.empty(N, device='cuda', dtype=torch.float32)
+A = torch.randn(N, device="cuda", dtype=torch.float32)
+B = torch.randn(N, device="cuda", dtype=torch.float32)
+C = torch.empty(N, device="cuda", dtype=torch.float32)
 
 kernel = add(N)
 kernel(A, B, C)  # runs on GPU
@@ -205,14 +212,14 @@ fragment accumulator. It mirrors the quickstart style found in the repository.
 ```python
 @T.prim_func
 def gemm(
-    A: T.Tensor((M, K), 'float16'),
-    B: T.Tensor((K, N), 'float16'),
-    C: T.Tensor((M, N), 'float16'),
+    A: T.Tensor((M, K), "float16"),
+    B: T.Tensor((K, N), "float16"),
+    C: T.Tensor((M, N), "float16"),
 ):
     with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=128) as (bx, by):
-        A_s = T.alloc_shared((BM, BK), 'float16')
-        B_s = T.alloc_shared((BK, BN), 'float16')
-        C_f = T.alloc_fragment((BM, BN), 'float32')
+        A_s = T.alloc_shared((BM, BK), "float16")
+        B_s = T.alloc_shared((BK, BN), "float16")
+        C_f = T.alloc_fragment((BM, BN), "float32")
         T.clear(C_f)
 
         for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
@@ -229,9 +236,9 @@ Use `T.print` inside a kernel for quick introspection. TileLang emits printing
 from a single thread for shared/fragment scopes to avoid floods.
 
 ```python
-T.print(C_f, msg='accumulator:')
-T.print(A_s, msg='A tile:')
-T.print(C[0], msg='C[0] = ')
+T.print(C_f, msg="accumulator:")
+T.print(A_s, msg="A tile:")
+T.print(C[0], msg="C[0] = ")
 ```
 
 ## 9. Where to Go Next

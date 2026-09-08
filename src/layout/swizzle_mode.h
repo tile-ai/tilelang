@@ -55,6 +55,11 @@ public:
     return static_cast<int>(operator->()->_value);
   }
 
+  // The byte-space Sw<b,4,3> width: none->0, 32B->1, 64B->2, 128B->3.
+  int BBits() const { return CanonicalOrdinal(); }
+
+  static SwizzleMode FromBBits(int b_bits) { return FromOrdinal(b_bits); }
+
   bool IsNone() const { return CanonicalOrdinal() == 0; }
 
   // GMMA descriptor layout type field: none->0, 32B->3, 64B->2, 128B->1.

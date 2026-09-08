@@ -35,10 +35,13 @@ static constexpr const char *kHasTMA = "tl.has_tma";
 // because they are part of the Python PassContext interface.
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
+static constexpr const char *kEnableAutoSchedule = "tl.enable_auto_schedule";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
+static constexpr const char *kEnableFP32x2Reduction =
+    "tl.enable_fp32x2_reduction";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 static constexpr const char *kEnableLowerLDGSTG = "tl.enable_lower_ldgstg";
@@ -86,6 +89,18 @@ TVM_DLL const Op &ieee_fsqrt();
 TVM_DLL const Op &ieee_frsqrt();
 // ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
 TVM_DLL const Op &ieee_fdiv();
+
+// Round-to-nearest arithmetic with guaranteed instruction selection.
+// Unlike the ieee_* ops these are vectorizable: the backend may lower them
+// to packed x2 instructions (tl::mul2 / tl::fma2) when profitable.
+//
+// fma(x, y, z) - fused multiply-add; the fusion (single rounding) is
+// guaranteed regardless of compiler contraction settings.
+TVM_DLL const Op &fma();
+// fmul(x, y) - multiply with an explicit boundary that is never contracted
+// into a neighbouring FMA.
+TVM_DLL const Op &fmul();
+
 TVM_DLL const Op &max2_nan();
 TVM_DLL const Op &min2_nan();
 

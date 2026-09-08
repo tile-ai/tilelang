@@ -237,6 +237,29 @@ private:
   const std::unordered_set<const Object *> &syncs_;
 };
 
+namespace {
+
+PrimExpr MakeLinearThreadId(const Array<IterVar> &thread_vars) {
+  DataType index_dtype = DataType::Int(64);
+  PrimExpr linear_thread_id = make_const(index_dtype, 0);
+  PrimExpr stride = make_const(index_dtype, 1);
+  static const char *kThreadTags[] = {"threadIdx.x", "threadIdx.y",
+                                      "threadIdx.z"};
+  for (const char *thread_tag : kThreadTags) {
+    for (const auto &iv : thread_vars) {
+      if (iv->thread_tag != thread_tag)
+        continue;
+      PrimExpr index = Cast(index_dtype, iv->var - iv->dom->min);
+      linear_thread_id = linear_thread_id + index * stride;
+      stride = stride * Cast(index_dtype, iv->dom->extent);
+      break;
+    }
+  }
+  return linear_thread_id;
+}
+
+} // namespace
+
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
 public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
@@ -437,9 +460,9 @@ struct ConditionThreadProperty {
  * - `token_ids[tx] != -1` is runtime-dependent and non-uniform.
  * - `batch_sizes[bx] > 0` is runtime-dependent but block-uniform.
  *
- * Only runtime-dependent, non-uniform conditions need to force sync hoisting.
- * In addition, some non-uniform threadIdx-only conditions still need hoisting
- * when ThreadPartialSyncRewriter cannot handle them.
+ * Runtime-dependent, non-uniform conditions use the existing conservative
+ * hoisting path. Thread-only conditions that otherwise remain in place need a
+ * warp-uniformity proof before ThreadPartialSyncRewriter can lower them safely.
  */
 class ConditionThreadPropertyChecker : public IRMutatorWithAnalyzer {
 public:
@@ -708,7 +731,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     LOG(FATAL) << "Thread variable " << tag << " not found";
     return IterVar();
   }
-
   /*!
    * \brief Try to prove that every thread reaches the same verdict on
    *        \p condition, using the live constraint set as premises.
@@ -744,6 +766,42 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
                               tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
     return analyzer.CanProve(agree);
+  }
+
+  /*! \brief Return whether every hardware warp agrees on \p condition. */
+  bool IsWarpUniformCondition(const PrimExpr &condition) {
+    Map<Var, PrimExpr> sub1, sub2;
+    for (const auto &iv : env_threads_) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank != 1)
+        continue;
+      sub1.Set(iv->var, Var(iv->var->name_hint + "<T1>", iv->var.dtype()));
+      sub2.Set(iv->var, Var(iv->var->name_hint + "<T2>", iv->var.dtype()));
+    }
+    if (sub1.empty()) {
+      return true;
+    }
+
+    DataType index_dtype = DataType::Int(64);
+    PrimExpr linear_thread_id = MakeLinearThreadId(env_threads_);
+
+    ConstrSet cset = GetConstrSet();
+    ConstrSet c1 =
+        cset.RenameFrom("<T1>", sub1, std::nullopt, /*rename_ranges=*/false);
+    ConstrSet c2 =
+        cset.RenameFrom("<T2>", sub2, std::nullopt, /*rename_ranges=*/false);
+    arith::Analyzer analyzer;
+    c1.ToConstraints().Merge(c2.ToConstraints()).Populate(analyzer);
+
+    PrimExpr lhs = Substitute(condition, sub1);
+    PrimExpr rhs = Substitute(condition, sub2);
+    PrimExpr linear1 = Substitute(linear_thread_id, sub1);
+    PrimExpr linear2 = Substitute(linear_thread_id, sub2);
+    PrimExpr warp_size = make_const(index_dtype, warp_size_);
+    PrimExpr same_warp =
+        FloorDiv(linear1, warp_size) == FloorDiv(linear2, warp_size);
+    PrimExpr agree = tirx::Or(tirx::And(lhs, rhs),
+                              tirx::And(tirx::Not(lhs), tirx::Not(rhs)));
+    return analyzer.CanProve(tirx::Or(tirx::Not(same_warp), agree));
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -903,10 +961,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
    * buffer reads, writes, and synchronization events under the condition's
    * constraints.
    *
-   * IMPORTANT: If syncs are inserted inside an if-statement with a non-uniform
-   * condition (i.e., the condition depends on threadIdx), we must hoist the
-   * sync to before the if-statement. Otherwise, only some threads will reach
-   * the sync point, causing a deadlock.
+   * IMPORTANT: Before preserving a partial barrier in a thread-divergent
+   * branch, prove that every hardware warp agrees on branch participation.
+   * Conditions already handled by the legacy conservative hoisting path keep
+   * that behavior for compatibility.
    */
   void VisitStmt_(const IfThenElseNode *op) final {
     StmtEntry s;
@@ -991,39 +1049,56 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ConditionThreadPropertyChecker checker(&analyzer, env_threads_,
                                              let_var_properties_, warp_size_);
       IterVar tx = GetThreadVar("threadIdx.x");
-      auto condition_prop = checker.AnalyzeCondition(op->condition, tx);
+      auto must_hoist = [&](const PrimExpr &branch_condition,
+                            const char *branch_name) {
+        auto condition_prop = checker.AnalyzeCondition(branch_condition, tx);
+        bool may_hoist =
+            condition_prop.depends_on_runtime || condition_prop.requires_hoist;
+        bool proven_uniform =
+            may_hoist && IsBlockUniformCondition(branch_condition);
+        bool is_block_uniform =
+            condition_prop.is_block_uniform || proven_uniform;
+        bool should_hoist =
+            (condition_prop.depends_on_runtime && !is_block_uniform) ||
+            (condition_prop.requires_hoist && !proven_uniform);
 
-      // The estimate calls anything mentioning a thread variable divergent; ask
-      // the prover before hoisting. Only added to it, never subtracted, and
-      // only asked when something below could act on the answer.
-      bool may_hoist =
-          condition_prop.depends_on_runtime || condition_prop.requires_hoist;
-      bool proven_uniform = may_hoist && IsBlockUniformCondition(op->condition);
-      bool is_block_uniform = condition_prop.is_block_uniform || proven_uniform;
-      // requires_hoist means the participation count was not established, so
-      // ThreadPartialSyncRewriter cannot emit `bar.sync id, count`. Uniformity
-      // answers that: the barrier is reached by the whole block or by nobody,
-      // and a plain __syncthreads() is right. Only a proof counts, not the
-      // heuristic.
-      if ((condition_prop.depends_on_runtime && !is_block_uniform) ||
-          (condition_prop.requires_hoist && !proven_uniform)) {
+        if (!should_hoist && !is_block_uniform &&
+            !IsWarpUniformCondition(branch_condition)) {
+          LOG(FATAL)
+              << "[ThreadSync] Cannot lower a required shared-memory sync "
+                 "inside the "
+              << branch_name
+              << " branch: its participating threads are not warp-uniform. "
+                 "A partial barrier requires every non-exited thread in each "
+                 "participating warp to reach the barrier. Condition: "
+              << branch_condition;
+        }
+        return should_hoist;
+      };
+
+      bool hoist_then =
+          !syncs_in_then.empty() && must_hoist(op->condition, "then");
+      bool hoist_else = !syncs_in_else.empty() &&
+                        must_hoist(tirx::Not(op->condition), "else");
+      if (hoist_then || hoist_else) {
         LOG(WARNING)
             << "[ThreadSync] Hoisting sync out of an if whose condition is not "
                "safe for an in-if sync. This is not a fix: both ends of the "
                "conflict are inside the branch, so the hoisted barrier no "
                "longer separates them and the race remains. Constraining the "
                "condition -- a T.assume on the parameters it reads -- keeps "
-               "the "
-               "barrier in place instead. Condition: "
+               "the barrier in place instead. Condition: "
             << op->condition;
-        for (const auto &sync : syncs_in_then) {
-          syncs_inserted_.erase(sync);
+        if (hoist_then) {
+          for (const auto &sync : syncs_in_then) {
+            syncs_inserted_.erase(sync);
+          }
         }
-        for (const auto &sync : syncs_in_else) {
-          syncs_inserted_.erase(sync);
+        if (hoist_else) {
+          for (const auto &sync : syncs_in_else) {
+            syncs_inserted_.erase(sync);
+          }
         }
-
-        // Insert sync before the if-statement itself
         insert_syncs(op);
       }
     }
@@ -1063,7 +1138,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         const Op &call_op = opt.value();
         return call_op.same_as(tl::tma_load()) ||
                call_op.same_as(tl::tma_load_im2col()) ||
-               call_op.same_as(tl::tma_load_multicast());
+               call_op.same_as(tl::tma_load_multicast()) ||
+               call_op.same_as(tl::tma_load_gather4());
       }
       return false;
     }();

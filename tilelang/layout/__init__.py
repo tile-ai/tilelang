@@ -3,6 +3,10 @@
 
 from .layout import Layout  # noqa: F401
 from .fragment import Fragment  # noqa: F401
+from .partial_fragment import (
+    PartialFragment,  # noqa: F401
+    make_fully_replicated_partial_fragment,  # noqa: F401
+)
 from .swizzle import (
     make_swizzled_layout,  # noqa: F401
     make_volta_swizzled_layout,  # noqa: F401

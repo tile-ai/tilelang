@@ -37,6 +37,7 @@ def get_nvcc_subprocess_env() -> dict[str, str] | None:
 
 
 def _get_nvcc_host_compiler() -> str | None:
+    """Resolve NVCC's host C++ compiler, including activated MSVC tools."""
     explicit = os.environ.get("CXX") or os.environ.get("CC")
     if explicit:
         return explicit

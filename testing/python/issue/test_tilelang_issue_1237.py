@@ -7,7 +7,7 @@ def test_issue_1237_dynamic_copy_extent_builds():
     # The goal is to ensure T.copy correctly handles dynamic extents
     # (e.g., src slice length vs. static dst buffer size) during prim_func building.
 
-    length = T.symbolic("len", dtype=T.int32)
+    length = T.dynamic("len", dtype=T.int32)
 
     @T.prim_func
     def sample_kernel(global_tensor: T.Tensor[(length,), T.int32]):  # noqa: F821

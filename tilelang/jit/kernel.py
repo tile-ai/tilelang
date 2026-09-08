@@ -29,6 +29,7 @@ from tilelang.instrumentation import compile_pass_instrumentation, create_pass_i
 from tilelang.tools.pass_timing import create_pass_timing_tool
 import logging
 import os
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -750,7 +751,9 @@ class JITKernel(Generic[_P, _T]):
         # rt_module: use export_library to export
         # rt_params: use cloudpickle to serialize
 
-        if self.artifact is None or self.artifact.rt_mod is None:
+        runtime_module = self.artifact.rt_mod if self.artifact is not None else None
+        cached_library = getattr(self.adapter, "libpath", None) if self.execution_backend == "tvm_ffi" else None
+        if runtime_module is None and cached_library is None:
             raise AttributeError(
                 'Runtime module is not available. Please compile the kernel with `execution_backend="tvm_ffi"` before exporting.'
             )
@@ -759,7 +762,10 @@ class JITKernel(Generic[_P, _T]):
         if dir_path:
             os.makedirs(dir_path, exist_ok=True)
 
-        self.artifact.rt_mod.export_library(kernel_file)
+        if runtime_module is not None:
+            runtime_module.export_library(kernel_file)
+        elif not (os.path.exists(kernel_file) and os.path.samefile(cached_library, kernel_file)):
+            shutil.copyfile(cached_library, kernel_file)
         logger.info(f"Kernel library exported to {os.path.abspath(kernel_file)}")
 
     def _get_ptx(self, verbose: bool | None = None) -> str:
