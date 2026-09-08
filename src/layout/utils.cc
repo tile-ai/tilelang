@@ -722,6 +722,7 @@ std::optional<std::string> GetForwardMapBijectionError(
 namespace {
 
 constexpr int64_t kMaxEnumeratedFragmentPoints = int64_t{1} << 30;
+constexpr int64_t kMaxEnumeratedContainmentChecks = int64_t{1} << 20;
 
 enum class FragmentBijectionStatus { kValid, kInvalid, kUnavailable };
 
@@ -734,7 +735,22 @@ FragmentBijectionResult EnumerateFragmentBijection(const Fragment &fragment,
                                                    arith::Analyzer *analyzer) {
   Array<PrimExpr> logical_shape = fragment->InputShape();
   logical_shape.push_back(fragment->ReplicateExtent());
-  Array<PrimExpr> physical_shape{fragment->ThreadExtent()};
+  auto scoped_analyzer = analyzer->Clone();
+  for (size_t i = 0; i < fragment->InputDim(); ++i) {
+    scoped_analyzer->Bind(InputPlaceholder(i),
+                          Range(0, fragment->InputShape()[i]), true);
+  }
+  scoped_analyzer->Bind(ReplicationPlaceholder(),
+                        Range(0, fragment->ReplicateExtent()), true);
+  arith::IntSet thread_set =
+      scoped_analyzer->int_set(fragment->GetForwardThread());
+  if (thread_set.IsEverything()) {
+    return {FragmentBijectionStatus::kUnavailable, ""};
+  }
+  PrimExpr thread_min = analyzer->Simplify(thread_set.min());
+  PrimExpr thread_extent =
+      analyzer->Simplify(thread_set.max() - thread_min + 1);
+  Array<PrimExpr> physical_shape{thread_extent};
   Array<PrimExpr> output_shape = fragment->OutputShape();
   physical_shape.insert(physical_shape.end(), output_shape.begin(),
                         output_shape.end());
@@ -803,6 +819,11 @@ FragmentBijectionResult EnumerateFragmentBijection(const Fragment &fragment,
        << "with volume " << physical_volume;
     return {FragmentBijectionStatus::kInvalid, os.str()};
   }
+  std::optional<int64_t> thread_min_value =
+      EvaluateConstantInteger(analyzer->Simplify(thread_min));
+  if (!thread_min_value) {
+    return {FragmentBijectionStatus::kUnavailable, ""};
+  }
 
   Array<PrimExpr> forward_coordinates{fragment->GetForwardThread()};
   Array<PrimExpr> forward_indices = fragment->GetForwardIndex();
@@ -833,6 +854,9 @@ FragmentBijectionResult EnumerateFragmentBijection(const Fragment &fragment,
       if (!coordinate) {
         return {FragmentBijectionStatus::kUnavailable, ""};
       }
+      if (i == 0) {
+        *coordinate -= *thread_min_value;
+      }
       if (*coordinate < 0 || *coordinate >= physical_extents[i]) {
         std::ostringstream os;
         os << "the fragment forward map does not form a rectangle: physical "
@@ -858,6 +882,143 @@ FragmentBijectionResult EnumerateFragmentBijection(const Fragment &fragment,
   // The logical and physical volumes are equal, so an injective in-bounds map
   // also visits every cell in the physical rectangle exactly once.
   return {FragmentBijectionStatus::kValid, ""};
+}
+
+enum class FragmentContainmentStatus { kValid, kInvalid, kUnavailable };
+
+FragmentContainmentStatus
+EnumerateFragmentContains(const Fragment &small_frag,
+                          const Fragment &large_frag,
+                          const Array<PrimExpr> &small_frag_indices,
+                          const Array<PrimExpr> &large_frag_indices,
+                          arith::Analyzer *analyzer, bool check_forward_index) {
+  ICHECK(analyzer != nullptr);
+  if (small_frag_indices.size() != small_frag->InputDim() ||
+      large_frag_indices.size() != large_frag->InputDim()) {
+    return FragmentContainmentStatus::kUnavailable;
+  }
+
+  std::vector<Var> logical_variables;
+  std::vector<int64_t> logical_extents;
+  logical_variables.reserve(small_frag_indices.size() + 2);
+  logical_extents.reserve(small_frag_indices.size());
+  int64_t logical_volume = 1;
+  for (size_t i = 0; i < small_frag_indices.size(); ++i) {
+    const auto *var_node = small_frag_indices[i].as<VarNode>();
+    std::optional<int64_t> extent = EvaluateConstantInteger(
+        analyzer->Simplify(small_frag->InputShape()[i]));
+    if (var_node == nullptr || !extent || *extent <= 0 ||
+        *extent > kMaxEnumeratedContainmentChecks / logical_volume) {
+      return FragmentContainmentStatus::kUnavailable;
+    }
+    Var var = GetRef<Var>(var_node);
+    if (std::any_of(logical_variables.begin(), logical_variables.end(),
+                    [&](const Var &other) { return other.same_as(var); })) {
+      return FragmentContainmentStatus::kUnavailable;
+    }
+    logical_variables.push_back(var);
+    logical_extents.push_back(*extent);
+    logical_volume *= *extent;
+  }
+
+  std::optional<int64_t> small_replicas = EvaluateConstantInteger(
+      analyzer->Simplify(small_frag->ReplicateExtent()));
+  std::optional<int64_t> large_replicas = EvaluateConstantInteger(
+      analyzer->Simplify(large_frag->ReplicateExtent()));
+  if (!small_replicas || !large_replicas || *small_replicas <= 0 ||
+      *large_replicas <= 0 ||
+      *small_replicas > kMaxEnumeratedContainmentChecks / logical_volume ||
+      *large_replicas > kMaxEnumeratedContainmentChecks /
+                            (logical_volume * *small_replicas)) {
+    return FragmentContainmentStatus::kUnavailable;
+  }
+
+  std::vector<int64_t> large_shape;
+  large_shape.reserve(large_frag->InputDim());
+  for (const PrimExpr &extent_expr : large_frag->InputShape()) {
+    std::optional<int64_t> extent =
+        EvaluateConstantInteger(analyzer->Simplify(extent_expr));
+    if (!extent || *extent <= 0) {
+      return FragmentContainmentStatus::kUnavailable;
+    }
+    large_shape.push_back(*extent);
+  }
+
+  Var small_rep("__tl_contains_small_rep",
+                small_frag->ReplicateExtent()->dtype);
+  Var large_rep("__tl_contains_large_rep",
+                large_frag->ReplicateExtent()->dtype);
+  PrimExpr small_thread =
+      small_frag->ForwardThread(small_frag_indices, small_rep);
+  PrimExpr large_thread =
+      large_frag->ForwardThread(large_frag_indices, large_rep);
+  Array<PrimExpr> small_physical = small_frag->Forward(small_frag_indices);
+  Array<PrimExpr> large_physical = large_frag->Forward(large_frag_indices);
+  if (check_forward_index && small_physical.size() != large_physical.size()) {
+    return FragmentContainmentStatus::kInvalid;
+  }
+
+  logical_variables.push_back(small_rep);
+  logical_variables.push_back(large_rep);
+  std::vector<int64_t> values(logical_variables.size(), 0);
+  IntegerExpressionEvaluator evaluator(&logical_variables, &values);
+
+  for (int64_t linear = 0; linear < logical_volume; ++linear) {
+    int64_t residual = linear;
+    for (size_t rev = logical_extents.size(); rev > 0; --rev) {
+      size_t i = rev - 1;
+      values[i] = residual % logical_extents[i];
+      residual /= logical_extents[i];
+    }
+
+    for (size_t i = 0; i < large_frag_indices.size(); ++i) {
+      std::optional<int64_t> index = evaluator(large_frag_indices[i]);
+      if (!index) {
+        return FragmentContainmentStatus::kUnavailable;
+      }
+      if (*index < 0 || *index >= large_shape[i]) {
+        return FragmentContainmentStatus::kInvalid;
+      }
+    }
+    if (check_forward_index) {
+      for (size_t i = 0; i < small_physical.size(); ++i) {
+        std::optional<int64_t> small_index = evaluator(small_physical[i]);
+        std::optional<int64_t> large_index = evaluator(large_physical[i]);
+        if (!small_index || !large_index) {
+          return FragmentContainmentStatus::kUnavailable;
+        }
+        if (*small_index != *large_index) {
+          return FragmentContainmentStatus::kInvalid;
+        }
+      }
+    }
+
+    for (int64_t small_replica = 0; small_replica < *small_replicas;
+         ++small_replica) {
+      values[logical_extents.size()] = small_replica;
+      std::optional<int64_t> expected_thread = evaluator(small_thread);
+      if (!expected_thread) {
+        return FragmentContainmentStatus::kUnavailable;
+      }
+      bool found_owner = false;
+      for (int64_t large_replica = 0; large_replica < *large_replicas;
+           ++large_replica) {
+        values[logical_extents.size() + 1] = large_replica;
+        std::optional<int64_t> owner_thread = evaluator(large_thread);
+        if (!owner_thread) {
+          return FragmentContainmentStatus::kUnavailable;
+        }
+        if (*owner_thread == *expected_thread) {
+          found_owner = true;
+          break;
+        }
+      }
+      if (!found_owner) {
+        return FragmentContainmentStatus::kInvalid;
+      }
+    }
+  }
+  return FragmentContainmentStatus::kValid;
 }
 
 } // namespace
@@ -890,6 +1051,18 @@ GetFragmentBijectionError(const Fragment &fragment, arith::Analyzer *analyzer) {
   Array<PrimExpr> forward_indices = fragment->GetForwardIndex();
   physical_coordinates.insert(physical_coordinates.end(),
                               forward_indices.begin(), forward_indices.end());
+
+  auto scoped_analyzer = analyzer->Clone();
+  for (const IterVar &iter_var : logical_domain) {
+    scoped_analyzer->Bind(iter_var->var, iter_var->dom, true);
+  }
+  arith::IntSet thread_set =
+      scoped_analyzer->int_set(fragment->GetForwardThread());
+  if (thread_set.IsEverything()) {
+    return "the fragment forward map has an unbounded thread range";
+  }
+  physical_coordinates.Set(
+      0, analyzer->Simplify(fragment->GetForwardThread() - thread_set.min()));
 
   return GetForwardMapBijectionError(physical_coordinates, logical_domain,
                                      analyzer, "the fragment forward map",
@@ -988,7 +1161,20 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   // Simplify the difference between the threads.
   auto diff = analyzer.Simplify(thread - check_thread);
   // If the difference is zero, the threads match and the access is valid.
-  return analyzer.CanProve(diff == 0);
+  if (analyzer.CanProve(diff == 0)) {
+    return true;
+  }
+
+  // Symbolic inversion can be inconclusive for valid many-to-one accesses,
+  // such as `fragment[i, j // 32]`. Check the ownership relation directly:
+  // every thread selected by the small fragment must appear in the forward
+  // thread image of the accessed large-fragment element. Keep this fallback
+  // deliberately bounded because it evaluates every logical point and pair of
+  // replica coordinates.
+  return EnumerateFragmentContains(small_frag, large_frag, small_frag_indices,
+                                   large_frag_indices, &analyzer,
+                                   check_forward_index) ==
+         FragmentContainmentStatus::kValid;
 }
 
 } // namespace tl

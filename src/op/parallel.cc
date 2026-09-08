@@ -144,25 +144,34 @@ GetFragmentForwardMapError(const Fragment &fragment, const Range &thread_bounds,
        << " is outside the current participant range " << thread_bounds;
     return os.str();
   }
-  if (!analyzer->CanProve(fragment->ThreadExtent() <= declared_range->extent)) {
+  auto scoped_analyzer = analyzer->Clone();
+  for (size_t i = 0; i < fragment->InputDim(); ++i) {
+    scoped_analyzer->Bind(InputPlaceholder(i),
+                          Range(0, fragment->InputShape()[i]), true);
+  }
+  scoped_analyzer->Bind(ReplicationPlaceholder(),
+                        Range(0, fragment->ReplicateExtent()), true);
+  arith::IntSet thread_set =
+      scoped_analyzer->int_set(fragment->GetForwardThread());
+  if (thread_set.IsEverything()) {
+    return "the fragment thread image is unbounded";
+  }
+  PrimExpr thread_extent =
+      analyzer->Simplify(thread_set.max() - thread_set.min() + 1);
+  if (!analyzer->CanProve(thread_extent <= declared_range->extent)) {
     std::ostringstream os;
-    os << "normalized thread extent " << fragment->ThreadExtent()
+    os << "normalized thread extent " << thread_extent
        << " exceeds the declared participant extent " << declared_range->extent;
     return os.str();
   }
   return GetFragmentBijectionError(fragment, analyzer);
 }
 
-std::optional<std::string> GetFragmentAccessBijectionError(
+std::optional<std::string> GetFragmentWriteInjectivityError(
     const Fragment &loop_layout, const Fragment &fragment,
     const Array<IterVar> &loop_vars, const Map<Var, IterVar> &inner_vars,
     const Array<PrimExpr> &access_indices, arith::Analyzer *analyzer) {
-  ICHECK(loop_layout.defined());
-  ICHECK(fragment.defined());
-  ICHECK_EQ(access_indices.size(), fragment->InputDim());
-  ICHECK(analyzer != nullptr);
-
-  Var rep("__tl_parallel_bijection_rep", loop_layout->ReplicateExtent()->dtype);
+  Var rep("__tl_parallel_write_rep", loop_layout->ReplicateExtent()->dtype);
   Array<PrimExpr> loop_indices = loop_vars.Map(
       [](const IterVar &iter_var) { return PrimExpr(iter_var->var); });
   Array<PrimExpr> physical_coordinates{
@@ -171,10 +180,6 @@ std::optional<std::string> GetFragmentAccessBijectionError(
   physical_coordinates.insert(physical_coordinates.end(),
                               physical_indices.begin(), physical_indices.end());
 
-  // A statically bounded inner loop participates in the accessed rectangle
-  // when its iterator reaches a fragment coordinate.  Variables outside the
-  // Parallel subtree are fixed parameters for each invocation and are left out
-  // of the logical domain.
   Array<IterVar> logical_domain = loop_vars;
   for (const auto &[var, iter_var] : inner_vars) {
     bool is_used = false;
@@ -190,12 +195,29 @@ std::optional<std::string> GetFragmentAccessBijectionError(
       logical_domain.push_back(iter_var);
     }
   }
-
   logical_domain.push_back(IterVar(Range(0, loop_layout->ReplicateExtent()),
                                    rep, IterVarType::kDataPar));
-  return GetForwardMapBijectionError(
-      physical_coordinates, logical_domain, analyzer,
-      "the fragment write induced by T.Parallel");
+
+  Array<IterVar> normalized_domain;
+  Map<Var, PrimExpr> normalization;
+  for (size_t i = 0; i < logical_domain.size(); ++i) {
+    const IterVar &iter_var = logical_domain[i];
+    Var normalized_var("__tl_write_i" + std::to_string(i),
+                       iter_var->var.dtype());
+    normalized_domain.push_back(IterVar(Range(0, iter_var->dom->extent),
+                                        normalized_var, IterVarType::kDataPar));
+    normalization.Set(iter_var->var, normalized_var + iter_var->dom->min);
+  }
+  arith::IterMapResult injectivity =
+      Layout(normalized_domain, Substitute(physical_coordinates, normalization))
+          ->DetectInjective();
+  if (injectivity->errors.empty()) {
+    return std::nullopt;
+  }
+  std::ostringstream os;
+  os << "the fragment write is not one-to-one. Details: "
+     << injectivity->errors;
+  return os.str();
 }
 
 } // anonymous namespace
@@ -696,12 +718,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     for (const auto &[buffer, layout] : results) {
       completed_layout_map.Set(buffer, layout);
     }
-    ValidateInferredLayout(
-        LayoutInferArgs{layout_args.target, layout_args.thread_bounds,
-                        completed_layout_map, layout_args.analyzer,
-                        layout_args.buffer_remap, layout_args.bind_var_to_expr,
-                        layout_args.in_pipeline, layout_args.strict_layout_map,
-                        layout_args.candidate_vector_size_limit});
+    ValidateInferredLayout(LayoutInferArgs{
+        layout_args.target, layout_args.thread_bounds, completed_layout_map,
+        layout_args.analyzer, layout_args.buffer_remap,
+        layout_args.bind_var_to_expr, layout_args.in_pipeline,
+        layout_args.strict_layout_map, layout_args.candidate_vector_size_limit,
+        layout_args.allocated_fragment_buffers});
   }
 
   loop_layout_inferred_ = true;
@@ -902,13 +924,12 @@ void ParallelOpNode::ValidateInferredLayout(
     if (!fragment.defined()) {
       continue;
     }
-    if (auto error = GetFragmentAccessBijectionError(
+    if (auto error = GetFragmentWriteInjectivityError(
             loop_layout_, fragment.value(), loop_vars_, inner_vars_,
             access.indices, layout_args.analyzer)) {
       std::ostringstream os;
       os << "T.Parallel cannot write fragment buffer `" << buffer->name
-         << "`: " << *error
-         << ". Fragment layout: " << fragment.value()->DebugOutput();
+         << "`: " << *error;
       throw LayoutConflictException(os.str());
     }
   }

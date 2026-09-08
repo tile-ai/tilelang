@@ -286,7 +286,8 @@ public:
                                                   bind_var_to_expr_,
                                                   false,
                                                   strict_layout_map,
-                                                  candidate_vector_size_limit},
+                                                  candidate_vector_size_limit,
+                                                  allocated_fragment_buffers_},
                                   level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
@@ -971,6 +972,9 @@ private:
 
   void VisitStmt_(const SBlockNode *op) final {
     for (auto buffer : op->alloc_buffers) {
+      if (IsFragmentBuffer(buffer)) {
+        allocated_fragment_buffers_.Set(buffer, Bool(true));
+      }
       if (buffer_data_to_buffers_.count(buffer->data)) {
         auto buffers = buffer_data_to_buffers_[buffer->data];
         buffers.push_back(buffer);
@@ -1272,6 +1276,9 @@ private:
   }
 
   Map<Var, Array<Buffer>> buffer_data_to_buffers_;
+  // Buffer identities originating at T.alloc_fragment sites. Views and
+  // aliases sharing the same data Var are deliberately excluded.
+  Map<Buffer, Bool> allocated_fragment_buffers_;
   // Map from Bind variable to its bound expression
   Map<Var, PrimExpr> bind_var_to_expr_;
   std::vector<ObjectRef> infer_list_stmt_;
@@ -1417,7 +1424,8 @@ private:
       // Reducer buffers carry PartialFragment values whose replicas are
       // addends, not duplicate storage. Their injectivity is checked by the
       // reducer-specific commit path.
-      if (!IsFragmentBuffer(buffer) || IsReducerV2Buffer(buffer)) {
+      if (!IsFragmentBuffer(buffer) || IsReducerV2Buffer(buffer) ||
+          !allocated_fragment_buffers_.count(buffer)) {
         continue;
       }
       if (!layout_map.count(buffer)) {
@@ -1453,7 +1461,8 @@ private:
       LayoutInferArgs layout_args{target_,    thread_bounds_vec_[member],
                                   layout_map, analyzer_vec_[member].get(),
                                   {},         bind_var_to_expr_,
-                                  false,      {}};
+                                  false,      {},
+                                  0,          allocated_fragment_buffers_};
       const auto *parallel = infer_list_[member].as<ParallelOpNode>();
       if (parallel != nullptr) {
         parallel->ValidateInferredLayout(layout_args);

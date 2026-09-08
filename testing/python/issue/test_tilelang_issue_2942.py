@@ -186,7 +186,7 @@ def test_explicit_parallel_fragment_collision_is_rejected():
 
         return main
 
-    with pytest.raises(ValueError, match="does not form a rectangle"):
+    with pytest.raises(ValueError, match="not one-to-one"):
         prog()
 
 
