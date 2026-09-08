@@ -17,9 +17,10 @@
  *    Available through `tl.layout_cost_model="io-aware"` for opt-in use
  *    and A/B comparisons.
  *  - ReductionAwareCostModel (default for CUDA reducers): enumerates vector
- *    widths and prefers bank-conflict-free attempts before comparing the sum
- *    of spill, execution, and normalized register costs. Physical reducer plans
- *    are analyzed with the materializer's own narrow/wide and packed decisions.
+ *    widths and prefers known attempts, then bank-conflict-free ones, before
+ *    comparing spill and execution estimates plus a register-slot penalty.
+ *    This is a heuristic score, not a calibrated latency estimate. Physical
+ *    reducer plans use the materializer's narrow/wide and packed decisions.
  *
  * Concrete models live in the .cc; callers go through Create().
  */

@@ -31,6 +31,10 @@ def make_shared_reducer(**kwargs):
     return load_factory("maint/layout_inference/cases/reduction_aware_shared.py")(**kwargs)
 
 
+def make_weighted_pooling(**kwargs):
+    return load_factory("maint/layout_inference/bench_reduction_aware.py", "make_weighted_pooling")(**kwargs)
+
+
 def reducer_candidate_costs(diagnostics):
     """Exclude unrelated register-count components with zero execution cost."""
     costs = [
@@ -132,6 +136,41 @@ def test_equal_register_communication_kernel_correctness(within_warp):
     kernel = tl.compile(make_communication_reducer(within_warp=within_warp), out_idx=-1, target="cuda")
     inputs = torch.randn((8, 128), device="cuda")
     torch.testing.assert_close(kernel(inputs), inputs.sum(dim=0), atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize("queries", [1, 32])
+def test_weighted_pooling_selects_less_communication_at_equal_register_cost(queries, capfd):
+    features, scores, layouts = {}, {}, {}
+    for width in (4, 1, None):
+        function, layouts[width] = infer(
+            factory=make_weighted_pooling,
+            groups=1,
+            queries=queries,
+            width=width,
+            pass_configs={"tl.enable_reducer_plan_verbose": True},
+        )
+        candidates = reducer_candidate_costs(capfd.readouterr().err)
+        assert candidates and all(cost["known"] and cost["bank_conflict_free"] for cost in candidates)
+        scores[width] = min(candidates, key=lambda cost: cost["total"])
+        features[width] = reducer_cost(function)["acc"]
+    assert scores[4]["regs"] == scores[1]["regs"] == scores[None]["regs"] == 18
+    assert all(score["spill"] == 0 for score in scores.values())
+    assert features[4]["local_issues"] == features[1]["local_issues"] == features[None]["local_issues"]
+    assert features[4]["barriers"] == 16 * queries
+    assert features[1]["barriers"] == features[None]["barriers"] == 0
+    assert layouts[None]["values"].is_equal(layouts[1]["values"])
+    assert scores[None]["total"] == scores[1]["total"] < scores[4]["total"]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("width", [4, 1, None])
+def test_weighted_pooling_kernel_correctness(width):
+    kernel = tl.compile(make_weighted_pooling(groups=4, queries=3, width=width), out_idx=-1, target="cuda")
+    inputs = torch.randn((4, 8, 128), device="cuda")
+    weights = torch.randn((4, 3, 8), device="cuda")
+    expected = (weights.unsqueeze(-1) * inputs.unsqueeze(1)).sum(dim=2)
+    torch.testing.assert_close(kernel(inputs, weights), expected, atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")

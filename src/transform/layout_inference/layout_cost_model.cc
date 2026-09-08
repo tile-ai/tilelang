@@ -1432,6 +1432,37 @@ int64_t CudaReducerIssueCost(const ReducerCostFeatures &features) {
   return AddCost(cost, MultiplyCost(kBarrierWeight, features.barriers));
 }
 
+/*! \brief Reduction-aware heuristic, not a calibrated latency model.
+ *
+ * Known attempts precede unknown ones; bank-conflict-free attempts then take
+ * precedence over conflicting ones. Within that ordering, minimize:
+ *
+ * \code
+ * reducer_issues = local_issues + shared_issues + combine_issues
+ *                  + 4 * shuffle_issues + 32 * barriers
+ * execution = memory_cost + sum_reducers(threads * max_vector_bytes
+ *                                       * reducer_issues)
+ * register_penalty = 4 * max_threads * register_slots
+ * total = spill_bytes + execution + register_penalty
+ * \endcode
+ *
+ * threads is each reducer's participant count; max_threads is their maximum.
+ * max_vector_bytes = MaxVectorLoadBits(target, false) / 8. memory_cost covers
+ * ordinary global/shared accesses; shared_issues above covers collective
+ * communication. The arithmetic issue counts cover reducer work, not all
+ * kernel arithmetic. Spill, memory, and issue estimates include execution
+ * counts.
+ *
+ * register_slots sums physical fragment slots per thread, including packing
+ * temporaries, without liveness analysis. This is a static resource penalty;
+ * unlike traffic/issues, it is not multiplied by execution counts.
+ *
+ * Byte-like scaling aligns thread scope, not performance cost: register
+ * capacity, memory traffic, and issue-equivalent bytes are not interchangeable.
+ * The top-level 1:1:1 and issue weights are uncalibrated heuristics. With
+ * max_vector_bytes=16 and equal thread counts, one local issue scores like
+ * four extra per-thread register slots; one barrier scores like 128 slots.
+ */
 class ReductionAwareCostModel final : public LayoutCostModel {
 public:
   ReductionAwareCostModel(Target target, const PrimFunc &function,
