@@ -57,8 +57,9 @@ def test_norm_fn():
     assert rel < 1e-2, f"rel={rel:.4e}"
 
     src = kernel.get_kernel_source()
-    assert "mad(" in src, "missing cube mad instruction"
-    assert "load_cbuf" in src, "missing L1->L0 load_cbuf"
+    assert "asc_mmad(" in src, "missing cube matrix multiply C API"
+    assert "asc_copy_l12l0a(" in src, "missing L1->L0A copy C API"
+    assert "asc_copy_l12l0b(" in src, "missing L1->L0B copy C API"
 
 
 if __name__ == "__main__":

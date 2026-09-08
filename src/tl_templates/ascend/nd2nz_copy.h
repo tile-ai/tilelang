@@ -22,7 +22,7 @@ using namespace AscendC;
  *
  * The standalone entry is __simd_vf__ (runs on AIV vector pipe).  Code that
  * is already inside a SimdVF calls the __simd_callee__ entry instead.  The
- * caller must issue copy_ubuf_to_cbuf() separately after this returns.
+ * caller must issue asc_copy_ub2l1() separately after this returns.
  *
  * For single-fractal tiles (ROWS <= 16 && COLS <= 16), this is a no-op
  * since ND == NZ.  The caller should just use raw copy in that case.
@@ -66,9 +66,9 @@ struct ascend_nd2nz_scatter_impl<
     while (count > 0) {
       vector_bool mask;
       if constexpr (sizeof(T) == 2) {
-        mask = plt_b16(count, POST_UPDATE);
+        mask = asc_update_mask_b16(count);
       } else if constexpr (sizeof(T) == 4) {
-        mask = plt_b32(count, POST_UPDATE);
+        mask = asc_update_mask_b32(count);
       } else {
         static_assert(sizeof(T) == 0,
                       "unsupported element size for same-type scatter");
@@ -76,7 +76,7 @@ struct ascend_nd2nz_scatter_impl<
       __ubuf__ T *dstPtr = dst_nz_ub + pass * (ROWS + 1) * VL_T;
       __ubuf__ T *srcBase = src_ub + pass * VL_T;
       for (int r = 0; r < ROWS; ++r) {
-        auto reg = V::vlds(srcBase + r * COLS, 0, NORM);
+        auto reg = V::vlds_norm(srcBase + r * COLS, 0);
         dstPtr = V::vsstb(reg, dstPtr, STRIDE, mask, POST_UPDATE);
       }
       ++pass;
@@ -97,14 +97,14 @@ struct ascend_nd2nz_scatter_impl<ROWS, COLS, float, bfloat16_t,
     constexpr int NUM_PASSES = COLS / 64;
     constexpr int STRIDE = ((ROWS + 1) << 16) | 1;
 
-    auto f32Mask = pset_b32(PAT_ALL);
-    auto bf16Mask = pset_b16(PAT_VL64);
+    auto f32Mask = asc_create_mask_b32(PAT_ALL);
+    auto bf16Mask = asc_create_mask_b16(PAT_VL64);
 
     for (int pass = 0; pass < NUM_PASSES; ++pass) {
       __ubuf__ bfloat16_t *dstPtr = dst_nz_ub + pass * (ROWS + 1) * 64;
       __ubuf__ float *srcBase = src_ub + pass * 64;
       for (int r = 0; r < ROWS; ++r) {
-        auto srcReg = V::vlds(srcBase + r * COLS, 0, NORM);
+        auto srcReg = V::vlds_norm(srcBase + r * COLS, 0);
         auto castReg = V::vcvt<bfloat16_t>(srcReg, f32Mask, ROUND_R, RS_DISABLE,
                                            PART_EVEN, MODE_ZEROING);
         auto packReg = V::vpack<uint16_t>((V::vec_t<uint32_t> &)castReg, LOWER);
@@ -140,15 +140,15 @@ struct ascend_nd2nz_scatter_impl<ROWS, COLS, bfloat16_t, float,
     constexpr int NUM_PASSES = COLS / 128;
     constexpr int STRIDE = ((ROWS + 1) << 16) | 1;
 
-    auto bf16Mask = pset_b16(PAT_ALL);
-    auto f32Mask = pset_b32(PAT_ALL);
+    auto bf16Mask = asc_create_mask_b16(PAT_ALL);
+    auto f32Mask = asc_create_mask_b32(PAT_ALL);
 
     for (int pass = 0; pass < NUM_PASSES; ++pass) {
       __ubuf__ float *dstPtr0 = dst_nz_ub + pass * (ROWS + 1) * 128;
       __ubuf__ float *dstPtr1 = dstPtr0 + (ROWS + 1) * 64;
 
       for (int r = 0; r < ROWS; ++r) {
-        auto src = V::vlds(src_ub + r * COLS + pass * 128, 0, NORM);
+        auto src = V::vlds_norm(src_ub + r * COLS + pass * 128, 0);
         auto dst_lo = V::vcvt<float>(src, bf16Mask, PART_EVEN, MODE_ZEROING);
         auto dst_hi = V::vcvt<float>(src, bf16Mask, PART_ODD, MODE_ZEROING);
         auto [dst_half0, dst_half1] = V::vintlv(dst_lo, dst_hi);

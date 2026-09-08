@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pytest
 
@@ -51,13 +53,39 @@ def test_ascend_simd_pair_validates_dtypes_and_index():
         ascend_simd.pair_get(pair, 2)
 
 
-def test_ascend_simd_vexpdif_rejects_invalid_part():
-    src0 = tirx.Var("src0", "float32x64")
-    src1 = tirx.Var("src1", "float32x64")
+def test_ascend_simd_vexpdif_rejects_widening_form():
+    src0 = tirx.Var("src0", "float16x128")
+    src1 = tirx.Var("src1", "float16x128")
     mask = tirx.Var("mask", "boolx256")
 
-    with pytest.raises(ValueError, match="part must be the integer 0 or 1"):
-        ascend_simd.vexpdif(src0, src1, mask, part=2)
+    with pytest.raises(TypeError, match="requires matching float32 vectors"):
+        ascend_simd.vexpdif(src0, src1, mask)
+
+
+def test_ascend_simd_vexpdif_codegen():
+    @T.prim_func
+    def func(
+        A: T.Buffer((64,), "float32"),
+        B: T.Buffer((64,), "float32"),
+        C: T.Buffer((64,), "float32"),
+    ):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((64,), "float32")
+            b_ub = T.alloc_shared((64,), "float32")
+            c_ub = T.alloc_shared((64,), "float32")
+            T.copy(A, a_ub)
+            T.copy(B, b_ub)
+            with T.SimdVF():
+                mask = T.simd.pset(32)
+                src0 = T.simd.vld(a_ub[0])
+                src1 = T.simd.vld(b_ub[0])
+                result = T.simd.vexpdif(src0, src1, mask)
+                T.simd.vsts(c_ub[0], result, mask)
+            T.copy(c_ub, C)
+
+    source = lower(func, target="ascend").kernel_source
+    assert "simd_inst::vexpdif(" in source
+    assert "simd_inst::vexpdif<" not in source
 
 
 def test_ascend_pipe_barrier():
@@ -65,12 +93,14 @@ def test_ascend_pipe_barrier():
     def func(A: T.Buffer((16,), "float32")):
         with T.Kernel(1) as _:
             T.ascend_pipe_barrier("PIPE_ALL")
+            T.ascend_pipe_barrier("PIPE_V")
             A[0] = T.float32(1)
 
     artifact = lower(func, target="ascend")
     source = artifact.kernel_source
     print(source)
-    assert "AscendC::PipeBarrier<pipe_t::PIPE_ALL>();" in source
+    assert "asc_sync();" in source
+    assert "asc_sync_pipe(PIPE_V);" not in source
 
 
 def test_ascend_simd_mem_bar_pto_codegen():
@@ -94,8 +124,8 @@ def test_ascend_set_wait_flag():
     artifact = lower(func, target="ascend")
     source = artifact.kernel_source
     print(source)
-    assert "AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(0)" in source
-    assert "AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(0)" in source
+    assert "asc_sync_notify(PIPE_S, PIPE_MTE3, static_cast<event_t>(0));" in source
+    assert "asc_sync_wait(PIPE_S, PIPE_MTE3, static_cast<event_t>(0));" in source
 
 
 def test_ascend_sync_inter_arrive_wait():
@@ -110,8 +140,8 @@ def test_ascend_sync_inter_arrive_wait():
     source = artifact.kernel_source
     print(source)
     assert "#include <c_api/asc_simd.h>" not in source
-    assert "AscendC::CrossCoreSetFlag<0, PIPE_FIX>(3);" in source
-    assert "AscendC::CrossCoreWaitFlag<0, PIPE_MTE3>(flag_id);" in source
+    assert "asc_sync_inter_arrive(PIPE_FIX, 3);" in source
+    assert "asc_sync_inter_wait(PIPE_MTE3, flag_id);" in source
 
 
 def test_ascend_threadfence():
@@ -137,7 +167,7 @@ def test_ascend_cross_core_set_flag():
     artifact = lower(func, target="ascend")
     source = artifact.kernel_source
     print(source)
-    assert "AscendC::CrossCoreSetFlag<0, PIPE_MTE3>(8)" in source
+    assert "asc_sync_inter_arrive(PIPE_MTE3, 8)" in source
 
 
 def test_ascend_cross_core_wait_flag():
@@ -150,7 +180,7 @@ def test_ascend_cross_core_wait_flag():
     artifact = lower(func, target="ascend")
     source = artifact.kernel_source
     print(source)
-    assert "AscendC::CrossCoreWaitFlag<0, PIPE_MTE3>(8)" in source
+    assert "asc_sync_inter_wait(PIPE_MTE3, 8)" in source
 
 
 def test_ascend_simd_3510_intrinsics_codegen():
@@ -363,7 +393,7 @@ def test_ascend_simd_vdiv_precision_override():
 
 
 def test_ascend_simd_sfu_precision_merging():
-    """ftz_false in MODE_MERGING selects the *_1ulp_ftz_false wrappers."""
+    """ftz_false in MODE_MERGING selects the precision wrappers."""
 
     @T.prim_func
     def func(
@@ -723,9 +753,8 @@ def test_ascend_simd_vld_e2b_b16_extent():
     assert "E2B_B16" in tir
     source = lower(func, target="ascend").kernel_source
     print(source)
-    assert "E2B_B16" in source
     # Latest ascend lowers E2B_B16 through vlds with a zero hardware offset.
-    assert "simd_inst::vlds<" in source
+    assert "simd_inst::vlds_brc_elem2datablock<" in source
 
 
 def test_ascend_simd_vsts_extent_override():
@@ -765,13 +794,17 @@ def test_copy_pad_value_gm_to_ub():
 
     source = lower(func, target="ascend").kernel_source
     print(source)
-    pad_idx = source.find("set_mov_pad_val")
-    copy_idx = source.find("copy_gm_to_ubuf_align_v2")
+    pad_idx = source.find("asc_set_copy_pad_val")
+    copy_idx = source.find("asc_copy_gm2ub_align")
     assert pad_idx != -1 and copy_idx != -1
     # The pad-register write must precede the padded copy.
     assert pad_idx < copy_idx
-    # Padded copy: rightPadding=2 (128B-120B)/4, dataSelect=1, dst_stride=128.
-    assert "0, 4, 120, 0, 2, 1," in source
+    # Padded copy: right_padding=2, constant padding enabled, dst_stride=128B.
+    assert re.search(
+        r"asc_copy_gm2ub_align\([^;]*,\s*4,\s*120,\s*0,\s*2,\s*1,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*120,\s*128\);",
+        source,
+    ), source
 
 
 if __name__ == "__main__":

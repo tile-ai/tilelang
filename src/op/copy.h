@@ -34,7 +34,7 @@ public:
   Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
   // Ascend MX scale-factor companion source (L1/cbuf) for an L1→L0 data copy.
   // When set, the L1→L0A/L0B lowering also loads the per-block scale factors
-  // into the L0 MX scale registers (load_cbuf_to_ca_mx / load_cbuf_to_cb_mx).
+  // into the L0 MX scale registers (asc_copy_l12l0a_mx / asc_copy_l12l0b_mx).
   Optional<Buffer> sf;
   Array<Range> sf_range; // Ranges for each dimension of `sf`.
   // Annotated source OOB fallback value resolved from the enclosing block.

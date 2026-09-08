@@ -16,7 +16,7 @@ def test_ascend_copy_gm_to_ub_outside_simtvf():
     print("=== test_ascend_copy_gm_to_ub_outside_simtvf ===")
     print(source)
 
-    assert "copy_gm_to_ubuf" in source, "Outside-SimtVF GM→UB copy should generate copy_gm_to_ubuf DMA call"
+    assert "asc_copy_gm2ub_align" in source, "Outside-SimtVF GM->UB copy should generate the aligned C API DMA call"
     assert "__simt_vf__" not in source, "No SimtVF region in this kernel — should not emit __simt_vf__"
     print("[PASS] test_ascend_copy_gm_to_ub_outside_simtvf\n")
 
@@ -37,8 +37,8 @@ def test_ascend_copy_ub_to_gm_outside_simtvf():
     print("=== test_ascend_copy_ub_to_gm_outside_simtvf ===")
     print(source)
 
-    assert "copy_gm_to_ubuf" in source, "Should have GM→UB DMA for loading A into temp"
-    assert "copy_ubuf_to_gm" in source, "Outside-SimtVF UB→GM copy should generate copy_ubuf_to_gm DMA call"
+    assert "asc_copy_gm2ub_align" in source, "Should have GM->UB DMA for loading A into temp"
+    assert "asc_copy_ub2gm_align" in source, "Outside-SimtVF UB->GM copy should generate the aligned C API DMA call"
     print("[PASS] test_ascend_copy_ub_to_gm_outside_simtvf\n")
 
 
@@ -60,7 +60,7 @@ def test_ascend_copy_inside_simtvf():
     vf_start = source.find("simt_vf_0")
     assert vf_start >= 0, "Should have simt_vf_0 helper function"
     vf_body = source[vf_start : source.find("\nextern", vf_start)]
-    assert "copy_gm_to_ubuf" not in vf_body, "Inside-SimtVF copy should NOT use DMA copy_gm_to_ubuf — should be per-thread"
+    assert "asc_copy_gm2ub_align" not in vf_body, "Inside-SimtVF copy should use per-thread access rather than DMA"
     assert "threadIdx.x" in source, "Inside-SimtVF copy should use threadIdx.x for per-thread indexing"
     print("[PASS] test_ascend_copy_inside_simtvf\n")
 
@@ -84,7 +84,7 @@ def test_ascend_copy_mixed_outside_dma_inside_simt():
     print("=== test_ascend_copy_mixed_outside_dma_inside_simt ===")
     print(source)
 
-    assert "copy_gm_to_ubuf" in source, "Outside-SimtVF copy should generate DMA copy_gm_to_ubuf"
+    assert "asc_copy_gm2ub_align" in source, "Outside-SimtVF copy should generate the aligned C API DMA call"
     assert "__simt_vf__" in source, "Should emit __simt_vf__ for the SimtVF region"
     assert "asc_vf_call" in source, "Should emit asc_vf_call to invoke the SimtVF helper"
     print("[PASS] test_ascend_copy_mixed_outside_dma_inside_simt\n")

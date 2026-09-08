@@ -135,7 +135,8 @@ def AscendInsertOOBPadding():
     for a padded GM->L1 copy it also appends semantic T.fill operations with
     exact destination regions. Runs after InsertNd2Nz and before AutoSchedule
     so each fill is scheduled as its own MTE2 task and ordered against L1->L0
-    consumers. LowerTileOp later converts the fills to create_cbuf_matrix.
+    consumers. LowerTileOp later converts the fills to ascend_fill_l1, which
+    codegen emits as asc_fill_l1.
     """
     return _ffi_api.AscendInsertOOBPadding()  # type: ignore
 

@@ -178,7 +178,7 @@ def ascend_cross_core_wait_flag(mode_id: int, pipe: str, flag_id) -> None:
 def ascend_get_buf(pipe, buf_id, mode=False):
     """Acquire a pipe buffer for double-buffer management.
 
-    Generates: get_buf(pipe, buf_id, mode);
+    Generates: asc_lock(pipe, buf_id, mode);
 
     Parameters
     ----------
@@ -202,7 +202,7 @@ def ascend_get_buf(pipe, buf_id, mode=False):
 def ascend_rls_buf(pipe, buf_id, mode=False):
     """Release a pipe buffer for double-buffer management.
 
-    Generates: rls_buf(pipe, buf_id, mode);
+    Generates: asc_unlock(pipe, buf_id, mode);
 
     Parameters
     ----------

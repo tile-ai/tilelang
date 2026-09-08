@@ -247,7 +247,7 @@ class GemmMAD(GemmBase):
     def _lower_l0_blockscaled(self):
         # L0 block-scaled MAD. The per-block scale factors must already have been
         # loaded into the L0A/L0B MX scale registers (e.g. via
-        # T.copy(l1_data, l0, sf=l1_sf)); mad_mx then applies them. The call
+        # T.copy(l1_data, l0, sf=l1_sf)); asc_mmad_mx then applies them. The call
         # signature matches tl.ascend_mad — the scaling is implicit in the
         # hardware MX registers, so no SF pointer is passed here.
         m, n, k = self._l0_operation_extents()

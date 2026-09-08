@@ -1,8 +1,8 @@
 """
-Test for ND→NZ scatter + 2D copy_ubuf_to_cbuf on Ascend (UB→L1, V→C direction).
+Test for ND→NZ scatter + 2D asc_copy_ub2l1 on Ascend (UB→L1, V→C direction).
 
 Dataflow:
-  AIV:  GM(D) → UB → L1 (nd2nz scatter + 2D copy_ubuf_to_cbuf)
+  AIV:  GM(D) → UB → L1 (nd2nz scatter + 2D asc_copy_ub2l1)
   AIC:  GM(I) → L1 (MTE2, hardware ND→NZ) → wait AIV → gemm(I, D) → L0C → GM(C)
 
 Verify: I @ D = D  (identity matmul), so output C should equal input D.
@@ -106,9 +106,9 @@ def test_nd2nz_matmul_reuses_mixed_kernel_sid(split_dim):
     source = tilelang.lower(nd2nz_matmul(64, 128, "float", "float", num_aiv=2, split_dim=split_dim), target="ascend").kernel_source
 
     assert "__global__ __mix__(1, 2)" in source
-    assert source.count("get_subblockid()") == 1
-    assert source.count("copy_gm_to_ubuf_align_v2") == 1
-    assert source.count("copy_ubuf_to_cbuf") == 1
+    assert source.count("asc_get_sub_block_id()") == 1
+    assert source.count("asc_copy_gm2ub_align") == 1
+    assert source.count("asc_copy_ub2l1") == 1
 
 
 if __name__ == "__main__":

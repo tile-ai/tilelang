@@ -15,8 +15,8 @@ FLAG = 3
 
 def _core_branch(source: str, token: str) -> str:
     position = source.index(token)
-    aic = source.rfind("if ASCEND_IS_AIC", 0, position)
-    aiv = source.rfind("if ASCEND_IS_AIV", 0, position)
+    aic = source.rfind("if ASC_IS_AIC", 0, position)
+    aiv = source.rfind("if ASC_IS_AIV", 0, position)
     if max(aic, aiv) >= 0:
         return "AIC" if aic > aiv else "AIV"
 
@@ -67,33 +67,39 @@ def _make_per_core_mte2_program(to_l1: bool, mode: int = 0):
     return main
 
 
-@pytest.mark.parametrize("mode", [0, 7])
-def test_per_core_mte2_uses_copy_destination_core(mode):
-    marker = f"AscendC::CrossCoreWaitFlag<{mode}, PIPE_MTE2>({FLAG});"
+def test_per_core_mte2_uses_copy_destination_core():
+    marker = f"asc_sync_inter_wait(PIPE_MTE2, {FLAG});"
     for to_l1, expected in ((True, "AIC"), (False, "AIV")):
-        source = lower(_make_per_core_mte2_program(to_l1, mode), target="ascend").kernel_source
+        source = lower(_make_per_core_mte2_program(to_l1, 0), target="ascend").kernel_source
         assert _core_branch(source, marker) == expected
 
 
-def _make_arbitrary_cross_core_mode_program():
+def _make_supported_cross_core_mode_program():
     @T.prim_func
     def main():
         with T.Kernel(1):
             # Flag IDs share one hardware domain across modes. The concrete
             # PIPE_V endpoint places the ambiguous PIPE_MTE2 endpoint on AIV.
-            T.ascend_cross_core_set_flag(3, "PIPE_MTE2", FLAG)
-            T.ascend_cross_core_set_flag(7, "PIPE_V", FLAG)
+            T.ascend_cross_core_set_flag(0, "PIPE_MTE2", FLAG)
+            T.ascend_cross_core_set_flag(1, "PIPE_V", FLAG)
+            T.ascend_cross_core_set_flag(2, "PIPE_MTE2", FLAG)
+            T.ascend_cross_core_set_flag(4, "PIPE_V", FLAG)
 
     return main
 
 
-def test_cross_core_placement_accepts_arbitrary_modes():
-    source = lower(_make_arbitrary_cross_core_mode_program(), target="ascend").kernel_source
+def test_cross_core_placement_accepts_supported_modes():
+    source = lower(_make_supported_cross_core_mode_program(), target="ascend").kernel_source
 
-    ambiguous_marker = f"AscendC::CrossCoreSetFlag<3, PIPE_MTE2>({FLAG});"
-    vector_marker = f"AscendC::CrossCoreSetFlag<7, PIPE_V>({FLAG});"
-    assert _core_branch(source, ambiguous_marker) == "AIV"
-    assert _core_branch(source, vector_marker) == "AIV"
+    sync_mode_0 = f"asc_sync_inter_arrive(PIPE_MTE2, {FLAG});"
+    sync_mode_1 = f"asc_sync_subblock_arrive(PIPE_V, {FLAG});"
+    sync_mode_2 = f"asc_sync_block_arrive(PIPE_MTE2, {FLAG});"
+    sync_mode_4 = f"asc_sync_intra_arrive(PIPE_V, {FLAG});"
+
+    assert _core_branch(source, sync_mode_0) == "AIV"
+    assert _core_branch(source, sync_mode_1) == "AIV"
+    assert _core_branch(source, sync_mode_2) == "AIV"
+    assert _core_branch(source, sync_mode_4) == "AIV"
 
 
 def _make_per_core_candidate_program(explicit: bool, leave_second_unmarked: bool = False):
@@ -124,8 +130,8 @@ def _make_per_core_candidate_program(explicit: bool, leave_second_unmarked: bool
 
 
 def _assert_per_core_mte2_mte1_sync(source: str):
-    set_flag = "AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>"
-    wait_flag = "AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>"
+    set_flag = "asc_sync_notify(PIPE_MTE2, PIPE_MTE1,"
+    wait_flag = "asc_sync_wait(PIPE_MTE2, PIPE_MTE1,"
     assert source.count(set_flag) == 2
     assert source.count(wait_flag) == 1
 
@@ -187,7 +193,7 @@ def _make_per_core_dual_copy_store_program():
 
 def test_per_core_task_rewrites_standalone_ub_to_gm_dual_copy():
     source = lower(_make_per_core_dual_copy_store_program(), target="ascend").kernel_source
-    store = re.search(r"copy_ubuf_to_gm_align_v2\(\(__gm__ void\*\)\(([^,]+)\),", source)
+    store = re.search(r"asc_copy_ub2gm_align\(\(__gm__ uint8_t\*\)\(([^,]+)\),", source)
     assert store is not None
     assert "sid" in store.group(1)
 

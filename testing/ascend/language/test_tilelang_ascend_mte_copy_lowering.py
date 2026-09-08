@@ -73,10 +73,11 @@ def test_gm2ub_single_row_copy():
 
     source = kernel.get_kernel_source()
     good = re.search(
-        r"copy_gm_to_ubuf_align_v2\([^;]*,\s*0,\s*1,\s*4096,\s*0,\s*0,\s*0,\s*0,\s*4096,\s*4096\);",
+        r"asc_copy_gm2ub_align\([^;]*,\s*1,\s*4096,\s*0,\s*0,\s*0,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*4096,\s*4096\);",
         source,
     )
-    bad = re.search(r"copy_gm_to_ubuf\(", source)
+    bad = re.search(r"asc_copy_gm2ub\(", source)
     assert good is not None, source
     assert bad is None, source
 
@@ -118,12 +119,14 @@ def test_ub2gm_partial_col_copy():
     # 4 bursts of 4 int32 (16B), source stride = row pitch (64*4 = 256B),
     # dest stride = contiguous 16B. cacheMode for a store defaults to 4.
     good = re.search(
-        r"copy_ubuf_to_gm_align_v2\([^;]*,\s*0,\s*4,\s*16,\s*4,\s*16,\s*256\);",
+        r"asc_copy_ub2gm_align\([^;]*,\s*4,\s*16,\s*"
+        r"static_cast<asc_store_l2_cache_mode>\(4\),\s*16,\s*256\);",
         source,
     )
     # The buggy collapse emitted a single 64B contiguous burst.
     bad = re.search(
-        r"copy_ubuf_to_gm_align_v2\([^;]*,\s*0,\s*1,\s*64,\s*4,\s*64,\s*64\);",
+        r"asc_copy_ub2gm_align\([^;]*,\s*1,\s*64,\s*"
+        r"static_cast<asc_store_l2_cache_mode>\(4\),\s*64,\s*64\);",
         source,
     )
     assert good is not None, source
@@ -161,7 +164,8 @@ def test_gm2ub_1d_to_2d():
 
     source = kernel.get_kernel_source()
     good = re.search(
-        r"copy_gm_to_ubuf_align_v2\([^;]*,\s*0,\s*4,\s*16,\s*0,\s*0,\s*0,\s*0,\s*16,\s*256\);",
+        r"asc_copy_gm2ub_align\([^;]*,\s*4,\s*16,\s*0,\s*0,\s*0,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*16,\s*256\);",
         source,
     )
     assert good is not None, source
@@ -201,7 +205,8 @@ def test_gm2ub_2d_to_2d():
 
     source = kernel.get_kernel_source()
     good = re.search(
-        r"copy_gm_to_ubuf_align_v2\([^;]*,\s*0,\s*4,\s*16,\s*0,\s*0,\s*0,\s*0,\s*32,\s*64\);",
+        r"asc_copy_gm2ub_align\([^;]*,\s*4,\s*16,\s*0,\s*0,\s*0,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*32,\s*64\);",
         source,
     )
     assert good is not None, source
@@ -237,7 +242,8 @@ def test_gm2ub_single_element_rows():
 
     source = kernel.get_kernel_source()
     good = re.search(
-        r"copy_gm_to_ubuf_align_v2\([^;]*,\s*0,\s*4,\s*4,\s*0,\s*0,\s*0,\s*0,\s*256,\s*4\);",
+        r"asc_copy_gm2ub_align\([^;]*,\s*4,\s*4,\s*0,\s*0,\s*0,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*256,\s*4\);",
         source,
     )
     assert good is not None, source
@@ -270,7 +276,7 @@ def runtime_divisor_copy():
 def test_mte_copy_hoists_let_bindings_before_calls():
     source = tilelang.lower(runtime_divisor_copy(), target="ascend").kernel_source
 
-    for call_name in ("copy_gm_to_ubuf_align_v2", "copy_ubuf_to_gm_align_v2"):
+    for call_name in ("asc_copy_gm2ub_align", "asc_copy_ub2gm_align"):
         call_start = source.index(call_name)
         call_end = source.index(");", call_start)
         call = source[call_start:call_end]
@@ -339,11 +345,13 @@ def test_gm2ub_dynamic_rows_middle_dim():
     # The dynamic row count is clamped to the buffer's row extent (DYNAMIC_ROWS)
     # so an out-of-range `n` cannot issue an OOB DMA.
     good = re.search(
-        rf"copy_gm_to_ubuf_align_v2\([^;]*,\s*0,\s*min\(n,\s*{DYNAMIC_ROWS}\),\s*2048,\s*0,\s*0,\s*0,\s*0,\s*4096,\s*2048\);",
+        rf"asc_copy_gm2ub_align\([^;]*,\s*min\(n,\s*{DYNAMIC_ROWS}\),\s*2048,\s*0,\s*0,\s*0,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*4096,\s*2048\);",
         source,
     )
     bad = re.search(
-        r"copy_gm_to_ubuf_align_v2\([^;]*,\s*0,\s*1,\s*\(n \* 2048\),\s*0,\s*0,\s*0,\s*0,",
+        r"asc_copy_gm2ub_align\([^;]*,\s*1,\s*\(n \* 2048\),\s*0,\s*0,\s*0,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),",
         source,
     )
     assert good is not None, source
@@ -393,7 +401,7 @@ def test_l0c_to_strided_gm_uses_runtime_row_stride():
     kernel = tilelang.compile(l0c_to_strided_gm_copy(), target="ascend")
     source = kernel.get_kernel_source()
     assert re.search(
-        r"copy_matrix_cc_to_gm\([^;]*,\s*0,\s*16,\s*16,\s*\(\(int32_t\)ldd\),\s*16,",
+        r"asc_copy_l0c2gm\([^;]*,\s*16,\s*16,\s*\(\(int32_t\)ldd\),\s*16,",
         source,
     ), source
 
@@ -445,10 +453,10 @@ def test_compact_l0_regions_drive_load_mad_and_store_geometry():
 
     # The L1 allocation keeps its 64-row / 4-fractal pitch, while each compact
     # L0 operand uses the 17/19-row region pitch (two fractals).
-    assert re.search(r"load_cbuf_to_ca\([^;]*,\s*0,\s*0,\s*2,\s*2,\s*4,\s*2,\s*0\);", source), source
-    assert re.search(r"load_cbuf_to_cb\([^;]*,\s*0,\s*0,\s*2,\s*2,\s*4,\s*2,\s*0\);", source), source
-    assert re.search(r"mad\([^;]*,\s*17,\s*18,\s*19,", source), source
-    assert re.search(r"copy_matrix_cc_to_gm\([^;]*,\s*0,\s*19,\s*17,\s*19,\s*32,", source), source
+    assert re.search(r"asc_copy_l12l0a\([^;]*,\s*0,\s*0,\s*2,\s*2,\s*4,\s*2\);", source), source
+    assert re.search(r"asc_copy_l12l0b\([^;]*,\s*0,\s*0,\s*2,\s*2,\s*4,\s*2\);", source), source
+    assert re.search(r"asc_mmad\([^;]*,\s*17,\s*18,\s*19,", source), source
+    assert re.search(r"asc_copy_l0c2gm\([^;]*,\s*19,\s*17,\s*19,\s*32,", source), source
 
 
 def dynamic_compact_l0_region_copy():
@@ -494,17 +502,17 @@ def test_dynamic_compact_l0_region_uses_symbolic_geometry():
     k_blocks = r"\(\(\(k - 1\) >> 4\) \+ 1\)"
     assert re.search(
         rf"if \(\(0 < m\) && \(0 < k\)\) \{{\s*"
-        rf"load_cbuf_to_ca\([^;]*,\s*0,\s*0,\s*{m_blocks},\s*{k_blocks},\s*4,\s*{m_blocks},\s*0\);",
+        rf"asc_copy_l12l0a\([^;]*,\s*0,\s*0,\s*{m_blocks},\s*{k_blocks},\s*4,\s*{m_blocks}\);",
         source,
     ), source
     assert re.search(
         rf"if \(\(0 < n\) && \(0 < k\)\) \{{\s*"
-        rf"load_cbuf_to_cb\([^;]*,\s*0,\s*0,\s*{n_blocks},\s*{k_blocks},\s*4,\s*{n_blocks},\s*0\);",
+        rf"asc_copy_l12l0b\([^;]*,\s*0,\s*0,\s*{n_blocks},\s*{k_blocks},\s*4,\s*{n_blocks}\);",
         source,
     ), source
-    assert re.search(r"mad\([^;]*,\s*m,\s*k,\s*n,", source), source
+    assert re.search(r"asc_mmad\([^;]*,\s*m,\s*k,\s*n,", source), source
     assert re.search(
-        r"copy_matrix_cc_to_gm\([^;]*,\s*0,\s*min\(n, 64\),\s*min\(m, 64\),\s*64,"
+        r"asc_copy_l0c2gm\([^;]*,\s*min\(n, 64\),\s*min\(m, 64\),\s*64,"
         r"\s*\(\(\(\(min\(m, 64\) - 1\) >> 4\) \* 16\) \+ 16\),",
         source,
     ), source
@@ -532,11 +540,13 @@ def test_gm_to_l1_fixed_outer_axis_uses_effective_row_stride():
     # only 80 bf16 (160B) apart. The fixed group axis belongs in the pointer
     # offset, not the ND2NZ row-stride argument.
     assert re.search(
-        r"copy_gm_to_cbuf_multi_nd2nz\([^;]*,\s*0,\s*160,\s*0,\s*16,\s*64,",
+        r"asc_copy_gm2l1_nd2nz\([^;]*,\s*160,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*16,\s*64,",
         source,
     ), source
     assert not re.search(
-        r"copy_gm_to_cbuf_multi_nd2nz\([^;]*,\s*0,\s*4000,\s*0,\s*16,\s*64,",
+        r"asc_copy_gm2l1_nd2nz\([^;]*,\s*4000,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*16,\s*64,",
         source,
     ), source
 
@@ -566,7 +576,7 @@ def test_l0c_to_rank3_gm_uses_effective_row_stride():
     artifact = tilelang.lower(l0c_to_rank3_gm_copy(), target="ascend")
     source = artifact.kernel_source
     assert re.search(
-        r"copy_matrix_cc_to_gm\([^;]*,\s*0,\s*12,\s*8,\s*40,\s*16,",
+        r"asc_copy_l0c2gm\([^;]*,\s*12,\s*8,\s*40,\s*16,",
         source,
     ), source
 
@@ -606,11 +616,15 @@ def l0c_to_oob_gm_copy():
 def test_l0c_to_oob_gm_preserves_source_geometry():
     artifact = tilelang.lower(l0c_to_oob_gm_copy(), target="ascend")
     source = artifact.kernel_source
-    copy = re.search(r"copy_matrix_cc_to_gm\([^;]+\);", source)
+    copy = re.search(r"asc_copy_l0c2gm\([^;]+\);", source)
     assert copy is not None, source
     args = copy.group(0)
-    assert re.search(r",\s*0,\s*16,\s*min\(128,", args), args
-    assert re.search(r",\s*16,\s*128,\s*0,\s*0,", args), args
+    assert re.search(r",\s*16,\s*min\(128,", args), args
+    assert re.search(
+        r",\s*16,\s*128,\s*static_cast<asc_store_l2_cache_mode>\(0\),\s*"
+        r"static_cast<asc_unit_flag_mode>\(3\),",
+        args,
+    ), args
 
 
 def gm_to_l1_true_nd_copy():
@@ -694,11 +708,13 @@ def test_gm2ub2gm_fp4_copy():
 
     source = kernel.get_kernel_source()
     good_gm2ub = re.search(
-        r"copy_gm_to_ubuf_align_v2\([^;]*,\s*0,\s*1,\s*512,\s*0,\s*0,\s*0,\s*0,\s*512,\s*512\);",
+        r"asc_copy_gm2ub_align\([^;]*,\s*1,\s*512,\s*0,\s*0,\s*0,\s*"
+        r"static_cast<asc_load_l2_cache_mode>\(0\),\s*512,\s*512\);",
         source,
     )
     good_ub2gm = re.search(
-        r"copy_ubuf_to_gm_align_v2\([^;]*,\s*0,\s*1,\s*512,\s*4,\s*512,\s*512\);",
+        r"asc_copy_ub2gm_align\([^;]*,\s*1,\s*512,\s*"
+        r"static_cast<asc_store_l2_cache_mode>\(4\),\s*512,\s*512\);",
         source,
     )
     assert good_gm2ub is not None, source

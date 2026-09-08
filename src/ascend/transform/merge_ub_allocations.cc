@@ -88,7 +88,7 @@ static bool IsScopeMemory(Var buffer_var, const std::string &target_scope) {
 // fractal-tiled data whose MTE/FixPipe strides and mad positions are computed
 // in fractal units, so a sub-buffer base that is not on a fractal boundary
 // shifts the whole fractal grid relative to base-0 and makes
-// load_cbuf_to_ca/cb, mad and copy_matrix_cc_to_ub address the wrong fractals.
+// asc_copy_l12l0a/b, asc_mmad and asc_copy_l0c2ub address the wrong fractals.
 //
 // Fractal sizes are fixed by the hardware:
 //   - L1 / L0A / L0B: NZ fractal is 16 x (32B / sizeof(dtype)) = 512 bytes,

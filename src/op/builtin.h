@@ -625,11 +625,11 @@ TVM_DLL const Op &ascend_copy_gm_to_cbuf();
  * ascend_fill_l1(dst, byte_offset, raw_value, repeat_times, block_num,
  *                dst_gap, fill_word_bits)
  *
- * Emits create_cbuf_matrix at dst + byte_offset. repeat_times is the number of
- * fill iterations; block_num is the number of 32-byte blocks written by each
- * iteration; dst_gap is the number of skipped 32-byte blocks between adjacent
- * iterations. fill_word_bits selects a raw uint16_t or uint32_t destination
- * view, and raw_value carries the repeated element bit pattern.
+ * Codegen emits asc_fill_l1 at dst + byte_offset. repeat_times is the number
+ * of fill iterations; block_num is the number of 32-byte blocks written by
+ * each iteration; dst_gap is the number of skipped 32-byte blocks between
+ * adjacent iterations. fill_word_bits selects a raw uint16_t or uint32_t
+ * destination view, and raw_value carries the repeated element bit pattern.
  */
 TVM_DLL const Op &ascend_fill_l1();
 
@@ -640,7 +640,7 @@ TVM_DLL const Op &ascend_fill_l1();
  * mStep, kStep, srcStride, dstStride, transpose)
  *
  * Optionally 16 args when an MX scale-factor companion load is attached; the
- * extra args drive a following load_cbuf_to_ca_mx:
+ * extra args drive a following asc_copy_l12l0a_mx:
  *   [9]  sf_ptr, [10] sf_x_start,
  *   [11] sf_y_start (y is contiguous fractal direction),
  *   [12] sf_x_step,
@@ -656,7 +656,7 @@ TVM_DLL const Op &ascend_load_cbuf_to_ca();
  * mStep, kStep, srcStride, dstStride, transpose)
  *
  * Optionally 16 args when an MX scale-factor companion load is attached; the
- * extra args drive a following load_cbuf_to_cb_mx:
+ * extra args drive a following asc_copy_l12l0b_mx:
  *   [9]  sf_ptr, [10] sf_x_start,
  *   [11] sf_y_start (y is contiguous fractal direction),
  *   [12] sf_x_step,

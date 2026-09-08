@@ -472,7 +472,8 @@ private:
     // are grouped by VisitStmt_(SeqStmtNode*) so paired A/B loads are followed
     // by both fills. AutoSchedule sees their exact tl.fill write regions and
     // orders them before the MTE1 consumers; LowerTileOp later converts them
-    // to create_cbuf_matrix. The fallback here handles a copy that is not
+    // to ascend_fill_l1, which codegen emits as asc_fill_l1. The fallback here
+    // handles a copy that is not
     // inside a SeqStmt.
     std::vector<Stmt> fills = MakeL1PaddingStmts(copy, layout_map_, analyzer_);
     std::vector<MxKTailFill> mx_fills;

@@ -2,8 +2,6 @@
 
 #include <stdint.h>
 
-#include "kernel_operator.h"
-
 namespace tl {
 
 // Scalar GM access that bypasses the per-core DCache. AscendC::{Read,Write}
@@ -19,20 +17,16 @@ __aicore__ inline T read_gm_bypass_dcache(__gm__ T *addr) {
                 "read_gm_bypass_dcache only supports 1/2/4/8-byte scalar "
                 "types");
   if constexpr (sizeof(T) == 8) {
-    uint64_t bits =
-        AscendC::ReadGmByPassDCache(reinterpret_cast<__gm__ uint64_t *>(addr));
+    uint64_t bits = asc_load_dev(reinterpret_cast<__gm__ uint64_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else if constexpr (sizeof(T) == 4) {
-    uint32_t bits =
-        AscendC::ReadGmByPassDCache(reinterpret_cast<__gm__ uint32_t *>(addr));
+    uint32_t bits = asc_load_dev(reinterpret_cast<__gm__ uint32_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else if constexpr (sizeof(T) == 2) {
-    uint16_t bits =
-        AscendC::ReadGmByPassDCache(reinterpret_cast<__gm__ uint16_t *>(addr));
+    uint16_t bits = asc_load_dev(reinterpret_cast<__gm__ uint16_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else {
-    uint8_t bits =
-        AscendC::ReadGmByPassDCache(reinterpret_cast<__gm__ uint8_t *>(addr));
+    uint8_t bits = asc_load_dev(reinterpret_cast<__gm__ uint8_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   }
 }
@@ -45,20 +39,16 @@ __aicore__ inline void write_gm_bypass_dcache(__gm__ T *addr, T value) {
                 "types");
   if constexpr (sizeof(T) == 8) {
     uint64_t bits = *reinterpret_cast<uint64_t *>(&value);
-    AscendC::WriteGmByPassDCache(reinterpret_cast<__gm__ uint64_t *>(addr),
-                                 bits);
+    asc_store_dev(reinterpret_cast<__gm__ uint64_t *>(addr), bits);
   } else if constexpr (sizeof(T) == 4) {
     uint32_t bits = *reinterpret_cast<uint32_t *>(&value);
-    AscendC::WriteGmByPassDCache(reinterpret_cast<__gm__ uint32_t *>(addr),
-                                 bits);
+    asc_store_dev(reinterpret_cast<__gm__ uint32_t *>(addr), bits);
   } else if constexpr (sizeof(T) == 2) {
     uint16_t bits = *reinterpret_cast<uint16_t *>(&value);
-    AscendC::WriteGmByPassDCache(reinterpret_cast<__gm__ uint16_t *>(addr),
-                                 bits);
+    asc_store_dev(reinterpret_cast<__gm__ uint16_t *>(addr), bits);
   } else {
     uint8_t bits = *reinterpret_cast<uint8_t *>(&value);
-    AscendC::WriteGmByPassDCache(reinterpret_cast<__gm__ uint8_t *>(addr),
-                                 bits);
+    asc_store_dev(reinterpret_cast<__gm__ uint8_t *>(addr), bits);
   }
 }
 

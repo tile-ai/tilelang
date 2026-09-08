@@ -23,7 +23,8 @@ env:
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "" # explicit cleanup
-  PIP_USER: "" # explicit cleanup
+  PIP_USER: "0" # install into the job venv
+  PIP_TIMEOUT: "600"
   COLUMNS: "100"
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
@@ -57,6 +58,11 @@ jobs:
             pyproject.toml
             requirements*.txt
             .pre-commit-config.yaml
+
+      - name: Install pipx
+        run: |
+          # Install local copies without uninstalling the runner's shared packages.
+          "${{ steps.setup-pylowest.outputs.python-path }}" -m pip install --ignore-installed pipx
 
       - name: Check AST with Python 3.12
         run: |
@@ -112,6 +118,15 @@ jobs:
             done
           fi
 
+          # Preserve the runner interpreter before setup-uv changes PATH.
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          CI_PYTHON_VERSION="$("${CI_BASE_PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [[ "${CI_PYTHON_VERSION}" != "${{ matrix.python-version }}" ]]; then
+            echo "::error::Runner Python ${CI_PYTHON_VERSION} does not match requested ${{ matrix.python-version }}"
+            exit 1
+          fi
+          echo "CI_BASE_PYTHON=${CI_BASE_PYTHON}" >> "${GITHUB_ENV}"
+
           # Use runner tool_cache as cache root for self-hosted runners to avoid internet connection
           # issues and to share cache between jobs.
           export XDG_CACHE_HOME="${{ runner.tool_cache }}/.ci-cache-${{ github.workflow }}"
@@ -148,12 +163,11 @@ jobs:
             echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
           } | tee -a "${GITHUB_ENV}"
 
-      - name: Setup Python and uv with caching
+      - name: Setup uv with caching
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: ${{ matrix.python-version }}
-          activate-environment: true
+          activate-environment: false
           # Do not use cache for self-hosted runners, as it will download/upload caches which is slow.
           enable-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
           prune-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
@@ -175,14 +189,37 @@ jobs:
           export PYTHONPATH=""
           export PIP_USER=0
 
-          uv pip install --upgrade pip setuptools wheel
-          uv pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
-          uv pip install -v -r requirements-test.txt
-          uv pip install pybind11==2.12.0
-          echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
+          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
+          source .venv/bin/activate
+          export UV_PYTHON="${VIRTUAL_ENV}/bin/python"
+          export PIP_CONSTRAINT="${RUNNER_TEMP}/inherited-torch-constraints.txt"
+          {
+            echo "VIRTUAL_ENV=${VIRTUAL_ENV}"
+            echo "UV_PYTHON=${UV_PYTHON}"
+            echo "PIP_CONSTRAINT=${PIP_CONSTRAINT}"
+          } >> "${GITHUB_ENV}"
+          echo "${VIRTUAL_ENV}/bin" >> "${GITHUB_PATH}"
+
+          # Fail early if the runner's Torch stack cannot load, and preserve its versions.
+          python - <<'PY'
+          import importlib
+          import os
+          from importlib.metadata import version
+
+          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+              for package in ("torch", "torch_npu"):
+                  module = importlib.import_module(package)
+                  requirement = f"{package}=={version(package)}"
+                  constraints.write(f"{requirement}\n")
+                  print(f"{requirement} ({module.__file__})")
+          PY
+
+          # pip recognizes inherited packages; uv pip would install another Torch copy.
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -v -r requirements-test.txt
+          python -m pip install pybind11==2.12.0
           echo "::group::torch.utils.collect_env"
-          uv run --no-project -m -- torch.utils.collect_env
-          uv pip install /nfs-hg/prod/deepseek/permanent/shared/caohuanqi/pytorch/dist/torch_npu-2.10.0.post1+git4be33e9-cp312-cp312-linux_aarch64.whl
+          python -m torch.utils.collect_env
           # Self-contained PTO toolchain from the official hw-native-sys/PTOAS
           # vmi-v0.1.6 release (ptodsl + MLIR dialects + ptoas CLI).
           case "${RUNNER_ARCH}" in
@@ -214,7 +251,7 @@ jobs:
             mv "${PTOAS_DOWNLOAD}" "${PTOAS_WHEEL}"
             trap - EXIT
           fi
-          uv pip install "${PTOAS_WHEEL}"
+          python -m pip install "${PTOAS_WHEEL}"
           echo "::endgroup::"
 
       - name: Clear uv cache for self-hosted runners (if setup failed)
@@ -232,7 +269,7 @@ jobs:
         env:
           USE_CUDA: "OFF"
         run: |
-          uv pip install -v .
+          python -m pip install -v .
 
       - name: Run Ascend example tests with Python ${{ matrix.python-version }}
         run: |

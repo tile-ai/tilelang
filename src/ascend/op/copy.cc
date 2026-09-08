@@ -287,10 +287,11 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
     if (dma_path == DMAPath::kGMToUB) {
       if (do_pad) {
         // Padded copy: rightPadding fills the row tail from the pad-value
-        // register (set_mov_pad_val). The destination stride is the physical
-        // UB row stride (plan_dst_stride_bytes), NOT the padded row width: the
-        // dst buffer may be over-allocated wider than align32(row), and rows
-        // must land at their real stride to avoid clobbering each other.
+        // register (asc_set_copy_pad_val). The destination stride is the
+        // physical UB row stride (plan_dst_stride_bytes), NOT the padded row
+        // width: the dst buffer may be over-allocated wider than align32(row),
+        // and rows must land at their real stride to avoid clobbering each
+        // other.
         call =
             Call(DataType::Void(), ascend_copy_gm_to_ubuf(),
                  {plan_dst_ptr, plan_src_ptr, sid, plan.n_rows, plan_row_bytes,
@@ -524,7 +525,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
         // SF buffer layout is (..., K-pairs, M): K-pairs is the second-to-last
         // dim, M is the last. All positions are derived from the SF region
         // itself (independent of the data copy), and the M/K start positions
-        // flow through the load_cbuf_to_ca_mx intrinsic parameters rather than
+        // flow through the asc_copy_l12l0a_mx intrinsic parameters rather than
         // the pointer.
         const int sf_k_dim = sf_range_ndim >= 2 ? sf_range_ndim - 2 : -1;
         const int sf_m_dim = sf_range_ndim - 1;

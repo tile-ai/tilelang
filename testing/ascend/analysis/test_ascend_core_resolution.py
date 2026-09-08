@@ -313,7 +313,7 @@ def _make_per_core_context_for_ambiguous_pipe_program():
 def test_per_core_task_supplies_pure_kernel_context_for_ambiguous_pipe():
     source = lower(_make_per_core_context_for_ambiguous_pipe_program(), target="ascend").kernel_source
     assert "__global__ __cube__ void main_kernel" in source
-    assert "CrossCoreSetFlag<0, PIPE_MTE2>(3)" in source
+    assert "asc_sync_inter_arrive(PIPE_MTE2, 3)" in source
 
 
 def _make_sid_context_for_ambiguous_pipe_program():
@@ -339,7 +339,7 @@ def _make_sid_context_for_ambiguous_pipe_program():
 
 def test_task_guard_resolves_ambiguous_cross_core_pipe():
     source = lower(_make_sid_context_for_ambiguous_pipe_program(), target="ascend").kernel_source
-    assert "CrossCoreSetFlag<4, PIPE_S>(3)" in source
+    assert "asc_sync_intra_arrive(PIPE_S, 3)" in source
 
 
 def _make_ancestor_controlled_ambiguous_pipe_program():
@@ -368,8 +368,8 @@ def _make_ancestor_controlled_ambiguous_pipe_program():
 
 def test_ancestor_control_resolves_ambiguous_cross_core_pipe():
     source = lower(_make_ancestor_controlled_ambiguous_pipe_program(), target="ascend").kernel_source
-    flag = source.index("CrossCoreSetFlag<4, PIPE_S>(3)")
-    assert source.rfind("if ASCEND_IS_AIV", 0, flag) > source.rfind("if ASCEND_IS_AIC", 0, flag)
+    flag = source.index("asc_sync_intra_arrive(PIPE_S, 3)")
+    assert source.rfind("if ASC_IS_AIV", 0, flag) > source.rfind("if ASC_IS_AIC", 0, flag)
 
 
 def _make_broadcast_only_scalar_program():

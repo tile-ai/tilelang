@@ -196,8 +196,8 @@ def copy(
         scale (Optional[BufferLikeType], keyword-only): Ascend MX scale-factor source
             buffer (in L1/cbuf) for an L1→L0A/L0B copy. When provided, the copy
             additionally loads the per-block scale factors into the L0 MX scale
-            registers via ``load_cbuf_to_ca_mx`` / ``load_cbuf_to_cb_mx`` so that a
-            subsequent ``mad_mx`` applies the scaling. K-offset / K-step are
+            registers via ``asc_copy_l12l0a_mx`` / ``asc_copy_l12l0b_mx`` so that a
+            subsequent ``asc_mmad_mx`` applies the scaling. K-offset / K-step are
             auto-derived from the data slice (1 SF pair = 64 K-elements); the
             NZ stride is taken from the scale buffer's second-to-last dimension.
             Ascend L1→L0 only; ignored on other paths/backends. Defaults to None.
@@ -313,7 +313,7 @@ def copy(
 
     # Ascend MX scale-factor companion load (L1→L0A/L0B). Pass the scale source
     # as a third positional region so the backend can derive the scale L1 pointer
-    # and emit load_cbuf_to_ca_mx / load_cbuf_to_cb_mx alongside the data load.
+    # and emit asc_copy_l12l0a_mx / asc_copy_l12l0b_mx alongside the data load.
     if scale is not None:
         scale_extent = get_extent(scale)
         scale_region = to_buffer_region(scale, access_type="r", extents=scale_extent)

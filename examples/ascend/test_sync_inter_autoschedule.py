@@ -44,10 +44,10 @@ def test_cross_core_mte3_write_visible_to_mte2_read(target):
     source = kernel.get_kernel_source()
 
     if target == "ascend":
-        mte3_store = source.index("copy_ubuf_to_gm")
-        arrive = source.index("AscendC::CrossCoreSetFlag<0, PIPE_MTE3>(4);")
-        wait = source.index("AscendC::CrossCoreWaitFlag<0, PIPE_MTE2>(4);")
-        mte2_loads = [match.start() for match in re.finditer("copy_gm_to_ubuf", source)]
+        mte3_store = source.index("asc_copy_ub2gm")
+        arrive = source.index("asc_sync_inter_arrive(PIPE_MTE3, 4);")
+        wait = source.index("asc_sync_inter_wait(PIPE_MTE2, 4);")
+        mte2_loads = [match.start() for match in re.finditer("asc_copy_gm2ub", source)]
         assert len(mte2_loads) == 2
         assert mte3_store < arrive
         assert wait < mte2_loads[1]

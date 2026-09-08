@@ -91,7 +91,7 @@ BoundedDMACopyRanges ClampDMACopyTail(const CopyNode &op,
  *
  * Keeping the semantic region on tl.fill lets AutoSchedule reason about the
  * exact write footprint. Ascend fill lowering converts it to
- * ascend_fill_l1/create_cbuf_matrix after scheduling.
+ * ascend_fill_l1 after scheduling, which codegen emits as asc_fill_l1.
  */
 Stmt MakeL1Fill(const Buffer &dst, const Array<Range> &region,
                 const PrimExpr &value);

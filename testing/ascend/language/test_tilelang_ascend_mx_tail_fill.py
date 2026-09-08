@@ -78,15 +78,16 @@ def test_mx_actual_k_copy_emits_deepgemm_tail_fill(
         make_mx_actual_k_copy(major_mn, actual_k, normalize_to_k_major),
         target="ascend",
     ).kernel_source
-    pattern = re.compile(
-        rf"create_cbuf_matrix\([^;]*\+ {offset}\), "
-        rf"\(uint64_t\)\({repeats}\) \| \(\(uint64_t\)\({blocks}\) << 16\) "
-        rf"\| \(\(uint64_t\)\({gap}\) << 32\),"
+    fill = re.search(
+        rf"asc_fill_l1\([^;]*\+ {offset}\), [^;]*, \{{\s*"
+        rf"\.repeat = static_cast<uint64_t>\({repeats}\),\s*"
+        rf"\.blk_num = static_cast<uint64_t>\({blocks}\),\s*"
+        rf"\.dst_gap = static_cast<uint64_t>\({gap}\)\}}\);",
+        source,
     )
-    assert pattern.search(source), source
-    assert source.count("create_cbuf_matrix(") == 1
-    assert "PipeBarrier<pipe_t::PIPE_MTE2>()" not in source
-    assert "PipeBarrier<pipe_t::PIPE_MTE1>()" not in source
+    assert fill is not None, source
+    assert source.count("asc_fill_l1(") == 1
+    assert "asc_sync_pipe(PIPE_MTE1);" not in source
 
 
 @pytest.mark.parametrize(
@@ -98,7 +99,7 @@ def test_mx_actual_k_copy_skips_unneeded_tail_fill(major_mn, normalize_to_k_majo
         make_mx_actual_k_copy(major_mn, actual_k, normalize_to_k_major),
         target="ascend",
     ).kernel_source
-    assert "create_cbuf_matrix(" not in source
+    assert "asc_fill_l1(" not in source
 
 
 if __name__ == "__main__":

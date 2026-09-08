@@ -340,6 +340,7 @@ def run_regression(
         latency_ms = do_bench(run_kernel, backend="msprof", _n_warmup=30, _n_repeat=50)
         flops = 2.0 * M * N * K
         print(f"{latency_ms:.3f} ms/iter | {flops / (latency_ms / 1e3) / 1e12:.1f} TFLOPS")
+        return latency_ms
 
     return rel_mean_diff
 

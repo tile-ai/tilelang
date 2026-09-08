@@ -94,10 +94,9 @@ def test_legalize_simd_merging_marks_destination_read_write():
 def test_simd_merging_codegen_updates_existing_destination():
     source = lower(merging_assignment, target="ascend").kernel_source
 
-    assert "::vadds(*((&(dst[0]))), src," in source
+    assert "simd_inst::vadds(*((&(dst[0]))), src," in source
     assert "MODE_MERGING" in source
-    assert "simd_inst::vadds(" not in source
-    assert source.index("dst[0] = simd_inst::vlds") < source.index("::vadds") < source.index("simd_inst::vsts")
+    assert source.index("dst[0] = simd_inst::vlds") < source.index("simd_inst::vadds(*") < source.index("simd_inst::vsts")
 
 
 def test_simd_merging_requires_mutable_destination():

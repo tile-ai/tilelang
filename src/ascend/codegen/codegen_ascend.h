@@ -1,6 +1,10 @@
 #ifndef TVM_TL_ASCEND_CODEGEN_CODEGEN_ASCEND_H_
 #define TVM_TL_ASCEND_CODEGEN_CODEGEN_ASCEND_H_
 
+#include <cstddef>
+#include <initializer_list>
+#include <string>
+
 #include "target/source/codegen_c.h"
 #include <tvm/arith/analyzer.h>
 
@@ -59,6 +63,12 @@ protected:
                         PrimExpr rhs, std::ostream &os) final;
 
 private:
+  struct CApiArgument {
+    PrimExpr value;
+    std::string prefix{};
+    std::string suffix{};
+  };
+
   enum class VFMode { kNone, kSimt, kSimd };
 
   class VFModeScope {
@@ -120,6 +130,29 @@ private:
   void EmitPhiloxVectorFloat(std::ostream &os, const std::string &distribution,
                              int lanes);
   bool EmitSimdMergingCall(const CallNode *op, std::ostream &os);
+  std::string ResolveSimdIntrinsicName_(const Call &call,
+                                        DataType result_dtype) const;
+  void PrintSimdCall_(const Call &call, size_t num_expr_args, std::ostream &os);
+  void EmitCApiCall_(const std::string &function_name,
+                     std::initializer_list<CApiArgument> arguments);
+  bool EmitAscendMemoryCall_(const CallNode *op);
+  void EmitPipeBarrier_(const CallNode *op);
+  void EmitHardEventSync_(const CallNode *op, bool notify);
+  void EmitCrossCoreSync_(const CallNode *op, bool arrive);
+  void EmitSetCopyPadValue_(const CallNode *op);
+  void EmitGmToUbufCopy_(const CallNode *op);
+  void EmitUbufToGmCopy_(const CallNode *op);
+  void EmitGmToL1Copy_(const CallNode *op);
+  void EmitFillL1_(const CallNode *op);
+  void EmitL1ToL0Copy_(const CallNode *op, bool is_l0a);
+  void EmitL0cToUbufCopy_(const CallNode *op);
+  void EmitL0cToGmCopy_(const CallNode *op);
+  void EmitUbufToL1Copy_(const CallNode *op);
+  void EmitNd2NzScatter_(const CallNode *op);
+  void EmitNd2NzPostCopy_(const CallNode *op);
+  void EmitMad_(const CallNode *op, bool is_mx);
+  void EmitGemmL1_(const CallNode *op);
+  void EmitBlockscaledGemmL1_(const CallNode *op);
   bool IsGlobalGmBuffer(const BufferNode *buffer) const;
   std::string GetGmBypassPtr(DataType dtype, const BufferNode *buffer,
                              PrimExpr index);

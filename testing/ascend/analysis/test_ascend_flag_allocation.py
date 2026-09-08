@@ -584,7 +584,11 @@ def _make_cross_core_reuse_program(
 
 
 def _constant_flag_ids(source: str, hard_event: str) -> set[int]:
-    pattern = re.compile(rf"AscendC::(?:SetFlag|WaitFlag)<AscendC::HardEvent::{hard_event}>\((\d+)\)")
+    source_pipe, target_pipe = hard_event.split("_", maxsplit=1)
+    pattern = re.compile(
+        rf"asc_sync_(?:notify|wait)\(PIPE_{source_pipe}, PIPE_{target_pipe}, "
+        rf"static_cast<event_t>\(([0-9]+)\)\)"
+    )
     return {int(value) for value in pattern.findall(source)}
 
 
@@ -595,7 +599,7 @@ def _initial_flag_ids(source: str, hard_event: str) -> set[int]:
 
 
 def _constant_cross_core_flag_ids(source: str) -> set[int]:
-    pattern = re.compile(r"CrossCore(?:Set|Wait)Flag<4, PIPE_[A-Z0-9]+>\((\d+)\)")
+    pattern = re.compile(r"asc_sync_intra_(?:arrive|wait)\(PIPE_[A-Z0-9]+, (\d+)\)")
     return {int(value) for value in pattern.findall(source)}
 
 
@@ -624,7 +628,7 @@ def test_counter_sibling_protocol_stays_within_flag_limit():
     assert ids
     assert max(ids) < 8
     events = re.findall(
-        r"(?:Set|Wait)Flag<AscendC::HardEvent::MTE3_MTE2>\(([^;]+)\);",
+        r"asc_sync_(?:notify|wait)\(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>\(([^;]+)\)\);",
         source,
     )
     dynamic = [event for event in events if "version_counter" in event]
@@ -651,8 +655,8 @@ def test_multi_owner_counter_channels_keep_exclusive_allocations():
     # RewriteFlagToBuf spills the second eight-slot ring.
     assert len(snapshots) == 1
     assert _constant_tir_flag_ids(snapshots[0], "MTE3_MTE2") == set(range(16))
-    assert "get_buf(" in source
-    assert "rls_buf(" in source
+    assert "asc_lock(" in source
+    assert "asc_unlock(" in source
 
 
 def test_auto_schedule_reuses_lexical_flags_only_until_within_limit():
@@ -688,7 +692,7 @@ def test_cross_core_handshake_does_not_reuse_within_limit(versions):
     ids = _constant_cross_core_flag_ids(source)
     assert {event_id % 16 for event_id in ids} == set(range(versions))
 
-    dynamic_calls = "\n".join(line for line in source.splitlines() if "CrossCore" in line and re.search(r"\bw(?:_\d+)?\b", line))
+    dynamic_calls = "\n".join(line for line in source.splitlines() if "asc_sync_intra_" in line and re.search(r"\bw(?:_\d+)?\b", line))
     assert "PIPE_FIX" in dynamic_calls
     assert "PIPE_MTE3" in dynamic_calls
     assert re.search(rf"\+ (?:{versions}|{versions + 16})\)", dynamic_calls)
@@ -702,7 +706,7 @@ def test_cross_core_handshake_reuses_when_over_limit():
     ids = _constant_cross_core_flag_ids(source)
     assert {event_id % 16 for event_id in ids} == set(range(versions))
 
-    dynamic_calls = "\n".join(line for line in source.splitlines() if "CrossCore" in line and re.search(r"\bw(?:_\d+)?\b", line))
+    dynamic_calls = "\n".join(line for line in source.splitlines() if "asc_sync_intra_" in line and re.search(r"\bw(?:_\d+)?\b", line))
     assert "PIPE_FIX" in dynamic_calls
     assert "PIPE_MTE3" in dynamic_calls
     assert not re.search(rf"\+ (?:{versions}|{versions + 16})\)", dynamic_calls)
@@ -716,7 +720,7 @@ def test_cross_core_counter_handshake_reuses_when_over_limit():
     ids = _constant_cross_core_flag_ids(source)
     assert {event_id % 16 for event_id in ids} == set(range(versions))
 
-    dynamic_calls = "\n".join(line for line in source.splitlines() if "CrossCore" in line and "version_counter" in line)
+    dynamic_calls = "\n".join(line for line in source.splitlines() if "asc_sync_intra_" in line and "version_counter" in line)
     assert "PIPE_FIX" in dynamic_calls
     assert "PIPE_MTE3" in dynamic_calls
     assert not re.search(rf"\+ (?:{versions}|{versions + 16})\)", dynamic_calls)
@@ -734,11 +738,11 @@ def test_cross_core_handshake_with_different_pipes_reuses_when_over_limit():
     )
     source = artifact.kernel_source
 
-    assert "AscendC::CrossCoreSetFlag<0, PIPE_FIX>(15);" in source
+    assert "asc_sync_inter_arrive(PIPE_FIX, 15);" in source
     ids = _constant_cross_core_flag_ids(source)
     assert {event_id % 16 for event_id in ids} == set(range(versions))
 
-    dynamic_calls = "\n".join(line for line in source.splitlines() if "CrossCore" in line and re.search(r"\bw(?:_\d+)?\b", line))
+    dynamic_calls = "\n".join(line for line in source.splitlines() if "asc_sync_intra_" in line and re.search(r"\bw(?:_\d+)?\b", line))
     assert "PIPE_FIX" in dynamic_calls
     assert "PIPE_V" in dynamic_calls
     assert "PIPE_MTE3" in dynamic_calls
@@ -749,8 +753,9 @@ def test_single_iteration_loop_has_no_reverse_flag():
     one_iter_source = lower(_make_inner_loop_program(1), target="ascend").kernel_source
     many_iter_source = lower(_make_inner_loop_program(4), target="ascend").kernel_source
 
-    assert "HardEvent::V_MTE2" not in one_iter_source
-    assert "HardEvent::V_MTE2" in many_iter_source
+    reverse_flag = "asc_sync_notify(PIPE_V, PIPE_MTE2,"
+    assert reverse_flag not in one_iter_source
+    assert reverse_flag in many_iter_source
 
 
 def test_nested_single_iteration_loop_uses_outer_multi_buffer_versions():
@@ -763,8 +768,8 @@ def test_nested_single_iteration_loop_uses_outer_multi_buffer_versions():
 def test_nested_single_iteration_loop_does_not_promote_noneligible_buffer():
     artifact = lower(_make_noneligible_single_iteration_nested_loop_program(), target="ascend")
     source = artifact.kernel_source
-    dynamic_wait = "WaitFlag<AscendC::HardEvent::MTE3_MTE2>((w % 3))"
-    dynamic_set = "SetFlag<AscendC::HardEvent::MTE3_MTE2>((w % 3))"
+    dynamic_wait = "asc_sync_wait(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>((w % 3)))"
+    dynamic_set = "asc_sync_notify(PIPE_MTE3, PIPE_MTE2, static_cast<event_t>((w % 3)))"
 
     assert source.count(dynamic_wait) == 1
     assert source.count(dynamic_set) == 1
@@ -774,8 +779,8 @@ def test_auto_schedule_spills_unavoidable_flag_overflow_to_buf_mutexes(capfd):
     source = lower(_make_unavoidable_overflow_program(), target="ascend").kernel_source
     stderr = capfd.readouterr().err
 
-    assert "get_buf(" in source
-    assert "rls_buf(" in source
+    assert "asc_lock(" in source
+    assert "asc_unlock(" in source
     assert re.search(
         r"allocated 10 flag ids for [A-Z0-9_]+.*exceeding the dav-3510 limit of 8"
         r".*RewriteFlagToBuf.*get_buf/rls_buf",

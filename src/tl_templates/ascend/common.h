@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 #include "acl/acl.h"
-#include "kernel_operator.h"
+#include "c_api/asc_simd.h"
 #include "simt_api/asc_bf16.h"
 #include "simt_api/asc_fp16.h"
 #include "simt_api/asc_fp8.h"

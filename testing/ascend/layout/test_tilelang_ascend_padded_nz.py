@@ -128,9 +128,9 @@ def test_auto_scatter_synthesizes_one_reusable_sid():
         source = tilelang.lower(_matmul_auto_scatter(), target="ascend").kernel_source
 
     assert "__global__ __mix__(1, 2)" in source
-    assert source.count("get_subblockid()") == 1
-    assert source.count("copy_gm_to_ubuf_align_v2") == 1
-    assert source.count("copy_ubuf_to_cbuf") == 1
+    assert source.count("asc_get_sub_block_id()") == 1
+    assert source.count("asc_copy_gm2ub_align") == 1
+    assert source.count("asc_copy_ub2l1") == 1
     assert estimated_costs == {"gm_to_ub": (418, 328), "post_copy": (171, 128)}
 
 

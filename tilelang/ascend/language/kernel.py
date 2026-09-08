@@ -191,7 +191,7 @@ def MixedKernel(
         Number of active AIV sub-cores (1 or 2). Default is 2. On dav-3510,
         mixed kernels always launch the physical ``__mix__(1, 2)`` group;
         ``sids=1`` restricts the vector body to sub-core 0. Binds as ``sid``
-        via ``get_subblockid()`` in generated code.
+        via ``asc_get_sub_block_id()`` in generated code.
     prelude : str, optional
         Import C code injected before the generated kernel.
 

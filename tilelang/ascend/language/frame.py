@@ -38,7 +38,7 @@ class VectorFrame(TIRFrame):
     In Mix mode, provides a subblock ID variable via ``as`` binding::
 
         with T.Vector(vector=2) as sid:
-            # sid = get_subblockid()
+            # sid = asc_get_sub_block_id()
             ...
     """
 

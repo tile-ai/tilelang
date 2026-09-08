@@ -1034,7 +1034,7 @@ def vgather2(base, index, mask=None):
         elem_dtype = str(inner_load.buffer.dtype)
     if mask is None:
         # gather reads source elements, so the predicate aligns to the source (low-lane)
-        # width -- e.g. an int8 gather widens the output to int16 but masks with pset_b8.
+        # width -- e.g. an int8 gather widens the output to int16 but masks with asc_create_mask_b8.
         mask = _default_mask_bits(_mask_bits(elem_dtype))
     out_elem = {
         "int8": "int16",
@@ -1065,19 +1065,20 @@ def vscatter(src, base, index, mask=None):
 # -- Type conversion --------------------------------------------------------------
 
 
-def vexpdif(src0, src1, mask=None, part=0):
-    """Fused exp-sub: dst = vexpdif(src0, src1, mask, PART_X).
+def vexpdif(src0, src1, mask=None):
+    """Fused exp-sub: dst = exp(src0 - src1).
 
-    Computes dst = exp(src0 - src1). part: 0=EVEN, 1=ODD.
-    Supported types: float32, float16.
+    The same-width form supports matching float32 vectors. Widening float16
+    inputs to float32 requires separate even/odd results and is not represented
+    by this API.
     """
+    src0_dtype = str(src0.dtype)
+    src1_dtype = str(src1.dtype)
+    if src0_dtype != src1_dtype or src0_dtype.split("x", 1)[0] != "float32":
+        raise TypeError("T.simd.vexpdif requires matching float32 vectors")
     if mask is None:
         mask = _default_mask(src0.dtype)
-    if isinstance(part, tirx.IntImm):
-        part = int(part.value)
-    if not isinstance(part, int) or isinstance(part, bool) or part not in (0, 1):
-        raise ValueError(f"vexpdif part must be the integer 0 or 1, got {part!r}")
-    return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vexpdif"), src0, src1, mask, part)
+    return tirx.call_intrin(src0_dtype, _Op("tl.simd.vexpdif"), src0, src1, mask)
 
 
 def vabsdif(src0, src1, mask=None, mode="MODE_ZEROING"):
@@ -1155,7 +1156,7 @@ def vcvt(
     if mask is None:
         # vcvt masks by the narrower (low-lane) element: source when widening, target
         # when narrowing. So the predicate width is min(src, target), e.g. u8<->u16 both
-        # use pset_b8 and u16<->u32 both use pset_b16.
+        # use asc_create_mask_b8 and u16<->u32 both use asc_create_mask_b16.
         mask = _default_mask_bits(min(_mask_bits(src.dtype), _mask_bits(target_dtype)))
 
     target_dtype = str(target_dtype)

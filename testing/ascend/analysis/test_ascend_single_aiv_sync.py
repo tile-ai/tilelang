@@ -55,21 +55,21 @@ def _lower_with_snapshots(program):
 
 
 def _aic_branch(source: str) -> str:
-    return source.split("if ASCEND_IS_AIC {", maxsplit=1)[1].split("if ASCEND_IS_AIV {", maxsplit=1)[0]
+    return source.split("if ASC_IS_AIC {", maxsplit=1)[1].split("if ASC_IS_AIV {", maxsplit=1)[0]
 
 
 def test_mixed_kernel_single_aiv_lowers_one_subcore_protocol():
     source, snapshots = _lower_with_snapshots(_make_epilogue_program(1))
 
     assert "__global__ __mix__(1, 2)" in source
-    assert "if (get_subblockid() == 0)" in source
-    assert "get_subblockid()" in source
+    assert "if (asc_get_sub_block_id() == 0)" in source
+    assert "asc_get_sub_block_id()" in source
     assert '"vector_count": 1' in snapshots["tl.LowerScheduledTIR"]
-    assert "CrossCoreSetFlag<4," in source
-    assert "CrossCoreWaitFlag<4," in source
-    assert "CrossCoreSetFlag<2," not in source
-    assert "CrossCoreWaitFlag<2," not in source
-    aic_cross_core = [line for line in _aic_branch(source).splitlines() if "CrossCore" in line]
+    assert "asc_sync_intra_arrive(" in source
+    assert "asc_sync_intra_wait(" in source
+    assert "asc_sync_block_arrive(" not in source
+    assert "asc_sync_block_wait(" not in source
+    aic_cross_core = [line for line in _aic_branch(source).splitlines() if "asc_sync_intra_" in line]
     assert aic_cross_core
     assert not any("+ 16" in line for line in aic_cross_core)
 
@@ -78,11 +78,11 @@ def test_mixed_kernel_default_keeps_two_subcores():
     source, snapshots = _lower_with_snapshots(_make_epilogue_program(2))
 
     assert "__global__ __mix__(1, 2)" in source
-    assert "get_subblockid()" in source
+    assert "asc_get_sub_block_id()" in source
     assert '"vector_count": 2' in snapshots["tl.LowerScheduledTIR"]
-    assert "CrossCoreSetFlag<4," in source
-    assert "CrossCoreWaitFlag<4," in source
-    aic_cross_core = [line for line in _aic_branch(source).splitlines() if "CrossCore" in line]
+    assert "asc_sync_intra_arrive(" in source
+    assert "asc_sync_intra_wait(" in source
+    aic_cross_core = [line for line in _aic_branch(source).splitlines() if "asc_sync_intra_" in line]
     assert any("+ 16" in line for line in aic_cross_core)
 
 

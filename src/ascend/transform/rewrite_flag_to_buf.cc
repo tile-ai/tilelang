@@ -1,30 +1,30 @@
 /*!
  * \file rewrite_flag_to_buf.cc
  * \brief Split each hard_event's synchronization between the 8-slot flag
- * namespace and the shared get_buf/rls_buf mutex pool to minimize wasted
+ * namespace and the shared asc_lock/asc_unlock mutex pool to minimize wasted
  * flag_ids.
  *
  * A set_flag/wait_flag event-pair (hard_event) owns only 8 event_id slots. When
  * a hard_event's sync points need more than 8 slots in total, some must spill
- * to the shared 32-slot get_buf/rls_buf mutex pool. To waste as few flag slots
- * as possible, we treat each sync point as an indivisible block (a contiguous
- * event_id range of size = its version count, since a dynamic
+ * to the shared 32-slot asc_lock/asc_unlock mutex pool. To waste as few flag
+ * slots as possible, we treat each sync point as an indivisible block (a
+ * contiguous event_id range of size = its version count, since a dynamic
  * event_id = iter%nv + base cannot be split across the 8-boundary at runtime)
  * and run a 0/1 knapsack (capacity 8) per hard_event: the subset of blocks that
  * fills the 8 flag slots best is KEPT as set_flag/wait_flag (renumbered into
  * [0,8)); the rest SPILL to the mutex pool.
  *
  * Spill lowering (hard_event = "PROD_CONS", split at '_'):
- *   set_flag<PROD_CONS>(id):  get_buf(PIPE_PROD, buf, true);
- *                             rls_buf(PIPE_PROD, buf, true);
- *   wait_flag<PROD_CONS>(id): get_buf(PIPE_CONS, buf, false);
- *                             rls_buf(PIPE_CONS, buf, false);
+ *   set_flag<PROD_CONS>(id):  asc_lock(PIPE_PROD, buf, ASC_LOCK_NON_BLOCK);
+ *                             asc_unlock(PIPE_PROD, buf, ASC_LOCK_NON_BLOCK);
+ *   wait_flag<PROD_CONS>(id): asc_lock(PIPE_CONS, buf, ASC_LOCK_BLOCK);
+ *                             asc_unlock(PIPE_CONS, buf, ASC_LOCK_BLOCK);
  *
  * A hard_event whose sync points total <= 8 is left entirely as flags
  * (unchanged); a kernel with no such overflow is a no-op.
  *
  * Must run AFTER MergeUBAllocations, which relies on set_flag/wait_flag as its
- * liveness-graph anchors and cannot model get_buf/rls_buf.
+ * liveness-graph anchors and cannot model asc_lock/asc_unlock.
  */
 
 #include <tvm/arith/analyzer.h>
@@ -53,7 +53,7 @@ using namespace ffi;
 
 namespace {
 
-// Total shared get_buf/rls_buf mutex slots available on the hardware.
+// Total shared asc_lock/asc_unlock mutex slots available on the hardware.
 constexpr int kMaxBufId = 32;
 
 // Number of event_id slots a single set_flag/wait_flag event-pair supports.
@@ -281,7 +281,7 @@ public:
       Op op_id = is_set ? ascend_set_flag() : ascend_wait_flag();
       return Evaluate(Call(DataType::Handle(), op_id, {StringImm(he), new_id}));
     }
-    // Spill to the mutex pool as a back-to-back get_buf/rls_buf pair.
+    // Spill to the mutex pool as a back-to-back asc_lock/asc_unlock pair.
     auto pipes = SplitHardEvent(he);
     std::string pipe = is_set ? pipes.first : pipes.second;
     int mode = is_set ? 1 : 0;

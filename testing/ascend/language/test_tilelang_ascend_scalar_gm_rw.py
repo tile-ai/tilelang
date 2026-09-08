@@ -63,8 +63,8 @@ def test_scalar_gm_rw_codegen():
     print(source)
 
     # Vector-core work must survive: MTE copies both directions + a SimdVF helper.
-    assert "copy_gm_to_ubuf" in source, "missing GM->UB vector-core copy"
-    assert "copy_ubuf_to_gm" in source, "missing UB->GM vector-core copy"
+    assert "asc_copy_gm2ub_align" in source, "missing GM->UB vector-core copy"
+    assert "asc_copy_ub2gm_align" in source, "missing UB->GM vector-core copy"
     assert re.search(r"simd_vf_\d+\s*\(", source), "missing SimdVF helper call"
 
     # Regression: the junk scalar tasks used to be tagged broadcast, which made
@@ -74,8 +74,9 @@ def test_scalar_gm_rw_codegen():
     # sync at all.
     assert "__global__ __vector__" in source, "expected a single pure-AIV kernel"
     assert "__mix__" not in source, "no Cube/AIC side should be generated for a scalar-only + vector kernel"
-    assert "get_subblockid" not in source, "no AIC/AIV sub-block split should appear"
-    assert "CrossCore" not in source, "broadcast scalar tasks must not trigger phantom cross-core AIC<->AIV sync"
+    assert "asc_get_sub_block_id" not in source, "no AIC/AIV sub-block split should appear"
+    assert "asc_sync_inter_" not in source, "broadcast scalar tasks must not trigger inter-block synchronization"
+    assert "asc_sync_intra_" not in source, "broadcast scalar tasks must not trigger AIC<->AIV synchronization"
 
 
 if __name__ == "__main__":

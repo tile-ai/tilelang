@@ -13,8 +13,8 @@ LOOP_TRIPS = 2
 
 def _core_branch(source: str, token: str) -> str:
     position = source.index(token)
-    aic = source.rfind("if ASCEND_IS_AIC", 0, position)
-    aiv = source.rfind("if ASCEND_IS_AIV", 0, position)
+    aic = source.rfind("if ASC_IS_AIC", 0, position)
+    aiv = source.rfind("if ASC_IS_AIV", 0, position)
     assert max(aic, aiv) >= 0
     return "AIC" if aic > aiv else "AIV"
 
@@ -48,8 +48,8 @@ def _make_loop_nested_wait_program():
 def test_loop_nested_wait_orders_following_pipe_user():
     source = lower(_make_loop_nested_wait_program(), target="ascend").kernel_source
     assert "while (1)" in source
-    wait = source.index(f"AscendC::CrossCoreWaitFlag<0, PIPE_MTE2>({FLAG});")
-    mte2_loads = [match.start() for match in re.finditer("copy_gm_to_ubuf", source)]
+    wait = source.index(f"asc_sync_inter_wait(PIPE_MTE2, {FLAG});")
+    mte2_loads = [match.start() for match in re.finditer("asc_copy_gm2ub_align", source)]
     assert len(mte2_loads) == 3
     assert wait < mte2_loads[-1]
 
@@ -86,10 +86,10 @@ def _make_loop_nested_pad_writer_program():
 
 def test_loop_nested_pad_writer_follows_external_reader_core():
     source = lower(_make_loop_nested_pad_writer_program(), target="ascend").kernel_source
-    writer = source.index("set_mov_pad_val")
-    reader = source.index("copy_gm_to_ubuf_align_v2")
+    writer = source.index("asc_set_copy_pad_val")
+    reader = source.index("asc_copy_gm2ub_align")
     assert source.rfind("while (1)", 0, writer) >= 0
-    assert _core_branch(source, "set_mov_pad_val") == "AIV"
+    assert _core_branch(source, "asc_set_copy_pad_val") == "AIV"
     assert writer < reader
 
 
@@ -124,8 +124,8 @@ def _make_nested_loop_break_program():
 
 def test_nested_loop_break_is_emitted_on_every_core():
     source = lower(_make_nested_loop_break_program(), target="ascend").kernel_source
-    aic_start = source.index("if ASCEND_IS_AIC")
-    aiv_start = source.index("if ASCEND_IS_AIV")
+    aic_start = source.index("if ASC_IS_AIC")
+    aiv_start = source.index("if ASC_IS_AIV")
     assert "break;" in source[aic_start:aiv_start]
     assert "break;" in source[aiv_start:]
 
@@ -153,10 +153,10 @@ def _make_split_atomic_writer_program():
 
 def test_atomic_writers_are_broadcast_across_split_core_readers():
     source = lower(_make_split_atomic_writer_program(), target="ascend").kernel_source
-    assert source.count("AscendC::SetAtomicAdd<float>();") == 4
-    assert source.count("AscendC::SetAtomicNone();") == 4
-    assert _core_branch(source, "copy_ubuf_to_gm") == "AIV"
-    assert _core_branch(source, "copy_matrix_cc_to_gm") == "AIC"
+    assert source.count("asc_set_atomic_add_float();") == 4
+    assert source.count("asc_set_atomic_none();") == 4
+    assert _core_branch(source, "asc_copy_ub2gm") == "AIV"
+    assert _core_branch(source, "asc_copy_l0c2gm") == "AIC"
 
 
 if __name__ == "__main__":

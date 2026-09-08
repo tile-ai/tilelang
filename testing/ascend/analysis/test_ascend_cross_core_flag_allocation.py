@@ -12,7 +12,7 @@ TILE = 256
 
 
 def _generated_cross_core_slots(source: str) -> set[int]:
-    return {int(value) % 16 for value in re.findall(r"CrossCore(?:Set|Wait)Flag<4, [^>]+>\((\d+)\)", source)}
+    return {int(value) % 16 for value in re.findall(r"asc_sync_intra_(?:arrive|wait)\(PIPE_[A-Z0-9]+, (\d+)\)", source)}
 
 
 def _make_sparse_explicit_cross_core_flag_program():
@@ -41,7 +41,7 @@ def _make_sparse_explicit_cross_core_flag_program():
 
 def test_sparse_explicit_cross_core_flag_allocation():
     source = lower(_make_sparse_explicit_cross_core_flag_program(), target="ascend").kernel_source
-    assert "AscendC::CrossCoreSetFlag<0, PIPE_FIX>(15);" in source
+    assert "asc_sync_inter_arrive(PIPE_FIX, 15);" in source
     assert _generated_cross_core_slots(source) == {0}
 
 

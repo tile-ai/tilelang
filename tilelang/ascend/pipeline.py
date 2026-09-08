@@ -79,7 +79,8 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     # Clamp DMA copy OOB tails and emit GM->L1 padding as semantic T.fill ops so
     # AutoSchedule sees each fill's exact L1 write region. LowerTileOp converts
-    # them to create_cbuf_matrix after scheduling. Must run before AutoSchedule.
+    # them to ascend_fill_l1 after scheduling, which codegen emits as
+    # asc_fill_l1. Must run before AutoSchedule.
     mod = ascend_transform.AscendInsertOOBPadding()(mod)
 
     if allow_autoschedule(pass_ctx=pass_ctx):

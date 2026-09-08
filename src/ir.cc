@@ -429,12 +429,13 @@ KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
   n->grid_extents.push_back(grid_size[0]);
   n->frames.push_back(bx_frame);
 
-  // Frame 1: sid = get_subblockid() via the Ascend "cthread" binding. Also
-  // emitted as a thread_binding For loop; MaterializeKernelLaunch recognizes
-  // the "cthread" tag (declared by the Ascend pipeline in launch_dim_tags) and
-  // materializes it into a thread_extent AttrStmt. It is a block-level launch
-  // dimension of the mixed kernel, so it is reported alongside bx as one of the
-  // vars the launch yields (`with T.MixedKernel(...) as (bx, sid)`).
+  // Frame 1: sid = asc_get_sub_block_id() via the Ascend "cthread" binding.
+  // Also emitted as a thread_binding For loop; MaterializeKernelLaunch
+  // recognizes the "cthread" tag (declared by the Ascend pipeline in
+  // launch_dim_tags) and materializes it into a thread_extent AttrStmt. It is a
+  // block-level launch dimension of the mixed kernel, so it is reported
+  // alongside bx as one of the vars the launch yields
+  // (`with T.MixedKernel(...) as (bx, sid)`).
   ForFrame sid_frame =
       MakeThreadBindingFrame("sid", "cthread", cthread_extent);
   n->grid_vars.push_back(sid_frame->vars[0]);

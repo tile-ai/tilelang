@@ -30,16 +30,15 @@ def _predicate_load_store_kernel():
 def test_predicate_load_store_ascend_codegen():
     source = lower(_predicate_load_store_kernel(), target="ascend").kernel_source
 
-    assert "simd_inst::plds(" in source
-    assert "simd_inst::psts(" in source
+    assert "simd_inst::plds_upsample(" in source
+    assert "simd_inst::plds_downsample(" in source
+    assert "simd_inst::psts_pack(" in source
+    assert "simd_inst::psts_norm(" in source
     assert "simd_inst::pldi(" not in source
     assert "simd_inst::psti(" not in source
-    assert "US" in source
-    assert "DS" in source
-    assert "PK" in source
     predicate_lines = [line for line in source.splitlines() if "simd_inst::p" in line]
     assert len(predicate_lines) == 4
-    assert all(", 0, " in line for line in predicate_lines)
+    assert all(", 0);" in line for line in predicate_lines)
 
 
 def test_predicate_public_apis_share_internal_ops():

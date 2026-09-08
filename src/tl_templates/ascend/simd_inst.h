@@ -1,6 +1,8 @@
 #pragma once
 
-#include "kernel_operator.h"
+#include <type_traits>
+
+#include "c_api/asc_simd.h"
 
 namespace simd_inst {
 template <typename T> struct vec {};
@@ -22,9 +24,6 @@ template <> struct vec<fp8_e4_t> {
 template <> struct vec<fp8_e5_t> {
   using type = vector_f8e5m2;
 };
-// template <> struct vec<float8_e4m3_t> {
-//   using type = vector_f8e4m3;
-// };
 template <> struct vec<float8_e5m2_t> {
   using type = vector_f8e5m2;
 };
@@ -78,6 +77,32 @@ template <typename FirstVec, typename SecondVec = FirstVec> struct vec_pair {
 
 template <typename T> using vec_t = typename vec<T>::type;
 
+// C APIs produce a zeroing result for masked register operations. Legalized
+// MODE_MERGING calls use this helper to preserve inactive destination lanes,
+// matching the software merge in the CCE intrinsics on dav-3510.
+template <typename Vec>
+__simd_callee__ inline Vec merge_masked(Vec &dst, Vec result,
+                                        vector_bool mask) {
+  Vec old_dst = dst;
+  asc_select(dst, result, old_dst, mask);
+  return dst;
+}
+
+template <typename Vec, typename Pattern>
+__simd_callee__ inline vector_bool reduction_result_mask(Pattern pattern) {
+  if constexpr (std::is_same<Vec, vector_s8>::value ||
+                std::is_same<Vec, vector_u8>::value) {
+    return asc_create_mask_b8(pattern);
+  } else if constexpr (std::is_same<Vec, vector_s16>::value ||
+                       std::is_same<Vec, vector_u16>::value ||
+                       std::is_same<Vec, vector_f16>::value ||
+                       std::is_same<Vec, vector_bf16>::value) {
+    return asc_create_mask_b16(pattern);
+  } else {
+    return asc_create_mask_b32(pattern);
+  }
+}
+
 template <typename SrcVec> struct widen_vec {
   using type = SrcVec;
 };
@@ -100,26 +125,60 @@ template <> struct widen_vec<vector_u16> {
 
 template <typename SrcVec> using widen_vec_t = typename widen_vec<SrcVec>::type;
 
-template <typename T, typename Offset, typename Dist>
-__simd_callee__ inline vec_t<T> vlds(__ubuf__ T *src, Offset offset,
-                                     Dist dist) {
-  vec_t<T> dst;
-  ::vlds(dst, src, offset, dist);
-  return dst;
-}
+// Single-distribution register loads. T determines the element width;
+// codegen selects one C API per distribution family.
+#define SIMD_INST_DEFINE_LOAD(Op, CApi)                                        \
+  template <typename T, typename Offset>                                       \
+  __simd_callee__ inline vec_t<T> Op(__ubuf__ T *src, Offset offset) {         \
+    vec_t<T> dst;                                                              \
+    CApi(dst, src, offset);                                                    \
+    return dst;                                                                \
+  }
 
-template <typename Dist>
-__simd_callee__ inline vector_bool plds(__ubuf__ uint32_t *src, int32_t offset,
-                                        Dist dist) {
+SIMD_INST_DEFINE_LOAD(vlds_norm, asc_loadalign)
+SIMD_INST_DEFINE_LOAD(vlds_brc_elem, asc_loadalign_brc_elem)
+SIMD_INST_DEFINE_LOAD(vlds_upsample, asc_loadalign_upsample)
+SIMD_INST_DEFINE_LOAD(vlds_downsample, asc_loadalign_downsample)
+SIMD_INST_DEFINE_LOAD(vlds_unpack, asc_loadalign_unpack)
+SIMD_INST_DEFINE_LOAD(vlds_unpack4, asc_loadalign_unpack4)
+SIMD_INST_DEFINE_LOAD(vlds_brc_datablock, asc_loadalign_brc_datablock)
+SIMD_INST_DEFINE_LOAD(vlds_brc_elem2datablock, asc_loadalign_brc_elem2datablock)
+
+#undef SIMD_INST_DEFINE_LOAD
+
+// Predicate-register loads. One entry per asc_loadalign* predicate variant;
+// mirrors the vlds_* split, so codegen selects the distribution by name
+// instead of threading a `dist` branch through the body.
+__simd_callee__ inline vector_bool plds_norm(__ubuf__ uint32_t *src,
+                                             int32_t offset) {
   vector_bool dst;
-  ::plds(dst, src, offset, dist);
+  asc_loadalign(dst, src, offset);
   return dst;
 }
 
-template <typename Dist>
-__simd_callee__ inline void psts(vector_bool src, __ubuf__ uint32_t *base,
-                                 int32_t offset, Dist dist) {
-  ::psts(src, base, offset, dist);
+__simd_callee__ inline vector_bool plds_upsample(__ubuf__ uint32_t *src,
+                                                 int32_t offset) {
+  vector_bool dst;
+  asc_loadalign_upsample(dst, src, offset);
+  return dst;
+}
+
+__simd_callee__ inline vector_bool plds_downsample(__ubuf__ uint32_t *src,
+                                                   int32_t offset) {
+  vector_bool dst;
+  asc_loadalign_downsample(dst, src, offset);
+  return dst;
+}
+
+// Predicate-register stores. One entry per asc_storealign* predicate variant.
+__simd_callee__ inline void psts_norm(vector_bool src, __ubuf__ uint32_t *base,
+                                      int32_t offset) {
+  asc_storealign(base, src, offset);
+}
+
+__simd_callee__ inline void psts_pack(vector_bool src, __ubuf__ uint32_t *base,
+                                      int32_t offset) {
+  asc_storealign_pack(base, src, offset);
 }
 
 // Dual-dest memory load (ASC DIST_DINTLV_B16). Prefer ::vld(dst0,dst1,...)
@@ -127,7 +186,7 @@ __simd_callee__ inline void psts(vector_bool src, __ubuf__ uint32_t *base,
 template <typename T, typename Dist>
 __simd_callee__ inline vec_pair<vec_t<T>> vld_x2(__ubuf__ T *src, Dist dist) {
   vec_pair<vec_t<T>> dst;
-  ::vld(dst.v0, dst.v1, src, dist);
+  asc_loadalign_deintlv(dst.v0, dst.v1, src);
   return dst;
 }
 
@@ -135,14 +194,14 @@ template <typename T, typename Offset, typename Dist>
 __simd_callee__ inline vec_pair<vec_t<T>> vld_x2(__ubuf__ T *src, Offset offset,
                                                  Dist dist) {
   vec_pair<vec_t<T>> dst;
-  ::vld(dst.v0, dst.v1, src, offset, dist);
+  asc_loadalign_deintlv(dst.v0, dst.v1, src, offset);
   return dst;
 }
 
 template <typename T>
 __simd_callee__ inline vec_t<T> vgatherb(__ubuf__ T *base, vector_u32 idx) {
   vec_t<T> dst;
-  ::vgatherb(dst, base, idx);
+  asc_gather_datablock(dst, base, idx);
   return dst;
 }
 
@@ -150,7 +209,7 @@ template <typename T>
 __simd_callee__ inline vec_t<T> vgatherb(__ubuf__ T *base, vector_u32 idx,
                                          vector_bool mask) {
   vec_t<T> dst;
-  ::vgatherb(dst, base, idx, mask);
+  asc_gather_datablock(dst, base, idx, mask);
   return dst;
 }
 
@@ -158,7 +217,7 @@ template <typename T, typename IdxVec>
 __simd_callee__ inline vec_t<T> vgather2(__ubuf__ T *base, IdxVec idx,
                                          vector_bool mask) {
   vec_t<T> dst;
-  ::vgather2(dst, base, idx, mask);
+  asc_gather(dst, base, idx, mask);
   return dst;
 }
 
@@ -166,7 +225,7 @@ template <typename IdxVec>
 __simd_callee__ inline widen_vec_t<vec_t<int8_t>>
 vgather2(__ubuf__ int8_t *base, IdxVec idx, vector_bool mask) {
   widen_vec_t<vec_t<int8_t>> dst;
-  ::vgather2(dst, base, idx, mask);
+  asc_gather(dst, base, idx, mask);
   return dst;
 }
 
@@ -174,111 +233,124 @@ template <typename IdxVec>
 __simd_callee__ inline widen_vec_t<vec_t<uint8_t>>
 vgather2(__ubuf__ uint8_t *base, IdxVec idx, vector_bool mask) {
   widen_vec_t<vec_t<uint8_t>> dst;
-  ::vgather2(dst, base, idx, mask);
+  asc_gather(dst, base, idx, mask);
   return dst;
 }
 
 template <typename T, typename IdxVec>
 __simd_callee__ inline void vscatter(vec_t<T> data, __ubuf__ T *base,
                                      IdxVec idx, vector_bool mask) {
-  ::vscatter(data, base, idx, mask);
+  asc_scatter(base, data, idx, mask);
 }
 
 __simd_callee__ inline vector_bool pand(vector_bool src_0, vector_bool src_1,
                                         vector_bool mask) {
   vector_bool dst;
-  ::pand(dst, src_0, src_1, mask);
+  asc_and(dst, src_0, src_1, mask);
   return dst;
 }
 
 __simd_callee__ inline vector_bool por(vector_bool src_0, vector_bool src_1,
                                        vector_bool mask) {
   vector_bool dst;
-  ::por(dst, src_0, src_1, mask);
+  asc_or(dst, src_0, src_1, mask);
   return dst;
 }
 
 __simd_callee__ inline vector_bool pxor(vector_bool src_0, vector_bool src_1,
                                         vector_bool mask) {
   vector_bool dst;
-  ::pxor(dst, src_0, src_1, mask);
+  asc_xor(dst, src_0, src_1, mask);
   return dst;
 }
 
 __simd_callee__ inline vector_bool pnot(vector_bool src, vector_bool mask) {
   vector_bool dst;
-  ::pnot(dst, src, mask);
+  asc_not(dst, src, mask);
   return dst;
 }
 
 __simd_callee__ inline vector_bool psel(vector_bool src_0, vector_bool src_1,
                                         vector_bool mask) {
   vector_bool dst;
-  ::psel(dst, src_0, src_1, mask);
+  asc_select(dst, src_0, src_1, mask);
   return dst;
 }
 
-// f16->f32, f8->f32, i32->f32: ::vcvt(dst, src, mask, part/round, mode)
-template <typename U, typename SrcVec, typename Part, typename Mode>
-__simd_callee__ inline vec_t<U> vcvt(SrcVec src, vector_bool srcMask, Part part,
-                                     Mode mode) {
+// Keep conversion dispatch on the CCE intrinsic to cover its full type matrix.
+// The trailing controls vary by dtype: part/round, optional rs/part, then mode.
+template <typename U, typename SrcVec, typename... Controls>
+__simd_callee__ inline vec_t<U> vcvt(SrcVec src, vector_bool mask,
+                                     Controls... controls) {
   vec_t<U> dst;
-  ::vcvt(dst, src, srcMask, part, mode);
-  return dst;
-}
-
-// f32->i32: ::vcvt(dst, src, mask, round, rs, mode)
-template <typename U, typename SrcVec, typename RoundMode, typename Rs,
-          typename Mode>
-__simd_callee__ inline vec_t<U> vcvt(SrcVec src, vector_bool srcMask,
-                                     RoundMode roundingMode, Rs rsMode,
-                                     Mode mode) {
-  vec_t<U> dst;
-  ::vcvt(dst, src, srcMask, roundingMode, rsMode, mode);
-  return dst;
-}
-
-// f32->f16, f32->f8, f16->f8: ::vcvt(dst, src, mask, round, rs, part, mode)
-template <typename U, typename SrcVec, typename RoundMode, typename Rs,
-          typename Part, typename Mode>
-__simd_callee__ inline vec_t<U> vcvt(SrcVec src, vector_bool srcMask,
-                                     RoundMode roundingMode, Rs rsMode,
-                                     Part part, Mode mode) {
-  vec_t<U> dst;
-  ::vcvt(dst, src, srcMask, roundingMode, rsMode, part, mode);
+  ::vcvt(dst, src, mask, controls...);
   return dst;
 }
 
 template <typename SrcVec>
 __simd_callee__ inline vec_pair<SrcVec> vdintlv(SrcVec src_0, SrcVec src_1) {
   vec_pair<SrcVec> dst;
-  ::vdintlv(dst.v0, dst.v1, src_0, src_1);
+  asc_deintlv(dst.v0, dst.v1, src_0, src_1);
   return dst;
 }
 
 template <typename SrcVec>
 __simd_callee__ inline vec_pair<SrcVec> vintlv(SrcVec src_0, SrcVec src_1) {
   vec_pair<SrcVec> dst;
-  ::vintlv(dst.v0, dst.v1, src_0, src_1);
+  asc_intlv(dst.v0, dst.v1, src_0, src_1);
   return dst;
 }
 
 // -- Binary arithmetic
 // ----------------------------------------------------------
 
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vadd(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vadd(dst, src_0, src_1, mask, mode);
-  return dst;
-}
+// Vector and scalar RHS operands share the same zeroing/merging adapter.
+// LegalizeSimdMerging supplies dst only for MODE_MERGING calls.
+#define SIMD_INST_DEFINE_BINARY(Op, CApi)                                      \
+  template <typename SrcVec, typename RHS, typename Mode>                      \
+  __simd_callee__ inline SrcVec Op(SrcVec src_0, RHS src_1, vector_bool mask,  \
+                                   Mode) {                                     \
+    SrcVec dst;                                                                \
+    CApi(dst, src_0, src_1, mask);                                             \
+    return dst;                                                                \
+  }                                                                            \
+  template <typename SrcVec, typename RHS, typename Mode>                      \
+  __simd_callee__ inline SrcVec Op(SrcVec &dst, SrcVec src_0, RHS src_1,       \
+                                   vector_bool mask, Mode) {                   \
+    SrcVec result;                                                             \
+    CApi(result, src_0, src_1, mask);                                          \
+    return merge_masked(dst, result, mask);                                    \
+  }
+
+SIMD_INST_DEFINE_BINARY(vadd, asc_add)
+SIMD_INST_DEFINE_BINARY(vsub, asc_sub)
+SIMD_INST_DEFINE_BINARY(vmul, asc_mul)
+SIMD_INST_DEFINE_BINARY(vdiv, asc_div)
+SIMD_INST_DEFINE_BINARY(vmax, asc_max)
+SIMD_INST_DEFINE_BINARY(vmin, asc_min)
+SIMD_INST_DEFINE_BINARY(vand, asc_and)
+SIMD_INST_DEFINE_BINARY(vor, asc_or)
+SIMD_INST_DEFINE_BINARY(vxor, asc_xor)
+SIMD_INST_DEFINE_BINARY(vshl, asc_shiftleft)
+SIMD_INST_DEFINE_BINARY(vshr, asc_shiftright)
+SIMD_INST_DEFINE_BINARY(vabsdif, asc_abs_sub)
+
+SIMD_INST_DEFINE_BINARY(vadds, asc_add_scalar)
+SIMD_INST_DEFINE_BINARY(vmaxs, asc_max_scalar)
+SIMD_INST_DEFINE_BINARY(vmins, asc_min_scalar)
+SIMD_INST_DEFINE_BINARY(vmuls, asc_mul_scalar)
+SIMD_INST_DEFINE_BINARY(vshls, asc_shiftleft_scalar)
+SIMD_INST_DEFINE_BINARY(vshrs, asc_shiftright_scalar)
+
+#undef SIMD_INST_DEFINE_BINARY
 
 template <typename SrcVec>
 __simd_callee__ inline vec_pair<vector_bool, SrcVec>
 vaddc(SrcVec src_0, SrcVec src_1, vector_bool mask) {
   vec_pair<vector_bool, SrcVec> dst;
-  ::vaddc(dst.v0, dst.v1, src_0, src_1, mask);
+  asc_add(dst.v0, reinterpret_cast<vector_u32 &>(dst.v1),
+          reinterpret_cast<vector_u32 &>(src_0),
+          reinterpret_cast<vector_u32 &>(src_1), mask);
   return dst;
 }
 
@@ -286,7 +358,9 @@ template <typename SrcVec>
 __simd_callee__ inline vec_pair<vector_bool, SrcVec>
 vsubc(SrcVec src_0, SrcVec src_1, vector_bool mask) {
   vec_pair<vector_bool, SrcVec> dst;
-  ::vsubc(dst.v0, dst.v1, src_0, src_1, mask);
+  asc_sub(dst.v0, reinterpret_cast<vector_u32 &>(dst.v1),
+          reinterpret_cast<vector_u32 &>(src_0),
+          reinterpret_cast<vector_u32 &>(src_1), mask);
   return dst;
 }
 
@@ -294,7 +368,9 @@ template <typename SrcVec>
 __simd_callee__ inline vec_pair<vector_bool, SrcVec>
 vaddcs(SrcVec src_0, SrcVec src_1, vector_bool carrysrcp, vector_bool mask) {
   vec_pair<vector_bool, SrcVec> dst;
-  ::vaddcs(dst.v0, dst.v1, src_0, src_1, carrysrcp, mask);
+  asc_addc(dst.v0, reinterpret_cast<vector_u32 &>(dst.v1),
+           reinterpret_cast<vector_u32 &>(src_0),
+           reinterpret_cast<vector_u32 &>(src_1), carrysrcp, mask);
   return dst;
 }
 
@@ -302,31 +378,17 @@ template <typename SrcVec>
 __simd_callee__ inline vec_pair<vector_bool, SrcVec>
 vsubcs(SrcVec src_0, SrcVec src_1, vector_bool carrysrcp, vector_bool mask) {
   vec_pair<vector_bool, SrcVec> dst;
-  ::vsubcs(dst.v0, dst.v1, src_0, src_1, carrysrcp, mask);
+  asc_subc(dst.v0, reinterpret_cast<vector_u32 &>(dst.v1),
+           reinterpret_cast<vector_u32 &>(src_0),
+           reinterpret_cast<vector_u32 &>(src_1), carrysrcp, mask);
   return dst;
 }
 
 template <typename SrcVec>
-__simd_callee__ inline vec_pair<SrcVec, SrcVec>
-vmull(SrcVec src_0, SrcVec src_1, vector_bool mask) {
-  vec_pair<SrcVec, SrcVec> dst;
-  ::vmull(dst.v0, dst.v1, src_0, src_1, mask);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vsub(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vsub(dst, src_0, src_1, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vmul(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vmul(dst, src_0, src_1, mask, mode);
+__simd_callee__ inline vec_pair<SrcVec> vmull(SrcVec src_0, SrcVec src_1,
+                                              vector_bool mask) {
+  vec_pair<SrcVec> dst;
+  asc_mull(dst.v0, dst.v1, src_0, src_1, mask);
   return dst;
 }
 
@@ -345,15 +407,20 @@ __simd_callee__ inline void vmadd(SrcVec *dst, SrcVec src_0, SrcVec src_1,
 template <typename SrcVec, typename ScalarT, typename Mode>
 __simd_callee__ inline void vaxpy(SrcVec *dst, SrcVec src, ScalarT scalar,
                                   vector_bool mask, Mode mode) {
-  ::vaxpy(*dst, src, scalar, mask, mode);
+  SrcVec old_dst = *dst;
+  SrcVec result = old_dst;
+  asc_axpy(result, src, scalar, mask);
+  if constexpr (mode == MODE_ZEROING) {
+    *dst = result;
+  } else {
+    asc_select(*dst, result, old_dst, mask);
+  }
 }
 
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vdiv(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vdiv(dst, src_0, src_1, mask, mode);
-  return dst;
+template <typename SrcVec, typename ScalarT, typename Mode>
+__simd_callee__ inline void vaxpy(SrcVec &dst, SrcVec src, ScalarT scalar,
+                                  vector_bool mask, Mode mode) {
+  vaxpy(&dst, src, scalar, mask, mode);
 }
 
 // ============================================================================
@@ -371,163 +438,95 @@ vdiv_0ulp_ftz_true(vector_f32 src0, vector_f32 src1, vector_bool mask,
   constexpr uint32_t signBitNum = 0x80000000u;
 
   vector_f32 regNegZero;
-  ::vdup((vector_u32 &)regNegZero, signBitNum, mask, mode);
+  asc_duplicate_scalar((vector_u32 &)regNegZero, signBitNum, mask);
 
   vector_f32 z;
-  ::vdiv(z, src0, src1, mask, mode);
+  asc_div(z, src0, src1, mask);
 
   vector_u32 infNan;
-  ::vor(infNan, (vector_u32 &)z, (vector_u32 &)regNegZero, mask, mode);
+  asc_or(infNan, (vector_u32 &)z, (vector_u32 &)regNegZero, mask);
 
   vector_f32 tmpDst = z;
 
   vector_bool zeroCmp;
-  ::vcmps_eq(zeroCmp, z, 0.0f, mask);
+  asc_eq_scalar(zeroCmp, z, 0.0f, mask);
   vector_bool infNanCmp;
-  ::vcmps_ge(infNanCmp, infNan, infNanBound, mask);
-  ::por(infNanCmp, infNanCmp, zeroCmp, mask);
+  asc_ge_scalar(infNanCmp, infNan, infNanBound, mask);
+  asc_or(infNanCmp, infNanCmp, zeroCmp, mask);
 
   vector_f32 y;
-  ::vmuls(y, src1, -1.0f, mask, mode);
+  asc_mul_scalar(y, src1, -1.0f, mask);
   vector_f32 r = src0;
   ::vmula(r, z, y, mask, mode);
 
   vector_f32 rPre, rNext, zPre, zNext;
-  ::vadds((vector_s32 &)zPre, (vector_s32 &)z, -1, mask, mode);
-  ::vadds((vector_s32 &)zNext, (vector_s32 &)z, 1, mask, mode);
+  asc_add_scalar((vector_s32 &)zPre, (vector_s32 &)z, -1, mask);
+  asc_add_scalar((vector_s32 &)zNext, (vector_s32 &)z, 1, mask);
 
   rPre = src0;
   rNext = src0;
   ::vmula(rPre, zPre, y, mask, mode);
   ::vmula(rNext, zNext, y, mask, mode);
 
-  ::vabs(r, r, mask, mode);
-  ::vabs(rPre, rPre, mask, mode);
-  ::vabs(rNext, rNext, mask, mode);
+  asc_abs(r, r, mask);
+  asc_abs(rPre, rPre, mask);
+  asc_abs(rNext, rNext, mask);
 
   vector_bool cmpMaskReg;
-  ::vcmp_lt(cmpMaskReg, r, rPre, mask);
-  ::vsel(r, r, rPre, cmpMaskReg);
-  ::vsel(z, z, zPre, cmpMaskReg);
+  asc_lt(cmpMaskReg, r, rPre, mask);
+  asc_select(r, r, rPre, cmpMaskReg);
+  asc_select(z, z, zPre, cmpMaskReg);
 
-  ::vcmp_lt(cmpMaskReg, rNext, r, mask);
-  ::vsel(z, zNext, z, cmpMaskReg);
+  asc_lt(cmpMaskReg, rNext, r, mask);
+  asc_select(z, zNext, z, cmpMaskReg);
 
   vector_f32 dst;
-  ::vsel(dst, tmpDst, z, infNanCmp);
+  asc_select(dst, tmpDst, z, infNanCmp);
   return dst;
 }
 
 template <typename Mode>
-__simd_callee__ inline void vdiv_0ulp_ftz_true(vector_f32 &dst, vector_f32 src0,
-                                               vector_f32 src1,
-                                               vector_bool mask, Mode mode) {
+__simd_callee__ inline vector_f32
+vdiv_0ulp_ftz_true(vector_f32 &dst, vector_f32 src0, vector_f32 src1,
+                   vector_bool mask, Mode mode) {
   (void)mode;
-  // The in-place overload implements MODE_MERGING: update active lanes while
-  // preserving the old destination value for inactive lanes.
   vector_f32 result = vdiv_0ulp_ftz_true(src0, src1, mask, MODE_ZEROING);
-  ::vsel(dst, result, dst, mask);
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vmax(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vmax(dst, src_0, src_1, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vmin(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vmin(dst, src_0, src_1, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vand(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vand(dst, src_0, src_1, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vor(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                  Mode mode) {
-  SrcVec dst;
-  ::vor(dst, src_0, src_1, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vxor(SrcVec src_0, SrcVec src_1, vector_bool mask,
-                                   Mode mode) {
-  SrcVec dst;
-  ::vxor(dst, src_0, src_1, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename ShiftVec, typename Mode>
-__simd_callee__ inline SrcVec vshl(SrcVec src_0, ShiftVec src_1,
-                                   vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vshl(dst, src_0, src_1, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename ShiftVec, typename Mode>
-__simd_callee__ inline SrcVec vshr(SrcVec src_0, ShiftVec src_1,
-                                   vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vshr(dst, src_0, src_1, mask, mode);
-  return dst;
+  return merge_masked(dst, result, mask);
 }
 
 // -- Unary
 // ----------------------------------------------------------------------
 
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vln(SrcVec src, vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vln(dst, src, mask, mode);
-  return dst;
-}
+#define SIMD_INST_DEFINE_UNARY(Op, CApi)                                       \
+  template <typename SrcVec, typename Mode>                                    \
+  __simd_callee__ inline SrcVec Op(SrcVec src, vector_bool mask, Mode) {       \
+    SrcVec dst;                                                                \
+    CApi(dst, src, mask);                                                      \
+    return dst;                                                                \
+  }                                                                            \
+  template <typename SrcVec, typename Mode>                                    \
+  __simd_callee__ inline SrcVec Op(SrcVec &dst, SrcVec src, vector_bool mask,  \
+                                   Mode) {                                     \
+    SrcVec result;                                                             \
+    CApi(result, src, mask);                                                   \
+    return merge_masked(dst, result, mask);                                    \
+  }
 
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vsqrt(SrcVec src, vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vsqrt(dst, src, mask, mode);
-  return dst;
-}
+SIMD_INST_DEFINE_UNARY(vln, asc_ln)
+SIMD_INST_DEFINE_UNARY(vsqrt, asc_sqrt)
+SIMD_INST_DEFINE_UNARY(vabs, asc_abs)
+SIMD_INST_DEFINE_UNARY(vneg, asc_neg)
+SIMD_INST_DEFINE_UNARY(vrelu, asc_relu)
+SIMD_INST_DEFINE_UNARY(vnot, asc_not)
+SIMD_INST_DEFINE_UNARY(vexp, asc_exp)
 
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vabs(SrcVec src, vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vabs(dst, src, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vneg(SrcVec src, vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vneg(dst, src, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vrelu(SrcVec src, vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vrelu(dst, src, mask, mode);
-  return dst;
-}
+#undef SIMD_INST_DEFINE_UNARY
 
 template <typename SrcVec, typename ScalarT>
 __simd_callee__ inline SrcVec vlrelu(SrcVec src, ScalarT alpha,
                                      vector_bool mask) {
   SrcVec dst;
-  ::vlrelu(dst, src, alpha, mask, MODE_ZEROING);
+  asc_leakyrelu(dst, src, alpha, mask);
   return dst;
 }
 
@@ -535,21 +534,7 @@ template <typename SrcVec>
 __simd_callee__ inline SrcVec vprelu(SrcVec src_0, SrcVec src_1,
                                      vector_bool mask) {
   SrcVec dst;
-  ::vprelu(dst, src_0, src_1, mask, MODE_UNKNOWN);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vnot(SrcVec src, vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vnot(dst, src, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vexp(SrcVec src, vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vexp(dst, src, mask, mode);
+  asc_prelu(dst, src_0, src_1, mask);
   return dst;
 }
 
@@ -580,24 +565,22 @@ __simd_callee__ inline SrcVec vexp_1ulp_ftz_false(SrcVec src, vector_bool mask,
       1.1754942e-38f; // largest subnormal (2^-126 - 2^-149)
   SrcVec z, t, half;
   vector_bool m;
-  ::vexp(z, src, mask, mode);            // SFU initial value
-  ::vcmps_le(m, z, kMaxSubnormal, mask); // output would be subnormal?
-  ::vmuls(half, src, 0.5f, mask, mode);
-  ::vexp(t, half, mask, mode); // e^(x/2): stays in normal range
-  ::vmul(t, t, t, mask, mode);
+  asc_exp(z, src, mask);                    // SFU initial value
+  asc_le_scalar(m, z, kMaxSubnormal, mask); // output would be subnormal?
+  asc_mul_scalar(half, src, 0.5f, mask);
+  asc_exp(t, half, mask); // e^(x/2): stays in normal range
+  asc_mul(t, t, t, mask);
   SrcVec dst;
-  ::vsel(dst, t, z, m);
+  asc_select(dst, t, z, m);
   return dst;
 }
 
-// In-place overload implementing MODE_MERGING (mirrors vdiv_0ulp_ftz_true):
-// active lanes get the FTZ_FALSE result, inactive lanes keep their old value.
 template <typename SrcVec, typename Mode>
-__simd_callee__ inline void vexp_1ulp_ftz_false(SrcVec &dst, SrcVec src,
-                                                vector_bool mask, Mode mode) {
+__simd_callee__ inline SrcVec vexp_1ulp_ftz_false(SrcVec &dst, SrcVec src,
+                                                  vector_bool mask, Mode mode) {
   (void)mode;
   SrcVec result = vexp_1ulp_ftz_false(src, mask, MODE_ZEROING);
-  ::vsel(dst, result, dst, mask);
+  return merge_masked(dst, result, mask);
 }
 
 // vln FTZ_FALSE: positive subnormal inputs are scaled by 2^23 before VLN and
@@ -613,25 +596,24 @@ __simd_callee__ inline SrcVec vln_1ulp_ftz_false(SrcVec src, vector_bool mask,
   constexpr float kLn2p23 = 15.942385152878742f; // ln(2^23)
   SrcVec z, t, scaled;
   vector_bool sub, pos, m;
-  ::vln(z, src, mask, mode);              // hardware path
-  ::vcmps_lt(sub, src, kMinNormal, mask); // subnormal magnitude
-  ::vcmps_gt(pos, src, 0.0f, mask);       // positive only
-  ::pand(m, sub, pos, mask);
-  ::vmuls(scaled, src, 8388608.0f, mask, mode); // 2^23
-  ::vln(t, scaled, mask, mode);
-  ::vadds(t, t, -kLn2p23, mask, mode);
+  asc_ln(z, src, mask);                      // hardware path
+  asc_lt_scalar(sub, src, kMinNormal, mask); // subnormal magnitude
+  asc_gt_scalar(pos, src, 0.0f, mask);       // positive only
+  asc_and(m, sub, pos, mask);
+  asc_mul_scalar(scaled, src, 8388608.0f, mask); // 2^23
+  asc_ln(t, scaled, mask);
+  asc_add_scalar(t, t, -kLn2p23, mask);
   SrcVec dst;
-  ::vsel(dst, t, z, m);
+  asc_select(dst, t, z, m);
   return dst;
 }
 
-// In-place overload implementing MODE_MERGING (mirrors vdiv_0ulp_ftz_true).
 template <typename SrcVec, typename Mode>
-__simd_callee__ inline void vln_1ulp_ftz_false(SrcVec &dst, SrcVec src,
-                                               vector_bool mask, Mode mode) {
+__simd_callee__ inline SrcVec vln_1ulp_ftz_false(SrcVec &dst, SrcVec src,
+                                                 vector_bool mask, Mode mode) {
   (void)mode;
   SrcVec result = vln_1ulp_ftz_false(src, mask, MODE_ZEROING);
-  ::vsel(dst, result, dst, mask);
+  return merge_masked(dst, result, mask);
 }
 
 // vsqrt FTZ_FALSE: replica of CANN 9.1.0 SqrtFastInverseImpl
@@ -650,40 +632,39 @@ __simd_callee__ inline SrcVec vsqrt_0ulp_ftz_false(SrcVec src, vector_bool mask,
   constexpr float kPosInf = __builtin_inff(); // true +infinity
   SrcVec b, scaled, one, tmp, err, res, x;
   vector_bool p, isZero, isInf, special;
-  ::vcmps_lt(p, src, kOne, mask); // scale inputs < 1 up
-  ::vmuls(scaled, src, kScaleUp, mask, mode);
-  ::vsel(b, scaled, src, p);
-  ::vdup(one, kOne, mask, mode);
-  ::vsqrt(tmp, b, mask, mode);
-  ::vdiv(x, one, tmp, mask, mode); // 1/sqrt(b) initial value
-  ::vmuls(tmp, x, -kOne, mask, mode);
-  ::vmul(err, x, b, mask, mode);
+  asc_lt_scalar(p, src, kOne, mask); // scale inputs < 1 up
+  asc_mul_scalar(scaled, src, kScaleUp, mask);
+  asc_select(b, scaled, src, p);
+  asc_duplicate_scalar(one, kOne, mask);
+  asc_sqrt(tmp, b, mask);
+  asc_div(x, one, tmp, mask); // 1/sqrt(b) initial value
+  asc_mul_scalar(tmp, x, -kOne, mask);
+  asc_mul(err, x, b, mask);
   ::vmula(one, err, tmp, mask, mode); // first Newton step
-  ::vmuls(tmp, x, kHalf, mask, mode);
+  asc_mul_scalar(tmp, x, kHalf, mask);
   ::vmula(x, one, tmp, mask, mode);
-  ::vmul(res, x, b, mask, mode);
-  ::vmuls(tmp, res, -kOne, mask, mode);
+  asc_mul(res, x, b, mask);
+  asc_mul_scalar(tmp, res, -kOne, mask);
   err = b;
   ::vmula(err, res, tmp, mask, mode); // second residual correction
-  ::vmuls(tmp, x, kHalf, mask, mode);
-  ::vmadd(tmp, err, res, mask, mode);
-  ::vmuls(scaled, tmp, kScaleDn, mask, mode);
-  ::vsel(tmp, scaled, tmp, p);           // unscale only the scaled inputs
-  ::vcmps_eq(isZero, src, 0.0f, mask);   // +-0 pass through
-  ::vcmps_eq(isInf, src, kPosInf, mask); // +inf pass through
-  ::por(special, isZero, isInf, mask);
+  asc_mul_scalar(tmp, x, kHalf, mask);
+  asc_madd(tmp, err, res, mask);
+  asc_mul_scalar(scaled, tmp, kScaleDn, mask);
+  asc_select(tmp, scaled, tmp, p);          // unscale only scaled inputs
+  asc_eq_scalar(isZero, src, 0.0f, mask);   // +-0 pass through
+  asc_eq_scalar(isInf, src, kPosInf, mask); // +inf pass through
+  asc_or(special, isZero, isInf, mask);
   SrcVec dst;
-  ::vsel(dst, src, tmp, special); // special ? src : tmp
+  asc_select(dst, src, tmp, special); // special ? src : tmp
   return dst;
 }
 
-// In-place overload implementing MODE_MERGING (mirrors vdiv_0ulp_ftz_true).
 template <typename SrcVec, typename Mode>
-__simd_callee__ inline void vsqrt_0ulp_ftz_false(SrcVec &dst, SrcVec src,
-                                                 vector_bool mask, Mode mode) {
+__simd_callee__ inline SrcVec
+vsqrt_0ulp_ftz_false(SrcVec &dst, SrcVec src, vector_bool mask, Mode mode) {
   (void)mode;
   SrcVec result = vsqrt_0ulp_ftz_false(src, mask, MODE_ZEROING);
-  ::vsel(dst, result, dst, mask);
+  return merge_masked(dst, result, mask);
 }
 
 // -- Cross-lane reductions
@@ -691,7 +672,7 @@ __simd_callee__ inline void vsqrt_0ulp_ftz_false(SrcVec &dst, SrcVec src,
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vcpadd(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  ::vcpadd(dst, src, mask, mode);
+  asc_pair_reduce_sum(dst, src, mask);
   return dst;
 }
 
@@ -699,49 +680,77 @@ template <typename SrcVec, typename Mode>
 __simd_callee__ inline widen_vec_t<SrcVec> vcadd(SrcVec src, vector_bool mask,
                                                  Mode mode) {
   widen_vec_t<SrcVec> dst;
-  ::vcadd(dst, src, mask, mode);
+  asc_reduce_sum(dst, src, mask);
   return dst;
+}
+
+template <typename SrcVec, typename Mode>
+__simd_callee__ inline widen_vec_t<SrcVec>
+vcadd(widen_vec_t<SrcVec> &dst, SrcVec src, vector_bool mask, Mode mode) {
+  (void)mode;
+  using DstVec = widen_vec_t<SrcVec>;
+  DstVec result;
+  asc_reduce_sum(result, src, mask);
+  return merge_masked(dst, result, reduction_result_mask<DstVec>(PAT_VL1));
 }
 
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vcmax(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  ::vcmax(dst, src, mask, mode);
+  asc_reduce_max(dst, src, mask);
   return dst;
+}
+
+template <typename SrcVec, typename Mode>
+__simd_callee__ inline SrcVec vcmax(SrcVec &dst, SrcVec src, vector_bool mask,
+                                    Mode mode) {
+  (void)mode;
+  SrcVec result;
+  asc_reduce_max(result, src, mask);
+  return merge_masked(dst, result, reduction_result_mask<SrcVec>(PAT_VL2));
 }
 
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vcmin(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  ::vcmin(dst, src, mask, mode);
+  asc_reduce_min(dst, src, mask);
   return dst;
+}
+
+template <typename SrcVec, typename Mode>
+__simd_callee__ inline SrcVec vcmin(SrcVec &dst, SrcVec src, vector_bool mask,
+                                    Mode mode) {
+  (void)mode;
+  SrcVec result;
+  asc_reduce_min(result, src, mask);
+  return merge_masked(dst, result, reduction_result_mask<SrcVec>(PAT_VL2));
 }
 
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vcgadd(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  ::vcgadd(dst, src, mask, mode);
+  asc_reduce_sum_datablock(dst, src, mask);
   return dst;
 }
 
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vcgmax(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  ::vcgmax(dst, src, mask, mode);
+  asc_reduce_max_datablock(dst, src, mask);
   return dst;
 }
 
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vcgmin(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  ::vcgmin(dst, src, mask, mode);
+  asc_reduce_min_datablock(dst, src, mask);
   return dst;
 }
 
 template <typename SrcVec, typename Mode>
 __simd_callee__ inline SrcVec vsqz(SrcVec src, vector_bool mask, Mode mode) {
   SrcVec dst;
-  ::vsqz(dst, src, mask, mode);
+  asc_squeeze(dst, src, mask);
   return dst;
 }
 
@@ -749,37 +758,42 @@ __simd_callee__ inline SrcVec vsqz(SrcVec src, vector_bool mask, Mode mode) {
 // Vd via vdup (a `{}` init lowers to a BUILD_VECTOR the backend rejects).
 template <typename T> __simd_callee__ inline vec_t<T> vusqz(vector_bool mask) {
   vec_t<T> dst;
-  ::vdup(dst, static_cast<T>(0), mask, MODE_ZEROING);
-  ::vusqz(dst, mask);
+  asc_duplicate_scalar(dst, static_cast<T>(0), mask);
+  asc_unsqueeze(dst, mask);
   return dst;
 }
 
 __simd_callee__ inline vector_bool update_mask_b8(uint32_t value) {
-  uint32_t v = value;
-  return ::plt_b8(v, POST_UPDATE);
+  return asc_update_mask_b8(value);
 }
 
 __simd_callee__ inline vector_bool update_mask_b16(uint32_t value) {
-  uint32_t v = value;
-  return ::plt_b16(v, POST_UPDATE);
+  return asc_update_mask_b16(value);
 }
 
 __simd_callee__ inline vector_bool update_mask_b32(uint32_t value) {
-  uint32_t v = value;
-  return ::plt_b32(v, POST_UPDATE);
+  return asc_update_mask_b32(value);
 }
 
 template <typename Part>
 __simd_callee__ inline vector_bool ppack(vector_bool src, Part part) {
   vector_bool dst;
-  ::ppack(dst, src, part);
+  if constexpr (part == HIGHER) {
+    asc_pack_to_high(dst, src);
+  } else {
+    asc_pack_to_low(dst, src);
+  }
   return dst;
 }
 
 template <typename Part>
 __simd_callee__ inline vector_bool punpack(vector_bool src, Part part) {
   vector_bool dst;
-  ::punpack(dst, src, part);
+  if constexpr (part == HIGHER) {
+    asc_unpack_upper(dst, src);
+  } else {
+    asc_unpack_lower(dst, src);
+  }
   return dst;
 }
 
@@ -787,13 +801,13 @@ __simd_callee__ inline vector_bool punpack(vector_bool src, Part part) {
   __simd_callee__ inline vec_pair<vector_bool> pintlv_##WIDTH(                 \
       vector_bool src_0, vector_bool src_1) {                                  \
     vec_pair<vector_bool> dst;                                                 \
-    ::pintlv_##WIDTH(dst.v0, dst.v1, src_0, src_1);                            \
+    asc_intlv_##WIDTH(dst.v0, dst.v1, src_0, src_1);                           \
     return dst;                                                                \
   }                                                                            \
   __simd_callee__ inline vec_pair<vector_bool> pdintlv_##WIDTH(                \
       vector_bool src_0, vector_bool src_1) {                                  \
     vec_pair<vector_bool> dst;                                                 \
-    ::pdintlv_##WIDTH(dst.v0, dst.v1, src_0, src_1);                           \
+    asc_deintlv_##WIDTH(dst.v0, dst.v1, src_0, src_1);                         \
     return dst;                                                                \
   }
 
@@ -805,13 +819,21 @@ TL_SIMD_PINTLV_IMPL(b32)
 template <typename Bin>
 __simd_callee__ inline void dhistv2(vector_u16 *dst, vector_u8 src,
                                     vector_bool mask, Bin bin) {
-  ::dhistv2(*dst, src, mask, bin);
+  if constexpr (bin == Bin_N0) {
+    asc_frequency_histogram_bin0(*dst, src, mask);
+  } else {
+    asc_frequency_histogram_bin1(*dst, src, mask);
+  }
 }
 
 template <typename Bin>
 __simd_callee__ inline void chistv2(vector_u16 *dst, vector_u8 src,
                                     vector_bool mask, Bin bin) {
-  ::chistv2(*dst, src, mask, bin);
+  if constexpr (bin == Bin_N0) {
+    asc_cumulative_histogram_bin0(*dst, src, mask);
+  } else {
+    asc_cumulative_histogram_bin1(*dst, src, mask);
+  }
 }
 
 // -- Index ramp / compare
@@ -821,32 +843,36 @@ __simd_callee__ inline void chistv2(vector_u16 *dst, vector_u8 src,
 template <typename T, typename Order>
 __simd_callee__ inline vec_t<T> vci(T index, Order order) {
   vec_t<T> dst;
-  ::vci(dst, index, order);
+  if constexpr (order == INC_ORDER) {
+    asc_arange(dst, index);
+  } else {
+    asc_arange_descend(dst, index);
+  }
   return dst;
 }
 
-#define __SIMD_INST_VCMP(OP)                                                   \
+#define SIMD_INST_DEFINE_COMPARE(OP)                                           \
   template <typename SrcVec>                                                   \
   __simd_callee__ inline vector_bool vcmp_##OP(SrcVec src_0, SrcVec src_1,     \
                                                vector_bool mask) {             \
     vector_bool dst;                                                           \
-    ::vcmp_##OP(dst, src_0, src_1, mask);                                      \
+    asc_##OP(dst, src_0, src_1, mask);                                         \
     return dst;                                                                \
   }                                                                            \
   template <typename SrcVec, typename ScalarT>                                 \
   __simd_callee__ inline vector_bool vcmps_##OP(SrcVec src, ScalarT scalar,    \
                                                 vector_bool mask) {            \
     vector_bool dst;                                                           \
-    ::vcmps_##OP(dst, src, scalar, mask);                                      \
+    asc_##OP##_scalar(dst, src, scalar, mask);                                 \
     return dst;                                                                \
   }
-__SIMD_INST_VCMP(eq)
-__SIMD_INST_VCMP(ne)
-__SIMD_INST_VCMP(gt)
-__SIMD_INST_VCMP(ge)
-__SIMD_INST_VCMP(lt)
-__SIMD_INST_VCMP(le)
-#undef __SIMD_INST_VCMP
+SIMD_INST_DEFINE_COMPARE(eq)
+SIMD_INST_DEFINE_COMPARE(ne)
+SIMD_INST_DEFINE_COMPARE(gt)
+SIMD_INST_DEFINE_COMPARE(ge)
+SIMD_INST_DEFINE_COMPARE(lt)
+SIMD_INST_DEFINE_COMPARE(le)
+#undef SIMD_INST_DEFINE_COMPARE
 
 // -- Broadcast
 // ------------------------------------------------------------------
@@ -855,16 +881,37 @@ __SIMD_INST_VCMP(le)
 template <typename T, typename Mode>
 __simd_callee__ inline vec_t<T> vdup(T src, vector_bool mask, Mode mode) {
   vec_t<T> dst;
-  ::vdup(dst, src, mask, mode);
+  asc_duplicate_scalar(dst, src, mask);
   return dst;
+}
+
+template <typename T, typename Mode>
+__simd_callee__ inline vec_t<T> vdup(vec_t<T> &dst, T src, vector_bool mask,
+                                     Mode mode) {
+  (void)mode;
+  vec_t<T> result;
+  asc_duplicate_scalar(result, src, mask);
+  return merge_masked(dst, result, mask);
 }
 
 template <typename SrcVec, typename Pos, typename Mode>
 __simd_callee__ inline SrcVec vdupv(SrcVec src, vector_bool mask, Pos pos,
                                     Mode mode) {
   SrcVec dst;
-  ::vdup(dst, src, mask, pos, mode);
+  if constexpr (pos == POS_LOWEST) {
+    asc_duplicate(dst, src, mask);
+  } else {
+    asc_duplicate_highest(dst, src, mask);
+  }
   return dst;
+}
+
+template <typename SrcVec, typename Pos, typename Mode>
+__simd_callee__ inline SrcVec vdupv(SrcVec &dst, SrcVec src, vector_bool mask,
+                                    Pos pos, Mode mode) {
+  (void)mode;
+  SrcVec result = vdupv(src, mask, pos, MODE_ZEROING);
+  return merge_masked(dst, result, mask);
 }
 
 // -- Select
@@ -874,123 +921,122 @@ template <typename SrcVec>
 __simd_callee__ inline SrcVec vsel(SrcVec src_0, SrcVec src_1,
                                    vector_bool mask) {
   SrcVec dst;
-  ::vsel(dst, src_0, src_1, mask);
+  asc_select(dst, src_0, src_1, mask);
   return dst;
 }
 
 template <typename SrcVec, typename IdxVec>
 __simd_callee__ inline SrcVec vselr(SrcVec src, IdxVec idx) {
   SrcVec dst;
-  ::vselr(dst, src, idx);
-  return dst;
-}
-
-// -- Scalar-vector ops
-// ----------------------------------------------------------
-
-template <typename SrcVec, typename ScalarT, typename Mode>
-__simd_callee__ inline SrcVec vadds(SrcVec src, ScalarT scalar,
-                                    vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vadds(dst, src, scalar, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename ScalarT, typename Mode>
-__simd_callee__ inline SrcVec vmaxs(SrcVec src, ScalarT scalar,
-                                    vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vmaxs(dst, src, scalar, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename ScalarT, typename Mode>
-__simd_callee__ inline SrcVec vmins(SrcVec src, ScalarT scalar,
-                                    vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vmins(dst, src, scalar, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename ScalarT, typename Mode>
-__simd_callee__ inline SrcVec vmuls(SrcVec src, ScalarT scalar,
-                                    vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vmuls(dst, src, scalar, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename ScalarT, typename Mode>
-__simd_callee__ inline SrcVec vshls(SrcVec src, ScalarT scalar,
-                                    vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vshls(dst, src, scalar, mask, mode);
-  return dst;
-}
-
-template <typename SrcVec, typename ScalarT, typename Mode>
-__simd_callee__ inline SrcVec vshrs(SrcVec src, ScalarT scalar,
-                                    vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vshrs(dst, src, scalar, mask, mode);
+  asc_gather(dst, src, idx);
   return dst;
 }
 
 // -- Exponential difference
 // -----------------------------------------------------
 
-template <typename SrcVec, typename Part>
+template <typename SrcVec>
 __simd_callee__ inline SrcVec vexpdif(SrcVec src_0, SrcVec src_1,
-                                      vector_bool mask, Part part) {
+                                      vector_bool mask) {
   SrcVec dst;
-  ::vexpdif(dst, src_0, src_1, mask, part);
-  return dst;
-}
-
-template <typename SrcVec, typename Mode>
-__simd_callee__ inline SrcVec vabsdif(SrcVec src_0, SrcVec src_1,
-                                      vector_bool mask, Mode mode) {
-  SrcVec dst;
-  ::vabsdif(dst, src_0, src_1, mask, mode);
+  asc_exp_sub(dst, src_0, src_1, mask);
   return dst;
 }
 
 template <typename U, typename SrcVec, typename Part>
 __simd_callee__ inline vec_t<U> vpack(SrcVec src, Part part) {
   vec_t<U> dst;
-  ::vpack(dst, src, part);
+  if constexpr (part == HIGHER) {
+    asc_pack_to_high(dst, src);
+  } else {
+    asc_pack_to_low(dst, src);
+  }
   return dst;
 }
 
 template <typename SrcVec, typename Part>
 __simd_callee__ inline widen_vec_t<SrcVec> vunpack(SrcVec src, Part part) {
   widen_vec_t<SrcVec> dst;
-  ::vunpack(dst, src, part);
+  if constexpr (part == HIGHER) {
+    asc_unpack_upper(dst, src);
+  } else {
+    asc_unpack_lower(dst, src);
+  }
   return dst;
 }
 
 template <typename T>
 __simd_callee__ inline void vsstb(vec_t<T> src, __ubuf__ T *base,
                                   int32_t stride, vector_bool mask) {
-  ::vsstb(src, base, stride, mask);
+  asc_storealign(base, src, static_cast<uint16_t>(stride >> 16),
+                 static_cast<uint16_t>(stride), mask);
 }
 
 template <typename T, typename Post>
 __simd_callee__ inline __ubuf__ T *vsstb(vec_t<T> src, __ubuf__ T *base,
                                          int32_t stride, vector_bool mask,
                                          Post post) {
-  ::vsstb(src, base, stride, mask, post);
+  asc_storealign_postupdate(base, src, static_cast<uint16_t>(stride >> 16),
+                            static_cast<uint16_t>(stride), mask);
   return base;
 }
 
-template <typename T, typename Dist>
-__simd_callee__ inline void vsts(vec_t<T> data, __ubuf__ T *base,
-                                 int32_t offset, Dist dist, vector_bool mask) {
-  ::vsts(data, base, offset, dist, mask);
+// Register stores. One entry per asc_storealign* distribution; the element
+// width (B8/B16/B32) is carried by T, so the width-suffixed dist names
+// collapse onto one function per family. Mirrors the vlds_* / plds_* split.
+template <typename T>
+__simd_callee__ inline void vsts_norm(vec_t<T> data, __ubuf__ T *base,
+                                      int32_t offset, vector_bool mask) {
+  asc_storealign(base, data, offset, mask);
+}
+
+template <typename T>
+__simd_callee__ inline void vsts_1st(vec_t<T> data, __ubuf__ T *base,
+                                     int32_t offset, vector_bool mask) {
+  asc_storealign_1st(base, data, offset);
+}
+
+template <typename T>
+__simd_callee__ inline void vsts_pack_b16(vec_t<T> data, __ubuf__ T *base,
+                                          int32_t offset, vector_bool mask) {
+  asc_storealign_pack((__ubuf__ uint16_t *)base,
+                      reinterpret_cast<vector_uint16_t &>(data), offset, mask);
+}
+
+template <typename T>
+__simd_callee__ inline void vsts_pack_b32(vec_t<T> data, __ubuf__ T *base,
+                                          int32_t offset, vector_bool mask) {
+  asc_storealign_pack((__ubuf__ uint32_t *)base,
+                      reinterpret_cast<vector_uint32_t &>(data), offset, mask);
+}
+
+template <typename T>
+__simd_callee__ inline void vsts_pack_quarter(vec_t<T> data, __ubuf__ T *base,
+                                              int32_t offset,
+                                              vector_bool mask) {
+  if constexpr (std::is_same<T, int32_t>::value ||
+                std::is_same<T, uint32_t>::value ||
+                std::is_same<T, float>::value) {
+    asc_storealign_pack_quarter(base, data, offset, mask);
+  } else if constexpr (std::is_same<T, fp8_e4_t>::value ||
+                       std::is_same<T, fp8_e5_t>::value ||
+                       std::is_same<T, float4_e2m1x2_t>::value ||
+                       std::is_same<T, float4_e1m2x2_t>::value ||
+                       std::is_same<T, uint8_t>::value ||
+                       std::is_same<T, int8_t>::value) {
+    asc_storealign_pack_quarter((__ubuf__ uint32_t *)base, (vector_u32 &)data,
+                                offset, mask);
+  }
+}
+
+template <typename T>
+__simd_callee__ inline void vsts_intlv(vec_t<T> data, __ubuf__ T *base,
+                                       int32_t offset, vector_bool mask) {
+  asc_storealign_intlv(base, data, offset, mask);
 }
 
 template <typename T> __simd_callee__ inline void mem_bar(T mem_type) {
-  ::mem_bar(mem_type);
+  ::asc_mem_bar(mem_type);
 }
 
 } // namespace simd_inst

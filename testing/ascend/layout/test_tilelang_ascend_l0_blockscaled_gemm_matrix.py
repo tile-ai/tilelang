@@ -231,7 +231,7 @@ def test_l0_blockscaled_gemm_regions_drive_mn_geometry():
         ),
         target="ascend",
     ).kernel_source
-    assert re.search(r"mad_mx\([^;]*,\s*17,\s*128,\s*19,", source), source
+    assert re.search(r"asc_mmad_mx\([^;]*,\s*17,\s*128,\s*19,", source), source
 
 
 if __name__ == "__main__":

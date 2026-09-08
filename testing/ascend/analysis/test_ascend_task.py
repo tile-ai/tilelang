@@ -80,7 +80,7 @@ def test_task_allows_standalone_fixpipe_dual_copy():
                 T.dual_copy(accum, temp)
 
     source = lower(main, target="ascend").kernel_source
-    assert "get_subblockid()" not in source
+    assert "asc_get_sub_block_id()" not in source
 
 
 def test_task_allows_standalone_cross_core_sync():
@@ -90,7 +90,7 @@ def test_task_allows_standalone_cross_core_sync():
             T.ascend_sync_inter_wait("PIPE_V", FLAG)
 
     source = lower(main, target="ascend").kernel_source
-    assert f"AscendC::CrossCoreWaitFlag<0, PIPE_V>({FLAG});" in source
+    assert f"asc_sync_inter_wait(PIPE_V, {FLAG});" in source
 
 
 def test_task_rejects_multiple_cross_core_syncs():

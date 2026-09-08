@@ -199,9 +199,9 @@ def test_rewrite_dual_copy_rejects_unaligned_hardware_n_split():
 def test_rewrite_dual_copy_supports_one_dimensional_software_paths():
     with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: True}):
         source = tilelang.lower(_one_dimensional_software_dual_copies(), target="ascend").kernel_source
-    assert "copy_gm_to_ubuf" in source
-    assert "copy_ubuf_to_gm" in source
-    assert "copy_ubuf_to_cbuf" in source
+    assert "asc_copy_gm2ub_align" in source
+    assert "asc_copy_ub2gm_align" in source
+    assert "asc_copy_ub2l1" in source
     assert "A[(sid * 64)]" in source
     assert "C[(sid * 64)]" in source
     assert source.count("sid * 64") >= 3
@@ -211,7 +211,7 @@ def test_rewrite_dual_copy_supports_manual_one_dimensional_software_paths():
     with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False}):
         source = tilelang.lower(_manual_one_dimensional_software_dual_copies(), target="ascend").kernel_source
     assert "__global__ __mix__(1, 2)" in source
-    assert source.count("get_subblockid()") == 1
+    assert source.count("asc_get_sub_block_id()") == 1
     assert "A[(sid * 64)]" in source
     assert "C[(sid * 64)]" in source
 
@@ -251,7 +251,7 @@ def test_rewrite_dual_copy_strips_software_unit_flag_ctrl():
         config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False},
         instruments=[CaptureRewriteDualCopy()],
     ):
-        tilelang.lower(_manual_unit_flag_dual_copies(), target="ascend")
+        source = tilelang.lower(_manual_unit_flag_dual_copies(), target="ascend").kernel_source
 
     hardware = [annotations for annotations in rewritten_annotations if "dual_dst_ctl" in annotations]
     software = [annotations for annotations in rewritten_annotations if "dual_dst_ctl" not in annotations]
@@ -259,6 +259,10 @@ def test_rewrite_dual_copy_strips_software_unit_flag_ctrl():
     assert len(software) == 2
     assert all("unit_flag_ctrl" not in annotations for annotations in software)
     assert all("dual_dst_ctl" not in annotations for annotations in software)
+    assert (
+        "static_cast<asc_dual_dst_mode>(1), static_cast<asc_unit_flag_mode>(3), "
+        "static_cast<asc_quant_mode>(0), static_cast<asc_relu_pre_mode>(0), 0, 1, 0, 0);" in source
+    )
 
 
 def test_rewrite_dual_copy_rejects_unaligned_one_dimensional_ub_to_l1():

@@ -201,8 +201,8 @@ def test_manual_pipeline_rewrites_compact_nz_dual_copy():
     )
     source = kernel.get_kernel_source()
     assert "__global__ __mix__(1, 2)" in source
-    assert source.count("get_subblockid()") == 1
-    assert source.count("copy_ubuf_to_cbuf") == 1
+    assert source.count("asc_get_sub_block_id()") == 1
+    assert source.count("asc_copy_ub2l1") == 1
 
 
 @pytest.mark.parametrize(
@@ -211,9 +211,9 @@ def test_manual_pipeline_rewrites_compact_nz_dual_copy():
         (
             "ascend",
             "__global__ __mix__(1, 2)",
-            "get_subblockid()",
-            "copy_gm_to_ubuf_align_v2",
-            "copy_ubuf_to_gm_align_v2",
+            "asc_get_sub_block_id()",
+            "asc_copy_gm2ub_align",
+            "asc_copy_ub2gm_align",
         ),
         (
             "pto",
@@ -274,7 +274,7 @@ def test_nd2nz_scatter_tcopy_codegen():
 
     assert "__global__ __vector__ void main_kernel" in source
     assert "ascend_nd2nz_scatter<32, 128, float, bfloat16_t>" in source
-    assert "copy_ubuf_to_cbuf" not in source
+    assert "asc_copy_ub2l1" not in source
 
 
 def test_nd2nz_scatter_tcopy_requires_padding_row():

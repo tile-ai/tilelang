@@ -1,6 +1,6 @@
 #pragma once
 
-#include "kernel_operator.h"
+#include "c_api/asc_simd.h"
 
 /*!
  * \brief Ascend GEMM template for L1-scoped inputs with double-buffered L0.
@@ -14,12 +14,11 @@
  * double-buffer synchronization (sk & 1).  The caller MUST:
  *
  *   1. Pre-set these flags exactly once before the first call:
- *        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(0);
- *        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(1);
- *
+ *        asc_unlock(PIPE_MTE1, 0, ASC_LOCK_BLOCK);
+ *        asc_unlock(PIPE_MTE1, 1, ASC_LOCK_BLOCK);
  *   2. Drain them exactly once after the last call:
- *        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(0);
- *        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(1);
+ *        asc_lock(PIPE_M, 0, ASC_LOCK_BLOCK);
+ *        asc_lock(PIPE_M, 1, ASC_LOCK_BLOCK);
  *
  *   3. NOT use IDs 0/1 for any other M_MTE1 flags in the surrounding
  *      code.  If the caller also needs M_MTE1 flags for its own L1
@@ -64,32 +63,34 @@ ascend_gemm_l1(__cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr,
   __cb__ InT *l0b = (__cb__ InT *)0;
 
   for (int sk = 0; sk < SUB_K; ++sk) {
-    get_buf(PIPE_MTE1, buf_offset + (sk & 1), false);
-    load_cbuf_to_ca((__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)), cbuf_a_ptr, 0,
-                    (sk * kStep), mStepA, kStep, mStepA, mStepA, 0);
+    // ASC_LOCK_BLOCK is the default lock mode; keep it explicit at call sites.
+    asc_lock(PIPE_MTE1, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
+    asc_copy_l12l0a((__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)), cbuf_a_ptr, 0,
+                    (sk * kStep), mStepA, kStep, mStepA, mStepA);
     if constexpr (TRANS_B) {
       // NT case: W[N,K] in L1, cb transpose=false (ZZ)
       // rows=N, cols=K → sub-K along cols (kStart)
       // mStep=N/16 (nBlk), kStep=TILE_K_SUB/C0 (nGroups in K)
-      load_cbuf_to_cb((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), cbuf_b_ptr,
-                      0, (sk * kStep), mStepB, kStep, mStepB, mStepB, 0);
+      asc_copy_l12l0b((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), cbuf_b_ptr,
+                      0, (sk * kStep), mStepB, kStep, mStepB, mStepB);
     } else {
       // NN case: B[K,N] in L1, cb transpose=true (ZN).
-      // ⚠️ transpose=true in load_cbuf_to_cb only works for b16 types;
+      // ⚠️ transpose=true in asc_copy_l12l0b only works for b16 types;
       //    fp32 NN matmul MUST use the NT path (transpose during GM→L1).
       // rows=K, cols=N → sub-K along rows (mStart)
       constexpr int srcStrideNN = K / C0; // nBlk in L1
-      load_cbuf_to_cb((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), cbuf_b_ptr,
-                      (sk * kStep), // mStartPosition: sub-K row offset
-                      0,            // kStartPosition: start from col 0
-                      kStep,        // mStep: TILE_K_SUB/C0 K-row fractals
-                      mStepB,       // kStep: N/FRAC_N N-col fractals
-                      srcStrideNN,  // srcStride: K/C0 (nBlk in L1)
-                      kStep,        // dstStride: mStep
-                      1);
+      asc_copy_l12l0b_transpose(
+          (__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), cbuf_b_ptr,
+          (sk * kStep), // mStartPosition: sub-K row offset
+          0,            // kStartPosition: start from col 0
+          kStep,        // mStep: TILE_K_SUB/C0 K-row fractals
+          mStepB,       // kStep: N/FRAC_N N-col fractals
+          srcStrideNN,  // srcStride: K/C0 (nBlk in L1)
+          kStep         // dstStride: mStep
+      );
     }
-    rls_buf(PIPE_MTE1, buf_offset + (sk & 1), false);
-    get_buf(PIPE_M, buf_offset + (sk & 1), false);
+    asc_unlock(PIPE_MTE1, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
+    asc_lock(PIPE_M, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
 
     bool is_first = (sk == 0);
     bool is_last = (sk == SUB_K - 1);
@@ -98,10 +99,10 @@ ascend_gemm_l1(__cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr,
       uf_ctrl = 2;
     }
 
-    mad(cc_ptr, (__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)),
-        (__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), M, TILE_K_SUB, N, uf_ctrl,
-        true, false, clear_accum && is_first);
-    rls_buf(PIPE_M, buf_offset + (sk & 1), false);
+    asc_mmad(cc_ptr, (__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)),
+             (__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), M, TILE_K_SUB, N,
+             uf_ctrl, true, false, clear_accum && is_first);
+    asc_unlock(PIPE_M, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
   }
 }
 
@@ -110,9 +111,9 @@ ascend_gemm_l1(__cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr,
  *        double-buffered L0 and scale factor pipeline.
  *
  * Data flow:
- *   1. L1→L0A/L0B  data:  load_cbuf_to_ca  / load_cbuf_to_cb
- *   2. L1→L0A/L0B  scale: load_cbuf_to_ca_mx / load_cbuf_to_cb_mx
- *   3. Compute:            mad_mx (reads data + scale from L0A/L0B)
+ *   1. L1→L0A/L0B  data:  asc_copy_l12l0a  / asc_copy_l12l0b
+ *   2. L1→L0A/L0B  scale: asc_copy_l12l0a_mx / asc_copy_l12l0b_mx
+ *   3. Compute:            asc_mmad_mx (reads data + scale from L0A/L0B)
  *
  * SF layout conventions:
  *   - kSFDivisor = 64:  one SF pair (int16_t = 2×float8_e8m0) per 64 K-elements
@@ -168,37 +169,20 @@ __aicore__ inline void ascend_blockscaled_gemm_l1(
   __cb__ InT *l0b = (__cb__ InT *)0;
 
   for (int sk = 0; sk < SUB_K; ++sk) {
-    get_buf(PIPE_MTE1, buf_offset + (sk & 1), false);
+    // ASC_LOCK_BLOCK is the default lock mode; keep it explicit at call sites.
+    asc_lock(PIPE_MTE1, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
 
-    if constexpr (is_fp4) {
-      load_cbuf_to_ca_s4((__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)),
-                         cbuf_a_ptr, 0, (sk * kStep), mStepA, kStep, mStepA,
-                         mStepA, 0);
+    asc_copy_l12l0a((__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)), cbuf_a_ptr, 0,
+                    (sk * kStep), mStepA, kStep, mStepA, mStepA);
 
-      if constexpr (TRANS_B) {
-        load_cbuf_to_cb_s4((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)),
-                           cbuf_b_ptr, 0, (sk * kStep), mStepB, kStep, mStepB,
-                           mStepB, 0);
-      } else {
-        constexpr int srcStrideNN = K / C0;
-        load_cbuf_to_cb_s4((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)),
-                           cbuf_b_ptr, (sk * kStep), 0, kStep, mStepB,
-                           srcStrideNN, kStep, 1);
-      }
+    if constexpr (TRANS_B) {
+      asc_copy_l12l0b((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), cbuf_b_ptr,
+                      0, (sk * kStep), mStepB, kStep, mStepB, mStepB);
     } else {
-      load_cbuf_to_ca((__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)), cbuf_a_ptr,
-                      0, (sk * kStep), mStepA, kStep, mStepA, mStepA, 0);
-
-      if constexpr (TRANS_B) {
-        load_cbuf_to_cb((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)),
-                        cbuf_b_ptr, 0, (sk * kStep), mStepB, kStep, mStepB,
-                        mStepB, 0);
-      } else {
-        constexpr int srcStrideNN = K / C0;
-        load_cbuf_to_cb((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)),
-                        cbuf_b_ptr, (sk * kStep), 0, kStep, mStepB, srcStrideNN,
-                        kStep, 1);
-      }
+      constexpr int srcStrideNN = K / C0;
+      asc_copy_l12l0b_transpose((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)),
+                                cbuf_b_ptr, (sk * kStep), 0, kStep, mStepB,
+                                srcStrideNN, kStep);
     }
 
     {
@@ -211,18 +195,20 @@ __aicore__ inline void ascend_blockscaled_gemm_l1(
 
       uint16_t sf_y = sf_k_offset + sk * kSFPairsPerInner;
 
-      load_cbuf_to_ca_mx(dst_a, (__cbuf__ fp8_e4_t *)cbuf_sfa_ptr, 0, sf_y,
+      // The MX copy C API consumes the scale-factor buffer in its physical
+      // E8M0 format; its logical template type does not carry that encoding.
+      asc_copy_l12l0a_mx(dst_a, (__cbuf__ fp8_e8m0_t *)cbuf_sfa_ptr, 0, sf_y,
                          mStepA, kSFPairsPerInner, SF_NZ_STRIDE,
                          kSFPairsPerInner);
 
-      load_cbuf_to_cb_mx(dst_b, (__cbuf__ fp8_e4_t *)cbuf_sfb_ptr, 0, sf_y,
+      asc_copy_l12l0b_mx(dst_b, (__cbuf__ fp8_e8m0_t *)cbuf_sfb_ptr, 0, sf_y,
                          mStepB, kSFPairsPerInner, SF_NZ_STRIDE,
                          kSFPairsPerInner);
     }
 
-    rls_buf(PIPE_MTE1, buf_offset + (sk & 1), false);
+    asc_unlock(PIPE_MTE1, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
 
-    get_buf(PIPE_M, buf_offset + (sk & 1), false);
+    asc_lock(PIPE_M, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
 
     bool is_first = (sk == 0);
     bool is_last = (sk == SUB_K - 1);
@@ -231,10 +217,10 @@ __aicore__ inline void ascend_blockscaled_gemm_l1(
       uf_ctrl = 2;
     }
 
-    mad_mx(cc_ptr, (__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)),
-           (__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), M, TILE_K_SUB, N,
-           uf_ctrl, true, false, clear_accum && is_first);
+    asc_mmad_mx(cc_ptr, (__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)),
+                (__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), M, TILE_K_SUB, N,
+                uf_ctrl, true, false, clear_accum && is_first);
 
-    rls_buf(PIPE_M, buf_offset + (sk & 1), false);
+    asc_unlock(PIPE_M, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
   }
 }
