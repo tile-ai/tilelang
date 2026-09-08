@@ -4,9 +4,9 @@ from collections.abc import Callable
 
 from tilelang.layout import Fragment, Layout, PartialFragment
 from tilelang.utils.language import is_fragment, is_reducer
+from tvm.tirx import FloatImm, IntImm, tvm_tuple
 from tvm.tirx.script.parser import attr
 from tvm.tirx.script.builder.ir import sblock_attr
-from tvm.tirx import FloatImm, IntImm, tvm_tuple
 
 __all__ = [
     "WSID",

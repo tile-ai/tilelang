@@ -1,0 +1,652 @@
+/*!
+ * \file ascend_module.cc
+ * \brief Runnable tvm_ffi runtime module for executable Ascend device ELFs.
+ *
+ * The module mirrors CUDA's binary runtime module: codegen stores executable
+ * device bytes and launch metadata, while the runtime loads functions and
+ * launches them on the stream supplied by TVM-FFI's DLPack Exchange API.
+ * CANN symbols are resolved lazily so TileLang keeps no CANN build-time
+ * dependency. The Ascend backend is Linux-only.
+ */
+#include <dlfcn.h>
+#include <tvm/ffi/extra/c_env_api.h>
+#include <tvm/ffi/extra/module.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/runtime/base.h>
+#include <tvm/runtime/logging.h>
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "runtime/thread_storage_scope.h"
+#include "support/bytes_io.h"
+#include "support/check.h"
+
+namespace tvm {
+namespace ascend {
+
+using namespace tvm::runtime;
+
+namespace {
+
+using AclError = int32_t;
+using AclBinHandle = void *;
+using AclFuncHandle = void *;
+using AclStream = void *;
+
+constexpr AclError kAclSuccess = 0;
+constexpr int32_t kAclLaunchKernelAttrDynUbufSize = 2;
+constexpr size_t kAclArgMinAlignment = 4;
+constexpr size_t kAclArgBufferAlignment = 8;
+
+size_t AlignUp(size_t value, size_t alignment) {
+  TVM_FFI_ICHECK_NE(alignment, 0U);
+  TVM_FFI_ICHECK_EQ(alignment & (alignment - 1), 0U);
+  return (value + alignment - 1) & ~(alignment - 1);
+}
+
+enum class AclArgKind {
+  kInt8,
+  kInt16,
+  kInt32,
+  kInt64,
+  kUInt8,
+  kUInt16,
+  kUInt32,
+  kUInt64,
+  kFloat32,
+  kFloat64,
+  kHandle,
+};
+
+struct AclArgLayout {
+  AclArgKind kind;
+  size_t offset;
+};
+
+struct AclArgPackPlan {
+  std::vector<AclArgLayout> args;
+  size_t buffer_size{0};
+};
+
+AclArgKind GetAclArgKind(DLDataType dtype, size_t index,
+                         const std::string &function_name) {
+  if (dtype.lanes != 1) {
+    TVM_FFI_THROW(RuntimeError)
+        << "Ascend kernel `" << function_name << "` argument " << index
+        << " has " << dtype.lanes
+        << " lanes; aclrtLaunchKernelWithHostArgs only supports scalar "
+           "kernel arguments";
+  }
+  if (dtype.code == kDLOpaqueHandle) {
+    return AclArgKind::kHandle;
+  }
+  if (dtype.code == kDLInt) {
+    switch (dtype.bits) {
+    case 8:
+      return AclArgKind::kInt8;
+    case 16:
+      return AclArgKind::kInt16;
+    case 32:
+      return AclArgKind::kInt32;
+    case 64:
+      return AclArgKind::kInt64;
+    default:
+      break;
+    }
+  } else if (dtype.code == kDLUInt) {
+    switch (dtype.bits) {
+    case 8:
+      return AclArgKind::kUInt8;
+    case 16:
+      return AclArgKind::kUInt16;
+    case 32:
+      return AclArgKind::kUInt32;
+    case 64:
+      return AclArgKind::kUInt64;
+    default:
+      break;
+    }
+  } else if (dtype.code == kDLFloat) {
+    if (dtype.bits == 32) {
+      return AclArgKind::kFloat32;
+    }
+    if (dtype.bits == 64) {
+      return AclArgKind::kFloat64;
+    }
+  }
+  TVM_FFI_THROW(RuntimeError)
+      << "Ascend kernel `" << function_name << "` argument " << index
+      << " has unsupported type code=" << static_cast<int>(dtype.code)
+      << ", bits=" << static_cast<int>(dtype.bits) << ", lanes=" << dtype.lanes;
+  TVM_FFI_UNREACHABLE();
+}
+
+size_t GetAclArgSize(AclArgKind kind) {
+  switch (kind) {
+  case AclArgKind::kInt8:
+    return sizeof(int8_t);
+  case AclArgKind::kInt16:
+    return sizeof(int16_t);
+  case AclArgKind::kInt32:
+    return sizeof(int32_t);
+  case AclArgKind::kInt64:
+    return sizeof(int64_t);
+  case AclArgKind::kUInt8:
+    return sizeof(uint8_t);
+  case AclArgKind::kUInt16:
+    return sizeof(uint16_t);
+  case AclArgKind::kUInt32:
+    return sizeof(uint32_t);
+  case AclArgKind::kUInt64:
+    return sizeof(uint64_t);
+  case AclArgKind::kFloat32:
+    return sizeof(float);
+  case AclArgKind::kFloat64:
+    return sizeof(double);
+  case AclArgKind::kHandle:
+    return sizeof(void *);
+  }
+  TVM_FFI_UNREACHABLE();
+}
+
+size_t GetAclArgAlignment(AclArgKind kind) {
+  size_t alignment = 0;
+  switch (kind) {
+  case AclArgKind::kInt8:
+    alignment = alignof(int8_t);
+    break;
+  case AclArgKind::kInt16:
+    alignment = alignof(int16_t);
+    break;
+  case AclArgKind::kInt32:
+    alignment = alignof(int32_t);
+    break;
+  case AclArgKind::kInt64:
+    alignment = alignof(int64_t);
+    break;
+  case AclArgKind::kUInt8:
+    alignment = alignof(uint8_t);
+    break;
+  case AclArgKind::kUInt16:
+    alignment = alignof(uint16_t);
+    break;
+  case AclArgKind::kUInt32:
+    alignment = alignof(uint32_t);
+    break;
+  case AclArgKind::kUInt64:
+    alignment = alignof(uint64_t);
+    break;
+  case AclArgKind::kFloat32:
+    alignment = alignof(float);
+    break;
+  case AclArgKind::kFloat64:
+    alignment = alignof(double);
+    break;
+  case AclArgKind::kHandle:
+    alignment = alignof(void *);
+    break;
+  }
+  return std::max(alignment, kAclArgMinAlignment);
+}
+
+AclArgPackPlan MakeAclArgPackPlan(const ffi::Array<DLDataType> &arg_types,
+                                  const std::string &function_name) {
+  AclArgPackPlan plan;
+  plan.args.reserve(arg_types.size());
+  size_t offset = 0;
+  for (size_t i = 0; i < arg_types.size(); ++i) {
+    AclArgKind kind = GetAclArgKind(arg_types[i], i, function_name);
+    offset = AlignUp(offset, GetAclArgAlignment(kind));
+    plan.args.push_back({kind, offset});
+    offset += GetAclArgSize(kind);
+  }
+  plan.buffer_size = AlignUp(offset, kAclArgBufferAlignment);
+  return plan;
+}
+
+template <typename T, typename U>
+void StoreAclArg(uint8_t *destination, U value) {
+  T converted = static_cast<T>(value);
+  std::memcpy(destination, &converted, sizeof(converted));
+}
+
+void PackAclArg(const TVMFFIAny &source, AclArgKind kind,
+                uint8_t *destination) {
+  switch (kind) {
+  case AclArgKind::kInt8:
+    return StoreAclArg<int8_t>(destination, source.v_int64);
+  case AclArgKind::kInt16:
+    return StoreAclArg<int16_t>(destination, source.v_int64);
+  case AclArgKind::kInt32:
+    return StoreAclArg<int32_t>(destination, source.v_int64);
+  case AclArgKind::kInt64:
+    return StoreAclArg<int64_t>(destination, source.v_int64);
+  case AclArgKind::kUInt8:
+    return StoreAclArg<uint8_t>(destination, source.v_int64);
+  case AclArgKind::kUInt16:
+    return StoreAclArg<uint16_t>(destination, source.v_int64);
+  case AclArgKind::kUInt32:
+    return StoreAclArg<uint32_t>(destination, source.v_int64);
+  case AclArgKind::kUInt64:
+    return StoreAclArg<uint64_t>(destination, source.v_int64);
+  case AclArgKind::kFloat32:
+    return StoreAclArg<float>(destination, source.v_float64);
+  case AclArgKind::kFloat64:
+    return StoreAclArg<double>(destination, source.v_float64);
+  case AclArgKind::kHandle:
+    std::memcpy(destination, &source.v_ptr, sizeof(source.v_ptr));
+    return;
+  }
+  TVM_FFI_UNREACHABLE();
+}
+
+template <size_t kNumWords> class AclArgBuffer {
+public:
+  explicit AclArgBuffer(size_t num_words) {
+    TVM_FFI_ICHECK_LE(num_words, kNumWords);
+  }
+
+  uint8_t *data() { return reinterpret_cast<uint8_t *>(storage_.data()); }
+
+private:
+  alignas(kAclArgBufferAlignment) std::array<uint64_t, kNumWords> storage_{};
+};
+
+template <> class AclArgBuffer<0> {
+public:
+  explicit AclArgBuffer(size_t num_words) : storage_(num_words, 0) {}
+
+  uint8_t *data() { return reinterpret_cast<uint8_t *>(storage_.data()); }
+
+private:
+  std::vector<uint64_t> storage_;
+};
+
+template <size_t kNumWords, typename F>
+ffi::Function PackFuncAclHostArgs_(F function, AclArgPackPlan plan) {
+  size_t num_words = plan.buffer_size / sizeof(uint64_t);
+  auto wrapped = [function = std::move(function), plan = std::move(plan),
+                  num_words](ffi::PackedArgs args, ffi::Any *return_value) {
+    AclArgBuffer<kNumWords> buffer(num_words);
+    const TVMFFIAny *raw_args =
+        reinterpret_cast<const TVMFFIAny *>(args.data());
+    for (size_t i = 0; i < plan.args.size(); ++i) {
+      const AclArgLayout &layout = plan.args[i];
+      PackAclArg(raw_args[i], layout.kind, buffer.data() + layout.offset);
+    }
+    function(args, return_value, buffer.data(), plan.buffer_size);
+  };
+  return ffi::Function(wrapped);
+}
+
+template <typename F>
+ffi::Function PackFuncAclHostArgs(F function,
+                                  const ffi::Array<DLDataType> &arg_types,
+                                  const std::string &function_name) {
+  AclArgPackPlan plan = MakeAclArgPackPlan(arg_types, function_name);
+  size_t num_words = plan.buffer_size / sizeof(uint64_t);
+  if (num_words <= 4) {
+    return PackFuncAclHostArgs_<4>(std::move(function), std::move(plan));
+  }
+  if (num_words <= 8) {
+    return PackFuncAclHostArgs_<8>(std::move(function), std::move(plan));
+  }
+  if (num_words <= 16) {
+    return PackFuncAclHostArgs_<16>(std::move(function), std::move(plan));
+  }
+  return PackFuncAclHostArgs_<0>(std::move(function), std::move(plan));
+}
+
+union AclLaunchKernelAttrValue {
+  uint8_t schem_mode;
+  uint32_t dyn_ubuf_size;
+  uint32_t engine_type;
+  uint32_t block_dim_offset;
+  uint8_t is_block_task_prefetch;
+  uint8_t is_data_dump;
+  uint16_t timeout;
+  uint32_t reserved[4];
+};
+
+struct AclLaunchKernelAttr {
+  int32_t id;
+  AclLaunchKernelAttrValue value;
+};
+
+struct AclLaunchKernelCfg {
+  AclLaunchKernelAttr *attrs;
+  size_t num_attrs;
+};
+
+class AscendDriver {
+public:
+  static AscendDriver *Global() {
+    static auto *driver = new AscendDriver();
+    return driver;
+  }
+
+  AclError BinaryLoadFromData(const void *data, size_t size,
+                              AclBinHandle *handle) const {
+    return binary_load_from_data_(data, size, nullptr, handle);
+  }
+
+  AclError BinaryGetFunction(AclBinHandle binary, const char *name,
+                             AclFuncHandle *function) const {
+    return binary_get_function_(binary, name, function);
+  }
+
+  AclError BinaryUnload(AclBinHandle binary) const {
+    return binary_unload_(binary);
+  }
+
+  AclError GetDevice(int32_t *device_id) const {
+    return get_device_(device_id);
+  }
+
+  AclError LaunchKernelWithHostArgs(AclFuncHandle function, uint32_t num_blocks,
+                                    AclStream stream,
+                                    AclLaunchKernelCfg *config, void *args,
+                                    size_t args_size) const {
+    return launch_kernel_with_host_args_(function, num_blocks, stream, config,
+                                         args, args_size, nullptr, 0);
+  }
+
+  const char *GetRecentErrorMessage() const {
+    return get_recent_error_message_ == nullptr ? nullptr
+                                                : get_recent_error_message_();
+  }
+
+private:
+  using BinaryLoadFromDataFn = AclError (*)(const void *, size_t, const void *,
+                                            AclBinHandle *);
+  using BinaryGetFunctionFn = AclError (*)(AclBinHandle, const char *,
+                                           AclFuncHandle *);
+  using BinaryUnloadFn = AclError (*)(AclBinHandle);
+  using GetDeviceFn = AclError (*)(int32_t *);
+  using LaunchKernelWithHostArgsFn = AclError (*)(AclFuncHandle, uint32_t,
+                                                  AclStream,
+                                                  AclLaunchKernelCfg *, void *,
+                                                  size_t, void *, size_t);
+  using GetRecentErrorMessageFn = const char *(*)();
+
+  AscendDriver() {
+    library_ = dlopen("libascendcl.so", RTLD_LAZY | RTLD_LOCAL);
+    TVM_FFI_CHECK(library_ != nullptr, RuntimeError)
+        << "Ascend runtime could not load libascendcl.so: " << dlerror();
+    binary_load_from_data_ =
+        LoadSymbol<BinaryLoadFromDataFn>("aclrtBinaryLoadFromData");
+    binary_get_function_ =
+        LoadSymbol<BinaryGetFunctionFn>("aclrtBinaryGetFunction");
+    binary_unload_ = LoadSymbol<BinaryUnloadFn>("aclrtBinaryUnLoad");
+    get_device_ = LoadSymbol<GetDeviceFn>("aclrtGetDevice");
+    launch_kernel_with_host_args_ =
+        LoadSymbol<LaunchKernelWithHostArgsFn>("aclrtLaunchKernelWithHostArgs");
+    get_recent_error_message_ =
+        LoadSymbol<GetRecentErrorMessageFn>("aclGetRecentErrMsg");
+  }
+
+  template <typename FunctionType> FunctionType LoadSymbol(const char *name) {
+    dlerror();
+    void *symbol = dlsym(library_, name);
+    const char *error = dlerror();
+    TVM_FFI_CHECK(symbol != nullptr && error == nullptr, RuntimeError)
+        << "Ascend runtime could not resolve " << name
+        << " from libascendcl.so: "
+        << (error == nullptr ? "symbol not found" : error);
+    return reinterpret_cast<FunctionType>(symbol);
+  }
+
+  void *library_{nullptr};
+  BinaryLoadFromDataFn binary_load_from_data_{nullptr};
+  BinaryGetFunctionFn binary_get_function_{nullptr};
+  BinaryUnloadFn binary_unload_{nullptr};
+  GetDeviceFn get_device_{nullptr};
+  LaunchKernelWithHostArgsFn launch_kernel_with_host_args_{nullptr};
+  GetRecentErrorMessageFn get_recent_error_message_{nullptr};
+};
+
+void CheckAcl(AclError result, const char *operation) {
+  if (result == kAclSuccess) {
+    return;
+  }
+  const char *message = AscendDriver::Global()->GetRecentErrorMessage();
+  TVM_FFI_THROW(RuntimeError)
+      << operation << " failed with ACL error " << result
+      << (message == nullptr ? "" : std::string(": ") + message);
+}
+
+} // namespace
+
+class AscendModuleNode : public ffi::ModuleObj {
+public:
+  AscendModuleNode(ffi::Bytes code, ffi::String fmt,
+                   ffi::Map<ffi::String, FunctionInfo> fmap,
+                   ffi::Map<ffi::String, ffi::String> source)
+      : code_(std::move(code)), fmt_(std::move(fmt)), fmap_(std::move(fmap)),
+        source_(std::move(source)) {}
+
+  ~AscendModuleNode() {
+    if (device_modules_.empty()) {
+      return;
+    }
+    AscendDriver *driver = AscendDriver::Global();
+    for (const auto &[device_id, device_module] : device_modules_) {
+      if (device_module.binary != nullptr) {
+        AclError result = driver->BinaryUnload(device_module.binary);
+        if (result != kAclSuccess) {
+          LOG(WARNING) << "aclrtBinaryUnLoad failed for Ascend device "
+                       << device_id << " with error " << result;
+        }
+      }
+    }
+  }
+
+  const char *kind() const final { return "asc"; }
+
+  int GetPropertyMask() const final {
+    return ffi::Module::kBinarySerializable | ffi::Module::kRunnable;
+  }
+
+  ffi::Optional<ffi::Function> GetFunction(const ffi::String &name) final;
+
+  ffi::Bytes SaveToBytes() const final {
+    // Keep the same payload shape as CUDA: [fmt][fmap][device code].
+    std::string buffer;
+    support::BytesOutStream stream(&buffer);
+    stream.Write(fmt_);
+    stream.Write(fmap_);
+    stream.Write(code_);
+    return ffi::Bytes(std::move(buffer));
+  }
+
+  ffi::String InspectSource(const ffi::String &format) const final {
+    if (format == fmt_) {
+      return ffi::String(code_.data(), code_.size());
+    }
+    if (auto source = source_.Get(format)) {
+      return source.value();
+    }
+    if (format.empty()) {
+      if (auto source = source_.Get("asc")) {
+        return source.value();
+      }
+    }
+    return ffi::String();
+  }
+
+  AclFuncHandle GetFunctionHandle(int32_t device_id, const std::string &name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AscendDriver *driver = AscendDriver::Global();
+    DeviceModule &device_module = device_modules_[device_id];
+    if (device_module.binary == nullptr) {
+      CheckAcl(driver->BinaryLoadFromData(code_.data(), code_.size(),
+                                          &device_module.binary),
+               "aclrtBinaryLoadFromData");
+    }
+
+    auto cached = device_module.functions.find(name);
+    if (cached != device_module.functions.end()) {
+      return cached->second;
+    }
+
+    AclFuncHandle function{nullptr};
+    CheckAcl(driver->BinaryGetFunction(device_module.binary, name.c_str(),
+                                       &function),
+             "aclrtBinaryGetFunction");
+    device_module.functions.emplace(name, function);
+    return function;
+  }
+
+private:
+  struct DeviceModule {
+    AclBinHandle binary{nullptr};
+    std::unordered_map<std::string, AclFuncHandle> functions;
+  };
+
+  ffi::Bytes code_;
+  ffi::String fmt_;
+  ffi::Map<ffi::String, FunctionInfo> fmap_;
+  ffi::Map<ffi::String, ffi::String> source_;
+
+  std::mutex mutex_;
+  std::unordered_map<int32_t, DeviceModule> device_modules_;
+};
+
+class AscendWrappedFunc {
+public:
+  void Init(AscendModuleNode *module, ffi::ObjectPtr<ffi::Object> module_ref,
+            std::string function_name, size_t num_kernel_args,
+            const ffi::Array<ffi::String> &launch_param_tags) {
+    module_ = module;
+    module_ref_ = std::move(module_ref);
+    function_name_ = std::move(function_name);
+    launch_param_config_.Init(num_kernel_args, launch_param_tags);
+  }
+
+  void operator()(ffi::PackedArgs args, ffi::Any *return_value,
+                  void *packed_args, size_t packed_args_size) const {
+    ThreadWorkLoad workload = launch_param_config_.Extract(args);
+    size_t num_blocks = 1;
+    for (size_t axis = 0; axis < 3; ++axis) {
+      size_t extent = workload.grid_dim(axis);
+      TVM_FFI_CHECK(extent > 0, RuntimeError)
+          << "Ascend launch grid must be positive for kernel "
+          << function_name_;
+      TVM_FFI_CHECK(extent <= std::numeric_limits<uint32_t>::max() / num_blocks,
+                    RuntimeError)
+          << "Ascend launch grid exceeds uint32 range for kernel "
+          << function_name_;
+      num_blocks *= extent;
+    }
+    TVM_FFI_CHECK(workload.dyn_shmem_size <=
+                      std::numeric_limits<uint32_t>::max(),
+                  RuntimeError)
+        << "Ascend dynamic UBUF size exceeds uint32 range for kernel "
+        << function_name_;
+
+    AscendDriver *driver = AscendDriver::Global();
+    int32_t device_id = 0;
+    CheckAcl(driver->GetDevice(&device_id), "aclrtGetDevice");
+    AclFuncHandle function =
+        module_->GetFunctionHandle(device_id, function_name_);
+    AclStream stream = TVMFFIEnvGetStream(kDLExtDev, device_id);
+
+    AclLaunchKernelAttr attribute{};
+    AclLaunchKernelCfg config{};
+    AclLaunchKernelCfg *config_ptr = nullptr;
+    if (workload.dyn_shmem_size != 0) {
+      attribute.id = kAclLaunchKernelAttrDynUbufSize;
+      attribute.value.dyn_ubuf_size =
+          static_cast<uint32_t>(workload.dyn_shmem_size);
+      config.attrs = &attribute;
+      config.num_attrs = 1;
+      config_ptr = &config;
+    }
+
+    AclError result = driver->LaunchKernelWithHostArgs(
+        function, static_cast<uint32_t>(num_blocks), stream, config_ptr,
+        packed_args, packed_args_size);
+    if (result != kAclSuccess) {
+      const char *message = driver->GetRecentErrorMessage();
+      std::ostringstream error;
+      error << "aclrtLaunchKernelWithHostArgs failed for " << function_name_
+            << " with ACL error " << result << ", grid=" << num_blocks
+            << ", dyn_ubuf_bytes=" << workload.dyn_shmem_size;
+      if (message != nullptr) {
+        error << ": " << message;
+      }
+      ffi::String source = module_->InspectSource("asc");
+      if (!source.empty()) {
+        error << "\n// Ascend Source\n" << source;
+      }
+      TVM_FFI_THROW(RuntimeError) << error.str();
+    }
+  }
+
+private:
+  AscendModuleNode *module_{nullptr};
+  ffi::ObjectPtr<ffi::Object> module_ref_;
+  std::string function_name_;
+  LaunchParamConfig launch_param_config_;
+};
+
+ffi::Optional<ffi::Function>
+AscendModuleNode::GetFunction(const ffi::String &name) {
+  auto function_info = fmap_.Get(name);
+  if (!function_info.has_value()) {
+    return ffi::Function();
+  }
+  ffi::ObjectPtr<ffi::Object> module_ref = ffi::GetObjectPtr<ffi::Object>(this);
+  FunctionInfo info = function_info.value();
+  TVM_FFI_CHECK(info->arg_extra_tags.empty(), RuntimeError)
+      << "Ascend runtime does not support extra kernel argument tags";
+  AscendWrappedFunc function;
+  function.Init(this, std::move(module_ref), name, info->arg_types.size(),
+                info->launch_param_tags);
+  return PackFuncAclHostArgs(std::move(function), info->arg_types, name);
+}
+
+ffi::Module AscendModuleCreate(ffi::Bytes code, ffi::String fmt,
+                               ffi::Map<ffi::String, FunctionInfo> fmap,
+                               ffi::Map<ffi::String, ffi::String> source) {
+  auto module = ffi::make_object<AscendModuleNode>(
+      std::move(code), std::move(fmt), std::move(fmap), std::move(source));
+  return ffi::Module(module);
+}
+
+static ffi::Module AscendModuleLoadFromBytes(const ffi::Bytes &bytes) {
+  support::BytesInStream stream(bytes);
+  ffi::String fmt;
+  ffi::Map<ffi::String, FunctionInfo> fmap;
+  ffi::Bytes code;
+  stream.Read(&fmt);
+  TVM_FFI_ICHECK(stream.Read(&fmap));
+  stream.Read(&code);
+  TVM_FFI_CHECK(fmt == "aibin", RuntimeError)
+      << "Unsupported Ascend module format `" << fmt
+      << "`. This is likely a legacy source-only cache entry; remove it and "
+         "recompile.";
+  return AscendModuleCreate(std::move(code), std::move(fmt), std::move(fmap),
+                            ffi::Map<ffi::String, ffi::String>());
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+      .def("ffi.Module.load_from_bytes.asc", AscendModuleLoadFromBytes)
+      .def("tl.ascend.ModuleCreate", AscendModuleCreate);
+}
+
+} // namespace ascend
+} // namespace tvm

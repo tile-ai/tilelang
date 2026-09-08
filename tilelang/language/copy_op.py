@@ -14,15 +14,31 @@ import tvm
 from tvm import ir, tirx
 
 
-def _normalize_copy_regions(
+def _normalize_copy_regions_with_extents(
     src: BufferLikeType, dst: BufferLikeType
 ) -> tuple[
     tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
     tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
+    list[tirx.PrimExpr] | None,
+    list[tirx.PrimExpr] | None,
 ]:
-    # If both side are buffers, we should make sure their shapes are equal
+    # If both side are buffers, check total element counts match.  Shape
+    # equality is NOT required: Ascend fractal copies between differently-
+    # major'd buffers (e.g. [K,M] -> [M,K]) have transposed shapes but equal
+    # element counts.
     if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
-        ir.assert_structural_equal(src.shape, dst.shape)
+        from tvm import arith
+
+        src_elems = 1
+        for s in src.shape:
+            src_elems = src_elems * s
+        dst_elems = 1
+        for s in dst.shape:
+            dst_elems = dst_elems * s
+        analyzer = arith.Analyzer()
+        assert analyzer.can_prove_equal(src_elems, dst_elems), (
+            f"T.copy src/dst element count mismatch: src={src.shape} ({src_elems}) vs dst={dst.shape} ({dst_elems})"
+        )
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
@@ -33,7 +49,7 @@ def _normalize_copy_regions(
     # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
     # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
     if src_is_scalar_load and dst_is_scalar_load:
-        return src, dst
+        return src, dst, None, None
 
     assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
     # Treat missing extent as length-matched ones for convenience. This provides limited
@@ -48,7 +64,81 @@ def _normalize_copy_regions(
     # Use legalized extents for src and dst respectively.
     src = to_buffer_region(src, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
+    return src, dst, src_extent, dst_extent
+
+
+def _normalize_copy_regions(
+    src: BufferLikeType, dst: BufferLikeType
+) -> tuple[
+    tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
+    tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
+]:
+    src, dst, _, _ = _normalize_copy_regions_with_extents(src, dst)
     return src, dst
+
+
+# Short-name → int mapping for L2 cache control.
+_L2_CACHE_CTRL_MAP = {
+    # ── LD_L2CacheType (Load / GM→L1) ──
+    "NORMAL_FV": 0,
+    "NORMAL_LV": 1,
+    "NORMAL_PERS": 2,
+    "NORMAL_PREF": 3,
+    "NOTALLOC_KEEP": 4,
+    "NOTALLOC_CLEAN": 5,
+    "NOTALLOC_DROP": 6,
+    "IDS_FV": 8,
+    "IDS_LV": 9,
+    "IDS_PERS": 10,
+    "IDS_PREF": 11,
+    "EXCLUSIV_FV": 12,
+    "EXCLUSIV_LV": 13,
+    "EXCLUSIV_PERS": 14,
+    "EXCLUSIV_PREF": 15,
+    "INVALID": 16,
+    # ── ST_L2CacheType (Store / UB→GM) — names that differ from LD ──
+    "NORMAL_RED": 3,
+    "NOTALLOC_CI": 4,
+    "NOTALLOC_PW": 5,
+    "NOTALLOC_PI": 6,
+    "NOTALLOC_RED": 7,
+    "WBH_FV": 8,
+    "WBH_LV": 9,
+    "WBH_PERS": 10,
+    "WBH_RED": 11,
+    "WTS_FV": 12,
+    "WTS_LV": 13,
+    "WTS_PERS": 14,
+    "WTS_RED": 15,
+}
+
+
+def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | None) -> int | None:
+    """Convert a string l2_cache_ctrl name to its integer value.
+
+    Matching is case-insensitive and suffix-based:
+    ``"NORMAL_FV"``, ``"normal_fv"``, and ``"L2_CACHE_HINT_NORMAL_FV"``
+    all map to ``0``.  Integers pass through unchanged.
+    """
+    if value is None:
+        return None
+    if isinstance(value, tirx.IntImm):
+        value = int(value)
+    elif isinstance(value, tirx.StringImm):
+        value = value.value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        key = value.upper()
+        # Exact match
+        if key in _L2_CACHE_CTRL_MAP:
+            return _L2_CACHE_CTRL_MAP[key]
+        # Suffix match (e.g. "L2_CACHE_HINT_NORMAL_FV" or "_NORMAL_FV")
+        for map_key, map_val in _L2_CACHE_CTRL_MAP.items():
+            if key.endswith(map_key):
+                return map_val
+        raise ValueError(f"Unknown l2_cache_ctrl string {value!r}. Valid suffixes: {sorted(_L2_CACHE_CTRL_MAP.keys())}")
+    raise TypeError(f"l2_cache_ctrl must be int, str, or None, got {type(value)}")
 
 
 def copy(
@@ -61,6 +151,13 @@ def copy(
     prefer_instruction: str | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
+    transpose: bool = False,
+    l2_cache_ctrl: int | str | None = None,
+    unit_flag_ctrl: int | tirx.PrimExpr | None = None,
+    sub_blockid: int | tirx.PrimExpr | None = None,
+    scale: BufferLikeType | None = None,
+    pad_value: int | float | tirx.PrimExpr | None = None,
+    data_select: bool = False,
 ) -> tirx.PrimExpr | tirx.Stmt:
     """Copy data between memory regions.
 
@@ -82,6 +179,45 @@ def copy(
         loop_layout (Optional[Fragment], keyword-only): A parallel loop layout hint for the SIMT copy
             (only valid for normal SIMT copy; incompatible with TMA/LDSM/STSM/TMem). When provided,
             it is attached to the outermost parallel loop generated by this copy.
+        transpose (bool, keyword-only): Ascend GM-to-L1 transpose hint for dn2nz layout.
+            Defaults to False.
+        l2_cache_ctrl (Optional[int | str], keyword-only): Ascend L2 cache control
+            policy for GM↔UB, GM↔L1, and UB↔GM DMA paths. Accepts an integer (hardware
+            L2Ctrl value) or a case-insensitive string name.
+            Common values: ``0`` / ``"normal_fv"``, ``4`` / ``"notalloc_keep"``
+            (bypass L2 to stream past), ``5`` / ``"notalloc_clean"`` (bypass L2 to
+            avoid pollution). Defaults to None; Ascend UB→GM store paths use
+            default 4, while load paths use default 0.
+            Ascend only; ignored on other backends.
+        unit_flag_ctrl (Optional[int | PrimExpr], keyword-only): Ascend unit-flag
+            control. ``None`` omits the annotation and lowers as 0.
+        sub_blockid (Optional[int | PrimExpr], keyword-only): Ascend AIV sub-block
+            selector. ``None`` omits the annotation and lowers as 0.
+        scale (Optional[BufferLikeType], keyword-only): Ascend MX scale-factor source
+            buffer (in L1/cbuf) for an L1→L0A/L0B copy. When provided, the copy
+            additionally loads the per-block scale factors into the L0 MX scale
+            registers via ``load_cbuf_to_ca_mx`` / ``load_cbuf_to_cb_mx`` so that a
+            subsequent ``mad_mx`` applies the scaling. K-offset / K-step are
+            auto-derived from the data slice (1 SF pair = 64 K-elements); the
+            NZ stride is taken from the scale buffer's second-to-last dimension.
+            Ascend L1→L0 only; ignored on other paths/backends. Defaults to None.
+        pad_value (Optional[int | float | PrimExpr], keyword-only): Ascend GM→UB
+            padding fill value. When set, an unaligned copy row is right-padded
+            up to the next 32B boundary and the pad lanes are filled with this
+            value. Emits a leading ``T.ascend_set_copy_pad_value(value)`` (so
+            AutoSchedule syncs the pad-register write before the copy) and pads
+            the copy via ``data_select``. The fill dtype is the destination
+            element dtype. Opt-in: without it, an unaligned multi-row copy still
+            errors as before. Ascend GM→UB (global→shared) only; ignored on
+            other paths/backends. Defaults to None.
+        data_select (bool, keyword-only): Ascend GM→UB. Same right-pad behavior
+            as ``pad_value`` (dataSelect=1 + rightPadding to the 32B boundary),
+            but the fill value is NOT set by this copy — it uses whatever the
+            hardware pad register currently holds, which the caller must have
+            set via ``T.ascend_set_copy_pad_value(...)`` beforehand. Use this to
+            reuse one pad value across several copies without re-setting it.
+            Mutually exclusive with ``pad_value`` (passing both raises
+            ValueError). Ascend GM→UB only. Defaults to False.
 
     Raises:
         TypeError: If copy extents cannot be deduced from arguments
@@ -106,8 +242,13 @@ def copy(
     - The finalized extents are encoded with `tl.region` via `to_buffer_region`
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
+    - On Ascend, a UB-to-UB copy from a dense source into a destination annotated
+      with ``make_ascend_compact_nz_layout`` lowers to the ND-to-NZ scatter. The
+      destination allocation must reserve one padding row, and the copied region
+      must exclude that row (for example, ``T.copy(src, dst[:rows, :])``).
     """
-    src, dst = _normalize_copy_regions(src, dst)
+    dst_orig = dst
+    src, dst, src_extent, dst_extent = _normalize_copy_regions_with_extents(src, dst)
 
     # Build annotations dict before selecting the scalar fast path: a scalar
     # copy with metadata must remain a tile op so the metadata is preserved.
@@ -128,6 +269,63 @@ def copy(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
+    # Ascend GM→L1: use dn2nz (transpose N/D mapping) instead of nd2nz
+    if transpose and "transpose" not in ann:
+        ann["transpose"] = tirx.IntImm("int32", 1)
+
+    # Ascend DMA: L2 cache control for GM↔L1 and UB↔GM paths.
+    if l2_cache_ctrl is not None and "l2_cache_ctrl" not in ann:
+        ann["l2_cache_ctrl"] = l2_cache_ctrl
+    if unit_flag_ctrl is not None and "unit_flag_ctrl" not in ann:
+        ann["unit_flag_ctrl"] = unit_flag_ctrl
+    if sub_blockid is not None and "sub_blockid" not in ann:
+        ann["sub_blockid"] = sub_blockid
+    if pad_value is not None and data_select:
+        raise ValueError(
+            "T.copy: pad_value and data_select are mutually exclusive. Pass "
+            "pad_value to set the fill value on this copy, or data_select to "
+            "reuse a pad value already set via T.ascend_set_copy_pad_value()."
+        )
+    if pad_value is not None:
+        import tvm.script.ir_builder.tir as tb_tir
+        from tilelang.ascend.language.dma import ascend_set_copy_pad_value
+
+        # Emit SetPadValue as a leading TIR statement (not folded into the copy
+        # lowering) so it exists in the IR before AutoSchedule, which then
+        # inserts the PIPE_S -> PIPE_MTE2 sync between the scalar pad-register
+        # write and the MTE2 copy that reads it. Folding it in at LowerTileOp
+        # (which runs after AutoSchedule) would leave the two unsynchronized and
+        # the copy would read a stale pad register. The copy itself then just
+        # reuses the register via data_select. dst_orig is a
+        # Buffer/BufferRegion/BufferLoad; all but a raw Buffer expose .buffer.
+        if not isinstance(dst_orig, (tirx.Buffer, tirx.BufferRegion, tirx.BufferLoad)):
+            raise TypeError(
+                "T.copy: pad_value requires dst to be a Buffer, BufferRegion, or "
+                f"BufferLoad so the pad fill dtype can be derived, got {type(dst_orig)}."
+            )
+        dst_buf = dst_orig.buffer if isinstance(dst_orig, (tirx.BufferRegion, tirx.BufferLoad)) else dst_orig
+        tb_tir.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(dst_buf.dtype)))
+        ann["data_select"] = tirx.IntImm("int32", 1)
+    if data_select and "data_select" not in ann:
+        ann["data_select"] = tirx.IntImm("int32", 1)
+    if "l2_cache_ctrl" in ann:
+        ann["l2_cache_ctrl"] = _normalize_l2_cache_ctrl(ann["l2_cache_ctrl"])
+
+    # Ascend MX scale-factor companion load (L1→L0A/L0B). Pass the scale source
+    # as a third positional region so the backend can derive the scale L1 pointer
+    # and emit load_cbuf_to_ca_mx / load_cbuf_to_cb_mx alongside the data load.
+    if scale is not None:
+        scale_extent = get_extent(scale)
+        scale_region = to_buffer_region(scale, access_type="r", extents=scale_extent)
+        return tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.tileop.copy"),
+            src,
+            dst,
+            scale_region,
+            annotations=ann if ann else None,
+        )
+
     if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
         # Scalar fast path. Mirror the dtype conversion the region path applies
         # in copy.cc; cast to the load dtype, which is what BufferStore checks
@@ -137,7 +335,7 @@ def copy(
             value = tirx.Cast(dst.dtype, src)
         return tirx.BufferStore(dst.buffer, value, dst.indices)
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
 
 
 def copy_cluster(

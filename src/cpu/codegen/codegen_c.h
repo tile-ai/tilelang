@@ -24,7 +24,9 @@ public:
   CodeGenTileLangC();
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,
             std::string target_str,
-            const std::unordered_set<std::string> &devices);
+            const std::unordered_set<std::string> &devices,
+            const std::string &prelude_include =
+                "#include <tl_templates/cpp/common.h>\n");
 
   void InitGlobalContext();
   // Override this as a work around for non tvm runtime code generations
@@ -41,20 +43,21 @@ public:
   void DefineModuleName();
 
   using CodeGenC::PrintType;
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
-  void PrintFuncPrefix(std::ostream &os) final;       // NOLINT(*)
+  void PrintType(DataType t, std::ostream &os) override; // NOLINT(*)
+  void PrintFuncPrefix(std::ostream &os) final;          // NOLINT(*)
 
   // overload visitor functions
-  void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
+  void VisitExpr_(const BroadcastNode *op,
+                  std::ostream &os) override;                     // NOLINT(*)
+  void VisitExpr_(const CallNode *op, std::ostream &os) override; // NOLINT(*)
   // overload min and max to use the ternary operator, so we don't rely on the
   // standard library implementations
   void VisitExpr_(const MinNode *op, std::ostream &os) final;      // NOLINT(*)
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;      // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final; // NOLINT(*)
 
-  void VisitStmt_(const AssertStmtNode *op) final;  // NOLINT(*)
-  void VisitStmt_(const AllocBufferNode *op) final; // NOLINT(*)
+  void VisitStmt_(const AssertStmtNode *op) final;     // NOLINT(*)
+  void VisitStmt_(const AllocBufferNode *op) override; // NOLINT(*)
 
   void GenerateForwardFunctionDeclarations(ffi::String global_symbol,
                                            const ffi::Array<Type> &arg_types,

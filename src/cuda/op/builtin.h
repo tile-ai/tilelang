@@ -35,7 +35,9 @@ static constexpr const char *kHasTMA = "tl.has_tma";
 // because they are part of the Python PassContext interface.
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
-static constexpr const char *kEnableAutoSchedule = "tl.enable_auto_schedule";
+// Keep the CUDA scheduler name separate from Ascend's existing boolean
+// tl.enable_auto_schedule option; pass-config types are process-global.
+static constexpr const char *kCudaAutoSchedule = "tl.cuda_auto_schedule";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";

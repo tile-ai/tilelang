@@ -182,3 +182,53 @@ def register_metal_postproc_callback(func: Callable | bool = None, override: boo
         return _register
 
     raise TypeError("Invalid decorator usage")
+
+
+def register_ascend_postproc(func: Callable[[str, Target], str], override: bool = True):
+    """Register a post-processing function for Ascend-family code generation.
+
+    The callback receives AscendC source for an Ascend target and PTODSL Python
+    source for a PTO target. Use ``"pto" in target.keys`` to distinguish them.
+
+    Args:
+        func: A callable that takes generated code (str) and target (Target) as input,
+              and returns the processed code (str).
+        override: Whether to override existing registered function. Defaults to True.
+    """
+    tvm_ffi.register_global_func("tilelang_callback_ascend_postproc", f=func, override=override)
+
+
+def register_ascend_postproc_callback(func: Callable | bool = None, override: bool = True):
+    """Decorator for registering an Ascend-family post-processing callback.
+
+    The callback receives AscendC source for an Ascend target and PTODSL Python
+    source for a PTO target. Use ``"pto" in target.keys`` to distinguish them.
+
+    Can be used with or without parentheses:
+        @register_ascend_postproc_callback
+        def func(code, target): ...
+
+        @register_ascend_postproc_callback()
+        def func(code, target): ...
+
+        @register_ascend_postproc_callback(override=False)
+        def func(code, target): ...
+
+    Args:
+        func: The function to be decorated or a boolean override flag
+        override: Whether to override existing registered function. Defaults to True.
+    """
+    if callable(func):
+        register_ascend_postproc(func, override)
+        return func
+
+    if func is None or isinstance(func, bool):
+        _override = func if isinstance(func, bool) else override
+
+        def _register(fn: Callable[[str, Target], str]):
+            register_ascend_postproc(fn, _override)
+            return fn
+
+        return _register
+
+    raise TypeError("Invalid decorator usage")

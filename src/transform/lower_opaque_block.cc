@@ -68,28 +68,9 @@ public:
   }
 
 private:
-  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
-    // We have convert blocks into opaque blocks in previous passes.
-    ICHECK(op->iter_values.empty())
-        << "Non-opaque blocks are not allowed in FlattenBuffer. Please "
-           "call pass ConvertBlocksToOpaque before.";
-    // Step 1. Visit the body
-    SBlock new_block = Downcast<SBlock>(this->VisitStmt(op->block));
-    PrimExpr predicate = this->VisitExpr(op->predicate);
-    // Step 2. Transform the `predicate` to if-then-else
-    Stmt body = new_block->body;
-    if (!is_one(predicate)) {
-      body = IfThenElse(predicate, std::move(body));
-    }
-    // Step 3. Handle annotations, block annotations are not preserved by
-    // default.
-    std::vector<std::pair<std::string, PrimExpr>> pragma_attrs;
-    HandleAnnotations(new_block->annotations, &pragma_attrs, /*is_block=*/true,
-                      new_block->alloc_buffers);
-
-    // Step 4. Handle allocations in reverse order
-    for (size_t i = new_block->alloc_buffers.size(); i > 0; --i) {
-      const Buffer &buffer = new_block->alloc_buffers[i - 1];
+  Stmt MaterializeAllocations(const Array<Buffer> &alloc_buffers, Stmt body) {
+    for (size_t i = alloc_buffers.size(); i > 0; --i) {
+      const Buffer &buffer = alloc_buffers[i - 1];
       Array<PrimExpr> allocation_shape = GetBufferAllocationShape(buffer);
       body = SeqStmt({DeclBuffer(buffer), std::move(body)});
       Map<String, Any> allocate_annotations;
@@ -116,6 +97,34 @@ private:
       body = SeqStmt(
           {AllocBuffer(alloc_buf, allocate_annotations), std::move(body)});
     }
+    return body;
+  }
+
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
+    // We have convert blocks into opaque blocks in previous passes.
+    ICHECK(op->iter_values.empty())
+        << "Non-opaque blocks are not allowed in FlattenBuffer. Please "
+           "call pass ConvertBlocksToOpaque before.";
+    // Step 1. Visit the body. The SBlock handler skips lowering alloc_buffers
+    // while this realized block is consuming them.
+    bool prev_inside_realize = inside_realize_;
+    inside_realize_ = true;
+    SBlock new_block = Downcast<SBlock>(this->VisitStmt(op->block));
+    inside_realize_ = prev_inside_realize;
+    PrimExpr predicate = this->VisitExpr(op->predicate);
+    // Step 2. Transform the `predicate` to if-then-else
+    Stmt body = new_block->body;
+    if (!is_one(predicate)) {
+      body = IfThenElse(predicate, std::move(body));
+    }
+    // Step 3. Handle annotations, block annotations are not preserved by
+    // default.
+    std::vector<std::pair<std::string, PrimExpr>> pragma_attrs;
+    HandleAnnotations(new_block->annotations, &pragma_attrs, /*is_block=*/true,
+                      new_block->alloc_buffers);
+
+    // Step 4. Lower allocations
+    body = MaterializeAllocations(new_block->alloc_buffers, std::move(body));
     // Step 5. Materialize a lexical scope boundary only for blocks that were
     // explicitly marked by an earlier semantic lowering pass (for example
     // gemm/gemm_sp). We intentionally avoid re-inferring this from the
@@ -131,10 +140,21 @@ private:
     }
     return body;
   }
+
   Stmt VisitStmt_(const SBlockNode *op) final {
+    bool was_inside_realize = inside_realize_;
+    inside_realize_ = false;
     SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
+    inside_realize_ = was_inside_realize;
     if (block->annotations.count("stmt_group")) {
       return block->body;
+    }
+    if (!inside_realize_ && !block->alloc_buffers.empty()) {
+      Stmt new_body = MaterializeAllocations(block->alloc_buffers, block->body);
+      auto n = block.CopyOnWrite();
+      n->body = std::move(new_body);
+      n->alloc_buffers = ffi::Array<Buffer>();
+      return block;
     }
     return block;
   }
@@ -143,7 +163,10 @@ private:
     // Step 1. Update unit loop info.
     PrimExpr min = this->VisitExpr(op->min);
     PrimExpr extent = this->VisitExpr(op->extent);
-    if (is_one(extent) && IsEffectivelyEmptyAnnotation(op->annotations)) {
+    bool is_unit_loop = is_one(extent) &&
+                        IsEffectivelyEmptyAnnotation(op->annotations) &&
+                        !ContainsLoopBreak(op->body);
+    if (is_unit_loop) {
       // handling unit loop
       unit_loop_vars_[op->loop_var] = min;
     }
@@ -159,8 +182,7 @@ private:
       ICHECK(op->thread_binding.defined());
       String thread_tag = op->thread_binding.value()->thread_tag;
       body = MakeLaunchThread(min, extent, op->loop_var, thread_tag, body);
-    } else if (is_one(extent) &&
-               IsEffectivelyEmptyAnnotation(op->annotations)) {
+    } else if (is_unit_loop) {
       // Case 2. Unit loop
       return body;
     } else {
@@ -190,6 +212,22 @@ private:
       }
     }
     return false;
+  }
+
+  // Whether `stmt` contains a `tl.loop_break` call. Used to prevent unit-loop
+  // flattening from orphaning a `break;`.
+  static bool ContainsLoopBreak(const Stmt &stmt) {
+    bool found = false;
+    PostOrderVisit(stmt, [&found](const ObjectRef &node) {
+      if (found)
+        return;
+      if (const auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(tl::loop_break())) {
+          found = true;
+        }
+      }
+    });
+    return found;
   }
 
   PrimExpr VisitExpr_(const VarNode *op) final {
@@ -331,6 +369,11 @@ private:
   /*! \brief Cluster dims collected from tilelang.cluster_dims block annotation.
    */
   Optional<Array<Integer>> cluster_dims_{std::nullopt};
+
+  /*! \brief True while we are visiting the inner Block of a BlockRealize.
+   * Used so that the SBlockNode handler does not double-lower alloc_buffers
+   * when the enclosing SBlockRealize handler is about to do it itself. */
+  bool inside_realize_ = false;
 };
 
 PrimFunc TLLowerOpaqueBlock(PrimFunc f) {

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Literal
 from tvm import tirx
 from tilelang.language.common import copy, macro, alloc_fragment, evaluate
-from tilelang.utils.language import to_buffer_region, to_tile_region
+from tilelang.utils.language import to_buffer_region, to_tile_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment, is_local
 from tvm.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
@@ -12,7 +12,7 @@ from tilelang.language.utils import _normalize_annotations
 
 def _legalize_dim(buffer: tirx.Buffer, dim: int):
     if dim < 0:
-        dim = len(buffer.shape) + dim
+        dim = len(retrieve_shape(buffer)) + dim
     return dim
 
 
@@ -61,12 +61,14 @@ def reduce(
     if reduce_type in ("bitand", "bitor", "bitxor") and not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
         raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
-    expected_shapes = [buffer.shape[:dim] + buffer.shape[dim + 1 :], buffer.shape[:dim] + [1] + buffer.shape[dim + 1 :]]
-    if list(out_buffer.shape) not in expected_shapes:
+    buf_shape = retrieve_shape(buffer)
+    out_shape = retrieve_shape(out)
+    expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
+    if list(out_shape) not in expected_shapes:
         expected_shapes_str = " or ".join(map(str, expected_shapes))
         raise ValueError(
-            f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
-            f"output shape is {out_buffer.shape}, expected shapes are {expected_shapes_str}"
+            f"Invalid reduce output shape, buffer shape is {buf_shape}, dim is {dim}, "
+            f"output shape is {out_shape}, expected shapes are {expected_shapes_str}"
         )
 
     annotations = _normalize_annotations(annotations)
@@ -93,32 +95,57 @@ def reduce(
 
     @macro
     def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
+        buf_shape = retrieve_shape(buffer)
+        out_shape = retrieve_shape(out)
+        buf_dtype = _get_buffer(buffer).dtype
+        out_dtype = _get_buffer(out).dtype
+        buf_name = _get_buffer(buffer).name
+        out_name = _get_buffer(out).name
+        buf_scope = _get_buffer(buffer).scope()
+        out_scope = _get_buffer(out).scope()
         if is_shared(buffer) and is_shared(out):
-            red_frag_in = alloc_fragment(buffer.shape, buffer.dtype)
-            red_frag_out = alloc_fragment(out.shape, out.dtype)
+            # Deferred: the Ascend dialect package imports tilelang.language.common,
+            # which imports this module, so a module-scope import would cycle.
+            from tilelang.ascend.language.frame import inside_simdvf
 
-            # rename buffers
-            IRBuilder.name(buffer.name + "_frag", red_frag_in)
-            IRBuilder.name(out.name + "_frag", red_frag_out)
+            if inside_simdvf():
+                # Inside SimdVF: reduce directly on shared buffers (no fragment wrapping)
+                tirx.call_intrin(
+                    "handle",
+                    tirx.op.Op.get(_REDUCE_OP_KEY),
+                    to_tile_region(buffer, access_type="r"),
+                    to_tile_region(out, access_type="w"),
+                    reduce_type,
+                    dim,
+                    clear,
+                    annotations=annotations,
+                )
+            else:
+                red_frag_in = alloc_fragment(buf_shape, buf_dtype)
+                red_frag_out = alloc_fragment(out_shape, out_dtype)
 
-            if not clear:
-                copy(out, red_frag_out)
+                # rename buffers
+                IRBuilder.name(buf_name + "_frag", red_frag_in)
+                IRBuilder.name(out_name + "_frag", red_frag_out)
 
-            copy(buffer, red_frag_in)
-            tirx.call_intrin(
-                "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
-                to_tile_region(red_frag_in, access_type="r"),
-                to_tile_region(red_frag_out, access_type="w"),
-                reduce_type,
-                dim,
-                clear,
-                annotations=annotations,
-            )
-            copy(red_frag_out, out)
+                if not clear:
+                    copy(out, red_frag_out)
+
+                copy(buffer, red_frag_in)
+                tirx.call_intrin(
+                    "handle",
+                    tirx.op.Op.get(_REDUCE_OP_KEY),
+                    to_tile_region(red_frag_in, access_type="r"),
+                    to_tile_region(red_frag_out, access_type="w"),
+                    reduce_type,
+                    dim,
+                    clear,
+                    annotations=annotations,
+                )
+                copy(red_frag_out, out)
         elif is_shared(buffer) and is_fragment(out):
-            red_frag_in = alloc_fragment(buffer.shape, buffer.dtype)
-            IRBuilder.name(buffer.name + "_frag", red_frag_in)
+            red_frag_in = alloc_fragment(buf_shape, buf_dtype)
+            IRBuilder.name(buf_name + "_frag", red_frag_in)
 
             copy(buffer, red_frag_in)
             tirx.call_intrin(
@@ -132,8 +159,8 @@ def reduce(
                 annotations=annotations,
             )
         elif is_fragment(buffer) and is_shared(out):
-            red_frag_out = alloc_fragment(out.shape, out.dtype)
-            IRBuilder.name(out.name + "_frag", red_frag_out)
+            red_frag_out = alloc_fragment(out_shape, out_dtype)
+            IRBuilder.name(out_name + "_frag", red_frag_out)
 
             if not clear:
                 copy(out, red_frag_out)
@@ -161,7 +188,7 @@ def reduce(
                 annotations=annotations,
             )
         else:
-            raise ValueError(f"Invalid buffer scopes: {buffer.scope()} and {out.scope()}")
+            raise ValueError(f"Invalid buffer scopes: {buf_scope} and {out_scope}")
 
     reduce_macro(buffer, out, reduce_type, dim, clear)
 

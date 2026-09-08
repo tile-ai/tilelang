@@ -14,7 +14,6 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <tvm/tirx/var.h>
-#include <utility>
 
 namespace tvm::tl {
 
@@ -60,53 +59,42 @@ struct ParallelLoopVerifier : public ConstrVisitor {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
-    if (parallel_loop_vars_.empty()) {
-      StmtExprVisitor::VisitStmt_(op);
-      return;
-    }
-
     ConstrSet cset{constr_stack_};
-    // Model a second logical iteration. Renaming starts at the outermost
-    // parallel loop variable: binds before it are outside all parallelism and
-    // stay shared, while the loop variables and anything inside the region are
-    // private per iteration. Merge, so a shared bind is not populated twice.
     Map<Var, PrimExpr> subs;
-    cset = cset.Merge(
-        cset.RenameFrom("<OTHER>", subs, parallel_loop_vars_.front()));
+    // Rename the other thread's binds starting from the OUTERMOST parallel loop
+    // var (RenameFrom pivot): binds defined before it are outside all thread
+    // parallelism → thread-invariant → stay shared; binds inside the parallel
+    // region (the parallel loop vars themselves, and any let in the body) may
+    // differ per thread and are renamed. `subs` is filled with those renames,
+    // so the index/value substitutions below see the other thread's vars.
+    if (!parallel_loop_vars_.empty())
+      cset = cset.Merge(
+          cset.RenameFrom("<OTHER>", subs, parallel_loop_vars_.front()));
     for (const auto &idx : op->indices) {
       cset.AddConstr(idx == tirx::Substitute(idx, subs));
     }
     arith::Analyzer analyzer;
     cset.Populate(analyzer);
-
-    Array<Var> parallel_var_pairs;
-    PrimExpr same_iteration = Bool(true);
-    for (const auto &var : parallel_loop_vars_) {
-      auto it = subs.find(var);
-      if (it != subs.end()) {
-        same_iteration = And(same_iteration, EQ(var, (*it).second));
-        parallel_var_pairs.push_back(var);
-      }
-    }
-    PrimExpr same_value = op->value == tirx::Substitute(op->value, subs);
-    PrimExpr race_free = Or(same_iteration, same_value);
-    if (analyzer.CanProve(race_free)) {
+    // If we can prove the values are the same, then no data race can happen.
+    if (analyzer.CanProve(op->value == tirx::Substitute(op->value, subs))) {
       StmtExprVisitor::VisitStmt_(op);
       return;
     }
-
     Array<Var> failed_vars;
-    for (const auto &var : parallel_var_pairs) {
-      if (!analyzer.CanProve(EQ(var, subs.at(var)))) {
-        failed_vars.push_back(var);
+    PrimExpr failed_var_expr;
+    for (auto [k, v] : subs) {
+      if (!analyzer.CanProve(k == v)) {
+        failed_vars.push_back(k);
+        failed_var_expr =
+            failed_var_expr.defined() ? And(failed_var_expr, k == v) : (k == v);
       }
     }
     if (!failed_vars.empty()) {
-      reports_.push_back({op->buffer, op->indices, failed_vars,
-                          analyzer.z3_prover.GetModel(race_free), op->span,
-                          parallel_loop_spans_.empty()
-                              ? Span()
-                              : parallel_loop_spans_.back()});
+      reports_.push_back(
+          {op->buffer, op->indices, failed_vars,
+           analyzer.z3_prover.GetModel(failed_var_expr), op->span,
+           parallel_loop_spans_.empty() ? Span()
+                                        : parallel_loop_spans_.back()});
     }
     StmtExprVisitor::VisitStmt_(op);
   }

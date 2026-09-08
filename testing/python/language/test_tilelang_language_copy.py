@@ -61,6 +61,22 @@ def test_scalar_copy_annotations_preserved():
     assert 'test.copy="async"' in async_line
 
 
+def test_copy_l2_cache_ctrl_string_annotation_matches_keyword():
+    @T.prim_func
+    def annotation_path(A: T.Tensor((16,), T.float32), B: T.Tensor((16,), T.float32)):
+        with T.Kernel(1):
+            T.copy(A, B, annotations={"l2_cache_ctrl": "NORMAL_FV"})
+
+    @T.prim_func
+    def keyword_path(A: T.Tensor((16,), T.float32), B: T.Tensor((16,), T.float32)):
+        with T.Kernel(1):
+            T.copy(A, B, l2_cache_ctrl="NORMAL_FV")
+
+    for func in (annotation_path, keyword_path):
+        copy_line = next(line for line in func.script().splitlines() if "T.copy(" in line)
+        assert "l2_cache_ctrl=0" in copy_line
+
+
 def run_tilelang_copy_cross_dtype(M=256, N=256, block_M=128, block_N=128, src_dtype=T.float16, dst_dtype=T.bfloat16):
     program = tilelang_copy(M, N, block_M, block_N, src_dtype=src_dtype, dst_dtype=dst_dtype)
     kernel = tilelang.compile(program, out_idx=[1])

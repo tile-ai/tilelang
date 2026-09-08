@@ -1,9 +1,8 @@
-"""Utilities to adapt TVM FFI kernels to Torch tensors.
+"""Utilities to adapt TVM-FFI kernels to Torch tensors.
 
-This adapter intentionally captures PyTorch's current CUDA stream and device
-via light-weight callables so that, when the wrapped function is invoked,
-the execution observes the same stream context as the active Torch code.
-On non-CUDA builds, the stream/device fall back to 0/CPU semantics.
+TVM-FFI obtains the active work stream through Torch's DLPack Exchange API.
+The Ascend adapter installs TileLang's Torch NPU callback before the first
+tensor reaches an executable.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
+from tilelang.jit.adapter.utils import is_ascend_target, is_pto_target
 
 
 COMPILE_ARGS = {}
@@ -37,16 +37,24 @@ elif sys.platform == "win32":
     COMPILE_ARGS["fcompile"] = _msvc_create_shared
 
 
+def _install_torch_stream_exchange(target: Target) -> None:
+    if not is_ascend_target(target):
+        return
+
+    from tilelang.ascend.torch_exchange import (
+        install_torch_npu_stream_exchange,
+    )
+
+    install_torch_npu_stream_exchange()
+
+
 class TVMFFIKernelAdapter(BaseKernelAdapter):
     """Adapter that runs a TVM runtime.Executable with Torch tensors.
 
     Notes
-    - We capture the "current" PyTorch CUDA stream/device as thunks (callables)
-      rather than materializing them at construction time. This ensures the
-      actual stream/device is read just-in-time when the function runs, matching
-      the user's current Torch context (e.g., after a stream guard/switch).
-    - The stream pointer returned is a raw CUDA stream handle compatible with
-      TVM's device API; on CPU or when CUDA is unavailable, we return 0.
+    - Torch tensors use TVM-FFI's zero-copy DLPack Exchange API conversion.
+    - Ascend execution installs a Cython callback that reads Torch's current
+      NPU stream for every invocation.
     """
 
     # Class attributes to store compiled kernel information
@@ -67,6 +75,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     rt_mod: tvm.runtime.Module | None = None
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
+
+    def _post_init(self) -> None:
+        _install_torch_stream_exchange(self.target)
+        super()._post_init()
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
@@ -148,10 +160,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if not self.result_idx:
             return False
 
-        # The native wrapper is currently emitted for CUDA with TileLang's C
-        # host codegen. Other device and host backends retain the preallocated-
-        # output path until they have equivalent result-slot lowering.
-        if self.target.kind.name != "cuda":
+        # The native wrapper is emitted for CUDA and plain Ascend targets with
+        # TileLang's C host codegen. PTO retains the preallocated-output path.
+        is_plain_ascend = is_ascend_target(self.target) and not is_pto_target(self.target)
+        if self.target.kind.name != "cuda" and not is_plain_ascend:
             return False
         target_host = self.target.host
         return target_host is not None and target_host.kind.name == "c"
@@ -204,21 +216,23 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Convert TVM shape arrays to native Python lists
         param_shapes = []
 
-        for param in self.params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
-                else:
-                    native_shape.append(dim)
-            tl_dtype = param.dtype
-            if tl_dtype.bits < 8:
-                stroage_dtype: dtype = dtype(param.torch_dtype())
-                # last dim divide by bits to get the actual shape
-                native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (stroage_dtype.bits * stroage_dtype.lanes)
-            param_shapes.append(native_shape)
+        if is_pto_target(self.target):
+            param_shapes = [param.storage_shape(target=self.target) for param in self.params]
+        else:
+            for param in self.params:
+                native_shape = []
+                for dim in param.shape:
+                    if isinstance(dim, tirx.IntImm):
+                        native_shape.append(int(dim))
+                    elif isinstance(dim, tirx.Var):
+                        native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
+                    else:
+                        native_shape.append(dim)
+                tl_dtype = param.dtype
+                if tl_dtype.bits < 8:
+                    storage_dtype: dtype = dtype(param.torch_dtype())
+                    native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
+                param_shapes.append(native_shape)
 
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None
@@ -305,15 +319,22 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         """Create a Torch callable whose outputs are allocated by TVM-FFI."""
         current_device_functor = self.get_current_device_functor()
         expected_inputs = len(self.params) - len(self.result_idx)
-        cuda_available = torch.cuda.is_available()
+        target = getattr(self, "target", None)
+        is_plain_ascend = getattr(getattr(target, "kind", None), "name", None) == "ascend" and not is_pto_target(target)
+        if is_plain_ascend:
+            device_available = hasattr(torch, "npu") and torch.npu.is_available()
+            device_name = "Ascend NPU"
+        else:
+            device_available = torch.cuda.is_available()
+            device_name = "CUDA"
         has_allocator_exchange = hasattr(torch.Tensor, "__dlpack_c_exchange_api__") or hasattr(torch.Tensor, "__c_dlpack_exchange_api__")
 
         def func(*inputs: torch.Tensor | Any):
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
 
-            if not cuda_available:
-                raise RuntimeError("TVM-FFI callee-allocated outputs require an available CUDA device.")
+            if not device_available:
+                raise RuntimeError(f"TVM-FFI callee-allocated outputs require an available {device_name} device.")
             if not has_allocator_exchange:
                 raise RuntimeError(
                     "TVM-FFI callee-allocated outputs require Torch's DLPack allocator exchange API. "

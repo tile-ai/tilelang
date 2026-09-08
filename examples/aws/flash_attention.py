@@ -3,7 +3,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 import tilelang
-import tilelang.language as T
+import tilelang.cuda.language as T
 from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
@@ -16,7 +16,7 @@ PASS_CFG = {
 @tilelang.jit(
     pass_configs={
         **PASS_CFG,
-        tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: "role_based",
+        tilelang.PassConfigKey.TL_CUDA_AUTO_SCHEDULE: "role_based",
     }
 )
 def flash_attention(

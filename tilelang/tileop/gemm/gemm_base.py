@@ -193,12 +193,22 @@ class GemmBase:
         return getattr(self.gemm_node, "sfbRegion", None)
 
     @property
+    def block_scaled(self) -> bool:
+        return self.is_blockscaled
+
+    @property
     def sf_k_start(self) -> PrimExpr:
         return getattr(self.gemm_node, "sfKStart", tvm.tirx.const(0, T.int32))
 
     @property
+    def unit_flag_ctrl(self) -> PrimExpr:
+        ann = getattr(self.gemm_node, "annotations", {})
+        return ann.get("unit_flag_ctrl", tvm.tirx.const(0, T.int32))
+
+    @property
     def is_blockscaled(self) -> bool:
-        return self.SFARegion is not None and self.SFBRegion is not None
+        ann = getattr(self.gemm_node, "annotations", {})
+        return bool(ann.get("blockscaled", False)) or (self.SFARegion is not None and self.SFBRegion is not None)
 
     def get_region_base_offsets(self, region):
         """

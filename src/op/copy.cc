@@ -304,7 +304,16 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dst = dst_access.region->buffer;
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
-  node->SetAccessRegions({src_access, dst_access});
+  // Optional args[2]: Ascend MX scale-factor source region (L1→L0 companion
+  // load). Present only when T.copy(..., sf=<buffer>) is used.
+  if (args.size() > 2 && args[2].as<CallNode>()) {
+    auto sf_access = NormalizeToAccessRegion(args[2], kAccessRead);
+    node->sf = sf_access.region->buffer;
+    node->sf_range = sf_access.region->region;
+    node->SetAccessRegions({src_access, dst_access, sf_access});
+  } else {
+    node->SetAccessRegions({src_access, dst_access});
+  }
   // Copy annotations from the Call node
   node->annotations = annotations;
   if (auto dst_block = node->annotations.Get("dst_block")) {

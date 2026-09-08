@@ -59,14 +59,26 @@ class BaseKernelAdapter(ABC):
     # --- Common helpers to align with PyTorch stream/device semantics ---
     @staticmethod
     def get_current_stream_functor() -> Callable[[], int]:
-        """Return a callable that reads Torch's current CUDA stream pointer.
+        """Return a callable that reads Torch's current device stream pointer.
 
-        The returned lambda yields the raw CUDA stream handle of the current
+        The returned lambda yields the raw stream handle of the current
         PyTorch stream on the active device. It's a thunk (evaluated at call
-        time) so that any upstream stream guards are respected. If CUDA is
-        unavailable, it returns a lambda that yields 0.
+        time) so that any upstream stream guards are respected. If no supported
+        device runtime is available, it returns a lambda that yields 0.
         """
-        if torch.cuda.is_available():
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            # NOTE(chaofan): Mirror the CUDA branch: use the low-level raw-stream accessor.
+            # torch.npu.current_stream() internally probes
+            # torch.cuda.is_available(), which costs ~150us per call on a
+            # CUDA-less NPU host; the _C accessor avoids that.
+            try:
+                import torch_npu
+
+                get_npu_stream = torch_npu._C._npu_getCurrentRawStream
+                return lambda: int(get_npu_stream(torch.npu.current_device()))
+            except (ImportError, AttributeError):
+                return lambda: int(torch.npu.current_stream().npu_stream)
+        elif torch.cuda.is_available():
             try:
                 torch.cuda._lazy_init()
                 current_device = torch._C._cuda_getDevice
@@ -75,7 +87,7 @@ class BaseKernelAdapter(ABC):
             except Exception:
                 # Fallback to Python API if internal handles are unavailable
                 return lambda: int(torch.cuda.current_stream().cuda_stream)
-        # CPU or CUDA unavailable: no stream semantics
+        # CPU or device unavailable: no stream semantics
         return lambda: 0
 
     @staticmethod
@@ -86,7 +98,9 @@ class BaseKernelAdapter(ABC):
         fetches the current device according to PyTorch. On CPU or when CUDA is
         unavailable, returns ``torch.device('cpu')``.
         """
-        if torch.cuda.is_available():
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return lambda: torch.device("npu", torch.npu.current_device())
+        elif torch.cuda.is_available():
             try:
                 torch.cuda._lazy_init()
                 current_device = torch._C._cuda_getDevice

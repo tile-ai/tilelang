@@ -22,14 +22,19 @@
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
 #include "../op/operator.h"
+#include "../op/simd_vf.h"
+#include "../op/simt_vf.h"
 #include "../op/utils.h"
 #include "../span_utils.h"
+#include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
 
 #include "../op/reducer.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "ascend/transform/buffer_version.h"
+#include "common/attr.h"
 #include "common/mbarrier.h"
 #include "common/pipeline_utils.h"
 #include "loop_partition.h"
@@ -295,10 +300,70 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
+  struct SimtVFThreadContext {
+    IterVar thread_var;
+    Range thread_bounds;
+  };
+
+  IterVar GetActiveThreadVar() const {
+    if (!simt_vf_thread_ctx_stack_.empty()) {
+      return simt_vf_thread_ctx_stack_.back().thread_var;
+    }
+    return thread_binding_;
+  }
+
+  Range InferThreadBoundsFromIterVar(const IterVar &iter_var) const {
+    if (iter_var.defined() &&
+        analyzer_->const_int_bound.IsBound(iter_var->var)) {
+      auto const_int_bound = analyzer_->const_int_bound(iter_var->var);
+      auto min_value = const_int_bound->min_value;
+      auto max_value = const_int_bound->max_value;
+      auto extent = max_value + 1 - min_value;
+      return Range::FromMinExtent(IntImm(iter_var->var.dtype(), min_value),
+                                  IntImm(iter_var->var.dtype(), extent));
+    }
+    return Range::FromMinExtent(0, 1);
+  }
+
+  Range GetActiveThreadBounds() const {
+    if (!simt_vf_thread_ctx_stack_.empty()) {
+      return simt_vf_thread_ctx_stack_.back().thread_bounds;
+    }
+    return InferThreadBoundsFromIterVar(thread_binding_);
+  }
+
+  void PushSimtVFThreadContext(const SBlockNode *op) {
+    const auto *attr = op->body.as<AttrStmtNode>();
+    ICHECK(attr && attr->attr_key == tirx::attr::thread_extent)
+        << "SIMT_VF block body must start with thread_extent AttrStmt";
+    const auto *iv = attr->node.as<IterVarNode>();
+    ICHECK(iv && iv->thread_tag == "threadIdx.x")
+        << "SIMT_VF block body must bind threadIdx.x first";
+    PrimExpr threads = attr->value;
+    DataType dtype = threads.dtype();
+    IterVar active_thread_var = IterVar(
+        Range::FromMinExtent(make_zero(dtype), threads),
+        Var("simtvf_tx", dtype), IterVarType::kThreadIndex, "threadIdx.x");
+    simt_vf_thread_ctx_stack_.push_back(
+        {active_thread_var, active_thread_var->dom});
+  }
+
+  void PopSimtVFThreadContext() {
+    ICHECK(!simt_vf_thread_ctx_stack_.empty());
+    simt_vf_thread_ctx_stack_.pop_back();
+  }
+
   Stmt VisitStmt_(const SBlockNode *op) final {
     Map<String, Any> previous_block_annotations = block_annotations_;
     Map<Var, PrimExpr> previous_safe_value_map = safe_value_map_;
     block_annotations_ = op->annotations;
+
+    bool is_simt_vf = (op->name_hint == "SIMT_VF");
+    IterVar saved_thread_var;
+    if (is_simt_vf) {
+      saved_thread_var = thread_binding_;
+      PushSimtVFThreadContext(op);
+    }
 
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
@@ -401,6 +466,118 @@ private:
       }
     }
 
+    if (is_simt_vf) {
+      Map<Var, PrimExpr> bind_var_to_expr;
+      for (const auto &[var, expr] : bind_var_to_expr_) {
+        bind_var_to_expr.Set(var, expr);
+      }
+
+      Range thread_bounds = GetActiveThreadBounds();
+      IterVar active_thread_var = GetActiveThreadVar();
+
+      AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
+        auto workspace =
+            decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
+        if (!workspace_stack_.empty()) {
+          workspace_stack_.back().push_back(workspace);
+        } else {
+          workspace_stack_.emplace_back(Array<Buffer>{workspace});
+        }
+        return workspace.access_ptr(2);
+      };
+
+      AllocMBarrierCallback mbarrier_callback =
+          [this](int arrive_count, std::optional<std::string> name) -> int {
+        if (!mbarrier_buffer_.defined()) {
+          mbarrier_buffer_ =
+              CreateMBarrierBuffer(name.value_or(injected_mbarrier_name_), 1);
+        }
+        int id = mbarrier_count_++;
+        mbarrier_arrive_counts_.push_back(arrive_count);
+        return id;
+      };
+
+      UpdateBarrierArriveCallback barrier_arrive_callback = [this](Var data_var,
+                                                                   PrimExpr n) {
+        barrier_arrive_updates_[data_var] = n;
+      };
+
+      auto simt_vf_op = SimtVFOp(block);
+      LowerArgs lower_args;
+      lower_args.target = target_;
+      lower_args.thread_bounds = thread_bounds;
+      lower_args.thread_index = active_thread_var->var;
+      lower_args.layout_map = layout_map_;
+      lower_args.buffer_remap = buffer_remap_;
+      lower_args.bind_var_to_expr = bind_var_to_expr;
+      lower_args.mbar_phase_expr = loop_mbar_phase_stack_.empty()
+                                       ? PrimExpr(IntImm(DataType::Int(32), 0))
+                                       : loop_mbar_phase_stack_.back();
+      lower_args.mbarrier_buffer = &mbarrier_buffer_;
+      lower_args.cluster_size = cluster_size_;
+      lower_args.add_workspace = callback;
+      lower_args.alloc_mbarrier = mbarrier_callback;
+      lower_args.update_barrier_arrive = barrier_arrive_callback;
+      Stmt lowered = simt_vf_op->Lower(lower_args, analyzer_);
+      PopSimtVFThreadContext();
+      thread_binding_ = saved_thread_var;
+      block_annotations_ = std::move(previous_block_annotations);
+      safe_value_map_ = std::move(previous_safe_value_map);
+      return lowered;
+    }
+
+    if (op->name_hint == "SIMD_VF") {
+      Map<Var, PrimExpr> bind_var_to_expr;
+      for (const auto &[var, expr] : bind_var_to_expr_) {
+        bind_var_to_expr.Set(var, expr);
+      }
+
+      AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
+        auto workspace =
+            decl_buffer({PrimExpr(num_elem)}, dtype, "workspace", "shared.dyn");
+        if (!workspace_stack_.empty()) {
+          workspace_stack_.back().push_back(workspace);
+        } else {
+          workspace_stack_.emplace_back(Array<Buffer>{workspace});
+        }
+        return workspace.access_ptr(2);
+      };
+      AllocMBarrierCallback mbarrier_callback =
+          [](int arrive_count, std::optional<std::string> name) -> int {
+        (void)arrive_count;
+        (void)name;
+        return 0;
+      };
+      UpdateBarrierArriveCallback barrier_arrive_callback = [](Var data_var,
+                                                               PrimExpr n) {
+        (void)data_var;
+        (void)n;
+      };
+
+      auto simd_vf_op = SimdVFOp(block);
+      LowerArgs lower_args;
+      lower_args.target = target_;
+      lower_args.thread_bounds = Range::FromMinExtent(0, 1);
+      // SimdVF is scalar CCE code with no thread dimension, so the logical
+      // thread index is constant 0 rather than a synthetic unbound Var.
+      lower_args.thread_index = IntImm(DataType::Int(32), 0);
+      lower_args.layout_map = layout_map_;
+      lower_args.buffer_remap = buffer_remap_;
+      lower_args.bind_var_to_expr = bind_var_to_expr;
+      lower_args.mbar_phase_expr = loop_mbar_phase_stack_.empty()
+                                       ? PrimExpr(IntImm(DataType::Int(32), 0))
+                                       : loop_mbar_phase_stack_.back();
+      lower_args.mbarrier_buffer = &mbarrier_buffer_;
+      lower_args.cluster_size = cluster_size_;
+      lower_args.add_workspace = callback;
+      lower_args.alloc_mbarrier = mbarrier_callback;
+      lower_args.update_barrier_arrive = barrier_arrive_callback;
+      Stmt lowered = simd_vf_op->Lower(lower_args, analyzer_);
+      block_annotations_ = std::move(previous_block_annotations);
+      safe_value_map_ = std::move(previous_safe_value_map);
+      return lowered;
+    }
+
     block_annotations_ = std::move(previous_block_annotations);
     safe_value_map_ = std::move(previous_safe_value_map);
     return block;
@@ -440,6 +617,16 @@ private:
     for (size_t i = 0; i < indices.size(); ++i) {
       multi_dim_indices.Set(
           i, analyzer_->Simplify(indices[i] + multi_dim_indices[i]));
+    }
+    // Layout input placeholders are int32. The access-ptr offset can be int64
+    // here (e.g. Ascend pipelines offsets in int64 before NarrowDataType runs),
+    // so coerce the derived indices to the placeholder dtype; otherwise
+    // Layout::Forward's Substitute fails its strict dtype check. Tile-local
+    // indices are small, so the narrowing is safe.
+    for (size_t i = 0; i < multi_dim_indices.size(); ++i) {
+      if (multi_dim_indices[i].dtype() != DataType::Int(32)) {
+        multi_dim_indices.Set(i, cast(DataType::Int(32), multi_dim_indices[i]));
+      }
     }
     return layout->Forward(multi_dim_indices);
   }
@@ -1081,7 +1268,7 @@ private:
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
 
-    Range thread_bounds = CurrentThreadBounds();
+    Range thread_bounds = GetActiveThreadBounds();
 
     // Convert bind_var_to_expr_ to Map<Var, PrimExpr> for LowerArgs
     Map<Var, PrimExpr> bind_var_to_expr;
@@ -1163,11 +1350,48 @@ private:
       ICHECK_NE(iv->thread_tag.length(), 0U);
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
-        ICHECK(iv->dom->extent.as<IntImmNode>());
-        thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
+        // Ascend thread extents may be symbolic, so tolerate a non-constant
+        // extent here instead of asserting IntImm.
+        if (const auto *imm = iv->dom->extent.as<IntImmNode>()) {
+          thread_block_size_ = imm->value;
+        }
+        if (!simt_vf_thread_ctx_stack_.empty()) {
+          simt_vf_thread_ctx_stack_.back().thread_var = iv;
+          simt_vf_thread_ctx_stack_.back().thread_bounds =
+              Range::FromMinExtent(make_zero(op->value.dtype()), op->value);
+        }
       }
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (op->attr_key != tl::attr::kBufferVersion) {
+      return stmt;
+    }
+
+    auto versions = op->node.try_cast<BufferVersionMap>();
+    ICHECK(versions.has_value())
+        << "'" << tl::attr::kBufferVersion
+        << "' AttrStmt node must be a buffer version map";
+    AttrStmt attr = Downcast<AttrStmt>(std::move(stmt));
+    attr.CopyOnWrite()->node = RemapBufferVersionMap_(versions.value());
+    return attr;
+  }
+
+  BufferVersionMap
+  RemapBufferVersionMap_(const BufferVersionMap &versions) const {
+    BufferVersionMap remapped_versions;
+    for (const auto &[data, version] : versions) {
+      Var remapped_data = data;
+      if (auto remap = var_remap_.find(data); remap != var_remap_.end()) {
+        remapped_data = (*remap).second;
+      }
+      auto existing = remapped_versions.find(remapped_data);
+      ICHECK(existing == remapped_versions.end() ||
+             (*existing).second == version)
+          << "Conflicting buffer version counts after storage remapping for "
+          << remapped_data;
+      remapped_versions.Set(std::move(remapped_data), version);
+    }
+    return remapped_versions;
   }
 
   /**
@@ -1366,7 +1590,7 @@ private:
     // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
     // lowering does not require converting eligible global->shared copies to
     // `tir.ptx_cp_async`.
-    if (TargetCudaHasAsyncCopy(target_)) {
+    if (TargetIsCuda(target_) && TargetHasAsyncCopy(target_)) {
       tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
       bool auto_async_copy_enabled =
           ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
@@ -1392,6 +1616,11 @@ private:
   // Var when a thread_extent binding exists, otherwise constant 0 (e.g. CPU
   // serial launch). Never an unbound synthetic Var.
   PrimExpr CurrentThreadIndex() const {
+    // Inside a SIMT_VF region the active thread var comes from that region's
+    // own thread_extent binding rather than the enclosing kernel's.
+    if (!simt_vf_thread_ctx_stack_.empty()) {
+      return simt_vf_thread_ctx_stack_.back().thread_var->var;
+    }
     if (thread_binding_.defined()) {
       return thread_binding_->var;
     }
@@ -1419,6 +1648,7 @@ private:
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
   // exists. Stays undefined for targets without thread bindings (e.g. CPU).
   IterVar thread_binding_;
+  std::vector<SimtVFThreadContext> simt_vf_thread_ctx_stack_;
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;

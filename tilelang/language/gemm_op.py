@@ -6,7 +6,7 @@ from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 from tilelang.layout import Layout
-from tvm import tirx
+from tvm import tirx, arith
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -33,6 +33,9 @@ def _gemm_impl(
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
+    sfa: BufferLikeType | None = None,
+    sfb: BufferLikeType | None = None,
+    sf_k_start: int | tirx.PrimExpr = 0,
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
@@ -54,12 +57,17 @@ def _gemm_impl(
             return T.get_let_value(arg).buffer
         return arg
 
+    def prove_equal(expr1, expr2) -> bool:
+        return prim_expr_equal(expr1, expr2) or arith.Analyzer().can_prove_equal(expr1, expr2)
+
     annotations = _normalize_annotations(annotations)
 
     A = legalize_arguments(A)
     B = legalize_arguments(B)
     C = legalize_arguments(C)
     mbar = legalize_arguments(mbar) if mbar is not None else None
+    sfa = legalize_arguments(sfa) if sfa is not None else None
+    sfb = legalize_arguments(sfb) if sfb is not None else None
 
     # Normalize A/B/C to BufferRegion for shape/stride/offset analysis
     A_region = to_buffer_region(A)
@@ -70,6 +78,9 @@ def _gemm_impl(
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
 
+    A_stride = retrieve_stride(A_region)
+    B_stride = retrieve_stride(B_region)
+
     assert len(C_shape) >= 2, "current only support C as a 2D or higher-order tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
@@ -78,22 +89,39 @@ def _gemm_impl(
             assert shape[i] == 1, (
                 f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
             )
+    if len(C_shape) > 2:
+        assert C_region.buffer.scope() in ("shared.l0c", "shared.l0c.dyn"), (
+            "higher-order C regions are only supported for Ascend L0C buffers"
+        )
 
     M, N = C_shape[-2], C_shape[-1]
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     K = A_shape[-2] if transpose_A else A_shape[-1]
     N_B = B_shape[-2] if transpose_B else B_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert prim_expr_equal(M_A, M), f"T.gemm M shape check failed: M_A = {M_A}, M_C = {M}"
-    assert prim_expr_equal(K, K_B), f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
+    assert prove_equal(M_A, M), f"T.gemm M shape check failed: M_A = {M_A}, M_C = {M}"
+    assert prove_equal(K, K_B), f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
     use_2cta = annotations.get("use_2cta", 0)
     if use_2cta:
         # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
-        assert prim_expr_equal(N_B * 2, N), f"T.gemm N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
+        assert prove_equal(N_B * 2, N), f"T.gemm N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
     else:
-        assert prim_expr_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
+        assert prove_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
 
-    for name, dim in (("M", M), ("N", N), ("K", K)):
+    # Ascend L0 regions describe one operation-local compact MAD tile.  Keep
+    # the positional M/N/K fields static because GemmNode and the non-Ascend
+    # instruction selectors use them as compile-time tile metadata; the
+    # Ascend L0 lowering reads the actual (possibly symbolic) geometry from the
+    # three BufferRegions instead.
+    is_ascend_l0_gemm = (
+        A_region.buffer.scope() == "shared.l0a" and B_region.buffer.scope() == "shared.l0b" and C_region.buffer.scope() == "shared.l0c"
+    )
+    node_M, node_N, node_K = M, N, K
+    if is_ascend_l0_gemm:
+        node_M, node_N = C_region.buffer.shape[-2:]
+        node_K = A_region.buffer.shape[-2] if transpose_A else A_region.buffer.shape[-1]
+
+    for name, dim in (("M", node_M), ("N", node_N), ("K", node_K)):
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
@@ -120,11 +148,22 @@ def _gemm_impl(
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
-    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    C_arg = buffer_region_to_tile_region(C_region, "w" if isinstance(clear_accum, bool) and clear_accum else "rw", [r for r in C_shape])
     # When mbar is None, pass a placeholder constant (0).
     # The C++ side checks if arg 16 is a BufferLoadNode before using it,
     # so a non-BufferLoad value will be correctly ignored.
     mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
+    extra_args = []
+    if sfa is not None or sfb is not None:
+        assert sfa is not None and sfb is not None, "block-scaled GEMM requires both sfa and sfb"
+        sfa_region = to_buffer_region(sfa, access_type="r")
+        sfb_region = to_buffer_region(sfb, access_type="r")
+        sfa_arg = buffer_region_to_tile_region(sfa_region, "r", list(retrieve_shape(sfa_region)))
+        sfb_arg = buffer_region_to_tile_region(sfb_region, "r", list(retrieve_shape(sfb_region)))
+        if not isinstance(sf_k_start, tirx.PrimExpr):
+            sf_k_start = tirx.const(sf_k_start, dtype="int32")
+        extra_args = [sfa_arg, sfb_arg, sf_k_start]
+
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get(op_key),
@@ -133,9 +172,9 @@ def _gemm_impl(
         C_arg,
         transpose_A,
         transpose_B,
-        M,
-        N,
-        K,
+        node_M,
+        node_N,
+        node_K,
         policy,
         clear_accum,
         stride_a,
@@ -145,8 +184,9 @@ def _gemm_impl(
         k_pack,
         wg_wait,
         mbar_arg,
-        C_coords[0],
-        C_coords[1],
+        C_coords[-2],
+        C_coords[-1],
+        *extra_args,
         annotations=annotations,
     )
 
@@ -161,6 +201,7 @@ def gemm(
     clear_accum: bool = False,
     k_pack: int = 1,
     mbar: BarrierType | None = None,
+    unit_flag_ctrl: int | tirx.PrimExpr | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator.
@@ -185,11 +226,17 @@ def gemm(
         k_pack (int): Number of packed matrix cores, for ROCm only. Must be 1 or 2. Defaults to 1.
         mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
             Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
+        unit_flag_ctrl (int | tirx.PrimExpr, optional): Unit flag control for the
+            instruction. ``None`` omits the annotation and lowers as 0.
         annotations (Optional[dict]): Additional annotations.
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
     """
+
+    ann = dict(annotations) if annotations else {}
+    if unit_flag_ctrl is not None:
+        ann["unit_flag_ctrl"] = unit_flag_ctrl
     return _gemm_impl(
         "tl.tileop.gemm",
         A,
@@ -202,7 +249,7 @@ def gemm(
         k_pack,
         0,
         mbar,
-        annotations=annotations,
+        annotations=ann,
     )
 
 

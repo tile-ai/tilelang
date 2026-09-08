@@ -2,7 +2,7 @@
  * \file auto_schedule.cc
  * \brief Generic entrypoint for automatic warp-specialization schedulers.
  *
- * The pass config "tl.enable_auto_schedule" names the scheduler to run
+ * The pass config "tl.cuda_auto_schedule" names the scheduler to run
  * (see SchedulerRegistry; currently "role_based"); when unset the pass
  * is a no-op. For each eligible kernel — a tilelang_root block with a
  * known threadIdx.x extent, no existing schedule, and no manual warp
@@ -46,7 +46,7 @@ using namespace tirx::transform;
 
 namespace {
 
-// Available schedulers, by the name passed in tl.enable_auto_schedule.
+// Available schedulers, by the name passed in tl.cuda_auto_schedule.
 const std::map<std::string, SchedulerFn> &SchedulerRegistry() {
   static const std::map<std::string, SchedulerFn> registry = {
       {"role_based", RoleBasedSchedule},
@@ -135,21 +135,21 @@ PrimFunc AutoScheduleImpl(PrimFunc func, SchedulerFn scheduler) {
 
 } // namespace
 
-tvm::transform::Pass AutoSchedule() {
+tvm::transform::Pass CudaAutoSchedule() {
   auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &ctx) {
     auto scheduler_name =
-        ctx->GetConfig(kEnableAutoSchedule, ffi::Optional<ffi::String>());
+        ctx->GetConfig(kCudaAutoSchedule, ffi::Optional<ffi::String>());
     if (!scheduler_name.has_value())
       return func;
     return AutoScheduleImpl(std::move(func),
                             FindScheduler(scheduler_name.value()));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AutoSchedule", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.cuda.AutoSchedule", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.cuda.transform.AutoSchedule", AutoSchedule);
+  refl::GlobalDef().def("tl.cuda.transform.AutoSchedule", CudaAutoSchedule);
 }
 
 } // namespace tl

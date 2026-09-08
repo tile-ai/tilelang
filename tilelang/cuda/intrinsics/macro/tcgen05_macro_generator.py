@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import tilelang.language as T
+import tilelang.cuda.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from .wgmma_macro_generator import decode_k_panel_elems
 from ..layout.mma_sm100_layout import (

@@ -33,6 +33,7 @@
 #include <queue>
 
 #include "../../op/parallel.h"
+#include "../../op/reducer.h"
 #include "../loop_partition.h"
 #include "../loop_vectorize.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -99,9 +100,11 @@ public:
     return substituter.VisitStmt(stmt);
   }
 
-private:
+protected:
   ParallelLoopFuser(arith::Analyzer *analyzer)
       : IRMutatorWithAnalyzer(analyzer) {};
+
+  virtual bool PreserveParallelLoopNest(const ForNode *) const { return false; }
 
   Stmt VisitStmt_(const ForNode *op) final {
     // Gather consecutive parallel loops
@@ -111,7 +114,7 @@ private:
     FragmentAccessDetector detector;
     detector.Collect(op->body);
     // Do not fuse if there is a fragment access
-    if (detector.HasFragmentAccess()) {
+    if (detector.HasFragmentAccess() || PreserveParallelLoopNest(op)) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
     while (true) {
@@ -244,6 +247,47 @@ private:
     }
     return fused_for;
   }
+};
+
+class ParallelLoopFuserSkipSimdVF : public ParallelLoopFuser {
+public:
+  static Stmt Fuse(const Stmt &stmt) {
+    arith::Analyzer analyzer;
+    ParallelLoopFuserSkipSimdVF substituter(&analyzer);
+    return substituter.VisitStmt(stmt);
+  }
+
+private:
+  ParallelLoopFuserSkipSimdVF(arith::Analyzer *analyzer)
+      : ParallelLoopFuser(analyzer) {}
+
+  bool PreserveParallelLoopNest(const ForNode *op) const final {
+    if (!inside_simt_vf_) {
+      return false;
+    }
+    bool has_reducer_update = false;
+    PostOrderVisit(op->body, [&](const ObjectRef &obj) {
+      if (const auto *call = obj.as<CallNode>()) {
+        has_reducer_update |= call->op.same_as(reducer_update());
+      }
+    });
+    return has_reducer_update;
+  }
+
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    if (op->name_hint == "SIMD_VF") {
+      return GetRef<Stmt>(op);
+    }
+    bool previous_inside_simt_vf = inside_simt_vf_;
+    if (op->name_hint == "SIMT_VF") {
+      inside_simt_vf_ = true;
+    }
+    Stmt result = IRMutatorWithAnalyzer::VisitStmt_(op);
+    inside_simt_vf_ = previous_inside_simt_vf;
+    return result;
+  }
+
+  bool inside_simt_vf_{false};
 };
 
 } // namespace tl

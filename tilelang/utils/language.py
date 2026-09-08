@@ -58,6 +58,7 @@ def is_shared(buffer: BufferLikeType, allow_dynamic: bool = True) -> bool:
     buffer = _get_buffer(buffer)
     conditions = [False]
     conditions.append(buffer.scope() == "shared")
+    conditions.append(buffer.scope() == "shared.l1")
     if allow_dynamic:
         conditions.append(is_shared_dynamic(buffer))
     return any(conditions)

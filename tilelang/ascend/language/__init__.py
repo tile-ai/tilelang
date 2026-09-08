@@ -1,0 +1,83 @@
+"""Ascend language dialect: common TileLang plus Ascend extensions."""
+
+from __future__ import annotations
+
+from tilelang.language.common import *  # noqa: F401,F403
+from tilelang.language.common import __all__ as _COMMON_ALL
+from .allocate import alloc_l1, alloc_l0a, alloc_l0b, alloc_l0c  # noqa: F401
+from .annotations import (  # noqa: F401
+    annotate_buffer_versions,
+    annotate_manual_multi_buffer,
+    annotate_unlimit_memory,
+)
+from .copy_op import dual_copy  # noqa: F401
+from .gemm_op import blockscaled_gemm  # noqa: F401
+from .kernel import MixedKernel  # noqa: F401
+from .schedule_hint import PerCoreTask, Stage, Task, assume_no_conflict  # noqa: F401
+from .tile_schedule import (  # noqa: F401
+    AscendBaseTileScheduler,
+    AscendBatchedTileScheduler,
+    AscendKGroupedTileScheduler,
+    AscendMGroupedTileScheduler,
+    AscendTileScheduler,
+)
+from .frame import Cube, CubeFrame, SimdVF, SimdVFFrame, SimtVF, SimtVFFrame, Vector, VectorFrame  # noqa: F401
+
+from . import simd as simd  # noqa: F401 (exposed as T.simd.*)
+from . import vmi as vmi  # noqa: F401 (exposed as T.vmi.*)
+
+# #2734 filed these under the CUDA dialect, but on this fork they also support
+# Ascend: device_assert lowers through the toolkit's assert() macro and the RNG
+# and print intrinsics are emitted by the Ascend codegen too.
+from tilelang.cuda.debug import device_assert as device_assert  # noqa: F401
+from tilelang.cuda.language.print import print as print  # noqa: F401,A001
+from tilelang.cuda.language.random import rng_init, rng_rand, rng_rand_float  # noqa: F401
+
+from .dma import *  # noqa: F401,F403
+from .dma import __all__ as _DMA_ALL
+from .mode import *  # noqa: F401,F403
+from .mode import __all__ as _MODE_ALL
+from .sync import *  # noqa: F401,F403
+from .sync import __all__ as _SYNC_ALL
+
+_ASCEND_API_ALL = (
+    "AscendBaseTileScheduler",
+    "AscendBatchedTileScheduler",
+    "AscendKGroupedTileScheduler",
+    "AscendMGroupedTileScheduler",
+    "AscendTileScheduler",
+    "Cube",
+    "CubeFrame",
+    "MixedKernel",
+    "PerCoreTask",
+    "Stage",
+    "Task",
+    "SimdVF",
+    "SimdVFFrame",
+    "SimtVF",
+    "SimtVFFrame",
+    "Vector",
+    "VectorFrame",
+    "alloc_l0a",
+    "alloc_l0b",
+    "alloc_l0c",
+    "alloc_l1",
+    "annotate_buffer_versions",
+    "annotate_manual_multi_buffer",
+    "annotate_unlimit_memory",
+    "assume_no_conflict",
+    "blockscaled_gemm",
+    "device_assert",
+    "dual_copy",
+    "print",
+    "rng_init",
+    "rng_rand",
+    "rng_rand_float",
+    "simd",
+    "vmi",
+)
+
+__tilelang_dialect__ = "ascend"
+__all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_ASCEND_API_ALL, *_DMA_ALL, *_MODE_ALL, *_SYNC_ALL)))
+
+del _ASCEND_API_ALL, _COMMON_ALL, _DMA_ALL, _MODE_ALL, _SYNC_ALL

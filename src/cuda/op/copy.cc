@@ -9,6 +9,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
+#include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
 #include "cuda/op/tma_layout.h"

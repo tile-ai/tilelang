@@ -74,6 +74,20 @@ public:
 
   virtual ffi::Array<PrimExpr> Forward(const ffi::Array<PrimExpr> &vars) const;
 
+  /// Map a logical (input-space) sub-region to its physical (output-space)
+  /// region.
+  ///
+  /// Given a region [min_i, min_i + extent_i) for each input dimension, compute
+  /// the bounding box of forward_index_ when the input variables are bound to
+  /// those ranges.  The result is one Range per output dimension.
+  ///
+  /// This is the region-aware generalization of OutputShape(), which is
+  /// equivalent to MapRegion with full-extent ranges [0, input_size_[i]).
+  ///
+  /// Example (NZ layout): logical region [m0:m1, k0:k1] on a [M, K] buffer
+  /// maps to physical [m0/16:(m1-m0)/16, k0/C0:(k1-k0)/C0, 0:16, 0:C0].
+  virtual ffi::Array<Range> MapRegion(const ffi::Array<Range> &region) const;
+
   // Repeat the layout along a single input dimension and prepend a new output
   // dimension that indicates the repeat-group index.
   //

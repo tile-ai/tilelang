@@ -18,7 +18,12 @@ from tilelang.jit.adapter import (
     TVMFFIKernelAdapter,
     MetalKernelAdapter,
 )
-from tilelang.profiler import Profiler, TensorSupplyType
+
+# Import TensorSupplyType from its defining module rather than via
+# tilelang.profiler: this fork's profiler/bench.py declares a module-level
+# @tilelang.jit(target="ascend") kernel, so importing the profiler here would
+# form a circular import. Profiler itself is imported lazily in get_profiler().
+from tilelang.utils.tensor import TensorSupplyType
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
@@ -235,10 +240,16 @@ class JITKernel(Generic[_P, _T]):
 
             compile_flags = self.compile_flags
             if compile_flags is not None:
+                # Normalize the existing config: it may be absent, a single
+                # string, or an arbitrary sequence.
                 compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
-                pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (
-                    compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
-                )
+                if compile_flags_cfg is None:
+                    compile_flags_cfg = []
+                elif isinstance(compile_flags_cfg, str):
+                    compile_flags_cfg = [compile_flags_cfg]
+                else:
+                    compile_flags_cfg = list(compile_flags_cfg)
+                pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = [*compile_flags_cfg, *compile_flags]
 
             capture_hip_resource_usage = is_hip_target(target)
             if capture_hip_resource_usage:
@@ -492,7 +503,7 @@ class JITKernel(Generic[_P, _T]):
         """
         return cls(func=tilelang_func, **kwargs)
 
-    def get_profiler(self, tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto) -> Profiler:
+    def get_profiler(self, tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto):
         """
         Creates a profiler to benchmark the compiled runtime module.
 
@@ -506,6 +517,8 @@ class JITKernel(Generic[_P, _T]):
         Profiler
             A Profiler instance for benchmarking the runtime module.
         """
+        from tilelang.profiler import Profiler
+
         return Profiler(self.params, self.out_idx, tensor_supply_type).with_default_adapter(self.adapter)
 
     def get_kernel_source(self, kernel_only: bool = True) -> str:

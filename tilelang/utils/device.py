@@ -4,6 +4,16 @@ import torch
 
 IS_CUDA = torch.cuda.is_available()
 
+IS_NPU = False
+try:
+    if not hasattr(torch, "npu"):
+        import torch_npu  # noqa: F401
+    IS_NPU = hasattr(torch, "npu") and torch.npu.is_available()
+except ImportError:
+    IS_NPU = False
+except Exception as e:
+    print(f"An unexpected error occurred while checking NPU availability: {e}")
+
 IS_MPS = False
 try:
     IS_MPS = torch.backends.mps.is_available()
@@ -13,14 +23,37 @@ except Exception as e:
     print(f"An unexpected error occurred while checking MPS availability: {e}")
 
 
+if IS_CUDA:
+    Event = torch.cuda.Event
+elif IS_NPU:
+    Event = torch.npu.Event
+elif IS_MPS:
+    Event = torch.mps.Event
+else:
+    Event = None
+
+
 def get_current_device():
     device = None
     if IS_CUDA:
         device = torch.cuda.current_device()
+    elif IS_NPU:
+        device = torch.npu.current_device()
     elif IS_MPS:
         device = "mps:0"
 
     return device
+
+
+def device_synchronize() -> None:
+    if IS_CUDA:
+        torch.cuda.synchronize()
+    elif IS_NPU:
+        torch.npu.synchronize()
+    elif IS_MPS:
+        torch.mps.synchronize()
+    else:
+        raise RuntimeError("No device is available")
 
 
 def get_available_cpu_count() -> int:

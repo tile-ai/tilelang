@@ -153,18 +153,8 @@ def test_sync_if_with_same_index():
     assert "T.tvm_storage_sync" in str(mod.script())
 
 
-def test_no_sync_if_with_same_index_with_modulo_if():
-    """A thread-private update needs no barrier even under a divergent guard.
-
-    Every thread accesses ``temp_shared[threadIdx_x]`` and nothing else, so the
-    index is injective and no two threads ever reach the same address; the
-    threads that skip the guarded write simply read an uninitialised slot, which
-    is not a cross-thread hazard. Unequal participation alone (only
-    ``tx % 4 == 0`` writes, everybody reads) is one of the two conditions a
-    same-index hazard needs -- the other being a non-injective index -- so it
-    must not by itself trigger a barrier.
-    """
-
+@tilelang.testing.requires_cuda
+def test_sync_if_with_same_index_with_modulo_if():
     @T.prim_func(check_well_formed=False)
     def func() -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
@@ -182,7 +172,7 @@ def test_no_sync_if_with_same_index_with_modulo_if():
         result_local[0] = temp_shared[threadIdx_x]
 
     mod = run_passes(func)
-    assert "T.tvm_storage_sync" not in str(mod.script())
+    assert "T.tvm_storage_sync" in str(mod.script())
 
 
 @tilelang.testing.requires_cuda
@@ -559,14 +549,14 @@ def test_sync_hoist_non_uniform_if_with_threadidx():
     assert sync_pos < if_pos, f"Sync should be before if statement:\n{s}"
 
 
-def test_no_sync_for_thread_private_read_inside_non_uniform_if():
-    """A thread-private read guarded by a non-uniform condition needs no barrier.
+@tilelang.testing.requires_cuda
+def test_sync_hoist_non_uniform_if_shared_memory_condition():
+    """Test sync hoisting when if condition reads from shared memory with thread-dependent index.
 
-    This is the shape that caused the original deadlock report: the condition
-    reads shared memory at a threadIdx-dependent index, so a barrier inside the
-    branch would hang. The guarded access is ``data_shared[tx]`` though -- the
-    slot this very thread wrote just above -- so no two threads reach the same
-    address and there is nothing to order.
+    This is the exact pattern that caused the original deadlock:
+    - Condition reads shared memory at index depending on threadIdx
+    - Different threads get different values -> non-uniform condition
+    - Sync inside if would cause deadlock
     """
 
     @T.prim_func(private=True)
@@ -585,12 +575,18 @@ def test_no_sync_for_thread_private_read_inside_non_uniform_if():
         # token_ids[tx] can be different for each thread (e.g., some are -1, some are valid)
         if token_ids[tx] != -1:
             # Inside the if, we read from data_shared
+            # Sync is needed but must be hoisted because condition is non-uniform
             result_local[0] = data_shared[tx]
 
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
-    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
+    # Sync should appear before the if statement
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # The sync should be before the if that checks token_ids
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if token_ids")
+    assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
 
 
 @tilelang.testing.requires_cuda
@@ -683,13 +679,9 @@ def test_sync_hoist_nested_non_uniform_if():
     assert sync_pos < if_pos, f"Sync should be hoisted before outer if:\n{s}"
 
 
-def test_no_sync_for_thread_private_read_inside_non_uniform_if_in_loop():
-    """Same shape as above inside a loop, and still thread private.
-
-    Iteration ``k`` writes ``data_shared[tx]`` and the guarded read of iteration
-    ``k`` or ``k + 1`` targets the same slot, always from the same thread, so
-    program order already orders them.
-    """
+@tilelang.testing.requires_cuda
+def test_sync_hoist_non_uniform_if_in_loop():
+    """Test sync hoisting when non-uniform if is inside a loop."""
 
     @T.prim_func(private=True)
     def func():
@@ -711,7 +703,9 @@ def test_no_sync_for_thread_private_read_inside_non_uniform_if_in_loop():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
-    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # Sync should be before the if inside the loop, not inside the if
+    # This ensures all threads can reach the sync point
 
 
 @tilelang.testing.requires_cuda
@@ -743,12 +737,9 @@ def test_no_sync_needed_uniform_accesses():
     assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
 
 
-def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
-    """A non-uniform condition reading the slot the same thread just wrote.
-
-    The write and the condition's read are both ``token_ids[tx]``, so the pair is
-    thread private even though the condition is divergent and sits in a loop.
-    """
+@tilelang.testing.requires_cuda
+def test_sync_hoist_non_uniform_if_in_loop_with_shared_memory():
+    """Test sync hoisting when non-uniform if is inside a loop with shared memory."""
 
     @T.prim_func(private=True)
     def func():
@@ -769,7 +760,11 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
     mod = tvm.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
-    assert 'T.tvm_storage_sync("shared")' not in s, f"Unexpected sync:\n{s}"
+    assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync:\n{s}"
+    # Sync should be before the if inside the loop, not inside the if
+    sync_pos = s.index('T.tvm_storage_sync("shared")')
+    if_pos = s.index("if token_ids[tx] >= 0")
+    assert sync_pos < if_pos, f"Sync should be hoisted before non-uniform if:\n{s}"
 
 
 @tilelang.testing.requires_cuda

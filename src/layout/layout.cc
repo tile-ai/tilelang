@@ -801,6 +801,47 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
   return ret;
 }
 
+Array<Range> LayoutNode::MapRegion(const Array<Range> &region) const {
+  ICHECK_EQ(region.size(), InputDim())
+      << "MapRegion: region rank (" << region.size()
+      << ") != layout input rank (" << InputDim() << ")";
+
+  arith::Analyzer analyzer;
+  // Bind each InputPlaceholder to the sub-range [min, min + extent)
+  // instead of the full extent [0, input_size) that OutputShape uses.
+  for (size_t i = 0; i < InputDim(); i++) {
+    PrimExpr min = region[i]->min;
+    PrimExpr ext = region[i]->extent;
+    analyzer.Bind(InputPlaceholder(i), Range(min, min + ext));
+  }
+
+  Array<Range> result;
+  result.reserve(OutputDim());
+  for (size_t i = 0; i < OutputDim(); i++) {
+    auto ist = analyzer.int_set(forward_index_[i]);
+    PrimExpr lo = ist.min();
+    PrimExpr hi = ist.max();
+    if (arith::is_neg_inf(lo) && arith::is_pos_inf(hi)) {
+      // Analyzer couldn't form an IntervalSet (e.g. bitwise ops).
+      // Fall back to ConstIntBound, mirroring OutputShape's strategy.
+      auto cib = analyzer.const_int_bound(forward_index_[i]);
+      if (cib->min_value != arith::ConstIntBound::kNegInf &&
+          cib->max_value != arith::ConstIntBound::kPosInf &&
+          cib->min_value >= 0) {
+        lo = Integer(cib->min_value);
+        hi = Integer(cib->max_value);
+      } else {
+        // Last-resort: use the full output dimension extent.
+        Array<PrimExpr> out_shape = OutputShape();
+        lo = Integer(0);
+        hi = out_shape[i];
+      }
+    }
+    result.push_back(Range(lo, hi + 1));
+  }
+  return result;
+}
+
 PrimExpr LayoutNode::GetLinearizedForwardIndex() const {
   Array<PrimExpr> output_shape = OutputShape();
   ICHECK_EQ(output_shape.size(), forward_index_.size());
@@ -1727,6 +1768,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Layout layout, Layout other) {
              const LayoutNode *other_node = other.as<LayoutNode>();
              return layout->IsEqual(other_node);
+           })
+      .def("tl.Layout_map_region",
+           [](Layout layout, Array<Range> region) {
+             return layout->MapRegion(region);
            })
       .def_packed("tl.Fragment",
                   [](PackedArgs args, Any *rv) {

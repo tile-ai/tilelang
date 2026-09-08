@@ -12,6 +12,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include "backend/common/target_utils.h"
 #include "common/storage_size.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -136,8 +137,15 @@ private:
       // use the first appearance as def.
       if (!defined_thread.count(iv.get())) {
         defined_thread.insert(iv.get());
-        info_.launch_params.push_back(iv->thread_tag);
         thread_extent.Set(iv->thread_tag, op->value);
+        // Ascend launches only a grid of AI cores. Internal cthread/vthread
+        // domains belong to SimtVF regions and must not be interpreted as
+        // block dimensions by the generic runtime launch metadata.
+        std::string thread_tag = iv->thread_tag;
+        if (!TargetIsAscend(info_.target) ||
+            thread_tag.rfind("blockIdx.", 0) == 0) {
+          info_.launch_params.push_back(iv->thread_tag);
+        }
       }
     }
 
@@ -269,8 +277,23 @@ public:
     }
 
     const auto &info = device_info_map_.at(gvar.get());
-    const auto &thread_extent = info.thread_extent;
-    func = WithAttr(std::move(func), "thread_extent", thread_extent);
+    if (TargetIsAscend(
+            func->GetAttr<Target>(tvm::attr::kTarget).value_or(info.target))) {
+      // Ascend: keep blockIdx extents (grid shape) but drop threadIdx extents
+      // since thread domains are managed per-region by SimtVF.
+      Map<String, PrimExpr> grid_extent;
+      for (const auto &kv : info.thread_extent) {
+        if (std::string(kv.first).find("blockIdx") != std::string::npos) {
+          grid_extent.Set(kv.first, kv.second);
+        }
+      }
+      if (!grid_extent.empty()) {
+        func = WithAttr(std::move(func), "thread_extent", grid_extent);
+      }
+    } else {
+      const auto &thread_extent = info.thread_extent;
+      func = WithAttr(std::move(func), "thread_extent", thread_extent);
+    }
     if (info.dyn_shmem_size.defined()) {
       func = WithAttr(std::move(func), "dyn_shared_memory_buf",
                       info.dyn_shmem_size.value());
@@ -309,7 +332,10 @@ private:
 
     bool same_device_type = caller_target->GetTargetDeviceType() ==
                             callee_target->GetTargetDeviceType();
-    if (same_device_type) {
+    // For Ascend target, always use call_packed path to generate consistent
+    // host code that can be properly wrapped by the cython adapter.
+    bool is_ascend_callee = TargetIsAscend(callee_target);
+    if (same_device_type && !is_ascend_callee) {
       // Calls to another target using the same device (e.g. LLVM
       // calling a custom TIRToRuntime target) do not require a kernel
       // launch, but need to be replaced with call_extern.
@@ -322,12 +348,16 @@ private:
       return Call(node->dtype, builtin::call_extern(), args);
     }
 
-    ICHECK(dev_info.launch_params.defined())
-        << "CallNode attempted kernel launch to " << gvar->name_hint
-        << " on target " << dev_info.target << ", but subroutine "
-        << gvar->name_hint
-        << " did not have the tirx::attr::kKernelLaunchParams attribute "
-        << "required for cross-target kernel launch";
+    // For Ascend, skip the launch_params check since we handle it differently.
+    // For other cross-target calls, verify launch_params is defined.
+    if (!is_ascend_callee) {
+      ICHECK(dev_info.launch_params.defined())
+          << "CallNode attempted kernel launch to " << gvar->name_hint
+          << " on target " << dev_info.target << ", but subroutine "
+          << gvar->name_hint
+          << " did not have the tirx::attr::kKernelLaunchParams attribute "
+          << "required for cross-target kernel launch";
+    }
 
     // Collected kernel information may be in terms of the callee's
     // arguments, but we need expressions for them in terms of the

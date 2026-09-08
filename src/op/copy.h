@@ -32,6 +32,11 @@ public:
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
   Optional<PrimExpr> dst_block;      // Destination block index for cluster copy
+  // Ascend MX scale-factor companion source (L1/cbuf) for an L1→L0 data copy.
+  // When set, the L1→L0A/L0B lowering also loads the per-block scale factors
+  // into the L0 MX scale registers (load_cbuf_to_ca_mx / load_cbuf_to_cb_mx).
+  Optional<Buffer> sf;
+  Array<Range> sf_range; // Ranges for each dimension of `sf`.
   // Annotated source OOB fallback value resolved from the enclosing block.
   Optional<PrimExpr> src_oob_safe_value;
   Map<String, ObjectRef> annotations; // Backend/pass-specific annotations.
@@ -54,8 +59,77 @@ public:
         .def_ro("src_range", &CopyNode::src_range)
         .def_ro("dst_range", &CopyNode::dst_range)
         .def_ro("dst_block", &CopyNode::dst_block)
+        .def_ro("sf", &CopyNode::sf)
+        .def_ro("sf_range", &CopyNode::sf_range)
         .def_ro("src_oob_safe_value", &CopyNode::src_oob_safe_value)
         .def_ro("annotations", &CopyNode::annotations);
+  }
+
+  int GetDualDstCtl() const {
+    if (auto val = annotations.Get("dual_dst_ctl")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0;
+  }
+
+  PrimExpr GetUnitFlagCtl() const {
+    if (auto val = annotations.Get("unit_flag_ctrl")) {
+      return Downcast<PrimExpr>(val.value());
+    }
+    return IntImm(DataType::Int(32), 0);
+  }
+
+  PrimExpr GetSubBlockId() const {
+    if (auto val = annotations.Get("sub_blockid")) {
+      return Downcast<PrimExpr>(val.value());
+    }
+    return IntImm(DataType::Int(32), 0);
+  }
+
+  int GetTranspose() const {
+    if (auto val = annotations.Get("transpose")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0;
+  }
+
+  int GetNd2Nz() const {
+    if (auto val = annotations.Get("nd2nz")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0;
+  }
+
+  int GetL2CacheCtrl(int default_value = 0) const {
+    if (auto val = annotations.Get("l2_cache_ctrl")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return default_value;
+  }
+
+  // Ascend GM->UB hardware padding selection.
+  int GetDataSelect() const {
+    if (auto val = annotations.Get("data_select")) {
+      if (auto int_val = val->as<IntImmNode>()) {
+        return int_val->value;
+      }
+    }
+    return 0;
+  }
+
+  Optional<PrimExpr> GetPadValue() const {
+    if (auto value = annotations.Get("pad_value")) {
+      return Downcast<PrimExpr>(value.value());
+    }
+    return std::nullopt;
   }
 
   /*!

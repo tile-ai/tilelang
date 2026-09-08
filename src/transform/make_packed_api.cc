@@ -24,9 +24,11 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "backend/common/target_utils.h"
 #include "common/attr.h"
 #include "merge_if_stmt.h"
 #include "tir/transforms/ir_utils.h"
+#include "tirx/transform/ir_utils.h"
 #include "tvm_ffi_binder.h"
 
 namespace tvm {
@@ -345,10 +347,19 @@ std::vector<int> GetCalleeAllocatedOutputIndices(const PrimFunc &func) {
   }
 
   auto target = func->GetAttr<Target>(tvm::attr::kTarget);
-  if (!target || target.value()->kind->name != "cuda") {
+  if (!target) {
     return {};
   }
-  auto target_host = target.value()->GetHost();
+  const Target &target_value = target.value();
+  bool is_pto = false;
+  for (const String &key : target_value->keys) {
+    is_pto = is_pto || key == "pto";
+  }
+  if (target_value->kind->name != "cuda" &&
+      !(TargetIsAscend(target_value) && !is_pto)) {
+    return {};
+  }
+  auto target_host = target_value->GetHost();
   if (!target_host || target_host.value()->kind->name != "c") {
     return {};
   }
@@ -1056,9 +1067,19 @@ MakePackedAPI(PrimFunc func,
   func_ptr->params = args;
 
   Array<Var> undefined = UndefinedVars(body, func_ptr->params);
+  Array<Var> api_undefined;
+  for (const Var &var : undefined) {
+    if (var.dtype().is_handle() && var->type_annotation.as<PointerTypeNode>()) {
+      std::string scope = GetPtrStorageScope(var);
+      if (scope == "local" || scope == "local.fragment") {
+        continue;
+      }
+    }
+    api_undefined.push_back(var);
+  }
 
-  ICHECK_EQ(undefined.size(), 0)
-      << "In PrimFunc " << name_hint << " variables " << undefined
+  ICHECK_EQ(api_undefined.size(), 0)
+      << "In PrimFunc " << name_hint << " variables " << api_undefined
       << " are used, but are not passed in as API arguments";
 
   func_ptr->buffer_map = Map<Var, Buffer>();

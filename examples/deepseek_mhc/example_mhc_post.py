@@ -20,7 +20,7 @@ def mhc_post_tilelang(a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_b
     c: T.Tensor((n, hc), T.float32)
     d: T.Tensor((n, h), T.bfloat16)
     x: T.Tensor((n, hc, h), T.bfloat16)
-    with T.Kernel(n, threads=n_thr) as i_n:
+    with T.Kernel(n) as i_n:
         x_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
         b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
         d_shared = T.alloc_shared(h_blk, T.bfloat16)
@@ -29,22 +29,23 @@ def mhc_post_tilelang(a, b, c, d, x, hc: int, hidden: int, n_thr: int = 128, h_b
         b_local = T.alloc_fragment((hc, h_blk), T.float32)
         d_local = T.alloc_fragment(h_blk, T.float32)
 
-        a_local = T.alloc_fragment((hc, hc), T.float32)
-        c_local = T.alloc_fragment(hc, T.float32)
-        T.copy(a[i_n, 0, 0], a_local)
-        T.copy(c[i_n, 0], c_local)
+        a_shared = T.alloc_shared((hc, hc), T.float32)
+        c_shared = T.alloc_shared(hc, T.float32)
+        T.copy(a[i_n, 0, 0], a_shared)
+        T.copy(c[i_n, 0], c_shared)
 
-        for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
+        for i0_h in T.serial(T.ceildiv(h, h_blk)):
             T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
             T.copy(d[i_n, i0_h * h_blk], d_shared)
 
-            T.copy(b_shared, b_local)
-            T.copy(d_shared, d_local)
-            for i_hco, i1_h in T.Parallel(hc, h_blk):
-                x_local[i_hco, i1_h] = c_local[i_hco] * d_local[i1_h]
-                for i_hci in T.serial(hc):
-                    x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
-            T.copy(x_local, x_shared)
+            with T.SIMT_VF(threads=n_thr):
+                T.copy(b_shared, b_local)
+                T.copy(d_shared, d_local)
+                for i_hco, i1_h in T.Parallel(hc, h_blk):
+                    x_local[i_hco, i1_h] = c_shared[i_hco] * d_local[i1_h]
+                    for i_hci in T.serial(hc):
+                        x_local[i_hco, i1_h] += a_shared[i_hci, i_hco] * b_local[i_hci, i1_h]
+                T.copy(x_local, x_shared)
 
             T.copy(x_shared, x[i_n, 0, i0_h * h_blk])
 

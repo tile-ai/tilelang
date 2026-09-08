@@ -239,7 +239,7 @@ class AutoTuner:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+            backend: Profiler backend - "event", "cupti", or "cudagraph".
         Returns:
             AutoTuner: Self for method chaining.
         """

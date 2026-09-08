@@ -223,12 +223,12 @@ public:
       : arith::IRMutatorWithAnalyzer(analyzer), layout_map_(layout_map) {}
 
   int Plan(const For &node) {
+    Target target = Target::Current(false);
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
     vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
         MaxVectorLoadBits(
-            Target::Current(false),
-            VectorizeFindMemoryAccess::MaySupportVectorize256(node));
+            target, VectorizeFindMemoryAccess::MaySupportVectorize256(node));
 
     // Check if For body contains SeqStmt (multiple statements).
     // When there's SeqStmt, we use conservative strategy - treating local
@@ -541,8 +541,12 @@ private:
 
   PrimExpr VisitExpr_(const SelectNode *node) final {
     // Select stays an expression-level ternary. Constrain its vector width
-    // using the same condition-uniformity rule as IfThenElse.
-    CheckConditionVectorized(node->condition);
+    // using the same condition-uniformity rule as IfThenElse. Ascend codegen
+    // supports lane-wise vector predicates, so it does not need this
+    // control-flow restriction.
+    if (!TargetIsAscend(Target::Current(false))) {
+      CheckConditionVectorized(node->condition);
+    }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
@@ -615,6 +619,20 @@ private:
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::tvm_access_ptr())) {
       HandleTvmAccessPtr(node);
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    } else if (node->op.same_as(tl::rng_rand_float())) {
+      // Stateful RNG calls produce scalar values before any destination cast.
+      // Keep that source width as a non-cast constraint: the simple-store
+      // strategy intentionally ignores cast constraints, while later passes
+      // handle the packed destination conversion independently.
+      int value_bits = node->dtype.bits() * node->dtype.lanes();
+      ICHECK_GT(value_bits, 0)
+          << "tl.rng_rand_float requires a fixed-width result dtype, got "
+          << node->dtype;
+      int vectorize_length =
+          std::max(1, std::min(4, vector_load_bits_max_ / value_bits));
+      buffer_vector_infos_.push_back(
+          {Buffer(), vectorize_length, false, {}, /*is_cast=*/false});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == tl::atomic_add_elem_op()) {
       // Assert at least 2 args (dst_ptr and src)
@@ -987,7 +1005,13 @@ private:
       return {1, /*requires_scalarization=*/true};
     }
     if (is_independent) {
-      return {buffer_vec_size, /*requires_scalarization=*/false};
+      // Even when the offset is independent of the loop var (broadcast
+      // pattern), the vector size must still respect the hardware lane
+      // capacity. Otherwise a single independent load can inflate the
+      // final vector_size far beyond what the hardware supports
+      // (e.g. fp32 x 64 lanes = 2048 bits on an Ascend 128-bit target).
+      return {arith::ZeroAwareGCD(buffer_vec_size, min_vec_size),
+              /*requires_scalarization=*/false};
     }
     // 4. Try to find max vectorize size for this buffer
     while (buffer_vec_size > 1 &&
@@ -1201,6 +1225,9 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
 }
 
 int MaxVectorLoadBits(const Target &target, bool global_only_access) {
+  if (TargetIsAscend(target)) {
+    return 64;
+  }
   if (TargetSupportVectorize256(target) && !tl_config::Vectorize256Disabled() &&
       global_only_access) {
     return 256;

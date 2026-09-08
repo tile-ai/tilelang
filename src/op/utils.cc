@@ -129,7 +129,8 @@ AccessRegion NormalizeToAccessRegion(const PrimExpr &arg,
 }
 
 PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
-                                 bool require_2d) {
+                                 bool require_2d,
+                                 bool leading_dims_offset_only) {
   Buffer buf = region->buffer;
   int ndim = static_cast<int>(buf->shape.size());
   if (require_2d) {
@@ -151,9 +152,11 @@ PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region, int rw_mask,
       strides[i] = cur;
       cur = cur * buf->shape[i];
     }
-    // Offset: sum_{i in [0..ndim-1]} min_i * stride_i
+    // Offset: sum_{i in [0..ndim-1]} min_i * stride_i, or only the leading dims
+    // when the innermost 2D position is conveyed separately by the caller.
+    int offset_dims = leading_dims_offset_only ? ndim - 2 : ndim;
     offset = make_const(buf->shape[0].dtype(), 0);
-    for (int i = 0; i < ndim; ++i) {
+    for (int i = 0; i < offset_dims; ++i) {
       offset = offset + region->region[i]->min * strides[i];
     }
     // Extent: last two extents product (elements)

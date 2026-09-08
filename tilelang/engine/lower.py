@@ -92,6 +92,7 @@ def host_codegen(
 def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tirx.transform.Simplify()(device_mod)
+
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
     return device_mod
 
@@ -130,10 +131,13 @@ def lower_to_host_device_ir(
             _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
             _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
-            # Run backend-independent semantic checks before target-specific lowering.
-            PreLowerSemanticCheck(mod)
+            # Keep target context active for passes that rely on Target::Current.
+            with target:
+                # Run backend-independent semantic checks before target-specific
+                # lowering.
+                PreLowerSemanticCheck(mod)
 
-            mod = context.lower(mod)
+                mod = context.lower(mod)
 
             host_mod = tirx.transform.Filter(_is_host_call)(mod)
             device_mod = tirx.transform.Filter(_is_device_call)(mod)

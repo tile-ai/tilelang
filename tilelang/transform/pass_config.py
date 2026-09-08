@@ -74,8 +74,13 @@ class PassConfigKey(str, Enum):
     """Disable warp specialization optimization. Default: False"""
 
     TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
-    """Name of the automatic warp-specialization scheduler to run (e.g.
-    "role_based"). Default: unset (disabled)."""
+    """Enable Ascend auto scheduling. Default: True."""
+
+    TL_CUDA_AUTO_SCHEDULE = "tl.cuda_auto_schedule"
+    """Name of the CUDA automatic warp-specialization scheduler (e.g.
+    "role_based"). Default: unset (disabled). Separate from Ascend's boolean
+    TL_ENABLE_AUTO_SCHEDULE because pass-config types are process-global.
+    """
 
     TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
     """

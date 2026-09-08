@@ -92,6 +92,9 @@ def Persistent(
     wave_size: tirx.PrimExpr,
     index: tirx.PrimExpr,
     group_size: tirx.PrimExpr | int | None = 8,
+    num_stages: int = 0,
+    *,
+    annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct persistent for loop.
 
@@ -105,8 +108,13 @@ def Persistent(
         The tile index in one wave.
     group_size : tirx.PrimExpr
         The group size.
+    num_stages : int
+        The number of pipeline stages for double buffering.
+        If 0, pipeline is disabled.
     """
-    return _ffi_api.Persistent(domain, wave_size, index, group_size)
+    if annotations is None:
+        annotations: dict[str, Any] = {}
+    return _ffi_api.Persistent(domain, wave_size, index, group_size, num_stages, annotations)
 
 
 def Pipelined(
@@ -117,6 +125,7 @@ def Pipelined(
     stage: list[int] | None = None,
     sync: list[list[int]] | None = None,
     group: list[list[int]] | None = None,
+    *,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct pipelined for loop.
@@ -191,7 +200,7 @@ def Pipelined(
     if group is None:
         group = []
     if annotations is None:
-        annotations = {}
+        annotations: dict[str, Any] = {}
     # type: ignore[attr-defined] # pylint: disable=no-member
     return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group, annotations)
 

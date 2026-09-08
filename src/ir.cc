@@ -26,6 +26,9 @@ namespace tl {
 using namespace script::ir_builder::tirx;
 using namespace ffi;
 
+class SimtVFFrameNode;
+class SimtVFFrame;
+
 // Build a ForFrame that emits a target-neutral kThreadBinding loop for one
 // kernel-launch dimension. The launch nest is materialized into the
 // target-specific form (thread_extent AttrStmt on GPU, serial For on CPU) by
@@ -99,6 +102,9 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
   return ForFrame(n);
 }
 
+SimtVFFrame SimtVF(const Array<PrimExpr> &thread_extents, int64_t vf_latency,
+                   int64_t source_index);
+
 ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
                       const Array<PrimExpr> &order,
                       const Array<PrimExpr> &stages,
@@ -136,7 +142,8 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
 }
 
 ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
-                       const PrimExpr &index, PrimExpr group_size) {
+                       const PrimExpr &index, PrimExpr group_size,
+                       int num_stages, const Map<String, Any> &annotations) {
   using namespace tvm::tirx;
   ICHECK(!domain.empty());
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
@@ -150,19 +157,6 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
   PrimExpr last_extent = domain[domain.size() - 1];
   group_size =
       max(make_const(group_size.dtype(), 1), min(group_size, last_extent));
-  Array<PrimExpr> grouped_domain;
-  grouped_domain.push_back(ceildiv(last_extent, group_size));
-  for (int i = 0; i < domain.size() - 1; ++i) {
-    grouped_domain.push_back(domain[i]);
-  }
-  grouped_domain.push_back(group_size);
-  PrimExpr padded_domain_size = grouped_domain[0];
-  for (int i = 1; i < grouped_domain.size(); ++i) {
-    padded_domain_size *= grouped_domain[i];
-  }
-
-  auto waves = ceildiv(padded_domain_size, wave_size);
-  auto loop_var = Var("w", waves.dtype());
   Array<Var> coord_vars;
 
   for (int i = 0; i < domain.size(); ++i) {
@@ -173,11 +167,53 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     n->doms.push_back(Range(make_const(dtype, 0), domain[i]));
   }
 
+  // Build a "grouped" domain that reorders iteration so that consecutive
+  // linear indices map to consecutive values in the last dimension (for
+  // locality), while still covering the full domain exactly once.
+  //
+  // Original domain: [D0, D1, ..., D_{n-1}]  (n >= 1)
+  // We split D_{n-1} into (num_groups, group_size) where:
+  //   num_groups = ceildiv(D_{n-1}, group_size)
+  //   last group may be partial
+  //
+  // Grouped domain ordering: [D0, ..., D_{n-2}, num_groups, group_size]
+  // This means: outer dims iterate slowest, then groups, then offsets within
+  // a group. So consecutive linear indices stay within the same group (same
+  // outer dims), maximizing locality along the last dimension.
+  //
+  // When D_{n-1} % group_size != 0, some grouped coords map to
+  // coord_{n-1} >= D_{n-1}. We must guard against this.
+
+  PrimExpr num_groups = ceildiv(domain[domain.size() - 1], group_size);
+  // The "virtual" domain size including padding for incomplete last group.
+  PrimExpr virtual_domain_size = num_groups;
+  for (int i = 0; i < domain.size() - 1; ++i) {
+    virtual_domain_size = virtual_domain_size * domain[i];
+  }
+  virtual_domain_size = virtual_domain_size * group_size;
+
+  // grouped_domain = [D0, ..., D_{n-2}, num_groups, group_size]
+  Array<PrimExpr> grouped_domain;
+  for (int i = 0; i < domain.size() - 1; ++i) {
+    grouped_domain.push_back(domain[i]);
+  }
+  grouped_domain.push_back(num_groups);
+  grouped_domain.push_back(group_size);
+
+  auto virtual_waves = ceildiv(virtual_domain_size, wave_size);
+  auto loop_var = Var("w", virtual_waves.dtype());
+
   n->f_make_for_loop = [=](const Array<Var> &vars, const Array<Range> &doms,
                            const Array<Optional<PrimExpr>> &steps,
                            Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
-    Map<String, Any> anno;
+    Map<String, Any> anno = annotations;
+    if (num_stages > 0) {
+      anno.Set("num_stages", PrimExpr(num_stages));
+    }
+    // Decompose linear_index into grouped coords via mixed-radix.
+    // grouped_domain = [D0, ..., D_{n-2}, num_groups, group_size]
+    // idxs[0..n-2] = outer dims, idxs[n-1] = group_idx, idxs[n] = offset
     Array<PrimExpr> idxs(grouped_domain.size(), PrimExpr());
     PrimExpr rem = loop_var * wave_size + index;
 
@@ -186,30 +222,47 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
       rem = truncdiv(rem, grouped_domain[i]);
     }
     idxs.Set(0, rem);
-    PrimExpr last_coord =
-        idxs[0] * group_size + idxs[grouped_domain.size() - 1];
-    PrimExpr in_range = last_coord < domain[domain.size() - 1];
-    auto out_if = tvm::tirx::IfThenElse(
-        padded_domain_size <= (loop_var * wave_size + index),
-        tvm::tirx::Evaluate(
-            tvm::tirx::Call(DataType::Handle(), tvm::tl::loop_break(), {})),
-        Stmt());
-    Stmt guarded_body = tvm::tirx::IfThenElse(in_range, body, Stmt());
+
+    // Compute the last-dimension coordinate from group_idx and offset.
+    // idxs[n-2] = group_idx (second to last in grouped_domain)
+    // idxs[n-1] = offset (last in grouped_domain)
+    int gd_size = grouped_domain.size();
+    PrimExpr last_dim_coord =
+        idxs[gd_size - 2] * group_size + idxs[gd_size - 1];
 
     arith::Analyzer analyzer;
-    Stmt new_body = guarded_body;
-    if (analyzer.CanProveGreaterEqual(waves, 2)) {
-      new_body = SeqStmt({out_if, guarded_body});
+    Stmt new_body = body;
+    // Guard against two kinds of overflow:
+    // 1. Total overflow: virtual_waves * wave_size > virtual_domain_size
+    //    (some linear_index values exceed the grouped domain)
+    // 2. Last-dim overflow: domain[-1] % group_size != 0
+    //    (last group is partial, some coords exceed domain[-1])
+    PrimExpr linear_index = loop_var * wave_size + index;
+    bool needs_total_guard =
+        !analyzer.CanProveEqual(virtual_waves * wave_size, virtual_domain_size);
+    bool needs_lastdim_guard =
+        !analyzer.CanProveEqual(virtual_domain_size, domain_size);
+    if (needs_total_guard || needs_lastdim_guard) {
+      PrimExpr guard_cond = const_true();
+      if (needs_total_guard) {
+        guard_cond = guard_cond && (linear_index < virtual_domain_size);
+      }
+      if (needs_lastdim_guard) {
+        guard_cond = guard_cond && (last_dim_coord < domain[domain.size() - 1]);
+      }
+      new_body = IfThenElse(guard_cond, body);
     }
     Optional<PrimExpr> step =
         !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
-    Stmt outer = For(loop_var, 0, waves, ForKind::kSerial, new_body,
+    Stmt outer = For(loop_var, 0, virtual_waves, ForKind::kSerial, new_body,
                      /*thread_binding=*/std::nullopt, /*annotations=*/anno,
                      /*step=*/step);
+    // vars[0..n-2] = outer domain coords (from idxs[0..n-2])
     for (int i = 0; i < vars.size() - 1; ++i) {
-      outer = SeqStmt({tirx::Bind(vars[i], idxs[i + 1]), outer});
+      outer = SeqStmt({tirx::Bind(vars[i], idxs[i]), outer});
     }
-    outer = SeqStmt({tirx::Bind(vars[vars.size() - 1], last_coord), outer});
+    // vars[n-1] = last dim coord (reconstructed from group_idx + offset)
+    outer = SeqStmt({tirx::Bind(vars[vars.size() - 1], last_dim_coord), outer});
     return outer;
   };
 
@@ -300,13 +353,295 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   return KernelLaunchFrame(n);
 }
 
+KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
+                                    PrimExpr cthread_extent,
+                                    const Map<String, Any> &attrs) {
+  ObjectPtr<KernelLaunchFrameNode> n =
+      tvm::ffi::make_object<KernelLaunchFrameNode>();
+
+  ICHECK_EQ(grid_size.size(), 1) << "MixedKernel only supports 1-D grid";
+  const auto *vector_count = cthread_extent.as<IntImmNode>();
+  ICHECK(vector_count != nullptr &&
+         (vector_count->value == 1 || vector_count->value == 2))
+      << "Mixed-kernel vector_count must be the constant integer 1 or 2, got "
+      << cthread_extent;
+
+  // Frame 0: bx = blockIdx.x. Emit a target-neutral thread_binding For loop;
+  // tl.MaterializeKernelLaunch turns it into a thread_extent AttrStmt.
+  n->frames.push_back(MakeThreadBindingFrame("bx", "blockIdx.x", grid_size[0]));
+
+  // Frame 1: sid = get_subblockid() via the Ascend "cthread" binding. Also
+  // emitted as a thread_binding For loop; MaterializeKernelLaunch recognizes
+  // the "cthread" tag and materializes it into a thread_extent AttrStmt.
+  n->frames.push_back(MakeThreadBindingFrame("sid", "cthread", cthread_extent));
+
+  // Frame 2: MainBlock with NPU marker
+  auto main_block = tvm::script::ir_builder::tirx::Block(DeviceMainBlockName);
+  main_block->reads = Array<tvm::tirx::BufferRegion>();
+  main_block->writes = Array<tvm::tirx::BufferRegion>();
+  Map<String, Any> block_annotations = attrs;
+  block_annotations.Set("vector_count", cthread_extent);
+  main_block->annotations = block_annotations;
+  n->frames.push_back(main_block);
+
+  return KernelLaunchFrame(n);
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
       .def("tl.Parallel", ParallelFor)
+      .def("tl.SimtVF", SimtVF)
       .def("tl.Pipelined", PipelinedFor)
       .def("tl.Persistent", PersistentFor)
-      .def("tl.KernelLaunch", KernelLaunch);
+      .def("tl.KernelLaunch", KernelLaunch)
+      .def("tl.MixedKernelLaunch", MixedKernelLaunch);
+}
+
+/**
+ * Record the current number of alloc_buffers on the parent SBlockFrame.
+ * Call this during EnterWithScope of SimtVF/Cube/Vector frames so that
+ * ExitWithScope can later steal only the buffers added during this frame's
+ * lifetime (i.e. those hoisted by TVM's AllocBuffer).
+ */
+static size_t RecordParentAllocCount() {
+  script::ir_builder::IRBuilder builder =
+      script::ir_builder::IRBuilder::Current();
+  ffi::Optional<SBlockFrame> opt_parent = builder->FindFrame<SBlockFrame>();
+  if (!opt_parent.defined()) {
+    return 0;
+  }
+  return opt_parent.value()->alloc_buffers.size();
+}
+
+/**
+ * Steal buffers that were added to the parent SBlockFrame during this frame's
+ * lifetime.  TVM's AllocBuffer() hoists buffers to the nearest SBlockFrame,
+ * but for SimtVF/Cube/Vector frames we want those buffers inside their own
+ * Block node instead.
+ *
+ * @param parent_alloc_count  The alloc_buffers count recorded at
+ *                            EnterWithScope time via RecordParentAllocCount().
+ */
+static ffi::Array<tvm::tirx::Buffer>
+StealAllocBuffers(size_t parent_alloc_count) {
+  using namespace tvm::tirx;
+  script::ir_builder::IRBuilder builder =
+      script::ir_builder::IRBuilder::Current();
+
+  ffi::Optional<SBlockFrame> opt_parent = builder->FindFrame<SBlockFrame>();
+  if (!opt_parent.defined()) {
+    return {};
+  }
+  SBlockFrame parent = opt_parent.value();
+
+  size_t total = parent->alloc_buffers.size();
+  if (parent_alloc_count >= total) {
+    return {};
+  }
+
+  ffi::Array<Buffer> stolen;
+  ffi::Array<Buffer> remaining;
+  for (size_t i = 0; i < total; ++i) {
+    if (i < parent_alloc_count) {
+      remaining.push_back(parent->alloc_buffers[i]);
+    } else {
+      stolen.push_back(parent->alloc_buffers[i]);
+    }
+  }
+
+  parent->alloc_buffers = remaining;
+  return stolen;
+}
+
+class SimtVFFrameNode : public TIRFrameNode {
+public:
+  Array<PrimExpr> thread_extents;
+  Array<Var> thread_vars;
+  size_t parent_alloc_count_{0};
+  int64_t vf_latency_{0};
+  int64_t source_index_{0};
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<SimtVFFrameNode>()
+        .def_ro("thread_extents", &SimtVFFrameNode::thread_extents)
+        .def_ro("thread_vars", &SimtVFFrameNode::thread_vars);
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.SimtVFFrame", SimtVFFrameNode,
+                                    TIRFrameNode);
+
+public:
+  TVM_DLL void EnterWithScope() final {
+    TIRFrameNode::EnterWithScope();
+    parent_alloc_count_ = RecordParentAllocCount();
+  }
+
+  TVM_DLL void ExitWithScope() final {
+    using namespace tvm::tirx;
+    TIRFrameNode::ExitWithScope();
+    auto stolen_bufs = StealAllocBuffers(parent_alloc_count_);
+
+    auto make_thread_extent = [](const Var &var, const String &thread_tag,
+                                 const PrimExpr &extent, Stmt inner) {
+      DataType dtype = extent.dtype();
+      IterVar iv(Range::FromMinExtent(make_zero(dtype), extent), var,
+                 IterVarType::kThreadIndex, thread_tag);
+      return AttrStmt(iv, tirx::attr::thread_extent, extent, inner);
+    };
+
+    ICHECK_EQ(thread_extents.size(), 3)
+        << "SimtVF requires exactly 3 thread extents [tx, ty, tz]";
+    ICHECK_EQ(thread_vars.size(), 3)
+        << "SimtVF requires exactly 3 thread vars [tx, ty, tz]";
+
+    Stmt body = tvm::tirx::SeqStmt::Flatten(stmts);
+
+    // SimtVF scope marker: placed inside thread extents (innermost),
+    // so that StorageRewrite attaches local.fragment allocations here.
+    // This keeps fragments inside the VF function as local variables.
+    body = AttrStmt(StringImm("simtvf"), "tl.simtvf_scope",
+                    IntImm(DataType::Int(32), 1), std::move(body));
+
+    body = make_thread_extent(thread_vars[2], "threadIdx.z", thread_extents[2],
+                              std::move(body));
+    body = make_thread_extent(thread_vars[1], "threadIdx.y", thread_extents[1],
+                              std::move(body));
+    body = make_thread_extent(thread_vars[0], "threadIdx.x", thread_extents[0],
+                              std::move(body));
+
+    ffi::Map<ffi::String, ffi::Any> simtvf_annotations;
+    simtvf_annotations.Set("tl.vf_source_index",
+                           IntImm(DataType::Int(64), source_index_));
+    if (vf_latency_ > 0) {
+      simtvf_annotations.Set("tl.vf_latency",
+                             IntImm(DataType::Int(64), vf_latency_));
+    }
+    Stmt stmt = SBlock({}, {}, {}, "SIMT_VF", body, std::nullopt, stolen_bufs,
+                       {}, simtvf_annotations);
+
+    script::ir_builder::IRBuilder builder =
+        script::ir_builder::IRBuilder::Current();
+    if (builder->frames.empty()) {
+      ICHECK(!builder->result.defined())
+          << "ValueError: Builder.result has already been set";
+      builder->result = stmt;
+    } else if (const auto *tir_frame =
+                   builder->frames.back().as<TIRFrameNode>()) {
+      ffi::GetRef<TIRFrame>(tir_frame)->stmts.push_back(stmt);
+    } else {
+      LOG(FATAL) << "TypeError: Unsupported frame type: "
+                 << builder->frames.back();
+    }
+  }
+};
+
+class SimtVFFrame : public TIRFrame {
+public:
+  explicit SimtVFFrame(ObjectPtr<SimtVFFrameNode> data)
+      : TIRFrame(::tvm::ffi::UnsafeInit{}) {
+    ICHECK(data != nullptr);
+    data_ = std::move(data);
+  }
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimtVFFrame, TIRFrame,
+                                                SimtVFFrameNode);
+};
+
+SimtVFFrame SimtVF(const Array<PrimExpr> &thread_extents, int64_t vf_latency,
+                   int64_t source_index) {
+  ICHECK_EQ(thread_extents.size(), 3)
+      << "SimtVF requires exactly 3 thread extents [tx, ty, tz]";
+  ObjectPtr<SimtVFFrameNode> n = tvm::ffi::make_object<SimtVFFrameNode>();
+  n->thread_extents = thread_extents;
+  DataType dtype = DataType::Int(32);
+  n->thread_vars = {
+      Var("simtvf_tx", dtype),
+      Var("simtvf_ty", dtype),
+      Var("simtvf_tz", dtype),
+  };
+  n->vf_latency_ = vf_latency;
+  n->source_index_ = source_index;
+  return SimtVFFrame(n);
+}
+
+class SimdVFFrameNode : public TIRFrameNode {
+public:
+  size_t parent_alloc_count_{0};
+  int64_t vf_latency_{0};
+  int64_t source_index_{0};
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<SimdVFFrameNode>();
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.SimdVFFrame", SimdVFFrameNode,
+                                    TIRFrameNode);
+
+public:
+  TVM_DLL void EnterWithScope() final {
+    TIRFrameNode::EnterWithScope();
+    parent_alloc_count_ = RecordParentAllocCount();
+  }
+
+  TVM_DLL void ExitWithScope() final {
+    using namespace tvm::tirx;
+    TIRFrameNode::ExitWithScope();
+    auto stolen_bufs = StealAllocBuffers(parent_alloc_count_);
+
+    Stmt body = tvm::tirx::SeqStmt::Flatten(stmts);
+
+    // SimdVF scope marker: placed inside the Block body so that
+    // fragment allocations (stolen into alloc_buffers) stay inside
+    // the helper function during codegen.
+    body = AttrStmt(StringImm("simdvf"), "tl.simdvf_scope",
+                    IntImm(DataType::Int(32), 1), std::move(body));
+
+    // No thread extent AttrStmts — SimdVF has no thread dimensions.
+
+    ffi::Map<ffi::String, ffi::Any> simdvf_annotations;
+    simdvf_annotations.Set("tl.vf_source_index",
+                           IntImm(DataType::Int(64), source_index_));
+    if (vf_latency_ > 0) {
+      simdvf_annotations.Set("tl.vf_latency",
+                             IntImm(DataType::Int(64), vf_latency_));
+    }
+    Stmt stmt = SBlock({}, {}, {}, "SIMD_VF", body, std::nullopt, stolen_bufs,
+                       {}, simdvf_annotations);
+
+    script::ir_builder::IRBuilder builder =
+        script::ir_builder::IRBuilder::Current();
+    if (builder->frames.empty()) {
+      ICHECK(!builder->result.defined())
+          << "ValueError: Builder.result has already been set";
+      builder->result = stmt;
+    } else if (const auto *tir_frame =
+                   builder->frames.back().as<TIRFrameNode>()) {
+      ffi::GetRef<TIRFrame>(tir_frame)->stmts.push_back(stmt);
+    } else {
+      LOG(FATAL) << "TypeError: Unsupported frame type: "
+                 << builder->frames.back();
+    }
+  }
+};
+
+class SimdVFFrame : public TIRFrame {
+public:
+  explicit SimdVFFrame(ObjectPtr<SimdVFFrameNode> data)
+      : TIRFrame(::tvm::ffi::UnsafeInit{}) {
+    ICHECK(data != nullptr);
+    data_ = std::move(data);
+  }
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimdVFFrame, TIRFrame,
+                                                SimdVFFrameNode);
+};
+
+SimdVFFrame SimdVF(int64_t vf_latency, int64_t source_index) {
+  ObjectPtr<SimdVFFrameNode> n = tvm::ffi::make_object<SimdVFFrameNode>();
+  n->vf_latency_ = vf_latency;
+  n->source_index_ = source_index;
+  return SimdVFFrame(n);
 }
 
 class WarpSpecializeFrameNode : public TIRFrameNode {
@@ -389,13 +724,152 @@ WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
   return WarpSpecializeFrame(n);
 }
 
+class CubeFrameNode : public TIRFrameNode {
+public:
+  size_t parent_alloc_count_{0};
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<CubeFrameNode>();
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CubeFrame", CubeFrameNode,
+                                    TIRFrameNode);
+
+public:
+  TVM_DLL void EnterWithScope() final {
+    TIRFrameNode::EnterWithScope();
+    parent_alloc_count_ = RecordParentAllocCount();
+  }
+
+  TVM_DLL void ExitWithScope() final {
+    using namespace tvm::tirx;
+    TIRFrameNode::ExitWithScope();
+    auto stolen_bufs = StealAllocBuffers(parent_alloc_count_);
+
+    Stmt body = tvm::tirx::SeqStmt::Flatten(stmts);
+    Stmt stmt =
+        SBlock({}, {}, {}, "CUBE", body, std::nullopt, stolen_bufs, {}, {});
+
+    script::ir_builder::IRBuilder builder =
+        script::ir_builder::IRBuilder::Current();
+    if (builder->frames.empty()) {
+      ICHECK(!builder->result.defined())
+          << "ValueError: Builder.result has already been set";
+      builder->result = stmt;
+    } else if (const auto *tir_frame =
+                   builder->frames.back().as<TIRFrameNode>()) {
+      ffi::GetRef<TIRFrame>(tir_frame)->stmts.push_back(stmt);
+    } else {
+      LOG(FATAL) << "TypeError: Unsupported frame type: "
+                 << builder->frames.back();
+    }
+  }
+};
+
+class CubeFrame : public TIRFrame {
+public:
+  explicit CubeFrame(ObjectPtr<CubeFrameNode> data)
+      : TIRFrame(::tvm::ffi::UnsafeInit{}) {
+    ICHECK(data != nullptr);
+    data_ = std::move(data);
+  }
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(CubeFrame, TIRFrame,
+                                                CubeFrameNode);
+};
+
+CubeFrame Cube() { return CubeFrame(tvm::ffi::make_object<CubeFrameNode>()); }
+
+class VectorFrameNode : public TIRFrameNode {
+public:
+  int vector_count;
+  tvm::tirx::Var sid_var;
+  size_t parent_alloc_count_{0};
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<VectorFrameNode>()
+        .def_ro("vector_count", &VectorFrameNode::vector_count)
+        .def_ro("sid_var", &VectorFrameNode::sid_var);
+  }
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.VectorFrame", VectorFrameNode,
+                                    TIRFrameNode);
+
+public:
+  TVM_DLL void EnterWithScope() final {
+    TIRFrameNode::EnterWithScope();
+    parent_alloc_count_ = RecordParentAllocCount();
+  }
+
+  TVM_DLL void ExitWithScope() final {
+    using namespace tvm::tirx;
+    TIRFrameNode::ExitWithScope();
+    auto stolen_bufs = StealAllocBuffers(parent_alloc_count_);
+
+    Stmt body = tvm::tirx::SeqStmt::Flatten(stmts);
+
+    DataType dtype = DataType::Int(32);
+    PrimExpr extent = IntImm(dtype, vector_count);
+    IterVar iv(Range::FromMinExtent(make_zero(dtype), extent), sid_var,
+               IterVarType::kThreadIndex, "cthread");
+    body = AttrStmt(iv, tirx::attr::thread_extent, extent, body);
+
+    Map<String, ObjectRef> annotations;
+    annotations.Set("vector_count", IntImm(dtype, vector_count));
+    Stmt stmt = SBlock({}, {}, {}, "VECTOR", body, std::nullopt, stolen_bufs,
+                       {}, annotations);
+
+    script::ir_builder::IRBuilder builder =
+        script::ir_builder::IRBuilder::Current();
+    if (builder->frames.empty()) {
+      ICHECK(!builder->result.defined())
+          << "ValueError: Builder.result has already been set";
+      builder->result = stmt;
+    } else if (const auto *tir_frame =
+                   builder->frames.back().as<TIRFrameNode>()) {
+      ffi::GetRef<TIRFrame>(tir_frame)->stmts.push_back(stmt);
+    } else {
+      LOG(FATAL) << "TypeError: Unsupported frame type: "
+                 << builder->frames.back();
+    }
+  }
+};
+
+class VectorFrame : public TIRFrame {
+public:
+  explicit VectorFrame(ObjectPtr<VectorFrameNode> data)
+      : TIRFrame(::tvm::ffi::UnsafeInit{}) {
+    ICHECK(data != nullptr);
+    data_ = std::move(data);
+  }
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(VectorFrame, TIRFrame,
+                                                VectorFrameNode);
+};
+
+VectorFrame Vector(int vector_count) {
+  ICHECK(vector_count >= 1 && vector_count <= 2)
+      << "Vector core count must be 1 or 2, got " << vector_count;
+  auto n = tvm::ffi::make_object<VectorFrameNode>();
+  n->vector_count = vector_count;
+  n->sid_var = tvm::tirx::Var("sid", DataType::Int(32));
+  return VectorFrame(n);
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
       .def("tl.WarpSpecialize", WarpSpecialize)
-      .def("tl.SideEffect", tirx::SideEffect);
+      .def("tl.SideEffect", tirx::SideEffect)
+      .def("tl.Cube", Cube)
+      .def("tl.Vector", Vector)
+      .def("tl.SimdVF", SimdVF);
   KernelLaunchFrameNode::RegisterReflection();
+  SimtVFFrameNode::RegisterReflection();
+  SimdVFFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
+  CubeFrameNode::RegisterReflection();
+  VectorFrameNode::RegisterReflection();
 }
 
 // ---------------------------------------------------------------------------

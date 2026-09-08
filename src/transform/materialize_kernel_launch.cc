@@ -51,8 +51,17 @@ bool IsThreadBinding(const ForNode *op) {
   return tag.rfind("threadIdx.", 0) == 0;
 }
 
+// Ascend mixed-kernel sub-block id binding. It behaves like a block-level
+// launch dimension (materialized into a thread_extent AttrStmt on the SIMT
+// path) and is emitted at the top launch nest by T.MixedKernel.
+bool IsCthreadBinding(const ForNode *op) {
+  if (op->kind != ForKind::kThreadBinding || !op->thread_binding.defined())
+    return false;
+  return op->thread_binding.value()->thread_tag == "cthread";
+}
+
 bool IsLaunchBinding(const ForNode *op) {
-  return IsBlockBinding(op) || IsThreadBinding(op);
+  return IsBlockBinding(op) || IsThreadBinding(op) || IsCthreadBinding(op);
 }
 
 class KernelLaunchMaterializer : public StmtMutator {

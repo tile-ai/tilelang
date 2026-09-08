@@ -55,17 +55,17 @@ fi
 
 MERGE_BASE=""
 get_merge_base() {
-    UPSTREAM_REPO="https://github.com/tile-ai/tilelang"
-    if git ls-remote --exit-code "${UPSTREAM_REPO}" main &>/dev/null; then
+    UPSTREAM_REPO="https://github.com/tile-ai/tilelang-deepseek"
+    if git ls-remote --exit-code "${UPSTREAM_REPO}" asc &>/dev/null; then
         # First try to use the upstream repository directly
-        MERGE_BASE="$(git fetch "${UPSTREAM_REPO}" main &>/dev/null && git merge-base FETCH_HEAD HEAD)"
-    elif git show-ref --verify --quiet refs/remotes/origin/main; then
-        # Fall back to origin/main if available
-        BASE_BRANCH="origin/main"
+        MERGE_BASE="$(git fetch "${UPSTREAM_REPO}" asc &>/dev/null && git merge-base FETCH_HEAD HEAD)"
+    elif git show-ref --verify --quiet refs/remotes/origin/asc; then
+        # Fall back to origin/asc if available
+        BASE_BRANCH="origin/asc"
         MERGE_BASE="$(git merge-base "${BASE_BRANCH}" HEAD)"
     else
-        # Last resort, use local main
-        BASE_BRANCH="main"
+        # Last resort, use local asc
+        BASE_BRANCH="asc"
         MERGE_BASE="$(git merge-base "${BASE_BRANCH}" HEAD)"
     fi
     echo "${MERGE_BASE}"

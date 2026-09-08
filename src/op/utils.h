@@ -44,10 +44,15 @@ TVM_DLL AccessRegion NormalizeToAccessRegion(
 // Build a tvm_access_ptr(handle) from a BufferRegion.
 // - If `require_2d` is true, checks buffer ndim >= 2.
 // - For 1D regions (when allowed), offset=min, extent=extent.
-// - For ndim >= 2, offset sums all but last two dims using row-major strides,
-//   extent is product of the last two extents.
+// - For ndim >= 2, offset sums all dims using row-major strides, extent is
+//   product of the last two extents.
+// - If `leading_dims_offset_only` is true, the last two dims are excluded from
+//   the offset. Callers that convey the innermost 2D position through separate
+//   intrinsic arguments (e.g. the Ascend L1->L0 M/K args) need this, otherwise
+//   that position would be counted twice.
 TVM_DLL PrimExpr MakeAccessPtrFromRegion(const BufferRegion &region,
-                                         int rw_mask, bool require_2d = false);
+                                         int rw_mask, bool require_2d = false,
+                                         bool leading_dims_offset_only = false);
 
 // Build a tvm_access_ptr(handle) from a BufferLoad.
 TVM_DLL PrimExpr MakeAccessPtrFromBufferLoad(const BufferLoad &load,
@@ -164,6 +169,31 @@ inline bool IsValidTMACopyDtypePair(DataType global_dtype,
 inline bool IsFP4UnpackLoad(const Buffer &src, const Buffer &dst) {
   return IsGlobalBuffer(src) && IsSharedBuffer(dst) &&
          IsFP4PackedToUnpackedStorageCopy(src->dtype, dst->dtype);
+}
+
+inline bool IsL1Buffer(const Buffer &buffer) {
+  return buffer.defined() &&
+         (buffer.scope() == "shared.l1" || buffer.scope() == "shared.l1.dyn");
+}
+
+inline bool IsL0ABuffer(const Buffer &buffer) {
+  return buffer.defined() &&
+         (buffer.scope() == "shared.l0a" || buffer.scope() == "shared.l0a.dyn");
+}
+
+inline bool IsL0BBuffer(const Buffer &buffer) {
+  return buffer.defined() &&
+         (buffer.scope() == "shared.l0b" || buffer.scope() == "shared.l0b.dyn");
+}
+
+inline bool IsL0CBuffer(const Buffer &buffer) {
+  return buffer.defined() &&
+         (buffer.scope() == "shared.l0c" || buffer.scope() == "shared.l0c.dyn");
+}
+
+inline bool IsAscendOnChipBuffer(const Buffer &buffer) {
+  return IsSharedBuffer(buffer) || IsL1Buffer(buffer) || IsL0ABuffer(buffer) ||
+         IsL0BBuffer(buffer) || IsL0CBuffer(buffer);
 }
 
 } // namespace tl

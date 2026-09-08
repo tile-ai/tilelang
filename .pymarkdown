@@ -1,4 +1,9 @@
 {
+  "extensions": {
+    "front-matter": {
+      "enabled": true
+    }
+  },
   "plugins": {
     "md003": {
       "style": "atx"

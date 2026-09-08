@@ -1,7 +1,7 @@
-from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang import tvm as tvm
 from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 
 
@@ -106,9 +106,7 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
             tid = T.get_thread_binding()
 
             for j in T.serial(N):
-                A_shared[tid, j] = T.if_then_else(
-                    j + N_offset < N, T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset], T.float32(0)), T.float32(0)
-                )
+                A_shared[tid, j] = T.if_then_else(tid < M - M_offset and j < N - N_offset, A[tid + M_offset, j + N_offset], T.float32(0))
 
     return main, expected
 
@@ -147,9 +145,7 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset
             tid = T.get_thread_binding()
 
             for j in T.serial(N):
-                A_shared[tid, j] = T.if_then_else(
-                    j + N_offset < N, T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset], T.float32(0)), T.float32(0)
-                )
+                A_shared[tid, j] = T.if_then_else(tid < M - M_offset and j < N - N_offset, A[tid + M_offset, j + N_offset], T.float32(0))
                 # Nest if-then-else is expected, do not flatten it to pass structural equal check
                 if j + N_offset < N:  # noqa: SIM102
                     if tid + M_offset < M:
@@ -189,9 +185,8 @@ def oob_store_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: in
         with T.Kernel(1, 1, threads=M) as (bx, by):
             tid = T.get_thread_binding()
             for j in T.serial(N):
-                if j + N_offset < N:  # noqa: SIM102
-                    if tid + M_offset < M:
-                        A[tid + M_offset, j + N_offset] = T.float32(1.0)
+                if tid < M - M_offset and j < N - N_offset:
+                    A[tid + M_offset, j + N_offset] = T.float32(1.0)
 
     return main, expected
 

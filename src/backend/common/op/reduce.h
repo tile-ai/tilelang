@@ -185,8 +185,23 @@ inline int GetPreferredVectorizedSize(DataType dt,
   return 1;
 }
 
+inline bool NeedsWorkspace(int reducing_threads, int scale, Target target) {
+  if (TargetIsAscend(target)) {
+    bool is_pow2 = (reducing_threads & (reducing_threads - 1)) == 0;
+    bool scale_is_pow2 = (scale & (scale - 1)) == 0;
+    if (reducing_threads <= 32 && is_pow2 && scale_is_pow2) {
+      return false;
+    }
+    if (reducing_threads > 32 && is_pow2 && scale <= 32 && scale_is_pow2) {
+      return true;
+    }
+    return reducing_threads > 1;
+  }
+  return reducing_threads > 32;
+}
+
 inline void CheckAllReduceWidth(int reducing_threads, int scale,
-                                const char *op_name) {
+                                const char *op_name, Target target = Target()) {
   ICHECK_GT(reducing_threads, 0)
       << op_name << ": AllReduce threads must be positive, got "
       << reducing_threads;
@@ -195,6 +210,12 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
   ICHECK_EQ(reducing_threads % scale, 0)
       << op_name << ": AllReduce threads (" << reducing_threads
       << ") must be divisible by scale (" << scale << ")";
+  // The power-of-two requirement is specific to the XOR-butterfly shuffle
+  // reduction. Ascend lowers to tl::AscendAllReduce, which handles arbitrary
+  // widths, so the check would reject valid kernels there.
+  if (TargetIsAscend(target)) {
+    return;
+  }
   int logical_width = reducing_threads / scale;
   int shift = 0;
   ICHECK(tirx::is_const_power_of_two_integer(Integer(logical_width), &shift))
@@ -1006,7 +1027,7 @@ template <typename Impl> struct ReduceLowerer {
         for (const auto &thread_step : reduce_plan.thread_steps) {
           int reducing_threads = thread_step.ReducingThreads();
           reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                      "tl.reduce");
+                                      "tl.reduce", lower_args.target);
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
@@ -1028,7 +1049,8 @@ template <typename Impl> struct ReduceLowerer {
                                   ? clear_buffer->dtype.with_lanes(vsize)
                                   : clear_buffer->dtype;
           PrimExpr workspace;
-          bool need_workspace = reducing_threads > 32;
+          bool need_workspace = reduce::NeedsWorkspace(
+              reducing_threads, thread_step.scale, lower_args.target);
           if (need_workspace) {
             int ws_size = block_threads * eff_batch;
             workspace = lower_args.add_workspace(ws_size, ws_dtype);
@@ -1199,7 +1221,7 @@ template <typename Impl> struct ReduceLowerer {
       for (const auto &thread_step : reduce_plan.thread_steps) {
         int reducing_threads = thread_step.ReducingThreads();
         reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
-                                    "tl.reduce");
+                                    "tl.reduce", lower_args.target);
         auto thread_offset = lower_args.thread_bounds->min;
         PrimExpr all_threads = lower_args.thread_bounds->extent;
         if (reducing_threads > 32 &&
@@ -1214,7 +1236,8 @@ template <typename Impl> struct ReduceLowerer {
             thread_step.scale, thread_offset, all_threads, lower_args.target);
         Array<PrimExpr> thread_reduce_args = {
             StringImm(allreduce), BufferLoad(clear_buffer, red_indices)};
-        if (reducing_threads > 32) {
+        if (reduce::NeedsWorkspace(reducing_threads, thread_step.scale,
+                                   lower_args.target)) {
           int workspace_size =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           PrimExpr workspace =

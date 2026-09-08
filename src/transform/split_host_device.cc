@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "backend/common/target_utils.h"
 #include "common/assume.h"
 #include "common/attr.h"
 #include "tir/analysis/var_use_def_analysis.h"
@@ -483,6 +484,10 @@ private:
     // code.
 
     bool can_propagate_errors = [&]() {
+      // Ascend kernels use void return type
+      if (TargetIsAscend(device_target)) {
+        return false;
+      }
       auto kind = device_target->GetTargetDeviceType();
       return kind == kDLCPU || kind == kDLExtDev || kind == kDLHexagon;
     }();

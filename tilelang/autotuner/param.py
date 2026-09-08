@@ -103,7 +103,7 @@ class ProfileArgs:
         warmup: Number of warmup iterations.
         rep: Number of repetitions for timing.
         timeout: Maximum time per configuration.
-        backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+        backend: Profiler backend - "event", "cupti", or "cudagraph".
         supply_type: Type of tensor supply mechanism.
         ref_prog: Reference program for correctness validation.
         supply_prog: Supply program for input tensors.

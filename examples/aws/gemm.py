@@ -2,12 +2,12 @@ import argparse
 
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.cuda.language as T
 from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: "role_based"})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_CUDA_AUTO_SCHEDULE: "role_based"})
 def gemm(
     A,
     B,

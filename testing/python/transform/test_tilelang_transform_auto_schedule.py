@@ -14,7 +14,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import torch
-from tilelang import language as T
+from tilelang.cuda import language as T
 from tilelang import tvm
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
@@ -30,7 +30,7 @@ def _prepare(func):
 
 def _auto_schedule(mod, scheduler="role_based"):
     """Apply AutoSchedule with the scheduler opted in via pass config."""
-    with tvm.transform.PassContext(config={"tl.enable_auto_schedule": scheduler}):
+    with tvm.transform.PassContext(config={"tl.cuda_auto_schedule": scheduler}):
         return tilelang.cuda.transform.AutoSchedule()(mod)
 
 
@@ -746,7 +746,7 @@ def test_rmw_accumulator_numerical():
         _rmw_accumulator_kernel(),
         target="cuda",
         out_idx=[3],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((4, 128, 64), device="cuda", dtype=torch.float16)
     b = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
@@ -886,7 +886,7 @@ def test_post_loop_read_numerical():
         _post_loop_read_kernel(),
         target="cuda",
         out_idx=[1, 2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((2, 4, 64, 64), device="cuda", dtype=torch.float16)
     b, c = kernel(a)
@@ -900,7 +900,7 @@ def test_pipeline_opt_in_runs_automatic_ws():
     mod = tvm.IRModule.from_expr(func)
     with (
         _TARGET,
-        tvm.transform.PassContext(config={"tl.enable_auto_schedule": "role_based"}),
+        tvm.transform.PassContext(config={"tl.cuda_auto_schedule": "role_based"}),
     ):
         out = tilelang.cuda.pipeline.CUDAPassPipelineBodyPrologue(mod, _TARGET)["main"]
 
@@ -993,7 +993,7 @@ def test_while_scope_numerical():
         _persistent_while_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((2, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1005,7 +1005,7 @@ def test_pipelined_load_numerical():
         _pipelined_load_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1017,7 +1017,7 @@ def test_two_cycles_numerical():
         _two_cycle_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((2, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1029,7 +1029,7 @@ def test_gather_bind_numerical():
         _gather_kernel(worker_uses_index=True),
         target="cuda",
         out_idx=[2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     indices = torch.tensor([5, 2, 7, 0], device="cuda", dtype=torch.int32)
     a = torch.randn((8, 64, 64), device="cuda", dtype=torch.float16)
@@ -1045,7 +1045,7 @@ def test_local_chain_numerical():
         _local_chain_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     expected = torch.stack([a[k * 2 % 4] for k in range(4)])
@@ -1058,7 +1058,7 @@ def test_worker_gemm_numerical():
         _local_accumulator_gemm(),
         target="cuda",
         out_idx=[2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((64, 128), device="cuda", dtype=torch.float16)
     b = torch.randn((128, 64), device="cuda", dtype=torch.float16)
@@ -1169,7 +1169,7 @@ def test_non_tma_layout_numerical():
         _non_tma_layout_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a + a)
@@ -1229,7 +1229,7 @@ def test_cp_async_load_numerical():
         _cp_async_load_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1322,7 +1322,7 @@ def test_pointer_table_bind_follows_freshened_buffer():
         _pointer_table_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     src = torch.randn((64, 64), device="cuda", dtype=torch.float16)
     ptrs = torch.tensor([src.data_ptr()], device="cuda", dtype=torch.int64)
@@ -1382,7 +1382,7 @@ def test_tmem_gemm_numerical():
         _tmem_gemm(),
         target="cuda",
         out_idx=[2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((2, 128, 64), device="cuda", dtype=torch.float16)
     b = torch.randn((2, 128, 64), device="cuda", dtype=torch.float16)
@@ -1512,7 +1512,7 @@ def test_annotated_ws_pipeline_depth_ring_numerical():
         _waved_rmw_accumulator_kernel(depth=2),
         target="cuda",
         out_idx=[3],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.cuda_auto_schedule": "role_based"},
     )
     a = torch.randn((2, 4, 128, 64), device="cuda", dtype=torch.float16)
     b = torch.randn((2, 4, 64, 64), device="cuda", dtype=torch.float16)

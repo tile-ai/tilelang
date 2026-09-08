@@ -100,6 +100,14 @@ def is_metal_target(target: Target) -> bool:
     return target.kind.name == "metal"
 
 
+def is_ascend_target(target: Target) -> bool:
+    return target.kind.name == "ascend"
+
+
+def is_pto_target(target: Target) -> bool:
+    return is_ascend_target(target) and "pto" in target.keys
+
+
 def is_cutedsl_target(target: Target) -> bool:
     return target.kind.name == "cuda" and "cutedsl" in target.keys
 
