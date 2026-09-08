@@ -102,6 +102,9 @@ enum class PreferredCopyInstruction {
 
 constexpr const char *kPreferInstruction = "prefer_instruction";
 
+constexpr const char *kLoadCachePolicies[] = {"ca", "cg", "cs", "lu", "cv"};
+constexpr const char *kStoreCachePolicies[] = {"wb", "cg", "cs", "wt"};
+
 constexpr std::pair<const char *, PreferredCopyInstruction>
     kPreferredCopyInstructions[] = {
         {"tma", PreferredCopyInstruction::kTMA},
@@ -119,6 +122,37 @@ std::optional<std::string> GetStringAnnotation(const CopyNode &op,
   ICHECK(str) << "T.copy " << key << " annotation must be a string, but got "
               << val.value().GetTypeKey();
   return str->value;
+}
+
+template <size_t N>
+std::optional<std::string>
+GetCachePolicyAnnotation(const CopyNode &op, const char *key,
+                         const char *const (&valid_policies)[N]) {
+  std::optional<std::string> policy = GetStringAnnotation(op, key);
+  if (!policy.has_value()) {
+    return std::nullopt;
+  }
+  for (const char *valid_policy : valid_policies) {
+    if (policy.value() == valid_policy) {
+      return policy;
+    }
+  }
+
+  std::ostringstream expected;
+  for (size_t i = 0; i < N; ++i) {
+    if (i != 0) {
+      expected << ", ";
+    }
+    expected << '"' << valid_policies[i] << '"';
+  }
+  LOG(FATAL) << "Unsupported T.copy " << key << "=\"" << policy.value()
+             << "\". Expected one of: " << expected.str() << ".";
+  return std::nullopt;
+}
+
+bool HasCachePolicy(const CopyNode &op) {
+  return op.annotations.count(attr::kLoadCachePolicy) ||
+         op.annotations.count(attr::kStoreCachePolicy);
 }
 
 PreferredCopyInstruction
@@ -528,6 +562,62 @@ CopyInstSelection Unsupported(std::string reason) {
   return CopyInstSelection{CopyInst::kInvalid, false, std::move(reason)};
 }
 
+std::optional<CopyInstSelection> SelectCachePolicyCopy(const CopyNode &op,
+                                                       Target target) {
+  std::optional<std::string> load_policy =
+      GetCachePolicyAnnotation(op, attr::kLoadCachePolicy, kLoadCachePolicies);
+  std::optional<std::string> store_policy = GetCachePolicyAnnotation(
+      op, attr::kStoreCachePolicy, kStoreCachePolicies);
+  if (!load_policy.has_value() && !store_policy.has_value()) {
+    return std::nullopt;
+  }
+
+  if (!target.defined() || !TargetIsCuda(target)) {
+    return Unsupported(
+        "T.copy load_cache_policy and store_cache_policy require a CUDA "
+        "target.");
+  }
+  if (TargetIsCuTeDSL(target)) {
+    return Unsupported(
+        "T.copy load_cache_policy and store_cache_policy are not supported "
+        "by the CuTeDSL code generator.");
+  }
+  if (GetPreferredInstruction(op) != PreferredCopyInstruction::kSync) {
+    return Unsupported(
+        "T.copy load_cache_policy and store_cache_policy currently require "
+        "prefer_instruction=\"sync\" so the requested PTX cache operator "
+        "cannot be bypassed by TMA or cp.async lowering.");
+  }
+  if (load_policy.has_value() && !IsGlobalBuffer(op.src)) {
+    std::ostringstream oss;
+    oss << "T.copy load_cache_policy requires a global-memory source, but "
+           "src="
+        << op.src->name << " has scope=" << op.src.scope() << ".";
+    return Unsupported(oss.str());
+  }
+  if (store_policy.has_value() && !IsGlobalBuffer(op.dst)) {
+    std::ostringstream oss;
+    oss << "T.copy store_cache_policy requires a global-memory destination, "
+           "but dst="
+        << op.dst->name << " has scope=" << op.dst.scope() << ".";
+    return Unsupported(oss.str());
+  }
+  if (load_policy.has_value() && op.src->dtype.bits() < 8) {
+    std::ostringstream oss;
+    oss << "T.copy load_cache_policy does not support sub-byte source dtype "
+        << op.src->dtype << ".";
+    return Unsupported(oss.str());
+  }
+  if (store_policy.has_value() && op.dst->dtype.bits() < 8) {
+    std::ostringstream oss;
+    oss << "T.copy store_cache_policy does not support sub-byte destination "
+           "dtype "
+        << op.dst->dtype << ".";
+    return Unsupported(oss.str());
+  }
+  return Supported(CopyInst::kNormal);
+}
+
 std::string MakeTmaUnavailableReason(const CopyNode &op) {
   std::ostringstream oss;
   if (GetTmaDescriptorBaseIsDeviceBound(op)) {
@@ -715,6 +805,11 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
 
 CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
                                             const CopyAnalysisContext &ctx) {
+  if (std::optional<CopyInstSelection> cache_selection =
+          SelectCachePolicyCopy(op, ctx.target)) {
+    return cache_selection.value();
+  }
+
   // tile::gather4 / scatter4 markers take precedence over generic TMA paths.
   // The IR carries explicit row indices via annotations and must always be
   // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
@@ -812,6 +907,11 @@ CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
   CopyAnalysisContext ctx;
   ctx.target = target;
 
+  if (std::optional<CopyInstSelection> cache_selection =
+          SelectCachePolicyCopy(op, target)) {
+    return cache_selection.value();
+  }
+
   if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
     return SelectCopyInstForLowering(op, ctx);
   }
@@ -891,6 +991,9 @@ CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
 }
 
 bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target) {
+  if (HasCachePolicy(op)) {
+    return false;
+  }
   CopyAnalysisContext ctx;
   ctx.target = target;
   CopyFacts facts = AnalyzeCopyFacts(op, ctx);

@@ -146,6 +146,14 @@ LayoutMap InferCopyLayout(const CopyNode &op,
 
 Stmt LowerCopyForTarget(const CopyNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
+  bool has_cuda_cache_policy = op.annotations.count(attr::kLoadCachePolicy) ||
+                               op.annotations.count(attr::kStoreCachePolicy);
+  if (has_cuda_cache_policy &&
+      lower_args.target->GetTargetDeviceType() != kDLCUDA) {
+    LOG(FATAL) << "T.copy load_cache_policy and store_cache_policy are only "
+                  "supported by the CUDA normal-copy backend, but got target="
+               << lower_args.target;
+  }
   return ResolveCopyImpl(lower_args.target).lower(op, lower_args, analyzer);
 }
 

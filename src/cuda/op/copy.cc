@@ -146,6 +146,18 @@ bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   return false;
 }
 
+std::optional<std::string> GetStringAnnotation(const CopyNode &op,
+                                               const char *key) {
+  auto val = op.annotations.Get(key);
+  if (!val) {
+    return std::nullopt;
+  }
+  auto str = val->as<StringImmNode>();
+  ICHECK(str) << "T.copy " << key << " annotation must be a string, but got "
+              << val.value().GetTypeKey();
+  return str->value;
+}
+
 bool GetDisableTMA(const CopyNode &op) {
   return GetBoolAnnotation(op, "disable_tma");
 }
@@ -906,7 +918,18 @@ Stmt Copy::LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
 
 Stmt Copy::LowerNormal(const CopyNode &op, const LowerArgs &lower_args,
                        arith::Analyzer *analyzer) {
-  return tl::LowerNormalCopy(op, lower_args, analyzer);
+  Stmt lowered = tl::LowerNormalCopy(op, lower_args, analyzer);
+  if (std::optional<std::string> load_policy =
+          GetStringAnnotation(op, attr::kLoadCachePolicy)) {
+    lowered = AttrStmt(op.src->data, attr::kLoadCachePolicy,
+                       StringImm(load_policy.value()), std::move(lowered));
+  }
+  if (std::optional<std::string> store_policy =
+          GetStringAnnotation(op, attr::kStoreCachePolicy)) {
+    lowered = AttrStmt(op.dst->data, attr::kStoreCachePolicy,
+                       StringImm(store_policy.value()), std::move(lowered));
+  }
+  return lowered;
 }
 
 Stmt Copy::LowerCluster(const CopyNode &op, const LowerArgs &lower_args,
