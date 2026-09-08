@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 #include "support/check.h"
 #include <tvm/arith/iter_affine_map.h>
@@ -39,6 +40,21 @@ private:
  * \return The integer value, or std::nullopt for an unsupported expression.
  */
 std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr);
+
+/*!
+ * \brief Evaluate an integer expression after assigning concrete values to
+ *        its variables.
+ *
+ * This uses the same layout-expression evaluator as
+ * EvaluateConstantInteger, including floor division/modulo and bitwise
+ * operators.
+ *
+ * \return The integer value, or std::nullopt for an unsupported expression.
+ */
+std::optional<int64_t>
+EvaluateIntegerExpression(const PrimExpr &expr,
+                          const std::vector<Var> &variables,
+                          const std::vector<int64_t> &values);
 
 /*!
  * \brief Collect the IterSplit that is not used in expr.

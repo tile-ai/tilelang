@@ -19,6 +19,8 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <vector>
 
+#include "arith/const_fold.h"
+
 namespace tvm {
 namespace tl {
 
@@ -288,6 +290,13 @@ private:
 
 std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr) {
   return IntegerExpressionEvaluator()(expr);
+}
+
+std::optional<int64_t>
+EvaluateIntegerExpression(const PrimExpr &expr,
+                          const std::vector<Var> &variables,
+                          const std::vector<int64_t> &values) {
+  return IntegerExpressionEvaluator(&variables, &values)(expr);
 }
 
 bool CanProveDivisible(const PrimExpr &lhs, const PrimExpr &rhs) {
@@ -659,7 +668,8 @@ std::optional<std::string> GetForwardMapBijectionError(
   for (size_t i = 0; i < physical_coordinates.size(); ++i) {
     PrimExpr coordinate = analyzer->Simplify(physical_coordinates[i]);
     arith::IntSet coordinate_set = scoped_analyzer->int_set(coordinate);
-    if (coordinate_set.IsEverything()) {
+    if (coordinate_set.IsNothing() || arith::is_neg_inf(coordinate_set.min()) ||
+        arith::is_pos_inf(coordinate_set.max())) {
       std::ostringstream os;
       os << description << " does not form a rectangle: physical coordinate "
          << i << " has an unbounded range " << coordinate_set;
@@ -721,7 +731,7 @@ std::optional<std::string> GetForwardMapBijectionError(
 
 namespace {
 
-constexpr int64_t kMaxEnumeratedFragmentPoints = int64_t{1} << 30;
+constexpr int64_t kMaxEnumeratedFragmentPoints = int64_t{1} << 22;
 constexpr int64_t kMaxEnumeratedContainmentChecks = int64_t{1} << 20;
 
 enum class FragmentBijectionStatus { kValid, kInvalid, kUnavailable };
@@ -744,7 +754,8 @@ FragmentBijectionResult EnumerateFragmentBijection(const Fragment &fragment,
                         Range(0, fragment->ReplicateExtent()), true);
   arith::IntSet thread_set =
       scoped_analyzer->int_set(fragment->GetForwardThread());
-  if (thread_set.IsEverything()) {
+  if (thread_set.IsNothing() || arith::is_neg_inf(thread_set.min()) ||
+      arith::is_pos_inf(thread_set.max())) {
     return {FragmentBijectionStatus::kUnavailable, ""};
   }
   PrimExpr thread_min = analyzer->Simplify(thread_set.min());
@@ -1058,7 +1069,8 @@ GetFragmentBijectionError(const Fragment &fragment, arith::Analyzer *analyzer) {
   }
   arith::IntSet thread_set =
       scoped_analyzer->int_set(fragment->GetForwardThread());
-  if (thread_set.IsEverything()) {
+  if (thread_set.IsNothing() || arith::is_neg_inf(thread_set.min()) ||
+      arith::is_pos_inf(thread_set.max())) {
     return "the fragment forward map has an unbounded thread range";
   }
   physical_coordinates.Set(
@@ -1138,31 +1150,39 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   auto thread = small_frag->ForwardThread(small_frag_indices, rep_small) +
                 small_thread_base;
 
-  // Get physical index and thread for large_frag.
-  auto large_frag_physical_and_thread = large_frag->Forward(large_frag_indices);
-  // The large fragment inverse consumes a thread coordinate normalized to its
-  // own participant range.
-  large_frag_physical_and_thread.push_back(thread - large_thread_base);
-  // Get the inverse of the large fragment.
-  auto inv_large_frag = large_frag->Inverse();
-  // Compute logical index and replicate index using inverse layout.
-  auto inv_large_frag_logical_and_rep =
-      inv_large_frag->Forward(large_frag_physical_and_thread);
+  try {
+    // Get physical index and thread for large_frag.
+    auto large_frag_physical_and_thread =
+        large_frag->Forward(large_frag_indices);
+    // The large fragment inverse consumes a thread coordinate normalized to
+    // its own participant range.
+    large_frag_physical_and_thread.push_back(thread - large_thread_base);
+    // Get the inverse of the large fragment.
+    auto inv_large_frag = large_frag->Inverse();
+    // Compute logical index and replicate index using inverse layout.
+    auto inv_large_frag_logical_and_rep =
+        inv_large_frag->Forward(large_frag_physical_and_thread);
 
-  // Extract replicate index from the result.
-  auto inv_large_frag_rep =
-      inv_large_frag_logical_and_rep[inv_large_frag_logical_and_rep.size() - 1];
+    // Extract replicate index from the result.
+    auto inv_large_frag_rep =
+        inv_large_frag_logical_and_rep[inv_large_frag_logical_and_rep.size() -
+                                       1];
 
-  // Calculate thread based on the logical index and replicate index.
-  auto check_thread =
-      large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep) +
-      large_thread_base;
+    // Calculate thread based on the logical index and replicate index.
+    auto check_thread =
+        large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep) +
+        large_thread_base;
 
-  // Simplify the difference between the threads.
-  auto diff = analyzer.Simplify(thread - check_thread);
-  // If the difference is zero, the threads match and the access is valid.
-  if (analyzer.CanProve(diff == 0)) {
-    return true;
+    // Simplify the difference between the threads.
+    auto diff = analyzer.Simplify(thread - check_thread);
+    // If the difference is zero, the threads match and the access is valid.
+    if (analyzer.CanProve(diff == 0)) {
+      return true;
+    }
+  } catch (const NormalizeIterException &) {
+    // Some valid floor-div/mod layouts do not have an inverse expressible by
+    // TVM's iter-map solver.  The bounded forward check below does not need
+    // that inverse.
   }
 
   // Symbolic inversion can be inconclusive for valid many-to-one accesses,
