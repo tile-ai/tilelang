@@ -27,8 +27,7 @@ and shared-memory issues. Measurable bank-conflict-free attempts take precedence
 over conflicting attempts regardless of their other costs. Within each group,
 spill bytes, execution cost, and normalized register cost are added, rather than
 ranked lexicographically. Non-reducer components,
-unsupported targets, and unknown serial trip counts retain register-count scoring. See
-`docs/developer_guide/reduction_aware_layout.md` for cost units and limitations.
+unsupported targets, and unknown serial trip counts retain register-count scoring.
 The `reduction_aware` cases include a column reduction whose intermediate
 width avoids communication without giving up two-element memory accesses.
 The warp-collective case also guards communication-aware scoring when warp

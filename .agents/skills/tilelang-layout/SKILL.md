@@ -104,7 +104,7 @@ annotation contract.
   and normalized register costs. Physical reducer planning is
   shared with materialization. Non-reducer components, non-CUDA targets, and
   unknown serial trip counts fall back to register-count. No new pass-config
-  value is needed; see `docs/developer_guide/reduction_aware_layout.md`.
+  value is needed.
 - `tl.layout_cost_model="io-aware"` (opt-in): every
   fragment<->global copy and global-touching parallel loop is charged
   `max(bandwidth bytes, issue bytes)` under the attempt's layouts, scored

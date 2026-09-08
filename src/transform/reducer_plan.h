@@ -14,26 +14,14 @@
 namespace tvm {
 namespace tl {
 
-tirx::Stmt MakeReducerUpdateStore(const ReducerUpdateArgs &update,
-                                  const tirx::Buffer &target,
-                                  ReducerV2OpType op,
-                                  const ffi::Optional<tirx::Var> &pack_lane,
-                                  bool narrow);
-
 struct ReducerUpdatePlanSite {
   Fragment loop_layout;
-  ffi::Array<tirx::Var> loop_vars;
-  ffi::Array<PrimExpr> indices;
-  PrimExpr value;
-  ffi::Array<tirx::Var> serial_vars;
-  ffi::Array<PrimExpr> serial_extents;
   tirx::For loop;
   PrimExpr execution_count{1};
 };
 
 struct ReducerPlanInfo {
   tirx::Buffer reducer;
-  tirx::Buffer dst;
   ReducerV2OpType op;
   Range thread_bounds;
   Fragment storage_layout;

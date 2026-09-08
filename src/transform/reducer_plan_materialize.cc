@@ -112,7 +112,19 @@ PrimExpr MakeFullRegion(const Buffer &buffer, int access_mask) {
 // Phase A: epoch collection
 // ---------------------------------------------------------------------------
 
-using UpdateSite = ReducerUpdatePlanSite;
+struct UpdateSite {
+  Fragment loop_layout;    // solved layout of the enclosing parallel nest
+  Array<Var> loop_vars;    // nest loop vars in order
+  Array<PrimExpr> indices; // logical output indices of the update target
+  PrimExpr value;          // contribution expression
+  // Serial loops between the parallel nest and the update (outermost
+  // first). They accumulate on one thread; the packed-accumulation
+  // optimization uses the innermost one as its lane source.
+  Array<Var> serial_vars;
+  Array<PrimExpr> serial_extents;
+  For loop;
+  PrimExpr execution_count{1};
+};
 
 struct EpochInfo {
   Buffer buffer;
@@ -266,8 +278,10 @@ private:
     }
     if (op->op.same_as(FinalizeReducerV2Op::Get())) {
       if (EpochInfo *epoch = FindEpoch(op->args[0])) {
-        epoch->finalize_count =
-            analyzer_.Simplify(epoch->finalize_count + execution_count_);
+        if (collect_unresolved_loops_) {
+          epoch->finalize_count =
+              analyzer_.Simplify(epoch->finalize_count + execution_count_);
+        }
         if (auto call2 = op->args[1].as<CallNode>()) {
           if (call2->op.same_as(region())) {
             if (auto load = call2->args[0].as<BufferLoadNode>()) {
@@ -313,6 +327,30 @@ private:
 // ---------------------------------------------------------------------------
 // Phase B: narrow-plan analysis
 // ---------------------------------------------------------------------------
+
+struct NarrowDecision {
+  Fragment storage_layout; // induced partial layout (also post-collective)
+  // Collective steps: (reducing_threads, scale) per thread-expression split
+  // sourced from a reduction axis. Empty = no communication (LocalComplete).
+  std::vector<std::pair<int, int>> steps;
+  // True when the destination's free-level inferred layout is replaced by
+  // the induced layout (legal only for unconstrained destinations); the
+  // chain lists further downstream fragments (fp32->fp16 staging hops etc.)
+  // that must be overridden together so the connecting copies stay
+  // slot-compatible.
+  bool override_dst_layout{false};
+  std::vector<Buffer> override_chain;
+  // Packed partial accumulation (16-bit floats): updates write two
+  // interleaved lanes per logical slot selected by the parity of
+  // `pack_lane_var` (the innermost on-thread reduction loop), which breaks
+  // the serial combine dependence chain and lets the vectorizer emit
+  // paired 16-bit (half2-style) operations. A fold loop combines the lanes
+  // into the plain induced storage before the collective, so the plan's
+  // communication and destination proofs are untouched.
+  bool packed{false};
+  Var pack_lane_var;
+  Fragment packed_layout; // storage_layout with an extra innermost lane dim
+};
 
 /*! \brief Per-buffer access census plus the copy graph, used to decide
  *  whether a finalize destination's inferred layout may be replaced. A
@@ -490,12 +528,12 @@ TryWideFinalizeDstOverride(const EpochInfo &epoch,
   return entries;
 }
 
-std::optional<ReducerPlanInfo>
+std::optional<NarrowDecision>
 DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
                      const Map<Buffer, Layout> &known_layouts,
                      const UseGraph &use_graph, arith::Analyzer *analyzer,
                      std::string *reason) {
-  auto fail = [&](const std::string &why) -> std::optional<ReducerPlanInfo> {
+  auto fail = [&](const std::string &why) -> std::optional<NarrowDecision> {
     *reason = why;
     return std::nullopt;
   };
@@ -507,8 +545,7 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
   // reaching this pass is authoritative). Only lowering details that live
   // outside the layout are derived here: the packed-lane heuristic (serial
   // loop structure) and the destination-containment lowerability gate.
-  ReducerPlanInfo decision;
-  decision.narrow = true;
+  NarrowDecision decision;
   decision.storage_layout = partial.AsPostCollective();
   decision.steps = partial->CombineSteps();
 
@@ -581,6 +618,7 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
           Fragment(packed_shape, {fwd_index[0] * 2 + lane}, fwd_thread,
                    storage->ReplicateExtent(), std::nullopt)
               ->BindThreadRange(storage->ThreadRange());
+      decision.packed = true;
       decision.pack_lane_var = lane_var.value();
     }
   }
@@ -616,10 +654,8 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
       // multi-slot overrides are safe.
       std::vector<Buffer> chain;
       if (CollectOverrideChain(epoch.dst->data.get(), use_graph, &chain)) {
-        decision.layout_overrides.Set(epoch.dst, storage);
-        for (const Buffer &staged : chain) {
-          decision.layout_overrides.Set(staged, storage);
-        }
+        decision.override_dst_layout = true;
+        decision.override_chain = std::move(chain);
       } else {
         return fail("destination layout is not covered by the induced layout");
       }
@@ -630,7 +666,7 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
   return decision;
 }
 
-std::optional<ReducerPlanInfo>
+std::optional<NarrowDecision>
 SelectNarrowReducerPlan(const EpochInfo &epoch, const LayoutMap &known_layouts,
                         const UseGraph &use_graph, arith::Analyzer *analyzer,
                         std::string *reason) {
@@ -653,46 +689,6 @@ SelectNarrowReducerPlan(const EpochInfo &epoch, const LayoutMap &known_layouts,
   }
   return DeriveNarrowLowering(epoch, partial, known_layouts, use_graph,
                               analyzer, reason);
-}
-
-ReducerPlanInfo SelectReducerPlan(const EpochInfo &epoch,
-                                  const LayoutMap &layouts,
-                                  const UseGraph &use_graph,
-                                  arith::Analyzer *analyzer) {
-  std::string reason;
-  ReducerPlanInfo plan =
-      SelectNarrowReducerPlan(epoch, layouts, use_graph, analyzer, &reason)
-          .value_or(ReducerPlanInfo{});
-  plan.reducer = epoch.buffer;
-  plan.dst = epoch.dst;
-  plan.op = epoch.op;
-  plan.batch = epoch.batch;
-  plan.finalize_count = epoch.finalize_count;
-  plan.has_seed = epoch.seed.defined();
-  plan.reason = std::move(reason);
-  plan.updates = epoch.updates;
-  if (epoch.thread_extent > 0) {
-    plan.thread_bounds = Range::FromMinExtent(Integer(epoch.thread_min),
-                                              Integer(epoch.thread_extent));
-    if (!plan.narrow) {
-      plan.storage_layout =
-          Fragment::FullyReplicated(epoch.buffer->shape,
-                                    Integer(epoch.thread_extent))
-              ->BindThreadRange(plan.thread_bounds);
-      if (epoch.thread_extent > 1) {
-        plan.steps.emplace_back(static_cast<int>(epoch.thread_extent), 1);
-      }
-    }
-  }
-  if (!plan.narrow) {
-    if (auto overrides =
-            TryWideFinalizeDstOverride(epoch, layouts, use_graph)) {
-      for (const auto &[buffer, layout] : overrides.value()) {
-        plan.layout_overrides.Set(buffer, layout);
-      }
-    }
-  }
-  return plan;
 }
 
 // ---------------------------------------------------------------------------
@@ -745,45 +741,85 @@ public:
       // (W == rep < participants), which keep compact storage and
       // unguarded updates. Only the destination-containment lowerability
       // gate can still demote a narrow node at materialize.
-      ReducerPlanInfo plan =
-          SelectReducerPlan(epoch, known_layouts, use_graph, &analyzer);
-      std::string msg = "[ReducerPlan] `" + std::string(epoch.buffer->name);
-      if (plan.narrow) {
-        msg += "`: narrow plan, ";
-        if (plan.steps.empty()) {
+      std::string reason;
+      std::optional<NarrowDecision> decision = SelectNarrowReducerPlan(
+          epoch, known_layouts, use_graph, &analyzer, &reason);
+      bool verbose = tl_config::ReducerPlanVerboseEnabled();
+      if (decision.has_value()) {
+        std::string msg = "[ReducerPlan] `" + std::string(epoch.buffer->name) +
+                          "`: narrow plan, ";
+        if (decision->steps.empty()) {
           msg += "no collective";
         } else {
-          for (const auto &[threads, scale] : plan.steps) {
-            msg += "AllReduce<" + std::to_string(threads) + "," +
-                   std::to_string(scale) + "> ";
+          for (const auto &[rt, s] : decision->steps) {
+            msg += "AllReduce<" + std::to_string(rt) + "," + std::to_string(s) +
+                   "> ";
           }
         }
-        if (plan.packed_layout.defined()) {
+        if (decision->packed) {
           msg += ", packed lanes";
         }
-        rewriter.narrow_decisions_.emplace(var, plan);
+        if (verbose) {
+          LOG(INFO) << msg;
+        } else {
+          DLOG(INFO) << msg;
+        }
+        rewriter.narrow_decisions_.emplace(var, *decision);
+        // Destination-layout overrides must be registered BEFORE traversal:
+        // LayoutInference publishes the stale entry on every block, and the
+        // materializer's block post-processing runs bottom-up — a sibling
+        // block processed before the finalize statement would otherwise
+        // keep the stale entry and shadow the override in LowerTileOp's
+        // block-by-block annotation accumulation.
+        if (decision->override_dst_layout) {
+          // Retirement telemetry: with spill priced in the layout cost model
+          // this rewrite should stay silent — a hit means inference still
+          // chose a placement the plan must correct (verify cache-disabled).
+          DLOG(INFO) << "[ReducerOverride] narrow dst chain of `"
+                     << epoch.buffer->name << "` re-layouted ("
+                     << decision->override_chain.size() + 1 << " buffer(s))";
+          rewriter.extra_layout_entries_.Set(epoch.dst,
+                                             decision->storage_layout);
+          for (const Buffer &staged : decision->override_chain) {
+            rewriter.extra_layout_entries_.Set(staged,
+                                               decision->storage_layout);
+          }
+        }
       } else {
-        msg +=
-            "`: wide plan (FullParticipant); narrow rejected: " + plan.reason;
-        if (!plan.layout_overrides.empty()) {
+        // Same pre-traversal registration rationale as the narrow overrides
+        // above; per-buffer participant-wide replication instead of the
+        // induced layout.
+        auto wide_override =
+            TryWideFinalizeDstOverride(epoch, known_layouts, use_graph);
+        if (wide_override.has_value()) {
+          for (const auto &[buffer, layout] : *wide_override) {
+            // Retirement telemetry: only actual changes are logged (the
+            // steered finalize dst is usually already participant-wide);
+            // with spill priced in the cost model the whole chain should
+            // arrive replicated and this stays silent (verify
+            // cache-disabled).
+            auto existing = known_layouts.Get(buffer);
+            if (!existing.has_value() ||
+                !layout->IsEqual(existing.value().get())) {
+              DLOG(INFO) << "[ReducerOverride] wide dst chain member `"
+                         << buffer->name << "` re-layouted to "
+                         << layout->DebugOutput();
+            }
+            rewriter.extra_layout_entries_.Set(buffer, layout);
+          }
+        }
+        std::string msg =
+            "[ReducerPlan] `" + std::string(epoch.buffer->name) +
+            "`: wide plan (FullParticipant); narrow rejected: " + reason;
+        if (wide_override.has_value()) {
           msg += "; unconstrained finalize destination re-layouted to "
                  "participant-wide replication";
         }
-      }
-      if (tl_config::ReducerPlanVerboseEnabled()) {
-        LOG(INFO) << msg;
-      } else {
-        DLOG(INFO) << msg;
-      }
-      for (const auto &[buffer, layout] : plan.layout_overrides) {
-        auto existing = known_layouts.Get(buffer);
-        if (!existing.has_value() || !layout->IsEqual(existing.value().get())) {
-          DLOG(INFO) << "[ReducerOverride] "
-                     << (plan.narrow ? "narrow" : "wide")
-                     << " dst chain member `" << buffer->name
-                     << "` re-layouted to " << layout->DebugOutput();
+        if (verbose) {
+          LOG(INFO) << msg;
+        } else {
+          DLOG(INFO) << msg;
         }
-        rewriter.extra_layout_entries_.Set(buffer, layout);
       }
     }
 
@@ -970,15 +1006,13 @@ private:
 
     auto narrow_it = narrow_decisions_.find(var);
     if (narrow_it != narrow_decisions_.end()) {
-      const ReducerPlanInfo &decision = narrow_it->second;
+      const NarrowDecision &decision = narrow_it->second;
       plan.narrow = true;
       plan.layout = decision.storage_layout;
       plan.steps = decision.steps;
-      plan.packed = decision.packed_layout.defined();
-      if (plan.packed) {
-        plan.packed_layout = decision.packed_layout.value();
-        plan.pack_lane_var = decision.pack_lane_var.value();
-      }
+      plan.packed = decision.packed;
+      plan.packed_layout = decision.packed_layout;
+      plan.pack_lane_var = decision.pack_lane_var;
     } else {
       // Wide-plan storage: one full logical partial per participant. The
       // analyzer narrows threadIdx.x inside warp-specialized branches.
@@ -1064,12 +1098,31 @@ private:
            "VerifyReducerEpoch)";
     const Plan &plan = it->second;
 
-    update.value = VisitExpr(update.value);
-    const Buffer &target = plan.packed ? plan.packed_buffer : plan.new_buffer;
-    Optional<Var> pack_lane =
-        plan.packed ? Optional<Var>(plan.pack_lane_var) : std::nullopt;
-    return MakeReducerUpdateStore(update, target, plan.op, pack_lane,
-                                  plan.narrow);
+    PrimExpr value = VisitExpr(update.value);
+    Array<PrimExpr> indices = update.indices;
+    Buffer target = plan.new_buffer;
+    if (plan.packed) {
+      // Alternate between the two lanes of the executing thread's slot:
+      // the lane parity splits the on-thread combine chain in half and
+      // makes adjacent iterations touch adjacent physical elements.
+      target = plan.packed_buffer;
+      indices.push_back(
+          FloorMod(plan.pack_lane_var, IntImm(DataType::Int(32), 2)));
+    }
+    PrimExpr current = BufferLoad(target, indices);
+    Stmt store =
+        BufferStore(target, ReducerV2Combine(plan.op, current, value), indices);
+    if (plan.narrow) {
+      // Narrow plan: every replica executes the update. Each thread's
+      // partial accumulates exactly the contributions of the iterations
+      // mapped to it, so no multiplicity guard is needed.
+      return store;
+    }
+    // Wide plan: generic execution-multiplicity contract — one dynamic
+    // logical iteration of the enclosing T.Parallel loop contributes exactly
+    // once, no matter how the loop layout replicates iterations over threads.
+    return AttrStmt(plan.new_buffer->data, attr::kParallelMultiplicity,
+                    IntImm(DataType::Int(32), 1), store);
   }
 
   Stmt MaterializeFinalize(const CallNode *call) {
@@ -1229,30 +1282,12 @@ private:
   IterVar thread_var_;
   std::unordered_map<const VarNode *, Map<String, Any>> reducer_info_;
   std::unordered_map<const VarNode *, Plan> plans_;
-  std::unordered_map<const VarNode *, ReducerPlanInfo> narrow_decisions_;
+  std::unordered_map<const VarNode *, NarrowDecision> narrow_decisions_;
   Map<Buffer, Layout> known_layouts_;
   Map<Buffer, Layout> extra_layout_entries_;
 };
 
 } // namespace
-
-Stmt MakeReducerUpdateStore(const ReducerUpdateArgs &update,
-                            const Buffer &target, ReducerV2OpType op,
-                            const Optional<Var> &pack_lane, bool narrow) {
-  Array<PrimExpr> indices = update.indices;
-  if (pack_lane.defined()) {
-    indices.push_back(
-        FloorMod(pack_lane.value(), IntImm(DataType::Int(32), 2)));
-  }
-  Stmt store = BufferStore(
-      target, ReducerV2Combine(op, BufferLoad(target, indices), update.value),
-      indices);
-  if (!narrow) {
-    store = AttrStmt(target->data, attr::kParallelMultiplicity,
-                     IntImm(DataType::Int(32), 1), store);
-  }
-  return store;
-}
 
 struct ReducerPlanAnalyzer::Impl {
   std::unordered_map<Var, EpochInfo, ObjectPtrHash, ObjectPtrEqual> epochs;
@@ -1292,9 +1327,51 @@ ReducerPlanAnalyzer::Analyze(const LayoutMap &layouts,
         return std::nullopt;
       }
     }
+    ReducerPlanInfo info;
+    info.reducer = buffer;
+    info.op = epoch.op;
+    info.thread_bounds = Range::FromMinExtent(Integer(epoch.thread_min),
+                                              Integer(epoch.thread_extent));
+    info.batch = epoch.batch;
+    info.finalize_count = epoch.finalize_count;
+    info.has_seed = epoch.seed.defined();
     arith::Analyzer analyzer;
-    result.push_back(
-        SelectReducerPlan(epoch, layouts, impl_->use_graph, &analyzer));
+    auto decision = SelectNarrowReducerPlan(epoch, layouts, impl_->use_graph,
+                                            &analyzer, &info.reason);
+    if (decision.has_value()) {
+      info.narrow = true;
+      info.storage_layout = decision->storage_layout;
+      info.steps = decision->steps;
+      if (decision->packed) {
+        info.packed_layout = decision->packed_layout;
+        info.pack_lane_var = decision->pack_lane_var;
+      }
+      if (decision->override_dst_layout) {
+        info.layout_overrides.Set(epoch.dst, decision->storage_layout);
+        for (const Buffer &staged : decision->override_chain) {
+          info.layout_overrides.Set(staged, decision->storage_layout);
+        }
+      }
+    } else {
+      info.storage_layout =
+          Fragment::FullyReplicated(buffer->shape, Integer(epoch.thread_extent))
+              ->BindThreadRange(info.thread_bounds);
+      if (epoch.thread_extent > 1) {
+        info.steps.emplace_back(static_cast<int>(epoch.thread_extent), 1);
+      }
+      auto overrides =
+          TryWideFinalizeDstOverride(epoch, layouts, impl_->use_graph);
+      if (overrides.has_value()) {
+        for (const auto &[destination, layout] : overrides.value()) {
+          info.layout_overrides.Set(destination, layout);
+        }
+      }
+    }
+    for (const UpdateSite &site : epoch.updates) {
+      info.updates.push_back(
+          {site.loop_layout, site.loop, site.execution_count});
+    }
+    result.push_back(std::move(info));
   }
   return result;
 }

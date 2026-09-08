@@ -1325,8 +1325,21 @@ private:
     }
     ReducerUpdateArgs args = ParseReducerUpdate(call);
     const Update &update = updates_.at(args.reducer->data);
-    return MakeReducerUpdateStore(args, update.buffer, update.op,
-                                  update.pack_lane, update.narrow);
+    Array<PrimExpr> indices = args.indices;
+    if (update.pack_lane.defined()) {
+      indices.push_back(
+          FloorMod(update.pack_lane.value(), IntImm(DataType::Int(32), 2)));
+    }
+    Stmt store = BufferStore(
+        update.buffer,
+        ReducerV2Combine(update.op, BufferLoad(update.buffer, indices),
+                         args.value),
+        indices);
+    if (!update.narrow) {
+      store = AttrStmt(update.buffer->data, attr::kParallelMultiplicity,
+                       IntImm(DataType::Int(32), 1), store);
+    }
+    return store;
   }
 
   std::unordered_map<Var, Update, ObjectPtrHash, ObjectPtrEqual> updates_;
