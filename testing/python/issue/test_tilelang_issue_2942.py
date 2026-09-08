@@ -7,10 +7,13 @@ import tilelang.testing
 
 
 M, N = 32, 64
+# Keep the inferred fragment geometry identical on pre-SM100 and SM100+
+# targets. These tests exercise float32x4 ownership boundaries.
+PASS_CONFIGS = {"tl.disable_vectorize_256": True}
 
 
 def build(off, h):
-    @tilelang.jit(out_idx=[-1])
+    @tilelang.jit(out_idx=[-1], pass_configs=PASS_CONFIGS)
     def prog():
         @T.prim_func
         def main(
@@ -28,7 +31,7 @@ def build(off, h):
     return prog
 
 
-@pytest.mark.parametrize("off, h", [(0, 8), (8, 8), (3, 8)])
+@pytest.mark.parametrize("off, h", [(0, 8), (8, 8), (3, 4)])
 @tilelang.testing.requires_cuda
 def test_fragment_fill_rectangular_slice_uses_valid_fallback_layout(off, h):
     kernel = build(off, h)()
@@ -42,25 +45,25 @@ def test_fragment_fill_rectangular_slice_uses_valid_fallback_layout(off, h):
 @tilelang.testing.requires_cuda
 def test_fragment_fill_non_rectangular_slice_is_rejected():
     with pytest.raises(ValueError, match="No valid layout"):
-        build(8, 16)()
+        build(6, 4)()
 
 
 @tilelang.testing.requires_cuda
 def test_fragment_copy_read_slice_uses_valid_fallback_layout():
-    @tilelang.jit(out_idx=[-2, -1])
+    @tilelang.jit(out_idx=[-2, -1], pass_configs=PASS_CONFIGS)
     def prog():
         @T.prim_func
         def main(
             A: T.Tensor((M, N), "float32"),
             C: T.Tensor((M, N), "float32"),
-            D: T.Tensor((8, N), "float32"),
+            D: T.Tensor((4, N), "float32"),
         ):
             with T.Kernel(1, threads=128):
                 f = T.alloc_fragment((M, N), "float32")
-                s = T.alloc_shared((8, N), "float32")
+                s = T.alloc_shared((4, N), "float32")
 
                 T.copy(A, f)
-                T.copy(f[3:11, :], s)
+                T.copy(f[3:7, :], s)
                 T.copy(s, D)
                 T.copy(f, C)
 
@@ -70,23 +73,23 @@ def test_fragment_copy_read_slice_uses_valid_fallback_layout():
     a = torch.arange(M * N, dtype=torch.float32, device="cuda").reshape(M, N)
     c, d = kernel(a)
     torch.testing.assert_close(c, a, rtol=0, atol=0)
-    torch.testing.assert_close(d, a[3:11], rtol=0, atol=0)
+    torch.testing.assert_close(d, a[3:7], rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda
 def test_fragment_copy_non_rectangular_write_slice_is_rejected():
-    @tilelang.jit
+    @tilelang.jit(pass_configs=PASS_CONFIGS)
     def prog():
         @T.prim_func
         def main(
             A: T.Tensor((M, N), "float32"),
-            patch: T.Tensor((16, N), "float32"),
+            patch: T.Tensor((4, N), "float32"),
             C: T.Tensor((M, N), "float32"),
         ):
             with T.Kernel(1, threads=128):
                 f = T.alloc_fragment((M, N), "float32")
                 T.copy(A, f)
-                T.copy(patch, f[8:24, :])
+                T.copy(patch, f[6:10, :])
                 T.copy(f, C)
 
         return main
@@ -96,7 +99,7 @@ def test_fragment_copy_non_rectangular_write_slice_is_rejected():
 
 
 def build_parallel_fragment_slice(off, h):
-    @tilelang.jit
+    @tilelang.jit(pass_configs=PASS_CONFIGS)
     def prog():
         @T.prim_func
         def main(
@@ -117,7 +120,7 @@ def build_parallel_fragment_slice(off, h):
 
 
 def build_unanchored_parallel_fragment_slice(off, h):
-    @tilelang.jit(out_idx=[-1])
+    @tilelang.jit(out_idx=[-1], pass_configs=PASS_CONFIGS)
     def prog():
         @T.prim_func
         def main(
@@ -135,7 +138,7 @@ def build_unanchored_parallel_fragment_slice(off, h):
     return prog
 
 
-@pytest.mark.parametrize("off, h", [(3, 8), (16, 8)])
+@pytest.mark.parametrize("off, h", [(3, 4), (16, 8)])
 @tilelang.testing.requires_cuda
 def test_explicit_parallel_fragment_slice_uses_valid_fallback_layout(off, h):
     kernel = build_parallel_fragment_slice(off, h)()
@@ -151,12 +154,12 @@ def test_explicit_parallel_fragment_slice_uses_valid_fallback_layout(off, h):
 @tilelang.testing.requires_cuda
 def test_explicit_parallel_fragment_non_rectangular_slice_is_rejected():
     with pytest.raises(ValueError, match="No valid layout"):
-        build_parallel_fragment_slice(8, 16)()
+        build_parallel_fragment_slice(6, 4)()
 
 
 @tilelang.testing.requires_cuda
 def test_unanchored_parallel_fragment_rectangular_slice_is_allowed():
-    off, h = 3, 8
+    off, h = 3, 4
     kernel = build_unanchored_parallel_fragment_slice(off, h)()
     patch = torch.arange(h * N, dtype=torch.float32, device="cuda").reshape(h, N)
     c = kernel(patch)
@@ -166,7 +169,7 @@ def test_unanchored_parallel_fragment_rectangular_slice_is_allowed():
 @tilelang.testing.requires_cuda
 def test_unanchored_parallel_fragment_non_rectangular_slice_is_rejected():
     with pytest.raises(ValueError, match="No valid layout"):
-        build_unanchored_parallel_fragment_slice(8, 16)()
+        build_unanchored_parallel_fragment_slice(6, 4)()
 
 
 @tilelang.testing.requires_cuda
