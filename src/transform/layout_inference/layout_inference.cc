@@ -966,7 +966,9 @@ private:
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
     } else {
-      IRVisitorWithAnalyzer::VisitStmt(op->body);
+      // Preserve serial-loop bounds in analyzer snapshots captured by nested
+      // TileOps. Visiting only the body bypasses the analyzer's For scope.
+      IRVisitorWithAnalyzer::VisitStmt_(op);
     }
   }
 
