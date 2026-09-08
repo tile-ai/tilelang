@@ -38,12 +38,17 @@ same-root ties retain the native plan and equal-cost roots retain program order.
 ## Physical plans, not inferred communication alone
 
 The scorer's read-only analysis and `ReducerPlanAndMaterialize` share the
-same physical-plan selection logic.
+same `ReducerPlanInfo` representation and physical-plan selection path,
+including the narrow/wide decision and destination-layout overrides.
 It includes destination containment, copy-only destination overrides, and
 packed accumulation. In particular, a narrow `PartialFragment` can still
 lower to a FullParticipant plan when its destination is incompatible. The
 scorer charges the resulting full-participant collective, not the narrower
 `CombineSteps` recorded in the inferred layout.
+Update-store construction is also shared, including packed-lane indices and
+wide-plan execution-multiplicity guards.
+Both plans register their destination overrides before materialization traverses
+the body, so sibling blocks cannot retain stale layout annotations.
 
 The policy does not extend reducer-index legality. For example, direct-memory
 parallel nests can be fused before reducer analysis; index projections that

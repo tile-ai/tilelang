@@ -14,6 +14,12 @@
 namespace tvm {
 namespace tl {
 
+tirx::Stmt MakeReducerUpdateStore(const ReducerUpdateArgs &update,
+                                  const tirx::Buffer &target,
+                                  ReducerV2OpType op,
+                                  const ffi::Optional<tirx::Var> &pack_lane,
+                                  bool narrow);
+
 struct ReducerUpdatePlanSite {
   Fragment loop_layout;
   ffi::Array<tirx::Var> loop_vars;

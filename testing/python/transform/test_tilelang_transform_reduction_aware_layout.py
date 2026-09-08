@@ -23,6 +23,10 @@ def make_reducer(**kwargs):
     return load_factory("maint/layout_inference/cases/reduction_aware.py")(**kwargs)
 
 
+def make_communication_reducer(**kwargs):
+    return load_factory("maint/layout_inference/cases/reduction_aware.py", "make_communication_reducer")(**kwargs)
+
+
 def make_shared_reducer(**kwargs):
     return load_factory("maint/layout_inference/cases/reduction_aware_shared.py")(**kwargs)
 
@@ -95,6 +99,39 @@ def test_scalar_fp32_arithmetic_is_not_discounted_by_layout_width():
     assert native_cost["barriers"] == 16
     assert native_cost["issue_cost"] == 544
     assert scalar_cost["issue_cost"] == 8
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+def test_equal_register_scores_account_for_communication(capfd):
+    scores, features = {}, {}
+    for within_warp in (False, True):
+        function, _ = infer(
+            factory=make_communication_reducer,
+            within_warp=within_warp,
+            pass_configs={"tl.enable_reducer_plan_verbose": True},
+        )
+        candidates = reducer_candidate_costs(capfd.readouterr().err)
+        assert candidates and all(cost["known"] and cost["bank_conflict_free"] for cost in candidates)
+        scores[within_warp] = min(candidates, key=lambda cost: cost["total"])
+        features[within_warp] = reducer_cost(function)["acc"]
+    for score in scores.values():
+        assert score["regs"] == 16 and score["spill"] == 0
+    block, warp = features[False], features[True]
+    assert block["barriers"] == 16 and block["shuffle_issues"] == 0
+    assert warp["barriers"] == 0 and warp["shuffle_issues"] == 8
+    assert block["local_issues"] == warp["local_issues"]
+    communication_delta = (block["issue_cost"] - warp["issue_cost"]) * 128 * 16
+    assert communication_delta > 0
+    assert scores[False]["execution"] - scores[True]["execution"] == communication_delta
+    assert scores[False]["total"] - scores[True]["total"] == communication_delta
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("within_warp", [False, True])
+def test_equal_register_communication_kernel_correctness(within_warp):
+    kernel = tl.compile(make_communication_reducer(within_warp=within_warp), out_idx=-1, target="cuda")
+    inputs = torch.randn((8, 128), device="cuda")
+    torch.testing.assert_close(kernel(inputs), inputs.sum(dim=0), atol=1e-5, rtol=1e-5)
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")

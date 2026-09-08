@@ -31,6 +31,8 @@ unsupported targets, and unknown serial trip counts retain register-count scorin
 `docs/developer_guide/reduction_aware_layout.md` for cost units and limitations.
 The `reduction_aware` cases include a column reduction whose intermediate
 width avoids communication without giving up two-element memory accesses.
+The warp-collective case also guards communication-aware scoring when warp
+shuffles and block barriers have the same register footprint.
 The `reduction_aware_shared` case keeps FP32 shared loads conflict-free even
 when a conflicting layout has a lower combined cost from its int8
 copies.

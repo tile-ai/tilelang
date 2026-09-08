@@ -508,5 +508,151 @@
         }
       }
     }
+  },
+  "warp_collective": {
+    "io-aware": {
+      "buffers": {
+        "acc": {
+          "forward_index": [
+            "_i % 4"
+          ],
+          "forward_thread": "_i // 4 * 4 + _rep",
+          "input_shape": [
+            128
+          ],
+          "kind": "PartialFragment",
+          "output_shape": [
+            4
+          ],
+          "replicate": 4,
+          "threads": 128
+        },
+        "result": {
+          "forward_index": [
+            "_i % 4"
+          ],
+          "forward_thread": "_i // 4 * 4 + _rep",
+          "input_shape": [
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            4
+          ],
+          "replicate": 4,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        },
+        "values": {
+          "forward_index": [
+            "_i // 4 * 4 + _j % 4"
+          ],
+          "forward_thread": "_j // 4 * 4 + _i % 4",
+          "input_shape": [
+            8,
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            8
+          ],
+          "replicate": 1,
+          "threads": 128
+        }
+      },
+      "loops": {
+        "row,column[8x128]": {
+          "forward_index": [
+            "_i // 4 * 4 + _j % 4"
+          ],
+          "forward_thread": "_j // 4 * 4 + _i % 4",
+          "input_shape": [
+            8,
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            8
+          ],
+          "replicate": 1,
+          "threads": 128
+        }
+      }
+    },
+    "register-count": {
+      "buffers": {
+        "acc": {
+          "forward_index": [
+            "_i % 4"
+          ],
+          "forward_thread": "_i // 4 * 4 + _rep",
+          "input_shape": [
+            128
+          ],
+          "kind": "PartialFragment",
+          "output_shape": [
+            4
+          ],
+          "replicate": 4,
+          "threads": 128
+        },
+        "result": {
+          "forward_index": [
+            "_i % 4"
+          ],
+          "forward_thread": "_i // 4 * 4 + _rep",
+          "input_shape": [
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            4
+          ],
+          "replicate": 4,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        },
+        "values": {
+          "forward_index": [
+            "_i // 4 * 4 + _j % 4"
+          ],
+          "forward_thread": "_j // 4 * 4 + _i % 4",
+          "input_shape": [
+            8,
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            8
+          ],
+          "replicate": 1,
+          "threads": 128
+        }
+      },
+      "loops": {
+        "row,column[8x128]": {
+          "forward_index": [
+            "_i // 4 * 4 + _j % 4"
+          ],
+          "forward_thread": "_j // 4 * 4 + _i % 4",
+          "input_shape": [
+            8,
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            8
+          ],
+          "replicate": 1,
+          "threads": 128
+        }
+      }
+    }
   }
 }

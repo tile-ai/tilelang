@@ -706,7 +706,6 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
  *  pattern replays, shifted, once per serial iteration). */
 class LoopMemoryAccessCollector : public StmtExprVisitor {
 public:
-  explicit LoopMemoryAccessCollector(bool shared = false) : shared_(shared) {}
   struct RawAccess {
     Buffer buffer;
     Array<PrimExpr> indices;
@@ -715,9 +714,7 @@ public:
     bool symbolic_repeat;
   };
   std::vector<RawAccess> accesses;
-  // Whether the loop body also touches shared memory: feeds the shared
-  // width-cap policy (256-bit loads are global-only).
-  bool touches_shared{false};
+  std::vector<RawAccess> shared_accesses;
 
   void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
@@ -742,10 +739,8 @@ private:
   }
   void Record(const Buffer &buffer, const Array<PrimExpr> &indices,
               bool is_store) {
-    if (IsSharedBuffer(buffer)) {
-      touches_shared = true;
-    }
-    if (shared_ ? !IsSharedBuffer(buffer) : !IsGlobalBuffer(buffer)) {
+    bool shared = IsSharedBuffer(buffer);
+    if (!shared && !IsGlobalBuffer(buffer)) {
       return;
     }
     int64_t repeat = 1;
@@ -757,10 +752,10 @@ private:
         repeat *= extent;
       }
     }
-    accesses.push_back(RawAccess{buffer, indices, is_store, repeat, symbolic});
+    (shared ? shared_accesses : accesses)
+        .push_back(RawAccess{buffer, indices, is_store, repeat, symbolic});
   }
   std::vector<int64_t> serial_stack_;
-  bool shared_{false};
 };
 
 /*! \brief Prepare a parallel loop with direct global accesses for scoring
@@ -838,7 +833,7 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
     return worst_only("loop forward maps have unsupported geometry");
   }
   probe.vector_bits = MaxVectorLoadBits(
-      target, /*global_only_access=*/!collector.touches_shared);
+      target, /*global_only_access=*/collector.shared_accesses.empty());
   BindMemoryGeometry(&probe, target);
 
   for (const auto &raw : collector.accesses) {
@@ -1027,104 +1022,103 @@ public:
     cost.regs = CountRegisterSlots(tmp_layout_map);
 
     for (int idx : members) {
-      const TileOperator &op = infer_list[idx];
-      DLOG(INFO) << "[LayoutCost] member " << idx
-                 << " begin: type=" << op->GetTypeKey();
-      if (const auto *copy = infer_list[idx].as<CopyNode>()) {
-        Copy copy_op = GetRef<Copy>(copy);
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " copy: src=" << copy->src
-                   << " (scope=" << copy->src.scope() << ") dst=" << copy->dst
-                   << " (scope=" << copy->dst.scope() << ')';
-        bool src_frag = IsFragmentBuffer(copy->src);
-        bool dst_frag = IsFragmentBuffer(copy->dst);
-        Buffer frag;
-        bool frag_is_src = false;
-        if (src_frag && IsGlobalBuffer(copy->dst)) {
-          frag = copy->src;
-          frag_is_src = true;
-        } else if (dst_frag && IsGlobalBuffer(copy->src)) {
-          frag = copy->dst;
-        } else {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " copy ignored: not a fragment<->global transfer";
-          continue; // register moves / shared staging: out of the model
-        }
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " copy modeled as global "
-                   << (frag_is_src ? "store" : "load")
-                   << " through fragment=" << frag;
-        auto layout = tmp_layout_map.Get(frag);
-        if (!layout.has_value()) {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " copy ignored: fragment has no tentative layout";
-          continue;
-        }
-        auto frag_layout = layout.value().as<Fragment>();
-        if (!frag_layout.has_value()) {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " copy ignored: tentative layout is not a Fragment";
-          continue;
-        }
-        DLOG(INFO) << "[LayoutCost] member " << idx << " copy fragment layout: "
-                   << frag_layout.value()->DebugOutput();
-        int64_t statement_mem =
-            CachedStatementMem(idx, frag_layout.value(), [&]() {
-              std::optional<StatementProbe> probe;
-              try {
-                probe = BuildCopyProbe(copy_op, frag_layout.value(),
-                                       frag_is_src, target_);
-              } catch (const std::exception &e) {
-                DLOG(INFO) << "[LayoutCost] member " << idx
-                           << " copy probe construction threw: " << e.what();
-                probe = std::nullopt; // skipped below; builder-side fallbacks
-                                      // cover every non-throwing failure
-              }
-              return ChargeStatement(probe, idx, "copy");
-            });
-        cost.mem += statement_mem;
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " copy contribution=" << statement_mem
-                   << " running_mem=" << cost.mem;
-      } else if (const auto *loop = infer_list[idx].as<ParallelOpNode>()) {
-        ParallelOp loop_op = GetRef<ParallelOp>(loop);
-        Fragment loop_layout = loop_op->GetLoopLayout();
-        if (loop_layout.defined()) {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " parallel-loop layout: " << loop_layout->DebugOutput();
-        } else {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " parallel-loop layout is undefined";
-        }
-        auto compute = [&]() {
-          std::optional<StatementProbe> probe;
-          try {
-            probe = BuildLoopProbe(loop_op, target_);
-          } catch (const std::exception &e) {
-            DLOG(INFO) << "[LayoutCost] member " << idx
-                       << " parallel-loop probe construction threw: "
-                       << e.what();
-            probe = std::nullopt;
-          }
-          return ChargeStatement(probe, idx, "parallel-loop");
-        };
-        int64_t statement_mem =
-            loop_layout.defined()
-                ? CachedStatementMem(idx, loop_layout, compute)
-                : compute();
-        cost.mem += statement_mem;
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " parallel-loop contribution=" << statement_mem
-                   << " running_mem=" << cost.mem;
-      } else {
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " ignored: type=" << op->GetTypeKey()
-                   << " is outside the IO-aware statement model";
-      }
+      cost.mem += GlobalMemoryCost(idx, infer_list[idx], tmp_layout_map);
     }
     DLOG(INFO) << "[LayoutCost] io-aware score end: mem=" << cost.mem
                << " regs=" << cost.regs;
     return cost;
+  }
+
+  int64_t GlobalMemoryCost(int idx, const TileOperator &op,
+                           const LayoutMap &tmp_layout_map) const {
+    DLOG(INFO) << "[LayoutCost] member " << idx
+               << " begin: type=" << op->GetTypeKey();
+    if (const auto *copy = op.as<CopyNode>()) {
+      Copy copy_op = GetRef<Copy>(copy);
+      DLOG(INFO) << "[LayoutCost] member " << idx << " copy: src=" << copy->src
+                 << " (scope=" << copy->src.scope() << ") dst=" << copy->dst
+                 << " (scope=" << copy->dst.scope() << ')';
+      bool src_frag = IsFragmentBuffer(copy->src);
+      bool dst_frag = IsFragmentBuffer(copy->dst);
+      Buffer frag;
+      bool frag_is_src = false;
+      if (src_frag && IsGlobalBuffer(copy->dst)) {
+        frag = copy->src;
+        frag_is_src = true;
+      } else if (dst_frag && IsGlobalBuffer(copy->src)) {
+        frag = copy->dst;
+      } else {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy ignored: not a fragment<->global transfer";
+        return 0;
+      }
+      DLOG(INFO) << "[LayoutCost] member " << idx << " copy modeled as global "
+                 << (frag_is_src ? "store" : "load")
+                 << " through fragment=" << frag;
+      auto layout = tmp_layout_map.Get(frag);
+      if (!layout.has_value()) {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy ignored: fragment has no tentative layout";
+        return 0;
+      }
+      auto frag_layout = layout.value().as<Fragment>();
+      if (!frag_layout.has_value()) {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy ignored: tentative layout is not a Fragment";
+        return 0;
+      }
+      DLOG(INFO) << "[LayoutCost] member " << idx << " copy fragment layout: "
+                 << frag_layout.value()->DebugOutput();
+      int64_t statement_mem =
+          CachedStatementMem(idx, frag_layout.value(), [&]() {
+            std::optional<StatementProbe> probe;
+            try {
+              probe = BuildCopyProbe(copy_op, frag_layout.value(), frag_is_src,
+                                     target_);
+            } catch (const std::exception &e) {
+              DLOG(INFO) << "[LayoutCost] member " << idx
+                         << " copy probe construction threw: " << e.what();
+              probe = std::nullopt; // skipped below; builder-side fallbacks
+                                    // cover every non-throwing failure
+            }
+            return ChargeStatement(probe, idx, "copy");
+          });
+      DLOG(INFO) << "[LayoutCost] member " << idx
+                 << " copy contribution=" << statement_mem;
+      return statement_mem;
+    } else if (const auto *loop = op.as<ParallelOpNode>()) {
+      ParallelOp loop_op = GetRef<ParallelOp>(loop);
+      Fragment loop_layout = loop_op->GetLoopLayout();
+      if (loop_layout.defined()) {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " parallel-loop layout: " << loop_layout->DebugOutput();
+      } else {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " parallel-loop layout is undefined";
+      }
+      auto compute = [&]() {
+        std::optional<StatementProbe> probe;
+        try {
+          probe = BuildLoopProbe(loop_op, target_);
+        } catch (const std::exception &e) {
+          DLOG(INFO) << "[LayoutCost] member " << idx
+                     << " parallel-loop probe construction threw: " << e.what();
+          probe = std::nullopt;
+        }
+        return ChargeStatement(probe, idx, "parallel-loop");
+      };
+      int64_t statement_mem =
+          loop_layout.defined() ? CachedStatementMem(idx, loop_layout, compute)
+                                : compute();
+      DLOG(INFO) << "[LayoutCost] member " << idx
+                 << " parallel-loop contribution=" << statement_mem;
+      return statement_mem;
+    } else {
+      DLOG(INFO) << "[LayoutCost] member " << idx
+                 << " ignored: type=" << op->GetTypeKey()
+                 << " is outside the IO-aware statement model";
+    }
+    return 0;
   }
 
   const char *Name() const final { return "io-aware"; }
@@ -1331,20 +1325,8 @@ private:
     }
     ReducerUpdateArgs args = ParseReducerUpdate(call);
     const Update &update = updates_.at(args.reducer->data);
-    Array<PrimExpr> indices = args.indices;
-    if (update.pack_lane.defined()) {
-      indices.push_back(FloorMod(update.pack_lane.value(), Integer(2)));
-    }
-    Stmt store = BufferStore(
-        update.buffer,
-        ReducerV2Combine(update.op, BufferLoad(update.buffer, indices),
-                         args.value),
-        indices);
-    if (!update.narrow) {
-      store = AttrStmt(update.buffer->data, attr::kParallelMultiplicity,
-                       Integer(1), store);
-    }
-    return store;
+    return MakeReducerUpdateStore(args, update.buffer, update.op,
+                                  update.pack_lane, update.narrow);
   }
 
   std::unordered_map<Var, Update, ObjectPtrHash, ObjectPtrEqual> updates_;
@@ -1524,37 +1506,24 @@ public:
         int64_t spill =
             CountSpilledBytes({member}, infer_list, physical_layouts);
         spilled = AddCost(spilled, MultiplyCost(spill, repeats));
-        AttemptCost io =
-            io_model_.Score({member}, infer_list, physical_layouts);
-        int64_t global = io.mem - spill;
-        Optional<ParallelOp> loop;
-        if (auto parallel = infer_list[member].as<ParallelOp>()) {
-          loop = parallel.value();
-        } else if (auto copy = infer_list[member].as<Copy>()) {
+        int64_t memory = io_model_.GlobalMemoryCost(member, infer_list[member],
+                                                    physical_layouts);
+        Optional<ParallelOp> loop = infer_list[member].as<ParallelOp>();
+        if (auto copy = infer_list[member].as<Copy>()) {
           if (copy.value()->par_op_.defined()) {
             loop = copy.value()->par_op_;
           }
         }
         if (loop.defined()) {
-          auto shared =
-              LoopMemoryIssueCost(loop.value(), physical_layouts, widths, true);
-          if (!shared.has_value()) {
-            cost.execution = kUnknownReductionCost;
+          auto loop_memory =
+              LoopMemoryCost(loop.value(), physical_layouts, widths, memory);
+          if (!loop_memory.has_value()) {
             return cost;
           }
-          bank_conflict_free &= repeats == 0 || shared->bank_conflict_free;
-          execution =
-              AddCost(execution, MultiplyCost(shared->execution, repeats));
-          if (widths.count(loop.value()->GetRoot())) {
-            auto issue = LoopMemoryIssueCost(loop.value(), physical_layouts,
-                                             widths, false);
-            if (!issue.has_value()) {
-              return cost;
-            }
-            global = std::max(global, issue->execution);
-          }
+          bank_conflict_free &= repeats == 0 || loop_memory->bank_conflict_free;
+          memory = loop_memory->execution;
         }
-        execution = AddCost(execution, MultiplyCost(global, repeats));
+        execution = AddCost(execution, MultiplyCost(memory, repeats));
       }
       cost.mem = spilled;
       cost.execution = execution;
@@ -1653,21 +1622,17 @@ private:
     return conflicts;
   }
 
-  std::optional<MemoryIssueCost>
-  LoopMemoryIssueCost(const ParallelOp &loop, const LayoutMap &layouts,
-                      const Map<For, Integer> &widths, bool shared) const {
-    MemoryIssueCost cost;
-    LoopMemoryAccessCollector collector(shared);
+  std::optional<MemoryIssueCost> LoopMemoryCost(const ParallelOp &loop,
+                                                const LayoutMap &layouts,
+                                                const Map<For, Integer> &widths,
+                                                int64_t global) const {
+    MemoryIssueCost cost{global};
+    LoopMemoryAccessCollector collector;
     collector.Collect(loop->GetRoot());
-    if (collector.accesses.empty()) {
+    auto solved_width = widths.Get(loop->GetRoot());
+    if (collector.shared_accesses.empty() &&
+        (!solved_width.has_value() || collector.accesses.empty())) {
       return cost;
-    }
-    int64_t accesses = 0;
-    for (const auto &access : collector.accesses) {
-      if (access.symbolic_repeat || access.repeat < 0) {
-        return std::nullopt;
-      }
-      accesses = AddCost(accesses, access.repeat);
     }
     Fragment layout = loop->GetLoopLayout();
     if (!layout.defined()) {
@@ -1678,11 +1643,11 @@ private:
     if (!slots.has_value() || !threads.has_value()) {
       return std::nullopt;
     }
-    auto solved_width = widths.Get(loop->GetRoot());
     int width = solved_width.has_value()
                     ? static_cast<int>(solved_width.value()->value)
-                    : PartitionedVectorWidth(loop->GetRoot(), layout, layouts);
-    if (shared) {
+                    : 0;
+    int64_t shared_accesses = 0;
+    if (!collector.shared_accesses.empty()) {
       arith::Analyzer analyzer;
       Var thread("shared_cost_thread", DataType::Int(32));
       Range bounds = layout->ThreadRange();
@@ -1692,6 +1657,10 @@ private:
       analyzer.Bind(thread, bounds);
       For partitioned =
           PartitionLoop(loop->GetRoot(), thread, &analyzer, layout);
+      if (!solved_width.has_value()) {
+        auto vector_analyzer = analyzer.Clone();
+        width = GetVectorizeSize(partitioned, vector_analyzer.get(), layouts);
+      }
       PostOrderVisit(partitioned, [&](const ObjectRef &object) {
         if (auto serial = object.as<For>()) {
           analyzer.Bind(serial.value()->loop_var,
@@ -1699,29 +1668,45 @@ private:
                                              serial.value()->extent));
         }
       });
-      LoopMemoryAccessCollector physical(true);
+      LoopMemoryAccessCollector physical;
       physical.Collect(partitioned);
-      if (physical.accesses.size() != collector.accesses.size()) {
+      if (physical.shared_accesses.size() != collector.shared_accesses.size()) {
         return std::nullopt;
       }
-      accesses = 0;
-      for (size_t index = 0; index < physical.accesses.size(); ++index) {
+      for (size_t index = 0; index < physical.shared_accesses.size(); ++index) {
+        const auto &access = collector.shared_accesses[index];
+        if (access.symbolic_repeat || access.repeat < 0) {
+          return std::nullopt;
+        }
         auto conflicts = SharedBankConflictFactor(
-            physical.accesses[index], thread, bounds, threads.value(), width,
-            layouts, &analyzer);
+            physical.shared_accesses[index], thread, bounds, threads.value(),
+            width, layouts, &analyzer);
         if (!conflicts.has_value()) {
           return std::nullopt;
         }
-        cost.bank_conflict_free &=
-            collector.accesses[index].repeat == 0 || conflicts.value() == 1;
-        accesses =
-            AddCost(accesses, MultiplyCost(collector.accesses[index].repeat,
-                                           conflicts.value()));
+        cost.bank_conflict_free &= access.repeat == 0 || conflicts.value() == 1;
+        shared_accesses = AddCost(
+            shared_accesses, MultiplyCost(access.repeat, conflicts.value()));
       }
     }
-    cost.execution = MultiplyCost(
-        MultiplyCost(CeilDiv(slots.value(), width), accesses),
-        MultiplyCost(threads.value(), MaxVectorLoadBits(target_, !shared) / 8));
+    auto issue_cost = [&](int64_t accesses, bool global_only) {
+      return MultiplyCost(
+          MultiplyCost(CeilDiv(slots.value(), width), accesses),
+          MultiplyCost(threads.value(),
+                       MaxVectorLoadBits(target_, global_only) / 8));
+    };
+    if (solved_width.has_value()) {
+      int64_t global_accesses = 0;
+      for (const auto &access : collector.accesses) {
+        if (access.symbolic_repeat || access.repeat < 0) {
+          return std::nullopt;
+        }
+        global_accesses = AddCost(global_accesses, access.repeat);
+      }
+      cost.execution = std::max(global, issue_cost(global_accesses, true));
+    }
+    cost.execution =
+        AddCost(cost.execution, issue_cost(shared_accesses, false));
     return cost;
   }
 
