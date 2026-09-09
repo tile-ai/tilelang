@@ -540,17 +540,43 @@ Stmt LowerAsyncCommitWaitAttrs(const Stmt &stmt) {
  * source to the destination. \param[out] dep_dst2src Optional, a map to store
  * dependency edges from the destination to the source.
  */
+static bool RegionsMayConflict(const BufferRegion &write,
+                               const BufferRegion &read) {
+  if (!write->buffer->data.same_as(read->buffer->data)) {
+    return false;
+  }
+  // Distinct Buffer views may share one data Var while using different shapes,
+  // ranks, strides, or coordinate systems. Without an explicit view mapping,
+  // retain the old conservative dependency for those aliases.
+  if (!write->buffer.same_as(read->buffer) ||
+      write->region.size() != read->region.size()) {
+    return true;
+  }
+  for (size_t i = 0; i < write->region.size(); ++i) {
+    arith::IntSet lhs_set = arith::IntSet::FromRange(write->region[i]);
+    arith::IntSet rhs_set = arith::IntSet::FromRange(read->region[i]);
+    if (arith::Intersect({lhs_set, rhs_set}).IsNothing()) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void BuildDependencyGraph(const Array<SBlock> &blocks,
                           BlockDependencyGraph *dep_src2dst,
                           BlockDependencyGraph *dep_dst2src) {
-  std::unordered_map<Var, Array<SBlock>, ObjectPtrHash, ObjectPtrEqual>
+  using Writer = std::pair<SBlock, BufferRegion>;
+  std::unordered_map<Var, std::vector<Writer>, ObjectPtrHash, ObjectPtrEqual>
       buffer_writers;
 
   for (const SBlock &block : blocks) {
     for (const BufferRegion &read : block->reads) {
       auto it = buffer_writers.find(read->buffer->data);
       if (it != buffer_writers.end()) {
-        for (const SBlock &writer : it->second) {
+        for (const auto &[writer, write] : it->second) {
+          if (!RegionsMayConflict(write, read)) {
+            continue;
+          }
           if (dep_src2dst != nullptr) {
             (*dep_src2dst)[writer].push_back(block);
           }
@@ -561,7 +587,7 @@ void BuildDependencyGraph(const Array<SBlock> &blocks,
       }
     }
     for (const BufferRegion &write : block->writes) {
-      buffer_writers[write->buffer->data].push_back(block);
+      buffer_writers[write->buffer->data].emplace_back(block, write);
     }
   }
 }
