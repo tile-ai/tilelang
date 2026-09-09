@@ -391,6 +391,7 @@ inline uint16_t AnalyzeSpecialRegisterWrites(const Stmt &stmt) {
 }
 
 inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
+  using ascend::MemoryAccessDetector;
   MemoryAccessDetector memory_detector;
   memory_detector.Analyze(stmt);
   TaskAccessInfo result;

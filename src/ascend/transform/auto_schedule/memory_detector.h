@@ -22,6 +22,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 
@@ -539,5 +540,6 @@ private:
   }
 };
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm
