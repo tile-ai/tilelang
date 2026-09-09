@@ -122,6 +122,29 @@ PrimExpr IRStructure::GetConditionGuard() const {
   return guard;
 }
 
+bool IRStructure::GuardsTouchStorage(const Var &storage) const {
+  auto touches_storage = [&](const PrimExpr &expression) {
+    return expression.defined() &&
+           TaskAccessesStorage(AnalyzeTaskAccesses(Evaluate(expression)),
+                               storage);
+  };
+
+  for (const auto &guard : GetGuards()) {
+    if (guard->IsCondition()) {
+      const auto *condition = static_cast<const ConditionGuard *>(guard.get());
+      if (touches_storage(condition->condition))
+        return true;
+      continue;
+    }
+
+    const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
+    auto node = attribute->node.try_cast<PrimExpr>();
+    if (node.has_value() && touches_storage(node.value()))
+      return true;
+  }
+  return false;
+}
+
 Stmt WrapWithGuard(Stmt stmt, const PrimExpr &guard) {
   ICHECK(guard.defined());
   return is_one(guard) ? stmt : IfThenElse(guard, std::move(stmt));

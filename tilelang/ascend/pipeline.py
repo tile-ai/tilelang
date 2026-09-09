@@ -85,9 +85,9 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     if allow_autoschedule(pass_ctx=pass_ctx):
         mod = ascend_transform.NormalizeControlFlowForSchedule()(mod)
-        mod = ascend_transform.AnnotateMultiBufferEligible()(mod)
         mod = ascend_transform.NormalizeNoConflictHints()(mod)
         mod = ascend_transform.MaterializeScheduleUnits()(mod)
+        mod = ascend_transform.AnnotateMultiBufferEligible()(mod)
         mod = ascend_transform.EstimateLatency()(mod)
         mod = ascend_transform.AutoSchedule()(mod)
         mod = ascend_transform.AssignCore()(mod)

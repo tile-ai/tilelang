@@ -1,14 +1,16 @@
 /*!
  * \file annotate_multi_buffer_eligible.cc
- * \brief Pre-AutoSchedule analysis: for each For loop, decide which on-chip
+ * \brief Scheduled-TIR analysis: for each For loop, decide which on-chip
  *        buffers can be multi-buffered and record the set on the For's
  *        annotations under "multi_buffer_eligible".
  *
- *  Runs after NormalizeControlFlowForSchedule (which rewrites `while` loops
- *  into bounded serial for loops and hoists complex if conditions into Bind
- *  variables). Operating after that rewrite lets this pass mark buffers inside
- * a former while body as multi-buffer eligible; the hoisted Bind conditions
- * keep the if-then-else intact so the write-first analysis is unaffected.
+ *  Runs after NormalizeControlFlowForSchedule and MaterializeScheduleUnits,
+ *  then decodes the shared IRStructure. Buffer-dependent loop bounds are
+ *  therefore explicit tasks, while manual T.Stage requests are available when
+ *  recovering the logical write-before-read order. Materialization flattens
+ *  IfThenElse into guarded sibling nodes, so write-first analysis reasons
+ *  about guard equivalence and implication instead of relying on nested
+ *  statement shape.
  *
  *  Automatic claims form the deepest disjoint loop frontier that completely
  *  covers a storage's ordinary accesses; owner-external fills may initialize
@@ -18,16 +20,13 @@
  *  promoted to a write-first ancestor. Independent sibling loops may
  *  therefore become multiple owners of one storage.
  *
- *  Frontend may pre-set the annotation. We treat it as a seed rather than a
- *  veto: frontend-listed buffers are kept unless the storage is already
- *  manually versioned or is used by an unsupported AttrStmt::node expression.
- *  Known assume attributes carry a PrimExpr node that is analyzed and rewritten
- *  with the guarded task. Any buffer the analysis additionally proves eligible
- *  is unioned in. A buffer the user does NOT want
- *  multi-buffered can be pinned to a single version via
+ *  Frontend may pre-set the annotation. A storage named by any explicit claim
+ *  is excluded from automatic owner inference across the whole kernel; the
+ *  explicit claim is preserved unless the storage is already manually
+ *  versioned. Other buffers proven eligible are added automatically. A buffer
+ *  the user does NOT want multi-buffered can be pinned to a single version via
  *  T.annotate_buffer_versions({buf: 1}) instead of being omitted here.
  */
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
@@ -46,9 +45,9 @@
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
 #include "ascend/transform/auto_schedule/multi_buffer.h"
+#include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ascend/transform/buffer_version.h"
 #include "op/builtin.h"
-#include "op/utils.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -60,8 +59,8 @@ using namespace ffi;
 namespace {
 
 using StorageSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-using LoopStorageClaims =
-    std::unordered_map<For, std::vector<Var>, ObjectPtrHash, ObjectPtrEqual>;
+using ControlStorageClaims =
+    std::unordered_map<ControlNode *, std::vector<Var>>;
 
 Array<Var> NormalizeEligibleStorages(const Any &annotation) {
   Array<Var> result;
@@ -109,6 +108,66 @@ enum class AccessOrder {
   kReadFirst,
 };
 
+// Terminal states determine the answer; further sub-events cannot change it.
+bool IsTerminal(AccessOrder order) {
+  return order == AccessOrder::kReadFirst || order == AccessOrder::kWriteFirst;
+}
+
+// Sequential composition of two sub-events in program order. Terminal states
+// absorb the suffix; a conditional write followed by a read remains read-first
+// because the write may have been skipped.
+AccessOrder SeqCompose(AccessOrder first, AccessOrder second) {
+  if (IsTerminal(first))
+    return first;
+  if (first == AccessOrder::kUntouched)
+    return second;
+  if (second == AccessOrder::kUntouched)
+    return AccessOrder::kMaybeWriteFirst;
+  return second;
+}
+
+// Merge mutually exclusive then/else branch classifications.
+AccessOrder MergeIfThenElse(AccessOrder then_order, AccessOrder else_order) {
+  if (then_order == AccessOrder::kReadFirst ||
+      else_order == AccessOrder::kReadFirst) {
+    return AccessOrder::kReadFirst;
+  }
+  if (then_order == AccessOrder::kUntouched &&
+      else_order == AccessOrder::kUntouched) {
+    return AccessOrder::kUntouched;
+  }
+  if (then_order == AccessOrder::kWriteFirst &&
+      else_order == AccessOrder::kWriteFirst) {
+    return AccessOrder::kWriteFirst;
+  }
+  return AccessOrder::kMaybeWriteFirst;
+}
+
+// Merge a single then branch with an implicit untouched else branch.
+AccessOrder MergeIfThenOnly(AccessOrder then_order) {
+  if (then_order == AccessOrder::kReadFirst)
+    return AccessOrder::kReadFirst;
+  if (then_order == AccessOrder::kUntouched)
+    return AccessOrder::kUntouched;
+  return AccessOrder::kMaybeWriteFirst;
+}
+
+// A possibly skipped scope cannot provide a guaranteed first write.
+AccessOrder DemoteIfNotMustExecute(AccessOrder order, bool must_execute) {
+  if (!must_execute && order == AccessOrder::kWriteFirst)
+    return AccessOrder::kMaybeWriteFirst;
+  return order;
+}
+
+AccessOrder AssumeForExecutes(AccessOrder body) {
+  // NOTE: intentionally aggressive. Treat every For as executing at least
+  // once, and assume a maybe-write-first body takes a writing path in some
+  // iteration. A zero-trip or fully skipped loop may therefore make a later
+  // read appear to have a preceding write.
+  return body == AccessOrder::kMaybeWriteFirst ? AccessOrder::kWriteFirst
+                                               : body;
+}
+
 class WriteFirstClassifier : public StmtExprVisitor {
 public:
   AccessOrder Classify(const Stmt &s, const Var &storage) {
@@ -118,29 +177,16 @@ public:
     return result_;
   }
 
+  AccessOrder Classify(const PrimExpr &e, const Var &storage) {
+    target_storage_ = storage;
+    result_ = AccessOrder::kUntouched;
+    StmtExprVisitor::VisitExpr(e);
+    return result_;
+  }
+
 private:
   Var target_storage_;
   AccessOrder result_ = AccessOrder::kUntouched;
-  arith::Analyzer analyzer_;
-
-  // Terminal states determine the answer; further sub-events can't change it.
-  static bool IsTerminal(AccessOrder o) {
-    return o == AccessOrder::kReadFirst || o == AccessOrder::kWriteFirst;
-  }
-
-  // Sequential composition: order of two sub-events in program order.
-  // (kReadFirst / kWriteFirst absorb; kMaybeWriteFirst+kReadFirst is
-  //  conservatively kReadFirst since the prefix's skip case would leak.)
-  static AccessOrder SeqCompose(AccessOrder a, AccessOrder b) {
-    if (a == AccessOrder::kReadFirst || a == AccessOrder::kWriteFirst)
-      return a;
-    if (a == AccessOrder::kUntouched)
-      return b;
-    // a == kMaybeWriteFirst
-    if (b == AccessOrder::kUntouched)
-      return AccessOrder::kMaybeWriteFirst;
-    return b;
-  }
 
   // Dispatch short-circuit: skip further work once a terminal is reached.
   void VisitStmt(const Stmt &s) final {
@@ -161,48 +207,6 @@ private:
     AccessOrder local = result_;
     result_ = saved;
     return local;
-  }
-
-  // Merge of an if/then/else (both branches taken under mutually exclusive
-  // conditions). Returns the safest classification consistent with both.
-  static AccessOrder MergeIfThenElse(AccessOrder t, AccessOrder e) {
-    if (t == AccessOrder::kReadFirst || e == AccessOrder::kReadFirst)
-      return AccessOrder::kReadFirst;
-    if (t == AccessOrder::kUntouched && e == AccessOrder::kUntouched)
-      return AccessOrder::kUntouched;
-    if (t == AccessOrder::kWriteFirst && e == AccessOrder::kWriteFirst)
-      return AccessOrder::kWriteFirst;
-    // Mix among {kUntouched, kWriteFirst, kMaybeWriteFirst}: maybe-write.
-    return AccessOrder::kMaybeWriteFirst;
-  }
-  // Single-branch if (no else); implicit else is kUntouched.
-  static AccessOrder MergeIfThenOnly(AccessOrder t) {
-    if (t == AccessOrder::kReadFirst)
-      return AccessOrder::kReadFirst;
-    if (t == AccessOrder::kUntouched)
-      return AccessOrder::kUntouched;
-    // kWriteFirst or kMaybeWriteFirst: either the branch ran and wrote, or
-    // didn't run at all — never a leaked read.
-    return AccessOrder::kMaybeWriteFirst;
-  }
-  // If the surrounding loop / block may not execute, demote write-first to
-  // maybe-write-first (write not guaranteed). kReadFirst and kUntouched and
-  // kMaybeWriteFirst pass through unchanged.
-  static AccessOrder DemoteIfNotMustExecute(AccessOrder r, bool must_execute) {
-    if (must_execute)
-      return r;
-    if (r == AccessOrder::kWriteFirst)
-      return AccessOrder::kMaybeWriteFirst;
-    return r;
-  }
-
-  bool ForMustExecute(const ForNode *op) {
-    // step >= 1 (default is 1) and extent > 0.
-    if (op->step.has_value()) {
-      if (!analyzer_.CanProve(op->step.value() >= 1))
-        return false;
-    }
-    return analyzer_.CanProve(op->extent > 0);
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
@@ -251,21 +255,8 @@ private:
       if (IsTerminal(result_))
         return;
     }
-    bool must_exec = ForMustExecute(op);
     auto body = ClassifyLocal([&] { VisitStmt(op->body); });
-    // NOTE: technically unsafe heuristic. kMaybeWriteFirst body means each
-    // iteration is independently safe (skip or write-first), but says
-    // nothing about whether *any* iteration takes the write branch. If every
-    // iteration happens to skip, the loop overall leaves the buffer
-    // untouched — yet we report kWriteFirst, which can mislead an outer
-    // classifier that sees a subsequent read in the same scope as "safe
-    // because the For wrote first". We accept this risk because the typical
-    // pattern (conditional write inside a hot loop) almost always has the
-    // condition true at least once, and being conservative here was
-    // empirically too restrictive for multi-buffer eligibility.
-    if (must_exec && body == AccessOrder::kMaybeWriteFirst)
-      body = AccessOrder::kWriteFirst;
-    result_ = SeqCompose(result_, DemoteIfNotMustExecute(body, must_exec));
+    result_ = SeqCompose(result_, AssumeForExecutes(body));
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
@@ -430,132 +421,165 @@ private:
   }
 };
 
-// ---------------------------------------------------------------------------
-// StorageAccessCollector: one-shot scan of a Stmt to collect every on-chip
-// storage that is read or written anywhere inside it, preserving first-access
-// order.
-// ---------------------------------------------------------------------------
-class StorageAccessCollector : public StmtExprVisitor {
+int RequestedStage(const IRStructure *node) {
+  int stage = node->GetStage();
+  return stage == kUnscheduledStage ? 0 : stage;
+}
+
+std::vector<const IRStructure *>
+GetWriteFirstOrder(const std::vector<std::shared_ptr<IRStructure>> &nodes) {
+  std::vector<const IRStructure *> result;
+  result.reserve(nodes.size());
+  bool has_requested_stage = false;
+  for (const auto &node : nodes) {
+    result.push_back(node.get());
+    has_requested_stage |= node->GetStage() != kUnscheduledStage;
+  }
+  if (has_requested_stage) {
+    std::stable_sort(result.begin(), result.end(),
+                     [](const IRStructure *lhs, const IRStructure *rhs) {
+                       return RequestedStage(lhs) < RequestedStage(rhs);
+                     });
+  }
+  return result;
+}
+
+// MaterializeScheduleUnits turns structured branches into guarded siblings.
+// Track the condition under which an earlier guaranteed write has occurred,
+// and prove that every later read executes only inside that condition. This
+// recovers both equal guards and exhaustive opposite guards without rebuilding
+// an IfThenElse tree.
+class IRWriteFirstClassifier {
 public:
-  static std::vector<Var> Collect(const Stmt &stmt) {
-    StorageAccessCollector collector;
-    collector(stmt);
-    return std::move(collector.touched_);
-  }
-
-  static std::vector<Var> Collect(const PrimExpr &expr) {
-    StorageAccessCollector collector;
-    collector(expr);
-    return std::move(collector.touched_);
-  }
-
-private:
-  std::vector<Var> touched_;
-  StorageSet seen_;
-
-  void Record(const Buffer &buffer) {
-    if (!IsAscendOnChipBuffer(buffer))
-      return;
-    const Var &storage = buffer->data;
-    if (seen_.insert(storage).second)
-      touched_.push_back(storage);
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    Record(op->buffer);
-    StmtExprVisitor::VisitExpr_(op);
-  }
-  void VisitStmt_(const BufferStoreNode *op) final {
-    Record(op->buffer);
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitStmt_(const SBlockNode *op) final {
-    for (const auto &r : op->reads)
-      Record(r->buffer);
-    for (const auto &w : op->writes)
-      Record(w->buffer);
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (CanRewriteMultiBufferAttrNode(op->attr_key, op->node))
-      VisitExpr(Downcast<PrimExpr>(op->node));
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitExpr_(const CallNode *op) final {
-    static const Op &region_op = region();
-    static const auto access_ptr_op = Op::Get("tl.access_ptr");
-    if (op->op.same_as(region_op) && !op->args.empty()) {
-      if (const auto *bl = op->args[0].as<BufferLoadNode>())
-        Record(bl->buffer);
-    } else if (op->op.same_as(access_ptr_op) && !op->args.empty()) {
-      if (const auto *bl = op->args[0].as<BufferLoadNode>())
-        Record(bl->buffer);
+  static AccessOrder
+  Classify(const std::vector<std::shared_ptr<IRStructure>> &nodes,
+           const Var &storage, const ConstrSet &outer_ctx) {
+    State state;
+    for (const IRStructure *node : GetWriteFirstOrder(nodes)) {
+      ProcessNode(node, storage, outer_ctx, &state);
+      if (state.unsafe)
+        return AccessOrder::kReadFirst;
     }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-};
-
-// AttrStmt::node is an Any and generic TIR visitors do not traverse it. Known
-// assume attributes have an explicit PrimExpr contract and follow the guarded
-// task's physical version. Other node protocols remain unsupported, so storage
-// referenced from them is excluded from automatic and explicit claims.
-class UnsupportedAttrNodeStorageCollector : public StmtExprVisitor {
-public:
-  static StorageSet Collect(const Stmt &stmt) {
-    UnsupportedAttrNodeStorageCollector collector;
-    collector(stmt);
-    return std::move(collector.storages_);
+    if (!state.touched)
+      return AccessOrder::kUntouched;
+    return IsCovered(Bool(true), state.written_guard, outer_ctx)
+               ? AccessOrder::kWriteFirst
+               : AccessOrder::kMaybeWriteFirst;
   }
 
 private:
-  StorageSet storages_;
+  struct State {
+    bool touched{false};
+    bool unsafe{false};
+    PrimExpr written_guard{Bool(false)};
+  };
 
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (!CanRewriteMultiBufferAttrNode(op->attr_key, op->node)) {
-      auto node = op->node.try_cast<PrimExpr>();
-      if (node.has_value()) {
-        std::vector<Var> storages =
-            StorageAccessCollector::Collect(node.value());
-        storages_.insert(storages.begin(), storages.end());
+  static bool IsCovered(const PrimExpr &access_guard,
+                        const PrimExpr &written_guard,
+                        const ConstrSet &outer_ctx) {
+    return GuardsEquivalent(access_guard, written_guard, outer_ctx) ||
+           GuardImplies(access_guard, written_guard, outer_ctx);
+  }
+
+  static PrimExpr MergeWriteGuard(const PrimExpr &known, const PrimExpr &added,
+                                  const ConstrSet &outer_ctx) {
+    if (is_zero(known))
+      return added;
+    if (is_zero(added) || GuardsEquivalent(known, added, outer_ctx) ||
+        GuardImplies(added, known, outer_ctx)) {
+      return known;
+    }
+    if (GuardImplies(known, added, outer_ctx))
+      return added;
+    return known || added;
+  }
+
+  static void ProcessAccess(AccessOrder order, const PrimExpr &active_guard,
+                            const ConstrSet &outer_ctx, State *state) {
+    ICHECK(state != nullptr);
+    if (order == AccessOrder::kUntouched || state->unsafe)
+      return;
+    state->touched = true;
+    if (order == AccessOrder::kReadFirst) {
+      state->unsafe = !IsCovered(active_guard, state->written_guard, outer_ctx);
+      return;
+    }
+    if (order == AccessOrder::kWriteFirst) {
+      state->written_guard =
+          MergeWriteGuard(state->written_guard, active_guard, outer_ctx);
+    }
+  }
+
+  static AccessOrder ClassifyPayload(const IRStructure *node,
+                                     const Var &storage) {
+    WriteFirstClassifier classifier;
+    if (node->IsTask()) {
+      return classifier.Classify(static_cast<const TaskNode *>(node)->stmt,
+                                 storage);
+    }
+
+    const auto *control = static_cast<const ControlNode *>(node);
+    AccessOrder header = classifier.Classify(control->task->stmt, storage);
+    if (header == AccessOrder::kReadFirst ||
+        header == AccessOrder::kWriteFirst) {
+      return header;
+    }
+
+    AccessOrder body =
+        Classify(control->children, storage, control->GetLoopBodyContext());
+    return SeqCompose(header, AssumeForExecutes(body));
+  }
+
+  static void ProcessNode(const IRStructure *node, const Var &storage,
+                          const ConstrSet &outer_ctx, State *state) {
+    PrimExpr active_guard = Bool(true);
+    WriteFirstClassifier classifier;
+    for (const auto &guard : node->GetGuards()) {
+      if (guard->IsCondition()) {
+        const PrimExpr &condition =
+            static_cast<const ConditionGuard *>(guard.get())->condition;
+        ProcessAccess(classifier.Classify(condition, storage), active_guard,
+                      outer_ctx, state);
+        active_guard =
+            is_one(active_guard) ? condition : active_guard && condition;
+        continue;
+      }
+
+      const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
+      if (auto node_expr = attribute->node.try_cast<PrimExpr>()) {
+        ProcessAccess(classifier.Classify(node_expr.value(), storage),
+                      active_guard, outer_ctx, state);
       }
     }
-    StmtExprVisitor::VisitStmt_(op);
+    ProcessAccess(ClassifyPayload(node, storage), active_guard, outer_ctx,
+                  state);
   }
 };
-
-bool IsTaskBoundaryAttribute(const String &attr_key) {
-  return attr_key == tl::attr::kAscendTask ||
-         attr_key == tl::attr::kAscendPerCoreTask ||
-         attr_key == attr::kScheduleUnit;
-}
 
 // ---------------------------------------------------------------------------
 // MultiBufferOwnerPlanner: for each storage, choose the deepest set of
 // disjoint structural loops that covers every ordinary access. Independently
 // rewritable fills may remain outside the frontier. A loop is selected only
-// when its descendants do not already provide complete coverage and the whole
-// loop body is write-first. This keeps a row-writing inner loop from claiming
-// a buffer consumed after that loop, while allowing independent sibling loops
-// to become multiple owners.
-//
-// Recursion mirrors MaterializeScheduleUnits:
-//   - SeqStmt / IfThenElse / scheduling AttrStmt -> transparent structure
-//   - For (serial/unrolled)            -> candidate ControlNode
-//   - all other statements             -> opaque TaskNode leaf
+// when its descendants do not already provide complete coverage and its
+// stage-ordered body is write-first.
 // ---------------------------------------------------------------------------
 class MultiBufferOwnerPlanner {
 public:
-  static LoopStorageClaims Plan(const Stmt &body,
-                                const StorageSet &excluded_storages) {
+  static ControlStorageClaims
+  Plan(const std::vector<std::shared_ptr<IRStructure>> &root,
+       const StorageSet &excluded_storages) {
     MultiBufferOwnerPlanner planner;
-    for (const Var &storage : StorageAccessCollector::Collect(body)) {
-      if (excluded_storages.count(storage))
-        continue;
-      CoveragePlan plan = planner.PlanStmt(body, storage);
-      if (!plan.IsComplete())
-        continue;
-      for (const For &owner : plan.owners)
-        planner.claims_[owner].push_back(storage);
+    StorageSet seen;
+    for (const auto &node : root) {
+      for (const Var &storage : node->GetOnChipStorages()) {
+        if (!seen.insert(storage).second || excluded_storages.count(storage))
+          continue;
+        CoveragePlan plan = planner.PlanList(root, storage);
+        if (!plan.IsComplete())
+          continue;
+        for (ControlNode *owner : plan.owners)
+          planner.claims_[owner].push_back(storage);
+      }
     }
     return std::move(planner.claims_);
   }
@@ -563,23 +587,14 @@ public:
 private:
   // Ordered from least to most restrictive; sibling composition takes max.
   enum class Coverage {
-    // No access in this subtree.
     kUntouched,
-    // Every access is covered by descendant owners, an explicit claim, or a
-    // broadcast fill.
     kCovered,
-    // An ancestor loop may still claim the uncovered accesses.
     kNeedsOwner,
-    // A control expression prevents any ancestor from claiming the storage.
-    kBlocked,
   };
 
   struct CoveragePlan {
     Coverage coverage{Coverage::kUntouched};
-    // Explicit claims are fixed seeds. An automatic ancestor must not subsume
-    // one, because the explicit nested claim will remain in the IR.
-    bool has_explicit_claim{false};
-    std::vector<For> owners;
+    std::vector<ControlNode *> owners;
 
     bool IsComplete() const {
       return coverage == Coverage::kUntouched || coverage == Coverage::kCovered;
@@ -590,194 +605,129 @@ private:
       // fills. Keep those fills outside the owner frontier so they initialize
       // every physical version instead of advancing one version per loop
       // iteration.
-      return !has_explicit_claim && coverage == Coverage::kNeedsOwner;
+      return coverage == Coverage::kNeedsOwner;
     }
 
-    void AddUncoveredAccess() {
-      if (coverage != Coverage::kBlocked)
-        coverage = Coverage::kNeedsOwner;
-    }
-
-    void BlockAncestorClaim() { coverage = Coverage::kBlocked; }
+    void AddUncoveredAccess() { coverage = Coverage::kNeedsOwner; }
 
     void Merge(const CoveragePlan &other) {
       coverage = std::max(coverage, other.coverage);
-      has_explicit_claim |= other.has_explicit_claim;
       owners.insert(owners.end(), other.owners.begin(), other.owners.end());
     }
   };
 
-  LoopStorageClaims claims_;
+  ControlStorageClaims claims_;
 
-  template <typename Container>
-  static bool ContainsStorage(const Container &storages, const Var &storage) {
-    return std::any_of(storages.begin(), storages.end(), [&](const Var &other) {
-      return other.same_as(storage);
-    });
-  }
-
-  static bool TouchesStorage(const Stmt &stmt, const Var &storage) {
-    return ContainsStorage(StorageAccessCollector::Collect(stmt), storage);
-  }
-
-  static bool TouchesStorage(const PrimExpr &expr, const Var &storage) {
-    return ContainsStorage(StorageAccessCollector::Collect(expr), storage);
-  }
-
-  static bool HasExplicitClaim(const For &loop, const Var &storage) {
-    auto annotation = loop->annotations.Get(kMultiBufferEligible);
-    return annotation.has_value() &&
-           ContainsStorage(NormalizeEligibleStorages(annotation.value()),
-                           storage);
-  }
-
-  static CoveragePlan PlanLeaf(const Stmt &stmt, const Var &storage) {
-    if (!TouchesStorage(stmt, storage))
+  static CoveragePlan PlanLeaf(const TaskNode *task, const Var &storage) {
+    if (!task->TouchesStorage(storage))
       return {};
     CoveragePlan result;
-    result.coverage = CanBroadcastFillToStorage(stmt, storage)
-                          ? Coverage::kCovered
-                          : Coverage::kNeedsOwner;
+    bool broadcast_fill = !task->GuardsTouchStorage(storage) &&
+                          CanBroadcastFillToStorage(task->stmt, storage);
+    result.coverage =
+        broadcast_fill ? Coverage::kCovered : Coverage::kNeedsOwner;
     return result;
   }
 
-  CoveragePlan PlanStmt(const Stmt &stmt, const Var &storage) {
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      CoveragePlan result;
-      for (const Stmt &child : seq->seq)
-        result.Merge(PlanStmt(child, storage));
-      return result;
+  CoveragePlan PlanList(const std::vector<std::shared_ptr<IRStructure>> &nodes,
+                        const Var &storage) {
+    CoveragePlan result;
+    for (const auto &node : nodes)
+      result.Merge(PlanNode(node.get(), storage));
+    return result;
+  }
+
+  CoveragePlan PlanNode(IRStructure *node, const Var &storage) {
+    if (node->IsTask()) {
+      return PlanLeaf(static_cast<const TaskNode *>(node), storage);
     }
 
-    if (const auto *loop_node = stmt.as<ForNode>()) {
-      For loop = GetRef<For>(loop_node);
-      if (loop_node->kind != ForKind::kSerial &&
-          loop_node->kind != ForKind::kUnrolled) {
-        return PlanLeaf(stmt, storage);
-      }
-
-      if (HasExplicitClaim(loop, storage)) {
-        CoveragePlan result;
-        result.coverage = TouchesStorage(stmt, storage) ? Coverage::kCovered
-                                                        : Coverage::kUntouched;
-        result.has_explicit_claim = true;
-        return result;
-      }
-
-      CoveragePlan body = PlanStmt(loop_node->body, storage);
-      bool control_touched = TouchesStorage(loop_node->min, storage) ||
-                             TouchesStorage(loop_node->extent, storage) ||
-                             (loop_node->step.has_value() &&
-                              TouchesStorage(loop_node->step.value(), storage));
-      if (control_touched) {
-        body.BlockAncestorClaim();
-        return body;
-      }
-      if (!body.CanClaimHere())
-        return body;
-
-      WriteFirstClassifier classifier;
-      AccessOrder order = classifier.Classify(loop_node->body, storage);
+    auto *control = static_cast<ControlNode *>(node);
+    CoveragePlan result = PlanList(control->children, storage);
+    if (result.CanClaimHere()) {
+      AccessOrder order = IRWriteFirstClassifier::Classify(
+          control->children, storage, control->GetLoopBodyContext());
       if (order == AccessOrder::kWriteFirst ||
           order == AccessOrder::kMaybeWriteFirst) {
-        CoveragePlan result;
         result.coverage = Coverage::kCovered;
-        result.owners.push_back(loop);
-        return result;
+        result.owners = {control};
       }
-      return body;
     }
 
-    if (const auto *condition = stmt.as<IfThenElseNode>()) {
-      CoveragePlan result = PlanStmt(condition->then_case, storage);
-      if (condition->else_case.has_value())
-        result.Merge(PlanStmt(condition->else_case.value(), storage));
-      if (TouchesStorage(condition->condition, storage))
-        result.BlockAncestorClaim();
-      return result;
-    }
-
-    if (const auto *attribute = stmt.as<AttrStmtNode>()) {
-      if (IsTaskBoundaryAttribute(attribute->attr_key)) {
-        return PlanLeaf(stmt, storage);
-      }
-      CoveragePlan result = PlanStmt(attribute->body, storage);
-      if (TouchesStorage(attribute->value, storage))
-        result.BlockAncestorClaim();
-      if (auto node = attribute->node.try_cast<PrimExpr>();
-          node.has_value() && TouchesStorage(node.value(), storage)) {
-        if (CanRewriteMultiBufferAttrNode(attribute->attr_key,
-                                          attribute->node)) {
-          result.AddUncoveredAccess();
-        } else {
-          result.BlockAncestorClaim();
-        }
-      }
-      return result;
-    }
-
-    return PlanLeaf(stmt, storage);
+    // A ControlNode's task describes accesses that execute before entering
+    // the loop body, including guards and loop-header expressions. They cannot
+    // be covered by this loop's version epoch, but remain ordinary accesses
+    // that an enclosing loop may cover.
+    if (control->task->TouchesStorage(storage))
+      result.AddUncoveredAccess();
+    return result;
   }
 };
 
-// ---------------------------------------------------------------------------
-// MultiBufferAnnotator: normalize explicit claims and add the automatic owner
-// frontier selected above. Traversal follows the same structural loop spine.
-// ---------------------------------------------------------------------------
-class MultiBufferAnnotator : public StmtMutator {
+// Normalize explicit claims and add the automatic owner frontier directly to
+// the decoded ControlNodes. Encoding preserves schedule-unit stages and guards.
+class MultiBufferAnnotator {
 public:
-  static Stmt Rewrite(const Stmt &body, StorageSet manual_buffers) {
+  static void Rewrite(ScheduledTIR *scheduled_tir, StorageSet manual_buffers) {
+    ICHECK(scheduled_tir != nullptr);
     StorageSet excluded_storages = manual_buffers;
-    StorageSet attr_node_storages =
-        UnsupportedAttrNodeStorageCollector::Collect(body);
-    excluded_storages.insert(attr_node_storages.begin(),
-                             attr_node_storages.end());
-    LoopStorageClaims claims =
-        MultiBufferOwnerPlanner::Plan(body, excluded_storages);
-    return MultiBufferAnnotator(std::move(claims), std::move(manual_buffers),
-                                std::move(attr_node_storages))(body);
+    CollectExplicitStorages(scheduled_tir->tree, &excluded_storages);
+    ControlStorageClaims claims =
+        MultiBufferOwnerPlanner::Plan(scheduled_tir->tree, excluded_storages);
+    MultiBufferAnnotator annotator(std::move(claims),
+                                   std::move(manual_buffers));
+    annotator.RewriteNodes(scheduled_tir->tree);
   }
 
 private:
-  MultiBufferAnnotator(LoopStorageClaims claims, StorageSet manual_buffers,
-                       StorageSet attr_node_storages)
-      : claims_(std::move(claims)), manual_buffers_(std::move(manual_buffers)),
-        attr_node_storages_(std::move(attr_node_storages)) {}
+  MultiBufferAnnotator(ControlStorageClaims claims, StorageSet manual_buffers)
+      : claims_(std::move(claims)), manual_buffers_(std::move(manual_buffers)) {
+  }
 
-  LoopStorageClaims claims_;
+  ControlStorageClaims claims_;
   StorageSet manual_buffers_;
-  StorageSet attr_node_storages_;
   StorageSet warned_excluded_storages_;
 
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Serial and unrolled loops are structural ControlNodes and may own an
-    // automatic version ring. Parallel/vectorized loops remain opaque tasks.
-    if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled) {
-      return GetRef<For>(op);
+  static void CollectExplicitStorages(
+      const std::vector<std::shared_ptr<IRStructure>> &nodes,
+      StorageSet *storages) {
+    ICHECK(storages != nullptr);
+    for (const auto &node : nodes) {
+      if (!node->IsControl())
+        continue;
+      const auto *control = static_cast<const ControlNode *>(node.get());
+      if (auto annotation =
+              control->control->annotations.Get(kMultiBufferEligible)) {
+        for (const Var &storage :
+             NormalizeEligibleStorages(annotation.value())) {
+          storages->insert(storage);
+        }
+      }
+      CollectExplicitStorages(control->children, storages);
     }
+  }
 
-    For for_node = GetRef<For>(op);
-    Stmt new_body = VisitStmt(op->body);
+  void RewriteNodes(std::vector<std::shared_ptr<IRStructure>> &nodes) {
+    for (const auto &node : nodes) {
+      if (!node->IsControl())
+        continue;
+      auto *control = static_cast<ControlNode *>(node.get());
+      RewriteNodes(control->children);
+      RewriteControl(control);
+    }
+  }
 
-    // Seed the eligible set with any frontend-provided annotation, then union
-    // in everything the analysis proves safe. The frontend list is a hint of
-    // buffers the user definitely wants multi-buffered; it does not suppress
-    // additional candidates (the user pins unwanted ones to a single version
-    // via T.annotate_buffer_versions instead).
+  void RewriteControl(ControlNode *control) {
+    For loop = control->control;
     Array<Var> eligible;
     StorageSet already;
-    if (auto v = op->annotations.Get(kMultiBufferEligible)) {
-      for (const Var &storage : NormalizeEligibleStorages(v.value())) {
-        bool is_manual = manual_buffers_.count(storage);
-        bool has_unsupported_attr_node = attr_node_storages_.count(storage);
-        if (is_manual || has_unsupported_attr_node) {
+    if (auto annotation = loop->annotations.Get(kMultiBufferEligible)) {
+      for (const Var &storage : NormalizeEligibleStorages(annotation.value())) {
+        if (manual_buffers_.count(storage)) {
           if (warned_excluded_storages_.insert(storage).second) {
-            LOG(WARNING)
-                << "Ignoring explicit '" << kMultiBufferEligible
-                << "' claim for storage " << storage->name_hint
-                << (is_manual ? " because it is already manually multi-buffered"
-                              : " because it is referenced by an unsupported "
-                                "AttrStmt::node expression");
+            LOG(WARNING) << "Ignoring explicit '" << kMultiBufferEligible
+                         << "' claim for storage " << storage->name_hint
+                         << " because it is already manually multi-buffered";
           }
           continue;
         }
@@ -786,7 +736,7 @@ private:
       }
     }
 
-    auto planned = claims_.find(for_node);
+    auto planned = claims_.find(control);
     if (planned != claims_.end()) {
       for (const Var &storage : planned->second) {
         if (already.insert(storage).second)
@@ -794,60 +744,30 @@ private:
       }
     }
 
-    auto *n = for_node.CopyOnWrite();
-    n->body = new_body;
-    n->annotations.Set(kMultiBufferEligible, eligible);
-    return for_node;
+    loop.CopyOnWrite()->annotations.Set(kMultiBufferEligible, eligible);
+    control->control = std::move(loop);
   }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (IsTaskBoundaryAttribute(op->attr_key)) {
-      return GetRef<AttrStmt>(op);
-    }
-    return StmtMutator::VisitStmt_(op);
-  }
-
-  // Leaves in the IR structure: do not descend (matches AutoSchedule).
-  //
-  // The callback runs this visitor on tilelang_root's body. Every block below
-  // that root is an opaque TaskNode leaf.
-  Stmt VisitStmt_(const SBlockNode *op) final { return GetRef<SBlock>(op); }
-  Stmt VisitStmt_(const WhileNode *op) final { return GetRef<While>(op); }
 };
 
 } // namespace
 
 using namespace tirx::transform;
 
-// Collect the data Vars named in the `tl.manual_multi_buffer` annotation on any
-// SBlock in the function body.
-static StorageSet CollectManualMultiBuffers(const Stmt &body) {
-  struct Visitor : public StmtVisitor {
-    StorageSet vars;
-    void VisitStmt_(const SBlockNode *op) final {
-      if (auto annotation = op->annotations.Get(kManualMultiBuffer)) {
-        for (const auto &[data, _] :
-             annotation.value().cast<BufferVersionMap>()) {
-          vars.insert(data);
-        }
-      }
-      StmtVisitor::VisitStmt_(op);
-    }
-  } v;
-  v(body);
-  return std::move(v.vars);
-}
-
 tvm::transform::Pass AnnotateMultiBufferEligible() {
   auto pass_func = [=](PrimFunc f, const IRModule &, const PassContext &) {
     return RewriteTilelangKernels(
         std::move(f), "AnnotateMultiBufferEligible",
         [](const TilelangKernelContext &context) {
-          SBlock root = context.root;
-          auto manual = CollectManualMultiBuffers(root);
-          root.CopyOnWrite()->body =
-              MultiBufferAnnotator::Rewrite(root->body, std::move(manual));
-          return root;
+          ScheduledTIR scheduled_tir =
+              DecodeScheduledTIR(context.root, context.outer_ctx);
+          StorageSet manual_buffers;
+          for (const auto &[storage, _] :
+               scheduled_tir.metadata.manual_buffer_versions) {
+            manual_buffers.insert(storage);
+          }
+          MultiBufferAnnotator::Rewrite(&scheduled_tir,
+                                        std::move(manual_buffers));
+          return EncodeScheduledTIR(std::move(scheduled_tir));
         },
         /*require_kernel=*/false);
   };

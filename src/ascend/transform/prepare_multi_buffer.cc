@@ -493,10 +493,13 @@ public:
            (counter_available || !can_fallback_to_iteration));
       if (storage.uses_counter) {
         for (size_t i = 0; i < storage.info.owners.size(); ++i) {
-          ICHECK(counter_stages[i].has_value())
-              << "Counter multi-buffer storage " << state.storage->name_hint
-              << " is accessed at multiple schedule stages in one owner "
-                 "loop; all owner-level accesses must share one stage";
+          if (!counter_stages[i].has_value()) {
+            LOG(FATAL)
+                << "Counter multi-buffer storage " << state.storage->name_hint
+                << " is accessed at multiple schedule stages in one owner "
+                   "loop. Align their T.Stage values, provide a compatible "
+                   "manual owner, or request one buffer version";
+          }
           storage.storage_stages[i] = counter_stages[i].value();
         }
         storage.protocol_core_mask =
@@ -732,44 +735,6 @@ private:
            TaskAccessesStorage(AnalyzeTaskAccesses(Evaluate(expr)), storage);
   }
 
-  enum class GuardStorageAccess {
-    kNone,
-    kRewritableAssume,
-    kUnsupported,
-  };
-
-  static GuardStorageAccess ClassifyGuardStorageAccess(const IRStructure *node,
-                                                       const Var &storage) {
-    GuardStorageAccess result = GuardStorageAccess::kNone;
-    for (const auto &guard : node->GetGuards()) {
-      if (guard->IsCondition()) {
-        const auto *condition =
-            static_cast<const ConditionGuard *>(guard.get());
-        if (ExprTouchesStorage(condition->condition, storage))
-          return GuardStorageAccess::kUnsupported;
-        continue;
-      }
-      const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
-      if (ExprTouchesStorage(attribute->value, storage))
-        return GuardStorageAccess::kUnsupported;
-      auto attr_node = attribute->node.try_cast<PrimExpr>();
-      if (!attr_node.has_value() ||
-          !ExprTouchesStorage(attr_node.value(), storage))
-        continue;
-      if (!CanRewriteMultiBufferAttrNode(attribute->key, attribute->node))
-        return GuardStorageAccess::kUnsupported;
-      result = GuardStorageAccess::kRewritableAssume;
-    }
-    return result;
-  }
-
-  static bool CanBroadcastFillTaskToStorage(const TaskNode *task,
-                                            const Var &storage) {
-    return ClassifyGuardStorageAccess(task, storage) ==
-               GuardStorageAccess::kNone &&
-           CanBroadcastFillToStorage(task->stmt, storage);
-  }
-
   static bool IsL1Storage(const Var &storage) {
     ffi::String scope = GetPtrStorageScope(storage);
     return scope == "shared.l1" || scope == "shared.l1.dyn";
@@ -794,10 +759,7 @@ private:
         return;
       if (node->IsTask()) {
         auto *task = static_cast<TaskNode *>(node);
-        GuardStorageAccess guard_access =
-            ClassifyGuardStorageAccess(task, state.storage);
-        if (!task->TouchesStorage(state.storage) &&
-            guard_access == GuardStorageAccess::kNone)
+        if (!task->TouchesStorage(state.storage))
           return;
         size_t owner_count = 0;
         for (ControlNode *owner : state.owners)
@@ -805,14 +767,14 @@ private:
         ICHECK_LE(owner_count, 1U)
             << "Automatic multi-buffer storage " << state.storage->name_hint
             << " has a task inside nested owner loops";
-        if (owner_count == 1) {
-          ICHECK(guard_access != GuardStorageAccess::kUnsupported)
-              << "Automatic multi-buffer storage " << state.storage->name_hint
-              << " is used by an unsupported task guard; only assume "
-                 "attribute nodes can follow the owner's physical version";
+        if (owner_count == 1)
           return;
-        }
-        ICHECK(CanBroadcastFillTaskToStorage(task, state.storage))
+        ICHECK(!task->GuardsTouchStorage(state.storage))
+            << "Automatic multi-buffer storage " << state.storage->name_hint
+            << " is accessed by a task guard outside its annotated owner "
+               "loops; guards can follow a physical version only when they "
+               "are strictly inside one owner";
+        ICHECK(CanBroadcastFillToStorage(task->stmt, state.storage))
             << "Automatic multi-buffer storage " << state.storage->name_hint
             << " is accessed outside its annotated owner loops; "
                "only T.fill accesses that can be rewritten independently "
@@ -831,16 +793,17 @@ private:
           ExprTouchesStorage(loop->extent, state.storage) ||
           (loop->step.has_value() &&
            ExprTouchesStorage(loop->step.value(), state.storage));
-      GuardStorageAccess guard_access =
-          ClassifyGuardStorageAccess(control, state.storage);
-      if (range_touches_storage || guard_access != GuardStorageAccess::kNone) {
-        ICHECK(!range_touches_storage &&
-               guard_access == GuardStorageAccess::kRewritableAssume &&
-               IsStrictlyWithinOneOwner(state, control))
+      ICHECK(!range_touches_storage)
+          << "Automatic multi-buffer storage " << state.storage->name_hint
+          << " is used by an unnormalized loop bound; run "
+             "NormalizeControlFlowForSchedule before MaterializeScheduleUnits "
+             "so buffer-dependent loop bounds become schedulable tasks";
+      bool guard_touches_storage = control->GuardsTouchStorage(state.storage);
+      if (guard_touches_storage) {
+        ICHECK(IsStrictlyWithinOneOwner(state, control))
             << "Automatic multi-buffer storage " << state.storage->name_hint
-            << " is used by an unsupported loop bound or guard; only assume "
-               "expressions strictly inside one owner can follow that "
-               "owner's physical version";
+            << " is used by a guard outside its owner; only guards strictly "
+               "inside one owner can follow that owner's physical version";
       }
       for (const auto &child : control->children)
         visit(child.get());

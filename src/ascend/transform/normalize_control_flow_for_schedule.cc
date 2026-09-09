@@ -175,8 +175,8 @@ private:
   // SIMT_VF / SIMD_VF / user blocks) becomes an opaque TaskNode leaf that is
   // never scheduled, so a
   // `while` nested inside it must NOT be rewritten (codegen emits it verbatim)
-  // and its conditions need no extraction. This mirrors the leaf boundaries in
-  // MultiBufferAnnotator (annotate_multi_buffer_eligible.cc).
+  // and its conditions need no extraction. This mirrors the TaskNode leaf
+  // boundaries.
   Stmt VisitStmt_(const ForNode *op) final {
     if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled) {
       return GetRef<For>(op);

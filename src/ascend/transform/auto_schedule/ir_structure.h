@@ -17,12 +17,14 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "../ascend_pipe.h"
 #include "../buffer_version.h"
 #include "../core_mask.h"
+#include "op/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -270,6 +272,8 @@ public:
   // Guard deltas introduced at this node relative to its nearest
   // surviving structural ancestor.
   const GuardList &GetGuards() const { return guards_; }
+  // Return whether condition or attribute-node guards access this storage.
+  bool GuardsTouchStorage(const Var &storage) const;
   PrimExpr GetConditionGuard() const;
   bool HasGuards() const { return !guards_.empty(); }
   // True iff the node carries a real *conditional* guard
@@ -371,6 +375,24 @@ public:
   }
   bool TouchesStorage(const Var &storage) const {
     return ReadsStorage(storage) || WritesStorage(storage);
+  }
+
+  // Return unique on-chip storage identities touched by this node. Composite
+  // nodes include their complete subtree through GetRead/WriteRegions().
+  std::vector<Var> GetOnChipStorages() const {
+    std::vector<Var> storages;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> seen;
+    auto collect = [&](const std::vector<BufferRegion> &regions) {
+      for (const BufferRegion &region : regions) {
+        if (IsAscendOnChipBuffer(region->buffer) &&
+            seen.insert(region->buffer->data).second) {
+          storages.push_back(region->buffer->data);
+        }
+      }
+    };
+    collect(GetReadRegions());
+    collect(GetWriteRegions());
+    return storages;
   }
 
   // Variable access (used for dependency analysis)

@@ -535,9 +535,9 @@ def test_auto_schedule_analyzes_dependencies_in_manual_stage_order():
     mod = _bind_target(_make_partially_staged_program())
     for transform in (
         ascend_transform.NormalizeControlFlowForSchedule,
-        ascend_transform.AnnotateMultiBufferEligible,
         ascend_transform.NormalizeNoConflictHints,
         ascend_transform.MaterializeScheduleUnits,
+        ascend_transform.AnnotateMultiBufferEligible,
         ascend_transform.EstimateLatency,
         ascend_transform.AutoSchedule,
     ):
@@ -545,10 +545,10 @@ def test_auto_schedule_analyzes_dependencies_in_manual_stage_order():
 
     loop_units = [unit for unit in _collect_schedule_units(mod) if isinstance(unit.body, tirx.For)]
     assert len(loop_units) == 1
-    # With source-ordered dependency analysis, the stage-1 read would create an
-    # impossible distance-0 edge to the stage-0 write. Successful scheduling
-    # while preserving [1, 0] therefore requires stage-ordered dependencies.
-    assert _direct_schedule_unit_stages(loop_units[0].body.body) == [1, 0]
+    # Stage-ordered dependency and eligibility analysis recovers the stage-0
+    # write as the producer. AutoSchedule can therefore enable two versions and
+    # emit the producer before the stage-1 consumer.
+    assert _direct_schedule_unit_stages(loop_units[0].body.body) == [0, 1]
 
 
 def test_auto_schedule_requires_estimate_latency():

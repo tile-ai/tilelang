@@ -238,13 +238,16 @@ def _make_mutable_bind_nested_extent_program():
     return main
 
 
-def _make_versioned_storage_control_program():
+def _make_versioned_storage_control_program(explicit_claim=True):
     @T.prim_func
     def main(C: T.Buffer((2,), "int32")):
         with T.Kernel(1):
             ub = T.alloc_shared((2,), "int32")
             T.annotate_buffer_versions({ub: 2})
-            for i in T.serial(2, annotations={"multi_buffer_eligible": [ub]}):
+            for i in T.serial(
+                2,
+                annotations={"multi_buffer_eligible": [ub]} if explicit_claim else {},
+            ):
                 ub[0] = i + 1
                 for j in T.serial(ub[0]):
                     C[i] = j
@@ -1093,6 +1096,26 @@ def _make_offset_program(enable_offset=True, mode="counter"):
                     value = T.simd.vld(ub[0])
                     T.simd.vsts(ub[0], value, mask)
                 T.copy(ub, C[i * tile : (i + 1) * tile])
+
+    return main
+
+
+def _make_auto_sibling_cross_stage_counter_program():
+    @T.prim_func
+    def main(A: T.Buffer((4,), "float32"), C: T.Buffer((4,), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((1,), "float32")
+            T.annotate_buffer_versions({ub: 2})
+            for i in T.serial(2, annotations={"enable_offset": True}):
+                with T.Stage(1):
+                    C[i] = ub[0]
+                with T.Stage(0):
+                    ub[0] = A[i]
+            for j in T.serial(2, annotations={"enable_offset": True}):
+                with T.Stage(1):
+                    C[j + 2] = ub[0]
+                with T.Stage(0):
+                    ub[0] = A[j + 2]
 
     return main
 
@@ -3001,7 +3024,7 @@ def _make_fill_with_target_dependent_region_program(bound):
     return main
 
 
-def _make_assumed_fill_initialization_program():
+def _make_assumed_fill_initialization_program(explicit_claim=True):
     tile = 64
 
     @T.prim_func
@@ -3014,7 +3037,7 @@ def _make_assumed_fill_initialization_program():
             for i in T.Pipelined(
                 4,
                 num_stages=2,
-                annotations={"multi_buffer_eligible": [ub]},
+                annotations={"multi_buffer_eligible": [ub]} if explicit_claim else {},
             ):
                 T.copy(A[i * tile : (i + 1) * tile], ub)
 
@@ -3147,9 +3170,9 @@ def _prepare_script(program):
     mod = tirx.transform.BindTarget(determine_target("ascend"))(mod)
     for transform in (
         ascend_transform.NormalizeControlFlowForSchedule,
-        ascend_transform.AnnotateMultiBufferEligible,
         ascend_transform.NormalizeNoConflictHints,
         ascend_transform.MaterializeScheduleUnits,
+        ascend_transform.AnnotateMultiBufferEligible,
         ascend_transform.EstimateLatency,
         ascend_transform.AutoSchedule,
         ascend_transform.AssignCore,
@@ -3162,12 +3185,19 @@ def _prepare_script(program):
 def _prepare_without_control_normalization(program):
     mod = tvm.IRModule.from_expr(program.with_attr("global_symbol", "main"))
     mod = tirx.transform.BindTarget(determine_target("ascend"))(mod)
-    mod = ascend_transform.AnnotateMultiBufferEligible()(mod)
     mod = ascend_transform.MaterializeScheduleUnits()(mod)
+    mod = ascend_transform.AnnotateMultiBufferEligible()(mod)
     mod = ascend_transform.EstimateLatency()(mod)
     mod = ascend_transform.AutoSchedule()(mod)
     mod = ascend_transform.AssignCore()(mod)
     return ascend_transform.PrepareMultiBuffer()(mod)
+
+
+def _materialize_without_control_normalization(program):
+    mod = _prepare_without_control_normalization(program)
+    mod = ascend_transform.ResolveCore()(mod)
+    mod = ascend_transform.InsertSync()(mod)
+    return ascend_transform.MaterializeMultiBuffer()(mod)
 
 
 def _counter_name(script):
@@ -3716,9 +3746,15 @@ def test_owner_rewrites_assume_guard_on_nested_control():
     assert all("% 2" in line and ", 0]" in line for line in assume_lines)
 
 
-def test_prepare_rejects_unrewritten_versioned_storage_condition_guard():
-    with pytest.raises(tvm.error.InternalError, match="unsupported task guard"):
-        _prepare_without_control_normalization(_make_versioned_storage_condition_guard_program())
+def test_materialize_rewrites_versioned_storage_condition_guard():
+    mod = _materialize_without_control_normalization(_make_versioned_storage_condition_guard_program())
+    condition = next(line for line in mod.script().splitlines() if "if " in line and "ub_" in line)
+    assert "% 2" in condition and ", 0]" in condition
+
+
+def test_prepare_rejects_unnormalized_versioned_storage_loop_bound():
+    with pytest.raises(Exception, match="unnormalized loop bound"):
+        _prepare_without_control_normalization(_make_versioned_storage_control_program(explicit_claim=False))
 
 
 def test_sibling_owner_assumes_share_counter_version():
@@ -4931,8 +4967,16 @@ def test_owner_external_fill_rejects_target_dependent_region(bound):
 
 
 def test_owner_external_fill_rejects_target_storage_assume_guard():
-    with pytest.raises(Exception, match="only T.fill accesses that can be rewritten independently"):
+    with pytest.raises(Exception, match="task guard outside its annotated owner loops"):
         _pass_script(_make_assumed_fill_initialization_program(), "tl.PrepareMultiBuffer")
+
+
+def test_auto_owner_rejects_target_storage_assume_guarded_fill():
+    program = _make_assumed_fill_initialization_program(explicit_claim=False)
+    eligible = _pass_script(program, "tl.AnnotateMultiBufferEligible")
+    owner = next(line for line in eligible.splitlines() if "for i" in line)
+    assert "ub" not in owner
+    _pass_script(program, "tl.PrepareMultiBuffer")
 
 
 def test_iteration_mode_uses_stepped_loop_trip_count():
@@ -5124,6 +5168,11 @@ def test_group_break_with_equal_signatures_shares_storage_counter():
 def test_counter_rejects_enable_offset():
     with pytest.raises(Exception, match="accessed at multiple schedule stages"):
         _device_script(_make_offset_program())
+
+
+def test_auto_multi_owner_counter_reports_cross_stage_accesses():
+    with pytest.raises(Exception, match="Align their T.Stage values"):
+        _pass_script(_make_auto_sibling_cross_stage_counter_program(), "tl.PrepareMultiBuffer")
 
 
 def test_iteration_mode_allows_enable_offset():

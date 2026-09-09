@@ -200,6 +200,10 @@ public:
     return VisitExpr(Downcast<PrimExpr>(node));
   }
 
+  PrimExpr RewriteGuardExpression(const PrimExpr &expression) {
+    return VisitExpr(expression);
+  }
+
 private:
   bool IsBroadcastFill(const Buffer &buffer) const {
     return broadcast_storages_.count(buffer->data) != 0;
@@ -279,13 +283,14 @@ private:
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> broadcast_storages_;
 };
 
-void RewriteAttributeGuards(IRStructure *node,
-                            MultiBufferAccessRewriter *rewriter) {
+void RewriteGuards(IRStructure *node, MultiBufferAccessRewriter *rewriter) {
   GuardList guards;
   guards.reserve(node->GetGuards().size());
   for (const auto &guard : node->GetGuards()) {
     if (guard->IsCondition()) {
-      guards.push_back(guard->Clone());
+      const auto *condition = static_cast<const ConditionGuard *>(guard.get());
+      guards.push_back(std::make_unique<ConditionGuard>(
+          rewriter->RewriteGuardExpression(condition->condition)));
       continue;
     }
     const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
@@ -305,7 +310,7 @@ void RewriteScheduledTree(std::vector<std::shared_ptr<IRStructure>> *nodes,
       auto *task = static_cast<TaskNode *>(node.get());
       broadcast_storages = GetMultiBufferBroadcastFills(task);
       MultiBufferAccessRewriter rewriter(plan, buffers, broadcast_storages);
-      RewriteAttributeGuards(task, &rewriter);
+      RewriteGuards(task, &rewriter);
       task->stmt = rewriter(task->stmt);
       if (!broadcast_storages.empty())
         ClearMultiBufferBroadcastFills(task);
@@ -313,7 +318,7 @@ void RewriteScheduledTree(std::vector<std::shared_ptr<IRStructure>> *nodes,
     }
     auto *control = static_cast<ControlNode *>(node.get());
     MultiBufferAccessRewriter rewriter(plan, buffers, broadcast_storages);
-    RewriteAttributeGuards(control, &rewriter);
+    RewriteGuards(control, &rewriter);
     RewriteScheduledTree(&control->children, plan, buffers);
     For loop = control->control;
     auto *for_node = loop.CopyOnWrite();

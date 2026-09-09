@@ -29,7 +29,13 @@ def RestoreWhileLoops():
 
 
 def AnnotateMultiBufferEligible():
-    """Annotate each For loop with the set of buffers that can be multi-buffered."""
+    """Annotate scheduled For loops with buffers that can be multi-buffered.
+
+    Requires :func:`NormalizeControlFlowForSchedule` followed by
+    :func:`MaterializeScheduleUnits`, so buffer-dependent control expressions
+    are schedulable tasks and manual stages and flattened scheduling guards are
+    available through the shared IRStructure codec.
+    """
     return _ffi_api.AnnotateMultiBufferEligible()  # type: ignore
 
 
