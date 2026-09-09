@@ -7,6 +7,7 @@ import tilelang
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    should_enable_cpu_parallel,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -70,6 +71,9 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.Simplify()(mod)
     mod = tirx.transform.RemoveNoOp()(mod)
     mod = s_tir.transform.HoistIfThenElse()(mod)
+
+    if should_enable_cpu_parallel():
+        mod = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
