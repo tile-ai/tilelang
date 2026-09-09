@@ -59,11 +59,6 @@ jobs:
             requirements*.txt
             .pre-commit-config.yaml
 
-      - name: Install pipx
-        run: |
-          # Install local copies without uninstalling the runner's shared packages.
-          "${{ steps.setup-pylowest.outputs.python-path }}" -m pip install --ignore-installed pipx
-
       - name: Check AST with Python 3.12
         run: |
           "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
