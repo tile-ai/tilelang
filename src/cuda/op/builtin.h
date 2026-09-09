@@ -35,7 +35,8 @@ static constexpr const char *kHasTMA = "tl.has_tma";
 // because they are part of the Python PassContext interface.
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
-static constexpr const char *kEnableAutoSchedule = "tl.enable_auto_schedule";
+static constexpr const char *kEnableAutoWarpSpecialization =
+    "tl.enable_auto_warp_specialization";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";

@@ -73,7 +73,7 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
-    TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
+    TL_ENABLE_AUTO_WARP_SPECIALIZATION = "tl.enable_auto_warp_specialization"
     """Name of the automatic warp-specialization scheduler to run (e.g.
     "role_based"). Default: unset (disabled)."""
 
