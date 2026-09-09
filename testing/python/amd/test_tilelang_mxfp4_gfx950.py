@@ -24,7 +24,7 @@ from tilelang import tvm as tvm
 
 
 def _hip_target():
-    return "hip -mcpu=gfx950"
+    return {"kind": "hip", "mcpu": "gfx950"}
 
 
 def _fp4_encode(vals):
@@ -232,7 +232,7 @@ def test_get_mxfp_intrin_group_returns_hip_source():
     """get_mxfp_intrin_group() returns HIP C++ source (not CUDA PTX) for gfx950."""
     from examples.dequantize_gemm.quantize import get_mxfp_intrin_group
 
-    target = tvm.target.Target("hip -mcpu=gfx950")
+    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx950"})
     info = get_mxfp_intrin_group(
         out_dtype=T.bfloat16,
         source_bit=4,
