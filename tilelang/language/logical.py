@@ -9,30 +9,20 @@ from tilelang.utils.language import get_buffer_elems
 from tilelang._typing import BufferLikeType
 
 
-def any_of(buffer: BufferLikeType, scope: str = "auto") -> tirx.PrimExpr:
+def any_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     """Check if any element in the buffer is true.
 
     Args:
         buffer: The buffer or buffer region to check.
-        scope: Reduction scope. ``"auto"`` uses a cooperative warp reduction
-            when the compiler can prove warp-uniform execution and otherwise
-            falls back to ``"thread"``. ``"thread"`` makes each thread scan
-            the full buffer independently. ``"warp"`` explicitly partitions
-            the scan across a warp and requires every participating lane to
-            reach the call in converged control flow.
 
     Returns:
         A boolean expression indicating whether any element is true.
     """
     return_type: str = "bool"
-    if not isinstance(scope, str):
-        raise TypeError(f"T.any_of scope must be a string, but got {type(scope)}")
-    if scope not in ("thread", "warp", "auto"):
-        raise ValueError(f"T.any_of scope must be 'auto', 'thread' or 'warp', but got {scope!r}")
 
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tirx.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems, scope)
+        return T.call_intrin(return_type, tirx.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -54,37 +44,24 @@ def any_of(buffer: BufferLikeType, scope: str = "auto") -> tirx.PrimExpr:
             tirx.op.Op.get("tl.any_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
-            scope,
         )
     else:
         raise TypeError(f"Invalid buffer type: {type(buffer)}")
 
 
-def all_of(buffer: BufferLikeType, scope: str = "auto") -> tirx.PrimExpr:
+def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     """Check if all elements in the buffer are true.
 
     Args:
         buffer: The buffer or buffer region to check.
-        scope: Reduction scope. ``"auto"`` uses a cooperative warp reduction
-            when the compiler can prove warp-uniform execution and otherwise
-            falls back to ``"thread"``. ``"thread"`` makes each thread scan
-            the full buffer independently. ``"warp"`` explicitly partitions
-            the scan across a warp and requires every participating lane to
-            reach the call in converged control flow.
 
     Returns:
         A boolean expression indicating whether all elements are true.
     """
-
-    if not isinstance(scope, str):
-        raise TypeError(f"T.all_of scope must be a string, but got {type(scope)}")
-    if scope not in ("thread", "warp", "auto"):
-        raise ValueError(f"T.all_of scope must be 'auto', 'thread' or 'warp', but got {scope!r}")
-
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tirx.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems, scope)
+        return T.call_intrin(return_type, tirx.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
         buffer, region = buffer.buffer, buffer.region
         new_region = []
@@ -106,7 +83,6 @@ def all_of(buffer: BufferLikeType, scope: str = "auto") -> tirx.PrimExpr:
             tirx.op.Op.get("tl.all_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
-            scope,
         )
     else:
         raise TypeError(f"Invalid buffer type: {type(buffer)}")

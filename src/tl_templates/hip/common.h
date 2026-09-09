@@ -314,7 +314,7 @@ template <typename T> TL_DEVICE bool AnyWarp(T *a, int size) {
   const auto lane_id = __lane_id();
 
   bool result = false;
-  for (int i = lane_id; i < size; i += 64) {
+  for (int i = lane_id; i < size; i += warpSize) {
     result |= a[i];
   }
   return __any(result) == 1;
@@ -334,7 +334,7 @@ template <typename T> TL_DEVICE bool AllWarp(T *a, int size) {
   const auto lane_id = __lane_id();
 
   bool result = true;
-  for (int i = lane_id; i < size; i += 64) {
+  for (int i = lane_id; i < size; i += warpSize) {
     result &= a[i];
   }
   return __all(result) == 1;

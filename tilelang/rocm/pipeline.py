@@ -50,6 +50,7 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
+    mod = tilelang.transform.ResolveLogicalScope()(mod)
     mod = tilelang.transform.LowerAccessPtr()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.HoistNonRestrictParams()(mod)

@@ -1,18 +1,19 @@
-#include "support/check.h"
 #include <optional>
+
+#include <tvm/arith/analyzer.h>
+#include <tvm/ir/cast.h>
+#include <tvm/runtime/data_type.h>
 #include <tvm/target/target.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "runtime/thread_storage_scope.h"
 #include "../op/builtin.h"
 #include "../op/utils.h"
-#include "tvm/runtime/data_type.h"
-#include "tvm/tirx/stmt.h"
-#include <tvm/arith/analyzer.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/analysis.h>
+#include "runtime/thread_storage_scope.h"
+#include "support/check.h"
 
 namespace tvm {
 namespace tl {
@@ -87,23 +88,24 @@ class LogicalScopeResolver : public StmtExprMutator {
 public:
   explicit LogicalScopeResolver(int warp_size) : warp_size_(warp_size) {}
 
-  PrimExpr Visit(PrimExpr expr) { return VisitExpr(std::move(expr)); }
-
 private:
-  bool IsSharedAccess(const CallNode *logical_call) const {
-    ICHECK_EQ(logical_call->args.size(), 3U);
-    const auto *access_ptr = logical_call->args[0].as<CallNode>();
-    ICHECK(access_ptr != nullptr);
-    ICHECK(access_ptr->op.same_as(tl::access_ptr()));
-    ICHECK_EQ(access_ptr->args.size(), 3U);
+  bool HasFullWarps() const {
+    if (env_threads_.empty()) {
+      return false;
+    }
 
-    const auto base_load_node = access_ptr->args[0].as<BufferLoadNode>();
-    ICHECK(base_load_node) << "tl.access_ptr base must be BufferLoad, but got "
-                          << access_ptr->args[0];
-    return IsSharedBuffer(base_load_node->buffer);
+    DataType dtype = DataType::Int(64);
+    PrimExpr thread_count = make_const(dtype, 1);
+    for (const IterVar &thread : env_threads_) {
+      thread_count = thread_count * Cast(dtype, thread->dom->extent);
+    }
+
+    arith::Analyzer analyzer;
+    PrimExpr warp_size = make_const(dtype, warp_size_);
+    return analyzer.CanProve(FloorMod(thread_count, warp_size) == 0);
   }
 
-  bool IsWarpUniformExpr(const PrimExpr &expr) {
+  bool IsWarpUniformExpr(const PrimExpr &expr) const {
     PrimExpr expanded_expr = Substitute(expr, bind_values_);
     ThreadPrivateLoadDetector detector;
     if (detector.Detect(expanded_expr)) {
@@ -139,12 +141,43 @@ private:
         FloorDiv(linear_one, warp_size) == FloorDiv(linear_two, warp_size);
     PrimExpr agree;
     if (expanded_expr.dtype().is_bool()) {
-      agree = Or(And(lhs, rhs),
-                        And(Not(lhs), Not(rhs)));
+      agree = Or(And(lhs, rhs), And(Not(lhs), Not(rhs)));
     } else {
       agree = lhs == rhs;
     }
     return analyzer.CanProve(Or(Not(same_warp), agree));
+  }
+
+  bool IsWarpUniformAccess(const CallNode *logical_call) const {
+    ICHECK(logical_call->args.size() == 2U || logical_call->args.size() == 3U);
+    const auto *access_ptr = logical_call->args[0].as<CallNode>();
+    ICHECK(access_ptr != nullptr);
+    ICHECK(access_ptr->op.same_as(tl::access_ptr()));
+    ICHECK_EQ(access_ptr->args.size(), 3U);
+    const auto *base_load = access_ptr->args[0].as<BufferLoadNode>();
+    ICHECK(base_load != nullptr)
+        << "tl.access_ptr base must be BufferLoad, but got "
+        << access_ptr->args[0];
+    if (!IsSharedBuffer(base_load->buffer) &&
+        !IsGlobalBuffer(base_load->buffer)) {
+      return false;
+    }
+    for (const PrimExpr &index : base_load->indices) {
+      if (!IsWarpUniformExpr(index)) {
+        return false;
+      }
+    }
+    const PrimExpr &access_extent = access_ptr->args[1];
+    if (!IsWarpUniformExpr(access_extent)) {
+      return false;
+    }
+
+    const PrimExpr &reduction_size = logical_call->args[1];
+    if (!IsWarpUniformExpr(reduction_size)) {
+      return false;
+    }
+
+    return true;
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
@@ -160,7 +193,8 @@ private:
       is_warp_uniform_ = condition_is_uniform && parent_is_uniform;
       PrimExpr else_case = VisitExpr(op->args[2]);
       is_warp_uniform_ = parent_is_uniform;
-      return Call(op->dtype, op->op, {condition, then_case, else_case}, op->span);
+      return Call(op->dtype, op->op, {condition, then_case, else_case},
+                  op->span);
     }
     PrimExpr visited = StmtExprMutator::VisitExpr_(op);
     const auto *call = visited.as<CallNode>();
@@ -171,18 +205,35 @@ private:
       return visited;
     }
 
-    ICHECK_EQ(call->args.size(), 3U);
-    const auto *scope = call->args[2].as<StringImmNode>();
-    ICHECK(scope != nullptr);
-
-    if (scope->value != "auto") {
-      return visited;
+    ICHECK(call->args.size() == 2U || call->args.size() == 3U);
+    if (call->args.size() == 3U) {
+      const auto *scope = call->args[2].as<StringImmNode>();
+      ICHECK(scope != nullptr);
+      if (scope->value != "auto") {
+        return visited;
+      }
     }
 
     Array<PrimExpr> args = call->args;
-    const bool use_warp = is_warp_uniform_ && IsSharedAccess(call);
-    args.Set(2, StringImm(use_warp ? "warp" : "thread"));
+    const bool use_warp =
+        is_warp_uniform_ && HasFullWarps() && IsWarpUniformAccess(call);
+    if (args.size() == 2U) {
+      args.push_back(StringImm(use_warp ? "warp" : "thread"));
+    } else {
+      args.Set(2, StringImm(use_warp ? "warp" : "thread"));
+    }
     return Call(call->dtype, call->op, args, call->span);
+  }
+
+  PrimExpr VisitExpr_(const LetNode *op) final {
+    PrimExpr value = VisitExpr(op->value);
+    PrimExpr expanded_value = Substitute(value, bind_values_);
+
+    Map<Var, PrimExpr> parent_bind_values = bind_values_;
+    bind_values_.Set(op->var, expanded_value);
+    PrimExpr body = VisitExpr(op->body);
+    bind_values_ = parent_bind_values;
+    return Let(op->var, value, body, op->span);
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -229,14 +280,17 @@ private:
       effective_step = VisitExpr(op->step.value());
       new_step = effective_step;
     }
-    bool condition_is_uniform = IsWarpUniformExpr(min) && IsWarpUniformExpr(extent) && IsWarpUniformExpr(effective_step);
+    bool condition_is_uniform = IsWarpUniformExpr(min) &&
+                                IsWarpUniformExpr(extent) &&
+                                IsWarpUniformExpr(effective_step);
 
     bool parent_is_uniform = is_warp_uniform_;
     is_warp_uniform_ = parent_is_uniform && condition_is_uniform;
     Stmt body = VisitStmt(op->body);
 
     is_warp_uniform_ = parent_is_uniform;
-    return For(op->loop_var, min, extent, op->kind, body, op->thread_binding, op->annotations, new_step, op->span);
+    return For(op->loop_var, min, extent, op->kind, body, op->thread_binding,
+               op->annotations, new_step, op->span);
   }
   Stmt VisitStmt_(const WhileNode *op) final {
     // In a while loop we always turn "auto" -> "thread"

@@ -13,52 +13,41 @@ namespace tvm {
 namespace tl {
 using namespace tirx;
 
-PrimExpr any_of_op(PrimExpr args) {
+namespace {
+
+PrimExpr LowerLogicalReduction(PrimExpr args, ffi::String thread_helper,
+                               ffi::String warp_helper) {
   const CallNode *call = args.as<CallNode>();
   ICHECK(call != nullptr);
   const ffi::Array<PrimExpr> &arg = call->args;
-  ICHECK_EQ(arg.size(), 3);
+  ICHECK(arg.size() == 2 || arg.size() == 3);
   PrimExpr buffer_address = arg[0];
   PrimExpr elems = arg[1];
-  const auto scope_imm = arg[2].as<StringImmNode>();
-  ICHECK(scope_imm != nullptr);
-  const auto scope = scope_imm->value;
-  ffi::String fn_name;
-  if (scope == "warp") {
-    fn_name = "tl::AnyWarp";
-  } else if (scope == "thread" || scope == "auto") {
-    // By default auto uses tl::Any, if it can prove no warp divergence it'll
-    // use tl::AnyWarp instead
-    fn_name = "tl::Any";
-  } else {
-    ICHECK(false) << "Invalid scope: " << scope;
+
+  ffi::String helper = thread_helper;
+  if (arg.size() == 3) {
+    const auto *scope = arg[2].as<StringImmNode>();
+    ICHECK(scope != nullptr);
+    if (scope->value == "warp") {
+      helper = warp_helper;
+    } else {
+      ICHECK(scope->value == "thread" || scope->value == "auto")
+          << "Invalid internal logical reduction scope: " << scope->value;
+    }
   }
+
   return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                    {StringImm(fn_name), buffer_address, elems});
+                    {StringImm(helper), buffer_address, elems});
+}
+
+} // namespace
+
+PrimExpr any_of_op(PrimExpr args) {
+  return LowerLogicalReduction(args, "tl::Any", "tl::AnyWarp");
 }
 
 PrimExpr all_of_op(PrimExpr args) {
-  const CallNode *call = args.as<CallNode>();
-  ICHECK(call != nullptr);
-  const ffi::Array<PrimExpr> &arg = call->args;
-  ICHECK_EQ(arg.size(), 3);
-  PrimExpr buffer_address = arg[0];
-  PrimExpr elems = arg[1];
-  const auto scope_imm = arg[2].as<StringImmNode>();
-  ICHECK(scope_imm != nullptr);
-  const auto scope = scope_imm->value;
-  ffi::String fn_name;
-  if (scope == "warp") {
-    fn_name = "tl::AllWarp";
-  } else if (scope == "thread" || scope == "auto") {
-    // By default auto uses tl::Any, if it can prove no warp divergence it'll
-    // use tl::AnyWarp instead
-    fn_name = "tl::All";
-  } else {
-    ICHECK(false) << "Invalid scope: " << scope;
-  }
-  return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                    {StringImm(fn_name), buffer_address, elems});
+  return LowerLogicalReduction(args, "tl::All", "tl::AllWarp");
 }
 
 TVM_REGISTER_OP("tl.any_of")

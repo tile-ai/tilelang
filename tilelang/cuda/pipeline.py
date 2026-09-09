@@ -150,6 +150,9 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
+    # Resolve automatic logical-reduction scopes while buffer metadata and
+    # structured control flow are still available.
+    mod = tilelang.transform.ResolveLogicalScope()(mod)
     # Lower frontend pointer metadata op to standard tvm_access_ptr
     mod = tilelang.transform.LowerAccessPtr()(mod)
     # Simplify again to clean up any duplicated conditions

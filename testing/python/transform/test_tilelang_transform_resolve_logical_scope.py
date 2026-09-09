@@ -3,15 +3,17 @@ import pytest
 import tilelang
 import tilelang.language as T
 from tilelang import tvm
+from tilelang.rocm.target import with_rocm_target_attrs
 from tvm.tirx import op
 from tvm.tirx.stmt_functor import post_order_visit
 
 
 _CUDA_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
-_ROCM_TARGET = tvm.target.Target({"kind": "hip", "mcpu": "gfx90a", "thread_warp_size": 64})
+_ROCM_TARGET = with_rocm_target_attrs(tvm.target.Target({"kind": "hip", "mcpu": "gfx90a"}))
+_ROCM_WAVE32_TARGET = with_rocm_target_attrs(tvm.target.Target({"kind": "hip", "mcpu": "gfx1100"}))
 
 
-def _make_any_of_kernel(condition_kind, scope="auto"):
+def _make_any_of_kernel(condition_kind):
     @T.prim_func
     def main(
         source: T.Tensor((70,), "int32"),
@@ -22,16 +24,16 @@ def _make_any_of_kernel(condition_kind, scope="auto"):
             tx = T.get_thread_binding()
 
             if condition_kind == "none":
-                result[tx] = T.any_of(shared, scope=scope)
+                result[tx] = T.any_of(shared)
             elif condition_kind == "single_lane":
                 if tx == 0:
-                    result[tx] = T.any_of(shared, scope=scope)
+                    result[tx] = T.any_of(shared)
             elif condition_kind == "warp_group":
                 if tx // 32 == 0:
-                    result[tx] = T.any_of(shared, scope=scope)
+                    result[tx] = T.any_of(shared)
             elif condition_kind == "alternating":
                 if tx % 2 == 0:
-                    result[tx] = T.any_of(shared, scope=scope)
+                    result[tx] = T.any_of(shared)
             else:
                 raise ValueError(condition_kind)
 
@@ -166,6 +168,33 @@ def _make_if_then_else_any_of_kernel(condition_kind):
     return main
 
 
+def _make_let_condition_kernel(condition_kind):
+    @T.prim_func
+    def main(
+        source: T.Tensor((70,), "int32"),
+        result: T.Tensor((64,), "bool"),
+    ):
+        with T.Kernel(1, threads=64):
+            shared = T.alloc_shared((70,), "int32")
+            tx = T.get_thread_binding()
+            predicate = tvm.tirx.Var("predicate", "bool")
+
+            if condition_kind == "single_lane":
+                value = tx == 0
+            elif condition_kind == "warp_group":
+                value = tx // 32 == 0
+            else:
+                raise ValueError(condition_kind)
+
+            result[tx] = tvm.tirx.Let(
+                predicate,
+                value,
+                T.if_then_else(predicate, T.any_of(shared), False),
+            )
+
+    return main
+
+
 def _resolve(func, target=_CUDA_TARGET):
     mod = tvm.IRModule({"main": func})
     mod = tvm.tirx.transform.BindTarget(target)(mod)
@@ -202,12 +231,6 @@ def test_resolve_any_of_auto_scope(condition_kind, expected_scope):
     assert _logical_scopes(resolved) == [expected_scope]
 
 
-@pytest.mark.parametrize("scope", ["thread", "warp"])
-def test_resolve_any_of_preserves_explicit_scope(scope):
-    resolved = _resolve(_make_any_of_kernel("single_lane", scope=scope))
-    assert _logical_scopes(resolved) == [scope]
-
-
 @pytest.mark.parametrize(
     ("divergent", "expected_scope"),
     [(False, "warp"), (True, "thread")],
@@ -223,15 +246,20 @@ def test_resolve_restores_scope_after_divergent_branch():
 
 
 @pytest.mark.parametrize(
-    ("divisor", "expected_scope"),
-    [(64, "warp"), (32, "thread")],
+    ("target", "divisor", "expected_scope"),
+    [
+        (_ROCM_TARGET, 64, "warp"),
+        (_ROCM_TARGET, 32, "thread"),
+        (_ROCM_WAVE32_TARGET, 32, "warp"),
+        (_ROCM_WAVE32_TARGET, 16, "thread"),
+    ],
 )
-def test_resolve_uses_target_warp_size(divisor, expected_scope):
-    resolved = _resolve(_make_wave_partitioned_kernel(divisor), _ROCM_TARGET)
+def test_resolve_uses_target_warp_size(target, divisor, expected_scope):
+    resolved = _resolve(_make_wave_partitioned_kernel(divisor), target)
     assert _logical_scopes(resolved) == [expected_scope]
 
 
-def test_resolve_global_auto_scope_stays_thread():
+def test_resolve_global_uniform_range_uses_warp():
     @T.prim_func
     def main(
         source: T.Tensor((70,), "int32"),
@@ -240,6 +268,49 @@ def test_resolve_global_auto_scope_stays_thread():
         with T.Kernel(1, threads=64):
             tx = T.get_thread_binding()
             result[tx] = T.any_of(source)
+
+    resolved = _resolve(main)
+    assert _logical_scopes(resolved) == ["warp"]
+
+
+def test_resolve_lane_dependent_shared_range_stays_thread():
+    @T.prim_func
+    def main(
+        source: T.Tensor((128,), "int32"),
+        result: T.Tensor((64,), "bool"),
+    ):
+        with T.Kernel(1, threads=64):
+            shared = T.alloc_shared((128,), "int32")
+            tx = T.get_thread_binding()
+            result[tx] = T.any_of(shared[tx : tx + 8])
+
+    resolved = _resolve(main)
+    assert _logical_scopes(resolved) == ["thread"]
+
+
+def test_frontend_logical_call_keeps_two_argument_form():
+    func = _make_any_of_kernel("none")
+    argument_counts = []
+    logical_op = op.Op.get("tl.any_of")
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.Call) and node.op.same_as(logical_op):
+            argument_counts.append(len(node.args))
+
+    post_order_visit(func.body, collect)
+    assert argument_counts == [2]
+
+
+def test_resolve_partial_warp_launch_stays_thread():
+    @T.prim_func
+    def main(
+        source: T.Tensor((70,), "int32"),
+        result: T.Tensor((48,), "bool"),
+    ):
+        with T.Kernel(1, threads=48):
+            shared = T.alloc_shared((70,), "int32")
+            tx = T.get_thread_binding()
+            result[tx] = T.any_of(shared)
 
     resolved = _resolve(main)
     assert _logical_scopes(resolved) == ["thread"]
@@ -301,3 +372,15 @@ def test_resolve_local_buffer_condition_stays_thread():
 
     resolved = _resolve(main)
     assert _logical_scopes(resolved) == ["thread"]
+
+
+@pytest.mark.parametrize(
+    ("condition_kind", "expected_scope"),
+    [
+        ("single_lane", "thread"),
+        ("warp_group", "warp"),
+    ],
+)
+def test_resolve_auto_scope_through_let(condition_kind, expected_scope):
+    resolved = _resolve(_make_let_condition_kernel(condition_kind))
+    assert _logical_scopes(resolved) == [expected_scope]
