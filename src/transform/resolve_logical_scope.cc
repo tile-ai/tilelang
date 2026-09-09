@@ -80,6 +80,11 @@ private:
       ExprVisitor::VisitExpr_(op);
       return;
     }
+
+    // Treat future storage ranks as thread-private until explicitly
+    // classified above. Keeping this outside the switch preserves -Wswitch
+    // diagnostics when StorageRank gains a new value.
+    found_ = true;
   }
   bool found_{false};
 };
