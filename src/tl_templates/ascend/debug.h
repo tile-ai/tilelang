@@ -274,10 +274,17 @@
                                                                                \
   ATTR inline void device_assert(bool cond) { assert(cond); }                  \
                                                                                \
+  /* Inlining this failure path before a sync wait can produce unsupported */  \
+  /* stacksave instructions in Bisheng. Keep the condition in the caller. */   \
+  ATTR __attribute__((noinline)) inline void device_assert_fail_with_msg(      \
+      __gm__ const char *msg) {                                                \
+    printf("Device assert failed: %s BlockIdx=%d\n", msg, BLOCK_IDX);          \
+    assert(false);                                                             \
+  }                                                                            \
+                                                                               \
   ATTR inline void device_assert_with_msg(bool cond, __gm__ const char *msg) { \
     if (!cond) {                                                               \
-      printf("Device assert failed: %s BlockIdx=%d\n", msg, BLOCK_IDX);        \
-      assert(false);                                                           \
+      device_assert_fail_with_msg(msg);                                        \
     }                                                                          \
   }
 
