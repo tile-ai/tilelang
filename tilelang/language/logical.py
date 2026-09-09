@@ -13,13 +13,16 @@ def any_of(buffer: BufferLikeType, scope: str = "auto") -> tirx.PrimExpr:
     """Check if any element in the buffer is true.
 
     Args:
-        buffer: Either a TVM buffer or buffer region to be checked
-        scope: Reduction scope. ``"thread"`` makes each thread scan the full
-            buffer independently. ``"warp"`` partitions the buffer across a
-            warp and returns a warp-uniform result.
+        buffer: The buffer or buffer region to check.
+        scope: Reduction scope. ``"auto"`` uses a cooperative warp reduction
+            when the compiler can prove warp-uniform execution and otherwise
+            falls back to ``"thread"``. ``"thread"`` makes each thread scan
+            the full buffer independently. ``"warp"`` explicitly partitions
+            the scan across a warp and requires every participating lane to
+            reach the call in converged control flow.
 
     Returns:
-        A TVM intrinsic call that performs the any operation
+        A boolean expression indicating whether any element is true.
     """
     return_type: str = "bool"
     if not isinstance(scope, str):
@@ -61,14 +64,16 @@ def all_of(buffer: BufferLikeType, scope: str = "auto") -> tirx.PrimExpr:
     """Check if all elements in the buffer are true.
 
     Args:
-        buffer: Either a TVM buffer or buffer region to be checked
-        scope: Reduction scope. ``"auto"`` uses ``"warp"`` reduction if it can prove that there is no warp divergence, else ``"thread"``.
-            ``"thread"`` makes each thread scan the full
-            buffer independently. ``"warp"`` partitions the buffer across a
-            warp and returns a warp-uniform result.
+        buffer: The buffer or buffer region to check.
+        scope: Reduction scope. ``"auto"`` uses a cooperative warp reduction
+            when the compiler can prove warp-uniform execution and otherwise
+            falls back to ``"thread"``. ``"thread"`` makes each thread scan
+            the full buffer independently. ``"warp"`` explicitly partitions
+            the scan across a warp and requires every participating lane to
+            reach the call in converged control flow.
 
     Returns:
-        A TVM intrinsic call that performs the all operation
+        A boolean expression indicating whether all elements are true.
     """
 
     if not isinstance(scope, str):
