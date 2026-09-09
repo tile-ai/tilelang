@@ -82,6 +82,148 @@ struct MteGeometry {
   int64_t contiguous_bytes_lower_bound{0};
 };
 
+using Hf32ModeMap =
+    std::unordered_map<Call, uint8_t, ObjectPtrHash, ObjectPtrEqual>;
+
+// Track the mode reaching each GEMM before estimating individual Task markers.
+// Keep branch conditions in the state: MaterializeScheduleUnits can split a
+// guarded mode setter and GEMM into separate, identically guarded tasks.
+// Loop backedges join possible modes; an ambiguous mode uses the FP32 cost.
+class Hf32ModeAnalyzer : public StmtExprVisitor {
+public:
+  static constexpr uint8_t kDisabled = 1;
+  static constexpr uint8_t kEnabled = 2;
+
+  static Hf32ModeMap Analyze(const Stmt &body) {
+    Hf32ModeAnalyzer analyzer;
+    analyzer(body);
+    return std::move(analyzer.modes_);
+  }
+
+private:
+  static PrimExpr Mode(uint8_t modes) {
+    return IntImm(DataType::Int(32), modes);
+  }
+
+  uint8_t PossibleModes() {
+    if (analyzer_.CanProve(state_ == kDisabled))
+      return kDisabled;
+    if (analyzer_.CanProve(state_ == kEnabled))
+      return kEnabled;
+    return kDisabled | kEnabled;
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::ascend_set_hf32_mode())) {
+      ICHECK_EQ(op->args.size(), 1);
+      const auto *mode = op->args[0].as<IntImmNode>();
+      ICHECK(mode && mode->value >= 0 && mode->value <= 2)
+          << "HF32 mode must be a constant in {0, 1, 2}";
+      state_ = Mode(mode->value == 0 ? kDisabled : kEnabled);
+    } else if (op->op.same_as(Op::Get("tl.tileop.gemm"))) {
+      modes_[GetRef<Call>(op)] |= PossibleModes();
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BindNode *op) final {
+    VisitExpr(op->value);
+    if (op->var.dtype().is_scalar() && !op->var.dtype().is_handle()) {
+      // A normalized condition is a snapshot. Distinct mutable reads must
+      // not become equal merely because their expressions look the same.
+      analyzer_.Bind(op->var, FreshenMutableReads()(op->value),
+                     /*allow_override=*/true);
+    }
+  }
+
+  void VisitConditional(const PrimExpr &condition, const Stmt &then_case,
+                        const Optional<Stmt> &else_case = std::nullopt) {
+    VisitExpr(condition);
+    PrimExpr guard = analyzer_.Simplify(FreshenMutableReads()(condition));
+    if (analyzer_.CanProve(guard)) {
+      VisitStmt(then_case);
+      return;
+    }
+    if (analyzer_.CanProve(Not(guard))) {
+      if (else_case)
+        VisitStmt(else_case.value());
+      return;
+    }
+    PrimExpr incoming = state_;
+    PrimExpr then_out;
+    {
+      With<arith::ConstraintContext> context(&analyzer_, guard);
+      state_ = analyzer_.Simplify(incoming);
+      VisitStmt(then_case);
+      then_out = state_;
+    }
+    {
+      With<arith::ConstraintContext> context(&analyzer_, Not(guard));
+      state_ = analyzer_.Simplify(incoming);
+      if (else_case)
+        VisitStmt(else_case.value());
+    }
+    state_ = analyzer_.Simplify(Select(guard, then_out, state_));
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    VisitConditional(op->condition, op->then_case, op->else_case);
+  }
+
+  void AnalyzeLoop(const Stmt &body, bool must_execute) {
+    // Forget iteration-local predicates at the backedge: the same loop Var
+    // and Bind nodes represent different values on the next iteration.
+    uint8_t incoming = PossibleModes();
+    uint8_t header = incoming;
+    // There are only two mode bits, so the ascending state chain converges
+    // after at most three visits, including the final unchanged state.
+    for (int i = 0; i < 3; ++i) {
+      state_ = Mode(header);
+      VisitStmt(body);
+      uint8_t body_out = PossibleModes();
+      uint8_t next = incoming | body_out;
+      if (next == header) {
+        state_ = Mode(must_execute ? body_out : header);
+        return;
+      }
+      header = next;
+    }
+    LOG(FATAL) << "HF32 mode analysis failed to converge";
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    if (analyzer_.CanProve(op->extent <= 0))
+      return;
+    if (analyzer_.CanProve(op->extent == 1)) {
+      VisitStmt(op->body);
+      return;
+    }
+    AnalyzeLoop(op->body, analyzer_.CanProve(op->extent > 0));
+  }
+
+  void VisitStmt_(const WhileNode *op) final {
+    VisitExpr(op->condition);
+    AnalyzeLoop(op->body, false);
+  }
+
+  void VisitStmt_(const SBlockNode *op) final {
+    if (op->init) {
+      uint8_t incoming = PossibleModes();
+      VisitStmt(op->init.value());
+      state_ = Mode(PossibleModes() | incoming);
+    }
+    VisitStmt(op->body);
+  }
+
+  void VisitStmt_(const SBlockRealizeNode *op) final {
+    VisitConditional(op->predicate, op->block);
+  }
+
+  arith::Analyzer analyzer_;
+  PrimExpr state_{Mode(kDisabled)};
+  Hf32ModeMap modes_;
+};
+
 // Estimator-only operation details. They deliberately do not live on
 // AutoSchedule's TaskNode: the scheduler consumes the resulting latency/II,
 // not the copy descriptors or Cube shapes used to derive them.
@@ -91,6 +233,7 @@ struct TaskCostFeatures {
     int64_t n;
     int64_t k;
     DataType input_dtype;
+    bool hf32;
   };
 
   struct CopyInfo {
@@ -118,6 +261,9 @@ struct TaskCostFeatures {
 // is implemented separately in estimate_latency.cc.
 class TaskCostEstimator {
 public:
+  explicit TaskCostEstimator(Hf32ModeMap hf32_modes)
+      : hf32_modes_(std::move(hf32_modes)) {}
+
   // Estimate latency and initiation interval for one Ascend task.
   void Estimate(TaskNode *task);
 
@@ -167,6 +313,7 @@ private:
                                       const ConstrSet &outer_ctx);
 
   AscendLatencyParams params_;
+  Hf32ModeMap hf32_modes_;
 
   // ====================================================================
   // Every divisor is guarded so an unknown bandwidth/throughput contributes
@@ -277,26 +424,6 @@ private:
   static bool IsAivMtePath(AscendPath path) {
     return path == AscendPath::kGmToUb || path == AscendPath::kUbToGm ||
            path == AscendPath::kUbToL1;
-  }
-
-  int64_t AivMteIIBytes(AscendPath path, int64_t per_aiv_bytes,
-                        int64_t normalized_bytes) const {
-    // Tiny GM packets are descriptor-limited. Larger packets and every
-    // UB->L1 transfer use the common two-AIV calibration unit.
-    switch (path) {
-    case AscendPath::kGmToUb:
-      return normalized_bytes > params_.mte2_gm_to_ub_packet_floor_bytes
-                 ? normalized_bytes
-                 : per_aiv_bytes;
-    case AscendPath::kUbToGm:
-      return normalized_bytes > params_.mte3_ub_to_gm_packet_floor_bytes
-                 ? normalized_bytes
-                 : per_aiv_bytes;
-    case AscendPath::kUbToL1:
-      return normalized_bytes;
-    default:
-      return per_aiv_bytes;
-    }
   }
 
   static int64_t ScaleBandwidth(int64_t bytes, int64_t numerator,
@@ -464,8 +591,7 @@ private:
         params_.mte_descriptor_cycles +
         MemLatencyForPath(path, normalized_bytes, bandwidth,
                           BaseLatencyForCopy(path, info));
-    return {completion_latency,
-            AivMteIIBytes(path, info.bytes, normalized_bytes), bandwidth};
+    return {completion_latency, normalized_bytes, bandwidth};
   }
 
   // Best-effort classification of a single region into an AscendPath from
@@ -543,17 +669,20 @@ private:
     return AscendPath::kUnknown;
   }
 
-  // Per-dtype Cube throughput (MACs/cycle).
-  int64_t CubeThroughputFor(DataType dtype) const {
+  // Throughput in operations/cycle, matching the 2*M*N*K operation count.
+  int64_t CubeThroughputFor(DataType dtype, bool hf32 = false) const {
     if (dtype.is_float16())
       return params_.cube_throughput_fp16 ? params_.cube_throughput_fp16
                                           : params_.cube_fallback_throughput;
     if (dtype.is_bfloat16())
       return params_.cube_throughput_bf16 ? params_.cube_throughput_bf16
                                           : params_.cube_fallback_throughput;
-    if (dtype.is_float() && dtype.bits() == 32)
-      return params_.cube_throughput_fp32 ? params_.cube_throughput_fp32
-                                          : params_.cube_fallback_throughput;
+    if (dtype.is_float() && dtype.bits() == 32) {
+      int64_t throughput =
+          hf32 ? params_.cube_throughput_hf32 : params_.cube_throughput_fp32;
+      ICHECK_GT(throughput, 0) << "FP32/HF32 Cube throughput must be positive";
+      return throughput;
+    }
     if (dtype.is_float8() || (dtype.is_float() && dtype.bits() == 8))
       return params_.cube_throughput_fp8 ? params_.cube_throughput_fp8
                                          : params_.cube_fallback_throughput;
@@ -599,6 +728,37 @@ private:
         cost.override_cycles +=
             std::max(safe_div_ceil(ii_bytes, BandwidthForPath(path)),
                      params_.mte2_gm_to_l1_min_ii);
+      } else if ((path == AscendPath::kGmToUb || path == AscendPath::kUbToGm) &&
+                 ii_bytes > 0) {
+        int64_t min_ii = path == AscendPath::kGmToUb
+                             ? params_.mte2_gm_to_ub_min_ii
+                             : params_.mte3_ub_to_gm_min_ii;
+        int64_t bandwidth = ii_bandwidth_override > 0 ? ii_bandwidth_override
+                                                      : BandwidthForPath(path);
+        cost.override_cycles +=
+            std::max(min_ii, safe_div_ceil(ii_bytes, bandwidth));
+      } else if ((path == AscendPath::kL1ToL0a ||
+                  path == AscendPath::kL1ToL0b) &&
+                 ii_bytes > 0) {
+        cost.override_cycles += params_.mte1_issue_overhead +
+                                safe_div_ceil(ii_bytes, BandwidthForPath(path));
+      } else if ((path == AscendPath::kL0cToUb ||
+                  path == AscendPath::kL0cToGm) &&
+                 ii_bytes > 0) {
+        // A dual copy can be limited by either the shared FixPipe endpoint
+        // or its per-AIV row width. Charge descriptor overhead only on the
+        // endpoint: a narrow row already keeps it occupied for longer.
+        int64_t endpoint_bandwidth =
+            path == AscendPath::kL0cToUb && ii_bandwidth_override > 0
+                ? params_.fixpipe_dual_bandwidth
+                : params_.fixpipe_bandwidth;
+        int64_t endpoint_ii = params_.fixpipe_issue_overhead +
+                              safe_div_ceil(ii_bytes, endpoint_bandwidth);
+        int64_t geometry_ii =
+            ii_bandwidth_override > 0
+                ? safe_div_ceil(ii_bytes, ii_bandwidth_override)
+                : 0;
+        cost.override_cycles += std::max(endpoint_ii, geometry_ii);
       } else if (ii_bandwidth_override > 0) {
         cost.override_cycles += safe_div_ceil(ii_bytes, ii_bandwidth_override);
       } else {
@@ -695,16 +855,24 @@ private:
     }
 
     if (has_cube) {
-      // matmul latency = base + total_MACs / per-dtype throughput.
+      // Charge completion overhead once for this leaf's Cube instruction
+      // stream, separately from its total throughput cost. Sequential tasks
+      // and loop iterations are composed by EstimateStmtCost below.
       // Use recorded GEMM shapes, or fall back to one unit MMAD.
       int64_t matmul_latency = params_.cube_base_latency;
       if (!cost_features.cube_shapes.empty()) {
+        int64_t base_latency = params_.cube_base_latency;
         for (const TaskCostFeatures::CubeShape &shape :
              cost_features.cube_shapes) {
           int64_t ops = shape.m * shape.n * shape.k * 2;
-          int64_t throughput = CubeThroughputFor(shape.input_dtype);
+          int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32);
+          if (shape.input_dtype.is_float() && shape.input_dtype.bits() == 32) {
+            base_latency =
+                std::max(base_latency, params_.cube_fp32_base_latency);
+          }
           matmul_latency += safe_div_ceil(ops, throughput);
         }
+        matmul_latency += base_latency - params_.cube_base_latency;
       } else if (params_.cube_unit_m > 0 && params_.cube_unit_k > 0 &&
                  params_.cube_unit_n > 0) {
         // Single unit mad fallback.
@@ -744,22 +912,11 @@ private:
         for (const TaskCostFeatures::CubeShape &shape :
              cost_features.cube_shapes) {
           int64_t ops = shape.m * shape.n * shape.k * 2;
-          int64_t throughput = CubeThroughputFor(shape.input_dtype);
+          int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32);
           cube_ii = std::max(cube_ii, safe_div_ceil(ops, throughput));
         }
       }
       cube_ii = std::max(cube_ii, params_.cube_pipeline_depth);
-    }
-
-    int64_t vector_ii = 1;
-    if (has_vec) {
-      if (measured_vf_latency > 0) {
-        vector_ii = measured_vf_latency;
-      } else {
-        int64_t denom =
-            params_.vector_queue_depth > 0 ? params_.vector_queue_depth : 1;
-        vector_ii = std::max(vector_ii, safe_div_ceil(vector_latency, denom));
-      }
     }
 
     if (has_dma && !has_cube && !has_vec) {
@@ -769,9 +926,8 @@ private:
       // Cube-only: II is bounded by pipeline depth and MAC throughput.
       ii = std::max(ii, cube_ii);
     } else if (has_vec && !has_dma && !has_cube) {
-      // Vector-only: II = compute_latency / vector_queue_depth (fallback to
-      // compute_latency when queue depth is unknown).
-      ii = std::max(ii, vector_ii);
+      // Vector tasks occupy the pipe for their full completion latency.
+      ii = std::max(ii, vector_latency);
     } else {
       // Mixed / fallback: keep task granularity, but bound II by the slowest
       // active pipe instead of forcing it to the full sequential latency.
@@ -780,7 +936,7 @@ private:
       if (has_cube)
         ii = std::max(ii, cube_ii);
       if (has_vec)
-        ii = std::max(ii, vector_ii);
+        ii = std::max(ii, vector_latency);
     }
 
     task->SetLatency(total_latency);
@@ -989,7 +1145,67 @@ private:
       StmtExprVisitor::VisitExpr_(op);
     }
 
+    int64_t EstimateNd2NzScatterLatency(const CallNode *op) const {
+      // InsertNd2Nz validates this template contract before EstimateLatency.
+      // Unknown shapes or conversions need a new fit, not a minimum-cost fit.
+      ICHECK_EQ(op->args.size(), 6U);
+      const int64_t *rows = as_const_int(op->args[2]);
+      const int64_t *cols = as_const_int(op->args[3]);
+      const auto *dst_dtype = op->args[4].as<StringImmNode>();
+      const auto *src_dtype = op->args[5].as<StringImmNode>();
+      ICHECK(rows && cols && src_dtype && dst_dtype)
+          << "ND->NZ scatter requires static shape and dtype arguments: "
+          << GetRef<Call>(op);
+      ICHECK_GT(*rows, 0);
+      ICHECK_GT(*cols, 0);
+      ICHECK(src_dtype->value == "float" || src_dtype->value == "half" ||
+             src_dtype->value == "bfloat16_t");
+
+      const AscendLatencyParams::Nd2NzLatencyParams *profile =
+          &params->nd2nz_same_dtype;
+      if (src_dtype->value != dst_dtype->value) {
+        if (src_dtype->value == "bfloat16_t" && dst_dtype->value == "float") {
+          profile = &params->nd2nz_bf16_to_f32;
+        } else {
+          ICHECK(src_dtype->value == "float" &&
+                 dst_dtype->value == "bfloat16_t")
+              << "Unsupported ND->NZ scatter dtype conversion: "
+              << src_dtype->value << " -> " << dst_dtype->value;
+          profile = &params->nd2nz_f32_to_bf16;
+        }
+      }
+
+      int64_t vector_elements = src_dtype->value == "float" ? 64 : 128;
+      int64_t passes = *cols / vector_elements + (*cols % vector_elements != 0);
+      int64_t row_iterations =
+          CheckedSerialTaskMultiply(*rows, passes, "ND->NZ row iterations");
+      int64_t row_cycles_x4 = CheckedSerialTaskMultiply(
+          row_iterations, profile->row_cycles_x4, "ND->NZ row cycles");
+      int64_t cycles = CheckedSerialTaskAdd(
+          profile->setup_cycles,
+          CheckedSerialTaskMultiply(passes, profile->pass_cycles,
+                                    "ND->NZ pass cycles"),
+          "ND->NZ setup cycles");
+      cycles = CheckedSerialTaskAdd(
+          cycles, row_cycles_x4 / 4 + (row_cycles_x4 % 4 != 0),
+          "ND->NZ scatter latency");
+      return std::max(profile->min_cycles, cycles);
+    }
+
     void VisitExpr_(const CallNode *op) final {
+      if (op->op.same_as(tl::ascend_nd2nz_scatter())) {
+        // This opaque helper's loops, conversions and stores are absent from
+        // TIR. Count the full template, including repeated calls inside a VF.
+        // Access-pointer descriptors are not extra vector operations.
+        int64_t cycles = EstimateNd2NzScatterLatency(op);
+        for (const auto &loop : loop_stack) {
+          cycles = CheckedSerialTaskMultiply(cycles, loop.trip_count,
+                                             "ND->NZ loop latency");
+        }
+        total_latency =
+            CheckedSerialTaskAdd(total_latency, cycles, "ND->NZ task latency");
+        return;
+      }
       auto contained_vars = AnalyzeContainedLoopVars(ffi::GetRef<PrimExpr>(op));
 
       // Check for special math functions by name
@@ -1131,16 +1347,18 @@ private:
 class CostFeatureAnalyzer : public StmtExprVisitor {
 public:
   static TaskCostFeatures Analyze(const Stmt &stmt,
-                                  arith::Analyzer *arith_analyzer) {
+                                  arith::Analyzer *arith_analyzer,
+                                  const Hf32ModeMap &hf32_modes) {
     ICHECK(arith_analyzer != nullptr);
-    CostFeatureAnalyzer analyzer(arith_analyzer);
+    CostFeatureAnalyzer analyzer(arith_analyzer, hf32_modes);
     analyzer(stmt);
     return analyzer.features_;
   }
 
 private:
-  explicit CostFeatureAnalyzer(arith::Analyzer *arith_analyzer)
-      : arith_analyzer_(arith_analyzer) {}
+  CostFeatureAnalyzer(arith::Analyzer *arith_analyzer,
+                      const Hf32ModeMap &hf32_modes)
+      : arith_analyzer_(arith_analyzer), hf32_modes_(hf32_modes) {}
 
   static int64_t SafeHalf(int64_t value) {
     if (value <= 0)
@@ -1236,6 +1454,13 @@ private:
                                "Ascend L0C->UB latency destination");
       src_row_size = src_mte_layout.modes[0].size;
       dst_row_size = dst_mte_layout.modes[0].size;
+    } else if (src_layout.modes.size() == 1 && dst_layout.modes.size() == 2) {
+      // Match PlanMTECopy: split the contiguous side at the strided side's
+      // physical row boundary. Its coalesced size is the whole transfer,
+      // whose dynamic row count must not make a fixed row width unknown.
+      src_row_size = dst_row_size;
+    } else if (src_layout.modes.size() == 2 && dst_layout.modes.size() == 1) {
+      dst_row_size = src_row_size;
     }
     int64_t src_row_elements = EstimateExprPositiveLowerBound(src_row_size);
     int64_t dst_row_elements = EstimateExprPositiveLowerBound(dst_row_size);
@@ -1344,8 +1569,11 @@ private:
       int64_t n = op->args[6].as<IntImmNode>()->value;
       int64_t k = op->args[7].as<IntImmNode>()->value;
       Gemm gemm(op->args, op->annotations);
+      auto mode = hf32_modes_.find(GetRef<Call>(op));
+      bool hf32 = mode != hf32_modes_.end() &&
+                  mode->second == Hf32ModeAnalyzer::kEnabled;
       if (m > 0 && n > 0 && k > 0)
-        features_.cube_shapes.push_back({m, n, k, gemm->a_->dtype});
+        features_.cube_shapes.push_back({m, n, k, gemm->a_->dtype, hf32});
     }
     StmtExprVisitor::VisitExpr_(op);
   }
@@ -1355,6 +1583,7 @@ private:
   void VisitStmt_(const SBlockNode *) final {}
 
   arith::Analyzer *arith_analyzer_;
+  const Hf32ModeMap &hf32_modes_;
   TaskCostFeatures features_;
 };
 
@@ -1613,7 +1842,7 @@ void TaskCostEstimator::Estimate(TaskNode *task) {
   arith::Analyzer analyzer;
   task->outer_ctx.Populate(analyzer);
   TaskCostFeatures cost_features =
-      CostFeatureAnalyzer::Analyze(task->stmt, &analyzer);
+      CostFeatureAnalyzer::Analyze(task->stmt, &analyzer, hf32_modes_);
   EstimateAscend(task, cost_features, &analyzer);
 }
 
@@ -1753,13 +1982,14 @@ using TaskCostMap =
 class TaskCostCollector : public TaskAwareConstrVisitor {
 public:
   static TaskCostMap Collect(const Stmt &body, const ConstrSet &outer_ctx) {
-    TaskCostCollector collector(outer_ctx);
+    TaskCostCollector collector(body, outer_ctx);
     collector(body);
     return std::move(collector.costs_);
   }
 
 private:
-  explicit TaskCostCollector(const ConstrSet &outer_ctx) {
+  TaskCostCollector(const Stmt &body, const ConstrSet &outer_ctx)
+      : estimator_(Hf32ModeAnalyzer::Analyze(body)) {
     constr_stack_ = outer_ctx.constrs_;
   }
 

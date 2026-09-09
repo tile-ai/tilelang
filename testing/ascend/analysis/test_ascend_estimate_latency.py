@@ -426,7 +426,7 @@ def test_aiv_mte_large_hbm_uses_full_occupancy_ii():
 def test_aiv_mte_small_copy_keeps_descriptor_floor_ii():
     estimated = _estimate_copy_metadata(_make_mixed_aiv_copy_program(1, 64))
 
-    assert estimated == [(93, 2), (183, 2)]
+    assert estimated == [(93, 13), (183, 10)]
 
 
 def test_cthread_symbolic_stride_uses_conservative_unknown_split():
@@ -438,7 +438,7 @@ def test_cthread_symbolic_stride_uses_conservative_unknown_split():
 def test_aiv_mte_high_dim_copy_uses_actual_mte_row_axis():
     estimated = _estimate_copy_metadata(_make_high_dim_strided_copy_program())
 
-    assert estimated == [(86, 11), (190, 10)]
+    assert estimated == [(86, 13), (190, 10)]
 
 
 def test_rank_one_dual_copy_keeps_geometry_across_rewrite():
@@ -492,13 +492,13 @@ def test_updated_non_aiv_copy_costs_match_full_path_remeasurement():
     assert _estimate_copy_metadata(_make_gm_to_l1_program(16)) == [(196, 64)]
     assert _estimate_copy_metadata(_make_gm_to_l1_program(128)) == [(518, 328)]
     assert _estimate_copy_metadata(_make_two_small_gm_to_l1_copies_program()) == [(260, 128)]
-    assert _estimate_copy_metadata(_make_l0c_copy_program("ub", "float32")) == [(570, 512)]
-    assert _estimate_copy_metadata(_make_l0c_copy_program("gm", "float32")) == [(712, 512)]
+    assert _estimate_copy_metadata(_make_l0c_copy_program("ub", "float32")) == [(570, 514)]
+    assert _estimate_copy_metadata(_make_l0c_copy_program("gm", "float32")) == [(712, 514)]
 
 
 def test_fixpipe_quant_cost_uses_destination_payload_bytes():
-    assert _estimate_copy_metadata(_make_l0c_copy_program("ub", "bfloat16")) == [(314, 256)]
-    assert _estimate_copy_metadata(_make_l0c_copy_program("gm", "bfloat16")) == [(456, 256)]
+    assert _estimate_copy_metadata(_make_l0c_copy_program("ub", "bfloat16")) == [(314, 258)]
+    assert _estimate_copy_metadata(_make_l0c_copy_program("gm", "bfloat16")) == [(456, 258)]
 
 
 @pytest.mark.parametrize("split_n", [False, True])

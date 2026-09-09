@@ -155,12 +155,15 @@ def _make_multi_owner_counter_channel_program():
 
     @T.macro
     def protocol(A, C, ub, offset, row):
-        T.copy(A[offset : offset + tile], ub[row, :])
-        with T.SimdVF():
-            mask = T.simd.pset(32)
-            value = T.simd.vld(ub[row, 0])
-            T.simd.vsts(ub[row, 0], value, mask)
-        T.copy(ub[row, :], C[offset : offset + tile])
+        # Preserve the same row order on MTE2 and MTE3 so both counter
+        # channels survive sync-edge pruning, independently of task costs.
+        with T.Stage(0):
+            T.copy(A[offset : offset + tile], ub[row, :])
+            with T.SimdVF():
+                mask = T.simd.pset(32)
+                value = T.simd.vld(ub[row, 0])
+                T.simd.vsts(ub[row, 0], value, mask)
+            T.copy(ub[row, :], C[offset : offset + tile])
 
     @T.prim_func
     def main(
