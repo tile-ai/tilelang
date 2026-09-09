@@ -5,6 +5,8 @@ from tilelang.utils.tensor import torch_assert_close
 import tilelang.testing
 import torch
 import tilelang.language as T
+from tilelang import tvm
+from tilelang.layout.gemm_sp import make_cutlass_metadata_layout_sm8x
 
 
 def matmul(
@@ -755,6 +757,22 @@ def test_gemm_rr(
 )
 def test_compress_dtype_combinations(in_dtype, out_dtype, dtypeAccum, meta_dtype):
     run_gemm_ss(128, 128, 128, False, True, in_dtype, out_dtype, dtypeAccum, 128, 128, 64, 2, 128, meta_dtype=meta_dtype)
+
+
+def test_make_cutlass_metadata_layout_sm8x_rejects_bad_shapes():
+    with pytest.raises(ValueError, match="multiple of"):
+        make_cutlass_metadata_layout_sm8x(tvm.tirx.decl_buffer((48, 4), T.int16), mma_dtype=T.float16)  # 48 % 32 != 0
+
+    with pytest.raises(ValueError, match="even"):
+        make_cutlass_metadata_layout_sm8x(tvm.tirx.decl_buffer((64, 3), T.int16), mma_dtype=T.float16)  # odd K
+
+    with pytest.raises(ValueError, match="multiple of"):
+        make_cutlass_metadata_layout_sm8x(tvm.tirx.decl_buffer((40, 4), T.int32), mma_dtype=T.int8)  # 40 % 16 != 0
+
+
+def test_make_cutlass_metadata_layout_sm8x_accepts_valid_shapes():
+    make_cutlass_metadata_layout_sm8x(tvm.tirx.decl_buffer((64, 4), T.int16), mma_dtype=T.float16)
+    make_cutlass_metadata_layout_sm8x(tvm.tirx.decl_buffer((48, 4), T.int32), mma_dtype=T.int8)
 
 
 if __name__ == "__main__":
