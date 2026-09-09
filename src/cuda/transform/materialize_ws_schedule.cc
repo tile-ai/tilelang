@@ -100,6 +100,7 @@ namespace tl {
 
 using namespace tirx;
 using namespace ffi;
+using namespace cuda;
 
 namespace {
 

@@ -63,6 +63,7 @@
 
 namespace tvm {
 namespace tl {
+namespace cuda {
 
 using namespace tirx;
 using namespace ffi;
@@ -332,8 +333,8 @@ private:
     if (!ok_)
       return;
     if (op->else_case.defined()) {
-      LOG(WARNING)
-          << "AutoSchedule skipped: if-else branches are not supported";
+      LOG(WARNING) << "AutoWarpSpecialization skipped: if-else branches are "
+                      "not supported";
       ok_ = false;
       return;
     }
@@ -346,8 +347,8 @@ private:
     if (!ok_)
       return;
     auto id = op->annotations.Get(kWSOpIdKey);
-    ICHECK(id.has_value()) << "AutoSchedule normalized loop is missing "
-                           << kWSOpIdKey;
+    ICHECK(id.has_value())
+        << "AutoWarpSpecialization normalized loop is missing " << kWSOpIdKey;
     // Sequential loops are scopes; parallel / vectorized loops are one op.
     if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled) {
       MakeOp(ExtractOpId(id.value()), GetRef<For>(op));
@@ -413,22 +414,22 @@ private:
         return;
       }
     }
-    LOG(FATAL) << "AutoSchedule: Evaluate carries no ws op id";
+    LOG(FATAL) << "AutoWarpSpecialization: Evaluate carries no ws op id";
   }
 
   // The normalizer wraps these statement forms with an id; reaching one
   // bare is its bug.
   void VisitStmt_(const BufferStoreNode *op) final {
-    LOG(FATAL) << "AutoSchedule: BufferStore carries no ws op id";
+    LOG(FATAL) << "AutoWarpSpecialization: BufferStore carries no ws op id";
   }
   void VisitStmt_(const BindNode *op) final {
-    LOG(FATAL) << "AutoSchedule: Bind carries no ws op id";
+    LOG(FATAL) << "AutoWarpSpecialization: Bind carries no ws op id";
   }
   void VisitStmt_(const WhileNode *op) final {
-    LOG(FATAL) << "AutoSchedule: while loop carries no ws op id";
+    LOG(FATAL) << "AutoWarpSpecialization: while loop carries no ws op id";
   }
   void VisitStmt_(const SBlockNode *op) final {
-    LOG(FATAL) << "AutoSchedule: block carries no ws op id";
+    LOG(FATAL) << "AutoWarpSpecialization: block carries no ws op id";
   }
 
   Target target_;
@@ -439,8 +440,8 @@ private:
 };
 
 // Plans the schedule for one normalized kernel body. Every unsupported
-// shape declines with a warning: auto scheduling is opt-in, so the user
-// expects it to fire.
+// shape declines with a warning: auto warp specialization is opt-in, so the
+// user expects it to fire.
 class RoleBasedScheduler {
 public:
   RoleBasedScheduler(Target target, int worker_threads)
@@ -448,12 +449,14 @@ public:
 
   Optional<WSSchedule> Run(const SBlock &block, const Stmt &body) {
     if (!TargetHasBulkCopy(target_)) {
-      LOG(WARNING) << "AutoSchedule skipped: target has no bulk-copy (TMA) "
-                      "support";
+      LOG(WARNING)
+          << "AutoWarpSpecialization skipped: target has no bulk-copy (TMA) "
+             "support";
       return std::nullopt;
     }
     if (worker_threads_ % 128 != 0) {
-      LOG(WARNING) << "AutoSchedule skipped: worker threads must be a multiple "
+      LOG(WARNING) << "AutoWarpSpecialization skipped: worker threads must be "
+                      "a multiple "
                       "of 128 so issuer warps start a fresh warpgroup";
       return std::nullopt;
     }
@@ -473,8 +476,9 @@ public:
     if (!BuildPipelines(block))
       return std::nullopt;
     if (pipelines_.empty()) {
-      LOG(WARNING) << "AutoSchedule skipped: no cross-role on-chip handoff to "
-                      "pipeline";
+      LOG(WARNING)
+          << "AutoWarpSpecialization skipped: no cross-role on-chip handoff to "
+             "pipeline";
       return std::nullopt;
     }
     return Emit();
@@ -522,7 +526,7 @@ private:
           if (auto mask = copy->annotations.Get("cluster_mask")) {
             if (const auto *imm = mask.value().as<IntImmNode>();
                 imm == nullptr || imm->value != 0) {
-              LOG(WARNING) << "AutoSchedule skipped: op '" << op.id
+              LOG(WARNING) << "AutoWarpSpecialization skipped: op '" << op.id
                            << "' is a cluster multicast copy";
               return false;
             }
@@ -539,7 +543,7 @@ private:
         continue;
       case TileStmtKind::kCpAsyncRaw:
         // Raw cp.async carries its own thread-local completion protocol.
-        LOG(WARNING) << "AutoSchedule skipped: op '" << op.id
+        LOG(WARNING) << "AutoWarpSpecialization skipped: op '" << op.id
                      << "': raw cp.async statements carry their own "
                         "thread-local completion protocol";
         return false;
@@ -565,7 +569,7 @@ private:
         // release right after the gemm would race with them.
         if (auto gemm = GetGemmInfo(op.tile_op)) {
           if (gemm->wg_wait != 0) {
-            LOG(WARNING) << "AutoSchedule skipped: op '" << op.id
+            LOG(WARNING) << "AutoWarpSpecialization skipped: op '" << op.id
                          << "': gemm with wg_wait != 0 completes "
                             "asynchronously; delayed wgmma waits are not "
                             "supported yet";
@@ -619,9 +623,9 @@ private:
         if (def->roles.Contains(role))
           return true;
         if (!def->roleless) {
-          LOG(WARNING) << "AutoSchedule skipped: '" << user << "' needs op '"
-                       << def->id << "' in role " << RoleName(role)
-                       << ", but that op is fixed to role "
+          LOG(WARNING) << "AutoWarpSpecialization skipped: '" << user
+                       << "' needs op '" << def->id << "' in role "
+                       << RoleName(role) << ", but that op is fixed to role "
                        << RoleName(RoleOf(*def));
           return false;
         }
@@ -684,7 +688,8 @@ private:
     for (const auto &op : ops_)
       active.Add(op->roles);
     if (active.Empty()) {
-      LOG(WARNING) << "AutoSchedule skipped: kernel has no schedulable work";
+      LOG(WARNING)
+          << "AutoWarpSpecialization skipped: kernel has no schedulable work";
       return false;
     }
     std::vector<SchedOp *> leftovers;
@@ -797,7 +802,7 @@ private:
           two_roles = two_roles && (role == producer || role == consumer);
       }
       if (!two_roles) {
-        LOG(WARNING) << "AutoSchedule skipped: storage '"
+        LOG(WARNING) << "AutoWarpSpecialization skipped: storage '"
                      << resolution.allocation->name
                      << "' is handed between more than two roles in scope '"
                      << scope.id << "'";
@@ -879,7 +884,7 @@ private:
         ok = false;
       }
       if (!ok) {
-        LOG(WARNING) << "AutoSchedule skipped: storage '"
+        LOG(WARNING) << "AutoWarpSpecialization skipped: storage '"
                      << resolution.allocation->name << "' in scope '"
                      << scope.id << "': " << reason;
         resolution.failed = true;
@@ -934,7 +939,8 @@ private:
     // Under versioning, a guard-skipped write would expose the slot from
     // `depth` iterations ago instead of the previous value.
     if (guarded_writer && pipeline->depth > 1) {
-      LOG(WARNING) << "AutoSchedule skipped: storage '" << pipeline->name
+      LOG(WARNING) << "AutoWarpSpecialization skipped: storage '"
+                   << pipeline->name
                    << "' is written under a guard and would be "
                    << pipeline->depth
                    << "-way versioned; a skipped write would expose a "
@@ -976,7 +982,7 @@ private:
         for (const SchedOp *op : buffer_uses_[buffer->data].touches)
           others.Add(op->roles);
         if (!writer->roles.ContainsAll(others)) {
-          LOG(WARNING) << "AutoSchedule skipped: global buffer '"
+          LOG(WARNING) << "AutoWarpSpecialization skipped: global buffer '"
                        << buffer->name << "' is written by op '" << writer->id
                        << "' and touched by another role";
           return false;
@@ -1161,7 +1167,7 @@ private:
     int max_threads = static_cast<int>(
         target_->GetAttr<Integer>("max_num_threads").value_or(1024)->value);
     if (num_warps * 32 > max_threads) {
-      LOG(WARNING) << "AutoSchedule skipped: " << num_warps
+      LOG(WARNING) << "AutoWarpSpecialization skipped: " << num_warps
                    << " warps exceed the target's " << max_threads
                    << "-thread block limit";
       return std::nullopt;
@@ -1257,5 +1263,6 @@ ffi::Optional<WSSchedule> RoleBasedSchedule(const SBlock &block,
   return RoleBasedScheduler(target, worker_threads).Run(block, body);
 }
 
+} // namespace cuda
 } // namespace tl
 } // namespace tvm

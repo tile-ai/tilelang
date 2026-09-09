@@ -1,6 +1,7 @@
 /*!
  * \file common.h
- * \brief Shared declarations of the AutoSchedule entrypoint and schedulers.
+ * \brief Shared declarations of the AutoWarpSpecialization entrypoint and
+ * schedulers.
  *
  * A scheduler receives one eligible kernel — the root block and its body
  * normalized so every schedulable statement carries a "tl.ws_op_id" marker —
@@ -19,6 +20,7 @@
 
 namespace tvm {
 namespace tl {
+namespace cuda {
 
 using SchedulerFn = ffi::Optional<WSSchedule> (*)(const tirx::SBlock &block,
                                                   const tirx::Stmt &body,
@@ -32,9 +34,10 @@ inline ffi::String ExtractOpId(const ffi::Any &value) {
     return string.value();
   if (const auto *imm = value.as<tirx::StringImmNode>())
     return imm->value;
-  TVM_FFI_THROW(ValueError) << "AutoSchedule op id must be a string";
+  TVM_FFI_THROW(ValueError) << "AutoWarpSpecialization op id must be a string";
   return "";
 }
 
+} // namespace cuda
 } // namespace tl
 } // namespace tvm
