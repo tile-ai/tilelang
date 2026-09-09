@@ -1,6 +1,13 @@
 """T.simd.* - Raw CCE vector intrinsics for Ascend SIMD programming.
 
 Function names match the underlying CCE intrinsics directly.
+
+MODE_MERGING preserves inactive lanes of the mutable destination register.
+On Ascend 950, validated 8/16/32-bit operations use the CCE merging overloads;
+``vdupv`` maps to CCE's vector ``vdup`` overload. Scalar BF16 ``vdup`` retains
+software merging to work around CANN 9.2's inactive-lane bug. Precision-specific
+SFU algorithms also retain their wrappers, including the default exact FP32
+division and the ``ftz_false`` variants of ``vexp``, ``vln``, and ``vsqrt``.
 """
 
 from tvm import tirx

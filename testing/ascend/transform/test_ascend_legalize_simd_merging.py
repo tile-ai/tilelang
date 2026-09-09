@@ -94,9 +94,44 @@ def test_legalize_simd_merging_marks_destination_read_write():
 def test_simd_merging_codegen_updates_existing_destination():
     source = lower(merging_assignment, target="ascend").kernel_source
 
-    assert "simd_inst::vadds(*((&(dst[0]))), src," in source
+    assert "::vadds(*((&(dst[0]))), src," in source
+    assert "simd_inst::vadds(" not in source
     assert "MODE_MERGING" in source
-    assert source.index("dst[0] = simd_inst::vlds") < source.index("simd_inst::vadds(*") < source.index("simd_inst::vsts")
+    assert source.index("dst[0] = simd_inst::vlds") < source.index("::vadds(*") < source.index("simd_inst::vsts")
+
+
+def _inplace_vadds(dtype, mode):
+    bits = tvm.DataType(dtype).bits
+    lanes = 2048 // bits
+
+    @T.prim_func
+    def kernel(A: T.Buffer((lanes,), dtype)):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((lanes,), dtype)
+            T.copy(A, a_ub)
+            with T.SimdVF():
+                mask = T.simd.pset(bits, "PAT_VL8")
+                full = T.simd.pset(bits)
+                acc = T.simd.alloc_local((1,), dtype)
+                acc[0] = T.simd.vld(a_ub[0])
+                acc[0] = T.simd.vadds(acc[0], T.cast(1, dtype), mask, mode=mode)
+                T.simd.vsts(a_ub[0], acc[0], full)
+            T.copy(a_ub, A)
+
+    return kernel
+
+
+@pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int8", "uint8", "int16", "uint16", "int32", "uint32"])
+@pytest.mark.parametrize("mode", ["MODE_MERGING", "MODE_ZEROING"])
+def test_simd_vadds_inplace_codegen(dtype, mode):
+    source = lower(_inplace_vadds(dtype, mode), target="ascend").kernel_source
+
+    assert mode in source
+    if mode == "MODE_MERGING":
+        assert "::vadds(*((&(acc[0]))), acc[0]," in source
+        assert "simd_inst::vadds(" not in source
+    else:
+        assert "acc[0] = simd_inst::vadds(acc[0]," in source
 
 
 def test_simd_merging_requires_mutable_destination():

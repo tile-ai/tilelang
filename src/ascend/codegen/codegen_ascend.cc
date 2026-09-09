@@ -76,6 +76,45 @@ bool IsSimdMergingCall(const CallNode *op,
   return true;
 }
 
+// CCE merging overloads validated on dav-3510. Keep the existing C API path
+// for other element types, including FP8 and 64-bit vector representations.
+bool SupportsNativeSimdMerging(const std::string &name, DataType dtype) {
+  const bool is_integer =
+      (dtype.is_int() || dtype.is_uint()) &&
+      (dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32);
+  const bool is_float =
+      dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32);
+  if (!is_integer && !is_float && !dtype.is_bfloat16()) {
+    return false;
+  }
+  if (name == "vdup") {
+    // CANN 9.2's scalar BF16 overload merges into an uninitialized temporary
+    // instead of the old destination. Vector broadcast uses a different
+    // overload.
+    return !dtype.is_bfloat16();
+  }
+  if (name == "vabs" || name == "vneg") {
+    return (is_integer && dtype.is_int()) || is_float;
+  }
+  if (name == "vabsdif" || name == "vexp" || name == "vln" || name == "vsqrt" ||
+      name == "vaxpy") {
+    return is_float;
+  }
+  if (name == "vrelu") {
+    return is_float || (dtype.is_int() && dtype.bits() == 32);
+  }
+  if (name == "vshl" || name == "vshr" || name == "vshls" || name == "vshrs") {
+    return is_integer;
+  }
+  if (name == "vdiv" || name == "vcadd" || name == "vcmax" || name == "vcmin") {
+    return (is_integer && dtype.bits() >= 16) || is_float;
+  }
+  if (name == "vmul" || name == "vmuls") {
+    return !is_integer || dtype.bits() >= 16;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Per-op SFU precision resolution.
 //
@@ -1220,20 +1259,32 @@ bool CodeGenTileLangAscend::EmitSimdMergingCall(const CallNode *op,
          "and mode";
   ICHECK(op->args[0].dtype().is_handle())
       << "Legalized MODE_MERGING destination must be a pointer";
-  const std::string resolved_name =
+  std::string resolved_name =
       ResolveSimdIntrinsicName_(GetRef<Call>(op), op->args[1].dtype());
+  DataType dtype = op->args[1].dtype();
+  if (intrinsic_name == "vdup") {
+    // Scalar broadcast overloads are selected by the destination vector type.
+    const auto *destination = op->args[0].as<CallNode>();
+    ICHECK(destination &&
+           destination->op.same_as(tirx::builtin::address_of()) &&
+           destination->args.size() == 1);
+    dtype = destination->args[0].dtype();
+  }
 
-  // Ascend intrinsics do not support MODE_MERGING. Implement it in software.
-  // Resolve MergingMode issues at the operator level whenever possible.
-  // Concatenating software instructions within the API will degrade VF
-  // performance.
-  static const std::unordered_set<std::string> kCapiSoftwareMergingOps = {
+  // Use CCE merging for the validated overloads of these C API wrappers.
+  // Explicit zeroing + select can cause predicate spills in masked updates.
+  // Precision-specific SFU algorithms retain their software merging wrappers.
+  static const std::unordered_set<std::string> kCapiMergingOps = {
       "vadd",  "vsub",  "vmul",  "vdiv",  "vabsdif", "vmax",  "vmin",  "vand",
       "vor",   "vxor",  "vshl",  "vshr",  "vln",     "vsqrt", "vabs",  "vneg",
-      "vrelu", "vnot",  "vexp",  "vdup",  "vdupv",   "vadds", "vmaxs", "vmins",
-      "vmuls", "vshls", "vshrs", "vaxpy", "vcadd",   "vcmax", "vcmin"};
+      "vrelu", "vnot",  "vexp",  "vdup",  "vdupv",   "vmaxs", "vmins", "vmuls",
+      "vshls", "vshrs", "vaxpy", "vcadd", "vcmax",   "vcmin"};
   const bool use_wrapper = resolved_name != intrinsic_name ||
-                           kCapiSoftwareMergingOps.count(intrinsic_name);
+                           (kCapiMergingOps.count(intrinsic_name) &&
+                            !SupportsNativeSimdMerging(intrinsic_name, dtype));
+  if (!use_wrapper && intrinsic_name == "vdupv") {
+    resolved_name = "vdup";
+  }
   os << (use_wrapper ? "simd_inst::" : "::") << resolved_name << "(*(";
   PrintExpr(op->args[0], os);
   os << ")";
