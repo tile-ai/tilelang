@@ -405,6 +405,7 @@ SBlock EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
   annotations.erase(kBufferVersionMode);
   annotations.erase(kUnlimitMemoryScopes);
   annotations.erase(kVectorCount);
+  annotations.erase(kRootConflictHints);
   if (!scheduled_tir.metadata.buffer_versions.empty()) {
     annotations.Set(kBufferVersionsMap,
                     std::move(scheduled_tir.metadata.buffer_versions));
@@ -424,6 +425,10 @@ SBlock EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
   if (scheduled_tir.metadata.num_aiv_subcores.has_value()) {
     annotations.Set(kVectorCount,
                     Integer(scheduled_tir.metadata.num_aiv_subcores.value()));
+  }
+  if (!scheduled_tir.metadata.root_conflict_hints.empty()) {
+    annotations.Set(kRootConflictHints,
+                    std::move(scheduled_tir.metadata.root_conflict_hints));
   }
   node->annotations = std::move(annotations);
   return rewritten;
@@ -462,6 +467,10 @@ ScheduledTIR DecodeScheduledTIR(const SBlock &root, const ConstrSet &outer_ctx,
         << "Mixed-kernel vector_count must be the constant integer 1 or 2, got "
         << value.value();
     scheduled_tir.metadata.num_aiv_subcores = static_cast<int>(count->value);
+  }
+  if (auto value = root->annotations.Get(kRootConflictHints)) {
+    scheduled_tir.metadata.root_conflict_hints =
+        value.value().cast<Array<Any>>();
   }
   return scheduled_tir;
 }

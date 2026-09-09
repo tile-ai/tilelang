@@ -24,9 +24,11 @@
 
 #pragma once
 
+#include <tvm/ffi/container/array.h>
+#include <tvm/ffi/optional.h>
+
 #include <map>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -39,23 +41,21 @@ namespace tl {
 using namespace tirx;
 
 using DependencyTaskPair = std::pair<TaskNode *, TaskNode *>;
-using StorageSet =
-    std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
 struct DepInfo {
   IRStructure *prod_node;
   IRStructure *cons_node;
   // Storage identity shared by every Buffer alias participating in this
-  // dependency.
-  Var storage;
+  // dependency. Undefined for an explicit conflict between distinct storage
+  // keys; those edges do not participate in buffer versioning.
+  ffi::Optional<Var> storage;
   // Conflicting (producer access, consumer access) pairs. Each pair is a
   // concrete producer→consumer ordering that needs a sync.
   std::vector<DependencyTaskPair> task_pairs;
   // Cross-iteration distance of this dependency:
   //   0   : same-iteration dependency.
-  //   -1  : unresolved cross-iteration dependency on an auto-versioned
-  //         buffer. InsertSync resolves it to the full ring width at the owner
-  //         loop, or to one local iteration in a descendant loop.
+  //   -1  : unresolved cross-iteration dependency. A versioned storage may
+  //         resolve it to its ring width; otherwise it means one iteration.
   //   >=1 : dependency on a manually multi-buffered buffer, at the physical
   //         iteration distance solved per access pair.
   int distance;
@@ -64,6 +64,11 @@ struct DepInfo {
 // Per-phase dependency-analysis cache. A ControlNode key represents the
 // dependency result for its ordered child list at that phase.
 using DependencyCache = std::map<ControlNode *, std::vector<DepInfo>>;
+
+// Conflict-hint entries. Each entry is
+// [operand_a, operand_b, IntImm(cross_code), Bool(is_conflict)]. Kernel-root
+// entries apply only while analyzing the outermost sequence.
+using ConflictHintList = ffi::Array<ffi::Any>;
 
 // Analyze data dependencies among scheduled TaskNode/ControlNode nodes. A loop
 // child list is copied and stable-sorted by stage before dependency directions
@@ -86,7 +91,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
                     ControlNode *loop = nullptr,
                     const BufferVersionMap &manual_buffer_versions = {},
                     const MultiBufferOwnerMap &multi_buffer_owners = {},
-                    DependencyCache *dependency_cache = nullptr);
+                    DependencyCache *dependency_cache = nullptr,
+                    const ConflictHintList &root_conflicts = {});
 
 // Check whether two task regions may overlap under their respective symbolic
 // contexts. `offset == 0` compares accesses in the same iteration. A positive
@@ -102,7 +108,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
 bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
                         const ConstrSet &b_ctx, const BufferRegion &b_region,
                         ControlNode *loop, int offset,
-                        size_t num_storage_owners = 0);
+                        size_t num_storage_owners = 0,
+                        const ConflictHintList &root_conflicts = {});
 
 } // namespace tl
 } // namespace tvm

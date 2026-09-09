@@ -198,6 +198,11 @@ public:
     dependency_cache_.clear();
   }
 
+  void SetRootConflictHints(ConflictHintList root_conflict_hints) {
+    root_conflict_hints_ = std::move(root_conflict_hints);
+    dependency_cache_.clear();
+  }
+
   const BufferVersionMap &GetSelectedBufferVersions() const {
     return selected_buffer_versions_;
   }
@@ -251,6 +256,7 @@ private:
   BufferVersionMap buffer_version_overrides_;
   BufferVersionMap manual_buffer_versions_;
   MultiBufferOwnerMap multi_buffer_owners_;
+  ConflictHintList root_conflict_hints_;
   DependencyCache dependency_cache_;
   BufferVersionMap selected_buffer_versions_;
 };
@@ -522,9 +528,9 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
     }
 
     // Buffer-region data dependencies
-    auto deps =
-        AnalyzeDependencies(nodes, /*loop=*/nullptr, manual_buffer_versions_,
-                            multi_buffer_owners_, &dependency_cache_);
+    auto deps = AnalyzeDependencies(
+        nodes, /*loop=*/nullptr, manual_buffer_versions_, multi_buffer_owners_,
+        &dependency_cache_, root_conflict_hints_);
     std::unordered_map<IRStructure *, size_t> node_idx;
     for (size_t i = 0; i < n; ++i) {
       node_idx[nodes[i]] = i;
@@ -888,7 +894,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
 
   // Buffer-region data dependencies
   auto deps = AnalyzeDependencies(nodes, ctrl, manual_buffer_versions_,
-                                  multi_buffer_owners_, &dependency_cache_);
+                                  multi_buffer_owners_, &dependency_cache_,
+                                  root_conflict_hints_);
   std::unordered_map<IRStructure *, size_t> node_idx;
   for (size_t i = 0; i < n; ++i) {
     node_idx[nodes[i]] = i;
@@ -900,16 +907,19 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     if (dep.distance >= 0) {
       data_deps.emplace_back(i, j, dep.distance, latency);
     } else {
-      auto it = storage_version_id.find(dep.storage);
       int64_t distance = 1;
-      if (it != storage_version_id.end()) {
-        // Encode the storage-version id in the negative distance for the Z3
-        // scheduler to recognize.
-        distance = -(int64_t)it->second - 1;
-      } else {
-        auto ann_it = annotated_storage_versions.find(dep.storage);
-        if (ann_it != annotated_storage_versions.end()) {
-          distance = ann_it->second;
+      if (dep.storage.has_value()) {
+        Var storage = dep.storage.value();
+        auto it = storage_version_id.find(storage);
+        if (it != storage_version_id.end()) {
+          // Encode the storage-version id in the negative distance for the Z3
+          // scheduler to recognize.
+          distance = -(int64_t)it->second - 1;
+        } else {
+          auto ann_it = annotated_storage_versions.find(storage);
+          if (ann_it != annotated_storage_versions.end()) {
+            distance = ann_it->second;
+          }
         }
       }
       data_deps.emplace_back(i, j, distance, latency);
@@ -1269,8 +1279,10 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   }
   unit_builder.SetBufferVersionOverrides(metadata.buffer_versions);
   unit_builder.SetManualBufferVersions(metadata.manual_buffer_versions);
+  unit_builder.SetRootConflictHints(metadata.root_conflict_hints);
   unit_builder.ScheduleList(ir_structure);
 
+  metadata.unlimit_memory_scopes = {};
   metadata.buffer_versions = unit_builder.GetSelectedBufferVersions();
 }
 } // namespace

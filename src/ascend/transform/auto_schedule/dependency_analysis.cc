@@ -26,10 +26,9 @@
 
 #include <algorithm>
 #include <functional>
-#include <limits>
+#include <iterator>
 #include <set>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -48,88 +47,37 @@ namespace tl {
 
 using namespace tirx;
 
+// An undefined storage key groups explicit conflicts between distinct storage.
 using CoveredDependencyMap =
-    std::unordered_map<Var, std::set<DependencyTaskPair>, ffi::ObjectPtrHash,
-                       ffi::ObjectPtrEqual>;
+    std::unordered_map<ffi::Optional<Var>, std::set<DependencyTaskPair>,
+                       ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
-inline bool RegionUsesStorage(const BufferRegion &region, const Var &storage) {
-  return region->buffer->data.same_as(storage);
+// A bare buffer hint matches every region using its storage. A region hint
+// matches only the same logical buffer and exact footprint.
+static bool HintOperandMatches(const Any &hint, const BufferRegion &query) {
+  if (auto var = hint.as<Var>())
+    return var.value().same_as(query->buffer->data);
+  BufferRegion hint_region = Downcast<BufferRegion>(hint);
+  return hint_region->buffer.same_as(query->buffer) &&
+         RegionsEqual(hint_region->region, query->region);
 }
 
-bool TaskAccessesStorage(TaskNode *task, const Var &storage, bool is_write) {
-  const auto &regions =
-      is_write ? task->GetWriteRegions() : task->GetReadRegions();
-  return std::any_of(regions.begin(), regions.end(), [&](const auto &region) {
-    return RegionUsesStorage(region, storage);
-  });
-}
-
-std::vector<BufferRegion>
-TaskRegionsForStorage(TaskNode *task, const Var &storage, bool is_write) {
-  std::vector<BufferRegion> result;
-  const auto &regions =
-      is_write ? task->GetWriteRegions() : task->GetReadRegions();
-  for (const auto &region : regions) {
-    if (RegionUsesStorage(region, storage)) {
-      result.push_back(region);
-    }
-  }
-  return result;
-}
-
-// Collect every leaf task touching `storage`. Dependency consumers can recover
-// paths and schedule-local timestamps from the task's parent chain.
-std::vector<TaskNode *> CollectAccessTasks(IRStructure *node,
-                                           const Var &storage, bool is_write) {
-  std::vector<TaskNode *> result;
-  CollectAllTaskNodes(node, result);
-  result.erase(std::remove_if(result.begin(), result.end(),
-                              [&](auto *task) {
-                                return !TaskAccessesStorage(task, storage,
-                                                            is_write);
-                              }),
-               result.end());
-  return result;
-}
-
-// Check user `T.assume_no_conflict` hints carried on the current (innermost)
-// loop's `no_conflict` annotation. Each entry is a triple
-// [a, b, IntImm(cross_code)] with cross_code -1=any / 1=cross / 0=same, where a
-// and b are each a bare buffer's data Var (whole buffer, matched by storage
-// key) or a concrete BufferRegion (matched by region equality). A hint matches
-// when its two operands match the two queried regions (order-insensitive, since
-// non-overlap is symmetric) and the cross mode agrees.
-static bool DeclaredNoConflict(const BufferRegion &a_region,
-                               const BufferRegion &b_region, ControlNode *loop,
-                               bool cross) {
+static ConflictHintList
+ActiveConflictHints(ControlNode *loop, const ConflictHintList &root_hints) {
   if (loop == nullptr)
-    return false;
-  auto ann = loop->control->annotations.Get("no_conflict");
-  if (!ann.has_value())
-    return false;
+    return root_hints;
+  auto ann = loop->control->annotations.Get("conflict_hint");
+  return ann.has_value() ? ann.value().cast<ConflictHintList>()
+                         : ConflictHintList{};
+}
 
-  // A hint operand matches a queried region: a bare buffer's data Var matches
-  // any region of the same storage; a BufferRegion must match the same buffer
-  // and region.
-  auto operand_matches = [](const Any &hint, const BufferRegion &q) {
-    if (auto var = hint.as<Var>())
-      return var.value().same_as(q->buffer->data);
-    auto hr = Downcast<BufferRegion>(hint);
-    return hr->buffer.same_as(q->buffer) && RegionsEqual(hr->region, q->region);
-  };
-
-  for (const auto &entry : Downcast<Array<Any>>(ann.value())) {
-    auto triple = Downcast<Array<Any>>(entry);
-    const Any &ha = triple[0];
-    const Any &hb = triple[1];
-    int64_t cross_code = Downcast<IntImm>(triple[2])->value;
-    if (cross_code != -1 && (cross_code == 1) != cross)
-      continue;
-    if ((operand_matches(ha, a_region) && operand_matches(hb, b_region)) ||
-        (operand_matches(ha, b_region) && operand_matches(hb, a_region)))
-      return true;
-  }
-  return false;
+static bool IsConflictHint(const Array<Any> &hint) {
+  ICHECK_EQ(hint.size(), 4u)
+      << "conflict_hint annotation expects 4-element entries";
+  const auto *is_conflict = hint[3].as<IntImmNode>();
+  ICHECK(is_conflict != nullptr && is_conflict->dtype.is_bool())
+      << "conflict_hint annotation expects a constant boolean polarity";
+  return is_conflict->value;
 }
 
 // Return the suffix of the enclosing loop nest that forms one storage-local
@@ -166,7 +114,33 @@ std::vector<const ControlNode *> StorageIterationNest(ControlNode *loop,
 bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
                         const ConstrSet &b_ctx, const BufferRegion &b_region,
                         ControlNode *loop, int offset,
-                        size_t num_storage_owners) {
+                        size_t num_storage_owners,
+                        const ConflictHintList &root_conflicts) {
+  const bool cross = offset != 0;
+  if (cross && loop == nullptr)
+    return false;
+
+  bool declared_no_conflict = false;
+  for (const Any &entry : ActiveConflictHints(loop, root_conflicts)) {
+    Array<Any> hint = Downcast<Array<Any>>(entry);
+    bool is_conflict = IsConflictHint(hint);
+    int64_t cross_code = Downcast<IntImm>(hint[2])->value;
+    if (cross_code != -1 && (cross_code == 1) != cross)
+      continue;
+    bool matches = (HintOperandMatches(hint[0], a_region) &&
+                    HintOperandMatches(hint[1], b_region)) ||
+                   (HintOperandMatches(hint[0], b_region) &&
+                    HintOperandMatches(hint[1], a_region));
+    if (!matches)
+      continue;
+    if (is_conflict)
+      return true;
+    declared_no_conflict = true;
+  }
+  // A forced conflict wins if contradictory declarations match.
+  if (declared_no_conflict)
+    return false;
+
   if (!a_region->buffer->data.same_as(b_region->buffer->data))
     return false;
 
@@ -174,12 +148,6 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   // differ in rank/dtype/strides, so keep the dependency conservatively.
   if (!a_region->buffer.same_as(b_region->buffer))
     return true;
-
-  const bool cross = offset != 0;
-  if (cross && loop == nullptr)
-    return false;
-  if (DeclaredNoConflict(a_region, b_region, loop, cross))
-    return false;
 
   const Array<Range> &a_rng = a_region->region;
   const Array<Range> &b_rng = b_region->region;
@@ -251,7 +219,8 @@ std::vector<DepInfo>
 AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                     const BufferVersionMap &manual_buffer_versions,
                     const MultiBufferOwnerMap &multi_buffer_owners,
-                    DependencyCache *dependency_cache) {
+                    DependencyCache *dependency_cache,
+                    const ConflictHintList &root_conflicts) {
   DependencyCache local_cache;
   DependencyCache &cache = dependency_cache ? *dependency_cache : local_cache;
   if (loop) {
@@ -267,18 +236,23 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
   const size_t n = nodes.size();
   std::vector<DepInfo> deps;
 
-  std::vector<Var> storages;
-  StorageSet storages_seen;
-  auto add_storage = [&](const Var &storage) {
-    if (storages_seen.insert(storage).second)
-      storages.push_back(storage);
+  struct RegionAccess {
+    TaskNode *task;
+    BufferRegion region;
   };
+  struct NodeAccesses {
+    std::vector<RegionAccess> reads;
+    std::vector<RegionAccess> writes;
+  };
+  std::vector<NodeAccesses> accesses(n);
   for (size_t i = 0; i < n; ++i) {
-    for (const auto &region : nodes[i]->GetReadRegions()) {
-      add_storage(region->buffer->data);
-    }
-    for (const auto &region : nodes[i]->GetWriteRegions()) {
-      add_storage(region->buffer->data);
+    std::vector<TaskNode *> tasks;
+    CollectAllTaskNodes(nodes[i], tasks);
+    for (TaskNode *task : tasks) {
+      for (const BufferRegion &region : task->GetReadRegions())
+        accesses[i].reads.push_back({task, region});
+      for (const BufferRegion &region : task->GetWriteRegions())
+        accesses[i].writes.push_back({task, region});
     }
   }
 
@@ -292,11 +266,10 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
           children.push_back(child.get());
         auto child_deps =
             AnalyzeDependencies(children, ctrl, manual_buffer_versions,
-                                multi_buffer_owners, &cache);
+                                multi_buffer_owners, &cache, root_conflicts);
         for (const auto &cdep : child_deps) {
           auto &covered_pairs = out[cdep.storage];
-          for (const auto &[cprod, ccons] : cdep.task_pairs)
-            covered_pairs.emplace(cprod, ccons);
+          covered_pairs.insert(cdep.task_pairs.begin(), cdep.task_pairs.end());
         }
         for (auto *child : children)
           collect_subtree_deps(child, out);
@@ -307,113 +280,112 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     return covered;
   };
 
-  for (const Var &storage : storages) {
-    auto it = manual_buffer_versions.find(storage);
-    int manual_versions = it == manual_buffer_versions.end() ? 0 : (*it).second;
-    size_t num_storage_owners = 0;
-    if (loop != nullptr) {
-      if (auto owners = multi_buffer_owners.find(storage);
-          owners != multi_buffer_owners.end() &&
-          std::find(owners->second.begin(), owners->second.end(), loop) !=
-              owners->second.end()) {
-        num_storage_owners = owners->second.size();
-      }
+  auto get_manual_versions = [&](const ffi::Optional<Var> &storage) {
+    if (!storage.has_value())
+      return 0;
+    auto it = manual_buffer_versions.find(storage.value());
+    return it == manual_buffer_versions.end() ? 0 : (*it).second;
+  };
+  auto get_num_storage_owners =
+      [&](const ffi::Optional<Var> &storage) -> size_t {
+    if (loop == nullptr || !storage.has_value())
+      return 0;
+    auto owners = multi_buffer_owners.find(storage.value());
+    if (owners == multi_buffer_owners.end() ||
+        std::find(owners->second.begin(), owners->second.end(), loop) ==
+            owners->second.end()) {
+      return 0;
     }
+    return owners->second.size();
+  };
 
-    struct AccessTasks {
-      std::vector<TaskNode *> reads;
-      std::vector<TaskNode *> writes;
-
-      bool TouchesStorage() const { return !reads.empty() || !writes.empty(); }
-    };
-    std::vector<AccessTasks> accesses(n);
-    for (size_t i = 0; i < n; ++i) {
-      accesses[i].reads = CollectAccessTasks(nodes[i], storage, false);
-      accesses[i].writes = CollectAccessTasks(nodes[i], storage, true);
-    }
-
-    for (size_t i = 0; i < n; ++i) {
-      if (!accesses[i].TouchesStorage())
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = 0; j < n; ++j) {
+      if (loop == nullptr && i >= j)
         continue;
-      for (size_t j = 0; j < n; ++j) {
-        if (i == j && loop == nullptr)
-          continue;
-        if (!accesses[j].TouchesStorage())
-          continue;
-        if (!manual_versions && loop == nullptr && i >= j)
-          continue;
+      struct PendingDependency {
+        ffi::Optional<Var> storage;
+        int distance;
+        std::set<DependencyTaskPair> task_pairs;
+      };
+      std::vector<PendingDependency> pending;
 
-        std::set<DependencyTaskPair> pairs;
-        int min_manual_dist = std::numeric_limits<int>::max();
+      auto add_pair = [&](const ffi::Optional<Var> &storage, int distance,
+                          TaskNode *producer, TaskNode *consumer) {
+        auto existing = std::find_if(
+            pending.begin(), pending.end(), [&](const PendingDependency &dep) {
+              return dep.storage.same_as(storage) && dep.distance == distance;
+            });
+        if (existing == pending.end()) {
+          pending.push_back({storage, distance, {}});
+          existing = std::prev(pending.end());
+        }
+        existing->task_pairs.emplace(producer, consumer);
+      };
 
-        auto consider = [&](const std::vector<TaskNode *> &a_tasks,
-                            bool a_write,
-                            const std::vector<TaskNode *> &b_tasks,
-                            bool b_write) {
-          for (TaskNode *a : a_tasks) {
-            std::vector<BufferRegion> a_regions =
-                TaskRegionsForStorage(a, storage, a_write);
-            for (TaskNode *b : b_tasks) {
-              std::vector<BufferRegion> b_regions =
-                  TaskRegionsForStorage(b, storage, b_write);
-              for (const auto &rA : a_regions) {
-                for (const auto &rB : b_regions) {
-                  if (manual_versions) {
-                    // Find the smallest distance d in [0, N] at which this
-                    // access pair collides.
-                    int dist = -1;
-                    for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
-                      if (RegionsMayConflict(a->outer_ctx, rA, b->outer_ctx, rB,
-                                             loop, d)) {
-                        dist = d;
-                        break;
-                      }
-                    }
-                    if (dist < 0)
-                      continue;
-                    min_manual_dist = std::min(min_manual_dist, dist);
-                  } else {
-                    if (!RegionsMayConflict(a->outer_ctx, rA, b->outer_ctx, rB,
-                                            loop, i >= j ? -1 : 0,
-                                            num_storage_owners)) {
-                      continue;
-                    }
-                  }
-                  pairs.emplace(a, b);
+      auto consider = [&](const std::vector<RegionAccess> &lhs_accesses,
+                          const std::vector<RegionAccess> &rhs_accesses) {
+        for (const RegionAccess &lhs : lhs_accesses) {
+          for (const RegionAccess &rhs : rhs_accesses) {
+            const Var &lhs_storage = lhs.region->buffer->data;
+            const Var &rhs_storage = rhs.region->buffer->data;
+            ffi::Optional<Var> storage;
+            if (lhs_storage.same_as(rhs_storage))
+              storage = lhs_storage;
+            int manual_versions = get_manual_versions(storage);
+            if (manual_versions) {
+              for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
+                if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
+                                       rhs.task->outer_ctx, rhs.region, loop, d,
+                                       /*num_storage_owners=*/0,
+                                       root_conflicts)) {
+                  add_pair(storage, d, lhs.task, rhs.task);
+                  break;
                 }
+              }
+              continue;
+            }
+            for (int distance : {0, -1}) {
+              if (distance == 0 && i >= j)
+                continue;
+              if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
+                                     rhs.task->outer_ctx, rhs.region, loop,
+                                     distance, get_num_storage_owners(storage),
+                                     root_conflicts)) {
+                add_pair(storage, distance, lhs.task, rhs.task);
+                break;
               }
             }
           }
-        };
-        consider(accesses[i].writes, /*a_write=*/true, accesses[j].reads,
-                 /*b_write=*/false);
-        consider(accesses[i].writes, /*a_write=*/true, accesses[j].writes,
-                 /*b_write=*/true);
-        consider(accesses[i].reads, /*a_write=*/false, accesses[j].writes,
-                 /*b_write=*/true);
+        }
+      };
+      consider(accesses[i].writes, accesses[j].reads);
+      consider(accesses[i].writes, accesses[j].writes);
+      consider(accesses[i].reads, accesses[j].writes);
 
-        // Self-dependency on a control node: drop pairs already covered by the
-        // node's own subtree.
-        if (i == j && nodes[i]->IsControl()) {
-          const auto &covered = subtree_covered(nodes[i]);
-          auto covered_storage = covered.find(storage);
-          for (auto it = pairs.begin(); it != pairs.end();) {
-            if (covered_storage != covered.end() &&
-                covered_storage->second.count(*it)) {
-              it = pairs.erase(it);
+      if (i == j && nodes[i]->IsControl()) {
+        CoveredDependencyMap covered = subtree_covered(nodes[i]);
+        for (PendingDependency &dep : pending) {
+          auto covered_it = covered.find(dep.storage);
+          if (covered_it == covered.end())
+            continue;
+          for (auto it = dep.task_pairs.begin(); it != dep.task_pairs.end();) {
+            if (covered_it->second.count(*it)) {
+              it = dep.task_pairs.erase(it);
             } else {
               ++it;
             }
           }
         }
+      }
 
-        if (!pairs.empty()) {
-          int distance = manual_versions ? min_manual_dist : (i >= j ? -1 : 0);
-          deps.push_back(
-              {nodes[i], nodes[j], storage,
-               std::vector<DependencyTaskPair>(pairs.begin(), pairs.end()),
-               distance});
-        }
+      for (PendingDependency &dep : pending) {
+        if (dep.task_pairs.empty())
+          continue;
+        deps.push_back({nodes[i], nodes[j], std::move(dep.storage),
+                        std::vector<DependencyTaskPair>(dep.task_pairs.begin(),
+                                                        dep.task_pairs.end()),
+                        dep.distance});
       }
     }
   }

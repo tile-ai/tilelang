@@ -39,9 +39,9 @@ def AnnotateMultiBufferEligible():
     return _ffi_api.AnnotateMultiBufferEligible()  # type: ignore
 
 
-def NormalizeNoConflictHints():
-    """Consume ``T.assume_no_conflict`` markers into ``tl.no_conflict`` For annotations."""
-    return _ffi_api.NormalizeNoConflictHints()  # type: ignore
+def NormalizeConflictHints():
+    """Normalize ``T.assume_no_conflict`` and ``T.assume_conflict`` markers."""
+    return _ffi_api.NormalizeConflictHints()  # type: ignore
 
 
 def EstimateLatency():
@@ -206,14 +206,13 @@ __all__ = [
     "InsertSync",
     "LowerScheduledTIR",
     "EstimateLatency",
-    "IfConditionExtract",
     "InsertNd2Nz",
     "LegalizeSimdMerging",
     "MarkScalarDcacheBypass",
     "MergeUBAllocations",
     "NormalizeBufferVersion",
     "NormalizeControlFlowForSchedule",
-    "NormalizeNoConflictHints",
+    "NormalizeConflictHints",
     "PrepareMultiBuffer",
     "ResolveCore",
     "RewriteAscendBufferVersionLayout",

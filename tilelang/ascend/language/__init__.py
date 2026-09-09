@@ -23,7 +23,7 @@ from .kernel import (  # noqa: F401
     get_thread_extent,
     get_thread_extents,
 )
-from .schedule_hint import PerCoreTask, Stage, Task, assume_no_conflict  # noqa: F401
+from .schedule_hint import PerCoreTask, Stage, Task, assume_conflict, assume_no_conflict  # noqa: F401
 from .tile_schedule import (  # noqa: F401
     AscendBaseTileScheduler,
     AscendBatchedTileScheduler,
@@ -75,6 +75,7 @@ _ASCEND_API_ALL = (
     "annotate_buffer_versions",
     "annotate_manual_multi_buffer",
     "annotate_unlimit_memory",
+    "assume_conflict",
     "assume_no_conflict",
     "blockscaled_gemm",
     "device_assert",

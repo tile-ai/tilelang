@@ -33,7 +33,7 @@ def _lower_without_resolve(program):
     mod = tirx.transform.BindTarget(determine_target("ascend"))(mod)
     for transform in (
         ascend_transform.NormalizeControlFlowForSchedule,
-        ascend_transform.NormalizeNoConflictHints,
+        ascend_transform.NormalizeConflictHints,
         ascend_transform.MaterializeScheduleUnits,
         ascend_transform.AnnotateMultiBufferEligible,
         ascend_transform.EstimateLatency,

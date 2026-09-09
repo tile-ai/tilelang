@@ -312,8 +312,7 @@ public:
         ICHECK(parent == nullptr || parent->IsControl());
         auto *scope =
             parent == nullptr ? nullptr : static_cast<ControlNode *>(parent);
-        std::vector<int> domain_ids =
-            domains_.DomainsForTaskAtScope(task, scope);
+        std::vector<int> domain_ids = SiteDomainsForTaskAtScope(task, scope);
         AddInsertionSites(path_begin, task, domain_ids, inner_sites,
                           keyed_sites);
         sites_.insert(sites_.end(), inner_sites.begin(), inner_sites.end());
@@ -323,7 +322,7 @@ public:
         auto *parent_scope =
             static_cast<ControlNode *>(parent)->GetParentControl();
         std::vector<int> parent_domain_ids =
-            domains_.DomainsForTaskAtScope(task, parent_scope);
+            SiteDomainsForTaskAtScope(task, parent_scope);
         for (const SyncInsertionSite &inner_site : inner_sites) {
           for (int parent_domain_id : parent_domain_ids) {
             SyncInsertionSiteKey parent_key{parent, task,
@@ -484,8 +483,8 @@ public:
       auto *scope =
           parent == nullptr ? nullptr : static_cast<ControlNode *>(parent);
       for (TaskNode *task : tasks) {
-        AddInsertionSiteIds(
-            node, task, domains_.DomainsForTaskAtScope(task, scope), result);
+        AddInsertionSiteIds(node, task, SiteDomainsForTaskAtScope(task, scope),
+                            result);
       }
     }
     std::sort(result.begin(), result.end());
@@ -494,6 +493,15 @@ public:
   }
 
 private:
+  std::vector<int> SiteDomainsForTaskAtScope(const TaskNode *task,
+                                             ControlNode *scope) const {
+    std::vector<int> result = domains_.DomainsForTaskAtScope(task, scope);
+    int lexical_domain = domains_.UnconditionalLexicalDomain(scope);
+    if (std::find(result.begin(), result.end(), lexical_domain) == result.end())
+      result.push_back(lexical_domain);
+    return result;
+  }
+
   std::vector<size_t> PhysicalSiteVariants(size_t site_id) const {
     ICHECK_LT(site_id, sites_.size());
     const SyncInsertionSite &site = sites_[site_id];
@@ -728,9 +736,11 @@ class SyncAnalyzer {
 public:
   explicit SyncAnalyzer(const MultiBufferPlan &multi_buffer_plan,
                         const EpochDomainRegistry &domains,
-                        BufferVersionMap manual = {})
+                        BufferVersionMap manual = {},
+                        ConflictHintList root_conflicts = {})
       : multi_buffer_plan_(multi_buffer_plan), domains_(domains),
-        manual_(std::move(manual)), site_registry_(domains) {
+        manual_(std::move(manual)), root_conflicts_(std::move(root_conflicts)),
+        site_registry_(domains) {
     for (const MultiBufferInfo &info : multi_buffer_plan_.Infos()) {
       ICHECK(!info.owners.empty());
       std::vector<ControlNode *> owners;
@@ -960,11 +970,58 @@ private:
     return false;
   }
 
+  int FindSharedDependencyDomain(TaskNode *producer, TaskNode *consumer,
+                                 ControlNode *loop) const {
+    std::vector<int> producer_domains =
+        domains_.DomainsForTaskAtScope(producer, loop);
+    std::vector<int> consumer_domains =
+        domains_.DomainsForTaskAtScope(consumer, loop);
+    int lexical_domain = domains_.UnconditionalLexicalDomain(loop);
+    std::vector<int> candidates = producer_domains;
+    candidates.insert(candidates.end(), consumer_domains.begin(),
+                      consumer_domains.end());
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                     candidates.end());
+
+    // A guarded source domain is available at both endpoints only when both
+    // tasks already use it. The unconditional lexical domain needs no guard
+    // value and is therefore always a safe common fallback.
+    auto has_site = [&](const std::vector<int> &task_domains, int candidate) {
+      return candidate == lexical_domain ||
+             std::find(task_domains.begin(), task_domains.end(), candidate) !=
+                 task_domains.end();
+    };
+    auto projects_to_task = [&](int candidate,
+                                const std::vector<int> &task_domains) {
+      if (task_domains.empty())
+        return candidate == lexical_domain;
+      return std::any_of(
+          task_domains.begin(), task_domains.end(), [&](int target) {
+            return domains_.CanProjectDomain(candidate, target, loop);
+          });
+    };
+    for (int candidate : candidates) {
+      if (has_site(producer_domains, candidate) &&
+          has_site(consumer_domains, candidate) &&
+          projects_to_task(candidate, producer_domains) &&
+          projects_to_task(candidate, consumer_domains)) {
+        return candidate;
+      }
+    }
+    ICHECK(projects_to_task(lexical_domain, producer_domains) &&
+           projects_to_task(lexical_domain, consumer_domains))
+        << "The unconditional lexical domain must project to every task at "
+           "its scope";
+    return lexical_domain;
+  }
+
   std::vector<SyncPoint>
   CollectSyncPoints(const std::vector<IRStructure *> &nodes,
                     ControlNode *loop) {
-    std::vector<DepInfo> deps = AnalyzeDependencies(
-        nodes, loop, manual_, multi_buffer_owners_, &dependency_cache_);
+    std::vector<DepInfo> deps =
+        AnalyzeDependencies(nodes, loop, manual_, multi_buffer_owners_,
+                            &dependency_cache_, root_conflicts_);
 
     auto expand_cores = [](CoreMask task_mask) {
       std::vector<CoreMask> result;
@@ -977,10 +1034,12 @@ private:
 
     std::vector<SyncPoint> sync_points;
     for (const DepInfo &dep : deps) {
-      std::string storage_scope = GetPtrStorageScope(dep.storage);
-      if (storage_scope == "local" || storage_scope == "local.var" ||
-          storage_scope == "local.fragment") {
-        continue;
+      if (dep.storage.has_value()) {
+        std::string storage_scope = GetPtrStorageScope(dep.storage.value());
+        if (storage_scope == "local" || storage_scope == "local.var" ||
+            storage_scope == "local.fragment") {
+          continue;
+        }
       }
 
       int distance = dep.distance;
@@ -989,8 +1048,14 @@ private:
       const MultiBufferInfo *counter_info = nullptr;
       const MultiBufferOwnerInfo *counter_owner = nullptr;
 
-      const MultiBufferInfo *info = multi_buffer_plan_.Find(dep.storage);
-      auto manual_versions = manual_.Get(dep.storage);
+      const MultiBufferInfo *info =
+          dep.storage.has_value() ? multi_buffer_plan_.Find(dep.storage.value())
+                                  : nullptr;
+      int manual_versions = 0;
+      if (dep.storage.has_value()) {
+        if (auto versions = manual_.Get(dep.storage.value()))
+          manual_versions = versions.value();
+      }
       const MultiBufferOwnerInfo *enclosing_owner = nullptr;
       if (info != nullptr && loop != nullptr) {
         if (!info->UsesCounter())
@@ -1017,17 +1082,21 @@ private:
           distance = info->num_versions;
       } else if (info == nullptr) {
         if (manual_versions) {
-          num_versions =
-              dep.distance > 0 ? dep.distance : manual_versions.value();
+          num_versions = dep.distance > 0 ? dep.distance : manual_versions;
           flag_loop = loop;
         }
       }
       if (distance < 0)
         distance = 1;
       ICHECK_EQ(counter_info != nullptr, counter_owner != nullptr);
-      int dependency_domain_id = domains_.DomainForStorage(dep.storage, loop);
+      std::optional<int> dependency_domain_id;
+      if (dep.storage.has_value()) {
+        dependency_domain_id =
+            domains_.DomainForStorage(dep.storage.value(), loop);
+      }
       if (counter_info != nullptr) {
-        ICHECK_EQ(dependency_domain_id,
+        ICHECK(dependency_domain_id.has_value());
+        ICHECK_EQ(dependency_domain_id.value(),
                   domains_.DomainForStorage(counter_info->storage,
                                             counter_owner->loop));
       }
@@ -1036,6 +1105,10 @@ private:
       }
 
       for (const auto &[producer, consumer] : dep.task_pairs) {
+        int pair_domain_id =
+            dependency_domain_id.has_value()
+                ? dependency_domain_id.value()
+                : FindSharedDependencyDomain(producer, consumer, loop);
         std::string producer_pipe =
             GetResourcePipeName(producer->GetPipeMask());
         std::string consumer_pipe =
@@ -1055,10 +1128,10 @@ private:
             }
             size_t producer_site = site_registry_.FindSiteId(
                 SyncInsertionSiteKey{dep.prod_node, producer, false,
-                                     producer_core, dependency_domain_id});
+                                     producer_core, pair_domain_id});
             size_t consumer_site = site_registry_.FindSiteId(
                 SyncInsertionSiteKey{dep.cons_node, consumer, true,
-                                     consumer_core, dependency_domain_id});
+                                     consumer_core, pair_domain_id});
             DepEdge edge(producer_site, consumer_site, distance, true);
             if (counter_info != nullptr) {
               PrimExpr iteration = BufferLoad(counter_info->counter,
@@ -1368,6 +1441,7 @@ private:
   const EpochDomainRegistry &domains_;
   BufferVersionMap manual_;
   MultiBufferOwnerMap multi_buffer_owners_;
+  ConflictHintList root_conflicts_;
   SyncSiteRegistry site_registry_;
   std::vector<SyncPoint> sync_points_;
   std::set<std::pair<size_t, size_t>> reusable_pairs_;
@@ -2119,7 +2193,9 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
   }
   EpochDomainRegistry domains(root, multi_buffer_plan);
   SyncAnalyzer analyzer(multi_buffer_plan, domains,
-                        scheduled_tir.metadata.manual_buffer_versions);
+                        scheduled_tir.metadata.manual_buffer_versions,
+                        std::move(scheduled_tir.metadata.root_conflict_hints));
+  scheduled_tir.metadata.root_conflict_hints = {};
   analyzer.Analyze(root);
 
   CrossCoreFlagReservation cross_core_flag_reservation =

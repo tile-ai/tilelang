@@ -54,6 +54,7 @@ constexpr const char *kScheduleUnitStage = "stage";
 constexpr int kUnscheduledStage = -1;
 constexpr const char *kUnlimitMemoryScopes = "tl.unlimit_memory_scopes";
 constexpr const char *kVectorCount = "vector_count";
+constexpr const char *kRootConflictHints = "tl.root_conflict_hints";
 
 inline bool IsScheduleGuardAttribute(const ffi::String &key) {
   return key == tirx::attr::tilelang_assume ||
@@ -86,6 +87,8 @@ struct ScheduledTIRMetadata {
   ffi::Array<ffi::String> unlimit_memory_scopes;
   // Number of AIV subcores requested by T.MixedKernel. Absent for T.Kernel.
   std::optional<int> num_aiv_subcores;
+  // Conflict declarations attached to the kernel's outermost sequence.
+  ffi::Array<ffi::Any> root_conflict_hints;
 };
 
 // Decoded scheduled TIR. Passes transform this pair and leave serialization to

@@ -508,6 +508,13 @@ public:
     return LexicalDomainId(storage, loop);
   }
 
+  int UnconditionalLexicalDomain(const ControlNode *scope) const {
+    auto it = lexical_domain_ids_.find(scope);
+    ICHECK(it != lexical_domain_ids_.end())
+        << "Missing unconditional lexical epoch domain";
+    return it->second;
+  }
+
   std::vector<int> DomainsForTaskAtScope(const TaskNode *task,
                                          const ControlNode *scope) const {
     std::vector<int> result;
@@ -741,10 +748,7 @@ private:
             FindStorageBinding(lexical_bindings_, storage, owner)) {
       return *binding;
     }
-    auto it = lexical_domain_ids_.find(owner);
-    ICHECK(it != lexical_domain_ids_.end())
-        << "Missing unconditional lexical epoch domain";
-    return it->second;
+    return UnconditionalLexicalDomain(owner);
   }
 
   void AddLexicalScope(ControlNode *scope) {

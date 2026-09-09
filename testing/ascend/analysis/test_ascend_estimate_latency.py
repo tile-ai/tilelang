@@ -535,7 +535,7 @@ def test_auto_schedule_analyzes_dependencies_in_manual_stage_order():
     mod = _bind_target(_make_partially_staged_program())
     for transform in (
         ascend_transform.NormalizeControlFlowForSchedule,
-        ascend_transform.NormalizeNoConflictHints,
+        ascend_transform.NormalizeConflictHints,
         ascend_transform.MaterializeScheduleUnits,
         ascend_transform.AnnotateMultiBufferEligible,
         ascend_transform.EstimateLatency,

@@ -31,6 +31,7 @@ def test_auto_schedule_rewrites_every_tilelang_kernel():
     snapshots = {}
     snapshot_modules = {}
     wanted = {
+        "tl.EstimateLatency",
         "tl.AutoSchedule",
         "tl.AssignCore",
         "tl.PrepareMultiBuffer",
@@ -66,18 +67,22 @@ def test_auto_schedule_rewrites_every_tilelang_kernel():
         for snapshot in pass_snapshots:
             assert snapshot.count('T.sblock("tilelang_root")') == 2
 
-    intermediate = (
+    for snapshot in snapshots["tl.EstimateLatency"]:
+        assert snapshot.count("tl.unlimit_memory_scopes") == 2
+        assert '"shared"' in snapshot
+        assert '"shared.l1"' in snapshot
+
+    scheduled_and_later = (
         snapshots["tl.AutoSchedule"]
         + snapshots["tl.AssignCore"]
         + snapshots["tl.PrepareMultiBuffer"]
         + snapshots["tl.ResolveCore"]
         + snapshots["tl.InsertSync"]
         + snapshots["tl.MaterializeMultiBuffer"]
+        + snapshots["tl.LowerScheduledTIR"]
     )
-    for snapshot in intermediate:
-        assert snapshot.count("tl.unlimit_memory_scopes") == 2
-        assert '"shared"' in snapshot
-        assert '"shared.l1"' in snapshot
+    for snapshot in scheduled_and_later:
+        assert "tl.unlimit_memory_scopes" not in snapshot
 
     scheduled = snapshots["tl.AutoSchedule"][0]
     first_assigned = snapshots["tl.AssignCore"][0]

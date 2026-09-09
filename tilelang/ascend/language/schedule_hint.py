@@ -1,11 +1,13 @@
-"""Auto-schedule semantic hints."""
+"""Auto-schedule semantic hints, including buffer conflict declarations."""
 
 from tilelang.utils.language import to_tile_region
 from tvm import tirx
 from tvm.tirx import Buffer, IntImm, StringImm, call_intrin, op
 from tvm.tirx.script.builder.ir import attr
 
-__all__ = ["assume_no_conflict", "PerCoreTask", "Stage", "Task"]
+__all__ = ["assume_conflict", "assume_no_conflict", "PerCoreTask", "Stage", "Task"]
+
+_ALL_ENCLOSING_SCOPES = -2
 
 
 def PerCoreTask():
@@ -148,6 +150,41 @@ def Stage(stage: int):
     return attr(IntImm("int64", stage), "tl.ascend_stage", tirx.const(1, "int32"))
 
 
+def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
+    api_name = "assume_conflict" if is_conflict else "assume_no_conflict"
+    if cross is True:
+        cross_code = 1
+    elif cross is False:
+        cross_code = 0
+    elif cross is None:
+        cross_code = -1
+    else:
+        raise ValueError(f"cross must be None/True/False, got {cross!r}")
+    if level is not None and (isinstance(level, bool) or not isinstance(level, int) or level < -1):
+        raise ValueError(f"level must be None, -1, or a non-negative integer, got {level!r}")
+    if group is not None and b is not None:
+        raise ValueError(f"{api_name}: a group's two half-declarations each carry one region, so `b` must be None when `group` is set")
+
+    # A bare Buffer denotes its whole storage. A concrete region remains a
+    # `tl.region` Call so Simplify rewrites its bounds in lockstep with the real
+    # access rather than freezing symbolic vars inside a BufferRegion object.
+    def operand(x):
+        return x.data if isinstance(x, Buffer) else to_tile_region(x, "rw")
+
+    a_op = operand(a)
+    b_op = operand(b) if b is not None else a_op
+    return call_intrin(
+        "handle",
+        op.Op.get("tl.conflict_hint"),
+        a_op,
+        b_op,
+        IntImm("int32", level if level is not None else _ALL_ENCLOSING_SCOPES),
+        IntImm("int32", cross_code),
+        StringImm(group or ""),
+        IntImm("bool", is_conflict),
+    )
+
+
 def assume_no_conflict(a, b=None, *, level=None, cross=None, group=None):
     """Assert that two buffer regions do not conflict, suppressing a false
     dependency the auto-scheduler would otherwise conservatively insert.
@@ -156,22 +193,22 @@ def assume_no_conflict(a, b=None, *, level=None, cross=None, group=None):
     indexed accesses (e.g. a permutation ``state_cache[perm[idx], ...]``) are
     disjoint across loop iterations, so it inserts redundant synchronization.
     This hint lets the user declare that the regions do not overlap. It is
-    consumed by the ``NormalizeNoConflictHints`` pass before auto-scheduling; at
+    consumed by the ``NormalizeConflictHints`` pass before auto-scheduling; at
     runtime it is a no-op.
 
     Args:
         a: first region -- ``buffer[indices...]`` or a bare ``buffer`` (the
-            whole buffer). A region must cover the same footprint as the actual
+            whole buffer). A region must exactly match the footprint of the
             access it refers to: use slices for the accessed extents (e.g.
             ``buf[i, 0:M, 0:N]``), since a fully scalar-indexed ``buf[i, 0, 0]``
             denotes only a 1-element region and will not match a wider copy.
         b: second region; defaults to ``a`` (a self-dependency).
-        level: which enclosing loop the non-overlap is asserted at, counted from
-            the outermost enclosing loop (``0`` = outermost, ``1`` = next inner,
-            ...). ``None`` (default) asserts it at each enclosing loop
-            independently. For a ``group``, ``level`` indexes the loops enclosing
-            both halves (their common ancestors), still counted from the
-            outermost.
+        level: where the non-overlap is asserted. ``None`` applies it to the
+            outermost sequence represented by ``tilelang_root`` and independently
+            to every loop enclosing both operands. ``-1`` applies it only to the
+            outermost sequence. Non-negative values select one common enclosing
+            loop, counted from the outermost (``0`` = outermost, ``1`` = next
+            inner, ...).
         cross: ``None`` = both same- and cross-iteration are conflict-free
             (default); ``True`` = only cross-iteration; ``False`` = only
             same-iteration.
@@ -195,42 +232,41 @@ def assume_no_conflict(a, b=None, *, level=None, cross=None, group=None):
         >>> T.assume_no_conflict(A[wperm[i], 0:N], group="perm")   # in one loop
         >>> T.assume_no_conflict(A[rperm[j], 0:N], group="perm")   # in another
     """
-    if cross is True:
-        cross_code = 1
-    elif cross is False:
-        cross_code = 0
-    elif cross is None:
-        cross_code = -1
-    else:
-        raise ValueError(f"cross must be None/True/False, got {cross!r}")
-    if level is not None and (not isinstance(level, int) or level < 0):
-        raise ValueError(f"level must be None or a non-negative int, got {level!r}")
-    if group is not None and b is not None:
-        raise ValueError(
-            "assume_no_conflict: a group's two half-declarations each carry one region, so `b` must be None when `group` is set"
-        )
+    return _emit_conflict_hint(a, b, level=level, cross=cross, group=group, is_conflict=False)
 
-    # A bare Buffer (no indexing) declares non-conflict for the whole buffer; it
-    # is carried as its data Var (a handle PrimExpr) and matched by storage key
-    # downstream. A concrete region is encoded as a `tl.region` Call (like
-    # T.copy) -- NOT a bare BufferRegion -- so its min/extent are simplified/
-    # inlined in lockstep with the real accesses (a frozen BufferRegion would
-    # keep symbolic vars and never match a simplified access).
-    def operand(x):
-        return x.data if isinstance(x, Buffer) else to_tile_region(x, "rw")
 
-    a_op = operand(a)
-    b_op = operand(b) if b is not None else a_op
-    # level None (all enclosing loops) is encoded as -1. The marker is a
-    # statement-form Call (auto-evaluated by the eager builder, like T.copy).
-    # Arg order matches the API: a, b, level, cross, group.
-    level_imm = IntImm("int32", level if level is not None else -1)
-    return call_intrin(
-        "handle",
-        op.Op.get("tl.assume_no_conflict"),
-        a_op,
-        b_op,
-        level_imm,
-        IntImm("int32", cross_code),
-        StringImm(group or ""),
-    )
+def assume_conflict(a, b=None, *, level=None, cross=None, group=None):
+    """Assert that two buffer regions conflict for dependency analysis.
+
+    This is the conservative counterpart of :func:`assume_no_conflict`.  It
+    makes the auto-scheduler treat matching accesses as if they used the same
+    storage, even when the buffers are distinct or their regions are provably
+    disjoint.  The usual RAW, WAR, and WAW rules still apply: two read-only
+    accesses do not form a dependency.  The marker is consumed before
+    auto-scheduling and is a runtime no-op.
+
+    Args:
+        a: first region -- ``buffer[indices...]`` or a bare ``buffer`` (the
+            whole buffer). A concrete region must exactly match the footprint
+            of the access it refers to.
+        b: second region; defaults to ``a`` (a forced self-conflict).
+        level: where the conflict is asserted. ``None`` applies it to the
+            outermost sequence represented by ``tilelang_root`` and independently
+            to every loop enclosing both operands. ``-1`` applies it only to the
+            outermost sequence. Non-negative values select one common enclosing
+            loop, counted from the outermost.
+        cross: ``None`` = both same- and cross-iteration conflicts (default);
+            ``True`` = only cross-iteration; ``False`` = only same-iteration.
+        group: string tag pairing two declarations in different scopes. It
+            must appear exactly twice. With ``level=None``, declarations with no
+            common serial loop are still related at the root sequence.
+
+    Example:
+        >>> # Force ordering between accesses to two independent staging
+        >>> # buffers, including the loop-carried WAR edge needed for reuse.
+        >>> T.assume_conflict(a_ub, b_ub, level=0)
+        >>> # Pair regions declared in sibling loops at their common parent.
+        >>> T.assume_conflict(a_ub, group="reuse", level=-1)
+        >>> T.assume_conflict(b_ub, group="reuse", level=-1)
+    """
+    return _emit_conflict_hint(a, b, level=level, cross=cross, group=group, is_conflict=True)
