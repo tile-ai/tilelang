@@ -46,6 +46,25 @@ bool IsProvablyDivisible(const PrimExpr &expr, int64_t divisor) {
   return modular_set->coeff % divisor == 0 && modular_set->base % divisor == 0;
 }
 
+std::string CudaCachePolicyEnumValue(const std::string &policy) {
+  if (policy == "ca")
+    return "kCA";
+  if (policy == "cg")
+    return "kCG";
+  if (policy == "cs")
+    return "kCS";
+  if (policy == "lu")
+    return "kLU";
+  if (policy == "cv")
+    return "kCV";
+  if (policy == "wb")
+    return "kWB";
+  if (policy == "wt")
+    return "kWT";
+  LOG(FATAL) << "Unsupported CUDA cache policy \"" << policy << "\".";
+  return "";
+}
+
 std::optional<DataType> GetAccessPtrElementType(const PrimExpr &expr) {
   const auto *ptr_call = expr.as<CallNode>();
   if (ptr_call == nullptr) {
@@ -5124,6 +5143,22 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     PrintIndent();
     stream << "}\n";
     return;
+  } else if (op->attr_key == tl::attr::kLoadCachePolicy ||
+             op->attr_key == tl::attr::kStoreCachePolicy) {
+    const VarNode *buffer_node = op->node.as<VarNode>();
+    const StringImmNode *policy = op->value.as<StringImmNode>();
+    ICHECK(buffer_node && policy)
+        << op->attr_key << " expects a buffer Var and StringImm value.";
+    Var buffer = GetRef<Var>(buffer_node);
+    auto &policies = op->attr_key == tl::attr::kLoadCachePolicy
+                         ? load_cache_policies_
+                         : store_cache_policies_;
+    auto [it, inserted] = policies.emplace(buffer, policy->value);
+    ICHECK(inserted) << "Nested " << op->attr_key
+                     << " attributes for the same buffer are not supported.";
+    VisitStmt(op->body);
+    policies.erase(buffer);
+    return;
   } else if (op->attr_key == s_tir::attr::fragment_shape) {
     const VarNode *buffer = op->node.as<VarNode>();
     const StringImmNode *shape_str = op->value.as<StringImmNode>();
@@ -5342,6 +5377,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   PrimExpr index = op->indices[0];
   Var buffer_var = op->buffer->data;
   DataType element_dtype = op->buffer->dtype;
+  auto load_policy_it = load_cache_policies_.find(buffer_var);
+  bool has_load_cache_policy = load_policy_it != load_cache_policies_.end();
 
   const bool is_packed_int4_buffer = (element_dtype == DataType::Int(4) ||
                                       element_dtype == DataType::UInt(4)) &&
@@ -5351,6 +5388,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
                                      value_dtype.element_of() == element_dtype;
   const bool is_packed_int4x2 =
       is_packed_int4_vector && value_dtype.lanes() == 2;
+
+  ICHECK(!has_load_cache_policy || element_dtype.bits() >= 8)
+      << "CUDA cache-policy loads do not support sub-byte buffers.";
 
   std::string vid = GetVarID(buffer_var.get());
   auto print_packed_int4_load = [&](const std::string &idx_str,
@@ -5390,7 +5430,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
       os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
     } else {
       std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
-      HandleVolatileLoads(ref, op, os);
+      if (has_load_cache_policy) {
+        need_copy_h_ = true;
+        os << "tl::load_global_cache<tl::LoadCachePolicy::"
+           << CudaCachePolicyEnumValue(load_policy_it->second) << ">(&(" << ref
+           << "))";
+      } else {
+        HandleVolatileLoads(ref, op, os);
+      }
     }
   } else {
     bool can_vector_load = false;
@@ -5408,8 +5455,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
     }
 
     if (can_vector_load) {
-      std::string ref = GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
-      HandleVolatileLoads(ref, op, os);
+      std::string ref =
+          has_load_cache_policy
+              ? GetBufferRef(op->dtype, op->buffer.get(), base.Eval())
+              : GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
+      if (has_load_cache_policy) {
+        need_copy_h_ = true;
+        os << "tl::load_global_cache<tl::LoadCachePolicy::"
+           << CudaCachePolicyEnumValue(load_policy_it->second) << ">(&(" << ref
+           << "))";
+      } else {
+        HandleVolatileLoads(ref, op, os);
+      }
     } else {
       if (is_packed_int4_vector && !is_packed_int4x2) {
         // A packed vector load that cannot use a directly aligned carrier is
@@ -5472,7 +5529,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
           value_temp << ']';
         }
 
-        PrintVecElemLoadExpr(op->dtype, i, value_temp.str(), svalue_expr);
+        std::string lane_value = value_temp.str();
+        if (has_load_cache_policy) {
+          need_copy_h_ = true;
+          lane_value = "tl::load_global_cache<tl::LoadCachePolicy::" +
+                       CudaCachePolicyEnumValue(load_policy_it->second) +
+                       ">(&(" + lane_value + "))";
+        }
+        PrintVecElemLoadExpr(op->dtype, i, lane_value, svalue_expr);
       }
       os << svalue_expr.str();
     }
@@ -5488,6 +5552,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   DataType element_dtype = op->buffer->dtype;
   PrimExpr index_expr = op->indices[0];
   Var buffer_var = op->buffer->data;
+  auto store_policy_it = store_cache_policies_.find(buffer_var);
+  bool has_store_cache_policy = store_policy_it != store_cache_policies_.end();
 
   const bool is_packed_int4_buffer = (element_dtype == DataType::Int(4) ||
                                       element_dtype == DataType::UInt(4)) &&
@@ -5495,6 +5561,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
   const bool is_packed_int4_vector = is_packed_int4_buffer &&
                                      value_dtype.lanes() > 1 &&
                                      value_dtype.element_of() == element_dtype;
+
+  ICHECK(!has_store_cache_policy || element_dtype.bits() >= 8)
+      << "CUDA cache-policy stores do not support sub-byte buffers.";
 
   if (is_packed_int4_buffer && value_dtype.is_scalar()) {
     std::string idx_str = PrintExpr(index_expr);
@@ -5538,7 +5607,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       std::string ref =
           this->GetBufferRef(value_dtype, op->buffer.get(), index_expr);
       this->PrintIndent();
-      stream << ref << " = " << value << ";\n";
+      if (has_store_cache_policy) {
+        need_copy_h_ = true;
+        stream << "tl::store_global_cache<tl::StoreCachePolicy::"
+               << CudaCachePolicyEnumValue(store_policy_it->second) << ">(&("
+               << ref << "), " << value << ");\n";
+      } else {
+        stream << ref << " = " << value << ";\n";
+      }
     }
   } else {
     arith::PVar<PrimExpr> base;
@@ -5556,7 +5632,17 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
     }
     if (is_unit_stride_ramp) {
       std::string value = this->PrintExpr(op->value);
-      this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
+      if (has_store_cache_policy) {
+        need_copy_h_ = true;
+        std::string ref =
+            this->GetBufferRef(value_dtype, op->buffer.get(), base.Eval());
+        this->PrintIndent();
+        stream << "tl::store_global_cache<tl::StoreCachePolicy::"
+               << CudaCachePolicyEnumValue(store_policy_it->second) << ">(&("
+               << ref << "), " << value << ");\n";
+      } else {
+        this->PrintVecStore(op->buffer.get(), value_dtype, base.Eval(), value);
+      }
     } else {
       // The assignment below introduces side-effect, and the resulting value
       // cannot be reused across multiple expression, thus a new scope is needed
@@ -5568,6 +5654,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       std::string vid = GetVarID(buffer_var.get());
       for (int i = 0; i < value_dtype.lanes(); ++i) {
         this->PrintIndent();
+        if (has_store_cache_policy) {
+          need_copy_h_ = true;
+          stream << "tl::store_global_cache<tl::StoreCachePolicy::"
+                 << CudaCachePolicyEnumValue(store_policy_it->second) << ">(&(";
+        }
         DataType elem_type = value_dtype.element_of();
         if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
           stream << "((";
@@ -5584,9 +5675,9 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
         }
         stream << '[';
         PrintVecElemLoad(index, index_expr.dtype(), i, stream);
-        stream << "] = ";
+        stream << (has_store_cache_policy ? "]), " : "] = ");
         PrintVecElemLoad(value, op->value.dtype(), i, stream);
-        stream << ";\n";
+        stream << (has_store_cache_policy ? ");\n" : ";\n");
       }
       EndScope(vec_scope);
     }

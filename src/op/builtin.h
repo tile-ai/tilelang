@@ -33,6 +33,10 @@ static constexpr const char *kLocalVarInit = "tl.local_var_init";
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 
+// CUDA PTX cache operators for normal SIMT T.copy global-memory accesses.
+static constexpr const char *kLoadCachePolicy = "load_cache_policy";
+static constexpr const char *kStoreCachePolicy = "store_cache_policy";
+
 } // namespace attr
 
 inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(

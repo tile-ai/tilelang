@@ -69,6 +69,97 @@ TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
   }
 }
 
+enum class LoadCachePolicy { kCA, kCG, kCS, kLU, kCV };
+enum class StoreCachePolicy { kWB, kCG, kCS, kWT };
+
+template <int Bytes> struct CachePolicyAccessType;
+template <> struct CachePolicyAccessType<1> {
+  using Type = unsigned char;
+};
+template <> struct CachePolicyAccessType<2> {
+  using Type = unsigned short;
+};
+template <> struct CachePolicyAccessType<4> {
+  using Type = unsigned int;
+};
+template <> struct CachePolicyAccessType<8> {
+  using Type = unsigned long long;
+};
+template <> struct CachePolicyAccessType<16> {
+  using Type = uint4;
+};
+
+template <LoadCachePolicy Policy, typename AccessType>
+TL_DEVICE AccessType load_global_cache_native(const AccessType *ptr) {
+  if constexpr (Policy == LoadCachePolicy::kCA) {
+    return __ldca(ptr);
+  } else if constexpr (Policy == LoadCachePolicy::kCG) {
+    return __ldcg(ptr);
+  } else if constexpr (Policy == LoadCachePolicy::kCS) {
+    return __ldcs(ptr);
+  } else if constexpr (Policy == LoadCachePolicy::kLU) {
+    return __ldlu(ptr);
+  } else {
+    static_assert(Policy == LoadCachePolicy::kCV);
+    return __ldcv(ptr);
+  }
+}
+
+template <StoreCachePolicy Policy, typename AccessType>
+TL_DEVICE void store_global_cache_native(AccessType *ptr, AccessType value) {
+  if constexpr (Policy == StoreCachePolicy::kWB) {
+    __stwb(ptr, value);
+  } else if constexpr (Policy == StoreCachePolicy::kCG) {
+    __stcg(ptr, value);
+  } else if constexpr (Policy == StoreCachePolicy::kCS) {
+    __stcs(ptr, value);
+  } else {
+    static_assert(Policy == StoreCachePolicy::kWT);
+    __stwt(ptr, value);
+  }
+}
+
+template <LoadCachePolicy Policy, typename T>
+TL_DEVICE T load_global_cache(const T *ptr) {
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
+                sizeof(T) == 8 || sizeof(T) == 16 ||
+                (sizeof(T) > 16 && sizeof(T) % 16 == 0));
+  T result;
+  if constexpr (sizeof(T) <= 16) {
+    using AccessType = typename CachePolicyAccessType<sizeof(T)>::Type;
+    *reinterpret_cast<AccessType *>(&result) = load_global_cache_native<Policy>(
+        reinterpret_cast<const AccessType *>(ptr));
+  } else {
+    auto *result_chunks = reinterpret_cast<uint4 *>(&result);
+    auto *ptr_chunks = reinterpret_cast<const uint4 *>(ptr);
+#pragma unroll
+    for (int i = 0; i < sizeof(T) / 16; ++i) {
+      result_chunks[i] = load_global_cache_native<Policy>(ptr_chunks + i);
+    }
+  }
+  return result;
+}
+
+template <StoreCachePolicy Policy, typename T>
+TL_DEVICE void store_global_cache(T *ptr, const T &value) {
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
+                sizeof(T) == 8 || sizeof(T) == 16 ||
+                (sizeof(T) > 16 && sizeof(T) % 16 == 0));
+  if constexpr (sizeof(T) <= 16) {
+    using AccessType = typename CachePolicyAccessType<sizeof(T)>::Type;
+    store_global_cache_native<Policy>(
+        reinterpret_cast<AccessType *>(ptr),
+        *reinterpret_cast<const AccessType *>(&value));
+  } else {
+    auto *ptr_chunks = reinterpret_cast<uint4 *>(ptr);
+    auto *value_chunks = reinterpret_cast<const uint4 *>(&value);
+#pragma unroll
+    for (int i = 0; i < sizeof(T) / 16; ++i) {
+      store_global_cache_native<Policy>(ptr_chunks + i, value_chunks[i]);
+    }
+  }
+}
+
 // Global memory load intrinsics with explicit vector widths
 // Following CUTLASS style with template specialization
 
