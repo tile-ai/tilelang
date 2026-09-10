@@ -6,7 +6,9 @@
 file(GLOB TILE_LANG_CUDA_ALWAYS_SRCS
   src/cuda/codegen/intrin_rule_cuda.cc
   src/cuda/op/builtin.cc
+  src/cuda/op/copy.cc
   src/cuda/op/copy_analysis.cc
+  src/cuda/op/tma_layout.cc
   src/cuda/target_utils.cc
   src/cuda/transform/lower_ptx_async_copy.cc
   src/cuda/transform/ptx_async_copy_injector.cc

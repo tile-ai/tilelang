@@ -16,6 +16,8 @@ assert on fields instead of substring-matching a print format.
 
 from __future__ import annotations
 
+import json
+
 import tilelang as tl
 import tilelang.language as T  # noqa: F401  (cases import via common)
 from tilelang import tvm
@@ -26,11 +28,107 @@ from tvm.tirx.stmt_functor import post_order_visit
 # The two selection policies behind `tl.layout_cost_model`, by name.
 COST_MODELS = ("register-count", "io-aware")
 
+# Pinned suites. Layout inference is target-dependent -- both the cost model's
+# warp/vector-width arithmetic and the reduction paths read target attributes,
+# and `determine_target("auto")` picks the *host GPU's* compute capability, so
+# an unpinned run silently changes the question being asked. Goldens are
+# therefore stored per pinned target under ``expected/<key>/``.
+#
+# The suites below only name the target; the recorded config is the canonical
+# geometry a target with that name resolves to (see `resolve_target`), so a
+# suite recorded here and the same target reached through `--target auto`
+# compare equal.
+#
+# The default pins the architecture the checked-in goldens were recorded on;
+# `--target` selects any other registered suite (or an explicit JSON config)
+# and reads/writes that suite's own goldens.
+TARGET_SUITE_SPECS = {
+    "cuda-sm90": {"kind": "cuda", "arch": "sm_90"},
+    "cuda-sm100": {"kind": "cuda", "arch": "sm_100"},
+    "cuda-sm103": {"kind": "cuda", "arch": "sm_103"},
+    "metal": {"kind": "metal"},
+}
+DEFAULT_TARGET_SUITE = "cuda-sm90"
+TARGET_SUITES = tuple(TARGET_SUITE_SPECS)
+
+
+def _canonical(config: dict) -> dict:
+    """Order-insensitive form of a target config, for equality checks."""
+    return json.loads(json.dumps(config, sort_keys=True))
+
+
+def resolve_target(spec: str | None):
+    """Resolve a ``--target`` argument to ``(tvm Target, suite key, config)``.
+
+    ``None`` selects the default pinned suite. A suite name from
+    ``TARGET_SUITES`` selects that suite; ``"auto"`` keeps the historical
+    host-detection behaviour for ad-hoc investigation (goldens are then read
+    and written under the resolved host architecture's own key). An inline
+    JSON object defines an ad-hoc suite keyed by its kind and arch.
+    """
+    if spec is None:
+        key = DEFAULT_TARGET_SUITE
+        config = _suite_config(key)
+    elif spec in TARGET_SUITE_SPECS:
+        key = spec
+        config = _suite_config(key)
+    elif spec == "auto":
+        resolved = tvm.target.Target(determine_target("auto"))
+        config = json_safe_config(resolved.export())
+        key = _suite_key(config)
+    elif spec.startswith("{"):
+        config = _suite_config_from(json.loads(spec))
+        key = _suite_key(config)
+    else:
+        known = ", ".join(sorted(TARGET_SUITE_SPECS))
+        raise SystemExit(f"unknown --target {spec!r}; expected one of: {known}, auto, or an inline JSON config")
+    return tvm.target.Target(config), key, _canonical(config)
+
+
+def _suite_config(key: str) -> dict:
+    """Canonical config for a pinned suite: the spec normalized through TVM, so
+    it carries the same derived geometry `--target auto` would produce."""
+    return _suite_config_from(TARGET_SUITE_SPECS[key])
+
+
+def _suite_config_from(spec: dict) -> dict:
+    return json_safe_config(tvm.target.Target(spec).export())
+
+
+# Target attributes that carry the identity and the layout-relevant geometry.
+# Other exported entries (keys, libs, host, ...) are either derived or ffi
+# objects, and keeping them out keeps the config JSON-round-trippable so it
+# can be compared against the recorded `target.json`.
+_CONFIG_FIELDS = ("kind", "arch", "mtriple", "mcpu", "max_num_threads", "thread_warp_size")
+
+
+def json_safe_config(exported) -> dict:
+    """Reduce a `Target.export()` mapping to plain, comparable JSON values."""
+    config = {}
+    for field in _CONFIG_FIELDS:
+        value = exported.get(field) if hasattr(exported, "get") else None
+        if value is None:
+            continue
+        if isinstance(value, (str, int, bool)):
+            config[field] = value
+        else:
+            config[field] = str(value)
+    if "kind" not in config:
+        raise SystemExit(f"could not read a target kind out of {exported!r}")
+    return config
+
+
+def _suite_key(config: dict) -> str:
+    """Directory-safe suite key for a target config: ``cuda-sm90``, ``metal``."""
+    kind = str(config.get("kind", "unknown"))
+    arch = config.get("arch")
+    return f"{kind}-{arch}" if arch else kind
+
 
 def _run_passes(prim_func, cost_model: str, target=None):
     """The exact pass prefix LayoutInference sees in the real pipeline."""
     if target is None:
-        target = tvm.target.Target(determine_target("auto"))
+        target = resolve_target(None)[0]
     mod = tvm.IRModule({"main": prim_func})
     with tvm.target.Target(target):
         mod = tvm.tirx.transform.BindTarget(target)(mod)
@@ -78,7 +176,7 @@ def lower_and_extract_vector_widths(prim_func, target=None) -> dict[str, int]:
     emitted for the layout that won.
     """
     if target is None:
-        target = tvm.target.Target(determine_target("auto"))
+        target = resolve_target(None)[0]
     with tvm.target.Target(target), tvm.transform.PassContext(config={"tl.layout_cost_model": "io-aware"}):
         artifact = tl.lower(prim_func, target=target, enable_device_compile=False)
     widths: dict[str, int] = {}
