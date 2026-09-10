@@ -37,6 +37,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 
@@ -111,5 +112,6 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
                         size_t num_storage_owners = 0,
                         const ConflictHintList &root_conflicts = {});
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

@@ -20,7 +20,7 @@ def test_ascend_auto_schedule_preserves_boolean_option(enabled):
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("enabled", [False, True])
-def test_cuda_and_ascend_auto_schedule_options_coexist(enabled):
+def test_cuda_warp_specialization_and_ascend_auto_schedule_options_coexist(enabled):
     with tilelang.transform.PassContext(
         config={
             tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: enabled,

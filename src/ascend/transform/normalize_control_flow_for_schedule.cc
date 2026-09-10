@@ -38,6 +38,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ascend;
 using namespace ffi;
 
 class ControlFlowNormalizer : public StmtExprMutator {

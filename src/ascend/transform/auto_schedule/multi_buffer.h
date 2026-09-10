@@ -52,6 +52,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 
@@ -806,5 +807,6 @@ private:
   mutable std::unordered_map<const TaskNode *, std::vector<Var>> task_storages_;
 };
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

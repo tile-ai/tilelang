@@ -44,6 +44,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ascend;
 
 namespace {
 

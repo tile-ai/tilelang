@@ -55,6 +55,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ascend;
 using ffi::Array;
 using ffi::GetRef;
 using ffi::Map;

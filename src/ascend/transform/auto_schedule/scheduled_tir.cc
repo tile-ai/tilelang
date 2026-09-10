@@ -31,6 +31,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 using ffi::GetRef;
@@ -475,5 +476,6 @@ ScheduledTIR DecodeScheduledTIR(const SBlock &root, const ConstrSet &outer_ctx,
   return scheduled_tir;
 }
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

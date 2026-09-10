@@ -42,6 +42,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 // Short-lived scheduled TIR contract from MaterializeScheduleUnits through
 // LowerScheduledTIR. After native scheduling guards, every `tl.schedule_unit`
@@ -149,5 +150,6 @@ GetScheduledCoreMask(const tirx::AttrStmtNode *schedule_unit);
 
 CoreMask RequireScheduledCoreMask(const tirx::AttrStmtNode *schedule_unit);
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

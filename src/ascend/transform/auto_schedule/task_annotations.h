@@ -33,6 +33,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 
@@ -153,5 +154,6 @@ inline TaskCost ResolveTaskCost(const TaskCost &estimated,
   return result;
 }
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

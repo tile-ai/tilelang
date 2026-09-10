@@ -60,6 +60,7 @@ namespace tl {
 
 using namespace tirx;
 using namespace ffi;
+using namespace ascend;
 
 // Op registered in src/op/schedule_hint.cc.
 static constexpr const char *kConflictHintOpName = "tl.conflict_hint";

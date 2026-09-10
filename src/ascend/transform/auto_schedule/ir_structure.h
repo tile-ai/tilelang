@@ -28,6 +28,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 using ffi::Any;
@@ -906,5 +907,6 @@ CollectAllTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
 // Debug logging helpers.
 void PrintIRStructure(const IRStructure *node, int indent = 0);
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

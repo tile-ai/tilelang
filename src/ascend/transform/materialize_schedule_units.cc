@@ -47,6 +47,7 @@ namespace tl {
 
 using namespace tirx;
 using namespace tirx::transform;
+using namespace ascend;
 using ffi::Array;
 using ffi::GetRef;
 

@@ -46,6 +46,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 
@@ -391,7 +392,6 @@ inline uint16_t AnalyzeSpecialRegisterWrites(const Stmt &stmt) {
 }
 
 inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
-  using ascend::MemoryAccessDetector;
   MemoryAccessDetector memory_detector;
   memory_detector.Analyze(stmt);
   TaskAccessInfo result;
@@ -629,5 +629,6 @@ inline void ApplyTaskAccesses(const TaskAccessInfo &accesses, TaskNode *task) {
     task->AddWriteVar(var);
 }
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

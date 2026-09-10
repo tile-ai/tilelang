@@ -59,6 +59,7 @@ namespace tl {
 
 using namespace tirx;
 using namespace tirx::transform;
+using namespace ascend;
 using ffi::GetRef;
 using ffi::String;
 

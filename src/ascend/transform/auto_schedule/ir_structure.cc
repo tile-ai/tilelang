@@ -61,6 +61,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 
@@ -399,5 +400,6 @@ void PrintIRStructure(const IRStructure *node, int indent) {
   }
 }
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

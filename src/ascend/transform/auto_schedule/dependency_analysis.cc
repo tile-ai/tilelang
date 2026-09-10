@@ -44,6 +44,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 
@@ -394,5 +395,6 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
   return deps;
 }
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

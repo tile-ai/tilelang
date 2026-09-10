@@ -39,6 +39,7 @@
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 struct TilelangKernelContext {
   tirx::SBlock root;
@@ -156,5 +157,6 @@ inline PrimFunc RewriteTilelangKernels(PrimFunc func, const char *pass_name,
   return func;
 }
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm
