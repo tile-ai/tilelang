@@ -415,6 +415,18 @@ jobs:
             -k metal \
             ./python
 
+      # Layout-inference golden check. The harness pins its target, so this is
+      # the same golden set on every runner of a given build configuration.
+      # CUDA-only: the pinned `cuda-sm90` goldens are recorded against a build
+      # with CUDA codegen, and a -DUSE_CUDA=OFF build resolves a different
+      # tl.copy for that target (see maint/layout_inference/README.md).
+      - name: Run layout-inference golden check (pinned target)
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          cd testing
+          TILELANG_CACHE_DIR="$(mktemp -d)" \
+            uv run --no-project python ../maint/layout_inference/run.py --target cuda-sm90
+
       - name: List generated files
         if: ${{ !cancelled() }}
         run: |
