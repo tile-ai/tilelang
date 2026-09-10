@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from tilelang.engine.param import KernelParam
+from tilelang.jit.compile_phase import guard_kernel_launch
 
 
 @dataclass(frozen=True)
@@ -114,7 +115,7 @@ class BaseKernelAdapter(ABC):
             return self.mod.inspect_source() + "\n\n" + self.mod.imports[0].inspect_source()
 
     def _post_init(self):
-        self.func = self._convert_torch_func()
+        self.func = guard_kernel_launch(self._convert_torch_func())
 
     @staticmethod
     def _normalize_cached_text_source(source: CachedTextSourceLike) -> CachedTextSource:

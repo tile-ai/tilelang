@@ -382,7 +382,7 @@ class Environment:
     TILELANG_JIT_DIAGNOSTICS = EnvVar("TILELANG_JIT_DIAGNOSTICS", "0")  # enable JIT phase diagnostics
     TILELANG_REQUIRE_EXPLICIT_COMPILE = EnvVar(
         "TILELANG_REQUIRE_EXPLICIT_COMPILE", "0"
-    )  # reject @tilelang.jit cache misses during invocation; require .compile() first
+    )  # require .compile() and seal compilation on the first kernel launch
     TILELANG_COMPILE_TIMEOUT_SECONDS = EnvVar("TILELANG_COMPILE_TIMEOUT_SECONDS", "")  # optional NVCC subprocess timeout in seconds
 
     # Pass diff debugging

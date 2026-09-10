@@ -11,6 +11,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tilelang import env
 from tilelang.jit import JITImpl
+from tilelang.jit.compile_phase import compilation_scope
 from tilelang.jit.kernel import JITKernel
 from tvm.tirx import PrimFunc, Var
 from tvm.target import Target
@@ -1284,6 +1285,12 @@ class AutoTuneImpl(Generic[_P, _T]):
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel | _T:
         return_kernel = kwargs.pop("__return_kernel", False)
+        if return_kernel:
+            # AutoTuneImpl.compile() includes benchmark launches, so it cannot
+            # hold a compilation lease for the whole call. Still reject a new
+            # tuning request once another kernel has entered execution phase.
+            with compilation_scope():
+                pass
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
         autotuner = self.get_tunner()
@@ -1323,8 +1330,6 @@ class AutoTuneImpl(Generic[_P, _T]):
         best_kernel, best_config = self._tuner_cache[key]
 
         if return_kernel:
-            if require_explicit_compile:
-                best_kernel.prepare_for_execution()
             self._explicitly_compiled_keys.add(key)
 
         if mode == "lazy":

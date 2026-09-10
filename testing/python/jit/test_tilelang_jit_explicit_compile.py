@@ -8,6 +8,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
+from tilelang.jit.compile_phase import _reset_compilation_phase_for_testing
 
 
 jit_module = importlib.import_module("tilelang.jit")
@@ -71,8 +72,11 @@ def fake_compile(monkeypatch):
 def explicit_compile_environment(monkeypatch):
     # The explicit-specialization registry is intentionally independent of the
     # persistent/global kernel cache.
+    _reset_compilation_phase_for_testing()
     monkeypatch.setenv("TILELANG_DISABLE_CACHE", "1")
     monkeypatch.delenv("TILELANG_REQUIRE_EXPLICIT_COMPILE", raising=False)
+    yield
+    _reset_compilation_phase_for_testing()
 
 
 def test_default_mode_still_compiles_on_first_invocation(fake_compile):
@@ -217,3 +221,6 @@ def test_real_eager_compile_then_execute(monkeypatch):
     b = torch.empty_like(a)
     copy(a, b)
     torch.testing.assert_close(b, a)
+
+    with pytest.raises(RuntimeError, match="compilation is sealed"):
+        copy.compile(M=16, N=8)

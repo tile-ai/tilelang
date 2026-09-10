@@ -22,6 +22,7 @@ from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.contrib import nvcc as tl_nvcc
 from tilelang.contrib.hip_resource_info import pop_recorded, reset_recorder
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
+from tilelang.jit.compile_phase import compilation_guard
 from tilelang.jit.diagnostics import jit_phase
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
@@ -63,6 +64,7 @@ class JITKernel(Generic[_P, _T]):
     config: dict[str, Any] = None
     ref_latency: float = None
 
+    @compilation_guard
     def __init__(
         self,
         func: PrimFunc = None,
@@ -105,6 +107,7 @@ class JITKernel(Generic[_P, _T]):
         """
         self.prim_func = func
         self.verbose = verbose
+        self._execution_prepared = False
 
         self.pass_configs = normalize_pass_configs(pass_configs)
 
@@ -147,8 +150,11 @@ class JITKernel(Generic[_P, _T]):
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
         self.torch_function = adapter.func
+        if env.is_explicit_compile_required():
+            self.prepare_for_execution()
 
     @classmethod
+    @compilation_guard
     def from_database(
         cls,
         func: PrimFunc,
@@ -191,6 +197,8 @@ class JITKernel(Generic[_P, _T]):
             compile_flags=compile_flags,
         )
         instance.torch_function = instance.adapter.func
+        if env.is_explicit_compile_required():
+            instance.prepare_for_execution()
         return instance
 
     def __call__(self, *args: _P.args, **kwds: _P.kwargs) -> _T:
@@ -211,9 +219,12 @@ class JITKernel(Generic[_P, _T]):
         """
         return self.torch_function(*args, **kwds)
 
+    @compilation_guard
     def prepare_for_execution(self) -> JITKernel[_P, _T]:
         """Finish backend preparation that would otherwise occur on first launch."""
-        self.adapter.prepare_for_execution()
+        if not getattr(self, "_execution_prepared", False):
+            self.adapter.prepare_for_execution()
+            self._execution_prepared = True
         return self
 
     def _compile_and_create_adapter(

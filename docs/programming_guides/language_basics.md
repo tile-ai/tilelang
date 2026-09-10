@@ -208,7 +208,7 @@ Notes
 
 Set `TILELANG_REQUIRE_EXPLICIT_COMPILE=1` when execution must never trigger a
 new compilation. Every specialization must then be registered with `.compile()`
-or `.par_compile()` before the decorated function is invoked:
+or `.par_compile()` before any TileLang kernel is launched:
 
 ```bash
 export TILELANG_REQUIRE_EXPLICIT_COMPILE=1
@@ -218,6 +218,9 @@ export TILELANG_REQUIRE_EXPLICIT_COMPILE=1
 # Compilation phase: no kernel launch.
 add.compile(1 << 20)
 add.compile(1 << 22)
+
+# Optional explicit boundary; the first kernel launch also seals automatically.
+tilelang.seal_compilation()
 
 # Execution phase: these calls only look up an explicitly compiled specialization.
 add(1 << 20)(A_small, B_small, C_small)
@@ -245,10 +248,19 @@ be deferred to the first launch. `TILELANG_DISABLE_CACHE=1` may be used at the
 same time; it disables TileLang's global/persistent cache but does not disable
 the current process's explicit-specialization registry.
 
+The first kernel launch atomically seals compilation for the entire Python
+process. It waits for compilation calls already in progress, then every later
+`.compile()` or `.par_compile()` raises `RuntimeError`; additional launches of
+compiled kernels remain valid. A harness can call `tilelang.seal_compilation()`
+to establish this boundary before allocating execution resources. The phase is
+intentionally irreversible and process-local: start a new worker process for a
+new compilation phase, and use harness-level coordination across processes.
+
 For autotuned decorators, `.compile()` still executes candidate kernels to
 benchmark them. In explicit-compile mode, TileLang disables pipelined
 compile/benchmark overlap so all candidate compilation finishes before any
-candidate execution begins.
+candidate execution begins. The first candidate benchmark seals the process,
+so compile other kernels before starting an autotuning call.
 
 The CuTeDSL execution backend is the exception for a fresh artifact: its final
 `cute.compile` specialization requires runtime tensor metadata. Strict mode

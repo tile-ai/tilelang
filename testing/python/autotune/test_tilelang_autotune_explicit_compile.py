@@ -6,6 +6,7 @@ import torch
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner.tuner import AutoTuneImpl
+from tilelang.jit.compile_phase import _reset_compilation_phase_for_testing
 
 
 def _lazy_kernel_factory(size: int, block: int = 64):
@@ -50,13 +51,19 @@ class _FakeTuner:
 
     def run(self):
         self.run_count += 1
+        self.kernel.prepare_for_execution()
+        # AutoTuner.run benchmarks after candidate preparation.
+        tilelang.seal_compilation()
         return SimpleNamespace(kernel=self.kernel, config={"block": 32})
 
 
 @pytest.fixture(autouse=True)
 def explicit_compile_environment(monkeypatch):
+    _reset_compilation_phase_for_testing()
     monkeypatch.setenv("TILELANG_DISABLE_CACHE", "1")
     monkeypatch.setenv("TILELANG_REQUIRE_EXPLICIT_COMPILE", "1")
+    yield
+    _reset_compilation_phase_for_testing()
 
 
 def test_autotune_requires_explicit_compile_before_lookup(monkeypatch):
@@ -78,6 +85,8 @@ def test_autotune_requires_explicit_compile_before_lookup(monkeypatch):
     with pytest.raises(RuntimeError, match="No explicitly compiled specialization"):
         impl(16)
     assert tuner.run_count == 1
+    with pytest.raises(RuntimeError, match="compilation is sealed"):
+        impl.compile(16)
 
 
 def test_autotune_candidate_compilation_is_explicit_in_strict_mode(monkeypatch):

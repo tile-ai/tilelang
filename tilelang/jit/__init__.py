@@ -24,6 +24,7 @@ from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
+from tilelang.jit.compile_phase import compilation_guard, seal_compilation as seal_compilation
 from tilelang.cache import cached
 from tilelang.env import env
 from tilelang.utils.device import get_available_cpu_count
@@ -90,6 +91,7 @@ class _CallFormCache:
         self._remember(call_form_key, kernel)
 
 
+@compilation_guard
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
@@ -136,7 +138,8 @@ def compile(
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     TILELANG_REQUIRE_EXPLICIT_COMPILE : str
         When enabled, finish backend preparation during this explicit compile
-        instead of deferring any work until the first kernel launch.
+        instead of deferring any work until the first kernel launch. Compilation
+        is rejected after the process enters its execution phase.
     """
 
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
@@ -178,6 +181,7 @@ def compile(
     return kernel
 
 
+@compilation_guard
 def par_compile(
     funcs: Iterable[PrimFunc[_KP, _T]],
     out_idx: list[int] | int | None = None,
@@ -226,7 +230,8 @@ def par_compile(
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     TILELANG_REQUIRE_EXPLICIT_COMPILE : str
         When enabled, finish backend preparation for every compiled kernel
-        before this function returns.
+        before this function returns. Compilation is rejected after the process
+        enters its execution phase.
     """
 
     # funcs may be a one-shot iterable; materialize to size the pool and reuse below.
@@ -466,6 +471,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         # call-form entries so none can keep returning an older kernel object.
         self._call_form_cache.clear()
 
+    @compilation_guard
     def par_compile(
         self,
         configs: Iterable[dict[str, Any] | tuple[str, Any]],
@@ -558,6 +564,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
         return kernel_result
 
+    @compilation_guard
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel[_KP, _T]:
         """Explicitly compile and register one specialization for later invocation."""
         kwargs.update(kwargs.pop("__tune_params", {}))
@@ -703,7 +710,8 @@ def jit(
     TILELANG_REQUIRE_EXPLICIT_COMPILE : str
         Set to "1", "true", "yes", or "on" to reject specialization cache
         misses during decorated invocation. Register each specialization first
-        with `.compile()` or `.par_compile()`.
+        with `.compile()` or `.par_compile()`. The first kernel launch seals
+        compilation for the process; later compilation calls raise an error.
     """
 
     compile_args = dict(

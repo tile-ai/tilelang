@@ -203,7 +203,9 @@ print("GEMM + ReLU passed.")
 To separate compilation from execution, set
 `TILELANG_REQUIRE_EXPLICIT_COMPILE=1` and call
 `matmul_relu.compile(a, b)` before `matmul_relu(a, b)`. A new specialization
-then raises an error instead of compiling during execution; see the
+then raises an error instead of compiling during execution. The first kernel
+launch also seals compilation for the process, so compile every kernel first;
+see the
 [explicit compilation guide](https://tilelang.com/programming_guides/language_basics.html#separating-compilation-from-execution).
 
 ## Examples
