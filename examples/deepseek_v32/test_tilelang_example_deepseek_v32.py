@@ -1,6 +1,7 @@
 # ruff: noqa
 import tilelang
 import tilelang.testing
+import torch
 
 import topk_selector
 import fp8_lighting_indexer
@@ -26,6 +27,33 @@ def test_example_fp8_lighting_indexer():
 def test_example_sparse_mla_fwd():
     # small shapes for testing
     sparse_mla_fwd.test_sparse_mla_fwd(S=256, SKV=1024, H=64, HKV=1, DQK=576, DV=512, topk=256, check_correctness=False)
+
+
+@tilelang.testing.requires_rocm
+def test_example_sparse_mla_fwd_rocm():
+    """Validate the bounded one-wave sparse MLA configuration on ROCm."""
+    sequence_length = 32
+    indices = (
+        torch.arange(sequence_length, device="cuda", dtype=torch.int32)
+        .reshape(1, 1, 1, sequence_length)
+        .expand(1, sequence_length, 1, sequence_length)
+        .contiguous()
+    )
+    sparse_mla_fwd.test_sparse_mla_fwd(
+        S=sequence_length,
+        SKV=sequence_length,
+        H=16,
+        HKV=1,
+        DQK=576,
+        DV=512,
+        topk=sequence_length,
+        check_correctness=True,
+        profile=False,
+        indices=indices,
+        block_I=32,
+        num_stages=2,
+        threads=64,
+    )
 
 
 @tilelang.testing.requires_cuda

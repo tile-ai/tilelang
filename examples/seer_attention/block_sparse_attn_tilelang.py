@@ -129,10 +129,11 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
     return kernel_func(block_M, block_N, num_stages, threads)
 
 
-def test_topk_sparse_attention():
+def test_topk_sparse_attention(batch=4, heads=2, sequence_length=256, topk=2):
+    """Validate causal block-sparse self-attention."""
     # Config
-    BATCH, N_HEADS, SEQ_LEN, D_HEAD = 4, 2, 256, 64
-    TOPK = 2  # Keep top 8 elements per row
+    BATCH, N_HEADS, SEQ_LEN, D_HEAD = batch, heads, sequence_length, 64
+    TOPK = topk  # Keep top 8 elements per row
     BLOCK = 64
     torch.manual_seed(0)
 
@@ -174,11 +175,12 @@ def test_topk_sparse_attention():
     print("Pass topk sparse attention test with qlen == klen")
 
 
-def test_topk_sparse_attention_qlen_lt_klen():
+def test_topk_sparse_attention_qlen_lt_klen(batch=1, heads=1, query_length=128, kv_length=256, topk=1):
+    """Validate causal block-sparse attention when query is shorter than KV."""
     # Config
-    BATCH, N_HEADS = 1, 1
-    Q_LEN, K_LEN, D_HEAD = 128, 256, 64  # qlen < klen; here, past_len = 256 - 128 = 128.
-    TOPK = 1
+    BATCH, N_HEADS = batch, heads
+    Q_LEN, K_LEN, D_HEAD = query_length, kv_length, 64
+    TOPK = topk
     BLOCK = 64  # block size used in downsampling
     torch.manual_seed(0)
 
