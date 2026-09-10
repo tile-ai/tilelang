@@ -228,6 +228,12 @@ Control via env vars (tilelang.env)
 - `TILELANG_CACHE_DIR` (default `~/.tilelang/cache`)
 - Disable all kernel caches: `TILELANG_DISABLE_CACHE=1`
 - Disable autotune disk cache only: `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`
+- Require an explicit `.compile()` before decorated invocation:
+  `TILELANG_REQUIRE_EXPLICIT_COMPILE=1`. Autotuning necessarily executes
+  candidates, but this mode finishes compiling every candidate before
+  benchmarking begins. A fresh CuTeDSL artifact cannot provide this guarantee
+  because its final specialization needs runtime tensor metadata; strict mode
+  rejects it instead of compiling during execution.
 
 CPU worker control
 - `TILELANG_AUTO_TUNING_CPU_UTILITIES` (fraction, default 0.9)
@@ -261,6 +267,10 @@ cfgs = [
 kernels = impl.par_compile(cfgs, num_workers=4)
 # Now benchmark kernels[i](A, B, C) yourself
 ```
+
+`par_compile` also registers every successful specialization for later calls
+through `impl`. This permits a strict compile phase followed by an execution
+phase when `TILELANG_REQUIRE_EXPLICIT_COMPILE=1`.
 
 ## Recording and Reusing Best Configs
 

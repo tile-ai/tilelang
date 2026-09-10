@@ -25,6 +25,7 @@ from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
 from tilelang.cache import cached
+from tilelang.env import env
 from tilelang.utils.device import get_available_cpu_count
 from os import path, makedirs
 from logging import getLogger
@@ -133,6 +134,9 @@ def compile(
         Default execution backend. Defaults to "auto".
     TILELANG_VERBOSE : str
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
+    TILELANG_REQUIRE_EXPLICIT_COMPILE : str
+        When enabled, finish backend preparation during this explicit compile
+        instead of deferring any work until the first kernel launch.
     """
 
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
@@ -159,7 +163,7 @@ def compile(
                 func_cf.extend(compile_flags)
         compile_flags = func_cf
 
-    return cached(
+    kernel = cached(
         func=func,
         out_idx=out_idx,
         execution_backend=execution_backend,
@@ -169,6 +173,9 @@ def compile(
         pass_configs=pass_configs,
         compile_flags=compile_flags,
     )
+    if env.is_explicit_compile_required():
+        kernel.prepare_for_execution()
+    return kernel
 
 
 def par_compile(
@@ -217,6 +224,9 @@ def par_compile(
         Default execution backend. Defaults to "auto".
     TILELANG_VERBOSE : str
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
+    TILELANG_REQUIRE_EXPLICIT_COMPILE : str
+        When enabled, finish backend preparation for every compiled kernel
+        before this function returns.
     """
 
     # funcs may be a one-shot iterable; materialize to size the pool and reuse below.
@@ -360,6 +370,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             except NameError:
                 self.debug_root_path = path.abspath(self.debug_root_path)
         self._kernel_cache: dict[tuple, Kernel] = {}
+        self._explicitly_compiled_keys: set[tuple] = set()
         self._call_form_cache: _CallFormCache = _CallFormCache()
         self._tuner_cache: dict[tuple, Kernel] = {}
 
@@ -400,6 +411,61 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             raise ValueError("out_idx is only supported in lazy mode. In eager mode, use T.empty() to declare output tensors instead.")
         return self.mode
 
+    def _explicit_compile_error(self) -> RuntimeError:
+        func_name = getattr(self.func, "__name__", "jit_kernel")
+        return RuntimeError(
+            f"No explicitly compiled specialization was found for `{func_name}` while "
+            "TILELANG_REQUIRE_EXPLICIT_COMPILE=1. Call "
+            f"`{func_name}.compile(...)` with matching tensor shapes, dtypes, strides, "
+            "and compile-time arguments before invoking it."
+        )
+
+    def _explicit_compile_cache_keys(self, *args: _P.args, **kwargs: _P.kwargs) -> set[tuple]:
+        """Return the invocation cache keys authorized by one explicit compile."""
+        key, _ = self.func.parse_args(*args, **kwargs)
+        keys = {key}
+
+        # Eager kernels may be compiled without concrete tensors by supplying
+        # T.const values as extra keyword arguments, for example
+        # ``kernel.compile(M=1024, N=1024)``. Those values belong to the phase-2
+        # specialization key when the same kernel is later called with tensors,
+        # not to the phase-1 Python call key. Register that equivalent key too.
+        if self.mode != "eager" or not self.func.tensor_args:
+            return keys
+
+        phase1_key, phase2_key = key
+        template = self.func.p1_cache.get(phase1_key)
+        matcher = None if template is None else template.matcher
+        if not matcher:
+            return keys
+
+        constexpr_names = {match[3] for match in matcher.values()}
+        signature_names = set(self.signature.parameters)
+        explicit_const_names = (set(kwargs) - signature_names) & constexpr_names
+        if not explicit_const_names:
+            return keys
+
+        alias_kwargs = {name: value for name, value in kwargs.items() if name not in explicit_const_names}
+        try:
+            alias_bound = self.func._argument_binder.bind(args, alias_kwargs)
+        except TypeError:
+            # Complex signatures using *args/**kwargs may require concrete
+            # tensor arguments. The exact explicit call key remains valid.
+            return keys
+
+        alias_key = (alias_bound.p1_key, phase2_key)
+        keys.add(alias_key)
+        self.func.p1_cache.setdefault(alias_bound.p1_key, template)
+        return keys
+
+    def _register_explicit_kernel(self, kernel: JITKernel[_KP, _T], keys: set[tuple]) -> None:
+        for key in keys:
+            self._kernel_cache[key] = kernel
+        self._explicitly_compiled_keys.update(keys)
+        # An explicit recompile replaces every canonical alias. Discard raw
+        # call-form entries so none can keep returning an older kernel object.
+        self._call_form_cache.clear()
+
     def par_compile(
         self,
         configs: Iterable[dict[str, Any] | tuple[str, Any]],
@@ -429,14 +495,19 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
         configs = list(configs)
         funcs = []
+        compile_keys = []
         for cfg in tqdm(configs, desc="Elaborating"):
             if isinstance(cfg, tuple):
+                self.initialize_jit_mode(*cfg)
+                compile_keys.append(self._explicit_compile_cache_keys(*cfg))
                 funcs.append(self.get_tir(*cfg))
             elif isinstance(cfg, dict):
+                self.initialize_jit_mode(**cfg)
+                compile_keys.append(self._explicit_compile_cache_keys(**cfg))
                 funcs.append(self.get_tir(**cfg))
             else:
                 raise ValueError(f"Invalid config type: {type(cfg)}, expected tuple or dict.")
-        return par_compile(
+        kernels = par_compile(
             funcs,
             out_idx=self.out_idx,
             execution_backend=self.execution_backend,
@@ -449,7 +520,12 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             ignore_error=ignore_error,
         )
 
-    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
+        for keys, kernel in zip(compile_keys, kernels):
+            if kernel is not None:
+                self._register_explicit_kernel(kernel, keys)
+        return kernels
+
+    def _compile_kernel(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel[_KP, _T]:
         prim_func = self.get_tir(*args, **kwargs)
         kernel_result = compile(
             prim_func,
@@ -481,6 +557,15 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
                 print(prim_func.script(), file=f)
 
         return kernel_result
+
+    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel[_KP, _T]:
+        """Explicitly compile and register one specialization for later invocation."""
+        kwargs.update(kwargs.pop("__tune_params", {}))
+        self.initialize_jit_mode(*args, **kwargs)
+        keys = self._explicit_compile_cache_keys(*args, **kwargs)
+        kernel = self._compile_kernel(*args, **kwargs)
+        self._register_explicit_kernel(kernel, keys)
+        return kernel
 
     def parse_cache_key(self, *args: _P.args, **kwargs: _P.kwargs):
         tune_params = kwargs.pop("__tune_params", {})
@@ -521,6 +606,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
         has_tune_params = "__tune_params" in kwargs
         kwargs.update(kwargs.pop("__tune_params", {}))
+        require_explicit_compile = env.is_explicit_compile_required()
 
         # infer mode early, before parse_args needs it
         if self.mode == "auto":
@@ -528,15 +614,18 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             self.func.set_mode(self.mode)
 
         call_form_key = None
-        if self.is_lazy_mode() and self._can_use_call_form_cache(has_tune_params):
+        if not require_explicit_compile and self.is_lazy_mode() and self._can_use_call_form_cache(has_tune_params):
             kernel, call_form_key = self._call_form_cache.lookup(args, kwargs)
             if kernel is not _CALL_FORM_CACHE_MISS:
                 return kernel
 
         key, kernel_args = self.func.parse_args(*args, **kwargs)
         kernel = self._kernel_cache.get(key, None)
-        if kernel is None:
-            kernel = self.compile(*args, **kwargs)
+        if require_explicit_compile:
+            if key not in self._explicitly_compiled_keys or kernel is None:
+                raise self._explicit_compile_error()
+        elif kernel is None:
+            kernel = self._compile_kernel(*args, **kwargs)
             self._kernel_cache[key] = kernel
 
         if call_form_key is not None and self.is_lazy_mode() and not kernel_args:
@@ -608,6 +697,13 @@ def jit(
         Directory to save compiled kernel source for debugging.
     compile_flags : list[str] | str | None
         Additional compiler flags.
+
+    Environment Variables
+    ---------------------
+    TILELANG_REQUIRE_EXPLICIT_COMPILE : str
+        Set to "1", "true", "yes", or "on" to reject specialization cache
+        misses during decorated invocation. Register each specialization first
+        with `.compile()` or `.par_compile()`.
     """
 
     compile_args = dict(

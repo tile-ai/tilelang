@@ -99,6 +99,14 @@ class BaseKernelAdapter(ABC):
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         return self.func(*args, **kwds)
 
+    def prepare_for_execution(self) -> None:
+        """Finish backend work that would otherwise occur on first invocation.
+
+        Most adapters compile and load their executable during construction.
+        Backends with an additional lazy preparation step override this method.
+        """
+        return None
+
     def get_kernel_source(self, kernel_only: bool = True) -> str:
         if kernel_only:
             return self.mod.imports[0].inspect_source()

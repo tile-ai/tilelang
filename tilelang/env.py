@@ -380,6 +380,9 @@ class Environment:
     )  # cleanup temporary compiler files/dirs after compilation (set to 0 to keep for debugging)
     TILELANG_HIP_SAVE_TEMP_FILES = EnvVar("TILELANG_HIP_SAVE_TEMP_FILES", "0")  # save temporary files for HIP compilation
     TILELANG_JIT_DIAGNOSTICS = EnvVar("TILELANG_JIT_DIAGNOSTICS", "0")  # enable JIT phase diagnostics
+    TILELANG_REQUIRE_EXPLICIT_COMPILE = EnvVar(
+        "TILELANG_REQUIRE_EXPLICIT_COMPILE", "0"
+    )  # reject @tilelang.jit cache misses during invocation; require .compile() first
     TILELANG_COMPILE_TIMEOUT_SECONDS = EnvVar("TILELANG_COMPILE_TIMEOUT_SECONDS", "")  # optional NVCC subprocess timeout in seconds
 
     # Pass diff debugging
@@ -458,6 +461,9 @@ class Environment:
 
     def is_jit_diagnostics_enabled(self) -> bool:
         return str(self.TILELANG_JIT_DIAGNOSTICS).lower() in ("1", "true", "yes", "on")
+
+    def is_explicit_compile_required(self) -> bool:
+        return str(self.TILELANG_REQUIRE_EXPLICIT_COMPILE).strip().lower() in ("1", "true", "yes", "on")
 
     def is_pass_profile_enabled(self) -> bool:
         return str(self.TILELANG_PASS_PROFILE).strip().lower() in ("1", "true", "yes", "on")

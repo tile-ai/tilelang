@@ -204,6 +204,58 @@ Notes
 - You can pass compile‑time tunables (tile sizes, dtypes) through the outer
   Python function and bake them into the generated TIR.
 
+### Separating compilation from execution
+
+Set `TILELANG_REQUIRE_EXPLICIT_COMPILE=1` when execution must never trigger a
+new compilation. Every specialization must then be registered with `.compile()`
+or `.par_compile()` before the decorated function is invoked:
+
+```bash
+export TILELANG_REQUIRE_EXPLICIT_COMPILE=1
+```
+
+```python
+# Compilation phase: no kernel launch.
+add.compile(1 << 20)
+add.compile(1 << 22)
+
+# Execution phase: these calls only look up an explicitly compiled specialization.
+add(1 << 20)(A_small, B_small, C_small)
+add(1 << 22)(A_large, B_large, C_large)
+```
+
+For an eager-style JIT function, pass the same tensors and compile-time
+arguments that will specialize the later call:
+
+```python
+matmul_relu.compile(a, b, block_M=128)
+c = matmul_relu(a, b, block_M=128)
+```
+
+Eager kernels whose shapes are declared with `T.const` can also be compiled
+without allocating the tensors first. For example,
+`copy.compile(M=1024, N=1024)` registers the specialization used later by
+matching 1024-by-1024 tensors.
+
+An invocation with a shape, dtype, stride, or compile-time argument that was
+not explicitly compiled raises `RuntimeError` instead of compiling lazily.
+Set the variable before the compilation phase: in addition to enforcing the
+lookup, it makes `.compile()` finish backend preparation that would otherwise
+be deferred to the first launch. `TILELANG_DISABLE_CACHE=1` may be used at the
+same time; it disables TileLang's global/persistent cache but does not disable
+the current process's explicit-specialization registry.
+
+For autotuned decorators, `.compile()` still executes candidate kernels to
+benchmark them. In explicit-compile mode, TileLang disables pipelined
+compile/benchmark overlap so all candidate compilation finishes before any
+candidate execution begins.
+
+The CuTeDSL execution backend is the exception for a fresh artifact: its final
+`cute.compile` specialization requires runtime tensor metadata. Strict mode
+therefore rejects `.compile()` instead of silently compiling on first
+execution. Use `tvm_ffi`, `cython`, or `nvrtc` for strict two-phase execution,
+or reuse a CuTeDSL cache entry whose cubin has already been generated.
+
 ## 7. Tiled GEMM Skeleton
 
 Below is a minimal pattern for a tiled GEMM using shared memory staging and a

@@ -211,6 +211,11 @@ class JITKernel(Generic[_P, _T]):
         """
         return self.torch_function(*args, **kwds)
 
+    def prepare_for_execution(self) -> JITKernel[_P, _T]:
+        """Finish backend preparation that would otherwise occur on first launch."""
+        self.adapter.prepare_for_execution()
+        return self
+
     def _compile_and_create_adapter(
         self,
         tilelang_func: PrimFunc,
