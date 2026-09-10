@@ -22,7 +22,7 @@ def test_simtvf_frame_is_not_for_frame():
 
 
 def test_simtvf_frame_exported():
-    """SimtVFFrame should be importable from tilelang.language."""
-    from tilelang.language import SimtVFFrame as SF
+    """SimtVFFrame should be importable from the Ascend dialect."""
+    from tilelang.ascend.language import SimtVFFrame as SF
 
     assert SF is SimtVFFrame

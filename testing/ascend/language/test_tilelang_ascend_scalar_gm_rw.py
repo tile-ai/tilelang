@@ -13,7 +13,7 @@ import re
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang.language import simd as S
+from tilelang.ascend.language import simd as S
 from tilelang.engine.lower import lower
 
 NUM_CORES = 32

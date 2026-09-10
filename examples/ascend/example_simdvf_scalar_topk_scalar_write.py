@@ -9,7 +9,7 @@ codegen lowers to ``tl::write_gm_bypass_dcache`` (ASC) or
 
 import tilelang
 import tilelang.ascend.language as T
-from tilelang.language import simd as S
+from tilelang.ascend.language import simd as S
 
 VL = 64  # float32 lanes per 2048-bit vector register
 NUM_EXPERTS = 128
