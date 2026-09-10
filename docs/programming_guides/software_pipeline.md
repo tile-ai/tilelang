@@ -1,4 +1,4 @@
-# Software Pipeline Annotations
+# Software Pipelines
 
 TileLang can infer common producer/consumer pipelines from
 `T.Pipelined(..., num_stages=...)`. For regular GEMM-like kernels, this is the
@@ -15,6 +15,51 @@ For kernels whose loop body has unusual ordering, extra post-processing, or
 manual async-copy grouping, you can provide explicit pipeline annotations. This
 guide explains how to write those annotations and why replayable scalar `Bind`
 statements are not part of the user-visible schedule.
+
+## API and Execution Contract
+
+```python
+T.Pipelined(
+    start,
+    stop=None,
+    num_stages=0,
+    order=None,
+    stage=None,
+    sync=None,
+    group=None,
+    annotations=None,
+)
+```
+
+With one positional bound, iteration is over `[0, start)`; with two, it is over
+`[start, stop)`. There are two supported scheduling modes:
+
+| Mode | Arguments | Use |
+| --- | --- | --- |
+| Inferred | `num_stages=N` | Preferred for regular copy/compute loops |
+| Manual | matching `stage=[...]`, `order=[...]` | Pin statement stages and issue order |
+
+In inferred mode, `num_stages=0` disables software pipelining. A positive value
+requests that many versions for values whose live ranges cross stages. The
+compiler plans dependencies, creates prologue/steady-state/epilogue code, and
+inserts supported copy waits and synchronization. It may still select a
+synchronous instruction for an operation that cannot use an async path.
+
+`T.Pipelined` changes physical scheduling, not logical loop semantics: every
+logical iteration still happens once, dependencies must be preserved, and a
+buffer version cannot be overwritten before its consumers complete.
+
+The `sync` and `group` parameters expose legacy lowering metadata. They are not
+recommended for new user code; use inferred scheduling, explicit `stage` and
+`order`, or a declarative [warp-specialization schedule](warp_specialization.md).
+
+:::{note}
+`T.copy` keeps synchronous source-level semantics even when a pipeline lowers
+it through an asynchronous instruction. `T.async_copy` and `T.tma_copy` are
+explicit split-phase APIs; outside a compiler-managed pattern, their waits and
+buffer lifetimes are the user's responsibility. See [TMA](tma.md) and
+[Synchronization and Memory Ordering](synchronization.md).
+:::
 
 ## The User Model
 
@@ -312,6 +357,8 @@ keeps the user-facing schedule focused on real pipeline work.
 
 When writing manual pipeline annotations:
 
+- Start with `num_stages=2` or `3` and tune. A deeper pipeline consumes more
+  shared memory and can reduce occupancy; it is not unconditionally faster.
 - Count only scheduled statements when building `stage` and `order`.
 - Omit replayable scalar aliases such as `base = ko * BK` or
   `idx = Ids[ko]` when `Ids` is not written in the pipeline.
@@ -324,3 +371,9 @@ When writing manual pipeline annotations:
   scheduled statement list.
 - Prefer the bind-free form for replayable aliases in new code; rely on legacy
   bind slots only when maintaining old kernels.
+- Keep async issue, wait, and buffer reuse in one control-flow protocol. A
+  condition that skips the producer but not the consumer can deadlock or expose
+  uninitialized data.
+- When managing barriers explicitly, use `iteration % depth` for the stage
+  slot. Its parity changes when that same slot is reused, typically
+  `(iteration // depth) & 1`.

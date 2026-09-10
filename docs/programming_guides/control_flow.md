@@ -101,7 +101,8 @@ for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
 
 For manual `stage` / `order` annotations and the rule that scalar `Bind`
 statements do not consume annotation slots, see
-[Software Pipeline Annotations](software_pipeline.md).
+[Software Pipelines](software_pipeline.md). CUDA producer/consumer role
+splitting is covered by [Warp Specialization](warp_specialization.md).
 
 ### Persistent (advanced)
 

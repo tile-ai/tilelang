@@ -345,10 +345,14 @@ def tma_load_2sm(*args):
 
 
 def fence_proxy_async():
-    """Issue a shared memory fence for asynchronous proxy operations.
+    """Order generic-proxy shared writes before async-proxy operations.
 
-    Ensures that prior asynchronous operations (e.g. TMA stores) are visible
-    to subsequent memory accesses. Maps to ``fence.proxy.async.shared::cta``.
+    Maps to ``fence.proxy.async.shared::cta`` on supported NVIDIA targets.
+    This is a proxy-domain ordering fence: it is not a thread rendezvous and
+    does not wait for TMA, WGMMA, or other asynchronous work to complete.
+    The default CUDA lowering pipeline inserts it automatically for recognized
+    generic-to-async transitions; explicit use is normally needed only around
+    custom low-level operations.
 
     Returns:
         tirx.Call: A handle to the fence operation

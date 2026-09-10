@@ -3,6 +3,9 @@
 This page summarizes the core TileLang “instructions” available at the DSL
 level, how they map to hardware concepts, and how to use them correctly.
 
+For lifecycle and ordering contracts that do not fit in a concise catalog, see
+[Advanced Semantics](advanced_semantics.md).
+
 ## Quick Categories
 - Data movement: `T.copy`, `T.async_copy`, `T.tma_copy`, `T.c2d_im2col`, staging Global ↔ Shared ↔ Fragment
 - Compute primitives: `T.gemm`/`T.gemm_sp`, elementwise math (`T.exp`, `T.max`),
@@ -13,7 +16,8 @@ level, how they map to hardware concepts, and how to use them correctly.
 
 ## Data Movement
 
-Use `T.copy(src, dst, *, coalesced_width=None, disable_tma=False, eviction_policy=None, loop_layout=None)`
+Use `T.copy(src, dst, *, coalesced_width=None, disable_tma=False,
+prefer_instruction=None, eviction_policy=None, loop_layout=None)`
 to move tiles between memory scopes. It accepts `tir.Buffer`, `BufferLoad`, or
 `BufferRegion`; extents are inferred or broadcast when possible.
 
@@ -108,6 +112,10 @@ In HL pipelines, you usually don’t need to write explicit barriers. Passes suc
 as PipelinePlanning/InjectSoftwarePipeline/InjectTmaBarrier orchestrate
 producer/consumer ordering and thread synchronization behind the scenes.
 
+Barriers, async waits, and proxy fences solve different problems. See
+[Synchronization and Memory Ordering](synchronization.md) before combining
+them manually.
+
 If you need debugging or explicit checks:
 - `T.device_assert(cond, msg='')` emits device‑side asserts on CUDA targets.
 - `T.print(obj, msg='...')` prints scalars or buffers safely from one thread.
@@ -144,7 +152,8 @@ signatures, behaviors, constraints, and examples, refer to API Reference
 Data movement
 - `T.copy(src, dst, ...)`: Move tiles between Global/Shared/Fragment.
 - `T.async_copy(src, dst, ...)`: Explicit async global→shared copy via `cp.async`.
-- `T.tma_copy(src, dst, ...)`: Explicit async global→shared copy via `cp.async.bulk`
+- `T.tma_copy(src, dst, ...)`: Explicit split-phase TMA load or store; loads
+  use an mbarrier and stores use `T.tma_store_wait`.
 - `T.transpose(src, dst)`: Transpose a 2D shared buffer: `dst[j, i] = src[i, j]`.
 - `T.c2d_im2col(img, col, ...)`: 2D im2col transform for conv.
 
@@ -155,7 +164,9 @@ Memory allocation and descriptors
 - `T.alloc_barrier(arrive_count)`: Allocate and initialize one or more mbarriers.
 - `T.alloc_tmem(shape, dtype)`: Tensor memory (TMEM) buffer (Blackwell+).
 - `T.deallocate_tmem(buffer)`: Explicitly release a TMEM buffer at the current site.
-- `T.alloc_reducer(shape, dtype, op='sum', replication=None)`: Reducer buf.
+- `T.alloc_reducer(shape, dtype, op='sum')`: Allocate a first-class reducer
+  epoch; use `T.reducer_init`, `T.reducer_update`, and
+  `T.finalize_reducer(acc, dst)`. The `replication=` form is deprecated.
 - `T.alloc_descriptor(kind, dtype)`: Generic descriptor allocator.
   - `T.alloc_wgmma_desc(dtype='uint64')`
   - `T.alloc_tcgen05_smem_desc(dtype='uint64')`
@@ -233,13 +244,14 @@ Custom intrinsics
 Barriers, TMA, warp‑group
 - Barriers: `T.alloc_barrier(arrive_count)`.
 - Parity ops: `T.mbarrier_wait_parity(barrier, parity)`, `T.mbarrier_arrive(barrier)`.
-- Expect tx: `T.mbarrier_expect_tx(...)`; sugar: `T.barrier_wait(id, parity=None)`.
+- Expect tx: `T.mbarrier_expect_tx(...)`; exact aliases:
+  `T.barrier_wait(barrier, parity)` and `T.barrier_arrive(barrier)`.
 - TMA: `T.create_tma_descriptor(...)`, `T.tma_load(...)`,
   `T.tma_store_arrive(...)`, `T.tma_store_wait(count=0, read=True)`.
   `read=True` emits `cp.async.bulk.wait_group.read`; use `read=False` for
   `cp.async.bulk.wait_group` when the wait must include destination writes
   becoming visible.
-- Proxy/fences: `T.fence_proxy_async(...)`, `T.warpgroup_fence_operand(...)`.
+- Proxy/fences: `T.fence_proxy_async()`, `T.warpgroup_fence_operand(...)`.
 - Warp‑group: `T.warpgroup_arrive()`, `T.warpgroup_commit_batch()`,
   `T.warpgroup_wait(num_mma)`, `T.wait_wgmma(id)`.
 
