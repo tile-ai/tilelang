@@ -361,11 +361,35 @@ def _lower_copy(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: 
     # to element-offset indexing over a unit-stride strided view.
     src_tir_indices = _extract_tir_region_indices(stmt.call_args, 0)
     dst_tir_indices = _extract_tir_region_indices(stmt.call_args, 1)
+    # Whole GLOBAL <-> tile copies use the allocation's physical tile shape.
+    # Logical TensorView bounds mask padding; partial regions must retain their
+    # original shape so this cannot overwrite valid elements outside the copy.
+    padded_full_copy = False
+    if (src_val.type.space == MemSpace.GLOBAL) != (dst_val.type.space == MemSpace.GLOBAL):
+        from tilelang.tileir.emission_utils import _dtype_supports_tensor_view
+
+        global_val, local_val = (src_val, dst_val) if src_val.type.space == MemSpace.GLOBAL else (dst_val, src_val)
+        logical_shape = scope.buffer_logical_shapes.get(local_val.name)
+        origin_zero = (
+            src_tir_indices is not None
+            and dst_tir_indices is not None
+            and all(isinstance(idx, (int, _tirx.IntImm)) and int(idx) == 0 for idx in (*src_tir_indices, *dst_tir_indices))
+        )
+        if (
+            origin_zero
+            and logical_shape == tile_shape == dst_tile_shape_raw == tuple(global_val.type.shape)
+            and tuple(local_val.type.shape) != logical_shape
+            and _dtype_supports_tensor_view(global_val.type.dtype.name)
+            and global_val not in scope.alloca_buffer_values
+        ):
+            tile_shape = tuple(local_val.type.shape)
+            dst_tile_shape = ()
+            padded_full_copy = True
     src_idx, src_elem = _compute_view_indices(src_tir_indices, tile_shape, scope, builder, what="copy src")
     # Use dst_tile_shape for computing dst partition indices when it differs.
     _dst_shape_for_idx = dst_tile_shape if dst_tile_shape else tile_shape
     dst_idx, dst_elem = _compute_view_indices(dst_tir_indices, _dst_shape_for_idx, scope, builder, what="copy dst")
-    src_in_bounds = _prove_region_in_bounds(src_tir_indices, tile_shape, tuple(src_val.type.shape), scope, builder)
+    src_in_bounds = not padded_full_copy and _prove_region_in_bounds(src_tir_indices, tile_shape, tuple(src_val.type.shape), scope, builder)
 
     # Extract per-copy load/store hints from semantic attrs.
     # The TIR annotation keys are "annotation.tileir.latency" and "annotation.disable_tma".

@@ -1216,9 +1216,7 @@ class Store(TileOp, opcode="store", effect=Effect.WRITE):
         offsets = _reshape_tile_to(ct, _as_tile(ctx, offsets), squeezed_shape, loc)
 
         ptr_base = _broadcast_ptr(ct, buf_info.ptr, squeezed_shape, loc=loc)
-        from cuda_tile._mlir.dialects.cuda_tile_ops import _offset as _ptr_offset
-
-        ptrs = _ptr_offset(ptr_base, offsets, loc=loc)
+        ptrs = ct._offset(ptr_base, offsets, loc=loc)
 
         mask_tile = _as_tile(ctx, ctx.lookup(self.mask))
         # A scalar-like value (e.g. ``Logits[bx, idx] = -inf`` under a SIMT

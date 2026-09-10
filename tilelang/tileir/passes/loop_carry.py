@@ -1,8 +1,7 @@
 """Loop-carry liveness analysis.
 
-Determines, for each loop op, the minimal set of kernel-local (SHARED/REGISTER)
-tile buffers that genuinely need to be threaded as ``ForOp`` / ``LoopOp``
-iter-args.  A tile must be carried only when it is a true loop-carried value:
+Determines which kernel-local (SHARED/REGISTER) tile buffers to thread as
+``ForOp`` / ``LoopOp`` iter-args. A tile is carried when it is:
 
   * read-before-write inside the loop body (an accumulator / live-in whose
     previous-iteration value matters), OR
@@ -10,26 +9,31 @@ iter-args.  A tile must be carried only when it is a true loop-carried value:
     post-loop read would otherwise reference an SSA value defined inside the
     loop region, an MLIR domination error).
 
-Write-first scratch buffers (overwritten fresh each iteration and never read
-after the loop) are not carried. Carrying them is correct but pins their
+Writes to aliased storage are conservatively carried unless a preceding
+top-level, full-tile Copy/Fill proves the old contents are no longer needed.
+Per-buffer WRITE effects alone do not prove a complete overwrite through every
+view: conditional and partial writes may still need the previous iteration.
+Other write-first scratch buffers (overwritten fresh each iteration and never
+read outside the loop) are not carried. Carrying them is correct but pins their
 registers live across the whole loop, crushing occupancy on memory-bound
 kernels (e.g. RMSNorm / softmax persistent loops carrying their staging tiles).
 
 The result is stored on each loop op as ``op._carry_tile_value_ids`` — a set of
-``id(buffer_value)``.  ``Loop.emit_mlir`` consults it to filter the tiles it
+``id(backing_value)``. ``Loop.emit_mlir`` consults it to filter the tiles it
 threads as iter-args; when the attribute is absent (this pass did not run, e.g.
 standalone emit tests) it falls back to carrying every ``_tile_map`` entry.
 
-Missing a true live-out here is a *loud* failure (the cuda_tile verifier rejects
-the cross-region SSA reference), never a silent miscompile — so the analysis errs
-toward dropping only buffers it can prove are scratch.
+Missing a live tile can silently restore the pre-loop value when emission
+restores non-carried entries, so alias identities must match the backing keys
+used by the emitter's tile map.
 """
 
 from __future__ import annotations
 
+from math import prod
 from typing import Any
 
-from tilelang.tileir.ir.ops import Effect, TileOp
+from tilelang.tileir.ir.ops import Copy, Effect, Fill, TileOp
 from tilelang.tileir.ir.value import Block
 from tilelang.tileir.passes.base import PassContext, walk_block
 
@@ -52,8 +56,23 @@ def _buffer_reads_writes(op: Any) -> tuple[list[Any], list[Any]]:
     return reads, writes
 
 
+def _overwrites_tile(op: Any, value: Any) -> bool:
+    """Recognize Copy/Fill's full tile-map replacement, not region merges."""
+    if not isinstance(op, (Copy, Fill)) or op.dst is not value:
+        return False
+    shape = op.tile_shape
+    return bool(shape) and all(isinstance(d, int) and d > 0 for d in shape) and prod(shape) == prod(value.type.shape)
+
+
 def loop_carry_pass(root: Block, ctx: PassContext) -> None:
     """Annotate every loop op with ``_carry_tile_value_ids`` (see module doc)."""
+    # Semantic alias collection points each view directly to its allocation.
+    storage_ids = {id(alias): id(base) for alias, base in root.buffer_aliases.items()}
+    aliased_storage = set(storage_ids.values())
+
+    def storage_id(value: Any) -> int:
+        return storage_ids.get(id(value), id(value))
+
     loops: list[Any] = []
 
     def _collect_loop(op: Any) -> None:
@@ -64,6 +83,7 @@ def loop_carry_pass(root: Block, ctx: PassContext) -> None:
 
     for loop in loops:
         body_blocks = [b for b in loop.nested_blocks() if isinstance(b, Block)]
+        top_level_ids = {id(op) for blk in body_blocks for op in blk.ops}
 
         # Body op identities (so we can identify reads OUTSIDE the body).
         body_op_ids: set[int] = set()
@@ -75,14 +95,21 @@ def loop_carry_pass(root: Block, ctx: PassContext) -> None:
         read_before_write: set[int] = set()
         written_in_body: set[int] = set()
 
-        def _visit_body(op: Any, _sw=seen_written, _rbw=read_before_write, _w=written_in_body) -> None:
+        def _visit_body(op: Any, _sw=seen_written, _rbw=read_before_write, _w=written_in_body, _top=top_level_ids) -> None:
             reads, writes = _buffer_reads_writes(op)
             for r in reads:
-                if id(r) not in _sw:
-                    _rbw.add(id(r))
+                rid = storage_id(r)
+                if rid not in _sw:
+                    _rbw.add(rid)
             for w in writes:
-                _w.add(id(w))
-                _sw.add(id(w))
+                wid = storage_id(w)
+                _w.add(wid)
+                if wid not in aliased_storage or (id(op) in _top and _overwrites_tile(op, w)):
+                    _sw.add(wid)
+                elif wid not in _sw:
+                    # Conditional/partial alias writes can consume old contents
+                    # implicitly (e.g. select(mask, new_tile, old_tile)).
+                    _rbw.add(wid)
 
         for blk in body_blocks:
             walk_block(blk, _visit_body)
@@ -95,7 +122,7 @@ def loop_carry_pass(root: Block, ctx: PassContext) -> None:
                 return
             reads, _ = _buffer_reads_writes(op)
             for r in reads:
-                _ro.add(id(r))
+                _ro.add(storage_id(r))
 
         walk_block(root, _visit_outside)
 

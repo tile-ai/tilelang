@@ -27,7 +27,7 @@ from tilelang.tileir.ir.ops._base import (
 )
 
 
-def _collect_loop_token_bufs(body: Block, carried_tiles=()) -> list:
+def _collect_loop_token_bufs(body: Block, carried_tiles=(), aliases: dict | None = None) -> list:
     """Return GLOBAL buffers written or read to produce a carried local tile.
 
     Inspect WRITE/READWRITE ops directly in *body* (does not recurse into nested
@@ -43,6 +43,7 @@ def _collect_loop_token_bufs(body: Block, carried_tiles=()) -> list:
     written: list = []
     seen: set[int] = set()
     carried_ids = {id(tile) for tile in carried_tiles}
+    aliases = aliases or {}
     for op in body.ops:
         effect = getattr(op, "memory_effect", Effect.NONE)
         if effect not in (Effect.WRITE, Effect.READWRITE):
@@ -51,7 +52,11 @@ def _collect_loop_token_bufs(body: Block, carried_tiles=()) -> list:
         # A load that writes a live-out local tile also leaves an op token
         # consumed by later copies. Export its source token with the tile;
         # otherwise the dependency refers to an SSA value inside this loop.
-        writes_carried_tile = any(id(buf) in carried_ids and eff in (Effect.WRITE, Effect.READWRITE) for buf, eff in effects)
+        # Loop-carry liveness uses backing identities even when a copy writes
+        # through a view. Match that identity before exporting the load token.
+        writes_carried_tile = any(
+            id(aliases.get(buf, buf)) in carried_ids and eff in (Effect.WRITE, Effect.READWRITE) for buf, eff in effects
+        )
         for buf, buffer_effect in effects:
             if buffer_effect not in (Effect.WRITE, Effect.READWRITE) and not writes_carried_tile:
                 continue
@@ -242,7 +247,7 @@ class Loop(TileOp, opcode="loop", effect=Effect.NONE):
 
         # Thread last-op and last-store tokens for written global buffers to
         # preserve cross-iteration RAW, WAR, and WAW dependencies.
-        _written_global_bufs: list[Any] = _collect_loop_token_bufs(self.body, tile_keys)
+        _written_global_bufs: list[Any] = _collect_loop_token_bufs(self.body, tile_keys, aliases=ctx.buffer_aliases)
 
         # Each written buffer carries separate last-op and last-store tokens.
         _tok_type_mlir = None

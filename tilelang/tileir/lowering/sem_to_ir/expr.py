@@ -7,6 +7,7 @@ Imports only the shared foundation (``_base``).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from tvm import tirx as _tirx
@@ -16,6 +17,7 @@ from tilelang.tileir.errors import _UnboundScopeVariable, _UnsupportedTileIRNode
 from tilelang.tileir.ir.types import MemSpace, TileType
 from tilelang.tileir.ir.value import Value
 from tilelang.tileir.ir.ops import Cast, Constant, Elementwise, Load, Select
+from tilelang.tileir.emission_utils import _binary_result_shape, _select_result_shape
 
 from ._base import (
     _canonical_dtype_str,
@@ -125,9 +127,21 @@ def _make_elementwise(fn: str, operands: tuple, expr: Any, builder: IRBuilder, u
     else:
         dtype_str = str(getattr(expr, "dtype", "int32"))
         result_ty = _tir_dtype_to_tile_type(dtype_str)
+    shape = ()
+    for value in operands:
+        shape = _binary_result_shape(shape, tuple(value.type.shape))
+    result_ty = replace(result_ty, shape=shape)
     op = Elementwise(fn=fn, inputs=operands, unsigned=unsigned)
     created = builder.create(op, result_types=(result_ty,))
     return created.results[0]
+
+
+def _make_select(cond: Value, true: Value, false: Value, expr: Any, builder: IRBuilder) -> Value:
+    """Create a Select with the same shape contract as its MLIR emitter."""
+    shape = _select_result_shape(tuple(cond.type.shape), tuple(true.type.shape), tuple(false.type.shape))
+    result_ty = replace(_tir_dtype_to_tile_type(str(expr.dtype)), shape=shape)
+    op = builder.create(Select(cond=cond, true_val=true, false_val=false), result_types=(result_ty,))
+    return op.results[0]
 
 
 def _lower_buffer_load_scalar(expr: Any, scope: LoweringScope, builder: IRBuilder) -> Value:
@@ -191,19 +205,14 @@ def _lower_call_scalar(expr: Any, scope: LoweringScope, builder: IRBuilder) -> V
     unary_fn = _UNARY_CALL_FN.get(op_name)
     if unary_fn is not None and len(expr.args) == 1:
         arg_val = lower_expr(expr.args[0], scope, builder)
-        op = builder.create(Elementwise(fn=unary_fn, inputs=(arg_val,)), result_types=(result_ty,))
-        return op.results[0]
+        return _make_elementwise(unary_fn, (arg_val,), expr, builder)
 
     # if_then_else → Select
     if op_name in ("tir.if_then_else",):
         cond_val = lower_expr(expr.args[0], scope, builder)
         true_val = lower_expr(expr.args[1], scope, builder)
         false_val = lower_expr(expr.args[2], scope, builder)
-        sel_op = builder.create(
-            Select(cond=cond_val, true_val=true_val, false_val=false_val),
-            result_types=(result_ty,),
-        )
-        return sel_op.results[0]
+        return _make_select(cond_val, true_val, false_val, expr, builder)
 
     # Bitwise ops (tir.bitwise_and/or/xor/not) → Elementwise
     if op_name == "tir.bitwise_and" and len(expr.args) == 2:
@@ -224,8 +233,7 @@ def _lower_call_scalar(expr: Any, scope: LoweringScope, builder: IRBuilder) -> V
         # integer ~x must flip all bits -> dispatch to "bitwise_not".
         _bn_dtype = str(getattr(expr, "dtype", "")) or result_dtype_str
         _bn_fn = "not" if _bn_dtype in ("bool", "int1", "uint1") else "bitwise_not"
-        op = builder.create(Elementwise(fn=_bn_fn, inputs=(arg_val,)), result_types=(result_ty,))
-        return op.results[0]
+        return _make_elementwise(_bn_fn, (arg_val,), expr, builder)
 
     # Shift ops — lower to Elementwise shl/shr.
     if op_name in ("tir.shift_left", "tir.shift_right") and len(expr.args) == 2:
@@ -264,7 +272,7 @@ def _lower_call_scalar(expr: Any, scope: LoweringScope, builder: IRBuilder) -> V
         src_dtype_str = str(getattr(expr.args[0], "dtype", ""))
         cast_op = builder.create(
             Cast(src=src_val, dtype=result_dtype_str, src_dtype=src_dtype_str, bitcast=True),
-            result_types=(result_ty,),
+            result_types=(replace(result_ty, shape=src_val.type.shape),),
         )
         return cast_op.results[0]
 
@@ -341,16 +349,14 @@ def lower_expr(expr: Any, scope: LoweringScope, builder: IRBuilder) -> Value:
     # Logical Not
     if isinstance(expr, _tirx.Not):
         operand = lower_expr(expr.a, scope, builder)
-        result_ty = _scalar_bool_type()
-        op = builder.create(Elementwise(fn="not", inputs=(operand,)), result_types=(result_ty,))
-        return op.results[0]
+        return _make_elementwise("not", (operand,), expr, builder)
 
     # Cast
     if isinstance(expr, _tirx.Cast):
         src_val = lower_expr(expr.value, scope, builder)
         tgt_dtype_str = _canonical_dtype_str(expr.dtype)
         src_dtype_str = _canonical_dtype_str(getattr(expr.value, "dtype", ""))
-        result_ty = _tir_dtype_to_tile_type(tgt_dtype_str)
+        result_ty = replace(_tir_dtype_to_tile_type(tgt_dtype_str), shape=src_val.type.shape)
         cast_op = builder.create(
             Cast(src=src_val, dtype=tgt_dtype_str, src_dtype=src_dtype_str),
             result_types=(result_ty,),
@@ -362,13 +368,7 @@ def lower_expr(expr: Any, scope: LoweringScope, builder: IRBuilder) -> Value:
         cond_val = lower_expr(expr.condition, scope, builder)
         true_val = lower_expr(expr.true_value, scope, builder)
         false_val = lower_expr(expr.false_value, scope, builder)
-        dtype_str = str(getattr(expr, "dtype", str(getattr(expr.true_value, "dtype", "int32"))))
-        result_ty = _tir_dtype_to_tile_type(dtype_str)
-        sel_op = builder.create(
-            Select(cond=cond_val, true_val=true_val, false_val=false_val),
-            result_types=(result_ty,),
-        )
-        return sel_op.results[0]
+        return _make_select(cond_val, true_val, false_val, expr, builder)
 
     # Call (math functions, bitwise, if_then_else, ...)
     if isinstance(expr, _tirx.Call):

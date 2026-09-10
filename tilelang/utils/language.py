@@ -456,10 +456,32 @@ def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     """
     if len(shape) == 0:
         return tirx.IntImm("int32", 1)
+    dt = DataType(dtype)
+
+    # Multiplying the extents as int32 PrimExprs silently wraps once the bit
+    # count reaches 2**31, i.e. for any tensor larger than 256 MiB.  KV at
+    # b32-h128-s512-skv8192-d512 is 32*8192*512*16 = 2**31 bits exactly, and
+    # T.view's shape check then compared 2147483648 against -2147483648 and
+    # rejected a view that is in fact valid.  When every extent is a constant,
+    # do the arithmetic in Python where it cannot overflow.
+    consts: list[int] | None = []
+    for extent in shape:
+        if isinstance(extent, int):
+            consts.append(extent)
+        elif isinstance(extent, tirx.IntImm):
+            consts.append(int(extent.value))
+        else:
+            consts = None
+            break
+    if consts is not None:
+        total = 1
+        for c in consts:
+            total *= c
+        return total * dt.bits * dt.lanes
+
     result = shape[0]
     for i in range(1, len(shape)):
         result = result * shape[i]
-    dt = DataType(dtype)
     return result * dt.bits * dt.lanes
 
 
@@ -472,10 +494,19 @@ def prim_expr_equal(lhs, rhs) -> bool:
     """
     if isinstance(lhs, int) and isinstance(rhs, int):
         return lhs == rhs
+
+    def _imm(v: int):
+        # A hard-coded "int32" here raises on any value >= 2**31.  Callers such
+        # as T.view compare *bit* counts (bits_product), so a tensor larger than
+        # 256 MiB overflows: KV at b32-h128-s512-skv8192-d512 is
+        # 32*8192*512*16 = 2**31 bits exactly, and the view assert died before
+        # its own can_prove_equal fallback could run.
+        return tirx.IntImm("int64" if not (-(2**31) <= v < 2**31) else "int32", v)
+
     if isinstance(lhs, int):
-        lhs = tirx.IntImm("int32", lhs)
+        lhs = _imm(lhs)
     if isinstance(rhs, int):
-        rhs = tirx.IntImm("int32", rhs)
+        rhs = _imm(rhs)
     if ir.structural_equal(lhs, rhs):
         return True
     return tirx.analysis.expr_deep_equal(lhs, rhs)

@@ -243,9 +243,12 @@ def _build_gather_ptrs(ctx: Any, buf_val: Any, result_shape: list, dim_kinds: tu
         offsets = contrib if offsets is None else ct.add(offsets, contrib, loc=loc)
 
     ptr_base = _broadcast_ptr(ct, buf_info.ptr, result_shape, loc=loc)
-    from cuda_tile._mlir.dialects.cuda_tile_ops import _offset as _ptr_offset
-
-    return _ptr_offset(ptr_base, offsets, loc=loc)
+    # Keep the operation builder from the same dialect module as the values.
+    # CUDA Tile 13.3 exposes both ``cuda_tile`` and ``cuda_tile_ops`` module
+    # names in some builds.  Importing ``_offset`` from the latter while the
+    # values were built by the former creates distinct Python ``Tile`` classes,
+    # so its ``isinstance`` check mistakes a tile offset for a Python scalar.
+    return ct._offset(ptr_base, offsets, loc=loc)
 
 
 def _make_tile_view(ct: Any, tensor_view: Any, tile_shape: list, *, elem_view: bool, padding_value: Any = None, loc: Any) -> Any:
@@ -1020,6 +1023,37 @@ def _get_binary_op_table() -> dict:
 # _align_binary_tiles — ensure shapes and element types match
 
 
+def _broadcast_source_shape(source: tuple, target: tuple, *, prefix_axes: bool = True) -> tuple:
+    """Plan the existing tile broadcast, preserving Parallel's prefix axes."""
+    if len(source) < len(target):
+        ones = (1,) * (len(target) - len(source))
+        source = source + ones if prefix_axes and source == target[: len(source)] else ones + source
+    if len(source) != len(target) or any(s != 1 and s != t for s, t in zip(source, target)):
+        raise TileIRLoweringError(
+            f"cannot broadcast tile shape {source} to {target}; "
+            "non-unit extents differ. The semantic lowering must preserve the operand's parallel-axis placement."
+        )
+    return source
+
+
+def _binary_result_shape(lhs: tuple, rhs: tuple) -> tuple:
+    """Share emission's target selection with typed expression construction."""
+    if lhs == rhs:
+        return lhs
+    target = lhs if len(lhs) > len(rhs) or (len(lhs) == len(rhs) and max(lhs) >= max(rhs)) else rhs
+    _broadcast_source_shape(lhs, target)
+    _broadcast_source_shape(rhs, target)
+    return target
+
+
+def _select_result_shape(cond: tuple, true: tuple, false: tuple) -> tuple:
+    """Select aligns branches first, then broadcasts its condition with leading axes."""
+    branches = _binary_result_shape(true, false)
+    target = branches or cond
+    _broadcast_source_shape(cond, target, prefix_axes=False)
+    return target
+
+
 def _align_binary_tiles(ct: Any, lhs: Any, rhs: Any, ir: Any, loc: Any = None) -> tuple:
     """Ensure lhs and rhs have identical shapes and element types.
 
@@ -1040,47 +1074,14 @@ def _align_binary_tiles(ct: Any, lhs: Any, rhs: Any, ir: Any, loc: Any = None) -
             src_shape = _tile_shape(tile)
             if src_shape == target_shape:
                 return tile
-            rank = len(target_shape)
-            src_rank = len(src_shape)
-            if src_rank == 0:
-                # Scalar → reshape to all-ones rank, then broadcast.
-                # cuda_tile.broadcast requires same rank for source and result,
-                # so we cannot broadcast rank-0 directly to rank-N.
-                if rank == 0:
-                    return tile  # already same shape
-                tile = ct.reshape([1] * rank, tile, loc=loc)
-                return ct.broadcast(target_shape, tile, loc=loc)
-            if src_rank < rank:
-                # Determine whether to pad TRAILING or LEADING 1s.
-                # Rule: if src_shape is a prefix of target_shape (e.g. [64] is a
-                # prefix of [64,128]), pad TRAILING 1s ([64]→[64,1]) so that each
-                # row of the higher-rank tensor gets the same scalar.  This matches
-                # T.Parallel semantics like ``acc_o[i,j] *= scale[i]``.
-                # Otherwise (numpy convention): pad LEADING 1s.
-                n_extra = rank - src_rank
-                if list(src_shape) == list(target_shape[:src_rank]):
-                    pad = list(src_shape) + [1] * n_extra
-                else:
-                    pad = [1] * n_extra + list(src_shape)
+            pad = list(_broadcast_source_shape(tuple(src_shape), tuple(target_shape)))
+            if pad != src_shape:
                 tile = ct.reshape(pad, tile, loc=loc)
-                src_shape = pad
-            if any(src_dim != 1 and src_dim != target_dim for src_dim, target_dim in zip(src_shape, target_shape)):
-                raise TileIRLoweringError(
-                    f"_align_binary_tiles: cannot broadcast tile shape {src_shape} to {target_shape}; "
-                    "non-unit extents differ. The semantic lowering must preserve the operand's parallel-axis placement."
-                )
             return ct.broadcast(target_shape, tile, loc=loc)
 
-        if len(lhs_shape) > len(rhs_shape) or (
-            len(lhs_shape) == len(rhs_shape) and lhs_shape != rhs_shape and max(lhs_shape) >= max(rhs_shape)
-        ):
-            target_shape = list(lhs_shape)
-            rhs = _broadcast_to(rhs, target_shape)
-            rhs_shape = target_shape
-        elif len(rhs_shape) > len(lhs_shape) or (len(lhs_shape) == len(rhs_shape) and lhs_shape != rhs_shape):
-            target_shape = list(rhs_shape)
-            lhs = _broadcast_to(lhs, target_shape)
-            lhs_shape = target_shape
+        target_shape = list(_binary_result_shape(tuple(lhs_shape), tuple(rhs_shape)))
+        lhs = _broadcast_to(lhs, target_shape)
+        rhs = _broadcast_to(rhs, target_shape)
         # After broadcast, shapes must match.
         if _tile_shape(lhs) != _tile_shape(rhs):
             raise ValueError(f"_align_binary_tiles: shape mismatch after broadcast {_tile_shape(lhs)} vs {_tile_shape(rhs)}")
@@ -1251,6 +1252,7 @@ def _emit_elementwise(op: Any, ctx: Any) -> Any:
         # Align all three
         a, b = _align_binary_tiles(ct, a, b, ir, loc=loc)
         a, c = _align_binary_tiles(ct, a, c, ir, loc=loc)
+        a, b = _align_binary_tiles(ct, a, b, ir, loc=loc)
         return ct.fma(a, b, c, loc=loc)
 
     fast_math = getattr(ctx, "fast_math", False)
@@ -1358,6 +1360,7 @@ def _emit_select(op: Any, ctx: Any) -> Any:
     true_val, false_val = _align_binary_tiles(ct, true_val, false_val, ir, loc=loc)
     target_shape = _tile_shape(true_val)
     cond_shape = _tile_shape(cond)
+    _select_result_shape(tuple(cond_shape), tuple(target_shape), tuple(target_shape))
     if cond_shape == target_shape:
         # Already aligned — nothing to do.
         pass

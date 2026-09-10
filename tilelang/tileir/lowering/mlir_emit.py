@@ -202,8 +202,9 @@ class EmitContext:
 
         The tile is a zero-constant ct.Tile on entry; Copy/Store ops update
         it via ``set_tile`` to simulate shared-memory writes.  A reshape-view
-        alias (T.reshape / T.view) reads the BASE buffer's tile reshaped to
-        the alias shape — one tile is the single source of truth.
+        alias (T.reshape / T.view) reads the BASE buffer's tile reshaped or
+        storage-bitcast to the alias type — one tile is the single source of
+        truth.
 
         Raises
         ------
@@ -213,22 +214,66 @@ class EmitContext:
         base = self.buffer_aliases.get(buf_val)
         if base is not None:
             base_tile = self.get_tile(base)
-            return _reshape_tile_to(self.ct, _as_tile(self, base_tile), list(buf_val.type.shape), self.loc)
+            return self._reinterpret_buffer_tile(base_tile, base.type, buf_val.type)
         try:
             return self._tile_map[buf_val]
         except KeyError:
             raise KeyError(f"Value id={buf_val.id} (name={buf_val.name!r}) is not a SHARED/REGISTER buffer in _tile_map") from None
+
+    def _reinterpret_buffer_tile(self, tile: Any, source_type: TileType, target_type: TileType) -> Any:
+        """Reinterpret one equal-capacity buffer tile without changing bits.
+
+        CUDA Tile IR's elementwise ``bitcast`` requires equal element widths.
+        ``T.view`` also permits a width change (for example bf16[64] to
+        fp32[32]), so that case goes through the standard rank-1 ``pack`` /
+        ``unpack`` byte representation.  Both paths remain ordinary CUDA Tile
+        IR and introduce no Native SIMT provider boundary. Semantic lowering
+        verifies logical capacity and that padding is confined to the tail;
+        these types describe padded physical storage, not logical view extents.
+        """
+
+        source = _as_tile(self, tile)
+        target_shape = list(target_type.shape)
+        if source_type.dtype is target_type.dtype:
+            return _reshape_tile_to(self.ct, source, target_shape, self.loc)
+
+        source_elements = 1
+        for extent in source_type.shape:
+            source_elements *= int(extent)
+        target_elements = 1
+        for extent in target_type.shape:
+            target_elements *= int(extent)
+        source_bits = source_elements * int(source_type.dtype.bitwidth)
+        target_bits = target_elements * int(target_type.dtype.bitwidth)
+        if source_bits != target_bits:
+            raise TileIRLoweringError(
+                f"buffer reinterpret has incompatible physical storage capacity: source has {source_bits} bits, target has {target_bits} bits"
+            )
+
+        flat_source = _reshape_tile_to(self.ct, source, [source_elements], self.loc)
+        target_element_type = _mlir_element_type(self, target_type)
+        if source_type.dtype.bitwidth == target_type.dtype.bitwidth:
+            retyped = self.ct.bitcast(target_element_type, flat_source, loc=self.loc)
+        else:
+            retyped = self.ct.unpack(
+                target_element_type,
+                self.ct.pack(flat_source, loc=self.loc),
+                loc=self.loc,
+            )
+        return _reshape_tile_to(self.ct, retyped, target_shape, self.loc)
 
     def set_tile(self, buf_val: Value, mlir_tile: Any) -> None:
         """Update the MLIR tile value for a SHARED/REGISTER buffer.
 
         Called by Copy / Store emitters when writing into a tile-based buffer
         to keep the functional simulation state consistent.  Writing through a
-        reshape-view alias updates the BASE buffer's tile (reshaped back).
+        reshape/reinterpret-view alias updates the BASE buffer's tile
+        (reshaped or storage-bitcast back).
         """
         base = self.buffer_aliases.get(buf_val)
         if base is not None:
-            self.set_tile(base, _reshape_tile_to(self.ct, _as_tile(self, mlir_tile), list(base.type.shape), self.loc))
+            base_tile = self._reinterpret_buffer_tile(mlir_tile, buf_val.type, base.type)
+            self.set_tile(base, base_tile)
             return
         self._tile_map[buf_val] = mlir_tile
 
@@ -373,7 +418,7 @@ def emit_module(
             emit_ctx = EmitContext(ct=ct, ct_gen=ct_gen, ir=ir, loc=loc)
             # Wire the token_plan so _ensure_token can use precise deps.
             emit_ctx.token_plan = token_plan
-            # Reshape-view aliases (get_tile/set_tile redirection).
+            # Reshape/reinterpret-view aliases (get_tile/set_tile redirection).
             emit_ctx.buffer_aliases = dict(getattr(root, "buffer_aliases", {}) or {})
             # Store arch for optimization hints in Copy.emit_mlir.
             emit_ctx.arch = arch

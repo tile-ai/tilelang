@@ -59,8 +59,9 @@ class SemanticKernel:
     body: SemanticStmt
     # Reshape views (T.reshape / T.view): (alias_name, base_name, alias_shape,
     # dtype) — a body Buffer sharing an alloc buffer's data Var under a new
-    # shape. Same-dtype views only; dtype-changing views (bitcasts) are not
-    # collected and fail loudly downstream.
+    # shape and, for T.view, possibly a new dtype.  The frontend guarantees
+    # equal storage size; sem_to_ir validates it again before constructing the
+    # typed alias.
     buffer_aliases: tuple[tuple[str, str, tuple, str], ...] = ()
 
 
@@ -603,9 +604,10 @@ def _collect_buffer_aliases(stmt: tirx.Stmt, alloc_buffers: tuple[SemanticBuffer
 
     ``T.reshape(src, shape)`` / ``T.view(src, ...)`` build a NEW tirx.Buffer
     over ``src.data``; region extraction only sees the alias NAME, so the
-    lowering needs the (alias → base, shape) relation to keep a single tile
-    as the source of truth.  Only same-dtype views are collected — a
-    dtype-changing view is a bitcast, which reshape cannot express.
+    lowering needs the (alias → base, shape, dtype) relation to keep a single
+    tile as the source of truth.  Same-dtype aliases lower as reshapes;
+    dtype-changing ``T.view`` aliases lower as storage-preserving
+    reinterprets.
     """
     del alloc_buffers  # base names come from the raw SBlock alloc buffers below
 
@@ -620,17 +622,16 @@ def _collect_buffer_aliases(stmt: tirx.Stmt, alloc_buffers: tuple[SemanticBuffer
 
     aliases: dict[str, tuple[str, str, tuple, str]] = {}
 
-    def visit(node):
-        if not isinstance(node, (tirx.BufferLoad, tirx.BufferStore)):
-            return
-        buf = node.buffer
+    def record_alias(buf: tirx.Buffer) -> None:
         base = data_to_base.get(buf.data)
         if base is None or buf.name == base.name or buf.name in aliases:
             return
-        if str(buf.dtype) != str(base.dtype):
-            return  # bitcast view — leave unregistered (loud failure downstream)
         shape = tuple(int(d) if isinstance(d, tirx.IntImm) else _expr_text(d) for d in buf.shape)
         aliases[buf.name] = (buf.name, base.name, shape, str(buf.dtype))
+
+    def visit(node):
+        if isinstance(node, (tirx.BufferLoad, tirx.BufferStore, tirx.BufferRegion)):
+            record_alias(node.buffer)
 
     tirx.stmt_functor.post_order_visit(stmt, visit)
     return tuple(aliases.values())

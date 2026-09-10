@@ -8,6 +8,7 @@ FMA helper.  Imports the shared foundation and scalar ``lower_expr``; the
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from tvm import tirx as _tir
@@ -21,13 +22,11 @@ from tilelang.tileir.ir.ops import (
     AtomicRMW,
     Broadcast,
     Cast,
-    Elementwise,
     GatherLoad,
     Iota,
     Load,
     Permute,
     RepeatInterleave,
-    Select,
 )
 
 from ._base import (
@@ -38,7 +37,7 @@ from ._base import (
     _tir_dtype_to_tile_type,
     _UNARY_CALL_FN,
 )
-from .expr import lower_expr, _lower_attr_expr, _make_elementwise
+from .expr import lower_expr, _lower_attr_expr, _make_elementwise, _make_select
 
 
 def _try_lower_parallel_repeat_interleave_load(
@@ -314,6 +313,21 @@ def _try_lower_linearized_reg_load(expr: Any, scope: LoweringScope, builder: IRB
     return load_op.results[0]
 
 
+def _contains_shaped_binding(expr: Any, scope: LoweringScope) -> bool:
+    """Return whether *expr* consumes participant-private shaped SSA."""
+
+    found = False
+
+    def visit(node: Any) -> None:
+        nonlocal found
+        if isinstance(node, _tir.Var):
+            bound_value = scope.lookup(node)
+            found = found or (bound_value is not None and bool(tuple(bound_value.type.shape)))
+
+    _tir.stmt_functor.post_order_visit(expr, visit)
+    return found
+
+
 def _classify_gather_dims(indices, scope: LoweringScope, builder: IRBuilder, loop_vars: set, ordered_vars, ordered_extents):
     """Classify per-dim gather index specs (see ``GatherLoad``).
 
@@ -347,9 +361,39 @@ def _classify_gather_dims(indices, scope: LoweringScope, builder: IRBuilder, loo
     for idx in indices:
         e = idx
         if isinstance(e, _tir.Var) and e.name not in ov_set:
+            bound_value = scope.lookup(e)
+            if bound_value is not None and tuple(bound_value.type.shape):
+                if tuple(bound_value.type.shape) != result_shape:
+                    raise _UnsupportedTileIRNode(
+                        f"shaped gather index has shape {bound_value.type.shape}, expected participant shape {result_shape}"
+                    )
+                dim_kinds.append("tile")
+                dim_values.append(bound_value)
+                dim_axes.append(-1)
+                has_tile_dim = True
+                continue
             binding = scope.get_scalar_expr_binding(e)
             if binding is not None:
                 e = binding
+        if _contains_shaped_binding(e, scope):
+            tile_value = _lower_tile_level_expr(
+                e,
+                scope,
+                builder,
+                loop_vars,
+                ordered_vars=ordered_vars,
+                ordered_extents=ordered_extents,
+            )
+            if tuple(tile_value.type.shape) != result_shape:
+                raise _UnsupportedTileIRNode(
+                    f"shaped gather index lowered to shape {tile_value.type.shape}, expected participant shape {result_shape}; "
+                    "refusing scalar fallback"
+                )
+            dim_kinds.append("tile")
+            dim_values.append(tile_value)
+            dim_axes.append(-1)
+            has_tile_dim = True
+            continue
         # Affine chain with one bare parallel var (``base₀ + var + base₁``,
         # pure var included) → iota along the var's axis at the summed base.
         from .parallel import _split_affine_parallel_term
@@ -482,6 +526,11 @@ def _try_lower_classified_elem_load(expr: Any, scope: LoweringScope, builder: IR
     except KeyError:
         return None
     if buf_val.type.space != MemSpace.GLOBAL:
+        return None
+    # A shaped let-bound index must take the gather path below.  The classified
+    # element-load path only understands affine loop-variable indices and can
+    # otherwise extract lane zero from a participant-private tile.
+    if any(_contains_shaped_binding(index, scope) for index in expr.indices):
         return None
     raw_shape = tuple(buf_val.type.shape)
     if len(expr.indices) != len(raw_shape):
@@ -1149,7 +1198,8 @@ def _lower_cast_tile(expr: Any, builder: IRBuilder, recurse) -> Value:
     src_val = recurse(expr.value)
     tgt_dtype_str = _canonical_dtype_str(expr.dtype)
     src_dtype_str = _canonical_dtype_str(getattr(expr.value, "dtype", ""))
-    result_ty = _tir_dtype_to_tile_type(tgt_dtype_str)
+    scalar_ty = _tir_dtype_to_tile_type(tgt_dtype_str)
+    result_ty = TileType(dtype=scalar_ty.dtype, shape=src_val.type.shape, space=MemSpace.REGISTER, layout=None)
     cast_op = builder.create(
         Cast(src=src_val, dtype=tgt_dtype_str, src_dtype=src_dtype_str),
         result_types=(result_ty,),
@@ -1162,13 +1212,7 @@ def _lower_select_tile(expr: Any, builder: IRBuilder, recurse) -> Value:
     cond_val = recurse(expr.condition)
     true_val = recurse(expr.true_value)
     false_val = recurse(expr.false_value)
-    dtype_str = str(getattr(expr, "dtype", str(getattr(expr.true_value, "dtype", "int32"))))
-    result_ty = _tir_dtype_to_tile_type(dtype_str)
-    sel_op = builder.create(
-        Select(cond=cond_val, true_val=true_val, false_val=false_val),
-        result_types=(result_ty,),
-    )
-    return sel_op.results[0]
+    return _make_select(cond_val, true_val, false_val, expr, builder)
 
 
 def _lower_binop_tile(
@@ -1239,11 +1283,7 @@ def _lower_call_tile(expr: Any, scope: LoweringScope, builder: IRBuilder, ordere
         cond_val = recurse(expr.args[0])
         true_val = recurse(expr.args[1])
         false_val = recurse(expr.args[2])
-        sel_op = builder.create(
-            Select(cond=cond_val, true_val=true_val, false_val=false_val),
-            result_types=(result_ty,),
-        )
-        return sel_op.results[0]
+        return _make_select(cond_val, true_val, false_val, expr, builder)
 
     # Atomic-return calls embedded in a buffer_store RHS → AtomicRMW(return_prev=True).
     _ATOMIC_RET_OPS = {
@@ -1315,8 +1355,7 @@ def _lower_call_tile(expr: Any, scope: LoweringScope, builder: IRBuilder, ordere
     unary_fn = _UNARY_CALL_FN.get(op_name)
     if unary_fn is not None and len(expr.args) == 1:
         arg_val = recurse(expr.args[0])
-        op = builder.create(Elementwise(fn=unary_fn, inputs=(arg_val,)), result_types=(result_ty,))
-        return op.results[0]
+        return _make_elementwise(unary_fn, (arg_val,), expr, builder)
 
     # Binary intrinsic calls (bitwise / shift / pow) — recurse args in tile mode.
     if op_name in ("tir.bitwise_and", "tir.bitwise_or", "tir.bitwise_xor") and len(expr.args) == 2:
@@ -1328,8 +1367,7 @@ def _lower_call_tile(expr: Any, scope: LoweringScope, builder: IRBuilder, ordere
         arg_val = recurse(expr.args[0])
         _bn_dtype = str(getattr(expr, "dtype", "")) or result_dtype_str
         _bn_fn = "not" if _bn_dtype in ("bool", "int1", "uint1") else "bitwise_not"
-        op = builder.create(Elementwise(fn=_bn_fn, inputs=(arg_val,)), result_types=(result_ty,))
-        return op.results[0]
+        return _make_elementwise(_bn_fn, (arg_val,), expr, builder)
     if op_name in ("tir.shift_left", "tir.shift_right") and len(expr.args) == 2:
         lhs = recurse(expr.args[0])
         rhs = recurse(expr.args[1])
@@ -1353,7 +1391,7 @@ def _lower_call_tile(expr: Any, scope: LoweringScope, builder: IRBuilder, ordere
         src_dtype_str = str(getattr(expr.args[0], "dtype", ""))
         cast_op = builder.create(
             Cast(src=src_val, dtype=result_dtype_str, src_dtype=src_dtype_str, bitcast=True),
-            result_types=(result_ty,),
+            result_types=(replace(result_ty, shape=src_val.type.shape),),
         )
         return cast_op.results[0]
 

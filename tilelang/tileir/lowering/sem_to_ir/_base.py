@@ -9,6 +9,7 @@ package.  It imports no sibling module (it is the bottom of the import graph).
 from __future__ import annotations
 
 from contextlib import contextmanager
+from math import prod
 from typing import Any
 from collections.abc import Callable
 
@@ -140,6 +141,46 @@ def _sem_buffer_to_tile_type(buf: SemanticBuffer) -> TileType:
         shape = tuple(_next_power_of_two(d) for d in int_dims)
 
     return TileType(dtype=dt, shape=shape, space=space, layout=None)
+
+
+def _validate_dtype_view_layout(base: SemanticBuffer, base_type: TileType, alias: SemanticBuffer, alias_type: TileType) -> None:
+    """Prove flatten/pack/unpack preserves all logical bytes in a view.
+
+    Padding may follow the logical storage, but cannot separate its elements.
+    Interior padding needs an explicit layout conversion, which this path does
+    not implement. Physical capacity equality alone does not prove that mapping.
+    """
+    for buf in (base, alias):
+        if not all(isinstance(extent, int) and extent > 0 for extent in buf.shape):
+            raise _UnsupportedTileIRNode(
+                f"dtype-changing buffer view `{alias.name}` requires static positive logical shapes, "
+                f"got base={base.shape}, view={alias.shape}."
+            )
+    base_bits = prod(base.shape) * int(base_type.dtype.bitwidth)
+    alias_bits = prod(alias.shape) * int(alias_type.dtype.bitwidth)
+    if base_bits != alias_bits:
+        raise _UnsupportedTileIRNode(
+            f"buffer view `{alias.name}` changes logical storage capacity: base `{base.name}` has "
+            f"{base_bits} bits, view has {alias_bits} bits."
+        )
+    for buf, ty in ((base, base_type), (alias, alias_type)):
+        # An inner padded dimension repeats a gap once preceding dimensions
+        # contain multiple valid coordinates: [2, 3] -> [2, 4] is not a prefix.
+        prefix_elements = 1
+        for logical, physical in zip(buf.shape, ty.shape):
+            if logical != physical and prefix_elements != 1:
+                raise _UnsupportedTileIRNode(
+                    f"dtype-changing buffer view `{alias.name}` has unsupported interior padding: "
+                    f"buffer `{buf.name}` logical shape {buf.shape}, physical shape {ty.shape}."
+                )
+            prefix_elements *= logical
+    base_physical_bits = prod(base_type.shape) * int(base_type.dtype.bitwidth)
+    alias_physical_bits = prod(alias_type.shape) * int(alias_type.dtype.bitwidth)
+    if base_physical_bits != alias_physical_bits:
+        raise _UnsupportedTileIRNode(
+            f"dtype-changing buffer view `{alias.name}` has incompatible physical storage capacities: "
+            f"base has {base_physical_bits} bits, view has {alias_physical_bits} bits."
+        )
 
 
 def _is_unsigned_dtype(dtype_str: str) -> bool:
@@ -291,6 +332,7 @@ class LoweringScope:
         self.fast_math: bool = fast_math
         # Buffer table: name -> Value
         self._buffers: dict[str, Value] = {}
+        self.buffer_logical_shapes = {buf.name: tuple(buf.shape) for buf in sem_kernel.alloc_buffers}
 
         # Scalar entry params (non-buffer).  name -> Value (0-d TileType).
         # These are bound into the top-level _binding_stack frame so that lower_expr
@@ -391,18 +433,28 @@ class LoweringScope:
                 self._buffers[buf.name] = Value(id=-1, type=ty, name=buf.name)
             self._raw_dtypes[buf.name] = buf.dtype
 
-        # Register reshape views (T.reshape / T.view): an alias gets its own
-        # buffer Value with the VIEW shape but shares the base buffer's data —
+        # Register reshape/reinterpret views (T.reshape / T.view): an alias
+        # gets its own typed Value but shares the base buffer's storage.
         # lower_kernel records the (alias Value → base Value) relation in
-        # block.buffer_aliases and emit redirects tile reads/writes through
-        # the base tile with reshapes, keeping a single source of truth.
+        # block.buffer_aliases; emission uses reshape for same-dtype aliases
+        # and a typed reinterpret for dtype-changing, equal-capacity aliases.
         self.buffer_alias_values: dict[Value, Value] = {}
+        alloc_buffers_by_name = {buf.name: buf for buf in sem_kernel.alloc_buffers}
         for alias_name, base_name, alias_shape, alias_dtype in getattr(sem_kernel, "buffer_aliases", ()):
             base_val = self._buffers.get(base_name)
             if base_val is None or alias_name in self._buffers:
                 continue
+            base_buf = alloc_buffers_by_name.get(base_name)
             alias_buf = SemanticBuffer(name=alias_name, shape=tuple(alias_shape), dtype=alias_dtype, scope="")
             ty = _sem_buffer_to_tile_type(alias_buf)
+            if ty.dtype is not base_val.type.dtype:
+                if base_buf is None or base_val.type.space == MemSpace.GLOBAL:
+                    raise _UnsupportedTileIRNode(f"dtype-changing buffer view `{alias_name}` requires tile-backed allocation storage.")
+                # Views use the same physical padding policy as their allocation.
+                # Capacity and placement are checked against logical shapes below.
+                alias_buf = SemanticBuffer(name=alias_name, shape=tuple(alias_shape), dtype=alias_dtype, scope=base_buf.scope)
+                ty = _sem_buffer_to_tile_type(alias_buf)
+                _validate_dtype_view_layout(base_buf, base_val.type, alias_buf, ty)
             ty = TileType(dtype=ty.dtype, shape=ty.shape, space=base_val.type.space, layout=None)
             if builder is not None:
                 alias_val = fresh_value(builder._counter, ty, name=alias_name)
@@ -411,6 +463,7 @@ class LoweringScope:
             self._buffers[alias_name] = alias_val
             self._raw_dtypes[alias_name] = alias_dtype
             self.buffer_alias_values[alias_val] = base_val
+            self.buffer_logical_shapes[alias_name] = tuple(alias_shape)
 
     # Frame scoping
 
