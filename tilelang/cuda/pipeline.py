@@ -90,6 +90,7 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # diagnostics point at user-written code)
     mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
     mod = tilelang.transform.VerifyReducerEpoch()(mod)
+    mod = tilelang.transform.InferMemoryScope()(mod)
     # Warn on buffers that are read before anything writes them.
     # Runs after the reducer passes above, so legacy reducers have been
     # canonicalized, and before PipelinePlanning and LowerTileOp, while

@@ -161,6 +161,12 @@ def reduce(
                 annotations=annotations,
             )
         else:
+            if buffer.scope() == "auto" or out.scope() == "auto":
+                raise ValueError(
+                    f'T.reduce_* does not support buffers with the virtual scope "auto" '
+                    f"(got {buffer.scope()} and {out.scope()}); use explicit T.alloc_shared / "
+                    f"T.alloc_fragment instead of T.auto_alloc"
+                )
             raise ValueError(f"Invalid buffer scopes: {buffer.scope()} and {out.scope()}")
 
     reduce_macro(buffer, out, reduce_type, dim, clear)
