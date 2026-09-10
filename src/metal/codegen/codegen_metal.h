@@ -70,6 +70,8 @@ private:
   bool TryPrintSimdgroupIndexExpr(const CallNode *op, std::ostream &os);
   void PrintSimdgroupIndexExpr(int64_t group_mask, int64_t group_shift,
                                std::ostream &os) const;
+  void PrintSimdgroupElement(const Buffer &buffer, PrimExpr index, int lane,
+                             std::ostream &os);
   void EnsureFragmentLaneVars();
   void EnsureCooperativeTensorBuffer(const Var &var);
 
@@ -81,6 +83,8 @@ private:
       ct_c_inlined_;
   std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       ct_c_storage_elided_;
+  std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      simdgroup_fragments_;
   Var thread_idx_x_var_;
   Var block_idx_x_var_;
   Var block_idx_y_var_;

@@ -127,7 +127,9 @@ struct Gemm {
                     "Metal target "
                  << target->str();
     }
-    if (op.c_.scope() == "local.fragment" ||
+    if (op.a_.scope() == "local.fragment" ||
+        op.b_.scope() == "local.fragment" ||
+        op.c_.scope() == "local.fragment" ||
         op.c_.scope() == "metal.simdgroup") {
       return kMetalSIMDGroup;
     }

@@ -1,9 +1,7 @@
-"""Test Metal simdgroup register GEMM with direct simdgroup_store to device memory.
+"""Test register GEMM and logical fragment copies to device memory.
 
-These tests verify the simdgroup register accumulation path where C is allocated
-in metal.simdgroup scope. This eliminates C_simd load/store round-trips through
-shared memory on each K iteration. The final T.copy(C_local, C[...]) is lowered
-to simdgroup_store directly to device memory via LowerSIMDGroupStore.
+GEMM accumulators retain their fragment layout, while Metal codegen represents
+matrix registers natively and exposes their per-lane elements to ordinary copies.
 """
 
 import tilelang
@@ -65,13 +63,11 @@ def assert_simdgroup_store_codegen(M, N, K, block_M, block_N, block_K, dtype=T.f
     assert src is not None
     assert "[[kernel" in src or "kernel void" in src
     assert "simdgroup_multiply_accumulate" in src
-    assert "make_filled_simdgroup_matrix" in src
     assert "MetalPerformancePrimitives" not in src
 
     assert "simdgroup_float8x8" in src or "simdgroup_half8x8" in src, "Expected simdgroup_float8x8 or simdgroup_half8x8 for C accumulator"
 
-    store_to_device = src.count("simdgroup_store(C_local")
-    assert store_to_device > 0, "Expected simdgroup_store of C_local to device memory"
+    assert ".thread_elements()" in src, "Expected direct access to accumulator elements"
 
     load_c_from_shared = [line for line in src.split("\n") if "simdgroup_load" in line and "C_local" in line]
     assert len(load_c_from_shared) == 0, f"C_local should not be loaded from shared memory, but found: {load_c_from_shared}"
@@ -132,3 +128,8 @@ def test_correctness_non_square_matrix():
 if __name__ == "__main__":
     if torch.mps.is_available():
         tilelang.testing.main()
+
+
+@tilelang.testing.requires_metal
+def test_correctness_partial_tiles():
+    assert_simdgroup_store_correctness(45, 61, 35, 32, 32, 16)
