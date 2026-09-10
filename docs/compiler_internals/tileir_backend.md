@@ -134,3 +134,22 @@ If the CUDA Tile IR Python bindings or assembler are missing, TileIR-specific
 tests skip or fail at the dependency boundary instead of falling back to another
 execution backend. This keeps coverage tied to the structured TileIR path that
 the backend actually exposes.
+
+The dedicated `tileir` CI job builds CUDA Tile 13.4 bindings from pinned CUDA
+Tile and LLVM commits with its active Python 3.12 interpreter, then installs the
+`tileir` extra and checks toolchain availability before running the TileIR tests
+and examples. The ordinary CUDA, ROCm, and Metal jobs do not require these
+optional dependencies or a preconfigured bindings path.
+
+To reproduce the bindings build in an active virtual environment with `uv`, Git,
+and a C++ compiler available:
+
+```bash
+bash .github/scripts/build_cuda_tile.sh /tmp/cuda-tile-ci-build
+export PYTHONPATH=/tmp/cuda-tile-ci-build/build/python_packages
+python -m pip install '.[tileir]'
+python -c 'from tilelang.tileir.checks import check_tileir_available; print(check_tileir_available())'
+```
+
+Use a fresh build directory. The first build also compiles the matching LLVM/MLIR
+libraries and can take substantially longer than a TileLang-only build.
