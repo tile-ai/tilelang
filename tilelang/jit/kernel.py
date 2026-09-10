@@ -372,14 +372,11 @@ class JITKernel(Generic[_P, _T]):
                 MetalKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
-                # target=target,
                 func_or_mod=tilelang_func,
-                # host_mod=artifact.host_mod,
+                host_mod=artifact.host_mod,
                 device_mod=artifact.device_mod,
                 kernel_global_source=artifact.kernel_source,
                 verbose=self.verbose,
-                # pass_configs=pass_configs,
-                # compile_flags=compile_flags,
             )
         elif execution_backend == "cutedsl":
             assert is_cutedsl_target(target)
