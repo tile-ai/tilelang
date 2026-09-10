@@ -12,6 +12,7 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.backend.target import determine_target
 from tilelang.engine.param import KernelParam
+from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.tileir.runtime import load_native_dispatchers, make_torch_func
 from tilelang.tileir.assembly import target_arch
@@ -192,10 +193,20 @@ class TileIRKernelAdapter(BaseKernelAdapter):
         target: Target,
         pass_configs: dict[str, Any] | None = None,
     ) -> tuple[tvm.IRModule, tirx.PrimFunc]:
-        del target, pass_configs
+        del target
         mod = func_or_mod
         if isinstance(func_or_mod, tirx.PrimFunc):
             mod = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+
+        # Validate source TIR on both compilation and cache restoration, before
+        # launch materialization erases frontend structure. Reuse the shared
+        # checker and preserve its pass-context opt-out and diagnostic options.
+        pass_ctx = tvm.transform.PassContext.current()
+        config = dict(pass_ctx.config)
+        # TileIR-only options belong to Python lowering, not native PassContext.
+        config.update({key: value for key, value in (pass_configs or {}).items() if not key.startswith("tl.tileir.")})
+        with tvm.transform.PassContext(opt_level=pass_ctx.opt_level, config=config):
+            PreLowerSemanticCheck(mod)
 
         # T.Kernel traces the launch as a target-neutral kThreadBinding For-nest;
         # materialize it into the SIMT thread_extent form before the launch nest

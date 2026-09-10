@@ -96,6 +96,8 @@ static constexpr const char *kIfStmtBindingInlineReplayableBinds =
     "tl.if_stmt_binding_inline_replayable_binds";
 static constexpr const char *kStorageRewriteDetectInplace =
     "tl.storage_rewrite_detect_inplace";
+static constexpr const char *kDisablePrelowerSemanticCheck =
+    "tl.disable_prelower_semantic_check";
 static constexpr const char *kASTPrintEnable = "tl.ast_print_enable";
 static constexpr const char *kLayoutVisualizationEnable =
     "tl.layout_visualization_enable";
