@@ -250,23 +250,50 @@ def _describe_shape(param: KernelParam) -> str:
     return "(" + ", ".join(str(int(d)) if isinstance(d, (int, tirx.IntImm)) else str(d) for d in param.shape) + ")"
 
 
-def _check_tensor(index: int, param: KernelParam, value: Any) -> None:
-    if not isinstance(value, torch.Tensor):
-        raise TypeError(f"argument {index} must be a tensor, got {type(value).__name__}")
-    if value.device.type != "mps":
-        raise ValueError(f"argument {index} must be on the mps device, got {value.device}")
-    expected = param.torch_dtype()
-    if value.dtype != expected:
-        raise TypeError(f"argument {index} has dtype {value.dtype}, expected {expected}")
-    if not value.is_contiguous():
-        raise ValueError(f"argument {index} must be contiguous")
-    if value.dim() != len(param.shape):
-        raise ValueError(f"argument {index} has shape {tuple(value.shape)}, expected {_describe_shape(param)}")
-    for axis, dim in enumerate(param.shape):
-        if isinstance(dim, tirx.IntImm):
-            dim = int(dim)
-        if isinstance(dim, int) and value.shape[axis] != dim:
-            raise ValueError(f"argument {index} has shape {tuple(value.shape)}, expected {_describe_shape(param)}")
+@dataclass(frozen=True)
+class _TensorContract:
+    """Per-parameter facts checked on every launch, resolved once at adapter creation."""
+
+    index: int
+    dtype: Any
+    shape: tuple[int, ...] | None
+    static_dims: tuple[tuple[int, int], ...]
+    rank: int
+    described: str
+
+    @classmethod
+    def of(cls, index: int, param: KernelParam) -> _TensorContract:
+        static_dims = []
+        for axis, dim in enumerate(param.shape):
+            if isinstance(dim, tirx.IntImm):
+                static_dims.append((axis, int(dim)))
+            elif isinstance(dim, int):
+                static_dims.append((axis, dim))
+        return cls(
+            index=index,
+            dtype=param.torch_dtype(),
+            shape=_static_shape(param),
+            static_dims=tuple(static_dims),
+            rank=len(param.shape),
+            described=_describe_shape(param),
+        )
+
+    def check(self, value: Any) -> None:
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"argument {self.index} must be a tensor, got {type(value).__name__}")
+        if value.device.type != "mps":
+            raise ValueError(f"argument {self.index} must be on the mps device, got {value.device}")
+        if value.dtype != self.dtype:
+            raise TypeError(f"argument {self.index} has dtype {value.dtype}, expected {self.dtype}")
+        if not value.is_contiguous():
+            raise ValueError(f"argument {self.index} must be contiguous")
+        shape = value.shape
+        if self.shape is not None:
+            if tuple(shape) != self.shape:
+                raise ValueError(f"argument {self.index} has shape {tuple(shape)}, expected {self.described}")
+            return
+        if len(shape) != self.rank or any(shape[axis] != dim for axis, dim in self.static_dims):
+            raise ValueError(f"argument {self.index} has shape {tuple(shape)}, expected {self.described}")
 
 
 def _pack_scalars(values: Sequence[tuple[str, Any]]) -> torch.Tensor:
@@ -341,39 +368,55 @@ class MetalKernelAdapter(BaseKernelAdapter):
         return self._shader_kernels
 
     def _convert_torch_func(self) -> Callable:
+        """Build the launcher; everything derivable from the plan is resolved here, not per call."""
         kernels = self._kernels()
         params = list(self.params)
+        count = len(params)
         result_idx = list(self.result_idx)
-        inputs = [index for index in range(len(params)) if index not in result_idx]
-        launches = self.launches
-        output_shapes = {}
+        inputs = [index for index in range(count) if index not in result_idx]
+        expected = len(inputs)
+        # Argument slot i of a call is public parameter inputs[i].
+        contracts: list[tuple[int, _TensorContract | None]] = [
+            (index, None if params[index].is_scalar() else _TensorContract.of(index, params[index])) for index in inputs
+        ]
+        outputs_plan = []
         for index in result_idx:
             shape = _static_shape(params[index])
             if shape is None:
                 raise MetalLaunchPlanError(f"output parameter {index} has a dynamic shape {_describe_shape(params[index])}")
-            output_shapes[index] = shape
+            outputs_plan.append((index, shape, params[index].torch_dtype()))
+        launch_plan = [
+            (
+                kernels[launch.symbol],
+                launch.buffers,
+                tuple((index, str(params[index].dtype)) for index in launch.scalars),
+                list(launch.threads),
+                list(launch.block),
+            )
+            for launch in self.launches
+        ]
 
         def launcher(*args: Any) -> Any:
-            if len(args) != len(inputs):
-                raise TypeError(f"kernel expects {len(inputs)} arguments, got {len(args)}")
-            values: list[Any] = [None] * len(params)
-            for index, value in zip(inputs, args):
-                if params[index].is_scalar():
+            if len(args) != expected:
+                raise TypeError(f"kernel expects {expected} arguments, got {len(args)}")
+            values: list[Any] = [None] * count
+            for (index, contract), value in zip(contracts, args):
+                if contract is None:
                     if isinstance(value, bool) or not isinstance(value, (int, float)):
                         raise TypeError(f"argument {index} must be a scalar, got {type(value).__name__}")
                 else:
-                    _check_tensor(index, params[index], value)
+                    contract.check(value)
                 values[index] = value
             outputs = []
-            for index in result_idx:
-                tensor = torch.empty(output_shapes[index], dtype=params[index].torch_dtype(), device="mps")
+            for index, shape, dtype in outputs_plan:
+                tensor = torch.empty(shape, dtype=dtype, device="mps")
                 values[index] = tensor
                 outputs.append(tensor)
-            for launch in launches:
-                bound = [values[index] for index in launch.buffers]
-                if launch.scalars:
-                    bound.append(_pack_scalars([(str(params[index].dtype), values[index]) for index in launch.scalars]))
-                kernels[launch.symbol](*bound, threads=list(launch.threads), group_size=list(launch.block))
+            for kernel, buffers, scalars, threads, block in launch_plan:
+                bound = [values[index] for index in buffers]
+                if scalars:
+                    bound.append(_pack_scalars([(dtype, values[index]) for index, dtype in scalars]))
+                kernel(*bound, threads=threads, group_size=block)
             if not outputs:
                 return None
             return outputs[0] if len(outputs) == 1 else outputs
