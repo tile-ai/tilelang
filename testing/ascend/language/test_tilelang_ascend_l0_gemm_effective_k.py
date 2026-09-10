@@ -1,7 +1,7 @@
 """L0 GEMM consumes effective regions while copies and storage may stay padded."""
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 import pytest
 import torch

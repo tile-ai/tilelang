@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.engine.lower import lower
 
