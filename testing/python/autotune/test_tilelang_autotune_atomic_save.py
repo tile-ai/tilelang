@@ -2,6 +2,7 @@ import errno
 
 import pytest
 
+import tilelang.testing
 from tilelang.autotuner import param as autotune_param
 from tilelang.autotuner.param import (
     AutotuneResult,
@@ -17,6 +18,7 @@ from tilelang.autotuner.param import (
     PARAMS_PATH,
 )
 from tilelang.engine.param import KernelParam
+from tilelang.backend import create_backend_context
 from tilelang.env import env
 from tilelang import tvm
 
@@ -200,6 +202,7 @@ def test_autotune_save_tileir_uses_tileir_artifact_file(cache_dirs, tmp_path):
         "TileIR cache artifact compatibility does not match the active target/toolchain",
     ],
 )
+@tilelang.testing.requires_cuda
 def test_autotune_tileir_reload_error_is_treated_as_cache_miss(cache_dirs, tmp_path, monkeypatch, reload_error):
     result = _make_result(tmp_path, execution_backend="tileir")
     path = cache_dirs / "test-namespace" / "autotuner" / "autotune-tileir-stale"
@@ -211,11 +214,9 @@ def test_autotune_tileir_reload_error_is_treated_as_cache_miss(cache_dirs, tmp_p
 
     monkeypatch.setattr(autotune_param.JITKernel, "from_database", reject_stale_cache)
 
-    loaded = AutotuneResult._load_kernel_from_disk(
-        AutotuneResult,
+    loaded = result._load_kernel_from_disk(
         path,
-        target="tileir -arch=sm_120",
-        execution_backend="tileir",
+        backend_context=create_backend_context("tileir -arch=sm_120", "c", "tileir"),
         func=_fake_func,
     )
 

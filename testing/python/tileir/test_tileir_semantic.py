@@ -21,6 +21,7 @@ from tilelang.tileir.lowering import lower_primfunc_to_tileir
 from tilelang.tileir.semantic import (
     SemanticKernel,
     SemanticProgram,
+    SemanticRegion,
     SemanticStmt,
     TileLangSemanticError,
     extract_semantic_program,
@@ -44,6 +45,29 @@ from tileir_test_utils import (
     _load_flash_decode_example,
     _load_mla_paged_example,
 )
+
+
+@tilelang.testing.requires_cuda
+def test_tileir_semantic_copy_preserves_frontend_region_slices():
+    @T.prim_func
+    def kernel(A: T.Tensor((16, 32), T.float32), B: T.Tensor((16, 32), T.float32)):
+        with T.Kernel(1, threads=32):
+            T.copy(A[4:12, 8:24], B[2:10, 0:16])
+
+    program = extract_semantic_program(kernel)
+    copy = next(stmt for stmt in _semantic_stmts(program.kernels[0].body) if dict(stmt.attrs).get("op") == "tl.tileop.copy")
+
+    assert copy.regions == (
+        SemanticRegion(buffer="A", access="1", indices=("4", "8"), shape=(8, 16)),
+        SemanticRegion(buffer="B", access="2", indices=("2", "0"), shape=(8, 16)),
+    )
+
+
+def test_tileir_semantic_region_rejects_unrelated_call():
+    from tilelang.tileir.semantic import _semantic_region
+
+    with pytest.raises(TileLangSemanticError, match="Expected TileLang tile region"):
+        _semantic_region(tirx.call_extern("handle", "not_a_region"))
 
 
 def test_semantic_program_has_no_whole_tir_statement_backrefs_and_preserves_param_order():

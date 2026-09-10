@@ -184,7 +184,7 @@ def _let_body(stmt: tirx.Stmt) -> tirx.Stmt | None:
 
 
 def _semantic_region(expr: tirx.PrimExpr) -> SemanticRegion:
-    if not isinstance(expr, tirx.Call) or _op_name(expr) != "tl.tileop.region":
+    if not isinstance(expr, tirx.Call) or _op_name(expr) != "tl.region":
         raise TileLangSemanticError(f"Expected TileLang tile region, got `{type(expr).__name__}`.")
     load = expr.args[0]
     if not isinstance(load, tirx.BufferLoad):
@@ -199,7 +199,7 @@ def _semantic_region(expr: tirx.PrimExpr) -> SemanticRegion:
 
 
 def _semantic_load_region(expr: tirx.PrimExpr, *, access: str) -> SemanticRegion:
-    if isinstance(expr, tirx.Call) and _op_name(expr) == "tl.tileop.region":
+    if isinstance(expr, tirx.Call) and _op_name(expr) == "tl.region":
         region = _semantic_region(expr)
         return SemanticRegion(
             buffer=region.buffer,
@@ -224,7 +224,7 @@ def _semantic_load_region(expr: tirx.PrimExpr, *, access: str) -> SemanticRegion
 
 
 def _semantic_region_or_load(expr: tirx.PrimExpr, *, access: str) -> SemanticRegion:
-    if isinstance(expr, tirx.Call) and _op_name(expr) == "tl.tileop.region":
+    if isinstance(expr, tirx.Call) and _op_name(expr) == "tl.region":
         return _semantic_region(expr)
     if isinstance(expr, tirx.BufferLoad):
         return _semantic_load_region(expr, access=access)

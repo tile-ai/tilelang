@@ -887,7 +887,7 @@ def _lower_tile_op(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder)
 def _extract_region_buffer_name(tir_arg: Any) -> str | None:
     """Extract the buffer name from a region/access_ptr/BufferLoad TIR arg.
 
-    Handles a direct ``BufferLoad`` or one wrapped by ``tl.tileop.region``,
+    Handles a direct ``BufferLoad`` or one wrapped by ``tl.region``,
     ``tl.access_ptr``, or another call whose first argument is the load.
 
     Returns the buffer name string, or None if extraction fails.

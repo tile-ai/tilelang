@@ -192,7 +192,9 @@ def _load_dequant_gemv_example():
     spec = importlib.util.spec_from_file_location("tilelang_test_example_dequant_gemv_fp16xint4", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.syspath_prepend(str(path.parent))
+        spec.loader.exec_module(module)
     return module
 
 

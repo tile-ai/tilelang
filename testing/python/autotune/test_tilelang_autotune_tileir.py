@@ -168,7 +168,9 @@ def test_tileir_autotune_disk_cache_round_trip(monkeypatch, tmp_path):
             target=f"tileir -arch=sm_{major}{minor}",
             execution_backend="tileir",
         )
-        .set_profile_args(supply_prog=lambda _: [a, b], skip_check=True)
+        # Custom callbacks intentionally disable persistent caching, so use the
+        # built-in tensor supplier for this disk round-trip test.
+        .set_profile_args(skip_check=True)
     )
 
     result = tuner.run(warmup=1, rep=1, timeout=60)

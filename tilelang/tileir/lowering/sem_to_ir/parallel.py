@@ -1163,12 +1163,12 @@ def _lower_parallel_buffer_store(
 
 
 def _extract_tir_region_indices(call_args: tuple[Any, ...], region_index: int) -> tuple | None:
-    """Extract raw TIR PrimExpr indices from a ``tl.tileop.region`` call arg.
+    """Extract raw TIR PrimExpr indices from a ``tl.region`` call arg.
 
     ``stmt.call_args`` for a ``tile_op copy`` contains region calls of the form::
 
-        tl.tileop.copy(tl.tileop.region(A[bx*64, k*64], 1, 64, 64),
-                       tl.tileop.region(sa[0, 0], 2, 64, 64))
+        tl.tileop.copy(tl.region(A[bx*64, k*64], 1, 64, 64),
+                       tl.region(sa[0, 0], 2, 64, 64))
 
     This helper drills into ``call_args[region_index].args[0]``
     (the ``BufferLoad``) to return its ``.indices`` tuple of TIR PrimExpr
