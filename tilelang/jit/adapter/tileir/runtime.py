@@ -69,6 +69,10 @@ def torch_dtype_from_tileir(dtype: str):
         return torch.int8
     if dtype == "uint8":
         return torch.uint8
+    if dtype == "int16":
+        return torch.int16
+    if dtype == "uint16":
+        return torch.uint16
     if dtype in {"int32", "uint32"}:
         return torch.int32
     if dtype in {"int64", "uint64"}:

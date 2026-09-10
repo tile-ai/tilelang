@@ -324,3 +324,33 @@ def test_tileir_reinterpret_is_bitcast_not_numeric_convert(monkeypatch):
     out = reinterpret_kernel()(a)
     expected = a.view(torch.int32)
     assert torch.equal(out, expected), f"reinterpret must bit-preserve: got {out[:3].tolist()}, expected {expected[:3].tolist()}"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("dtype", ["int16", "uint16", "float32"])
+def test_tileir_host_orchestrated_temporary_dtype(monkeypatch, dtype):
+    _skip_if_tileir_toolchain_unavailable()
+    torch = _enable_tileir_runtime(monkeypatch)
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), B: T.Tensor((128,), dtype)):
+        temporary = T.alloc_global((128,), dtype)
+        with T.Kernel(1, threads=128):
+            T.copy(A, temporary)
+        with T.Kernel(1, threads=128):
+            T.copy(temporary, B)
+
+    kernel = tilelang.compile(main, execution_backend="tileir")
+    # Include both signed extremes and unsigned values with the high bit set.
+    values = {
+        "int16": [-32768, -123, -1, 0, 1, 123, 32766, 32767],
+        "uint16": [0, 1, 123, 32767, 32768, 40000, 65534, 65535],
+        "float32": [-3.5, -1.0, 0.0, 0.25, 1.0, 2.5, 10.0, 100.0],
+    }[dtype]
+    a = torch.tensor(values * 16, dtype=getattr(torch, dtype), device="cuda")
+    b = torch.empty_like(a)
+    kernel(a, b)
+    # Compare on the CPU in a common dtype; older torch CUDA builds do not
+    # implement all comparison operations for unsigned 16-bit tensors.
+    torch.testing.assert_close(b.cpu().to(torch.float64), a.cpu().to(torch.float64), rtol=0, atol=0)
