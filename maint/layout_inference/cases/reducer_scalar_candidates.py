@@ -58,16 +58,6 @@ def check(variant, model, result):
         assert result["buffers"]["acc"]["replicate"] == 128
 
 
-# This case's answers depend on the *build configuration*, not only on the
-# pinned target: the `sm_90` goldens were recorded against a build with CUDA
-# codegen enabled, and a build without it disagrees. Concretely, a
-# `-DUSE_CUDA=OFF` build registers a different `tl.copy` implementation for
-# `sm_90` (src/cuda/op/copy.cc is only compiled into the CUDA backend), and
-# every variant here then comes out fully replicated -- including the
-# `width=4` variant of #3171's unit test, which returns `combine_size == 128`
-# instead of the 4 it asserts. On the CUDA-enabled build the same assertions
-# pass, which is where these goldens are meaningful.
-#
-# So run this suite against a CUDA-enabled build (the CI gate does). A
-# non-CUDA build reporting drift here is a build-capability mismatch, not a
-# layout regression.
+# Needs a CUDA-enabled build: with -DUSE_CUDA=OFF, sm_90 resolves a different
+# tl.copy and every variant here comes out fully replicated. Drift reported by
+# such a build is a build-capability mismatch, not a layout regression.

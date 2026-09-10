@@ -1,44 +1,13 @@
 #!/usr/bin/env python
-"""Layout-inference verification driver.
+"""Layout-inference golden check.
 
-Each module under ``cases/`` constructs PrimFuncs whose free-mode layout
-search has a known-good answer.  This driver runs LayoutInference under a
-PINNED target and both selection policies (``tl.layout_cost_model`` =
-"register-count" or "io-aware"), snapshots the inferred layouts, and
-compares them against the reviewed golden files under ``expected/<suite>/``.
+Runs each case through LayoutInference under a pinned target and both
+``tl.layout_cost_model`` policies, and diffs the snapshots against
+``expected/<suite>/<case>.json``.  Layout inference is target-dependent, so
+the target is pinned rather than read from the host GPU.
 
-Layout inference is target-dependent, so goldens are stored per target
-suite.  Running without ``--target`` uses the default pinned suite
-(``cuda-sm90``) rather than the host GPU, which keeps the check identical on
-every machine; use ``--target auto`` for ad-hoc host-target investigation and
-``--target <name>`` for another pinned suite (see ``--list-targets``).
-
-Usage:
-    python run.py                 # verify every case against the pinned goldens
-    python run.py --case NAME     # verify one case (substring match)
-    python run.py --target NAME   # pin another suite (cuda-sm100, metal, ...)
-    python run.py --target auto   # use the host's detected target (ad-hoc)
-    python run.py --record        # (re)write goldens from current behavior
-    python run.py --show          # print inferred layouts as they run
-    python run.py --anchor        # lower fully and check that the widest
-                                  # per-buffer vector access in device TIR
-                                  # matches each case's VECTOR_ANCHOR (the
-                                  # width the io-aware model believed in);
-                                  # variants without an anchor print the
-                                  # observed widths for review
-    python run.py --cute          # compare the symbolic scorer with the
-                                  # independent exact-enumeration oracle
-
-Golden files are one JSON per case and target suite:
-    expected/<suite>/<case>.json = {variant: {model: {"buffers": ..., "loops": ...}}}
-    expected/<suite>/target.json = the pinned target config the suite was
-                                   recorded under (mismatch is an error)
-
-Record, review the diff by hand (the layouts ARE the expectation — never
-commit a recording you have not read), then commit.  A case module may
-additionally define ``check(variant, model, result)`` for invariants that
-must hold regardless of the exact golden (e.g. "this fragment must be
-fully replicated").
+    python run.py --target cuda-sm90 --record   # re-record a suite
+    python run.py --list-targets
 """
 
 from __future__ import annotations
@@ -75,13 +44,9 @@ def suite_dir(target_key: str) -> Path:
 
 
 def load_suite_meta(target_key: str, config: dict, *, recording: bool) -> None:
-    """Guard against comparing a run against goldens recorded for another target.
+    """Fail when a run's target differs from the suite's recorded target.
 
-    A silent target change is the failure mode this harness exists to prevent:
-    on a different architecture the whole suite drifts and every case looks
-    stale.  The recorded config makes the mismatch explicit.  Recording is
-    exempt -- it rewrites the suite in place, and the caller reports which
-    target it recorded under.
+    Without this a target change reads as whole-suite drift.
     """
     if recording:
         return
@@ -103,13 +68,7 @@ def load_suite_meta(target_key: str, config: dict, *, recording: bool) -> None:
 
 
 def load_suite_exclusions(target_key: str) -> dict:
-    """Cases this suite deliberately does not cover.
-
-    A build configuration can be unable to produce a case's answers at all --
-    e.g. the reducer-v2 cases need the CUDA codegen path, so a Metal build
-    cannot satisfy their invariants. The suite names those cases here instead
-    of shipping goldens for behavior it should not have.
-    """
+    """Cases this suite does not cover, e.g. ones needing another build's codegen."""
     path = suite_dir(target_key) / "excluded.json"
     return json.loads(path.read_text()) if path.exists() else {}
 
@@ -325,9 +284,6 @@ def main() -> int:
     recorded_cases: list[str] = []
     for case_name, module in modules:
         if case_name in excluded:
-            # A case whose answers this build configuration cannot produce has
-            # no goldens in this suite. Skipped by name, with the reason on
-            # record, rather than reported as drift.
             print(f"EXCLUDED {case_name}: {excluded[case_name]}")
             excluded_cases += 1
             continue
@@ -354,8 +310,6 @@ def main() -> int:
                         for key, layout in result[section].items():
                             print(f"    {section}/{key}: {format_layout(layout)}")
 
-                # Structural invariants hold in both record and verify mode:
-                # a recording that violates them must never become a golden.
                 check = getattr(module, "check", None)
                 if check is not None:
                     try:
@@ -382,8 +336,6 @@ def main() -> int:
                     print(f"PASS {tag}")
 
         if args.record:
-            # Always rewrite the case file: a stale snapshot must not survive
-            # a recording.
             if recording:
                 golden_path.parent.mkdir(parents=True, exist_ok=True)
                 golden_path.write_text(json.dumps(recording, indent=2, sort_keys=True) + "\n")

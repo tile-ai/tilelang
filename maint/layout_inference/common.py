@@ -1,17 +1,9 @@
-"""Shared helpers for the layout-inference verification harness.
+"""Helpers for the layout-inference golden check.
 
-Runs a PrimFunc through the exact pass prefix LayoutInference sees in the
-real pipeline (BindTarget -> MaterializeKernelLaunch -> LayoutInference)
-and extracts the search result from the IR annotations the pass leaves
-behind:
-
-  - SBlock annotation ``layout_map``:  Buffer -> Layout/Fragment
-  - For annotation ``parallel_loop_layout``: the loop nest's Fragment
-
-Layouts are snapshotted as STRUCTURED dicts (shapes, replicate extent,
-thread extent, forward maps as expression strings), not repr strings:
-golden diffs then point at the exact field that moved, and case checks
-assert on fields instead of substring-matching a print format.
+Runs the pass prefix LayoutInference sees in the real pipeline and snapshots
+what it annotated onto the IR (``layout_map`` per SBlock, ``parallel_loop_layout``
+per parallel nest) as structured dicts, so golden diffs name the exact field
+that moved.
 """
 
 from __future__ import annotations
@@ -28,20 +20,9 @@ from tvm.tirx.stmt_functor import post_order_visit
 # The two selection policies behind `tl.layout_cost_model`, by name.
 COST_MODELS = ("register-count", "io-aware")
 
-# Pinned suites. Layout inference is target-dependent -- both the cost model's
-# warp/vector-width arithmetic and the reduction paths read target attributes,
-# and `determine_target("auto")` picks the *host GPU's* compute capability, so
-# an unpinned run silently changes the question being asked. Goldens are
-# therefore stored per pinned target under ``expected/<key>/``.
-#
-# The suites below only name the target; the recorded config is the canonical
-# geometry a target with that name resolves to (see `resolve_target`), so a
-# suite recorded here and the same target reached through `--target auto`
-# compare equal.
-#
-# The default pins the architecture the checked-in goldens were recorded on;
-# `--target` selects any other registered suite (or an explicit JSON config)
-# and reads/writes that suite's own goldens.
+# Layout inference reads target attributes, and `determine_target("auto")`
+# resolves the *host GPU's* compute capability -- so an unpinned run asks a
+# different question per machine. Goldens live under ``expected/<key>/``.
 TARGET_SUITE_SPECS = {
     "cuda-sm90": {"kind": "cuda", "arch": "sm_90"},
     "cuda-sm100": {"kind": "cuda", "arch": "sm_100"},
@@ -53,7 +34,7 @@ TARGET_SUITES = tuple(TARGET_SUITE_SPECS)
 
 
 def _canonical(config: dict) -> dict:
-    """Order-insensitive form of a target config, for equality checks."""
+    """Order-insensitive target config, for equality checks."""
     return json.loads(json.dumps(config, sort_keys=True))
 
 
@@ -86,8 +67,8 @@ def resolve_target(spec: str | None):
 
 
 def _suite_config(key: str) -> dict:
-    """Canonical config for a pinned suite: the spec normalized through TVM, so
-    it carries the same derived geometry `--target auto` would produce."""
+    """Suite spec normalized through TVM, so it carries the derived geometry
+    `--target auto` would produce for the same target."""
     return _suite_config_from(TARGET_SUITE_SPECS[key])
 
 
@@ -103,7 +84,7 @@ _CONFIG_FIELDS = ("kind", "arch", "mtriple", "mcpu", "max_num_threads", "thread_
 
 
 def json_safe_config(exported) -> dict:
-    """Reduce a `Target.export()` mapping to plain, comparable JSON values."""
+    """Keep the JSON-comparable fields of `Target.export()`."""
     config = {}
     for field in _CONFIG_FIELDS:
         value = exported.get(field) if hasattr(exported, "get") else None
