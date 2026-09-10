@@ -46,6 +46,9 @@ from tilelang.language.builtin import (  # noqa: F401
 from tilelang.language.copy_op import copy_cluster, tma_copy, tma_gather4, tma_gather4_bytes, tma_scatter4  # noqa: F401
 from tilelang.language.kernel import ClusterKernel, CUDASourceCodeKernel  # noqa: F401
 
+# The CUDA dialect's T.Kernel shadows the target-neutral one from common: same
+# launch, plus the CUDA launch annotations (threads, prelude, cluster_dims).
+from .kernel import Kernel  # noqa: F401
 from .cluster import *  # noqa: F401,F403
 from .cluster import __all__ as _CLUSTER_ALL
 from .intrinsics import *  # noqa: F401,F403
@@ -66,6 +69,7 @@ from .warpgroup import __all__ as _WARPGROUP_ALL
 _CUDA_API_ALL = (
     "ClusterKernel",
     "CUDASourceCodeKernel",
+    "Kernel",
     "alloc_cluster_barrier",
     "alloc_descriptor",
     "alloc_tmem",

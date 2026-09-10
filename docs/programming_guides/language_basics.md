@@ -85,16 +85,40 @@ Notes
 
 ## 2. Launching Work with `T.Kernel`
 
-`with T.Kernel(...)` declares a launch context and creates block/thread
-bindings. For GPU backends, specify a grid and threads per block.
+`with T.Kernel(...)` declares a grid of tile programs. The positional
+arguments give the grid extent along each axis and the returned variables are
+the program indices along those axes. This is the part of a launch every
+target shares: on CUDA a program is a thread block and `bx`/`by` are
+`blockIdx.x`/`blockIdx.y`; on CPU the grid becomes the outer loop.
 
 ```python
 with T.Kernel(grid_x, grid_y, threads=128) as (bx, by):
-    ...  # bx/by are blockIdx.x/y
+    ...  # bx/by are the program indices (blockIdx.x/y on CUDA)
 ```
 
-You rarely need raw thread indices; most kernels use structured loops
-(`T.serial`, `T.unroll`, `T.Parallel`, `T.Pipelined`) inside a `T.Kernel`.
+Keyword arguments are launch annotations that the backend interprets once the
+target is known. Each language dialect's `Kernel` declares the annotations its
+backend understands as explicit keyword parameters, so hovering or
+autocompleting `T.Kernel` shows exactly those and anything else is rejected:
+`tilelang.language` (the CUDA dialect) offers `threads`, `prelude` and
+`cluster_dims`; `tilelang.rocm.language` / `tilelang.metal.language` offer
+`threads` and `prelude`; `tilelang.cpu.language` offers only `prelude`.
+`threads` is the SIMT one: how many threads run each tile program on
+GPU-style backends. Those backends pick a default (128) when it is omitted;
+a kernel written with the CUDA dialect still compiles for CPU, which ignores
+the thread count. Code inside `T.Kernel` operates at the tile-program level,
+so you rarely need raw thread indices; most kernels use structured loops
+(`T.serial`, `T.unroll`, `T.Parallel`, `T.Pipelined`) that the compiler maps
+onto threads. `T.get_thread_binding()` exposes the thread index for
+thread-level code on SIMT targets; a kernel that uses it is rejected when
+compiled for a target without SIMT threads.
+
+`T.ClusterKernel(..., cluster_dims=...)` adds the CUDA thread-block-cluster
+annotation (SM90+). A cluster is a `cluster_dims`-shaped tile of the grid, so
+`T.get_cluster_id(axis)` is plain program-index arithmetic
+(`bx // cluster_dims[axis]`) and works on every target, while
+`T.block_rank_in_cluster()` reads the hardware rank and is CUDA-only. Targets
+without clusters reject `cluster_dims` at compile time.
 
 ## 3. Loops and Control Flow
 

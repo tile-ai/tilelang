@@ -11,4 +11,8 @@ from __future__ import annotations
 from tilelang.cuda.language import *  # noqa: F401,F403
 from tilelang.cuda.language import __all__ as __all__  # noqa: F401
 
+# Imported by name so static type checkers resolve the CUDA-typed launch
+# signature through this facade (they cannot evaluate the dynamic __all__).
+from tilelang.cuda.language import Kernel  # noqa: F401
+
 __tilelang_dialect__ = "cuda"

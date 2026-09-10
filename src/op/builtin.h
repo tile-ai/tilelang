@@ -33,6 +33,12 @@ static constexpr const char *kLocalVarInit = "tl.local_var_init";
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 
+// Annotation on the tilelang_root block recording the SIMT thread-block
+// extents requested by T.Kernel(threads=...). It is a launch hint: SIMT
+// backends materialize it as threadIdx.* thread_extent scopes, other
+// backends ignore it.
+static constexpr const char *kLaunchThreads = "tl.launch_threads";
+
 } // namespace attr
 
 inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
@@ -184,6 +190,19 @@ TVM_DLL const Op &access_ptr();
  * - args[2 + i]: extent of axis i (may be a dynamic PrimExpr).
  */
 TVM_DLL const Op &region();
+
+/*!
+ * \brief Placeholder for the thread index along one launch axis.
+ *
+ * T.Kernel binds each thread variable as `LetStmt(tx, launch_thread_idx(axis))`
+ * so the kernel body can reference a thread index before the target is known.
+ * tl.MaterializeKernelLaunch replaces the binding with a real threadIdx.*
+ * thread_extent scope on SIMT backends and rejects any use on backends
+ * without SIMT. It must never reach codegen.
+ *
+ * int32 launch_thread_idx(axis)
+ */
+TVM_DLL const Op &launch_thread_idx();
 
 // Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
 TVM_DLL const Op &add2();

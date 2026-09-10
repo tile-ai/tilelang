@@ -27,10 +27,10 @@ using namespace script::ir_builder::tirx;
 using namespace ffi;
 
 // Build a ForFrame that emits a target-neutral kThreadBinding loop for one
-// kernel-launch dimension. The launch nest is materialized into the
-// target-specific form (thread_extent AttrStmt on GPU, serial For on CPU) by
-// the tl.MaterializeKernelLaunch pass once the Target is known at compile
-// time.
+// grid (program index) axis of a kernel launch. The launch nest is
+// materialized into the target-specific form (thread_extent AttrStmt on GPU,
+// serial For on CPU) by the tl.MaterializeKernelLaunch pass once the Target is
+// known at compile time.
 static ForFrame MakeThreadBindingFrame(const std::string &name,
                                        const String &thread_tag,
                                        const PrimExpr &extent) {
@@ -216,6 +216,38 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
   return ForFrame(n);
 }
 
+// Build a frame whose exit prefixes the body with
+// `tx = tl.launch_thread_idx(0); ty = ...; tz = ...` Bind statements. The
+// launch nest is traced before the Target is known, so the thread indices are
+// only placeholders here: the Vars keep their identity through
+// tl.MaterializeKernelLaunch, which rebinds them as threadIdx.* thread_extent
+// scopes on SIMT backends and drops them elsewhere.
+static ForFrame MakeLaunchThreadFrame() {
+  using namespace tvm::tirx;
+  static const char *kThreadVarNames[3] = {"tx", "ty", "tz"};
+  DataType dtype = DataType::Int(32);
+  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
+  for (int axis = 0; axis < 3; axis++) {
+    n->vars.push_back(Var(kThreadVarNames[axis], dtype));
+    // The extent is decided by the backend at materialization; this dom only
+    // keeps the ForFrame invariants satisfied.
+    n->doms.push_back(Range(make_const(dtype, 0), make_const(dtype, 1)));
+  }
+  n->f_make_for_loop = [](const Array<Var> &vars, const Array<Range> &doms,
+                          const Array<Optional<PrimExpr>> &steps,
+                          Stmt body) -> Stmt {
+    Array<Stmt> seq;
+    for (int axis = 0; axis < static_cast<int>(vars.size()); axis++) {
+      PrimExpr thread_idx = Call(vars[axis]->dtype, launch_thread_idx(),
+                                 {IntImm(DataType::Int(32), axis)});
+      seq.push_back(tvm::tirx::Bind(vars[axis], thread_idx));
+    }
+    seq.push_back(body);
+    return SeqStmt::Flatten(seq);
+  };
+  return ForFrame(n);
+}
+
 /*!
  * \brief A frame that represents a kernel launch.
  *
@@ -223,12 +255,26 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
  */
 class KernelLaunchFrameNode : public TIRFrameNode {
 public:
+  /*! \brief Grid loops, thread placeholders and the root block, outer to
+   * inner. */
   Array<TIRFrame> frames;
+  /*! \brief Program (grid) index vars, one per launch axis. */
+  Array<tvm::tirx::Var> grid_vars;
+  /*! \brief Grid extents, one per launch axis. */
+  Array<PrimExpr> grid_extents;
+  /*! \brief Placeholder thread index vars for the x, y and z axes. */
+  Array<tvm::tirx::Var> thread_vars;
+  /*! \brief Requested SIMT thread-block extents, when threads= was given. */
+  Optional<Array<PrimExpr>> thread_extents;
 
   static void RegisterReflection() {
     namespace refl = reflection;
-    refl::ObjectDef<KernelLaunchFrameNode>().def_ro(
-        "frames", &KernelLaunchFrameNode::frames);
+    refl::ObjectDef<KernelLaunchFrameNode>()
+        .def_ro("frames", &KernelLaunchFrameNode::frames)
+        .def_ro("grid_vars", &KernelLaunchFrameNode::grid_vars)
+        .def_ro("grid_extents", &KernelLaunchFrameNode::grid_extents)
+        .def_ro("thread_vars", &KernelLaunchFrameNode::thread_vars)
+        .def_ro("thread_extents", &KernelLaunchFrameNode::thread_extents);
   }
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.KernelLaunchFrame",
@@ -270,30 +316,40 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
                                const Map<String, Any> &attrs) {
   ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
-  auto block_size = block_size_opt.value_or(Array<PrimExpr>());
   ICHECK(grid_size.size() <= 3);
-  ICHECK(block_size.size() <= 3);
 
   static const char *kBlockVarNames[3] = {"bx", "by", "bz"};
   static const char *kBlockTags[3] = {"blockIdx.x", "blockIdx.y", "blockIdx.z"};
-  static const char *kThreadVarNames[3] = {"tx", "ty", "tz"};
-  static const char *kThreadTags[3] = {"threadIdx.x", "threadIdx.y",
-                                       "threadIdx.z"};
 
   for (size_t i = 0; i < grid_size.size(); i++) {
-    n->frames.push_back(
-        MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]));
+    ForFrame frame =
+        MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]);
+    n->grid_vars.push_back(frame->vars[0]);
+    n->grid_extents.push_back(grid_size[i]);
+    n->frames.push_back(frame);
   }
-  for (size_t i = 0; i < block_size.size(); i++) {
-    n->frames.push_back(MakeThreadBindingFrame(kThreadVarNames[i],
-                                               kThreadTags[i], block_size[i]));
+  // Thread placeholders are always emitted so the body may reference a thread
+  // index regardless of whether threads= was given; the backend decides what
+  // they mean.
+  ForFrame thread_frame = MakeLaunchThreadFrame();
+  n->thread_vars = thread_frame->vars;
+  n->frames.push_back(thread_frame);
+
+  Map<String, Any> block_annotations =
+      attrs.defined() ? attrs : Map<String, Any>{};
+  if (block_size_opt.defined()) {
+    Array<PrimExpr> block_size = block_size_opt.value();
+    ICHECK(block_size.size() <= 3);
+    while (block_size.size() < 3) {
+      block_size.push_back(IntImm(DataType::Int(32), 1));
+    }
+    n->thread_extents = block_size;
+    block_annotations.Set(attr::kLaunchThreads, block_size);
   }
 
   auto empty_block = tvm::script::ir_builder::tirx::Block(DeviceMainBlockName);
   empty_block->reads = Array<tvm::tirx::BufferRegion>();
   empty_block->writes = Array<tvm::tirx::BufferRegion>();
-  Map<String, Any> block_annotations =
-      attrs.defined() ? attrs : Map<String, Any>{};
   empty_block->annotations = block_annotations;
   n->frames.push_back(empty_block);
 
