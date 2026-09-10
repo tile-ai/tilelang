@@ -12,21 +12,25 @@ the kernel-level ``tx/ty/tz`` placeholders are dropped by the Ascend pipeline.
 
 from __future__ import annotations
 
-import threading
-
 from tvm import tirx
 
 from tilelang import _ffi_api
 from tilelang.jit.exceptions import JITNoBuilderError
 from tilelang.language.kernel import (
-    FrameStack,
     KernelLaunchFrame,
+    SimtVFContext,
     get_block_binding,
     get_block_bindings,
     get_block_extent,
     get_block_extents,
+    get_thread_binding,
+    get_thread_bindings,
+    get_thread_extent,
+    get_thread_extents,
     kernel_launch_factory,
     launch_kernel,
+    pop_simtvf_context,
+    push_simtvf_context,
 )
 
 __all__ = [
@@ -44,94 +48,6 @@ __all__ = [
     "pop_simtvf_context",
     "push_simtvf_context",
 ]
-
-# ---------------------------------------------------------------------------
-# SIMT thread scopes
-#
-# ``T.SimtVF`` owns a thread domain that is nested *inside* the kernel launch,
-# so ``T.get_thread_binding()`` and friends have to resolve against the active
-# SimtVF scope when there is one and against the launch frame otherwise. Both
-# the scope state and the accessors are Ascend's: CUDA/ROCm/Metal declare their
-# thread domain on the launch itself and never need the indirection. Keeping
-# them here is what lets the shared ``tilelang.language.kernel`` stay free of
-# backend branches.
-# ---------------------------------------------------------------------------
-
-
-class SimtVFContext:
-    """Stores thread binding info for an active SimtVF scope."""
-
-    __slots__ = ("thread_vars", "thread_extents")
-
-    def __init__(self, thread_vars, thread_extents):
-        self.thread_vars = thread_vars
-        self.thread_extents = thread_extents
-
-
-_simtvf_local = threading.local()
-
-
-def _get_simtvf_stack() -> FrameStack:
-    if not hasattr(_simtvf_local, "simtvf_stack"):
-        _simtvf_local.simtvf_stack = FrameStack()
-    return _simtvf_local.simtvf_stack
-
-
-def _get_current_simtvf() -> SimtVFContext | None:
-    stack = _get_simtvf_stack()
-    return stack.top() if stack else None
-
-
-def push_simtvf_context(ctx: SimtVFContext):
-    """Enter a SimtVF thread scope, making its thread vars the current ones."""
-    _get_simtvf_stack().push(ctx)
-
-
-def pop_simtvf_context():
-    """Leave the innermost SimtVF thread scope."""
-    _get_simtvf_stack().pop()
-
-
-def get_thread_binding(dim: int = 0):
-    """Returns the thread binding for the given dimension.
-
-    Inside a ``T.SimtVF`` block this is the SimtVF thread var; otherwise it is
-    the kernel launch's placeholder, which only has a meaning if the pipeline
-    materialized SIMT threads (Ascend never does at kernel scope).
-    """
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return simtvf.thread_vars[dim]
-    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
-    return KernelLaunchFrame.Current().get_thread_binding(dim)
-
-
-def get_thread_bindings() -> list:
-    """Returns all three thread bindings."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return list(simtvf.thread_vars)
-    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
-    return KernelLaunchFrame.Current().get_thread_bindings()
-
-
-def get_thread_extent(dim: int = 0) -> int:
-    """Returns the thread extent for the given dimension."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return simtvf.thread_extents[dim]
-    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
-    return KernelLaunchFrame.Current().get_thread_extent(dim)
-
-
-def get_thread_extents() -> list:
-    """Returns all three thread extents."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return list(simtvf.thread_extents)
-    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
-    return KernelLaunchFrame.Current().get_thread_extents()
-
 
 # ---------------------------------------------------------------------------
 # Launch frames
