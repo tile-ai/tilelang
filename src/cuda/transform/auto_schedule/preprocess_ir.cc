@@ -37,6 +37,7 @@
 
 namespace tvm {
 namespace tl {
+namespace cuda {
 
 using namespace tirx;
 using namespace ffi;
@@ -62,23 +63,26 @@ bool CheckCalls(const Stmt &body) {
     if (call == nullptr || !ok)
       return;
     if (call->op.same_as(tl::loop_break())) {
-      LOG(WARNING) << "AutoSchedule skipped: cannot schedule loop_break";
+      LOG(WARNING)
+          << "AutoWarpSpecialization skipped: cannot schedule loop_break";
       ok = false;
       return;
     }
     if (IsBarrierOrTmaControlCall(call)) {
-      LOG(WARNING) << "AutoSchedule skipped: cannot schedule hand-written "
-                      "synchronization or TMA control ('"
-                   << call->op << "'): block-wide syncs cannot be duplicated "
-                   << "into roles, and hand-managed barrier protocols are "
-                   << "invisible to the schedule";
+      LOG(WARNING)
+          << "AutoWarpSpecialization skipped: cannot schedule hand-written "
+             "synchronization or TMA control ('"
+          << call->op << "'): block-wide syncs cannot be duplicated "
+          << "into roles, and hand-managed barrier protocols are "
+          << "invisible to the schedule";
       ok = false;
       return;
     }
     if (const auto *op = call->op.as<OpNode>()) {
       if (std::string(op->name).find("atomic") != std::string::npos) {
-        LOG(WARNING) << "AutoSchedule skipped: cannot schedule atomic op '"
-                     << op->name << "'";
+        LOG(WARNING)
+            << "AutoWarpSpecialization skipped: cannot schedule atomic op '"
+            << op->name << "'";
         ok = false;
       }
     }
@@ -101,7 +105,7 @@ bool CheckHostsNoAsync(const Stmt &stmt, const Target &target) {
       return;
     if (const auto *copy = tile_op.as<CopyNode>()) {
       if (ClassifyCopy(copy, target) == TileStmtKind::kTmaProducer) {
-        LOG(WARNING) << "AutoSchedule skipped: an asynchronous "
+        LOG(WARNING) << "AutoWarpSpecialization skipped: an asynchronous "
                         "global->shared copy is nested inside a compound "
                         "statement; write it as its own statement so its "
                         "completion barrier can be wired";
@@ -111,9 +115,10 @@ bool CheckHostsNoAsync(const Stmt &stmt, const Target &target) {
     }
     if (auto gemm = GetGemmInfo(tile_op)) {
       if (IsTmemBuffer(gemm->accumulator) || gemm->wg_wait != 0) {
-        LOG(WARNING) << "AutoSchedule skipped: an asynchronous gemm is "
-                        "nested inside a compound statement; write it as "
-                        "its own statement";
+        LOG(WARNING)
+            << "AutoWarpSpecialization skipped: an asynchronous gemm is "
+               "nested inside a compound statement; write it as "
+               "its own statement";
         ok = false;
       }
     }
@@ -258,5 +263,6 @@ ffi::Optional<Stmt> PreprocessIR(Stmt body, const Target &target) {
   return OpIdNormalizer::Rewrite(std::move(body), target);
 }
 
+} // namespace cuda
 } // namespace tl
 } // namespace tvm

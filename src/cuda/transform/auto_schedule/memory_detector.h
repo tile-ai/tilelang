@@ -23,6 +23,7 @@
 
 namespace tvm {
 namespace tl {
+namespace cuda {
 
 using namespace tirx;
 using ffi::Array;
@@ -459,5 +460,6 @@ private:
   }
 };
 
+} // namespace cuda
 } // namespace tl
 } // namespace tvm

@@ -63,8 +63,7 @@ def main(
     A: T.Tensor((m,), dtype),
     B: T.Tensor((m + n,), dtype),
     C: T.Tensor((n * k,), dtype),
-):
-    ...
+): ...
 ```
 
 This enables enforcing cross-tensor relationships like `len(B) == m + n` and `len(C) == n * k` at runtime.
@@ -88,6 +87,8 @@ Passing `None` raises: `main.A_handle is expected to have non-NULL pointer`.
 2) Still must be non-NULL (constant-true branch)
 ```python
 some_cond: bool = True
+
+
 @T.prim_func
 def main(A: T.Tensor((M, K), dtype)):
     if some_cond:
@@ -97,6 +98,8 @@ def main(A: T.Tensor((M, K), dtype)):
 3) Nullable (constant-false branch, statically unreachable)
 ```python
 some_cond: bool = False
+
+
 @T.prim_func
 def main(A: T.Tensor((M, K), dtype)):
     if some_cond:
@@ -201,6 +204,7 @@ def matmul_relu_kernel(
             T.gemm(A_shared, B_shared, C_local)
         T.copy(C_local, C[by * block_M, bx * block_N])
 
+
 # For debugging, print the host source
 print(matmul_relu_kernel.get_host_source())
 ```
@@ -258,8 +262,8 @@ print(fn.get_host_source())
 ```python
 import torch
 
-A = torch.empty((M, K), device='cuda', dtype=torch.float16)
-B = torch.empty((K, N), device='cuda', dtype=torch.float16)
+A = torch.empty((M, K), device="cuda", dtype=torch.float16)
+B = torch.empty((K, N), device="cuda", dtype=torch.float16)
 # Missing C
 fn(A, B)
 ```
@@ -271,8 +275,8 @@ Fix: pass all arguments per the signature.
 ```python
 import torch
 
-B = torch.empty((K, N), device='cuda', dtype=torch.float16)
-C = torch.empty((M, N), device='cuda', dtype=torch.float16)
+B = torch.empty((K, N), device="cuda", dtype=torch.float16)
+C = torch.empty((M, N), device="cuda", dtype=torch.float16)
 fn(1, B, C)
 ```
 Expected: `<kernel>: Expect arg[0] to be pointer`.
@@ -283,9 +287,9 @@ Fix: pass a DLPack-compatible tensor (e.g., torch.Tensor).
 ```python
 import torch
 
-A = torch.empty((M, K, 1), device='cuda', dtype=torch.float16)  # rank=3
-B = torch.empty((K, N), device='cuda', dtype=torch.float16)
-C = torch.empty((M, N), device='cuda', dtype=torch.float16)
+A = torch.empty((M, K, 1), device="cuda", dtype=torch.float16)  # rank=3
+B = torch.empty((K, N), device="cuda", dtype=torch.float16)
+C = torch.empty((M, N), device="cuda", dtype=torch.float16)
 fn(A, B, C)
 ```
 Expected: `<kernel>.A_handle.ndim is expected to equal 2, but got mismatched ndim`.
@@ -296,9 +300,9 @@ Fix: ensure runtime rank equals compiled rank.
 ```python
 import torch
 
-A = torch.empty((M, K), device='cuda', dtype=torch.float32)  # should be float16
-B = torch.empty((K, N), device='cuda', dtype=torch.float16)
-C = torch.empty((M, N), device='cuda', dtype=torch.float16)
+A = torch.empty((M, K), device="cuda", dtype=torch.float32)  # should be float16
+B = torch.empty((K, N), device="cuda", dtype=torch.float16)
+C = torch.empty((M, N), device="cuda", dtype=torch.float16)
 fn(A, B, C)
 ```
 Expected: `<kernel>.A_handle.dtype is expected to be float16, but got incompatible dtype`.
@@ -309,9 +313,9 @@ Fix: `A = A.to(torch.float16)` or create with the correct dtype.
 ```python
 import torch
 
-A = torch.empty((M, K + 1), device='cuda', dtype=torch.float16)  # K mismatched
-B = torch.empty((K, N), device='cuda', dtype=torch.float16)
-C = torch.empty((M, N), device='cuda', dtype=torch.float16)
+A = torch.empty((M, K + 1), device="cuda", dtype=torch.float16)  # K mismatched
+B = torch.empty((K, N), device="cuda", dtype=torch.float16)
+C = torch.empty((M, N), device="cuda", dtype=torch.float16)
 fn(A, B, C)
 ```
 Expected: `Argument <kernel>.A_handle.shape[i] has an unsatisfied constraint: ... == <expected>`.
@@ -322,10 +326,10 @@ Fix: satisfy linear constraints and constants across tensors.
 ```python
 import torch
 
-A = torch.empty((M, K), device='cuda', dtype=torch.float16)
+A = torch.empty((M, K), device="cuda", dtype=torch.float16)
 A_nc = A.t()  # transpose -> non-contiguous
-B = torch.empty((K, N), device='cuda', dtype=torch.float16)
-C = torch.empty((M, N), device='cuda', dtype=torch.float16)
+B = torch.empty((K, N), device="cuda", dtype=torch.float16)
+C = torch.empty((M, N), device="cuda", dtype=torch.float16)
 fn(A_nc, B, C)
 ```
 Expected: `Argument <kernel>.A_handle.strides[1] has an unsatisfied constraint: ... == 1`.
@@ -336,9 +340,9 @@ Fix: pass `A_nc.contiguous()` or align the layout expectation in the kernel.
 ```python
 import torch
 
-A = torch.empty((M, K), device='cpu', dtype=torch.float16)
-B = torch.empty((K, N), device='cpu', dtype=torch.float16)
-C = torch.empty((M, N), device='cpu', dtype=torch.float16)
+A = torch.empty((M, K), device="cpu", dtype=torch.float16)
+B = torch.empty((K, N), device="cpu", dtype=torch.float16)
+C = torch.empty((M, N), device="cpu", dtype=torch.float16)
 fn(A, B, C)  # CUDA-targeted kernel
 ```
 Expected: `<kernel>.A_handle.device_type mismatch [expected: 2 (cuda)] ...`.
@@ -349,9 +353,9 @@ Fix: move tensors to the CUDA device.
 ```python
 import torch
 
-A = torch.empty((M, K), device='cuda:0', dtype=torch.float16)
-B = torch.empty((K, N), device='cuda:1', dtype=torch.float16)
-C = torch.empty((M, N), device='cuda:0', dtype=torch.float16)
+A = torch.empty((M, K), device="cuda:0", dtype=torch.float16)
+B = torch.empty((K, N), device="cuda:1", dtype=torch.float16)
+C = torch.empty((M, N), device="cuda:0", dtype=torch.float16)
 fn(A, B, C)
 ```
 Expected: `Argument <kernel>.B_handle.device_id has an unsatisfied constraint: ... == ...`.
@@ -369,12 +373,14 @@ Fix: ensure valid underlying storage; in PyTorch scenarios, avoid constructing t
 ```python
 import tilelang.language as T
 
+
 @T.prim_func
 def scalar_check(x: T.int32, flag: T.bool()):
     T.evaluate(0)
 
+
 scalar_check(1.0, True)  # x is float -> Expect arg[0] to be int
-scalar_check(1, 2.5)     # flag is float -> Expect arg[1] to be boolean
+scalar_check(1, 2.5)  # flag is float -> Expect arg[1] to be boolean
 ```
 
 Fix: pass correct scalar types, e.g., `scalar_check(1, True)`.

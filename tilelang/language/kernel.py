@@ -3,12 +3,12 @@
 from __future__ import annotations
 from collections import deque
 import os
+from typing import Any
 from tvm import tirx
 from tvm.tirx import Var
 from tvm.tirx.script.builder import evaluate as T_evaluate
 from tvm.tirx.script.builder.frame import TIRFrame
 from tvm.tirx.script.builder.frame import SBlockFrame
-from tvm.target import Target
 from tvm.ffi import register_object
 from tilelang import _ffi_api
 from tilelang.jit.exceptions import JITNoBuilderError
@@ -85,38 +85,6 @@ def _get_current_stack() -> FrameStack:
     return _local.kernel_launch_frame_stack
 
 
-class SimtVFContext:
-    """Stores thread binding info for an active SimtVF scope."""
-
-    __slots__ = ("thread_vars", "thread_extents")
-
-    def __init__(self, thread_vars, thread_extents):
-        self.thread_vars = thread_vars
-        self.thread_extents = thread_extents
-
-
-_simtvf_local = threading.local()
-
-
-def _get_simtvf_stack() -> FrameStack:
-    if not hasattr(_simtvf_local, "simtvf_stack"):
-        _simtvf_local.simtvf_stack = FrameStack()
-    return _simtvf_local.simtvf_stack
-
-
-def _get_current_simtvf() -> SimtVFContext | None:
-    stack = _get_simtvf_stack()
-    return stack.top() if stack else None
-
-
-def push_simtvf_context(ctx: SimtVFContext):
-    _get_simtvf_stack().push(ctx)
-
-
-def pop_simtvf_context():
-    _get_simtvf_stack().pop()
-
-
 def _normalize_bindings(bindings: list[Var]) -> Var | list[Var]:
     """
     Return a bare Var when we only have a single binding so that users may write either
@@ -130,21 +98,25 @@ def _normalize_bindings(bindings: list[Var]) -> Var | list[Var]:
 
 def _normalize_threads(
     threads: int | list[int] | tuple | None,
-) -> list[int]:
+) -> list[int] | None:
     """Normalize a thread-block specification into a 3-D extent list.
 
     Args:
-        threads: A thread count, a per-dimension extent list/tuple, or None for the default.
+        threads: A thread count, a per-dimension extent list/tuple, or None to
+            leave the choice to the backend.
 
     Returns:
-        The extents as ``[x, y, z]``, padding missing dimensions with 1.
+        The extents as ``[x, y, z]``, padding missing dimensions with 1, or
+        None when no thread count was requested. The frontend does not pick a
+        default: the thread count is a SIMT launch hint whose default (if any)
+        belongs to the backend that materializes the launch.
 
     Raises:
         ValueError: If ``threads`` has an unsupported type, or any concrete extent
             is not positive.
     """
     if threads is None:
-        threads = 128  # default thread number
+        return None
 
     if isinstance(threads, int):
         normalized = [threads, 1, 1]
@@ -179,30 +151,23 @@ def _normalize_cluster_dims(
     return None if cluster_dims == [1, 1, 1] else cluster_dims
 
 
-def _current_target_is_ascend() -> bool:
-    current_target = Target.current(allow_none=True)
-    if current_target is None:
-        return False
-    try:
-        from tilelang.ascend.target import target_is_ascend
-
-        return bool(target_is_ascend(current_target))
-    except Exception:
-        return current_target.kind.name == "ascend"
-
-
 @register_object("tl.KernelLaunchFrame")
 class KernelLaunchFrame(TIRFrame):
     """
     KernelLaunchFrame is a custom TIRFrame that manages block/thread indices
     and handles the entry and exit of the kernel launch scope.
+
+    Grid (program index) vars are bound by the frame itself. Thread vars are
+    placeholders: they have an identity so the body can reference them, but
+    their extent is only known once a backend materializes the launch. Thread
+    extents are therefore available at trace time only when ``threads=`` was
+    passed to :func:`Kernel`.
     """
 
     def __enter__(self) -> Var | list[Var]:
         """
         Enters the KernelLaunchFrame scope and pushes this frame onto the stack.
-        Returns one Var if we detect exactly 5 frames (meaning there is a single
-        block dimension), or a list of Vars otherwise.
+        Returns one Var for a single grid dimension, or a list of Vars otherwise.
         """
         super().__enter__()
         _get_current_stack().push(self)
@@ -210,20 +175,7 @@ class KernelLaunchFrame(TIRFrame):
         last_block_frame = self.frames[-1]
         assert isinstance(last_block_frame, SBlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
 
-        maybe_cpu = last_block_frame.annotations.get("tilelang.is_cpu_kernel_frame", False)
-        maybe_npu = last_block_frame.annotations.get("tilelang.is_npu_kernel_frame", False)
-
-        # All launch dimensions are target-neutral thread_binding For frames
-        # (regular T.Kernel and T.MixedKernel alike), so the loop var is
-        # frame.vars[0].
-        if maybe_cpu or maybe_npu:
-            # CPU/NPU kernels have no threadIdx frames; only the trailing block
-            # frame (with attributes) follows the grid frames.
-            return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-1]])
-        else:
-            # GPU: exclude the last 4 frames (threadIdx.x/y/z and the block frame
-            # with attributes).
-            return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-4]])
+        return _normalize_bindings(list(self.grid_vars))
 
     def __exit__(self, ptype, value, trace):
         """
@@ -248,9 +200,11 @@ class KernelLaunchFrame(TIRFrame):
         """
         Returns the block extent for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
+        Grid axes that were not launched have extent 1.
         """
-        iter_var = self.frames[dim].doms[0]
-        return int(iter_var.extent)
+        if dim >= len(self.grid_extents):
+            return 1
+        return int(self.grid_extents[dim])
 
     def get_block_extents(self) -> list[int]:
         """
@@ -262,9 +216,17 @@ class KernelLaunchFrame(TIRFrame):
         """
         Returns the thread extent for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
+
+        Raises:
+            ValueError: If the kernel was launched without ``threads=``. The
+                extent is then chosen by the backend and is not known at trace time.
         """
-        iter_var = self.frames[-4 + dim].doms[0]
-        return int(iter_var.extent)
+        if self.thread_extents is None:
+            raise ValueError(
+                "The thread extent is not known at trace time: T.Kernel(...) was called without "
+                "threads=. Pass threads= explicitly when the kernel body needs the thread-block size."
+            )
+        return int(self.thread_extents[dim])
 
     def get_thread_extents(self) -> list[int]:
         """
@@ -277,14 +239,14 @@ class KernelLaunchFrame(TIRFrame):
         Returns the thread binding for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        return self.frames[-4 + dim].vars[0]
+        return self.thread_vars[dim]
 
     def get_thread_bindings(self) -> list[Var]:
         """
         Returns the thread binding for the given dimension.
         dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
         """
-        return [frame.vars[0] for frame in self.frames[-4:-1]]
+        return list(self.thread_vars)
 
     def get_num_threads(self) -> int:
         """
@@ -300,27 +262,94 @@ class KernelLaunchFrame(TIRFrame):
         Returns the block binding for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
         """
-        return self.frames[dim].vars[0]
+        return self.grid_vars[dim]
 
     def get_block_bindings(self) -> list[Var]:
         """
         Returns all three block bindings.
         """
-        return [frame.vars[0] for frame in self.frames[0:-4]]
+        return list(self.grid_vars)
+
+    def get_launch_annotation(self, key: str, default=None):
+        """
+        Returns the launch annotation ``key`` recorded by T.Kernel (e.g. ``cluster_dims``),
+        or ``default`` when it was not given.
+        """
+        annotations = self.frames[-1].annotations
+        if annotations is None or key not in annotations:
+            return default
+        return annotations[key]
+
+    def get_cluster_dims(self) -> list[int]:
+        """
+        Returns the cluster dimensions as ``[x, y, z]``. A launch without
+        ``cluster_dims`` has clusters of a single program, i.e. ``[1, 1, 1]``.
+        """
+        dims = self.get_launch_annotation("cluster_dims")
+        if dims is None:
+            return [1, 1, 1]
+        dims = [int(d) for d in dims]
+        return dims + [1] * (3 - len(dims))
+
+    def get_cluster_size(self) -> int:
+        """
+        Returns the number of programs per cluster (product of the cluster dimensions).
+        """
+        size = 1
+        for dim in self.get_cluster_dims():
+            size *= dim
+        return size
+
+    def get_cluster_id(self, dim: int = 0) -> Var | tirx.PrimExpr:
+        """
+        Returns the index of the cluster the current program belongs to along
+        ``dim``, in program-space arithmetic: ``block_id // cluster_dims[dim]``.
+
+        A cluster is a ``cluster_dims``-shaped tile of the grid, so this is the
+        same on every target (clusterIdx on CUDA, a group of consecutive
+        programs elsewhere) and stays consistent with threadblock swizzling,
+        which permutes the grid at cluster granularity.
+        """
+        if dim >= len(self.grid_vars):
+            return tirx.IntImm("int32", 0)
+        block = self.grid_vars[dim]
+        cluster_dim = self.get_cluster_dims()[dim]
+        if cluster_dim == 1:
+            return block
+        return tirx.floordiv(block, tirx.IntImm(block.dtype, cluster_dim))
+
+    def get_cluster_ids(self) -> list[Var | tirx.PrimExpr]:
+        """
+        Returns the cluster index along every launched grid axis.
+        """
+        return [self.get_cluster_id(dim) for dim in range(len(self.grid_vars))]
+
+    def get_cluster_extent(self, dim: int = 0) -> int:
+        """
+        Returns the number of clusters along ``dim``: ``ceil(grid_extent / cluster_dims[dim])``.
+        """
+        cluster_dim = self.get_cluster_dims()[dim]
+        return -(-self.get_block_extent(dim) // cluster_dim)
+
+    def get_cluster_extents(self) -> list[int]:
+        """
+        Returns the number of clusters along all three dimensions.
+        """
+        return [self.get_cluster_extent(dim) for dim in range(3)]
 
     @property
     def blocks(self) -> list[Var]:
         """
         Returns the block indices from the topmost frame.
         """
-        return [frame.vars[0] for frame in self.frames[0:-4]]
+        return list(self.grid_vars)
 
     @property
     def threads(self) -> list[Var]:
         """
         Returns the thread indices from the topmost frame.
         """
-        return [frame.vars[0] for frame in self.frames[-4:-1]]
+        return list(self.thread_vars)
 
     @property
     def num_threads(self) -> int:
@@ -330,65 +359,51 @@ class KernelLaunchFrame(TIRFrame):
         return self.get_num_threads()
 
 
-def Kernel(
-    *blocks: int | tirx.PrimExpr,
-    threads: int | list[int] | tuple | None = None,
-    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
-    is_cpu: bool = False,
+# ---------------------------------------------------------------------------
+# Launch annotations
+#
+# T.Kernel(*grid) is the launch every target shares. Everything a backend may
+# additionally need (thread count, clusters, ...) is a *launch annotation*: the
+# frontend records it verbatim and the backend interprets it once the target
+# is known (MaterializeKernelLaunch). Which annotations exist is declared per
+# language dialect as the explicit keyword parameters of its own `Kernel`
+# (see tilelang/<backend>/language/kernel.py), so `tilelang.cuda.language.Kernel`
+# shows, autocompletes and accepts exactly what CUDA understands. Every
+# dialect's `Kernel` funnels into `launch_kernel` below.
+# ---------------------------------------------------------------------------
+
+
+_KERNEL_LAUNCH_FACTORY_ATTR = "__tilelang_kernel_launch__"
+
+
+def kernel_launch_factory(func):
+    """Mark ``func`` as a launch factory: a callable used as ``with func(...)``
+    to open a kernel launch. Every dialect's ``Kernel`` (and ``ClusterKernel``)
+    carries this mark so the eager JIT rewriter can find the launch regardless
+    of which dialect or alias the user went through."""
+    setattr(func, _KERNEL_LAUNCH_FACTORY_ATTR, True)
+    return func
+
+
+def is_kernel_launch_factory(obj) -> bool:
+    return getattr(obj, _KERNEL_LAUNCH_FACTORY_ATTR, False) is True
+
+
+def launch_kernel(
+    blocks: tuple[int | tirx.PrimExpr, ...],
+    *,
+    threads: int | list[int] | tuple[int, ...] | None = None,
     prelude: str | None = None,
-):
-    """Tools to quickly construct a kernel launch frame.
+    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+    **annotations: Any,
+) -> KernelLaunchFrame:
+    """Shared implementation behind every dialect's ``T.Kernel``.
 
-    The launch nest is emitted in a target-neutral form (thread_binding
-    For loops); each backend pipeline materializes it via
-    MaterializeKernelLaunch. Backends without SIMT (e.g. CPU) simply
-    ignore the thread extents at compile time, so the same kernel can be
-    compiled for any target.
-
-    Parameters
-    ----------
-    blocks : int
-        A list of extent, can be 1-3 dimension, representing gridDim.(x|y|z)
-    threads : int
-        A integer representing blockDim.x
-        Or a list of integers representing blockDim.(x|y|z)
-        if the value is -1, we skip the threadIdx.x binding.
-    cluster_dims : int | tuple[int, int, int] | list[int] | None
-        The cluster dimensions for SM90+ cluster launch.
-        For example, use 2 or (2, 1, 1) to create 2-CTA clusters.
-        When specified, the kernel will be launched using cudaLaunchKernelEx
-        with cudaLaunchAttributeClusterDimension.
-    is_cpu : bool
-        Whether the kernel is running on CPU.
-    is_ascend : bool
-        Explicitly force Ascend kernel-frame semantics when target inference is
-        not active.
-    prelude : str
-        The import c code of the kernel,
-        will be injected before the generated kernel code.
-
-    Returns
-    -------
-    res : Tuple[frame.LaunchThreadFrame]
-        The result LaunchThreadFrame.
-
-    Examples
-    --------
-    Create a 1-D CUDA kernel launch and unpack the single block index:
-
-    .. code-block:: python
-
-        with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
-            # bx is the blockIdx.x binding (also iterable as (bx,))
-            ...
-
-    Launch a 2-D grid while requesting two thread dimensions:
-
-    .. code-block:: python
-
-        with T.Kernel(grid_x, grid_y, threads=(64, 2)) as (bx, by):
-            tx, ty = T.get_thread_bindings()
-            ...
+    The well-known launch annotations are normalized here; any other keyword
+    a dialect forwards is recorded verbatim on the launch block for that
+    backend's pipeline to consume. Dialects, not this function, decide which
+    keywords exist: they only forward what their own ``Kernel`` signature
+    declares.
     """
     # In eager mode, we construct AST directly without prim_func,
     # so there must be a Builder available. If not, this function
@@ -399,44 +414,47 @@ def Kernel(
     if Builder.current() is None:
         raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
-    from tilelang.ascend.target import check_ascend_availability
-
-    is_ascend = check_ascend_availability()
-
     attrs: dict = {}
-    if is_ascend and is_cpu:
-        raise ValueError("Uncertain backend behavior for `is_cpu=True` and `is_ascend=True`")
-
-    if (is_ascend or _current_target_is_ascend()) and not is_cpu:
-        if threads is not None:
-            raise ValueError(
-                "Ascend backend does not support `threads=` in `T.Kernel(...)`. Use `T.SimtVF(threads=...)` to define thread domains."
-            )
-        if len(blocks) != 1:
-            raise ValueError(f"Ascend backend only supports 1-D grid in `T.Kernel(N)`. Got {len(blocks)}-D grid.")
-        attrs["tilelang.is_npu_kernel_frame"] = True
-    elif not is_cpu and threads is None:
-        # Keep backward compatibility when target is not Ascend (or unknown).
-        threads = 128  # default thread number
-
-    if threads is None:
-        normalized_threads = None
-    else:
-        normalized_threads = _normalize_threads(threads)
-
-    if is_cpu:
-        attrs["tilelang.is_cpu_kernel_frame"] = True
-
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
-
     cluster_dims = _normalize_cluster_dims(cluster_dims)
     if cluster_dims is not None:
         attrs["cluster_dims"] = cluster_dims
+    for key, value in annotations.items():
+        if value is not None:
+            attrs[key] = value
 
-    return _ffi_api.KernelLaunch(blocks, normalized_threads, attrs)
+    return _ffi_api.KernelLaunch(blocks, _normalize_threads(threads), attrs)
 
 
+@kernel_launch_factory
+def Kernel(*blocks: int | tirx.PrimExpr) -> KernelLaunchFrame:
+    """Construct a kernel launch frame: a grid of tile programs.
+
+    This is the target-neutral launch: the part every backend shares. Backend
+    dialects offer their own ``T.Kernel`` with the launch annotations that
+    backend understands, e.g. ``tilelang.cuda.language.Kernel(..., threads=128)``;
+    ``tilelang.language`` is the CUDA dialect.
+
+    Parameters
+    ----------
+    *blocks : int | PrimExpr
+        Extent of the grid along each axis (1-3 dimensions). The launch yields
+        one program index per axis (``blockIdx`` on CUDA, the outer loop on
+        CPU, the core index on an NPU).
+
+    Examples
+    --------
+    .. code-block:: python
+
+        with T.Kernel(T.ceildiv(N, 128)) as bx:
+            # bx is the program index along x; also iterable as (bx,)
+            ...
+    """
+    return launch_kernel(blocks)
+
+
+@kernel_launch_factory
 def ClusterKernel(
     *blocks: int | tirx.PrimExpr,
     cluster_dims: int | tuple[int, int, int] | list[int],
@@ -472,22 +490,7 @@ def ClusterKernel(
         with T.ClusterKernel(grid_x, grid_y, cluster_dims=2, threads=128) as (bx, by):
             ...
     """
-    from tilelang.language.eager.builder import Builder
-
-    if Builder.current() is None:
-        raise JITNoBuilderError("T.ClusterKernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
-
-    attrs: dict = {}
-    threads = _normalize_threads(threads)
-
-    if prelude is not None:
-        attrs["pragma_import_c"] = prelude
-
-    cluster_dims = _normalize_cluster_dims(cluster_dims)
-    if cluster_dims is not None:
-        attrs["cluster_dims"] = cluster_dims
-
-    return _ffi_api.KernelLaunch(blocks, threads, attrs)
+    return launch_kernel(blocks, threads=threads, prelude=prelude, cluster_dims=cluster_dims)
 
 
 # For CUDA source kernels, we need to load the source code from a file or string.
@@ -583,18 +586,12 @@ def CUDASourceCodeKernel(
 
 def get_thread_binding(dim: int = 0) -> Var:
     """Returns the thread binding for the given dimension."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return simtvf.thread_vars[dim]
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_binding(dim)
 
 
 def get_thread_bindings() -> list[Var]:
     """Returns all three thread bindings."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return list(simtvf.thread_vars)
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_bindings()
 
@@ -613,18 +610,12 @@ def get_block_bindings() -> list[Var]:
 
 def get_thread_extent(dim: int = 0) -> int:
     """Returns the thread extent for the given dimension."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return simtvf.thread_extents[dim]
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_extent(dim)
 
 
 def get_thread_extents() -> list[int]:
     """Returns all three thread extents."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return list(simtvf.thread_extents)
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_extents()
 
@@ -639,3 +630,40 @@ def get_block_extents() -> list[int]:
     """Returns all three block extents."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_extents()
+
+
+def get_cluster_dims() -> list[int]:
+    """Returns the cluster dimensions ``[x, y, z]`` of the current launch (``[1, 1, 1]`` without clusters)."""
+    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
+    return KernelLaunchFrame.Current().get_cluster_dims()
+
+
+def get_cluster_size() -> int:
+    """Returns the number of programs per cluster of the current launch."""
+    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
+    return KernelLaunchFrame.Current().get_cluster_size()
+
+
+def get_cluster_id(dim: int = 0) -> Var | tirx.PrimExpr:
+    """Returns the cluster index of the current program along ``dim``
+    (``block_id // cluster_dims[dim]``). See :meth:`KernelLaunchFrame.get_cluster_id`."""
+    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
+    return KernelLaunchFrame.Current().get_cluster_id(dim)
+
+
+def get_cluster_ids() -> list[Var | tirx.PrimExpr]:
+    """Returns the cluster index along every launched grid axis."""
+    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
+    return KernelLaunchFrame.Current().get_cluster_ids()
+
+
+def get_cluster_extent(dim: int = 0) -> int:
+    """Returns the number of clusters along ``dim``."""
+    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
+    return KernelLaunchFrame.Current().get_cluster_extent(dim)
+
+
+def get_cluster_extents() -> list[int]:
+    """Returns the number of clusters along all three dimensions."""
+    assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
+    return KernelLaunchFrame.Current().get_cluster_extents()

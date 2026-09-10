@@ -16,6 +16,8 @@ from tilelang.profiler import do_bench
 
 
 def _load_vertical_slash_index_ops():
+    import fcntl
+
     from torch.utils.cpp_extension import load
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,7 +57,18 @@ def _load_vertical_slash_index_ops():
             os.replace(tmp_path, stable_path)
         stable_sources.append(stable_path)
 
-    return load(name=name, sources=stable_sources, build_directory=build_dir, verbose=False)
+    # torch's JIT build guards build_dir with a plain lock *file* (FileBaton)
+    # that is not tied to the owning process: a build killed mid-compile leaves
+    # the file behind and every later load() polls on it forever. Serialize
+    # builds with an OS-level flock instead (released automatically when the
+    # holder dies); any FileBaton lock still present while we hold the flock is
+    # necessarily stale, so drop it before handing over to torch.
+    baton_path = os.path.join(build_dir, "lock")
+    with open(os.path.join(extension_root, ".build.flock"), "w") as flock_file:
+        fcntl.flock(flock_file, fcntl.LOCK_EX)
+        if os.path.exists(baton_path):
+            os.remove(baton_path)
+        return load(name=name, sources=stable_sources, build_directory=build_dir, verbose=False)
 
 
 @tilelang.jit(out_idx=[3])

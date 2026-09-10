@@ -46,8 +46,8 @@ fp8 with a per-block f32 scale. Groups `N` K tokens into
 **Interface**:
 ```python
 blocked_k, blocked_k_scale = fp8_native_block_mean_pooling_interface(
-    k,           # [N, D] fp8
-    k_scale,     # [N] f32  — per-token scale from indexer_k_quant_and_cache
+    k,  # [N, D] fp8
+    k_scale,  # [N] f32  — per-token scale from indexer_k_quant_and_cache
     k_block_size,
 )
 # blocked_k:       [num_blocks, D] fp8
@@ -72,12 +72,12 @@ blocked_k, blocked_k_scale = fp8_native_block_mean_pooling_interface(
 **Interface**:
 ```python
 block_k_score = pool_mqa_attn_return_logits_fp8_interface(
-    q_fp8,                    # [M, H, D] fp8
-    blocked_kv_fp8,           # [Nb, D]   fp8     (from step 1.1)
-    blocked_kv_scale,         # [Nb]      f32     (from step 1.1)
-    weights_f32,              # [M, H]    f32
-    cu_seqlen_blocked_ks,     # [M] int32 — per-query start in pool-block coords
-    cu_seqlen_blocked_ke,     # [M] int32 — per-query end   in pool-block coords
+    q_fp8,  # [M, H, D] fp8
+    blocked_kv_fp8,  # [Nb, D]   fp8     (from step 1.1)
+    blocked_kv_scale,  # [Nb]      f32     (from step 1.1)
+    weights_f32,  # [M, H]    f32
+    cu_seqlen_blocked_ks,  # [M] int32 — per-query start in pool-block coords
+    cu_seqlen_blocked_ke,  # [M] int32 — per-query end   in pool-block coords
 )
 # block_k_score: [M, Nb] f32
 ```
@@ -104,7 +104,7 @@ zero-init value.
 **Interface**:
 ```python
 clean_and_maintain_logits_interface(
-    logits,        # [M, Nb] f32 — stage-1 output; modified in place
+    logits,  # [M, Nb] f32 — stage-1 output; modified in place
     cu_seqlen_ks,  # [M] int32 — per-row start (inclusive)
     cu_seqlen_ke,  # [M] int32 — per-row end   (exclusive)
 )
@@ -131,14 +131,14 @@ auto-dispatched by the factory:
 **Interface**:
 ```python
 block_sparse_logits = fp8_native_block_sparse_mqa_attn_return_logits_interface(
-    q,                  # [M, H, D] fp8
-    k,                  # [N, D]    fp8
-    k_scale,            # [N]       f32
-    topk_block_index,   # [M, block_topk] int64 — from torch.topk over stage-1 scores
-    kv_block_size,      # == k_block_size
-    weights,            # [M, H] f32
-    cu_seqlen_ks,       # [M] int32 — per-query K start (absolute, in raw tokens)
-    cu_seqlen_ke,       # [M] int32 — per-query K end
+    q,  # [M, H, D] fp8
+    k,  # [N, D]    fp8
+    k_scale,  # [N]       f32
+    topk_block_index,  # [M, block_topk] int64 — from torch.topk over stage-1 scores
+    kv_block_size,  # == k_block_size
+    weights,  # [M, H] f32
+    cu_seqlen_ks,  # [M] int32 — per-query K start (absolute, in raw tokens)
+    cu_seqlen_ke,  # [M] int32 — per-query K end
 )
 # block_sparse_logits: [M, block_topk * kv_block_size] f32
 ```

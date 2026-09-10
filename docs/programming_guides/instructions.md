@@ -117,22 +117,22 @@ If you need debugging or explicit checks:
 ```python
 @T.prim_func
 def gemm(
-    A: T.Tensor((M, K), 'float16'),
-    B: T.Tensor((K, N), 'float16'),
-    C: T.Tensor((M, N), 'float16'),
+    A: T.Tensor((M, K), "float16"),
+    B: T.Tensor((K, N), "float16"),
+    C: T.Tensor((M, N), "float16"),
 ):
     with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), threads=128) as (bx, by):
-        A_s = T.alloc_shared((BM, BK), 'float16')
-        B_s = T.alloc_shared((BK, BN), 'float16')
-        C_f = T.alloc_fragment((BM, BN), 'float32')
+        A_s = T.alloc_shared((BM, BK), "float16")
+        B_s = T.alloc_shared((BK, BN), "float16")
+        C_f = T.alloc_fragment((BM, BN), "float32")
         T.clear(C_f)
 
         for ko in T.Pipelined(T.ceildiv(K, BK), num_stages=3):
             T.copy(A[by * BM, ko * BK], A_s)  # Global → Shared
             T.copy(B[ko * BK, bx * BN], B_s)
-            T.gemm(A_s, B_s, C_f)             # compute into fragment
+            T.gemm(A_s, B_s, C_f)  # compute into fragment
 
-        T.copy(C_f, C[by * BM, bx * BN])      # store back
+        T.copy(C_f, C[by * BM, bx * BN])  # store back
 ```
 
 ## Instruction Reference (Concise)

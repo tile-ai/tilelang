@@ -20,12 +20,20 @@ from . import transform as ascend_transform
 
 def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
-    # Materialize the target-neutral kernel-launch nest (thread_binding For
-    # loops emitted by T.Kernel) into thread_extent AttrStmts. Ascend's NPU
-    # launch is a 1-D blockIdx.x grid with no threadIdx, so SIMT-style
-    # materialization (lower_thread_binding=True) reproduces the previous
-    # LaunchThread(blockIdx.x) behavior.
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    # Materialize the target-neutral kernel-launch nest emitted by T.Kernel.
+    # Ascend's NPU launch is a real 1-D blockIdx.x core grid, so the grid loop
+    # becomes a thread_extent AttrStmt; there is no threadIdx at kernel scope,
+    # so the `tx/ty/tz = tl.launch_thread_idx(...)` placeholders are dropped.
+    # Thread domains only exist inside T.SimtVF, which emits its own thread
+    # scopes below the launch nest. `cthread` is Ascend's sub-block-id launch
+    # dimension, emitted by T.MixedKernel and read back by the Ascend codegen.
+    mod = tilelang.transform.MaterializeKernelLaunch(
+        lower_grid_binding=True,
+        lower_thread_binding=False,
+        default_threads=None,
+        unsupported_annotations=["cluster_dims"],
+        launch_dim_tags=["cthread"],
+    )(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
     if should_force_let_inline(pass_ctx=pass_ctx):

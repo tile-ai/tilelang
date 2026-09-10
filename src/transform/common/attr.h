@@ -24,11 +24,9 @@ inline bool IsDeviceMainBlock(const tirx::SBlockNode *node) {
   return node->name_hint == DeviceMainBlockName;
 }
 
-constexpr const char *tilelang_is_cpu_kernel_frame =
-    "tilelang.is_cpu_kernel_frame";
-
-constexpr const char *tilelang_is_npu_kernel_frame =
-    "tilelang.is_npu_kernel_frame";
+// The kernel-launch frame no longer needs a per-backend marker annotation:
+// KernelLaunchFrame exposes its grid_vars/thread_vars explicitly and each
+// backend pipeline decides what the launch means (MaterializeKernelLaunch).
 
 constexpr const char *tilelang_simt_vf_captures = "tl.simt_vf_captures";
 

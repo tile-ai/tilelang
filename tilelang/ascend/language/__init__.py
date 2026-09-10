@@ -12,7 +12,17 @@ from .annotations import (  # noqa: F401
 )
 from .copy_op import dual_copy  # noqa: F401
 from .gemm_op import blockscaled_gemm  # noqa: F401
-from .kernel import MixedKernel  # noqa: F401
+# Ascend owns its launch and its thread-scope accessors. These deliberately
+# shadow the common surface imported above: `T.Kernel` here is the 1-D NPU core
+# grid (no threads=), and `T.get_thread_binding()` resolves inside T.SimtVF.
+from .kernel import (  # noqa: F401
+    Kernel,
+    MixedKernel,
+    get_thread_binding,
+    get_thread_bindings,
+    get_thread_extent,
+    get_thread_extents,
+)
 from .schedule_hint import PerCoreTask, Stage, Task, assume_no_conflict  # noqa: F401
 from .tile_schedule import (  # noqa: F401
     AscendBaseTileScheduler,

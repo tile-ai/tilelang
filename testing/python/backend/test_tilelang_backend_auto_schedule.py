@@ -24,13 +24,13 @@ def test_cuda_and_ascend_auto_schedule_options_coexist(enabled):
     with tilelang.transform.PassContext(
         config={
             tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: enabled,
-            tilelang.PassConfigKey.TL_CUDA_AUTO_SCHEDULE: "role_based",
+            tilelang.PassConfigKey.TL_ENABLE_AUTO_WARP_SPECIALIZATION: "role_based",
         }
     ) as context:
         assert bool(allow_autoschedule(context)) is enabled
-        assert context.config[tilelang.PassConfigKey.TL_CUDA_AUTO_SCHEDULE] == "role_based"
+        assert context.config[tilelang.PassConfigKey.TL_ENABLE_AUTO_WARP_SPECIALIZATION] == "role_based"
         assert tilelang.ascend.transform.AutoSchedule().info.name == "tl.AutoSchedule"
-        assert tilelang.cuda.transform.AutoSchedule().info.name == "tl.cuda.AutoSchedule"
+        assert tilelang.cuda.transform.AutoWarpSpecialization().info.name == "tl.AutoWarpSpecialization"
 
 
 if __name__ == "__main__":

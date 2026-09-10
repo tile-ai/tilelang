@@ -88,7 +88,7 @@ class SimtVFFrame(TIRFrame):
 
     def __enter__(self):
         super().__enter__()
-        from tilelang.language.kernel import SimtVFContext, push_simtvf_context
+        from .kernel import SimtVFContext, push_simtvf_context
 
         ctx = SimtVFContext(
             thread_vars=list(self.thread_vars),
@@ -98,7 +98,7 @@ class SimtVFFrame(TIRFrame):
         return self
 
     def __exit__(self, ptype, value, trace):
-        from tilelang.language.kernel import pop_simtvf_context
+        from .kernel import pop_simtvf_context
 
         pop_simtvf_context()
         super().__exit__(ptype, value, trace)

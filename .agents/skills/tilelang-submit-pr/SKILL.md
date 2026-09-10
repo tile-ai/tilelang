@@ -53,8 +53,7 @@ tests:
 ```python
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("op", ["sum", "max"])
-def test_cuda_packed_codegen(op):
-    ...
+def test_cuda_packed_codegen(op): ...
 ```
 
 ## Validate the Current Head

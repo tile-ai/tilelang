@@ -14,7 +14,9 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 
 def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(
+        lower_grid_binding=False, lower_thread_binding=False, default_threads=None, unsupported_annotations=["cluster_dims"]
+    )(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
     if should_force_let_inline():

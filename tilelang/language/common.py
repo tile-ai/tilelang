@@ -42,6 +42,12 @@ from .kernel import (
     get_block_bindings,  # noqa: F401
     get_block_extent,  # noqa: F401
     get_block_extents,  # noqa: F401
+    get_cluster_dims,  # noqa: F401
+    get_cluster_size,  # noqa: F401
+    get_cluster_id,  # noqa: F401
+    get_cluster_ids,  # noqa: F401
+    get_cluster_extent,  # noqa: F401
+    get_cluster_extents,  # noqa: F401
 )
 from .allocate import (
     alloc_var,  # noqa: F401
@@ -265,6 +271,12 @@ _LOCAL_EXPORTS = (
     "get_block_bindings",
     "get_block_extent",
     "get_block_extents",
+    "get_cluster_dims",
+    "get_cluster_extent",
+    "get_cluster_extents",
+    "get_cluster_id",
+    "get_cluster_ids",
+    "get_cluster_size",
     "get_lane_idx",
     "get_let_value",
     "get_thread_binding",

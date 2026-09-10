@@ -73,9 +73,10 @@ This writes `gemm_relu_passes.html` (the interactive browser) and a sibling
 from tilelang.tools.pass_visualizer.viewer import build_pass_data, emit_html
 
 name, stages = build_pass_data(
-    "path/to/kernel.py", factory=None, target="auto",
-    kwargs={"M": 1024, "N": 1024, "K": 1024,
-            "block_M": 128, "block_N": 128, "block_K": 32},
+    "path/to/kernel.py",
+    factory=None,
+    target="auto",
+    kwargs={"M": 1024, "N": 1024, "K": 1024, "block_M": 128, "block_N": 128, "block_K": 32},
     source=open("path/to/kernel.py").read(),
 )
 html = emit_html(name, stages)
