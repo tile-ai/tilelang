@@ -374,7 +374,7 @@ class JITKernel(Generic[_P, _T]):
                 result_idx=out_idx,
                 # target=target,
                 func_or_mod=tilelang_func,
-                # host_mod=artifact.host_mod,
+                host_mod=artifact.host_mod,
                 device_mod=artifact.device_mod,
                 kernel_global_source=artifact.kernel_source,
                 verbose=self.verbose,
