@@ -17,8 +17,8 @@
  *    Available through `tl.layout_cost_model="io-aware"` for opt-in use
  *    and A/B comparisons.
  *  - ReductionAwareCostModel (default for CUDA reducers): enumerates vector
- *    widths and prefers known attempts, then bank-conflict-free ones, before
- *    comparing spill and execution estimates plus a register-slot penalty.
+ *    widths and prefers known attempts before comparing spill, global-memory
+ *    and reducer-execution estimates plus a register-slot penalty.
  *    This is a heuristic score, not a calibrated latency estimate. Physical
  *    reducer plans use the materializer's narrow/wide and packed decisions.
  *
@@ -43,10 +43,10 @@ namespace tvm {
 namespace tl {
 
 /*! \brief Score of one complete free-mode layout assignment. Known scores
- *  precede unmeasurable attempts, then prefer bank-conflict-free attempts and
- *  compare their combined total_cost. Legacy policies and unmeasurable attempts
+ *  precede unmeasurable attempts, then compare their combined total_cost.
+ *  Legacy policies and unmeasurable attempts
  *  leave total_cost unset and retain the mem/execution/regs ordering. Legacy
- *  policies also leave bank_conflict_free false and execution at zero.
+ *  policies also leave execution at zero.
  *  `mem` includes the estimated
  * local-memory traffic of register-array spills (a thread-dependent
  * register-array index demotes the whole array to local memory), priced in
@@ -60,14 +60,10 @@ struct AttemptCost {
   int64_t execution{0};
   int64_t regs{0};
   bool known{true};
-  bool bank_conflict_free{false};
   std::optional<int64_t> total_cost;
   bool BetterThan(const AttemptCost &other) const {
     if (known != other.known) {
       return known;
-    }
-    if (bank_conflict_free != other.bank_conflict_free) {
-      return bank_conflict_free;
     }
     if (total_cost.has_value() != other.total_cost.has_value()) {
       return total_cost.has_value();

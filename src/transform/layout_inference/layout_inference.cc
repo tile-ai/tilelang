@@ -1539,8 +1539,6 @@ private:
           DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
                      << " cost model " << cost_model->Name()
                      << " output: mem=" << outcome->cost.mem
-                     << " bank_conflict_free="
-                     << outcome->cost.bank_conflict_free
                      << " total=" << outcome->cost.total_cost.value_or(-1)
                      << " execution=" << outcome->cost.execution
                      << " regs=" << outcome->cost.regs;
@@ -1549,8 +1547,6 @@ private:
             LOG(INFO) << "[ReducerVectorPlan] root=" << attempt_infer_root
                       << " limit=" << candidate_vector_size_limit
                       << " known=" << outcome->cost.known
-                      << " bank_conflict_free="
-                      << outcome->cost.bank_conflict_free
                       << " total=" << outcome->cost.total_cost.value_or(-1)
                       << " spill=" << outcome->cost.mem
                       << " execution=" << outcome->cost.execution
@@ -1594,7 +1590,6 @@ private:
       DLOG(INFO) << "[InferInFreeMode] final selection: attempt root "
                  << best_infer_root << " cost model " << cost_model->Name()
                  << " output: mem=" << best_cost.mem
-                 << " bank_conflict_free=" << best_cost.bank_conflict_free
                  << " total=" << best_cost.total_cost.value_or(-1)
                  << " execution=" << best_cost.execution
                  << " regs=" << best_cost.regs;

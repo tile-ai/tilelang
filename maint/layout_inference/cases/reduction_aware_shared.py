@@ -1,4 +1,4 @@
-"""Conflict-free FP32 staging takes precedence over cheaper int8 memory issues."""
+"""Native FP32 staging is retained when reducer costs tie."""
 
 import tilelang.language as T
 

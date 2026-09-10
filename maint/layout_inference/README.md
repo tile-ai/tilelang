@@ -23,18 +23,18 @@ Why this exists:
 The default automatically tries native, intermediate, and scalar widths at
 unannotated CUDA reducer-update roots. It scores the actual materialization
 plan, including narrow-to-wide fallback, batched collectives, local arithmetic,
-and shared-memory issues. Measurable bank-conflict-free attempts take precedence
-over conflicting attempts regardless of their other costs. Within each group,
-spill bytes, execution cost, and normalized register cost are added, rather than
-ranked lexicographically. Non-reducer components,
+and collective shared-memory issues. Measurable attempts take precedence over
+unknown ones, then spill bytes, execution cost, and normalized register cost are
+added rather than ranked lexicographically. Execution cost includes ordinary
+global accesses and reducer work, but not ordinary shared accesses or bank
+conflicts. Non-reducer components,
 unsupported targets, and unknown serial trip counts retain register-count scoring.
 The `reduction_aware` cases include a column reduction whose intermediate
 width avoids communication without giving up two-element memory accesses.
 The warp-collective case also guards communication-aware scoring when warp
 shuffles and block barriers have the same register footprint.
-The `reduction_aware_shared` case keeps FP32 shared loads conflict-free even
-when a conflicting layout has a lower combined cost from its int8
-copies.
+The `reduction_aware_shared` case preserves native FP32 staging when reducer
+costs tie, without ranking ordinary shared-copy vectorization.
 
 The existing `io-aware` policy retains its candidate search and scoring.
 Native plans win same-root ties, and equal-cost roots retain program order.
@@ -135,4 +135,4 @@ nest's `parallel_loop_layout` annotation (see `common.py`).
 | `offset_region_copy` | Multi-block tiled copies whose region mins carry block indices (the model's "foreign vars"): offset regions must rank exactly like zero-offset ones. |
 | `shared_staging` | global→shared→fragment→global chain: the shared-side copy is outside the io model, so the fragment is decided by the copy-out alone; goldens would surface any change to that boundary. |
 | `reducer_scalar_candidates` | Register-count can choose scalar column ownership while preserving native packed layouts for a full reduction; io-aware keeps its existing search. |
-| `reduction_aware_shared` | FP32/int8 staging where the default must prefer conflict-free shared accesses over fewer memory issues. |
+| `reduction_aware_shared` | FP32/int8 staging where equal reducer costs preserve the native layout without scoring ordinary shared accesses. |

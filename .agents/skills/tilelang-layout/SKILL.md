@@ -99,9 +99,11 @@ annotation contract.
 
 - The default `register-count` policy automatically uses reduction-aware scoring
   for CUDA reducers:
-  search native, intermediate, and scalar vector widths, then prefer proven
-  bank-conflict-free attempts before comparing the sum of spill, execution,
-  and normalized register costs. Physical reducer planning is
+  search native, intermediate, and scalar vector widths, then prefer measurable
+  attempts before comparing the sum of spill, execution, and normalized register
+  costs. Execution covers global accesses and reducer work, including collective
+  shared communication, but not ordinary shared accesses or bank conflicts.
+  Physical reducer planning is
   shared with materialization. Non-reducer components, non-CUDA targets, and
   unknown serial trip counts fall back to register-count. No new pass-config
   value is needed.

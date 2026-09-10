@@ -13,7 +13,6 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
-#include <array>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -714,7 +713,7 @@ public:
     bool symbolic_repeat;
   };
   std::vector<RawAccess> accesses;
-  std::vector<RawAccess> shared_accesses;
+  bool has_shared_access{false};
 
   void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
@@ -739,8 +738,11 @@ private:
   }
   void Record(const Buffer &buffer, const Array<PrimExpr> &indices,
               bool is_store) {
-    bool shared = IsSharedBuffer(buffer);
-    if (!shared && !IsGlobalBuffer(buffer)) {
+    if (IsSharedBuffer(buffer)) {
+      has_shared_access = true;
+      return;
+    }
+    if (!IsGlobalBuffer(buffer)) {
       return;
     }
     int64_t repeat = 1;
@@ -752,8 +754,7 @@ private:
         repeat *= extent;
       }
     }
-    (shared ? shared_accesses : accesses)
-        .push_back(RawAccess{buffer, indices, is_store, repeat, symbolic});
+    accesses.push_back(RawAccess{buffer, indices, is_store, repeat, symbolic});
   }
   std::vector<int64_t> serial_stack_;
 };
@@ -833,7 +834,7 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
     return worst_only("loop forward maps have unsupported geometry");
   }
   probe.vector_bits = MaxVectorLoadBits(
-      target, /*global_only_access=*/collector.shared_accesses.empty());
+      target, /*global_only_access=*/!collector.has_shared_access);
   BindMemoryGeometry(&probe, target);
 
   for (const auto &raw : collector.accesses) {
@@ -1434,24 +1435,23 @@ int64_t CudaReducerIssueCost(const ReducerCostFeatures &features) {
 
 /*! \brief Reduction-aware heuristic, not a calibrated latency model.
  *
- * Known attempts precede unknown ones; bank-conflict-free attempts then take
- * precedence over conflicting ones. Within that ordering, minimize:
+ * Known attempts precede unknown ones. Within that ordering, minimize:
  *
  * \code
  * reducer_issues = local_issues + shared_issues + combine_issues
  *                  + 4 * shuffle_issues + 32 * barriers
- * execution = memory_cost + sum_reducers(threads * max_vector_bytes
- *                                       * reducer_issues)
+ * execution = global_memory_cost
+ *             + sum_reducers(threads * max_vector_bytes * reducer_issues)
  * register_penalty = 4 * max_threads * register_slots
  * total = spill_bytes + execution + register_penalty
  * \endcode
  *
  * threads is each reducer's participant count; max_threads is their maximum.
- * max_vector_bytes = MaxVectorLoadBits(target, false) / 8. memory_cost covers
- * ordinary global/shared accesses; shared_issues above covers collective
- * communication. The arithmetic issue counts cover reducer work, not all
- * kernel arithmetic. Spill, memory, and issue estimates include execution
- * counts.
+ * max_vector_bytes = MaxVectorLoadBits(target, false) / 8. global_memory_cost
+ * covers ordinary global accesses; shared_issues above covers collective
+ * communication, not ordinary shared accesses or bank conflicts. Arithmetic
+ * issues cover reducer work, not all kernel arithmetic. Spill, memory, and
+ * issue estimates include execution counts.
  *
  * register_slots sums physical fragment slots per thread, including packing
  * temporaries, without liveness analysis. This is a static resource penalty;
@@ -1512,7 +1512,6 @@ public:
           ReducerVectorWidths(plans.value(), physical_layouts);
       int64_t execution = 0;
       int64_t register_threads = 1;
-      bool bank_conflict_free = true;
       for (const ReducerPlanInfo &plan : plans.value()) {
         auto features = ExtractReducerCost(plan, widths, target_);
         if (!features.has_value()) {
@@ -1560,12 +1559,11 @@ public:
         }
         if (loop.defined()) {
           auto loop_memory =
-              LoopMemoryCost(loop.value(), physical_layouts, widths, memory);
+              GlobalLoopMemoryCost_(loop.value(), widths, memory);
           if (!loop_memory.has_value()) {
             return cost;
           }
-          bank_conflict_free &= repeats == 0 || loop_memory->bank_conflict_free;
-          memory = loop_memory->execution;
+          memory = loop_memory.value();
         }
         execution = AddCost(execution, MultiplyCost(memory, repeats));
       }
@@ -1579,7 +1577,6 @@ public:
       if (cost.known) {
         cost.total_cost = total_cost;
       }
-      cost.bank_conflict_free = cost.known && bank_conflict_free;
     } catch (const std::exception &error) {
       DLOG(INFO) << "[ReducerCost] unmeasurable attempt: " << error.what();
       cost.execution = kUnknownReductionCost;
@@ -1594,89 +1591,17 @@ public:
   }
 
 private:
-  struct MemoryIssueCost {
-    int64_t execution{0};
-    bool bank_conflict_free{true};
-  };
-
-  std::optional<int64_t>
-  SharedBankConflictFactor(const LoopMemoryAccessCollector::RawAccess &access,
-                           const Var &thread, const Range &bounds,
-                           int64_t threads, int width, const LayoutMap &layouts,
-                           arith::Analyzer *analyzer) const {
-    constexpr int64_t kBankCount = 32;
-    constexpr int64_t kBankBytes = 4;
-    int64_t element_bits =
-        access.buffer->dtype.bits() * access.buffer->dtype.lanes();
-    if (element_bits < 8 || element_bits % 8 != 0) {
-      return std::nullopt;
+  std::optional<int64_t> GlobalLoopMemoryCost_(const ParallelOp &loop,
+                                               const Map<For, Integer> &widths,
+                                               int64_t global) const {
+    auto solved_width = widths.Get(loop->GetRoot());
+    if (!solved_width.has_value()) {
+      return global;
     }
-    int64_t element_bytes = element_bits / 8;
-    PrimExpr address = make_zero(DataType::Int(32));
-    if (auto shared_layout = layouts.Get(access.buffer)) {
-      Array<PrimExpr> indices = shared_layout.value()->Forward(access.indices);
-      Array<PrimExpr> shape = shared_layout.value()->OutputShape();
-      for (size_t axis = 0; axis < indices.size(); ++axis) {
-        address = address * shape[axis] + indices[axis];
-      }
-    } else {
-      auto strides = RowMajorStrides(access.buffer);
-      if (!strides.has_value() || strides->size() != access.indices.size()) {
-        return std::nullopt;
-      }
-      for (size_t axis = 0; axis < access.indices.size(); ++axis) {
-        address = address +
-                  access.indices[axis] *
-                      IntImm(access.indices[axis].dtype(), (*strides)[axis]);
-      }
-    }
-    address =
-        analyzer->Simplify(address * IntImm(address.dtype(), element_bytes));
-    PrimExpr origin = Substitute(address, {{thread, bounds->min}});
-    PrimExpr next = Substitute(address, {{thread, bounds->min + 1}});
-    PrimExpr stride = analyzer->Simplify(next - origin);
-    const int64_t *stride_bytes = as_const_int(stride);
-    if (stride_bytes == nullptr || *stride_bytes < 0 ||
-        !analyzer->CanProveEqual(address,
-                                 origin + (thread - bounds->min) * stride)) {
-      return std::nullopt;
-    }
-    int64_t vector_bytes = std::min<int64_t>(
-        width * element_bytes, MaxVectorLoadBits(target_, false) / 8);
-    int64_t warp_size =
-        target_->GetAttr<Integer>("thread_warp_size").value_or(32)->value;
-    int64_t lanes = std::min(
-        {threads, warp_size,
-         kBankCount * kBankBytes / std::max(kBankBytes, vector_bytes)});
-    int64_t alignments = vector_bytes >= kBankBytes ? 1 : kBankBytes;
-    int64_t conflicts = 1;
-    for (int64_t alignment = 0; alignment < alignments; ++alignment) {
-      std::array<std::unordered_set<int64_t>, kBankCount> bank_words;
-      for (int64_t lane = 0; lane < lanes; ++lane) {
-        int64_t first = (alignment + lane * *stride_bytes) / kBankBytes;
-        int64_t last =
-            (alignment + lane * *stride_bytes + vector_bytes - 1) / kBankBytes;
-        for (int64_t word = first; word <= last; ++word) {
-          auto &words = bank_words[word % kBankCount];
-          words.insert(word);
-          conflicts = std::max(conflicts, static_cast<int64_t>(words.size()));
-        }
-      }
-    }
-    return conflicts;
-  }
-
-  std::optional<MemoryIssueCost> LoopMemoryCost(const ParallelOp &loop,
-                                                const LayoutMap &layouts,
-                                                const Map<For, Integer> &widths,
-                                                int64_t global) const {
-    MemoryIssueCost cost{global};
     LoopMemoryAccessCollector collector;
     collector.Collect(loop->GetRoot());
-    auto solved_width = widths.Get(loop->GetRoot());
-    if (collector.shared_accesses.empty() &&
-        (!solved_width.has_value() || collector.accesses.empty())) {
-      return cost;
+    if (collector.accesses.empty()) {
+      return global;
     }
     Fragment layout = loop->GetLoopLayout();
     if (!layout.defined()) {
@@ -1687,71 +1612,18 @@ private:
     if (!slots.has_value() || !threads.has_value()) {
       return std::nullopt;
     }
-    int width = solved_width.has_value()
-                    ? static_cast<int>(solved_width.value()->value)
-                    : 0;
-    int64_t shared_accesses = 0;
-    if (!collector.shared_accesses.empty()) {
-      arith::Analyzer analyzer;
-      Var thread("shared_cost_thread", DataType::Int(32));
-      Range bounds = layout->ThreadRange();
-      if (!bounds.defined()) {
-        bounds = Range::FromMinExtent(0, layout->ThreadExtent());
-      }
-      analyzer.Bind(thread, bounds);
-      For partitioned =
-          PartitionLoop(loop->GetRoot(), thread, &analyzer, layout);
-      if (!solved_width.has_value()) {
-        auto vector_analyzer = analyzer.Clone();
-        width = GetVectorizeSize(partitioned, vector_analyzer.get(), layouts);
-      }
-      PostOrderVisit(partitioned, [&](const ObjectRef &object) {
-        if (auto serial = object.as<For>()) {
-          analyzer.Bind(serial.value()->loop_var,
-                        Range::FromMinExtent(serial.value()->min,
-                                             serial.value()->extent));
-        }
-      });
-      LoopMemoryAccessCollector physical;
-      physical.Collect(partitioned);
-      if (physical.shared_accesses.size() != collector.shared_accesses.size()) {
+    int64_t global_accesses = 0;
+    for (const auto &access : collector.accesses) {
+      if (access.symbolic_repeat || access.repeat < 0) {
         return std::nullopt;
       }
-      for (size_t index = 0; index < physical.shared_accesses.size(); ++index) {
-        const auto &access = collector.shared_accesses[index];
-        if (access.symbolic_repeat || access.repeat < 0) {
-          return std::nullopt;
-        }
-        auto conflicts = SharedBankConflictFactor(
-            physical.shared_accesses[index], thread, bounds, threads.value(),
-            width, layouts, &analyzer);
-        if (!conflicts.has_value()) {
-          return std::nullopt;
-        }
-        cost.bank_conflict_free &= access.repeat == 0 || conflicts.value() == 1;
-        shared_accesses = AddCost(
-            shared_accesses, MultiplyCost(access.repeat, conflicts.value()));
-      }
+      global_accesses = AddCost(global_accesses, access.repeat);
     }
-    auto issue_cost = [&](int64_t accesses, bool global_only) {
-      return MultiplyCost(
-          MultiplyCost(CeilDiv(slots.value(), width), accesses),
-          MultiplyCost(threads.value(),
-                       MaxVectorLoadBits(target_, global_only) / 8));
-    };
-    if (solved_width.has_value()) {
-      int64_t global_accesses = 0;
-      for (const auto &access : collector.accesses) {
-        if (access.symbolic_repeat || access.repeat < 0) {
-          return std::nullopt;
-        }
-        global_accesses = AddCost(global_accesses, access.repeat);
-      }
-      cost.execution = std::max(global, issue_cost(global_accesses, true));
-    }
-    cost.execution =
-        AddCost(cost.execution, issue_cost(shared_accesses, false));
-    return cost;
+    int64_t issues = MultiplyCost(
+        CeilDiv(slots.value(), solved_width.value()->value), global_accesses);
+    int64_t issue_bytes =
+        MultiplyCost(threads.value(), MaxVectorLoadBits(target_, true) / 8);
+    return std::max(global, MultiplyCost(issues, issue_bytes));
   }
 
   Target target_;

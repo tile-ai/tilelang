@@ -115,7 +115,7 @@ def test_equal_register_scores_account_for_communication(capfd):
             pass_configs={"tl.enable_reducer_plan_verbose": True},
         )
         candidates = reducer_candidate_costs(capfd.readouterr().err)
-        assert candidates and all(cost["known"] and cost["bank_conflict_free"] for cost in candidates)
+        assert candidates and all(cost["known"] for cost in candidates)
         scores[within_warp] = min(candidates, key=lambda cost: cost["total"])
         features[within_warp] = reducer_cost(function)["acc"]
     for score in scores.values():
@@ -151,7 +151,7 @@ def test_weighted_pooling_selects_less_communication_at_equal_register_cost(quer
             pass_configs={"tl.enable_reducer_plan_verbose": True},
         )
         candidates = reducer_candidate_costs(capfd.readouterr().err)
-        assert candidates and all(cost["known"] and cost["bank_conflict_free"] for cost in candidates)
+        assert candidates and all(cost["known"] for cost in candidates)
         scores[width] = min(candidates, key=lambda cost: cost["total"])
         features[width] = reducer_cost(function)["acc"]
     assert scores[4]["regs"] == scores[1]["regs"] == scores[None]["regs"] == 18
@@ -340,19 +340,17 @@ def test_full_reduction_keeps_native_input_vectorization():
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
-def test_bank_conflict_free_precedes_combined_cost(capfd):
-    _, automatic = infer(factory=make_shared_reducer, pass_configs={"tl.enable_reducer_plan_verbose": True})
-    costs = reducer_candidate_costs(capfd.readouterr().err)
-    _, conflict_free = infer(factory=make_shared_reducer, width=4)
-    _, conflicting = infer(factory=make_shared_reducer, width=16)
-    assert automatic["values"].is_equal(conflict_free["values"])
-    assert not automatic["values"].is_equal(conflicting["values"])
-    measurable = [cost for cost in costs if cost["known"]]
-    assert measurable and all(cost["spill"] == 0 for cost in measurable)
-    free_costs = [cost["total"] for cost in measurable if cost["bank_conflict_free"]]
-    conflicting_costs = [cost["total"] for cost in measurable if not cost["bank_conflict_free"]]
-    assert free_costs and conflicting_costs
-    assert min(conflicting_costs) < min(free_costs)
+def test_shared_accesses_preserve_native_reducer_cost_ties(capfd):
+    scores, layouts = {}, {}
+    for width in (4, 16):
+        _, layouts[width] = infer(factory=make_shared_reducer, width=width, pass_configs={"tl.enable_reducer_plan_verbose": True})
+        costs = reducer_candidate_costs(capfd.readouterr().err)
+        assert costs and all(cost["known"] and cost["spill"] == 0 for cost in costs)
+        scores[width] = min(cost["total"] for cost in costs)
+    assert scores[4] == scores[16]
+    _, automatic = infer(factory=make_shared_reducer)
+    assert automatic["values"].is_equal(layouts[4]["values"])
+    assert not automatic["values"].is_equal(layouts[16]["values"])
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
@@ -367,7 +365,7 @@ def test_spill_execution_registers_share_total_cost(capfd, kwargs):
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
 @pytest.mark.parametrize("width", [4, 16])
-def test_bank_conflict_priority_preserves_explicit_layouts(capfd, width):
+def test_shared_layout_constraints_are_preserved(capfd, width):
     _, layouts = infer(factory=make_shared_reducer, width=width, pass_configs={"tl.enable_reducer_plan_verbose": True})
     costs = reducer_candidate_costs(capfd.readouterr().err)
     expected = T.Fragment(
@@ -377,23 +375,25 @@ def test_bank_conflict_priority_preserves_explicit_layouts(capfd, width):
     )
     assert layouts["values"].is_equal(expected)
     assert costs and all(cost["known"] for cost in costs)
-    assert all(cost["bank_conflict_free"] == (width == 4) for cost in costs)
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
-def test_unknown_shared_geometry_is_not_conflict_free(capfd):
-    infer(factory=make_shared_reducer, swizzle=True, pass_configs={"tl.enable_reducer_plan_verbose": True})
-    costs = reducer_candidate_costs(capfd.readouterr().err)
-    assert costs
-    assert all(not cost["known"] and not cost["bank_conflict_free"] for cost in costs)
-    assert all(cost["total"] == -1 for cost in costs)
+def test_shared_swizzle_does_not_change_reducer_cost(capfd):
+    scores = {}
+    for swizzle in (False, True):
+        infer(factory=make_shared_reducer, swizzle=swizzle, pass_configs={"tl.enable_reducer_plan_verbose": True})
+        costs = reducer_candidate_costs(capfd.readouterr().err)
+        assert costs and all(cost["known"] and cost["total"] >= 0 for cost in costs)
+        scores[swizzle] = min(cost["total"] for cost in costs)
+    assert scores[False] == scores[True]
 
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("width", [None, 4, 16])
-def test_mixed_dtype_shared_reduction(width):
+@pytest.mark.parametrize("swizzle", [False, True])
+def test_mixed_dtype_shared_reduction(width, swizzle):
     kernel = tl.compile(
-        make_shared_reducer(width=width),
+        make_shared_reducer(width=width, swizzle=swizzle),
         out_idx=-1,
         target="cuda",
         pass_configs={"tl.disable_vectorize_256": True},
