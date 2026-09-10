@@ -6,7 +6,7 @@ warnings.filterwarnings("ignore", message="Warning: The .* owner does not match 
 
 import pytest
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 import torch
 

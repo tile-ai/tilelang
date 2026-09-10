@@ -2,7 +2,7 @@
 
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.profiler import do_bench
 from tilelang.transform import PassConfigKey
 

@@ -1,6 +1,6 @@
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 

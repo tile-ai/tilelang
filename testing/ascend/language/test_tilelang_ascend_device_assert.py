@@ -1,7 +1,7 @@
 """Test T.device_assert() on Ascend target."""
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 
 

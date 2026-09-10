@@ -1,6 +1,6 @@
 """Tests for SimtVFFrame type after ForFrame→SimtVFFrame refactor."""
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.ascend.language.frame import SimtVFFrame
 from tvm.tirx.script.builder.frame import TIRFrame, ForFrame
 

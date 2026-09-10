@@ -46,7 +46,7 @@ import pytest
 import torch
 import tilelang
 import tilelang.testing
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 
 def single_row_copy(n: int):

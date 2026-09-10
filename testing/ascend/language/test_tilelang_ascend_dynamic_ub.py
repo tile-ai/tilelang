@@ -1,7 +1,7 @@
 """End-to-end correctness coverage for dynamic-shape UB allocations."""
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 import torch
 

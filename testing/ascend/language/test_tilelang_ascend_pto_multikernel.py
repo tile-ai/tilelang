@@ -3,7 +3,7 @@
 import pytest
 
 from tilelang import tvm
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.backend.target import determine_target
 from tilelang.engine.lower import lower
 from tilelang.jit.adapter.wrapper import TLPTOSourceWrapper

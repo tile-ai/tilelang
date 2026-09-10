@@ -4,7 +4,7 @@ import torch
 import torch_npu  # noqa: F401
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.layout import make_ascend_nz_layout
 

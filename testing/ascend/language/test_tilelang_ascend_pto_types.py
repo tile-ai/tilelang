@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.engine.lower import lower
 from tvm import tirx
 from tvm.tirx import Call

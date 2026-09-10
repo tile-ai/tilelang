@@ -12,7 +12,7 @@ VF3: computes temp2 * D → stores to E
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def ubuf_multi(N):

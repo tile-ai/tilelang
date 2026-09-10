@@ -6,7 +6,7 @@ return ``(carry, result)`` with carry as a ``boolx256`` predicate.
 
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.language import simd as S
 
 N = 64

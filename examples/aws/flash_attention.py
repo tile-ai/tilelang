@@ -3,7 +3,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 import tilelang
-import tilelang.cuda.language as T
+import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 

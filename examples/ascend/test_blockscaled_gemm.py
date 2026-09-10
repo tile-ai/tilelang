@@ -3,7 +3,7 @@
 import pytest
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from example_blockscaled_gemm import FP4_DTYPE, gemm, make_inputs, ref_program
 from example_blockscaled_gemm_l0 import gemm as gemm_l0
 from example_blockscaled_gemm_l0 import ref_program as ref_program_l0

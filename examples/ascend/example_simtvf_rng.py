@@ -6,7 +6,7 @@ index) so values are independent and reproducible across runs.
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 SEED = 42
 

@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 NUM_VECTOR_CORES = 64

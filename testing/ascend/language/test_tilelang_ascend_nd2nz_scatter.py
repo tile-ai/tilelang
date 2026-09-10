@@ -8,7 +8,7 @@ Then writes the physical NZ result back to GM for verification.
 import pytest
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_nz_layout

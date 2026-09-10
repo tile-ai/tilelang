@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def _rng_fill(groups, dtype, distribution, seed=42, seq=7, off=12):

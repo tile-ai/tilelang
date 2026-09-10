@@ -9,7 +9,7 @@ For production use, prefer the auto-scheduled equivalent in example_simtvf_vecad
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.profiler import do_bench
 
 

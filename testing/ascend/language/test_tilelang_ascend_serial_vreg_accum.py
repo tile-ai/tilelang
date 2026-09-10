@@ -10,7 +10,7 @@ import torch
 
 import tilelang
 import tilelang.testing
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.engine.lower import lower
 
 

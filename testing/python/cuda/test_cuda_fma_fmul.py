@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import tilelang
-import tilelang.cuda.language as T
+import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.cuda.target import normalize_cutedsl_target

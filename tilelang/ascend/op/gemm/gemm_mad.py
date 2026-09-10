@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
-from tilelang import language as T
+from tilelang.ascend import language as T
 from tilelang.layout import (
     make_ascend_major_k_layout,
     make_ascend_major_mn_layout,

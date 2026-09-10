@@ -16,7 +16,7 @@ Consequently, every core must execute the same number of output-tile iterations.
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.profiler import do_bench
 
 

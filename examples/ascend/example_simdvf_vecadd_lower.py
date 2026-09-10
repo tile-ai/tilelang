@@ -1,5 +1,5 @@
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.profiler import do_bench
 
 NUM_BLOCKS = 64  # AI cores

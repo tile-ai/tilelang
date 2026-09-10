@@ -4,7 +4,7 @@ import re
 
 import pytest
 import tilelang
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 
 M = 64

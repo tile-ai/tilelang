@@ -11,7 +11,7 @@ Verify: I @ D = D  (identity matmul), so output C should equal input D.
 import pytest
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 
 

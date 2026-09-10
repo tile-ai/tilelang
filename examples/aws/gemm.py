@@ -2,7 +2,7 @@ import argparse
 
 import torch
 import tilelang
-import tilelang.cuda.language as T
+import tilelang.language as T
 from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 

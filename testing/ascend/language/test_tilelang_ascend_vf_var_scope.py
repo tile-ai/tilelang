@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.language.eager import builder as eager_builder
 
 

@@ -2,7 +2,7 @@ import re
 
 import pytest
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 

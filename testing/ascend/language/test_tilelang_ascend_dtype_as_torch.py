@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.engine.param import KernelParam
 from tvm import tirx
 

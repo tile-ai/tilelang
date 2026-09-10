@@ -1,7 +1,7 @@
 """Ascend GM float32 atomic add, max, and min examples."""
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 from tilelang.profiler import do_bench
 

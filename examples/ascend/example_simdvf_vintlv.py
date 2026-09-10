@@ -6,7 +6,7 @@ vdintlv(a0, a1) → (x0, y0): de-interleaves back, should recover originals
 
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 LANES = 64
 N = LANES

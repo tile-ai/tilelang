@@ -1,6 +1,6 @@
 import pytest
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.backend import create_backend_context
 from tilelang.engine.lower import lower_to_host_device_ir

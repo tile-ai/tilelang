@@ -4,7 +4,7 @@ import re
 import pytest
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 
 

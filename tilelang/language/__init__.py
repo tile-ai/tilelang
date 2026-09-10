@@ -1,18 +1,18 @@
-"""Default TileLang language facade for the Ascend fork.
+"""Default TileLang language facade.
 
-Upstream re-exports the CUDA dialect here. This fork re-exports the Ascend
-dialect instead, so ``import tilelang.language as T`` yields the common surface
-plus the Ascend extensions. Other backends are reached explicitly via
-``tilelang.<backend>.language`` (which build on ``tilelang.language.common``).
+``tilelang.language`` re-exports the CUDA dialect so that ``import
+tilelang.language as T`` yields the common surface plus CUDA extensions. Other
+backends are reached explicitly via ``tilelang.<backend>.language`` (which build
+on ``tilelang.language.common``).
 """
 
 from __future__ import annotations
 
-from tilelang.ascend.language import *  # noqa: F401,F403
-from tilelang.ascend.language import __all__ as __all__  # noqa: F401
+from tilelang.cuda.language import *  # noqa: F401,F403
+from tilelang.cuda.language import __all__ as __all__  # noqa: F401
 
-# Imported by name so static type checkers resolve the Ascend-typed launch
+# Imported by name so static type checkers resolve the CUDA-typed launch
 # signature through this facade (they cannot evaluate the dynamic __all__).
-from tilelang.ascend.language import Kernel  # noqa: F401
+from tilelang.cuda.language import Kernel  # noqa: F401
 
-__tilelang_dialect__ = "ascend"
+__tilelang_dialect__ = "cuda"

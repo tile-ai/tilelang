@@ -8,7 +8,7 @@ arm/disarm store-atomic state around an ordinary UB→GM copy (split-K flush).
 import pytest
 
 import tilelang
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 
 @pytest.mark.pto

@@ -3,7 +3,7 @@
 import pytest
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 from example_atomic import atomic_add_gm_float, atomic_max_gm_float, atomic_min_gm_float
 

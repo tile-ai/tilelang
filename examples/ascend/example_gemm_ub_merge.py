@@ -21,7 +21,7 @@ each AIV sees its half in its own UB segment as (TILE_M // 2, TILE_N).
 import argparse
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import torch
 
 

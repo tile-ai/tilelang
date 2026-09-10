@@ -8,7 +8,7 @@ These tests assert the reuse decisions on the MergeUBAllocations-after IR.
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.engine.lower import lower
 from tvm import tirx

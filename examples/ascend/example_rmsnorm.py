@@ -12,7 +12,7 @@ Performance (fp32, batch=4096, HBM peak 1600 GB/s):
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import torch
 from tilelang.profiler import do_bench
 

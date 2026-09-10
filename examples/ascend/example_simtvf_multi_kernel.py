@@ -8,7 +8,7 @@ generated VF helpers are namespaced by the kernel's global_symbol
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def vector_add(N):

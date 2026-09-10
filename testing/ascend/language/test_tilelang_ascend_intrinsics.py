@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.ascend.language import simd as ascend_simd
 from tilelang.engine.lower import lower

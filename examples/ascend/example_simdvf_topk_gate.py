@@ -28,7 +28,7 @@ Performance (float32 scores, 4096 tokens, NPU):
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import torch
 from tilelang.language import simd as S
 from tilelang.profiler import do_bench

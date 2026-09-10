@@ -12,7 +12,7 @@ import pytest
 import torch
 import tilelang
 import tilelang.testing
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 N = 128

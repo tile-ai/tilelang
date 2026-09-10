@@ -11,7 +11,7 @@ this test asserts on the generated ``.asc`` rather than running on NPU.
 
 import re
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.language import simd as S
 from tilelang.engine.lower import lower

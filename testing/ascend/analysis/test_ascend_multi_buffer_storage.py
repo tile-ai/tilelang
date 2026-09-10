@@ -1,4 +1,4 @@
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tvm
 from tilelang.engine.lower import lower
 from tvm import tirx

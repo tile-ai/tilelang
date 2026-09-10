@@ -11,7 +11,7 @@ and handles sub-burst row sizes.
 import pytest
 import torch
 import tilelang
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 
 # ─── Sinkhorn-style: small matrix copy + reduce ─────────────────────────────

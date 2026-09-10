@@ -3,7 +3,7 @@
 import pytest
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 
 DTYPE_MAP = {"float32": torch.float32, "int32": torch.int32, "int64": torch.int64}

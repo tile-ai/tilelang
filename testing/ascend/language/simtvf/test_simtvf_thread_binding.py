@@ -6,7 +6,7 @@ query helpers that were added to the SimtVF frame.
 
 from __future__ import annotations
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.language import kernel as K
 from tilelang import tvm
 from tilelang.backend.target import determine_target

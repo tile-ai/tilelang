@@ -5,7 +5,7 @@ warnings.filterwarnings("ignore", message="Permission mismatch.*", module="torch
 warnings.filterwarnings("ignore", message="Warning: The .* owner does not match the current owner\\.", module="torch_npu.utils.collect_env")
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 import torch
 

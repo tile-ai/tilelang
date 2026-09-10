@@ -6,7 +6,7 @@ gemm(x_l0a, fn_l0b, out_l0c, clear_accum=sk==0)
 
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 
 # Simplified norm_fn fwd dimensions

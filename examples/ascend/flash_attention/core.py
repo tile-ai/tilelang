@@ -19,7 +19,7 @@ so the builder pins ``head_dim`` to 128 until the path is generalized.
 import math
 from dataclasses import dataclass
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.layout import make_ascend_compact_nz_layout
 from tilelang.language import simd as S
 

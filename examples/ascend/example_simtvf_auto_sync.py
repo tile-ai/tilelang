@@ -1,5 +1,5 @@
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def sync_kernel(N):

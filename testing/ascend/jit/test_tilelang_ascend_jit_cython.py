@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from tilelang import tvm as tvm
-import tilelang.language as T
+import tilelang.ascend.language as T
 import pytest
 import torch
 

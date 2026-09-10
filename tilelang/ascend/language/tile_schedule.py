@@ -7,7 +7,7 @@ Built on the shared ``BaseTileScheduler`` skeleton in
 
 from __future__ import annotations
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.language.meta import meta_class
 from tilelang.language.tile_schedule import BaseTileScheduler
 

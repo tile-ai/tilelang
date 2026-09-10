@@ -13,7 +13,7 @@ initialization region.
 import argparse
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import torch
 from tilelang.profiler import do_bench
 

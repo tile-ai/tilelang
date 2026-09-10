@@ -7,7 +7,7 @@ which requires Coalesce to filter out size-1 modes.
 import pytest
 import torch
 import tilelang
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 
 @tilelang.jit

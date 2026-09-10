@@ -1,6 +1,6 @@
 import pytest
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 import tvm
 from tilelang.engine.lower import lower

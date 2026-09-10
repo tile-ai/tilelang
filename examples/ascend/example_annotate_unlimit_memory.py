@@ -14,7 +14,7 @@ default 512 KB L1 limit.
 import argparse
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def gemm_with_unlimit(M, N, K, block_M, block_N, block_K, dtype="float16"):

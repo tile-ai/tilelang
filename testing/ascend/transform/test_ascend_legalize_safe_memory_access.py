@@ -1,5 +1,5 @@
 import tilelang as tl
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tvm.tirx.stmt_functor import post_order_visit

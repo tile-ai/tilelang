@@ -22,7 +22,7 @@ import argparse
 
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def copy_pad_value(M, N, N_pad, fill):

@@ -1,7 +1,7 @@
 import re
 
 import pytest
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 import tvm
 from tilelang.ascend import transform as ascend_transform

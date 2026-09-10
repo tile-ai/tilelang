@@ -10,7 +10,7 @@ too late and produces the inclusive prefix instead. This test guards that fix.
 import pytest
 import torch
 import tilelang
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 TILE_N = 8192
 N_CORES = 64

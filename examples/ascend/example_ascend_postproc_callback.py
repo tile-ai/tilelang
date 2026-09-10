@@ -9,7 +9,7 @@ is useful for:
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.engine.callback import register_ascend_postproc_callback
 
 

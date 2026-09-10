@@ -1,6 +1,6 @@
 import pytest
 import tilelang.ascend.transform as ascend_transform
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.backend.target import determine_target

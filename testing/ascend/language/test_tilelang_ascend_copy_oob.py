@@ -4,7 +4,7 @@ import torch
 import tilelang
 import tilelang.testing
 from tilelang import tvm
-from tilelang import language as T
+from tilelang.ascend import language as T
 from tvm import tirx
 from tvm.tirx.stmt_functor import post_order_visit
 

@@ -31,7 +31,7 @@ Run
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 DIM = 128
 VEC = 2

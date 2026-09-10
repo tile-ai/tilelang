@@ -6,7 +6,7 @@ pack yields ``output == x`` -- and the two packing paths must agree.
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tvm import tirx

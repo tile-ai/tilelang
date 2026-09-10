@@ -1,7 +1,7 @@
 """Example: SimtVF vector_add on Ascend NPU."""
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def vector_add(N):

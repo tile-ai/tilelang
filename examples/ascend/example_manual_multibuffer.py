@@ -26,7 +26,7 @@ Semantics: ``state`` starts at ``inp`` and adds one ``delta`` vector per step, s
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import torch
 from tilelang.profiler import do_bench
 

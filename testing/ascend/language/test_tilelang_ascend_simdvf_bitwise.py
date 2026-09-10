@@ -5,7 +5,7 @@ import torch
 
 import tilelang
 import tilelang.testing
-import tilelang.language as T
+import tilelang.ascend.language as T
 
 
 def bitwise_kernel(n, backend="asc"):

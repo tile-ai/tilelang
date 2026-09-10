@@ -1,6 +1,6 @@
 """PTO codegen must print Let-bearing For extents (post-#382 shape >= 0)."""
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.engine.lower import lower
 

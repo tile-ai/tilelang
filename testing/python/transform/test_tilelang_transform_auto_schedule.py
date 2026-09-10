@@ -14,7 +14,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import torch
-from tilelang.cuda import language as T
+from tilelang import language as T
 from tilelang import tvm
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})

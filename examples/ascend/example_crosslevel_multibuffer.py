@@ -8,7 +8,7 @@ versioned by the outer (claim-level) iteration. This exercises that path.
 
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.profiler import do_bench
 
 NUM_CORES = 64

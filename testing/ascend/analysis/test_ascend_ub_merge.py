@@ -26,7 +26,7 @@ import re
 import sys
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.engine.lower import lower
 
