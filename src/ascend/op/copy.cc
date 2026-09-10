@@ -16,6 +16,7 @@
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -479,6 +480,55 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
     bool major_mismatch = src_c0_axis != dst_c0_axis;
     bool needs_transpose = user_transpose ^ major_mismatch;
 
+    if (needs_transpose) {
+      // Validate the emitted load after storage normalization and OOB
+      // clamping. Logical extents need not cover whole fractals (e.g. bf16
+      // MN=24), but the hardware's transpose groups must be complete.
+      int c0 = AscendC0(op.src->dtype.bits());
+      auto require_multiple = [&](const PrimExpr &value, int multiple,
+                                  const char *parameter) {
+        if (multiple == 1)
+          return;
+        // Empty copies never issue the instruction. Scope this assumption
+        // to the proof so the runtime has_data guard is preserved below.
+        With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+        ICHECK(analyzer->CanProveEqual(
+            FloorMod(value, make_const(value.dtype(), multiple)), 0))
+            << "Ascend transposed L1->L0 copy of " << op.src->name << " ("
+            << op.src->dtype << ") requires " << parameter
+            << " to be divisible by " << multiple << ", got " << value
+            << ". Copy a padded source region covering complete transpose "
+               "groups; restrict the GEMM region to the effective M/N/K.";
+      };
+      require_multiple(m_step, c0 > 16 ? c0 / 16 : 1, "m_step");
+      require_multiple(k_step, c0 < 16 ? 16 / c0 : 1, "k_step");
+      size_t ndim = src_range.size();
+      require_multiple(
+          src_range[ndim - 2 + (src_info.row16_axis == LogicalAxis::kCol)]->min,
+          16, "source row16 origin");
+      require_multiple(
+          src_range[ndim - 2 + (src_info.c0_axis == LogicalAxis::kCol)]->min,
+          c0, "source C0 origin");
+
+      // Transposition exchanges the source's row16 and C0 dimensions.
+      // Compare physical regions, not logical extents or allocation bytes:
+      // the declared destination also describes the copy's write effects.
+      PrimExpr written_outer0 = FloorDiv(m_step * 16, c0);
+      PrimExpr written_outer1 = FloorDiv(k_step * c0, 16);
+      ICHECK(!analyzer->CanProve(written_outer0 > dst_region.outer0->extent) &&
+             !analyzer->CanProve(written_outer1 > dst_region.outer1->extent))
+          << "Ascend transposed L1->L0 copy writes " << written_outer0 << "x"
+          << written_outer1 << " fractals, but destination region "
+          << op.dst->name << " only covers " << dst_region.outer0->extent << "x"
+          << dst_region.outer1->extent
+          << ". Pad the L0 allocation and copy destination region to cover "
+             "the physical write; use the effective K only in T.gemm.";
+      ICHECK(!analyzer->CanProve(written_outer0 > dst_info.outer0) &&
+             !analyzer->CanProve(written_outer1 > dst_info.outer1))
+          << "Ascend transposed L1->L0 copy exceeds the physical L0 allocation "
+          << op.dst->name;
+    }
+
     auto intrinsic = dma_path == DMAPath::kL1ToL0A ? ascend_load_cbuf_to_ca()
                                                    : ascend_load_cbuf_to_cb();
     Array<PrimExpr> ld_args = {
@@ -852,11 +902,8 @@ struct Copy {
           // Transpose swaps the semantic roles of the physical C0 and row16
           // axes. Keep the stored layout physical, and use this operation-local
           // view to identify K and MN.
-          LogicalAxis effective_c0_axis = src_info.c0_axis;
-          LogicalAxis effective_row16_axis = src_info.row16_axis;
-          if (effective_transpose) {
-            std::swap(effective_c0_axis, effective_row16_axis);
-          }
+          LogicalAxis effective_c0_axis =
+              effective_transpose ? src_info.row16_axis : src_info.c0_axis;
           auto axis_extent = [](const Buffer &buffer, LogicalAxis axis) {
             size_t ndim = buffer->shape.size();
             return axis == LogicalAxis::kRow ? buffer->shape[ndim - 2]
@@ -874,17 +921,6 @@ struct Copy {
           if (k_align > 1) {
             check_alignment(axis_extent(op.src, effective_c0_axis), k_align,
                             "Ascend blockscaled source L1 K allocation extent");
-          }
-          if (effective_transpose) {
-            // After the L1->L0 transpose the source MN axis becomes the L0 C0
-            // axis (must cover complete C0 groups) and the source K axis
-            // becomes the L0 row16 axis (must cover complete 16-row groups).
-            int c0 = AscendC0(op.src->dtype.bits());
-            int row_frac = 16;
-            check_alignment(axis_extent(op.src, effective_c0_axis), c0,
-                            "Ascend transposed source L1 MN allocation extent");
-            check_alignment(axis_extent(op.src, effective_row16_axis), row_frac,
-                            "Ascend transposed source L1 K allocation extent");
           }
         }
       }

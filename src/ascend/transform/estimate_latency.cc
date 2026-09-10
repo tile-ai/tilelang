@@ -670,7 +670,21 @@ private:
     return AscendPath::kUnknown;
   }
 
-  // Throughput in operations/cycle, matching the 2*M*N*K operation count.
+  // MAD consumes logical regions, but executes complete compute groups.
+  // This geometry is independent of the padded L0 allocation and of MTE1's
+  // transpose groups. Full FP32 on A5 has K parallelism 1; HF32 has 8.
+  int64_t CubeOperations(const TaskCostFeatures::CubeShape &shape) const {
+    int64_t k_group = 256 / shape.input_dtype.bits();
+    if (shape.input_dtype.is_float() && shape.input_dtype.bits() == 32)
+      k_group = shape.hf32 ? 8 : 1;
+    auto align = [](int64_t extent, int64_t group) {
+      return ((extent + group - 1) / group) * group;
+    };
+    return 2 * align(shape.m, 16) * align(shape.n, 16) *
+           align(shape.k, k_group);
+  }
+
+  // Throughput in operations/cycle, matching the rounded operation count.
   int64_t CubeThroughputFor(DataType dtype, bool hf32 = false) const {
     if (dtype.is_float16())
       return params_.cube_throughput_fp16 ? params_.cube_throughput_fp16
@@ -865,7 +879,7 @@ private:
         int64_t base_latency = params_.cube_base_latency;
         for (const TaskCostFeatures::CubeShape &shape :
              cost_features.cube_shapes) {
-          int64_t ops = shape.m * shape.n * shape.k * 2;
+          int64_t ops = CubeOperations(shape);
           int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32);
           if (shape.input_dtype.is_float() && shape.input_dtype.bits() == 32) {
             base_latency =
@@ -912,7 +926,7 @@ private:
       if (!cost_features.cube_shapes.empty()) {
         for (const TaskCostFeatures::CubeShape &shape :
              cost_features.cube_shapes) {
-          int64_t ops = shape.m * shape.n * shape.k * 2;
+          int64_t ops = CubeOperations(shape);
           int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32);
           cube_ii = std::max(cube_ii, safe_div_ceil(ops, throughput));
         }
@@ -1492,6 +1506,14 @@ private:
     return bound->min_value > 0 ? bound->min_value : 0;
   }
 
+  int64_t EstimateGemmExtent(const PrimExpr &extent, int64_t fallback) const {
+    arith::ConstIntBound bound = arith_analyzer_->const_int_bound(extent);
+    if (bound->max_value >= 0 &&
+        bound->max_value != arith::ConstIntBound::kPosInf)
+      return std::min(fallback, bound->max_value);
+    return fallback;
+  }
+
   int64_t CalculateCopyBytes(const CopyNode *copy) const {
     RegionElementUpperBound src_estimate = EstimateRegionElementUpperBound(
         copy->src, copy->src_range, arith_analyzer_);
@@ -1570,6 +1592,16 @@ private:
       int64_t n = op->args[6].as<IntImmNode>()->value;
       int64_t k = op->args[7].as<IntImmNode>()->value;
       Gemm gemm(op->args, op->annotations);
+      if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
+        // The serialized ints are static tile metadata. A dynamic L0 tail
+        // may have a tighter region bound than its padded allocation.
+        const auto &c_ranges = gemm->cRegion_->region;
+        const auto &a_ranges = gemm->aRegion_->region;
+        m = EstimateGemmExtent(c_ranges[c_ranges.size() - 2]->extent, m);
+        n = EstimateGemmExtent(c_ranges[c_ranges.size() - 1]->extent, n);
+        k = EstimateGemmExtent(
+            a_ranges[a_ranges.size() - (gemm->transA_ ? 2 : 1)]->extent, k);
+      }
       auto mode = hf32_modes_.find(GetRef<Call>(op));
       bool hf32 = mode != hf32_modes_.end() &&
                   mode->second == Hf32ModeAnalyzer::kEnabled;

@@ -211,6 +211,13 @@ def gemm(
     On Blackwell TCGEN5MMA, TileLang inserts the corresponding
     `mbarrier_wait_parity(...)` implicitly after issue.
 
+    On Ascend, L0 operand regions specify the effective MAD M/N/K. Their
+    trailing matrix dimensions must start at zero and describe a compact
+    tile. L0 allocations and producer copies may be padded for hardware
+    alignment; for example, a transposed FP32 load can copy K32 while GEMM
+    consumes ``A[:, :24]`` and ``B[:, :24]``. Copy regions must cover the
+    physical transfer. Allocation padding remains part of the storage budget.
+
     For manual asynchronous scheduling, use `T.wgmma_gemm(...)` with
     `T.wait_wgmma(...)` on Hopper, or `T.tcgen05_gemm(...)` with
     `T.mbarrier_wait_parity(...)` on Blackwell.

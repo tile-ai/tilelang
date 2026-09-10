@@ -9,6 +9,54 @@ from tvm import tirx
 from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 
 
+def _make_gemm_cost_program(m, n, k, dtype="float32", hf32=True, dynamic_k=False, l0=True):
+    @T.prim_func
+    def main(tail_k: T.int32):
+        with T.Kernel(1):
+            a = T.alloc_l0a((64, 64), dtype) if l0 else T.alloc_l1((64, 64), dtype)
+            b = T.alloc_l0b((64, 64), dtype) if l0 else T.alloc_l1((64, 64), dtype)
+            c = T.alloc_l0c((64, 64), "float32")
+            if dtype == "float32":
+                T.set_hf32_mode("nearest_even" if hf32 else None)
+            effective_k = T.max(T.min(tail_k, k), 0) if dynamic_k else k
+            T.gemm(a[:m, :effective_k], b[:n, :effective_k], c[:m, :n], transpose_B=True, clear_accum=True)
+
+    return main
+
+
+def _estimate_gemm_cost(*args, **kwargs):
+    mod = _bind_target(_make_gemm_cost_program(*args, **kwargs))
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    mod = ascend_transform.EstimateLatency()(_materialize_schedule_units(mod))
+    metadata = _collect_task_metadata(mod)
+    return metadata["latency"][-1], metadata["ii"][-1]
+
+
+@pytest.mark.parametrize("dynamic_k", [False, True])
+def test_l0_gemm_effective_k_cost(dynamic_k):
+    # A5 HF32: 4096 ops/cycle plus67 completion cycles. Allocation stays64.
+    assert _estimate_gemm_cost(64, 64, 24, dynamic_k=dynamic_k) == (115, 48)
+    assert _estimate_gemm_cost(64, 64, 32) == (131, 64)
+
+
+def test_l0_gemm_mn_cost_rounds_to_fractals():
+    assert _estimate_gemm_cost(24, 17, 32) == _estimate_gemm_cost(32, 32, 32)
+
+
+@pytest.mark.parametrize("dtype,k,rounded_k", [("float32", 17, 24), ("bfloat16", 17, 32), ("float8_e4m3fn", 33, 64)])
+def test_l0_gemm_k_cost_uses_compute_groups(dtype, k, rounded_k):
+    assert _estimate_gemm_cost(64, 64, k, dtype=dtype) == _estimate_gemm_cost(64, 64, rounded_k, dtype=dtype)
+
+
+def test_l0_gemm_cost_respects_fp32_mode():
+    assert _estimate_gemm_cost(64, 64, 24, hf32=False) == (451, 384)
+
+
+def test_l1_gemm_cost_uses_compute_groups():
+    assert _estimate_gemm_cost(24, 24, 32, dtype="bfloat16", l0=False) == _estimate_gemm_cost(32, 32, 32, dtype="bfloat16", l0=False)
+
+
 def _make_program(latency=None, ii=None):
     @T.prim_func
     def main(A: T.Tensor((16,), "float32"), B: T.Tensor((16,), "float32")):
