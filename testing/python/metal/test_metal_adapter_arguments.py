@@ -59,7 +59,9 @@ def scaled(size: int):
     ):
         with T.Kernel(1, threads=size):
             i = T.get_thread_binding(0)
-            B[i] = A[i] * T.cast(S, "float32") + F + T.cast(L, "float32")
+            # Scale the int64 down so its contribution survives float32 rounding
+            # while the runtime value itself stays above 32 bits.
+            B[i] = A[i] * T.cast(S, "float32") + F + T.cast(L // (1 << 30), "float32")
 
     return main
 
@@ -124,12 +126,19 @@ def test_runtime_scalars_are_packed_in_struct_order():
     kernel = compile_metal(scaled(size))
     (launch,) = kernel.adapter.launches
     assert launch.buffers == (0, 3)
-    assert set(launch.scalars) == {1, 2, 4}
+    # Struct member order is the device parameter order, not the declared one.
+    assert launch.scalars == (2, 4, 1)
     a = torch.arange(size, dtype=torch.float32, device="mps")
     b = torch.zeros(size, device="mps")
-    kernel(a, 3, 0.5, b, 1 << 33)
+    big = (1 << 33) + (5 << 30)
+    kernel(a, 3, 0.5, b, big)
     torch.mps.synchronize()
-    torch.testing.assert_close(b.cpu(), torch.arange(size, dtype=torch.float32) * 3 + 0.5 + float(1 << 33))
+    torch.testing.assert_close(b.cpu(), torch.arange(size, dtype=torch.float32) * 3 + 0.5 + float(big >> 30))
+
+
+def test_scalar_output_is_rejected():
+    with pytest.raises(MetalLaunchPlanError):
+        compile_metal(scaled(32), out_idx=[1])
 
 
 def test_multi_kernel_program_launches_in_order_with_per_kernel_bindings():

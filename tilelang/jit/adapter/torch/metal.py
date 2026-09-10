@@ -213,6 +213,9 @@ def plan_metal_launches(
         extents = {"grid": [1, 1, 1], "block": [1, 1, 1]}
         for tag, value in zip(tags, launch_args):
             if tag == _DYN_SHARED_TAG:
+                # Metal has no dynamic threadgroup allocation at dispatch time;
+                # codegen_metal.cc sizes the shared buffer statically inside the
+                # kernel, so the launch argument carries nothing to bind.
                 continue
             if tag not in _LAUNCH_AXES:
                 raise MetalLaunchPlanError(f"launch parameter '{tag}' of '{symbol}' is not a Metal grid or threadgroup axis")
@@ -279,17 +282,19 @@ class _TensorContract:
         )
 
     def check(self, value: Any) -> None:
+        # Hot path: several hundred launches per model step. Cheap attribute
+        # reads and identity comparisons first; messages are built only on failure.
         if not isinstance(value, torch.Tensor):
             raise TypeError(f"argument {self.index} must be a tensor, got {type(value).__name__}")
-        if value.device.type != "mps":
+        if not value.is_mps:
             raise ValueError(f"argument {self.index} must be on the mps device, got {value.device}")
-        if value.dtype != self.dtype:
+        if value.dtype is not self.dtype:
             raise TypeError(f"argument {self.index} has dtype {value.dtype}, expected {self.dtype}")
         if not value.is_contiguous():
             raise ValueError(f"argument {self.index} must be contiguous")
         shape = value.shape
         if self.shape is not None:
-            if tuple(shape) != self.shape:
+            if shape != self.shape:
                 raise ValueError(f"argument {self.index} has shape {tuple(shape)}, expected {self.described}")
             return
         if len(shape) != self.rank or any(shape[axis] != dim for axis, dim in self.static_dims):
@@ -381,6 +386,8 @@ class MetalKernelAdapter(BaseKernelAdapter):
         ]
         outputs_plan = []
         for index in result_idx:
+            if params[index].is_scalar():
+                raise MetalLaunchPlanError(f"output parameter {index} is a scalar; only tensors can be allocated as outputs")
             shape = _static_shape(params[index])
             if shape is None:
                 raise MetalLaunchPlanError(f"output parameter {index} has a dynamic shape {_describe_shape(params[index])}")
