@@ -50,10 +50,10 @@ def gemm_with_unlimit(M, N, K, block_M, block_N, block_K, dtype="float16"):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Compile the annotate_unlimit_memory example with the Ascend or PTO backend.")
+    parser = argparse.ArgumentParser(description="Compile the annotate_unlimit_memory example with the Ascend backend.")
     parser.add_argument(
         "--target",
-        choices=("ascend", "pto"),
+        choices=("ascend",),
         default="ascend",
         help="Compilation backend (default: ascend).",
     )

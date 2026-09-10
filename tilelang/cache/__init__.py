@@ -65,9 +65,7 @@ def _resolve_cache_dispatch(
                 context.target.kind.name,
                 ", ".join(sorted(allowed_now)),
             )
-    # Plain Ascend and PTO share the "ascend" target kind, so dispatch on the
-    # resolved backend module rather than the target kind. PTO intentionally
-    # retains the generic Cython cache layout used before backend unification.
+    # Dispatch on the resolved backend module rather than on the target kind.
     dispatch_map = _ascend_dispatch_map if context.module.name == "ascend" else _dispatch_map
     if resolved_backend not in dispatch_map:
         raise ValueError(f'Cannot find support for execution backend "{resolved_backend}"')

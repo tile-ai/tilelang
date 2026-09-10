@@ -39,24 +39,13 @@ def vabsdif_kernel(N, dtype, backend="asc"):
                 T.copy(A[begin:end], tA)
                 T.copy(B[begin:end], tB)
                 with T.SimdVF():
-                    if backend == "pto":
-                        mask = T.vmi.create_mask(vec_len, size=vec_len)
-                        for i in range(TILE // vec_len):
-                            r0 = T.vmi.vload(tA[i * vec_len], size=vec_len)
-                            r1 = T.vmi.vload(tB[i * vec_len], size=vec_len)
-                            T.vmi.vstore(
-                                T.vmi.vabs(T.vmi.vsub(r0, r1, mask), mask),
-                                tC[i * vec_len],
-                                mask,
-                            )
-                    else:
-                        elem_width = 32 if dtype == "float32" else 16
-                        mask = T.simd.pset(elem_width)
-                        for i in range(TILE // vec_len):
-                            r0 = T.simd.vld(tA[i * vec_len])
-                            r1 = T.simd.vld(tB[i * vec_len])
-                            r2 = T.simd.vabsdif(r0, r1, mask)
-                            T.simd.vsts(tC[i * vec_len], r2, mask)
+                    elem_width = 32 if dtype == "float32" else 16
+                    mask = T.simd.pset(elem_width)
+                    for i in range(TILE // vec_len):
+                        r0 = T.simd.vld(tA[i * vec_len])
+                        r1 = T.simd.vld(tB[i * vec_len])
+                        r2 = T.simd.vabsdif(r0, r1, mask)
+                        T.simd.vsts(tC[i * vec_len], r2, mask)
                 T.copy(tC, C[begin:end])
 
     return main
@@ -77,7 +66,6 @@ def _test_dtype(N, dtype, backend):
     ("backend", "n"),
     [
         ("asc", 2**20),
-        pytest.param("pto", 2**20, marks=pytest.mark.pto),
     ],
 )
 @pytest.mark.parametrize("dtype", ["float32", "float16"])

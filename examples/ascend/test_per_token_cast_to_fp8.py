@@ -15,12 +15,12 @@ TEST_M = 8192
 TEST_N = 8192
 
 
-@pytest.mark.parametrize("backend", ["asc", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("backend", ["asc"])
 def test_simdvf_per_token_cast_to_fp8(backend):
     _run_simdvf_correctness(TEST_M, TEST_N, backend=backend, print_source=False)
 
 
-@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("target", ["ascend"])
 def test_simtvf_per_token_cast_to_fp8(target):
     kernel = tilelang.compile(
         _simtvf_per_token_cast_to_fp8.get_tir(TEST_M, TEST_N),

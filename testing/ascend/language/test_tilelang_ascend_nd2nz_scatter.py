@@ -215,23 +215,14 @@ def test_manual_pipeline_rewrites_compact_nz_dual_copy():
             "asc_copy_gm2ub_align",
             "asc_copy_ub2gm_align",
         ),
-        (
-            "pto",
-            'with pto.section("cube")',
-            "pto.get_subblock_idx()",
-            "pto.mte_gm_ub",
-            "pto.mte_ub_gm",
-        ),
     ],
-    ids=["ascend", "pto"],
+    ids=["ascend"],
 )
 def test_manual_mixed_pipeline_reuses_one_sid_for_dual_copy(target, kernel_marker, sid_marker, load_marker, store_marker):
     with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False}):
         source = tilelang.lower(_manual_mixed_dual_copy(), target=target).kernel_source
 
     assert kernel_marker in source
-    if target == "pto":
-        assert 'with pto.section("vector")' in source
     assert source.count(sid_marker) == 1
     assert source.count(load_marker) == 1
     assert source.count(store_marker) == 1

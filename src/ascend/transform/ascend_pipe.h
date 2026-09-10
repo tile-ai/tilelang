@@ -234,7 +234,7 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
     return PipeMask(ResourcePipe::kMTE3);
   }
   if (op.same_as(ascend_nd2nz_scatter()) || name.rfind("tl.simd.", 0) == 0 ||
-      name.rfind("tl.vmi.", 0) == 0 || op.same_as(sync_warp()) ||
+      op.same_as(sync_warp()) ||
       op.same_as(ballot_sync()) || op.same_as(ballot()) ||
       op.same_as(activemask()) || op.same_as(warp_reduce_sum()) ||
       op.same_as(warp_reduce_max()) || op.same_as(warp_reduce_min()) ||
@@ -343,7 +343,7 @@ inline bool IsAscendPipeRelevantCall(const Call &call) {
     return false;
   const std::string &name = callee.value()->name;
   return name.rfind("tl.ascend", 0) == 0 || name.rfind("tl.simd.", 0) == 0 ||
-         name.rfind("tl.vmi.", 0) == 0 || name.rfind("tl.tileop.", 0) == 0;
+         name.rfind("tl.tileop.", 0) == 0;
 }
 
 } // namespace tl

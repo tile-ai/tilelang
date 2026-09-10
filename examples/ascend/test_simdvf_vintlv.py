@@ -1,4 +1,4 @@
-"""ASC and PTO interleave/deinterleave roundtrip coverage."""
+"""ASC interleave/deinterleave roundtrip coverage."""
 
 import pytest
 import torch
@@ -8,7 +8,7 @@ import tilelang.testing
 from example_simdvf_vintlv import N, simulator_safe_randn, vintlv_kernel
 
 
-@pytest.mark.parametrize("backend", ["asc", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("backend", ["asc"])
 def test_simdvf_vintlv(backend):
     kernel = tilelang.compile(vintlv_kernel(backend), target=backend)
     device = torch.device("npu")

@@ -240,7 +240,6 @@ verbosity_assertions = 3
 filterwarnings = ["always"]
 markers = [
     "perf: benchmark and performance API tests skipped by default",
-    "pto: tests for the PTO backend",
     "slow: long-running correctness sweeps",
     # Feature markers emitted by vendored TVM's tvm.testing.utils requires_*
     # decorators (see 3rdparty/tvm/python/tvm/testing/utils.py). TVM registers

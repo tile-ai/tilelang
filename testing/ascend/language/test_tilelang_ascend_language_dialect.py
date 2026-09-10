@@ -59,4 +59,3 @@ def test_ascend_submodules_are_exposed():
     from tilelang.ascend import language as T
 
     assert T.simd is importlib.import_module("tilelang.ascend.language.simd")
-    assert T.vmi is importlib.import_module("tilelang.ascend.language.vmi")

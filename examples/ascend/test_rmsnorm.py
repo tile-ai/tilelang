@@ -1,4 +1,4 @@
-"""pytest tests for example_rmsnorm.py through AscendC and PTO backends."""
+"""pytest tests for example_rmsnorm.py through the AscendC backend."""
 
 import pytest
 import torch
@@ -32,17 +32,7 @@ def test_rmsnorm_auto(d):
     _run_rmsnorm(d, "ascend")
 
 
-@pytest.mark.pto
-@pytest.mark.parametrize("d", DS)
-def test_rmsnorm_pto(d):
-    _run_rmsnorm(d, "pto")
-
-
 if __name__ == "__main__":
     for d in DS:
         test_rmsnorm_auto(d)
         print(f"PASS: test_rmsnorm_auto d={d}")
-
-    for d in DS:
-        test_rmsnorm_pto(d)
-        print(f"PASS: test_rmsnorm_pto d={d}")

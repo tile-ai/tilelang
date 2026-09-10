@@ -128,7 +128,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run the auto-scheduled GEMM example.")
-    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
+    parser.add_argument("--target", choices=["ascend"], default="ascend")
     cli_args = parser.parse_args()
 
     device = torch.device("npu")

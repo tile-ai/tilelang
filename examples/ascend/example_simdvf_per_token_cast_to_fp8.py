@@ -12,7 +12,6 @@ def per_token_cast_to_fp8(M, N, backend="asc"):
     dtype = T.float
     group_size = 128
     fp8_max = 448.0
-    lanes = 64
 
     N_CORES = 64
     NUM_STAGES = 2
@@ -65,61 +64,30 @@ def per_token_cast_to_fp8(M, N, backend="asc"):
                         y_ub,
                     )
                     with T.SimdVF():
-                        if backend == "pto":
-                            full = T.vmi.create_mask(lanes, size=lanes)
-                            one = T.vmi.create_mask(1, size=1)
-                            eps = T.vmi.vbrc(T.float32(1e-4), size=1)
-                            fp8_max_reg = T.vmi.vbrc(T.float32(fp8_max), size=1)
-                            for i in range(blk_m):
-                                for j in range(group_block):
-                                    col = j * group_size
-                                    x0 = T.vmi.vload(y_ub[i, col], size=lanes)
-                                    x1 = T.vmi.vload(y_ub[i, col + lanes], size=lanes)
-                                    amax0 = T.vmi.vcmax(T.vmi.vabs(x0, full), full)
-                                    amax1 = T.vmi.vcmax(T.vmi.vabs(x1, full), full)
-                                    amax = T.vmi.vmax(T.vmi.vmax(amax0, amax1, one), eps, one)
-                                    scale = T.vmi.vdiv(amax, fp8_max_reg, one)
-                                    T.vmi.vstore(scale, y_s_ub[i, j], stride=1, group=1)
-                                    scale_brc = T.vmi.vbrc(scale, size=lanes)
-                                    q0 = T.vmi.vcvt(
-                                        T.vmi.vdiv(x0, scale_brc, full),
-                                        "float8_e4m3fn",
-                                        rounding="R",
-                                        saturate="SAT",
-                                    )
-                                    q1 = T.vmi.vcvt(
-                                        T.vmi.vdiv(x1, scale_brc, full),
-                                        "float8_e4m3fn",
-                                        rounding="R",
-                                        saturate="SAT",
-                                    )
-                                    T.vmi.vstore(q0, y_q_ub_fp8[i, col], full)
-                                    T.vmi.vstore(q1, y_q_ub_fp8[i, col + lanes], full)
-                        else:
-                            eps = T.simd.vdup(1e-4, "float32")
-                            fp8_max_reg = T.simd.vdup(fp8_max, "float32")
+                        eps = T.simd.vdup(1e-4, "float32")
+                        fp8_max_reg = T.simd.vdup(fp8_max, "float32")
 
-                            for i in range(blk_m):
-                                for j in range(group_block):
-                                    col = j * group_size
-                                    x0 = T.simd.vld(y_ub[i, col])
-                                    x1 = T.simd.vld(y_ub[i, col + 64])
-                                    abs0 = T.simd.vabs(x0)
-                                    abs1 = T.simd.vabs(x1)
-                                    amax_0 = T.simd.vmax(abs0, abs1)
-                                    amax_1 = T.simd.vcmax(amax_0)
-                                    amax = T.simd.vmax(amax_1, eps)
-                                    scale = T.simd.vdiv(amax, fp8_max_reg)
-                                    scale_brc = T.simd.vdupv(scale)
-                                    T.simd.vsts(y_s_ub[i, j], scale, dist="ONEPT_B32")
+                        for i in range(blk_m):
+                            for j in range(group_block):
+                                col = j * group_size
+                                x0 = T.simd.vld(y_ub[i, col])
+                                x1 = T.simd.vld(y_ub[i, col + 64])
+                                abs0 = T.simd.vabs(x0)
+                                abs1 = T.simd.vabs(x1)
+                                amax_0 = T.simd.vmax(abs0, abs1)
+                                amax_1 = T.simd.vcmax(amax_0)
+                                amax = T.simd.vmax(amax_1, eps)
+                                scale = T.simd.vdiv(amax, fp8_max_reg)
+                                scale_brc = T.simd.vdupv(scale)
+                                T.simd.vsts(y_s_ub[i, j], scale, dist="ONEPT_B32")
 
-                                    q0 = T.simd.vdiv(x0, scale_brc)
-                                    q0_fp8 = T.simd.vcvt(q0, "float8_e4m3fn")
-                                    T.simd.vsts(y_q_ub_fp8[i, col], q0_fp8, dist="PK4_B32")
+                                q0 = T.simd.vdiv(x0, scale_brc)
+                                q0_fp8 = T.simd.vcvt(q0, "float8_e4m3fn")
+                                T.simd.vsts(y_q_ub_fp8[i, col], q0_fp8, dist="PK4_B32")
 
-                                    q1 = T.simd.vdiv(x1, scale_brc)
-                                    q1_fp8 = T.simd.vcvt(q1, "float8_e4m3fn")
-                                    T.simd.vsts(y_q_ub_fp8[i, col + 64], q1_fp8, dist="PK4_B32")
+                                q1 = T.simd.vdiv(x1, scale_brc)
+                                q1_fp8 = T.simd.vcvt(q1, "float8_e4m3fn")
+                                T.simd.vsts(y_q_ub_fp8[i, col + 64], q1_fp8, dist="PK4_B32")
 
                     T.copy(
                         y_s_ub,

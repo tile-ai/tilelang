@@ -44,7 +44,7 @@ def _expand_2d_kernel(hidden: int, mhc: int, h_blk: int, num_sms: int = 32):
     return kernel
 
 
-@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("target", ["ascend"])
 def test_expand_2d(target):
     device = torch.device("npu")
     hidden, mhc, h_blk = 4096, 4, 128
@@ -62,6 +62,6 @@ def test_expand_2d(target):
 
 
 if __name__ == "__main__":
-    for target in ("ascend", "pto"):
+    for target in ("ascend",):
         test_expand_2d(target)
         print(f"PASS ({target})")

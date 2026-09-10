@@ -4,7 +4,6 @@ from typing import Any
 warnings.filterwarnings("ignore", message="Permission mismatch.*", module="torch_npu.utils._path_manager")
 warnings.filterwarnings("ignore", message="Warning: The .* owner does not match the current owner\\.", module="torch_npu.utils.collect_env")
 
-import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
@@ -75,56 +74,6 @@ def test_simdvf_vselr_reloads_mutated_local():
     source = kernel.get_kernel_source()
     assert source.count(" = x[0];") == 2
 
-    kernel(src, dst)
-    torch.npu.synchronize()
-    expected = torch.tensor([1.0, 3.0, 6.0, 10.0], dtype=torch.float32)
-    assert torch.equal(dst[:4].cpu(), expected)
-
-
-def pto_vselr_prefix_sum_kernel():
-    """Hillis-Steele prefix steps via native T.vmi.vselr (64-lane f32)."""
-
-    @T.prim_func
-    def main(src: T.Tensor((64,), "float32"), dst: T.Tensor((64,), "float32")):
-        with T.Kernel(1):
-            src_ub = T.alloc_shared((64,), "float32")
-            dst_ub = T.alloc_shared((64,), "float32")
-            T.copy(src, src_ub)
-            with T.SimdVF():
-                full = T.vmi.create_mask(64, size=64)
-                zero = T.vmi.vbrc(T.float32(0), size=64)
-                lane = T.vmi.vci(T.int32(0), size=64, order="ASC")
-                x0 = T.vmi.vload(src_ub[0], size=64)
-                # Clamp gather indices before vselr so inactive low lanes never
-                # feed negative OOB indices (results are still masked by vsel).
-                idx_m1 = T.vmi.vmaxs(T.vmi.vadds(lane, T.int32(-1), full), T.int32(0), full)
-                shifted_1 = T.vmi.vsel(
-                    T.vmi.vcmps(lane, T.int32(1), full, "ge"),
-                    T.vmi.vselr(x0, idx_m1),
-                    zero,
-                )
-                x1 = T.vmi.vadd(x0, shifted_1, full)
-                idx_m2 = T.vmi.vmaxs(T.vmi.vadds(lane, T.int32(-2), full), T.int32(0), full)
-                shifted_2 = T.vmi.vsel(
-                    T.vmi.vcmps(lane, T.int32(2), full, "ge"),
-                    T.vmi.vselr(x1, idx_m2),
-                    zero,
-                )
-                x2 = T.vmi.vadd(x1, shifted_2, full)
-                T.vmi.vstore(x2, dst_ub[0], full)
-            T.copy(dst_ub, dst)
-
-    return main
-
-
-@pytest.mark.pto
-def test_pto_vselr_prefix_sum():
-    kernel = tilelang.compile(pto_vselr_prefix_sum_kernel(), target="pto")
-    source = kernel.get_kernel_source()
-    assert "pto.vmi.vselr(" in source
-
-    src = torch.arange(1, 65, dtype=torch.float32, device="npu")
-    dst = torch.empty_like(src)
     kernel(src, dst)
     torch.npu.synchronize()
     expected = torch.tensor([1.0, 3.0, 6.0, 10.0], dtype=torch.float32)

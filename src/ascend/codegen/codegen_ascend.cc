@@ -44,19 +44,6 @@ bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
   return false;
 }
 
-bool IsVmiOp(const CallNode *op, std::string *op_name = nullptr) {
-  if (auto opt_call_op = op->op.as<Op>()) {
-    const std::string &name = opt_call_op.value()->name;
-    if (name.rfind("tl.vmi.", 0) == 0) {
-      if (op_name != nullptr) {
-        *op_name = name;
-      }
-      return true;
-    }
-  }
-  return false;
-}
-
 bool IsSimdMergingCall(const CallNode *op,
                        std::string *intrinsic_name = nullptr) {
   if (!op->dtype.is_void() || op->args.empty()) {
@@ -2555,13 +2542,6 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "Unsupported RNG distribution on Ascend: " << dist;
     os << "tl::philox_rand_" << dist << "(&" << ascend_rng_state_var_ << ")";
   } else {
-    std::string op_name;
-    // Evaluate statements print their value through this CallNode visitor, so
-    // statement-form VMI calls such as vstore are rejected here as well.
-    if (IsVmiOp(op, &op_name)) {
-      LOG(FATAL) << "Ascend CCE codegen does not support " << op_name
-                 << "; use target='pto' for T.vmi.*";
-    }
     CodeGenC::VisitExpr_(op, os);
   }
 }

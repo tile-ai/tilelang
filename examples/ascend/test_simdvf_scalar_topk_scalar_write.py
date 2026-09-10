@@ -13,14 +13,13 @@ from example_simdvf_scalar_topk_scalar_write import (
     simulator_safe_randn,
 )
 
-# Include "(" so PTO cannot pass on the unconditional Finish() import alone.
+# Include "(" so the assertion matches call sites, not declarations.
 BYPASS_CALLS = {
     "asc": "tl::write_gm_bypass_dcache(",
-    "pto": "_tl_pto_write_gm_bypass_dcache(",
 }
 
 
-@pytest.mark.parametrize("backend", ["asc", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("backend", ["asc"])
 def test_simdvf_scalar_topk_scalar_write(backend):
     kernel = make_kernel(backend)
     source = kernel.get_kernel_source()

@@ -126,7 +126,7 @@ def _parse_args():
     import argparse
 
     parser = argparse.ArgumentParser(description="Run the Ascend GEMM L0 example.")
-    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
+    parser.add_argument("--target", choices=["ascend"], default="ascend")
     return parser.parse_args()
 
 

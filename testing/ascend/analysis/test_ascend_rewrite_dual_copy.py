@@ -175,7 +175,7 @@ def _odd_one_dimensional_software_region(half_extent):
     return main
 
 
-@pytest.mark.parametrize("target", ["ascend", "pto"])
+@pytest.mark.parametrize("target", ["ascend"])
 def test_rewrite_dual_copy_rejects_unsupported_memory_path(target):
     with pytest.raises(ValueError, match="RewriteDualCopy supports only L0C->UB"):
         tilelang.lower(_unsupported_gm_to_l1_dual_copy(), target=target)

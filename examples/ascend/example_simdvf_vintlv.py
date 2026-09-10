@@ -31,30 +31,21 @@ def vintlv_kernel(backend="asc"):
             T.copy(Y, y_ub)
 
             with T.SimdVF():
-                if backend == "pto":
-                    mask = T.vmi.create_mask(LANES, size=LANES)
-                    x0 = T.vmi.vload(x_ub[0], size=LANES)
-                    y0 = T.vmi.vload(y_ub[0], size=LANES)
-                    a0, a1 = T.vmi.vintlv(x0, y0, mask)
-                    x0_back, y0_back = T.vmi.vdintlv(a0, a1, mask)
-                    T.vmi.vstore(x0_back, x_bak_ub[0], mask)
-                    T.vmi.vstore(y0_back, y_bak_ub[0], mask)
-                else:
-                    mask_32 = T.simd.pset(32)
+                mask_32 = T.simd.pset(32)
 
-                    # Load 64 elements each (one vector register)
-                    x0 = T.simd.vld(x_ub[0])
-                    y0 = T.simd.vld(y_ub[0])
+                # Load 64 elements each (one vector register)
+                x0 = T.simd.vld(x_ub[0])
+                y0 = T.simd.vld(y_ub[0])
 
-                    # vintlv: interleave x0 and y0 → a0, a1
-                    a0, a1 = T.simd.vintlv(x0, y0)
+                # vintlv: interleave x0 and y0 → a0, a1
+                a0, a1 = T.simd.vintlv(x0, y0)
 
-                    # vdintlv: de-interleave a0, a1 → should recover x0, y0
-                    x0_back, y0_back = T.simd.vdintlv(a0, a1)
+                # vdintlv: de-interleave a0, a1 → should recover x0, y0
+                x0_back, y0_back = T.simd.vdintlv(a0, a1)
 
-                    # Store recovered vectors
-                    T.simd.vsts(x_bak_ub[0], x0_back, mask_32)
-                    T.simd.vsts(y_bak_ub[0], y0_back, mask_32)
+                # Store recovered vectors
+                T.simd.vsts(x_bak_ub[0], x0_back, mask_32)
+                T.simd.vsts(y_bak_ub[0], y0_back, mask_32)
 
             T.copy(x_bak_ub, X_BAK)
             T.copy(y_bak_ub, Y_BAK)

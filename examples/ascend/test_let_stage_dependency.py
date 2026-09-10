@@ -48,7 +48,7 @@ def ref_program(gm: torch.Tensor) -> torch.Tensor:
     return exclusive.transpose(0, 1).contiguous()  # [core, w]
 
 
-@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("target", ["ascend"])
 def test_let_stage_dependency(target):
     device = torch.device("npu")
     torch.manual_seed(0)
@@ -64,6 +64,6 @@ def test_let_stage_dependency(target):
 
 
 if __name__ == "__main__":
-    for target in ("ascend", "pto"):
+    for target in ("ascend",):
         test_let_stage_dependency(target)
         print(f"PASS ({target})")

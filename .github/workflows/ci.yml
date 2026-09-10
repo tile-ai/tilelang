@@ -130,12 +130,6 @@ jobs:
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
-          # PTO toolchain is provided by the self-contained `ptoas` wheel installed
-          # in the "Setup venv" step (auditwheel-repaired: bundles the LLVM/MLIR
-          # shared libs with $ORIGIN RPATH, ptodsl, mlir dialects, and the ptoas CLI
-          # console script). No PYTHONPATH / PATH / LD_LIBRARY_PATH wiring to a build
-          # tree is needed anymore.
-
           # CANN runtime env for torch_npu autoload (libascendcl.so, liburma.so.0, ...).
           # The runner daemon does not inherit the container-injected CANN environment,
           # so torch_npu fails to load at `import torch` without this.
@@ -148,7 +142,6 @@ jobs:
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH}"
 
           # Propagate the assembled CANN environment to subsequent steps.
-          # (PTO/LLVM libs are self-contained inside the installed `ptoas` wheel.)
           {
             echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME}"
             echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
@@ -215,39 +208,6 @@ jobs:
           python -m pip install pybind11==2.12.0
           echo "::group::torch.utils.collect_env"
           python -m torch.utils.collect_env
-          # Self-contained PTO toolchain from the official hw-native-sys/PTOAS
-          # vmi-v0.1.6 release (ptodsl + MLIR dialects + ptoas CLI).
-          case "${RUNNER_ARCH}" in
-            ARM64)
-              PTOAS_ARCH=aarch64
-              PTOAS_SHA256=4fa6ccd152b126fbf9d2453b86d424a5212606ac4776f4dc9a50d5fb75566fd6
-              ;;
-            X64)
-              PTOAS_ARCH=x86_64
-              PTOAS_SHA256=e215fb0d4076566d4d9e41aa42ee85e93910b06d21701048129edc943903c219
-              ;;
-            *)
-              echo "Unsupported runner architecture: ${RUNNER_ARCH}" >&2
-              exit 1
-              ;;
-          esac
-          PTOAS_CACHE_DIR="${XDG_CACHE_HOME}/ptoas"
-          PTOAS_FILENAME="ptoas_vmi-0.1.6-cp312-cp312-manylinux_2_34_${PTOAS_ARCH}.whl"
-          PTOAS_WHEEL="${PTOAS_CACHE_DIR}/${PTOAS_FILENAME}"
-          mkdir -p "${PTOAS_CACHE_DIR}"
-          if ! [[ -f "${PTOAS_WHEEL}" ]] || \
-             ! printf '%s  %s\n' "${PTOAS_SHA256}" "${PTOAS_WHEEL}" | sha256sum --check --status -; then
-            PTOAS_DOWNLOAD="$(mktemp "${PTOAS_WHEEL}.tmp.XXXXXX")"
-            trap 'rm -f "${PTOAS_DOWNLOAD}"' EXIT
-            curl --fail --location --retry 3 \
-              --output "${PTOAS_DOWNLOAD}" \
-              "https://github.com/hw-native-sys/PTOAS/releases/download/vmi-v0.1.6/${PTOAS_FILENAME}"
-            printf '%s  %s\n' "${PTOAS_SHA256}" "${PTOAS_DOWNLOAD}" | sha256sum --check -
-            mv "${PTOAS_DOWNLOAD}" "${PTOAS_WHEEL}"
-            trap - EXIT
-          fi
-          python -m pip install "${PTOAS_WHEEL}"
-          echo "::endgroup::"
 
       - name: Clear uv cache for self-hosted runners (if setup failed)
         if: >-
@@ -273,7 +233,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 4
           )
-          "${PYTEST[@]}" --maxfail=3 -m "not pto" \
+          "${PYTEST[@]}" --maxfail=3 \
             ../examples/ascend
 
       - name: Run Ascend unit tests with Python ${{ matrix.python-version }}
@@ -283,28 +243,9 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 32
           )
-          "${PYTEST[@]}" --maxfail=3 -m "not pto" \
+          "${PYTEST[@]}" --maxfail=3 \
             ascend
 
-      - name: Run PTO example tests with Python ${{ matrix.python-version }}
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 4
-          )
-          "${PYTEST[@]}" --maxfail=3 -m "pto" \
-            ../examples/ascend
-
-      - name: Run PTO unit tests with Python ${{ matrix.python-version }}
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 32
-          )
-          "${PYTEST[@]}" --maxfail=3 -m "pto" \
-            ascend
 
       # Disabled on the asc branch while Ascend CI is split out from upstream multi-backend CI:
       # - CUDA examples: ../examples

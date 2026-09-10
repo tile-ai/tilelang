@@ -22,7 +22,7 @@ from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
-from tilelang.jit.adapter.utils import is_ascend_target, is_pto_target
+from tilelang.jit.adapter.utils import is_ascend_target
 
 
 COMPILE_ARGS = {}
@@ -160,10 +160,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if not self.result_idx:
             return False
 
-        # The native wrapper is emitted for CUDA and plain Ascend targets with
-        # TileLang's C host codegen. PTO retains the preallocated-output path.
-        is_plain_ascend = is_ascend_target(self.target) and not is_pto_target(self.target)
-        if self.target.kind.name != "cuda" and not is_plain_ascend:
+        # The native wrapper is emitted for CUDA and Ascend targets with
+        # TileLang's C host codegen.
+        is_ascend = is_ascend_target(self.target)
+        if self.target.kind.name != "cuda" and not is_ascend:
             return False
         target_host = self.target.host
         return target_host is not None and target_host.kind.name == "c"
@@ -216,23 +216,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Convert TVM shape arrays to native Python lists
         param_shapes = []
 
-        if is_pto_target(self.target):
-            param_shapes = [param.storage_shape(target=self.target) for param in self.params]
-        else:
-            for param in self.params:
-                native_shape = []
-                for dim in param.shape:
-                    if isinstance(dim, tirx.IntImm):
-                        native_shape.append(int(dim))
-                    elif isinstance(dim, tirx.Var):
-                        native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
-                    else:
-                        native_shape.append(dim)
-                tl_dtype = param.dtype
-                if tl_dtype.bits < 8:
-                    storage_dtype: dtype = dtype(param.torch_dtype())
-                    native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
-                param_shapes.append(native_shape)
+        for param in self.params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tirx.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tirx.Var):
+                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
+                else:
+                    native_shape.append(dim)
+            tl_dtype = param.dtype
+            if tl_dtype.bits < 8:
+                storage_dtype: dtype = dtype(param.torch_dtype())
+                native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
+            param_shapes.append(native_shape)
 
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None
@@ -320,8 +317,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         current_device_functor = self.get_current_device_functor()
         expected_inputs = len(self.params) - len(self.result_idx)
         target = getattr(self, "target", None)
-        is_plain_ascend = getattr(getattr(target, "kind", None), "name", None) == "ascend" and not is_pto_target(target)
-        if is_plain_ascend:
+        is_ascend = getattr(getattr(target, "kind", None), "name", None) == "ascend"
+        if is_ascend:
             device_available = hasattr(torch, "npu") and torch.npu.is_available()
             device_name = "Ascend NPU"
         else:

@@ -1,7 +1,6 @@
 import torch
 import tilelang
 import tilelang.ascend.language as T
-import pytest
 
 
 def gemm_padded_copy(M, K, N_pad):
@@ -71,13 +70,6 @@ def test_gemm_padded_copy():
     _run_gemm_padded_copy("ascend")
 
 
-@pytest.mark.pto
-def test_gemm_padded_copy_pto():
-    _run_gemm_padded_copy("pto")
-
-
 if __name__ == "__main__":
     test_gemm_padded_copy()
     print("PASS: test_gemm_padded_copy")
-    test_gemm_padded_copy_pto()
-    print("PASS: test_gemm_padded_copy_pto")

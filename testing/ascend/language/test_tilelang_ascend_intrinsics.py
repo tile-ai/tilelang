@@ -103,16 +103,6 @@ def test_ascend_pipe_barrier():
     assert "asc_sync_pipe(PIPE_V);" not in source
 
 
-def test_ascend_simd_mem_bar_pto_codegen():
-    @T.prim_func
-    def func():
-        with T.Kernel(1) as _, T.SimdVF():
-            T.simd.mem_bar("VST_VLD")
-
-    source = lower(func, target="pto").kernel_source
-    assert "pto.mem_bar(pto.BarrierType.VST_VLD)" in source
-
-
 def test_ascend_set_wait_flag():
     @T.prim_func
     def func(A: T.Buffer((16,), "float32")):
@@ -388,9 +378,6 @@ def test_ascend_simd_vdiv_precision_override():
     assert fast_default_source.count("simd_inst::vdiv_0ulp_ftz_true(") == 1
     assert fast_default_source.count("simd_inst::vdiv(") == 2
 
-    with pytest.raises(Exception, match="requires a newer PTOAS version"):
-        lower(func, target="pto")
-
 
 def test_ascend_simd_sfu_precision_merging():
     """ftz_false in MODE_MERGING selects the precision wrappers."""
@@ -423,9 +410,6 @@ def test_ascend_simd_sfu_precision_merging():
     assert "::vexp(" not in source
     assert "::vln(" not in source
     assert "::vsqrt(" not in source
-
-    with pytest.raises(Exception, match="MODE_MERGING"):
-        lower(func, target="pto")
 
 
 def test_ascend_simd_vsstb_threads_pointer_state():
@@ -472,16 +456,6 @@ def test_ascend_simd_vsstb_threads_pointer_state():
     assert "__ubuf__ void* dst_ptr" in source
     assert source.count("simd_inst::vsstb(") == 2
     assert source.count("POST_UPDATE") == 2
-
-    pto_source = lower(func, target="pto").kernel_source
-    assert "dst_ptr = None" in pto_source
-    assert pto_source.count("pto.vsstb(") == 2
-    assert "((196609 >> 16) & 65535), (196609 & 65535)" in pto_source
-    assert 'dist="1PT_B32"' in pto_source
-    assert "ONEPT_B32" not in pto_source
-    assert "_tl_coerce_i64(pto.addptr(" not in pto_source
-    assert "_tl_coerce_i64(pto.vsstb(" not in pto_source
-    assert "pto.mem_bar(pto.BarrierType.VST_VLD)" in pto_source
 
 
 def test_ascend_simd_vld2_dintlv_b16_codegen():

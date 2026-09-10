@@ -132,8 +132,6 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.host_kernel_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.host_kernel_source)
-        if self.wrapper.pto_kernel_source is not None:
-            self.lib_generator.update_pto_kernels(self.wrapper.pto_kernel_source, self.wrapper.pto_kernel_names)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
 
@@ -326,7 +324,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 static_shape, static_strides = [], []
-                packing_factor = KernelParam.from_buffer(buffer).storage_packing_factor(target=self.target)
+                packing_factor = 1
                 innermost_dim = len(buffer.shape) - 1
                 for j, s in enumerate(buffer.shape):
                     if isinstance(s, tirx.IntImm):

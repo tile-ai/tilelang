@@ -1,6 +1,5 @@
 """pytest test for example_while_pipelined.py — while-loop auto-schedule."""
 
-import pytest
 import torch
 import tilelang
 
@@ -9,11 +8,6 @@ from example_while_pipelined import while_pipelined, ref_program, N
 
 def test_while_pipelined():
     _run_while_pipelined("ascend")
-
-
-@pytest.mark.pto
-def test_while_pipelined_pto():
-    _run_while_pipelined("pto")
 
 
 def _run_while_pipelined(target):

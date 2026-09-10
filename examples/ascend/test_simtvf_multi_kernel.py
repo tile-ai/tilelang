@@ -32,7 +32,7 @@ def make_multi_kernel_program(N):
     return main
 
 
-@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("target", ["ascend"])
 def test_simtvf_multi_kernel(target):
     N = 1024
     SCALE = 3.0

@@ -28,7 +28,7 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
   ICHECK(op.op == ReducerV2OpType::kSum || op.op == ReducerV2OpType::kMax ||
          op.op == ReducerV2OpType::kMin)
       << "Ascend Reducer v2 currently supports sum, max, and min only; "
-         "bitand, bitor, and bitxor are not supported by the Ascend or PTO "
+         "bitand, bitor, and bitxor are not supported by the Ascend "
          "collective backend.";
 
   auto buffer = lower_args.buffer_remap[op.reducer];

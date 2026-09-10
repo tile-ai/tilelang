@@ -6,7 +6,7 @@ NUM_BLOCKS = 64  # AI cores
 NUM_THREADS = 2048  # SIMT threads per core
 TILE = NUM_THREADS * 4  # 8192 floats = 32 KB per tile
 NUM_STAGES = 2
-# Same problem size for AscendC and PTO so latency / bandwidth are comparable.
+# Same problem size across runs so latency / bandwidth are comparable.
 DEFAULT_N = 2**30
 
 
@@ -15,7 +15,6 @@ def vector_add(N, backend="asc"):
         raise ValueError(f"N must be a multiple of {TILE * NUM_BLOCKS}, got {N}")
 
     TOTAL_TILES = N // (TILE * NUM_BLOCKS)
-    lanes = 64
 
     @T.prim_func
     def main(
@@ -36,19 +35,12 @@ def vector_add(N, backend="asc"):
                 T.copy(A[begin:end], temp1)
                 T.copy(B[begin:end], temp2)
                 with T.SimdVF():
-                    if backend == "pto":
-                        mask = T.vmi.create_mask(lanes, size=lanes)
-                        for i in range(TILE // lanes):
-                            r0 = T.vmi.vload(temp1[i * lanes], size=lanes)
-                            r1 = T.vmi.vload(temp2[i * lanes], size=lanes)
-                            T.vmi.vstore(T.vmi.vadd(r0, r1, mask), temp3[i * lanes], mask)
-                    else:
-                        mask = T.simd.pset(32)
-                        for i in range(TILE // 64):
-                            r0 = T.simd.vld(temp1[i * 64])
-                            r1 = T.simd.vld(temp2[i * 64])
-                            r2 = T.simd.vadd(r0, r1, mask)
-                            T.simd.vsts(temp3[i * 64], r2, mask)
+                    mask = T.simd.pset(32)
+                    for i in range(TILE // 64):
+                        r0 = T.simd.vld(temp1[i * 64])
+                        r1 = T.simd.vld(temp2[i * 64])
+                        r2 = T.simd.vadd(r0, r1, mask)
+                        T.simd.vsts(temp3[i * 64], r2, mask)
                 T.copy(temp3, C[begin:end])
 
     return main

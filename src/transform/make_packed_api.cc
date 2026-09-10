@@ -351,12 +351,8 @@ std::vector<int> GetCalleeAllocatedOutputIndices(const PrimFunc &func) {
     return {};
   }
   const Target &target_value = target.value();
-  bool is_pto = false;
-  for (const String &key : target_value->keys) {
-    is_pto = is_pto || key == "pto";
-  }
   if (target_value->kind->name != "cuda" &&
-      !(TargetIsAscend(target_value) && !is_pto)) {
+      !TargetIsAscend(target_value)) {
     return {};
   }
   auto target_host = target_value->GetHost();

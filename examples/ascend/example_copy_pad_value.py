@@ -89,5 +89,5 @@ def run(target="ascend"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run GM-to-UB copy padding examples.")
-    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
+    parser.add_argument("--target", choices=["ascend"], default="ascend")
     run(parser.parse_args().target)

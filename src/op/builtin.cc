@@ -47,7 +47,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfileThresholdMs, FloatImm);
 
 // Ascend-only registration macros. The neutral TIR_DEFINE_TL_BUILTIN lives in
 // builtin_registry.h; #2855 moved the CUDA/Metal/ROCm ops to their per-backend
-// files, but the SIMD/VMI ops stay here since the Ascend backend keeps its
+// files, but the SIMD ops stay here since the Ascend backend keeps its
 // builtins in the common file.
 #define TIR_DEFINE_TL_SIMD_BUILTIN(Name)                                       \
   const Op &simd_##Name() {                                                    \
@@ -56,22 +56,6 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kPassProfileThresholdMs, FloatImm);
   }                                                                            \
   TVM_REGISTER_OP("tl.simd." #Name)                                            \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", "tl.simd." #Name)
-
-#define TIR_DEFINE_TL_VMI_BUILTIN(Name)                                        \
-  const Op &vmi_##Name() {                                                     \
-    static const Op &op = Op::Get("tl.vmi." #Name);                            \
-    return op;                                                                 \
-  }                                                                            \
-  TVM_REGISTER_OP("tl.vmi." #Name)                                             \
-      .set_attr<TScriptPrinterName>("TScriptPrinterName", "tl.vmi." #Name)
-
-#define TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(Name)                                 \
-  TIR_DEFINE_TL_VMI_BUILTIN(Name).set_attr<TCallEffectKind>(                   \
-      "TCallEffectKind", Integer(CallEffectKind::kOpaque))
-
-#define TIR_DEFINE_TL_VMI_PURE_BUILTIN(Name)                                   \
-  TIR_DEFINE_TL_VMI_BUILTIN(Name).set_attr<TCallEffectKind>(                   \
-      "TCallEffectKind", Integer(CallEffectKind::kPure))
 
 TIR_DEFINE_TL_BUILTIN(tvm_ffi_call_with_result)
     .set_num_inputs(4)
@@ -420,63 +404,6 @@ TIR_DEFINE_TL_SIMD_BUILTIN(vshrs).set_num_inputs(-1).set_attr<TCallEffectKind>(
 
 TIR_DEFINE_TL_SIMD_BUILTIN(mem_bar).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
-
-// VMI builtins are registered separately from the Python wrappers so later
-// passes/codegen can match on stable tl.vmi.* op identities. The positional
-// operand ABI plus annotation lowering rules are documented next to the
-// declarations in builtin.h and correspond to tilelang/ascend/language/vmi.py.
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vload).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vstore).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(create_mask).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vci).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vbrc).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vintlv).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vdintlv).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_PURE_BUILTIN(pair_get).set_num_inputs(2);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vadd).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vsub).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmul).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vdiv).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmax).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmin).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vand).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vor).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vxor).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vshl).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vshr).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vabs).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vneg).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vrelu).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vexp).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vln).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vsqrt).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vnot).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vadds).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmuls).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmaxs).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmins).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vshls).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vshrs).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vcmp).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vcmps).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vsel).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vselr).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vcadd).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vcmax).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vcmin).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vcvt).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vinterpret_cast).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vexpdif).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vaxpy).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vlrelu).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vprelu).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmull).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vmula).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vdhist).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vchist).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vgather).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vgatherb).set_num_inputs(-1);
-TIR_DEFINE_TL_VMI_OPAQUE_BUILTIN(vscatter).set_num_inputs(-1);
 
 TIR_DEFINE_TL_BUILTIN(ascend_set_flag)
     .set_num_inputs(2)

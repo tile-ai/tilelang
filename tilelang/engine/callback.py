@@ -187,8 +187,7 @@ def register_metal_postproc_callback(func: Callable | bool = None, override: boo
 def register_ascend_postproc(func: Callable[[str, Target], str], override: bool = True):
     """Register a post-processing function for Ascend-family code generation.
 
-    The callback receives AscendC source for an Ascend target and PTODSL Python
-    source for a PTO target. Use ``"pto" in target.keys`` to distinguish them.
+    The callback receives the generated AscendC source for an Ascend target.
 
     Args:
         func: A callable that takes generated code (str) and target (Target) as input,
@@ -201,8 +200,7 @@ def register_ascend_postproc(func: Callable[[str, Target], str], override: bool 
 def register_ascend_postproc_callback(func: Callable | bool = None, override: bool = True):
     """Decorator for registering an Ascend-family post-processing callback.
 
-    The callback receives AscendC source for an Ascend target and PTODSL Python
-    source for a PTO target. Use ``"pto" in target.keys`` to distinguish them.
+    The callback receives the generated AscendC source for an Ascend target.
 
     Can be used with or without parentheses:
         @register_ascend_postproc_callback

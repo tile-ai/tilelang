@@ -12,9 +12,3 @@ ASCEND_EXECUTION_BACKENDS = [
     ),
     ExecutionBackendSpec("cython"),
 ]
-
-# PTO emits a source-only module with no runnable tvm_ffi runtime, so it must use
-# the cython AOT pipeline (ptodsl -> ptoas -> bisheng).
-PTO_EXECUTION_BACKENDS = [
-    ExecutionBackendSpec("cython"),
-]

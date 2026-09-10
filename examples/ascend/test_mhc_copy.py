@@ -84,7 +84,7 @@ def _sinkhorn_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
     return comb
 
 
-@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("target", ["ascend"])
 @pytest.mark.parametrize("num_tokens", [1, 4])
 @pytest.mark.parametrize("hidden_size", [4])
 def test_mhc_sinkhorn_copy(target, num_tokens, hidden_size):
@@ -139,7 +139,7 @@ def _expand_ref(x: torch.Tensor, mhc: int) -> torch.Tensor:
     return x.unsqueeze(1).expand(-1, mhc, -1).contiguous()
 
 
-@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("target", ["ascend"])
 @pytest.mark.parametrize("num_tokens", [1, 8])
 @pytest.mark.parametrize("hidden", [128, 256])
 @pytest.mark.parametrize("mhc_mult", [2, 4])
