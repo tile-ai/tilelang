@@ -480,6 +480,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   has_gemm_l1_ = false;
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
+  name_supply_->ReserveName("block_idx");
 
   // Register function parameters with their storage scope for codegen
   for (const auto &param : f->params) {
@@ -662,12 +663,11 @@ CodeGenTileLangAscend::CollectVFCaptures(const SBlockNode *op) const {
       continue;
     }
     // SimtVF helpers are launched via asc_vf_call and retain kernel launch
-    // context, so blockIdx.x is directly accessible inside them and must not
-    // be captured. A plain __simd_vf__ helper has no such context, so the
-    // block index must be passed in as a parameter (handled below).
+    // context, so their block index must not be captured. A plain __simd_vf__
+    // helper has no such context, so block_idx is passed in as a parameter.
     auto it = var_idmap_.find(var.get());
     if (op->name_hint == "SIMT_VF" && it != var_idmap_.end() &&
-        it->second == "blockIdx.x") {
+        it->second == "block_idx") {
       continue;
     }
     seen.insert(var.get());
@@ -3005,6 +3005,13 @@ void CodeGenTileLangAscend::VisitStmt_(const AttrStmtNode *op) {
           stream << "0";
         }
         stream << ";\n";
+      } else if (iv->thread_tag == "blockIdx.x") {
+        // CANN 9.2 rejects the `blockIdx.x` builtin outside a SIMT context,
+        // which is exactly where the AIC (Cube) side of a __mix__ kernel runs.
+        // The C API's `block_idx` is valid there and equals blockIdx.x on the
+        // Cube core; Vector cores of a Mix(1, 2) kernel combine it with
+        // asc_get_sub_block_num()/asc_get_sub_block_id() on their own.
+        var_idmap_[iv->var.get()] = "block_idx";
       } else {
         var_idmap_[iv->var.get()] = iv->thread_tag;
       }
@@ -3510,7 +3517,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CastNode *op,
 
 void CodeGenTileLangAscend::VisitExpr_(const VarNode *op,
                                        std::ostream &os) { // NOLINT(*)
-  // blockIdx.* / threadIdx.* are mapped directly to the ASC thread builtins,
+  // block_idx / blockIdx.* / threadIdx.* map to ASC thread builtins,
   // which are unsigned (uint32). The IR binds them to a signed-int loop var
   // (IterVar forbids a uint var, see materialize_kernel_launch.cc). Without a
   // cast the generated C++ uses uint32 at the reference site, diverging from
@@ -3520,7 +3527,7 @@ void CodeGenTileLangAscend::VisitExpr_(const VarNode *op,
   // real int32 parameter and must not be touched.
   auto it = var_idmap_.find(op);
   if (it != var_idmap_.end() && op->dtype.is_int() &&
-      (it->second.rfind("blockIdx.", 0) == 0 ||
+      (it->second == "block_idx" || it->second.rfind("blockIdx.", 0) == 0 ||
        it->second.rfind("threadIdx.", 0) == 0)) {
     os << "((";
     PrintType(op->dtype, os);
