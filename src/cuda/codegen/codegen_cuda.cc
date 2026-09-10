@@ -1377,6 +1377,15 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
   os << sret;
 }
 
+/*!
+ * \brief Emit a prefix unary operator, such as `~`, on each vector lane.
+ *
+ * Materializes the input once and uses the lane load/store helpers to
+ * assemble the result, including packed integer representations. Masks
+ * 8-bit integer results so promoted upper bits cannot affect adjacent lanes.
+ * Supporting statements go to `stream`; the result variable name goes to
+ * `os`. The input and result must have the same fixed-length vector type.
+ */
 void CodeGenTileLangCUDA::PrintVecUnaryOp_(const std::string &op,
                                            DataType dtype,
                                            const PrimExpr &input,
