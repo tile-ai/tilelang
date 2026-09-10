@@ -154,7 +154,8 @@ class TileIRKernelAdapter(BaseKernelAdapter):
             for index, kernel in enumerate(self.tileir_artifact.kernels):
                 meta = kernel.launch_metadata
                 lines.append(
-                    f"kernel[{index}]={kernel.kernel_name} grid={meta.grid} block={meta.block} dynamic_smem_bytes={meta.dynamic_smem_bytes}"
+                    f"kernel[{index}]={kernel.kernel_name} grid={meta.grid} block={meta.block} dynamic_smem_bytes={meta.dynamic_smem_bytes} "
+                    f"scratch_bytes_per_block={kernel.scratch_bytes_per_block}"
                 )
             if self.tileir_artifact.temporary_buffers:
                 temps = ", ".join(f"{buffer.name}{buffer.shape}:{buffer.dtype}" for buffer in self.tileir_artifact.temporary_buffers)
@@ -168,6 +169,7 @@ class TileIRKernelAdapter(BaseKernelAdapter):
             f"grid={meta.grid}\n"
             f"block={meta.block}\n"
             f"dynamic_smem_bytes={meta.dynamic_smem_bytes}\n"
+            f"scratch_bytes_per_block={self.tileir_artifact.scratch_bytes_per_block}\n"
         )
 
     @staticmethod
@@ -346,6 +348,8 @@ class TileIRKernelAdapter(BaseKernelAdapter):
     def _validate_cached_artifact_abi(cls, artifact: TileIRLoweringResult, prim_func: tirx.PrimFunc) -> None:
         """Validate cached launch and argument metadata against the active TIR."""
 
+        from tilelang.tileir.scratch import scratch_bytes_for_primfunc
+
         prim_func = _split_grid_sync_primfunc(prim_func)
 
         def require_equal(field: str, actual, expected) -> None:
@@ -362,6 +366,7 @@ class TileIRKernelAdapter(BaseKernelAdapter):
         require_equal("program argument references", artifact.argument_refs, root_refs)
 
         if not artifact.kernels:
+            require_equal("per-block scratch bytes", artifact.scratch_bytes_per_block, scratch_bytes_for_primfunc(prim_func))
             require_equal("single-kernel temporary buffers", artifact.temporary_buffers, ())
             if not artifact.cubin:
                 raise ValueError("cached TileIR artifact ABI mismatch: a single-kernel artifact requires a non-empty cubin.")
@@ -374,6 +379,7 @@ class TileIRKernelAdapter(BaseKernelAdapter):
             return
 
         require_equal("multi-kernel program cubin", artifact.cubin, b"")
+        require_equal("multi-kernel program scratch bytes", artifact.scratch_bytes_per_block, 0)
         expected_temporaries = cls._expected_temporary_buffers(prim_func)
         require_equal("temporary buffers", artifact.temporary_buffers, expected_temporaries)
         split_functions = _split_host_orchestrated_primfunc(prim_func)
@@ -386,6 +392,7 @@ class TileIRKernelAdapter(BaseKernelAdapter):
             ref_by_name[temporary.name] = TileIRArgumentRef("temporary", index)
 
         for index, (kernel, split_func) in enumerate(zip(artifact.kernels, split_functions)):
+            require_equal(f"kernel {index} per-block scratch bytes", kernel.scratch_bytes_per_block, scratch_bytes_for_primfunc(split_func))
             if kernel.kernels:
                 raise ValueError(f"cached TileIR artifact ABI mismatch: kernel {index} must not contain nested kernels.")
             if not kernel.cubin:

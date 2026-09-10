@@ -7,11 +7,11 @@ PTX intrinsics. It assembles the resulting TileIR bytecode with `tileiras`.
 This backend does not lower through the cuTile Python DSL. The dependency
 boundary is:
 
-- CUDA Tile IR Python bindings from the public `NVIDIA/cuda-tile` `v13.3.0`
+- CUDA Tile IR Python bindings from the public `NVIDIA/cuda-tile` `v13.4.0`
   release built with
-  `CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON`. TileLang requires CUDA Tile IR 13.3
-  bindings so the backend can use the 13.3 dialect surface.
-- `tileiras` from CUDA Toolkit 13.3 or the matching NVIDIA Python toolchain
+  `CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON`. TileLang requires CUDA Tile IR 13.4
+  bindings so the backend can use the 13.4 dialect surface.
+- `tileiras` from CUDA Toolkit 13.4 or the matching NVIDIA Python toolchain
   wheels.
 - cuTile 1.5's native dispatcher runtime for loading and launching the assembled
   cubin. TileLang pins this minor version because the precompiled-cubin bridge
@@ -24,13 +24,14 @@ Install the assembler wheels:
 pip install 'tilelang[tileir]'
 ```
 
-The extra installs the supported cuTile 1.5 runtime and CUDA 13.3 assembler
+The extra installs the supported cuTile 1.5 runtime and CUDA 13.4 assembler
 stack. cuTile 1.5 supports Python 3.10 through 3.14, matching TileLang's declared
 Python-version range. Build the remaining CUDA Tile IR Python bindings from the
 matching public release:
 
 ```bash
-git clone --branch v13.3.0 --depth 1 https://github.com/NVIDIA/cuda-tile.git
+pip install 'nanobind>=2.9,<3.0'
+git clone --branch v13.4.0 --depth 1 https://github.com/NVIDIA/cuda-tile.git
 cmake -G Ninja -S cuda-tile -B cuda-tile/build \
   -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_ASSERTIONS=OFF \
@@ -48,7 +49,7 @@ For a manually managed `tileiras` binary whose `--version` output omits a
 numeric version, declare the verified ABI explicitly:
 
 ```bash
-export TILELANG_TILEIRAS_VERSION=13.3
+export TILELANG_TILEIRAS_VERSION=13.4
 ```
 
 Compile with the backend:
@@ -75,6 +76,14 @@ The backend is split into two packages: `tilelang/tileir/` owns the compiler
 (Semantic IR extraction, structured CUDA Tile IR lowering, assembly, and
 toolchain detection), and `tilelang/jit/adapter/tileir/` owns the runtime adapter
 that turns a lowered kernel into a torch-callable function.
+
+Shared buffers with data-dependent scatter or atomic indices require addressable
+memory. The runtime supplies a hidden byte workspace with a disjoint, aligned
+slice for each tile block. This avoids CUDA 13.4's observed duplication of
+`alloca` across producer and consumer warp groups. Workspace allocation follows
+the launch stream and CUDA Graph lifetime; ordinary SSA tiles need no workspace.
+The version 3 cache artifact records the bytes required per block and validates
+them against the active TIR before loading a cached cubin.
 
 The semantic model records:
 
@@ -113,7 +122,7 @@ or launch fails at that boundary.
 
 ## Validation
 
-TileIR support is gated by CUDA Tile IR 13.3 bindings, `tileiras` 13.3, and the
+TileIR support is gated by CUDA Tile IR 13.4 bindings, `tileiras` 13.4, and the
 cuTile 1.5 native dispatcher. In developer environments where those
 dependencies are present, run the focused JIT suite:
 

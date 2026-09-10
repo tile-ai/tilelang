@@ -18,6 +18,7 @@ from tilelang.tileir.emission_utils import (
     _static_contiguous_strides,
 )
 from tilelang.tileir.errors import TileIRLoweringError, TileIRLoweringNotImplementedError
+from tilelang.tileir.scratch import scratch_layout
 
 
 __all__ = ["EmitContext", "emit_module"]
@@ -90,7 +91,7 @@ class EmitContext:
         # Reshape-view aliases: alias buffer Value → base buffer Value
         # (from block.buffer_aliases; wired by emit_module).
         self.buffer_aliases: dict[Value, Value] = {}
-        # SIMT-demoted scratch buffers (alloca global): their atomics use
+        # SIMT-demoted scratch buffers (per-tile-block workspace): their atomics use
         # tile-block scope instead of device scope.
         self.alloca_values: set[Value] = set()
         self.current_op: Any = None  # TileOp | None — set by op-walk loop
@@ -359,7 +360,7 @@ def emit_module(
         from cuda_tile._mlir import ir
         from cuda_tile._mlir._mlir_libs._cuda_tile import register_dialect
         from cuda_tile._mlir.dialects import _cuda_tile_ops_gen as ct_gen
-        from cuda_tile._mlir.dialects import cuda_tile as ct
+        from cuda_tile._mlir.dialects import cuda_tile_ops as ct
     except ImportError as exc:
         raise ImportError("emit_module: cuda_tile MLIR Python bindings are unavailable.") from exc
 
@@ -392,6 +393,14 @@ def emit_module(
                     flat_arg_types.extend(_buffer_arg_types(emit_ctx, tile_ty))
                 else:
                     flat_arg_types.append(_mlir_tile_type(emit_ctx, tile_ty))
+
+            scratch_bytes, scratch_offsets = scratch_layout(root.alloca_buffers)
+            if scratch_bytes:
+                # One hidden, flat uint8 tensor: pointer, shape and stride.
+                flat_arg_types.extend(
+                    [ct.TileType.get([], ct.PointerType.get(ir.IntegerType.get_signless(8)))]
+                    + [ct.TileType.get([], ir.IntegerType.get_signless(32))] * 2
+                )
 
             with ir.InsertionPoint(module.body):
                 function_type = ir.TypeAttr.get(ir.FunctionType.get(flat_arg_types, []))
@@ -472,22 +481,25 @@ def emit_module(
                             )
                         emit_ctx.bind(_ph_val, _binfo.shape_tiles[_dim_idx])
 
-                    # Materialise SIMT-demoted scratch buffers as
-                    # ``alloca global`` memory. Registering a _BufferInfo (base
-                    # ptr + static shape/stride tiles, no TensorView) makes the
-                    # whole pointer gather/scatter/atomic machinery apply to
-                    # them exactly as to GLOBAL entry buffers.
+                    # CUDA 13.4 can rematerialize alloca separately in producer
+                    # and consumer warp groups. Use a runtime-owned workspace
+                    # so every group addresses the same per-tile-block slice.
+                    if scratch_bytes:
+                        workspace = _as_tile(emit_ctx, next(block_arg_iter))
+                        block_ids = [ct.exti(ct.Int64, v, loc=loc) for v in ct.get_tile_block_id(loc=loc)]
+                        grid_dims = [ct.exti(ct.Int64, v, loc=loc) for v in ct.get_num_tile_blocks(loc=loc)]
+                        yz = ct.add(block_ids[1], ct.mul(grid_dims[1], block_ids[2], loc=loc), loc=loc)
+                        block_index = ct.add(block_ids[0], ct.mul(grid_dims[0], yz, loc=loc), loc=loc)
+                        block_offset = ct.mul(block_index, ct.constant(scratch_bytes, ct.Int64, loc=loc), loc=loc)
+                        scratch_base = ct.add(ct.ptr_to_int(workspace, loc=loc), block_offset, loc=loc)
+
                     _alloca_buffers: dict = getattr(root, "alloca_buffers", {}) or {}
                     for _aval, (_ashape, _adtype) in _alloca_buffers.items():
                         _elem_ty = _mlir_element_type(emit_ctx, _aval.type)
                         _ptr_ty = ct.PointerType.get(_elem_ty)
-                        _tile_ptr_ty = ct.TileType.get([], _ptr_ty)
-                        _numel = 1
-                        for _d in _ashape:
-                            _numel *= int(_d)
-                        from cuda_tile._mlir.dialects.cuda_tile_ops import return_results as _ret_res
-
-                        _scratch_ptr = _ret_res(ct_gen.AllocaOp(_tile_ptr_ty, num_elem=_numel, alignment=16, global_=True, loc=loc))
+                        _scratch_ptr = ct.int_to_ptr(
+                            _ptr_ty, ct.add(scratch_base, ct.constant(scratch_offsets[_aval], ct.Int64, loc=loc), loc=loc), loc=loc
+                        )
                         _shape_tiles = [ct.constant(int(_d), ct.Int32, loc=loc) for _d in _ashape]
                         _strides = _static_contiguous_strides(tuple(int(_d) for _d in _ashape))
                         _stride_tiles = [ct.constant(int(_s), ct.Int32, loc=loc) for _s in _strides]

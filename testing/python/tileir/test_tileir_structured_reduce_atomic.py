@@ -24,6 +24,7 @@ from tileir_test_utils import (
     _build_tileir_module_for_test,
     _prepared_tileir_kernel_for_test,
     _tileir_source_for_test,
+    _skip_if_tileir_toolchain_unavailable,
 )
 
 
@@ -195,16 +196,14 @@ def test_tileir_structured_lowering_uses_atomic_red_view_for_relaxed_tile_atomic
     assert ", max," in source
 
 
-def test_tileir_rejects_multi_gemm_loop_indexed_atomic_partition():
-    pytest.importorskip(checks.CUDA_TILE_IR_MLIR_MODULE)
-
+def _multi_gemm_loop_indexed_atomic_kernel():
     @tilelang.jit
     def loop_indexed_atomic_kernel(src, weight, dst):
         src: T.Tensor((64, 32), T.float16)
         weight: T.Tensor((32, 32), T.float16)
         dst: T.Tensor((64, 32), T.float32)
 
-        with T.Kernel(1):
+        with T.Kernel(3):
             src_tile = T.alloc_shared((32, 32), T.float16)
             weight_tile = T.alloc_shared((32, 32), T.float16)
             acc = T.alloc_fragment((32, 32), T.float32)
@@ -217,10 +216,48 @@ def test_tileir_rejects_multi_gemm_loop_indexed_atomic_partition():
                 T.copy(acc, acc_shared)
                 T.atomic_add(dst[chunk * 32 : (chunk + 1) * 32, :], acc_shared)
 
-    target, prepared, _ = _prepared_tileir_kernel_for_test(loop_indexed_atomic_kernel, None, None, None)
+    return loop_indexed_atomic_kernel
 
-    with pytest.raises(TileIRLoweringNotImplementedError, match="loop-indexed atomic reduction.*multiple GEMM updates"):
-        _build_tileir_module_for_test(prepared, target)
+
+@tilelang.testing.requires_cuda
+def test_tileir_lowers_multi_gemm_loop_indexed_atomic_partition():
+    pytest.importorskip(checks.CUDA_TILE_IR_MLIR_MODULE)
+    source = _tileir_source_for_test(_multi_gemm_loop_indexed_atomic_kernel(), None, None, None)
+
+    assert source.count(" = mmaf ") == 2
+    assert "atomic_red_view_tko relaxed device" in source
+
+
+@tilelang.testing.requires_cuda
+def test_tileir_multi_gemm_loop_indexed_atomic_repeated_launches():
+    """CUDA 13.4 supports the multi-GEMM atomic pattern used by linear attention."""
+    _skip_if_tileir_toolchain_unavailable()
+    import torch
+
+    prim_func = _multi_gemm_loop_indexed_atomic_kernel().get_tir(None, None, None)
+    kernel = tilelang.compile(prim_func, execution_backend="tileir")
+    src = torch.empty((64, 32), device="cuda", dtype=torch.float16)
+    weight = torch.empty((32, 32), device="cuda", dtype=torch.float16)
+    dst = torch.empty((64, 32), device="cuda", dtype=torch.float32)
+
+    # Three CTAs each add two GEMMs to both loop-indexed partitions. Integer
+    # inputs keep the reference exact, including the nonzero initial output.
+    for seed in range(10):
+        torch.manual_seed(seed)
+        src.copy_(torch.randint(-2, 3, src.shape, device="cuda"))
+        weight.copy_(torch.randint(-2, 3, weight.shape, device="cuda"))
+        ref = 7 + 6 * (src.float() @ weight.float())
+        dst.fill_(7)
+        kernel(src, weight, dst)
+        torch.testing.assert_close(dst, ref, rtol=0, atol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        dst.fill_(7)
+        kernel(src, weight, dst)
+    for _ in range(3):
+        graph.replay()
+        torch.testing.assert_close(dst, ref, rtol=0, atol=0)
 
 
 def test_tileir_structured_lowering_supports_atomic_min_max_memory_order():

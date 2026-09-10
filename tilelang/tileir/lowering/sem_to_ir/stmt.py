@@ -268,7 +268,7 @@ def _lower_let(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> 
                 # would be popped before those siblings are lowered, losing the binding.
                 scope.bind(bind_key, bound_val)
                 # Also store the raw TIR PrimExpr so that
-                # _compute_partition_indices can symbolically divide let-bound vars
+                # _compute_view_indices can symbolically divide let-bound vars
                 # (e.g. "m_start = bx * block_M") to derive tile-level indices.
                 scope._tir_expr_bindings[bind_key] = tir_value
 

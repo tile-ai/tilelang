@@ -87,8 +87,8 @@ def test_tileir_from_database_preserves_cached_text_source_paths(tmp_path, monke
         lambda: checks.TileIRToolchain(
             cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
             tileiras_path=tmp_path / "tileiras",
-            tileiras_version="13.3.0",
-            cuda_tile_ir_version="13.3",
+            tileiras_version="13.4.0",
+            cuda_tile_ir_version="13.4",
             cuda_tile_runtime_version="1.5.0",
         ),
     )
@@ -129,8 +129,8 @@ def test_tileir_from_database_rejects_incompatible_cached_runtime(tmp_path, monk
         lambda: checks.TileIRToolchain(
             cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
             tileiras_path=tmp_path / "tileiras",
-            tileiras_version="13.3.0",
-            cuda_tile_ir_version="13.3",
+            tileiras_version="13.4.0",
+            cuda_tile_ir_version="13.4",
             cuda_tile_runtime_version="1.5.1",
         ),
     )
@@ -171,6 +171,7 @@ def test_tileir_single_artifact_cache_round_trip_preserves_argument_metadata(tmp
         cubin=b"\x00cubin\xff",
         tileir_source="module @single",
         launch_metadata=TileIRLaunchMetadata(grid=(n + 1, 2, 3), block=(4, 5, 6), dynamic_smem_bytes=7),
+        scratch_bytes_per_block=256,
         argument_names=("A", "scale", "B"),
         argument_scalar_flags=(False, True, False),
         argument_refs=(
@@ -186,7 +187,7 @@ def test_tileir_single_artifact_cache_round_trip_preserves_argument_metadata(tmp
     restored = _read_round_trip(tmp_path, artifact)
 
     assert envelope["format"] == "tilelang.tileir.artifact"
-    assert envelope["version"] == 2
+    assert envelope["version"] == 3
     assert envelope["compatibility"]["target_arch"] == "sm_120"
     assert envelope["compatibility"]["cuda_tile_runtime_version"] == "1.5.0"
     assert restored.kernel_name == artifact.kernel_name
@@ -194,6 +195,7 @@ def test_tileir_single_artifact_cache_round_trip_preserves_argument_metadata(tmp
     assert restored.tileir_source == artifact.tileir_source
     assert restored.launch_metadata.block == artifact.launch_metadata.block
     assert restored.launch_metadata.dynamic_smem_bytes == 7
+    assert restored.scratch_bytes_per_block == 256
     assert structural_equal(restored.launch_metadata.grid[0], artifact.launch_metadata.grid[0], map_free_vars=True)
     assert restored.launch_metadata.grid[1:] == (2, 3)
     assert restored.argument_names == ("A", "scale", "B")
@@ -271,8 +273,8 @@ def test_tileir_multi_artifact_cache_round_trip_preserves_argument_metadata(tmp_
             "Unsupported TileIR cache artifact version 1",
         ),
         (
-            json.dumps({"format": "tilelang.tileir.artifact", "version": 3, "artifact": {}}).encode(),
-            "Unsupported TileIR cache artifact version 3",
+            json.dumps({"format": "tilelang.tileir.artifact", "version": 2, "artifact": {}}).encode(),
+            "Unsupported TileIR cache artifact version 2",
         ),
     ],
 )
@@ -286,6 +288,17 @@ def test_tileir_cache_rejects_malformed_or_unknown_version(tmp_path, payload, er
             _prim_func_with_interleaved_scalar_param(),
             "module @cached_device",
         )
+
+
+@pytest.mark.parametrize("size", [None, True, -16, 1, "256"])
+def test_tileir_cache_rejects_invalid_scratch_size(tmp_path, size):
+    artifact = TileIRLoweringResult(kernel_name="main", cubin=b"cubin", compatibility=_artifact_compatibility())
+    envelope = json.loads(TileIRKernelAdapter._serialize_tileir_artifact(artifact))
+    envelope["artifact"]["scratch_bytes_per_block"] = size
+    path = tmp_path / "kernel.tileir.json"
+    path.write_text(json.dumps(envelope))
+    with pytest.raises(ValueError, match="scratch size"):
+        TileIRKernelAdapter._read_tileir_artifact(str(path), _prim_func_with_interleaved_scalar_param(), "module @cached_device")
 
 
 @pytest.mark.parametrize("extent", [0, -1])

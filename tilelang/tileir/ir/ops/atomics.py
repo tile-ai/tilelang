@@ -182,7 +182,7 @@ class AtomicRMW(TileOp, opcode="atomic_rmw", effect=Effect.READWRITE):
                         loc=loc,
                     )
             ptrs = _build_gather_ptrs(ctx, self.dst, result_shape, self.gather_dim_kinds, self.gather_dim_values, self.gather_dim_axes, loc)
-            # SIMT-demoted scratch (alloca global) is only shared within the
+            # SIMT-demoted scratch (per-tile-block workspace) is only shared within the
             # tile block — tile-block scope lets the assembler use cheaper
             # SM-local atomics (REDG.SM vs REDG.GPU).
             _scope = ct.MemoryScope.TL_BLK if self.dst in getattr(ctx, "alloca_values", ()) else ct.MemoryScope.DEVICE

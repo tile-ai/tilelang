@@ -14,6 +14,7 @@ scope.
 
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 
 # ---------------------------------------------------------------------------
@@ -320,6 +321,38 @@ def test_tma_gather4_scatter4_lowering_rejects_sliced_shared_region(is_gather):
     builder = IRBuilder()
     with pytest.raises(TileIRLoweringNotImplementedError, match="(?i)partial|whole buffer"):
         lower_kernel(kernel, builder, program=program)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("src_offset,dst_offset", [(0, 0), (1, 3), (17, 9)])
+def test_tma_copy_element_offsets_and_shared_stages(src_offset, dst_offset):
+    """TMA copies preserve element offsets and both slices of a staged tile."""
+    _skip_if_tileir_toolchain_unavailable()
+    import torch
+
+    @T.prim_func
+    def main(Src: T.Tensor((128,), "float32"), Dst: T.Tensor((128,), "float32"), src_start: T.int32, dst_start: T.int32):
+        with T.Kernel(1, threads=128):
+            staged = T.alloc_shared((2, 32), "float32")
+            bars = T.alloc_barrier([128, 128])
+            T.fill(staged, -99)
+            for stage in T.serial(2):
+                T.tma_copy(Src[src_start + stage * 32 : src_start + (stage + 1) * 32], staged[stage, :], barrier=bars[stage])
+                T.mbarrier_arrive(bars[stage])
+                T.mbarrier_wait_parity(bars[stage], 0)
+            for stage in T.serial(2):
+                T.tma_copy(staged[stage, :], Dst[dst_start + stage * 32 : dst_start + (stage + 1) * 32])
+            T.tma_store_wait(0)
+
+    kernel = tilelang.compile(main, execution_backend="tileir")
+    src = torch.arange(128, device="cuda", dtype=torch.float32)
+    for repeat in range(3):
+        src.add_(repeat)
+        dst = torch.full_like(src, -1)
+        kernel(src, dst, src_offset, dst_offset)
+        ref = torch.full_like(src, -1)
+        ref[dst_offset : dst_offset + 64] = src[src_offset : src_offset + 64]
+        torch.testing.assert_close(dst, ref, rtol=0, atol=0)
 
 
 def _hand_crafted_copy_extra_regions_kernel():

@@ -24,7 +24,7 @@ def test_tileir_assemble_module_writes_bytecode_without_text_translation(monkeyp
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "bin" / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
 
     class FakeModule:
@@ -108,7 +108,7 @@ def test_tileir_assemble_module_cleans_cuda_home_for_pip_tileiras(monkeypatch, t
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "nvidia" / "cu13" / "bin" / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
 
     class FakeModule:
@@ -150,7 +150,7 @@ def test_tileir_assemble_module_raises_on_tileiras_failure(monkeypatch, tmp_path
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "bin" / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
 
     class FakeModule:

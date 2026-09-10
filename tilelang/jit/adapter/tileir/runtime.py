@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from math import prod
 
 import torch
 
@@ -92,7 +93,7 @@ def load_native_dispatchers(adapter) -> tuple[PrecompiledTileIRDispatcher, list[
             PrecompiledTileIRDispatcher(
                 kernel.cubin,
                 kernel.kernel_name,
-                len(kernel.argument_names),
+                len(kernel.argument_names) + bool(kernel.scratch_bytes_per_block),
             )
             for kernel in artifact.kernels
         ]
@@ -102,7 +103,7 @@ def load_native_dispatchers(adapter) -> tuple[PrecompiledTileIRDispatcher, list[
     dispatcher = PrecompiledTileIRDispatcher(
         artifact.cubin,
         artifact.kernel_name,
-        num_args,
+        num_args + bool(artifact.scratch_bytes_per_block),
     )
     return dispatcher, [dispatcher]
 
@@ -257,6 +258,21 @@ def make_torch_func(adapter) -> Callable[..., Any]:
     def runtime_grid(launch_metadata, args: tuple[Any, ...]) -> tuple[int, int, int]:
         return tuple(eval_launch_extent(extent, args) for extent in launch_metadata.grid)
 
+    def launch_kernel(kernel, native_dispatcher, kernel_args, program_args, launch_stream):
+        grid = runtime_grid(kernel.launch_metadata, program_args)
+        launch_args = normalize_launch_args(kernel_args, kernel.argument_scalar_flags)
+        if kernel.scratch_bytes_per_block:
+            first_tensor = next((arg for arg in kernel_args if isinstance(arg, torch.Tensor)), None)
+            device = first_tensor.device if first_tensor is not None else current_device()
+            # Allocate on the launch stream. The allocator then keeps this
+            # invocation's workspace alive until its GPU work completes,
+            # including graph capture and explicit non-current streams.
+            with torch.cuda.stream(launch_stream):
+                scratch = torch.empty(prod(grid) * kernel.scratch_bytes_per_block, dtype=torch.uint8, device=device)
+                launch(launch_stream, grid, native_dispatcher, (*launch_args, scratch))
+        else:
+            launch(launch_stream, grid, native_dispatcher, launch_args)
+
     if compiled_kernels:
         dispatchers = tuple(dispatcher.dispatcher for dispatcher in adapter.native_dispatchers)
         temporary_buffers = adapter.tileir_artifact.temporary_buffers
@@ -285,12 +301,7 @@ def make_torch_func(adapter) -> Callable[..., Any]:
                 if len(kernel.argument_refs) != len(kernel.argument_names):
                     raise ValueError(f"TileIR kernel `{kernel.kernel_name}` is missing stable runtime argument references.")
                 kernel_args = tuple(resolve_argument(ref) for ref in kernel.argument_refs)
-                launch(
-                    launch_stream,
-                    runtime_grid(kernel.launch_metadata, args),
-                    dispatcher,
-                    normalize_launch_args(kernel_args, kernel.argument_scalar_flags),
-                )
+                launch_kernel(kernel, dispatcher, kernel_args, args, launch_stream)
             return return_results(args)
 
         return multi_kernel_func
@@ -299,23 +310,13 @@ def make_torch_func(adapter) -> Callable[..., Any]:
 
         def explicit_func(*inputs: Any, stream: torch.cuda.Stream | int | None = None):
             args = materialize_call_args(inputs)
-            launch(
-                resolve_launch_stream(stream),
-                runtime_grid(adapter.tileir_artifact.launch_metadata, args),
-                dispatcher,
-                normalize_launch_args(args, adapter.tileir_artifact.argument_scalar_flags),
-            )
+            launch_kernel(adapter.tileir_artifact, dispatcher, args, args, resolve_launch_stream(stream))
 
         return explicit_func
 
     def allocate_outputs_func(*inputs: Any, stream: torch.cuda.Stream | int | None = None):
         args = materialize_call_args(inputs)
-        launch(
-            resolve_launch_stream(stream),
-            runtime_grid(adapter.tileir_artifact.launch_metadata, args),
-            dispatcher,
-            normalize_launch_args(args, adapter.tileir_artifact.argument_scalar_flags),
-        )
+        launch_kernel(adapter.tileir_artifact, dispatcher, args, args, resolve_launch_stream(stream))
         return return_results(args)
 
     return allocate_outputs_func

@@ -77,7 +77,7 @@ def _build_atomic_cas_root(dst_elem=I32, shape=TILE_SHAPE):
 def _atomic_mode_int(name: str) -> int:
     """Return the integer ``mode`` attribute the dialect prints for an
     ``AtomicRMWMode`` member (e.g. ADD/ADDF/MAX/MIN)."""
-    from cuda_tile._mlir.dialects import cuda_tile as ct
+    from cuda_tile._mlir.dialects import cuda_tile_ops as ct
 
     member = getattr(ct.AtomicRMWMode, name)
     # The MLIR text prints the enum as its underlying integer; recover it via

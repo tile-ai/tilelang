@@ -47,35 +47,39 @@ CUTEDSL_KNOWN_FAILURES = {
     "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_act_quant_fp4",
 }
 
-# Known limitations when running the examples with TILELANG_TARGET=tileir.
+# Backend limitations, not a list of CUDA 13.3 compiler bugs. Keep each reason
+# visible in pytest's xfail report. Architecture skips still take precedence;
+# a skipped test does not confirm whether its lowering limitation remains.
 TILEIR_KNOWN_FAILURES = {
-    # Blackwell cluster-specialized tcgen path uses direct PTX/cluster intrinsics
-    # (tcgen05 warp copies, cluster barriers, and fence_proxy_async).
-    "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_fp8_fp4_gemm_1d1d",
-    # Per-thread SIMT dequant kernels (thread-allreduce / threadIdx gathers) — not in the collective tile model.
-    "dequantize_gemm/test_example_dequantize_gemm.py::test_example_dequant_gemv_fp16xint4",
-    "dequantize_gemm/test_example_dequantize_gemm.py::test_example_dequant_gemm_bf16_mxfp4_hopper",
-    # Explicit PTX intrinsic path, outside structured lowering.
-    "gemm/test_example_gemm.py::test_example_gemm_intrinsics",
-    # 2:4 sparse MMA (gemm_sp): no sparse MMA op in the cuda_tile dialect.
-    "gemm_sp/test_example_gemm_sp.py::test_example_gemm_sp",
-    # Scalar shared-memory indexed stores are rejected.
-    "gemv/test_example_gemv.py::test_example_gemv",
-    # Non-power-of-two tile dims (192-head, 576-wide dQ) — need the pad/split engine.
-    "flash_attention/test_example_flash_attention.py::test_example_gqa_bwd",
-    "flash_attention/test_example_flash_attention.py::test_example_gqa_bwd_tma_reduce_varlen",
-    "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_bwd",
-    # Non-power-of-two fragment (24-wide) slicing + SIMT shared prefix sums.
-    "deepseek_mhc/test_example_mhc.py::test_mhc_pre",
-    # Warp-specialized ptx_cp_async / set_max_nreg — no structured counterpart.
-    "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_fwd_pipelined",
-    # Non-power-of-two 257-bin histogram + cross-lane prefix scan (scatter/return-atomics do lower).
-    "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_topk_selector",
-    # Structured TMA views do not yet support element-offset indexing.
-    "minference/test_vs_sparse_attn.py::test_vs_sparse_attn",
-    # CUDA Tile IR does not yet support multi-GEMM, loop-indexed atomic reductions.
-    "linear_attention/test_linear_attn.py::test_example_linear_attn_fwd",
-    "linear_attention/test_linear_attn.py::test_example_linear_attn_bwd",
+    "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_fp8_fp4_gemm_1d1d": (
+        "tir.assume is not lowered; the kernel also uses direct tcgen05 copies and cluster intrinsics"
+    ),
+    "dequantize_gemm/test_example_dequantize_gemm.py::test_example_dequant_gemv_fp16xint4": (
+        "nested thread bindings in a SIMT region are not supported"
+    ),
+    "dequantize_gemm/test_example_dequantize_gemm.py::test_example_dequant_gemm_bf16_mxfp4_hopper": (
+        "per-thread SIMT dequantization requires thread-indexed gathers and reductions"
+    ),
+    "gemm/test_example_gemm.py::test_example_gemm_intrinsics": "explicit tl.ptx_ldmatrix / tir.ptx_mma have no structured lowering",
+    "gemm_sp/test_example_gemm_sp.py::test_example_gemm_sp": "2:4 sparse MMA has no CUDA Tile IR counterpart",
+    "gemv/test_example_gemv.py::test_example_gemv": "per-thread SIMT scatter into shared memory is not supported",
+    "flash_attention/test_example_flash_attention.py::test_example_gqa_bwd": "192-wide TileViews require non-power-of-two lowering",
+    "flash_attention/test_example_flash_attention.py::test_example_gqa_bwd_tma_reduce_varlen": (
+        "non-power-of-two attention tiles require padding or splitting"
+    ),
+    "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_bwd": (
+        "576-wide gradient tiles require non-power-of-two lowering"
+    ),
+    "deepseek_mhc/test_example_mhc.py::test_mhc_pre": "flattened shared-buffer indices j * 4 + k + 8 are not lowered in parallel stores",
+    "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_fwd_pipelined": (
+        "warp-specialized ptx_cp_async / set_max_nreg have no structured counterpart"
+    ),
+    "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_topk_selector": (
+        "257-bin histogram tiles and cross-lane prefix scans are not supported"
+    ),
+    "minference/test_vs_sparse_attn.py::test_vs_sparse_attn": (
+        "staged shared-index gathers and the warp-specialized sparse-attention schedule need lowering fixes"
+    ),
 }
 
 
@@ -103,14 +107,16 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
     if target.startswith("tileir"):
         for item in items:
             nid = item.nodeid
-            if _match_any(nid, TILEIR_KNOWN_FAILURES):
-                item.add_marker(
-                    pytest.mark.xfail(
-                        reason="TileIR: known structured lowering limitation",
-                        raises=TileIRLoweringNotImplementedError,
-                        strict=True,
+            for pattern, reason in TILEIR_KNOWN_FAILURES.items():
+                if pattern in nid:
+                    item.add_marker(
+                        pytest.mark.xfail(
+                            reason=f"TileIR: {reason}",
+                            raises=TileIRLoweringNotImplementedError,
+                            strict=True,
+                        )
                     )
-                )
+                    break
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

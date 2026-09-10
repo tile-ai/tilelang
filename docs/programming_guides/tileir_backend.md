@@ -5,8 +5,8 @@ the assembled cubin through the cuTile runtime.
 
 ## Install the toolchain
 
-TileIR currently requires a supported NVIDIA GPU, the CUDA Tile IR 13.3 Python
-bindings, `tileiras` 13.3, and the cuTile 1.5 runtime. Install the packaged
+TileIR currently requires a supported NVIDIA GPU, the CUDA Tile IR 13.4 Python
+bindings, `tileiras` 13.4, and the cuTile 1.5 runtime. Install the packaged
 assembler and runtime dependencies with:
 
 ```bash
@@ -210,10 +210,6 @@ for exposing kernel-specific parameters from another kernel factory.
   `tileir -arch=sm_90`, `sm_100`, or `sm_120`.
 - **Unsupported semantic construct:** simplify the kernel or report the first
   unsupported construct from the exception.
-- **Loop-indexed atomic reduction:** reductions whose value receives multiple
-  GEMM updates per loop iteration are currently rejected when the destination
-  partition also depends on that loop. Move the reduction outside the loop or
-  use another backend.
 - **Some candidates fail:** remove configurations that exceed the kernel or
   GPU's resource and hint constraints.
 - **All explicit hints are slower:** keep the unhinted configuration.

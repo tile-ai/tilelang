@@ -422,6 +422,9 @@ def _semantic_tile_op(call: tirx.Call) -> SemanticStmt:
         # ordering is handled by TKO tokens, so this wait is a scheduling hint
         # exactly like tir.ptx_wait_group above (lowered to the no-op Barrier).
         "tl.wait_wgmma",
+        # TMA stores use the same ordered TKO copy path. Their explicit
+        # completion wait is represented by the existing barrier node.
+        "tl.tma_store_wait",
     }:
         return SemanticStmt("tile_op", attrs=attrs, **_call_payload(call))
     if op in {"tl.device_assert", "tl.device_assert_with_msg"}:

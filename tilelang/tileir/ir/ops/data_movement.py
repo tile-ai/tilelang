@@ -276,7 +276,7 @@ class Copy(TileOp, opcode="copy", effect=Effect.READWRITE):
             # buffer's full alloc shape (e.g. acc_o[:4, :] from a [64,128]
             # buffer), use ct.extract to pull out the slice.  The extract
             # indices are the tile-level coordinates from src_idx_tuple
-            # (base / slice_extent, already computed by _compute_partition_indices).
+            # (base / slice_extent, already computed by _compute_view_indices).
             full_tile = _as_tile(ctx, ctx.get_tile(self.src))
             buf_shape = list(self.src.type.shape)
             if src_tile_shape and src_tile_shape != buf_shape:
@@ -433,126 +433,21 @@ class TmaCopy(TileOp, opcode="tma_copy", effect=Effect.READWRITE):
     src_indices: tuple = attribute(default=())
     dst_indices: tuple = attribute(default=())
 
+    src_elem_view: bool = attribute(default=False)
+    dst_elem_view: bool = attribute(default=False)
+
     def emit_mlir(self, ctx: Any) -> None:
-        """TmaCopy follows the same emission path as Copy."""
-        ct = ctx.ct
-        ir = ctx.ir
-        loc = ctx.loc
-
-        src_is_tile = ctx.is_tile_buffer(self.src)
-        dst_is_tile = ctx.is_tile_buffer(self.dst)
-
-        src_tile_shape = list(self.tile_shape)
-        dst_tile_shape = list(self.dst_tile_shape) if self.dst_tile_shape else src_tile_shape
-
-        src_elem_ty = _mlir_element_type(ctx, self.src.type)
-        dst_elem_ty = _mlir_element_type(ctx, self.dst.type)
-
-        src_ndim = len(src_tile_shape)
-        dst_ndim = len(dst_tile_shape)
-        src_idx_tuple = self.src_indices if self.src_indices else (0,) * src_ndim
-        dst_idx_tuple = self.dst_indices if self.dst_indices else (0,) * dst_ndim
-
-        # Squeezed tile shape: remove size-1 dims for TMA-addressed 4D buffers.
-        squeezed_shape = _squeeze_shape(src_tile_shape)
-
-        # Load phase
-        if src_is_tile:
-            # SHARED / REGISTER source: return the current tile value.
-            # Partial-slice path: when tile_shape is smaller than the
-            # buffer's full alloc shape, use ct.extract to pull out the slice.
-            full_tile = _as_tile(ctx, ctx.get_tile(self.src))
-            buf_shape = list(self.src.type.shape)
-            if src_tile_shape and src_tile_shape != buf_shape:
-                result_tile_type = ct.TileType.get(squeezed_shape, _mlir_element_type(ctx, self.src.type))
-                extract_indices = _make_i32_index_tiles(ctx, src_idx_tuple)
-                loaded_tile = ct.extract(result_tile_type, full_tile, extract_indices, loc=loc)
-            else:
-                loaded_tile = full_tile
-        else:
-            src_info = ctx.get_buffer_info(self.src)
-            src_tok = _ensure_token(ctx, self.src)
-            if src_info.view is not None:
-                src_partition = ct.make_partition_view(
-                    src_info.view,
-                    src_tile_shape,
-                    padding_value=ct.PaddingValue.ZERO,
-                    loc=loc,
-                )
-                src_indices = _make_i32_index_tiles(ctx, src_idx_tuple)
-                loaded_tile, src_out_tok = ct.load_view_tko(
-                    view=src_partition,
-                    indices=src_indices,
-                    input_token=src_tok,
-                    return_token=True,
-                    loc=loc,
-                )
-                # Reshape from 4D view tile to squeezed shape.
-                loaded_tile = _reshape_tile_to(ct, loaded_tile, squeezed_shape, loc)
-            else:
-                src_ptr_shaped = _broadcast_ptr(ct, src_info.ptr, squeezed_shape, loc=loc)
-                squeezed_tile_type = ct.TileType.get(squeezed_shape, src_elem_ty)
-                loaded_tile, src_out_tok = ct.load_ptr_tko(
-                    result=squeezed_tile_type,
-                    source=src_ptr_shaped,
-                    input_token=src_tok,
-                    return_token=True,
-                    loc=loc,
-                )
-            ctx._set_token(self.src, src_out_tok)
-
-        # Cast if src/dst dtypes differ (use _cast_tile helper, no ct.cast).
-        if src_elem_ty != dst_elem_ty:
-            src_dtype = _dtype_from_mlir_type(ir, src_elem_ty)
-            dst_dtype = _dtype_from_mlir_type(ir, dst_elem_ty)
-            loaded_tile = _cast_tile(ct, ir, _as_tile(ctx, loaded_tile), src_dtype, dst_dtype, loc=loc)
-
-        # Store phase
-        dst_squeezed_shape = _squeeze_shape(dst_tile_shape)
-
-        if dst_is_tile:
-            # Reshape to dst buffer's actual shape, with the same element-count
-            # guard as Copy.emit_mlir.
-            dst_shape = list(self.dst.type.shape)
-            cur_tile = _as_tile(ctx, loaded_tile)
-            cur_elems = functools.reduce(operator.mul, cur_tile.tile_type.shape, 1)
-            dst_elems = functools.reduce(operator.mul, dst_shape, 1)
-            if cur_elems == dst_elems:
-                store_tile = _reshape_tile_to(ct, cur_tile, dst_shape, loc)
-            else:
-                store_tile = cur_tile
-            ctx.set_tile(self.dst, store_tile)
-        else:
-            dst_info = ctx.get_buffer_info(self.dst)
-            dst_tok = _ensure_token(ctx, self.dst)
-            if dst_info.view is not None:
-                dst_partition = ct.make_partition_view(
-                    dst_info.view,
-                    dst_tile_shape,
-                    loc=loc,
-                )
-                dst_indices = _make_i32_index_tiles(ctx, dst_idx_tuple)
-                # Reshape tile back to full dst_tile_shape before store_view_tko.
-                store_tile = _reshape_tile_to(ct, _as_tile(ctx, loaded_tile), dst_tile_shape, loc)
-                out_tok = ct.store_view_tko(
-                    tile=store_tile,
-                    view=dst_partition,
-                    indices=dst_indices,
-                    input_token=dst_tok,
-                    loc=loc,
-                )
-            else:
-                dst_ptr_shaped = _broadcast_ptr(ct, dst_info.ptr, dst_squeezed_shape, loc=loc)
-                store_tile = _reshape_tile_to(ct, _as_tile(ctx, loaded_tile), dst_squeezed_shape, loc)
-                out_tok = ct.store_ptr_tko(
-                    destination=dst_ptr_shaped,
-                    value=store_tile,
-                    input_token=dst_tok,
-                    loc=loc,
-                )
-            ctx._set_token(self.dst, out_tok)
-
-        return None  # side-effect only
+        """Use Copy's indexing, partial-tile updates, and token handling."""
+        return Copy(
+            src=self.src,
+            dst=self.dst,
+            tile_shape=self.tile_shape,
+            dst_tile_shape=self.dst_tile_shape,
+            src_indices=self.src_indices,
+            dst_indices=self.dst_indices,
+            src_elem_view=self.src_elem_view,
+            dst_elem_view=self.dst_elem_view,
+        ).emit_mlir(ctx)
 
 
 @dataclasses.dataclass(eq=False)
@@ -765,6 +660,7 @@ class CopyGather(TileOp, opcode="gather4", effect=Effect.READWRITE):
             tile=loaded_tile_type,
             result_token=result_token_type,
             memory_ordering_semantics=sem_attr,
+            inbounds=ir.DenseBoolArrayAttr.get([False, False]),
             view=gsview,
             index=[index_tile, col_tile],
             token=src_tok,
@@ -838,6 +734,7 @@ class CopyScatter(TileOp, opcode="scatter4", effect=Effect.READWRITE):
         dst_tok = _ensure_token(ctx, self.dst)
         store_op = ct_gen.StoreViewTkoOp(
             memory_ordering_semantics=sem_attr,
+            inbounds=ir.DenseBoolArrayAttr.get([False, False]),
             tile=src_tile,
             view=gsview,
             index=[index_tile, col_tile],

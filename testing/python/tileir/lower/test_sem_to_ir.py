@@ -464,14 +464,13 @@ def test_tma_copy_preserves_exact_partition_index():
     assert tma_ops[0].dst_indices == (1,)
 
 
-def test_tma_copy_rejects_non_exact_partition_index_instead_of_using_zero():
+def test_tma_copy_preserves_element_offset_instead_of_using_zero():
     stmt, buffers = _tma_copy_stmt(_tirx.IntImm("int32", 1))
-
-    with pytest.raises(
-        _UnsupportedTileIRNode,
-        match="tma_copy dst start offset is not exactly divisible by its tile extent",
-    ):
-        _lower_handcrafted_stmt(stmt, buffers)
+    block = _lower_handcrafted_stmt(stmt, buffers)
+    op = _ops_of_type(block, TmaCopy)[0]
+    assert op.dst_indices == (1,)
+    assert op.dst_elem_view is True
+    assert op.src_elem_view is False
 
 
 def test_tma_copy_rejects_unlowerable_partition_index_instead_of_using_zero():
@@ -483,6 +482,22 @@ def test_tma_copy_rejects_unlowerable_partition_index_instead_of_using_zero():
         _UnsupportedTileIRNode,
         match="tma_copy dst: cannot lower start offset",
     ):
+        _lower_handcrafted_stmt(stmt, buffers)
+
+
+@pytest.mark.parametrize("shared_source", [False, True])
+def test_tma_copy_rejects_non_exact_shared_subtile(shared_source):
+    from dataclasses import replace
+
+    stmt, buffers = _tma_copy_stmt(_tirx.IntImm("int32", 1))
+    buffers = (replace(buffers[0], scope=""), replace(buffers[1], scope="shared"))
+    if shared_source:
+        stmt = replace(
+            stmt,
+            regions=(replace(stmt.regions[1], access="read"), replace(stmt.regions[0], access="write")),
+            call_args=tuple(reversed(stmt.call_args)),
+        )
+    with pytest.raises(_UnsupportedTileIRNode, match="shared/register tile slices require an exactly divisible start offset"):
         _lower_handcrafted_stmt(stmt, buffers)
 
 

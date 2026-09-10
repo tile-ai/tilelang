@@ -80,7 +80,7 @@ def test_tileir_dependency_check_does_not_import_cutile_dsl(monkeypatch):
     monkeypatch.setattr(checks.importlib, "import_module", fake_import_module)
     monkeypatch.setattr(checks, "_validated_cuda_tile_runtime_version", lambda: "1.5.0")
     monkeypatch.setattr(checks, "find_tileiras", lambda: _MOCK_TILEIRAS_PATH)
-    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.3")
+    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.4")
 
     toolchain = checks.check_tileir_available()
 
@@ -95,13 +95,14 @@ def test_tileir_dependency_error_points_to_cuda_tile_ir(monkeypatch):
         checks.check_tileir_available()
 
 
-def test_tileir_dependency_check_rejects_old_cuda_tile_ir_bindings(monkeypatch):
-    fake_tileir = types.SimpleNamespace(**{symbol: object() for symbol in checks.CUDA_TILE_IR_REQUIRED_SYMBOLS if symbol != "pack"})
+@pytest.mark.parametrize("missing_symbol", ["pack", "fpowf"])
+def test_tileir_dependency_check_rejects_old_cuda_tile_ir_bindings(monkeypatch, missing_symbol):
+    fake_tileir = types.SimpleNamespace(**{symbol: object() for symbol in checks.CUDA_TILE_IR_REQUIRED_SYMBOLS if symbol != missing_symbol})
 
     monkeypatch.setattr(checks.importlib.util, "find_spec", lambda _: object())
     monkeypatch.setattr(checks.importlib, "import_module", lambda _: fake_tileir)
 
-    with pytest.raises(checks.TileIRDependencyError, match="older than 13.3.*pack"):
+    with pytest.raises(checks.TileIRDependencyError, match=f"older than 13.4.*{missing_symbol}"):
         checks.check_tileir_available()
 
 
@@ -118,7 +119,7 @@ def test_tileir_dependency_check_rejects_missing_native_dispatcher(monkeypatch):
     monkeypatch.setattr(checks.importlib.util, "find_spec", fake_find_spec)
     monkeypatch.setattr(checks.importlib, "import_module", lambda _: fake_tileir)
     monkeypatch.setattr(checks, "find_tileiras", lambda: _MOCK_TILEIRAS_PATH)
-    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.3")
+    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.4")
 
     with pytest.raises(checks.TileIRDependencyError, match="native dispatcher"):
         checks.check_tileir_available()
@@ -136,7 +137,7 @@ def test_tileir_dependency_check_rejects_older_native_dispatcher_version(monkeyp
     )
     monkeypatch.setattr(checks, "_package_version", lambda package: "1.4.0" if package == "cuda-tile" else None)
     monkeypatch.setattr(checks, "find_tileiras", lambda: _MOCK_TILEIRAS_PATH)
-    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.3")
+    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.4")
 
     with pytest.raises(checks.TileIRDependencyError, match="requires cuda-tile 1.5"):
         checks.check_tileir_available()
@@ -154,9 +155,9 @@ def test_tileir_dependency_check_rejects_incompatible_tileiras(monkeypatch):
     )
     monkeypatch.setattr(checks, "_validated_cuda_tile_runtime_version", lambda: "1.5.0")
     monkeypatch.setattr(checks, "find_tileiras", lambda: _MOCK_TILEIRAS_PATH)
-    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.2.1")
+    monkeypatch.setattr(checks, "_tileiras_version", lambda _: "tileiras 13.3.36")
 
-    with pytest.raises(checks.TileIRDependencyError, match="requires tileiras 13.3"):
+    with pytest.raises(checks.TileIRDependencyError, match="requires tileiras 13.4"):
         checks.check_tileir_available()
 
 
@@ -191,11 +192,11 @@ def test_tileir_dependency_check_accepts_explicit_tileiras_version_override(monk
     monkeypatch.setattr(checks, "_validated_cuda_tile_runtime_version", lambda: "1.5.0")
     monkeypatch.setattr(checks, "find_tileiras", lambda: _MOCK_TILEIRAS_PATH)
     monkeypatch.setattr(checks, "_tileiras_version", lambda _: "version unavailable")
-    monkeypatch.setenv("TILELANG_TILEIRAS_VERSION", "13.3")
+    monkeypatch.setenv("TILELANG_TILEIRAS_VERSION", "13.4")
 
     toolchain = checks.check_tileir_available()
 
-    assert toolchain.tileiras_version == "13.3"
+    assert toolchain.tileiras_version == "13.4"
 
 
 def test_tileir_find_tileiras_prefers_explicit_override(monkeypatch, tmp_path):
@@ -208,9 +209,9 @@ def test_tileir_find_tileiras_prefers_explicit_override(monkeypatch, tmp_path):
 
 def test_tileir_pip_tileiras_rejects_mismatched_nvjitlink(monkeypatch):
     versions = {
-        "nvidia-cuda-tileiras": "13.3.36",
-        "nvidia-cuda-nvcc": "13.3.33",
-        "nvidia-nvvm": "13.3.33",
+        "nvidia-cuda-tileiras": "13.4.59",
+        "nvidia-cuda-nvcc": "13.4.59",
+        "nvidia-nvvm": "13.4.59",
         "nvidia-nvjitlink": "13.2.78",
     }
     monkeypatch.setattr(checks, "_package_version", lambda package: versions[package])

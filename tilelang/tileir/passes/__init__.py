@@ -12,12 +12,10 @@ from .dataflow import (
 from .token_order import TokenPlan, token_order_pass
 from .loop_carry import loop_carry_pass
 from .gemm_orientation import gemm_orientation_pass
-from .dynamic_atomic_validation import dynamic_atomic_validation_pass
 
 __all__ = [
     "loop_carry_pass",
     "gemm_orientation_pass",
-    "dynamic_atomic_validation_pass",
     "Pass",
     "PassContext",
     "run_pipeline",

@@ -26,14 +26,15 @@ import subprocess
 
 
 TILEIRAS_PACKAGES = ("nvidia-cuda-tileiras", "nvidia-cuda-nvcc", "nvidia-nvvm", "nvidia-nvjitlink")
-CUDA_TILE_IR_MLIR_MODULE = "cuda_tile._mlir.dialects.cuda_tile"
-CUDA_TILE_IR_SUPPORTED_VERSION = "13.3"
+CUDA_TILE_IR_MLIR_MODULE = "cuda_tile._mlir.dialects.cuda_tile_ops"
+CUDA_TILE_IR_SUPPORTED_VERSION = "13.4"
 CUDA_TILE_RUNTIME_SUPPORTED_VERSION = "1.5"
 CUDA_TILE_RUNTIME_MODULE = "cuda.tile._cext"
 CUDA_TILE_IR_REQUIRED_SYMBOLS = (
     "alloca",
     "atomic_red_view_tko",
     "Float4E2M1FN",
+    "fpowf",
     "Int4",
     "make_strided_view",
     "mmaf_scaled",
@@ -78,7 +79,7 @@ def _format_install_help() -> str:
         "Build/install the public NVIDIA/cuda-tile repository with "
         "`CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON` and make its Python package "
         "visible. Install the assembler stack with "
-        "`pip install tilelang[tileir]`, or install CUDA Toolkit 13.3 and make "
+        "`pip install tilelang[tileir]`, or install CUDA Toolkit 13.4 and make "
         "`tileiras` visible through `PATH`, `CUDA_HOME`, or `CUDA_PATH`. "
         "The `tileir` extra also installs the supported cuTile native dispatcher."
     )
@@ -215,8 +216,8 @@ def _validated_tileiras_version(tileiras_path: Path) -> str:
     if match is None:
         raise TileIRDependencyError(
             "TileLang could not determine the `tileiras` version. "
-            "Use the NVIDIA 13.3 wheel stack from `pip install tilelang[tileir]`, "
-            "or set TILELANG_TILEIRAS_VERSION=13.3 for a compatible explicitly managed binary."
+            "Use the NVIDIA 13.4 wheel stack from `pip install tilelang[tileir]`, "
+            "or set TILELANG_TILEIRAS_VERSION=13.4 for a compatible explicitly managed binary."
         )
     major_minor = f"{match.group(1)}.{match.group(2)}"
     if major_minor != CUDA_TILE_IR_SUPPORTED_VERSION:

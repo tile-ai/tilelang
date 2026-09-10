@@ -109,7 +109,7 @@ def test_tileir_lowering_boundary_reports_structured_coverage_gap(tmp_path):
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
     block_x = tirx.IterVar(
         Range(tirx.IntImm("int32", 0), tirx.IntImm("int32", 1)),
@@ -308,7 +308,7 @@ def test_tileir_lowering_splits_flash_decode_host_orchestration(monkeypatch, tmp
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
     lowered_symbols = []
 
@@ -372,7 +372,7 @@ def test_tileir_lowering_splits_grid_sync_into_ordered_host_launches(monkeypatch
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
     lowered_symbols = []
 

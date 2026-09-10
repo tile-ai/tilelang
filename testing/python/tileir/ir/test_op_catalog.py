@@ -187,92 +187,14 @@ def test_reduce_has_op_and_axis_attributes():
     assert "axis" in Reduce._attr_names, "Reduce must have 'axis' attribute"
 
 
-def _minimal_kwargs(op_class) -> dict:
-    """Build the minimum constructor kwargs to instantiate *op_class*.
-
-    Required marker fields (operands, buffer operands, nested blocks, and
-    attributes with no default) get ``None``; fields with a default are left
-    out so their defaults apply.
-    """
-    import dataclasses
-
-    kwargs: dict = {}
-    for name in op_class._operand_names:
-        kwargs[name] = None
-    for name in op_class._buffer_operand_names:
-        kwargs[name] = None
-    for name in op_class._block_names:
-        kwargs[name] = None
-    for name in op_class._attr_names:
-        for f in dataclasses.fields(op_class):
-            if f.name == name and f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING:
-                kwargs[name] = None
-                break
-    return kwargs
-
-
 # ---------------------------------------------------------------------------
-# 5. emit_mlir status — implemented vs. not-yet-implemented
+# 5. Every catalog op defines its own emit_mlir implementation
 # ---------------------------------------------------------------------------
-# Ops with a real emit_mlir.  Import-order independent
-# because the methods live directly on the class (not via monkey-patching).
-_IMPLEMENTED_EMIT = {
-    # Data movement
-    Load,
-    Store,
-    Copy,
-    TmaCopy,
-    Fill,
-    PartitionView,
-    # Control flow
-    Loop,
-    IfElse,
-    Break,
-    Continue,
-    GridSync,
-    # Gemm
-    Gemm,
-    Tcgen05Gemm,
-    # Reduce / cumsum (real emit) + thread_allreduce (raises _UnsupportedTileIRNode)
-    Reduce,
-    Cumsum,
-    ThreadAllreduce,
-    # Elementwise / cast / select
-    Elementwise,
-    Cast,
-    Select,
-    RepeatInterleave,
-    # Atomic rmw (unified) + cas (implemented via ct.atomic_cas_tko)
-    AtomicRMW,
-    AtomicCAS,
-    # Misc (barrier no-op, device assert, debug print, decoders, dp4a)
-    Barrier,
-    DeviceAssert,
-    DebugPrint,
-    DecodeI4,
-    DecodeI2,
-    Dp4a,
-}
-
-_NOT_YET_EMIT = [(cls, eff, buf) for cls, eff, buf in CATALOG if cls not in _IMPLEMENTED_EMIT]
-_NOT_YET_IDS = [cls.__name__ for cls, _, _ in _NOT_YET_EMIT]
-
-_IMPLEMENTED_EMIT_LIST = [(cls, eff, buf) for cls, eff, buf in CATALOG if cls in _IMPLEMENTED_EMIT]
-_IMPLEMENTED_IDS = [cls.__name__ for cls, _, _ in _IMPLEMENTED_EMIT_LIST]
 
 
-@pytest.mark.parametrize("op_class,expected_effect,expected_bufops", _NOT_YET_EMIT, ids=_NOT_YET_IDS)
-def test_emit_mlir_raises_not_implemented(op_class, expected_effect, expected_bufops):
-    """Ops that have not yet implemented emit_mlir must raise NotImplementedError."""
-    op = op_class(**_minimal_kwargs(op_class))
-    with pytest.raises(NotImplementedError):
-        op.emit_mlir(ctx=None)
-
-
-@pytest.mark.parametrize("op_class,expected_effect,expected_bufops", _IMPLEMENTED_EMIT_LIST, ids=_IMPLEMENTED_IDS)
+@pytest.mark.parametrize("op_class,expected_effect,expected_bufops", CATALOG, ids=_ids())
 def test_emit_mlir_is_overridden(op_class, expected_effect, expected_bufops):
-    """Ops in _IMPLEMENTED_EMIT must define emit_mlir directly on the class (not inherited)."""
+    """Every catalog op must define emit_mlir directly on the class."""
     assert "emit_mlir" in op_class.__dict__, (
-        f"{op_class.__name__} is listed in _IMPLEMENTED_EMIT but does not define "
-        "emit_mlir as a real class method (it would fall back to the base stub)."
+        f"{op_class.__name__} does not define emit_mlir as a real class method (it would fall back to the base stub)."
     )

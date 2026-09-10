@@ -354,16 +354,16 @@ jobs:
             uv pip install -v .
           fi
 
-      - name: Require CUDA Tile IR 13.3 Python bindings and runtime
+      - name: Require CUDA Tile IR 13.4 Python bindings and runtime
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
           if [[ -z "${TILELANG_CUDA_TILE_PYTHONPATH:-}" ]]; then
-            echo "::error::CUDA Tile IR Python bindings are required for CI. Set TILELANG_CUDA_TILE_PYTHONPATH to an NVIDIA/cuda-tile v13.3.0 build configured with CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON (https://github.com/NVIDIA/cuda-tile/releases/tag/v13.3.0)."
+            echo "::error::CUDA Tile IR Python bindings are required for CI. Set TILELANG_CUDA_TILE_PYTHONPATH to an NVIDIA/cuda-tile v13.4.0 build configured with CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON (https://github.com/NVIDIA/cuda-tile/releases/tag/v13.4.0)."
             exit 1
           fi
           CUDA_TILE_PYTHONPATH="${TILELANG_CUDA_TILE_PYTHONPATH}"
-          if [[ ! -f "${CUDA_TILE_PYTHONPATH}/cuda_tile/_mlir/dialects/cuda_tile.py" ]]; then
-            echo "::error::CUDA Tile IR Python bindings are required for CI. Set TILELANG_CUDA_TILE_PYTHONPATH to an NVIDIA/cuda-tile v13.3.0 build configured with CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON (https://github.com/NVIDIA/cuda-tile/releases/tag/v13.3.0)."
+          if [[ ! -f "${CUDA_TILE_PYTHONPATH}/cuda_tile/_mlir/dialects/cuda_tile_ops.py" ]]; then
+            echo "::error::CUDA Tile IR Python bindings are required for CI. Set TILELANG_CUDA_TILE_PYTHONPATH to an NVIDIA/cuda-tile v13.4.0 build configured with CUDA_TILE_ENABLE_BINDINGS_PYTHON=ON (https://github.com/NVIDIA/cuda-tile/releases/tag/v13.4.0)."
             exit 1
           fi
           echo "PYTHONPATH=${CUDA_TILE_PYTHONPATH}" | tee -a "${GITHUB_ENV}"

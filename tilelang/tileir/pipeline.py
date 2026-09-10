@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from dataclasses import replace
 
 from tilelang.tileir.errors import TileIRLoweringError
 from tilelang.tileir.ir.builder import IRBuilder
@@ -21,7 +22,7 @@ from tilelang.tileir.passes.dataflow import dataflow_pass
 from tilelang.tileir.passes.token_order import token_order_pass
 from tilelang.tileir.passes.loop_carry import loop_carry_pass
 from tilelang.tileir.passes.gemm_orientation import gemm_orientation_pass
-from tilelang.tileir.passes.dynamic_atomic_validation import dynamic_atomic_validation_pass
+from tilelang.tileir.scratch import scratch_bytes_for_primfunc
 
 __all__ = ["build_tileir_module", "lower_single_kernel_to_tileir"]
 
@@ -162,7 +163,7 @@ def build_tileir_module(
     pass_ctx.results["target_arch"] = arch
     pass_ctx = run_pipeline(
         root,
-        [dynamic_atomic_validation_pass, gemm_orientation_pass, dataflow_pass, token_order_pass, loop_carry_pass],
+        [gemm_orientation_pass, dataflow_pass, token_order_pass, loop_carry_pass],
         ctx=pass_ctx,
     )
 
@@ -257,7 +258,7 @@ def lower_single_kernel_to_tileir(
     launch_metadata = extract_launch_metadata(prim_func)
     argument_names = _argument_names(prim_func)
 
-    return assemble_tileir_module(
+    artifact = assemble_tileir_module(
         mlir_module,
         kernel_name=kernel_name,
         target=target,
@@ -266,3 +267,4 @@ def lower_single_kernel_to_tileir(
         argument_names=argument_names,
         opt_level=opt_level,
     )
+    return replace(artifact, scratch_bytes_per_block=scratch_bytes_for_primfunc(prim_func))

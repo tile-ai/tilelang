@@ -57,8 +57,8 @@ from ._base import (
 )
 from .expr import lower_expr
 from .parallel import (
-    _compute_partition_indices,
     _compute_view_indices,
+    _compute_tma_view_indices,
     _extract_tir_region_indices,
     _prove_region_in_bounds,
     _region_tile_shape,
@@ -415,9 +415,15 @@ def _lower_tma_copy(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, build
     # Resolve real partition indices from TIR source.
     src_tir_indices = _extract_tir_region_indices(stmt.call_args, 0)
     dst_tir_indices = _extract_tir_region_indices(stmt.call_args, 1)
-    src_idx = _compute_partition_indices(src_tir_indices, tile_shape, scope, builder, what="tma_copy src")
+    src_idx, src_elem = _compute_tma_view_indices(src_tir_indices, tile_shape, scope, builder, what="tma_copy src")
     _dst_shape_for_idx = dst_tile_shape if dst_tile_shape else tile_shape
-    dst_idx = _compute_partition_indices(dst_tir_indices, _dst_shape_for_idx, scope, builder, what="tma_copy dst")
+    dst_idx, dst_elem = _compute_tma_view_indices(dst_tir_indices, _dst_shape_for_idx, scope, builder, what="tma_copy dst")
+    for role, buf, elementwise in (("src", src_val, src_elem), ("dst", dst_val, dst_elem)):
+        if elementwise and buf.type.space != MemSpace.GLOBAL:
+            raise _UnsupportedTileIRNode(
+                f"tma_copy {role}: shared/register tile slices require an exactly divisible start offset; "
+                "element-offset views are supported only for global buffers."
+            )
 
     op = TmaCopy(
         src=src_val,
@@ -426,6 +432,8 @@ def _lower_tma_copy(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, build
         dst_tile_shape=dst_tile_shape,
         src_indices=src_idx,
         dst_indices=dst_idx,
+        src_elem_view=src_elem,
+        dst_elem_view=dst_elem,
     )
     builder.create(op)
 
@@ -779,6 +787,7 @@ def _lower_cummax(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder
     # are ordered by TKO tokens in this backend, so like the other waits
     # above this is a scheduling hint that emits nothing (Barrier is a no-op).
     "tl.wait_wgmma",
+    "tl.tma_store_wait",
 )
 def _lower_barrier_op(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: IRBuilder) -> None:
     builder.create(Barrier())

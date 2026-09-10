@@ -30,11 +30,11 @@ def cuda_target_for_test() -> Target:
 def artifact_compatibility(
     *,
     runtime_version: str = "1.5.0",
-    tileiras_version: str = "13.3.0",
+    tileiras_version: str = "13.4.0",
 ) -> TileIRArtifactCompatibility:
     return TileIRArtifactCompatibility(
         target_arch="sm_120",
-        cuda_tile_ir_version="13.3",
+        cuda_tile_ir_version="13.4",
         cuda_tile_runtime_version=runtime_version,
         tileiras_version=tileiras_version,
     )

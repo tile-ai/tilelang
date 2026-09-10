@@ -73,7 +73,7 @@ def test_tileir_lowers_scalar_and_guard(monkeypatch, tmp_path):
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
 
     def fake_assemble(tileir_module, *, kernel_name, target, toolchain, launch_metadata=None, argument_names=(), opt_level=3):
@@ -465,7 +465,7 @@ def test_tileir_rejects_dequant_gemv_thread_allreduce():
     # across threadIdx.x via `tvm_thread_allreduce`. The tile backend executes tiles
     # collectively and cannot represent per-thread lanes, so it must reject this kernel.
     #
-    # The pipeline rejects the kernel for "decode_i4u_to_f16 not yet lowered"
+    # The pipeline rejects nested thread bindings inside the SIMT region
     # before reaching tvm_thread_allreduce —
     # the key safety contract is that the kernel is REJECTED (not silently miscompiled),
     # regardless of which unsupported construct is caught first.
@@ -514,10 +514,7 @@ def test_tileir_lowers_deepseek_v4_fp8_act_quant(round_scale):
 
 
 @pytest.mark.xfail(
-    reason="data-dependent global gather K[bz, by, column_index[k+i], j] is not "
-    "expressible in cuTile's collective tile model: make_partition_view and "
-    "load_view_tko take one scalar partition index per dimension and cannot "
-    "represent a per-row indirect gather.",
+    reason="minference's staged gather from column_index[k+i] is not yet supported; its warp-specialized schedule also needs numerical fixes.",
     strict=True,
     raises=_UnsupportedTileIRNode,
 )
@@ -643,7 +640,7 @@ def test_tileir_lowers_mla_decode_split_let_bound_region_extents(monkeypatch, tm
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
 
     def fake_assemble(tileir_module, *, kernel_name, target, toolchain, launch_metadata=None, argument_names=(), opt_level=3):
@@ -712,7 +709,7 @@ def test_tileir_lowers_mla_persistent_split_grid_sync(monkeypatch, tmp_path):
     toolchain = checks.TileIRToolchain(
         cuda_tile_ir_module=checks.CUDA_TILE_IR_MLIR_MODULE,
         tileiras_path=tmp_path / "tileiras",
-        tileiras_version="tileiras 13.3",
+        tileiras_version="tileiras 13.4",
     )
 
     def fake_assemble(tileir_module, *, kernel_name, target, toolchain, launch_metadata=None, argument_names=(), opt_level=3):

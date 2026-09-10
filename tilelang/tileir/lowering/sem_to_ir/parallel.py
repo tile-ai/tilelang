@@ -1185,31 +1185,20 @@ def _extract_tir_region_indices(call_args: tuple[Any, ...], region_index: int) -
     return None
 
 
-def _compute_partition_indices(
+def _compute_tma_view_indices(
     tir_indices: tuple | None,
     tile_shape: tuple,
     scope: LoweringScope,
     builder: IRBuilder,
     *,
-    what: str = "partition view",
-) -> tuple:
-    """Compute exact tile-partition indices without a partition-0 fallback.
-
-    ``TmaCopy`` cannot encode the element-offset mode supported by ``Copy``.
-    Reuse the authoritative view-index computation, but reject any start that
-    requires element offsets rather than silently addressing partition zero.
-    """
+    what: str = "tma_copy",
+) -> tuple[tuple, bool]:
+    """Resolve TMA copy indices without silently assuming partition zero."""
     if tir_indices is None:
         raise _UnsupportedTileIRNode(f"{what}: raw TIR region indices are unavailable; refusing to assume partition 0.")
     if len(tir_indices) != len(tile_shape):
         raise _UnsupportedTileIRNode(f"{what}: region index rank {len(tir_indices)} does not match tile rank {len(tile_shape)}.")
-
-    indices, elementwise = _compute_view_indices(tir_indices, tile_shape, scope, builder, what=what)
-    if elementwise:
-        raise _UnsupportedTileIRNode(
-            f"{what} start offset is not exactly divisible by its tile extent; TmaCopy has no element-offset indexing mode."
-        )
-    return indices
+    return _compute_view_indices(tir_indices, tile_shape, scope, builder, what=what)
 
 
 def _compute_view_indices(

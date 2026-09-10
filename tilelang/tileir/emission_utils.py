@@ -179,7 +179,7 @@ def _reshape_tile_to(ct: Any, tile: Any, target_shape: list, loc: Any) -> Any:
     Parameters
     ----------
     ct :
-        ``cuda_tile._mlir.dialects.cuda_tile`` builder.
+        ``cuda_tile._mlir.dialects.cuda_tile_ops`` builder.
     tile :
         ``ct.Tile`` value to reshape.
     target_shape :
@@ -965,7 +965,7 @@ def _build_binary_op_table() -> dict:
     # We import the enums lazily (inside the lambdas) to avoid importing
     # cuda_tile at module load time.
     def _cmp(pred_name, ct, l, r, loc, signedness):
-        from cuda_tile._mlir.dialects.cuda_tile import ComparisonPredicates
+        from cuda_tile._mlir.dialects.cuda_tile_ops import ComparisonPredicates
 
         pred = getattr(ComparisonPredicates, pred_name)
         return ct.cmp(pred, l, r, signedness, loc=loc)

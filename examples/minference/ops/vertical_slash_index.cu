@@ -1,13 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
-#include <assert.h>
-
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <pybind11/numpy.h>
-#include <torch/extension.h>
-
 #include <cuda.h>
 
 __device__ void save_blocks(int* block_offset, int range_start, int range_end, int block_size, int& block_count) {
@@ -114,46 +107,4 @@ void convert_vertical_slash_indexes_64x64(
         block_count, block_offset, column_count, column_index,
         N_HEADS, N_ROWS, BLOCK_SIZE_M, BLOCK_SIZE_N, NNZ_V, NNZ_S
     );
-}
-
-std::vector<at::Tensor> convert_vertical_slash_indexes(
-    torch::Tensor seqlens,           // [BATCH, ]
-    torch::Tensor vertical_indexes,  // [BATCH, N_HEADS, NNZ_V]
-    torch::Tensor slash_indexes,     // [BATCH, N_HEADS, NNZ_S]
-    int context_size,
-    int block_size_M,
-    int block_size_N
-) {
-    assert(block_size_M == 64);
-    assert(block_size_N == 64);
-
-    cudaSetDevice(seqlens.get_device());
-
-    int batch_size = slash_indexes.size(0);
-    int num_heads = slash_indexes.size(1);
-    int nnz_slash = slash_indexes.size(2);
-    int nnz_vertical = vertical_indexes.size(2);
-    int num_rows = (context_size + block_size_M - 1) / block_size_M;
-
-    torch::Tensor block_count = torch::zeros({batch_size, num_heads, num_rows}, seqlens.options());
-    torch::Tensor block_offset = torch::zeros({batch_size, num_heads, num_rows, nnz_slash}, seqlens.options());
-    torch::Tensor column_count = torch::zeros({batch_size, num_heads, num_rows}, seqlens.options());
-    torch::Tensor column_index = torch::zeros({batch_size, num_heads, num_rows, nnz_vertical}, seqlens.options());
-
-    convert_vertical_slash_indexes_64x64(
-        seqlens.data_ptr<int>(),
-        vertical_indexes.data_ptr<int>(),
-        slash_indexes.data_ptr<int>(),
-        block_count.data_ptr<int>(),
-        block_offset.data_ptr<int>(),
-        column_count.data_ptr<int>(),
-        column_index.data_ptr<int>(),
-        batch_size,
-        num_heads,
-        num_rows,
-        nnz_vertical,
-        nnz_slash
-    );
-
-    return { block_count, block_offset, column_count, column_index };
 }

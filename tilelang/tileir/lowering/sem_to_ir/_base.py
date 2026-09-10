@@ -148,7 +148,7 @@ def _is_unsigned_dtype(dtype_str: str) -> bool:
 
 
 def _buffers_requiring_alloca(sem_kernel: SemanticKernel) -> set[str]:
-    """SHARED buffers that must be demoted to ``alloca global`` scratch.
+    """SHARED buffers that must be demoted to per-tile-block scratch.
 
     A SHARED buffer written or atomically updated at a DATA-DEPENDENT index
     (the index expression itself loads from a buffer, e.g. the histogram
@@ -302,7 +302,7 @@ class LoweringScope:
 
         # TIR PrimExpr bindings for let-bound variables.
         # Maps var_name → raw TIR PrimExpr (the RHS of the let).
-        # Populated by _lower_let so that _compute_partition_indices can
+        # Populated by _lower_let so that _compute_view_indices can
         # substitute let-bound variables (e.g. m_start = bx * block_M)
         # when computing partition indices for Copy/Load ops.
         self._tir_expr_bindings: dict[str, Any] = {}
@@ -365,7 +365,7 @@ class LoweringScope:
 
         # Populate kernel-local alloc buffers. SHARED buffers with
         # tile-inexpressible access patterns (data-dependent scatter/atomic
-        # indices) are DEMOTED to addressable ``alloca global`` scratch: their
+        # indices) are DEMOTED to addressable per-tile-block scratch: their
         # Value gets GLOBAL space so every pointer path (gather / scatter /
         # ptr atomics) applies unchanged; emit materializes the alloca.
         _alloca_names = _buffers_requiring_alloca(sem_kernel)
@@ -491,7 +491,7 @@ class LoweringScope:
     def get_scalar_expr_binding(self, key: Any) -> Any | None:
         """Return the raw TIR PrimExpr for a let-bound variable, or None.
 
-        Populated by _lower_let so that _compute_partition_indices
+        Populated by _lower_let so that _compute_view_indices
         can substitute let-bound variables (e.g. ``m_start = bx * block_M``)
         and then call ``_try_divide_expr`` on the substituted expression to
         derive the correct tile-level partition index.

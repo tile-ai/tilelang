@@ -13,7 +13,7 @@ from tvm import tirx
 
 
 TILEIR_CACHE_FORMAT = "tilelang.tileir.artifact"
-TILEIR_CACHE_FORMAT_VERSION = 2
+TILEIR_CACHE_FORMAT_VERSION = 3
 TILEIR_CACHE_FILENAME = "kernel.tileir.json"
 
 
@@ -92,8 +92,12 @@ class TileIRLoweringResult:
     temporary_buffers: tuple[TileIRTemporaryBuffer, ...] = ()
     kernels: tuple[TileIRLoweringResult, ...] = ()
     compatibility: TileIRArtifactCompatibility | None = None
+    # Nonzero adds one hidden uint8 tensor after the public entry arguments.
+    scratch_bytes_per_block: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.scratch_bytes_per_block) is not int or self.scratch_bytes_per_block < 0 or self.scratch_bytes_per_block % 16:
+            raise ValueError("TileIR scratch size must be a non-negative multiple of 16 bytes.")
         if self.argument_scalar_flags and len(self.argument_scalar_flags) != len(self.argument_names):
             raise ValueError(
                 "TileIR argument metadata must contain one scalar flag per ordered argument: "
@@ -157,6 +161,7 @@ def _encode_artifact(artifact: TileIRLoweringResult) -> dict[str, Any]:
             "dynamic_smem_bytes": artifact.launch_metadata.dynamic_smem_bytes,
         },
         "argument_names": list(artifact.argument_names),
+        "scratch_bytes_per_block": artifact.scratch_bytes_per_block,
         "argument_scalar_flags": list(artifact.argument_scalar_flags),
         "argument_refs": [{"kind": ref.kind, "index": ref.index} for ref in artifact.argument_refs],
         "temporary_buffers": [
@@ -283,6 +288,7 @@ def _decode_artifact(
         temporary_buffers=tuple(_decode_temporary_buffer(temporary) for temporary in _require_list(payload, "temporary_buffers")),
         kernels=tuple(_decode_artifact(kernel) for kernel in _require_list(payload, "kernels")),
         compatibility=compatibility,
+        scratch_bytes_per_block=payload.get("scratch_bytes_per_block"),
     )
 
 

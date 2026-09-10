@@ -27,9 +27,10 @@ from tilelang.tileir.ir.ops._base import (
 )
 
 
-def _collect_written_global_bufs(body: Block) -> list:
-    """Return the unique GLOBAL buffer ``Value``s written by top-level
-    WRITE/READWRITE ops directly in *body* (does not recurse into nested
+def _collect_loop_token_bufs(body: Block, carried_tiles=()) -> list:
+    """Return GLOBAL buffers written or read to produce a carried local tile.
+
+    Inspect WRITE/READWRITE ops directly in *body* (does not recurse into nested
     if/loop blocks -- mirrors the scope of the loop-carried-tile analysis
     elsewhere in this module).
 
@@ -41,13 +42,18 @@ def _collect_written_global_bufs(body: Block) -> list:
     """
     written: list = []
     seen: set[int] = set()
+    carried_ids = {id(tile) for tile in carried_tiles}
     for op in body.ops:
         effect = getattr(op, "memory_effect", Effect.NONE)
         if effect not in (Effect.WRITE, Effect.READWRITE):
             continue
-        effects = op.buffer_effects() if hasattr(op, "buffer_effects") else ()
+        effects = tuple(op.buffer_effects()) if hasattr(op, "buffer_effects") else ()
+        # A load that writes a live-out local tile also leaves an op token
+        # consumed by later copies. Export its source token with the tile;
+        # otherwise the dependency refers to an SSA value inside this loop.
+        writes_carried_tile = any(id(buf) in carried_ids and eff in (Effect.WRITE, Effect.READWRITE) for buf, eff in effects)
         for buf, buffer_effect in effects:
-            if buffer_effect not in (Effect.WRITE, Effect.READWRITE):
+            if buffer_effect not in (Effect.WRITE, Effect.READWRITE) and not writes_carried_tile:
                 continue
             # Only thread tokens for GLOBAL buffers (non-GLOBAL live in _tile_map).
             space = getattr(getattr(buf, "type", None), "space", None)
@@ -236,7 +242,7 @@ class Loop(TileOp, opcode="loop", effect=Effect.NONE):
 
         # Thread last-op and last-store tokens for written global buffers to
         # preserve cross-iteration RAW, WAR, and WAW dependencies.
-        _written_global_bufs: list[Any] = _collect_written_global_bufs(self.body)
+        _written_global_bufs: list[Any] = _collect_loop_token_bufs(self.body, tile_keys)
 
         # Each written buffer carries separate last-op and last-store tokens.
         _tok_type_mlir = None
@@ -468,7 +474,7 @@ class Loop(TileOp, opcode="loop", effect=Effect.NONE):
 
         The counter is always threaded as an iter-arg, plus TWO further
         iter-args (LAST_OP, LAST_STORE tokens) per GLOBAL buffer written
-        directly in the body (see ``_collect_written_global_bufs`` /
+        directly in the body (see ``_collect_loop_token_bufs`` /
         ``_emit_for``'s matching pipelined-loop token machinery, which this
         mirrors) so that ordering established by writes inside the loop
         survives the loop's structured region regardless of which iteration
@@ -591,7 +597,7 @@ class Loop(TileOp, opcode="loop", effect=Effect.NONE):
         # Thread a per-buffer ordering token as an ADDITIONAL LoopOp iter-arg
         # for every GLOBAL buffer written directly in the body -- mirrors
         # `_emit_for`'s pipelined-loop token machinery (see
-        # `_collect_written_global_bufs`).  Without this, a write to a
+        # `_collect_loop_token_bufs`).  Without this, a write to a
         # GLOBAL buffer inside a break-capable loop would have its ordering
         # token captured only in `ctx._token_map` during the body walk, then
         # discarded by the snapshot/restore below once the LoopOp's region
@@ -603,7 +609,7 @@ class Loop(TileOp, opcode="loop", effect=Effect.NONE):
         # written buffer (LAST_OP, LAST_STORE) exactly like `_emit_for`, even
         # though only LAST_OP is consulted via `ctx._token_map`; this remains
         # symmetric with `_emit_for`'s LAST_OP/LAST_STORE contract.
-        _written_global_bufs = _collect_written_global_bufs(self.body)
+        _written_global_bufs = _collect_loop_token_bufs(self.body)
         _tok_type_mlir = None
         _token_init_mlir: list[Any] = []
         for _wbuf in _written_global_bufs:
