@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from tvm import tirx
 
-from tilelang.language.kernel import KernelLaunchFrame, launch_kernel
+from tilelang.language.kernel import KernelLaunchFrame, kernel_launch_factory, launch_kernel
 
 __all__ = ["Kernel"]
 
 
+@kernel_launch_factory
 def Kernel(
     *blocks: int | tirx.PrimExpr,
     prelude: str | None = None,

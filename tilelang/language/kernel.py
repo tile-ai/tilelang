@@ -373,6 +373,22 @@ class KernelLaunchFrame(TIRFrame):
 # ---------------------------------------------------------------------------
 
 
+_KERNEL_LAUNCH_FACTORY_ATTR = "__tilelang_kernel_launch__"
+
+
+def kernel_launch_factory(func):
+    """Mark ``func`` as a launch factory: a callable used as ``with func(...)``
+    to open a kernel launch. Every dialect's ``Kernel`` (and ``ClusterKernel``)
+    carries this mark so the eager JIT rewriter can find the launch regardless
+    of which dialect or alias the user went through."""
+    setattr(func, _KERNEL_LAUNCH_FACTORY_ATTR, True)
+    return func
+
+
+def is_kernel_launch_factory(obj) -> bool:
+    return getattr(obj, _KERNEL_LAUNCH_FACTORY_ATTR, False) is True
+
+
 def launch_kernel(
     blocks: tuple[int | tirx.PrimExpr, ...],
     *,
@@ -411,6 +427,7 @@ def launch_kernel(
     return _ffi_api.KernelLaunch(blocks, _normalize_threads(threads), attrs)
 
 
+@kernel_launch_factory
 def Kernel(*blocks: int | tirx.PrimExpr) -> KernelLaunchFrame:
     """Construct a kernel launch frame: a grid of tile programs.
 
@@ -437,6 +454,7 @@ def Kernel(*blocks: int | tirx.PrimExpr) -> KernelLaunchFrame:
     return launch_kernel(blocks)
 
 
+@kernel_launch_factory
 def ClusterKernel(
     *blocks: int | tirx.PrimExpr,
     cluster_dims: int | tuple[int, int, int] | list[int],
