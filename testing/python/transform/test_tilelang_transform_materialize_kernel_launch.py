@@ -11,6 +11,7 @@ import inspect
 import pytest
 import tilelang as tl
 import tilelang.language as T
+import tilelang
 import tilelang.testing
 from tilelang import tvm
 from tvm.tirx.stmt_functor import post_order_visit
@@ -232,6 +233,35 @@ def test_get_thread_extent_with_threads_at_trace_time():
 
     (store,) = _collect(main, tvm.tirx.BufferStore)
     assert int(store.value) == 128
+
+
+class _TraceFailure(Exception):
+    pass
+
+
+def test_failed_trace_unwinds_launch_frames():
+    """An exception inside T.Kernel must leave no stale launch frame behind,
+    otherwise the next trace sees the previous kernel's KernelLaunchFrame."""
+    with pytest.raises(_TraceFailure):
+
+        @T.prim_func
+        def failing(A: T.Tensor((16,), "int32")):
+            with T.Kernel(1, threads=128):
+                raise _TraceFailure()
+
+    assert T.KernelLaunchFrame.Current() is None
+
+    @tilelang.jit
+    def failing_jit(A):
+        A: T.Tensor[[16], T.int32]
+        with T.Kernel(1, threads=128):
+            raise _TraceFailure()
+
+    import torch
+
+    with pytest.raises(_TraceFailure):
+        failing_jit.get_tir(torch.zeros(16, dtype=torch.int32))
+    assert T.KernelLaunchFrame.Current() is None
 
 
 def _cluster_kernel():
