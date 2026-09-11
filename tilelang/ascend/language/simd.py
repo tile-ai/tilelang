@@ -88,6 +88,11 @@ _ELEM_BITS = {
 }
 
 
+# Broadcast loads replicate one element whose width the dist suffix names.
+_BRC_DIST_BITS = {"BRC_B8": 8, "BRC_B16": 16, "BRC_B32": 32}
+_UNSIGNED_OF_BITS = {8: "uint8", 16: "uint16", 32: "uint32", 64: "uint64"}
+
+
 def _vreg_lanes(dtype_str: DType) -> int:
     key = str(dtype_str)
     if key == "bool":
@@ -299,14 +304,36 @@ def vld(addr, dist="NORM"):
 
     addr can be a BufferLoad auto-wrapped as tl.access_ptr. Express address
     offsets in ``addr``.
+
+    A ``BRC_B8/B16/B32`` broadcast replicates one element of the width named by
+    the suffix, widening the result past the source buffer's element type when
+    the two differ (``BRC_B16`` over a ``uint8`` buffer broadcasts a 16-bit
+    element, not a byte). Every other distribution takes its element width from
+    the source buffer; their ``_B*`` suffixes describe the data being loaded and
+    must agree with it.
     """
     if isinstance(addr, BufferLoad):
         elem_dtype = str(addr.buffer.dtype)
+        elem_bits = _ELEM_BITS.get(elem_dtype)
         lanes = _vreg_lanes(elem_dtype)
         extent = lanes
         if isinstance(dist, str):
-            if dist.startswith("BRC_"):
-                extent = 1
+            brc_bits = _BRC_DIST_BITS.get(dist)
+            if brc_bits is not None:
+                # Footprint is one element of the suffix width, expressed in
+                # source-buffer elements.
+                if elem_bits is None or brc_bits % elem_bits:
+                    raise ValueError(
+                        f"vld: dist {dist!r} broadcasts a {brc_bits}-bit element, which does not "
+                        f"fit the {elem_dtype!r} source buffer. Broadcast through a view of the "
+                        f"matching element width instead."
+                    )
+                extent = brc_bits // elem_bits
+                if brc_bits != elem_bits:
+                    elem_dtype = _UNSIGNED_OF_BITS[brc_bits]
+                    lanes = _vreg_lanes(elem_dtype)
+            elif dist.startswith("BRC_"):
+                raise ValueError(f"vld: `dist` must be one of {tuple(_BRC_DIST_BITS)} for a broadcast load, got {dist!r}")
             elif dist.startswith("E2B_"):
                 extent = 8
             elif dist == "BLK":
