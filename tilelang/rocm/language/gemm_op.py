@@ -58,7 +58,6 @@ def gemm(
         transpose_B,
         policy,
         clear_accum,
-        0,
         None,
         annotations=ann,
     )

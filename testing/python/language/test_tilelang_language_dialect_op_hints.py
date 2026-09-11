@@ -49,6 +49,7 @@ def test_each_dialect_declares_its_own_op_hints():
         "copy": {"disable_tma", "eviction_policy", "prefer_instruction"},
         "im2col": {"eviction_policy"},
         "gemm": {"mbar"},
+        "gemm_sp": {"wg_wait"},
         "atomic_add": {"use_tma"},
         "Parallel": {"prefer_async"},
         "unroll": {"unroll_factor"},
@@ -109,6 +110,26 @@ def test_cuda_loop_hints_are_recorded_as_loop_annotations():
     post_order_visit(main.body, visit)
     assert bool(annotations["parallel_prefer_async"])
     assert int(annotations["pragma_unroll_factor"]) == 2
+
+
+def test_cuda_wgmma_gemm_records_wg_wait_annotation():
+    """wgmma_gemm defers the warpgroup wait: wg_wait=-1 must ride the tile-op
+    annotations now that the positional slot is gone."""
+
+    @T.prim_func
+    def main(A: T.Tensor((64, 64), "float16"), B: T.Tensor((64, 64), "float16"), C: T.Tensor((64, 64), "float32")):
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((64, 64), "float16")
+            b = T.alloc_shared((64, 64), "float16")
+            c = T.alloc_fragment((64, 64), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            T.clear(c)
+            T.wgmma_gemm(a, b, c)
+            T.copy(c, C)
+
+    ann = _tileop_annotations(main, "tl.tileop.wgmma_gemm")
+    assert int(ann["wg_wait"]) == -1
 
 
 def test_rocm_gemm_k_pack_traces_and_validates():

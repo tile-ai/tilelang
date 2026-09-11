@@ -20,6 +20,7 @@ from tilelang.cuda.language import (  # noqa: F401
     atomic_add,
     copy,
     gemm,
+    gemm_sp,
     im2col,
     unroll,
 )

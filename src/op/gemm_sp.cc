@@ -116,14 +116,14 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->stride_B = args[13].as<IntImm>().value()->value;
   node->offset_A = args[14].as<IntImm>().value()->value;
   node->offset_B = args[15].as<IntImm>().value()->value;
-  if (args.size() > 16) {
-    node->kPack = args[16].as<IntImm>().value()->value;
-    if (node->kPack != 1 && node->kPack != 2) {
-      ICHECK(false) << "kPack must be 1 or 2";
-    }
-  }
-  if (args.size() > 17) {
-    node->wg_wait = args[17].as<IntImm>().value()->value;
+  // wg_wait is a Hopper warpgroup knob set by the CUDA dialect; it rides in
+  // the annotations rather than the positional call protocol. (The former
+  // kPack slot was parsed but never consumed by any sparse-GEMM lowering and
+  // is gone.)
+  if (auto val = annotations.Get("wg_wait")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "wg_wait annotation must be IntImmNode";
+    node->wg_wait = int_val->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
     const auto *int_val = val->as<IntImmNode>();

@@ -113,8 +113,12 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     node->kPack_ = int_val->value;
     ICHECK(node->kPack_ == 1 || node->kPack_ == 2) << "kPack must be 1 or 2";
   }
-  if (args.size() > 14) {
-    node->wgWait_ = args[14].as<IntImm>().value()->value;
+  // wg_wait is a Hopper warpgroup knob set by the CUDA dialect; like k_pack
+  // it rides in the annotations rather than the positional call protocol.
+  if (auto val = annotations.Get("wg_wait")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "wg_wait annotation must be IntImmNode";
+    node->wgWait_ = int_val->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
     const auto *int_val = val->as<IntImmNode>();
@@ -126,19 +130,19 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
     node->isTcgen05_ = int_val->value != 0;
   }
-  if (args.size() > 15 && args[15]->IsInstance<BufferLoadNode>()) {
-    node->mbar_ = Downcast<BufferLoad>(args[15]);
+  if (args.size() > 14 && args[14]->IsInstance<BufferLoadNode>()) {
+    node->mbar_ = Downcast<BufferLoad>(args[14]);
   }
   node->cCoords_ = Array<PrimExpr>(
-      {args[16].as<PrimExpr>().value(), args[17].as<PrimExpr>().value()});
+      {args[15].as<PrimExpr>().value(), args[16].as<PrimExpr>().value()});
+  if (args.size() > 17) {
+    node->sfaRegion_ = NormalizeToBufferRegion(args[17]);
+  }
   if (args.size() > 18) {
-    node->sfaRegion_ = NormalizeToBufferRegion(args[18]);
+    node->sfbRegion_ = NormalizeToBufferRegion(args[18]);
   }
   if (args.size() > 19) {
-    node->sfbRegion_ = NormalizeToBufferRegion(args[19]);
-  }
-  if (args.size() > 20) {
-    node->sfKStart_ = args[20].as<PrimExpr>().value();
+    node->sfKStart_ = args[19].as<PrimExpr>().value();
   }
   node->annotations_ = annotations;
   data_ = std::move(node);

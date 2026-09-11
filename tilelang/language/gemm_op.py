@@ -29,15 +29,14 @@ def _gemm_impl(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    wg_wait: int = 0,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
     Returns a call_intrin handle for the given op key. Backend lowering knobs
-    such as ``k_pack`` ride in ``annotations``; the dialect wrappers put them
-    there.
+    such as ``k_pack`` and ``wg_wait`` ride in ``annotations``; the dialect
+    wrappers and the CUDA gemm variants put them there.
     """
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
@@ -141,7 +140,6 @@ def _gemm_impl(
         stride_b,
         offset_a,
         offset_b,
-        wg_wait,
         mbar_arg,
         C_coords[0],
         C_coords[1],
@@ -196,7 +194,6 @@ def gemm(
         transpose_B,
         policy,
         clear_accum,
-        0,
         None,
         annotations=annotations,
     )
@@ -223,6 +220,9 @@ def wgmma_gemm(
     compilation fails instead of silently falling back to MMA.
     """
 
+    ann = _normalize_annotations(annotations)
+    # Explicit async WGMMA: never auto-emit the warpgroup wait.
+    ann.setdefault("wg_wait", -1)
     return _gemm_impl(
         "tl.tileop.wgmma_gemm",
         A,
@@ -232,9 +232,8 @@ def wgmma_gemm(
         transpose_B,
         policy,
         clear_accum,
-        -1,
         None,
-        annotations=annotations,
+        annotations=ann,
     )
 
 
@@ -282,7 +281,6 @@ def tcgen05_gemm(
         transpose_B,
         policy,
         clear_accum,
-        0,
         mbar,
         annotations=ann,
     )
@@ -348,6 +346,8 @@ def tcgen05_gemm_blockscaled(
     ann = {} if ann is None else dict(ann)
     ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
     ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
+    if wg_wait != 0:
+        ann["wg_wait"] = wg_wait
 
     # Re-read normalized regions below after let legalization.
 
@@ -441,13 +441,12 @@ def tcgen05_gemm_blockscaled(
         stride_b,
         offset_a,
         offset_b,
-        wg_wait,
         mbar,
         C_coords[0],
         C_coords[1],
-        SFA_arg,  # arg 19
-        SFB_arg,  # arg 20
-        k_start,  # arg 21
+        SFA_arg,
+        SFB_arg,
+        k_start,
         annotations=ann,
     )
 
@@ -558,7 +557,6 @@ def mma_gemm_blockscaled(
         stride_b,
         offset_a,
         offset_b,
-        0,  # wg_wait
         tirx.const(0, dtype="int32"),  # no mbarrier for synchronous mma.sync
         C_coords[0],
         C_coords[1],

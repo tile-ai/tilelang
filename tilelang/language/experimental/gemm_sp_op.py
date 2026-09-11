@@ -29,12 +29,12 @@ def _gemm_sp_impl(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    wg_wait: int = 0,
     annotations: dict | None = None,
 ) -> tirx.Call:
     """Shared sparse GEMM implementation.
 
-    Returns a call_intrin handle for the given op key.
+    Returns a call_intrin handle for the given op key. Backend lowering knobs
+    such as ``wg_wait`` ride in ``annotations``.
     """
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
@@ -118,11 +118,6 @@ def _gemm_sp_impl(
         stride_b,
         offset_a,
         offset_b,
-        # k_pack call slot: parsed and validated on the C++ side but never
-        # consumed by any sparse-GEMM lowering; kept at 1 for protocol
-        # stability.
-        1,
-        wg_wait,
         annotations=annotations,
     )
 
@@ -137,7 +132,6 @@ def gemm_sp(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    wg_wait: int = 0,
     annotations: dict | None = None,
 ) -> tirx.Call:
     """TileLang sparse GEMM operator.
@@ -159,8 +153,11 @@ def gemm_sp(
         transpose_B: Whether to transpose B. Defaults to False.
         policy: Warp partition policy. Defaults to GemmSPWarpPolicy.Square.
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
-        wg_wait: Warp group wait count. Defaults to 0.
-        annotations: Additional annotations.
+        annotations: Additional annotations. The CUDA dialect
+            (``tilelang.cuda.language.gemm_sp``) additionally exposes
+            ``wg_wait`` (Hopper warpgroup wait count) as a typed keyword. The
+            former ``k_pack`` parameter was parsed but never consumed by any
+            sparse-GEMM lowering and has been removed.
 
     Returns:
         tirx.Call: A handle to the sparse GEMM operation.
@@ -176,7 +173,6 @@ def gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        wg_wait,
         annotations=annotations,
     )
 
@@ -218,6 +214,9 @@ def wgmma_gemm_sp(
     Returns:
         tirx.Call: A handle to the sparse GEMM operation.
     """
+    ann = dict(annotations) if annotations is not None else {}
+    # Explicit async WGMMA SP: never auto-emit the warpgroup wait.
+    ann.setdefault("wg_wait", -1)
     return _gemm_sp_impl(
         "tl.tileop.wgmma_gemm_sp",
         A_sparse,
@@ -229,8 +228,7 @@ def wgmma_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        -1,
-        annotations=annotations,
+        annotations=ann,
     )
 
 
@@ -284,6 +282,5 @@ def tcgen05_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        0,
         annotations=annotations,
     )

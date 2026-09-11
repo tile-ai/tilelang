@@ -54,7 +54,7 @@ from tilelang.language.kernel import ClusterKernel, CUDASourceCodeKernel  # noqa
 # are recorded on the op and consumed by the CUDA pipeline.
 from .kernel import Kernel  # noqa: F401
 from .copy_op import copy, im2col  # noqa: F401
-from .gemm_op import gemm  # noqa: F401
+from .gemm_op import gemm, gemm_sp  # noqa: F401
 from .atomic import atomic_add  # noqa: F401
 from .loop import Parallel, Unroll, unroll  # noqa: F401
 from .cluster import *  # noqa: F401,F403
@@ -83,6 +83,7 @@ _CUDA_API_ALL = (
     "atomic_add",
     "copy",
     "gemm",
+    "gemm_sp",
     "im2col",
     "unroll",
     "alloc_cluster_barrier",
