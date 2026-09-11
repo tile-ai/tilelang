@@ -115,8 +115,6 @@ def Pipelined(
     num_stages: int = 0,
     order: list[int] | None = None,
     stage: list[int] | None = None,
-    sync: list[list[int]] | None = None,
-    group: list[list[int]] | None = None,
     annotations: dict[str, Any] | None = None,
 ) -> frame.ForFrame:
     """Tools to construct pipelined for loop.
@@ -141,10 +139,6 @@ def Pipelined(
         Optional manual pipeline stage for each scheduled statement in the loop
         body. The list is aligned with ``order`` and follows the same statement
         counting rule.
-    sync : Optional[List[List[int]]]
-        Optional synchronization metadata for manual pipeline lowering.
-    group : Optional[List[List[int]]]
-        Optional producer grouping metadata for manual pipeline lowering.
     annotations : Optional[Dict[str, Any]]
         Additional loop annotations.
 
@@ -186,14 +180,10 @@ def Pipelined(
         order = []
     if stage is None:
         stage = []
-    if sync is None:
-        sync = []
-    if group is None:
-        group = []
     if annotations is None:
         annotations = {}
     # type: ignore[attr-defined] # pylint: disable=no-member
-    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, sync, group, annotations)
+    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, annotations)
 
 
 def serial(
