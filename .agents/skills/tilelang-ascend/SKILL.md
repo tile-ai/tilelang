@@ -122,7 +122,7 @@ splitting automatically.
 # MixedKernel: only needed when you want sid for manual partitioning
 with T.MixedKernel(NUM_BLOCKS) as (bx, sid):
     ...
-    T.copy(temp[sid * (TILE_M // 2):...], C[...])
+    T.copy(temp[sid * (TILE_M // 2) : ...], C[...])
 
 # Equivalent without sid: just use T.Kernel + T.dual_copy
 with T.Kernel(NUM_BLOCKS) as bx:
@@ -204,11 +204,13 @@ version count, select the indexing mode, or do both:
 buf1 = T.alloc_shared((TILE,), "float32")
 buf2 = T.alloc_shared((TILE,), "float32")
 buf3 = T.alloc_shared((TILE,), "float32")
-T.annotate_buffer_versions({
-    buf1: 2,                # fixed count, automatic mode
-    buf2: (2, "counter"),  # fixed count and mode
-    buf3: "iteration",     # mode only; infer the count
-})
+T.annotate_buffer_versions(
+    {
+        buf1: 2,  # fixed count, automatic mode
+        buf2: (2, "counter"),  # fixed count and mode
+        buf3: "iteration",  # mode only; infer the count
+    }
+)
 ```
 
 The supported modes are `"auto"`, `"iteration"`, and `"counter"`.
@@ -240,7 +242,7 @@ W: T.Buffer((N_DIM, K_DIM), dtype)
 ### 5.3 Clear Accumulator
 
 ```python
-T.gemm(a, b, c, transpose_B=True, clear_accum=True)   # for first k-step
+T.gemm(a, b, c, transpose_B=True, clear_accum=True)  # for first k-step
 T.gemm(a, b, c, transpose_B=True, clear_accum=False)  # for subsequent
 ```
 
@@ -249,9 +251,9 @@ T.gemm(a, b, c, transpose_B=True, clear_accum=False)  # for subsequent
 For fp32 GEMM, enable HF32 to trade precision for ~2x throughput:
 
 ```python
-T.set_hf32_mode("nearest_even")   # or "nearest_zero"
+T.set_hf32_mode("nearest_even")  # or "nearest_zero"
 # ... T.gemm calls ...
-T.set_hf32_mode(None)              # restore full fp32
+T.set_hf32_mode(None)  # restore full fp32
 ```
 
 ---
@@ -273,8 +275,8 @@ T.copy(x_l1[f, :, k_slice], x_l0[sf, :, :])
 T.copy(res, C[row, col])
 
 # Ascend-specific params:
-T.copy(src, dst, l2_cache_ctrl="NOTALLOC_KEEP")   # L2 cache bypass
-T.copy(src, dst, transpose=True)                   # transposed DMA
+T.copy(src, dst, l2_cache_ctrl="NOTALLOC_KEEP")  # L2 cache bypass
+T.copy(src, dst, transpose=True)  # transposed DMA
 ```
 
 **L2 cache control values:** `"NORMAL_FV"` (default), `"NOTALLOC_KEEP"`,
@@ -290,7 +292,7 @@ row width so padded rows don't overlap. Two mutually-exclusive modes:
 ```python
 # Mode 1: pad_value=v — this copy sets the fill value AND pads.
 # 30 fp32 cols = 120B (not 32B-aligned) -> padded to 128B; tail lanes = -1.0.
-a_ub = T.alloc_shared((M, 32), T.float32)      # over-allocated to 128B rows
+a_ub = T.alloc_shared((M, 32), T.float32)  # over-allocated to 128B rows
 T.copy(A[:, :], a_ub[:, :30], pad_value=-1.0)
 
 # Mode 2: data_select=True — pad, but reuse the pad register set beforehand.
@@ -391,8 +393,7 @@ loop iterations. To let the scheduler offset same-pipe tasks across
 iterations/stages, opt in with the `enable_offset` annotation on the loop:
 
 ```python
-for k in T.Pipelined(NUM_KV_BLOCKS, num_stages=2,
-                     annotations={"enable_offset": True}):
+for k in T.Pipelined(NUM_KV_BLOCKS, num_stages=2, annotations={"enable_offset": True}):
     ...
 ```
 
@@ -413,8 +414,7 @@ direct child task or loop carries `T.Stage`, that list uses manual scheduling.
 Nested lists without a staged child remain automatic.
 
 ```python
-for k in T.Pipelined(NUM_KV_BLOCKS, num_stages=2,
-                     annotations={"enable_offset": True}):
+for k in T.Pipelined(NUM_KV_BLOCKS, num_stages=2, annotations={"enable_offset": True}):
     with T.Stage(0):
         T.copy(A[k], a_l1)
         T.copy(B[k], b_l1)
@@ -449,8 +449,8 @@ have been removed from the tree.
 ### 7.3 Pipe Barrier
 
 ```python
-T.ascend_pipe_barrier("PIPE_ALL")   # all pipes
-T.ascend_pipe_barrier("PIPE_V")     # vector pipe
+T.ascend_pipe_barrier("PIPE_ALL")  # all pipes
+T.ascend_pipe_barrier("PIPE_V")  # vector pipe
 T.ascend_pipe_barrier("PIPE_MTE1")  # MTE1 pipe
 ```
 
@@ -461,19 +461,15 @@ T.ascend_pipe_barrier("PIPE_MTE1")  # MTE1 pipe
 Low-level CCE vector intrinsics for `T.SimdVF()` blocks. These map
 directly to Ascend CCE MicroAPI instructions (2048-bit vectors).
 
-For detailed instruction semantics (lane widths, rounding modes, saturation
-behavior, mask predicates), refer to the PTO Micro-Instruction Spec:
-https://github.com/PTO-ISA/PTO-Gym/blob/main/docs/PTO-micro-Instruction-SPEC.md
-
 ### 8.1 Core Operations
 
 ```python
 with T.SimdVF():
-    mask = T.simd.pset(32)            # all lanes active for 32-bit elements
+    mask = T.simd.pset(32)  # all lanes active for 32-bit elements
 
     # Load/Store
-    r = T.simd.vld(buf[offset])       # 2048-bit vector load
-    T.simd.vsts(buf[offset], r, mask) # 2048-bit vector store
+    r = T.simd.vld(buf[offset])  # 2048-bit vector load
+    T.simd.vsts(buf[offset], r, mask)  # 2048-bit vector store
 
     # Predicate Load/Store
     pred = T.simd.pld(pred_buf[runtime_offset], dist="US")
@@ -491,12 +487,12 @@ with T.SimdVF():
     r = T.simd.vln(a, mask)
 
     # Type conversion
-    r = T.simd.vcvt(a, "float32")     # cast to float32
-    r = T.simd.vcvt(a, "bfloat16")    # cast to bfloat16
+    r = T.simd.vcvt(a, "float32")  # cast to float32
+    r = T.simd.vcvt(a, "bfloat16")  # cast to bfloat16
 
     # Interleave/Deinterleave
-    a0, a1 = T.simd.vintlv(x, y)      # interleave even/odd lanes
-    x, y = T.simd.vdintlv(a0, a1)     # deinterleave back
+    a0, a1 = T.simd.vintlv(x, y)  # interleave even/odd lanes
+    x, y = T.simd.vdintlv(a0, a1)  # deinterleave back
 ```
 
 `vld`, `vsts`, `pld`, and `pst` do not have a separate scalar `off`
@@ -575,9 +571,7 @@ The recommended modern pattern for basic GEMM.
 
 ```python
 @T.prim_func
-def main(X: T.Buffer((M, K), dtype),
-         W: T.Buffer((N, K), dtype),
-         C: T.Buffer((M, N), accum_dtype)):
+def main(X: T.Buffer((M, K), dtype), W: T.Buffer((N, K), dtype), C: T.Buffer((M, N), accum_dtype)):
     with T.Kernel(NUM_BLOCKS) as bx:
         x_l1 = T.alloc_l1((TILE_M, TILE_K), dtype)
         w_l1 = T.alloc_l1((TILE_N, TILE_K), dtype)
@@ -615,7 +609,7 @@ with T.MixedKernel(NUM_BLOCKS) as (bx, sid):
             T.copy(W[...], w_l1)
             T.gemm(x_l1, w_l1, res, transpose_B=True, clear_accum=(kt == 0))
         T.dual_copy(res, temp)
-        T.copy(temp[sid * (TILE_M // 2):...], C[...])
+        T.copy(temp[sid * (TILE_M // 2) : ...], C[...])
 ```
 
 Reference: `examples/ascend/example_gemm_mixedkernel.py`
@@ -724,8 +718,7 @@ import tilelang
 kernel = tilelang.compile(program, out_idx=-1)
 
 # Skip the complete AutoSchedule path for manual-flag kernels
-kernel = tilelang.compile(program, out_idx=-1,
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False})
+kernel = tilelang.compile(program, out_idx=-1, pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False})
 
 # T.Stage automatically selects manual scheduling for its containing child list
 kernel = tilelang.compile(staged_program, out_idx=-1)
@@ -751,6 +744,7 @@ compilation:
 
 ```python
 from tilelang.engine.callback import register_ascend_postproc
+
 
 @register_ascend_postproc
 def customize_source(code, target):
