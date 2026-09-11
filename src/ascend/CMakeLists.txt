@@ -14,9 +14,4 @@ file(GLOB TILE_LANG_ASCEND_SRCS
   src/ascend/transform/*.cc
   src/ascend/transform/auto_schedule/*.cc
 )
-# PTO is an Ascend codegen backend and reuses CodeGenTileLangPY. Keep this
-# source compiled even when the CUDA backend itself is disabled.
-list(APPEND TILE_LANG_ASCEND_SRCS
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda/codegen/codegen_py.cc"
-)
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ASCEND_SRCS})
