@@ -2,6 +2,8 @@ import pytest
 import torch
 import tilelang.testing
 import tilelang.language as T
+from tilelang import tvm
+from tvm import tirx
 
 
 @tilelang.jit
@@ -169,6 +171,71 @@ def test_vectorized_cast_fp4(src_dtype, dst_dtype, check_str, lanes):
 )
 def test_vectorized_cast_fp8_bf16(src_dtype, dst_dtype, check_str, lanes):
     run_vectorized_cast(src_dtype, dst_dtype, check_str, lanes)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("lanes", [1, 2, 4, 8, 16, 32])
+@pytest.mark.parametrize("destination", ["float8_e4m3", "float8_e4m3fn"])
+def test_fp4_fp32_fp8_codegen(lanes, destination):
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
+    if build is None:
+        pytest.skip("TileLang was built without the CUDA code generator")
+    suffix = f"x{lanes}" if lanes > 1 else ""
+    value = tirx.Var("value", "float4_e2m1fn" + suffix)
+    converted = tirx.Cast(destination + suffix, tirx.Cast("float32" + suffix, value))
+    func = tirx.PrimFunc([value], tirx.Evaluate(converted))
+    func = func.with_attr("global_symbol", "fp4_fp8_cast")
+    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    source = build(tvm.IRModule({"fp4_fp8_cast": func}), tvm.target.Target("cuda")).inspect_source()
+    assert source.count("__tl_cvt_e2m1x4_to_e4m3x4(") == max(1, lanes // 4)
+    assert "__tl_cvt_fp4x2_to_float2" not in source
+    assert "__nv_cvt_float2_to_fp8x2" not in source
+
+    if lanes == 2:
+        for annotation_owner in ("inner", "outer"):
+            annotations = {"sat": tirx.IntImm("bool", 1)}
+            intermediate = tirx.Cast("float32" + suffix, value, annotations if annotation_owner == "inner" else None)
+            annotated = tirx.Cast(destination + suffix, intermediate, annotations if annotation_owner == "outer" else None)
+            annotated_func = func.with_body(tirx.Evaluate(annotated))
+            annotated_source = build(tvm.IRModule({"fp4_fp8_cast": annotated_func}), tvm.target.Target("cuda")).inspect_source()
+            assert "__tl_cvt_e2m1x4_to_e4m3x4" not in annotated_source
+            assert "__tl_cvt_fp4x2_to_float2" in annotated_source
+            assert "__nv_cvt_float2_to_fp8x2" in annotated_source
+
+
+def fp4_fp32_fp8_kernel(elements, lanes):
+    tile = 128 * lanes
+
+    @T.prim_func
+    def main(A: T.Tensor((elements,), "float4_e2m1fn"), B: T.Tensor((elements,), "float8_e4m3fn")):
+        with T.Kernel(elements // tile, threads=128) as block:
+            for i in T.Parallel(tile):
+                index = block * tile + i
+                B[index] = T.Cast("float8_e4m3fn", T.Cast("float32", A[index]))
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="PyTorch packed FP4 dtype is unavailable")
+@pytest.mark.parametrize("lanes", [1, 2, 4, 8])
+def test_fp4_fp32_fp8_exact(lanes):
+    # Every four-nibble word exercises magnitude, sign, and lane ordering.
+    elements = 65536 * 4
+    kernel = tilelang.compile(fp4_fp32_fp8_kernel(elements, lanes), pass_configs={"tirx.disable_vectorize": lanes == 1})
+    assert "__tl_cvt_e2m1x4_to_e4m3x4" in kernel.get_kernel_source()
+    words = torch.arange(65536, dtype=torch.int32, device="cuda")[:, None]
+    packed = ((words >> torch.tensor([0, 8], device="cuda")) & 255).to(torch.uint8).flatten()
+    nibbles = ((words >> torch.tensor([0, 4, 8, 12], device="cuda")) & 15).flatten().long()
+    values = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+        device="cuda",
+    )
+    expected = values[nibbles].to(torch.float8_e4m3fn).view(torch.uint8)
+    output = torch.empty(elements, dtype=torch.float8_e4m3fn, device="cuda")
+    kernel(packed.view(torch.float4_e2m1fn_x2), output)
+    assert torch.equal(output.view(torch.uint8), expected)
 
 
 if __name__ == "__main__":
