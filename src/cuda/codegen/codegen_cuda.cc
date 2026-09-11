@@ -1717,7 +1717,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     int lanes = packed_ty.lanes();
     if (lanes == 1) {
       this->PrintType(target_ty, os);
-      os << "::bitcast(static_cast<uint8_t>(__tl_cvt_e2m1x4_to_e4m3x4(("
+      os << "::bitcast(static_cast<uint8_t>(ConvertE2M1x4ToE4M3x4(("
          << PrintExpr(inner_cast->value) << ").__x)))";
       return;
     }
@@ -1730,7 +1730,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       for (int first_lane = 0; first_lane < lanes; first_lane += 4) {
         std::string converted = name_supply_->FreshName("fp8_bits");
         PrintIndent();
-        stream << "uint32_t " << converted << " = __tl_cvt_e2m1x4_to_e4m3x4("
+        stream << "uint32_t " << converted << " = ConvertE2M1x4ToE4M3x4("
                << "reinterpret_cast<const uint8_t*>(&" << packed << ")["
                << first_lane / 2 << "]";
         if (first_lane + 2 < lanes) {

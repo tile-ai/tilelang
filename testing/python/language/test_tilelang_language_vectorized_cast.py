@@ -187,7 +187,7 @@ def test_fp4_fp32_fp8_codegen(lanes, destination):
     func = func.with_attr("global_symbol", "fp4_fp8_cast")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     source = build(tvm.IRModule({"fp4_fp8_cast": func}), tvm.target.Target("cuda")).inspect_source()
-    assert source.count("__tl_cvt_e2m1x4_to_e4m3x4(") == max(1, lanes // 4)
+    assert source.count("ConvertE2M1x4ToE4M3x4(") == max(1, lanes // 4)
     assert "__tl_cvt_fp4x2_to_float2" not in source
     assert "__nv_cvt_float2_to_fp8x2" not in source
 
@@ -198,7 +198,7 @@ def test_fp4_fp32_fp8_codegen(lanes, destination):
             annotated = tirx.Cast(destination + suffix, intermediate, annotations if annotation_owner == "outer" else None)
             annotated_func = func.with_body(tirx.Evaluate(annotated))
             annotated_source = build(tvm.IRModule({"fp4_fp8_cast": annotated_func}), tvm.target.Target("cuda")).inspect_source()
-            assert "__tl_cvt_e2m1x4_to_e4m3x4" not in annotated_source
+            assert "ConvertE2M1x4ToE4M3x4" not in annotated_source
             assert "__tl_cvt_fp4x2_to_float2" in annotated_source
             assert "__nv_cvt_float2_to_fp8x2" in annotated_source
 
@@ -224,7 +224,7 @@ def test_fp4_fp32_fp8_exact(lanes):
     # Every four-nibble word exercises magnitude, sign, and lane ordering.
     elements = 65536 * 4
     kernel = tilelang.compile(fp4_fp32_fp8_kernel(elements, lanes), pass_configs={"tirx.disable_vectorize": lanes == 1})
-    assert "__tl_cvt_e2m1x4_to_e4m3x4" in kernel.get_kernel_source()
+    assert "ConvertE2M1x4ToE4M3x4" in kernel.get_kernel_source()
     words = torch.arange(65536, dtype=torch.int32, device="cuda")[:, None]
     packed = ((words >> torch.tensor([0, 8], device="cuda")) & 255).to(torch.uint8).flatten()
     nibbles = ((words >> torch.tensor([0, 4, 8, 12], device="cuda")) & 15).flatten().long()
