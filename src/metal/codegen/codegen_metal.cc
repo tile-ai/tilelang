@@ -401,8 +401,15 @@ void CodeGenTileLangMetal::PrintType(DataType t,
       return;
     }
   } else if (t.is_bfloat16()) {
+    if (lanes == 3)
+      os << "packed_";
     os << "bfloat";
-    return;
+    if (lanes == 1)
+      return;
+    if (lanes >= 2 && lanes <= 4) {
+      os << lanes;
+      return;
+    }
   }
   LOG(FATAL) << "Cannot convert type " << t << " to Metal type";
 }
@@ -1696,6 +1703,8 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
 void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
                                       std::ostream &os) { // NOLINT(*)
   std::ostringstream temp;
+  if (op->dtype.is_bfloat16())
+    temp << "bfloat(";
   if (std::isinf(op->value)) {
     if (op->value < 0) {
       temp << "-";
@@ -1705,11 +1714,13 @@ void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
     temp << "NAN";
   } else {
     temp << std::scientific << op->value;
-    if (op->dtype.bits() == 32)
+    if (op->dtype.bits() == 32 || op->dtype.is_bfloat16())
       temp << 'f';
     else if (op->dtype.bits() == 16)
       temp << 'h';
   }
+  if (op->dtype.is_bfloat16())
+    temp << ")";
   MarkConst(temp.str());
   os << temp.str();
 }
