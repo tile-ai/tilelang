@@ -29,7 +29,6 @@ def _gemm_sp_impl(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
     wg_wait: int = 0,
     annotations: dict | None = None,
 ) -> tirx.Call:
@@ -119,7 +118,10 @@ def _gemm_sp_impl(
         stride_b,
         offset_a,
         offset_b,
-        k_pack,
+        # k_pack call slot: parsed and validated on the C++ side but never
+        # consumed by any sparse-GEMM lowering; kept at 1 for protocol
+        # stability.
+        1,
         wg_wait,
         annotations=annotations,
     )
@@ -135,7 +137,6 @@ def gemm_sp(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
     wg_wait: int = 0,
     annotations: dict | None = None,
 ) -> tirx.Call:
@@ -158,7 +159,6 @@ def gemm_sp(
         transpose_B: Whether to transpose B. Defaults to False.
         policy: Warp partition policy. Defaults to GemmSPWarpPolicy.Square.
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
-        k_pack: Number of K dimensions packed per warp. Defaults to 1.
         wg_wait: Warp group wait count. Defaults to 0.
         annotations: Additional annotations.
 
@@ -176,7 +176,6 @@ def gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        k_pack,
         wg_wait,
         annotations=annotations,
     )
@@ -230,7 +229,6 @@ def wgmma_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        1,
         -1,
         annotations=annotations,
     )
@@ -286,7 +284,6 @@ def tcgen05_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        1,
         0,
         annotations=annotations,
     )
