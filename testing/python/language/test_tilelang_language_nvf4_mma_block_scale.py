@@ -11,7 +11,10 @@ from tilelang import tvm
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import SM120BlockScaleTile
 from tilelang.cuda.language.intrinsics import TensorCoreIntrinEmitterSM120, get_swizzle_layout
-from examples.dequantize_gemm.quantize.nvfp4 import blockscaled_chunk_kmajor_word_offset
+from examples.dequantize_gemm.quantize.nvfp4 import (
+    blockscaled_chunk_kmajor_word_offset,
+    swizzle_blockscaled_chunk_kmajor_scale_words,
+)
 from tilelang.transform import simplify_prim_func
 
 
@@ -167,6 +170,7 @@ def _make_nvf4_matmul_codegen_kernel(
     warp_row_tiles=32,
     warp_col_tiles=32,
     sf_layout=None,
+    block_K=None,
 ):
     assert K % 64 == 0
     in_dtype = T.float4_e2m1fn
@@ -175,7 +179,7 @@ def _make_nvf4_matmul_codegen_kernel(
 
     micro_size_k = 64
 
-    chunk = K
+    chunk = block_K if block_K is not None else K
     shared_scope = "shared.dyn"
 
     block_M = block_row_warps * warp_row_tiles
@@ -213,6 +217,11 @@ def _make_nvf4_matmul_codegen_kernel(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.use_swizzle(panel_size=10)
 
+            # clear_accum zeroes the accumulator on every gemm call, so a
+            # multi-ko loop must hoist the clear out of the loop instead.
+            if K // block_K > 1:
+                T.clear(C_local)
+
             for ko in T.Pipelined((K // block_K), num_stages=num_stages):
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -233,8 +242,10 @@ def _make_nvf4_matmul_codegen_kernel(
                     SFA_shared,
                     SFB_shared,
                     transpose_B=True,
-                    clear_accum=True,
-                    k_start=ko * block_K,
+                    clear_accum=(K // block_K == 1),
+                    # rowmajor addresses scales relative to the staged slice
+                    # (buffer-local); kmajor ignores k_start in the fulltile path.
+                    k_start=(ko * block_K) if sf_layout is not None else 0,
                     sf_a_granularity_k=16,
                     sf_b_granularity_k=16,
                     sf_layout=sf_layout,
@@ -327,6 +338,133 @@ def _reference_blockscaled_gemm(A, B, SFA, SFB, M: int, N: int, K: int):
     sfa = _decode_ue4m3_scale_bytes(SFA).repeat_interleave(16, dim=1)
     sfb = _decode_ue4m3_scale_bytes(SFB).repeat_interleave(16, dim=1)
     return (a_f32 * sfa) @ (b_f32 * sfb).T
+
+
+def _make_varying_ue8m0_scale_words(rows: int, K: int, granularity: int):
+    # Adjacent granularity groups get different power-of-two scales so a
+    # byte-pair (parity) mix-up in the 2X path changes the result.
+    import torch
+
+    scale_choices = torch.tensor([0x7E, 0x7F, 0x80], device="cuda", dtype=torch.uint8)
+    row = torch.arange(rows, device="cuda", dtype=torch.int64)[:, None]
+    col = torch.arange(K // granularity, device="cuda", dtype=torch.int64)[None, :]
+    scale_bytes = scale_choices[(row + 2 * col) % scale_choices.numel()]
+    return _pack_scale_words(scale_bytes), scale_bytes
+
+
+def _decode_ue8m0_scale_bytes(scale_bytes):
+    import torch
+
+    return torch.pow(2.0, scale_bytes.to(torch.float32) - 127.0)
+
+
+def _reference_ue8m0_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M: int, N: int, K: int, granularity: int):
+    a_f32 = _decode_rowmajor_fp4(A, M, K)
+    b_f32 = _decode_rowmajor_fp4(B, N, K)
+    sfa = _decode_ue8m0_scale_bytes(sfa_bytes).repeat_interleave(granularity, dim=1)
+    sfb = _decode_ue8m0_scale_bytes(sfb_bytes).repeat_interleave(granularity, dim=1)
+    return (a_f32 * sfa) @ (b_f32 * sfb).T
+
+
+@simplify_prim_func
+def _make_mxf4_matmul_codegen_kernel(
+    M,
+    N,
+    K,
+    num_stages=2,
+    *,
+    sf_granularity_k=32,
+    scale_dtype="ue8m0",
+    sf_layout=None,
+    block_row_warps=2,
+    block_col_warps=2,
+    warp_row_tiles=32,
+    warp_col_tiles=32,
+    block_K=None,
+):
+    assert K % 64 == 0
+    in_dtype = T.float4_e2m1fn
+    out_dtype = T.float32
+    accum_dtype = T.float32
+
+    word_span = sf_granularity_k * 4
+
+    chunk = block_K if block_K is not None else K
+    shared_scope = "shared.dyn"
+
+    block_M = block_row_warps * warp_row_tiles
+    block_N = block_col_warps * warp_col_tiles
+    block_K = chunk
+
+    A_shape = (M, K)
+    B_shape = (N, K)
+    SFA_shape = (M, K // word_span)
+    SFB_shape = (N, K // word_span)
+    A_shared_shape = (block_M, block_K)
+    B_shared_shape = (block_N, block_K)
+    SFA_shared_shape = (block_M, block_K // word_span)
+    SFB_shared_shape = (block_N, block_K // word_span)
+
+    warp_size = 32
+    threads = warp_size * (block_row_warps * block_col_warps)
+
+    @T.prim_func
+    def main(
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        SFA: T.Tensor(SFA_shape, T.uint32),
+        SFB: T.Tensor(SFB_shape, T.uint32),
+        C: T.Tensor((M, N), out_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+            bx,
+            by,
+        ):
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
+            SFA_shared = T.alloc_shared(SFA_shared_shape, T.uint32, scope=shared_scope)
+            SFB_shared = T.alloc_shared(SFB_shared_shape, T.uint32, scope=shared_scope)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            T.use_swizzle(panel_size=10)
+
+            # clear_accum zeroes the accumulator on every gemm call, so a
+            # multi-ko loop must hoist the clear out of the loop instead.
+            if K // block_K > 1:
+                T.clear(C_local)
+
+            for ko in T.Pipelined((K // block_K), num_stages=num_stages):
+                for i, k in T.Parallel(block_M, block_K):
+                    A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
+
+                for j, k in T.Parallel(block_N, block_K):
+                    B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
+
+                for i, k in T.Parallel(block_M, block_K // word_span):
+                    SFA_shared[i, k] = SFA[by * block_M + i, ko * (block_K // word_span) + k]
+
+                for j, k in T.Parallel(block_N, block_K // word_span):
+                    SFB_shared[j, k] = SFB[bx * block_N + j, ko * (block_K // word_span) + k]
+
+                T.mma_gemm_blockscaled(
+                    A_shared,
+                    B_shared,
+                    C_local,
+                    SFA_shared,
+                    SFB_shared,
+                    transpose_B=True,
+                    clear_accum=(K // block_K == 1),
+                    # rowmajor addresses scales relative to the staged slice
+                    # (buffer-local); kmajor ignores k_start in the fulltile path.
+                    k_start=(ko * block_K) if sf_layout is not None else 0,
+                    sf_a_granularity_k=sf_granularity_k,
+                    sf_b_granularity_k=sf_granularity_k,
+                    sf_layout=sf_layout,
+                    scale_dtype=scale_dtype,
+                )
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
 
 
 def test_nvf4_mma_block_scale_fragment_layouts_match_cute():
@@ -425,7 +563,6 @@ def test_nvf4_mma_block_scale_lane_scale_mapping_matches_cute():
     "kwargs",
     [
         {"kind": "mxf4nvf4", "scale_vec_size": 2, "stype": "ue4m3"},
-        {"kind": "mxf4nvf4", "scale_vec_size": 4, "stype": "ue8m0"},
         {"kind": "mxf4", "scale_vec_size": 4, "stype": "ue4m3"},
     ],
 )
@@ -445,6 +582,87 @@ def test_nvf4_mma_block_scale_rejects_unsupported_configs(kwargs):
             chunk=256,
             **kwargs,
         )
+
+
+def test_sm120_mma_and_ldscale_reject_chunk_kmajor_scale_layout():
+    # The chunk-kmajor scale layout is served exclusively by
+    # mma_blockscaled_fulltile; the per-word mma()/ldscale() paths only
+    # understand rowmajor scale addressing.
+    emitter = TensorCoreIntrinEmitterSM120(
+        is_blockscaled=True,
+        a_dtype=T.float4_e2m1fn,
+        b_dtype=T.float4_e2m1fn,
+        accum_dtype=T.float32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=2,
+        warp_row_tiles=32,
+        warp_col_tiles=32,
+        chunk=256,
+    )
+    with pytest.raises(ValueError, match="mma_blockscaled_fulltile"):
+        emitter.mma(None, None, None, 0, SFA_buf=object(), SFB_buf=object(), sf_layout="blockscaled_chunk_kmajor")
+    with pytest.raises(ValueError, match="mma_blockscaled_fulltile"):
+        emitter.ldscale(None, None, None, None, None, sf_layout="blockscaled_chunk_kmajor")
+
+
+def _make_ue8m0_emitter(scale_vec_size, chunk):
+    return TensorCoreIntrinEmitterSM120(
+        is_blockscaled=True,
+        a_dtype=T.float4_e2m1fn,
+        b_dtype=T.float4_e2m1fn,
+        accum_dtype=T.float32,
+        a_transposed=False,
+        b_transposed=True,
+        block_row_warps=2,
+        block_col_warps=2,
+        warp_row_tiles=64,
+        warp_col_tiles=64,
+        chunk=chunk,
+        kind="mxf4nvf4",
+        scale_vec_size=scale_vec_size,
+        stype="ue8m0",
+    )
+
+
+def test_mxf4_2x_ue8m0_emitter_contract():
+    emitter = _make_ue8m0_emitter(2, 256)
+    assert (emitter.kind, emitter.scale_vec_size, emitter.stype) == ("mxf4nvf4", 2, "ue8m0")
+    assert emitter.sf_vec_size == 32
+
+    # One uint32 word covers K=128: word column is the k64-atom pair index,
+    # the byte id selects the 2-byte half by atom parity.
+    word_ks = [emitter._scale_word_k(0, ki, 32) for ki in range(4)]
+    byte_ids = [emitter._scale_byte_id(0, ki) for ki in range(4)]
+    analyzer = tvm.arith.Analyzer()
+    assert [int(analyzer.simplify(w)) for w in word_ks] == [0, 0, 1, 1]
+    assert [int(analyzer.simplify(tvm.tirx.const(0, "int32") + b)) for b in byte_ids] == [0, 2, 0, 2]
+
+    # 2X packs K=128 per word; narrower block_K cannot be staged.
+    for bad_chunk in (64, 192):
+        with pytest.raises(ValueError, match="multiple of"):
+            _make_ue8m0_emitter(2, bad_chunk)
+
+
+def test_mxf4nvf4_4x_ue8m0_emitter_contract():
+    emitter = _make_ue8m0_emitter(4, 256)
+    assert (emitter.kind, emitter.scale_vec_size, emitter.stype) == ("mxf4nvf4", 4, "ue8m0")
+    assert emitter.sf_vec_size == 16
+    # 4X keeps the whole-word consumption: byte id is the literal 0.
+    assert emitter._scale_byte_id(0, 3) == 0
+
+
+def test_sm120_fulltile_contract_tracks_2x_words_per_stage():
+    contract = SM120BlockScaleTile.from_emitter(
+        _make_ue8m0_emitter(2, 256),
+        sf_layout="blockscaled_chunk_kmajor",
+    )
+    assert (contract.kblocks, contract.sf_vec_size) == (4, 32)
+    assert contract.words_per_stage == 2
+    # Word columns range over words_per_stage, not kblocks.
+    with pytest.raises(ValueError, match="word column"):
+        contract._scale_word_offset(0, 2, 128)
 
 
 @pytest.mark.parametrize(
@@ -499,16 +717,44 @@ def test_sm120_fulltile_package_contract_supports_k128_path():
 
 
 def test_sm120_fulltile_package_contract_derives_arbitrary_reasonable_block_shape():
-    contract = _make_sm120_fulltile_contract(
-        chunk=192,
-        warp_row_tiles=32,
-        warp_col_tiles=96,
-    )
+    contract = _make_sm120_fulltile_contract(chunk=192)
 
-    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (64, 192, 192)
-    assert (contract.warp_rows, contract.warp_cols, contract.kblocks) == (2, 6, 3)
-    assert (contract.sfa_words, contract.sfb_words) == (1, 3)
-    assert (contract.warp_issues, contract.warpgroup_issues) == (24, 96)
+    assert (contract.tile_m, contract.tile_n, contract.tile_k) == (128, 128, 192)
+    assert (contract.warp_rows, contract.warp_cols, contract.kblocks) == (4, 4, 3)
+    assert (contract.sfa_words, contract.sfb_words) == (2, 2)
+    assert (contract.warp_issues, contract.warpgroup_issues) == (32, 128)
+
+
+def test_sm120_fulltile_package_contract_rejects_non_atom_multiple_tiles():
+    # The kmajor scale source stacks 128-row BlockScaledBasicChunk atoms, so a
+    # staged tile must cover whole atoms; 64x192 was silently mis-addressed
+    # before the packer-atom fix.
+    with pytest.raises(ValueError, match="multiples of 128"):
+        _make_sm120_fulltile_contract(chunk=192, warp_row_tiles=32, warp_col_tiles=96)
+
+
+def test_sm120_fulltile_contract_scale_words_follow_packer_atoms_for_tile_m_256():
+    # tile_m=256 stacks two 128-row packer atoms. The flat word offset must
+    # follow the host packer (atom index = row // 128, fixed 4-group split
+    # inside the atom), not a tile_rows-wide group split.
+    contract = _make_sm120_fulltile_contract(warp_row_tiles=128)
+
+    assert (contract.tile_m, contract.tile_n) == (256, 128)
+    assert (contract.sfa_words, contract.sfb_words) == (4, 2)
+    assert contract.words_per_stage == contract.kblocks
+
+    for lane in (0, 1, 2, 17, 31):
+        for warp_m in range(contract.block_row_warps):
+            for warp_n in range(contract.block_col_warps):
+                sfa_rows, sfb_rows = contract.compact_selector_scale_rows(lane, warp_m, warp_n)
+                for kblock in range(contract.kblocks):
+                    sfa_offsets, sfb_offsets = contract.compact_selector_scale_word_offsets(lane, warp_m, warp_n, kblock)
+                    for row, flat in zip(sfa_rows, sfa_offsets, strict=True):
+                        atom_base = (row // 128) * (contract.words_per_stage * 128)
+                        assert flat == atom_base + _oracle_blockscaled_chunk_kmajor_flat_word(row % 128, kblock)
+                    for row, flat in zip(sfb_rows, sfb_offsets, strict=True):
+                        # tile_n=128 stays inside a single atom.
+                        assert flat == _oracle_blockscaled_chunk_kmajor_flat_word(row, kblock)
 
 
 def test_sm120_fulltile_package_contract_describes_compact_selector_copy_view():
@@ -670,7 +916,7 @@ def test_nvf4_mma_block_scale_rejects_legacy_cutlass_128x4_layout_alias():
     [
         (128, 128, 64, 64, 64),
         (128, 128, 128, 64, 64),
-        (64, 192, 192, 32, 96),
+        (128, 128, 192, 64, 64),
         (128, 128, 256, 64, 64),
     ],
 )
@@ -793,6 +1039,153 @@ def test_nvf4_mma_block_scale_varying_scale_correctness():
     C = kernel(A, B, SFA, SFB)
     ref = _reference_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K)
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+def test_mma_gemm_blockscaled_rejects_mismatched_scale_mode():
+    with pytest.raises(ValueError, match="Unsupported SM120 block-scale mode"):
+        _make_mxf4_matmul_codegen_kernel(128, 128, 256, sf_granularity_k=32, scale_dtype="ue4m3")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("K", [128, 256])
+def test_mxf4_mma_block_scale_codegen(K):
+    kernel = tilelang.compile(
+        _make_mxf4_matmul_codegen_kernel(128, 128, K),
+        target="cuda",
+        out_idx=[4],
+    )
+    src = kernel.get_kernel_source()
+    assert "tl::sm120_mma_sync_blockscaled<" in src
+    assert "SM120MmaScaleType::kUE8M0" in src
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize(
+    "K,sf_layout",
+    [
+        (128, None),
+        (256, None),
+        (128, "blockscaled_chunk_kmajor"),
+        (256, "blockscaled_chunk_kmajor"),
+    ],
+)
+def test_mxf4_mma_block_scale_varying_scale_correctness(K, sf_layout):
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    # kmajor staging requires whole 128-row packer atoms per tile.
+    tiles = 64 if sf_layout else 32
+    kernel = tilelang.compile(
+        _make_mxf4_matmul_codegen_kernel(
+            M,
+            N,
+            K,
+            sf_layout=sf_layout,
+            warp_row_tiles=tiles,
+            warp_col_tiles=tiles,
+        ),
+        target="cuda",
+        out_idx=[4],
+    )
+
+    A, B = _make_packed_fp4_inputs(M, N, K, "random")
+    SFA, sfa_bytes = _make_varying_ue8m0_scale_words(M, K, 32)
+    SFB, sfb_bytes = _make_varying_ue8m0_scale_words(N, K, 32)
+    if sf_layout:
+        SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA, block_words=K // 128)
+        SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB, block_words=K // 128)
+
+    C = kernel(A, B, SFA, SFB)
+    ref = _reference_ue8m0_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K, 32)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+def _cuda_toolkit_below(major: int, minor: int) -> bool:
+    try:
+        from tilelang.contrib import nvcc as _nvcc
+
+        return _nvcc.get_cuda_version() < (major, minor)
+    except Exception:
+        # Fail closed: skip the version-gated test when the toolkit version
+        # cannot be determined.
+        return True
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.skipif(_cuda_toolkit_below(13, 1), reason="scale_vec::4X with ue8m0 needs CUDA 13.1+")
+def test_mxf4nvf4_4x_ue8m0_varying_scale_correctness():
+    # granularity 16 + ue8m0: the CUDA 13.1 scale_vec::4X.ue8m0 instruction.
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 256
+    kernel = tilelang.compile(
+        _make_mxf4_matmul_codegen_kernel(M, N, K, sf_granularity_k=16),
+        target="cuda",
+        out_idx=[4],
+    )
+
+    A, B = _make_packed_fp4_inputs(M, N, K, "random")
+    SFA, sfa_bytes = _make_varying_ue8m0_scale_words(M, K, 16)
+    SFB, sfb_bytes = _make_varying_ue8m0_scale_words(N, K, 16)
+
+    C = kernel(A, B, SFA, SFB)
+    ref = _reference_ue8m0_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K, 16)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("block_K", [128, 256])
+def test_nvf4_mma_block_scale_rowmajor_multi_k_stage_correctness(block_K):
+    # Rowmajor with block_K < K stages a per-ko scale slice, so scale
+    # addressing is buffer-local (k_start=0). This path was never covered
+    # before; a global k_start here silently reads out of the staged slice.
+    import torch
+
+    torch.manual_seed(0)
+    M = N = 128
+    K = 512
+    kernel = tilelang.compile(
+        _make_nvf4_matmul_codegen_kernel(M, N, K, block_K=block_K),
+        target="cuda",
+        out_idx=[4],
+    )
+
+    A, B = _make_packed_fp4_inputs(M, N, K, "random")
+    SFA, sfa_bytes = _make_varying_power_of_two_scale_words(M, K)
+    SFB, sfb_bytes = _make_varying_power_of_two_scale_words(N, K)
+
+    C = kernel(A, B, SFA, SFB)
+    ref = _reference_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K)
+    torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.skipif(_cuda_toolkit_below(13, 1), reason="scale_vec::4X with ue8m0 needs CUDA 13.1+")
+def test_mxf4nvf4_4x_ue8m0_kmajor_codegen():
+    kernel = tilelang.compile(
+        _make_mxf4_matmul_codegen_kernel(
+            128,
+            128,
+            256,
+            sf_granularity_k=16,
+            sf_layout="blockscaled_chunk_kmajor",
+            warp_row_tiles=64,
+            warp_col_tiles=64,
+        ),
+        target="cuda",
+        out_idx=[4],
+    )
+    src = kernel.get_kernel_source()
+    assert "SM120MmaScaleType::kUE8M0" in src
+    assert "tl::sm120_mma_sync_blockscaled<" in src
 
 
 # ---------------------------------------------------------------------------

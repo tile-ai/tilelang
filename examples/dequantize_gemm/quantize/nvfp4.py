@@ -44,10 +44,13 @@ def _import_torch():
 
 
 def _check_block_shape(block_rows: int, block_words: int) -> None:
-    if block_rows != _BLOCKSCALED_CHUNK_ROWS or block_words != _BLOCKSCALED_CHUNK_WORDS:
+    # The chunk atom is always 128 rows. block_words tracks block_K // 64 and
+    # only enters the packer as a per-tile width; the physical word order is
+    # the same 128-row K-major stack for every supported width.
+    if block_rows != _BLOCKSCALED_CHUNK_ROWS or block_words not in (1, 2, 4):
         raise ValueError(
             "SM120 BlockScaledBasicChunk K-major scale packing currently supports "
-            f"block_rows={_BLOCKSCALED_CHUNK_ROWS} and block_words={_BLOCKSCALED_CHUNK_WORDS}, "
+            f"block_rows={_BLOCKSCALED_CHUNK_ROWS} and block_words in (1, 2, 4), "
             f"got block_rows={block_rows}, block_words={block_words}"
         )
 
@@ -484,7 +487,8 @@ def quantize_bf16_to_nvfp4_blockscaled(
         accepted for tests and converted internally, but the intended runtime
         contract is BF16 activation input. The SM120 source contract requires
         ``rows`` to be a multiple of ``128`` and ``K`` to be a multiple of
-        ``256`` for the promoted ``blockscaled_chunk_kmajor`` scale layout.
+        ``64 * block_words`` for the promoted ``blockscaled_chunk_kmajor``
+        scale layout.
     scale_block_k:
         Number of consecutive K elements sharing one UE4M3 scale byte. SM120
         dense NVFP4 uses ``16``.

@@ -589,6 +589,23 @@ def test_pack_blockscaled_chunk_kmajor_scale_bytes_random_binary_512x32_matches_
     assert torch.equal(_unpack_with_oracle(packed, rows, k16_cols), scale_bytes)
 
 
+@pytest.mark.parametrize("block_words", [1, 2])
+def test_pack_blockscaled_chunk_kmajor_scale_bytes_narrow_block_words_matches_oracle(block_words):
+    # block_K = 64 / 128 tiles: same 128-row K-major word stack, narrower
+    # per-tile width. Three K tiles so multi-tile column order is exercised.
+    rows = 256
+    k = 64 * block_words * 3
+    k16_cols = k // 16
+    generator = torch.Generator(device="cpu").manual_seed(23 + block_words)
+    scale_bytes = torch.randint(0, 256, (rows, k16_cols), generator=generator, dtype=torch.uint8)
+
+    packed = pack_blockscaled_chunk_kmajor_scale_bytes(scale_bytes, block_words=block_words)
+
+    assert packed.shape == (rows, k16_cols // 4)
+    assert packed.dtype == torch.uint32
+    assert torch.equal(_unpack_with_oracle(packed, rows, k16_cols), scale_bytes)
+
+
 def test_pack_blockscaled_chunk_kmajor_scale_bytes_matches_cutedsl_blocked_sf_layout():
     """Byte-level cross-compatibility with the CuTeDSL/CUTLASS canonical SF layout.
 
@@ -873,6 +890,9 @@ def test_blockscaled_chunk_kmajor_scale_packer_rejects_invalid_shapes():
 
     with pytest.raises(ValueError, match="K/16 columns multiple of 16"):
         pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((128, 12), dtype=torch.uint8))
+
+    with pytest.raises(ValueError, match=r"block_words in \(1, 2, 4\)"):
+        pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((128, 12), dtype=torch.uint8), block_words=3)
 
     with pytest.raises(TypeError, match="torch.uint8"):
         pack_blockscaled_chunk_kmajor_scale_bytes(torch.zeros((128, 16), dtype=torch.int32))
