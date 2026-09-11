@@ -17,6 +17,12 @@ using namespace tirx;
 namespace rocm {
 
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
+  static bool AllReduceWidthRequiresPowerOfTwo(Target) { return true; }
+
+  static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
+    return reducing_threads > 32;
+  }
+
   static int WarpSize(Target target) { return TargetRocmGetWarpSize(target); }
 
   static std::string MakeBatchAllReduce(std::string reducer,

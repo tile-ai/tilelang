@@ -3,6 +3,7 @@
  * \brief Ascend implementation for tl.finalize_reducer AllReduce lowering.
  */
 
+#include "ascend/op/ascend_allreduce_policy.h"
 #include "backend/common/op/reduce.h"
 #include "backend/common/target_utils.h"
 #include "op/reducer.h"
@@ -89,7 +90,8 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
   Array<Stmt> step_stmts;
   for (const auto &[reducing_threads, scale] : steps) {
     backend::reduce::CheckAllReduceWidth(
-        reducing_threads, scale, "tl.finalize_reducer", lower_args.target);
+        reducing_threads, scale, "tl.finalize_reducer",
+        ascend::kAllReduceWidthRequiresPowerOfTwo);
 
     std::stringstream ss;
     ss << "tl::AscendAllReduce<" << op_str << ", " << reducing_threads << ", "
@@ -97,8 +99,7 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
 
     Array<PrimExpr> thread_reduce_args = {StringImm(ss.str()),
                                           BufferLoad(buffer, indices_0)};
-    if (backend::reduce::NeedsWorkspace(reducing_threads, scale,
-                                        lower_args.target)) {
+    if (ascend::AllReduceNeedsWorkspace(reducing_threads, scale)) {
       PrimExpr workspace = lower_args.add_workspace(
           *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
       thread_reduce_args.push_back(workspace);

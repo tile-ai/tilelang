@@ -19,6 +19,12 @@ using namespace tirx;
 namespace cuda {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
+  static bool AllReduceWidthRequiresPowerOfTwo(Target) { return true; }
+
+  static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
+    return reducing_threads > 32;
+  }
+
   static bool IsFAdd2Enabled(const ReduceOpNode &op) {
     auto pass_ctx = tvm::transform::PassContext::Current();
     bool globally_enabled =
