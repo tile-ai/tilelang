@@ -22,6 +22,9 @@ from tilelang.cuda.language import (  # noqa: F401
     gemm,
     gemm_sp,
     im2col,
+    reduce_absmax,
+    reduce_max,
+    reduce_min,
     unroll,
 )
 

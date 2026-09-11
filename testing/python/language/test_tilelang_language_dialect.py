@@ -56,8 +56,15 @@ def test_default_language_is_static_cuda_facade():
 
 def test_common_language_preserves_special_dsl_exports():
     assert T_comm.__tilelang_dialect__ == "common"
-    assert "__log" in T_comm.__all__
-    assert hasattr(T_comm, "__log")
+    # Packed-x2 math is target-neutral and stays on the common surface; the
+    # CUDA-only fast-math family (dunder names like __log) moved to the CUDA
+    # dialect, whose export machinery must keep supporting them.
+    assert "add2" in T_comm.__all__
+    assert "__log" not in T_comm.__all__
+    from tilelang.cuda import language as cuda_language
+
+    assert "__log" in cuda_language.__all__
+    assert hasattr(cuda_language, "__log")
     assert CUDA_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
     assert METAL_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
     assert ROCM_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)

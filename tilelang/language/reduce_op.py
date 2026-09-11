@@ -29,7 +29,6 @@ def reduce(
     dim: int,
     clear: bool,
     batch: int = 1,
-    nan_propagate: bool = False,
     annotations: dict | None = None,
 ) -> None:
     """Perform a reduction operation on a buffer along a specified dimension.
@@ -45,11 +44,10 @@ def reduce(
             compiler emits ceil(N/batch) batched AllReduce calls each sharing
             a single pair of barriers, reducing total barrier count by batch×.
             batch must evenly divide the per-thread output element count N.
-        nan_propagate (bool): Only meaningful for max/min/absmax on
-            float16/bfloat16. When True, lower to CUDA __hmax_nan/__hmin_nan so
-            NaNs propagate through the reduction. When False (default), use
-            __hmax/__hmin which return the non-NaN operand. CUDA-only.
-        annotations (dict, optional): Additional lowering controls. On CUDA
+        annotations (dict, optional): Additional lowering controls. The CUDA
+            dialect exposes ``nan_propagate`` on reduce_max/min/absmax as a
+            typed keyword (lowering to __hmax_nan/__hmin_nan); it rides here
+            as the ``{"nan_propagate": True}`` annotation. On CUDA
             SM100+, FP32 sum/abssum reductions accept
             ``{"enable_fadd2": False}`` to keep the reducer scalar. Packed
             FP32x2 reduction remains enabled by default, and can be disabled
@@ -72,8 +70,6 @@ def reduce(
     annotations = _normalize_annotations(annotations)
     if batch > 1:
         annotations["batch"] = batch
-    if nan_propagate:
-        annotations["nan_propagate"] = True
 
     # Emit local reductions before macro expansion so alloc_var retains its
     # underlying Buffer rather than becoming a scalar expression.
@@ -172,7 +168,6 @@ def reduce_max(
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
-    nan_propagate: bool = False,
     annotations: dict | None = None,
 ) -> None:
     """Perform reduce max on input buffer, store the result to output buffer
@@ -189,16 +184,12 @@ def reduce_max(
         If set to True, the output buffer will first be initialized to -inf.
     batch : int
         Number of output elements per batched AllReduce call (default 1).
-    nan_propagate : bool
-        For float16/bfloat16 only. When True, NaN inputs propagate through the
-        reduction (CUDA __hmax_nan). When False (default), NaN inputs are
-        ignored in favor of the other operand (CUDA __hmax). CUDA-only.
     Returns
     -------
     handle : PrimExpr
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "max", dim, clear, batch=batch, nan_propagate=nan_propagate, annotations=annotations)
+    reduce(buffer, out, "max", dim, clear, batch=batch, annotations=annotations)
 
 
 def reduce_min(
@@ -207,7 +198,6 @@ def reduce_min(
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
-    nan_propagate: bool = False,
     annotations: dict | None = None,
 ) -> None:
     """Perform reduce min on input buffer, store the result to output buffer.
@@ -218,15 +208,12 @@ def reduce_min(
         dim (int): The dimension to perform reduce on
         clear (bool, optional): If True, output buffer will be initialized to inf. Defaults to True.
         batch (int): Number of output elements per batched AllReduce call (default 1).
-        nan_propagate (bool, optional): For float16/bfloat16 only. When True,
-            NaN inputs propagate (CUDA __hmin_nan). When False (default), NaNs
-            are ignored (CUDA __hmin). CUDA-only.
 
     Returns:
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "min", dim, clear, batch=batch, nan_propagate=nan_propagate, annotations=annotations)
+    reduce(buffer, out, "min", dim, clear, batch=batch, annotations=annotations)
 
 
 def reduce_sum(
@@ -287,7 +274,6 @@ def reduce_absmax(
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
-    nan_propagate: bool = False,
     annotations: dict | None = None,
 ) -> None:
     """Perform reduce absolute max on input buffer, store the result to output buffer.
@@ -297,15 +283,12 @@ def reduce_absmax(
         out (tirx.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
         batch (int): Number of output elements per batched AllReduce call (default 1).
-        nan_propagate (bool, optional): For float16/bfloat16 only. When True,
-            NaN inputs propagate (CUDA __hmax_nan). When False (default), NaNs
-            are ignored. CUDA-only.
 
     Returns:
         tirx.Call: Handle to the reduction operation
     """
     dim = _legalize_dim(buffer, dim)
-    reduce(buffer, out, "absmax", dim, clear, batch=batch, nan_propagate=nan_propagate, annotations=annotations)
+    reduce(buffer, out, "absmax", dim, clear, batch=batch, annotations=annotations)
 
 
 def reduce_bitand(

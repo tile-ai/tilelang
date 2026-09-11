@@ -52,6 +52,9 @@ def test_each_dialect_declares_its_own_op_hints():
         "gemm_sp": {"wg_wait"},
         "atomic_add": {"use_tma"},
         "Parallel": {"prefer_async"},
+        "reduce_max": {"nan_propagate"},
+        "reduce_min": {"nan_propagate"},
+        "reduce_absmax": {"nan_propagate"},
         "unroll": {"unroll_factor"},
         "Unroll": {"unroll_factor"},
     }
