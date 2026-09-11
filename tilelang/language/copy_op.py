@@ -576,13 +576,12 @@ def im2col_impl(
 ) -> tirx.PrimExpr:
     """Shared im2col implementation behind the common and dialect wrappers.
 
-    ``eviction_policy`` occupies a slot of the tile-op call protocol; only the
-    CUDA TMA lowering reads it, so only the CUDA dialect exposes it.
+    ``eviction_policy`` rides in the tile-op annotations; only the CUDA TMA
+    lowering reads it, so only the CUDA dialect exposes it.
     """
-    if eviction_policy is None:
-        eviction_policy = 0
-    else:
-        eviction_policy = EVICTION_POLICY_IDS[eviction_policy]
+    ann = _normalize_annotations(annotations)
+    if eviction_policy is not None and "eviction_policy" not in ann:
+        ann["eviction_policy"] = EVICTION_POLICY_IDS[eviction_policy]
     img_region = to_buffer_region(img)
     col_region = to_buffer_region(col)
     img_extents = [r.extent for r in img_region.region]
@@ -600,8 +599,7 @@ def im2col_impl(
         stride,
         dilation,
         pad,
-        eviction_policy,
-        annotations=_normalize_annotations(annotations),
+        annotations=ann,
     )
 
 

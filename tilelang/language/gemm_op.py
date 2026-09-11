@@ -10,8 +10,6 @@ from tvm import tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
-    retrieve_stride,
-    retrieve_offset,
     prim_expr_equal,
 )
 from tilelang.language.utils import (
@@ -95,20 +93,6 @@ def _gemm_impl(
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
-    # Deprecated: every lowering consumes the complete operand BufferRegions,
-    # so the serialized per-axis strides and final-axis offsets below are no
-    # longer read in-tree and are NOT validated (the historic
-    # ``A_offset[-2] == 0`` assertions are gone).  They are kept in the call
-    # protocol only for out-of-tree consumers of the GemmNode fields.
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-    A_offset = retrieve_offset(A_region)
-    B_offset = retrieve_offset(B_region)
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
     if mbar is not None:
         assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
             f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
@@ -119,9 +103,9 @@ def _gemm_impl(
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
-    # When mbar is None, pass a placeholder constant (0).
-    # The C++ side checks if arg 16 is a BufferLoadNode before using it,
-    # so a non-BufferLoad value will be correctly ignored.
+    # When mbar is None, pass a placeholder constant (0). The C++ side only
+    # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
+    # correctly ignored.
     mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
     return tirx.call_intrin(
         "handle",
@@ -136,10 +120,6 @@ def _gemm_impl(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
         mbar_arg,
         C_coords[0],
         C_coords[1],
@@ -392,15 +372,6 @@ def tcgen05_gemm_blockscaled(
 
     # Deprecated: kept in the call protocol only for out-of-tree consumers;
     # not read or validated in-tree.
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-    A_offset = retrieve_offset(A_region)
-    B_offset = retrieve_offset(B_region)
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
     if mbar is not None:
         assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
             f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
@@ -437,10 +408,6 @@ def tcgen05_gemm_blockscaled(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
         mbar,
         C_coords[0],
         C_coords[1],
@@ -521,14 +488,6 @@ def mma_gemm_blockscaled(
     assert prim_expr_equal(K, K_B), f"T.mma_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
     assert prim_expr_equal(N_B, N), f"T.mma_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
 
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-    A_offset = retrieve_offset(A_region)
-    B_offset = retrieve_offset(B_region)
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
     C_coords = [r.min for r in C_region.region]
 
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
@@ -553,10 +512,6 @@ def mma_gemm_blockscaled(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
         tirx.const(0, dtype="int32"),  # no mbarrier for synchronous mma.sync
         C_coords[0],
         C_coords[1],

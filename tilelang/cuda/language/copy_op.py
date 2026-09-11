@@ -91,4 +91,4 @@ def im2col(
     ``eviction_policy`` is the L2 cache hint consumed by the CUDA TMA im2col
     lowering (ignored by the generic SIMT fallback other targets use).
     """
-    return im2col_impl(img, col, nhw_step, c_step, kernel, stride, dilation, pad, eviction_policy, annotations=annotations)
+    return im2col_impl(img, col, nhw_step, c_step, kernel, stride, dilation, pad, eviction_policy=eviction_policy, annotations=annotations)

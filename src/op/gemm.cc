@@ -67,17 +67,17 @@ void RegisterGemmImpl(GemmImpl impl) {
  *
  * Deserializes operator parameters from `args` and resolves buffer references,
  * populating an internal GemmNode with buffers, transpose flags, M/N/K,
- * warp policy, clear_accum, strides, offsets, optional kPack/wg_wait, and
- * optional mbarrier.
+ * warp policy, clear_accum, an optional mbarrier operand and the C tile
+ * coordinates.
  *
  * @param args Positional serialized arguments produced by the TL frontend:
  *   expected layout is:
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
- *      stride_A (Int), stride_B (Int), offset_A (PrimExpr),
- *      offset_B (PrimExpr),
- *      (optional) kPack (Int), (optional) internal wg_wait (Int),
- *      (optional) mbar (BufferLoad), cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
+ *      (optional) mbar (BufferLoad or const-0 placeholder),
+ *      cCoord_y (PrimExpr), cCoord_x (PrimExpr),
+ *      (optional, blockscaled) SFA, SFB regions, k_start (PrimExpr)]
+ *   Backend lowering knobs (k_pack, wg_wait) ride in the annotations map.
  */
 Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmNode> node = make_object<GemmNode>();
@@ -101,10 +101,6 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->k_ = args[7].as<IntImm>().value()->value;
   node->policy_ = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
   node->clearAccum_ = args[9].as<PrimExpr>().value();
-  node->strideA_ = args[10].as<IntImm>().value()->value;
-  node->strideB_ = args[11].as<IntImm>().value()->value;
-  node->offsetA_ = args[12].as<PrimExpr>().value();
-  node->offsetB_ = args[13].as<PrimExpr>().value();
   // k_pack rides in the annotations (a ROCm MFMA/WMMA lowering knob set by
   // the ROCm dialect), not in the positional call protocol.
   if (auto val = annotations.Get("k_pack")) {
@@ -130,19 +126,19 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
     node->isTcgen05_ = int_val->value != 0;
   }
-  if (args.size() > 14 && args[14]->IsInstance<BufferLoadNode>()) {
-    node->mbar_ = Downcast<BufferLoad>(args[14]);
+  if (args.size() > 10 && args[10]->IsInstance<BufferLoadNode>()) {
+    node->mbar_ = Downcast<BufferLoad>(args[10]);
   }
   node->cCoords_ = Array<PrimExpr>(
-      {args[15].as<PrimExpr>().value(), args[16].as<PrimExpr>().value()});
-  if (args.size() > 17) {
-    node->sfaRegion_ = NormalizeToBufferRegion(args[17]);
+      {args[11].as<PrimExpr>().value(), args[12].as<PrimExpr>().value()});
+  if (args.size() > 13) {
+    node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
   }
-  if (args.size() > 18) {
-    node->sfbRegion_ = NormalizeToBufferRegion(args[18]);
+  if (args.size() > 14) {
+    node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
   }
-  if (args.size() > 19) {
-    node->sfKStart_ = args[19].as<PrimExpr>().value();
+  if (args.size() > 15) {
+    node->sfKStart_ = args[15].as<PrimExpr>().value();
   }
   node->annotations_ = annotations;
   data_ = std::move(node);

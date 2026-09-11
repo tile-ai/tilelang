@@ -7,8 +7,6 @@ from tvm import tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
-    retrieve_stride,
-    retrieve_offset,
     prim_expr_equal,
 )
 from tilelang.language.utils import (
@@ -59,9 +57,6 @@ def _gemm_sp_impl(
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
 
-    A_stride = retrieve_stride(A_sparse)
-    B_stride = retrieve_stride(B)
-
     assert len(C_shape) == 2, "current only support C as a 2D tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
@@ -85,16 +80,6 @@ def _gemm_sp_impl(
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm_sp requires static tile dimensions, but {name} is symbolic: {dim}")
 
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-
-    A_offset = retrieve_offset(A_sparse)
-    B_offset = retrieve_offset(B)
-    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
-    assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     E_arg = buffer_region_to_tile_region(E_region, "r", [r for r in E_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
@@ -114,10 +99,6 @@ def _gemm_sp_impl(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
         annotations=annotations,
     )
 
