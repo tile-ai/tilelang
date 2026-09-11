@@ -1377,6 +1377,43 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
   os << sret;
 }
 
+/*!
+ * \brief Emit a prefix unary operator, such as `~`, on each vector lane.
+ *
+ * Materializes the input once and uses the lane load/store helpers to
+ * assemble the result, including packed integer representations. Masks
+ * 8-bit integer results so promoted upper bits cannot affect adjacent lanes.
+ * Supporting statements go to `stream`; the result variable name goes to
+ * `os`. The input and result must have the same fixed-length vector type.
+ */
+void CodeGenTileLangCUDA::PrintVecUnaryOp_(const std::string &op,
+                                           DataType dtype,
+                                           const PrimExpr &input,
+                                           std::ostream &os) {
+  std::string result = name_supply_->FreshName("_");
+  PrintIndent();
+  PrintType(dtype, stream);
+  stream << ' ' << result << ";\n";
+  int ssa_scope = BeginScope();
+  // Evaluate the vector once before extracting its lanes.
+  std::string value = SSAGetID(PrintExpr(input), input.dtype());
+  for (int i = 0; i < dtype.lanes(); ++i) {
+    std::ostringstream lane;
+    lane << '(' << op;
+    PrintVecElemLoad(value, input.dtype(), i, lane);
+    lane << ')';
+    // The packed byte store combines lanes with OR. Integer promotion must
+    // not leave upper bits set and overwrite neighboring bytes.
+    std::string lane_value = lane.str();
+    if (dtype.bits() == 8 && (dtype.is_int() || dtype.is_uint())) {
+      lane_value = "(" + lane_value + " & 0xffu)";
+    }
+    PrintVecElemStore(result, dtype, i, lane_value);
+  }
+  EndScope(ssa_scope);
+  os << result;
+}
+
 void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
                                            int i,
                                            std::ostream &os) { // NOLINT(*)
@@ -4692,6 +4729,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
        << ", " << PrintExpr(offset) << ")";
   } else if (HandleLateIntrinsicCall(op, os)) {
     // Handled by a helper to keep MSVC's parser away from the giant tail chain.
+  } else if (op->op.same_as(builtin::bitwise_not()) &&
+             op->dtype.is_fixed_length_vector() && !op->dtype.is_bool() &&
+             (op->dtype.is_int() || op->dtype.is_uint())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    PrintVecUnaryOp_("~", op->dtype, op->args[0], os);
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
