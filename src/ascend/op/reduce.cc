@@ -5,7 +5,6 @@
 
 #include "backend/common/op/reduce.h"
 
-#include "ascend/op/ascend_allreduce_policy.h"
 #include "backend/common/target_utils.h"
 
 #include <sstream>
@@ -18,8 +17,11 @@ using namespace tirx;
 namespace ascend {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
-  static bool AllReduceNeedsWorkspace(int reducing_threads, int scale, Target) {
-    return ascend::AllReduceNeedsWorkspace(reducing_threads, scale);
+  static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
+    // CheckAllReduceWidth ensures scale divides reducing_threads, so a
+    // power-of-two width also has a power-of-two scale.
+    return reducing_threads > 32 ||
+           (reducing_threads & (reducing_threads - 1)) != 0;
   }
 
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
