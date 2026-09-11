@@ -23,6 +23,7 @@ __all__ = [
     "requires_cuda_or_cdna",
     "requires_gfx950",
     "main",
+    "ascend_backend_compiled",
     "requires_ascend",
     "requires_cuda_compute_version",
     "process_func",
@@ -54,7 +55,7 @@ def _check_is_cuda_or_cdna() -> bool:
         return False
 
 
-def _ascend_backend_compiled() -> bool:
+def ascend_backend_compiled() -> bool:
     """Whether this build includes the Ascend backend (USE_ASCEND).
 
     The Ascend sources are gated behind USE_ASCEND, so a CUDA-only build has no
@@ -96,7 +97,7 @@ def _ascend_device_available() -> bool:
 requires_ascend = Feature(
     "ascend",
     "Ascend",
-    compile_time_check=_ascend_backend_compiled,
+    compile_time_check=ascend_backend_compiled,
     run_time_check=_ascend_device_available,
 )
 
