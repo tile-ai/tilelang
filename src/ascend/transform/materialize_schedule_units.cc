@@ -36,11 +36,11 @@
 #include <utility>
 #include <vector>
 
+#include "ascend/op/builtin.h"
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ascend/transform/auto_schedule/task_analysis.h"
 #include "ascend/transform/auto_schedule/task_annotations.h"
-#include "op/builtin.h"
 
 namespace tvm {
 namespace tl {

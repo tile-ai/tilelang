@@ -42,7 +42,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "op/builtin.h"
+#include "ascend/op/builtin.h"
 #include "transform/common/constr_visitor.h"
 
 namespace tvm {

@@ -18,8 +18,8 @@
 
 #include "arith/pattern_match.h"
 
+#include "ascend/op/builtin.h"
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
 #include "transform/common/attr.h"
 
 namespace tvm {

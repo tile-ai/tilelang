@@ -36,7 +36,7 @@
 
 #include "./ir_structure.h"
 #include "./memory_detector.h"
-#include "op/builtin.h"
+#include "ascend/op/builtin.h"
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/utils.h"

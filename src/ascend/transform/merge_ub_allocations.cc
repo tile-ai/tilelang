@@ -48,9 +48,9 @@
 #include <utility>
 #include <vector>
 
+#include "ascend/op/builtin.h"
 #include "ascend_pipe.h"
 #include "core_mask.h"
-#include "op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>

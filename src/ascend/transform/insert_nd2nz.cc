@@ -16,8 +16,8 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "ascend/layout/ascend_layouts.h"
+#include "ascend/op/builtin.h"
 #include "ascend/op/oob_padding.h"
-#include "op/builtin.h"
 #include "op/copy.h"
 #include "op/utils.h"
 #include "support/check.h"

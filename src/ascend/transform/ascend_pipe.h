@@ -35,7 +35,7 @@
 #include <cstdint>
 #include <string>
 
-#include "op/builtin.h"
+#include "ascend/op/builtin.h"
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/utils.h"
@@ -234,12 +234,11 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
     return PipeMask(ResourcePipe::kMTE3);
   }
   if (op.same_as(ascend_nd2nz_scatter()) || name.rfind("tl.simd.", 0) == 0 ||
-      op.same_as(sync_warp()) ||
-      op.same_as(ballot_sync()) || op.same_as(ballot()) ||
-      op.same_as(activemask()) || op.same_as(warp_reduce_sum()) ||
-      op.same_as(warp_reduce_max()) || op.same_as(warp_reduce_min()) ||
-      op.same_as(warp_reduce_bitand()) || op.same_as(warp_reduce_bitor()) ||
-      op.same_as(atomic_add_elem_op()) ||
+      op.same_as(sync_warp()) || op.same_as(ballot_sync()) ||
+      op.same_as(ballot()) || op.same_as(activemask()) ||
+      op.same_as(warp_reduce_sum()) || op.same_as(warp_reduce_max()) ||
+      op.same_as(warp_reduce_min()) || op.same_as(warp_reduce_bitand()) ||
+      op.same_as(warp_reduce_bitor()) || op.same_as(atomic_add_elem_op()) ||
       op.same_as(atomic_add_ret_elem_op()) ||
       op.same_as(atomic_addx2_elem_op()) ||
       op.same_as(atomic_addx2_ret_elem_op()) ||

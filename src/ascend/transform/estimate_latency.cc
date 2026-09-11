@@ -48,7 +48,7 @@
 #include "./auto_schedule/task_annotations.h"
 #include "./estimate_latency.h"
 #include "ascend/op/ascend_mte_plan.h"
-#include "op/builtin.h"
+#include "ascend/op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
 #include "transform/common/attr.h"

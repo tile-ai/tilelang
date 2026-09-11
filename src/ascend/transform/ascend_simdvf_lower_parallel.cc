@@ -13,7 +13,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "op/builtin.h"
+#include "ascend/op/builtin.h"
 #include "op/utils.h"
 
 #include <functional>

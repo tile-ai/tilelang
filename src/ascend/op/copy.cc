@@ -6,11 +6,11 @@
 #include "op/copy.h"
 
 #include "ascend/layout/ascend_layouts.h"
+#include "ascend/op/builtin.h"
 #include "ascend_mte_plan.h"
 #include "backend/common/target_utils.h"
 #include "layout/layout.h"
 #include "oob_padding.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "support/check.h"
 #include "transform/common/loop_fusion_utils.h"
