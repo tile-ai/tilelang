@@ -274,12 +274,13 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA ROCM METAL LLVM)
+set(TILELANG_BACKENDS CUDA ROCM METAL LLVM ASCEND)
 
 set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
 set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
 set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
 set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
+set(TILELANG_BACKEND_DOC_ASCEND "Enable Ascend backend")
 
 # TVM's config.cmake redefines USE_* options later, so we cache the user's choice
 # (including explicit -DUSE_XXX arguments) before we include TVM and restore it
@@ -354,6 +355,22 @@ unset(_TILELANG_USE_HIP_STUBS_DEFAULT)
 # /opt/rocm/include -> 3rdparty/hip-headers/include (vendored default).
 set(TILELANG_HIP_INCLUDE_DIR "" CACHE PATH
     "Path to HIP headers when building with USE_ROCM=ON on a host without a ROCm runtime")
+
+# The ascendcl stub library avoids a hard DT_NEEDED dependency on
+# libascendcl.so, so Ascend-enabled wheels can be imported on machines without
+# CANN installed.
+#
+# The stub is POSIX-only (dlopen/dlsym via <dlfcn.h>); the Ascend backend
+# itself does not support Windows. Only meaningful when USE_ASCEND is enabled.
+if(WIN32 AND NOT CYGWIN)
+  set(_TILELANG_USE_ASCEND_STUBS_DEFAULT OFF)
+else()
+  set(_TILELANG_USE_ASCEND_STUBS_DEFAULT ON)
+endif()
+option(TILELANG_USE_ASCEND_STUBS
+       "Use POSIX dlopen-based ascendcl stub library for portable wheels"
+       ${_TILELANG_USE_ASCEND_STUBS_DEFAULT})
+unset(_TILELANG_USE_ASCEND_STUBS_DEFAULT)
 # Configs end
 
 include(cmake/load_tvm.cmake)
@@ -454,10 +471,25 @@ if(NOT TILELANG_BACKEND_USER_SELECTED)
     endif()
   endif()
 
+  if(DEFINED ENV{USE_ASCEND})
+    set(_tilelang_backend_env_selected ON)
+    if($ENV{USE_ASCEND})
+      set(USE_ASCEND ON)
+    else()
+      set(USE_ASCEND OFF)
+    endif()
+  endif()
+
   if(NOT _tilelang_backend_env_selected)
     if(APPLE)
       message(STATUS "Enable Metal support by default.")
       set(USE_METAL ON)
+    elseif(IS_DIRECTORY "$ENV{ASCEND_HOME_PATH}" OR
+           IS_DIRECTORY "/usr/local/Ascend/ascend-toolkit/latest")
+      # A physical CANN install is a stronger signal than a (possibly
+      # pip-provided) CUDA toolkit, so probe it first.
+      message(STATUS "CANN toolkit found; enable Ascend support by default.")
+      set(USE_ASCEND ON)
     elseif(TILELANG_CUDA_TOOLKIT_AVAILABLE)
       message(STATUS "Enable CUDA support by default.")
       set(USE_CUDA ON)

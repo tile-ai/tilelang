@@ -5,10 +5,12 @@
  * The module mirrors CUDA's binary runtime module: codegen stores executable
  * device bytes and launch metadata, while the runtime loads functions and
  * launches them on the stream supplied by TVM-FFI's DLPack Exchange API.
- * CANN symbols are resolved lazily so TileLang keeps no CANN build-time
- * dependency. The Ascend backend is Linux-only.
+ * CANN symbols are resolved lazily by the ascendcl stub library
+ * (src/ascend/stubs/) so TileLang keeps no CANN build-time dependency.
+ * The Ascend backend is Linux-only.
  */
-#include <dlfcn.h>
+#include "ascend/stubs/ascendcl.h"
+
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/extra/module.h>
 #include <tvm/ffi/function.h>
@@ -329,98 +331,11 @@ struct AclLaunchKernelCfg {
   size_t num_attrs;
 };
 
-class AscendDriver {
-public:
-  static AscendDriver *Global() {
-    static auto *driver = new AscendDriver();
-    return driver;
-  }
-
-  AclError BinaryLoadFromData(const void *data, size_t size,
-                              AclBinHandle *handle) const {
-    return binary_load_from_data_(data, size, nullptr, handle);
-  }
-
-  AclError BinaryGetFunction(AclBinHandle binary, const char *name,
-                             AclFuncHandle *function) const {
-    return binary_get_function_(binary, name, function);
-  }
-
-  AclError BinaryUnload(AclBinHandle binary) const {
-    return binary_unload_(binary);
-  }
-
-  AclError GetDevice(int32_t *device_id) const {
-    return get_device_(device_id);
-  }
-
-  AclError LaunchKernelWithHostArgs(AclFuncHandle function, uint32_t num_blocks,
-                                    AclStream stream,
-                                    AclLaunchKernelCfg *config, void *args,
-                                    size_t args_size) const {
-    return launch_kernel_with_host_args_(function, num_blocks, stream, config,
-                                         args, args_size, nullptr, 0);
-  }
-
-  const char *GetRecentErrorMessage() const {
-    return get_recent_error_message_ == nullptr ? nullptr
-                                                : get_recent_error_message_();
-  }
-
-private:
-  using BinaryLoadFromDataFn = AclError (*)(const void *, size_t, const void *,
-                                            AclBinHandle *);
-  using BinaryGetFunctionFn = AclError (*)(AclBinHandle, const char *,
-                                           AclFuncHandle *);
-  using BinaryUnloadFn = AclError (*)(AclBinHandle);
-  using GetDeviceFn = AclError (*)(int32_t *);
-  using LaunchKernelWithHostArgsFn = AclError (*)(AclFuncHandle, uint32_t,
-                                                  AclStream,
-                                                  AclLaunchKernelCfg *, void *,
-                                                  size_t, void *, size_t);
-  using GetRecentErrorMessageFn = const char *(*)();
-
-  AscendDriver() {
-    library_ = dlopen("libascendcl.so", RTLD_LAZY | RTLD_LOCAL);
-    TVM_FFI_CHECK(library_ != nullptr, RuntimeError)
-        << "Ascend runtime could not load libascendcl.so: " << dlerror();
-    binary_load_from_data_ =
-        LoadSymbol<BinaryLoadFromDataFn>("aclrtBinaryLoadFromData");
-    binary_get_function_ =
-        LoadSymbol<BinaryGetFunctionFn>("aclrtBinaryGetFunction");
-    binary_unload_ = LoadSymbol<BinaryUnloadFn>("aclrtBinaryUnLoad");
-    get_device_ = LoadSymbol<GetDeviceFn>("aclrtGetDevice");
-    launch_kernel_with_host_args_ =
-        LoadSymbol<LaunchKernelWithHostArgsFn>("aclrtLaunchKernelWithHostArgs");
-    get_recent_error_message_ =
-        LoadSymbol<GetRecentErrorMessageFn>("aclGetRecentErrMsg");
-  }
-
-  template <typename FunctionType> FunctionType LoadSymbol(const char *name) {
-    dlerror();
-    void *symbol = dlsym(library_, name);
-    const char *error = dlerror();
-    TVM_FFI_CHECK(symbol != nullptr && error == nullptr, RuntimeError)
-        << "Ascend runtime could not resolve " << name
-        << " from libascendcl.so: "
-        << (error == nullptr ? "symbol not found" : error);
-    return reinterpret_cast<FunctionType>(symbol);
-  }
-
-  void *library_{nullptr};
-  BinaryLoadFromDataFn binary_load_from_data_{nullptr};
-  BinaryGetFunctionFn binary_get_function_{nullptr};
-  BinaryUnloadFn binary_unload_{nullptr};
-  GetDeviceFn get_device_{nullptr};
-  LaunchKernelWithHostArgsFn launch_kernel_with_host_args_{nullptr};
-  GetRecentErrorMessageFn get_recent_error_message_{nullptr};
-};
-
 void CheckAcl(AclError result, const char *operation) {
   if (result == kAclSuccess) {
     return;
   }
-  const char *message = AscendDriver::Global()->GetRecentErrorMessage();
+  const char *message = aclGetRecentErrMsg();
   TVM_FFI_THROW(RuntimeError)
       << operation << " failed with ACL error " << result
       << (message == nullptr ? "" : std::string(": ") + message);
@@ -440,10 +355,11 @@ public:
     if (device_modules_.empty()) {
       return;
     }
-    AscendDriver *driver = AscendDriver::Global();
     for (const auto &[device_id, device_module] : device_modules_) {
       if (device_module.binary != nullptr) {
-        AclError result = driver->BinaryUnload(device_module.binary);
+        // binary != nullptr implies a prior successful stub call, so the
+        // lazy-loaded library is guaranteed to be present here.
+        AclError result = aclrtBinaryUnLoad(device_module.binary);
         if (result != kAclSuccess) {
           LOG(WARNING) << "aclrtBinaryUnLoad failed for Ascend device "
                        << device_id << " with error " << result;
@@ -487,11 +403,10 @@ public:
 
   AclFuncHandle GetFunctionHandle(int32_t device_id, const std::string &name) {
     std::lock_guard<std::mutex> lock(mutex_);
-    AscendDriver *driver = AscendDriver::Global();
     DeviceModule &device_module = device_modules_[device_id];
     if (device_module.binary == nullptr) {
-      CheckAcl(driver->BinaryLoadFromData(code_.data(), code_.size(),
-                                          &device_module.binary),
+      CheckAcl(aclrtBinaryLoadFromData(code_.data(), code_.size(), nullptr,
+                                       &device_module.binary),
                "aclrtBinaryLoadFromData");
     }
 
@@ -501,9 +416,9 @@ public:
     }
 
     AclFuncHandle function{nullptr};
-    CheckAcl(driver->BinaryGetFunction(device_module.binary, name.c_str(),
-                                       &function),
-             "aclrtBinaryGetFunction");
+    CheckAcl(
+        aclrtBinaryGetFunction(device_module.binary, name.c_str(), &function),
+        "aclrtBinaryGetFunction");
     device_module.functions.emplace(name, function);
     return function;
   }
@@ -555,9 +470,8 @@ public:
         << "Ascend dynamic UBUF size exceeds uint32 range for kernel "
         << function_name_;
 
-    AscendDriver *driver = AscendDriver::Global();
     int32_t device_id = 0;
-    CheckAcl(driver->GetDevice(&device_id), "aclrtGetDevice");
+    CheckAcl(aclrtGetDevice(&device_id), "aclrtGetDevice");
     AclFuncHandle function =
         module_->GetFunctionHandle(device_id, function_name_);
     AclStream stream = TVMFFIEnvGetStream(kDLExtDev, device_id);
@@ -574,11 +488,11 @@ public:
       config_ptr = &config;
     }
 
-    AclError result = driver->LaunchKernelWithHostArgs(
+    AclError result = aclrtLaunchKernelWithHostArgs(
         function, static_cast<uint32_t>(num_blocks), stream, config_ptr,
-        packed_args, packed_args_size);
+        packed_args, packed_args_size, nullptr, 0);
     if (result != kAclSuccess) {
-      const char *message = driver->GetRecentErrorMessage();
+      const char *message = aclGetRecentErrMsg();
       std::ostringstream error;
       error << "aclrtLaunchKernelWithHostArgs failed for " << function_name_
             << " with ACL error " << result << ", grid=" << num_blocks
