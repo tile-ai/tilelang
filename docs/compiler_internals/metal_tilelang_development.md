@@ -640,3 +640,14 @@ Default benchmark:
 TILELANG_DISABLE_CACHE=1 python benchmark/matmul_metal/benchmark_matmul_metal.py \
   --m 4096 --n 4096 --k 4096 --warmup 10 --repeats 100
 ```
+
+## 6. Fragment Reductions
+
+Metal `T.reduce` uses the shared GPU reduction planner for logical fragment
+ownership, local accumulation, and thread reduction steps. The Metal backend
+emits SIMD-group shuffles, with threadgroup workspace and barriers for steps
+that cross SIMD groups. Such steps require the entire threadgroup to participate;
+partial threadgroup participation is rejected during lowering. Sum, max, min,
+absolute sum/max, bitwise reductions, and batched outputs use this path.
+
+Regression coverage is in `testing/python/metal/test_metal_reduce.py`.
