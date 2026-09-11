@@ -19,8 +19,6 @@ using namespace tirx;
 namespace cuda {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
-  static bool AllReduceWidthRequiresPowerOfTwo(Target) { return true; }
-
   static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
     return reducing_threads > 32;
   }
@@ -70,6 +68,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
                                         PrimExpr thread_offset,
                                         PrimExpr all_threads, int batch,
                                         int workspace_stride, Target target) {
+    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;
@@ -86,6 +85,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset,
                                          PrimExpr all_threads, Target target) {
+    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset;

@@ -17,8 +17,6 @@ using namespace tirx;
 namespace rocm {
 
 struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
-  static bool AllReduceWidthRequiresPowerOfTwo(Target) { return true; }
-
   static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
     return reducing_threads > 32;
   }
@@ -30,6 +28,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
                                         PrimExpr thread_offset, PrimExpr,
                                         int batch, int workspace_stride,
                                         Target) {
+    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ", " << batch << ", "
@@ -41,6 +40,7 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset, PrimExpr,
                                          Target) {
+    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";

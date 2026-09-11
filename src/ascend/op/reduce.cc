@@ -18,10 +18,6 @@ using namespace tirx;
 namespace ascend {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
-  static bool AllReduceWidthRequiresPowerOfTwo(Target) {
-    return ascend::kAllReduceWidthRequiresPowerOfTwo;
-  }
-
   static bool AllReduceNeedsWorkspace(int reducing_threads, int scale, Target) {
     return ascend::AllReduceNeedsWorkspace(reducing_threads, scale);
   }

@@ -186,8 +186,7 @@ inline int GetPreferredVectorizedSize(DataType dt,
 }
 
 inline void CheckAllReduceWidth(int reducing_threads, int scale,
-                                const char *op_name,
-                                bool requires_power_of_two_width = true) {
+                                const char *op_name) {
   ICHECK_GT(reducing_threads, 0)
       << op_name << ": AllReduce threads must be positive, got "
       << reducing_threads;
@@ -196,17 +195,20 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
   ICHECK_EQ(reducing_threads % scale, 0)
       << op_name << ": AllReduce threads (" << reducing_threads
       << ") must be divisible by scale (" << scale << ")";
-  // The power-of-two requirement belongs to the XOR-butterfly shuffle
-  // reduction. A backend whose all-reduce handles arbitrary widths answers
-  // false through Impl::AllReduceWidthRequiresPowerOfTwo().
-  if (!requires_power_of_two_width) {
-    return;
-  }
+}
+
+// Additional requirement of the XOR-butterfly shuffle all-reduce, which has no
+// fallback for widths that are not powers of two. It is deliberately not part
+// of CheckAllReduceWidth: a backend that lowers to an all-reduce with an
+// arbitrary-width fallback has nothing to satisfy here. It is called from the
+// backends that emit an XOR-butterfly intrinsic and never from shared code, so
+// this header stays free of target branching.
+inline void CheckXorButterflyWidth(int reducing_threads, int scale) {
   int logical_width = reducing_threads / scale;
   int shift = 0;
   ICHECK(tirx::is_const_power_of_two_integer(Integer(logical_width), &shift))
-      << op_name << ": XOR-butterfly AllReduce requires logical_width "
-      << "(threads / scale) to be a positive power of two, got "
+      << "XOR-butterfly all-reduce requires logical_width (threads / scale) to "
+         "be a positive power of two, got "
       << logical_width << " (threads=" << reducing_threads
       << ", scale=" << scale << ")";
 }
@@ -1012,9 +1014,8 @@ template <typename Impl> struct ReduceLowerer {
 
         for (const auto &thread_step : reduce_plan.thread_steps) {
           int reducing_threads = thread_step.ReducingThreads();
-          reduce::CheckAllReduceWidth(
-              reducing_threads, thread_step.scale, "tl.reduce",
-              Impl::AllReduceWidthRequiresPowerOfTwo(lower_args.target));
+          reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                      "tl.reduce");
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
@@ -1207,9 +1208,8 @@ template <typename Impl> struct ReduceLowerer {
 
       for (const auto &thread_step : reduce_plan.thread_steps) {
         int reducing_threads = thread_step.ReducingThreads();
-        reduce::CheckAllReduceWidth(
-            reducing_threads, thread_step.scale, "tl.reduce",
-            Impl::AllReduceWidthRequiresPowerOfTwo(lower_args.target));
+        reduce::CheckAllReduceWidth(reducing_threads, thread_step.scale,
+                                    "tl.reduce");
         auto thread_offset = lower_args.thread_bounds->min;
         PrimExpr all_threads = lower_args.thread_bounds->extent;
         if (reducing_threads > 32 &&

@@ -89,9 +89,8 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
   auto thread_offset = lower_args.thread_bounds->min;
   Array<Stmt> step_stmts;
   for (const auto &[reducing_threads, scale] : steps) {
-    backend::reduce::CheckAllReduceWidth(
-        reducing_threads, scale, "tl.finalize_reducer",
-        ascend::kAllReduceWidthRequiresPowerOfTwo);
+    backend::reduce::CheckAllReduceWidth(reducing_threads, scale,
+                                         "tl.finalize_reducer");
 
     std::stringstream ss;
     ss << "tl::AscendAllReduce<" << op_str << ", " << reducing_threads << ", "
