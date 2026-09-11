@@ -13,9 +13,13 @@ level, how they map to hardware concepts, and how to use them correctly.
 
 ## Data Movement
 
-Use `T.copy(src, dst, *, coalesced_width=None, disable_tma=False, eviction_policy=None, loop_layout=None)`
+Use `T.copy(src, dst, *, coalesced_width=None, loop_layout=None)`
 to move tiles between memory scopes. It accepts `tir.Buffer`, `BufferLoad`, or
-`BufferRegion`; extents are inferred or broadcast when possible.
+`BufferRegion`; extents are inferred or broadcast when possible. Backend
+dialects add their lowering hints as extra keywords: the CUDA dialect (the
+default `tilelang.language` facade) accepts `disable_tma`, `eviction_policy`
+and `prefer_instruction`. Hints are recorded on the op and ignored by targets
+that have no use for them.
 
 ```python
 # Global → Shared tiles (extents inferred from dst)
@@ -219,7 +223,8 @@ Warp-match (CUDA sm_70+, not supported on HIP). `mask` defaults to `0xFFFFFFFF`.
 > **Note on HIP:** `any_sync`/`all_sync` ignore the mask and call `__any`/`__all` directly. `ballot_sync`, `ballot`, and `activemask` call `__ballot` which returns `uint64` natively on 64-thread wavefronts — no truncation occurs. Shuffle intrinsics lower to `__shfl`/`__shfl_xor`/`__shfl_down`/`__shfl_up` (mask ignored). `syncthreads_count/and/or` have identical signatures on both platforms. `match_any_sync` and `match_all_sync` have no HIP equivalent and will fail to codegen on HIP.
 
 Atomics
-- `T.atomic_add(dst, value, memory_order=None, return_prev=False, use_tma=False)`.
+- `T.atomic_add(dst, value, memory_order=None, return_prev=False)`; the CUDA
+  dialect additionally accepts `use_tma=True` (sm90+ TMA `cp.reduce`).
 - `T.atomic_addx2(dst, value, return_prev=False)`; `T.atomic_addx4(...)`.
 - `T.atomic_max(dst, value, memory_order=None, return_prev=False)`.
 - `T.atomic_min(dst, value, memory_order=None, return_prev=False)`.

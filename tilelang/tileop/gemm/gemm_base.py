@@ -133,22 +133,6 @@ class GemmBase:
         return getattr(self.gemm_node, "cRegion", None)
 
     @property
-    def stride_A(self) -> int:
-        return getattr(self.gemm_node, "strideA", None)
-
-    @property
-    def stride_B(self) -> int:
-        return getattr(self.gemm_node, "strideB", None)
-
-    @property
-    def offset_A(self) -> int:
-        return getattr(self.gemm_node, "offsetA", None)
-
-    @property
-    def offset_B(self) -> int:
-        return getattr(self.gemm_node, "offsetB", None)
-
-    @property
     def clear_accum(self) -> PrimExpr:
         return getattr(self.gemm_node, "clearAccum", None)
 

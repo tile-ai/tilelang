@@ -427,29 +427,39 @@ def abs2(x: PrimExpr) -> PrimExpr:
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.abs2"), x)
 
 
-__all__ = [
-    "__log",  # noqa: F401
-    "__log2",  # noqa: F401
-    "__log10",  # noqa: F401
-    "__tan",  # noqa: F401
-    "__cos",  # noqa: F401
-    "__sin",  # noqa: F401
-    "__exp10",  # noqa: F401
-    "__exp",  # noqa: F401
-    "fast_rcp",  # noqa: F401
-    "ieee_add",  # noqa: F401
-    "ieee_sub",  # noqa: F401
-    "ieee_mul",  # noqa: F401
-    "ieee_fmaf",  # noqa: F401
-    "ieee_frcp",  # noqa: F401
-    "ieee_fsqrt",  # noqa: F401
-    "ieee_frsqrt",  # noqa: F401
-    "ieee_fdiv",  # noqa: F401
-    "add2",  # noqa: F401
-    "sub2",  # noqa: F401
-    "mul2",  # noqa: F401
-    "fma2",  # noqa: F401
-    "max2",  # noqa: F401
-    "min2",  # noqa: F401
-    "abs2",  # noqa: F401
+# Packed x2 element-wise math: registered target-neutrally and lowered on
+# both CUDA and ROCm (ROCm currently supports the float32x2 flavors).
+COMMON_MATH_INTRINSICS = [
+    "add2",
+    "sub2",
+    "mul2",
+    "fma2",
+    "max2",
+    "min2",
+    "abs2",
 ]
+
+# CUDA-only intrinsics: PTX fast-math approximations and IEEE ops with an
+# explicit rounding mode. Registered and lowered only by the CUDA backend,
+# so only the CUDA dialect exports them.
+CUDA_MATH_INTRINSICS = [
+    "__log",
+    "__log2",
+    "__log10",
+    "__tan",
+    "__cos",
+    "__sin",
+    "__exp10",
+    "__exp",
+    "fast_rcp",
+    "ieee_add",
+    "ieee_sub",
+    "ieee_mul",
+    "ieee_fmaf",
+    "ieee_frcp",
+    "ieee_fsqrt",
+    "ieee_frsqrt",
+    "ieee_fdiv",
+]
+
+__all__ = CUDA_MATH_INTRINSICS + COMMON_MATH_INTRINSICS

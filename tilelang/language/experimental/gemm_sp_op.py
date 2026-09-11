@@ -7,8 +7,6 @@ from tvm import tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
-    retrieve_stride,
-    retrieve_offset,
     prim_expr_equal,
 )
 from tilelang.language.utils import (
@@ -29,12 +27,12 @@ def _gemm_sp_impl(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    wg_wait: int = 0,
     annotations: dict | None = None,
 ) -> tirx.Call:
     """Shared sparse GEMM implementation.
 
-    Returns a call_intrin handle for the given op key.
+    Returns a call_intrin handle for the given op key. Backend lowering knobs
+    such as ``wg_wait`` ride in ``annotations``.
     """
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
@@ -59,9 +57,6 @@ def _gemm_sp_impl(
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
 
-    A_stride = retrieve_stride(A_sparse)
-    B_stride = retrieve_stride(B)
-
     assert len(C_shape) == 2, "current only support C as a 2D tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
     assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
@@ -85,16 +80,6 @@ def _gemm_sp_impl(
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm_sp requires static tile dimensions, but {name} is symbolic: {dim}")
 
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-
-    A_offset = retrieve_offset(A_sparse)
-    B_offset = retrieve_offset(B)
-    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
-    assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     E_arg = buffer_region_to_tile_region(E_region, "r", [r for r in E_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
@@ -114,15 +99,6 @@ def _gemm_sp_impl(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
-        # k_pack call slot: parsed and validated on the C++ side but never
-        # consumed by any sparse-GEMM lowering; kept at 1 for protocol
-        # stability.
-        1,
-        wg_wait,
         annotations=annotations,
     )
 
@@ -137,7 +113,6 @@ def gemm_sp(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    wg_wait: int = 0,
     annotations: dict | None = None,
 ) -> tirx.Call:
     """TileLang sparse GEMM operator.
@@ -159,8 +134,11 @@ def gemm_sp(
         transpose_B: Whether to transpose B. Defaults to False.
         policy: Warp partition policy. Defaults to GemmSPWarpPolicy.Square.
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
-        wg_wait: Warp group wait count. Defaults to 0.
-        annotations: Additional annotations.
+        annotations: Additional annotations. The CUDA dialect
+            (``tilelang.cuda.language.gemm_sp``) additionally exposes
+            ``wg_wait`` (Hopper warpgroup wait count) as a typed keyword. The
+            former ``k_pack`` parameter was parsed but never consumed by any
+            sparse-GEMM lowering and has been removed.
 
     Returns:
         tirx.Call: A handle to the sparse GEMM operation.
@@ -176,7 +154,6 @@ def gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        wg_wait,
         annotations=annotations,
     )
 
@@ -218,6 +195,9 @@ def wgmma_gemm_sp(
     Returns:
         tirx.Call: A handle to the sparse GEMM operation.
     """
+    ann = dict(annotations) if annotations is not None else {}
+    # Explicit async WGMMA SP: never auto-emit the warpgroup wait.
+    ann.setdefault("wg_wait", -1)
     return _gemm_sp_impl(
         "tl.tileop.wgmma_gemm_sp",
         A_sparse,
@@ -229,8 +209,7 @@ def wgmma_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        -1,
-        annotations=annotations,
+        annotations=ann,
     )
 
 
@@ -284,6 +263,5 @@ def tcgen05_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        0,
         annotations=annotations,
     )

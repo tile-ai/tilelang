@@ -571,8 +571,8 @@ Stmt CopyNode::Lower(const LowerArgs &lower_args,
 }
 
 // Constructs an Im2ColOp node from call arguments.
-// args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding,
-// eviction_policy
+// args: src, dst, nhw_step, c_step, kernel, stride, dilation, padding.
+// The CUDA-only eviction_policy hint rides in the annotations map.
 Im2ColOp::Im2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<Im2ColOpNode> node = make_object<Im2ColOpNode>();
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
@@ -588,7 +588,11 @@ Im2ColOp::Im2ColOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->stride_ = args[5].as<IntImm>().value()->value;
   node->dilation_ = args[6].as<IntImm>().value()->value;
   node->padding_ = args[7].as<IntImm>().value()->value;
-  node->eviction_policy_ = args[8].as<IntImm>().value()->value;
+  if (auto val = annotations.Get("eviction_policy")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "eviction_policy annotation must be IntImmNode";
+    node->eviction_policy_ = int_val->value;
+  }
   node->annotations_ = annotations;
   data_ = std::move(node);
 }
@@ -606,12 +610,12 @@ Stmt Im2ColOpNode::Lower(const LowerArgs &lower_args,
 
 // Register the Copy operation with TVM's TIR system
 // This makes the copy operation available for use in TVM programs
-// - Takes 5 inputs: src_buffer, dst_buffer, and annotation-driven options.
+// - Takes 2 inputs (src_buffer, dst_buffer); options ride in annotations.
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Copy, copy)
     .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
                                             ApplyCopyBlockAnnotations)
-    .set_num_inputs(5)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -627,7 +631,7 @@ TVM_REGISTER_OP("tl.tileop.async_copy")
                              })
     .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
                                             ApplyCopyBlockAnnotations)
-    .set_num_inputs(5)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -645,7 +649,7 @@ TVM_REGISTER_OP("tl.tileop.tma_copy")
                              })
     .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
                                             ApplyCopyBlockAnnotations)
-    .set_num_inputs(5)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -658,11 +662,11 @@ LayoutMap Im2ColOpNode::InferLayout(const LayoutInferArgs &layout_args,
 // Register the Im2Col operation with TVM's TIR system
 // This operation performs im2col transformation for 2D convolutions using a
 // target-specific lowering.
-// - Takes 9 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
-// dilation, padding, eviction_policy
+// - Takes 8 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
+// dilation, padding; the CUDA eviction_policy hint rides in annotations
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_TILE_OP(Im2ColOp, im2col)
-    .set_num_inputs(9)
+    .set_num_inputs(8)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -675,7 +679,7 @@ TVM_REGISTER_OP("tl.tileop.c2d_im2col")
                                 Map<String, ObjectRef> annotations) {
                                return Im2ColOp(args, annotations);
                              })
-    .set_num_inputs(9)
+    .set_num_inputs(8)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
