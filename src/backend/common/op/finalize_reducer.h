@@ -91,8 +91,8 @@ template <typename Impl> struct FinalizeReducerLowerer {
 
     Array<Stmt> step_stmts;
     for (const auto &[reducing_threads, scale] : steps) {
-      reduce::CheckAllReduceWidth(reducing_threads, scale,
-                                  "tl.finalize_reducer");
+      Impl::CheckAllReduceWidth(reducing_threads, scale, "tl.finalize_reducer",
+                                lower_args.target);
 
       bool use_batch = effective_batch > 1 &&
                        reducing_threads > Impl::WarpSize(lower_args.target);

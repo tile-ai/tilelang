@@ -21,6 +21,14 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
     return reducing_threads > 32;
   }
 
+  // The XOR-butterfly shuffle all-reduce has no arbitrary-width fallback, so
+  // the power-of-two rule applies on top of the universal checks.
+  static void CheckAllReduceWidth(int reducing_threads, int scale,
+                                  const char *op_name, Target) {
+    backend::reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
+    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
+  }
+
   static int WarpSize(Target target) { return TargetRocmGetWarpSize(target); }
 
   static std::string MakeBatchAllReduce(std::string reducer,
@@ -28,7 +36,6 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
                                         PrimExpr thread_offset, PrimExpr,
                                         int batch, int workspace_stride,
                                         Target) {
-    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ", " << batch << ", "
@@ -40,7 +47,6 @@ struct FinalizeReducer : backend::FinalizeReducerLowerer<FinalizeReducer> {
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset, PrimExpr,
                                          Target) {
-    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";

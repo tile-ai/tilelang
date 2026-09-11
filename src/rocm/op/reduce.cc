@@ -21,6 +21,14 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return reducing_threads > 32;
   }
 
+  // The XOR-butterfly shuffle all-reduce has no arbitrary-width fallback, so
+  // the power-of-two rule applies on top of the universal checks.
+  static void CheckAllReduceWidth(int reducing_threads, int scale,
+                                  const char *op_name, Target) {
+    backend::reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
+    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
+  }
+
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
 
   static int GetPreferredVectorizedSize(const ReduceOpNode &, Target) {
@@ -32,7 +40,6 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
                                         PrimExpr thread_offset, PrimExpr,
                                         int batch, int workspace_stride,
                                         Target) {
-    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ", " << batch << ", "
@@ -44,7 +51,6 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset, PrimExpr,
                                          Target) {
-    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
     std::stringstream ss;
     ss << "tl::AllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";

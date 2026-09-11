@@ -88,6 +88,9 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
   auto thread_offset = lower_args.thread_bounds->min;
   Array<Stmt> step_stmts;
   for (const auto &[reducing_threads, scale] : steps) {
+    // Same policy as ascend::Reduce::CheckAllReduceWidth: AscendAllReduce gates
+    // its butterfly and hardware-reduce paths on a power-of-two thread count,
+    // so the XOR-butterfly rule is vacuous and only the universal checks apply.
     backend::reduce::CheckAllReduceWidth(reducing_threads, scale,
                                          "tl.finalize_reducer");
 
