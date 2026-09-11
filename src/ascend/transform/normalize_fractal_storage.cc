@@ -207,7 +207,7 @@ private:
       for (size_t i = 1; i < ranges.size(); ++i)
         ICHECK(analyzer_->CanProve(ranges[i]->extent <= buffer->shape[i]))
             << "Cube region crosses an original reshape axis: " << region;
-      Array<Range> mapped = logical_maps_[buffer]->MapRegion(ranges);
+      Array<Range> mapped = logical_maps_[buffer]->MapRegionBounds(ranges);
       PrimExpr old_size = Integer(1), new_size = Integer(1);
       for (const Range &range : ranges)
         old_size = old_size * range->extent;

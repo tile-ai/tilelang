@@ -801,9 +801,9 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
   return ret;
 }
 
-Array<Range> LayoutNode::MapRegion(const Array<Range> &region) const {
+Array<Range> LayoutNode::MapRegionBounds(const Array<Range> &region) const {
   ICHECK_EQ(region.size(), InputDim())
-      << "MapRegion: region rank (" << region.size()
+      << "MapRegionBounds: region rank (" << region.size()
       << ") != layout input rank (" << InputDim() << ")";
 
   arith::Analyzer analyzer;
@@ -1769,9 +1769,9 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              const LayoutNode *other_node = other.as<LayoutNode>();
              return layout->IsEqual(other_node);
            })
-      .def("tl.Layout_map_region",
+      .def("tl.Layout_map_region_bounds",
            [](Layout layout, Array<Range> region) {
-             return layout->MapRegion(region);
+             return layout->MapRegionBounds(region);
            })
       .def_packed("tl.Fragment",
                   [](PackedArgs args, Any *rv) {

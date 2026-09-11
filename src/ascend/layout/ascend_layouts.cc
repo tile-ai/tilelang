@@ -372,7 +372,7 @@ bool TryExtractAscendFractalRegion(const Layout &layout,
                                    AscendFractalRegionInfo *out) {
   if (!layout.defined() || logical_region.size() != layout->InputDim())
     return false;
-  Array<Range> phys = layout->MapRegion(logical_region);
+  Array<Range> phys = layout->MapRegionBounds(logical_region);
   if (phys.size() < 4)
     return false;
   size_t n = phys.size();
@@ -402,7 +402,8 @@ Layout makeAscendNDLayout(const Buffer &buffer) {
 // strided buffer view for the given logical sub-region.
 //
 // Steps:
-// 1. MapRegion(logical_region) → physical region (one Range per output dim)
+// 1. MapRegionBounds(logical_region) → physical region (one Range per output
+// dim)
 // 2. Compute row-major strides from phys_buf shape (or use existing strides)
 // 3. offset = sum(phys_region[i].min * strides[i])
 // 4. shape  = [phys_region[i].extent for each dim]
@@ -410,7 +411,7 @@ Layout makeAscendNDLayout(const Buffer &buffer) {
 tirx::Buffer MakeStridedSlice(const tirx::Buffer &phys_buf,
                               const Layout &layout,
                               const Array<Range> &logical_region) {
-  Array<Range> phys_region = layout->MapRegion(logical_region);
+  Array<Range> phys_region = layout->MapRegionBounds(logical_region);
   int n = static_cast<int>(phys_region.size());
 
   ICHECK_EQ(n, static_cast<int>(phys_buf->shape.size()))

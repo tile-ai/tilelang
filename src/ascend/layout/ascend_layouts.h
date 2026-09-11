@@ -50,7 +50,7 @@ Layout makeAscendNDLayout(const tirx::Buffer &buffer);
 ///   - logical_region: one Range per layout input dim, [min, min+extent).
 ///
 /// Produces a Buffer sharing phys_buf->data, with:
-///   - shape = physical extents (from MapRegion)
+///   - shape = physical extents (from MapRegionBounds)
 ///   - strides = row-major strides of phys_buf shape
 ///   - elem_offset = sum(phys_region[i].min * strides[i])
 ///
