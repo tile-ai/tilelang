@@ -105,14 +105,16 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->strideB_ = args[11].as<IntImm>().value()->value;
   node->offsetA_ = args[12].as<PrimExpr>().value();
   node->offsetB_ = args[13].as<PrimExpr>().value();
-  if (args.size() > 14) {
-    node->kPack_ = args[14].as<IntImm>().value()->value;
-    if (node->kPack_ != 1 && node->kPack_ != 2) {
-      ICHECK(false) << "kPack must be 1 or 2";
-    }
+  // k_pack rides in the annotations (a ROCm MFMA/WMMA lowering knob set by
+  // the ROCm dialect), not in the positional call protocol.
+  if (auto val = annotations.Get("k_pack")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "k_pack annotation must be IntImmNode";
+    node->kPack_ = int_val->value;
+    ICHECK(node->kPack_ == 1 || node->kPack_ == 2) << "kPack must be 1 or 2";
   }
-  if (args.size() > 15) {
-    node->wgWait_ = args[15].as<IntImm>().value()->value;
+  if (args.size() > 14) {
+    node->wgWait_ = args[14].as<IntImm>().value()->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
     const auto *int_val = val->as<IntImmNode>();
@@ -124,19 +126,19 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
     ICHECK(int_val) << "is_tcgen05 annotation must be IntImmNode";
     node->isTcgen05_ = int_val->value != 0;
   }
-  if (args.size() > 16 && args[16]->IsInstance<BufferLoadNode>()) {
-    node->mbar_ = Downcast<BufferLoad>(args[16]);
+  if (args.size() > 15 && args[15]->IsInstance<BufferLoadNode>()) {
+    node->mbar_ = Downcast<BufferLoad>(args[15]);
   }
   node->cCoords_ = Array<PrimExpr>(
-      {args[17].as<PrimExpr>().value(), args[18].as<PrimExpr>().value()});
+      {args[16].as<PrimExpr>().value(), args[17].as<PrimExpr>().value()});
+  if (args.size() > 18) {
+    node->sfaRegion_ = NormalizeToBufferRegion(args[18]);
+  }
   if (args.size() > 19) {
-    node->sfaRegion_ = NormalizeToBufferRegion(args[19]);
+    node->sfbRegion_ = NormalizeToBufferRegion(args[19]);
   }
   if (args.size() > 20) {
-    node->sfbRegion_ = NormalizeToBufferRegion(args[20]);
-  }
-  if (args.size() > 21) {
-    node->sfKStart_ = args[21].as<PrimExpr>().value();
+    node->sfKStart_ = args[20].as<PrimExpr>().value();
   }
   node->annotations_ = annotations;
   data_ = std::move(node);

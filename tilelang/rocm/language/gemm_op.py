@@ -6,6 +6,7 @@ from tvm import tirx
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.gemm_op import GemmWarpPolicy, _gemm_impl
+from tilelang.language.utils import _normalize_annotations
 
 __all__ = ["gemm"]
 
@@ -43,6 +44,11 @@ def gemm(
     Returns:
         tirx.Call: A handle to the GEMM operation.
     """
+    if not (isinstance(k_pack, int) and not isinstance(k_pack, bool) and k_pack in (1, 2)):
+        raise ValueError(f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r}")
+    ann = _normalize_annotations(annotations)
+    if k_pack != 1:
+        ann.setdefault("k_pack", k_pack)
     return _gemm_impl(
         "tl.tileop.gemm",
         A,
@@ -52,8 +58,7 @@ def gemm(
         transpose_B,
         policy,
         clear_accum,
-        k_pack,
         0,
         None,
-        annotations=annotations,
+        annotations=ann,
     )

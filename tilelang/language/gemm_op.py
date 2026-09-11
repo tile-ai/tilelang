@@ -29,17 +29,16 @@ def _gemm_impl(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
-    Returns a call_intrin handle for the given op key.
+    Returns a call_intrin handle for the given op key. Backend lowering knobs
+    such as ``k_pack`` ride in ``annotations``; the dialect wrappers put them
+    there.
     """
-    if not (isinstance(k_pack, int) and not isinstance(k_pack, bool) and k_pack in (1, 2)):
-        raise ValueError(f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r}")
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
@@ -142,7 +141,6 @@ def _gemm_impl(
         stride_b,
         offset_a,
         offset_b,
-        k_pack,
         wg_wait,
         mbar_arg,
         C_coords[0],
@@ -198,7 +196,6 @@ def gemm(
         transpose_B,
         policy,
         clear_accum,
-        1,
         0,
         None,
         annotations=annotations,
@@ -235,7 +232,6 @@ def wgmma_gemm(
         transpose_B,
         policy,
         clear_accum,
-        1,
         -1,
         None,
         annotations=annotations,
@@ -286,7 +282,6 @@ def tcgen05_gemm(
         transpose_B,
         policy,
         clear_accum,
-        1,
         0,
         mbar,
         annotations=ann,
@@ -446,7 +441,6 @@ def tcgen05_gemm_blockscaled(
         stride_b,
         offset_a,
         offset_b,
-        1,  # k_pack
         wg_wait,
         mbar,
         C_coords[0],
@@ -564,7 +558,6 @@ def mma_gemm_blockscaled(
         stride_b,
         offset_a,
         offset_b,
-        1,  # k_pack
         0,  # wg_wait
         tirx.const(0, dtype="int32"),  # no mbarrier for synchronous mma.sync
         C_coords[0],

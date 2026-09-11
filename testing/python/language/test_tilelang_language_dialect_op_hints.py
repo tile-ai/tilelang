@@ -125,6 +125,8 @@ def test_rocm_gemm_k_pack_traces_and_validates():
             Trocm.copy(c, C)
 
     assert main is not None
+    ann = _tileop_annotations(main, "tl.tileop.gemm")
+    assert int(ann["k_pack"]) == 2
 
     with pytest.raises(ValueError, match="k_pack must be an int equal to 1 or 2"):
 
