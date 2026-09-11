@@ -107,9 +107,6 @@ public:
   BufferRegion aRegion_, bRegion_, cRegion_;
   bool transA_, transB_;
   int m_, n_, k_;
-  int strideA_, strideB_;
-  // Offsets may be symbolic (e.g. a sliced operand B[:, j*64:...] in a loop).
-  PrimExpr offsetA_, offsetB_;
   PrimExpr clearAccum_ = const_false();
   tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
@@ -140,10 +137,6 @@ public:
         .def_ro("m", &GemmNode::m_)
         .def_ro("n", &GemmNode::n_)
         .def_ro("k", &GemmNode::k_)
-        .def_ro("strideA", &GemmNode::strideA_)
-        .def_ro("strideB", &GemmNode::strideB_)
-        .def_ro("offsetA", &GemmNode::offsetA_)
-        .def_ro("offsetB", &GemmNode::offsetB_)
         .def_ro("clearAccum", &GemmNode::clearAccum_)
         .def_ro("mbar", &GemmNode::mbar_)
         .def_ro("cCoords", &GemmNode::cCoords_)

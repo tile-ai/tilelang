@@ -2,7 +2,7 @@
 
 import pytest
 
-import tilelang.language as T
+import tilelang.rocm.language as T
 import tilelang.testing
 
 

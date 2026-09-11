@@ -39,8 +39,6 @@ def blockscaled_gemm(
         transpose_B=transpose_B,
         policy=GemmWarpPolicy.Square,
         clear_accum=clear_accum,
-        k_pack=1,
-        wg_wait=0,
         mbar=None,
         sfa=sfa,
         sfb=sfb,

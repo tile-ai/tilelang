@@ -84,12 +84,7 @@ public:
   BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
   bool trans_A, trans_B, trans_E;
   int M, N, K;
-  int stride_A, stride_B;
-  int offset_A, offset_B;
   PrimExpr clear_accum = const_false();
-  // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
-  // only will be enabled under cdna mfma instructions
-  int kPack = 1;
   int wg_wait = 0;
   bool isWgmma_ = false;
   bool isTcgen05_ = false;
@@ -114,12 +109,7 @@ public:
         .def_ro("M", &GemmSPNode::M)
         .def_ro("N", &GemmSPNode::N)
         .def_ro("K", &GemmSPNode::K)
-        .def_ro("stride_A", &GemmSPNode::stride_A)
-        .def_ro("stride_B", &GemmSPNode::stride_B)
-        .def_ro("offset_A", &GemmSPNode::offset_A)
-        .def_ro("offset_B", &GemmSPNode::offset_B)
         .def_ro("clear_accum", &GemmSPNode::clear_accum)
-        .def_ro("kPack", &GemmSPNode::kPack)
         .def_ro("wg_wait", &GemmSPNode::wg_wait)
         .def_ro("isWgmma", &GemmSPNode::isWgmma_)
         .def_ro("isTcgen05", &GemmSPNode::isTcgen05_)

@@ -108,8 +108,6 @@ SimtVFFrame SimtVF(const Array<PrimExpr> &thread_extents, int64_t vf_latency,
 ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
                       const Array<PrimExpr> &order,
                       const Array<PrimExpr> &stages,
-                      const Array<Array<PrimExpr>> &sync,
-                      const Array<Array<PrimExpr>> &groups,
                       const Map<String, Any> &annotations) {
   using namespace tvm::tirx;
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
@@ -129,8 +127,6 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
       anno.Set("tl_pipeline_order", order);
     if (!stages.empty())
       anno.Set("tl_pipeline_stage", stages);
-    if (!groups.empty())
-      anno.Set("tl_pipeline_group", groups);
     Optional<PrimExpr> step =
         !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,

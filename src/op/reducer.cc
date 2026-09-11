@@ -406,7 +406,8 @@ TileOperator ReducerInitOpNode::Clone() const {
 }
 
 TIR_REGISTER_TL_TILE_OP(ReducerInitOp, reducer_init)
-    .set_num_inputs(1)
+    // reducer region plus an optional init value.
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -659,7 +660,9 @@ TileOperator FinalizeReducerOpNode::Clone() const {
 }
 
 TIR_REGISTER_TL_TILE_OP(FinalizeReducerOp, finalize_reducer)
-    .set_num_inputs(1)
+    // user form: reducer region; materialized form appends the combine-op
+    // enum and the flattened (reducing_threads, scale) plan pairs.
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

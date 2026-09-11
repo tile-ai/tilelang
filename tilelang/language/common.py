@@ -30,7 +30,15 @@ from .loop import (
     Vectorized,  # noqa: F401
 )
 from .frame import has_let_value, get_let_value  # noqa: F401
-from .math_intrinsics import *  # noqa: F401,F403
+from .math_intrinsics import (  # noqa: F401
+    abs2,
+    add2,
+    fma2,
+    max2,
+    min2,
+    mul2,
+    sub2,
+)
 from .kernel import (
     Kernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
@@ -118,21 +126,10 @@ from .builtin import (  # noqa: F401
     any_sync,
     ballot,
     ballot_sync,
-    barrier_arrive,
-    barrier_wait,
-    get_lane_idx,
-    get_warp_idx,
-    get_warp_idx_sync,
-    mbarrier_arrive,
-    mbarrier_arrive_expect_tx,
-    mbarrier_expect_tx,
-    mbarrier_wait_parity,
-    no_set_max_nreg,
     shfl_down,
     shfl_sync,
     shfl_up,
     shfl_xor,
-    sync_global,
     sync_grid,
     sync_threads,
     sync_warp,
@@ -189,7 +186,7 @@ def import_source(source: str | None = None):
 from .tir.common import __all__ as _TIR_COMMON_ALL  # noqa: E402
 from .eager import __all__ as _EAGER_ALL  # noqa: E402
 from .tir.ir import __all__ as _TIR_IR_ALL  # noqa: E402
-from .math_intrinsics import __all__ as _MATH_ALL  # noqa: E402
+from .math_intrinsics import COMMON_MATH_INTRINSICS as _MATH_ALL  # noqa: E402
 
 _LOCAL_EXPORTS = (
     "BaseTileScheduler",
@@ -251,8 +248,6 @@ _LOCAL_EXPORTS = (
     "atomic_store",
     "ballot",
     "ballot_sync",
-    "barrier_arrive",
-    "barrier_wait",
     "c2d_im2col",
     "clamp",
     "clear",
@@ -277,14 +272,11 @@ _LOCAL_EXPORTS = (
     "get_cluster_id",
     "get_cluster_ids",
     "get_cluster_size",
-    "get_lane_idx",
     "get_let_value",
     "get_thread_binding",
     "get_thread_bindings",
     "get_thread_extent",
     "get_thread_extents",
-    "get_warp_idx",
-    "get_warp_idx_sync",
     "has_let_value",
     "im2col",
     "import_source",
@@ -293,12 +285,7 @@ _LOCAL_EXPORTS = (
     "loop_break",
     "make_tensor",
     "make_tensor_from_addr",
-    "mbarrier_arrive",
-    "mbarrier_arrive_expect_tx",
-    "mbarrier_expect_tx",
-    "mbarrier_wait_parity",
     "meta_class",
-    "no_set_max_nreg",
     "reduce",
     "reduce_absmax",
     "reduce_abssum",
@@ -313,7 +300,6 @@ _LOCAL_EXPORTS = (
     "shfl_sync",
     "shfl_up",
     "shfl_xor",
-    "sync_global",
     "sync_grid",
     "sync_threads",
     "sync_warp",

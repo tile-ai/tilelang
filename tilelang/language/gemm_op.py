@@ -10,8 +10,6 @@ from tvm import tirx, arith
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
-    retrieve_stride,
-    retrieve_offset,
     prim_expr_equal,
 )
 from tilelang.language.utils import (
@@ -29,8 +27,6 @@ def _gemm_impl(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
-    wg_wait: int = 0,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
     sfa: BufferLikeType | None = None,
@@ -39,10 +35,10 @@ def _gemm_impl(
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
-    Returns a call_intrin handle for the given op key.
+    Returns a call_intrin handle for the given op key. Backend lowering knobs
+    such as ``k_pack`` and ``wg_wait`` ride in ``annotations``; the dialect
+    wrappers and the CUDA gemm variants put them there.
     """
-    if not (isinstance(k_pack, int) and not isinstance(k_pack, bool) and k_pack in (1, 2)):
-        raise ValueError(f"T.gemm k_pack must be an int equal to 1 or 2, got {k_pack!r}")
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         """Convert let-bound variables to their corresponding buffers.
@@ -77,9 +73,6 @@ def _gemm_impl(
     A_shape = retrieve_shape(A_region)
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
-
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
 
     assert len(C_shape) >= 2, "current only support C as a 2D or higher-order tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
@@ -125,20 +118,6 @@ def _gemm_impl(
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
-    # Deprecated: every lowering consumes the complete operand BufferRegions,
-    # so the serialized per-axis strides and final-axis offsets below are no
-    # longer read in-tree and are NOT validated (the historic
-    # ``A_offset[-2] == 0`` assertions are gone).  They are kept in the call
-    # protocol only for out-of-tree consumers of the GemmNode fields.
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-    A_offset = retrieve_offset(A_region)
-    B_offset = retrieve_offset(B_region)
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
     if mbar is not None:
         assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
             f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
@@ -149,9 +128,9 @@ def _gemm_impl(
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
     C_arg = buffer_region_to_tile_region(C_region, "w" if isinstance(clear_accum, bool) and clear_accum else "rw", [r for r in C_shape])
-    # When mbar is None, pass a placeholder constant (0).
-    # The C++ side checks if arg 16 is a BufferLoadNode before using it,
-    # so a non-BufferLoad value will be correctly ignored.
+    # When mbar is None, pass a placeholder constant (0). The C++ side only
+    # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
+    # correctly ignored.
     mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
     extra_args = []
     if sfa is not None or sfb is not None:
@@ -177,12 +156,6 @@ def _gemm_impl(
         node_K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
-        k_pack,
-        wg_wait,
         mbar_arg,
         C_coords[-2],
         C_coords[-1],
@@ -199,8 +172,6 @@ def gemm(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
-    mbar: BarrierType | None = None,
     unit_flag_ctrl: int | tirx.PrimExpr | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
@@ -230,12 +201,13 @@ def gemm(
         transpose_B (bool): Whether to transpose B. Defaults to False.
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
-        k_pack (int): Number of packed matrix cores, for ROCm only. Must be 1 or 2. Defaults to 1.
-        mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
-            Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
         unit_flag_ctrl (int | tirx.PrimExpr, optional): Unit flag control for the
             instruction. ``None`` omits the annotation and lowers as 0.
         annotations (Optional[dict]): Additional annotations.
+
+    Backend dialects extend this signature with their hardware's knobs:
+    ``tilelang.cuda.language.gemm`` adds ``mbar`` (Blackwell TCGEN5MMA
+    barrier), ``tilelang.rocm.language.gemm`` adds ``k_pack`` (packed MFMA).
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
@@ -253,9 +225,7 @@ def gemm(
         transpose_B,
         policy,
         clear_accum,
-        k_pack,
-        0,
-        mbar,
+        None,
         annotations=ann,
     )
 
@@ -281,6 +251,9 @@ def wgmma_gemm(
     compilation fails instead of silently falling back to MMA.
     """
 
+    ann = _normalize_annotations(annotations)
+    # Explicit async WGMMA: never auto-emit the warpgroup wait.
+    ann.setdefault("wg_wait", -1)
     return _gemm_impl(
         "tl.tileop.wgmma_gemm",
         A,
@@ -290,10 +263,8 @@ def wgmma_gemm(
         transpose_B,
         policy,
         clear_accum,
-        1,
-        -1,
         None,
-        annotations=annotations,
+        annotations=ann,
     )
 
 
@@ -341,8 +312,6 @@ def tcgen05_gemm(
         transpose_B,
         policy,
         clear_accum,
-        1,
-        0,
         mbar,
         annotations=ann,
     )
@@ -408,6 +377,8 @@ def tcgen05_gemm_blockscaled(
     ann = {} if ann is None else dict(ann)
     ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
     ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
+    if wg_wait != 0:
+        ann["wg_wait"] = wg_wait
 
     # Re-read normalized regions below after let legalization.
 
@@ -452,15 +423,6 @@ def tcgen05_gemm_blockscaled(
 
     # Deprecated: kept in the call protocol only for out-of-tree consumers;
     # not read or validated in-tree.
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-    A_offset = retrieve_offset(A_region)
-    B_offset = retrieve_offset(B_region)
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
-
     if mbar is not None:
         assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
             f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
@@ -497,18 +459,12 @@ def tcgen05_gemm_blockscaled(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
-        1,  # k_pack
-        wg_wait,
         mbar,
         C_coords[0],
         C_coords[1],
-        SFA_arg,  # arg 19
-        SFB_arg,  # arg 20
-        k_start,  # arg 21
+        SFA_arg,
+        SFB_arg,
+        k_start,
         annotations=ann,
     )
 
@@ -583,14 +539,6 @@ def mma_gemm_blockscaled(
     assert prim_expr_equal(K, K_B), f"T.mma_gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
     assert prim_expr_equal(N_B, N), f"T.mma_gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
 
-    A_stride = retrieve_stride(A_region)
-    B_stride = retrieve_stride(B_region)
-    A_offset = retrieve_offset(A_region)
-    B_offset = retrieve_offset(B_region)
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
     C_coords = [r.min for r in C_region.region]
 
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
@@ -615,12 +563,6 @@ def mma_gemm_blockscaled(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
-        1,  # k_pack
-        0,  # wg_wait
         tirx.const(0, dtype="int32"),  # no mbarrier for synchronous mma.sync
         C_coords[0],
         C_coords[1],

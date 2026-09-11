@@ -11,7 +11,7 @@ Two new behaviours introduced in commit dfa63b10:
 
 import pytest
 import tilelang as tl
-import tilelang.language as T
+import tilelang.rocm.language as T
 import tilelang.testing
 from tilelang.testing import _check_is_gfx950 as _is_gfx950
 

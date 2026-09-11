@@ -33,7 +33,7 @@ def gemm_lower(
 class Gemm(Node, Scriptable):
     # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
     # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
-    # strideA, strideB, offsetA, offsetB, clearAccum, kPack, wgWait, policy
+    # clearAccum, kPack, wgWait, policy
     #
     # Backward-compat alias properties are provided below to support old names.
 
@@ -81,22 +81,6 @@ class Gemm(Node, Scriptable):
     @property
     def trans_B(self):
         return self.transB
-
-    @property
-    def stride_A(self):
-        return self.strideA
-
-    @property
-    def stride_B(self):
-        return self.strideB
-
-    @property
-    def offset_A(self):
-        return self.offsetA
-
-    @property
-    def offset_B(self):
-        return self.offsetB
 
     @property
     def clear_accum(self):

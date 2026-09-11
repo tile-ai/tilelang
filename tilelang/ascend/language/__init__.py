@@ -12,6 +12,9 @@ from .annotations import (  # noqa: F401
 )
 from .copy_op import dual_copy  # noqa: F401
 from .gemm_op import blockscaled_gemm  # noqa: F401
+# Ascend owns the unroll-factor knob: the Ascend codegen lowers the
+# "pragma_unroll_factor" annotation to `#pragma unroll N`.
+from .loop import unroll  # noqa: F401
 # Ascend owns its launch and its thread-scope accessors. These deliberately
 # shadow the common surface imported above: `T.Kernel` here is the 1-D NPU core
 # grid (no threads=), and `T.get_thread_binding()` resolves inside T.SimtVF.
@@ -84,6 +87,7 @@ _ASCEND_API_ALL = (
     "rng_rand",
     "rng_rand_float",
     "simd",
+    "unroll",
 )
 
 __tilelang_dialect__ = "ascend"

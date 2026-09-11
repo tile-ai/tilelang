@@ -5148,6 +5148,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
       }
     }
     ICHECK(!func_name.empty() && panel_size > 0);
+    // Only the row/column rasterizations exist in the CUDA device templates;
+    // e.g. T.use_swizzle(order="mlx") is Metal-only and must fail here
+    // instead of surfacing as a missing-symbol error from the device
+    // compiler.
+    ICHECK(func_name == "rasterization2DRow" ||
+           func_name == "rasterization2DColumn")
+        << "threadblock swizzle pattern `" << func_name
+        << "` is not supported by the CUDA backend";
     if (this->cluster_dims.has_value()) {
       auto [cluster_grid_x_ext, cluster_grid_y_ext, cluster_grid_z_ext] =
           this->cluster_dims.value();
