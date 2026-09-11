@@ -60,6 +60,10 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     mod = tirx.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
+    # The CPU codegens have no native BF16. Host codegen legalizes BF16 storage
+    # to uint16, which requires BF16 arithmetic to have been legalized first;
+    # this is the point TVM's default pipeline runs it.
+    mod = tirx.transform.BF16ComputeLegalize()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tirx.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
