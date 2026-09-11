@@ -1241,9 +1241,31 @@ public:
     Stmt body =
         EmitImpl(pipeline_loop_->min + max_stage_,
                  pipeline_loop_->min + pipeline_loop_->extent, false, false);
-    Stmt epilogue = EmitImpl(
-        pipeline_loop_->min + pipeline_loop_->extent,
-        pipeline_loop_->min + pipeline_loop_->extent + max_stage_, true, true);
+    // For a symbolic short loop, the ordinary epilogue overlaps with the
+    // prologue.  Emit only the non-overlapping tail interval instead of
+    // guarding individual pipeline stages: copy, commit, and wait scopes must
+    // stay in the same control-flow region for async-pipeline bookkeeping.
+    PrimExpr epilogue_start = pipeline_loop_->min + pipeline_loop_->extent;
+    PrimExpr epilogue_end = epilogue_start + max_stage_;
+    Stmt epilogue;
+    if (max_stage_ > 1 &&
+        !analyzer_.CanProveGreaterEqual(pipeline_loop_->extent, max_stage_)) {
+      PrimExpr stage_count = IntImm(pipeline_loop_->extent.dtype(), max_stage_);
+      epilogue_start =
+          pipeline_loop_->min + tirx::Max(pipeline_loop_->extent, stage_count);
+      epilogue_end = pipeline_loop_->min + pipeline_loop_->extent + stage_count;
+      PrimExpr epilogue_extent =
+          analyzer_.Simplify(epilogue_end - epilogue_start);
+      bool epilogue_is_static = as_const_int(epilogue_extent) != nullptr;
+      // A dynamic tail must not inherit the pipeline-loop annotation: it is a
+      // drain loop, not a steady-state pipeline loop for wait relaxation.  It
+      // may otherwise retain the original loop kind, except kUnrolled, which
+      // LoopUnroller cannot apply to a symbolic extent.
+      epilogue = EmitImpl(epilogue_start, epilogue_end, epilogue_is_static,
+                          true, !epilogue_is_static);
+    } else {
+      epilogue = EmitImpl(epilogue_start, epilogue_end, true, true);
+    }
 
     Array<Stmt> pipeline_parts;
     for (const Stmt &part : {prologue, body, epilogue}) {
@@ -2820,10 +2842,12 @@ private:
    * \param start The start of the range
    * \param end The end of the range
    * \param unroll_loop Whether the loop should be unrolled.
+   * \param is_dynamic_drain_loop Whether this is a dynamic epilogue drain
+   * loop.
    * \return The result loop.
    */
   Stmt EmitImpl(const PrimExpr &start, const PrimExpr &end, bool unroll_loop,
-                bool need_bound_check) {
+                bool need_bound_check, bool is_dynamic_drain_loop = false) {
     PrimExpr new_loop_var;
     PrimExpr extent = end - start;
     Optional<Integer> pipeline_num_stages =
@@ -2847,8 +2871,8 @@ private:
                 analyzer_.Simplify(start + IntImm(extent.dtype(), iter));
             PrimExpr unit_end =
                 analyzer_.Simplify(start + IntImm(extent.dtype(), iter + 1));
-            Stmt unit_stmt =
-                EmitImpl(unit_start, unit_end, false, need_bound_check);
+            Stmt unit_stmt = EmitImpl(unit_start, unit_end, false,
+                                      need_bound_check, is_dynamic_drain_loop);
             expanded.push_back(unit_stmt);
           }
           Stmt result = expanded.size() == 1 ? expanded[0] : SeqStmt(expanded);
@@ -3018,20 +3042,25 @@ private:
             kv.first != kPipelineAsyncProducerGroups &&
             kv.first != kPipelineTmaCopies &&
             kv.first != kPipelineReplayableScalarBinds &&
-            kv.first != "num_stages") {
+            kv.first != "num_stages" &&
+            (!is_dynamic_drain_loop || kv.first != "tl_pipelined_num_stages")) {
           preserved_annotations.Set(key, kv.second);
         }
       }
-      if (pipeline_num_stages &&
+      if (!is_dynamic_drain_loop && pipeline_num_stages &&
           preserved_annotations.find("tl_pipelined_num_stages") ==
               preserved_annotations.end()) {
         preserved_annotations.Set("tl_pipelined_num_stages",
                                   pipeline_num_stages.value());
       }
+      ForKind loop_kind =
+          unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind;
+      if (is_dynamic_drain_loop && loop_kind == ForKind::kUnrolled) {
+        loop_kind = ForKind::kSerial;
+      }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
-                     unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
-                     std::move(new_loop), std::nullopt, preserved_annotations,
-                     std::nullopt, pipeline_loop_->span);
+                     loop_kind, std::move(new_loop), std::nullopt,
+                     preserved_annotations, std::nullopt, pipeline_loop_->span);
     }
     Stmt result = SBlockRealize({}, Bool(true),
                                 MakeBlock(new_loop, buffer_data_to_buffer_));
