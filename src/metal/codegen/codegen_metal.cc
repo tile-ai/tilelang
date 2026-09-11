@@ -1313,6 +1313,28 @@ bool CodeGenTileLangMetal::TryPrintSimdgroupIndexExpr(const CallNode *op,
   return true;
 }
 
+void CodeGenTileLangMetal::PrintSimdgroupReduce(const char *function,
+                                                bool integer_only,
+                                                const CallNode *op,
+                                                std::ostream &os) {
+  // tl.warp_reduce_* reduce one register value across the executing warp.
+  // Metal's SIMD-group functions have the same scope and result on every
+  // lane, so the call lowers directly. MSL provides them for float, half and
+  // the integer types up to 32 bits; there are no bfloat or 64-bit overloads.
+  TVM_FFI_ICHECK_EQ(op->args.size(), 1U);
+  DataType dtype = op->dtype;
+  bool integral = dtype.is_int() || dtype.is_uint();
+  bool floating = dtype.is_float() && !integer_only;
+  TVM_FFI_ICHECK(dtype.is_scalar() && dtype.bits() <= 32 &&
+                 (integral || floating))
+      << "Metal SIMD-group reduction " << function << " takes one scalar "
+      << (integer_only ? "integer" : "float, half or integer")
+      << " value of at most 32 bits, got " << dtype;
+  os << function << "(";
+  this->PrintExpr(op->args[0], os);
+  os << ")";
+}
+
 void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
                                       std::ostream &os) { // NOLINT(*)
   TVM_FFI_ICHECK(!op->op.as<GlobalVarNode>())
@@ -1336,7 +1358,17 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
         << "Only 8x8 matrix is supported, but got " << col_val << "x"
         << row_val;
   };
-  if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
+  if (op->op.same_as(tl::warp_reduce_sum())) {
+    PrintSimdgroupReduce("simd_sum", false, op, os);
+  } else if (op->op.same_as(tl::warp_reduce_max())) {
+    PrintSimdgroupReduce("simd_max", false, op, os);
+  } else if (op->op.same_as(tl::warp_reduce_min())) {
+    PrintSimdgroupReduce("simd_min", false, op, os);
+  } else if (op->op.same_as(tl::warp_reduce_bitand())) {
+    PrintSimdgroupReduce("simd_and", true, op, os);
+  } else if (op->op.same_as(tl::warp_reduce_bitor())) {
+    PrintSimdgroupReduce("simd_or", true, op, os);
+  } else if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 5);
     Var var = Downcast<Var>(op->args[0]);
     // Get the data type of the simdgroup matrix
