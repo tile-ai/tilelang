@@ -10,8 +10,8 @@ from .annotations import (  # noqa: F401
     annotate_manual_multi_buffer,
     annotate_unlimit_memory,
 )
-from .copy_op import dual_copy  # noqa: F401
-from .gemm_op import blockscaled_gemm  # noqa: F401
+from .copy_op import copy, dual_copy  # noqa: F401
+from .gemm_op import blockscaled_gemm, gemm  # noqa: F401
 # Ascend owns the unroll-factor knob: the Ascend codegen lowers the
 # "pragma_unroll_factor" annotation to `#pragma unroll N`.
 from .loop import unroll  # noqa: F401
@@ -80,6 +80,8 @@ _ASCEND_API_ALL = (
     "assume_conflict",
     "assume_no_conflict",
     "blockscaled_gemm",
+    "copy",
+    "gemm",
     "device_assert",
     "dual_copy",
     "print",

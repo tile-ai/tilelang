@@ -172,7 +172,6 @@ def gemm(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    unit_flag_ctrl: int | tirx.PrimExpr | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator.
@@ -201,21 +200,17 @@ def gemm(
         transpose_B (bool): Whether to transpose B. Defaults to False.
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
-        unit_flag_ctrl (int | tirx.PrimExpr, optional): Unit flag control for the
-            instruction. ``None`` omits the annotation and lowers as 0.
         annotations (Optional[dict]): Additional annotations.
 
     Backend dialects extend this signature with their hardware's knobs:
     ``tilelang.cuda.language.gemm`` adds ``mbar`` (Blackwell TCGEN5MMA
-    barrier), ``tilelang.rocm.language.gemm`` adds ``k_pack`` (packed MFMA).
+    barrier), ``tilelang.rocm.language.gemm`` adds ``k_pack`` (packed MFMA),
+    ``tilelang.ascend.language.gemm`` adds ``unit_flag_ctrl`` (Cube unit flag).
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
     """
 
-    ann = dict(annotations) if annotations else {}
-    if unit_flag_ctrl is not None:
-        ann["unit_flag_ctrl"] = unit_flag_ctrl
     return _gemm_impl(
         "tl.tileop.gemm",
         A,
@@ -226,7 +221,7 @@ def gemm(
         policy,
         clear_accum,
         None,
-        annotations=ann,
+        annotations=annotations,
     )
 
 

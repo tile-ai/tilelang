@@ -90,5 +90,27 @@ def test_ascend_copy_mixed_outside_dma_inside_simt():
     print("[PASS] test_ascend_copy_mixed_outside_dma_inside_simt\n")
 
 
+def test_ascend_copy_l2_cache_ctrl_string_annotation_matches_keyword():
+    """The Ascend dialect owns l2_cache_ctrl; names normalize to ints.
+
+    The keyword and the annotation must agree, and a string policy name must
+    reach the tile op as the integer the backend expects (here NORMAL_FV -> 0).
+    """
+
+    @T.prim_func
+    def annotation_path(A: T.Tensor((16,), T.float32), B: T.Tensor((16,), T.float32)):
+        with T.Kernel(1):
+            T.copy(A, B, annotations={"l2_cache_ctrl": "NORMAL_FV"})
+
+    @T.prim_func
+    def keyword_path(A: T.Tensor((16,), T.float32), B: T.Tensor((16,), T.float32)):
+        with T.Kernel(1):
+            T.copy(A, B, l2_cache_ctrl="NORMAL_FV")
+
+    for func in (annotation_path, keyword_path):
+        copy_line = next(line for line in func.script().splitlines() if "T.copy(" in line)
+        assert "l2_cache_ctrl=0" in copy_line
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
