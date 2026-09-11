@@ -46,9 +46,17 @@ from tilelang.language.builtin import (  # noqa: F401
 from tilelang.language.copy_op import copy_cluster, tma_copy, tma_gather4, tma_gather4_bytes, tma_scatter4  # noqa: F401
 from tilelang.language.kernel import ClusterKernel, CUDASourceCodeKernel  # noqa: F401
 
-# The CUDA dialect's T.Kernel shadows the target-neutral one from common: same
-# launch, plus the CUDA launch annotations (threads, prelude, cluster_dims).
+# The CUDA dialect shadows a handful of common constructs with versions that
+# expose CUDA's knobs as typed keywords: T.Kernel (threads, prelude,
+# cluster_dims), T.copy / T.im2col (TMA and cache hints), T.gemm (mbar),
+# T.atomic_add (use_tma), T.Parallel (prefer_async) and T.unroll
+# (unroll_factor). Semantics match the common versions; the extra keywords
+# are recorded on the op and consumed by the CUDA pipeline.
 from .kernel import Kernel  # noqa: F401
+from .copy_op import copy, im2col  # noqa: F401
+from .gemm_op import gemm  # noqa: F401
+from .atomic import atomic_add  # noqa: F401
+from .loop import Parallel, Unroll, unroll  # noqa: F401
 from .cluster import *  # noqa: F401,F403
 from .cluster import __all__ as _CLUSTER_ALL
 from .intrinsics import *  # noqa: F401,F403
@@ -70,6 +78,13 @@ _CUDA_API_ALL = (
     "ClusterKernel",
     "CUDASourceCodeKernel",
     "Kernel",
+    "Parallel",
+    "Unroll",
+    "atomic_add",
+    "copy",
+    "gemm",
+    "im2col",
+    "unroll",
     "alloc_cluster_barrier",
     "alloc_descriptor",
     "alloc_tmem",

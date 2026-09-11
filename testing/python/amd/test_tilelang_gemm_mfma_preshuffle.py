@@ -3,7 +3,7 @@ import torch
 import tilelang
 import tilelang.testing
 from tilelang import tvm as tvm
-import tilelang.language as T
+import tilelang.rocm.language as T
 from tilelang.rocm.intrinsics import make_mfma_swizzle_layout as make_swizzle_layout
 from tilelang.rocm.intrinsics.mfma_macro_generator import MatrixCorePreshuffleIntrinEmitter
 from tilelang.transform import simplify_prim_func

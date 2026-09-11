@@ -159,8 +159,6 @@ def gemm(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
-    mbar: BarrierType | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator.
@@ -182,10 +180,11 @@ def gemm(
         transpose_B (bool): Whether to transpose B. Defaults to False.
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
-        k_pack (int): Number of packed matrix cores, for ROCm only. Must be 1 or 2. Defaults to 1.
-        mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
-            Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
         annotations (Optional[dict]): Additional annotations.
+
+    Backend dialects extend this signature with their hardware's knobs:
+    ``tilelang.cuda.language.gemm`` adds ``mbar`` (Blackwell TCGEN5MMA
+    barrier), ``tilelang.rocm.language.gemm`` adds ``k_pack`` (packed MFMA).
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
@@ -199,9 +198,9 @@ def gemm(
         transpose_B,
         policy,
         clear_accum,
-        k_pack,
+        1,
         0,
-        mbar,
+        None,
         annotations=annotations,
     )
 

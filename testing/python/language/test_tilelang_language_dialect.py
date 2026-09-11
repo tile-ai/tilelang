@@ -72,7 +72,11 @@ def test_cuda_language_composes_common_and_cuda_symbols():
     from tilelang.cuda import language as T
     from tilelang.cuda import debug as cuda_debug
 
-    assert T.copy is T_comm.copy
+    # The CUDA dialect shadows T.copy with a version exposing CUDA hints
+    # (disable_tma, eviction_policy, prefer_instruction); see
+    # test_tilelang_language_dialect_op_hints.py for the full contract.
+    assert T.copy is not T_comm.copy
+    assert T.async_copy is T_comm.async_copy
     assert T.tcgen05_mma is T.tcgen05_gemm
     assert T.tcgen05_mma_blockscaled is T.tcgen05_gemm_blockscaled
     assert T.wgmma_mma is T.wgmma_gemm
