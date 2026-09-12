@@ -56,3 +56,8 @@ def check(variant, model, result):
         assert result["buffers"]["acc"]["replicate"] == 1
     if variant == "full_bf16":
         assert result["buffers"]["acc"]["replicate"] == 128
+
+
+# Needs a CUDA-enabled build: with -DUSE_CUDA=OFF, sm_90 resolves a different
+# tl.copy and every variant here comes out fully replicated. Drift reported by
+# such a build is a build-capability mismatch, not a layout regression.

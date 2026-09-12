@@ -1,0 +1,3 @@
+{
+  "reducer_scalar_candidates": "reducer-v2 layout selection depends on CUDA codegen (src/cuda/op/copy.cc); a Metal build cannot satisfy this case's invariant, so it has no goldens here. See ../../README.md."
+}

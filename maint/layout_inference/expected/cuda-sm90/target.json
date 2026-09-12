@@ -1,0 +1,6 @@
+{
+  "arch": "sm_90",
+  "kind": "cuda",
+  "max_num_threads": 1024,
+  "thread_warp_size": 32
+}
