@@ -9,6 +9,13 @@ ASCEND_EXECUTION_BACKENDS = [
         "tvm_ffi",
         enable_host_codegen=True,
         enable_device_compile=True,
+        # Ascend's host codegen lowers the TVM-FFI callee-allocated-output
+        # result slot, so a kernel with out_idx allocates its outputs inside
+        # the generated host function. This is the single gate for that ABI
+        # (see tilelang/jit/abi.py): MakePackedAPI and the adapter both read
+        # the attribute it stamps, so the backend declares the capability here
+        # instead of each side sniffing the target.
+        supports_callee_allocated_outputs=True,
     ),
     ExecutionBackendSpec("cython"),
 ]
