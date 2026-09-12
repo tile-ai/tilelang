@@ -13,26 +13,41 @@ namespace tvm {
 namespace tl {
 using namespace tirx;
 
-PrimExpr any_of_op(PrimExpr args) {
+namespace {
+
+PrimExpr LowerLogicalReduction(PrimExpr args, ffi::String thread_helper,
+                               ffi::String warp_helper) {
   const CallNode *call = args.as<CallNode>();
   ICHECK(call != nullptr);
   const ffi::Array<PrimExpr> &arg = call->args;
-  ICHECK_EQ(arg.size(), 2);
+  ICHECK(arg.size() == 2 || arg.size() == 3);
   PrimExpr buffer_address = arg[0];
   PrimExpr elems = arg[1];
+
+  ffi::String helper = thread_helper;
+  if (arg.size() == 3) {
+    const auto *scope = arg[2].as<StringImmNode>();
+    ICHECK(scope != nullptr);
+    if (scope->value == "warp") {
+      helper = warp_helper;
+    } else {
+      ICHECK(scope->value == "thread" || scope->value == "auto")
+          << "Invalid internal logical reduction scope: " << scope->value;
+    }
+  }
+
   return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                    {StringImm("tl::Any"), buffer_address, elems});
+                    {StringImm(helper), buffer_address, elems});
+}
+
+} // namespace
+
+PrimExpr any_of_op(PrimExpr args) {
+  return LowerLogicalReduction(args, "tl::Any", "tl::AnyWarp");
 }
 
 PrimExpr all_of_op(PrimExpr args) {
-  const CallNode *call = args.as<CallNode>();
-  ICHECK(call != nullptr);
-  const ffi::Array<PrimExpr> &arg = call->args;
-  ICHECK_EQ(arg.size(), 2);
-  PrimExpr buffer_address = arg[0];
-  PrimExpr elems = arg[1];
-  return tirx::Call(DataType::Bool(), tirx::builtin::call_extern(),
-                    {StringImm("tl::All"), buffer_address, elems});
+  return LowerLogicalReduction(args, "tl::All", "tl::AllWarp");
 }
 
 TVM_REGISTER_OP("tl.any_of")

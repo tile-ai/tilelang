@@ -13,12 +13,13 @@ def any_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     """Check if any element in the buffer is true.
 
     Args:
-        buffer: Either a TVM buffer or buffer region to be checked
+        buffer: The buffer or buffer region to check.
 
     Returns:
-        A TVM intrinsic call that performs the any operation
+        A boolean expression indicating whether any element is true.
     """
     return_type: str = "bool"
+
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
         return T.call_intrin(return_type, tirx.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
@@ -45,17 +46,17 @@ def any_of(buffer: BufferLikeType) -> tirx.PrimExpr:
             extent,
         )
     else:
-        raise ValueError(f"Invalid buffer type: {type(buffer)}")
+        raise TypeError(f"Invalid buffer type: {type(buffer)}")
 
 
 def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     """Check if all elements in the buffer are true.
 
     Args:
-        buffer: Either a TVM buffer or buffer region to be checked
+        buffer: The buffer or buffer region to check.
 
     Returns:
-        A TVM intrinsic call that performs the any operation
+        A boolean expression indicating whether all elements are true.
     """
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
@@ -84,4 +85,4 @@ def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
             extent,
         )
     else:
-        raise ValueError(f"Invalid buffer type: {type(buffer)}")
+        raise TypeError(f"Invalid buffer type: {type(buffer)}")
