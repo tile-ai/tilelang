@@ -185,10 +185,18 @@ cdef class CythonKernelWrapper:
                 stream = 0
 
         cdef int ins_idx = 0
-        cdef list tensor_list = []
+        cdef list tensor_list = [None] * len(self.params)
         device = None
 
-        # Prepare input and output tensors
+        # Inputs are placed first so that a symbolic dimension owned by an input can be
+        # resolved even when the output that needs it comes earlier in the signature;
+        # the outputs are then allocated below, in parameter order.
+        for i in range(len(self.params)):
+            if i not in self.result_idx:
+                tensor_list[i] = inputs[ins_idx]
+                ins_idx += 1
+
+        # Prepare output tensors
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
@@ -212,20 +220,16 @@ cdef class CythonKernelWrapper:
                         f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                         f"Expected shape: {shape}"
                     )
-                tensor = torch.empty(*shape, dtype=dtype, device=device)
-            else:
-                tensor = inputs[ins_idx]
-                ins_idx += 1
-            # TODO(chenggang): remove this check or rewrite by ourselves?
-            '''
-            if isinstance(tensor, torch.Tensor) and tensor._base is not None and not tensor.is_contiguous():
-                base_tensor = tensor._base.as_strided(tensor._base.shape, tensor.stride())
-                if torch._debug_has_internal_overlap(base_tensor):
-                    raise ValueError(f"Cannot use an overlapping tensor"
-                                     f"(shape={tensor.shape}, strides={tensor.stride()}, "
-                                     f"overlap={torch._debug_has_internal_overlap(base_tensor)}) as the kernel input")
-            '''
-            tensor_list.append(tensor)
+                tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
+                # TODO(chenggang): remove this check or rewrite by ourselves?
+                '''
+                if isinstance(tensor_list[i], torch.Tensor) and tensor_list[i]._base is not None and not tensor_list[i].is_contiguous():
+                    base_tensor = tensor_list[i]._base.as_strided(tensor_list[i]._base.shape, tensor_list[i].stride())
+                    if torch._debug_has_internal_overlap(base_tensor):
+                        raise ValueError(f"Cannot use an overlapping tensor"
+                                         f"(shape={tensor_list[i].shape}, strides={tensor_list[i].stride()}, "
+                                         f"overlap={torch._debug_has_internal_overlap(base_tensor)}) as the kernel input")
+                '''
 
         # Convert tensor pointers to C void pointers for kernel call
         cdef dict dtype_to_ctype = {
