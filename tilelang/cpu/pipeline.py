@@ -41,6 +41,10 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutInference()(mod)
     mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     LayoutVisual(mod)
+    # Tag atomic kernels before LowerTileOp lowers both atomic forms away;
+    # the parallel-grid pass keeps them serial (see MarkCPUAtomics).
+    if should_enable_cpu_parallel():
+        mod = tilelang.cpu.transform.MarkCPUAtomics()(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
     mod = tilelang.transform.VerifyReducerConsumed()(mod)
     # Scalar-path atomic intrinsics (tl.atomic_*_elem_op) survive LowerTileOp;

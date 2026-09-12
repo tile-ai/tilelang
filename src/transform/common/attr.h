@@ -49,6 +49,12 @@ constexpr const char *kCodeBlockEntryName = "code_block_entry_name";
 // config is enabled.
 constexpr const char *kCPUGridDim = "tl.cpu_grid_dim";
 
+// Set on a PrimFunc by MarkCPUAtomics when the body calls any `tl.atomic*`
+// op. Atomic ops are lowered to plain read-modify-write before the tail of
+// the CPU pipeline, so MaterializeCPUParallelGrid keeps such kernels serial
+// — a parallel grid would turn the RMW into a data race.
+constexpr const char *kCPUHadAtomics = "tl.cpu_had_atomics";
+
 // Requested OpenMP thread count for the CPU grid parallel region, stamped
 // by T.Kernel(cpu_num_threads=...) on the outermost grid loop and carried
 // through the pipeline as a loop annotation. Consumed by the C codegen as

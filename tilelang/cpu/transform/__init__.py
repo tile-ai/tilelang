@@ -19,6 +19,23 @@ def LowerCPUAtomics():
     return _ffi_api.LowerCPUAtomics()  # type: ignore
 
 
+def MarkCPUAtomics():
+    """Tag functions that call any ``tl.atomic*`` op with the
+    ``tl.cpu_had_atomics`` attribute.
+
+    Runs before LowerTileOp (both atomic forms are lowered to plain
+    read-modify-write afterwards, where the tail pass could no longer see
+    them). MaterializeCPUParallelGrid keeps such kernels serial: a parallel
+    grid would turn the RMW into a data race.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MarkCPUAtomics()  # type: ignore
+
+
 def MaterializeCPUParallelGrid():
     """Convert the annotated CPU grid loop nest to OpenMP parallel loops.
 
