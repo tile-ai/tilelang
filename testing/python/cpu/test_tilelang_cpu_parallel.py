@@ -452,6 +452,7 @@ def test_cpu_parallel_atomic_stays_serial():
 
     @T.prim_func
     def atomic_sum(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((1,), "float32")):
+        B[0] = 0.0  # initialize the accumulator before the grid
         with T.Kernel(200, threads=1) as bx:
             for i in T.serial(1000):
                 T.atomic_add(B[0], A[bx * 1000 + i])
@@ -523,6 +524,121 @@ def test_cpu_parallel_param_overlapping_store_stays_serial():
     A = torch.randn(M, dtype=torch.float32)
     # Serial semantics: the last write (bx=3, i=127) wins.
     torch.testing.assert_close(kernel(A)[0], A[M - 1], rtol=1e-6, atol=1e-6)
+
+
+def test_cpu_parallel_region_atomic_stays_serial():
+    # Region-form atomics (tl.tileop.atomic*) must also be marked: they
+    # lower to serial RMW loops, which would race across workers.
+    N_ATOMIC = 256
+
+    @T.prim_func
+    def region_atomic(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((N_ATOMIC,), "float32")):
+        for i in T.serial(N_ATOMIC):
+            B[i] = 0.0
+        with T.Kernel(N_ATOMIC, threads=1):
+            T.atomic_add(B, A)
+
+    kernel = tilelang.compile(
+        region_atomic,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    torch.manual_seed(0)
+    A = torch.randn(N_ATOMIC, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), N_ATOMIC * A, rtol=1e-4, atol=1e-3)
+
+
+def test_cpu_parallel_partial_init_stays_serial():
+    # A partial write (state[0]) must not count as a whole-buffer
+    # per-iteration reset for state[1], which accumulates across grid
+    # iterations: the nest stays serial.
+    N_PI = 256
+    BLOCK_PI = 32
+
+    @T.prim_func
+    def partial_init(A: T.Tensor((N_PI,), "float32"), B: T.Tensor((N_PI,), "float32")):
+        with T.Kernel(N_PI // BLOCK_PI, threads=1) as bx:
+            state = T.alloc_buffer((2,), "float32", scope="local")
+            state[0] = 1.0
+            if bx == 0:
+                state[1] = 0.0
+            for i in T.serial(BLOCK_PI):
+                state[1] = state[1] + A[bx * BLOCK_PI + i]
+                B[bx * BLOCK_PI + i] = state[1]
+
+    kernel = tilelang.compile(
+        partial_init,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    torch.manual_seed(0)
+    A = torch.randn(N_PI, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), torch.cumsum(A, 0), rtol=1e-4, atol=1e-3)
+
+
+def test_cpu_parallel_colliding_affine_store_stays_serial():
+    # B[bx % 2] += ... — the address varies with the grid var but is not
+    # injective (two blocks collide on each slot): the nest stays serial.
+    N_COL = 256
+    BLOCK_COL = 32
+
+    @T.prim_func
+    def collide(A: T.Tensor((N_COL,), "float32"), B: T.Tensor((2,), "float32")):
+        B[0] = 0.0
+        B[1] = 0.0
+        with T.Kernel(N_COL // BLOCK_COL, threads=1) as bx:
+            for i in T.serial(BLOCK_COL):
+                B[bx % 2] = B[bx % 2] + A[bx * BLOCK_COL + i]
+
+    kernel = tilelang.compile(
+        collide,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    torch.manual_seed(0)
+    A = torch.randn(N_COL, dtype=torch.float32)
+    expected = torch.stack([A.reshape(-1, BLOCK_COL)[0::2].sum(), A.reshape(-1, BLOCK_COL)[1::2].sum()])
+    torch.testing.assert_close(kernel(A), expected, rtol=1e-4, atol=1e-3)
+
+
+def test_cpu_parallel_shared_rmw_no_grid_var_stays_serial():
+    # B[0] += A[i] — the value carries no grid var, but a shared RMW on an
+    # iteration-invariant address is still a race: the nest stays serial.
+    N_RMW = 256
+    BLOCK_RMW = 32
+
+    @T.prim_func
+    def shared_rmw(A: T.Tensor((N_RMW,), "float32"), B: T.Tensor((1,), "float32")):
+        B[0] = 0.0
+        with T.Kernel(N_RMW // BLOCK_RMW, threads=1):
+            for i in T.serial(BLOCK_RMW):
+                B[0] = B[0] + A[i]
+
+    kernel = tilelang.compile(
+        shared_rmw,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    torch.manual_seed(0)
+    A = torch.randn(N_RMW, dtype=torch.float32)
+    expected = A[:BLOCK_RMW].sum() * (N_RMW // BLOCK_RMW)
+    torch.testing.assert_close(kernel(A)[0], expected, rtol=1e-4, atol=1e-3)
 
 
 if __name__ == "__main__":
