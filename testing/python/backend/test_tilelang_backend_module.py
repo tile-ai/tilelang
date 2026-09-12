@@ -121,3 +121,22 @@ def test_create_backend_context_binds_compile_state():
 
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
+
+
+def test_backend_context_exposes_lowering_and_execution_capabilities():
+    context = create_backend_context("metal", "c", "tvm_ffi")
+
+    assert context.capabilities.subgroup_width == 32
+    assert context.capabilities.max_threads_per_group == 1024
+    assert context.capabilities.shared_memory_bytes == 32768
+    assert context.capabilities.supports("subgroup_exchange")
+    assert context.capabilities.native_multi_launch
+    assert context.capabilities.native_argument_binding
+    assert context.capabilities.max_kernels_per_program is None
+
+
+def test_capability_fingerprint_changes_with_execution_contract():
+    context = create_backend_context("metal", "c", "tvm_ffi")
+    torch_context = create_backend_context("metal", "c", "torch")
+
+    assert context.capabilities.fingerprint != torch_context.capabilities.fingerprint

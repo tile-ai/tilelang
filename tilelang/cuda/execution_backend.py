@@ -26,6 +26,8 @@ CUDA_EXECUTION_BACKENDS = [
         "tvm_ffi",
         enable_host_codegen=True,
         enable_device_compile=True,
+        native_multi_launch=True,
+        native_argument_binding=True,
     ),
     ExecutionBackendSpec("nvrtc", is_available=_is_nvrtc_available),
     ExecutionBackendSpec("cython"),

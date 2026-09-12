@@ -8,5 +8,11 @@ from tilelang.backend.execution_backend import ExecutionBackendSpec
 # for Metal. tvm_ffi remains available as an explicit opt-in.
 EXECUTION_BACKENDS = [
     ExecutionBackendSpec("torch"),
-    ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
+    ExecutionBackendSpec(
+        "tvm_ffi",
+        enable_host_codegen=True,
+        enable_device_compile=True,
+        native_multi_launch=True,
+        native_argument_binding=True,
+    ),
 ]

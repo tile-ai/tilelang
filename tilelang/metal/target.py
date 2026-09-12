@@ -58,7 +58,13 @@ def _metal_target_config(enable_metal4: bool) -> dict[str, object]:
     keys = ["metal", "gpu"]
     if enable_metal4:
         keys.append("metal4")
-    return {"kind": "metal", "keys": keys}
+    return {
+        "kind": "metal",
+        "keys": keys,
+        "thread_warp_size": 32,
+        "max_threads_per_block": 1024,
+        "max_shared_memory_per_block": 32768,
+    }
 
 
 def _detect_metal_target() -> Target | str | None:
