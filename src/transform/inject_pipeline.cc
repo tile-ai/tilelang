@@ -3799,12 +3799,6 @@ private:
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
-    if (op->name_hint == "SIMT_VF" || op->name_hint == "VECTOR" ||
-        op->name_hint == "CUBE") {
-      // TODO: analyze BufferRegion with threadIdx
-      return StmtExprMutator::VisitStmt_(op);
-    }
-
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
       allocated_buffers_.insert(buffer);
