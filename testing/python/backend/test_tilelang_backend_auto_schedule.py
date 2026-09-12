@@ -4,7 +4,7 @@ import pytest
 
 import tilelang
 import tilelang.testing
-from tilelang.backend.pass_pipeline.pipeline_utils import allow_autoschedule
+from tilelang.ascend.pipeline import allow_autoschedule
 
 # These exercise Ascend's boolean scheduling flag. A build without USE_ASCEND
 # does not register tl.enable_auto_schedule at all.

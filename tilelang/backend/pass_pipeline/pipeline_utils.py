@@ -36,13 +36,6 @@ def allow_global_thread_synchronization(pass_ctx: PassContext | None = None) -> 
     return enable_global_thread_sync
 
 
-def allow_autoschedule(pass_ctx: PassContext | None = None) -> bool:
-    if pass_ctx is None:
-        pass_ctx = tilelang.transform.get_pass_context()
-    enable_autoschedule = pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE, True)
-    return enable_autoschedule
-
-
 def should_enable_aggressive_merge(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
     del target
     if pass_ctx is None:

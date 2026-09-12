@@ -7,7 +7,6 @@ import tilelang
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
-    allow_autoschedule,
     allow_global_thread_synchronization,
     allow_vectorize,
     should_disable_shared_memory_reuse,
@@ -16,6 +15,20 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 )
 
 from . import transform as ascend_transform
+
+
+def allow_autoschedule(pass_ctx=None) -> bool:
+    """Whether the Ascend auto-scheduler should run for this pass context.
+
+    Ascend-owned: TL_ENABLE_AUTO_SCHEDULE only exists when the Ascend backend is
+    compiled in, so this does not belong on the backend-neutral
+    pipeline_utils surface. AutoSchedule schedules Ascend per-core tasks, so
+    disabling it leaves the kernel unscheduled rather than handing it to another
+    scheduler.
+    """
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE, True)
 
 
 def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
