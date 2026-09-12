@@ -53,11 +53,11 @@ def _count_parallel_loops(mod):
     return count
 
 
-def _lowered_parallel_loop_count(pass_config):
+def _lowered_parallel_loop_count(pass_config, func=gemm):
     """kParallel loops in the lowered module (host + device) — proof the
     grid nest was actually parallelized, not just numerically correct."""
     with tvm.target.Target("llvm"), tvm.transform.PassContext(config=pass_config):
-        artifact = tilelang.lower(gemm, target="llvm")
+        artifact = tilelang.lower(func, target="llvm")
     return _count_parallel_loops(artifact.host_mod) + _count_parallel_loops(artifact.device_mod)
 
 
@@ -79,6 +79,33 @@ def test_llvm_cpu_parallel_disabled_by_default():
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
     torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
+
+
+@tilelang.testing.requires_llvm
+def test_llvm_cpu_parallel_region_atomic_stays_serial():
+    # Region-form atomics (tl.tileop.atomic*) lower to serial RMW loops;
+    # marking them must keep the grid serial on the llvm path too.
+    N_ATOMIC = 256
+
+    @T.prim_func
+    def region_atomic(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((N_ATOMIC,), "float32")):
+        for i in T.serial(N_ATOMIC):
+            B[i] = 0.0
+        with T.Kernel(N_ATOMIC, threads=1):
+            T.atomic_add(B, A)
+
+    assert _lowered_parallel_loop_count({"tl.cpu_parallel": True}, region_atomic) == 0
+
+    torch.manual_seed(0)
+    kernel = tilelang.compile(
+        region_atomic,
+        target="llvm",
+        out_idx=-1,
+        execution_backend="tvm_ffi",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    A = torch.randn(N_ATOMIC, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), N_ATOMIC * A, rtol=1e-4, atol=1e-3)
 
 
 if __name__ == "__main__":
