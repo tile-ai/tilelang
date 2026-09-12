@@ -1162,6 +1162,45 @@ def _patch_prim_func_attrs(pf: PrimFunc, builder: Builder) -> PrimFunc:
     return pf
 
 
+def build_prim_func(
+    name: str,
+    parameters: Sequence[tuple[str, Buffer | Var]],
+    body: Callable[..., None],
+) -> PrimFunc:
+    """Build a PrimFunc from a dynamic parameter list and an eager Python body.
+
+    This is the programmatic counterpart of ``@T.prim_func``.  It is intended
+    for compiler frontends that determine a function's ABI at lowering time
+    while still authoring all device work with normal TileLang Python APIs.
+
+    ``body`` executes once while the eager IR builder is active.  It receives
+    the bound parameters positionally and may use ordinary host-side Python to
+    compose statically authored ``@T.macro`` fragments.  Device-side control
+    flow remains inside those macros.
+    """
+    if not name or not name.isidentifier():
+        raise ValueError(f"invalid PrimFunc name: {name!r}")
+    if Builder.current() is not None:
+        raise RuntimeError("build_prim_func cannot be nested inside another TileLang builder")
+    if not callable(body):
+        raise TypeError("PrimFunc body must be callable")
+
+    declared = tuple(parameters)
+    names = tuple(parameter_name for parameter_name, _ in declared)
+    if any(not parameter_name or not parameter_name.isidentifier() for parameter_name in names):
+        raise ValueError("PrimFunc parameter names must be valid Python identifiers")
+    if len(set(names)) != len(names):
+        raise ValueError("PrimFunc parameter names must be unique")
+
+    builder = Builder()
+    with builder.prim_func(name):
+        bound = tuple(builder.prim_func_arg(parameter_name, value) for parameter_name, value in declared)
+        result = body(*bound)
+        if result is not None:
+            raise TypeError("PrimFunc body must return None")
+    return _patch_prim_func_attrs(builder.get(), builder)
+
+
 @dataclass
 class TirTemplate(Generic[_P, _T]):
     """
