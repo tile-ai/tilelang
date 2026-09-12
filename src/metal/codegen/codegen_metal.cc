@@ -1674,12 +1674,16 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
          << " + __i] = __ct_c[__i]; }";
     }
   } else if (op->op.same_as(builtin::reinterpret())) {
-    // generate as_type<TYPE>(ARG)
+    // Metal applies C integer promotion to narrow integer expressions. Cast
+    // the expression back to its TIR dtype before as_type so a uint16 bitwise
+    // expression remains a legal half bitcast rather than becoming int.
     os << "(as_type<";
     this->PrintType(op->dtype, os);
-    os << ">(";
+    os << ">((";
+    this->PrintType(op->args[0].dtype(), os);
+    os << ")(";
     this->PrintExpr(op->args[0], os);
-    os << "))";
+    os << ")))";
   } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 2U);
     std::string addr_space = GetAddrSpaceOf(op->args[0]);
