@@ -7,6 +7,9 @@ import tilelang
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    inline_private_host_launchers,
+    internalize_private_host_launcher_abis,
+    retarget_private_host_launchers,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -78,11 +81,14 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # as serial loops. Revisit this if CPU gains thread-level reduce/allreduce support.
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    mod = internalize_private_host_launcher_abis(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
+    mod = retarget_private_host_launchers(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     mod = tilelang.transform.MergeIfStmt()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    mod = inline_private_host_launchers(mod)
     return mod

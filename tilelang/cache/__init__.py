@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Literal
 from tvm.target import Target as TVMTarget
 from tvm.tirx import PrimFunc
+from tvm import IRModule
 from tilelang.jit import JITKernel
 from tilelang import env
 from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache
@@ -65,7 +66,7 @@ def _resolve_cache_dispatch(
 
 
 def cached(
-    func: PrimFunc = None,
+    func: PrimFunc | IRModule = None,
     out_idx: list[int] = None,
     *args,
     target: TargetLike | None = None,

@@ -2,11 +2,84 @@ from __future__ import annotations
 
 import os
 
-from tvm import IRModule
+from tvm import IRModule, tirx
 from tvm.target import Target
 
 import tilelang
 from tilelang.transform import PassContext
+
+
+def retarget_private_host_launchers(mod: IRModule) -> IRModule:
+    """Retarget split private schedule wrappers to their host target.
+
+    Programmatic schedule functions initially need the full target so their
+    T.Kernel regions can be lowered and split.  After splitting, the remaining
+    wrapper is an internal host function.  Retargeting it here keeps ordinary
+    host-to-host calls internal while LowerDeviceKernelLaunch rewrites only its
+    calls to the extracted device kernels.
+    """
+    updates = {}
+    for global_var, base_func in mod.functions.items():
+        if not isinstance(base_func, tirx.PrimFunc) or base_func.attrs is None:
+            continue
+        if not base_func.attrs.get("tl.is_host_launcher"):
+            continue
+        target = base_func.attrs.get("target")
+        if target is None or target.host is None:
+            raise ValueError("a private TileLang host launcher requires a target with a host")
+        updates[global_var] = base_func.with_attr("target", target.host)
+    if updates:
+        mod.update(IRModule(updates))
+    return mod
+
+
+def internalize_private_host_launcher_abis(mod: IRModule) -> IRModule:
+    """Replace private launchers' external buffer handles with data pointers.
+
+    This runs after buffer flattening and immediately before host/device
+    splitting.  The private entry is called from already-unpacked host code,
+    so its ABI is the buffer data pointers used by the extracted device
+    kernels, not public DLTensor handles requiring MakePackedAPI.
+    """
+    updates = {}
+    for global_var, base_func in mod.functions.items():
+        if not isinstance(base_func, tirx.PrimFunc) or base_func.attrs is None:
+            continue
+        if not base_func.attrs.get("tl.is_host_launcher"):
+            continue
+        params = [base_func.buffer_map[param].data if param in base_func.buffer_map else param for param in base_func.params]
+        updates[global_var] = tirx.PrimFunc(
+            params,
+            base_func.body,
+            base_func.ret_type,
+            {},
+            base_func.attrs,
+            base_func.span,
+        )
+    if updates:
+        mod.update(IRModule(updates))
+    return mod
+
+
+def inline_private_host_launchers(mod: IRModule) -> IRModule:
+    """Inline only host launch wrappers after their device calls are lowered.
+
+    LowerDeviceKernelLaunch gives every remaining PrimFunc a symbol for codegen.
+    Restore marked schedule wrappers to private status, then use TVM's existing
+    private-function inliner.  Extracted device kernels retain their public
+    symbols and remain reusable single definitions.
+    """
+    updates = {}
+    for global_var, base_func in mod.functions.items():
+        if not isinstance(base_func, tirx.PrimFunc) or base_func.attrs is None:
+            continue
+        if not base_func.attrs.get("tl.is_host_launcher"):
+            continue
+        updates[global_var] = base_func.without_attr("global_symbol").without_attr("tl.is_host_launcher")
+    if updates:
+        mod.update(IRModule(updates))
+        mod = tirx.transform.InlinePrivateFunctions()(mod)
+    return mod
 
 
 def _env_data_race_check_enabled() -> bool:

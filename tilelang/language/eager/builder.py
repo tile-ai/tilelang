@@ -1201,6 +1201,75 @@ def build_prim_func(
     return _patch_prim_func_attrs(builder.get(), builder)
 
 
+@dataclass(frozen=True)
+class PrimFuncDefinition:
+    """A private function definition used by :func:`build_prim_module`."""
+
+    name: str
+    parameters: Sequence[tuple[str, Buffer | Var]]
+    body: Callable[..., None]
+
+
+class PrimFuncRef:
+    """A callable reference to a private PrimFunc while building a module entry."""
+
+    def __init__(self, global_var: tvm.ir.GlobalVar):
+        self._global_var = global_var
+
+    def __call__(self, *arguments) -> None:
+        values = [argument.data if isinstance(argument, Buffer) else unwrap_expr(argument) for argument in arguments]
+        tirx.evaluate(tvm.tirx.Call("int32", self._global_var, values))
+
+
+def build_prim_module(
+    name: str,
+    parameters: Sequence[tuple[str, Buffer | Var]],
+    body: Callable[..., None],
+    private: Sequence[PrimFuncDefinition],
+) -> tvm.IRModule:
+    """Build one public entry that may repeatedly call private TileLang schedules.
+
+    Private definitions are lowered once each even when the entry calls their
+    corresponding :class:`PrimFuncRef` many times.  Calls are expressed in the
+    target-neutral TileLang language; backend lowering decides how to realize
+    the resulting native multi-launch program.
+
+    ``body`` receives a mapping from definition name to callable reference as
+    its first argument, followed by the entry parameters.
+    """
+    definitions = tuple(private)
+    names = tuple(definition.name for definition in definitions)
+    if len(set(names)) != len(names):
+        raise ValueError("private PrimFunc names must be unique")
+    if name in names:
+        raise ValueError("the public entry name cannot also name a private PrimFunc")
+
+    globals_by_name = {private_name: tvm.ir.GlobalVar(private_name) for private_name in names}
+    functions = {}
+    for definition in definitions:
+        function = build_prim_func(
+            definition.name,
+            definition.parameters,
+            definition.body,
+        ).without_attr("global_symbol")
+        # This private function is a host-side schedule launcher: its body may
+        # contain one or more target-neutral T.Kernel regions.  BindTarget
+        # cannot infer that distinction from an ordinary host call, so retain
+        # it explicitly until the concrete target is available in lowering.
+        function = function.with_attr("tl.is_host_launcher", True)
+        functions[globals_by_name[definition.name]] = function
+
+    references = {private_name: PrimFuncRef(global_var) for private_name, global_var in globals_by_name.items()}
+
+    def entry_body(*bound) -> None:
+        result = body(references, *bound)
+        if result is not None:
+            raise TypeError("PrimModule body must return None")
+
+    functions[name] = build_prim_func(name, parameters, entry_body)
+    return tvm.IRModule(functions)
+
+
 @dataclass
 class TirTemplate(Generic[_P, _T]):
     """

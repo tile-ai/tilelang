@@ -17,12 +17,13 @@ from hashlib import sha256
 from typing import Literal
 from collections.abc import Callable
 
+from tvm import IRModule
 from tvm.target import Target
 from tvm.tirx import PrimFunc
 from tvm.runtime import Executable
 from tilelang.backend.module import BackendContext, create_backend_context
 from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
-from tilelang.utils.language import get_prim_func_name
+from tilelang.utils.language import get_prim_func_name, retrieve_entry_func
 from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.jit.adapter.base import CachedTextSource
@@ -285,7 +286,7 @@ class KernelCache:
 
     def cached(
         self,
-        func: PrimFunc = None,
+        func: PrimFunc | IRModule = None,
         out_idx: list[int] = None,
         *args,
         target: str | Target | None = None,
@@ -303,7 +304,7 @@ class KernelCache:
         and execution backend resolution should happen. All compilation paths go through here.
 
         Args:
-            func: Function to be compiled or a prepared PrimFunc
+            func: Prepared PrimFunc or single-entry IRModule to compile
             out_idx: Indices specifying which outputs to return
             target: Compilation target platform (None = read from TILELANG_DEFAULT_TARGET env var).
                 Use a dict for target attributes, for example {"kind": "cuda", "arch": "sm_90"}.
@@ -343,6 +344,7 @@ class KernelCache:
         target = backend_context.target
         target_host = backend_context.target_host
         execution_backend = backend_context.execution_backend.name
+        kernel_name = get_prim_func_name(retrieve_entry_func(func), "<unknown>")
 
         if not env.is_cache_enabled():
             if verbose:
@@ -370,12 +372,11 @@ class KernelCache:
             compile_flags=compile_flags,
         )
         if verbose:
-            self.logger.info(f"Generated cache key: {key} for kernel {get_prim_func_name(func, '<unknown>')}")
+            self.logger.info(f"Generated cache key: {key} for kernel {kernel_name}")
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
                 # Include kernel name for easier debugging when hitting memory cache
-                kernel_name = get_prim_func_name(func, "<unknown>")
                 self.logger.warning(
                     "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.jit` instead of direct kernel caching.",
                     kernel_name,
@@ -383,7 +384,7 @@ class KernelCache:
                 return self._memory_cache[key]
 
         if verbose:
-            self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
+            self.logger.debug(f"Checking disk cache for kernel {kernel_name}")
 
         if execution_backend == "torch":
             # Metal's torch backend does not support cache yet
@@ -403,7 +404,7 @@ class KernelCache:
             )
         if kernel is not None:
             if verbose:
-                self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
+                self.logger.debug(f"Found kernel in disk cache for {kernel_name}")
             with self._lock:
                 existing = self._memory_cache.get(key)
                 if existing is not None:
@@ -412,12 +413,12 @@ class KernelCache:
             return kernel
 
         if verbose:
-            self.logger.debug(f"No cached kernel for {get_prim_func_name(func, '<unknown>')}")
+            self.logger.debug(f"No cached kernel for {kernel_name}")
         # Compile kernel if cache miss; leave critical section
         with jit_phase(
             "cache.compile",
             verbose=verbose,
-            kernel=get_prim_func_name(func, "<unknown>"),
+            kernel=kernel_name,
             target=str(target),
             target_host=str(target_host) if target_host is not None else None,
             backend=execution_backend,

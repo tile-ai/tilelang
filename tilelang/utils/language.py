@@ -184,9 +184,45 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     """
     if not isinstance(ir_module, IRModule):
         raise ValueError("Not supported type: ", type(ir_module))
-    assert len(ir_module.get_global_vars()) == 1, "The optimized module should only have one global variable for default schedule."
-    func = list(ir_module.functions.values())[0]
-    return func
+    functions = [func for func in ir_module.functions.values() if isinstance(func, PrimFunc)]
+    if len(functions) == 1:
+        return functions[0]
+    exposed = [func for func in functions if func.attrs is not None and func.attrs.get("global_symbol") is not None]
+    if len(exposed) != 1:
+        raise ValueError("an IRModule must contain one PrimFunc or exactly one externally exposed PrimFunc")
+    return exposed[0]
+
+
+def retrieve_entry_func(program: PrimFunc | IRModule) -> PrimFunc:
+    """
+    Retrieve the externally exposed PrimFunc of a compilation unit.
+
+    A compilation unit is either a single PrimFunc or an IRModule whose one
+    PrimFunc carrying a ``global_symbol`` is the public entry; every other
+    function in such a module is private to it.
+
+    Args:
+        program (PrimFunc | IRModule): The program handed to the compiler.
+
+    Returns:
+        PrimFunc: The PrimFunc that callers of the compiled program invoke.
+
+    Raises:
+        ValueError: If program is neither a PrimFunc nor an IRModule, or if the
+            module does not expose exactly one PrimFunc.
+    """
+    if isinstance(program, PrimFunc):
+        return program
+    if not isinstance(program, IRModule):
+        raise ValueError("Not supported type: ", type(program))
+    exposed = [
+        func
+        for func in program.functions.values()
+        if isinstance(func, PrimFunc) and func.attrs is not None and func.attrs.get("global_symbol") is not None
+    ]
+    if len(exposed) != 1:
+        raise ValueError("a compiled IRModule must contain exactly one PrimFunc with a global_symbol")
+    return exposed[0]
 
 
 def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list[PrimExpr] | None = None) -> PrimExpr | BufferRegion:

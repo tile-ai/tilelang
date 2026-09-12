@@ -7,6 +7,9 @@ import tilelang
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    inline_private_host_launchers,
+    internalize_private_host_launcher_abis,
+    retarget_private_host_launchers,
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
     should_enable_race_check,
@@ -81,7 +84,9 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    mod = internalize_private_host_launcher_abis(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
+    mod = retarget_private_host_launchers(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
@@ -94,4 +99,5 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    mod = inline_private_host_launchers(mod)
     return mod

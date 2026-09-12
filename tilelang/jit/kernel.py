@@ -10,6 +10,7 @@ from tilelang import env
 from tilelang.backend.module import BackendContext, create_backend_context
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
+from tilelang.utils.language import retrieve_entry_func
 from tilelang.jit.adapter import (
     BaseKernelAdapter,
     CachedTextSource,
@@ -65,7 +66,7 @@ class JITKernel(Generic[_P, _T]):
 
     def __init__(
         self,
-        func: PrimFunc = None,
+        func: PrimFunc | tvm.IRModule = None,
         out_idx: list[int] | int = None,
         execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
         target: TargetLike = "auto",
@@ -81,8 +82,9 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        func : tvm.tirx.PrimFunc, optional
-            The TileLang TIR function to compile and wrap.
+        func : tvm.tirx.PrimFunc or tvm.IRModule, optional
+            The TileLang TIR program to compile and wrap. Modules must contain
+            exactly one externally exposed PrimFunc.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
         execution_backend : Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
@@ -103,7 +105,7 @@ class JITKernel(Generic[_P, _T]):
             Pre-resolved context supplied by compiler infrastructure. Direct
             callers may omit it and let this public entry resolve one context.
         """
-        self.prim_func = func
+        self.prim_func = None if func is None else retrieve_entry_func(func)
         self.verbose = verbose
 
         self.pass_configs = normalize_pass_configs(pass_configs)
@@ -132,7 +134,7 @@ class JITKernel(Generic[_P, _T]):
         # whether the communication timeout is from compilation
         if env.is_print_on_compilation_enabled():
             # assert func must have "global_symbol"
-            func_name = func.attrs.get("global_symbol")
+            func_name = self.prim_func.attrs.get("global_symbol")
             assert func_name is not None, "func must have global_symbol"
             logger.info(f"TileLang begins to compile kernel `{func_name}` with `{out_idx=}`")
 
@@ -140,7 +142,7 @@ class JITKernel(Generic[_P, _T]):
         adapter = self._compile_and_create_adapter(func, out_idx)
 
         if env.is_print_on_compilation_enabled():
-            func_name = func.attrs.get("global_symbol")
+            func_name = self.prim_func.attrs.get("global_symbol")
             assert func_name is not None, "func must have global_symbol"
             logger.info(f"TileLang completes to compile kernel `{func_name}`")
 
@@ -151,7 +153,7 @@ class JITKernel(Generic[_P, _T]):
     @classmethod
     def from_database(
         cls,
-        func: PrimFunc,
+        func: PrimFunc | tvm.IRModule,
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
@@ -213,7 +215,7 @@ class JITKernel(Generic[_P, _T]):
 
     def _compile_and_create_adapter(
         self,
-        tilelang_func: PrimFunc,
+        tilelang_func: PrimFunc | tvm.IRModule,
         out_idx: list[int] | int | None,
     ) -> BaseKernelAdapter:
         """Compile one kernel and construct its adapter in one tool session."""
@@ -222,9 +224,20 @@ class JITKernel(Generic[_P, _T]):
             # from main's packed arguments and replace them with one allocator
             # anchor.  Use a derived PrimFunc so manual out_idx does not become
             # a persistent frontend attribute on the user's function.
-            tilelang_func, out_idx = prepare_tvm_ffi_callee_allocated_outputs(tilelang_func, out_idx)
+            entry = retrieve_entry_func(tilelang_func)
+            prepared, out_idx = prepare_tvm_ffi_callee_allocated_outputs(entry, out_idx)
+            if prepared is not entry:
+                if isinstance(tilelang_func, PrimFunc):
+                    tilelang_func = prepared
+                else:
+                    functions = dict(tilelang_func.functions)
+                    for global_var, function in functions.items():
+                        if function.same_as(entry):
+                            functions[global_var] = prepared
+                            break
+                    tilelang_func = tvm.IRModule(functions, attrs=tilelang_func.attrs)
 
-        func_name = str(tilelang_func.attrs.get("global_symbol", "<unknown>"))
+        func_name = str(retrieve_entry_func(tilelang_func).attrs.get("global_symbol", "<unknown>"))
         timing_tool = create_pass_timing_tool(self.pass_configs)
         tools = [timing_tool] if timing_tool is not None else []
         with compile_pass_instrumentation(name=func_name, tools=tools):
@@ -266,11 +279,11 @@ class JITKernel(Generic[_P, _T]):
 
     def _compile_artifact(
         self,
-        tilelang_func: PrimFunc,
+        tilelang_func: PrimFunc | tvm.IRModule,
         pass_configs: dict[str, Any],
         compile_metadata: dict[str, Any],
     ) -> CompiledArtifact:
-        """Lower one TileLang function into the host/device compilation artifact."""
+        """Lower one TileLang program into the host/device compilation artifact."""
         enable_host_codegen = self.execution_backend_spec.enable_host_codegen
         enable_device_compile = self.execution_backend_spec.enable_device_compile
 
@@ -302,7 +315,7 @@ class JITKernel(Generic[_P, _T]):
 
     def _create_adapter_from_artifact(
         self,
-        tilelang_func: PrimFunc,
+        tilelang_func: PrimFunc | tvm.IRModule,
         out_idx: list[int] | int | None,
         artifact: CompiledArtifact,
         pass_configs: dict[str, Any],

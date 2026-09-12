@@ -10,6 +10,9 @@ from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    inline_private_host_launchers,
+    internalize_private_host_launcher_abis,
+    retarget_private_host_launchers,
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
     should_enable_race_check,
@@ -237,7 +240,9 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    mod = internalize_private_host_launcher_abis(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
+    mod = retarget_private_host_launchers(mod)
 
     # @CUDA-specific
     # Mark the function contains pdl_sync or pdl_trigger
@@ -273,6 +278,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    mod = inline_private_host_launchers(mod)
 
     # @CUDA-specific
     # Transform threadblock to persistent threadblock
