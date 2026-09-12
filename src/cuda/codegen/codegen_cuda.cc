@@ -5292,6 +5292,26 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), alloc_dtype);
 }
 
+void CodeGenTileLangCUDA::VisitStmt_(const AssertStmtNode *op) {
+  // Every function this codegen emits is a __global__ kernel, so a tirx
+  // AssertStmt has to lower to the device-legal helper. The inherited CodeGenC
+  // visitor streams a host-only TVMFFI error call plus `return -1`, neither of
+  // which is valid inside a kernel.
+  std::string cond = PrintExpr(op->condition);
+  this->PrintIndent();
+  if (op->message_parts.empty()) {
+    stream << "device_assert(" << cond << ");\n";
+    return;
+  }
+  std::string joined_msg;
+  for (const auto &part : op->message_parts) {
+    joined_msg += part->value;
+  }
+  stream << "device_assert_with_msg(" << cond << ", ";
+  PrintEscapedCString(joined_msg, stream);
+  stream << ");\n";
+}
+
 void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
