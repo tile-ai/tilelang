@@ -14,6 +14,7 @@ import sys
 import threading
 
 import torch
+import tvm_ffi
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
@@ -300,6 +301,40 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             return [tensor_list[i] for i in self.result_idx]
 
         return func
+
+    def bind(self, static: dict[int, Any], dynamic_indices: tuple[int, ...]) -> Callable[..., Any]:
+        """Create a stable argument frame for a caller-allocated-output ABI."""
+        if self.result_idx:
+            raise ValueError("partial binding requires caller-allocated outputs")
+        parameter_count = len(self.params)
+        dynamic_set = set(dynamic_indices)
+        if len(dynamic_set) != len(dynamic_indices):
+            raise ValueError("dynamic argument slots must be unique")
+        if set(static) & dynamic_set:
+            raise ValueError("static and dynamic argument slots overlap")
+        if set(static) | dynamic_set != set(range(parameter_count)):
+            raise ValueError("bound argument slots must cover the complete ABI")
+        executable = self._get_executable()
+        # Resolve the packed entrypoint while binding.  Besides removing a
+        # per-invocation module lookup, target runtimes such as Metal use
+        # function resolution to create and cache the native pipeline state.
+        # Compilation therefore remains outside the bound invocation path.
+        # A fresh compilation retains ``runtime.Executable`` while a cache hit
+        # loads its already-jitted runtime module. Resolve the same packed main
+        # entrypoint for both representations before native partial binding.
+        if isinstance(executable, runtime.Executable):
+            entrypoint = executable.jit().main
+        else:
+            entrypoint = executable.get_function("main", query_imports=True)
+        factory = tvm_ffi.get_global_func("tilelang.runtime.bind_packed_function")
+        static_indices = tuple(sorted(static))
+        return factory(
+            entrypoint,
+            parameter_count,
+            list(static_indices),
+            [static[index] for index in static_indices],
+            list(dynamic_indices),
+        )
 
     def _convert_ffi_callee_allocated_output_func(self) -> Callable[..., Any]:
         """Create a Torch callable whose outputs are allocated by TVM-FFI."""

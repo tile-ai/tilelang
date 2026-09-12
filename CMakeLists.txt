@@ -402,6 +402,7 @@ file(GLOB TILE_LANG_SRCS
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
+  src/runtime/bound_function.cc
 )
 # Track if the user explicitly selected a backend via cache options.
 set(TILELANG_BACKEND_USER_SELECTED OFF)
