@@ -172,13 +172,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         for i, param in enumerate(params):
             if isinstance(param, tirx.Var) and (param not in dynamic_symbolic_map):
                 dynamic_symbolic_map[param] = (2, i, -1, 1)
-        for i, param in enumerate(params):
+        # Inputs are visited first. An output's shape is resolved from these entries
+        # while that output is being allocated, so a dimension mentioned by both an
+        # input and an output must be owned by the input; owning it on the output
+        # would make the allocation loop read a slot it has not filled yet.
+        ordered = [i for i in range(len(params)) if i not in self.result_idx]
+        ordered += [i for i in range(len(params)) if i in self.result_idx]
+        for i in ordered:
+            param = params[i]
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
                     if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
                         dynamic_symbolic_map[shape] = (0, i, j, 1)
-        for i, param in enumerate(params):
+        for i in ordered:
+            param = params[i]
             if param in buffer_map:
                 buffer = buffer_map[param]
                 element_bits = buffer.dtype.bits * buffer.dtype.lanes
@@ -252,11 +260,18 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 None,
             )
 
-            # Stitch the full positional argument list expected by the TVM executable
+            # Stitch the full positional argument list expected by the TVM executable.
+            # Inputs are placed first so that a symbolic dimension owned by an input can
+            # be resolved even when the output that needs it comes earlier in the
+            # signature; the outputs are then allocated in parameter order.
             ins_idx: int = 0
-            tensor_list: list[torch.Tensor] = []
+            tensor_list: list[torch.Tensor | None] = [None] * len(self.params)
+            for i in range(len(self.params)):
+                if i not in self.result_idx:
+                    tensor_list[i] = inputs[ins_idx]
+                    ins_idx += 1
 
-            # Prepare input and output tensors
+            # Prepare output tensors
             for i in range(len(self.params)):
                 if i in self.result_idx:
                     dtype = param_dtypes[i]
@@ -269,10 +284,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                                     ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = dynamic_symbolic_map[key]
                                     if ref_id == 2:
                                         shape.append(inputs[ref_tensor_idx])
-                                    elif ref_id == 0:
-                                        shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                                        continue
+                                    ref_tensor = tensor_list[ref_tensor_idx]
+                                    if ref_tensor is None:
+                                        param_name = self.params[i].name if hasattr(self.params[i], "name") else f"parameter_{i}"
+                                        raise ValueError(
+                                            f"Cannot resolve symbolic dimension {s} of output parameter {param_name}: "
+                                            f"it is taken from parameter {ref_tensor_idx}, which is an output that has "
+                                            f"not been allocated yet."
+                                        )
+                                    if ref_id == 0:
+                                        shape.append(ref_tensor.shape[ref_shape_idx])
                                     elif ref_id == 1:
-                                        shape.append(tensor_list[ref_tensor_idx].stride()[ref_shape_idx] * stride_scale)
+                                        shape.append(ref_tensor.stride()[ref_shape_idx] * stride_scale)
                         else:  # Already converted to Python int during initialization
                             shape.append(s)
 
@@ -285,11 +309,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                             f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                             f"Expected shape: {shape}"
                         )
-                    tensor = torch.empty(*shape, dtype=dtype, device=out_device)
-                else:
-                    tensor = inputs[ins_idx]
-                    ins_idx += 1
-                tensor_list.append(tensor)
+                    tensor_list[i] = torch.empty(*shape, dtype=dtype, device=out_device)
 
             executable = self._get_executable()
             executable(*tensor_list)
