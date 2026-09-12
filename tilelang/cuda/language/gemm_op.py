@@ -21,6 +21,7 @@ def gemm(
     clear_accum: bool = False,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
+    valid_m: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator for CUDA.
 
@@ -45,6 +46,7 @@ def gemm(
         mbar (BarrierType, i.e. Buffer | BufferLoad, or Var, optional): Mbarrier in Blackwell.
             Required when this GEMM lowers to TCGEN5MMA. Defaults to None.
         annotations (Optional[dict]): Additional annotations.
+        valid_m (int | PrimExpr | None): Runtime-valid prefix of the M axis.
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
@@ -60,6 +62,7 @@ def gemm(
         clear_accum,
         mbar,
         annotations=annotations,
+        valid_m=valid_m,
     )
 
 

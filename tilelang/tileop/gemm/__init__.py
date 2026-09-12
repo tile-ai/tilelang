@@ -1,5 +1,5 @@
 from tilelang import tvm as tvm
-from tvm import tirx
+from tvm import arith, tirx
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.ir import Range
@@ -33,7 +33,7 @@ def gemm_lower(
 class Gemm(Node, Scriptable):
     # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
     # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
-    # clearAccum, kPack, wgWait, policy
+    # clearAccum, validM, kPack, wgWait, policy
     #
     # Backward-compat alias properties are provided below to support old names.
 
@@ -87,6 +87,10 @@ class Gemm(Node, Scriptable):
         return self.clearAccum
 
     @property
+    def valid_m(self):
+        return self.validM
+
+    @property
     def k_pack(self):
         return self.kPack
 
@@ -120,6 +124,8 @@ class Gemm(Node, Scriptable):
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
+        if not arith.Analyzer().can_prove_equal(self.valid_m, self.m) and not impl_class.supports_runtime_valid_m:
+            raise NotImplementedError(f"{impl_class.__name__} does not support T.gemm valid_m")
         return impl_class(self).lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> str:

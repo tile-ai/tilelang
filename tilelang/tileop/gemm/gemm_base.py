@@ -23,6 +23,7 @@ class GemmBase:
     """
 
     gemm_node: Node
+    supports_runtime_valid_m = False
 
     def __post_init__(self) -> None:
         validate_gemm_ab_dtypes(
@@ -135,6 +136,10 @@ class GemmBase:
     @property
     def clear_accum(self) -> PrimExpr:
         return getattr(self.gemm_node, "clearAccum", None)
+
+    @property
+    def valid_m(self) -> PrimExpr:
+        return getattr(self.gemm_node, "validM", tvm.tirx.const(self.M, T.int32))
 
     @property
     def k_pack(self) -> int:

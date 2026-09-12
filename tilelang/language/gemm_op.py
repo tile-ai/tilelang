@@ -29,6 +29,7 @@ def _gemm_impl(
     clear_accum: bool = False,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
+    valid_m: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
@@ -93,6 +94,13 @@ def _gemm_impl(
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
+    if valid_m is not None and (isinstance(valid_m, bool) or not isinstance(valid_m, (int, tirx.PrimExpr))):
+        raise TypeError(f"T.gemm valid_m must be an int, PrimExpr, or None, got {valid_m!r}")
+    elif isinstance(valid_m, int):
+        if not 0 <= valid_m <= int(M):
+            raise ValueError(f"T.gemm valid_m must be in [0, {int(M)}], got {valid_m}")
+        valid_m = tirx.const(valid_m, dtype=M.dtype)
+
     if mbar is not None:
         assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
             f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
@@ -107,9 +115,7 @@ def _gemm_impl(
     # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
     # correctly ignored.
     mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
-    return tirx.call_intrin(
-        "handle",
-        tirx.op.Op.get(op_key),
+    call_args = [
         A_arg,
         B_arg,
         C_arg,
@@ -123,6 +129,13 @@ def _gemm_impl(
         mbar_arg,
         C_coords[0],
         C_coords[1],
+    ]
+    if valid_m is not None:
+        call_args.append(valid_m)
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get(op_key),
+        *call_args,
         annotations=annotations,
     )
 
@@ -136,6 +149,7 @@ def gemm(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     annotations: dict | None = None,
+    valid_m: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator.
 
@@ -157,6 +171,9 @@ def gemm(
         policy (GemmWarpPolicy): GEMM warp partition policy.
         clear_accum (bool): Whether to clear the accumulator.
         annotations (Optional[dict]): Additional annotations.
+        valid_m (int | PrimExpr | None): Runtime-valid prefix of the M axis.
+            The physical A/C tile shapes remain static. Rows in ``[0, valid_m)``
+            are computed; the suffix is unspecified. Defaults to the full tile.
 
     Backend dialects extend this signature with their hardware's knobs:
     ``tilelang.cuda.language.gemm`` adds ``mbar`` (Blackwell TCGEN5MMA
@@ -176,6 +193,7 @@ def gemm(
         clear_accum,
         None,
         annotations=annotations,
+        valid_m=valid_m,
     )
 
 

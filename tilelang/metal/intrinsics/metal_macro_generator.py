@@ -108,7 +108,14 @@ class MPSIntrinEmitter:
             stride = buffer.shape[-1]
         return buffer, extra, off_row, off_col, stride
 
-    def ldmatrix_a(self, A_local_buf, A_shared_buf: Buffer | BufferRegion, ki, k_inner: int = 0):
+    def ldmatrix_a(
+        self,
+        A_local_buf,
+        A_shared_buf: Buffer | BufferRegion,
+        ki,
+        k_inner: int = 0,
+        valid_m: tir.PrimExpr | None = None,
+    ):
         """Load matrix A tiles from memory into simdgroup/cooperative tensor buffers."""
         warp_rows = self.warp_rows
         warp_row_tiles = self.warp_row_tiles
@@ -132,37 +139,46 @@ class MPSIntrinEmitter:
                 else:
                     row_idx = offset_m + warp_m * warp_row_tiles + i * micro_size_x
                     col_idx = offset_k + ki * micro_size_k
-                ptr = T.access_ptr(buffer[extra + (row_idx, col_idx)], "r")
-                if use_cooperative_tensor:
-                    T.cooperative_tensor_load(
-                        A_local_buf.data,
-                        k_inner * warp_rows + i,
-                        ptr,
-                        stride,
-                        micro_size_x,
-                        micro_size_k,
-                        T.bool(a_transposed),
-                        micro_size_x,
-                        micro_size_y,
-                        micro_size_k,
-                        OPERAND_LEFT,
-                    )
-                else:
-                    T.simdgroup_load(
-                        A_local_buf.data,
-                        i,
-                        ptr,
-                        stride,
-                        micro_size_x,
-                        micro_size_k,
-                        T.bool(a_transposed),
-                    )
+                if valid_m is None or warp_m * warp_row_tiles + i * micro_size_x < valid_m:
+                    ptr = T.access_ptr(buffer[extra + (row_idx, col_idx)], "r")
+                    if use_cooperative_tensor:
+                        T.cooperative_tensor_load(
+                            A_local_buf.data,
+                            k_inner * warp_rows + i,
+                            ptr,
+                            stride,
+                            micro_size_x,
+                            micro_size_k,
+                            T.bool(a_transposed),
+                            micro_size_x,
+                            micro_size_y,
+                            micro_size_k,
+                            OPERAND_LEFT,
+                        )
+                    else:
+                        T.simdgroup_load(
+                            A_local_buf.data,
+                            i,
+                            ptr,
+                            stride,
+                            micro_size_x,
+                            micro_size_k,
+                            T.bool(a_transposed),
+                        )
 
         return _warp_ldmatrix_a(A_local_buf, buffer, offset_m, offset_k, stride, warp_m, ki)
 
-    def ldmatrix_b(self, B_local_buf, B_shared_buf: Buffer | BufferRegion, ki, k_inner: int = 0):
+    def ldmatrix_b(
+        self,
+        B_local_buf,
+        B_shared_buf: Buffer | BufferRegion,
+        ki,
+        k_inner: int = 0,
+        valid_m: tir.PrimExpr | None = None,
+    ):
         """Load matrix B tiles from memory into simdgroup/cooperative tensor buffers."""
         warp_cols = self.warp_cols
+        warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
         micro_size_x = self.micro_size_x
         micro_size_y = self.micro_size_y
@@ -170,94 +186,106 @@ class MPSIntrinEmitter:
         b_transposed = self.b_transposed
         use_cooperative_tensor = self.use_cooperative_tensor
 
-        _, warp_n = self._get_warp_indices()
+        warp_m, warp_n = self._get_warp_indices()
         buffer, extra, offset_k, offset_n, stride = self._parse_buffer_nd(B_shared_buf)
         if self.b_stride_override is not None:
             stride = self.b_stride_override
 
         @T.macro
         def _warp_ldmatrix_b(B_local_buf, buffer, offset_k, offset_n, stride, warp_n, ki):
-            for j in T.serial(warp_cols):
-                if b_transposed:
-                    row_idx = offset_n + warp_n * warp_col_tiles + j * micro_size_y
-                    col_idx = offset_k + ki * micro_size_k
-                else:
-                    row_idx = offset_k + ki * micro_size_k
-                    col_idx = offset_n + warp_n * warp_col_tiles + j * micro_size_y
-                ptr = T.access_ptr(buffer[extra + (row_idx, col_idx)], "r")
-                if use_cooperative_tensor:
-                    T.cooperative_tensor_load(
-                        B_local_buf.data,
-                        k_inner * warp_cols + j,
-                        ptr,
-                        stride,
-                        micro_size_k,
-                        micro_size_y,
-                        T.bool(b_transposed),
-                        micro_size_x,
-                        micro_size_y,
-                        micro_size_k,
-                        OPERAND_RIGHT,
-                    )
-                else:
-                    T.simdgroup_load(
-                        B_local_buf.data,
-                        j,
-                        ptr,
-                        stride,
-                        micro_size_k,
-                        micro_size_y,
-                        T.bool(b_transposed),
-                    )
+            if valid_m is None or warp_m * warp_row_tiles < valid_m:
+                for j in T.serial(warp_cols):
+                    if b_transposed:
+                        row_idx = offset_n + warp_n * warp_col_tiles + j * micro_size_y
+                        col_idx = offset_k + ki * micro_size_k
+                    else:
+                        row_idx = offset_k + ki * micro_size_k
+                        col_idx = offset_n + warp_n * warp_col_tiles + j * micro_size_y
+                    ptr = T.access_ptr(buffer[extra + (row_idx, col_idx)], "r")
+                    if use_cooperative_tensor:
+                        T.cooperative_tensor_load(
+                            B_local_buf.data,
+                            k_inner * warp_cols + j,
+                            ptr,
+                            stride,
+                            micro_size_k,
+                            micro_size_y,
+                            T.bool(b_transposed),
+                            micro_size_x,
+                            micro_size_y,
+                            micro_size_k,
+                            OPERAND_RIGHT,
+                        )
+                    else:
+                        T.simdgroup_load(
+                            B_local_buf.data,
+                            j,
+                            ptr,
+                            stride,
+                            micro_size_k,
+                            micro_size_y,
+                            T.bool(b_transposed),
+                        )
 
         return _warp_ldmatrix_b(B_local_buf, buffer, offset_k, offset_n, stride, warp_n, ki)
 
-    def mma(self, A_local_buf, B_local_buf, C_local_buf, k_inner: int = 0):
+    def mma(
+        self,
+        A_local_buf,
+        B_local_buf,
+        C_local_buf,
+        k_inner: int = 0,
+        valid_m: tir.PrimExpr | None = None,
+    ):
         """Perform matrix multiply-accumulate: C += A * B."""
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
+        warp_row_tiles = self.warp_row_tiles
         micro_size_x = self.micro_size_x
         micro_size_y = self.micro_size_y
         micro_size_k = self.micro_size_k
         a_transposed = self.a_transposed
         b_transposed = self.b_transposed
         use_cooperative_tensor = self.use_cooperative_tensor
+        warp_m, _ = self._get_warp_indices()
 
         @T.macro
         def _warp_mma(A_local_buf, B_local_buf, C_local_buf):
-            for i, j in T.grid(warp_rows, warp_cols):
-                index_c = i * warp_cols + j
-                if use_cooperative_tensor:
-                    T.cooperative_tensor_multiply_accumulate(
-                        C_local_buf.data,
-                        index_c,
-                        A_local_buf.data,
-                        k_inner * warp_rows + i,
-                        B_local_buf.data,
-                        k_inner * warp_cols + j,
-                        C_local_buf.data,
-                        index_c,
-                        micro_size_x,
-                        micro_size_y,
-                        micro_size_k,
-                        T.bool(a_transposed),
-                        T.bool(b_transposed),
-                    )
-                else:
-                    T.simdgroup_multiply_accumulate(
-                        C_local_buf.data,
-                        index_c,
-                        A_local_buf.data,
-                        i,
-                        B_local_buf.data,
-                        j,
-                        C_local_buf.data,
-                        index_c,
-                    )
+            for i in T.serial(warp_rows):
+                if valid_m is None or warp_m * warp_row_tiles + i * micro_size_x < valid_m:
+                    for j in T.serial(warp_cols):
+                        index_c = i * warp_cols + j
+                        if use_cooperative_tensor:
+                            T.cooperative_tensor_multiply_accumulate(
+                                C_local_buf.data,
+                                index_c,
+                                A_local_buf.data,
+                                k_inner * warp_rows + i,
+                                B_local_buf.data,
+                                k_inner * warp_cols + j,
+                                C_local_buf.data,
+                                index_c,
+                                micro_size_x,
+                                micro_size_y,
+                                micro_size_k,
+                                T.bool(a_transposed),
+                                T.bool(b_transposed),
+                            )
+                        else:
+                            T.simdgroup_multiply_accumulate(
+                                C_local_buf.data,
+                                index_c,
+                                A_local_buf.data,
+                                i,
+                                B_local_buf.data,
+                                j,
+                                C_local_buf.data,
+                                index_c,
+                            )
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 
-    def simdgroup_copy(self, C_simd_buf, C_dst, is_store=True):
+    def simdgroup_copy(self, C_simd_buf, C_dst, is_store=True, valid_m: tir.PrimExpr | None = None):
         """Copy between register-backed Metal matrix buffers and memory."""
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
@@ -277,35 +305,37 @@ class MPSIntrinEmitter:
 
         @T.macro
         def _simdgroup_copy(C_simd_buf, buffer, offset_m, offset_n, stride, warp_m, warp_n):
-            for i, j in T.grid(warp_rows, warp_cols):
-                row = offset_m + warp_m * warp_row_tiles + i * micro_size_x
-                col = offset_n + warp_n * warp_col_tiles + j * micro_size_y
-                index_c = i * warp_cols + j
-                ptr = T.access_ptr(buffer[extra + (row, col)], access_mode)
-                if use_cooperative_tensor:
-                    ct_op(
-                        C_simd_buf.data,
-                        index_c,
-                        ptr,
-                        stride,
-                        micro_size_x,
-                        micro_size_y,
-                        T.bool(False),
-                        micro_size_x,
-                        micro_size_y,
-                        micro_size_k,
-                        OPERAND_DEST,
-                    )
-                else:
-                    simd_op(
-                        C_simd_buf.data,
-                        index_c,
-                        ptr,
-                        stride,
-                        micro_size_x,
-                        micro_size_y,
-                        T.bool(False),
-                    )
+            for i in T.serial(warp_rows):
+                if valid_m is None or warp_m * warp_row_tiles + i * micro_size_x < valid_m:
+                    for j in T.serial(warp_cols):
+                        row = offset_m + warp_m * warp_row_tiles + i * micro_size_x
+                        col = offset_n + warp_n * warp_col_tiles + j * micro_size_y
+                        index_c = i * warp_cols + j
+                        ptr = T.access_ptr(buffer[extra + (row, col)], access_mode)
+                        if use_cooperative_tensor:
+                            ct_op(
+                                C_simd_buf.data,
+                                index_c,
+                                ptr,
+                                stride,
+                                micro_size_x,
+                                micro_size_y,
+                                T.bool(False),
+                                micro_size_x,
+                                micro_size_y,
+                                micro_size_k,
+                                OPERAND_DEST,
+                            )
+                        else:
+                            simd_op(
+                                C_simd_buf.data,
+                                index_c,
+                                ptr,
+                                stride,
+                                micro_size_x,
+                                micro_size_y,
+                                T.bool(False),
+                            )
 
         return _simdgroup_copy(C_simd_buf, buffer, offset_m, offset_n, stride, warp_m, warp_n)
 
@@ -342,10 +372,10 @@ class MPSIntrinEmitter:
 
         return T.Fragment(shape, forward_thread_fn=forward_thread, forward_index_fn=forward_index)
 
-    def simd_store(self, C_simd_buf, C_dst):
+    def simd_store(self, C_simd_buf, C_dst, valid_m: tir.PrimExpr | None = None):
         """Store simdgroup/cooperative tensor local buffer to memory."""
-        return self.simdgroup_copy(C_simd_buf, C_dst, is_store=True)
+        return self.simdgroup_copy(C_simd_buf, C_dst, is_store=True, valid_m=valid_m)
 
-    def simd_load(self, C_simd_buf, C_src):
+    def simd_load(self, C_simd_buf, C_src, valid_m: tir.PrimExpr | None = None):
         """Load memory into simdgroup/cooperative tensor local buffer."""
-        return self.simdgroup_copy(C_simd_buf, C_src, is_store=False)
+        return self.simdgroup_copy(C_simd_buf, C_src, is_store=False, valid_m=valid_m)

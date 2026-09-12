@@ -76,6 +76,7 @@ void RegisterGemmImpl(GemmImpl impl) {
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      (optional) mbar (BufferLoad or const-0 placeholder),
  *      cCoord_y (PrimExpr), cCoord_x (PrimExpr),
+ *      (optional) valid_m (PrimExpr), or
  *      (optional, blockscaled) SFA, SFB regions, k_start (PrimExpr)]
  *   Backend lowering knobs (k_pack, wg_wait) ride in the annotations map.
  */
@@ -101,6 +102,7 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->k_ = args[7].as<IntImm>().value()->value;
   node->policy_ = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
   node->clearAccum_ = args[9].as<PrimExpr>().value();
+  node->validM_ = IntImm(DataType::Int(32), node->m_);
   // k_pack rides in the annotations (a ROCm MFMA/WMMA lowering knob set by
   // the ROCm dialect), not in the positional call protocol.
   if (auto val = annotations.Get("k_pack")) {
@@ -131,13 +133,11 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[11].as<PrimExpr>().value(), args[12].as<PrimExpr>().value()});
-  if (args.size() > 13) {
+  if (args.size() == 14) {
+    node->validM_ = args[13].as<PrimExpr>().value();
+  } else if (args.size() > 13) {
     node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
-  }
-  if (args.size() > 14) {
     node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
-  }
-  if (args.size() > 15) {
     node->sfKStart_ = args[15].as<PrimExpr>().value();
   }
   node->annotations_ = annotations;
