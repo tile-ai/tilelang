@@ -61,6 +61,7 @@
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
+#include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
 #include "runtime/thread_storage_scope.h"

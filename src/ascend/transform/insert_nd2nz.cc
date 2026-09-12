@@ -18,6 +18,7 @@
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/oob_padding.h"
+#include "ascend/op/utils.h"
 #include "op/copy.h"
 #include "op/utils.h"
 #include "support/check.h"

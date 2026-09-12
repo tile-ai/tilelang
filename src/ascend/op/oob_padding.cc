@@ -4,6 +4,7 @@
  */
 
 #include "oob_padding.h"
+#include "ascend/op/utils.h"
 
 #include "ascend_mte_plan.h"
 #include "op/builtin.h"

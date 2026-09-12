@@ -4,6 +4,7 @@
  */
 
 #include "op/copy.h"
+#include "ascend/op/utils.h"
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
@@ -418,11 +419,9 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
     CheckCompactL0Region(op.dst, dst_range, analyzer,
                          "Ascend L1->L0 compact destination");
     // M/K positions go through intrinsic args; leading dims (e.g. version)
-    // through the pointer offset.  MakeAccessPtrFromRegion splits offset/extent
-    // the same way: leading dims → offset, last two (M×K) → extent.
+    // through the pointer offset.
     PrimExpr src_base_ptr =
-        MakeAccessPtrFromRegion(BufferRegion(op.src, src_range), 1, false,
-                                /*leading_dims_offset_only=*/true);
+        MakeAscendLeadingDimAccessPtr(BufferRegion(op.src, src_range), 1);
 
     AscendFractalLayoutInfo src_info;
     AscendFractalLayoutInfo dst_info;
@@ -541,8 +540,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
       NormalizeTrailingMTE2DLayout(sf_buf, op.sf_range, analyzer,
                                    "Ascend L1->L0 scale source");
       PrimExpr sf_ptr =
-          MakeAccessPtrFromRegion(BufferRegion(sf_buf, op.sf_range), 1, false,
-                                  /*leading_dims_offset_only=*/true);
+          MakeAscendLeadingDimAccessPtr(BufferRegion(sf_buf, op.sf_range), 1);
 
       AscendFractalLayoutInfo sf_info;
       Optional<Layout> sf_layout = FindLayoutForBuffer(T.layout_map, sf_buf);
@@ -583,8 +581,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
         // SF pointer: M/K positions go through intrinsic args; leading dims
         // (e.g. pipeline version) go through the pointer offset.
         sf_ptr =
-            MakeAccessPtrFromRegion(BufferRegion(sf_buf, op.sf_range), 1, false,
-                                    /*leading_dims_offset_only=*/true);
+            MakeAscendLeadingDimAccessPtr(BufferRegion(sf_buf, op.sf_range), 1);
         sf_m_start = op.sf_range[sf_m_dim]->min / I(16);
         sf_m_step = op.sf_range[sf_m_dim]->extent / I(16);
         sf_k_start = sf_k_dim >= 0 ? op.sf_range[sf_k_dim]->min : I(0);

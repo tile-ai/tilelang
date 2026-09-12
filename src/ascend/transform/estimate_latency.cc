@@ -49,6 +49,7 @@
 #include "./estimate_latency.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
+#include "ascend/op/utils.h"
 #include "ascend/transform/attr.h"
 #include "op/copy.h"
 #include "op/gemm.h"

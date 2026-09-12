@@ -40,6 +40,7 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/oob_padding.h"
+#include "ascend/op/utils.h"
 #include "layout/layout.h"
 #include "op/copy.h"
 #include "op/gemm.h"

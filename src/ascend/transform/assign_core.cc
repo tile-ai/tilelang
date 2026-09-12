@@ -42,6 +42,7 @@
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/task_analysis.h"
+#include "ascend/op/utils.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "support/check.h"

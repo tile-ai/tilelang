@@ -36,6 +36,7 @@
 #include <string>
 
 #include "ascend/op/builtin.h"
+#include "ascend/op/utils.h"
 #include "op/copy.h"
 #include "op/fill.h"
 #include "op/utils.h"

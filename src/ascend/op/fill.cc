@@ -4,6 +4,7 @@
  */
 
 #include "backend/common/op/fill.h"
+#include "ascend/op/utils.h"
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"

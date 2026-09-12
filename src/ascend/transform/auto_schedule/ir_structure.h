@@ -6,6 +6,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
+#include "ascend/op/utils.h"
 #include "op/gemm.h"
 #include "transform/common/constr_visitor.h"
 #include <tvm/tirx/stmt_functor.h>
