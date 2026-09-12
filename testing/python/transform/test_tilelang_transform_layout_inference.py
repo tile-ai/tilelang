@@ -110,7 +110,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
-def test_register_count_is_default_layout_cost_model():
+def test_non_reducer_defaults_to_register_count():
     @T.prim_func
     def main(
         S: T.Tensor((2,), T.float32),
@@ -272,6 +272,7 @@ def test_column_broadcast_fragment_values(block_n):
     assert torch.equal(out, expected)
 
 
+@tilelang.testing.requires_cuda
 def test_spill_pricing_no_false_positive_on_strided_fragment_layouts():
     """Distilled from hai-llm's kl_div_with_mask large-d kernel (a 1.23-1.29x
     production regression): a pipelined scan staging fp32/int8 chunks through
@@ -340,6 +341,7 @@ def test_spill_pricing_no_false_positive_on_strided_fragment_layouts():
     kern = tl.compile(
         kernel,
         out_idx=-1,
+        target="cuda",
         pass_configs={
             # Pin 128-bit vectorization so the asserted distribution (float4,
             # thread stride 4) is architecture-independent.

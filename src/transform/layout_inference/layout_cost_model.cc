@@ -6,12 +6,14 @@
 
 #include "layout_cost_model.h"
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <sstream>
@@ -21,14 +23,19 @@
 #include <utility>
 #include <vector>
 
+#include "../../config.h"
+#include "../../cuda/target_utils.h"
 #include "../../layout/cute_layout.h"
 #include "../../layout/layout.h"
 #include "../../layout/utils.h"
 #include "../../op/copy.h"
 #include "../../op/parallel.h"
+#include "../../op/reducer.h"
 #include "../../op/utils.h"
 #include "../../span_utils.h"
+#include "../loop_partition.h"
 #include "../loop_vectorize.h"
+#include "../reducer_plan.h"
 
 namespace tvm {
 namespace tl {
@@ -696,7 +703,7 @@ StatementProbe BuildCopyProbe(const Copy &copy, const Fragment &frag_layout,
 /*! \brief Collect the direct global-memory accesses of a parallel loop
  *  body, with the trip count of any enclosing serial loops (the access
  *  pattern replays, shifted, once per serial iteration). */
-class LoopGlobalAccessCollector : public StmtExprVisitor {
+class LoopMemoryAccessCollector : public StmtExprVisitor {
 public:
   struct RawAccess {
     Buffer buffer;
@@ -706,9 +713,7 @@ public:
     bool symbolic_repeat;
   };
   std::vector<RawAccess> accesses;
-  // Whether the loop body also touches shared memory: feeds the shared
-  // width-cap policy (256-bit loads are global-only).
-  bool touches_shared{false};
+  bool has_shared_access{false};
 
   void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
@@ -734,7 +739,8 @@ private:
   void Record(const Buffer &buffer, const Array<PrimExpr> &indices,
               bool is_store) {
     if (IsSharedBuffer(buffer)) {
-      touches_shared = true;
+      has_shared_access = true;
+      return;
     }
     if (!IsGlobalBuffer(buffer)) {
       return;
@@ -763,7 +769,7 @@ private:
  *  even be sized (skip — nothing sensible to charge). */
 std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
                                              const Target &target) {
-  LoopGlobalAccessCollector collector;
+  LoopMemoryAccessCollector collector;
   collector.Collect(loop->GetRoot());
   StatementProbe probe;
   if (collector.accesses.empty()) {
@@ -828,7 +834,7 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
     return worst_only("loop forward maps have unsupported geometry");
   }
   probe.vector_bits = MaxVectorLoadBits(
-      target, /*global_only_access=*/!collector.touches_shared);
+      target, /*global_only_access=*/!collector.has_shared_access);
   BindMemoryGeometry(&probe, target);
 
   for (const auto &raw : collector.accesses) {
@@ -990,7 +996,9 @@ public:
     return cost;
   }
   const char *Name() const final { return "register-count"; }
-  bool ExploreReducerScalarLayouts() const final { return true; }
+  ReducerVectorSearch GetReducerVectorSearch() const final {
+    return ReducerVectorSearch::kScalar;
+  }
 };
 
 /*! \brief IO-aware policy (layout RFC, design B2): every global-touching
@@ -1015,104 +1023,103 @@ public:
     cost.regs = CountRegisterSlots(tmp_layout_map);
 
     for (int idx : members) {
-      const TileOperator &op = infer_list[idx];
-      DLOG(INFO) << "[LayoutCost] member " << idx
-                 << " begin: type=" << op->GetTypeKey();
-      if (const auto *copy = infer_list[idx].as<CopyNode>()) {
-        Copy copy_op = GetRef<Copy>(copy);
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " copy: src=" << copy->src
-                   << " (scope=" << copy->src.scope() << ") dst=" << copy->dst
-                   << " (scope=" << copy->dst.scope() << ')';
-        bool src_frag = IsFragmentBuffer(copy->src);
-        bool dst_frag = IsFragmentBuffer(copy->dst);
-        Buffer frag;
-        bool frag_is_src = false;
-        if (src_frag && IsGlobalBuffer(copy->dst)) {
-          frag = copy->src;
-          frag_is_src = true;
-        } else if (dst_frag && IsGlobalBuffer(copy->src)) {
-          frag = copy->dst;
-        } else {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " copy ignored: not a fragment<->global transfer";
-          continue; // register moves / shared staging: out of the model
-        }
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " copy modeled as global "
-                   << (frag_is_src ? "store" : "load")
-                   << " through fragment=" << frag;
-        auto layout = tmp_layout_map.Get(frag);
-        if (!layout.has_value()) {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " copy ignored: fragment has no tentative layout";
-          continue;
-        }
-        auto frag_layout = layout.value().as<Fragment>();
-        if (!frag_layout.has_value()) {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " copy ignored: tentative layout is not a Fragment";
-          continue;
-        }
-        DLOG(INFO) << "[LayoutCost] member " << idx << " copy fragment layout: "
-                   << frag_layout.value()->DebugOutput();
-        int64_t statement_mem =
-            CachedStatementMem(idx, frag_layout.value(), [&]() {
-              std::optional<StatementProbe> probe;
-              try {
-                probe = BuildCopyProbe(copy_op, frag_layout.value(),
-                                       frag_is_src, target_);
-              } catch (const std::exception &e) {
-                DLOG(INFO) << "[LayoutCost] member " << idx
-                           << " copy probe construction threw: " << e.what();
-                probe = std::nullopt; // skipped below; builder-side fallbacks
-                                      // cover every non-throwing failure
-              }
-              return ChargeStatement(probe, idx, "copy");
-            });
-        cost.mem += statement_mem;
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " copy contribution=" << statement_mem
-                   << " running_mem=" << cost.mem;
-      } else if (const auto *loop = infer_list[idx].as<ParallelOpNode>()) {
-        ParallelOp loop_op = GetRef<ParallelOp>(loop);
-        Fragment loop_layout = loop_op->GetLoopLayout();
-        if (loop_layout.defined()) {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " parallel-loop layout: " << loop_layout->DebugOutput();
-        } else {
-          DLOG(INFO) << "[LayoutCost] member " << idx
-                     << " parallel-loop layout is undefined";
-        }
-        auto compute = [&]() {
-          std::optional<StatementProbe> probe;
-          try {
-            probe = BuildLoopProbe(loop_op, target_);
-          } catch (const std::exception &e) {
-            DLOG(INFO) << "[LayoutCost] member " << idx
-                       << " parallel-loop probe construction threw: "
-                       << e.what();
-            probe = std::nullopt;
-          }
-          return ChargeStatement(probe, idx, "parallel-loop");
-        };
-        int64_t statement_mem =
-            loop_layout.defined()
-                ? CachedStatementMem(idx, loop_layout, compute)
-                : compute();
-        cost.mem += statement_mem;
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " parallel-loop contribution=" << statement_mem
-                   << " running_mem=" << cost.mem;
-      } else {
-        DLOG(INFO) << "[LayoutCost] member " << idx
-                   << " ignored: type=" << op->GetTypeKey()
-                   << " is outside the IO-aware statement model";
-      }
+      cost.mem += GlobalMemoryCost(idx, infer_list[idx], tmp_layout_map);
     }
     DLOG(INFO) << "[LayoutCost] io-aware score end: mem=" << cost.mem
                << " regs=" << cost.regs;
     return cost;
+  }
+
+  int64_t GlobalMemoryCost(int idx, const TileOperator &op,
+                           const LayoutMap &tmp_layout_map) const {
+    DLOG(INFO) << "[LayoutCost] member " << idx
+               << " begin: type=" << op->GetTypeKey();
+    if (const auto *copy = op.as<CopyNode>()) {
+      Copy copy_op = GetRef<Copy>(copy);
+      DLOG(INFO) << "[LayoutCost] member " << idx << " copy: src=" << copy->src
+                 << " (scope=" << copy->src.scope() << ") dst=" << copy->dst
+                 << " (scope=" << copy->dst.scope() << ')';
+      bool src_frag = IsFragmentBuffer(copy->src);
+      bool dst_frag = IsFragmentBuffer(copy->dst);
+      Buffer frag;
+      bool frag_is_src = false;
+      if (src_frag && IsGlobalBuffer(copy->dst)) {
+        frag = copy->src;
+        frag_is_src = true;
+      } else if (dst_frag && IsGlobalBuffer(copy->src)) {
+        frag = copy->dst;
+      } else {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy ignored: not a fragment<->global transfer";
+        return 0;
+      }
+      DLOG(INFO) << "[LayoutCost] member " << idx << " copy modeled as global "
+                 << (frag_is_src ? "store" : "load")
+                 << " through fragment=" << frag;
+      auto layout = tmp_layout_map.Get(frag);
+      if (!layout.has_value()) {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy ignored: fragment has no tentative layout";
+        return 0;
+      }
+      auto frag_layout = layout.value().as<Fragment>();
+      if (!frag_layout.has_value()) {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " copy ignored: tentative layout is not a Fragment";
+        return 0;
+      }
+      DLOG(INFO) << "[LayoutCost] member " << idx << " copy fragment layout: "
+                 << frag_layout.value()->DebugOutput();
+      int64_t statement_mem =
+          CachedStatementMem(idx, frag_layout.value(), [&]() {
+            std::optional<StatementProbe> probe;
+            try {
+              probe = BuildCopyProbe(copy_op, frag_layout.value(), frag_is_src,
+                                     target_);
+            } catch (const std::exception &e) {
+              DLOG(INFO) << "[LayoutCost] member " << idx
+                         << " copy probe construction threw: " << e.what();
+              probe = std::nullopt; // skipped below; builder-side fallbacks
+                                    // cover every non-throwing failure
+            }
+            return ChargeStatement(probe, idx, "copy");
+          });
+      DLOG(INFO) << "[LayoutCost] member " << idx
+                 << " copy contribution=" << statement_mem;
+      return statement_mem;
+    } else if (const auto *loop = op.as<ParallelOpNode>()) {
+      ParallelOp loop_op = GetRef<ParallelOp>(loop);
+      Fragment loop_layout = loop_op->GetLoopLayout();
+      if (loop_layout.defined()) {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " parallel-loop layout: " << loop_layout->DebugOutput();
+      } else {
+        DLOG(INFO) << "[LayoutCost] member " << idx
+                   << " parallel-loop layout is undefined";
+      }
+      auto compute = [&]() {
+        std::optional<StatementProbe> probe;
+        try {
+          probe = BuildLoopProbe(loop_op, target_);
+        } catch (const std::exception &e) {
+          DLOG(INFO) << "[LayoutCost] member " << idx
+                     << " parallel-loop probe construction threw: " << e.what();
+          probe = std::nullopt;
+        }
+        return ChargeStatement(probe, idx, "parallel-loop");
+      };
+      int64_t statement_mem =
+          loop_layout.defined() ? CachedStatementMem(idx, loop_layout, compute)
+                                : compute();
+      DLOG(INFO) << "[LayoutCost] member " << idx
+                 << " parallel-loop contribution=" << statement_mem;
+      return statement_mem;
+    } else {
+      DLOG(INFO) << "[LayoutCost] member " << idx
+                 << " ignored: type=" << op->GetTypeKey()
+                 << " is outside the IO-aware statement model";
+    }
+    return 0;
   }
 
   const char *Name() const final { return "io-aware"; }
@@ -1181,20 +1188,565 @@ private:
       stmt_cache_;
 };
 
+constexpr int64_t kUnknownReductionCost =
+    std::numeric_limits<int64_t>::max() / 16;
+
+int64_t CeilDiv(int64_t numerator, int64_t denominator) {
+  return numerator / denominator + (numerator % denominator != 0);
+}
+
+int64_t AddCost(int64_t left, int64_t right) {
+  return left >= kUnknownReductionCost - right ? kUnknownReductionCost
+                                               : left + right;
+}
+
+int64_t MultiplyCost(int64_t left, int64_t right) {
+  if (left == 0 || right == 0) {
+    return 0;
+  }
+  return left > kUnknownReductionCost / right ? kUnknownReductionCost
+                                              : left * right;
+}
+
+std::optional<int64_t> ConstantCount(const PrimExpr &expression) {
+  arith::Analyzer analyzer;
+  PrimExpr simplified = analyzer.Simplify(expression);
+  const int64_t *value = as_const_int(simplified);
+  if (value == nullptr || *value < 0 || *value >= kUnknownReductionCost) {
+    return std::nullopt;
+  }
+  return *value;
+}
+
+std::optional<int64_t> ConstantProduct(const Array<PrimExpr> &extents) {
+  int64_t result = 1;
+  for (const PrimExpr &extent : extents) {
+    auto value = ConstantCount(extent);
+    if (!value.has_value()) {
+      return std::nullopt;
+    }
+    result = MultiplyCost(result, value.value());
+  }
+  return result < kUnknownReductionCost ? std::optional<int64_t>(result)
+                                        : std::nullopt;
+}
+
+class ExecutionCountCollector : public StmtExprVisitor {
+public:
+  std::unordered_map<ObjectRef, int64_t, ObjectPtrHash, ObjectPtrEqual> counts;
+  bool known{true};
+
+  void Collect(const PrimFunc &function) { VisitStmt(function->body); }
+
+private:
+  void VisitStmt_(const ForNode *loop) final {
+    counts[GetRef<For>(loop)] = count_;
+    int64_t previous = count_;
+    if (loop->kind != ForKind::kParallel) {
+      auto extent = ConstantCount(loop->extent);
+      count_ = count_ < 0 || !extent.has_value()
+                   ? -1
+                   : MultiplyCost(count_, extent.value());
+      known = known && count_ >= 0 && count_ < kUnknownReductionCost;
+    }
+    StmtExprVisitor::VisitStmt_(loop);
+    count_ = previous;
+  }
+
+  void VisitExpr_(const CallNode *call) final {
+    counts[GetRef<Call>(call)] = count_;
+    StmtExprVisitor::VisitExpr_(call);
+  }
+
+  int64_t count_{1};
+};
+
+struct ReducerCostFeatures {
+  int64_t local_issues{0};
+  int64_t shared_issues{0};
+  int64_t shuffle_issues{0};
+  int64_t shared_rounds{0};
+  int64_t barriers{0};
+  int64_t combine_issues{0};
+  int64_t slots{0};
+  std::vector<int> vector_widths;
+};
+
+int PartitionedVectorWidth(const For &loop, const Fragment &layout,
+                           const LayoutMap &layouts) {
+  arith::Analyzer analyzer;
+  Var thread("reduction_cost_thread", DataType::Int(32));
+  Range bounds = layout->ThreadRange();
+  if (!bounds.defined()) {
+    bounds = Range::FromMinExtent(0, layout->ThreadExtent());
+  }
+  analyzer.Bind(thread, bounds);
+  For partitioned = PartitionLoop(loop, thread, &analyzer, layout);
+  return GetVectorizeSize(partitioned, &analyzer, layouts);
+}
+
+class ReducerCostRewriter : public StmtExprMutator {
+public:
+  ReducerCostRewriter(const std::vector<ReducerPlanInfo> &plans,
+                      const LayoutMap &layouts)
+      : layouts(layouts) {
+    for (const ReducerPlanInfo &plan : plans) {
+      Array<PrimExpr> shape = plan.reducer->shape;
+      Fragment storage = plan.storage_layout;
+      if (plan.packed_layout.defined()) {
+        shape.push_back(Integer(2));
+        storage = plan.packed_layout.value();
+      }
+      Var data("reduction_cost_acc",
+               PointerType(PrimType(plan.reducer->dtype), "local.fragment"));
+      Buffer buffer(data, plan.reducer->dtype, shape, {}, Integer(0),
+                    "reduction_cost_acc", plan.reducer->data_alignment,
+                    plan.reducer->offset_factor, plan.reducer->buffer_type);
+      this->layouts.Set(buffer, storage);
+      updates_.emplace(
+          plan.reducer->data,
+          Update{buffer, plan.op, plan.pack_lane_var, plan.narrow});
+    }
+  }
+
+  LayoutMap layouts;
+
+private:
+  struct Update {
+    Buffer buffer;
+    ReducerV2OpType op;
+    Optional<Var> pack_lane;
+    bool narrow;
+  };
+
+  Stmt VisitStmt_(const EvaluateNode *statement) final {
+    const auto *call = statement->value.as<CallNode>();
+    if (call == nullptr || !call->op.same_as(reducer_update())) {
+      return StmtExprMutator::VisitStmt_(statement);
+    }
+    ReducerUpdateArgs args = ParseReducerUpdate(call);
+    const Update &update = updates_.at(args.reducer->data);
+    Array<PrimExpr> indices = args.indices;
+    if (update.pack_lane.defined()) {
+      indices.push_back(
+          FloorMod(update.pack_lane.value(), IntImm(DataType::Int(32), 2)));
+    }
+    Stmt store = BufferStore(
+        update.buffer,
+        ReducerV2Combine(update.op, BufferLoad(update.buffer, indices),
+                         args.value),
+        indices);
+    if (!update.narrow) {
+      store = AttrStmt(update.buffer->data, attr::kParallelMultiplicity,
+                       IntImm(DataType::Int(32), 1), store);
+    }
+    return store;
+  }
+
+  std::unordered_map<Var, Update, ObjectPtrHash, ObjectPtrEqual> updates_;
+};
+
+Map<For, Integer> ReducerVectorWidths(const std::vector<ReducerPlanInfo> &plans,
+                                      const LayoutMap &layouts) {
+  ReducerCostRewriter rewriter(plans, layouts);
+  Map<For, Integer> widths;
+  for (const ReducerPlanInfo &plan : plans) {
+    for (const ReducerUpdatePlanSite &site : plan.updates) {
+      if (!widths.count(site.loop)) {
+        For loop = Downcast<For>(rewriter(site.loop));
+        widths.Set(site.loop, Integer(PartitionedVectorWidth(
+                                  loop, site.loop_layout, rewriter.layouts)));
+      }
+    }
+  }
+  return widths;
+}
+
+std::optional<ReducerCostFeatures>
+ExtractReducerCost(const ReducerPlanInfo &plan, const Map<For, Integer> &widths,
+                   const Target &target) {
+  ReducerCostFeatures features;
+  auto slots = ConstantProduct(plan.storage_layout->OutputShape());
+  auto finalizations = ConstantCount(plan.finalize_count);
+  bool materializes_finalize =
+      !plan.narrow || !plan.steps.empty() || plan.has_seed;
+  if (!slots.has_value() || !finalizations.has_value() || plan.batch < 1 ||
+      (materializes_finalize && plan.batch > 1 &&
+       (plan.batch > slots.value() || slots.value() % plan.batch != 0))) {
+    return std::nullopt;
+  }
+  features.slots = slots.value();
+  bool packed_arithmetic = plan.reducer->dtype.is_float16() ||
+                           plan.reducer->dtype.is_bfloat16() ||
+                           (plan.reducer->dtype == DataType::Float(32) &&
+                            TargetHasSMVersionGE(target, 100));
+  for (const ReducerUpdatePlanSite &site : plan.updates) {
+    auto points = ConstantProduct(site.loop_layout->OutputShape());
+    auto repeats = ConstantCount(site.execution_count);
+    if (!points.has_value() || !repeats.has_value()) {
+      return std::nullopt;
+    }
+    int width = static_cast<int>(widths.at(site.loop)->value);
+    features.vector_widths.push_back(width);
+    int arithmetic_width = packed_arithmetic ? std::min(width, 2) : 1;
+    int64_t work = MultiplyCost(points.value(), repeats.value());
+    features.local_issues =
+        AddCost(features.local_issues, CeilDiv(work, arithmetic_width));
+  }
+  if (plan.packed_layout.defined()) {
+    features.local_issues =
+        AddCost(features.local_issues,
+                MultiplyCost(features.slots, finalizations.value()));
+  }
+  int warp_size =
+      target->GetAttr<Integer>("thread_warp_size").value_or(32)->value;
+  for (const auto &[threads, scale] : plan.steps) {
+    if (scale <= 0 || threads < scale || threads % scale != 0 ||
+        ((threads / scale) & (threads / scale - 1)) != 0) {
+      return std::nullopt;
+    }
+    int64_t batch = threads > warp_size ? plan.batch : 1;
+    int64_t groups =
+        MultiplyCost(features.slots / batch, finalizations.value());
+    int64_t values = MultiplyCost(features.slots, finalizations.value());
+    for (int offset = threads / 2; offset >= scale; offset /= 2) {
+      if (offset >= warp_size) {
+        features.shared_rounds = AddCost(features.shared_rounds, groups);
+        features.barriers = AddCost(features.barriers, MultiplyCost(2, groups));
+        features.shared_issues =
+            AddCost(features.shared_issues, MultiplyCost(2, values));
+      } else {
+        features.shuffle_issues = AddCost(features.shuffle_issues, values);
+      }
+      features.combine_issues = AddCost(features.combine_issues, values);
+    }
+  }
+  return features;
+}
+
+int64_t CudaReducerIssueCost(const ReducerCostFeatures &features) {
+  constexpr int64_t kShuffleWeight = 4;
+  constexpr int64_t kBarrierWeight = 32;
+  int64_t cost = AddCost(features.local_issues, features.shared_issues);
+  cost = AddCost(cost, features.combine_issues);
+  cost = AddCost(cost, MultiplyCost(kShuffleWeight, features.shuffle_issues));
+  return AddCost(cost, MultiplyCost(kBarrierWeight, features.barriers));
+}
+
+/*! \brief Reduction-aware heuristic, not a calibrated latency model.
+ *
+ * Known attempts precede unknown ones. Within that ordering, minimize:
+ *
+ * \code
+ * reducer_issues = local_issues + shared_issues + combine_issues
+ *                  + 4 * shuffle_issues + 32 * barriers
+ * execution = global_memory_cost
+ *             + sum_reducers(threads * max_vector_bytes * reducer_issues)
+ * register_penalty = 4 * max_threads * register_slots
+ * total = spill_bytes + execution + register_penalty
+ * \endcode
+ *
+ * threads is each reducer's participant count; max_threads is their maximum.
+ * max_vector_bytes = MaxVectorLoadBits(target, false) / 8. global_memory_cost
+ * covers ordinary global accesses; shared_issues above covers collective
+ * communication, not ordinary shared accesses or bank conflicts. Arithmetic
+ * issues cover reducer work, not all kernel arithmetic. Spill, memory, and
+ * issue estimates include execution counts.
+ *
+ * register_slots sums physical fragment slots per thread, including packing
+ * temporaries, without liveness analysis. This is a static resource penalty;
+ * unlike traffic/issues, it is not multiplied by execution counts.
+ *
+ * Byte-like scaling aligns thread scope, not performance cost: register
+ * capacity, memory traffic, and issue-equivalent bytes are not interchangeable.
+ * The top-level 1:1:1 and issue weights are uncalibrated heuristics. With
+ * max_vector_bytes=16 and equal thread counts, one local issue scores like
+ * four extra per-thread register slots; one barrier scores like 128 slots.
+ */
+class ReductionAwareCostModel final : public LayoutCostModel {
+public:
+  ReductionAwareCostModel(Target target, const PrimFunc &function,
+                          std::vector<int64_t> execution_counts)
+      : target_(std::move(target)), plans_(function), io_model_(target_),
+        execution_counts_(std::move(execution_counts)) {}
+
+  AttemptCost Score(const std::vector<int> &members,
+                    const std::vector<TileOperator> &infer_list,
+                    const LayoutMap &layouts) const final {
+    Array<Buffer> reducers;
+    std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> seen;
+    Map<For, Fragment> loop_layouts;
+    for (int member : members) {
+      if (auto finalize = infer_list[member].as<FinalizeReducerV2Op>()) {
+        if (seen.insert(finalize.value()->reducer).second) {
+          reducers.push_back(finalize.value()->reducer);
+        }
+      }
+      if (auto loop = infer_list[member].as<ParallelOp>()) {
+        loop_layouts.Set(loop.value()->GetRoot(),
+                         loop.value()->GetLoopLayout());
+      }
+    }
+    if (reducers.empty()) {
+      return RegisterCountCostModel().Score(members, infer_list, layouts);
+    }
+    AttemptCost cost;
+    cost.mem = CountSpilledBytes(members, infer_list, layouts);
+    cost.regs = CountRegisterSlots(layouts);
+    cost.execution = kUnknownReductionCost;
+    cost.known = false;
+    try {
+      auto plans = plans_.Analyze(layouts, loop_layouts, reducers);
+      if (!plans.has_value()) {
+        return cost;
+      }
+      LayoutMap physical_layouts = layouts;
+      for (const ReducerPlanInfo &plan : plans.value()) {
+        physical_layouts.Set(plan.reducer, plan.storage_layout);
+        for (const auto &[buffer, layout] : plan.layout_overrides) {
+          physical_layouts.Set(buffer, layout);
+        }
+      }
+      cost.regs = CountRegisterSlots(physical_layouts);
+      Map<For, Integer> widths =
+          ReducerVectorWidths(plans.value(), physical_layouts);
+      int64_t execution = 0;
+      int64_t register_threads = 1;
+      for (const ReducerPlanInfo &plan : plans.value()) {
+        auto features = ExtractReducerCost(plan, widths, target_);
+        if (!features.has_value()) {
+          return cost;
+        }
+        int64_t participants = *as_const_int(plan.thread_bounds->extent);
+        register_threads = std::max(register_threads, participants);
+        int64_t issue_bytes =
+            MultiplyCost(participants, MaxVectorLoadBits(target_, false) / 8);
+        execution = AddCost(
+            execution,
+            MultiplyCost(CudaReducerIssueCost(features.value()), issue_bytes));
+        if (plan.packed_layout.defined()) {
+          auto packed_slots =
+              ConstantProduct(plan.packed_layout.value()->OutputShape());
+          if (!packed_slots.has_value()) {
+            return cost;
+          }
+          cost.regs = AddCost(cost.regs, packed_slots.value());
+        }
+        if (tl_config::ReducerPlanVerboseEnabled()) {
+          LOG(INFO) << "[ReducerCost] reducer=" << plan.reducer->name
+                    << " narrow=" << plan.narrow << " reason=" << plan.reason
+                    << " local_issues=" << features->local_issues
+                    << " shared_rounds=" << features->shared_rounds
+                    << " barriers=" << features->barriers
+                    << " shuffle_issues=" << features->shuffle_issues
+                    << " vector_widths="
+                    << FormatVector(features->vector_widths);
+        }
+      }
+      int64_t spilled = 0;
+      for (int member : members) {
+        int64_t repeats = execution_counts_.at(member);
+        int64_t spill =
+            CountSpilledBytes({member}, infer_list, physical_layouts);
+        spilled = AddCost(spilled, MultiplyCost(spill, repeats));
+        int64_t memory = io_model_.GlobalMemoryCost(member, infer_list[member],
+                                                    physical_layouts);
+        Optional<ParallelOp> loop = infer_list[member].as<ParallelOp>();
+        if (auto copy = infer_list[member].as<Copy>()) {
+          if (copy.value()->par_op_.defined()) {
+            loop = copy.value()->par_op_;
+          }
+        }
+        if (loop.defined()) {
+          auto loop_memory =
+              GlobalLoopMemoryCost_(loop.value(), widths, memory);
+          if (!loop_memory.has_value()) {
+            return cost;
+          }
+          memory = loop_memory.value();
+        }
+        execution = AddCost(execution, MultiplyCost(memory, repeats));
+      }
+      cost.mem = spilled;
+      cost.execution = execution;
+      constexpr int64_t kRegisterSlotBytes = 4;
+      int64_t register_cost = MultiplyCost(
+          cost.regs, MultiplyCost(register_threads, kRegisterSlotBytes));
+      int64_t total_cost = AddCost(AddCost(spilled, execution), register_cost);
+      cost.known = total_cost < kUnknownReductionCost;
+      if (cost.known) {
+        cost.total_cost = total_cost;
+      }
+    } catch (const std::exception &error) {
+      DLOG(INFO) << "[ReducerCost] unmeasurable attempt: " << error.what();
+      cost.execution = kUnknownReductionCost;
+    }
+    return cost;
+  }
+
+  const char *Name() const final { return "reduction-aware"; }
+
+  ReducerVectorSearch GetReducerVectorSearch() const final {
+    return ReducerVectorSearch::kAll;
+  }
+
+private:
+  std::optional<int64_t> GlobalLoopMemoryCost_(const ParallelOp &loop,
+                                               const Map<For, Integer> &widths,
+                                               int64_t global) const {
+    auto solved_width = widths.Get(loop->GetRoot());
+    if (!solved_width.has_value()) {
+      return global;
+    }
+    LoopMemoryAccessCollector collector;
+    collector.Collect(loop->GetRoot());
+    if (collector.accesses.empty()) {
+      return global;
+    }
+    Fragment layout = loop->GetLoopLayout();
+    if (!layout.defined()) {
+      return std::nullopt;
+    }
+    auto slots = ConstantProduct(layout->OutputShape());
+    auto threads = ConstantCount(layout->ThreadExtent());
+    if (!slots.has_value() || !threads.has_value()) {
+      return std::nullopt;
+    }
+    int64_t global_accesses = 0;
+    for (const auto &access : collector.accesses) {
+      if (access.symbolic_repeat || access.repeat < 0) {
+        return std::nullopt;
+      }
+      global_accesses = AddCost(global_accesses, access.repeat);
+    }
+    int64_t issues = MultiplyCost(
+        CeilDiv(slots.value(), solved_width.value()->value), global_accesses);
+    int64_t issue_bytes =
+        MultiplyCost(threads.value(), MaxVectorLoadBits(target_, true) / 8);
+    return std::max(global, MultiplyCost(issues, issue_bytes));
+  }
+
+  Target target_;
+  ReducerPlanAnalyzer plans_;
+  IOAwareCostModel io_model_;
+  std::vector<int64_t> execution_counts_;
+};
+
+Map<Buffer, Map<String, Any>> ReducerCostSummary(const PrimFunc &function) {
+  Target target = function->GetAttr<Target>(tvm::attr::kTarget).value();
+  ICHECK(TargetIsCuda(target)) << "ReducerCost currently supports CUDA targets";
+  With<Target> target_scope(target);
+  LayoutMap layouts;
+  Map<For, Fragment> loops;
+  Array<Buffer> reducers;
+  PostOrderVisit(function->body, [&](const ObjectRef &object) {
+    if (auto block = object.as<SBlock>()) {
+      if (auto annotation = block.value()->annotations.Get(attr::kLayoutMap)) {
+        for (const auto &[buffer, layout] :
+             Downcast<LayoutMap>(annotation.value())) {
+          layouts.Set(buffer, layout);
+        }
+      }
+      for (const Buffer &buffer : block.value()->alloc_buffers) {
+        if (IsReducerV2Buffer(buffer)) {
+          reducers.push_back(buffer);
+        }
+      }
+    } else if (auto loop = object.as<For>()) {
+      if (auto layout =
+              loop.value()->annotations.Get(attr::kParallelLoopLayout)) {
+        loops.Set(loop.value(), Downcast<Fragment>(layout.value()));
+      }
+    }
+  });
+  auto plans = ReducerPlanAnalyzer(function).Analyze(layouts, loops, reducers);
+  ICHECK(plans.has_value())
+      << "ReducerCost requires completed layout inference";
+  for (const ReducerPlanInfo &plan : plans.value()) {
+    for (const auto &[buffer, layout] : plan.layout_overrides) {
+      layouts.Set(buffer, layout);
+    }
+  }
+  Map<For, Integer> widths = ReducerVectorWidths(plans.value(), layouts);
+  Map<Buffer, Map<String, Any>> result;
+  for (const ReducerPlanInfo &plan : plans.value()) {
+    Map<String, Any> summary;
+    summary.Set("narrow", plan.narrow);
+    summary.Set("reason", String(plan.reason));
+    summary.Set("batch", plan.batch);
+    Array<Array<Integer>> steps;
+    for (const auto &[threads, scale] : plan.steps) {
+      steps.push_back({Integer(threads), Integer(scale)});
+    }
+    summary.Set("steps", steps);
+    auto features = ExtractReducerCost(plan, widths, target);
+    summary.Set("known", features.has_value());
+    if (features.has_value()) {
+      Array<Integer> widths;
+      for (int width : features->vector_widths) {
+        widths.push_back(Integer(width));
+      }
+      summary.Set("vector_widths", widths);
+      summary.Set("local_issues", features->local_issues);
+      summary.Set("shared_issues", features->shared_issues);
+      summary.Set("shuffle_issues", features->shuffle_issues);
+      summary.Set("shared_rounds", features->shared_rounds);
+      summary.Set("barriers", features->barriers);
+      summary.Set("combine_issues", features->combine_issues);
+      summary.Set("slots", features->slots);
+      summary.Set("issue_cost", CudaReducerIssueCost(features.value()));
+    }
+    result.Set(plan.reducer, summary);
+  }
+  return result;
+}
+
 } // namespace
 
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("tl.analysis.ReducerCost",
+                                   ReducerCostSummary);
+}
+
 std::unique_ptr<LayoutCostModel>
-LayoutCostModel::Create(const std::string &name, Target target) {
+LayoutCostModel::Create(const std::string &name, Target target,
+                        const PrimFunc &function,
+                        const std::vector<ObjectRef> &statements) {
   if (name == "io-aware") {
     return std::make_unique<IOAwareCostModel>(std::move(target));
   }
-  if (name == "register-count") {
+  if (name != "register-count") {
+    LOG(FATAL) << "Unknown layout cost model \"" << name
+               << "\" for pass config `tl.layout_cost_model`; valid values "
+                  "are \"register-count\" (default) and \"io-aware\".";
+  }
+  bool has_reducer = std::any_of(
+      statements.begin(), statements.end(), [](const ObjectRef &statement) {
+        const auto *call = statement.as<CallNode>();
+        return call != nullptr && call->op.same_as(FinalizeReducerV2Op::Get());
+      });
+  if (!TargetIsCuda(target) || !has_reducer) {
     return std::make_unique<RegisterCountCostModel>();
   }
-  LOG(FATAL) << "Unknown layout cost model \"" << name
-             << "\" for pass config `tl.layout_cost_model`; valid values "
-                "are \"register-count\" (default) and \"io-aware\".";
-  return nullptr; // unreachable
+  ICHECK(function.defined()) << "reduction-aware scoring requires a PrimFunc";
+  ExecutionCountCollector collector;
+  collector.Collect(function);
+  if (!collector.known) {
+    return std::make_unique<RegisterCountCostModel>();
+  }
+  std::vector<int64_t> counts;
+  for (const ObjectRef &statement : statements) {
+    auto found = collector.counts.find(statement);
+    if (found == collector.counts.end() || found->second < 0 ||
+        found->second >= kUnknownReductionCost) {
+      DLOG(INFO)
+          << "[ReducerCost] unknown execution count; using register-count";
+      return std::make_unique<RegisterCountCostModel>();
+    }
+    counts.push_back(found->second);
+  }
+  return std::make_unique<ReductionAwareCostModel>(std::move(target), function,
+                                                   std::move(counts));
 }
 
 } // namespace tl
