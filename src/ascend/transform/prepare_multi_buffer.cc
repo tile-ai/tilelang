@@ -45,6 +45,7 @@
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
+#include "ascend/transform/attr.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {

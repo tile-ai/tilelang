@@ -37,6 +37,7 @@
 #include "../core_mask.h"
 #include "./ir_structure.h"
 #include "./multi_buffer.h"
+#include "ascend/transform/attr.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
 

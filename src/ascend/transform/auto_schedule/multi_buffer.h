@@ -45,6 +45,7 @@
 #include "../buffer_version.h"
 #include "./ir_structure.h"
 #include "./task_annotations.h"
+#include "ascend/transform/attr.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 #include "tir/transforms/ir_utils.h"

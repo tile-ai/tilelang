@@ -28,6 +28,7 @@
 
 #include "./task_analysis.h"
 #include "./task_annotations.h"
+#include "ascend/transform/attr.h"
 
 namespace tvm {
 namespace tl {

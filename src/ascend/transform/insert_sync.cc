@@ -58,6 +58,7 @@
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/op/builtin.h"
+#include "ascend/transform/attr.h"
 #include "buffer_version.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"

@@ -47,6 +47,7 @@
 #include <utility>
 #include <vector>
 
+#include "ascend/transform/attr.h"
 #include "op/builtin.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
