@@ -64,7 +64,11 @@ def compile_grouped_unit_tvm_ffi(
                 original_symbol = str(program.attrs["global_symbol"])
                 unique_symbol = f"{original_symbol}_gc_{idx}"
                 program = program.with_attr("global_symbol", unique_symbol)
-                program, output_indices = prepare_tvm_ffi_callee_allocated_outputs(program, compile_args.out_idx)
+                program, output_indices = prepare_tvm_ffi_callee_allocated_outputs(
+                    program,
+                    compile_args.out_idx,
+                    supports_callee_allocated_outputs=backend_context.execution_backend.supports_callee_allocated_outputs,
+                )
 
                 lower_context = f"stage=grouped-lower, config={idx}, kernel={unique_symbol}"
                 config_instruments = [
