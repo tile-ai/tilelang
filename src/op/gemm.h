@@ -108,6 +108,9 @@ public:
   bool transA_, transB_;
   int m_, n_, k_;
   PrimExpr clearAccum_ = const_false();
+  // Runtime-valid prefix of the static M tile. Backends predicate whole
+  // instruction rows outside [0, validM_); the physical tile remains static.
+  PrimExpr validM_;
   tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
@@ -138,6 +141,7 @@ public:
         .def_ro("n", &GemmNode::n_)
         .def_ro("k", &GemmNode::k_)
         .def_ro("clearAccum", &GemmNode::clearAccum_)
+        .def_ro("validM", &GemmNode::validM_)
         .def_ro("mbar", &GemmNode::mbar_)
         .def_ro("cCoords", &GemmNode::cCoords_)
         .def_ro("kPack", &GemmNode::kPack_)

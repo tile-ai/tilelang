@@ -21,6 +21,7 @@ def gemm(
     clear_accum: bool = False,
     k_pack: int = 1,
     annotations: dict | None = None,
+    valid_m: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
     """TileLang GEMM operator for ROCm.
 
@@ -40,6 +41,7 @@ def gemm(
         k_pack (int): Number of packed matrix cores along K. Must be 1 or 2.
             Defaults to 1.
         annotations (Optional[dict]): Additional annotations.
+        valid_m (int | PrimExpr | None): Runtime-valid prefix of the M axis.
 
     Returns:
         tirx.Call: A handle to the GEMM operation.
@@ -60,4 +62,5 @@ def gemm(
         clear_accum,
         None,
         annotations=ann,
+        valid_m=valid_m,
     )
