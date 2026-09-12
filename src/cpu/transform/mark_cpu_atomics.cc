@@ -3,13 +3,13 @@
  * \brief Mark PrimFuncs that call atomic ops, for the CPU parallel-grid pass.
  *
  * Both atomic forms are lowered to plain read-modify-write long before the
- * tail of the CPU pipeline (region forms inside LowerTileOp, scalar
- * `tl.atomic_*_elem_op` intrinsics by LowerCPUAtomics), so the parallel-grid
- * pass cannot see them anymore. This pass runs before LowerTileOp and tags
- * the function with the ``tl.cpu_had_atomics`` attribute when any
- * ``tl.atomic*`` op call is present; MaterializeCPUParallelGrid refuses to
- * parallelize such kernels — a parallel grid would turn the serial RMW into
- * a data race.
+ * tail of the CPU pipeline (region forms `tl.tileop.atomic*` inside
+ * LowerTileOp, scalar `tl.atomic_*_elem_op` intrinsics by LowerCPUAtomics),
+ * so the parallel-grid pass cannot see them anymore. This pass runs before
+ * LowerTileOp and tags the function with the ``tl.cpu_had_atomics``
+ * attribute when any atomic op call is present; MaterializeCPUParallelGrid
+ * refuses to parallelize such kernels — a parallel grid would turn the
+ * serial RMW into a data race.
  */
 
 #include "support/check.h"
@@ -36,7 +36,8 @@ bool HasAtomicCall(const Stmt &body) {
   PostOrderVisit(body, [&](const ObjectRef &node) {
     if (const auto *call = node.as<CallNode>()) {
       if (const auto *op = call->op.as<OpNode>();
-          op && op->name.find("tl.atomic") == 0) {
+          op && (op->name.find("tl.atomic") == 0 ||
+                 op->name.find("tl.tileop.atomic") == 0)) {
         found = true;
       }
     }
