@@ -102,6 +102,7 @@ from .reduce_op import (
     warp_reduce_bitand,  # noqa: F401
     warp_reduce_bitor,  # noqa: F401
 )
+from .arg_reduce_op import reduce_argmax, reduce_argmin  # noqa: F401
 from .scan_op import cumsum, cummax  # noqa: F401
 from .customize import (
     atomic_max,  # noqa: F401
@@ -290,6 +291,8 @@ _LOCAL_EXPORTS = (
     "reduce",
     "reduce_absmax",
     "reduce_abssum",
+    "reduce_argmax",
+    "reduce_argmin",
     "reduce_bitand",
     "reduce_bitor",
     "reduce_bitxor",
