@@ -94,6 +94,12 @@ public:
     return alloc_depths_;
   }
 
+  //! True for data vars declared by an AllocBuffer anywhere (parameter and
+  //! global buffers have no declaration).
+  bool HasAllocation(const Var &data) const {
+    return alloc_depths_.count(data) > 0;
+  }
+
 private:
   void VisitStmt_(const ForNode *op) override {
     bool grid = HasGridAnnotation(op);
@@ -183,11 +189,96 @@ PrimExpr NormalizedStep(const ForNode *op) {
   return IntImm(op->loop_var.dtype(), 1);
 }
 
+/*! \brief Per-nest check: does a buffer read observe the previous grid
+ * iteration's value? A load is iteration-private only when a store that
+ * neither reads the buffer nor is if-guarded precedes it in the sink body
+ * (e.g. the T.clear before gemm's RMW accumulation). */
+class IterationPrivacyChecker : public StmtExprVisitor {
+public:
+  bool ReadsPrevious(const Var &data) const {
+    auto it = state_.find(data);
+    return it != state_.end() && it->second.reads_previous;
+  }
+
+private:
+  struct St {
+    bool dominating_store = false;
+    bool reads_previous = false;
+  };
+  void VisitStmt_(const IfThenElseNode *op) override {
+    ++if_depth_;
+    StmtExprVisitor::VisitStmt_(op);
+    --if_depth_;
+  }
+  void VisitStmt_(const BufferStoreNode *op) override {
+    bool reads_self = false;
+    PostOrderVisit(op->value, [&](const ObjectRef &node) {
+      if (const auto *load = node.as<BufferLoadNode>();
+          load && load->buffer->data.same_as(op->buffer->data)) {
+        reads_self = true;
+      }
+    });
+    StmtExprVisitor::VisitStmt_(op);
+    if (!reads_self && if_depth_ == 0) {
+      state_[op->buffer->data].dominating_store = true;
+    }
+  }
+  void VisitExpr_(const BufferLoadNode *op) override {
+    if (!state_[op->buffer->data].dominating_store) {
+      state_[op->buffer->data].reads_previous = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+  std::unordered_map<Var, St, ObjectPtrHash, ObjectPtrEqual> state_;
+  int if_depth_ = 0;
+};
+
+/*! \brief Per-nest check: a store to a parameter/global buffer whose address
+ * is invariant across the grid iterations but whose value is not — a
+ * definite overlapping write. */
+class OverlapStoreChecker : public StmtExprVisitor {
+public:
+  OverlapStoreChecker(const GridAccessAnalysis &analysis,
+                      std::unordered_set<const VarNode *> chain_vars)
+      : analysis_(analysis), chain_vars_(std::move(chain_vars)) {}
+
+  bool found() const { return found_; }
+  const std::string &buffer_name() const { return buffer_name_; }
+
+private:
+  bool UsesChainVar(const PrimExpr &expr) const {
+    bool found = false;
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (const auto *var = node.as<VarNode>()) {
+        found |= chain_vars_.count(var) > 0;
+      }
+    });
+    return found;
+  }
+  void VisitStmt_(const BufferStoreNode *op) override {
+    if (!analysis_.HasAllocation(op->buffer->data)) {
+      bool index_varies = false;
+      for (const PrimExpr &idx : op->indices) {
+        index_varies |= UsesChainVar(idx);
+      }
+      if (!index_varies && UsesChainVar(op->value)) {
+        found_ = true;
+        buffer_name_ = op->buffer->name;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+  const GridAccessAnalysis &analysis_;
+  std::unordered_set<const VarNode *> chain_vars_;
+  bool found_ = false;
+  std::string buffer_name_;
+};
+
 struct GridRewriter : public StmtMutator {
   GridRewriter(bool collapse_all_dims, int64_t min_trip,
-               const GridAccessAnalysis &analysis)
+               const GridAccessAnalysis &analysis, bool force_serial = false)
       : collapse_all_dims_(collapse_all_dims), min_trip_(min_trip),
-        analysis_(analysis) {}
+        analysis_(analysis), force_serial_(force_serial) {}
 
   //! The annotated chain head reachable through transparent wrappers, if any.
   static const ForNode *TransparentNestHead(const Stmt &stmt) {
@@ -316,7 +407,8 @@ struct GridRewriter : public StmtMutator {
       const auto *alloc = elem.as<AllocBufferNode>();
       if (alloc != nullptr &&
           SinkableAlloc(analysis_.Lookup(alloc->buffer->data), grid_head,
-                        sink_depth)) {
+                        sink_depth) &&
+          !Privacy(grid_head).ReadsPrevious(alloc->buffer->data)) {
         sunk.push_back(elem);
       } else {
         kept.push_back(elem);
@@ -326,13 +418,24 @@ struct GridRewriter : public StmtMutator {
     return sunk;
   }
 
+  /*! \brief Lazily run (and cache) the iteration-privacy check over the
+   * sink body of the nest headed by `head`. */
+  IterationPrivacyChecker &Privacy(const ForNode *head) {
+    auto it = privacy_cache_.find(head);
+    if (it == privacy_cache_.end()) {
+      it = privacy_cache_.emplace(head, IterationPrivacyChecker{}).first;
+      std::vector<const ForNode *> loops = CollectChain(head);
+      it->second(loops[SinkIndex(loops, collapse_all_dims_)]->body);
+    }
+    return it->second;
+  }
+
   /*! \brief Rewrite the outermost annotated grid nest `head`; the bool
    * reports whether it was converted to parallel. */
   std::pair<Stmt, bool> ConvertGridNest(const ForNode *head,
                                         std::vector<Stmt> sunk) {
     std::vector<const ForNode *> loops = CollectChain(head);
     int sink_depth = static_cast<int>(SinkIndex(loops, collapse_all_dims_)) + 1;
-
     // Failure paths: rebuild serial with annotations stripped.
     auto rebuild_serial = [&loops, &sunk]() -> std::pair<Stmt, bool> {
       Stmt body = loops.back()->body;
@@ -351,6 +454,12 @@ struct GridRewriter : public StmtMutator {
       }
       return {body, false};
     };
+
+    // Atomic kernels keep the serial lowering (see pass_func): strip the
+    // annotations without converting.
+    if (force_serial_) {
+      return rebuild_serial();
+    }
 
     int64_t trip = 1;
     bool dynamic_extents = false;
@@ -414,6 +523,25 @@ struct GridRewriter : public StmtMutator {
       }
     }
 
+    // P1-3: refuse definite overlapping writes to parameter/global buffers
+    // (address invariant across grid iterations, value not).
+    {
+      std::unordered_set<const VarNode *> chain_vars;
+      for (const ForNode *loop : loops) {
+        chain_vars.insert(loop->loop_var.get());
+      }
+      OverlapStoreChecker overlap(analysis_, std::move(chain_vars));
+      overlap(loops.back()->body);
+      if (overlap.found()) {
+        LOG(WARNING) << "tl.cpu_parallel: buffer `" << overlap.buffer_name()
+                     << "` is written at an iteration-invariant address with "
+                        "an iteration-dependent value (overlapping write); "
+                        "grid loop `"
+                     << head->loop_var->name_hint << "` stays serial";
+        return rebuild_serial();
+      }
+    }
+
     // Refuse to parallelize when a function-scope buffer is mutated (or
     // opaquely used) inside the nest but cannot be privatized into it —
     // running it shared across workers would be a data race. Load-only
@@ -427,7 +555,8 @@ struct GridRewriter : public StmtMutator {
       if (!info.nests.count(head)) {
         continue; // not used inside this nest
       }
-      if (SinkableAlloc(info, head, sink_depth)) {
+      if (SinkableAlloc(info, head, sink_depth) &&
+          !Privacy(head).ReadsPrevious(data)) {
         bool was_sunk = false;
         for (const Stmt &s : sunk) {
           if (s.as<AllocBufferNode>() &&
@@ -448,7 +577,9 @@ struct GridRewriter : public StmtMutator {
       }
       if (info.store_inside || info.opaque_inside) {
         const char *reason =
-            info.opaque_inside
+            Privacy(head).ReadsPrevious(data)
+                ? "it carries state across grid iterations"
+            : info.opaque_inside
                 ? "it is referenced through opaque accesses (call_extern / "
                   "address_of / access_ptr)"
             : info.outside          ? "it is also used outside the nest"
@@ -492,6 +623,9 @@ struct GridRewriter : public StmtMutator {
   bool collapse_all_dims_;
   int64_t min_trip_;
   const GridAccessAnalysis &analysis_;
+  std::unordered_map<const ForNode *, IterationPrivacyChecker> privacy_cache_;
+  // Strip annotations without converting (kernels marked tl.cpu_had_atomics).
+  bool force_serial_;
   // True while visiting the body of a successfully parallelized nest:
   // annotated nests found there must stay serial.
   bool in_parallel_ = false;
@@ -527,7 +661,15 @@ tvm::transform::Pass MaterializeCPUParallelGrid() {
                            .value()
                            ->value;
 
-    GridRewriter rewriter(collapse_all_dims, min_trip, analysis);
+    bool force_serial =
+        func->GetAttr<Bool>(attr::kCPUHadAtomics).value_or(Bool(false))->value;
+    if (force_serial) {
+      LOG(WARNING) << "tl.cpu_parallel: the kernel calls atomic ops, which "
+                      "are lowered to serial read-modify-write on CPU; the "
+                      "grid nest stays serial to avoid a data race";
+    }
+
+    GridRewriter rewriter(collapse_all_dims, min_trip, analysis, force_serial);
     func.CopyOnWrite()->body = rewriter(func->body);
     return func;
   };
