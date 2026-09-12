@@ -16,6 +16,14 @@ using namespace tirx;
 
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoSchedule, Bool);
 
+// Emitted by tilelang.ascend.language.assume_conflict/assume_no_conflict and
+// consumed by src/ascend/transform/normalize_conflict_hints.cc, so it lives
+// with the rest of the Ascend op registrations.
+TIR_DEFINE_TL_BUILTIN(conflict_hint)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 // The T.simd.* ops are registered under a "tl.simd.<name>" prefix while their
 // accessors are simd_<name>, so they need a macro of their own; the neutral
 // TIR_DEFINE_TL_BUILTIN (op/builtin_registry.h) maps both names to the same

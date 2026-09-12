@@ -16,6 +16,19 @@ namespace tl {
 static constexpr const char *kEnableAutoSchedule = "tl.enable_auto_schedule";
 
 /*!
+ * \brief Marker op for user-declared auto-schedule conflict facts.
+ *
+ * One no-op marker carries both conflict polarities as statements:
+ *   Evaluate(Call(tl.conflict_hint, a, b, level, cross, group, is_conflict))
+ * The marker is consumed by NormalizeConflictHints before AutoSchedule.
+ * Registered as `kPure` so that, when auto-schedule is disabled and the marker
+ * is left unconsumed, RemoveNoOp drops it -- it never reaches codegen. It has no
+ * `TLOpBuilder`: ParseOperator returns an empty TileOperator, which every
+ * tile-op consumer skips via `.defined()`.
+ */
+TVM_DLL const Op &conflict_hint();
+
+/*!
  * \brief Ascend pipeline barrier intrinsic.
  *
  * ascend_pipe_barrier(pipe_t_string)
