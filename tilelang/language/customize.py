@@ -3,7 +3,7 @@
 from __future__ import annotations
 from tilelang._typing import ShapeType, DType, BufferLikeType
 import tilelang.language as T
-from tvm import arith
+from tvm import DataType, DataTypeCode, arith
 from tvm.tirx import PrimExpr, Buffer, op
 from tilelang.utils.language import bits_product, prim_expr_equal, retrieve_buffer_and_offset
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_or, atomic_store  # noqa: F401
@@ -41,8 +41,23 @@ def dp4a(A: BufferLikeType, B: BufferLikeType, C: BufferLikeType) -> PrimExpr:
     )
 
 
+_NON_FLOAT_TYPE_CODES = (
+    DataTypeCode.INT,
+    DataTypeCode.UINT,
+    DataTypeCode.BOOL,
+    DataTypeCode.HANDLE,
+)
+
+
 def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     """Clamps the input value dst between [min_val, max_val]
+
+    A ``NaN`` input yields ``NaN``, matching ``torch.clamp`` and ``numpy.clip``.
+    ``T.max``/``T.min`` lower to the CUDA ``fmaxf``/``fminf`` family, which return
+    the non-``NaN`` operand, so the composition below would otherwise replace a
+    ``NaN`` with ``min_val`` silently. Only floating-point dtypes can hold a
+    ``NaN``, and ``tir.isnan`` is not implemented for every one of them, so the
+    predicate is evaluated on an ``fp32`` cast, which preserves ``NaN``.
 
     Args:
         dst: Input value to be clamped
@@ -52,9 +67,10 @@ def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     Returns:
         Value clamped to the specified range
     """
-    dst = T.max(dst, min_val)  # Ensure value is not less than minimum
-    dst = T.min(dst, max_val)  # Ensure value is not greater than maximum
-    return dst
+    clamped = T.min(T.max(dst, min_val), max_val)
+    if DataType(dst.dtype).type_code in _NON_FLOAT_TYPE_CODES:
+        return clamped
+    return T.if_then_else(T.isnan(T.cast(dst, "float32")), dst, clamped)
 
 
 def reshape(src: Buffer, shape: ShapeType) -> Buffer:

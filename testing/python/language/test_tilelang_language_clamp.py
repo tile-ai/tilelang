@@ -115,6 +115,60 @@ def test_clamp():
     run_clamp_value_range(1024, 128, T.float32)
 
 
+CLAMP_NAN_DTYPES = [
+    T.float16,
+    T.bfloat16,
+    T.float32,
+    T.float64,
+    T.float8_e4m3,
+    T.float8_e5m2,
+]
+
+
+def clamp_nan_kernel(N, block_N, dtype):
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        C: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            for i in T.Parallel(block_N):
+                C[bx * block_N + i] = T.clamp(A[bx * block_N + i], T.cast(-1.0, dtype), T.cast(1.0, dtype))
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", CLAMP_NAN_DTYPES)
+def test_clamp_propagates_nan(dtype):
+    """``T.clamp`` must propagate ``NaN`` the way ``torch.clamp`` does.
+
+    ``T.clamp`` composes ``T.min(T.max(...))``, and on CUDA those lower to the
+    ``fmaxf``/``fminf`` family, which returns the non-``NaN`` operand. Without an
+    explicit re-injection a ``NaN`` input silently becomes ``min_val``.
+    """
+    import torch
+
+    N = 32
+    kernel = tilelang.compile(clamp_nan_kernel(N, N, dtype))
+    torch_dtype = dtype.as_torch()
+
+    a = torch.linspace(-2.0, 2.0, N, device="cuda", dtype=torch.float32)
+    a[7] = float("nan")
+    a = a.to(torch_dtype)
+
+    # Caller-allocated output: rebuilding a torch tensor from an fp8 DLPack
+    # tensor is not supported on every torch version.
+    C = torch.empty(N, device="cuda", dtype=torch_dtype)
+    kernel(a, C)
+    got = C.float()
+
+    assert torch.isnan(got[7]).item(), f"T.clamp dropped NaN for {dtype}: got {got[7].item()} instead of NaN"
+    ref = torch.clamp(a.float(), -1.0, 1.0)
+    finite = ~torch.isnan(ref)
+    torch.testing.assert_close(got[finite], ref[finite], atol=0, rtol=0)
+
+
 FP8_OPS = {
     "max": lambda a, b, dtype: T.max(a, b),
     "min": lambda a, b, dtype: T.min(a, b),
