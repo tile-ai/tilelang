@@ -19,6 +19,7 @@ from tvm import runtime, tirx
 from tvm.target import Target
 from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
+from tilelang.jit.abi import CALLEE_ALLOCATED_OUTPUTS_ATTR
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
@@ -148,13 +149,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if not self.result_idx:
             return False
 
-        # The native wrapper is currently emitted for CUDA with TileLang's C
-        # host codegen. Other device and host backends retain the preallocated-
-        # output path until they have equivalent result-slot lowering.
-        if self.target.kind.name != "cuda":
+        # The ABI decision is stamped on the PrimFunc at compile time from the
+        # execution backend's declared capability; read it back rather than
+        # re-deriving it from the target, so lowering and dispatch can never
+        # disagree.
+        attrs = getattr(self.prim_func, "attrs", None)
+        if attrs is None or CALLEE_ALLOCATED_OUTPUTS_ATTR not in attrs:
             return False
-        target_host = self.target.host
-        return target_host is not None and target_host.kind.name == "c"
+        return int(attrs[CALLEE_ALLOCATED_OUTPUTS_ATTR]) != 0
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
