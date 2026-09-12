@@ -1,12 +1,20 @@
 # Ascend backend: source files, stubs, and build configuration.
 #
-# Ascend target helpers and layout registrations are pure C++ registrations
-# used by common code (TargetIsAscend is called from common transforms via
-# backend/common/target_utils.h; tilelang.layout registers the
+# Ascend target helpers, layout registrations and frontend frames are pure C++
+# registrations used by common code (TargetIsAscend is called from common
+# transforms via backend/common/target_utils.h; tilelang.layout registers the
 # tl.AscendFractalLayout object type at import time). Compile them regardless
 # of USE_ASCEND.
+#
+# src/ascend/ir.cc belongs here for the same reason: tilelang.ascend.language
+# binds tl.CubeFrame / tl.VectorFrame / tl.SimtVFFrame / tl.SimdVFFrame with
+# @register_object at import time, and tilelang/__init__.py imports
+# tilelang.ascend unconditionally, so those object types must exist in every
+# build -- a missing type key raises "Cannot find object type index" and breaks
+# "import tilelang" outright. The frames carry no CANN dependency.
 file(GLOB TILE_LANG_ASCEND_ALWAYS_SRCS
   src/ascend/target_utils.cc
+  src/ascend/ir.cc
   src/ascend/layout/ascend_layouts.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ASCEND_ALWAYS_SRCS})
