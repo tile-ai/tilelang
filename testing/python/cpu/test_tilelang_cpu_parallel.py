@@ -445,5 +445,85 @@ def test_cpu_parallel_address_of_use_stays_serial():
     torch.testing.assert_close(kernel(A), expected, rtol=1e-6, atol=1e-6)
 
 
+def test_cpu_parallel_atomic_stays_serial():
+    # Kernels calling atomic ops stay serial: atomics lower to plain
+    # read-modify-write, which would race across workers in a parallel grid.
+    N_ATOMIC = 200000
+
+    @T.prim_func
+    def atomic_sum(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((1,), "float32")):
+        with T.Kernel(200, threads=1) as bx:
+            for i in T.serial(1000):
+                T.atomic_add(B[0], A[bx * 1000 + i])
+
+    kernel = tilelang.compile(
+        atomic_sum,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    torch.manual_seed(0)
+    A = torch.randn(N_ATOMIC, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A)[0], A.sum(), rtol=1e-4, atol=1e-3)
+
+
+def test_cpu_parallel_cross_iteration_state_stays_serial():
+    # A buffer carrying state across grid iterations (read-modify-write with
+    # no per-iteration reset) must not be privatized; since it is also
+    # mutated inside, the nest stays serial.
+    N_RANK = 512
+
+    @T.prim_func
+    def rank(A: T.Tensor((N_RANK,), "float32"), B: T.Tensor((N_RANK,), "float32")):
+        with T.Kernel(N_RANK // 128, threads=1) as bx:
+            acc = T.alloc_buffer((1,), "float32", scope="local")
+            for i in T.serial(128):
+                acc[0] = 0.0 if (bx == 0 and i == 0) else acc[0] + 1.0
+                B[bx * 128 + i] = acc[0] + A[bx * 128 + i] * 0.0
+
+    kernel = tilelang.compile(
+        rank,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    torch.manual_seed(0)
+    A = torch.randn(N_RANK, dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), torch.arange(N_RANK, dtype=torch.float32), rtol=1e-6, atol=1e-6)
+
+
+def test_cpu_parallel_param_overlapping_store_stays_serial():
+    # A store to a parameter buffer at an iteration-invariant address with an
+    # iteration-dependent value is a definite overlapping write: the nest
+    # must stay serial.
+    TILE = 128
+
+    @T.prim_func
+    def overlapping(A: T.Tensor((M,), "float32"), B: T.Tensor((1,), "float32")):
+        with T.Kernel(M // TILE, M // TILE, threads=1) as (bx, by):
+            for i in T.serial(TILE):
+                B[0] = A[bx * TILE + i] + by * 0.0
+
+    kernel = tilelang.compile(
+        overlapping,
+        target="c",
+        out_idx=-1,
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    torch.manual_seed(0)
+    A = torch.randn(M, dtype=torch.float32)
+    # Serial semantics: the last write (bx=3, i=127) wins.
+    torch.testing.assert_close(kernel(A)[0], A[M - 1], rtol=1e-6, atol=1e-6)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
