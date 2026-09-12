@@ -11,12 +11,14 @@ from tvm import IRModule
 from tvm.target import Target
 
 if TYPE_CHECKING:
+    from tilelang.backend.capabilities import BackendCapabilities
     from tilelang.backend.device_codegen import DeviceCodegen
     from tilelang.backend.execution_backend import ExecutionBackendSpec
     from tilelang.backend.host_codegen import HostCodegen, HostCodegenHook
     from tilelang.backend.pass_pipeline import PassPipeline
 
 BackendCallback = Callable[..., object]
+CapabilityProvider = Callable[[Target], "BackendCapabilities"]
 TargetPredicate = Callable[[Target], bool]
 _T = TypeVar("_T")
 
@@ -34,6 +36,7 @@ class BackendModule:
     pipelines: Mapping[str, PassPipeline]
     device_codegens: Mapping[str, DeviceCodegen]
     execution_backends: tuple[ExecutionBackendSpec, ...]
+    capabilities: CapabilityProvider
     supports_target: TargetPredicate | None = None
     host_codegens: Mapping[str, HostCodegen] = field(default_factory=dict)
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
@@ -207,6 +210,18 @@ class BackendContext:
         """Return the selected backend module name."""
 
         return self.module.name
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        """Return capabilities for this exact target and execution pairing."""
+
+        target_capabilities = self.module.capabilities(self.target)
+        execution = self.execution_backend
+        return target_capabilities.with_execution(
+            native_multi_launch=execution.native_multi_launch,
+            native_argument_binding=execution.native_argument_binding,
+            max_kernels_per_program=execution.max_kernels_per_program,
+        )
 
     def lower(self, mod: IRModule) -> IRModule:
         """Run the selected backend's lowering pipeline."""

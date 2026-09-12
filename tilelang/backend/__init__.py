@@ -2,6 +2,7 @@ from .pass_pipeline import PassPipeline  # noqa: F401
 from .device_codegen import DeviceCodegen  # noqa: F401
 from .host_codegen import HostCodegen, HostCodegenHook  # noqa: F401
 from .execution_backend import ExecutionBackendSpec  # noqa: F401
+from .capabilities import BackendCapabilities, MatrixInstruction  # noqa: F401
 from .module import (  # noqa: F401
     BackendContext,
     BackendModule,

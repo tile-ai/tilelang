@@ -5,6 +5,7 @@ import re
 from tvm import tirx
 
 from tilelang.backend.device_codegen import DeviceCodegen
+from tilelang.backend.capabilities import MatrixInstruction, target_limits
 from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.module import BackendModule, register_backend
 from tilelang.contrib import nvcc
@@ -12,6 +13,19 @@ from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 
 from . import codegen, execution_backend, pipeline
+
+
+def _capabilities(target):
+    return target_limits(
+        target,
+        subgroup_width=32,
+        matrix_instructions=(
+            MatrixInstruction(16, 16, 16, "float16", "float32"),
+            MatrixInstruction(16, 16, 16, "bfloat16", "float32"),
+        ),
+        features=frozenset({"async_copy", "subgroup_exchange", "atomic.add.float32", "atomic.add.int32"}),
+    )
+
 
 _CUDA_GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
 
@@ -134,6 +148,7 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.CUDA_EXECUTION_BACKENDS,
+        capabilities=_capabilities,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={
             "tilelang_callback_cuda_validate": tilelang_callback_cuda_validate,

@@ -11,5 +11,11 @@ def _is_c_target(target: Target) -> bool:
 
 EXECUTION_BACKENDS = [
     ExecutionBackendSpec("cython", supports_target=_is_c_target),
-    ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
+    ExecutionBackendSpec(
+        "tvm_ffi",
+        enable_host_codegen=True,
+        enable_device_compile=True,
+        native_multi_launch=True,
+        native_argument_binding=True,
+    ),
 ]

@@ -22,6 +22,9 @@ class ExecutionBackendSpec:
     supports_target: TargetPredicate | None = None
     enable_host_codegen: bool = False
     enable_device_compile: bool = False
+    native_multi_launch: bool = False
+    native_argument_binding: bool = False
+    max_kernels_per_program: int | None = None
 
     def matches(self, target: Target) -> bool:
         return True if self.supports_target is None else self.supports_target(target)
