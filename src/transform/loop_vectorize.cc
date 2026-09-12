@@ -541,10 +541,14 @@ private:
 
   PrimExpr VisitExpr_(const SelectNode *node) final {
     // Select stays an expression-level ternary. Constrain its vector width
-    // using the same condition-uniformity rule as IfThenElse. Ascend codegen
-    // supports lane-wise vector predicates, so it does not need this
-    // control-flow restriction.
-    if (!TargetIsAscend(Target::Current(false))) {
+    // using the same condition-uniformity rule as IfThenElse, unless the
+    // target codegen supports lane-wise vector predicates and therefore
+    // does not need this control-flow restriction.
+    Target target = Target::Current(false);
+    bool vector_predicate =
+        target.defined() &&
+        target->GetAttr<Bool>("supports_vector_predicate", Bool(false)).value();
+    if (!vector_predicate) {
       CheckConditionVectorized(node->condition);
     }
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
@@ -1225,8 +1229,8 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
 }
 
 int MaxVectorLoadBits(const Target &target, bool global_only_access) {
-  if (TargetIsAscend(target)) {
-    return 64;
+  if (auto max_bits = target->GetAttr<Integer>("max_vector_bits")) {
+    return static_cast<int>(max_bits.value()->value);
   }
   if (TargetSupportVectorize256(target) && !tl_config::Vectorize256Disabled() &&
       global_only_access) {

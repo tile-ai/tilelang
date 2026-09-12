@@ -23,6 +23,7 @@
  */
 
 #include <tvm/ffi/container/array.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target.h>
 #include <tvm/target/target_kind.h>
 
@@ -30,9 +31,21 @@
 
 namespace tvm {
 
+namespace refl = tvm::ffi::reflection;
+
 TVM_REGISTER_TARGET_KIND("ascend", kDLExtDev)
     .add_attr_option<ffi::String>("mcpu")
     .add_attr_option<ffi::String>("arch")
+    // Kernel entries return void, so the host cannot receive an int32
+    // status code from the device the way CPU-codegen targets do.
+    .add_attr_option<bool>("supports_kernel_status_return",
+                           refl::DefaultValue(false))
+    // AscendC emits lane-wise vector predicates, so vectorized Select does
+    // not require a uniform condition.
+    .add_attr_option<bool>("supports_vector_predicate",
+                           refl::DefaultValue(true))
+    // Widest vector load/store issued by the vectorizer, in bits.
+    .add_attr_option<int64_t>("max_vector_bits", refl::DefaultValue(64))
     .set_default_keys({"ascend"});
 
 } // namespace tvm
