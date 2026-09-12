@@ -211,6 +211,14 @@ class JITKernel(Generic[_P, _T]):
         """
         return self.torch_function(*args, **kwds)
 
+    def bind(self, static: dict[int, Any], dynamic_indices: tuple[int, ...]):
+        """Bind stable ABI slots once and expose only invocation-varying slots.
+
+        The adapter owns argument validation and frame construction so clients
+        do not rebuild or reinterpret immutable tensor arguments on hot calls.
+        """
+        return self.adapter.bind(static, dynamic_indices)
+
     def _compile_and_create_adapter(
         self,
         tilelang_func: PrimFunc,
