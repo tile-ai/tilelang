@@ -7,7 +7,7 @@ import torch
 from tilelang import tvm
 from tilelang.jit.kernel import JITKernel
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
-from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
+from tilelang.jit.adapter.tvm_ffi import COMPILE_ARGS, TVMFFIKernelAdapter
 
 tirx = tvm.tirx
 
@@ -97,6 +97,40 @@ def test_preloaded_executable_is_reused():
 
     assert adapter._get_executable() is preloaded_executable
     assert adapter.get_exportable_executable() is preloaded_executable
+    assert created == []
+
+
+def test_prepare_for_execution_jits_fresh_executable_before_dispatch():
+    adapter, _ = _make_adapter()
+    adapter.rt_mod = object()
+    jit_calls = []
+
+    class FakeExecutable:
+        def jit(self, **kwargs):
+            jit_calls.append(kwargs)
+            return self
+
+    executable = FakeExecutable()
+    adapter._make_executable = lambda: executable
+
+    adapter.prepare_for_execution()
+
+    assert adapter.executable is executable
+    assert jit_calls == [COMPILE_ARGS]
+
+
+def test_prepare_for_execution_skips_preloaded_disk_cache_module():
+    adapter, created = _make_adapter()
+    adapter.rt_mod = None
+
+    def preloaded_executable(*args):
+        return None
+
+    adapter.executable = preloaded_executable
+
+    adapter.prepare_for_execution()
+
+    assert adapter.executable is preloaded_executable
     assert created == []
 
 

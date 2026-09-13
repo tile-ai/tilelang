@@ -144,6 +144,15 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def get_exportable_executable(self) -> tvm.runtime.Executable:
         return self._get_executable()
 
+    def prepare_for_execution(self) -> None:
+        """Compile and link a fresh TVM executable before its first launch."""
+        # Disk-cache restores install an already runnable Module and clear
+        # ``rt_mod``. Freshly lowered kernels retain ``rt_mod`` and otherwise
+        # let Executable.__call__ trigger this JIT step on first invocation.
+        if getattr(self, "rt_mod", None) is None:
+            return
+        self._get_executable().jit(**COMPILE_ARGS)
+
     def _uses_ffi_callee_allocated_output_abi(self) -> bool:
         """Whether lowering gives this kernel the callee-allocated main ABI."""
         if not self.result_idx:
