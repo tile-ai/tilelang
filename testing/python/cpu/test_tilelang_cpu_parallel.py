@@ -655,7 +655,7 @@ def test_cpu_parallel_extern_write_to_param_stays_serial():
         with T.Kernel(
             N_EXT,
             threads=1,
-            prelude="static inline void writer(float* p) { *p += 1.0f; }\n",
+            prelude='extern "C" void writer(float* p) { *p += 1.0f; }\n',
         ) as _bx:
             T.call_extern("void", "writer", T.address_of(B[0]))
 
@@ -687,7 +687,7 @@ def test_cpu_parallel_extern_bare_data_var_stays_serial():
         with T.Kernel(
             N_BV,
             threads=1,
-            prelude="static inline void writer(float* p) { *p += 1.0f; }\n",
+            prelude='extern "C" void writer(float* p) { *p += 1.0f; }\n',
         ) as _bx:
             T.call_extern("void", "writer", B.data)
 
@@ -719,7 +719,7 @@ def test_cpu_parallel_address_of_write_range_stays_serial():
         with T.Kernel(
             N_AW,
             threads=1,
-            prelude="static inline void writer(float* p) {\n    p[0] += 1.0f;\n    p[1] += 1.0f;\n}\n",
+            prelude='extern "C" void writer(float* p) {\n    p[0] += 1.0f;\n    p[1] += 1.0f;\n}\n',
         ) as bx:
             T.call_extern("void", "writer", T.address_of(B[bx]))
 
