@@ -12,7 +12,6 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "backend/common/target_utils.h"
 #include "common/storage_size.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -23,6 +22,14 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 namespace {
+
+// Whether the target launches only a grid: thread domains stay local to
+// device-side regions and must not become runtime launch dimensions.
+bool LaunchGridOnly(const Target &target) {
+  return target.defined() &&
+         target->GetAttr<Bool>("launch_grid_only", Bool(false)).value();
+}
+
 struct KernelInfo {
   // The device on which the PrimFunc runs
   Target target;
@@ -138,11 +145,11 @@ private:
       if (!defined_thread.count(iv.get())) {
         defined_thread.insert(iv.get());
         thread_extent.Set(iv->thread_tag, op->value);
-        // Ascend launches only a grid of AI cores. Internal cthread/vthread
-        // domains belong to SimtVF regions and must not be interpreted as
-        // block dimensions by the generic runtime launch metadata.
+        // Grid-only launch targets keep thread domains local to device-side
+        // regions; only the blockIdx.* grid axes are runtime launch
+        // dimensions.
         std::string thread_tag = iv->thread_tag;
-        if (!TargetIsAscend(info_.target) ||
+        if (!LaunchGridOnly(info_.target) ||
             thread_tag.rfind("blockIdx.", 0) == 0) {
           info_.launch_params.push_back(iv->thread_tag);
         }
@@ -277,10 +284,10 @@ public:
     }
 
     const auto &info = device_info_map_.at(gvar.get());
-    if (TargetIsAscend(
+    if (LaunchGridOnly(
             func->GetAttr<Target>(tvm::attr::kTarget).value_or(info.target))) {
-      // Ascend: keep blockIdx extents (grid shape) but drop threadIdx extents
-      // since thread domains are managed per-region by SimtVF.
+      // Grid-only launch: keep blockIdx extents (grid shape) but drop
+      // threadIdx extents, which are managed inside device-side regions.
       Map<String, PrimExpr> grid_extent;
       for (const auto &kv : info.thread_extent) {
         if (std::string(kv.first).find("blockIdx") != std::string::npos) {
@@ -332,10 +339,10 @@ private:
 
     bool same_device_type = caller_target->GetTargetDeviceType() ==
                             callee_target->GetTargetDeviceType();
-    // For Ascend target, always use call_packed path to generate consistent
-    // host code that can be properly wrapped by the cython adapter.
-    bool is_ascend_callee = TargetIsAscend(callee_target);
-    if (same_device_type && !is_ascend_callee) {
+    // Kernels of packed-launch-only targets are separately compiled
+    // artifacts the host cannot reach through call_extern, even when the
+    // caller reports the same device type; force the kernel-launch path.
+    if (same_device_type) {
       // Calls to another target using the same device (e.g. LLVM
       // calling a custom TIRToRuntime target) do not require a kernel
       // launch, but need to be replaced with call_extern.
@@ -348,16 +355,12 @@ private:
       return Call(node->dtype, builtin::call_extern(), args);
     }
 
-    // For Ascend, skip the launch_params check since we handle it differently.
-    // For other cross-target calls, verify launch_params is defined.
-    if (!is_ascend_callee) {
-      ICHECK(dev_info.launch_params.defined())
-          << "CallNode attempted kernel launch to " << gvar->name_hint
-          << " on target " << dev_info.target << ", but subroutine "
-          << gvar->name_hint
-          << " did not have the tirx::attr::kKernelLaunchParams attribute "
-          << "required for cross-target kernel launch";
-    }
+    ICHECK(dev_info.launch_params.defined())
+        << "CallNode attempted kernel launch to " << gvar->name_hint
+        << " on target " << dev_info.target << ", but subroutine "
+        << gvar->name_hint
+        << " did not have the tirx::attr::kKernelLaunchParams attribute "
+        << "required for cross-target kernel launch";
 
     // Collected kernel information may be in terms of the callee's
     // arguments, but we need expressions for them in terms of the

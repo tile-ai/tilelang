@@ -46,6 +46,9 @@ TVM_REGISTER_TARGET_KIND("ascend", kDLExtDev)
                            refl::DefaultValue(true))
     // Widest vector load/store issued by the vectorizer, in bits.
     .add_attr_option<int64_t>("max_vector_bits", refl::DefaultValue(64))
+    // Kernels are launched as a grid of AI cores only; threadIdx domains
+    // are region-local (SimtVF) and are not runtime launch dimensions.
+    .add_attr_option<bool>("launch_grid_only", refl::DefaultValue(true))
     .set_default_keys({"ascend"});
 
 } // namespace tvm
