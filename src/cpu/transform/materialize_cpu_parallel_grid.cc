@@ -33,6 +33,7 @@
 #include "transform/common/attr.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/buffer.h>
@@ -306,9 +307,17 @@ bool StoreCoversWholeBuffer(const BufferStoreNode *op,
     return false;
   }
 
+  if (enclosing.empty()) {
+    // The store always executes; it is a reset only for a scalar buffer
+    // written as a whole.
+    return numel == 1;
+  }
+
   // Any suffix of the enclosing nest may be the level that fully rewrites
-  // the buffer; check innermost-outward.
-  for (size_t start = 0; start <= enclosing.size(); ++start) {
+  // the buffer; check innermost-outward. The suffix must be non-empty: a
+  // store nested in loops whose extents cannot be proven positive
+  // (possibly zero-trip) is not a per-iteration reset.
+  for (size_t start = 0; start < enclosing.size(); ++start) {
     ffi::Map<Var, Range> ranges;
     int64_t trip = 1;
     bool ok = true;
@@ -318,6 +327,15 @@ bool StoreCoversWholeBuffer(const BufferStoreNode *op,
       if (!extent || extent->value <= 0 || !is_zero(loop->min)) {
         ok = false;
         break;
+      }
+      // A non-unit step visits only a strided subset of the range, so the
+      // trip-count coverage below would not hold.
+      if (loop->step.defined()) {
+        const auto *step = loop->step.as<IntImmNode>();
+        if (!step || step->value != 1) {
+          ok = false;
+          break;
+        }
       }
       ranges.Set(loop->loop_var, Range::FromMinExtent(
                                      IntImm(DataType::Int(32), 0),
@@ -382,13 +400,20 @@ private:
   int if_depth_ = 0;
 };
 
-/*! \brief Per-nest check: refuse overlapping writes to parameter/global
- * buffers. A store is safe when its flat address is injective over all
- * parallel iterations and their serial scopes; otherwise it is benign only
- * when colliding iterations provably write the same value (invariant value,
- * or the value depends only on the parallel vars the address is injective
- * in). Anything else — colliding affine maps, shared RMW, unprovable forms —
- * overlaps. */
+/*! \brief Per-nest check for parameter/global buffers (those without an
+ * AllocBuffer): every write-relevant access must be provably race-free.
+ * Accesses are collected during the traversal and evaluated in Finish():
+ *  1. A bare data var in a Call argument (call_extern / access_ptr) is an
+ *     unanalyzable opaque use -> refuse.
+ *  2. All store addresses (including address_of indices — the callee may
+ *     write through the pointer) must be the same per-iteration address;
+ *     different stores to one buffer may not cover each other.
+ *  3. That address must be injective over the parallel scope and the
+ *     per-iteration serial scopes — no same-value exemption: concurrent
+ *     writes to one address are a data race even when the values agree.
+ *  4. Every load of a written buffer must use that same address
+ *     (same-iteration); anything else is a cross-iteration dependency.
+ * Read-only buffers are always fine. */
 class OverlapStoreChecker : public StmtExprVisitor {
 public:
   OverlapStoreChecker(const GridAccessAnalysis &analysis,
@@ -400,14 +425,76 @@ public:
   bool found() const { return found_; }
   const std::string &buffer_name() const { return buffer_name_; }
 
+  //! Evaluate the collected accesses; call after the traversal.
+  void Finish() {
+    arith::Analyzer analyzer;
+    for (const auto &[data, acc] : access_) {
+      bool fail = acc.opaque_unanalyzable;
+      PrimExpr uniform;
+      for (const StoreRec &rec : acc.stores) {
+        PrimExpr simplified =
+            rec.index.defined() ? analyzer.Simplify(rec.index) : PrimExpr();
+        if (!simplified.defined()) {
+          fail = true;
+          break;
+        }
+        if (!uniform.defined()) {
+          uniform = simplified;
+        } else if (!StructuralEqual()(uniform, simplified)) {
+          fail = true; // stores to one buffer cover each other's addresses
+          break;
+        }
+        auto ranges = rec.ranges;
+        if (!ProveInjectiveIndex(ScalarizedIndex(rec.index, &ranges), ranges)) {
+          fail = true; // colliding write across grid iterations
+          break;
+        }
+      }
+      if (!fail && uniform.defined()) {
+        // A written buffer may only be read at the same per-iteration
+        // address; anything else is a loop-carried dependency.
+        for (const PrimExpr &ld : acc.load_indices) {
+          if (!ld.defined() ||
+              !StructuralEqual()(uniform, analyzer.Simplify(ld))) {
+            fail = true;
+            break;
+          }
+        }
+      }
+      if (fail) {
+        found_ = true;
+        buffer_name_ = acc.name;
+        return;
+      }
+    }
+  }
+
 private:
-  /*! \brief Range for affine analysis: the extent expression is used as-is
-   * (IterMap handles symbolic extents such as ceildiv(m, 128); widening
-   * casts in the index are stripped separately). */
+  struct StoreRec {
+    PrimExpr index;
+    ffi::Map<Var, Range> ranges;
+  };
+  struct BufAccess {
+    std::string name;
+    std::vector<StoreRec> stores; // BufferStore + address_of (opaque write)
+    std::vector<PrimExpr> load_indices;
+    bool opaque_unanalyzable = false;
+  };
+
+  ffi::Map<Var, Range> CurrentRanges() const {
+    ffi::Map<Var, Range> ranges = RangesFor(parallel_scope_);
+    for (const auto &[var, range] : RangesFor(outer_serial_scope_)) {
+      ranges.Set(var, range);
+    }
+    for (const auto &[var, extent] : serial_scope_) {
+      ranges.Set(var, RangeForExtent(extent));
+    }
+    return ranges;
+  }
+
   static Range RangeForExtent(const PrimExpr &extent) {
     return Range::FromMinExtent(IntImm(DataType::Int(32), 0), extent);
   }
-
   ffi::Map<Var, Range>
   RangesFor(const std::vector<std::pair<Var, PrimExpr>> &scopes) const {
     ffi::Map<Var, Range> ranges;
@@ -417,82 +504,66 @@ private:
     return ranges;
   }
 
-  std::unordered_set<const VarNode *> ParallelVarsOf(const PrimExpr &expr) {
-    std::unordered_set<const VarNode *> out;
-    PostOrderVisit(expr, [&](const ObjectRef &node) {
-      if (const auto *var = node.as<VarNode>()) {
-        for (const auto &[pvar, extent] : parallel_scope_) {
-          if (pvar.get() == var) {
-            out.insert(var);
-          }
-        }
-      }
-    });
-    return out;
-  }
-
   void VisitStmt_(const ForNode *op) override {
     serial_scope_.push_back({op->loop_var, op->extent});
     StmtExprVisitor::VisitStmt_(op);
     serial_scope_.pop_back();
   }
   void VisitStmt_(const BufferStoreNode *op) override {
-    if (analysis_.HasAllocation(op->buffer->data)) {
-      StmtExprVisitor::VisitStmt_(op);
-      return;
-    }
-    bool rmw = StoreReadsSameBuffer(op);
-    bool safe = false;
-    if (op->indices.size() == 1) {
-      const PrimExpr &index = op->indices[0];
-      ffi::Map<Var, Range> full = RangesFor(parallel_scope_);
-      ffi::Map<Var, Range> serial = RangesFor(outer_serial_scope_);
-      for (const auto &[var, extent] : serial_scope_) {
-        serial.Set(var, RangeForExtent(extent));
-      }
-      ffi::Map<Var, Range> all = full;
-      for (const auto &[var, extent] : serial) {
-        all.Set(var, extent);
-      }
-      if (ProveInjectiveIndex(ScalarizedIndex(index, &all), all)) {
-        safe = true; // disjoint addresses, RMW included
-      } else if (!rmw) {
-        arith::Analyzer analyzer;
-        PrimExpr value = analyzer.Simplify(op->value);
-        if (!ExprHasVar(value)) {
-          safe = true; // invariant value: colliding writes agree
-        } else {
-          // Benign iff the address is injective over exactly the parallel
-          // vars it (and the value) mentions.
-          std::unordered_set<const VarNode *> addr_vars = ParallelVarsOf(index);
-          ffi::Map<Var, Range> sub = serial;
-          for (const auto *var : addr_vars) {
-            for (const auto &[pvar, extent] : parallel_scope_) {
-              if (pvar.get() == var) {
-                sub.Set(pvar, RangeForExtent(extent));
-              }
-            }
-          }
-          if (ProveInjectiveIndex(ScalarizedIndex(index, &sub), sub)) {
-            std::unordered_set<const VarNode *> value_vars =
-                ParallelVarsOf(value);
-            safe = std::all_of(
-                value_vars.begin(), value_vars.end(),
-                [&](const VarNode *v) { return addr_vars.count(v) > 0; });
-          }
-        }
-      }
-    }
-    if (!safe) {
-      found_ = true;
-      buffer_name_ = op->buffer->name;
+    if (!analysis_.HasAllocation(op->buffer->data)) {
+      BufAccess &acc = access_[op->buffer->data];
+      acc.name = op->buffer->name;
+      acc.stores.push_back(
+          {op->indices.size() == 1 ? op->indices[0] : PrimExpr(),
+           CurrentRanges()});
     }
     StmtExprVisitor::VisitStmt_(op);
   }
+  void VisitExpr_(const BufferLoadNode *op) override {
+    if (!analysis_.HasAllocation(op->buffer->data)) {
+      BufAccess &acc = access_[op->buffer->data];
+      acc.name = op->buffer->name;
+      acc.load_indices.push_back(op->indices.size() == 1 ? op->indices[0]
+                                                         : PrimExpr());
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+  void VisitExpr_(const CallNode *op) override {
+    // address_of wraps a BufferLoad; the callee may write through the
+    // pointer, so the index counts as a store address.
+    if (op->op.same_as(builtin::address_of()) && !op->args.empty()) {
+      if (const auto *load = op->args[0].as<BufferLoadNode>();
+          load && !analysis_.HasAllocation(load->buffer->data)) {
+        BufAccess &acc = access_[load->buffer->data];
+        acc.name = load->buffer->name;
+        acc.stores.push_back(
+            {load->indices.size() == 1 ? load->indices[0] : PrimExpr(),
+             CurrentRanges()});
+      }
+    }
+    ++in_call_;
+    StmtExprVisitor::VisitExpr_(op);
+    --in_call_;
+  }
+  void VisitExpr_(const VarNode *op) override {
+    // A bare data var of a parameter/global buffer in a call argument is an
+    // unanalyzable opaque use (call_extern / access_ptr). Create the entry
+    // on demand: the buffer may have no plain load/store inside the nest.
+    if (in_call_ > 0 && op->dtype.is_handle() &&
+        !analysis_.HasAllocation(GetRef<Var>(op))) {
+      BufAccess &acc = access_[GetRef<Var>(op)];
+      acc.name = op->name_hint;
+      acc.opaque_unanalyzable = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
   const GridAccessAnalysis &analysis_;
   std::vector<std::pair<Var, PrimExpr>> parallel_scope_;
   std::vector<std::pair<Var, PrimExpr>> outer_serial_scope_;
   std::vector<std::pair<Var, PrimExpr>> serial_scope_;
+  std::unordered_map<Var, BufAccess, ObjectPtrHash, ObjectPtrEqual> access_;
+  int in_call_ = 0;
   bool found_ = false;
   std::string buffer_name_;
 };
@@ -759,6 +830,7 @@ struct GridRewriter : public StmtMutator {
       OverlapStoreChecker overlap(analysis_, std::move(parallel_scope),
                                   std::move(outer_serial));
       overlap(loops.back()->body);
+      overlap.Finish();
       if (overlap.found()) {
         LOG(WARNING) << "tl.cpu_parallel: buffer `" << overlap.buffer_name()
                      << "` is written at addresses that collide across grid "
