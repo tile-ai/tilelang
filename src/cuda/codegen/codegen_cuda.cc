@@ -1706,6 +1706,51 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
 
+  // The FP32 intermediate preserves every E2M1 value, including signed zero.
+  // Emit packed E4M3 encodings directly for this exact conversion chain.
+  const auto *inner_cast = op->value.as<CastNode>();
+  if (inner_cast && op->annotations.empty() &&
+      inner_cast->annotations.empty() && from_ty.is_float() &&
+      from_ty.bits() == 32 && inner_cast->value.dtype().is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
+    DataType packed_ty = inner_cast->value.dtype();
+    int lanes = packed_ty.lanes();
+    if (lanes == 1) {
+      this->PrintType(target_ty, os);
+      os << "::bitcast(static_cast<uint8_t>(ConvertE2M1x4ToE4M3x4(("
+         << PrintExpr(inner_cast->value) << ").__x)))";
+      return;
+    }
+    if (lanes == 2 || lanes == 4 || lanes == 8 || lanes == 16 || lanes == 32) {
+      std::string packed = SSAGetID(PrintExpr(inner_cast->value), packed_ty);
+      std::string result = name_supply_->FreshName("fp8_cast");
+      PrintIndent();
+      PrintType(target_ty, stream);
+      stream << " " << result << ";\n";
+      for (int first_lane = 0; first_lane < lanes; first_lane += 4) {
+        std::string converted = name_supply_->FreshName("fp8_bits");
+        PrintIndent();
+        stream << "uint32_t " << converted << " = ConvertE2M1x4ToE4M3x4("
+               << "reinterpret_cast<const uint8_t*>(&" << packed << ")["
+               << first_lane / 2 << "]";
+        if (first_lane + 2 < lanes) {
+          stream << " | (uint16_t(reinterpret_cast<const uint8_t*>(&" << packed
+                 << ")[" << first_lane / 2 + 1 << "]) << 8)";
+        }
+        stream << ");\n";
+        for (int lane = first_lane; lane < first_lane + 4 && lane < lanes;
+             ++lane) {
+          PrintIndent();
+          stream << "reinterpret_cast<uint8_t*>(&" << result << ")[" << lane
+                 << "] = static_cast<uint8_t>(" << converted << " >> "
+                 << (lane - first_lane) * 8 << ");\n";
+        }
+      }
+      os << result;
+      return;
+    }
+  }
+
   // Scalar fp8 <-> half via the __tl_cvt helpers; the default cast detours
   // through fp32.
   if (from_ty.is_scalar() && cast_round.empty() && target_ty.is_float16() &&

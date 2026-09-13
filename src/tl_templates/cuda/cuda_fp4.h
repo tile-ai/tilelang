@@ -125,6 +125,14 @@ template <typename V, typename... Ts> TL_DEVICE V make_fp4_vec(Ts... lanes) {
 }
 } // namespace tl
 
+// E2M1 magnitudes are exactly representable in E4M3. Each register table
+// contains four magnitude encodings; the second permutation spreads signs.
+TL_DEVICE uint32_t ConvertE2M1x4ToE4M3x4(uint16_t packed) {
+  uint32_t magnitude = __byte_perm(0x3c383000, 0x4c484440, packed & 0x7777);
+  uint32_t signs = (__byte_perm(packed, packed >> 4, 0x5140) & 0x08080808) << 4;
+  return magnitude | signs;
+}
+
 // ============================================================================
 // FP4 <-> Half Precision Conversions
 // ============================================================================
