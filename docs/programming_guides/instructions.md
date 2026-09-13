@@ -98,6 +98,48 @@ Reductions and scans
 - Allocate and initialize accumulators via `T.alloc_fragment` + `T.clear` or
   `T.fill`.
 
+### Index reductions
+
+`T.reduce_argmax(src, indices, dim=-1)` and `T.reduce_argmin` return the
+zero-based index along a tile dimension. They support fragment and shared
+buffers, including copies between these scopes. The destination uses `int32`
+or `int64`; its shape removes the reduced axis or retains it with extent one.
+For a one-dimensional input, use a scalar destination `()` or `(1,)`.
+
+```python
+@tilelang.jit(out_idx=[1])
+def row_argmax(rows, cols):
+    @T.prim_func
+    def main(A: T.Tensor((rows, cols), "float32"), I: T.Tensor((rows,), "int32")):
+        with T.Kernel(1, threads=128):
+            values = T.alloc_fragment((rows, cols), "float32")
+            indices = T.alloc_fragment((rows,), "int32")
+            T.copy(A, values)
+            T.reduce_argmax(values, indices, dim=1)
+            T.copy(indices, I)
+
+    return main
+```
+
+Ties choose the first index, including ties between positive and negative zero.
+If a row contains NaNs, both operations return the first NaN's index. For
+example, `[3, 7, 7]` has argmax `1`, and `[7, NaN, NaN]` has argmax and argmin
+`1`. Integer comparisons retain the input precision.
+
+The source may use `float16`, `bfloat16`, `float32`, `float64`, or signed/unsigned
+8-, 16-, 32-, or 64-bit integers, subject to the backend's ordinary reduction
+support. The reduced extent must be a positive compile-time constant that fits
+the output index dtype. Non-power-of-two reduction extents are padded internally;
+padding positions are excluded from the returned indices. The input remains
+unchanged and the output is replaced on every call. Like other tile reductions,
+all participating threads must execute the operation collectively.
+
+Index reductions expand into a value reduction and a minimum-index reduction
+within the same kernel. Intermediate values and indices use fragments, with
+shared workspace managed by the existing reduction backend. There is no
+additional kernel launch or global temporary allocation. A shared input is
+copied into a fragment once before the two reductions.
+
 Elementwise math
 - Most math ops mirror TVM TIR: `T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`,
   `T.sigmoid`, etc. Compose freely inside loops.
@@ -170,6 +212,7 @@ Compute primitives
 - `T.gemm(A_s, B_s, C_f)`: Tile GEMM into fragment accumulator.
 - `T.gemm_sp(...)`: Sparse (2:4) tensor core GEMM.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
+- Index reductions: `T.reduce_argmax`, `T.reduce_argmin`.
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
 - Elementwise math: TIR ops (`T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`, ...).
