@@ -1,5 +1,6 @@
 import pytest
 import tilelang
+import tilelang.language as T
 import tilelang.testing
 
 from tilelang import tvm
@@ -185,6 +186,34 @@ def _build_scalar_select_source():
     return build(mod, tvm.target.Target("rocm")).inspect_source()
 
 
+def _build_integer_call_select_source(operation, dtype):
+    @T.prim_func
+    def integer_call_select(
+        source: T.Tensor[(4,), dtype],
+        mask: T.Tensor[(4,), T.int32],
+        destination: T.Tensor[(4,), dtype],
+    ):
+        with T.Kernel(1, threads=1):
+            for index in T.vectorized(4):
+                destination[index] = T.Select(
+                    mask[index] != 0,
+                    operation(source[index]),
+                    T.cast(0, dtype),
+                )
+
+    build = tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
+    if build is None:
+        pytest.skip("TileLang was built without the ROCm code generator")
+    target = tvm.target.Target("hip")
+    with target:
+        artifact = tilelang.lower(
+            integer_call_select,
+            target=target,
+            enable_device_compile=False,
+        )
+    return artifact.kernel_source
+
+
 def test_vector_condition_select_is_scalarized_in_hip_source():
     source = _build_vector_select_source(4)
 
@@ -199,6 +228,30 @@ def test_scalar_select_uses_base_ternary_path():
 
     assignments = [line for line in source.splitlines() if "?" in line and "=" in line]
     assert assignments == ["  output[0] = ((mask[0] > 0.000000e+00f) ? input[0] : 0.000000e+00f);"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "dtype", "source_pattern"),
+    [
+        pytest.param(lambda value: T.bitwise_and(value, 255), "int32", "&", id="bitwise_and"),
+        pytest.param(lambda value: T.bitwise_or(value, 255), "int32", "|", id="bitwise_or"),
+        pytest.param(lambda value: T.bitwise_xor(value, 255), "int32", "^", id="bitwise_xor"),
+        pytest.param(lambda value: T.bitwise_not(value), "int32", "~", id="bitwise_not"),
+        pytest.param(lambda value: T.shift_left(value, 2), "int32", "<<", id="shift_left"),
+        pytest.param(lambda value: T.shift_right(value, 2), "int32", ">>", id="shift_right"),
+        pytest.param(lambda value: T.popcount(value), "uint32", "__popc", id="popcount"),
+    ],
+)
+def test_integer_call_is_scalarized_per_select_lane(operation, dtype, source_pattern):
+    source = _build_integer_call_select_source(operation, dtype)
+
+    assignments = [line for line in source.splitlines() if "?" in line and "source[" in line]
+    assert len(assignments) == 4
+    for lane, assignment in enumerate(assignments):
+        assert f"source[{lane}]" in assignment
+        assert source_pattern in assignment
+    carrier = "uint4" if dtype == "uint32" else "int4"
+    assert f"*({carrier}*)(source" not in source
 
 
 def test_eight_lane_select_keeps_masked_loads_in_ternary_branches():

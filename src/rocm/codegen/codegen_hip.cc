@@ -9,6 +9,7 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
@@ -188,6 +189,12 @@ private:
         }
         PrimExpr zero = make_zero(args[0].dtype());
         return Select(args[0] >= zero, args[0], -args[0]);
+      }
+      static const OpAttrMap<TVectorizable> op_vectorizable =
+          Op::GetAttrMap<TVectorizable>("TVectorizable");
+      auto optional_op = op->op.as<Op>();
+      if (optional_op && op_vectorizable.get(optional_op.value(), false)) {
+        return Call(op->dtype.element_of(), op->op, args, op->annotations);
       }
     }
     return ExprMutator::VisitExpr_(op);
