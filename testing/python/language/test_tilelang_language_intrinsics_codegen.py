@@ -155,12 +155,85 @@ def test_half_math_intrinsics(dtype):
         )
 
 
+# Same bridging as HALF_MATH_OPS, but asin, acos, atanh and acosh have
+# restricted domains, so this group takes inputs of its own. (op, lowered h*
+# intrinsic, torch reference, input index), in the row order
+# domain_math_kernel writes.
+DOMAIN_MATH_OPS = (
+    ("asin", "hasin", torch.asin, 0),
+    ("acos", "hacos", torch.acos, 0),
+    ("atanh", "hatanh", torch.atanh, 0),
+    ("asinh", "hasinh", torch.asinh, 0),
+    ("log1p", "hlog1p", torch.log1p, 0),
+    ("acosh", "hacosh", torch.acosh, 1),
+)
+
+
+def domain_math_kernel(dtype, N):
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        C: T.Tensor((N,), dtype),
+        B: T.Tensor((len(DOMAIN_MATH_OPS), N), dtype),
+    ):
+        with T.Kernel(1, threads=N):
+            i = T.get_thread_binding()
+            # Keep the temporaries: they copy-initialize, a store only assigns.
+            asin_value = T.asin(A[i])
+            acos_value = T.acos(A[i])
+            atanh_value = T.atanh(A[i])
+            asinh_value = T.asinh(A[i])
+            log1p_value = T.log1p(A[i])
+            acosh_value = T.acosh(C[i])
+            B[0, i] = asin_value
+            B[1, i] = acos_value
+            B[2, i] = atanh_value
+            B[3, i] = asinh_value
+            B[4, i] = log1p_value
+            B[5, i] = acosh_value
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+def test_domain_math_intrinsics(dtype):
+    N = 128
+    kernel = tilelang.compile(domain_math_kernel(dtype, N), target="cuda")
+    body = kernel.get_kernel_source()
+    body = body[body.rindex("__global__") :]
+
+    torch_dtype = dtype.as_torch()
+    idx = torch.arange(N, device="cuda", dtype=torch.float32)
+    # Exact in both dtypes and inside (-1, 1), keeping every result finite.
+    a = ((idx - 63.5) * 0.015625).to(torch_dtype)
+    # acosh needs [1, inf).
+    c = (idx * 0.03125 + 1.0).to(torch_dtype)
+    b = torch.empty(len(DOMAIN_MATH_OPS), N, device="cuda", dtype=torch_dtype)
+    kernel(a, c, b)
+
+    inputs = (a, c)
+    for row, (name, intrinsic, ref_fn, which) in enumerate(DOMAIN_MATH_OPS):
+        assert body.count(f"{intrinsic}(") == 1
+        ref = ref_fn(inputs[which].float()).to(torch_dtype)
+        torch.testing.assert_close(
+            b[row].float(),
+            ref.float(),
+            atol=2e-2,
+            rtol=2e-2,
+            msg=lambda base, name=name: f"T.{name} mismatch\n{base}",
+        )
+
+
 # (op, lowered h* intrinsic, torch reference, dtypes it can reach codegen on).
 # bfloat16 T.pow is rejected before codegen by an upstream dtype check, so its
 # bridge is not reachable yet (tile-ai/tilelang#2571).
 BINARY_MATH_OPS = (
     ("fmod", "hfmod", torch.fmod, (T.float16, T.bfloat16)),
     ("pow", "hpow", torch.pow, (T.float16,)),
+    ("atan2", "hatan2", torch.atan2, (T.float16, T.bfloat16)),
+    ("hypot", "hhypot", torch.hypot, (T.float16, T.bfloat16)),
+    ("copysign", "hcopysign", torch.copysign, (T.float16, T.bfloat16)),
 )
 
 
@@ -202,10 +275,15 @@ def test_binary_math_intrinsics(name, intrinsic, ref_fn, dtype):
         # value is exact in float16 and bfloat16.
         a = ((idx - 64) * 0.25).to(torch_dtype)
         c = (((idx % 5) - 2.5) * 1.5).to(torch_dtype)
-    else:
+    elif name == "pow":
         # [0.5, 1.5) base and [0.5, 2.5) exponent keep pow finite in float16.
         a = (idx * 0.0078125 + 0.5).to(torch_dtype)
         c = (idx * 0.015625 + 0.5).to(torch_dtype)
+    else:
+        # A crosses zero and C takes both signs at a comparable magnitude: atan2
+        # sees all four quadrants, hypot cannot pass as |A|, copysign must flip.
+        a = ((idx - 64) * 0.25).to(torch_dtype)
+        c = (((idx % 9) - 4) * 2.0).to(torch_dtype)
     b = torch.empty(N, device="cuda", dtype=torch_dtype)
     kernel(a, c, b)
 
@@ -217,6 +295,86 @@ def test_binary_math_intrinsics(name, intrinsic, ref_fn, dtype):
         rtol=2e-2,
         msg=lambda base: f"T.{name} mismatch\n{base}",
     )
+
+
+def ldexp_kernel(dtype, N):
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        C: T.Tensor((N,), T.int32),
+        B: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(1, threads=N):
+            i = T.get_thread_binding()
+            # Keep the temporary: it copy-initializes, a store only assigns.
+            value = T.ldexp(A[i], C[i])
+            B[i] = value
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+def test_ldexp_intrinsic(dtype):
+    N = 128
+    kernel = tilelang.compile(ldexp_kernel(dtype, N), target="cuda")
+    body = kernel.get_kernel_source()
+    body = body[body.rindex("__global__") :]
+    assert body.count("hldexp(") == 1
+
+    torch_dtype = dtype.as_torch()
+    idx = torch.arange(N, device="cuda", dtype=torch.float32)
+    # Exponents of both signs. Scaling exact multiples of 0.25 by 2**n is exact
+    # in both dtypes, so the result has to match exactly.
+    a = ((idx - 64) * 0.25).to(torch_dtype)
+    n = ((idx % 7) - 3).to(torch.int32)
+    b = torch.empty(N, device="cuda", dtype=torch_dtype)
+    kernel(a, n, b)
+
+    ref = torch.ldexp(a.float(), n).to(torch_dtype)
+    torch.testing.assert_close(b.float(), ref.float(), atol=0, rtol=0)
+
+
+# Fast math flushes float32 subnormals, which bfloat16 subnormals become, so
+# bfloat16 also runs with it on; float16 subnormals are float32 normals.
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "dtype, fast_math",
+    [(T.float16, False), (T.bfloat16, False), (T.bfloat16, True)],
+)
+def test_nextafter_intrinsic(dtype, fast_math):
+    N = 128
+    kernel = tilelang.compile(
+        binary_math_kernel("nextafter", dtype, N),
+        target="cuda",
+        pass_configs={"tl.enable_fast_math": fast_math},
+    )
+    body = kernel.get_kernel_source()
+    body = body[body.rindex("__global__") :]
+    assert body.count("hnextafter(") == 1
+
+    torch_dtype = dtype.as_torch()
+    idx = torch.arange(N, device="cuda", dtype=torch.float32)
+    # Steps in both directions on both sides of zero, including x == y.
+    a = ((idx - 64) * 0.25).to(torch_dtype)
+    c = (((idx % 9) - 4) * 2.0).to(torch_dtype)
+    # The edges the encoding step has to get right: signed zeros, the
+    # smallest subnormal, the largest finite value, infinities and NaN.
+    inf, nan = float("inf"), float("nan")
+    big = torch.finfo(torch_dtype).max
+    tiny = torch.tensor([1], dtype=torch.int16).view(torch_dtype).item()
+    edge_a = [0.0, -0.0, 0.0, -0.0, tiny, -tiny, big, -big, inf, -inf, nan, 1.0]
+    edge_c = [1.0, -1.0, -0.0, 0.0, -1.0, 1.0, inf, -inf, 0.0, 0.0, 1.0, nan]
+    a[: len(edge_a)] = torch.tensor(edge_a, dtype=torch_dtype)
+    c[: len(edge_c)] = torch.tensor(edge_c, dtype=torch_dtype)
+    b = torch.empty(N, device="cuda", dtype=torch_dtype)
+    kernel(a, c, b)
+
+    ref = torch.nextafter(a, c)
+    # Compare encodings: the sign of a zero result is part of the answer.
+    non_nan = ~torch.isnan(ref)
+    assert torch.equal(torch.isnan(b), ~non_nan)
+    assert torch.equal(b.view(torch.int16)[non_nan], ref.view(torch.int16)[non_nan])
 
 
 if __name__ == "__main__":
