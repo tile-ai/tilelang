@@ -16,6 +16,12 @@ file(GLOB TILE_LANG_ASCEND_ALWAYS_SRCS
   src/ascend/target_utils.cc
   src/ascend/ir.cc
   src/ascend/layout/ascend_layouts.cc
+  # The VF region operators register themselves into the shared region-op
+  # registry (src/op/region_op.h) consumed by LayoutInference/LowerTileOp.
+  # Keep them in every build so VF blocks behave identically regardless of
+  # USE_ASCEND, matching the always-available VF frontend frames in ir.cc.
+  src/ascend/op/simt_vf.cc
+  src/ascend/op/simd_vf.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ASCEND_ALWAYS_SRCS})
 

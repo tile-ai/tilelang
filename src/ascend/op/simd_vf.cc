@@ -1,9 +1,11 @@
 /*!
- * \file tl/op/simd_vf.cc
+ * \file tl/ascend/op/simd_vf.cc
  * \brief SimdVF control TileOperator.
  */
 
 #include "simd_vf.h"
+
+#include "op/region_op.h"
 
 namespace tvm {
 namespace tl {
@@ -31,6 +33,21 @@ LayoutMap SimdVFOpNode::InferLayout(const LayoutInferArgs &T,
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() { SimdVFOpNode::RegisterReflection(); }
+
+namespace {
+
+// SimdVF is scalar CCE code with no thread dimension: no region scope, so
+// nested operators keep the enclosing execution scope.
+TileOperator MakeSimdVFOp(const SBlock &block) { return SimdVFOp(block); }
+
+bool RegisterSimdVFRegionOp() {
+  RegisterRegionOpImpl({"SIMD_VF", MakeSimdVFOp, nullptr});
+  return true;
+}
+
+const bool simd_vf_region_op_registered = RegisterSimdVFRegionOp();
+
+} // namespace
 
 } // namespace tl
 } // namespace tvm

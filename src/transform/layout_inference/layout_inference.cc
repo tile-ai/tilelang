@@ -30,8 +30,7 @@
 #include "../../op/copy.h"
 #include "../../op/parallel.h"
 #include "../../op/reducer.h"
-#include "../../op/simd_vf.h"
-#include "../../op/simt_vf.h"
+#include "../../op/region_op.h"
 #include "../../op/utils.h"
 #include "../../span_utils.h"
 #include "../common/attr.h"
@@ -735,31 +734,13 @@ public:
   }
 
 private:
-  struct SimtVFThreadContext {
+  // Region-local execution scope of an opaque region block (see
+  // RegionOpImpl::enter_scope). While non-empty, layout inference records
+  // the innermost region's thread var and bounds instead of the kernel's.
+  struct RegionThreadScope {
     IterVar thread_var;
     Range thread_bounds;
   };
-
-  void PushSimtVFThreadContext(const SBlockNode *op) {
-    const auto *attr = op->body.as<AttrStmtNode>();
-    ICHECK(attr && attr->attr_key == tirx::attr::thread_extent)
-        << "SIMT_VF block body must start with thread_extent AttrStmt";
-    const auto *iv = attr->node.as<IterVarNode>();
-    ICHECK(iv && iv->thread_tag == "threadIdx.x")
-        << "SIMT_VF block body must bind threadIdx.x first";
-    PrimExpr threads = attr->value;
-    DataType dtype = threads.dtype();
-    IterVar active_thread_var = IterVar(
-        Range::FromMinExtent(make_zero(dtype), threads),
-        Var("simtvf_tx", dtype), IterVarType::kThreadIndex, "threadIdx.x");
-    simt_vf_thread_ctx_stack_.push_back(
-        {active_thread_var, active_thread_var->dom});
-  }
-
-  void PopSimtVFThreadContext() {
-    ICHECK(!simt_vf_thread_ctx_stack_.empty());
-    simt_vf_thread_ctx_stack_.pop_back();
-  }
 
   Map<Var, Buffer> GetBufferMap() const {
     Map<Var, Buffer> buffer_map;
@@ -830,7 +811,7 @@ private:
         // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
         CollectFragmentBuffersFromExpr(arg);
       }
-      // Compute thread_index and thread_bounds (SimtVF-local if present).
+      // Compute thread_index and thread_bounds (region-local if present).
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
@@ -997,16 +978,24 @@ private:
   }
 
   void VisitStmt_(const SBlockNode *op) final {
-    if (op->name_hint == "SIMT_VF") {
-      PushSimtVFThreadContext(op);
-      // SimtVF is a control-style TileOperator wrapper. Visit body first so
-      // nested TileOps (e.g. Parallel) are still collected normally.
+    if (const RegionOpImpl *region_impl =
+            LookupRegionOpImpl(std::string(op->name_hint))) {
+      // A region operator wraps the block for the inference worklist. Visit
+      // the body first (under the region's execution scope when it has one)
+      // so nested TileOps (e.g. Parallel) are still collected normally.
+      bool pushed_region_scope = false;
+      if (region_impl->enter_scope != nullptr) {
+        if (auto scope = region_impl->enter_scope(op)) {
+          region_thread_scope_stack_.push_back({scope->first, scope->second});
+          pushed_region_scope = true;
+        }
+      }
       IRVisitorWithAnalyzer::VisitStmt(op->body);
-      // Post-load kLayoutMap from the SimtVF block annotation so explicitly
+      // Post-load kLayoutMap from the region block annotation so explicitly
       // annotated layouts are available during InferLayout.
       // Must happen after visiting body so buffer_data_to_buffers_ is
       // populated.
-      if (op->annotations.count(attr::kLayoutMap)) {
+      if (pushed_region_scope && op->annotations.count(attr::kLayoutMap)) {
         auto map = op->annotations.Get(attr::kLayoutMap)
                        ->as<Map<Var, Layout>>()
                        .value();
@@ -1018,25 +1007,15 @@ private:
           }
         }
       }
-      auto infer = SimtVFOp(tvm::ffi::GetRef<SBlock>(op));
+      auto infer = region_impl->make(tvm::ffi::GetRef<SBlock>(op));
       infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
       infer_list_.push_back(std::move(infer));
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
-      PopSimtVFThreadContext();
-      return;
-    }
-
-    if (op->name_hint == "SIMD_VF") {
-      // SimdVF has no thread context — just visit body to collect nested ops
-      IRVisitorWithAnalyzer::VisitStmt(op->body);
-      auto infer = SimdVFOp(tvm::ffi::GetRef<SBlock>(op));
-      infer_list_stmt_.push_back(tvm::ffi::GetRef<ObjectRef>(op));
-      infer_list_.push_back(std::move(infer));
-      thread_index_vec_.push_back(CurrentThreadIndex());
-      thread_bounds_vec_.push_back(CurrentThreadBounds());
-      analyzer_vec_.push_back(analyzer_.Clone());
+      if (pushed_region_scope) {
+        region_thread_scope_stack_.pop_back();
+      }
       return;
     }
 
@@ -1139,9 +1118,9 @@ private:
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
-        if (!simt_vf_thread_ctx_stack_.empty()) {
-          simt_vf_thread_ctx_stack_.back().thread_var = iv;
-          simt_vf_thread_ctx_stack_.back().thread_bounds =
+        if (!region_thread_scope_stack_.empty()) {
+          region_thread_scope_stack_.back().thread_var = iv;
+          region_thread_scope_stack_.back().thread_bounds =
               Range::FromMinExtent(make_zero(op->value.dtype()), op->value);
         }
       }
@@ -1174,8 +1153,8 @@ private:
   }
 
   Range CurrentThreadBounds() const {
-    if (!simt_vf_thread_ctx_stack_.empty()) {
-      return simt_vf_thread_ctx_stack_.back().thread_bounds;
+    if (!region_thread_scope_stack_.empty()) {
+      return region_thread_scope_stack_.back().thread_bounds;
     }
     return ComputeThreadBounds(thread_binding_, analyzer_);
   }
@@ -1186,8 +1165,8 @@ private:
   PrimExpr CurrentThreadIndex() const {
     // Inside a SIMT_VF region the active thread var comes from that region's
     // own thread_extent binding rather than the enclosing kernel's.
-    if (!simt_vf_thread_ctx_stack_.empty()) {
-      return simt_vf_thread_ctx_stack_.back().thread_var->var;
+    if (!region_thread_scope_stack_.empty()) {
+      return region_thread_scope_stack_.back().thread_var->var;
     }
     if (thread_binding_.defined()) {
       return thread_binding_->var;
@@ -1392,7 +1371,7 @@ private:
   // where the logical thread index is the constant 0 and thread bounds are
   // [0, 1) — no synthetic fallback Var is ever created.
   IterVar thread_binding_;
-  std::vector<SimtVFThreadContext> simt_vf_thread_ctx_stack_;
+  std::vector<RegionThreadScope> region_thread_scope_stack_;
   std::vector<PrimExpr> thread_index_vec_;
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;

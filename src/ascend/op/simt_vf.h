@@ -1,15 +1,15 @@
 /*!
- * \file tl/op/simt_vf.h
+ * \file tl/ascend/op/simt_vf.h
  * \brief SimtVF control TileOperator.
  */
 
-#ifndef TVM_TL_OP_SIMT_VF_H_
-#define TVM_TL_OP_SIMT_VF_H_
+#ifndef TVM_TL_ASCEND_OP_SIMT_VF_H_
+#define TVM_TL_ASCEND_OP_SIMT_VF_H_
 
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
 
-#include "./operator.h"
+#include "op/operator.h"
 
 namespace tvm {
 namespace tl {
@@ -49,4 +49,4 @@ public:
 } // namespace tl
 } // namespace tvm
 
-#endif // TVM_TL_OP_SIMT_VF_H_
+#endif // TVM_TL_ASCEND_OP_SIMT_VF_H_
