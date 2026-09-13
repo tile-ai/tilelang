@@ -2,30 +2,22 @@
  * \file materialize_cpu_parallel_grid.cc
  * \brief Convert the annotated CPU grid loop nests to parallel loops.
  *
- * When the ``tl.cpu_parallel`` pass config is enabled, MaterializeKernelLaunch
- * tags each grid (blockIdx) loop with the ``tl.cpu_grid_dim`` annotation. The
- * annotation rides through the pipeline inertly (mid-pipeline passes only
- * react to ForKind::kParallel) until this tail pass, where loop structure is
- * final. For every annotated nest it then:
+ * MaterializeKernelLaunch tags each grid (blockIdx) loop with
+ * ``tl.cpu_grid_dim`` when ``tl.cpu_parallel`` is enabled; the annotation
+ * rides the pipeline inertly until this tail pass, where loop structure is
+ * final. For every annotated nest this pass:
  *
  *  1. Gates on total trip count (``tl.cpu_parallel_min_trip``, default 0;
- *     dynamic extents skip the gate — both OpenMP and TVM's parallel launch
- *     handle runtime trip counts).
+ *     dynamic extents skip the gate).
  *  2. Converts the chain to kParallel: every dim on ``c`` (for
  *     ``collapse(n)``), the first non-unit dim on ``llvm`` (its codegen
  *     rejects nested parallel loops).
- *  3. Sinks AllocBuffers into the parallel body (per-worker private copies;
- *     on ``c`` at the innermost parallelized dim to keep collapse(n) perfect
- *     nesting). Only allocs whose uses are all plain load/store inside this
- *     nest sink; load-only buffers may stay shared. A nest whose buffer is
- *     mutated inside but cannot be privatized (opaque/cross-level/
- *     cross-nest/outside uses) is refused with a warning rather than raced.
+ *  3. Sinks AllocBuffers into the parallel body (per-worker private copies)
+ *     when every use is a plain load/store inside the nest. A buffer mutated
+ *     inside but not privatizable refuses the nest with a warning.
  *
- * Sibling nests convert independently; a nest inside an already-parallel one
- * stays serial. Invariant: no ``tl.cpu_grid_dim`` survives this pass — every
- * nest is either converted or stripped with an in-place warning naming the
- * loop and the reason. Opt-in only: without the annotation this pass is not
- * even in the pipeline.
+ * Invariant: no ``tl.cpu_grid_dim`` survives this pass — every nest is
+ * converted or stripped with a warning naming the loop and the reason.
  */
 
 #include "op/builtin.h"
@@ -41,6 +33,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -186,10 +179,7 @@ private:
 
 //! A missing For step is the implicit default of 1; materialize the literal.
 PrimExpr NormalizedStep(const ForNode *op) {
-  if (op->step.defined()) {
-    return op->step.value();
-  }
-  return IntImm(op->loop_var.dtype(), 1);
+  return op->step.value_or(IntImm(op->loop_var.dtype(), 1));
 }
 
 /*! \brief Scalarize a possibly-vectorized flat index for affine analysis:
@@ -267,21 +257,11 @@ bool StoreReadsSameBuffer(const BufferStoreNode *op) {
   return reads;
 }
 
-bool ExprHasVar(const PrimExpr &expr) {
-  bool found = false;
-  PostOrderVisit(expr, [&](const ObjectRef &node) {
-    found |= node.as<VarNode>() != nullptr;
-  });
-  return found;
-}
-
-/*! \brief Prove that a store writes every element of its buffer exactly
- * once per execution of some enclosing loop suffix: that suffix has
- * constant extents whose product (times vector lanes) equals the buffer
- * size, and the flat index is injective over it. Outer loops may repeat the
- * full rewrite (e.g. per-stage shared-buffer copies). Anything less
- * (partial writes, dynamic or zero-trip loops, non-affine indices) is not a
- * valid per-iteration reset. */
+/*! \brief Prove that a store rewrites the whole buffer once per execution of
+ * some non-empty enclosing loop suffix: constant extents, unit steps,
+ * trip×lanes == numel, and an injective flat index. Partial writes, dynamic
+ * or zero-trip loops, and non-affine indices do not count as a reset. Outer
+ * loops may repeat the full rewrite (e.g. per-stage shared-buffer copies). */
 bool StoreCoversWholeBuffer(const BufferStoreNode *op,
                             const std::vector<const ForNode *> &enclosing) {
   int64_t numel = 1;
@@ -308,15 +288,12 @@ bool StoreCoversWholeBuffer(const BufferStoreNode *op,
   }
 
   if (enclosing.empty()) {
-    // The store always executes; it is a reset only for a scalar buffer
-    // written as a whole.
+    // The store always executes; it is a reset only for a scalar buffer.
     return numel == 1;
   }
 
-  // Any suffix of the enclosing nest may be the level that fully rewrites
-  // the buffer; check innermost-outward. The suffix must be non-empty: a
-  // store nested in loops whose extents cannot be proven positive
-  // (possibly zero-trip) is not a per-iteration reset.
+  // Any non-empty suffix of the enclosing nest may be the level that fully
+  // rewrites the buffer; check innermost-outward.
   for (size_t start = 0; start < enclosing.size(); ++start) {
     ffi::Map<Var, Range> ranges;
     int64_t trip = 1;
@@ -324,18 +301,10 @@ bool StoreCoversWholeBuffer(const BufferStoreNode *op,
     for (size_t i = start; i < enclosing.size(); ++i) {
       const ForNode *loop = enclosing[i];
       const auto *extent = loop->extent.as<IntImmNode>();
-      if (!extent || extent->value <= 0 || !is_zero(loop->min)) {
+      if (!extent || extent->value <= 0 || !is_zero(loop->min) ||
+          !is_one(NormalizedStep(loop))) {
         ok = false;
         break;
-      }
-      // A non-unit step visits only a strided subset of the range, so the
-      // trip-count coverage below would not hold.
-      if (loop->step.defined()) {
-        const auto *step = loop->step.as<IntImmNode>();
-        if (!step || step->value != 1) {
-          ok = false;
-          break;
-        }
       }
       ranges.Set(loop->loop_var, Range::FromMinExtent(
                                      IntImm(DataType::Int(32), 0),
@@ -403,17 +372,12 @@ private:
 /*! \brief Per-nest check for parameter/global buffers (those without an
  * AllocBuffer): every write-relevant access must be provably race-free.
  * Accesses are collected during the traversal and evaluated in Finish():
- *  1. Opaque uses are unanalyzable -> refuse: a bare data var in a Call
- *     argument (call_extern / access_ptr), or address_of of the buffer
- *     (the callee may write past the addressed element).
- *  2. All store addresses must be the same per-iteration address;
- *     different stores to one buffer may not cover each other.
- *  3. That address must be injective over the parallel scope and the
- *     per-iteration serial scopes — no same-value exemption: concurrent
- *     writes to one address are a data race even when the values agree.
- *  4. Every load of a written buffer must use that same address
- *     (same-iteration); anything else is a cross-iteration dependency.
- * Read-only buffers are always fine. */
+ * opaque uses are unanalyzable (a bare data var in a Call argument, or
+ * address_of — the callee may write past the addressed element); all store
+ * addresses must agree and be injective over the parallel scope and the
+ * per-iteration serial scopes (concurrent writes to one address race even
+ * when the values agree); loads of a written buffer must use that same
+ * address. Read-only buffers are always fine. */
 class OverlapStoreChecker : public StmtExprVisitor {
 public:
   OverlapStoreChecker(const GridAccessAnalysis &analysis,
@@ -491,24 +455,13 @@ private:
   };
 
   ffi::Map<Var, Range> CurrentRanges() const {
-    ffi::Map<Var, Range> ranges = RangesFor(parallel_scope_);
-    for (const auto &[var, range] : RangesFor(outer_serial_scope_)) {
-      ranges.Set(var, range);
-    }
-    for (const auto &[var, extent] : serial_scope_) {
-      ranges.Set(var, RangeForExtent(extent));
-    }
-    return ranges;
-  }
-
-  static Range RangeForExtent(const PrimExpr &extent) {
-    return Range::FromMinExtent(IntImm(DataType::Int(32), 0), extent);
-  }
-  ffi::Map<Var, Range>
-  RangesFor(const std::vector<std::pair<Var, PrimExpr>> &scopes) const {
     ffi::Map<Var, Range> ranges;
-    for (const auto &[var, extent] : scopes) {
-      ranges.Set(var, RangeForExtent(extent));
+    for (const auto *scope :
+         {&parallel_scope_, &outer_serial_scope_, &serial_scope_}) {
+      for (const auto &[var, extent] : *scope) {
+        ranges.Set(var,
+                   Range::FromMinExtent(IntImm(DataType::Int(32), 0), extent));
+      }
     }
     return ranges;
   }
@@ -619,8 +572,7 @@ struct GridRewriter : public StmtMutator {
       return StmtMutator::VisitStmt_(op);
     }
     if (in_parallel_) {
-      // Nested inside an already-parallel region: keep serial, report in
-      // place, strip the annotation (deeper nests are handled likewise).
+      // Nested inside an already-parallel region: strip and stay serial.
       LOG(WARNING) << "tl.cpu_parallel: grid loop `" << op->loop_var->name_hint
                    << "` is nested inside another parallelized nest; it "
                       "stays serial";
@@ -629,15 +581,7 @@ struct GridRewriter : public StmtMutator {
                  StripGridAnnotation(op->annotations), NormalizedStep(op),
                  op->span);
     }
-    auto [result, converted] = ConvertGridNest(op, {});
-    // Whether or not this nest converted, its body may hide further
-    // annotated nests: if this one is now parallel they must stay serial,
-    // otherwise they convert independently.
-    bool was_in_parallel = in_parallel_;
-    in_parallel_ = converted;
-    Stmt out = VisitStmt(result);
-    in_parallel_ = was_in_parallel;
-    return out;
+    return ConvertThenVisit(op, {});
   }
 
   //! Convert the nest headed by `head`, rebuilding transparent wrappers.
@@ -648,6 +592,13 @@ struct GridRewriter : public StmtMutator {
                       ConvertNestElement(attr->body, head, std::move(sunk)),
                       attr->span);
     }
+    return ConvertThenVisit(head, std::move(sunk));
+  }
+
+  //! Convert the nest headed by `head`, then keep visiting the result: an
+  //! annotated nest hidden deeper must stay serial when this one turned
+  //! parallel, and converts independently otherwise.
+  Stmt ConvertThenVisit(const ForNode *head, std::vector<Stmt> sunk) {
     auto [result, converted] = ConvertGridNest(head, std::move(sunk));
     bool was_in_parallel = in_parallel_;
     in_parallel_ = converted;
@@ -827,8 +778,8 @@ struct GridRewriter : public StmtMutator {
       }
     }
 
-    // P1-3: refuse definite overlapping writes to parameter/global buffers
-    // (address not injective across grid iterations, shared RMW, etc.).
+    // Refuse writes to parameter/global buffers that cannot be proven
+    // race-free across grid iterations.
     {
       std::vector<std::pair<Var, PrimExpr>> parallel_scope, outer_serial;
       for (size_t i = 0; i < loops.size(); ++i) {
@@ -852,9 +803,9 @@ struct GridRewriter : public StmtMutator {
     }
 
     // Refuse to parallelize when a function-scope buffer is mutated (or
-    // opaquely used) inside the nest but cannot be privatized into it —
-    // running it shared across workers would be a data race. Load-only
-    // sharing (e.g. a table initialized before the nest) is race-free.
+    // opaquely used) inside the nest but cannot be privatized into it;
+    // load-only sharing (e.g. a table initialized before the nest) is
+    // race-free.
     for (const auto &kv : analysis_.AllocDepths()) {
       const Var &data = kv.first;
       if (kv.second != 0) {
@@ -866,14 +817,11 @@ struct GridRewriter : public StmtMutator {
       }
       if (SinkableAlloc(info, head, sink_depth) &&
           !Privacy(head).ReadsPrevious(data)) {
-        bool was_sunk = false;
-        for (const Stmt &s : sunk) {
-          if (s.as<AllocBufferNode>() &&
-              s.as<AllocBufferNode>()->buffer->data.same_as(data)) {
-            was_sunk = true;
-            break;
-          }
-        }
+        bool was_sunk =
+            std::any_of(sunk.begin(), sunk.end(), [&](const Stmt &s) {
+              const auto *alloc = s.as<AllocBufferNode>();
+              return alloc && alloc->buffer->data.same_as(data);
+            });
         if (!was_sunk) {
           LOG(WARNING) << "tl.cpu_parallel: buffer `" << data->name_hint
                        << "` is used only inside the nest of grid loop `"
