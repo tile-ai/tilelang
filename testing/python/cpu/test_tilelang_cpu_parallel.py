@@ -705,6 +705,38 @@ def test_cpu_parallel_extern_bare_data_var_stays_serial():
     torch.testing.assert_close(kernel(A)[0], torch.tensor(float(N_BV)))
 
 
+def test_cpu_parallel_address_of_write_range_stays_serial():
+    # The callee writes past the addressed element (p[0] and p[1]), so
+    # adjacent iterations' write sets overlap even though the start
+    # addresses are injective; the nest must stay serial.
+    N_AW = 4096
+
+    @T.prim_func
+    def address_of_range(
+        A: T.Tensor((N_AW,), "float32"),
+        B: T.Tensor((N_AW + 1,), "float32"),
+    ):
+        with T.Kernel(
+            N_AW,
+            threads=1,
+            prelude="static inline void writer(float* p) {\n    p[0] += 1.0f;\n    p[1] += 1.0f;\n}\n",
+        ) as bx:
+            T.call_extern("void", "writer", T.address_of(B[bx]))
+
+    kernel = tilelang.compile(
+        address_of_range,
+        target="c",
+        execution_backend="cython",
+        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+    )
+    assert "#pragma omp" not in kernel.get_kernel_source()
+
+    A = torch.zeros(N_AW, dtype=torch.float32)
+    B = torch.zeros(N_AW + 1, dtype=torch.float32)
+    kernel(A, B)
+    torch.testing.assert_close(B.sum(), torch.tensor(float(2 * N_AW)))
+
+
 def test_cpu_parallel_cross_store_collision_stays_serial():
     # B[bx] and B[bx+1] are each injective on their own, but iteration bx and
     # bx+1 collide on B[bx+1]: the nest must stay serial.
