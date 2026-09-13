@@ -185,30 +185,35 @@ inline bool CanVectorizeAtomicTarget(const PrimExpr &original_dst,
     return false;
   }
 
-  auto advance_of = [&](const PrimExpr &idx) {
-    return analyzer->Simplify(
-        Substitute(idx, {{vectorized_var, IntImm(vectorized_var->dtype, 1)}}) -
-        Substitute(idx, {{vectorized_var, IntImm(vectorized_var->dtype, 0)}}));
+  auto at_lane = [&](const PrimExpr &idx, int lane) {
+    return analyzer->Simplify(Substitute(
+        idx, {{vectorized_var, IntImm(vectorized_var->dtype, lane)}}));
   };
 
-  bool has_lane_index = false;
-  size_t lane_index = 0;
+  // Exactly one innermost index must advance one element per lane; every other
+  // index must stay constant across all lanes. Check every lane transition, not
+  // just 0 -> 1: `B[i % 2]` agrees on lanes 0/1 but repeats for larger widths.
+  int lane_index = -1;
   for (size_t k = 0; k < orig_load.value()->indices.size(); ++k) {
-    const auto *adv =
-        advance_of(orig_load.value()->indices[k]).as<IntImmNode>();
-    if (adv == nullptr) {
-      return false;
+    PrimExpr base = at_lane(orig_load.value()->indices[k], 0);
+    bool is_constant = true;
+    bool is_unit_stride = true;
+    for (int lane = 1; lane < vector_size; ++lane) {
+      PrimExpr value = at_lane(orig_load.value()->indices[k], lane);
+      is_constant = is_constant && analyzer->CanProveEqual(value, base);
+      is_unit_stride =
+          is_unit_stride &&
+          analyzer->CanProveEqual(value, base + make_const(base.dtype(), lane));
     }
-    if (adv->value == 0) {
+    if (is_constant) {
       continue;
     }
-    if (has_lane_index || adv->value != 1) {
+    if (!is_unit_stride || lane_index >= 0) {
       return false;
     }
-    has_lane_index = true;
-    lane_index = k;
+    lane_index = static_cast<int>(k);
   }
-  if (!has_lane_index || lane_index != orig_load.value()->indices.size() - 1) {
+  if (lane_index != static_cast<int>(orig_load.value()->indices.size()) - 1) {
     return false;
   }
 

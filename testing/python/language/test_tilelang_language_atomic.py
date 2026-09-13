@@ -1437,17 +1437,22 @@ def _invariant_index(which, i):
         return 0
     if which == 5:  # invariant, odd base
         return (i // 2) * 2 + 1
+    if which == 6:  # two-periodic: agrees on lanes 0/1, repeats at width 4
+        return i % 2
     raise ValueError(f"unknown case {which}")
 
 
-# (which, expect_wide)
+# (which, dtype, max_width): bound on the vector width the destination may use.
+# A destination with a valid contiguous run of k elements bounds at k (4 is the
+# widest any target emits), so the assertion is target independent.
 _INVARIANT_CASES = [
-    (0, True),
-    (1, True),
-    (2, False),
-    (3, False),
-    (4, False),
-    (5, False),
+    (0, T.float16, 4),  # B[i]
+    (1, T.float16, 4),  # B[i+2]
+    (2, T.float16, 1),  # B[i//2]
+    (3, T.float16, 1),  # B[(i//2)*2]
+    (4, T.float16, 1),  # B[0]
+    (5, T.float16, 1),  # B[(i//2)*2+1]
+    (6, T.float32, 2),  # B[i%2]: only lanes 0/1 form a valid run
 ]
 
 
@@ -1507,18 +1512,25 @@ def _invariant_reference(which, a):
 
 @tilelang.testing.requires_cuda
 def test_atomic_add_invariant_destination():
-    a = torch.arange(1, _INV_EXTENT + 1, dtype=torch.float16, device="cuda")
-
-    def run(kernel, which, expect_wide):
-        assert ("AtomicAddx" in kernel.get_kernel_source()) == expect_wide
-        b = torch.zeros(_INV_N, dtype=torch.float16, device="cuda")
+    def run(which, dtype, max_width):
+        kernel = atomic_add_invariant_program(which, dtype)
+        widths = [int(w) for w in re.findall(r"AtomicAddx(\d)", kernel.get_kernel_source())]
+        assert all(w <= max_width for w in widths), (which, widths, max_width)
+        a = torch.arange(1, _INV_EXTENT + 1, dtype=getattr(torch, dtype), device="cuda")
+        b = torch.zeros(_INV_N, dtype=getattr(torch, dtype), device="cuda")
         kernel(a, b)
         torch.testing.assert_close(b, _invariant_reference(which, a), atol=0, rtol=0)
 
-    for which, expect_wide in _INVARIANT_CASES:
-        run(atomic_add_invariant_program(which), which, expect_wide)
-    run(atomic_add_invariant_shared_program(), 2, False)
-    run(atomic_add_invariant_memory_order_program(), 2, False)
+    for which, dtype, max_width in _INVARIANT_CASES:
+        run(which, dtype, max_width)
+
+    a = torch.arange(1, _INV_EXTENT + 1, dtype=torch.float16, device="cuda")
+    for program in (atomic_add_invariant_shared_program, atomic_add_invariant_memory_order_program):
+        kernel = program()
+        assert "AtomicAddx" not in kernel.get_kernel_source()
+        b = torch.zeros(_INV_N, dtype=torch.float16, device="cuda")
+        kernel(a, b)
+        torch.testing.assert_close(b, _invariant_reference(2, a), atol=0, rtol=0)
 
 
 if __name__ == "__main__":
