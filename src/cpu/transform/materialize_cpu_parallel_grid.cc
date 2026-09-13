@@ -403,10 +403,10 @@ private:
 /*! \brief Per-nest check for parameter/global buffers (those without an
  * AllocBuffer): every write-relevant access must be provably race-free.
  * Accesses are collected during the traversal and evaluated in Finish():
- *  1. A bare data var in a Call argument (call_extern / access_ptr) is an
- *     unanalyzable opaque use -> refuse.
- *  2. All store addresses (including address_of indices — the callee may
- *     write through the pointer) must be the same per-iteration address;
+ *  1. Opaque uses are unanalyzable -> refuse: a bare data var in a Call
+ *     argument (call_extern / access_ptr), or address_of of the buffer
+ *     (the callee may write past the addressed element).
+ *  2. All store addresses must be the same per-iteration address;
  *     different stores to one buffer may not cover each other.
  *  3. That address must be injective over the parallel scope and the
  *     per-iteration serial scopes — no same-value exemption: concurrent
@@ -424,29 +424,37 @@ public:
 
   bool found() const { return found_; }
   const std::string &buffer_name() const { return buffer_name_; }
+  const char *reason() const { return reason_; }
 
   //! Evaluate the collected accesses; call after the traversal.
   void Finish() {
     arith::Analyzer analyzer;
     for (const auto &[data, acc] : access_) {
       bool fail = acc.opaque_unanalyzable;
+      if (fail) {
+        reason_ = "opaque pointer use (call_extern / address_of / "
+                  "access_ptr)";
+      }
       PrimExpr uniform;
       for (const StoreRec &rec : acc.stores) {
         PrimExpr simplified =
             rec.index.defined() ? analyzer.Simplify(rec.index) : PrimExpr();
         if (!simplified.defined()) {
           fail = true;
+          reason_ = "unanalyzable store address";
           break;
         }
         if (!uniform.defined()) {
           uniform = simplified;
         } else if (!StructuralEqual()(uniform, simplified)) {
           fail = true; // stores to one buffer cover each other's addresses
+          reason_ = "stores to one buffer cover each other's addresses";
           break;
         }
         auto ranges = rec.ranges;
         if (!ProveInjectiveIndex(ScalarizedIndex(rec.index, &ranges), ranges)) {
           fail = true; // colliding write across grid iterations
+          reason_ = "write addresses collide across grid iterations";
           break;
         }
       }
@@ -457,6 +465,7 @@ public:
           if (!ld.defined() ||
               !StructuralEqual()(uniform, analyzer.Simplify(ld))) {
             fail = true;
+            reason_ = "cross-iteration dependency (loop-carried load)";
             break;
           }
         }
@@ -476,7 +485,7 @@ private:
   };
   struct BufAccess {
     std::string name;
-    std::vector<StoreRec> stores; // BufferStore + address_of (opaque write)
+    std::vector<StoreRec> stores; // plain BufferStore addresses
     std::vector<PrimExpr> load_indices;
     bool opaque_unanalyzable = false;
   };
@@ -529,16 +538,16 @@ private:
     StmtExprVisitor::VisitExpr_(op);
   }
   void VisitExpr_(const CallNode *op) override {
-    // address_of wraps a BufferLoad; the callee may write through the
-    // pointer, so the index counts as a store address.
+    // address_of hands the callee a raw pointer into the buffer; the write
+    // range through that pointer is unanalyzable (the callee may store past
+    // the addressed element), so it takes the same conservative path as
+    // access_ptr: refuse.
     if (op->op.same_as(builtin::address_of()) && !op->args.empty()) {
       if (const auto *load = op->args[0].as<BufferLoadNode>();
           load && !analysis_.HasAllocation(load->buffer->data)) {
         BufAccess &acc = access_[load->buffer->data];
         acc.name = load->buffer->name;
-        acc.stores.push_back(
-            {load->indices.size() == 1 ? load->indices[0] : PrimExpr(),
-             CurrentRanges()});
+        acc.opaque_unanalyzable = true;
       }
     }
     ++in_call_;
@@ -566,6 +575,7 @@ private:
   int in_call_ = 0;
   bool found_ = false;
   std::string buffer_name_;
+  const char *reason_ = "";
 };
 
 struct GridRewriter : public StmtMutator {
@@ -833,8 +843,9 @@ struct GridRewriter : public StmtMutator {
       overlap.Finish();
       if (overlap.found()) {
         LOG(WARNING) << "tl.cpu_parallel: buffer `" << overlap.buffer_name()
-                     << "` is written at addresses that collide across grid "
-                        "iterations (overlapping write); grid loop `"
+                     << "` cannot be proven race-free across grid iterations "
+                        "("
+                     << overlap.reason() << "); grid loop `"
                      << head->loop_var->name_hint << "` stays serial";
         return rebuild_serial();
       }
