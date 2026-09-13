@@ -164,6 +164,59 @@ inline int GetMaxAtomicVectorSize(const Buffer &destination, Target target) {
   return 1;
 }
 
+/*!
+ * \brief Whether a scalar atomic_add target can be widened to a vectorized
+ * atomic. The wide atomic writes `vector_size` contiguous elements from the
+ * base, so the loop var must advance one element per lane in a single innermost
+ * index and the base must be aligned to the atomic width.
+ */
+inline bool CanVectorizeAtomicTarget(const PrimExpr &original_dst,
+                                     const PrimExpr &visited_dst,
+                                     const Var &vectorized_var, int vector_size,
+                                     arith::Analyzer *analyzer) {
+  auto orig_load = ExtractBufferLoadForAtomic(original_dst);
+  auto visited_load = ExtractBufferLoadForAtomic(visited_dst);
+  if (!orig_load.defined() || !visited_load.defined()) {
+    return false;
+  }
+  if (orig_load.value()->buffer->dtype.lanes() != 1 || vector_size <= 1 ||
+      orig_load.value()->indices.size() !=
+          visited_load.value()->indices.size()) {
+    return false;
+  }
+
+  auto advance_of = [&](const PrimExpr &idx) {
+    return analyzer->Simplify(
+        Substitute(idx, {{vectorized_var, IntImm(vectorized_var->dtype, 1)}}) -
+        Substitute(idx, {{vectorized_var, IntImm(vectorized_var->dtype, 0)}}));
+  };
+
+  bool has_lane_index = false;
+  size_t lane_index = 0;
+  for (size_t k = 0; k < orig_load.value()->indices.size(); ++k) {
+    const auto *adv =
+        advance_of(orig_load.value()->indices[k]).as<IntImmNode>();
+    if (adv == nullptr) {
+      return false;
+    }
+    if (adv->value == 0) {
+      continue;
+    }
+    if (has_lane_index || adv->value != 1) {
+      return false;
+    }
+    has_lane_index = true;
+    lane_index = k;
+  }
+  if (!has_lane_index || lane_index != orig_load.value()->indices.size() - 1) {
+    return false;
+  }
+
+  PrimExpr base_idx = visited_load.value()->indices[lane_index];
+  return analyzer->CanProve(
+      floormod(base_idx, make_const(base_idx.dtype(), vector_size)) == 0);
+}
+
 // Rewrite vectorized allocation access
 // This is necessary for making each vector component containing its own
 // workspace. Originates from Halide's loop vectorizer
@@ -635,11 +688,27 @@ public:
 
     // Check if dtype supports this vector size
     auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
+    if (!dst_buffer_load.defined()) {
+      need_scalarize_ = true;
+      return GetRef<PrimExpr>(op);
+    }
     Target target = Target::Current(false);
     int max_vec_size =
         GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer, target);
     if (vector_size > max_vec_size) {
       // Keep the loop binder when this atomic requires scalar lanes.
+      need_scalarize_ = true;
+      return GetRef<PrimExpr>(op);
+    }
+
+    // The widened atomic writes `vector_size` contiguous elements at the
+    // destination base address, so only emit it when the destination index
+    // advances exactly one element per lane and the base is aligned to the
+    // atomic width. An invariant/broadcast destination (`B[i // 2]`, `B[0]`),
+    // a strided one, or an odd base would silently corrupt neighbours or fault
+    // with a misaligned address, so fall back to scalar atomics.
+    if (!CanVectorizeAtomicTarget(op->args[0], dst, var_, vector_size,
+                                  &analyzer_)) {
       need_scalarize_ = true;
       return GetRef<PrimExpr>(op);
     }

@@ -1340,6 +1340,9 @@ def test_atomic_add_contended_bf16():
     # bf16 is the dtype whose pre-SM80 add is a CAS loop; float32 contention is
     # already covered by the multi-block test_atomic_add above.
     run_atomic_add_contended(128, 128, T.bfloat16)
+    # With more elements than threads the loop vectorizes; the shared constant
+    # destination must stay scalar instead of widening to AtomicAddx2.
+    run_atomic_add_contended(256, 128, T.bfloat16)
 
 
 @tilelang.jit
@@ -1413,6 +1416,109 @@ def test_atomic_add_bf16_compiles_for_sm75():
         "AtomicAddx4Ret(",
     ):
         assert helper in source, f"{helper} not exercised by the sm_75 kernel"
+
+
+# ======================= Invariant atomic destination =======================
+
+_INV_N = 64
+_INV_EXTENT = 2
+
+
+def _invariant_index(which, i):
+    if which == 0:  # contiguous, aligned
+        return i
+    if which == 1:  # contiguous with an even base
+        return i + 2
+    if which == 2:  # invariant within the 2-lane boundary
+        return i // 2
+    if which == 3:  # invariant, aligned base
+        return (i // 2) * 2
+    if which == 4:  # constant destination
+        return 0
+    if which == 5:  # invariant, odd base
+        return (i // 2) * 2 + 1
+    raise ValueError(f"unknown case {which}")
+
+
+# (which, expect_wide)
+_INVARIANT_CASES = [
+    (0, True),
+    (1, True),
+    (2, False),
+    (3, False),
+    (4, False),
+    (5, False),
+]
+
+
+@tilelang.jit
+def atomic_add_invariant_program(which, dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B[_invariant_index(which, i)], A_local[i])
+
+    return atomic_add_invariant
+
+
+@tilelang.jit
+def atomic_add_invariant_shared_program(dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant_shared(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            B_shared = T.alloc_shared((_INV_N,), dtype)
+            for i in T.Parallel(_INV_N):
+                B_shared[i] = B[i]
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B_shared[i // 2], A_local[i])
+            for i in T.Parallel(_INV_N):
+                B[i] = B_shared[i]
+
+    return atomic_add_invariant_shared
+
+
+@tilelang.jit
+def atomic_add_invariant_memory_order_program(dtype=T.float16):
+    @T.prim_func
+    def atomic_add_invariant_memory_order(A: T.Tensor((_INV_EXTENT,), dtype), B: T.Tensor((_INV_N,), dtype)):
+        with T.Kernel(1, threads=1) as _:
+            A_local = T.alloc_fragment((_INV_EXTENT,), dtype)
+            for i in T.Parallel(_INV_EXTENT):
+                A_local[i] = A[i]
+            for i in T.Parallel(_INV_EXTENT):
+                T.atomic_add(B[i // 2], A_local[i], memory_order="relaxed")
+
+    return atomic_add_invariant_memory_order
+
+
+def _invariant_reference(which, a):
+    ref = torch.zeros(_INV_N, dtype=a.dtype, device=a.device)
+    for i in range(_INV_EXTENT):
+        ref[_invariant_index(which, i)] += a[i]
+    return ref
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_add_invariant_destination():
+    a = torch.arange(1, _INV_EXTENT + 1, dtype=torch.float16, device="cuda")
+
+    def run(kernel, which, expect_wide):
+        assert ("AtomicAddx" in kernel.get_kernel_source()) == expect_wide
+        b = torch.zeros(_INV_N, dtype=torch.float16, device="cuda")
+        kernel(a, b)
+        torch.testing.assert_close(b, _invariant_reference(which, a), atol=0, rtol=0)
+
+    for which, expect_wide in _INVARIANT_CASES:
+        run(atomic_add_invariant_program(which), which, expect_wide)
+    run(atomic_add_invariant_shared_program(), 2, False)
+    run(atomic_add_invariant_memory_order_program(), 2, False)
 
 
 if __name__ == "__main__":
