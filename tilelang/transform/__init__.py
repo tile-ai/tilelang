@@ -202,10 +202,11 @@ DEFAULT_SIMT_THREADS = 128
 
 
 def MaterializeKernelLaunch(
-    lower_grid_binding: bool | None = None,
     lower_thread_binding: bool = True,
     default_threads: int | list[int] | tuple | None = DEFAULT_SIMT_THREADS,
     unsupported_annotations: list[str] | tuple[str, ...] | None = None,
+    *,
+    lower_grid_binding: bool | None = None,
     launch_dim_tags: list[str] | tuple[str, ...] | None = None,
 ):
     """Materialize the target-neutral kernel launch nest emitted by T.Kernel
@@ -216,16 +217,6 @@ def MaterializeKernelLaunch(
 
     Parameters
     ----------
-    lower_grid_binding : bool | None
-        If True (targets with a real block/core-level launch, e.g. CUDA,
-        Ascend), lower the launch loops (blockIdx.* grid axes and any tag in
-        ``launch_dim_tags``) into thread_extent AttrStmts carrying each loop's
-        own thread tag.
-        If False (targets with no program-index space, e.g. CPU), lower those
-        loops into plain serial For loops.
-        If None (the default), follow ``lower_thread_binding``: a backend with
-        SIMT threads has a program-index space too, and a backend without them
-        has none. Pass this explicitly to decouple the two, as Ascend does.
     lower_thread_binding : bool
         If True (SIMT backends, e.g. CUDA/ROCm/Metal), bind the thread
         placeholders as threadIdx.* thread_extent scopes.
@@ -243,11 +234,21 @@ def MaterializeKernelLaunch(
         ``cluster_dims``) that have no meaning on this backend. A launch
         carrying one is rejected here instead of being silently ignored by
         later passes.
+    lower_grid_binding : bool | None
+        Keyword-only. If True (targets with a real block/core-level launch,
+        e.g. CUDA, Ascend), lower the launch loops (blockIdx.* grid axes and
+        any tag in ``launch_dim_tags``) into thread_extent AttrStmts carrying
+        each loop's own thread tag.
+        If False (targets with no program-index space, e.g. CPU), lower those
+        loops into plain serial For loops.
+        If None (the default), follow ``lower_thread_binding``: a backend with
+        SIMT threads has a program-index space too, and a backend without them
+        has none. Pass this explicitly to decouple the two, as Ascend does.
     launch_dim_tags : list[str] | None
-        Extra thread_binding tags that belong to the launch nest rather than to
-        the thread domain, so a backend can extend the launch vocabulary
-        without this pass knowing about it. Ascend passes ``["cthread"]`` for
-        ``T.MixedKernel``'s sub-block-id dimension.
+        Keyword-only. Extra thread_binding tags that belong to the launch
+        nest rather than to the thread domain, so a backend can extend the
+        launch vocabulary without this pass knowing about it. Ascend passes
+        ``["cthread"]`` for ``T.MixedKernel``'s sub-block-id dimension.
 
     Returns
     -------
