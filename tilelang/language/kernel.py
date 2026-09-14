@@ -85,59 +85,6 @@ def _get_current_stack() -> FrameStack:
     return _local.kernel_launch_frame_stack
 
 
-# ---------------------------------------------------------------------------
-# Nested thread scopes
-#
-# A launch owns the grid, and a SIMT backend may additionally declare the thread
-# extents on the launch itself (threads=). Some backends instead open a *nested*
-# thread domain inside the launch: Ascend's T.SimtVF declares its own threadIdx
-# extents below the launch nest, so T.get_thread_binding() there must resolve
-# against the SimtVF scope rather than against the launch frame.
-#
-# The stack lives here, not in the dialect, because the accessors below are
-# re-exported by ``tilelang.language.common`` and reached by name from
-# backend-neutral code (e.g. tilelang/cuda/language/random.py binds
-# ``tilelang.language.common as T`` and calls T.get_thread_extent()). A dialect
-# that only shadowed its own accessor would be bypassed by those callers. Only
-# the mechanism is shared; the frames that push onto it are backend-owned.
-# ---------------------------------------------------------------------------
-
-
-class SimtVFContext:
-    """Thread vars and extents of the innermost nested thread scope."""
-
-    __slots__ = ("thread_vars", "thread_extents")
-
-    def __init__(self, thread_vars, thread_extents):
-        self.thread_vars = thread_vars
-        self.thread_extents = thread_extents
-
-
-_thread_scope_local = threading.local()
-
-
-def _get_thread_scope_stack() -> FrameStack:
-    if not hasattr(_thread_scope_local, "thread_scope_stack"):
-        _thread_scope_local.thread_scope_stack = FrameStack()
-    return _thread_scope_local.thread_scope_stack
-
-
-def _get_current_simtvf() -> SimtVFContext | None:
-    """The innermost nested thread scope, or None when the launch owns threads."""
-    stack = _get_thread_scope_stack()
-    return stack.top() if stack else None
-
-
-def push_simtvf_context(ctx: SimtVFContext):
-    """Enter a nested thread scope, making its thread vars the current ones."""
-    _get_thread_scope_stack().push(ctx)
-
-
-def pop_simtvf_context():
-    """Leave the innermost nested thread scope."""
-    _get_thread_scope_stack().pop()
-
-
 def _normalize_bindings(bindings: list[Var]) -> Var | list[Var]:
     """
     Return a bare Var when we only have a single binding so that users may write either
@@ -639,18 +586,12 @@ def CUDASourceCodeKernel(
 
 def get_thread_binding(dim: int = 0) -> Var:
     """Returns the thread binding for the given dimension."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return simtvf.thread_vars[dim]
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_binding(dim)
 
 
 def get_thread_bindings() -> list[Var]:
     """Returns all three thread bindings."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return list(simtvf.thread_vars)
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_bindings()
 
@@ -669,18 +610,12 @@ def get_block_bindings() -> list[Var]:
 
 def get_thread_extent(dim: int = 0) -> int:
     """Returns the thread extent for the given dimension."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return simtvf.thread_extents[dim]
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_extent(dim)
 
 
 def get_thread_extents() -> list[int]:
     """Returns all three thread extents."""
-    simtvf = _get_current_simtvf()
-    if simtvf is not None:
-        return list(simtvf.thread_extents)
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_extents()
 

@@ -41,13 +41,12 @@ from .frame import Cube, CubeFrame, SimdVF, SimdVFFrame, SimtVF, SimtVFFrame, Ve
 from . import simd as simd  # noqa: F401 (exposed as T.simd.*)
 
 # Ascend owns its debug surface: device_assert lowers through the toolkit's
-# assert() macro and print gates by the NPU execution model (no CUDA-style
-# single-thread condition). The RNG intrinsics stay imported from the CUDA
-# dialect module: #2734 filed them there, and they are pure emission that the
-# Ascend codegen also implements.
+# assert() macro, print gates by the NPU execution model (no CUDA-style
+# single-thread condition), and rng_init derives its default sequence id from
+# the SimtVF thread scope.
 from ..debug import device_assert  # noqa: F401
 from .print import print  # noqa: F401,A001
-from tilelang.cuda.language.random import rng_init, rng_rand, rng_rand_float  # noqa: F401
+from .random import rng_init, rng_rand, rng_rand_float  # noqa: F401
 
 from .dma import *  # noqa: F401,F403
 from .dma import __all__ as _DMA_ALL

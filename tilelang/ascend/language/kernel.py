@@ -12,25 +12,26 @@ the kernel-level ``tx/ty/tz`` placeholders are dropped by the Ascend pipeline.
 
 from __future__ import annotations
 
+import threading
+
 from tvm import tirx
+from tvm.tirx import Var
 
 from tilelang import _ffi_api
 from tilelang.jit.exceptions import JITNoBuilderError
 from tilelang.language.kernel import (
+    FrameStack,
     KernelLaunchFrame,
-    SimtVFContext,
     get_block_binding,
     get_block_bindings,
     get_block_extent,
     get_block_extents,
-    get_thread_binding,
-    get_thread_bindings,
-    get_thread_extent,
-    get_thread_extents,
+    get_thread_binding as _launch_thread_binding,
+    get_thread_bindings as _launch_thread_bindings,
+    get_thread_extent as _launch_thread_extent,
+    get_thread_extents as _launch_thread_extents,
     kernel_launch_factory,
     launch_kernel,
-    pop_simtvf_context,
-    push_simtvf_context,
 )
 
 __all__ = [
@@ -48,6 +49,86 @@ __all__ = [
     "pop_simtvf_context",
     "push_simtvf_context",
 ]
+
+# ---------------------------------------------------------------------------
+# Nested thread scopes
+#
+# The Ascend launch owns only the 1-D core grid; real threadIdx domains are
+# opened *inside* the kernel body by T.SimtVF. This dialect's thread accessors
+# therefore resolve against the innermost SimtVF scope first and only fall
+# back to the launch frame. Every accessor that can run under a SimtVF scope
+# is dialect-owned (T.get_thread_binding via this module, T.rng_init via
+# ascend/language/random.py), so the mechanism lives here rather than in the
+# shared launch module.
+# ---------------------------------------------------------------------------
+
+
+class SimtVFContext:
+    """Thread vars and extents of the innermost nested thread scope."""
+
+    __slots__ = ("thread_vars", "thread_extents")
+
+    def __init__(self, thread_vars, thread_extents):
+        self.thread_vars = thread_vars
+        self.thread_extents = thread_extents
+
+
+_thread_scope_local = threading.local()
+
+
+def _get_thread_scope_stack() -> FrameStack:
+    if not hasattr(_thread_scope_local, "thread_scope_stack"):
+        _thread_scope_local.thread_scope_stack = FrameStack()
+    return _thread_scope_local.thread_scope_stack
+
+
+def _get_current_simtvf() -> SimtVFContext | None:
+    """The innermost nested thread scope, or None when the launch owns threads."""
+    stack = _get_thread_scope_stack()
+    return stack.top() if stack else None
+
+
+def push_simtvf_context(ctx: SimtVFContext):
+    """Enter a nested thread scope, making its thread vars the current ones."""
+    _get_thread_scope_stack().push(ctx)
+
+
+def pop_simtvf_context():
+    """Leave the innermost nested thread scope."""
+    _get_thread_scope_stack().pop()
+
+
+def get_thread_binding(dim: int = 0) -> Var:
+    """Returns the thread binding for the given dimension."""
+    simtvf = _get_current_simtvf()
+    if simtvf is not None:
+        return simtvf.thread_vars[dim]
+    return _launch_thread_binding(dim)
+
+
+def get_thread_bindings() -> list[Var]:
+    """Returns all three thread bindings."""
+    simtvf = _get_current_simtvf()
+    if simtvf is not None:
+        return list(simtvf.thread_vars)
+    return _launch_thread_bindings()
+
+
+def get_thread_extent(dim: int = 0) -> int:
+    """Returns the thread extent for the given dimension."""
+    simtvf = _get_current_simtvf()
+    if simtvf is not None:
+        return simtvf.thread_extents[dim]
+    return _launch_thread_extent(dim)
+
+
+def get_thread_extents() -> list[int]:
+    """Returns all three thread extents."""
+    simtvf = _get_current_simtvf()
+    if simtvf is not None:
+        return list(simtvf.thread_extents)
+    return _launch_thread_extents()
+
 
 # ---------------------------------------------------------------------------
 # Launch frames
