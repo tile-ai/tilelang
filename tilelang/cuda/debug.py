@@ -8,20 +8,7 @@ import tilelang.language as T
 from tilelang.cuda.target import check_cuda_availability
 from tilelang.language.eager.builder import Builder, macro
 
-
-def _check_ascend_availability() -> bool:
-    try:
-        import torch
-
-        return hasattr(torch, "npu") and torch.npu.is_available()
-    except Exception:
-        return False
-
-
 _IS_CUDA_AVAILABLE = check_cuda_availability()
-# This fork also emits device asserts on Ascend NPUs, where the toolkit's
-# assert() macro works in both aicore and SIMT code.
-_IS_ASCEND_AVAILABLE = _check_ascend_availability()
 
 
 def get_stack_str(msg, stacklevel=1):
@@ -35,9 +22,9 @@ def get_stack_str(msg, stacklevel=1):
 @macro
 def device_assert(condition: tirx.PrimExpr, msg: str = "", no_stack_info=False):
     """
-    Device-side assert emulation for CUDA and Ascend targets.
+    Device-side assert emulation for CUDA targets.
     """
-    if _IS_ASCEND_AVAILABLE or _IS_CUDA_AVAILABLE:
+    if _IS_CUDA_AVAILABLE:
         if no_stack_info:
             if msg == "":
                 T.call_intrin("void", tirx.op.Op.get("tl.device_assert"), condition)

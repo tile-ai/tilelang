@@ -12,9 +12,11 @@ from .annotations import (  # noqa: F401
 )
 from .copy_op import copy, dual_copy  # noqa: F401
 from .gemm_op import blockscaled_gemm, gemm  # noqa: F401
+
 # Ascend owns the unroll-factor knob: the Ascend codegen lowers the
 # "pragma_unroll_factor" annotation to `#pragma unroll N`.
 from .loop import unroll  # noqa: F401
+
 # Ascend owns its launch and its thread-scope accessors. These deliberately
 # shadow the common surface imported above: `T.Kernel` here is the 1-D NPU core
 # grid (no threads=), and `T.get_thread_binding()` resolves inside T.SimtVF.
@@ -38,11 +40,13 @@ from .frame import Cube, CubeFrame, SimdVF, SimdVFFrame, SimtVF, SimtVFFrame, Ve
 
 from . import simd as simd  # noqa: F401 (exposed as T.simd.*)
 
-# #2734 filed these under the CUDA dialect, but on this fork they also support
-# Ascend: device_assert lowers through the toolkit's assert() macro and the RNG
-# and print intrinsics are emitted by the Ascend codegen too.
-from tilelang.cuda.debug import device_assert as device_assert  # noqa: F401
-from tilelang.cuda.language.print import print as print  # noqa: F401,A001
+# Ascend owns its debug surface: device_assert lowers through the toolkit's
+# assert() macro and print gates by the NPU execution model (no CUDA-style
+# single-thread condition). The RNG intrinsics stay imported from the CUDA
+# dialect module: #2734 filed them there, and they are pure emission that the
+# Ascend codegen also implements.
+from ..debug import device_assert  # noqa: F401
+from .print import print  # noqa: F401,A001
 from tilelang.cuda.language.random import rng_init, rng_rand, rng_rand_float  # noqa: F401
 
 from .dma import *  # noqa: F401,F403

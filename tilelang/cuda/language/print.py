@@ -10,34 +10,6 @@ from tilelang.language.kernel import get_thread_bindings
 from tilelang.language.common import alloc_shared, copy, macro, serial
 from tilelang.language.utils import index_to_coordinates
 
-
-def _check_ascend_availability() -> bool:
-    try:
-        import torch
-
-        return hasattr(torch, "npu") and torch.npu.is_available()
-    except Exception:
-        return False
-
-
-def check_cuda_availability() -> bool:
-    """
-    Check if CUDA is available on the system by locating the CUDA path.
-    Returns:
-        bool: True if CUDA is available, False otherwise.
-    """
-    try:
-        from tilelang.contrib import nvcc
-
-        nvcc.find_cuda_path()
-        return True
-    except Exception:
-        return False
-
-
-_IS_ASCEND_AVAILABLE = _check_ascend_availability()
-_IS_CUDA_AVAILABLE = check_cuda_availability()
-
 __all__ = ["device_assert", "print"]
 
 
@@ -171,37 +143,53 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
         ValueError: If the input object type is unsupported.
     """
     if isinstance(obj, tirx.Buffer):
+        # Buffers must be printed in just one thread to avoid duplicate outputs.
+        # Retrieve the thread bindings for thread x, y, and z.
+        tx, ty, tz = get_thread_bindings()
+        warp_group_size = 128
+        warp_size = 32
+        main_lane = warp_group_id * warp_group_size + warp_id * warp_size
+
+        # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
         buffer = obj
-
-        # Compute total number of elements.
-        elems = 1
-        for dim in buffer.shape:
-            elems *= dim
-
-        if not msg:
-            msg = f"buffer<{buffer.name}, {buffer.dtype}>"
-
         if buffer.scope() == "local":
-            print_local_buffer_with_condition(True, buffer, elems, msg)
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
+            condition = True
+            if not msg:
+                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+            print_local_buffer_with_condition(condition, buffer, elems, msg)
         elif buffer.scope() == "local.fragment":
-            tx, ty, tz = get_thread_bindings()
-            warp_group_size = 128
-            warp_size = 32
-            main_lane = warp_group_id * warp_group_size + warp_id * warp_size
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
+
+            # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
             condition = tx == main_lane and ty == 0 and tz == 0
+            if not msg:
+                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             print_fragment_buffer_with_condition(condition, buffer, elems, msg)
         elif buffer.scope() in {"shared", "shared.dyn"}:
-            if _IS_ASCEND_AVAILABLE:
-                condition = True
-            else:
-                tx, ty, tz = get_thread_bindings()
-                warp_group_size = 128
-                warp_size = 32
-                main_lane = warp_group_id * warp_group_size + warp_id * warp_size
-                condition = tx == main_lane and ty == 0 and tz == 0
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
+
+            # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
+            condition = tx == main_lane and ty == 0 and tz == 0
+            if not msg:
+                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             print_shared_buffer_with_condition(condition, buffer, elems, msg)
         elif buffer.scope() == "global":
-            print_global_buffer_with_condition(True, buffer, elems, msg)
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
+            condition = True
+            print_global_buffer_with_condition(condition, buffer, elems, msg)
         else:
             raise ValueError(f"Unsupported buffer scope: {buffer.scope()}")
 
