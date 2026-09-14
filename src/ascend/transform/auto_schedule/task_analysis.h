@@ -81,14 +81,17 @@ protected:
   }
 
   void VisitStmt_(const SeqStmtNode *op) final {
-    std::vector<Guard> bind_guards;
+    // Mirror ConstrVisitor's own SeqStmt handling: a flat Bind (here wrapped
+    // in a Task/schedule-unit attr) defines its variable for the following
+    // statements of this sequence, but not while its value is evaluated.
+    size_t old_size = constr_stack_.size();
     for (const Stmt &stmt : op->seq) {
       VisitStmt(stmt);
       if (ffi::Optional<Bind> bind = GetFlatBind(stmt); bind.defined()) {
-        bind_guards.push_back(
-            MakeGuard(bind.value()->var, bind.value()->value));
+        constr_stack_.emplace_back(bind.value()->var, bind.value()->value);
       }
     }
+    constr_stack_.resize(old_size);
   }
 };
 
