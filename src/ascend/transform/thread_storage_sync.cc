@@ -1,18 +1,18 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements. See the NOTICE file
+ * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
+ * regarding copyright ownership.  The ASF licenses this file
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
- * with the License. You may obtain a copy of the License at
+ * with the License.  You may obtain a copy of the License at
  *
  *   http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied. See the License for the
+ * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
  */
@@ -20,14 +20,15 @@
 /*!
  * \file thread_storage_sync.cc
  */
-#include "./common/constr_visitor.h"
-#include "./common/thread_sync_types.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "common/attr.h"
+#include "ascend/target_utils.h"
 #include "cuda/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
+#include "transform/common/attr.h"
+#include "transform/common/constr_visitor.h"
+#include "transform/common/thread_sync_types.h"
 #include <algorithm>
 #include <string>
 #include <tvm/arith/analyzer.h>
@@ -54,6 +55,8 @@ using namespace ffi;
 using arith::IRMutatorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;
+
+namespace {
 
 // Similar to ThreadSyncAfterWaitQueueInserter, but for explicit cp.async
 // synchronization intrinsics (ptx_wait_group).
@@ -550,10 +553,6 @@ private:
     if (it != let_var_properties_.end()) {
       current_.Merge(it->second);
     } else {
-      // A kernel parameter, blockIdx or an enclosing serial loop var has no
-      // compile-time value, so the participating set is unknown. Leave
-      // is_block_uniform alone, so a condition built only from these
-      // (`bx < 2`, `flags[bx] > 0`) keeps its sync in place.
       current_.depends_on_runtime = true;
     }
     return GetRef<Var>(op);
@@ -562,9 +561,9 @@ private:
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     current_.depends_on_runtime = true;
     // Do not mark local-scope loads as non-block-uniform solely based on
-    // storage scope. Thread-local buffers (fragments) commonly hold
+    // storage scope.  Thread-local buffers (fragments) commonly hold
     // block-uniform data when populated from block-uniform global addresses
-    // (e.g., T.copy(BlockMask[blockIdx.y, :], fragment)). If the load
+    // (e.g., T.copy(BlockMask[blockIdx.y, :], fragment)).  If the load
     // indices actually depend on threadIdx, the recursive visit of indices
     // below (via IRMutatorWithAnalyzer::VisitExpr_) will correctly set
     // is_block_uniform = false through VisitExpr_(VarNode*).
@@ -576,10 +575,10 @@ private:
         op->op.same_as(builtin::address_of())) {
       current_.depends_on_runtime = true;
       // Do not mark local-scope tvm_access_ptr loads as non-block-uniform
-      // solely based on storage scope. Thread-local buffers (fragments)
+      // solely based on storage scope.  Thread-local buffers (fragments)
       // commonly hold block-uniform data when populated from block-uniform
       // global addresses (e.g., a per-thread fragment that every thread
-      // fills with the same global value). If the access indices actually
+      // fills with the same global value).  If the access indices actually
       // depend on threadIdx, the recursive visit of args below (via
       // IRMutatorWithAnalyzer::VisitExpr_) will correctly mark the
       // condition as non-block-uniform through VisitExpr_(VarNode*).
@@ -1590,6 +1589,9 @@ private:
     if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
       return false;
     }
+    if (lhs.buffer_indices.size() > 1 || rhs.buffer_indices.size() > 1) {
+      return false;
+    }
     ConstrSet prev_cset{lhs.cset};
     ConstrSet curr_cset{rhs.cset};
     arith::Analyzer analyzer;
@@ -1624,9 +1626,6 @@ private:
       prev_sub.Set(old_prev_var, Var(info.name_prev, old_prev_var.dtype()));
       curr_sub.Set(old_curr_var, Var(info.name_curr, old_curr_var.dtype()));
     }
-    // Two threads here as well, so every per-thread bind needs its own copy;
-    // sharing one would force the two thread variables to agree. Ranges stay
-    // shared: an enclosing iteration variable is the same for both sides.
     prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
                                      /*rename_ranges=*/false);
     curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,
@@ -1635,8 +1634,10 @@ private:
     lhs_max = Substitute(lhs_max, prev_sub);
     rhs_min = Substitute(rhs_min, curr_sub);
     rhs_max = Substitute(rhs_max, curr_sub);
-    // Lower to predicates before merging so that a variable bound to different
-    // values on the two sides does not trip the analyzer's re-bind check.
+    // Lower both sides' constraints to predicates (ToConstraints) before
+    // merging: the two access points may bind the same let var to different
+    // per-side values, and binding predicates (rather than analyzer Binds)
+    // lets those coexist without a conflicting re-bind. Populate once.
     prev_cset.ToConstraints()
         .Merge(curr_cset.ToConstraints())
         .Populate(analyzer);
@@ -1778,21 +1779,20 @@ private:
       return false;
     }
 
-    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
-      // They are not the same indices, should be conflict.
-      return true;
-    }
-
     if (prev.is_pointer_access || curr.is_pointer_access) {
       // For accesses created via tvm_access_ptr we may still be able to prove
       // disjointness using their byte ranges. If both sides expose a touched
       // interval and we can show they don't overlap, skip the conflict.
-      if (prev.is_pointer_access && curr.is_pointer_access &&
-          PointerAccessIsDisjoint(prev, curr)) {
+      if (PointerAccessIsDisjoint(prev, curr)) {
         return false;
       }
       // Otherwise fall back to the conservative answer: treat them as
       // overlapping.
+      return true;
+    }
+
+    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
+      // They are not the same indices, should be conflict.
       return true;
     }
 
@@ -1830,7 +1830,9 @@ private:
     // (e.g. float32 index i aliases fp8 index 4*i). Fall through to byte-range
     // analysis in that case so cross-thread WAR/RAW hazards are not missed.
     bool same_index_means_same_byte = prev.dtype.bytes() == curr.dtype.bytes();
-    if (has_same_index && same_index_means_same_byte) {
+    bool enable_same_index_equivalence_shortcut = false;
+    if (has_same_index && same_index_means_same_byte &&
+        enable_same_index_equivalence_shortcut) {
       // Use Z3 to check if prev and curr constraints are equivalent.
       // If equivalent, the same set of threads execute both accesses, so no
       // sync is needed.
@@ -1862,18 +1864,15 @@ private:
           tirx::Or(tirx::Not(curr_constr), prev_constr));
 
       if (prev_implies_curr && curr_implies_prev) {
-        // Same index, same participants: a collision would mean two threads
-        // wrote one location (RAR never reaches FindConflict), which is
-        // undefined behaviour rather than a hazard to order.
+        // If constraints are equivalent, they are not in conflict
         return false;
+      } else {
+        // If constraints are not equivalent, they are in conflict
+        return true;
       }
-      // Unequal participation alone says nothing about two threads reaching the
-      // same address; a real same-index hazard needs a non-injective index too,
-      // which the cross-thread proof below decides. Fall through.
     }
 
-    // Proving the addresses unequal shows the index is injective over the
-    // participating threads, which rules out a hazard for any pair of indices.
+    // Indices are different, need to check if they can overlap
     bool range_is_overlap = true;
 
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
@@ -1945,11 +1944,6 @@ private:
       if (!same_access_type) {
         analyzer.EnterConstraint(thread_condition);
       }
-      // Two instances in one analyzer, so per-instance binds need their own
-      // copy; see ConstrSet::RenameFrom. They differ when they are two threads
-      // (RAW/WAR) or two iterations of one thread (loop carry); a same-type
-      // pair within one iteration is one execution, where renaming would only
-      // lose the bind.
       if (!same_access_type || loop != nullptr) {
         prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
                                          /*rename_ranges=*/false);
@@ -1959,9 +1953,11 @@ private:
         prev_cset = prev_cset.Substitute(prev_sub);
         curr_cset = curr_cset.Substitute(curr_sub);
       }
-      // Lower to predicates before merging: the analyzer already binds the loop
-      // variable to an adjusted range above while each side still carries its
-      // full range, so keeping the binds would trip the re-bind check.
+      // Lower to predicates before merging: the analyzer already Binds the loop
+      // var to an adjusted range above, and each cset also carries the loop var
+      // (full range) plus possibly-shared per-side let binds; predicates
+      // coexist with that external Bind without a conflicting re-bind. Populate
+      // once.
       prev_cset.ToConstraints()
           .Merge(curr_cset.ToConstraints())
           .Populate(analyzer);
@@ -2055,23 +2051,60 @@ private:
   }
 };
 
-PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
+PrimFunc AscendThreadSync(PrimFunc func, const std::string &storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
   if (sync_scope.rank == StorageRank::kGlobal) {
     return func;
   }
   auto *n = func.CopyOnWrite();
   auto stmt = n->body;
-  if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
-    stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
-  }
   // Get warp size from target, defaulting to 32 if not available
   int warp_size = 32;
+  bool is_ascend = false;
   if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
     warp_size = target.value()
                     ->GetAttr<Integer>("thread_warp_size", 32)
                     .value()
                     .IntValue();
+    is_ascend = TargetIsAscend(target.value());
+  }
+
+  if (is_ascend) {
+    // Ascend: process each SimtVF block independently.
+    // ThreadSyncAfterWaitQueueInserter and ThreadPartialSyncRewriter are
+    // CUDA-specific and skipped for Ascend.
+    struct SimtVFThreadSyncMutator : StmtExprMutator {
+      StorageScope scope;
+      Map<Var, Buffer> buf_map;
+      int warp_size;
+      SimtVFThreadSyncMutator(StorageScope scope, Map<Var, Buffer> buf_map,
+                              int warp_size)
+          : scope(std::move(scope)), buf_map(std::move(buf_map)),
+            warp_size(warp_size) {}
+      Stmt VisitStmt_(const SBlockNode *op) final {
+        if (op->name_hint == "SIMT_VF") {
+          TileLangThreadSyncPlanner planner(scope, warp_size);
+          for (const auto &[_, buffer] : buf_map) {
+            planner.SetBufferDataToBuffer(buffer->data, buffer);
+          }
+          Stmt body = op->body;
+          planner(body);
+          body = ThreadSyncInserter(scope, planner.syncs_inserted_)(body);
+          SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
+          block.CopyOnWrite()->body = body;
+          return block;
+        }
+        return StmtExprMutator::VisitStmt_(op);
+      }
+    };
+    SimtVFThreadSyncMutator mutator{sync_scope, func->buffer_map, warp_size};
+    n->body = mutator(stmt);
+    return func;
+  }
+
+  // Original non-Ascend path
+  if (sync_scope.rank == StorageRank::kShared && sync_scope.tag.empty()) {
+    stmt = ThreadSyncAfterWaitGroupInserter(sync_scope)(stmt);
   }
   TileLangThreadSyncPlanner planner(sync_scope, warp_size);
   for (const auto &[_, buffer] : func->buffer_map) {
@@ -2084,11 +2117,13 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   return func;
 }
 
+} // namespace
+
 using namespace tirx::transform;
 
 namespace transform {
 
-tvm::transform::Pass ThreadSync(const String &storage_scope) {
+tvm::transform::Pass AscendThreadSync(const String &storage_scope) {
   auto pass_func = [storage_scope](PrimFunc f, const IRModule &m,
                                    const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
@@ -2098,15 +2133,15 @@ tvm::transform::Pass ThreadSync(const String &storage_scope) {
     if (disable_syncthreads) {
       return f;
     }
-    return tl::TileLangThreadSync(std::move(f), storage_scope);
+    return tl::AscendThreadSync(std::move(f), storage_scope);
     ;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.AscendThreadSync", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.ThreadSync", ThreadSync);
+  refl::GlobalDef().def("tl.transform.AscendThreadSync", AscendThreadSync);
 }
 
 } // namespace transform

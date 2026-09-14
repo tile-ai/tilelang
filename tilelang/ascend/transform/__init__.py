@@ -134,6 +134,11 @@ def AscendSimdVFLowerParallel():
     return _ffi_api.AscendSimdVFLowerParallel()  # type: ignore
 
 
+def AscendThreadSync(storage_scope: str):
+    """Insert thread-storage synchronization independently within each SIMT_VF."""
+    return _ffi_api.AscendThreadSync(storage_scope)
+
+
 def AscendInsertOOBPadding():
     """Clamp DMA copy OOB tails and emit GM->L1 padding fills before AutoSchedule.
 
@@ -201,6 +206,7 @@ __all__ = [
     "AscendRemoveNoOp",
     "AscendInsertOOBPadding",
     "AscendSimdVFLowerParallel",
+    "AscendThreadSync",
     "AssignCore",
     "AutoSchedule",
     "InsertSync",
