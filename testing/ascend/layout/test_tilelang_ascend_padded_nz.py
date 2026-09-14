@@ -119,7 +119,7 @@ def test_auto_scatter_synthesizes_one_reusable_sid():
                 body = str(node.body)
                 if "ascend_nd2nz_post_copy" in body:
                     estimated_costs["post_copy"] = (int(node.node["latency"]), int(node.node["ii"]))
-                elif "x_nd" in body and "T.copy" in body:
+                elif "x_nd" in body and ("T.ascend_copy" in body or "T.copy" in body):
                     estimated_costs["gm_to_ub"] = (int(node.node["latency"]), int(node.node["ii"]))
 
             post_order_visit(mod["main"].body, visit)

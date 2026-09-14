@@ -242,7 +242,7 @@ def test_rewrite_dual_copy_strips_software_unit_flag_ctrl():
                 return
 
             def visit(node):
-                if isinstance(node, tvm.tirx.Call) and node.op.name == "tl.tileop.copy":
+                if isinstance(node, tvm.tirx.Call) and node.op.name in ("tl.tileop.ascend_copy", "tl.tileop.copy"):
                     rewritten_annotations.append(node.annotations)
 
             post_order_visit(mod["main"].body, visit)

@@ -4,6 +4,7 @@
  */
 
 #include "op/copy.h"
+#include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 
 #include "ascend/layout/ascend_layouts.h"
@@ -19,6 +20,7 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <string>
@@ -184,7 +186,7 @@ PrimExpr MakeCopyHasDataPredicate(const Array<Range> &src_ranges,
   return analyzer->Simplify(has_data);
 }
 
-Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
+Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                   arith::Analyzer *analyzer, DMAPath dma_path) {
   auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
   int elem_bits = op.src->dtype.bits() * op.src->dtype.lanes();
@@ -229,7 +231,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
 
   PrimExpr sid = I(0);
   PrimExpr zero = I(0);
-  PrimExpr l2_cache_ctrl = I(op.GetL2CacheCtrl());
+  PrimExpr l2_cache_ctrl = I(op.L2CacheCtrlOr(0));
 
   PrimExpr call;
   if (dma_path == DMAPath::kGMToUB || dma_path == DMAPath::kUBToGM) {
@@ -260,7 +262,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
       return -1;
     };
     int64_t rb_plan = as_int_plan(plan_row_bytes);
-    bool data_select = dma_path == DMAPath::kGMToUB && op.GetDataSelect() != 0;
+    bool data_select = dma_path == DMAPath::kGMToUB && op.data_select != 0;
     // Padding right-pads each row up to the next 32B boundary, so it needs a
     // statically-known row byte length to compute the pad count. A symbolic
     // row extent would silently skip padding and read garbage tail lanes.
@@ -313,7 +315,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
     } else {
       constexpr int kStoreDefaultL2CacheCtrl = 4;
       PrimExpr store_l2_cache_ctrl =
-          I(op.GetL2CacheCtrl(kStoreDefaultL2CacheCtrl));
+          I(op.L2CacheCtrlOr(kStoreDefaultL2CacheCtrl));
       if (plan_single_row) {
         call = Call(DataType::Void(), ascend_copy_ubuf_to_gm(),
                     {plan_dst_ptr, plan_src_ptr, sid, I(1), plan_total_bytes,
@@ -344,7 +346,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
           << "GM->L1 copy expects an Ascend fractal layout on the L1 dst "
           << op.dst->name;
     }
-    bool needs_transpose = op.GetTranspose();
+    bool needs_transpose = op.transpose != 0;
     PrimExpr dst_n_value;
     if (has_dst_layout) {
       if (dst_layout.kind == AscendFractalKind::kSF) {
@@ -365,7 +367,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
     // destination may be over-allocated to provide a larger NZ pitch. kSF
     // flips the hardware transpose bit for its packed physical layout; logical
     // source/destination axis matching still follows the user request.
-    bool geometry_transpose = op.GetTranspose();
+    bool geometry_transpose = op.transpose != 0;
     bool source_exceeds_destination =
         geometry_transpose
             ? analyzer->CanProve(src_row.size > dst_inner.size) ||
@@ -471,7 +473,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
     // L1 tiles are canonically K-major (reduce-K on the C0 axis); when the L1
     // source carries no explicit layout we assume K-major so the mismatch is
     // driven purely by the inferred L0 major.
-    bool user_transpose = op.GetTranspose();
+    bool user_transpose = op.transpose != 0;
     LogicalAxis src_c0_axis =
         have_src_layout ? src_info.c0_axis : LogicalAxis::kCol;
     LogicalAxis dst_c0_axis =
@@ -632,7 +634,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
         << op.src->name;
     loop_src_stride = compact_src_region.outer1->extent * info.row_frac;
 
-    int dual_dst_ctl = op.GetDualDstCtl();
+    int dual_dst_ctl = op.dual_dst_ctl;
     PrimExpr copy_inner = src_inner.size;
     PrimExpr copy_rows = src_row.size;
     if (dual_dst_ctl == 0) {
@@ -648,8 +650,8 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
       copy_rows = dst_row.size;
     }
     PrimExpr dual_dst_ctl_val = I(dual_dst_ctl);
-    PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.GetUnitFlagCtl());
-    PrimExpr sub_blockid_val = cast(DataType::Int(32), op.GetSubBlockId());
+    PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.unit_flag_ctl);
+    PrimExpr sub_blockid_val = cast(DataType::Int(32), op.sub_blockid);
     call = Call(DataType::Void(), ascend_copy_matrix_cc_to_ub(),
                 {dst_ptr,
                  src_ptr,
@@ -678,7 +680,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
                  zero,   // broadcast_en
                  zero}); // NZ2DN_en
   } else if (dma_path == DMAPath::kUBToL1) {
-    ICHECK(!op.GetNd2Nz())
+    ICHECK(!op.nd2nz)
         << "Ascend nd2nz UB->L1 copy must be emitted directly from the Python "
            "frontend (tilelang/language/copy_op.py); it should never reach "
            "tl.tileop.copy lowering. This indicates the Python bypass was not "
@@ -761,7 +763,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
         << src_row.size << "x" << src_inner.size << " and destination "
         << dst_row.size << "x" << dst_inner.size << ".";
     PrimExpr dst_row_stride = cast(DataType::Int(32), dst_row.stride);
-    PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.GetUnitFlagCtl());
+    PrimExpr unit_flag_ctl_val = cast(DataType::Int(32), op.unit_flag_ctl);
     call =
         Call(DataType::Void(), ascend_copy_matrix_cc_to_gm(),
              {dst_ptr,
@@ -771,7 +773,7 @@ Stmt LowerDMACopy(const CopyNode &op, const LowerArgs &T,
               dst_row.size,
               dst_row_stride,
               loop_src_stride,
-              I(op.GetL2CacheCtrl()), // [7] l2_cache_ctl
+              I(op.L2CacheCtrlOr(0)), // [7] l2_cache_ctl
               zero,                   // [8] clip_relu_pre
               unit_flag_ctl_val,      // [9] unit_flag_ctl
               I(GetCCQuantPre(op.src->dtype, op.dst->dtype)), // [10] quant_pre
@@ -827,9 +829,12 @@ Stmt LowerAscendNormalCopy(const CopyNode &op, const LowerArgs &T,
 
 } // namespace
 
-struct Copy {
-  static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
-                               InferLevel level) {
+// Implementation of the AscendCopyNode behavior. Shared between the virtual
+// methods (typed nodes parsed from tl.tileop.ascend_copy) and the CopyImpl
+// bridge below (base nodes parsed from plain tl.tileop.copy).
+struct AscendCopyImpl {
+  static LayoutMap InferLayout(const AscendCopyNode &op,
+                               const LayoutInferArgs &T, InferLevel level) {
     if (IsDMACopy(op)) {
       Map<Buffer, Layout> result_map;
       PrimExpr thread_extent = T.thread_bounds->extent;
@@ -894,7 +899,7 @@ struct Copy {
             TryExtractAscendFractalLayout(dst_layout.value(), op.dst,
                                           &dst_info)) {
           bool major_mismatch = src_info.c0_axis != dst_info.c0_axis;
-          bool effective_transpose = op.GetTranspose() ^ major_mismatch;
+          bool effective_transpose = (op.transpose != 0) ^ major_mismatch;
 
           // Transpose swaps the semantic roles of the physical C0 and row16
           // axes. Keep the stored layout physical, and use this operation-local
@@ -934,7 +939,7 @@ struct Copy {
     return op.InferSIMTLayout(T, level);
   }
 
-  static Stmt Lower(const CopyNode &op, const LowerArgs &T,
+  static Stmt Lower(const AscendCopyNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer) {
     if (!IsInsideSimtVF(T) && !IsLocalBuffer(op.src) &&
         !IsLocalBuffer(op.dst)) {
@@ -952,15 +957,105 @@ struct Copy {
 
 namespace {
 
+// Decode the Ascend copy hint annotations into the typed AscendCopyNode
+// fields. The annotations map on the Call stays the durable encoding; both
+// AscendCopy constructors funnel through here so the two parse paths cannot
+// diverge.
+void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
+  auto int_or = [node](const char *key, int default_value) {
+    if (auto val = node->annotations.Get(key)) {
+      if (const auto *int_val = val->as<IntImmNode>()) {
+        return static_cast<int>(int_val->value);
+      }
+    }
+    return default_value;
+  };
+  node->nd2nz = int_or("nd2nz", 0);
+  node->dual_dst_ctl = int_or("dual_dst_ctl", 0);
+  node->transpose = int_or("transpose", 0);
+  node->data_select = int_or("data_select", 0);
+  node->l2_cache_ctrl = std::nullopt;
+  if (auto val = node->annotations.Get("l2_cache_ctrl")) {
+    if (const auto *int_val = val->as<IntImmNode>()) {
+      node->l2_cache_ctrl = Integer(int_val->value);
+    }
+  }
+  node->unit_flag_ctl = IntImm(DataType::Int(32), 0);
+  if (auto val = node->annotations.Get("unit_flag_ctrl")) {
+    node->unit_flag_ctl = Downcast<PrimExpr>(val.value());
+  }
+  node->sub_blockid = IntImm(DataType::Int(32), 0);
+  if (auto val = node->annotations.Get("sub_blockid")) {
+    node->sub_blockid = Downcast<PrimExpr>(val.value());
+  }
+  node->pad_value = std::nullopt;
+  if (auto val = node->annotations.Get("pad_value")) {
+    node->pad_value = Downcast<PrimExpr>(val.value());
+  }
+}
+
+// Mirrors ApplyCopyBlockAnnotations in src/op/copy.cc: resolve the annotated
+// source OOB fallback value from the enclosing block.
+TileOperator
+ApplyAscendCopyBlockAnnotations(TileOperator tile_op,
+                                BlockAnnotations block_annotations) {
+  AscendCopy copy = Downcast<AscendCopy>(tile_op);
+
+  // Safe because this handler is invoked immediately after TLOpBuilder creates
+  // a fresh AscendCopyNode, before the node escapes ParseOperator.
+  auto *node = const_cast<AscendCopyNode *>(copy.get());
+  ICHECK(node != nullptr);
+
+  node->src_oob_safe_value = PrimExpr();
+  auto safe_value_map_obj = block_annotations.Get(attr::kSafeValueMap);
+  if (!safe_value_map_obj) {
+    return copy;
+  }
+
+  auto safe_value_map =
+      Downcast<Map<Var, PrimExpr>>(safe_value_map_obj.value());
+  auto it = safe_value_map.find(node->src->data);
+  if (it != safe_value_map.end()) {
+    node->src_oob_safe_value = (*it).second;
+  }
+  return copy;
+}
+
 bool MatchAscendCopyTarget(Target target) { return TargetIsAscend(target); }
+
+// Plain tl.tileop.copy calls (e.g. copies synthesized by shared passes such
+// as ReducerPlanAndMaterialize) parse into the base CopyNode and reach the
+// target-dispatched CopyImpl registry; upgrade them so both spellings
+// converge on the AscendCopyImpl implementation.
+LayoutMap BridgeAscendCopyInferLayout(const CopyNode &op,
+                                      const LayoutInferArgs &layout_args,
+                                      InferLevel level) {
+  if (op.IsInstance<AscendCopyNode>()) {
+    return ascend::AscendCopyImpl::InferLayout(
+        static_cast<const AscendCopyNode &>(op), layout_args, level);
+  }
+  AscendCopy upgraded(op);
+  return ascend::AscendCopyImpl::InferLayout(*upgraded.get(), layout_args,
+                                             level);
+}
+
+Stmt BridgeAscendCopyLower(const CopyNode &op, const LowerArgs &lower_args,
+                           arith::Analyzer *analyzer) {
+  if (op.IsInstance<AscendCopyNode>()) {
+    return ascend::AscendCopyImpl::Lower(
+        static_cast<const AscendCopyNode &>(op), lower_args, analyzer);
+  }
+  AscendCopy upgraded(op);
+  return ascend::AscendCopyImpl::Lower(*upgraded.get(), lower_args, analyzer);
+}
 
 bool RegisterAscendCopy() {
   RegisterCopyImpl(CopyImpl{
       "ascend.Copy",
       MatchAscendCopyTarget,
       200,
-      ascend::Copy::InferLayout,
-      ascend::Copy::Lower,
+      BridgeAscendCopyInferLayout,
+      BridgeAscendCopyLower,
   });
   return true;
 }
@@ -968,6 +1063,91 @@ bool RegisterAscendCopy() {
 const bool ascend_copy_registered = RegisterAscendCopy();
 
 } // namespace
+
+// Constructs an AscendCopy operator node from tl.tileop.ascend_copy call
+// arguments and annotations.
+// args[0]: source region, args[1]: destination region,
+// optional args[2]: MX scale-factor source region (L1→L0 companion load,
+// present only when T.copy(..., scale=<region>) is used).
+AscendCopy::AscendCopy(Array<PrimExpr> args,
+                       Map<String, ObjectRef> annotations) {
+  ObjectPtr<AscendCopyNode> node = make_object<AscendCopyNode>();
+  auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
+  auto dst_access = NormalizeToAccessRegion(args[1], kAccessWrite);
+  node->src = src_access.region->buffer;
+  node->dst = dst_access.region->buffer;
+  node->src_range = src_access.region->region;
+  node->dst_range = dst_access.region->region;
+  if (args.size() > 2 && args[2].as<CallNode>()) {
+    auto sf_access = NormalizeToAccessRegion(args[2], kAccessRead);
+    node->sf = sf_access.region->buffer;
+    node->sf_range = sf_access.region->region;
+    node->SetAccessRegions({src_access, dst_access, sf_access});
+  } else {
+    node->SetAccessRegions({src_access, dst_access});
+  }
+  node->annotations = annotations;
+  if (auto dst_block = node->annotations.Get("dst_block")) {
+    if (auto int_imm = dst_block->as<IntImmNode>()) {
+      if (int_imm->value != -1) {
+        node->dst_block = Integer(int_imm->value);
+      }
+    } else {
+      node->dst_block = Downcast<PrimExpr>(dst_block.value());
+    }
+  }
+  DecodeAscendCopyAnnotations(node.get());
+  data_ = std::move(node);
+}
+
+// Upgrades a base copy parsed from a plain tl.tileop.copy call. The base
+// state (regions, access regions, block-annotation results) transfers as-is;
+// a base-spelled copy never carries an MX scale-factor region.
+AscendCopy::AscendCopy(const CopyNode &base) {
+  ObjectPtr<AscendCopyNode> node = make_object<AscendCopyNode>(base);
+  DecodeAscendCopyAnnotations(node.get());
+  data_ = std::move(node);
+}
+
+// Creates a shallow clone of this AscendCopyNode.
+TileOperator AscendCopyNode::Clone() const {
+  auto op = make_object<AscendCopyNode>(*this);
+  if (par_op_.defined()) {
+    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+  }
+  return AscendCopy(op);
+}
+
+LayoutMap AscendCopyNode::InferLayout(const LayoutInferArgs &layout_args,
+                                      InferLevel level) const {
+  return ascend::AscendCopyImpl::InferLayout(*this, layout_args, level);
+}
+
+Stmt AscendCopyNode::Lower(const LowerArgs &lower_args,
+                           arith::Analyzer *analyzer) const {
+  return ascend::AscendCopyImpl::Lower(*this, lower_args, analyzer);
+}
+
+bool IsAscendCopyCall(const CallNode *call) {
+  if (call == nullptr) {
+    return false;
+  }
+  return call->op.same_as(AscendCopy::Get()) || call->op.same_as(Copy::Get());
+}
+
+// Register the Ascend dialect copy operation. Same contract as
+// tl.tileop.copy, plus an optional third MX scale-factor region input; the
+// Ascend lowering hints ride in annotations and are decoded into typed
+// AscendCopyNode fields at parse time.
+// - Marked as opaque since it has side effects (memory writes)
+TIR_REGISTER_TL_TILE_OP(AscendCopy, ascend_copy)
+    .set_attr<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler,
+                                            ApplyAscendCopyBlockAnnotations)
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK() { AscendCopyNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

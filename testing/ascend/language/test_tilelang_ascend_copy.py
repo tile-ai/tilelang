@@ -108,7 +108,7 @@ def test_ascend_copy_l2_cache_ctrl_string_annotation_matches_keyword():
             T.copy(A, B, l2_cache_ctrl="NORMAL_FV")
 
     for func in (annotation_path, keyword_path):
-        copy_line = next(line for line in func.script().splitlines() if "T.copy(" in line)
+        copy_line = next(line for line in func.script().splitlines() if "T.ascend_copy(" in line)
         assert "l2_cache_ctrl=0" in copy_line
 
 

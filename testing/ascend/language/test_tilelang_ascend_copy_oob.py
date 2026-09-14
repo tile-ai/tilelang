@@ -241,7 +241,7 @@ def test_dual_copy_is_rewritten_before_oob_clamping() -> None:
             regions = []
 
             def visit(node):
-                if not isinstance(node, tirx.Call) or getattr(node.op, "name", "") != "tl.tileop.copy":
+                if not isinstance(node, tirx.Call) or getattr(node.op, "name", "") not in ("tl.tileop.ascend_copy", "tl.tileop.copy"):
                     return
                 destination = node.args[1]
                 load = destination.args[0]

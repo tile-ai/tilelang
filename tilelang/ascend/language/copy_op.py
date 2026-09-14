@@ -341,17 +341,28 @@ def copy(  # noqa: A001
         scale_region = to_buffer_region(scale, access_type="r", extents=get_extent(scale))
         return tirx.call_intrin(
             "handle",
-            tirx.op.Op.get("tl.tileop.copy"),
+            tirx.op.Op.get("tl.tileop.ascend_copy"),
             src_region,
             dst_region,
             scale_region,
             annotations=ann if ann else None,
         )
 
-    return _common_copy(
+    ret = _common_copy(
         src,
         dst,
         coalesced_width=coalesced_width,
         annotations=ann or None,
         loop_layout=loop_layout,
     )
+    # Respell the common tile op as the Ascend dialect op so the C++ side
+    # parses it into the typed AscendCopyNode. Scalar copies come back as a
+    # plain BufferStore and stay untouched.
+    if isinstance(ret, tirx.Call) and ret.op.same_as(tirx.op.Op.get("tl.tileop.copy")):
+        return tirx.call_intrin(
+            "handle",
+            tirx.op.Op.get("tl.tileop.ascend_copy"),
+            *ret.args,
+            annotations=ret.annotations,
+        )
+    return ret

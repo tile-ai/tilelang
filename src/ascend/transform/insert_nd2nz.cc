@@ -436,10 +436,9 @@ private:
     if (inside_simt_vf_)
       return Parent::VisitStmt_(op);
     const auto *call = op->value.as<CallNode>();
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
-    if (call == nullptr || !call->op.same_as(copy_op))
+    if (call == nullptr || !IsAscendCopyCall(call))
       return Parent::VisitStmt_(op);
-    Copy copy(call->args, call->annotations);
+    AscendCopy copy(call->args, call->annotations);
     if (std::optional<Stmt> rewritten = RewriteUBToUB(*copy.get()))
       return rewritten.value();
     if (std::optional<Stmt> rewritten = RewriteUBToL1(*copy.get()))

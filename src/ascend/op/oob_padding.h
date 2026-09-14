@@ -15,6 +15,7 @@
 #include "op/copy.h"
 
 #include "ascend/layout/ascend_layouts.h"
+#include "ascend/op/copy.h"
 #include "layout/layout.h"
 
 #include <tvm/arith/analyzer.h>
@@ -83,7 +84,7 @@ struct BoundedDMACopyRanges {
  * the original ranges with `clamped == false` when no clamp is needed or the
  * shape structure is unsupported.
  */
-BoundedDMACopyRanges ClampDMACopyTail(const CopyNode &op,
+BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
                                       arith::Analyzer *analyzer);
 
 /*!
@@ -102,7 +103,7 @@ Stmt MakeL1Fill(const Buffer &dst, const Array<Range> &region,
  *
  * \param valid_cols In-bounds column extent actually filled by the copy.
  */
-Optional<Stmt> MakeL1ColPadding(const CopyNode &op,
+Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
                                 arith::Analyzer *analyzer,
                                 const PrimExpr &valid_cols);
@@ -114,7 +115,7 @@ Optional<Stmt> MakeL1ColPadding(const CopyNode &op,
  * A full-row tail denotes a fully out-of-bounds non-singleton tile origin and
  * is omitted according to ClampDMACopyTail's origin contract.
  */
-Optional<Stmt> MakeL1RowPadding(const CopyNode &op,
+Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
                                 arith::Analyzer *analyzer,
                                 const PrimExpr &valid_rows);

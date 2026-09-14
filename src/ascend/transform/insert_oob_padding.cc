@@ -75,7 +75,7 @@ PrimExpr MakeRegionCall(const Buffer &buffer, const Array<Range> &ranges,
 // empty vector when the copy needs no padding. Mirrors copy.cc's
 // DMAPath::kGMToL1 major-layout branch (valid extents from the clamped source,
 // dst geometry from the full destination range).
-std::vector<Stmt> MakeL1PaddingStmts(const CopyNode *copy,
+std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
                                      const LayoutMap &layout_map,
                                      arith::Analyzer *analyzer) {
   std::vector<Stmt> stmts;
@@ -115,7 +115,7 @@ std::vector<Stmt> MakeL1PaddingStmts(const CopyNode *copy,
   PrimExpr valid_src_rows = bounded.src[src_row_axis]->extent;
   PrimExpr valid_src_cols = bounded.src[src_inner_axis]->extent;
 
-  bool needs_transpose = copy->GetTranspose();
+  bool needs_transpose = copy->transpose != 0;
   PrimExpr valid_rows = needs_transpose ? valid_src_cols : valid_src_rows;
   PrimExpr valid_cols = needs_transpose ? valid_src_rows : valid_src_cols;
 
@@ -193,16 +193,15 @@ private:
       : operand_axes_(operand_axes) {}
 
   void VisitExpr_(const CallNode *op) final {
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
     static const Op &gemm_op = Op::Get("tl.tileop.gemm");
-    if (op->op.same_as(copy_op)) {
-      Copy copy(op->args, op->annotations);
+    if (IsAscendCopyCall(op)) {
+      AscendCopy copy(op->args, op->annotations);
       auto it = operand_axes_.find(copy->dst->data);
       if (copy->sf.defined() && IsL1Buffer(copy->src) &&
           (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst)) &&
           it != operand_axes_.end()) {
         LogicalAxis src_k_axis = it->second;
-        if (copy->GetTranspose() != 0) {
+        if (copy->transpose != 0) {
           src_k_axis = src_k_axis == LogicalAxis::kRow ? LogicalAxis::kCol
                                                        : LogicalAxis::kRow;
         }
@@ -337,14 +336,13 @@ private:
   }
 
   Optional<Copy> AsMxGMToL1Copy(const Stmt &stmt) const {
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
     const auto *evaluate = stmt.as<EvaluateNode>();
     if (!evaluate)
       return std::nullopt;
     const auto *call = evaluate->value.as<CallNode>();
-    if (!call || !call->op.same_as(copy_op))
+    if (!call || !IsAscendCopyCall(call))
       return std::nullopt;
-    Copy copy(call->args, call->annotations);
+    AscendCopy copy(call->args, call->annotations);
     if (!IsGlobalBuffer(copy->src) || !IsL1Buffer(copy->dst) ||
         !IsMxL1Data(copy->dst)) {
       return std::nullopt;
@@ -431,14 +429,13 @@ private:
   }
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
     const auto *call = op->value.as<CallNode>();
-    if (!call || !call->op.same_as(copy_op)) {
+    if (!call || !IsAscendCopyCall(call)) {
       return Parent::VisitStmt_(op);
     }
 
-    Copy copy_obj(call->args, call->annotations);
-    const CopyNode *copy = copy_obj.get();
+    AscendCopy copy_obj(call->args, call->annotations);
+    const AscendCopyNode *copy = copy_obj.get();
 
     ascend::DMAPath dma_path = ascend::GetDMAPath(copy->src, copy->dst);
     // Only GM-facing paths need semantic range clamping. All DMA paths receive

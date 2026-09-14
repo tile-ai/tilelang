@@ -49,6 +49,7 @@
 #include "./estimate_latency.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
+#include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "ascend/transform/attr.h"
 #include "op/copy.h"
@@ -1411,7 +1412,7 @@ private:
     return result;
   }
 
-  MteGeometry InferMteGeometry(const CopyNode *copy) const {
+  MteGeometry InferMteGeometry(const AscendCopyNode *copy) const {
     Array<Range> src_ranges = copy->src_range;
     Array<Range> dst_ranges = copy->dst_range;
     if (src_ranges.empty() || dst_ranges.empty() ||
@@ -1423,7 +1424,7 @@ private:
     src_ranges = NormalizeEmptyUnitAxesForMTE(src_ranges, arith_analyzer_);
     dst_ranges = NormalizeEmptyUnitAxesForMTE(dst_ranges, arith_analyzer_);
 
-    int dual_dst_ctl = copy->GetDualDstCtl();
+    int dual_dst_ctl = copy->dual_dst_ctl;
     if (dual_dst_ctl == 1 || dual_dst_ctl == 2) {
       int src_axis = SplitAxis(src_ranges, dual_dst_ctl);
       int dst_axis = SplitAxis(dst_ranges, dual_dst_ctl);
@@ -1516,13 +1517,13 @@ private:
     return fallback;
   }
 
-  int64_t CalculateCopyBytes(const CopyNode *copy) const {
+  int64_t CalculateCopyBytes(const AscendCopyNode *copy) const {
     RegionElementUpperBound src_estimate = EstimateRegionElementUpperBound(
         copy->src, copy->src_range, arith_analyzer_);
     RegionElementUpperBound dst_estimate = EstimateRegionElementUpperBound(
         copy->dst, copy->dst_range, arith_analyzer_);
 
-    if (copy->GetDualDstCtl() == 1 || copy->GetDualDstCtl() == 2) {
+    if (copy->dual_dst_ctl == 1 || copy->dual_dst_ctl == 2) {
       // The frontend represents one side as a full logical region and the
       // other as one AIV's half region. Normalize both forms to one AIV's
       // physical payload. `double` identifies the half-source form. Prefer
@@ -1576,15 +1577,14 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
-    static const auto copy_op = Op::Get("tl.tileop.copy");
     static const auto gemm_op = Op::Get("tl.tileop.gemm");
-    if (op->op.same_as(copy_op)) {
-      Copy copy_obj(op->args, op->annotations);
-      const CopyNode *copy = copy_obj.get();
+    if (IsAscendCopyCall(op)) {
+      AscendCopy copy_obj(op->args, op->annotations);
+      const AscendCopyNode *copy = copy_obj.get();
       MteGeometry geometry = InferMteGeometry(copy);
       features_.copy_infos.push_back({copy->src.scope(), copy->dst.scope(),
                                       CalculateCopyBytes(copy),
-                                      copy->GetDualDstCtl(), geometry.kind,
+                                      copy->dual_dst_ctl, geometry.kind,
                                       geometry.contiguous_bytes_lower_bound,
                                       /*is_nd2nz_post_copy=*/false});
     } else if (op->op.same_as(tl::ascend_nd2nz_post_copy())) {

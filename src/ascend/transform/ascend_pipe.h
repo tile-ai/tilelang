@@ -36,6 +36,7 @@
 #include <string>
 
 #include "ascend/op/builtin.h"
+#include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "op/copy.h"
 #include "op/fill.h"
@@ -189,9 +190,8 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
   const Op &op = callee.value();
   const std::string &name = op->name;
 
-  static const Op &copy_op = Op::Get("tl.tileop.copy");
   static const Op &fill_op = Op::Get("tl.tileop.fill");
-  if (op.same_as(copy_op)) {
+  if (IsAscendCopyCall(call.get())) {
     Copy copy(call->args, call->annotations);
     return GetAscendCopyPipeMask(copy->src, copy->dst);
   }

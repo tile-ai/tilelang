@@ -117,7 +117,9 @@ class _VFCheckVisitor(PyStmtExprVisitor):
 
     def visit_evaluate_(self, op: tirx.Evaluate) -> None:
         call = op.value
-        if isinstance(call, tirx.Call) and call.op == tirx.op.Op.get("tl.tileop.copy"):
+        if isinstance(call, tirx.Call) and (
+            call.op.same_as(tirx.op.Op.get("tl.tileop.ascend_copy")) or call.op.same_as(tirx.op.Op.get("tl.tileop.copy"))
+        ):
             self._check_copy(call)
         super().visit_evaluate_(op)
 

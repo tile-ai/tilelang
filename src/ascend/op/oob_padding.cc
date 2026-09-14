@@ -76,7 +76,7 @@ Optional<Layout> FindLayoutForBuffer(const LayoutMap &layout_map,
   return std::nullopt;
 }
 
-BoundedDMACopyRanges ClampDMACopyTail(const CopyNode &op,
+BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
                                       arith::Analyzer *analyzer) {
   BoundedDMACopyRanges result{op.src_range, op.dst_range, false};
   if (op.src_range.size() != op.src->shape.size() ||
@@ -84,7 +84,7 @@ BoundedDMACopyRanges ClampDMACopyTail(const CopyNode &op,
     return result;
   }
 
-  bool need_transpose = op.GetTranspose();
+  bool need_transpose = op.transpose != 0;
   DMAPath dma_path = GetDMAPath(op.src, op.dst);
   bool preserve_l0c_source_geometry = dma_path == DMAPath::kL0CToGM;
   std::vector<size_t> src_axes, dst_axes;
@@ -260,7 +260,7 @@ Stmt MakeL1Fill(const Buffer &dst, const Array<Range> &region,
   return Evaluate(Call(DataType::Handle(), Fill::Get(), {dst_region, value}));
 }
 
-Optional<Stmt> MakeL1ColPadding(const CopyNode &op,
+Optional<Stmt> MakeL1ColPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
                                 arith::Analyzer *analyzer,
                                 const PrimExpr &valid_cols) {
@@ -298,11 +298,11 @@ Optional<Stmt> MakeL1ColPadding(const CopyNode &op,
   Array<Range> fill_region =
       MakeFractalFillRegion(op, layout, valid_c0_blocks * layout.c0,
                             tail_c0_blocks * layout.c0, I(0), dst_n);
-  PrimExpr fill_value = op.GetPadValue().value_or(make_zero(op.dst->dtype));
+  PrimExpr fill_value = op.pad_value.value_or(make_zero(op.dst->dtype));
   return MakeL1Fill(op.dst, fill_region, fill_value);
 }
 
-Optional<Stmt> MakeL1RowPadding(const CopyNode &op,
+Optional<Stmt> MakeL1RowPadding(const AscendCopyNode &op,
                                 const AscendFractalLayoutInfo &layout,
                                 arith::Analyzer *analyzer,
                                 const PrimExpr &valid_rows) {
@@ -337,7 +337,7 @@ Optional<Stmt> MakeL1RowPadding(const CopyNode &op,
   PrimExpr dst_c0_blocks = FloorDiv(dst_cols + layout.c0 - I(1), layout.c0);
   Array<Range> fill_region = MakeFractalFillRegion(
       op, layout, I(0), dst_c0_blocks * layout.c0, valid_rows, tail_rows);
-  PrimExpr fill_value = op.GetPadValue().value_or(make_zero(op.dst->dtype));
+  PrimExpr fill_value = op.pad_value.value_or(make_zero(op.dst->dtype));
   return MakeL1Fill(op.dst, fill_region, fill_value);
 }
 

@@ -37,6 +37,7 @@
 #include "./ir_structure.h"
 #include "./memory_detector.h"
 #include "ascend/op/builtin.h"
+#include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "ascend/transform/attr.h"
 #include "op/copy.h"
@@ -286,14 +287,12 @@ public:
 
 private:
   void VisitExpr_(const CallNode *op) final {
-    static const auto copy_op = Op::Get("tl.tileop.copy");
-
     usage_.pipe_mask |= GetAscendTaskPipeMask(ffi::GetRef<Call>(op));
-    if (op->op.same_as(copy_op)) {
-      Copy copy_obj(op->args, op->annotations);
-      const CopyNode *copy = copy_obj.get();
+    if (IsAscendCopyCall(op)) {
+      AscendCopy copy_obj(op->args, op->annotations);
+      const AscendCopyNode *copy = copy_obj.get();
       usage_.hbm_mask |= GetHbmResourceMask(copy->src, copy->dst);
-      if (copy_obj->GetDataSelect() != 0)
+      if (copy->data_select != 0)
         usage_.reads_pad_value = true;
       if (IsGlobalBuffer(copy->dst))
         usage_.reads_atomic = true;

@@ -14,6 +14,7 @@
 #include <tvm/tirx/transform.h>
 
 #include "ascend/op/builtin.h"
+#include "ascend/op/copy.h"
 #include "op/utils.h"
 
 #include <functional>
@@ -432,7 +433,7 @@ private:
       if (opnode->name == "tl.tileop.fill") {
         return LowerFill(call);
       }
-      if (opnode->name == "tl.tileop.copy") {
+      if (IsAscendCopyCall(call)) {
         return LowerCopy(call);
       }
       if (opnode->name == "tl.tileop.reduce") {

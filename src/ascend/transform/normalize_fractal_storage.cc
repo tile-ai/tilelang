@@ -15,6 +15,7 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "ascend/layout/ascend_layouts.h"
+#include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
 #include "op/copy.h"
@@ -263,8 +264,7 @@ private:
       if (buffers_.count(buffer_region->buffer))
         return MakeRegion_(RewriteRegion_(buffer_region), GetRef<Call>(op));
     }
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
-    if (op->op.same_as(copy_op)) {
+    if (IsAscendCopyCall(op)) {
       Copy copy(op->args, op->annotations);
       Call call = Downcast<Call>(Parent::VisitExpr_(op));
       if (!IsGlobalBuffer(copy->src) || !IsL1Buffer(copy->dst) ||

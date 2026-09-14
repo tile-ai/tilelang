@@ -283,7 +283,7 @@ def test_short_in_bounds_copy_keeps_its_requested_gm_region():
     tirx.stmt_functor.post_order_visit(
         snapshots["tl.AscendInsertOOBPadding"]["main"].body, lambda node: calls.append(node) if isinstance(node, tirx.Call) else None
     )
-    copy = next(node for node in calls if node.op.name == "tl.tileop.copy")
+    copy = next(node for node in calls if node.op.name in ("tl.tileop.ascend_copy", "tl.tileop.copy"))
     assert [int(x) for x in copy.args[0].args[2:]] == [15, 15]
     assert [int(x) for x in copy.args[1].args[2:]] == [15, 15]
     assert not any(node.op.name == "tl.ascend_fill_l1" for node in calls)
@@ -317,7 +317,7 @@ def test_padded_storage_is_the_destination_bound():
     copies = []
 
     def collect(node):
-        if isinstance(node, tirx.Call) and node.op.name == "tl.tileop.copy":
+        if isinstance(node, tirx.Call) and node.op.name in ("tl.tileop.ascend_copy", "tl.tileop.copy"):
             copies.append(node)
 
     tirx.stmt_functor.post_order_visit(snapshots["tl.AscendInsertOOBPadding"]["main"].body, collect)

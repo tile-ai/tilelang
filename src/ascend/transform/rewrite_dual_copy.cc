@@ -35,6 +35,7 @@
 #include <utility>
 
 #include "ascend/op/builtin.h"
+#include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "op/copy.h"
 #include "op/utils.h"
@@ -102,11 +103,11 @@ enum class DualCopyPath {
   kUnsupported,
 };
 
-DualCopyPath ClassifyDualCopy(const Copy &copy) {
+DualCopyPath ClassifyDualCopy(const AscendCopy &copy) {
   if (!copy->annotations.Get("dual_dst_ctl"))
     return DualCopyPath::kNotDualCopy;
 
-  int dual_control = copy->GetDualDstCtl();
+  int dual_control = copy->dual_dst_ctl;
   if (dual_control != 1 && dual_control != 2)
     return DualCopyPath::kUnsupported;
 
@@ -148,9 +149,9 @@ int SplitAxis(const Array<Range> &ranges, int dual_control, DualCopyPath path) {
   return static_cast<int>(ranges.size()) - 2 + (dual_control == 1 ? 0 : 1);
 }
 
-void ValidateStaticSplitConstraints(const Copy &copy, DualCopyPath path,
+void ValidateStaticSplitConstraints(const AscendCopy &copy, DualCopyPath path,
                                     const Call &call) {
-  int dual_control = copy->GetDualDstCtl();
+  int dual_control = copy->dual_dst_ctl;
   int source_axis = SplitAxis(copy->src_range, dual_control, path);
   int destination_axis = SplitAxis(copy->dst_range, dual_control, path);
   const int64_t *source_extent =
@@ -180,12 +181,10 @@ void ValidateStaticSplitConstraints(const Copy &copy, DualCopyPath path,
 }
 
 bool CallNeedsSoftwareSid(const CallNode *op) {
-  static const Op &copy_op = Op::Get("tl.tileop.copy");
-  if (!op->op.same_as(copy_op) ||
-      !op->annotations.Get("dual_dst_ctl").has_value())
+  if (!IsAscendCopyCall(op) || !op->annotations.Get("dual_dst_ctl").has_value())
     return false;
 
-  Copy copy(op->args, op->annotations);
+  AscendCopy copy(op->args, op->annotations);
   return IsSoftwareDualCopy(ClassifyDualCopy(copy));
 }
 
@@ -293,10 +292,9 @@ private:
       return rewritten;
     Call call = ffi::GetRef<Call>(call_node);
 
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
-    if (!call->op.same_as(copy_op))
+    if (!IsAscendCopyCall(call_node))
       return rewritten;
-    Copy copy(call->args, call->annotations);
+    AscendCopy copy(call->args, call->annotations);
     DualCopyPath path = ClassifyDualCopy(copy);
     if (path == DualCopyPath::kNotDualCopy) {
       return rewritten;
@@ -313,14 +311,14 @@ private:
       return rewritten;
 
     Var sid = RequireSid(call);
-    int dual_control = copy->GetDualDstCtl();
+    int dual_control = copy->dual_dst_ctl;
     int source_axis = SplitAxis(copy->src_range, dual_control, path);
     int destination_axis = SplitAxis(copy->dst_range, dual_control, path);
     if (path == DualCopyPath::kSoftwareGMToUB) {
       PrimExpr split_extent = copy->dst_range[destination_axis]->extent;
       Call source = RewriteRegion(Downcast<Call>(call->args[0]), source_axis,
                                   sid * split_extent, split_extent);
-      return Evaluate(Call(call->dtype, copy_op,
+      return Evaluate(Call(call->dtype, call->op,
                            {source, Downcast<Call>(call->args[1])},
                            StripDualCopyAnnotations(call->annotations, false)));
     }
@@ -329,7 +327,7 @@ private:
     Call destination =
         RewriteRegion(Downcast<Call>(call->args[1]), destination_axis,
                       sid * split_extent, split_extent);
-    return Evaluate(Call(call->dtype, copy_op,
+    return Evaluate(Call(call->dtype, call->op,
                          {Downcast<Call>(call->args[0]), destination},
                          StripDualCopyAnnotations(call->annotations, true)));
   }
