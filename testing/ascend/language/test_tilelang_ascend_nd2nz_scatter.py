@@ -258,10 +258,13 @@ def test_nd2nz_scatter(sd, dd):
 
 
 def test_nd2nz_scatter_tcopy_codegen():
-    source = tilelang.lower(
-        nd2nz_scatter_test(torch.float32, torch.bfloat16, ROWS, COLS),
-        target="ascend",
-    ).kernel_source
+    # tilelang.lower expects the caller to hold the target scope; the
+    # vectorize planner consults Target.current(). Same below.
+    with tvm.target.Target("ascend"):
+        source = tilelang.lower(
+            nd2nz_scatter_test(torch.float32, torch.bfloat16, ROWS, COLS),
+            target="ascend",
+        ).kernel_source
 
     assert "__global__ __vector__ void main_kernel" in source
     assert "ascend_nd2nz_scatter<32, 128, float, bfloat16_t>" in source
@@ -269,37 +272,41 @@ def test_nd2nz_scatter_tcopy_codegen():
 
 
 def test_nd2nz_scatter_tcopy_requires_padding_row():
-    with pytest.raises(ValueError, match="reserve exactly one padding row"):
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="reserve exactly one padding row"):
         tilelang.lower(_invalid_unpadded_nd2nz_copy(ROWS, COLS), target="ascend")
 
 
 def test_staged_nd2nz_scatter_uses_loop_bounds():
-    source = tilelang.lower(_staged_nd2nz_copy(), target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        source = tilelang.lower(_staged_nd2nz_copy(), target="ascend").kernel_source
     assert "ascend_nd2nz_scatter<16, 16, half, half>" in source
 
 
 def test_reshaped_source_tcopy_codegen():
-    source = tilelang.lower(_reshaped_source_nd2nz_copy(), target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        source = tilelang.lower(_reshaped_source_nd2nz_copy(), target="ascend").kernel_source
     assert "ascend_nd2nz_scatter<32, 128, bfloat16_t, float>" in source
 
 
 def test_nd2nz_scatter_rejects_strided_source():
-    with pytest.raises(ValueError, match="compact trailing source matrix"):
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="compact trailing source matrix"):
         tilelang.lower(_strided_source_nd2nz_copy(), target="ascend")
 
 
 def test_nd2nz_scatter_accepts_aligned_leading_stride():
-    source = tilelang.lower(_leading_strided_source_nd2nz_copy(ROWS * COLS), target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        source = tilelang.lower(_leading_strided_source_nd2nz_copy(ROWS * COLS), target="ascend").kernel_source
     assert "ascend_nd2nz_scatter<32, 128, float, float>" in source
 
 
 def test_nd2nz_scatter_rejects_unaligned_source_address():
-    with pytest.raises(ValueError, match="32-byte-aligned source address"):
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="32-byte-aligned source address"):
         tilelang.lower(_leading_strided_source_nd2nz_copy(ROWS * COLS - 1), target="ascend")
 
 
 def test_simtvf_copy_is_not_rewritten_to_simdvf_scatter():
-    source = tilelang.lower(_simtvf_nd2nz_copy(), target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        source = tilelang.lower(_simtvf_nd2nz_copy(), target="ascend").kernel_source
     assert "__simt_vf__" in source
     assert "ascend_nd2nz_scatter" not in source
 

@@ -9,7 +9,10 @@ from tilelang.engine.lower import lower_to_host_device_ir
 def _run_to_optimize(func):
     context = create_backend_context("ascend")
     mod = tvm.IRModule({"main": func})
-    return lower_to_host_device_ir(mod, context)
+    # lower_to_host_device_ir expects its caller to hold the target scope;
+    # the vectorize planner consults Target.current().
+    with tvm.target.Target("ascend"):
+        return lower_to_host_device_ir(mod, context)
 
 
 def test_fragment_narrow_checker_fragment():
@@ -42,6 +45,3 @@ def test_fragment_narrow_checker_rejects_fragment_leak():
 
     with pytest.raises(ValueError, match="Parallel loops outside VF blocks are not supported on Ascend NPU"):
         _run_to_optimize(leaked)
-
-
-test_fragment_narrow_checker_rejects_fragment_leak()

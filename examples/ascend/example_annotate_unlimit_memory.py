@@ -72,5 +72,10 @@ if __name__ == "__main__":
     print("Default L1 limit: 512 KB -- annotate_unlimit_memory required\n")
 
     program = gemm_with_unlimit(M, N, K, block_M, block_N, block_K, dtype)
-    mod = tilelang.lower(program, target=args.target)
+    # tilelang.lower expects the caller to hold the target scope; passes that
+    # consult Target.current() read the Ascend vector capabilities through it.
+    from tvm.target import Target
+
+    with Target(args.target):
+        mod = tilelang.lower(program, target=args.target)
     print(f'Compilation succeeded with target="{args.target}" and T.annotate_unlimit_memory("shared.l1").')

@@ -18,7 +18,6 @@ source-only lowering tests keep running on a host without an NPU.
 
 from __future__ import annotations
 
-import pytest
 
 import tilelang.testing
 

@@ -148,7 +148,9 @@ def test_reducer_v2_rejects_unsupported_bitwise_collectives(op, target):
             T.finalize_reducer(partial, result)
             T.copy(result, B)
 
-    with pytest.raises(Exception, match="bitand, bitor, and bitxor are not supported"):
+    # tilelang.lower expects the caller to hold the target scope; the
+    # vectorize planner consults Target.current().
+    with tilelang.tvm.target.Target(target), pytest.raises(Exception, match="bitand, bitor, and bitxor are not supported"):
         tilelang.lower(kernel, target=target)
 
 
