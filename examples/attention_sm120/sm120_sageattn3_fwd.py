@@ -1,4 +1,4 @@
-"""SM120 SageAttention3-style NVFP4 attention forward in TileLang (v3: two warp groups out of phase).
+"""SM120 SageAttention3-style NVFP4 attention forward in TileLang (v4: two warp groups, rotated GEMMs).
 
 Algorithm (thu-ml/SageAttention `sageattention3_blackwell`, paper arXiv:2505.11594): Q, K, V are
 NVFP4 (e2m1 + per-16-element e4m3 scales; K smoothed by its sequence mean, Q by its 128-row block
@@ -12,12 +12,18 @@ keys and the C-fragment -> A-fragment relabeling is the identity; V^T and P ther
 original key order. Inputs: packed fp4 (2 elem/byte, low nibble first) and row-major uint32 scale
 words (4 e4m3 bytes = 4 consecutive 16-groups, LSB first).
 
-Kernel structure: 256 threads = two warp groups of 4 warps (FullRow: 16 rows per warp). Both groups
-run the same softmax / P-quantization / PV code on the same fragments; only the QK GEMM is split
-and phase-shifted with a manual pipeline schedule (T.Pipelined order/stage): group A computes S of
-tile t at the start of the iteration that consumes it, group B computes S of tile t one pipeline
-stage earlier and carries it in registers, so while one group issues MMAs the other runs the
-softmax ALU/MUFU work. The P scale is folded into the exp2 exponent (P/absmax = exp2((s - smax)
+Kernel structure (FA3-style rotation): 256 threads = two warp groups of 4 warps (FullRow: 16 rows
+per warp), one warp of each group per warp scheduler. Both groups run the same softmax /
+P-quantization code over the same fragments -- each thread only ever touches its own rows, so the
+duplication costs no registers -- but their GEMMs are rotated against each other by a manual
+pipeline schedule (T.Pipelined order/stage), so one group issues MMAs while the other runs the
+softmax ALU/MUFU work:
+
+    group A:                   softmax(t) | PV(t)  QK(t+1)
+    group B:   PV(t-1) QK(t)   | softmax(t)
+
+Group B's PV is rotated one tile back, which gives it a full MMA chunk to issue while group A is
+in its softmax section, and lets both groups reach the end of the iteration together. The P scale is folded into the exp2 exponent (P/absmax = exp2((s - smax)
 * log2e/sqrt(d) - log2 6)); the P-scale bytes are written with a warp-private shared store
 (each warp reads back only its own rows) so no block barrier separates them from the PV GEMM;
 the five per-tile copies form one cp.async commit group (one wait + barrier per iteration).
@@ -129,11 +135,11 @@ def build_sm120_sageattn3_fwd(
     threads: int = 256,
     out_dtype=T.bfloat16,
 ):
-    assert dim == 128, "v3 supports head_dim = 128"
+    assert dim == 128, "v4 supports head_dim = 128"
     assert block_M == 128 and block_N == 128, "tile contract: 128x128"
     assert threads == 256, "two warp groups of 4 warps (16 rows per warp)"
-    # Group B consumes the K/V tile at prefetch distance num_stages-1; with num_stages=2 the
-    # pipeline's cp.async wait is one commit group short for that consumer (silent races).
+    # Group B consumes the K/V tile at prefetch distance num_stages-1; at distance 1 the pipeline's
+    # cp.async wait is one commit group short for that consumer (silent races).
     assert num_stages >= 3, "num_stages must be >= 3"
     n_warps = threads // 32
     warp_rows = block_M // n_warps  # 16: FullRow policy, every warp owns 16 full rows
@@ -151,20 +157,23 @@ def build_sm120_sageattn3_fwd(
     g_layout = _p_group_layout(block_M, n_groups, warp_rows)
     ph_layout = _p_half_layout(block_M, n_groups, warp_rows)
 
-    # Manual pipeline schedule, one entry per top-level statement of the loop body (thread
-    # predicates are distributed over the statements before planning): 5 copies at stage 0,
-    # group A's QK, 14 shared softmax statements, group B's QK one stage earlier, then the
-    # P-scale store, __syncwarp, PV GEMM and the row-sum update. The copies are emitted after
-    # the compute statements (7% faster than copies-first at 16K); that order is only safe
-    # because every consumer sits at prefetch distance >= 2 (num_stages >= 3).
+    # Manual pipeline schedule. The thread predicates are distributed over the statements before
+    # planning, so every statement of a predicated block needs its own entry:
+    #   5 copies (stage 0) | B's rotated PV (SA+1) | A's block (SA) | B's QK (SA) | B's block (SA)
+    #   | A's QK (SA-1)
+    # Two emission-order rules keep every fragment single-versioned (a second version of the S or
+    # output accumulator would cost 64 registers per thread): each write of the S accumulator is
+    # emitted after all of its reads, and B's rotated PV is emitted before every stage-SA write of
+    # the output accumulator.
     SA = num_stages
-    n_copy, n_sm, n_tail = 5, 14, 4
-    n_compute = 1 + n_sm + 1 + n_tail
-    stage = [0] * n_copy + [SA] + [SA] * n_sm + [SA - 1] + [SA] * n_tail
+    n_copy, n_alu_a = 5, 18
+    n_alu_b = n_alu_a - 1  # group B's block has no PV
+    n_compute = 1 + n_alu_a + 1 + n_alu_b + 1
+    stage = [0] * n_copy + [SA + 1] + [SA] * n_alu_a + [SA] + [SA] * n_alu_b + [SA - 1]
     order = list(range(n_compute, n_compute + n_copy)) + list(range(n_compute))
     pipe_ann = {  # all five copies in one cp.async commit group
-        "software_pipeline_async_producers": [1] * n_copy + [0] * (len(stage) - n_copy),
-        "software_pipeline_async_producer_groups": [0] * n_copy + [-1] * (len(stage) - n_copy),
+        "software_pipeline_async_producers": [1] * n_copy + [0] * n_compute,
+        "software_pipeline_async_producer_groups": [0] * n_copy + [-1] * n_compute,
     }
 
     @T.macro
@@ -186,6 +195,105 @@ def build_sm120_sageattn3_fwd(
             sf_layout="rowmajor",
             scale_dtype="ue4m3",
         )
+
+    @T.macro
+    def pv_gemm(Pw, V_sh, acc_o, SFP_sh, SFV_sh):
+        T.mma_gemm_blockscaled(
+            Pw,
+            V_sh,
+            acc_o,
+            SFP_sh,
+            SFV_sh,
+            transpose_B=True,
+            policy=T.GemmWarpPolicy.FullRow,
+            clear_accum=False,
+            k_start=0,
+            sf_a_granularity_k=16,
+            sf_b_granularity_k=16,
+            sf_layout="rowmajor",
+            scale_dtype="ue4m3",
+            a_packed_words=True,
+        )
+
+    @T.macro
+    def softmax_quant(
+        with_pv,
+        DS_sh,
+        V_sh,
+        SFV_sh,
+        SFP_sh,
+        SFP_u8,
+        acc_s,
+        G,
+        smax,
+        absmax,
+        coff,
+        rowsum8,
+        Pw,
+        Ev,
+        Od,
+        Es,
+        acc_o,
+        m_i,
+        m_prev,
+        ms,
+        rescale,
+        l_tile,
+        l_i,
+    ):
+        # Regroup S columns (permuted-K order) into original-key 16-groups -- a pure in-lane
+        # renaming under the K permutation -- and add delta_s, indexed by original key:
+        # o(c) = 32*(c//32) + PERM32[c%32] for the permuted column c.
+        for i, kk, hi, q1, q0, n, jj in T.Parallel(block_M, 2, 2, 2, 2, 4, 2):
+            G[i, 4 * kk + 2 * hi + q1, 8 * q0 + 2 * n + jj] = (
+                acc_s[i, 64 * kk + 32 * hi + 8 * n + 4 * q1 + 2 * q0 + jj] + DS_sh[64 * kk + 32 * hi + 16 * q1 + 8 * q0 + 2 * n + jj]
+            )
+        T.reduce_max(G, smax, dim=2, clear=True)  # per-16-key max: 8 in-lane + one xor-1 shuffle
+        T.copy(m_i, m_prev)
+        T.reduce_max(smax, m_i, dim=1, clear=False)
+        for i in T.Parallel(block_M):
+            ms[i] = m_i[i] * sl2 + LOG2_P1
+            rescale[i] = T.exp2((m_prev[i] - m_i[i]) * sl2)  # same expression order as the original
+        for i, m in T.Parallel(block_M, n_groups):
+            absmax[i, m] = T.exp2(smax[i, m] * sl2 - ms[i] + LOG2_FP4)  # = max16(P2) / 6
+            coff[i, m] = smax[i, m] * sl2 + LOG2_FP4
+        # P2 / absmax = exp2((s - smax) * sl2 - log2 6): one exp2 per element, no scaling pass;
+        # even/odd key halves so one cvt converts a key pair (one index pattern per loop body).
+        for i, m, t in T.Parallel(block_M, n_groups, 8):
+            Ev[i, m, t] = T.exp2(G[i, m, 2 * t] * sl2 - coff[i, m])
+        for i, m, t in T.Parallel(block_M, n_groups, 8):
+            Od[i, m, t] = T.exp2(G[i, m, 2 * t + 1] * sl2 - coff[i, m])
+        for i, m, t in T.Parallel(block_M, n_groups, 8):
+            Es[i, m, t] = Ev[i, m, t] + Od[i, m, t]
+        T.reduce_sum(Es, rowsum8, dim=2, clear=True)
+        for i, m in T.Parallel(block_M, n_groups):
+            rowsum8[i, m] = rowsum8[i, m] * absmax[i, m]  # rowsum(P2) = sum_m absmax_m * sum_k (P2/absmax)
+        T.reduce_sum(rowsum8, l_tile, dim=1, clear=True)
+        for i, m, k8 in T.Parallel(block_M, n_groups, 2):  # e2m1 nibbles, 8 keys per uint32
+            Pw[i, 2 * m + k8] = 0
+            for t2 in T.serial(4):
+                Pw[i, 2 * m + k8] = Pw[i, 2 * m + k8] | T.shift_left(
+                    T.call_extern("uint32", "tl_cvt_e2m1x2_rn", Ev[i, m, 4 * k8 + t2], Od[i, m, 4 * k8 + t2]),
+                    T.cast(8 * t2, T.uint32),
+                )
+        for i, j in T.Parallel(block_M, dim):
+            acc_o[i, j] *= rescale[i]
+        # P-scale bytes (e4m3 RN satfinite), warp-private store: a warp reads back only its own
+        # rows, so no block barrier separates the store from the PV GEMM.
+        for i, m in T.Parallel(block_M, n_groups):
+            T.evaluate(
+                T.call_extern(
+                    "int32",
+                    "tl_sts_u8",
+                    T.address_of(SFP_u8[i, m]),
+                    T.cast(T.reinterpret(T.cast(absmax[i, m], T.float8_e4m3fn), T.uint8), T.uint32),
+                )
+            )
+        T.evaluate(T.call_extern("int32", "tl_syncwarp"))
+        if with_pv:
+            pv_gemm(Pw, V_sh, acc_o, SFP_sh, SFV_sh)
+        for i in T.Parallel(block_M):
+            l_i[i] = l_i[i] * rescale[i] + l_tile[i]
 
     @T.prim_func
     def main(
@@ -236,6 +344,7 @@ def build_sm120_sageattn3_fwd(
                 SFQ_sh[r, w] = SFQ[bz, by, bx * block_M + r, w]
             T.fill(acc_o, 0)
             T.fill(acc_s, 0)
+            T.fill(Pw, 0)
             T.fill(l_i, 0)
             for i in T.Parallel(block_M):  # explicit (T.fill with -inf is dropped by lowering)
                 m_i[i] = -T.infinity(accum)
@@ -249,85 +358,66 @@ def build_sm120_sageattn3_fwd(
                     SFV_sh[r, w] = SFV[bz, by, r, kt * sf_words_pv + w]
                 T.copy(DS[bz, by, bx, kt * block_N : (kt + 1) * block_N], DS_sh)
 
-                # group A: S of this tile (group B computed its S one iteration ago, see below)
-                if tx // group_threads == 0:
+                if tx // group_threads == 1:  # B: PV of the previous tile, while A is in its softmax
+                    pv_gemm(Pw, V_sh, acc_o, SFP_sh, SFV_sh)
+                if tx // group_threads == 0:  # A: softmax of this tile, then its own PV
+                    softmax_quant(
+                        True,
+                        DS_sh,
+                        V_sh,
+                        SFV_sh,
+                        SFP_sh,
+                        SFP_u8,
+                        acc_s,
+                        G,
+                        smax,
+                        absmax,
+                        coff,
+                        rowsum8,
+                        Pw,
+                        Ev,
+                        Od,
+                        Es,
+                        acc_o,
+                        m_i,
+                        m_prev,
+                        ms,
+                        rescale,
+                        l_tile,
+                        l_i,
+                    )
+                if tx // group_threads == 1:  # B: S of this tile, still inside A's softmax section
+                    qk_gemm(Q_sh, K_sh, SFQ_sh, SFK_sh, acc_s)
+                if tx // group_threads == 1:  # B: softmax of this tile (its PV runs next iteration)
+                    softmax_quant(
+                        False,
+                        DS_sh,
+                        V_sh,
+                        SFV_sh,
+                        SFP_sh,
+                        SFP_u8,
+                        acc_s,
+                        G,
+                        smax,
+                        absmax,
+                        coff,
+                        rowsum8,
+                        Pw,
+                        Ev,
+                        Od,
+                        Es,
+                        acc_o,
+                        m_i,
+                        m_prev,
+                        ms,
+                        rescale,
+                        l_tile,
+                        l_i,
+                    )
+                if tx // group_threads == 0:  # A: S of the next tile, while B is in its softmax
                     qk_gemm(Q_sh, K_sh, SFQ_sh, SFK_sh, acc_s)
 
-                # --- shared: online softmax + two-level P quantization (A: this tile, B: previous) ---
-                # Regroup S columns (permuted-K order) into original-key 16-groups (a pure in-lane
-                # renaming under the K permutation) and add delta_s, indexed by original key:
-                # o(c) = 32*(c//32) + PERM32[c%32] for the permuted column c.
-                for i, kk, hi, q1, q0, n, jj in T.Parallel(block_M, 2, 2, 2, 2, 4, 2):
-                    G[i, 4 * kk + 2 * hi + q1, 8 * q0 + 2 * n + jj] = (
-                        acc_s[i, 64 * kk + 32 * hi + 8 * n + 4 * q1 + 2 * q0 + jj]
-                        + DS_sh[64 * kk + 32 * hi + 16 * q1 + 8 * q0 + 2 * n + jj]
-                    )
-                T.reduce_max(G, smax, dim=2, clear=True)  # per-16-key max: 8 in-lane + one xor-1 shuffle
-                T.copy(m_i, m_prev)
-                T.reduce_max(smax, m_i, dim=1, clear=False)
-                for i in T.Parallel(block_M):
-                    ms[i] = m_i[i] * sl2 + LOG2_P1
-                    rescale[i] = T.exp2((m_prev[i] - m_i[i]) * sl2)  # same expression order as the original
-                for i, m in T.Parallel(block_M, n_groups):
-                    absmax[i, m] = T.exp2(smax[i, m] * sl2 - ms[i] + LOG2_FP4)  # = max16(P2) / 6
-                    coff[i, m] = smax[i, m] * sl2 + LOG2_FP4
-                # P2 / absmax = exp2((s - smax) * sl2 - log2 6): one exp2 per element, no scaling pass;
-                # even/odd key halves so one cvt converts a key pair (one index pattern per loop body).
-                for i, m, t in T.Parallel(block_M, n_groups, 8):
-                    Ev[i, m, t] = T.exp2(G[i, m, 2 * t] * sl2 - coff[i, m])
-                for i, m, t in T.Parallel(block_M, n_groups, 8):
-                    Od[i, m, t] = T.exp2(G[i, m, 2 * t + 1] * sl2 - coff[i, m])
-                for i, m, t in T.Parallel(block_M, n_groups, 8):
-                    Es[i, m, t] = Ev[i, m, t] + Od[i, m, t]
-                T.reduce_sum(Es, rowsum8, dim=2, clear=True)
-                for i, m in T.Parallel(block_M, n_groups):
-                    rowsum8[i, m] = rowsum8[i, m] * absmax[i, m]  # rowsum(P2) = sum_m absmax_m * sum_k (P2/absmax)
-                T.reduce_sum(rowsum8, l_tile, dim=1, clear=True)
-                for i, m, k8 in T.Parallel(block_M, n_groups, 2):  # e2m1 nibbles, 8 keys per uint32
-                    Pw[i, 2 * m + k8] = 0
-                    for t2 in T.serial(4):
-                        Pw[i, 2 * m + k8] = Pw[i, 2 * m + k8] | T.shift_left(
-                            T.call_extern("uint32", "tl_cvt_e2m1x2_rn", Ev[i, m, 4 * k8 + t2], Od[i, m, 4 * k8 + t2]),
-                            T.cast(8 * t2, T.uint32),
-                        )
-                for i, j in T.Parallel(block_M, dim):
-                    acc_o[i, j] *= rescale[i]
-
-                # group B: S of the next tile (one pipeline stage earlier), placed here so both groups
-                # reach the PV GEMM after one GEMM + one softmax
-                if tx // group_threads == 1:
-                    qk_gemm(Q_sh, K_sh, SFQ_sh, SFK_sh, acc_s)
-
-                # P-scale bytes (e4m3 RN satfinite), warp-private store; then O += FP4MM(P-hat, V^T)
-                for i, m in T.Parallel(block_M, n_groups):
-                    T.evaluate(
-                        T.call_extern(
-                            "int32",
-                            "tl_sts_u8",
-                            T.address_of(SFP_u8[i, m]),
-                            T.cast(T.reinterpret(T.cast(absmax[i, m], T.float8_e4m3fn), T.uint8), T.uint32),
-                        )
-                    )
-                T.evaluate(T.call_extern("int32", "tl_syncwarp"))
-                T.mma_gemm_blockscaled(
-                    Pw,
-                    V_sh,
-                    acc_o,
-                    SFP_sh,
-                    SFV_sh,
-                    transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow,
-                    clear_accum=False,
-                    k_start=0,
-                    sf_a_granularity_k=16,
-                    sf_b_granularity_k=16,
-                    sf_layout="rowmajor",
-                    scale_dtype="ue4m3",
-                    a_packed_words=True,
-                )
-                for i in T.Parallel(block_M):
-                    l_i[i] = l_i[i] * rescale[i] + l_tile[i]
-
+            # group B's last PV is drained by the pipeline epilogue (it is the highest stage)
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] = acc_o[i, j] / l_i[i]
             T.copy(acc_o, O_sh)
