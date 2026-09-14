@@ -156,7 +156,7 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     if allow_global_thread_synchronization(pass_ctx=pass_ctx):
-        mod = tilelang.transform.ThreadSync("global")(mod)
+        mod = ascend_transform.AscendThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = ascend_transform.MarkScalarDcacheBypass()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
@@ -173,8 +173,8 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # when no hard_event overflows 8 slots.
     mod = ascend_transform.RewriteFlagToBuf()(mod)
 
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = ascend_transform.AscendThreadSync("shared")(mod)
+    mod = ascend_transform.AscendThreadSync("shared.dyn")(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
