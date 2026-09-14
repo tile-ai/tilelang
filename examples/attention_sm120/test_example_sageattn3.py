@@ -56,7 +56,7 @@ def test_sageattn3_fwd_codegen_contract():
     src = kernel.get_kernel_source()
     assert "tl::tma_load(" in src or "tl::cp_async_gs<" in src  # packed fp4 K/V^T staging (TMA under WS, cp.async in the simple form)
     assert "SM120MmaBlockScaledKind::kMxf4nvf4, 4, tl::SM120MmaScaleType::kUE4M3" in src  # m16n8k64 4X ue4m3
-    assert "tl_cvt_e2m1_rn_div(" in src  # cvt.rn.satfinite.e2m1x2 P quantization
+    assert "tl_cvt_e2m1_rn_mul(" in src  # cvt.rn.satfinite.e2m1x2 P quantization
     assert "AllReduce<tl::MaxOp, 2, 1" in src  # per-16-key max = one xor-1 shuffle (K permutation contract)
     assert "= -CUDART_INF_F" in src  # running row max initialised
 

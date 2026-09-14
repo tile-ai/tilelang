@@ -36,10 +36,10 @@ LOG2E = 1.4426950408889634
 LOG2_P1 = math.log2(1.0 / (448.0 * 6.0))  # two-level: P2 = P * 2688 (softmax_fused.h)
 LOG2_FP4 = math.log2(1.0 / 6.0)  # per-16 scale = max16(P2) / 6
 
-# One fp32 -> one e2m1 nibble (low 4 bits of the result), x divided by the block scale first,
+# One fp32 -> one e2m1 nibble (low 4 bits of the result), x scaled by the block scale inverse,
 # via the same cvt.rn.satfinite.e2m1x2.f32 the original uses (utils.h packed_float_to_e2m1).
 CVT_E2M1_SRC = r"""
-__device__ __forceinline__ unsigned int tl_cvt_e2m1_rn_div(float x, float s) {
+__device__ __forceinline__ unsigned int tl_cvt_e2m1_rn_mul(float x, float inv) {
   unsigned int out;
   asm volatile(
       "{\n"
@@ -48,7 +48,7 @@ __device__ __forceinline__ unsigned int tl_cvt_e2m1_rn_div(float x, float s) {
       "cvt.u32.u8 %0, b;\n"
       "}"
       : "=r"(out)
-      : "f"(0.0f), "f"(x / s));
+      : "f"(0.0f), "f"(x * inv));
   return out & 0xFu;
 }
 """
@@ -153,6 +153,7 @@ def build_sm120_sageattn3_fwd(
             G = T.alloc_fragment((block_M, n_groups, 16), accum)
             smax = T.alloc_fragment((block_M, n_groups), accum)
             absmax = T.alloc_fragment((block_M, n_groups), accum)
+            sinv = T.alloc_fragment((block_M, n_groups), accum)
             rowsum8 = T.alloc_fragment((block_M, n_groups), accum)
             Pw = T.alloc_fragment((block_M, n_groups, 2), T.uint32)
             acc_o = T.alloc_fragment((block_M, dim), accum)
@@ -224,11 +225,13 @@ def build_sm120_sageattn3_fwd(
                 # uint32 (one lane owns 8 consecutive keys -> whole-word smem writes).
                 for i, m in T.Parallel(block_M, n_groups):
                     SFP_u8[i, m] = T.reinterpret(T.cast(absmax[i, m], T.float8_e4m3fn), T.uint8)
+                for i, m in T.Parallel(block_M, n_groups):
+                    sinv[i, m] = 1.0 / absmax[i, m]  # one reciprocal per 16-key group
                 for i, m, k8 in T.Parallel(block_M, n_groups, 2):
                     Pw[i, m, k8] = 0
                     for t in T.serial(8):
                         Pw[i, m, k8] = Pw[i, m, k8] | T.shift_left(
-                            T.call_extern("uint32", "tl_cvt_e2m1_rn_div", G[i, m, 8 * k8 + t], absmax[i, m]),
+                            T.call_extern("uint32", "tl_cvt_e2m1_rn_mul", G[i, m, 8 * k8 + t], sinv[i, m]),
                             T.cast(4 * t, T.uint32),
                         )
                 for i, m, k8 in T.Parallel(block_M, n_groups, 2):
