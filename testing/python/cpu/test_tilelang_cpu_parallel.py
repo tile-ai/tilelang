@@ -15,7 +15,7 @@ import sys
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 
@@ -35,6 +35,7 @@ def make_gemm(M, N, K, BM, BN, BK, cpu_num_threads=None):
         B: T.Tensor((K, N), dtype="float32"),
         C: T.Tensor((M, N), dtype="float32"),
     ):
+        # cpu_num_threads is declared only by the CPU dialect's Kernel.
         with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), cpu_num_threads=cpu_num_threads) as (bx, by):
             A_shared = T.alloc_buffer((BM, BK), dtype="float32", scope="shared")
             B_shared = T.alloc_buffer((BK, BN), dtype="float32", scope="shared")
