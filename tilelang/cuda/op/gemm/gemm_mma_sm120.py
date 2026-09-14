@@ -170,24 +170,61 @@ class GemmMMASm120BlockScaled(GemmMMA):
             assert is_full_region(A_region), "Fragment input A must be a full region"
             A_buf = A_region.buffer
 
+            n_ksteps = int(block_K // micro_size_k)
+            use_words = mma_emitter.supports_scale_words(int(sf_a_granularity_k), int(sf_b_granularity_k))
+
             @T.prim_func
             def _gemm_rs_blockscaled() -> None:
                 B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
                 if clear_accum:
                     T.clear(C_buf)
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
-                    mma_emitter.mma(
-                        A_buf,
-                        B_local,
-                        C_buf,
-                        ki,
-                        SFA_buf=self.SFARegion,
-                        SFB_buf=self.SFBRegion,
+                if use_words:
+                    # one vector load per atom row fetches the scale words of every k step
+                    SFA_words = T.alloc_local((warp_rows * n_ksteps), "uint32")
+                    SFB_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                    SFB_rep_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                    mma_emitter.ldscale_words(
+                        SFA_words,
+                        SFB_words,
+                        SFB_rep_words,
+                        self.SFARegion,
+                        self.SFBRegion,
+                        n_ksteps,
                         k_start=self.sf_k_start,
                         sf_a_granularity_k=int(sf_a_granularity_k),
                         sf_b_granularity_k=int(sf_b_granularity_k),
                     )
+                    for ki in T.unroll(n_ksteps):
+                        mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                        mma_emitter.mma(
+                            A_buf,
+                            B_local,
+                            C_buf,
+                            ki,
+                            SFA_buf=self.SFARegion,
+                            SFB_buf=self.SFBRegion,
+                            k_start=self.sf_k_start,
+                            sf_a_granularity_k=int(sf_a_granularity_k),
+                            sf_b_granularity_k=int(sf_b_granularity_k),
+                            SFA_words=SFA_words,
+                            SFB_words=SFB_words,
+                            SFB_rep_words=SFB_rep_words,
+                            n_ksteps=n_ksteps,
+                        )
+                else:
+                    for ki in T.serial(0, n_ksteps):
+                        mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                        mma_emitter.mma(
+                            A_buf,
+                            B_local,
+                            C_buf,
+                            ki,
+                            SFA_buf=self.SFARegion,
+                            SFB_buf=self.SFBRegion,
+                            k_start=self.sf_k_start,
+                            sf_a_granularity_k=int(sf_a_granularity_k),
+                            sf_b_granularity_k=int(sf_b_granularity_k),
+                        )
 
             return _Simplify(_gemm_rs_blockscaled, inline_let=True)
 
@@ -343,25 +380,63 @@ class GemmMMASm120BlockScaled(GemmMMA):
 
             return _Simplify(_gemm_ss_blockscaled_static_kblock, inline_let=True)
 
+        n_ksteps = int(block_K // micro_size_k)
+        use_words = mma_emitter.supports_scale_words(int(sf_a_granularity_k), int(sf_b_granularity_k))
+
         @T.prim_func
         def _gemm_ss_blockscaled() -> None:
             A_local = T.alloc_local((warp_rows * local_size_a), a_dtype)
             B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
             if clear_accum:
                 T.clear(C_buf)
-            for ki in T.serial(0, (block_K // micro_size_k)):
-                mma_emitter.ldmatrix_a(A_local, A_region, ki)
-                mma_emitter.ldmatrix_b(B_local, B_region, ki)
-                mma_emitter.mma(
-                    A_local,
-                    B_local,
-                    C_buf,
-                    ki,
-                    SFA_buf=self.SFARegion,
-                    SFB_buf=self.SFBRegion,
+            if use_words:
+                # one vector load per atom row fetches the scale words of every k step
+                SFA_words = T.alloc_local((warp_rows * n_ksteps), "uint32")
+                SFB_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                SFB_rep_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                mma_emitter.ldscale_words(
+                    SFA_words,
+                    SFB_words,
+                    SFB_rep_words,
+                    self.SFARegion,
+                    self.SFBRegion,
+                    n_ksteps,
                     k_start=self.sf_k_start,
                     sf_a_granularity_k=int(sf_a_granularity_k),
                     sf_b_granularity_k=int(sf_b_granularity_k),
                 )
+                for ki in T.unroll(n_ksteps):
+                    mma_emitter.ldmatrix_a(A_local, A_region, ki)
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma(
+                        A_local,
+                        B_local,
+                        C_buf,
+                        ki,
+                        SFA_buf=self.SFARegion,
+                        SFB_buf=self.SFBRegion,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        SFA_words=SFA_words,
+                        SFB_words=SFB_words,
+                        SFB_rep_words=SFB_rep_words,
+                        n_ksteps=n_ksteps,
+                    )
+            else:
+                for ki in T.serial(0, n_ksteps):
+                    mma_emitter.ldmatrix_a(A_local, A_region, ki)
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma(
+                        A_local,
+                        B_local,
+                        C_buf,
+                        ki,
+                        SFA_buf=self.SFARegion,
+                        SFB_buf=self.SFBRegion,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                    )
 
         return _Simplify(_gemm_ss_blockscaled, inline_let=True)

@@ -604,6 +604,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         sf_a_granularity_k: int | None = None,
         sf_b_granularity_k: int | None = None,
         sf_layout: str = "rowmajor",
+        SFA_words=None,
+        SFB_words=None,
+        SFB_rep_words=None,
+        n_ksteps: int = 1,
     ):
         # Keep the base-class positional signature (A, B, C, k_inner): the
         # non-blockscaled gemm lowering calls mma(A_local, B_local, C_buf, ki).
@@ -648,6 +652,11 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         a_is_fragment = is_fragment(A_local_buf)
         a_stride = k_inner * warp_rows * local_size_a if a_is_fragment else 0
         a_elems_per_unit = 8 if str(A_local_buf.dtype) == "uint32" else 1
+        # Scale words preloaded by ldscale_words(): one word per k64 step (granularity 16), laid
+        # out [atom][k step] in registers, so the MMA reads them without further shared loads.
+        use_words = SFA_words is not None
+        if use_words and (SFB_words is None or (replicate_b and SFB_rep_words is None)):
+            raise ValueError("preloaded scale words require SFA_words, SFB_words (and SFB_rep_words for n_dim=16)")
 
         @T.macro
         def _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
@@ -658,14 +667,18 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 a_offset = (a_stride + i * local_size_a) // a_elems_per_unit
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
-                scale_a_ptr = T.access_ptr(
-                    SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)],
-                    "r",
-                )
-                scale_b_ptr = T.access_ptr(
-                    SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)],
-                    "r",
-                )
+                if use_words:
+                    scale_a_ptr = T.access_ptr(SFA_words[i * n_ksteps + k_inner], "r")
+                    scale_b_ptr = T.access_ptr(SFB_words[j * n_ksteps + k_inner], "r")
+                else:
+                    scale_a_ptr = T.access_ptr(
+                        SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)],
+                        "r",
+                    )
+                    scale_b_ptr = T.access_ptr(
+                        SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + scale_b_word_k)],
+                        "r",
+                    )
                 T.ptx_mma_block_scale(
                     accum_dtype,
                     mma_prefix,
@@ -690,10 +703,13 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     0,
                 )
                 if replicate_b:
-                    scale_b_rep_ptr = T.access_ptr(
-                        SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
-                        "r",
-                    )
+                    if use_words:
+                        scale_b_rep_ptr = T.access_ptr(SFB_rep_words[j * n_ksteps + k_inner], "r")
+                    else:
+                        scale_b_rep_ptr = T.access_ptr(
+                            SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
+                            "r",
+                        )
                     T.ptx_mma_block_scale(
                         accum_dtype,
                         mma_prefix,
@@ -793,6 +809,62 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             SFB_data,
             thread_binding,
         )
+
+    def ldscale_words(
+        self,
+        SFA_words,
+        SFB_words,
+        SFB_rep_words,
+        SFA_buf,
+        SFB_buf,
+        n_ksteps: int,
+        k_start: PrimExpr = 0,
+        sf_a_granularity_k: int | None = None,
+        sf_b_granularity_k: int | None = None,
+    ):
+        """Preload the rowmajor scale words of all ``n_ksteps`` k64 steps into registers with one
+        vector load per atom row (``[atom][k step]`` order). Requires one scale word per k step,
+        i.e. granularity 16 (scale_vec::4X); see ``supports_scale_words``."""
+        warp_rows = self.warp_rows
+        warp_cols = self.warp_cols
+        warp_row_tiles = self.warp_row_tiles
+        warp_col_tiles = self.warp_col_tiles
+        micro_size_x = self.micro_size_x
+        micro_size_y = self.micro_size_y
+        sf_vec_size = self.sf_vec_size
+        sf_a_granularity_k = sf_vec_size if sf_a_granularity_k is None else sf_a_granularity_k
+        sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
+        if not self.supports_scale_words(sf_a_granularity_k, sf_b_granularity_k):
+            raise ValueError("ldscale_words requires one scale word per k step (granularity 16)")
+        word0_a = self._scale_word_k(k_start, 0, sf_a_granularity_k)
+        word0_b = self._scale_word_k(k_start, 0, sf_b_granularity_k)
+        thread_binding = self.get_thread_binding()
+        SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
+        SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
+        replicate_b = self.n_dim == 16
+
+        @T.macro
+        def _warp_ldscale_words(SFA_words, SFB_words, SFB_rep_words, SFA_data, SFB_data, thread_binding):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            sfa_row = self._sfa_row_in_atom(tx)
+            sfb_col = self._sfb_col_in_atom(tx)
+            for i in T.unroll(warp_rows):
+                scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
+                for v in T.vectorized(n_ksteps):
+                    SFA_words[i * n_ksteps + v] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + word0_a + v)]
+            for j in T.unroll(warp_cols):
+                scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
+                for v in T.vectorized(n_ksteps):
+                    SFB_words[j * n_ksteps + v] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + word0_b + v)]
+                if replicate_b:
+                    for v in T.vectorized(n_ksteps):
+                        SFB_rep_words[j * n_ksteps + v] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + word0_b + v)]
+
+        return _warp_ldscale_words(SFA_words, SFB_words, SFB_rep_words, SFA_data, SFB_data, thread_binding)
+
+    def supports_scale_words(self, sf_a_granularity_k: int, sf_b_granularity_k: int) -> bool:
+        """One rowmajor scale word (4 bytes) per k64 MMA step for both operands."""
+        return int(sf_a_granularity_k) * 4 == int(self.micro_size_k) and int(sf_b_granularity_k) * 4 == int(self.micro_size_k)
 
     def ldscale_fragment(
         self,
