@@ -15,7 +15,6 @@ sys.path.insert(0, "/root/qutao/tilelang_dev")
 from examples.attention_sm120 import sageattn3_quant as sq  # noqa: E402
 
 import fp4attn_cuda  # noqa: E402
-import fp4quant_cuda  # noqa: E402
 from sageattn3 import api as sage_api  # noqa: E402
 
 
