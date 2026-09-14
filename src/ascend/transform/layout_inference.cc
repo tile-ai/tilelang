@@ -23,27 +23,30 @@
 #include <queue>
 #include <unordered_set>
 
-#include "../../config.h"
-#include "../../layout/layout.h"
-#include "../../layout/utils.h"
-#include "../../op/builtin.h"
-#include "../../op/copy.h"
-#include "../../op/parallel.h"
-#include "../../op/reducer.h"
-#include "../../op/utils.h"
-#include "../../span_utils.h"
-#include "../common/loop_fusion_utils.h"
-#include "../common/pipeline_utils.h"
-#include "../common/union_find.h"
+#include "config.h"
+#include "layout/layout.h"
+#include "layout/utils.h"
+#include "op/builtin.h"
+#include "op/copy.h"
+#include "op/parallel.h"
+#include "op/reducer.h"
+#include "ascend/transform/vf_regions.h"
+#include "op/utils.h"
+#include "span_utils.h"
+#include "transform/common/attr.h"
+#include "transform/common/loop_fusion_utils.h"
+#include "transform/common/pipeline_utils.h"
+#include "transform/common/union_find.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "backend/common/target_utils.h"
-#include "layout_cost_model.h"
-#include "parallel_loop_layout_validator.h"
+#include "transform/layout_inference/layout_cost_model.h"
+#include "transform/layout_inference/parallel_loop_layout_validator.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 using namespace ffi;
@@ -732,6 +735,14 @@ public:
   }
 
 private:
+  // Region-local execution scope of an opaque region block (see
+  // RegionOpImpl::enter_scope). While non-empty, layout inference records
+  // the innermost region's thread var and bounds instead of the kernel's.
+  struct RegionThreadScope {
+    IterVar thread_var;
+    Range thread_bounds;
+  };
+
   Map<Var, Buffer> GetBufferMap() const {
     Map<Var, Buffer> buffer_map;
     for (const auto &[var, buffers] : buffer_data_to_buffers_) {
@@ -801,7 +812,7 @@ private:
         // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
         CollectFragmentBuffersFromExpr(arg);
       }
-      // Compute thread_index and thread_bounds
+      // Compute thread_index and thread_bounds (region-local if present).
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
@@ -910,7 +921,7 @@ private:
               if (!found) {
                 buffers.push_back(buffer_load->buffer);
                 buffer_data_to_buffers_.Set(buffer_load->buffer->data, buffers);
-                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                DLOG(INFO) << "[AscendLayoutInference] BufferStore: added buffer "
                            << buffer_load->buffer
                            << " buffer.get() = " << buffer_load->buffer.get()
                            << " data = " << buffer_load->buffer->data.get();
@@ -918,7 +929,7 @@ private:
             } else {
               buffer_data_to_buffers_.Set(buffer_load->buffer->data,
                                           {buffer_load->buffer});
-              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
+              DLOG(INFO) << "[AscendLayoutInference] BufferStore: new buffer "
                          << buffer_load->buffer
                          << " buffer.get() = " << buffer_load->buffer.get()
                          << " data = " << buffer_load->buffer->data.get();
@@ -941,7 +952,7 @@ private:
                 buffers.push_back(buffer_store->buffer);
                 buffer_data_to_buffers_.Set(buffer_store->buffer->data,
                                             buffers);
-                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+                DLOG(INFO) << "[AscendLayoutInference] BufferStore: added buffer "
                            << buffer_store->buffer
                            << " buffer.get() = " << buffer_store->buffer.get()
                            << " data = " << buffer_store->buffer->data.get();
@@ -949,7 +960,7 @@ private:
             } else {
               buffer_data_to_buffers_.Set(buffer_store->buffer->data,
                                           {buffer_store->buffer});
-              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
+              DLOG(INFO) << "[AscendLayoutInference] BufferStore: new buffer "
                          << buffer_store->buffer
                          << " buffer.get() = " << buffer_store->buffer.get()
                          << " data = " << buffer_store->buffer->data.get();
@@ -968,6 +979,41 @@ private:
   }
 
   void VisitStmt_(const SBlockNode *op) final {
+    if (IsVFRegion(op->name_hint)) {
+      // A VF region is opaque to the worklist itself: visit the body first
+      // (under the region's lane scope for SIMT_VF) so nested TileOps
+      // (e.g. Parallel) are still collected normally.
+      bool pushed_region_scope = false;
+      if (auto scope = VFRegionScope(op)) {
+        region_thread_scope_stack_.push_back({scope->first, scope->second});
+        pushed_region_scope = true;
+      }
+      IRVisitorWithAnalyzer::VisitStmt(op->body);
+      // Post-load kLayoutMap from the region block annotation so explicitly
+      // annotated layouts are available during InferLayout.
+      // Must happen after visiting body so buffer_data_to_buffers_ is
+      // populated.
+      if (pushed_region_scope && op->annotations.count(attr::kLayoutMap)) {
+        auto map = op->annotations.Get(attr::kLayoutMap)
+                       ->as<Map<Var, Layout>>()
+                       .value();
+        for (const auto &[var, layout] : map) {
+          if (buffer_data_to_buffers_.count(var)) {
+            for (const auto &buffer : buffer_data_to_buffers_[var]) {
+              annotated_layout_map_.Set(buffer, layout);
+            }
+          }
+        }
+      }
+      // Regions contribute nothing to the inference worklist themselves:
+      // nested tile operators were already collected while visiting the
+      // body, and the region block is consumed by codegen as-is.
+      if (pushed_region_scope) {
+        region_thread_scope_stack_.pop_back();
+      }
+      return;
+    }
+
     for (auto buffer : op->alloc_buffers) {
       if (buffer_data_to_buffers_.count(buffer->data)) {
         auto buffers = buffer_data_to_buffers_[buffer->data];
@@ -1066,8 +1112,12 @@ private:
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
-        ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_binding_ = iv;
+        if (!region_thread_scope_stack_.empty()) {
+          region_thread_scope_stack_.back().thread_var = iv;
+          region_thread_scope_stack_.back().thread_bounds =
+              Range::FromMinExtent(make_zero(op->value.dtype()), op->value);
+        }
       }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
@@ -1098,6 +1148,9 @@ private:
   }
 
   Range CurrentThreadBounds() const {
+    if (!region_thread_scope_stack_.empty()) {
+      return region_thread_scope_stack_.back().thread_bounds;
+    }
     return ComputeThreadBounds(thread_binding_, analyzer_);
   }
 
@@ -1105,6 +1158,11 @@ private:
   // threadIdx.x Var when a thread_extent binding exists, otherwise constant
   // 0 (e.g. CPU serial launch). Never an unbound synthetic Var.
   PrimExpr CurrentThreadIndex() const {
+    // Inside a SIMT_VF region the active thread var comes from that region's
+    // own thread_extent binding rather than the enclosing kernel's.
+    if (!region_thread_scope_stack_.empty()) {
+      return region_thread_scope_stack_.back().thread_var->var;
+    }
     if (thread_binding_.defined()) {
       return thread_binding_->var;
     }
@@ -1127,13 +1185,13 @@ private:
         if (!found) {
           buffers.push_back(op->buffer);
           buffer_data_to_buffers_.Set(op->buffer->data, buffers);
-          DLOG(INFO) << "[LayoutInference] BufferLoad: added buffer "
+          DLOG(INFO) << "[AscendLayoutInference] BufferLoad: added buffer "
                      << op->buffer << " buffer.get() = " << op->buffer.get()
                      << " data = " << op->buffer->data.get();
         }
       } else {
         buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
-        DLOG(INFO) << "[LayoutInference] BufferLoad: new buffer " << op->buffer
+        DLOG(INFO) << "[AscendLayoutInference] BufferLoad: new buffer " << op->buffer
                    << " buffer.get() = " << op->buffer.get()
                    << " data = " << op->buffer->data.get();
       }
@@ -1157,13 +1215,13 @@ private:
         if (!found) {
           buffers.push_back(op->buffer);
           buffer_data_to_buffers_.Set(op->buffer->data, buffers);
-          DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
+          DLOG(INFO) << "[AscendLayoutInference] BufferStore: added buffer "
                      << op->buffer << " buffer.get() = " << op->buffer.get()
                      << " data = " << op->buffer->data.get();
         }
       } else {
         buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
-        DLOG(INFO) << "[LayoutInference] BufferStore: new buffer " << op->buffer
+        DLOG(INFO) << "[AscendLayoutInference] BufferStore: new buffer " << op->buffer
                    << " buffer.get() = " << op->buffer.get()
                    << " data = " << op->buffer->data.get();
       }
@@ -1308,6 +1366,7 @@ private:
   // where the logical thread index is the constant 0 and thread bounds are
   // [0, 1) — no synthetic fallback Var is ever created.
   IterVar thread_binding_;
+  std::vector<RegionThreadScope> region_thread_scope_stack_;
   std::vector<PrimExpr> thread_index_vec_;
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
@@ -1553,7 +1612,7 @@ public:
   static PrimFunc Substitute(PrimFunc f) {
     arith::Analyzer analyzer;
     PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = ParallelLoopFuser::Fuse(f->body);
+    fptr->body = ParallelLoopFuserSkipSimdVF::Fuse(f->body);
     BufferUseDefCollector collector;
     collector.Collect(f);
     auto result = collector.Run();
@@ -1579,6 +1638,9 @@ private:
    * annotation set.
    */
   Stmt VisitStmt_(const SBlockNode *op) final {
+    if (op->name_hint == "SIMD_VF") {
+      return ffi::GetRef<Stmt>(op);
+    }
     SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     auto block_ptr = block.CopyOnWrite();
@@ -1644,7 +1706,7 @@ private:
   const LayoutInferenceResult result_;
 };
 
-tvm::transform::Pass LayoutInference() {
+tvm::transform::Pass AscendLayoutInference() {
   using namespace tirx::transform;
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     f = LayoutInferencer::Substitute(std::move(f));
@@ -1652,13 +1714,14 @@ tvm::transform::Pass LayoutInference() {
     ParallelLoopLayoutValidator::Validate(f->body);
     return f;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.AscendLayoutInference", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LayoutInference", LayoutInference);
+  refl::GlobalDef().def("tl.transform.AscendLayoutInference", AscendLayoutInference);
 }
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm

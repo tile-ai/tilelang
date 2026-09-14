@@ -279,7 +279,7 @@ def test_copy_oob_guards_are_lowered_after_auto_schedule() -> None:
         "tl.AnnotateMultiBufferEligible",
         "tl.AutoSchedule",
         "tl.InsertSync",
-        "tl.LowerTileOp",
+        "tl.AscendLowerTileOp",
     }
 
     @tvm.ir.instrument.pass_instrument
@@ -317,7 +317,7 @@ def test_copy_oob_guards_are_lowered_after_auto_schedule() -> None:
 
     # LowerTileOp reconstructs one runtime predicate from the clamped semantic
     # extents. It must cover both reasons for an empty DMA.
-    lowered_guards = generated_guard_lines("tl.LowerTileOp")
+    lowered_guards = generated_guard_lines("tl.AscendLowerTileOp")
     assert any("group" in line and "rows" in line for line in lowered_guards), lowered_guards
 
 
@@ -342,7 +342,7 @@ def test_gm_to_l1_oob_fill_keeps_precise_region_until_lowering() -> None:
     wanted = {
         "tl.AscendInsertOOBPadding",
         "tl.InsertSync",
-        "tl.LowerTileOp",
+        "tl.AscendLowerTileOp",
     }
 
     @tvm.ir.instrument.pass_instrument
@@ -364,7 +364,7 @@ def test_gm_to_l1_oob_fill_keeps_precise_region_until_lowering() -> None:
     assert synchronized.count("T.fill(T.region(") == 2
     assert 'T.ascend_pipe_barrier("PIPE_MTE2")' not in synchronized
 
-    lowered = snapshots["tl.LowerTileOp"]
+    lowered = snapshots["tl.AscendLowerTileOp"]
     assert "T.fill(" not in lowered
     assert lowered.count("T.ascend_fill_l1(") == 2
 

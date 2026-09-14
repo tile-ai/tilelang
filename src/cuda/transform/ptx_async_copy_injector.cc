@@ -17,15 +17,10 @@
 #include <optional>
 #include <vector>
 
-#include <tvm/ir/transform.h>
-
-#include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
-#include "op/builtin.h"
 #include "op/utils.h"
 #include "tir/ir/buffer_common.h"
-#include "transform/common/lower_hooks.h"
 
 namespace tvm {
 namespace tl {
@@ -688,68 +683,6 @@ InjectPTXAsyncCopy(const Stmt &body, bool async_without_async_commit_wait) {
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedPTXAsyncCopy()};
 }
-
-namespace {
-
-// LowerTileOp hook: convert eligible global->shared copies of a lowered
-// parallel loop into `tir.ptx_cp_async` on CUDA targets with async-copy
-// support. Only parallel-loop lowering needs this; thread-level lowering
-// does not.
-Stmt PTXAsyncCopyLoweredLoopHook(Stmt lowered, const ForNode *original,
-                                 const Target &target) {
-  if (!TargetIsCuda(target) || !TargetHasAsyncCopy(target)) {
-    return lowered;
-  }
-
-  bool parallel_prefer_async = false;
-  if (auto prefer_async_anno =
-          original->annotations.Get(attr::kLoopPreferAsync)) {
-    if (auto prefer_async_bool = prefer_async_anno.value().try_cast<Bool>()) {
-      parallel_prefer_async = prefer_async_bool.value()->value;
-    } else {
-      LOG(WARNING) << "Loop annotation `" << attr::kLoopPreferAsync
-                   << "` expects Bool value (True/False), but got "
-                   << prefer_async_anno.value().GetTypeKey()
-                   << ". Ignore override.";
-    }
-  }
-  bool parallel_async_without_async_commit_wait = false;
-  if (auto no_commit_wait_anno = original->annotations.Get(
-          attr::kParallelAsyncWithoutAsyncCommitWait)) {
-    if (auto no_commit_wait_bool =
-            no_commit_wait_anno.value().try_cast<Bool>()) {
-      parallel_async_without_async_commit_wait =
-          no_commit_wait_bool.value()->value;
-    } else {
-      LOG(WARNING) << "Loop annotation `"
-                   << attr::kParallelAsyncWithoutAsyncCommitWait
-                   << "` expects Bool value (True/False), but got "
-                   << no_commit_wait_anno.value().GetTypeKey()
-                   << ". Ignore override.";
-    }
-  }
-
-  tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
-  bool auto_async_copy_enabled =
-      ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-  bool should_inject_async_copy =
-      parallel_prefer_async ||
-      (auto_async_copy_enabled && parallel_async_without_async_commit_wait);
-  if (!should_inject_async_copy) {
-    return lowered;
-  }
-  return InjectPTXAsyncCopy(lowered, parallel_async_without_async_commit_wait)
-      .stmt;
-}
-
-bool RegisterPTXAsyncCopyHook() {
-  RegisterLoweredParallelLoopHook(PTXAsyncCopyLoweredLoopHook);
-  return true;
-}
-
-const bool ptx_async_copy_hook_registered = RegisterPTXAsyncCopyHook();
-
-} // namespace
 
 } // namespace tl
 } // namespace tvm

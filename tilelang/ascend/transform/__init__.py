@@ -139,6 +139,18 @@ def AscendThreadSync(storage_scope: str):
     return _ffi_api.AscendThreadSync(storage_scope)
 
 
+def AscendLayoutInference():
+    """Ascend fork of LayoutInference: VF regions are opaque to the worklist
+    and SIMT_VF bodies infer against the region's own lane scope."""
+    return _ffi_api.AscendLayoutInference()  # type: ignore
+
+
+def AscendLowerTileOp():
+    """Ascend fork of LowerTileOp: VF region scopes, buffer-version key remap,
+    and no CUDA async-copy post-processing."""
+    return _ffi_api.AscendLowerTileOp()  # type: ignore
+
+
 def AscendInsertOOBPadding():
     """Clamp DMA copy OOB tails and emit GM->L1 padding fills before AutoSchedule.
 
@@ -207,6 +219,8 @@ __all__ = [
     "AscendInsertOOBPadding",
     "AscendSimdVFLowerParallel",
     "AscendThreadSync",
+    "AscendLayoutInference",
+    "AscendLowerTileOp",
     "AssignCore",
     "AutoSchedule",
     "InsertSync",

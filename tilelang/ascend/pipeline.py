@@ -76,7 +76,7 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = ascend_transform.UnrollLoopSkipVF()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
-    mod = tilelang.transform.LayoutInference()(mod)
+    mod = ascend_transform.AscendLayoutInference()(mod)
     mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     LayoutVisual(mod)
     mod = ascend_transform.NormalizeAscendFractalStorage()(mod)
@@ -115,7 +115,7 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = ascend_transform.NormalizeBufferVersion()(mod)
     mod = ascend_transform.AscendSimdVFLowerParallel()(mod)
-    mod = tilelang.transform.LowerTileOp()(mod)
+    mod = ascend_transform.AscendLowerTileOp()(mod)
     mod = tilelang.transform.VerifyReducerConsumed()(mod)
 
     mod = tilelang.transform.DecoupleTypeCast()(mod)

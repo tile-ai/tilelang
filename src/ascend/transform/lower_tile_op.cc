@@ -1,6 +1,6 @@
 /*!
- * \file lower_tile_op.cc
- * \brief Lower the tile op for further codegen.
+ * \file tl/ascend/transform/lower_tile_op.cc
+ * \brief Ascend fork of LowerTileOp (VF region scopes, buffer-version remap).
  */
 
 #include "support/check.h"
@@ -17,25 +17,28 @@
 #include <unordered_map>
 #include <vector>
 
-#include "../layout/layout.h"
-#include "../layout/utils.h"
-#include "../op/gemm.h"
-#include "../op/gemm_sp.h"
-#include "../op/operator.h"
-#include "../op/utils.h"
-#include "../span_utils.h"
+#include "layout/layout.h"
+#include "layout/utils.h"
+#include "op/gemm.h"
+#include "op/gemm_sp.h"
+#include "op/operator.h"
+#include "op/utils.h"
+#include "span_utils.h"
 #include "cuda/op/builtin.h"
-#include "cuda/target_utils.h"
-#include "cuda/transform/ptx_async_copy_injector.h"
 
-#include "../op/reducer.h"
+#include "op/reducer.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "common/mbarrier.h"
-#include "common/pipeline_utils.h"
-#include "loop_partition.h"
+#include "transform/common/attr.h"
+#include "transform/common/mbarrier.h"
+#include "transform/common/pipeline_utils.h"
+#include "transform/loop_partition.h"
+
+#include "ascend/transform/buffer_version.h"
+#include "ascend/transform/vf_regions.h"
 
 namespace tvm {
 namespace tl {
+namespace ascend {
 
 using namespace tirx;
 using namespace ffi;
@@ -295,10 +298,46 @@ public:
 private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
+  // Region-local execution scope of an opaque region block (see
+  // RegionScopeProvider). While non-empty, tile operators lower against the
+  // innermost region's thread var and bounds instead of the kernel's.
+  struct RegionThreadScope {
+    IterVar thread_var;
+    Range thread_bounds;
+  };
+
+  Range InferThreadBoundsFromIterVar(const IterVar &iter_var) const {
+    if (iter_var.defined() &&
+        analyzer_->const_int_bound.IsBound(iter_var->var)) {
+      auto const_int_bound = analyzer_->const_int_bound(iter_var->var);
+      auto min_value = const_int_bound->min_value;
+      auto max_value = const_int_bound->max_value;
+      auto extent = max_value + 1 - min_value;
+      return Range::FromMinExtent(IntImm(iter_var->var.dtype(), min_value),
+                                  IntImm(iter_var->var.dtype(), extent));
+    }
+    return Range::FromMinExtent(0, 1);
+  }
+
+  Range GetActiveThreadBounds() const {
+    if (!region_thread_scope_stack_.empty()) {
+      return region_thread_scope_stack_.back().thread_bounds;
+    }
+    return InferThreadBoundsFromIterVar(thread_binding_);
+  }
+
   Stmt VisitStmt_(const SBlockNode *op) final {
     Map<String, Any> previous_block_annotations = block_annotations_;
     Map<Var, PrimExpr> previous_safe_value_map = safe_value_map_;
     block_annotations_ = op->annotations;
+
+    bool pushed_region_scope = false;
+    IterVar saved_thread_var;
+    if (auto scope = VFRegionScope(op)) {
+      saved_thread_var = thread_binding_;
+      region_thread_scope_stack_.push_back({scope->first, scope->second});
+      pushed_region_scope = true;
+    }
 
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
@@ -401,6 +440,10 @@ private:
       }
     }
 
+    if (pushed_region_scope) {
+      region_thread_scope_stack_.pop_back();
+      thread_binding_ = saved_thread_var;
+    }
     block_annotations_ = std::move(previous_block_annotations);
     safe_value_map_ = std::move(previous_safe_value_map);
     return block;
@@ -440,6 +483,16 @@ private:
     for (size_t i = 0; i < indices.size(); ++i) {
       multi_dim_indices.Set(
           i, analyzer_->Simplify(indices[i] + multi_dim_indices[i]));
+    }
+    // Layout input placeholders are int32. The access-ptr offset can be int64
+    // here (e.g. Ascend pipelines offsets in int64 before NarrowDataType runs),
+    // so coerce the derived indices to the placeholder dtype; otherwise
+    // Layout::Forward's Substitute fails its strict dtype check. Tile-local
+    // indices are small, so the narrowing is safe.
+    for (size_t i = 0; i < multi_dim_indices.size(); ++i) {
+      if (multi_dim_indices[i].dtype() != DataType::Int(32)) {
+        multi_dim_indices.Set(i, cast(DataType::Int(32), multi_dim_indices[i]));
+      }
     }
     return layout->Forward(multi_dim_indices);
   }
@@ -1081,7 +1134,7 @@ private:
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
 
-    Range thread_bounds = CurrentThreadBounds();
+    Range thread_bounds = GetActiveThreadBounds();
 
     // Convert bind_var_to_expr_ to Map<Var, PrimExpr> for LowerArgs
     Map<Var, PrimExpr> bind_var_to_expr;
@@ -1163,11 +1216,48 @@ private:
       ICHECK_NE(iv->thread_tag.length(), 0U);
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
-        ICHECK(iv->dom->extent.as<IntImmNode>());
-        thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
+        // Ascend thread extents may be symbolic, so tolerate a non-constant
+        // extent here instead of asserting IntImm.
+        if (const auto *imm = iv->dom->extent.as<IntImmNode>()) {
+          thread_block_size_ = imm->value;
+        }
+        // The innermost region scope tracks the real bound IterVar once the
+        // region body's own thread_extent is visited.
+        if (!region_thread_scope_stack_.empty()) {
+          region_thread_scope_stack_.back().thread_var = iv;
+          region_thread_scope_stack_.back().thread_bounds =
+              Range::FromMinExtent(make_zero(op->value.dtype()), op->value);
+        }
       }
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    // Buffer version metadata keys buffer data vars, which this pass
+    // rewrites; remap the keys so the multi-buffer passes downstream keep
+    // finding their storages. The map deliberately keys by Var identity:
+    // distinct versioned storages may share one name within a function.
+    if (op->attr_key == tl::attr::kBufferVersion) {
+      auto versions = op->node.try_cast<BufferVersionMap>();
+      ICHECK(versions.has_value())
+          << "'" << tl::attr::kBufferVersion
+          << "' AttrStmt node must be a buffer version map";
+      BufferVersionMap remapped_versions;
+      for (const auto &[data, version] : versions.value()) {
+        Var remapped_data = data;
+        if (auto remap = var_remap_.find(data); remap != var_remap_.end()) {
+          remapped_data = (*remap).second;
+        }
+        auto existing = remapped_versions.find(remapped_data);
+        ICHECK(existing == remapped_versions.end() ||
+               (*existing).second == version)
+            << "Conflicting buffer version counts after storage remapping "
+            << "for " << remapped_data;
+        remapped_versions.Set(std::move(remapped_data), version);
+      }
+      AttrStmt attr = Downcast<AttrStmt>(std::move(stmt));
+      attr.CopyOnWrite()->node = remapped_versions;
+      return attr;
+    }
+    return stmt;
   }
 
   /**
@@ -1253,33 +1343,6 @@ private:
                      << ". Ignore override.";
       }
     }
-    bool parallel_prefer_async = false;
-    if (auto prefer_async_anno = op->annotations.Get(attr::kLoopPreferAsync)) {
-      if (auto prefer_async_bool = prefer_async_anno.value().try_cast<Bool>()) {
-        parallel_prefer_async = prefer_async_bool.value()->value;
-      } else {
-        LOG(WARNING) << "Loop annotation `" << attr::kLoopPreferAsync
-                     << "` expects Bool value (True/False), but got "
-                     << prefer_async_anno.value().GetTypeKey()
-                     << ". Ignore override.";
-      }
-    }
-    bool parallel_async_without_async_commit_wait = false;
-    if (auto no_commit_wait_anno =
-            op->annotations.Get(attr::kParallelAsyncWithoutAsyncCommitWait)) {
-      if (auto no_commit_wait_bool =
-              no_commit_wait_anno.value().try_cast<Bool>()) {
-        parallel_async_without_async_commit_wait =
-            no_commit_wait_bool.value()->value;
-      } else {
-        LOG(WARNING) << "Loop annotation `"
-                     << attr::kParallelAsyncWithoutAsyncCommitWait
-                     << "` expects Bool value (True/False), but got "
-                     << no_commit_wait_anno.value().GetTypeKey()
-                     << ". Ignore override.";
-      }
-    }
-
     auto root = GetRef<For>(op);
 
     // Check if the loop writes to any non-local buffer or touches a fragment.
@@ -1363,23 +1426,8 @@ private:
         for_node, loop_layout, CurrentThreadIndex(), analyzer_, layout_map_,
         predicate, parallel_loop, require_padding_guard);
 
-    // Only parallel-loop lowering needs PTX cp.async injection. Thread-level
-    // lowering does not require converting eligible global->shared copies to
-    // `tir.ptx_cp_async`.
-    if (TargetCudaHasAsyncCopy(target_)) {
-      tvm::transform::PassContext ctx = tvm::transform::PassContext::Current();
-      bool auto_async_copy_enabled =
-          ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
-      bool should_inject_async_copy =
-          parallel_prefer_async ||
-          (auto_async_copy_enabled && parallel_async_without_async_commit_wait);
-      if (should_inject_async_copy) {
-        auto inject_result = InjectPTXAsyncCopy(
-            lowered, parallel_async_without_async_commit_wait);
-        lowered = inject_result.stmt;
-      }
-    }
-    // Stamp after PTX async-copy injection so injected nodes are covered too.
+    // The shared pass runs CUDA's PTX cp.async injection here; Ascend has no
+    // async-copy post-processing for lowered parallel loops.
     StampSubtreeSpans(lowered, op->span);
     return lowered;
   }
@@ -1392,6 +1440,12 @@ private:
   // Var when a thread_extent binding exists, otherwise constant 0 (e.g. CPU
   // serial launch). Never an unbound synthetic Var.
   PrimExpr CurrentThreadIndex() const {
+    // Inside a region with its own execution scope the active thread var
+    // comes from that region's thread binding rather than the enclosing
+    // kernel's.
+    if (!region_thread_scope_stack_.empty()) {
+      return region_thread_scope_stack_.back().thread_var->var;
+    }
     if (thread_binding_.defined()) {
       return thread_binding_->var;
     }
@@ -1419,6 +1473,7 @@ private:
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
   // exists. Stays undefined for targets without thread bindings (e.g. CPU).
   IterVar thread_binding_;
+  std::vector<RegionThreadScope> region_thread_scope_stack_;
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;
@@ -1460,18 +1515,19 @@ namespace transform {
 
 using namespace tirx::transform;
 
-tvm::transform::Pass LowerTileOp() {
+tvm::transform::Pass AscendLowerTileOp() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LowerTileOpPass::Substitute(std::move(f));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.AscendLowerTileOp", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
+  refl::GlobalDef().def("tl.transform.AscendLowerTileOp", AscendLowerTileOp);
 }
 } // namespace transform
 
+} // namespace ascend
 } // namespace tl
 } // namespace tvm
