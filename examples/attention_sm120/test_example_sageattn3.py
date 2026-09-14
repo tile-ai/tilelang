@@ -59,6 +59,8 @@ def test_sageattn3_fwd_codegen_contract():
     assert "tl_cvt_e2m1x2_rn(" in src  # cvt.rn.satfinite.e2m1x2 P quantization
     assert "AllReduce<tl::MaxOp, 2, 1" in src  # per-16-key max = one xor-1 shuffle (K permutation contract)
     assert "= -CUDART_INF_F" in src  # running row max initialised
+    assert "tl_sts_u8(" in src and "tl_syncwarp()" in src  # warp-private P-scale store, no block barrier before PV
+    assert "software_pipeline" not in src  # manual schedule fully lowered
 
 
 @tilelang.testing.requires_cuda
