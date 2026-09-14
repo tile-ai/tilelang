@@ -1321,6 +1321,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            })
       .def("tl.Fragment_condense_rep_var",
            [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
+      .def("tl.Fragment_bind_thread_range",
+           [](Fragment fragment, int thread_min, int thread_extent) {
+             return fragment->BindThreadRange(
+                 Range::FromMinExtent(thread_min, thread_extent));
+           })
       .def("tl.make_swizzled_layout",
            [](const Buffer &buffer, bool k_inner, bool allow_pad) {
              return MakeSwizzledLayout(buffer, k_inner, allow_pad);

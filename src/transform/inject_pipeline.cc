@@ -3100,6 +3100,102 @@ private:
    * statement B, it requires: case 1: stage(A) < stage(B) case 2: stage(A) ==
    * stage(B) and order(A) < order(B)
    */
+  /*! \brief The thread predicate of a statement of the form `if (cond) body`.
+   */
+  static Optional<PrimExpr> ThreadPredicateOf(const SBlock &block) {
+    const auto *ite = block->body.as<IfThenElseNode>();
+    if (ite != nullptr && !ite->else_case.defined()) {
+      return ite->condition;
+    }
+    return std::nullopt;
+  }
+
+  /*! \brief True when src and dst are thread-predicated statements whose
+   * predicates are provably disjoint and every buffer they share is
+   * register-scoped: registers are private to a thread, so no dependency can
+   * flow between them (each warp group computing its own rows of a fragment).
+   */
+  bool OnlyRegisterDepsAcrossDisjointThreads(const SBlock &src,
+                                             const SBlock &dst) {
+    Optional<PrimExpr> c1 = ThreadPredicateOf(src);
+    Optional<PrimExpr> c2 = ThreadPredicateOf(dst);
+    if (!c1.defined() || !c2.defined()) {
+      return false;
+    }
+    arith::Analyzer analyzer;
+    if (!analyzer.CanProve(!(c1.value() && c2.value()))) {
+      return false;
+    }
+    bool shared_any = false;
+    for (const BufferRegion &write : src->writes) {
+      for (const BufferRegion &read : dst->reads) {
+        if (!write->buffer->data.same_as(read->buffer->data)) {
+          continue;
+        }
+        shared_any = true;
+        std::string scope = write->buffer.scope();
+        if (scope != "local.fragment" && scope != "local") {
+          return false;
+        }
+      }
+    }
+    return shared_any;
+  }
+
+  /*! \brief A single-point read of a buffer that the same statement writes as a
+   * tile (some extent > 1): the region anchor of a write-only tile op such as a
+   * GEMM with clear_accum, not a value the statement consumes. */
+  static bool IsWriteOnlyTileAnchorRead(const SBlock &block,
+                                        const BufferRegion &read) {
+    for (const Range &r : read->region) {
+      if (!is_one(r->extent)) {
+        return false;
+      }
+    }
+    for (const BufferRegion &write : block->writes) {
+      if (!write->buffer->data.same_as(read->buffer->data)) {
+        continue;
+      }
+      for (const Range &r : write->region) {
+        if (!is_one(r->extent)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /*! \brief Whether any region written by src may overlap a region read by dst
+   * of the same buffer (conservative: true when ranks differ). */
+  bool WriteReadRegionsMayOverlap(const SBlock &src, const SBlock &dst) {
+    for (const BufferRegion &write : src->writes) {
+      for (const BufferRegion &read : dst->reads) {
+        if (!write->buffer->data.same_as(read->buffer->data)) {
+          continue;
+        }
+        if (IsWriteOnlyTileAnchorRead(dst, read)) {
+          continue;
+        }
+        if (write->region.size() != read->region.size()) {
+          return true;
+        }
+        bool disjoint = false;
+        for (size_t i = 0; i < write->region.size(); ++i) {
+          auto set1 = arith::IntSet::FromRange(write->region[i]);
+          auto set2 = arith::IntSet::FromRange(read->region[i]);
+          if (arith::Intersect({set1, set2}).IsNothing()) {
+            disjoint = true;
+            break;
+          }
+        }
+        if (!disjoint) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   void ValidatePipelineBody(const PipelineInfo &pipeline_info,
                             const Array<SBlock> &original_order) {
     std::unordered_set<int> used_orders;
@@ -3123,6 +3219,16 @@ private:
       const Array<SBlock> &dsts = pair.second;
       for (const SBlock &dst : dsts) {
         const auto &dst_info = pipeline_info.at(dst);
+        if (src_info.stage > dst_info.stage &&
+            (!WriteReadRegionsMayOverlap(src, dst) ||
+             OnlyRegisterDepsAcrossDisjointThreads(src, dst))) {
+          // The dependency graph is keyed by buffer: a later-stage statement
+          // that writes a region the earlier-stage statement never reads
+          // (e.g. another warp group's rows of the same fragment) is not a
+          // dependency, so a manual schedule may legitimately order them this
+          // way (register carry across iterations).
+          continue;
+        }
         ICHECK_LE(src_info.stage, dst_info.stage)
             << "ValueError: statement " << dst << " in stage " << dst_info.stage
             << " cannot depends on statement " << src << " in a later stage "

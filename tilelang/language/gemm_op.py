@@ -584,7 +584,8 @@ def mma_gemm_blockscaled(
 
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
-    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
+    # With clear_accum the accumulator is write-only for dependency analysis (the op clears it).
+    C_arg = buffer_region_to_tile_region(C_region, "w" if clear_accum else "rw", [r for r in C_shape])
     SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
     SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
 

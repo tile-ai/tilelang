@@ -861,6 +861,39 @@ public:
       return false;
     }
 
+    // Explicit per-statement async producer annotations (see the software
+    // pipeline guide) take precedence over the implicit grouping so a manual
+    // schedule can merge several copies into one commit group.
+    if (annotations->count(kPipelineAsyncProducers) &&
+        annotations->count(kPipelineAsyncProducerGroups)) {
+      auto producers = Downcast<Array<Integer>>(
+          annotations->Get(kPipelineAsyncProducers).value());
+      auto groups = Downcast<Array<Integer>>(
+          annotations->Get(kPipelineAsyncProducerGroups).value());
+      ICHECK_EQ(producers.size(), pipeline_stage_infos.size())
+          << "software_pipeline_async_producers must have one entry per "
+             "scheduled pipeline statement";
+      ICHECK_EQ(groups.size(), pipeline_stage_infos.size())
+          << "software_pipeline_async_producer_groups must have one entry per "
+             "scheduled pipeline statement";
+      std::unordered_set<int> explicit_async_stage_ids;
+      for (size_t i = 0; i < producers.size(); ++i) {
+        if (!is_zero(producers[i])) {
+          explicit_async_stage_ids.insert(pipeline_stage_infos[i].stage);
+        }
+      }
+      std::vector<int> sorted_ids(explicit_async_stage_ids.begin(),
+                                  explicit_async_stage_ids.end());
+      std::sort(sorted_ids.begin(), sorted_ids.end());
+      std::vector<Integer> explicit_async_stages;
+      for (int stage_id : sorted_ids) {
+        explicit_async_stages.push_back(Integer(stage_id));
+      }
+      annotations->Set(s_tir::attr::software_pipeline_async_stages,
+                       Array<Integer>(explicit_async_stages));
+      return !sorted_ids.empty();
+    }
+
     std::vector<int> async_group_ids(pipeline_stage_infos.size(), -1);
     std::vector<int> stmt_indices_by_order(pipeline_stage_infos.size());
     std::iota(stmt_indices_by_order.begin(), stmt_indices_by_order.end(), 0);

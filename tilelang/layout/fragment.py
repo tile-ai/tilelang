@@ -163,6 +163,16 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_condense_rep_var(self)
 
+    def bind_thread_range(self, thread_min: int, thread_extent: int) -> "Fragment":
+        """Bind this fragment to the absolute thread range ``[thread_min, thread_min + thread_extent)``.
+
+        The forward_thread function keeps local coordinates ``[0, thread_extent)``; lowering
+        normalizes ``threadIdx.x`` against ``thread_min``. Use it for fragments that live in a
+        thread-predicated region (e.g. ``if tx >= 128:``) so the loop partition maps the right
+        threads instead of folding the statements away.
+        """
+        return _ffi_api.Fragment_bind_thread_range(self, int(thread_min), int(thread_extent))
+
     def map_forward_thread(self, indices: list[PrimExpr]) -> PrimExpr:
         """
         Get the thread mapping expression for a given set of argument indices.
