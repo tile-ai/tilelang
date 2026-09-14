@@ -62,12 +62,6 @@ public:
   }
 
 private:
-  void VisitStmt_(const SBlockNode *op) final {
-    if (op->name_hint == "SIMD_VF")
-      return;
-    StmtVisitor::VisitStmt_(op);
-  }
-
   void VisitStmt_(const ForNode *op) final {
     // Only validate parallel loops
     if (op->kind != ForKind::kParallel) {

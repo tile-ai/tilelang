@@ -23,6 +23,10 @@
 #include <queue>
 #include <unordered_set>
 
+#include "arith/ir_mutator_with_analyzer.h"
+#include "arith/ir_visitor_with_analyzer.h"
+#include "ascend/transform/vf_regions.h"
+#include "backend/common/target_utils.h"
 #include "config.h"
 #include "layout/layout.h"
 #include "layout/utils.h"
@@ -30,19 +34,15 @@
 #include "op/copy.h"
 #include "op/parallel.h"
 #include "op/reducer.h"
-#include "ascend/transform/vf_regions.h"
 #include "op/utils.h"
 #include "span_utils.h"
+#include "tir/transforms/ir_utils.h"
 #include "transform/common/attr.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/common/pipeline_utils.h"
 #include "transform/common/union_find.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "arith/ir_visitor_with_analyzer.h"
-#include "backend/common/target_utils.h"
 #include "transform/layout_inference/layout_cost_model.h"
 #include "transform/layout_inference/parallel_loop_layout_validator.h"
-#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -921,10 +921,11 @@ private:
               if (!found) {
                 buffers.push_back(buffer_load->buffer);
                 buffer_data_to_buffers_.Set(buffer_load->buffer->data, buffers);
-                DLOG(INFO) << "[AscendLayoutInference] BufferStore: added buffer "
-                           << buffer_load->buffer
-                           << " buffer.get() = " << buffer_load->buffer.get()
-                           << " data = " << buffer_load->buffer->data.get();
+                DLOG(INFO)
+                    << "[AscendLayoutInference] BufferStore: added buffer "
+                    << buffer_load->buffer
+                    << " buffer.get() = " << buffer_load->buffer.get()
+                    << " data = " << buffer_load->buffer->data.get();
               }
             } else {
               buffer_data_to_buffers_.Set(buffer_load->buffer->data,
@@ -952,10 +953,11 @@ private:
                 buffers.push_back(buffer_store->buffer);
                 buffer_data_to_buffers_.Set(buffer_store->buffer->data,
                                             buffers);
-                DLOG(INFO) << "[AscendLayoutInference] BufferStore: added buffer "
-                           << buffer_store->buffer
-                           << " buffer.get() = " << buffer_store->buffer.get()
-                           << " data = " << buffer_store->buffer->data.get();
+                DLOG(INFO)
+                    << "[AscendLayoutInference] BufferStore: added buffer "
+                    << buffer_store->buffer
+                    << " buffer.get() = " << buffer_store->buffer.get()
+                    << " data = " << buffer_store->buffer->data.get();
               }
             } else {
               buffer_data_to_buffers_.Set(buffer_store->buffer->data,
@@ -1191,8 +1193,8 @@ private:
         }
       } else {
         buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
-        DLOG(INFO) << "[AscendLayoutInference] BufferLoad: new buffer " << op->buffer
-                   << " buffer.get() = " << op->buffer.get()
+        DLOG(INFO) << "[AscendLayoutInference] BufferLoad: new buffer "
+                   << op->buffer << " buffer.get() = " << op->buffer.get()
                    << " data = " << op->buffer->data.get();
       }
     }
@@ -1221,8 +1223,8 @@ private:
         }
       } else {
         buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
-        DLOG(INFO) << "[AscendLayoutInference] BufferStore: new buffer " << op->buffer
-                   << " buffer.get() = " << op->buffer.get()
+        DLOG(INFO) << "[AscendLayoutInference] BufferStore: new buffer "
+                   << op->buffer << " buffer.get() = " << op->buffer.get()
                    << " data = " << op->buffer->data.get();
       }
     }
@@ -1607,6 +1609,71 @@ private:
   }
 };
 
+// Ascend variant of the parallel-loop fuser. SIMD_VF bodies are opaque scalar
+// CCE code, so fusion never descends into them; inside SIMT_VF a loop nest
+// feeding reducer_update keeps its shape so ReducerPlanAndMaterialize can
+// still recognize the per-axis reduction structure.
+class ParallelLoopFuserSkipSimdVF : public ParallelLoopFuser {
+public:
+  static Stmt Fuse(const Stmt &stmt) {
+    arith::Analyzer analyzer;
+    ParallelLoopFuserSkipSimdVF substituter(&analyzer);
+    return substituter.VisitStmt(stmt);
+  }
+
+private:
+  ParallelLoopFuserSkipSimdVF(arith::Analyzer *analyzer)
+      : ParallelLoopFuser(analyzer) {}
+
+  bool PreserveParallelLoopNest(const ForNode *op) const final {
+    if (!inside_simt_vf_) {
+      return false;
+    }
+    bool has_reducer_update = false;
+    PostOrderVisit(op->body, [&](const ObjectRef &obj) {
+      if (const auto *call = obj.as<CallNode>()) {
+        has_reducer_update |= call->op.same_as(reducer_update());
+      }
+    });
+    return has_reducer_update;
+  }
+
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    if (op->name_hint == "SIMD_VF") {
+      return GetRef<Stmt>(op);
+    }
+    bool previous_inside_simt_vf = inside_simt_vf_;
+    if (op->name_hint == "SIMT_VF") {
+      inside_simt_vf_ = true;
+    }
+    Stmt result = IRMutatorWithAnalyzer::VisitStmt_(op);
+    inside_simt_vf_ = previous_inside_simt_vf;
+    return result;
+  }
+
+  bool inside_simt_vf_{false};
+};
+
+// Ascend variant of the post-inference validator. SIMD_VF bodies are opaque
+// scalar CCE regions whose T.Parallel loops are lowered later by
+// AscendSimdVFLowerParallel and never carry loop-layout annotations, so the
+// "every parallel loop is annotated" invariant must not be checked inside
+// them.
+class AscendParallelLoopLayoutValidator : public ParallelLoopLayoutValidator {
+public:
+  static void Validate(const Stmt &stmt) {
+    AscendParallelLoopLayoutValidator validator;
+    validator.VisitStmt(stmt);
+  }
+
+private:
+  void VisitStmt_(const SBlockNode *op) final {
+    if (op->name_hint == "SIMD_VF")
+      return;
+    StmtVisitor::VisitStmt_(op);
+  }
+};
+
 class LayoutInferencer : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -1711,7 +1778,7 @@ tvm::transform::Pass AscendLayoutInference() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     f = LayoutInferencer::Substitute(std::move(f));
     // Validate parallel loop layout annotations
-    ParallelLoopLayoutValidator::Validate(f->body);
+    AscendParallelLoopLayoutValidator::Validate(f->body);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.AscendLayoutInference", {});
@@ -1719,7 +1786,8 @@ tvm::transform::Pass AscendLayoutInference() {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.AscendLayoutInference", AscendLayoutInference);
+  refl::GlobalDef().def("tl.transform.AscendLayoutInference",
+                        AscendLayoutInference);
 }
 
 } // namespace ascend
