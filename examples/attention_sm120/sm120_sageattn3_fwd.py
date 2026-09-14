@@ -36,10 +36,10 @@ LOG2E = 1.4426950408889634
 LOG2_P1 = math.log2(1.0 / (448.0 * 6.0))  # two-level: P2 = P * 2688 (softmax_fused.h)
 LOG2_FP4 = math.log2(1.0 / 6.0)  # per-16 scale = max16(P2) / 6
 
-# One fp32 -> one e2m1 nibble (low 4 bits of the result), x scaled by the block scale inverse,
-# via the same cvt.rn.satfinite.e2m1x2.f32 the original uses (utils.h packed_float_to_e2m1).
+# Two fp32 -> one byte of two e2m1 nibbles (even key in the low nibble), via the same
+# cvt.rn.satfinite.e2m1x2.f32 the original uses (utils.h packed_float_to_e2m1).
 CVT_E2M1_SRC = r"""
-__device__ __forceinline__ unsigned int tl_cvt_e2m1_rn_mul(float x, float inv) {
+__device__ __forceinline__ unsigned int tl_cvt_e2m1x2_rn(float lo, float hi) {
   unsigned int out;
   asm volatile(
       "{\n"
@@ -48,8 +48,8 @@ __device__ __forceinline__ unsigned int tl_cvt_e2m1_rn_mul(float x, float inv) {
       "cvt.u32.u8 %0, b;\n"
       "}"
       : "=r"(out)
-      : "f"(0.0f), "f"(x * inv));
-  return out & 0xFu;
+      : "f"(hi), "f"(lo));
+  return out;
 }
 """
 
@@ -71,6 +71,19 @@ def _p_group_layout(block_m: int, n_groups: int, warp_rows: int = 32) -> Fragmen
         return (m // 4) * (warp_rows * 2) + ((i % warp_rows) // 16) * 32 + ((i % 16) // 8) * 8 + ((m % 4) // 2) * 16 + k % 8
 
     return Fragment((block_m, n_groups, 16), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
+
+
+def _p_half_layout(block_m: int, n_groups: int, warp_rows: int = 32) -> Fragment:
+    """Fragment layout of E[row, key_group, t] holding keys 2t (or 2t+1) of the group: G's layout on
+    the even (odd) keys, index = G index // 2 (bijective per lane)."""
+
+    def fwd_thread(i, m, t):
+        return (i // warp_rows) * 32 + (i % 8) * 4 + (m % 2) * 2 + t // 4
+
+    def fwd_index(i, m, t):
+        return (m // 4) * warp_rows + ((i % warp_rows) // 16) * 16 + ((i % 16) // 8) * 4 + ((m % 4) // 2) * 8 + t % 4
+
+    return Fragment((block_m, n_groups, 8), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
 
 
 def _p_word_layout(block_m: int, n_groups: int, warp_rows: int = 32) -> Fragment:
@@ -122,6 +135,7 @@ def build_sm120_sageattn3_fwd(
     n_kv_blocks = seq_len // block_N
     g_layout = _p_group_layout(block_M, n_groups, warp_rows)
     pw_layout = _p_word_layout(block_M, n_groups, warp_rows)
+    ph_layout = _p_half_layout(block_M, n_groups, warp_rows)
 
     @T.prim_func
     def main(
@@ -156,6 +170,8 @@ def build_sm120_sageattn3_fwd(
             sinv = T.alloc_fragment((block_M, n_groups), accum)
             rowsum8 = T.alloc_fragment((block_M, n_groups), accum)
             Pw = T.alloc_fragment((block_M, n_groups, 2), T.uint32)
+            Ev = T.alloc_fragment((block_M, n_groups, 8), accum)
+            Od = T.alloc_fragment((block_M, n_groups, 8), accum)
             acc_o = T.alloc_fragment((block_M, dim), accum)
             m_i = T.alloc_fragment((block_M,), accum)
             m_prev = T.alloc_fragment((block_M,), accum)
@@ -163,7 +179,7 @@ def build_sm120_sageattn3_fwd(
             rescale = T.alloc_fragment((block_M,), accum)
             l_tile = T.alloc_fragment((block_M,), accum)
             l_i = T.alloc_fragment((block_M,), accum)
-            T.annotate_layout({G: g_layout, Pw: pw_layout})
+            T.annotate_layout({G: g_layout, Pw: pw_layout, Ev: ph_layout, Od: ph_layout})
 
             T.copy(Q[bz, by, bx * block_M, 0], Q_sh)
             for r, w in T.Parallel(block_M, sf_words_qk):
@@ -227,12 +243,18 @@ def build_sm120_sageattn3_fwd(
                     SFP_u8[i, m] = T.reinterpret(T.cast(absmax[i, m], T.float8_e4m3fn), T.uint8)
                 for i, m in T.Parallel(block_M, n_groups):
                     sinv[i, m] = 1.0 / absmax[i, m]  # one reciprocal per 16-key group
+                # Even/odd key halves (pure in-lane renaming) so one cvt handles a key pair; a
+                # T.Parallel body may only touch a fragment through one index pattern.
+                for i, m, t in T.Parallel(block_M, n_groups, 8):
+                    Ev[i, m, t] = G[i, m, 2 * t] * sinv[i, m]
+                for i, m, t in T.Parallel(block_M, n_groups, 8):
+                    Od[i, m, t] = G[i, m, 2 * t + 1] * sinv[i, m]
                 for i, m, k8 in T.Parallel(block_M, n_groups, 2):
                     Pw[i, m, k8] = 0
-                    for t in T.serial(8):
+                    for t2 in T.serial(4):
                         Pw[i, m, k8] = Pw[i, m, k8] | T.shift_left(
-                            T.call_extern("uint32", "tl_cvt_e2m1_rn_mul", G[i, m, 8 * k8 + t], sinv[i, m]),
-                            T.cast(4 * t, T.uint32),
+                            T.call_extern("uint32", "tl_cvt_e2m1x2_rn", Ev[i, m, 4 * k8 + t2], Od[i, m, 4 * k8 + t2]),
+                            T.cast(8 * t2, T.uint32),
                         )
                 for i, m, k8 in T.Parallel(block_M, n_groups, 2):
                     P_u32[i, 2 * m + k8] = Pw[i, m, k8]
