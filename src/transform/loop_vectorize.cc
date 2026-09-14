@@ -1101,9 +1101,12 @@ int GetVectorizeSize(const For &loop, const LayoutMap &layout_map) {
   return VectorizePlanner(&analyzer, layout_map).Plan(loop);
 }
 
-int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
+int GetVectorizeSize(const For &loop, const arith::Analyzer *analyzer,
                      const LayoutMap &layout_map) {
-  return VectorizePlanner(analyzer, layout_map).Plan(loop);
+  // Planning is a query: visiting the loop must not install its local
+  // definitions in the caller's context, which may later analyze a rewrite.
+  auto local_analyzer = analyzer->Clone();
+  return VectorizePlanner(local_analyzer.get(), layout_map).Plan(loop);
 }
 
 namespace {
@@ -1317,11 +1320,10 @@ For VectorizeLoop(const For &loop, const LayoutMap &layout_map,
   return Downcast<For>(rewriter(loop));
 }
 
-For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
+For VectorizeLoop(const For &loop, const arith::Analyzer *analyzer,
                   const LayoutMap &layout_map, int vectorize_hint) {
   if (vectorize_hint <= 0) {
-    VectorizePlanner planner(analyzer, layout_map);
-    vectorize_hint = planner.Plan(loop);
+    vectorize_hint = GetVectorizeSize(loop, analyzer, layout_map);
   }
   if (vectorize_hint == 1)
     return ParallelToSerial(loop);
