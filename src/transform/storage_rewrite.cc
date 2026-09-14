@@ -18,7 +18,6 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <limits>
 #include <list>
 #include <map>
 #include <unordered_map>
@@ -27,7 +26,6 @@
 
 #include "../op/builtin.h"
 #include "arith/int_operator.h"
-#include "layout/layout.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/ir/buffer_common.h"
 #include "tir/transforms/ir_utils.h"
@@ -40,22 +38,6 @@ using runtime::StorageScope;
 using namespace tirx;
 using namespace ffi;
 
-static bool HasCompileTimeLanes(DataType dtype) {
-  DLDataType raw = dtype;
-  return static_cast<int16_t>(raw.lanes) >= 0;
-}
-
-static int CompileTimeLanes(DataType dtype) {
-  DLDataType raw = dtype;
-  int lanes = static_cast<int16_t>(raw.lanes);
-  ICHECK_GE(lanes, 0) << "Expected a dtype with compile-time lanes, but got "
-                      << dtype;
-  return lanes;
-}
-
-static bool CanEncodeFixedLanes(int64_t lanes) {
-  return lanes > 0 && lanes <= std::numeric_limits<int16_t>::max();
-}
 namespace {
 
 // Backend-managed allocation scopes whose AllocBuffer nodes must remain in
@@ -269,10 +251,6 @@ public:
       VisitNewScope(op);
     } else if (op->attr_key == tl::attr::kLexicalAllocScope) {
       VisitNewScope(op);
-    } else if (op->attr_key == "tl.simtvf_scope") {
-      VisitNewScope(op);
-    } else if (op->attr_key == "tl.simdvf_scope") {
-      VisitNewScope(op);
     } else {
       StmtExprVisitor::VisitStmt_(op);
     }
@@ -450,8 +428,6 @@ private:
  * value from the storage type to the output type after access.
  */
 class StoragePlanRewriter : public StmtExprMutator {
-  struct StorageEntry;
-
 public:
   using StmtEntry = LinearAccessPatternFinder::StmtEntry;
   using AllocEntry = LinearAccessPatternFinder::AllocEntry;
@@ -547,25 +523,8 @@ public:
       const StorageEntry *se = it->second;
       PrimExpr offset = this->VisitExpr(op->args[2]);
       PrimExpr extent = this->VisitExpr(op->args[3]);
-      uint64_t child_elem_bits = dtype.bits() * dtype.lanes();
-      uint64_t elem_bits = child_elem_bits;
-      // If merged into a parent alloc, use parent's element type so the
-      // offset matches the base pointer's C++ pointer arithmetic.
-      if (se->alloc_var.get() != buffer) {
-        auto parent_it = alloc_map_.find(se->alloc_var.get());
-        if (parent_it != alloc_map_.end()) {
-          elem_bits = parent_it->second->elem_type.bits() *
-                      parent_it->second->elem_type.lanes();
-        }
-      }
+      uint64_t elem_bits = dtype.bits() * dtype.lanes();
       ICHECK_EQ(se->bits_offset % elem_bits, 0U);
-      // Scale region offset (e.g. pipeline version) to parent element units
-      if (elem_bits != child_elem_bits) {
-        offset =
-            offset *
-            make_const(offset.dtype(), static_cast<int64_t>(child_elem_bits)) /
-            make_const(offset.dtype(), static_cast<int64_t>(elem_bits));
-      }
       if (se->bits_offset != 0) {
         offset =
             make_const(offset.dtype(), se->bits_offset / elem_bits) + offset;
@@ -581,8 +540,6 @@ public:
     if (op->attr_key == tirx::attr::thread_extent ||
         op->attr_key == s_tir::attr::virtual_thread ||
         op->attr_key == tl::attr::kLexicalAllocScope ||
-        op->attr_key == "tl.simtvf_scope" ||
-        op->attr_key == "tl.simdvf_scope" ||
         tirx::attr::IsPragmaKey(op->attr_key)) {
       // remake all the allocation at the attach scope.
       if (attach_map_.count(op)) {
@@ -622,65 +579,6 @@ public:
     }
   }
 
-  Map<String, Any> RemapBlockAnnotations(Map<String, Any> annotations) {
-    auto opt_layout_map = annotations.Get(attr::kLayoutMap);
-    if (!opt_layout_map.has_value()) {
-      return annotations;
-    }
-
-    auto var_layout_map = opt_layout_map.value().as<Map<Var, Layout>>();
-    if (var_layout_map.has_value()) {
-      bool changed = false;
-      Map<Var, Layout> updated_layout_map;
-      for (const auto &kv : var_layout_map.value()) {
-        Var var = kv.first;
-        Var remapped_var = var;
-        if (auto it = alloc_map_.find(var.get()); it != alloc_map_.end()) {
-          remapped_var = it->second->alloc_var;
-        }
-        changed = changed || !remapped_var.same_as(var);
-        updated_layout_map.Set(remapped_var, kv.second);
-      }
-      if (changed) {
-        annotations.Set(attr::kLayoutMap, updated_layout_map);
-      }
-      return annotations;
-    }
-
-    auto layout_map = opt_layout_map.value().as<Map<Buffer, Layout>>();
-    if (!layout_map.has_value()) {
-      return annotations;
-    }
-
-    bool changed = false;
-    Map<Buffer, Layout> updated_layout_map;
-    for (const auto &kv : layout_map.value()) {
-      Buffer buffer = kv.first;
-      Buffer remapped_buffer = buffer;
-      if (auto it = alloc_map_.find(buffer->data.get());
-          it != alloc_map_.end()) {
-        remapped_buffer = RemapBuffer(buffer, it->second->alloc_var);
-      }
-      changed = changed || !remapped_buffer.same_as(buffer);
-      updated_layout_map.Set(remapped_buffer, kv.second);
-    }
-
-    if (!changed) {
-      return annotations;
-    }
-    annotations.Set(attr::kLayoutMap, updated_layout_map);
-    return annotations;
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    auto block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
-    auto annotations = RemapBlockAnnotations(block->annotations);
-    if (!annotations.same_as(block->annotations)) {
-      block.CopyOnWrite()->annotations = std::move(annotations);
-    }
-    return block;
-  }
-
   Stmt VisitStmt_(const AllocBufferNode *op) final {
     if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
       return StmtExprMutator::VisitStmt_(op);
@@ -703,27 +601,6 @@ public:
     return Evaluate(0);
   }
 
-  bool IsRedundantDeclBuffer(const Buffer &buffer, const StorageEntry *entry) {
-    if (entry->bits_offset != 0 || entry->allocs.empty() ||
-        entry->alloc_var.get() != buffer->data.get()) {
-      return false;
-    }
-
-    const Buffer &alloc_buffer = entry->allocs[0]->buffer;
-    if (buffer->dtype != alloc_buffer->dtype ||
-        buffer->shape.size() != alloc_buffer->shape.size()) {
-      return false;
-    }
-
-    ExprDeepEqual expr_equal;
-    for (size_t i = 0; i < buffer->shape.size(); ++i) {
-      if (!expr_equal(buffer->shape[i], alloc_buffer->shape[i])) {
-        return false;
-      }
-    }
-    return true;
-  }
-
   Stmt VisitStmt_(const DeclBufferNode *op) final {
     if (!all_buffers_accessed_.count(op->buffer.get())) {
       return Evaluate(0);
@@ -732,9 +609,6 @@ public:
 
     if (auto it = alloc_map_.find(op->buffer->data.get());
         it != alloc_map_.end()) {
-      if (IsRedundantDeclBuffer(op->buffer, it->second)) {
-        return Evaluate(0);
-      }
       Buffer buf = RemapBuffer(op->buffer, it->second->alloc_var);
       node.CopyOnWrite()->buffer = buf;
     }
@@ -789,16 +663,6 @@ private:
            scope.tag != ".var" && scope.tag.find(".descriptor") != 0;
   }
 
-  static bool IsSimdVFScope(const Object *scope) {
-    if (scope == nullptr)
-      return false;
-    if (scope->IsInstance<AttrStmtNode>()) {
-      return static_cast<const AttrStmtNode *>(scope)->attr_key ==
-             "tl.simdvf_scope";
-    }
-    return false;
-  }
-
   // Allocate entry of node.
   // Event entry in liveness analysis
   struct EventEntry {
@@ -849,8 +713,6 @@ private:
         if (IsSpecialTaggedMemory(e->scope)) {
           ICHECK_NE(e->const_nbits, 0U)
               << "Special tagged memory must be const size";
-          if (IsSimdVFScope(e->attach_scope_))
-            continue;
           for (size_t j = 0; j < i; ++j) {
             if (e->scope == vec[j]->scope) {
               vec[j]->merged_children.push_back(e);
@@ -1036,32 +898,17 @@ private:
     }
   }
 
-  bool IsCurrentThreadScopeSimtVF() const {
-    if (thread_scope_ == nullptr ||
-        !thread_scope_->IsInstance<AttrStmtNode>()) {
-      return false;
-    }
-    const auto *attr = static_cast<const AttrStmtNode *>(thread_scope_);
-    return attr->attr_key == "tl.simtvf_scope";
-  }
-
   /*! \brief Return the effective attach scope for the given storage scope.
    *
-   * lexical_alloc_scope and tl.simtvf_scope are intended to bound
-   * register/local-like allocations.  Shared/global allocations should continue
-   * to follow the enclosing thread scope, so buffers allocated outside a SimtVF
-   * region are not moved into the generated VF helper.
+   * lexical_alloc_scope is intended to bound register/local-like allocations.
+   * Shared/global allocations should continue to follow thread_scope_ so we do
+   * not accidentally re-scope shared buffers nested inside a lexical block.
    */
   const Object *effective_scope(const StorageScope &storage_scope) const {
     if (lexical_scope_ != nullptr &&
         storage_scope.rank != StorageRank::kGlobal &&
         storage_scope.rank != StorageRank::kShared) {
       return lexical_scope_;
-    }
-    if (IsCurrentThreadScopeSimtVF() &&
-        (storage_scope.rank == StorageRank::kGlobal ||
-         storage_scope.rank == StorageRank::kShared)) {
-      return saved_thread_scope_;
     }
     return thread_scope_;
   }
@@ -1075,21 +922,6 @@ private:
 
     for (size_t i = 0; i < seq.size(); ++i) {
       const StmtEntry &s = seq[i];
-
-      // Ascend SimtVF: if this is the begin of a simtvf_scope, override
-      // thread_scope_ BEFORE processing gen events so that local
-      // allocations first touched inside the scope attach to it.
-      // Shared/global buffers are kept at the parent scope via the
-      // effective_scope check in the FindAlloc call below.
-      if (seq[i].scope_pair_offset > 0 && s.stmt->IsInstance<AttrStmtNode>()) {
-        const auto *attr = static_cast<const AttrStmtNode *>(s.stmt);
-        if (attr->attr_key == "tl.simtvf_scope" ||
-            attr->attr_key == "tl.simdvf_scope") {
-          saved_thread_scope_ = thread_scope_;
-          thread_scope_ = attr;
-        }
-      }
-
       auto it = event_map_.find(seq[i].stmt);
 
       // scope_pair_offset >= 0 means it is either
@@ -1138,8 +970,6 @@ private:
             }
           }
           if (dst_entry == nullptr) {
-            // Shared/global buffers must not be attached inside simtvf_scope.
-            // effective_scope() keeps them at the parent thread scope.
             dst_entry =
                 FindAlloc(alloc, effective_scope(storage_scope), storage_scope,
                           entry.num_physical_dimensions, enable_reuse,
@@ -1182,12 +1012,6 @@ private:
             }
             lexical_scope_ = lexical_scope_stack_.back();
             lexical_scope_stack_.pop_back();
-          }
-        } else if (op->attr_key == "tl.simtvf_scope" ||
-                   op->attr_key == "tl.simdvf_scope") {
-          if (seq[i].scope_pair_offset <= 0) {
-            thread_scope_ = saved_thread_scope_;
-            saved_thread_scope_ = nullptr;
           }
         } else {
           ICHECK(op->attr_key == tirx::attr::extern_scope);
@@ -1355,7 +1179,6 @@ private:
   const Object *lexical_scope_{nullptr};
   // Stack for nested lexical scopes.
   std::vector<const Object *> lexical_scope_stack_;
-  const Object *saved_thread_scope_{nullptr};
   // whether enable inplace detection.
   bool detect_inplace_{false};
   // Locations of free ops.
@@ -1656,7 +1479,7 @@ public:
       return;
     }
 
-    if (!HasCompileTimeLanes(value_dtype)) {
+    if (value_dtype.is_scalable_vector()) {
       // Scalable types are not currently supported in storage_rewrite. Scalable
       // buffer accesses are not currently checked and therefore are not
       // rewritten.
@@ -1665,16 +1488,8 @@ public:
 
     BufferVarInfo &var_info = it->second;
 
-    if (!HasCompileTimeLanes(var_info.element_dtype) ||
-        (!indices.empty() && !HasCompileTimeLanes(indices.back().dtype()))) {
-      // Scalable declarations or vectorized indices require scalable lane
-      // queries. StorageRewrite does not rewrite scalable accesses, so skip
-      // lane tracking for these accesses as well.
-      return;
-    }
-
     if (value_dtype.element_of() == DataType::Bool()) {
-      value_dtype = DataType::Int(8).with_lanes(CompileTimeLanes(value_dtype));
+      value_dtype = DataType::Int(8).with_lanes(value_dtype.lanes());
     }
 
     if (var_info.element_dtype.is_handle()) {
@@ -1684,14 +1499,11 @@ public:
       var_info.element_dtype = value_dtype.element_of();
     }
 
-    int index_lanes =
-        !indices.empty() ? CompileTimeLanes(indices.back().dtype()) : 1;
+    int index_lanes = !indices.empty() ? indices.back().dtype().lanes() : 1;
 
     DataType access_dtype = value_dtype;
 
-    int element_lanes = CompileTimeLanes(var_info.element_dtype);
-    int value_lanes = CompileTimeLanes(value_dtype);
-    int lanes_used = element_lanes;
+    int lanes_used = var_info.element_dtype.lanes();
 
     // This can happen due to a previous pass that had rewrite_store_load =
     // false.  This occurs from the StorageRewrite in tvm::lower, followed by
@@ -1699,21 +1511,21 @@ public:
     // false is necessary because the C-based codegens do not yet support
     // vectorized pointer types (e.g. float16x4*).  Once they do, this if
     // statement should instead be replaced by the below ICHECK_EQ.
-    if (index_lanes * element_lanes != value_lanes) {
+    if (index_lanes * var_info.element_dtype.lanes() != value_dtype.lanes()) {
       // If the total element sizes differ (e.g. a bfloat16 view of a
       // bfloat16x2 buffer where each bfloat16x2 = 4 bytes but bfloat16 = 2
       // bytes), this is a reinterpret-cast view access with a finer-grained
       // element type.  The buffer's declared element dtype must not be
       // downgraded in this case; just skip lane tracking for this access.
-      int declared_bytes = var_info.element_dtype.bits() * element_lanes / 8;
-      int access_bytes = value_dtype.bits() * value_lanes / 8;
+      int declared_bytes =
+          var_info.element_dtype.bits() * var_info.element_dtype.lanes() / 8;
+      int access_bytes = value_dtype.bits() * value_dtype.lanes() / 8;
       if (access_bytes != declared_bytes) {
         return;
       }
-      ICHECK_EQ(index_lanes, value_lanes);
+      ICHECK_EQ(index_lanes, value_dtype.lanes());
       lanes_used = 1;
       var_info.element_dtype = var_info.element_dtype.with_lanes(1);
-      element_lanes = 1;
     }
 
     // TODO(Lunderberg): Uncomment this check once it can be applied.
@@ -1741,8 +1553,7 @@ public:
           int lanes =
               static_cast<int>(Downcast<IntImm>(ramp_index->lanes)->value);
           arith::ModularSet me = analyzer_.modular_set(ramp_index->base);
-          if (CanEncodeFixedLanes(lanes) && (me->coeff % lanes == 0) &&
-              (me->base % lanes == 0)) {
+          if ((me->coeff % lanes == 0) && (me->base % lanes == 0)) {
             lanes_used = lanes;
           }
         }
@@ -1751,17 +1562,11 @@ public:
 
     if (detect_scalar_read_patterns_ && is_buffer_load && !indices.empty()) {
       const PrimExpr last_dim_index = indices[indices.size() - 1];
-      if (index_lanes == 1) {
+      if (last_dim_index.dtype().lanes() == 1) {
         arith::ModularSet me = analyzer_.modular_set(last_dim_index);
-        if (CanEncodeFixedLanes(me->coeff) && me->coeff > 0) {
-          var_info.scalar_read_dtype.emplace(
-              access_dtype.with_lanes(static_cast<int>(me->coeff)));
-          return;
-        }
+        var_info.scalar_read_dtype.emplace(access_dtype.with_lanes(me->coeff));
+        return;
       }
-    }
-    if (!CanEncodeFixedLanes(lanes_used)) {
-      return;
     }
     var_info.access_dtype.insert(access_dtype.with_lanes(lanes_used));
   }
