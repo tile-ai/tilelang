@@ -10,7 +10,7 @@ is useful for:
 
 import tilelang
 import tilelang.ascend.language as T
-from tilelang.engine.callback import register_ascend_postproc_callback
+from tilelang.ascend.callback import register_ascend_postproc_callback
 
 
 def vector_add(N):
