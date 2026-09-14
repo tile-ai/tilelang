@@ -8,8 +8,11 @@
   iteration instead of one per copy).
 * a register-carried operand: a thread-predicated statement at a lower pipeline stage writes a
   fragment (its own warps' rows) that a later-stage shared statement consumes one iteration later.
+* a rotated accumulator: a statement at a *higher* stage (an older tile) is emitted first and
+  accumulates into a buffer that a lower-stage statement then updates in the same iteration.
 """
 
+import pytest
 import torch
 
 import tilelang
@@ -164,6 +167,53 @@ def test_manual_pipeline_register_carry_between_warp_groups():
     a = torch.randn(128, 256, device="cuda", dtype=torch.float16)
     b = torch.randn(256, 64, device="cuda", dtype=torch.float16)
     ref = a.float() @ b.float()
+    torch.testing.assert_close(kernel(a, b), ref, rtol=1e-2, atol=1e-1)
+
+
+def _build_rotated_accumulator(n_tiles: int, decay: float):
+    """acc += A_t @ B (one tile behind) while acc is scaled by `decay` every iteration.
+
+    The GEMM sits one pipeline stage later than the scaling, which would normally be rejected as a
+    backwards dependency; it is legal because the GEMM is emitted first, so within one iteration
+    the accumulation for tile t-1 lands before the scaling for tile t.
+    """
+    M, N, BK = 64, 64, 32
+    K = BK * n_tiles
+    S = 2
+    # statements: copy A (stage 0), gemm of the previous tile (stage S+1), scale (stage S)
+    order = [0, 1, 2]
+    stage = [0, S + 1, S]
+
+    @T.prim_func
+    def main(A: T.Tensor((M, K), T.float16), B: T.Tensor((BK, N), T.float16), C: T.Tensor((M, N), T.float32)):
+        with T.Kernel(1, threads=128) as _:
+            A_sh = T.alloc_shared((M, BK), T.float16)
+            B_sh = T.alloc_shared((BK, N), T.float16)
+            acc = T.alloc_fragment((M, N), T.float32)
+            T.clear(acc)
+            T.copy(B, B_sh)
+            for ko in T.Pipelined(n_tiles, order=order, stage=stage):
+                T.copy(A[0, ko * BK], A_sh)
+                T.gemm(A_sh, B_sh, acc)
+                for i, j in T.Parallel(M, N):
+                    acc[i, j] = acc[i, j] * decay
+            T.copy(acc, C)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("n_tiles", [2, 4, 7])  # 2 is shorter than the pipeline depth
+def test_manual_pipeline_rotated_accumulator(n_tiles):
+    decay, M, N, BK = 0.5, 64, 64, 32
+    kernel = tilelang.jit(out_idx=[2])(_build_rotated_accumulator)(n_tiles, decay)
+    src = kernel.get_kernel_source()
+    assert "float acc[" in src  # the accumulator stays single-versioned (one array, not two)
+    a = torch.randn(M, BK * n_tiles, device="cuda", dtype=torch.float16)
+    b = torch.randn(BK, N, device="cuda", dtype=torch.float16)
+    ref = torch.zeros(M, N, device="cuda", dtype=torch.float32)
+    for t in range(n_tiles):  # gemm(t) is followed by the scalings of tiles t+1 .. n-1
+        ref += (a[:, t * BK : (t + 1) * BK].float() @ b.float()) * (decay ** (n_tiles - 1 - t))
     torch.testing.assert_close(kernel(a, b), ref, rtol=1e-2, atol=1e-1)
 
 

@@ -1223,8 +1223,16 @@ public:
     // Step 2: Emit the pipeline prologue, body and epilogue.
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
-    Stmt prologue = EmitImpl(pipeline_loop_->min,
-                             pipeline_loop_->min + max_stage_, true, true);
+    // The prologue fills the pipeline and must stop at the loop's own extent:
+    // for a loop shorter than the pipeline depth it would otherwise overlap the
+    // epilogue's range and emit those iterations twice (harmless for idempotent
+    // statements, but it double-accumulates anything that updates state).
+    PrimExpr prologue_end = pipeline_loop_->min + max_stage_;
+    if (!analyzer_.CanProve(pipeline_loop_->extent >= PrimExpr(max_stage_))) {
+      prologue_end =
+          min(prologue_end, pipeline_loop_->min + pipeline_loop_->extent);
+    }
+    Stmt prologue = EmitImpl(pipeline_loop_->min, prologue_end, true, true);
     Stmt body =
         EmitImpl(pipeline_loop_->min + max_stage_,
                  pipeline_loop_->min + pipeline_loop_->extent, false, false);
@@ -3115,6 +3123,44 @@ private:
    * register-scoped: registers are private to a thread, so no dependency can
    * flow between them (each warp group computing its own rows of a fragment).
    */
+  /*! \brief Split `f(x) == c` into (f(x), c); returns false for other forms. */
+  static bool AsEqualsConstant(const PrimExpr &cond, PrimExpr *expr,
+                               int64_t *value) {
+    const auto *eq = cond.as<EQNode>();
+    if (eq == nullptr) {
+      return false;
+    }
+    if (const auto *rhs = eq->b.as<IntImmNode>()) {
+      *expr = eq->a;
+      *value = rhs->value;
+      return true;
+    }
+    if (const auto *lhs = eq->a.as<IntImmNode>()) {
+      *expr = eq->b;
+      *value = lhs->value;
+      return true;
+    }
+    return false;
+  }
+
+  /*! \brief Whether two predicates can never hold for the same thread. Beyond
+   * what the analyzer proves directly, this recognizes the warp-group form
+   * `f(threadIdx.x) == c1` versus `f(threadIdx.x) == c2` with c1 != c2, which
+   * the analyzer does not simplify on its own. */
+  static bool ProvablyDisjointPredicates(const PrimExpr &c1,
+                                         const PrimExpr &c2) {
+    arith::Analyzer analyzer;
+    if (analyzer.CanProve(!(c1 && c2))) {
+      return true;
+    }
+    PrimExpr e1, e2;
+    int64_t v1 = 0, v2 = 0;
+    if (AsEqualsConstant(c1, &e1, &v1) && AsEqualsConstant(c2, &e2, &v2)) {
+      return v1 != v2 && analyzer.CanProveEqual(e1, e2);
+    }
+    return false;
+  }
+
   bool OnlyRegisterDepsAcrossDisjointThreads(const SBlock &src,
                                              const SBlock &dst) {
     Optional<PrimExpr> c1 = ThreadPredicateOf(src);
@@ -3122,8 +3168,7 @@ private:
     if (!c1.defined() || !c2.defined()) {
       return false;
     }
-    arith::Analyzer analyzer;
-    if (!analyzer.CanProve(!(c1.value() && c2.value()))) {
+    if (!ProvablyDisjointPredicates(c1.value(), c2.value())) {
       return false;
     }
     bool shared_any = false;
@@ -3221,12 +3266,18 @@ private:
         const auto &dst_info = pipeline_info.at(dst);
         if (src_info.stage > dst_info.stage &&
             (!WriteReadRegionsMayOverlap(src, dst) ||
-             OnlyRegisterDepsAcrossDisjointThreads(src, dst))) {
-          // The dependency graph is keyed by buffer: a later-stage statement
-          // that writes a region the earlier-stage statement never reads
-          // (e.g. another warp group's rows of the same fragment) is not a
-          // dependency, so a manual schedule may legitimately order them this
-          // way (register carry across iterations).
+             OnlyRegisterDepsAcrossDisjointThreads(src, dst) ||
+             src_info.order < dst_info.order)) {
+          // The dependency graph is keyed by buffer, so three cases reach here
+          // without being real reorder hazards, and a manual schedule may use
+          // any of them:
+          //  - the later-stage statement writes a region the earlier-stage one
+          //    never reads (another warp group's rows of the same fragment);
+          //  - the two statements are thread-predicated on disjoint groups and
+          //    share only register-scope buffers;
+          //  - the later-stage statement is *emitted first*, so the read
+          //    already sees the write inside one iteration of the rotated
+          //    loop (an accumulator updated by a stage-rotated producer).
           continue;
         }
         ICHECK_LE(src_info.stage, dst_info.stage)
