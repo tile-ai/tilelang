@@ -6,6 +6,9 @@ import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm.runtime import convert
 from tvm.tirx import Buffer, BufferRegion, PrimExpr, Var
+from tilelang.utils import is_fragment
+
+from tilelang.layout import Fragment
 
 from ..layout.mma_layout import (
     ldmatrix_32x16_to_shared_8x64_layout_b,
@@ -640,6 +643,11 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         SFA_data, SFA_other, SFA_base_m, SFA_base_k = self._scale_region_parts(SFA_buf)
         SFB_data, SFB_other, SFB_base_n, SFB_base_k = self._scale_region_parts(SFB_buf)
         replicate_b = self.n_dim == 16
+        # Register-A operand: the fragment holds every k atom, so step by k_inner (base-class
+        # convention); a uint32 word fragment addresses 8 packed e2m1 elements per word.
+        a_is_fragment = is_fragment(A_local_buf)
+        a_stride = k_inner * warp_rows * local_size_a if a_is_fragment else 0
+        a_elems_per_unit = 8 if str(A_local_buf.dtype) == "uint32" else 1
 
         @T.macro
         def _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
@@ -647,6 +655,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             sfa_row = self._sfa_row_in_atom(tx)
             sfb_col = self._sfb_col_in_atom(tx)
             for i, j in T.grid(warp_rows, warp_cols):
+                a_offset = (a_stride + i * local_size_a) // a_elems_per_unit
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
                 scale_a_ptr = T.access_ptr(
@@ -668,7 +677,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     b_dtype_abbrv,
                     stype,
                     A_local_buf.data,
-                    i * local_size_a,
+                    a_offset,
                     B_local_buf.data,
                     j * local_size_b,
                     C_local_buf.data,
@@ -696,7 +705,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                         b_dtype_abbrv,
                         stype,
                         A_local_buf.data,
-                        i * local_size_a,
+                        a_offset,
                         B_local_buf.data,
                         j * local_size_b + lift(local_size_b) // 2,
                         C_local_buf.data,
@@ -710,6 +719,24 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     )
 
         return _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
+
+    def make_mma_load_word_layout(self, word_buf: Buffer) -> Fragment:
+        """Layout of a uint32 fragment ``[rows, K // 8]`` holding 8 packed e2m1 elements per word in
+        the A-operand register order: word (row, w) <-> e2m1 element (row, 8 * w), index // 8."""
+        rows, words = word_buf.shape
+        elem_buf = tvm.tirx.decl_buffer((rows, words * 8), T.float4_e2m1fn, name=f"{word_buf.name}_e2m1", scope="local.fragment")
+        elem_layout = self.make_mma_load_layout(elem_buf, matrix="A")
+
+        def _scalar(x):
+            return x if isinstance(x, tvm.tirx.PrimExpr) else x[0]
+
+        def fwd_thread(i, w):
+            return _scalar(elem_layout.map_forward_thread([i, w * 8]))
+
+        def fwd_index(i, w):
+            return _scalar(elem_layout.map_forward_index([i, w * 8])) // 8
+
+        return Fragment((rows, words), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
 
     def ldscale(
         self,

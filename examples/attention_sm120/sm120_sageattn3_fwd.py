@@ -1,4 +1,4 @@
-"""SM120 SageAttention3-style NVFP4 attention forward in TileLang (v1: P goes through shared memory).
+"""SM120 SageAttention3-style NVFP4 attention forward in TileLang (v2: P stays in registers as packed e2m1 words).
 
 Algorithm (thu-ml/SageAttention `sageattention3_blackwell`, paper arXiv:2505.11594): Q, K, V are
 NVFP4 (e2m1 + per-16-element e4m3 scales; K smoothed by its sequence mean, Q by its 128-row block
@@ -86,18 +86,6 @@ def _p_half_layout(block_m: int, n_groups: int, warp_rows: int = 32) -> Fragment
     return Fragment((block_m, n_groups, 8), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
 
 
-def _p_word_layout(block_m: int, n_groups: int, warp_rows: int = 32) -> Fragment:
-    """Fragment layout of Pw[row, key_group, k8]: the uint32 holding keys 8*k8..8*k8+7 (= G index // 8)."""
-
-    def fwd_thread(i, m, k8):
-        return (i // warp_rows) * 32 + (i % 8) * 4 + (m % 2) * 2 + k8
-
-    def fwd_index(i, m, k8):
-        return (m // 4) * (warp_rows // 4) + ((i % warp_rows) // 16) * 4 + ((i % 16) // 8) + ((m % 4) // 2) * 2
-
-    return Fragment((block_m, n_groups, 2), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
-
-
 DEFAULT_PASS_CONFIGS = {
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     # The automatic producer/consumer warp specialization currently drops the fragment
@@ -134,7 +122,6 @@ def build_sm120_sageattn3_fwd(
     sl2 = softmax_scale * LOG2E
     n_kv_blocks = seq_len // block_N
     g_layout = _p_group_layout(block_M, n_groups, warp_rows)
-    pw_layout = _p_word_layout(block_M, n_groups, warp_rows)
     ph_layout = _p_half_layout(block_M, n_groups, warp_rows)
 
     @T.prim_func
@@ -153,8 +140,6 @@ def build_sm120_sageattn3_fwd(
             Q_sh = T.alloc_shared((block_M, dim), fp4)
             K_sh = T.alloc_shared((block_N, dim), fp4)
             V_sh = T.alloc_shared((dim, block_N), fp4)
-            P_sh = T.alloc_shared((block_M, block_N), fp4)
-            P_u32 = T.view(P_sh, (block_M, block_N // 8), dtype=T.uint32)
             SFQ_sh = T.alloc_shared((block_M, sf_words_qk), T.uint32)
             SFK_sh = T.alloc_shared((block_N, sf_words_qk), T.uint32)
             SFV_sh = T.alloc_shared((dim, sf_words_pv), T.uint32)
@@ -169,7 +154,7 @@ def build_sm120_sageattn3_fwd(
             absmax = T.alloc_fragment((block_M, n_groups), accum)
             sinv = T.alloc_fragment((block_M, n_groups), accum)
             rowsum8 = T.alloc_fragment((block_M, n_groups), accum)
-            Pw = T.alloc_fragment((block_M, n_groups, 2), T.uint32)
+            Pw = T.alloc_fragment((block_M, block_N // 8), T.uint32)  # P-hat words; layout set by the PV gemm
             Ev = T.alloc_fragment((block_M, n_groups, 8), accum)
             Od = T.alloc_fragment((block_M, n_groups, 8), accum)
             acc_o = T.alloc_fragment((block_M, dim), accum)
@@ -179,7 +164,7 @@ def build_sm120_sageattn3_fwd(
             rescale = T.alloc_fragment((block_M,), accum)
             l_tile = T.alloc_fragment((block_M,), accum)
             l_i = T.alloc_fragment((block_M,), accum)
-            T.annotate_layout({G: g_layout, Pw: pw_layout, Ev: ph_layout, Od: ph_layout})
+            T.annotate_layout({G: g_layout, Ev: ph_layout, Od: ph_layout})
 
             T.copy(Q[bz, by, bx * block_M, 0], Q_sh)
             for r, w in T.Parallel(block_M, sf_words_qk):
@@ -250,19 +235,16 @@ def build_sm120_sageattn3_fwd(
                 for i, m, t in T.Parallel(block_M, n_groups, 8):
                     Od[i, m, t] = G[i, m, 2 * t + 1] * sinv[i, m]
                 for i, m, k8 in T.Parallel(block_M, n_groups, 2):
-                    Pw[i, m, k8] = 0
+                    Pw[i, 2 * m + k8] = 0
                     for t2 in T.serial(4):
-                        Pw[i, m, k8] = Pw[i, m, k8] | T.shift_left(
+                        Pw[i, 2 * m + k8] = Pw[i, 2 * m + k8] | T.shift_left(
                             T.call_extern("uint32", "tl_cvt_e2m1x2_rn", Ev[i, m, 4 * k8 + t2], Od[i, m, 4 * k8 + t2]),
                             T.cast(8 * t2, T.uint32),
                         )
-                for i, m, k8 in T.Parallel(block_M, n_groups, 2):
-                    P_u32[i, 2 * m + k8] = Pw[i, m, k8]
-
                 for i, j in T.Parallel(block_M, dim):
                     acc_o[i, j] *= rescale[i]
                 T.mma_gemm_blockscaled(
-                    P_sh,
+                    Pw,
                     V_sh,
                     acc_o,
                     SFP_sh,
@@ -275,6 +257,7 @@ def build_sm120_sageattn3_fwd(
                     sf_b_granularity_k=16,
                     sf_layout="rowmajor",
                     scale_dtype="ue4m3",
+                    a_packed_words=True,
                 )
                 for i in T.Parallel(block_M):
                     l_i[i] = l_i[i] * rescale[i] + l_tile[i]

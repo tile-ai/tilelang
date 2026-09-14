@@ -6,6 +6,7 @@ from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
 )
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang.transform.simplify import _Simplify
+from tilelang.layout.swizzle import make_swizzled_layout
 from tilelang.utils.language import is_full_region
 from tvm import tirx
 from tvm.ir import Range
@@ -36,9 +37,30 @@ class GemmMMASm120BlockScaled(GemmMMA):
         if _is_explicit_non_sm120_cuda(target):
             raise ValueError("T.mma_gemm_blockscaled requires SM120 CUDA target")
 
+    def _a_packed_words(self) -> bool:
+        annotations = getattr(self.gemm_node, "annotations", {})
+        return bool(int(annotations.get("a_packed_words", 0)))
+
+    def __post_init__(self) -> None:
+        # A uint32 fragment of packed e2m1 words is a storage form of float4_e2m1fn, not a
+        # mixed-dtype GEMM: skip the base A/B dtype validation for that case.
+        if self._a_packed_words():
+            if str(self.B.dtype) != "float4_e2m1fn":
+                raise ValueError(f"a_packed_words requires a packed float4_e2m1fn B operand, got {self.B.dtype}")
+            return
+        super().__post_init__()
+
     def _validate_operands(self) -> None:
-        if not self.is_gemm_ss():
-            raise ValueError("T.mma_gemm_blockscaled supports shared-memory A/B operands only")
+        if self.is_gemm_ss():
+            return
+        if self.is_gemm_rs() and self._a_packed_words():
+            if str(self.a_dtype) != "uint32":
+                raise ValueError("T.mma_gemm_blockscaled(a_packed_words=True) requires a uint32 A fragment")
+            return
+        raise ValueError(
+            "T.mma_gemm_blockscaled supports shared-memory A/B operands, or a uint32 register-A "
+            "fragment of packed e2m1 words with a_packed_words=True"
+        )
 
     def _scale_mode(self) -> tuple[int, str]:
         annotations = getattr(self.gemm_node, "annotations", {})
@@ -68,8 +90,9 @@ class GemmMMASm120BlockScaled(GemmMMA):
             GEMM_INST_MMA_BLOCK_SCALED,
         )
         granularity, sf_dtype = self._scale_mode()
+        a_dtype = T.float4_e2m1fn if self._a_packed_words() else self.a_dtype
         return self.intrin_emitter_cls(
-            a_dtype=self.a_dtype,
+            a_dtype=a_dtype,
             b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
@@ -90,6 +113,13 @@ class GemmMMASm120BlockScaled(GemmMMA):
     def infer_layout(self, target: Target, thread_nums: int):
         self._validate_target(target)
         self._validate_operands()
+        if self.is_gemm_rs() and self._a_packed_words():
+            mma_emitter = self._make_mma_emitter(target, thread_nums)
+            return {
+                self.A: mma_emitter.make_mma_load_word_layout(self.A),
+                self.B: make_swizzled_layout(self.B),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
+            }
         return super().infer_layout(target, thread_nums)
 
     def lower(
@@ -133,6 +163,33 @@ class GemmMMASm120BlockScaled(GemmMMA):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
         if sf_a_granularity_k is None or sf_b_granularity_k is None:
             raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
+
+        if self.is_gemm_rs():
+            if sf_layout != "rowmajor":
+                raise ValueError("register-A blockscaled GEMM supports sf_layout='rowmajor' only")
+            assert is_full_region(A_region), "Fragment input A must be a full region"
+            A_buf = A_region.buffer
+
+            @T.prim_func
+            def _gemm_rs_blockscaled() -> None:
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
+                if clear_accum:
+                    T.clear(C_buf)
+                for ki in T.serial(0, (block_K // micro_size_k)):
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma(
+                        A_buf,
+                        B_local,
+                        C_buf,
+                        ki,
+                        SFA_buf=self.SFARegion,
+                        SFB_buf=self.SFBRegion,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                    )
+
+            return _Simplify(_gemm_rs_blockscaled, inline_let=True)
 
         if sf_layout == "blockscaled_chunk_kmajor":
 

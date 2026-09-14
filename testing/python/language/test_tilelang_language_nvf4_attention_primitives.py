@@ -105,5 +105,89 @@ def test_packed_fp4_shared_word_writes_land_on_expected_nibbles():
     assert torch.equal(got, packed)
 
 
+def _make_rs_vs_ss_kernel(M, N, K, threads):
+    """Same NVFP4 blockscaled GEMM twice: A from shared (ss) and A as a uint32 word fragment
+    (rs, a_packed_words) filled from the same shared tile; both accumulate into separate outputs."""
+    fp4 = T.float4_e2m1fn
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), fp4),
+        B: T.Tensor((N, K), fp4),
+        SFA: T.Tensor((M, K // 64), T.uint32),
+        SFB: T.Tensor((N, K // 64), T.uint32),
+        C_ss: T.Tensor((M, N), T.float32),
+        C_rs: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            A_sh = T.alloc_shared((M, K), fp4)
+            B_sh = T.alloc_shared((N, K), fp4)
+            SFA_sh = T.alloc_shared((M, K // 64), T.uint32)
+            SFB_sh = T.alloc_shared((N, K // 64), T.uint32)
+            A_words = T.view(A_sh, (M, K // 8), dtype=T.uint32)
+            Aw = T.alloc_fragment((M, K // 8), T.uint32)
+            acc_ss = T.alloc_fragment((M, N), T.float32)
+            acc_rs = T.alloc_fragment((M, N), T.float32)
+            T.copy(A, A_sh)
+            T.copy(B, B_sh)
+            T.copy(SFA, SFA_sh)
+            T.copy(SFB, SFB_sh)
+            T.clear(acc_ss)
+            T.mma_gemm_blockscaled(
+                A_sh,
+                B_sh,
+                acc_ss,
+                SFA_sh,
+                SFB_sh,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+            )
+            for i, w in T.Parallel(M, K // 8):
+                Aw[i, w] = A_words[i, w]
+            T.clear(acc_rs)
+            T.mma_gemm_blockscaled(
+                Aw,
+                B_sh,
+                acc_rs,
+                SFA_sh,
+                SFB_sh,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+                a_packed_words=True,
+            )
+            T.copy(acc_ss, C_ss)
+            T.copy(acc_rs, C_rs)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("M,N,K,threads", [(16, 32, 64, 32), (32, 32, 128, 32), (128, 128, 128, 256)])
+def test_blockscaled_register_a_packed_words_matches_shared_a(M, N, K, threads):
+    torch.manual_seed(0)
+    a = torch.randint(-128, 128, (M, K // 2), device="cuda", dtype=torch.int8)
+    b = torch.randint(-128, 128, (N, K // 2), device="cuda", dtype=torch.int8)
+    # ue4m3 scale bytes in the normal range, packed 4 per word
+    sfa_b = torch.randint(0x30, 0x40, (M, K // 16), device="cuda", dtype=torch.uint8).to(torch.int64).reshape(M, K // 64, 4)
+    sfb_b = torch.randint(0x30, 0x40, (N, K // 16), device="cuda", dtype=torch.uint8).to(torch.int64).reshape(N, K // 64, 4)
+    sfa = (sfa_b[..., 0] | (sfa_b[..., 1] << 8) | (sfa_b[..., 2] << 16) | (sfa_b[..., 3] << 24)).to(torch.uint32).contiguous()
+    sfb = (sfb_b[..., 0] | (sfb_b[..., 1] << 8) | (sfb_b[..., 2] << 16) | (sfb_b[..., 3] << 24)).to(torch.uint32).contiguous()
+    kernel = tilelang.compile(_make_rs_vs_ss_kernel(M, N, K, threads), target="cuda", out_idx=[4, 5])
+    c_ss, c_rs = kernel(a, b, sfa, sfb)
+    assert torch.isfinite(c_ss).all() and float(c_ss.abs().max()) > 0
+    assert torch.equal(c_ss.view(torch.int32), c_rs.view(torch.int32))
+    src = kernel.get_kernel_source()
+    assert src.count("sm120_mma_sync_blockscaled") >= 2
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
