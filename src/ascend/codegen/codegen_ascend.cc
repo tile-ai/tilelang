@@ -2695,6 +2695,16 @@ void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
   const VarNode *buf_var = op->buffer->data.get();
   PrimExpr index_expr = op->indices[0];
 
+  // A vector store that stays on the scalar core (outside any VF body) cannot
+  // use the simt-only vector constructors a broadcast needs (make_float2,
+  // make_int2, ...); bisheng rejects them outside a VF body. Such a store is
+  // element-wise scalar work, so emit one scalar store per lane.
+  if (IsOutsideVF() && value_dtype.lanes() > 1 &&
+      value_dtype.lanes() != element_dtype.lanes() && op->indices.size() == 1 &&
+      !IsGlobalGmBuffer(op->buffer.get()) && EmitOutOfVFBroadcastStore(op)) {
+    return;
+  }
+
   if (value_dtype.lanes() > 1 && op->indices.size() == 1) {
     const auto *broadcast_index = index_expr.as<BroadcastNode>();
     auto scope_it = alloc_storage_scope_.find(buf_var);
@@ -2754,6 +2764,29 @@ void CodeGenTileLangAscend::VisitStmt_(const BufferStoreNode *op) {
   }
 
   CodeGenC::VisitStmt_(op);
+}
+
+bool CodeGenTileLangAscend::EmitOutOfVFBroadcastStore(
+    const BufferStoreNode *op) {
+  const auto *broadcast = op->value.as<BroadcastNode>();
+  const auto *ramp = op->indices[0].as<RampNode>();
+  if (broadcast == nullptr || ramp == nullptr || !is_one(ramp->stride) ||
+      op->buffer->dtype.lanes() != 1) {
+    return false;
+  }
+  const IntImmNode *lanes = Downcast<IntImm>(broadcast->lanes).as<IntImmNode>();
+  ICHECK(lanes != nullptr) << "Broadcast lanes must be constant";
+  DataType elem_dtype = op->buffer->dtype;
+  SSAOperationScope ssa_scope(this);
+  std::string value = SSAGetID(PrintExpr(broadcast->value), elem_dtype);
+  for (int i = 0; i < lanes->value; ++i) {
+    PrimExpr lane_index =
+        analyzer_.Simplify(ramp->base + make_const(ramp->base.dtype(), i));
+    PrintIndent();
+    stream << GetBufferRef(elem_dtype, op->buffer.get(), lane_index) << " = "
+           << value << ";\n";
+  }
+  return true;
 }
 
 bool CodeGenTileLangAscend::EmitScalarizedStore(const BufferStoreNode *op) {

@@ -149,9 +149,17 @@ inline uint16_t GetAscendCopyPipeMask(const Buffer &src, const Buffer &dst) {
   return PipeMask(ResourcePipe::kVector);
 }
 
+// A fill on L1 lowers to ascend_fill_l1 (MTE2). Every other fill lowers to
+// element-wise BufferStores, and out-of-VF element-wise work is scalar work on
+// Ascend: vector stores, vector arithmetic, and the vector constructors they
+// need are only available inside a VF body. A fill that does run on the vector
+// unit is therefore always inside a VF block, which contributes PIPE_V through
+// GetAscendBlockPipe before this classifier is ever consulted. Reporting a fill
+// as PIPE_V here would make InsertSync treat its scalar stores as vector work
+// and drop the S->V handshake with the consumer of the filled tile.
 inline uint16_t GetAscendFillPipeMask(const Buffer &dst) {
   return PipeMask(IsL1Buffer(dst) ? ResourcePipe::kMTE2
-                                  : ResourcePipe::kVector);
+                                  : ResourcePipe::kScalar);
 }
 
 inline ResourcePipe GetAscendBlockPipe(const String &name_hint) {

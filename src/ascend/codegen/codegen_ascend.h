@@ -179,6 +179,7 @@ private:
                                   std::ostream &os);
   void EmitScalarizedLoad(const BufferLoadNode *op, std::ostream &os);
   bool EmitScalarizedStore(const BufferStoreNode *op);
+  bool EmitOutOfVFBroadcastStore(const BufferStoreNode *op);
 };
 
 } // namespace codegen

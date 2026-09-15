@@ -41,7 +41,9 @@ def test_task_rejects_conflicting_core_affinity():
         lower(main, target="ascend")
 
 
-def test_task_recognizes_vector_fill_pipe():
+def test_task_rejects_mixed_copy_and_fill_pipes():
+    # The copy is MTE2 and an out-of-VF fill is PIPE_S, so one task cannot hold
+    # both: the fill runs on the scalar unit, not on the DMA path.
     @T.prim_func
     def main(A: T.Tensor((TILE,), "float32")):
         with T.Kernel(1):
@@ -52,6 +54,34 @@ def test_task_recognizes_vector_fill_pipe():
 
     with pytest.raises(tvm.error.InternalError, match="exactly one Ascend hardware pipe"):
         lower(main, target="ascend")
+
+
+def test_out_of_vf_fill_issues_on_scalar_pipe():
+    # A fill outside a VF block is element-wise scalar work, so it must be
+    # ordered against its consumer as a PIPE_S task.
+    @T.prim_func
+    def main(A: T.Tensor((TILE,), "float32"), n: T.int32):
+        with T.Kernel(1):
+            temp = T.alloc_shared((TILE,), "float32")
+            T.fill(temp[0:n], 0)
+            T.copy(temp, A)
+
+    source = lower(main, target="ascend").kernel_source
+    assert "asc_sync_notify(PIPE_S, PIPE_MTE3," in source
+    assert "asc_sync_wait(PIPE_S, PIPE_MTE3," in source
+
+
+def test_statically_shaped_out_of_vf_fill_is_still_scalar():
+    @T.prim_func
+    def main(A: T.Tensor((TILE,), "float32")):
+        with T.Kernel(1):
+            temp = T.alloc_shared((TILE,), "float32")
+            T.fill(temp, 0)
+            T.copy(temp, A)
+
+    source = lower(main, target="ascend").kernel_source
+    assert "asc_sync_notify(PIPE_S, PIPE_MTE3," in source
+    assert "asc_sync_wait(PIPE_S, PIPE_MTE3," in source
 
 
 def test_task_recognizes_non_dma_copy_as_vector_pipe():

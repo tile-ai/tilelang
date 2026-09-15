@@ -53,6 +53,62 @@ def _rank_tl_ascend(nextn: int):
     return _rank
 
 
+@tilelang.jit(
+    out_idx=None,
+    pass_configs={tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True},
+)
+def _tail_fill_tl_ascend():
+    """Zero the invalid tail of a partial UB tile, then reduce it in a SimtVF.
+
+    The fill region is dynamically shaped, so it lowers to an element-wise
+    scalar store loop on PIPE_S. It used to be reported as a PIPE_V task, which
+    dropped the S->V handshake with the vector consumer and let the reduction
+    read stale UB contents.
+    """
+    tile, e, ntile = 64, 384, 3
+    seq_len = T.dynamic("seq_len")
+
+    @T.prim_func
+    def _tail_fill(
+        x: T.Tensor((seq_len, e), "float32"),
+        out: T.Tensor((ntile, e), "float32"),
+    ):
+        with T.Kernel(1):
+            buf = T.alloc_shared((tile, e), "float32")
+            acc = T.alloc_shared((ntile, e), "float32")
+            for t in T.serial(T.ceildiv(seq_len, tile)):
+                valid = T.min(tile, seq_len - t * tile)
+                T.copy(x[t * tile : t * tile + valid, :], buf[:valid, :])
+                if valid < tile:
+                    T.fill(buf[valid:tile, :], T.float32(0.0))
+                with T.SimtVF(threads=e):
+                    for col in T.Parallel(e):
+                        total = T.alloc_var(T.float32, init=T.float32(0.0))
+                        for row in T.unroll(tile):
+                            total = total + buf[row, col]
+                        acc[t, col] = total
+            T.copy(acc, out)
+
+    return _tail_fill
+
+
+def test_tail_fill_with_dynamic_ub_region():
+    e, ntile, seq_len = 384, 3, 129
+    device = torch.device("npu")
+    kernel = _tail_fill_tl_ascend()
+
+    x = torch.ones((seq_len, e), dtype=torch.float32, device=device)
+    out = torch.empty((ntile, e), dtype=torch.float32, device=device)
+    kernel(x, out)
+    torch.npu.synchronize()
+
+    expected = torch.empty((ntile, e), dtype=torch.float32)
+    expected[0].fill_(64.0)
+    expected[1].fill_(64.0)
+    expected[2].fill_(1.0)
+    torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)
+
+
 def test_rank_dynamic_ub():
     nextn = 5
     total_q = 4
