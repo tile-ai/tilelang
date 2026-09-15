@@ -1,5 +1,5 @@
 import warnings
-from tilelang.profiler._torch_gpu import _bench_with_cupti
+from tilelang.profiler.bench import _bench_with_cupti
 import tilelang.testing
 
 

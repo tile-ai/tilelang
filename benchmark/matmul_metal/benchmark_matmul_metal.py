@@ -6,7 +6,7 @@ import torch
 
 import tilelang
 import tilelang.language as T
-from tilelang.profiler import do_bench
+from tilelang.metal.profiler import do_bench as _bench
 
 logging.getLogger("tilelang").setLevel(logging.WARNING)
 
@@ -140,10 +140,6 @@ def matmul_cooperative_tensor_global(
 
 def _tflops(M, N, K, seconds):
     return 2.0 * M * N * K / seconds / 1e12
-
-
-def _bench(fn, warmup, repeats):
-    return do_bench(fn, backend="wall", device="mps", _n_warmup=warmup, _n_repeat=repeats) * 1e-3
 
 
 def bench_torch_mps(M, N, K, warmup, repeats):

@@ -32,7 +32,6 @@ tutorials/logging
 
 tools/index
 tools/compile_only
-tools/profiler
 tools/analyzer
 tools/layout_visualization
 tools/autodd

@@ -94,17 +94,14 @@ The native side mirrors target-backend ownership under `src/<backend>/`, where
 C++ op lowering, codegen, runtime modules, toolchain stubs, and backend-local
 CMake files live. `src/backend/` is reserved for shared native backend helpers.
 
-## Runtime Profiling
+## Profiling Helpers
 
-Runtime profiling is separate from the compiler manifest and execution backend
-selection. `tilelang/profiler/` owns the common `Profiler`, device resolution,
-benchmark entry point, and shared measurement helpers. Each supported runtime
-family exposes device scope, synchronization, supported timing methods, and a
-benchmark function through `tilelang/<backend>/profiler.py`. These modules are
-loaded only when profiling selects that runtime. CUDA and ROCm share their Torch
-GPU implementation; Metal and CPU use synchronized wall-clock measurements.
-See [Profiling and Benchmarking](../../docs/tools/profiler.md) for device and
-measurement semantics.
+The existing CUDA/ROCm benchmark implementation lives in
+`tilelang/profiler/_torch_gpu.py` and is re-exported by
+`tilelang/cuda/profiler.py`, `tilelang/rocm/profiler.py`, and the legacy
+`tilelang/profiler/bench.py` entry point. The existing Metal matmul benchmark
+helper lives in `tilelang/metal/profiler.py`. This separation does not change
+timing methods, defaults, units, iteration counts, or device handling.
 
 ## Backend Manifest
 

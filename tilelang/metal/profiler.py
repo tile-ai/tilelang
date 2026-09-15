@@ -1,22 +1,16 @@
-"""Synchronized wall-clock profiling for Metal kernels and Torch MPS functions."""
+"""Existing Metal benchmark helper, returning seconds per call."""
 
-from contextlib import nullcontext
-from functools import partial
+import time
 
 import torch
 
-from tilelang.profiler._common import bench_wall
 
-SUPPORTED_METHODS = frozenset({"wall"})
-
-
-def device_scope(device: torch.device):
-    return nullcontext()
-
-
-def synchronize(device: torch.device) -> None:
+def do_bench(fn, warmup, repeats):
+    for _ in range(warmup):
+        fn()
     torch.mps.synchronize()
-
-
-def benchmark(fn, *, device: torch.device, **options):
-    return bench_wall(fn, synchronize=partial(synchronize, device), **options)
+    t0 = time.perf_counter()
+    for _ in range(repeats):
+        fn()
+    torch.mps.synchronize()
+    return (time.perf_counter() - t0) / repeats
