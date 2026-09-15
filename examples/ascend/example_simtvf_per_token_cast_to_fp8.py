@@ -28,7 +28,7 @@ def per_token_cast_to_fp8(M, N):
                 [T.ceildiv(M, blk_m), T.ceildiv(N, group_size)],
                 N_CORES,
                 core_id,
-                group_size=1,
+                group_size=T.ceildiv(N, group_size),
                 num_stages=2,
             ):
                 y_ub = T.alloc_shared((blk_m, group_size), dtype)

@@ -51,7 +51,7 @@ def per_token_cast_to_fp8(M, N, backend="asc"):
                     [T.ceildiv(M, blk_m), T.ceildiv(num_groups, group_block)],
                     N_CORES,
                     core_id,
-                    group_size=1,
+                    group_size=T.ceildiv(num_groups, group_block),
                     num_stages=NUM_STAGES,
                 ):
                     y_ub = T.alloc_shared((blk_m, tile_n), dtype)
