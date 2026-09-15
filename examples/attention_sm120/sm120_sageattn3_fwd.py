@@ -159,8 +159,8 @@ def build_sm120_sageattn3_fwd(
 
     # Manual pipeline schedule. The thread predicates are distributed over the statements before
     # planning, so every statement of a predicated block needs its own entry:
-    #   5 copies (stage 0) | B's rotated PV (SA+1) | A's block (SA) | B's QK (SA) | B's block (SA)
-    #   | A's QK (SA-1)
+    #   5 copies (stage 0) | B's rotated PV (SA+1) | A's block (SA) | B's seed+QK (SA)
+    #   | B's block (SA) | A's seed+QK (SA-1)
     # Two emission-order rules keep every fragment single-versioned (a second version of the S or
     # output accumulator would cost 64 registers per thread): each write of the S accumulator is
     # emitted after all of its reads, and B's rotated PV is emitted before every stage-SA write of
@@ -168,13 +168,21 @@ def build_sm120_sageattn3_fwd(
     SA = num_stages
     n_copy, n_alu_a = 5, 18
     n_alu_b = n_alu_a - 1  # group B's block has no PV
-    n_compute = 1 + n_alu_a + 1 + n_alu_b + 1
-    stage = [0] * n_copy + [SA + 1] + [SA] * n_alu_a + [SA] + [SA] * n_alu_b + [SA - 1]
+    n_compute = 1 + n_alu_a + 2 + n_alu_b + 2  # each QK is preceded by its delta_s seed
+    stage = [0] * n_copy + [SA + 1] + [SA] * n_alu_a + [SA, SA] + [SA] * n_alu_b + [SA - 1, SA - 1]
     order = list(range(n_compute, n_compute + n_copy)) + list(range(n_compute))
     pipe_ann = {  # all five copies in one cp.async commit group
         "software_pipeline_async_producers": [1] * n_copy + [0] * n_compute,
         "software_pipeline_async_producer_groups": [0] * n_copy + [-1] * n_compute,
     }
+
+    @T.macro
+    def qk_seed(DS_sh, acc_s):
+        # S starts at delta_s (indexed by original key: o(c) = 32*(c//32) + PERM32[c%32]) and the
+        # GEMM accumulates on top, so this shared read sits behind the GEMM instead of inside the
+        # softmax's dependency chain.
+        for i, j in T.Parallel(block_M, block_N):
+            acc_s[i, j] = DS_sh[(j // 32) * 32 + ((j % 32) // 8) * 2 + ((j % 8) // 2) * 8 + j % 2]
 
     @T.macro
     def qk_gemm(Q_sh, K_sh, SFQ_sh, SFK_sh, acc_s):
@@ -188,7 +196,7 @@ def build_sm120_sageattn3_fwd(
             SFK_sh,
             transpose_B=True,
             policy=T.GemmWarpPolicy.FullRow,
-            clear_accum=True,
+            clear_accum=False,  # the accumulator already holds delta_s (see qk_seed)
             k_start=0,
             sf_a_granularity_k=16,
             sf_b_granularity_k=16,
@@ -241,13 +249,10 @@ def build_sm120_sageattn3_fwd(
         l_tile,
         l_i,
     ):
-        # Regroup S columns (permuted-K order) into original-key 16-groups -- a pure in-lane
-        # renaming under the K permutation -- and add delta_s, indexed by original key:
-        # o(c) = 32*(c//32) + PERM32[c%32] for the permuted column c.
+        # Regroup S columns (permuted-K order) into original-key 16-groups: a pure in-lane
+        # renaming under the K permutation.
         for i, kk, hi, q1, q0, n, jj in T.Parallel(block_M, 2, 2, 2, 2, 4, 2):
-            G[i, 4 * kk + 2 * hi + q1, 8 * q0 + 2 * n + jj] = (
-                acc_s[i, 64 * kk + 32 * hi + 8 * n + 4 * q1 + 2 * q0 + jj] + DS_sh[64 * kk + 32 * hi + 16 * q1 + 8 * q0 + 2 * n + jj]
-            )
+            G[i, 4 * kk + 2 * hi + q1, 8 * q0 + 2 * n + jj] = acc_s[i, 64 * kk + 32 * hi + 8 * n + 4 * q1 + 2 * q0 + jj]
         T.reduce_max(G, smax, dim=2, clear=True)  # per-16-key max: 8 in-lane + one xor-1 shuffle
         T.copy(m_i, m_prev)
         T.reduce_max(smax, m_i, dim=1, clear=False)
@@ -387,6 +392,8 @@ def build_sm120_sageattn3_fwd(
                         l_i,
                     )
                 if tx // group_threads == 1:  # B: S of this tile, still inside A's softmax section
+                    qk_seed(DS_sh, acc_s)
+                if tx // group_threads == 1:
                     qk_gemm(Q_sh, K_sh, SFQ_sh, SFK_sh, acc_s)
                 if tx // group_threads == 1:  # B: softmax of this tile (its PV runs next iteration)
                     softmax_quant(
@@ -415,6 +422,8 @@ def build_sm120_sageattn3_fwd(
                         l_i,
                     )
                 if tx // group_threads == 0:  # A: S of the next tile, while B is in its softmax
+                    qk_seed(DS_sh, acc_s)
+                if tx // group_threads == 0:
                     qk_gemm(Q_sh, K_sh, SFQ_sh, SFK_sh, acc_s)
 
             # group B's last PV is drained by the pipeline epilogue (it is the highest stage)
