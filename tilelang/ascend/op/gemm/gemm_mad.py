@@ -91,6 +91,20 @@ _ASCEND_DTYPE_MAP = {
 
 
 class GemmMAD(GemmBase):
+    @property
+    def is_blockscaled(self) -> bool:
+        # An Ascend L0-input block-scaled gemm carries no SF regions on the
+        # node (the scales were pre-loaded into the MX registers by
+        # T.copy(scale=...)); the dialect marks it with the "blockscaled"
+        # annotation instead, so widen the base's structural predicate.
+        ann = getattr(self.gemm_node, "annotations", {})
+        return bool(ann.get("blockscaled", False)) or super().is_blockscaled
+
+    @property
+    def unit_flag_ctrl(self) -> tirx.PrimExpr:
+        ann = getattr(self.gemm_node, "annotations", {})
+        return ann.get("unit_flag_ctrl", tirx.const(0, "int32"))
+
     def _check_blockscaled_k_alignment(self):
         if not self.is_blockscaled:
             return
