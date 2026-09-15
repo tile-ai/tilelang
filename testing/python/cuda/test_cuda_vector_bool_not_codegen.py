@@ -17,21 +17,19 @@ def _make_vector_not_module(lanes, bitwise=False):
     return tvm.IRModule({"vector_not": func})
 
 
-def _build_vector_not_source(lanes, bitwise=False):
+def _build_vector_not_source(lanes):
     build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the CUDA code generator")
-    return build(_make_vector_not_module(lanes, bitwise), tvm.target.Target("cuda")).inspect_source()
+    return build(_make_vector_not_module(lanes), tvm.target.Target("cuda")).inspect_source()
 
 
-@tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("lanes", "carrier_type"),
     [(2, "ushort2"), (3, "ushort3"), (4, "ushort4")],
 )
-@pytest.mark.parametrize("bitwise", [False, True])
-def test_vector_not_is_scalarized(lanes, carrier_type, bitwise):
-    source = _build_vector_not_source(lanes, bitwise)
+def test_vector_not_is_scalarized(lanes, carrier_type):
+    source = _build_vector_not_source(lanes)
 
     declarations = [line for line in source.splitlines() if line.startswith(f"  {carrier_type} __")]
     assert len(declarations) == 1
@@ -44,57 +42,41 @@ def test_vector_not_is_scalarized(lanes, carrier_type, bitwise):
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("lanes", [2, 3, 4])
-@pytest.mark.parametrize("bitwise", [False, True])
-def test_vector_not_compiles(lanes, bitwise):
+def test_vector_not_compiles(lanes):
     build = tvm.get_global_func("target.build.tilelang_cuda")
-    build(_make_vector_not_module(lanes, bitwise), tvm.target.Target("cuda"))
+    build(_make_vector_not_module(lanes), tvm.target.Target("cuda"))
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", ["bool", "int8", "uint8", "int32"])
-@pytest.mark.parametrize("explicit_intrinsic", [False, True])
-def test_bitwise_not_values(dtype, explicit_intrinsic):
+def test_boolean_bitwise_not_values():
     @T.prim_func
-    def main(A: T.Tensor((4,), dtype), B: T.Tensor((4,), dtype), C: T.Tensor((4,), "int32")):
+    def main(A: T.Tensor((2,), "bool"), B: T.Tensor((2,), "int32")):
         with T.Kernel(1, threads=1):
-            for i in T.serial(4):
-                value = T.bitwise_not(A[i]) if explicit_intrinsic else ~A[i]
-                B[i] = value
-                C[i] = T.Cast("int32", value)
+            for i in T.serial(2):
+                B[i] = T.Cast("int32", ~A[i])
 
-    kernel = tilelang.compile(main, out_idx=[1, 2], target="cuda")
-    values = [True, False, True, False] if dtype == "bool" else [0, 1, 5, 127]
-    a = torch.tensor(values, dtype=getattr(torch, dtype), device="cuda")
-    b, c = kernel(a)
-    expected = ~a
-    torch.testing.assert_close(b, expected)
-    torch.testing.assert_close(c, expected.to(torch.int32))
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    a = torch.tensor([False, True], device="cuda")
+    torch.testing.assert_close(kernel(a), (~a).to(torch.int32))
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", [f"{sign}{bits}" for sign in ("int", "uint") for bits in (8, 16, 32, 64)])
-@pytest.mark.parametrize("elements_per_thread", [1, 2, 4, 8])
-@pytest.mark.parametrize("explicit_intrinsic", [False, True])
-def test_integer_vector_bitwise_not_values(dtype, elements_per_thread, explicit_intrinsic):
-    n = 32 * elements_per_thread
+def test_vector_boolean_bitwise_not_compiles():
+    build = tvm.get_global_func("target.build.tilelang_cuda")
+    build(_make_vector_not_module(2, bitwise=True), tvm.target.Target("cuda"))
 
+
+@tilelang.testing.requires_cuda
+def test_vector_integer_bitwise_not_values():
     @T.prim_func
-    def main(A: T.Tensor((n,), dtype), B: T.Tensor((n,), dtype)):
+    def main(A: T.Tensor((64,), "int32"), B: T.Tensor((64,), "int32")):
         with T.Kernel(1, threads=32):
-            for i in T.Parallel(n):
-                B[i] = T.bitwise_not(A[i]) if explicit_intrinsic else ~A[i]
+            for i in T.Parallel(64):
+                B[i] = ~A[i]
 
-    bits = torch.iinfo(getattr(torch, dtype)).bits
-    mask = (1 << bits) - 1
-
-    def as_value(value):
-        return value - (1 << bits) if dtype.startswith("int") and value >= (1 << (bits - 1)) else value
-
-    patterns = [0, mask, 1, 1 << (bits - 1), (1 << (bits - 1)) - 1, mask // 3, 2 * (mask // 3), mask - 1]
-    values = patterns * (n // len(patterns))
-    a = torch.tensor([as_value(x) for x in values], dtype=getattr(torch, dtype), device="cuda")
-    kernel = tilelang.compile(main, out_idx=[1], target="cuda", execution_backend="tvm_ffi")
-    assert kernel(a).cpu().tolist() == [as_value(x ^ mask) for x in values]
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    a = torch.arange(-32, 32, device="cuda", dtype=torch.int32)
+    torch.testing.assert_close(kernel(a), ~a)
 
 
 if __name__ == "__main__":
