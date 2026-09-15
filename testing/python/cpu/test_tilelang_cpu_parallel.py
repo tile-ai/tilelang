@@ -199,13 +199,13 @@ def test_cpu_parallel_two_sequential_kernels():
         B: T.Tensor((M,), "float32"),
         C: T.Tensor((M,), "float32"),
     ):
-        with T.Kernel(M // TILE, threads=1) as bx:
+        with T.Kernel(M // TILE) as bx:
             buf1 = T.alloc_buffer((TILE,), "float32", scope="local")
             for i in T.serial(TILE):
                 buf1[i] = A[bx * TILE + i] + 1.0
             for i in T.serial(TILE):
                 B[bx * TILE + i] = buf1[i]
-        with T.Kernel(M // TILE, threads=1) as bx2:
+        with T.Kernel(M // TILE) as bx2:
             buf2 = T.alloc_buffer((TILE,), "float32", scope="local")
             for i in T.serial(TILE):
                 buf2[i] = A[bx2 * TILE + i] * 2.0
@@ -239,7 +239,7 @@ def test_cpu_parallel_dynamic_extent():
 
     @T.prim_func
     def dyn(A: T.Tensor((m,), "float32"), B: T.Tensor((m,), "float32")):
-        with T.Kernel(T.ceildiv(m, 128), threads=1) as bx:
+        with T.Kernel(T.ceildiv(m, 128)) as bx:
             for i in T.serial(128):
                 if bx * 128 + i < m:
                     B[bx * 128 + i] = A[bx * 128 + i] * 2.0
@@ -273,7 +273,6 @@ def test_cpu_parallel_opaque_use_stays_serial():
         with T.Kernel(
             M // TILE,
             M // TILE,
-            threads=1,
             prelude='extern "C" void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] += 1.0f; }\n',
         ) as (bx, by):
             buf = T.alloc_buffer((TILE,), "float32", scope="local")
@@ -312,7 +311,6 @@ def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
         with T.Kernel(
             M // TILE,
             M // TILE,
-            threads=1,
             prelude='extern "C" void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] = 0.0f; }\n',
         ) as (bx, by):
             for i in T.serial(TILE):
@@ -350,7 +348,7 @@ def test_cpu_parallel_outside_first_access_stays_serial():
     ):
         buf = T.alloc_buffer((TILE,), "float32", scope="local")
         buf[0] = 0.0  # outside access before the kernel nest
-        with T.Kernel(M // TILE, M // TILE, threads=1) as (bx, by):
+        with T.Kernel(M // TILE, M // TILE) as (bx, by):
             for i in T.serial(TILE):
                 buf[i] = A[bx * TILE + i]
             for i in T.serial(TILE):
@@ -384,7 +382,7 @@ def test_cpu_parallel_readonly_shared_table_still_parallelizes():
         tbl = T.alloc_buffer((TILE,), "float32", scope="local")
         for i in T.serial(TILE):
             tbl[i] = 2.0
-        with T.Kernel(M // TILE, threads=1) as bx:
+        with T.Kernel(M // TILE) as bx:
             for i in T.serial(TILE):
                 B[bx * TILE + i] = A[bx * TILE + i] * tbl[i]
 
@@ -420,7 +418,6 @@ def test_cpu_parallel_address_of_use_stays_serial():
         with T.Kernel(
             M // TILE,
             M // TILE,
-            threads=1,
             prelude='extern "C" void writer(float* p) { p[0] += 1.0f; }\n',
         ) as (bx, by):
             T.call_extern("void", "writer", T.address_of(buf[0]))
@@ -454,7 +451,7 @@ def test_cpu_parallel_atomic_stays_serial():
     @T.prim_func
     def atomic_sum(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((1,), "float32")):
         B[0] = 0.0  # initialize the accumulator before the grid
-        with T.Kernel(200, threads=1) as bx:
+        with T.Kernel(200) as bx:
             for i in T.serial(1000):
                 T.atomic_add(B[0], A[bx * 1000 + i])
 
@@ -480,7 +477,7 @@ def test_cpu_parallel_cross_iteration_state_stays_serial():
 
     @T.prim_func
     def rank(A: T.Tensor((N_RANK,), "float32"), B: T.Tensor((N_RANK,), "float32")):
-        with T.Kernel(N_RANK // 128, threads=1) as bx:
+        with T.Kernel(N_RANK // 128) as bx:
             acc = T.alloc_buffer((1,), "float32", scope="local")
             for i in T.serial(128):
                 acc[0] = 0.0 if (bx == 0 and i == 0) else acc[0] + 1.0
@@ -508,7 +505,7 @@ def test_cpu_parallel_param_overlapping_store_stays_serial():
 
     @T.prim_func
     def overlapping(A: T.Tensor((M,), "float32"), B: T.Tensor((1,), "float32")):
-        with T.Kernel(M // TILE, M // TILE, threads=1) as (bx, by):
+        with T.Kernel(M // TILE, M // TILE) as (bx, by):
             for i in T.serial(TILE):
                 B[0] = A[bx * TILE + i] + by * 0.0
 
@@ -536,7 +533,7 @@ def test_cpu_parallel_region_atomic_stays_serial():
     def region_atomic(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((N_ATOMIC,), "float32")):
         for i in T.serial(N_ATOMIC):
             B[i] = 0.0
-        with T.Kernel(N_ATOMIC, threads=1):
+        with T.Kernel(N_ATOMIC):
             T.atomic_add(B, A)
 
     kernel = tilelang.compile(
@@ -562,7 +559,7 @@ def test_cpu_parallel_partial_init_stays_serial():
 
     @T.prim_func
     def partial_init(A: T.Tensor((N_PI,), "float32"), B: T.Tensor((N_PI,), "float32")):
-        with T.Kernel(N_PI // BLOCK_PI, threads=1) as bx:
+        with T.Kernel(N_PI // BLOCK_PI) as bx:
             state = T.alloc_buffer((2,), "float32", scope="local")
             state[0] = 1.0
             if bx == 0:
@@ -595,7 +592,7 @@ def test_cpu_parallel_colliding_affine_store_stays_serial():
     def collide(A: T.Tensor((N_COL,), "float32"), B: T.Tensor((2,), "float32")):
         B[0] = 0.0
         B[1] = 0.0
-        with T.Kernel(N_COL // BLOCK_COL, threads=1) as bx:
+        with T.Kernel(N_COL // BLOCK_COL) as bx:
             for i in T.serial(BLOCK_COL):
                 B[bx % 2] = B[bx % 2] + A[bx * BLOCK_COL + i]
 
@@ -623,7 +620,7 @@ def test_cpu_parallel_shared_rmw_no_grid_var_stays_serial():
     @T.prim_func
     def shared_rmw(A: T.Tensor((N_RMW,), "float32"), B: T.Tensor((1,), "float32")):
         B[0] = 0.0
-        with T.Kernel(N_RMW // BLOCK_RMW, threads=1):
+        with T.Kernel(N_RMW // BLOCK_RMW):
             for i in T.serial(BLOCK_RMW):
                 B[0] = B[0] + A[i]
 
@@ -655,7 +652,6 @@ def test_cpu_parallel_extern_write_to_param_stays_serial():
         B[0] = 0.0
         with T.Kernel(
             N_EXT,
-            threads=1,
             prelude='extern "C" void writer(float* p) { *p += 1.0f; }\n',
         ) as _bx:
             T.call_extern("void", "writer", T.address_of(B[0]))
@@ -687,7 +683,6 @@ def test_cpu_parallel_extern_bare_data_var_stays_serial():
         B[0] = 0.0
         with T.Kernel(
             N_BV,
-            threads=1,
             prelude='extern "C" void writer(float* p) { *p += 1.0f; }\n',
         ) as _bx:
             T.call_extern("void", "writer", B.data)
@@ -719,7 +714,6 @@ def test_cpu_parallel_address_of_write_range_stays_serial():
     ):
         with T.Kernel(
             N_AW,
-            threads=1,
             prelude='extern "C" void writer(float* p) {\n    p[0] += 1.0f;\n    p[1] += 1.0f;\n}\n',
         ) as bx:
             T.call_extern("void", "writer", T.address_of(B[bx]))
@@ -745,7 +739,7 @@ def test_cpu_parallel_cross_store_collision_stays_serial():
 
     @T.prim_func
     def cross_store(A: T.Tensor((N_CS,), "float32"), B: T.Tensor((N_CS,), "float32")):
-        with T.Kernel(N_CS, threads=1) as bx:
+        with T.Kernel(N_CS) as bx:
             if bx + 1 < N_CS:
                 B[bx + 1] = A[bx]
             B[bx] = A[bx]
@@ -772,7 +766,7 @@ def test_cpu_parallel_loop_carried_dependency_stays_serial():
     @T.prim_func
     def loop_carried(A: T.Tensor((N_LC,), "float32"), B: T.Tensor((N_LC,), "float32")):
         B[0] = 0.0
-        with T.Kernel(N_LC - 1, threads=1) as bx:
+        with T.Kernel(N_LC - 1) as bx:
             B[bx + 1] = B[bx] + A[bx]
 
     kernel = tilelang.compile(
@@ -802,7 +796,7 @@ def test_cpu_parallel_zero_trip_reset_stays_serial():
         B: T.Tensor((256,), "float32"),
         n: T.int32,
     ):
-        with T.Kernel(256, threads=1) as bx:
+        with T.Kernel(256) as bx:
             s = T.alloc_buffer((1,), "float32", scope="local")
             for _t in T.serial(n):
                 s[0] = 0.0
