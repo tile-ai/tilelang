@@ -46,25 +46,6 @@ def _with_span(buffer: Buffer) -> Buffer:
     return buffer
 
 
-def _annotate_ascend_major_layout(buf: Buffer, major: Literal["K", "MN", "SF_K"] | None) -> None:
-    """Attach an Ascend fractal layout annotation for Cube-side buffers."""
-    if major is None:
-        return
-    if len(buf.shape) < 2:
-        return
-    from tilelang.layout import make_ascend_major_k_layout, make_ascend_major_mn_layout, make_ascend_sf_layout
-
-    if major == "K":
-        layout = make_ascend_major_k_layout(buf)
-    elif major == "MN":
-        layout = make_ascend_major_mn_layout(buf)
-    elif major == "SF_K":
-        layout = make_ascend_sf_layout(buf)
-    else:
-        raise ValueError(f"major must be 'K', 'MN', 'SF_K', or None, got {major!r}")
-    sblock_attr({"layout_map": {buf.data: layout}})
-
-
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     """Allocate a shared memory buffer for inter-thread communication.
 
@@ -77,12 +58,9 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
         T.Buffer: A TVM buffer object allocated in shared memory
     """
     if dtype == "bool":
-        from tilelang.ascend.target import check_ascend_availability
-
-        if not check_ascend_availability():
-            # lei: This is a hack to handle bool type.
-            # Because tilelang's merge smem pass cannot merge bool type currently.
-            scope = "shared"
+        # lei: This is a hack to handle bool type.
+        # Because tilelang's merge smem pass cannot merge bool type currently.
+        scope = "shared"
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 

@@ -9,6 +9,17 @@ from tvm.tirx.buffer import Buffer
 from tvm.tirx.script.builder.ir import sblock_attr
 
 
+def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
+    """Allocate a UB buffer.
+
+    Same surface as the common ``T.alloc_shared`` minus its CUDA-only bool
+    workaround (bool buffers there downgrade to the static "shared" scope
+    because the smem-merge pass cannot handle bool): Ascend UB handles bool
+    buffers in the requested scope directly.
+    """
+    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+
+
 def alloc_l1(shape: ShapeType, dtype: DType, scope="shared.l1") -> Buffer:
     """Allocate an L1 buffer (__cbuf__) on Ascend NPU.
 
@@ -57,6 +68,7 @@ def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool =
 
 
 __all__ = [
+    "alloc_shared",
     "alloc_l1",
     "alloc_l0a",
     "alloc_l0b",

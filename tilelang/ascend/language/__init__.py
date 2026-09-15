@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from tilelang.language.common import *  # noqa: F401,F403
 from tilelang.language.common import __all__ as _COMMON_ALL
-from .allocate import alloc_l1, alloc_l0a, alloc_l0b, alloc_l0c  # noqa: F401
+
+# alloc_shared deliberately shadows the common surface: Ascend UB takes
+# bool buffers in the requested scope, without CUDA's static-scope hack.
+from .allocate import alloc_shared, alloc_l1, alloc_l0a, alloc_l0b, alloc_l0c  # noqa: F401
 from .annotations import (  # noqa: F401
     annotate_buffer_versions,
     annotate_manual_multi_buffer,
