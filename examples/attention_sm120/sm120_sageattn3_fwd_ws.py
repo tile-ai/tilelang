@@ -210,6 +210,7 @@ def build_sm120_sageattn3_fwd(
     store_block_N: int = 64,
     q_stages: int = 2,
     out_dtype=T.bfloat16,
+    ds_dtype=T.float32,
 ):
     assert dim == 128, "v4 supports head_dim = 128"
     assert block_M == 128 and block_N == 128, "tile contract: 128x128"
@@ -222,6 +223,8 @@ def build_sm120_sageattn3_fwd(
 
     fp4 = T.float4_e2m1fn
     accum = T.float32
+    ds_is_f32 = str(ds_dtype) == "float32"
+    assert str(ds_dtype) in ("float32", "bfloat16"), ds_dtype
     sf_words_qk = dim // 64
     sf_words_pv = block_N // 64
     n_groups = block_N // 16
@@ -382,7 +385,7 @@ def build_sm120_sageattn3_fwd(
         SFQ: T.Tensor((batch, heads, seq_len, sf_words_qk), T.uint32),
         SFK: T.Tensor((batch, heads, seq_len, sf_words_qk), T.uint32),
         SFV: T.Tensor((batch, heads, dim, seq_len // 64), T.uint32),
-        DS: T.Tensor((batch, heads, seq_len // block_M, seq_len), accum),
+        DS: T.Tensor((batch, heads, seq_len // block_M, seq_len), ds_dtype),
         O: T.Tensor((batch, heads, seq_len, dim), out_dtype),
     ):
         with T.Kernel(driver.get_num_sms(), threads=threads) as block_id:
@@ -433,12 +436,16 @@ def build_sm120_sageattn3_fwd(
                         T.barrier_wait(consumed[stage], parity ^ 1)
                         T.tma_copy(K[bz, by, kt * block_N, 0], K_sh[stage, :, :], barrier=loaded[stage], leader_scope_threads=128)
                         T.tma_copy(VT[bz, by, 0, kt * block_N], V_sh[stage, :, :], barrier=loaded[stage], leader_scope_threads=128)
-                        T.tma_copy(
-                            DS[bz, by, bx, kt * block_N : (kt + 1) * block_N],
-                            DS_sh[stage, :],
-                            barrier=loaded[stage],
-                            leader_scope_threads=128,
-                        )
+                        if ds_is_f32:
+                            T.tma_copy(
+                                DS[bz, by, bx, kt * block_N : (kt + 1) * block_N],
+                                DS_sh[stage, :],
+                                barrier=loaded[stage],
+                                leader_scope_threads=128,
+                            )
+                        else:  # bf16 delta_s (the original's precision): widened by the producer, the consumer reads fp32
+                            for j in T.Parallel(block_N):
+                                DS_sh[stage, j] = T.cast(T.cast(DS[bz, by, bx, kt * block_N + j], ds_dtype), accum)
                         for r, w in T.Parallel(block_N // 2, 2 * sf_words_qk):
                             SFK_sh[stage, (r // 8) * 9 + r % 8, w] = SFK[bz, by, kt * block_N + 2 * r + w // sf_words_qk, w % sf_words_qk]
                         for r, w in T.Parallel(dim // 2, 2 * sf_words_pv):

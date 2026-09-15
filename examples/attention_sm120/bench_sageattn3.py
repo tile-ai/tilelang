@@ -1,11 +1,19 @@
-"""Sustained same-data benchmark: TileLang SM120 SageAttention3 forward vs the original kernel.
+"""Sustained same-data benchmark: TileLang SM120 SageAttention3 vs the original.
 
-kernel-only: both kernels consume the same pre-quantized NVFP4 tensors derived from one bf16 Q/K/V
-(byte-identical inputs; only the layouts differ). Timing: a CUDA graph of n_unroll launches
-replayed for >= sustain_secs (power-wall steady state), TOPS = 4*B*H*N^2*D / t.
+Arms (``--arms``, comma separated):
 
-  python bench_sageattn3.py --sizes 1024,4096 --num-stages 3          # TileLang only
-  python bench_sageattn3.py --arms tl,orig --sustain-secs 20           # both (needs fp4attn_cuda)
+* kernel-only, all consuming the same pre-quantized NVFP4 tensors derived from one bf16 Q/K/V
+  (byte-identical inputs; only the layouts differ): ``tl`` (sm120_sageattn3_fwd.py), ``ws``
+  (the persistent warp-specialized sm120_sageattn3_fwd_ws.py), ``orig`` (``fp4attn_cuda.fwd``);
+* end to end, bf16 q/k/v in and bf16 out: ``tl_e2e`` (``sageattn3_e2e.sageattn3_tl``) and
+  ``orig_e2e`` (``sageattn3_blackwell`` as shipped; it subtracts the K mean in place, so it gets
+  its own copy of K).
+
+Timing: a CUDA graph of n_unroll calls replayed for >= sustain_secs (power-wall steady state),
+TOPS = 4*B*H*N^2*D / t.
+
+  python bench_sageattn3.py --arms ws,orig --sustain-secs 20             # kernel-only
+  python bench_sageattn3.py --arms tl_e2e,orig_e2e --sustain-secs 20     # end to end
 """
 
 from __future__ import annotations
@@ -63,6 +71,39 @@ def _tl_fn(q, k, v, n, d, num_stages, threads):
     return fn
 
 
+def _ws_fn(q, k, v, n, d):
+    from examples.attention_sm120 import sm120_sageattn3_fwd_ws as ws
+
+    b, h = q.shape[0], q.shape[1]
+    _, kargs, _ = prepare_inputs(q, k, v)
+    kernel = ws.sm120_sageattn3_fwd(b, h, n, d)
+
+    def fn():
+        return kernel(*kargs)
+
+    return fn
+
+
+def _tl_e2e_fn(q, k, v):
+    from examples.attention_sm120.sageattn3_e2e import sageattn3_tl
+
+    def fn():
+        return sageattn3_tl(q, k, v)
+
+    return fn
+
+
+def _orig_e2e_fn(q, k, v):
+    from sageattn3 import sageattn3_blackwell
+
+    k_own = k.clone()
+
+    def fn():
+        return sageattn3_blackwell(q, k_own, v, is_causal=False)
+
+    return fn
+
+
 def _orig_fn(q, k, v, n, d):
     import fp4attn_cuda
 
@@ -84,9 +125,9 @@ def main():
     ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--heads", type=int, default=32)
     ap.add_argument("--dim", type=int, default=128)
-    ap.add_argument("--arms", default="tl", help="comma list of tl,orig")
-    ap.add_argument("--num-stages", type=int, default=3)
-    ap.add_argument("--threads", type=int, default=256)
+    ap.add_argument("--arms", default="ws,orig", help="comma list of tl,ws,orig,tl_e2e,orig_e2e")
+    ap.add_argument("--num-stages", type=int, default=3, help="tl arm only")
+    ap.add_argument("--threads", type=int, default=256, help="tl arm only")
     ap.add_argument("--sustain-secs", type=float, default=20.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="")
@@ -95,7 +136,8 @@ def main():
     arms = args.arms.split(",")
     rows = []
     print(f"# TileLang SageAttention3 fwd B={b} H={h} D={d} non-causal, sustained {args.sustain_secs}s/arm, cudagraph")
-    print(f"# tl: num_stages={args.num_stages} threads={args.threads}")
+    if "tl" in arms:
+        print(f"# tl: num_stages={args.num_stages} threads={args.threads}")
     for n in (int(x) for x in args.sizes.split(",")):
         torch.manual_seed(args.seed)
         q, k, v = (torch.randn(b, h, n, d, device="cuda", dtype=torch.bfloat16) for _ in range(3))
@@ -103,7 +145,18 @@ def main():
         n_unroll = 8 if n <= 4096 else (2 if n <= 16384 else 1)
         line = f"N={n:6d}"
         for arm in arms:
-            fn = _tl_fn(q, k, v, n, d, args.num_stages, args.threads) if arm == "tl" else _orig_fn(q, k, v, n, d)
+            if arm == "tl":
+                fn = _tl_fn(q, k, v, n, d, args.num_stages, args.threads)
+            elif arm == "ws":
+                fn = _ws_fn(q, k, v, n, d)
+            elif arm == "orig":
+                fn = _orig_fn(q, k, v, n, d)
+            elif arm == "tl_e2e":
+                fn = _tl_e2e_fn(q, k, v)
+            elif arm == "orig_e2e":
+                fn = _orig_e2e_fn(q, k, v)
+            else:
+                raise ValueError(f"unknown arm {arm!r}")
             ms = sustained(fn, n_unroll, args.sustain_secs)
             tops = flops / (ms * 1e-3) / 1e12
             rows.append({"arm": arm, "N": n, "ms": ms, "tops": tops})
