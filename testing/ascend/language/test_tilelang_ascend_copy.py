@@ -1,3 +1,4 @@
+from tilelang import tvm
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
@@ -50,7 +51,8 @@ def test_ascend_copy_inside_simtvf():
             with T.SimtVF(threads=128):
                 T.copy(A[:256], temp)
 
-    artifact = lower(inside_simtvf_kernel, target="ascend")
+    with tvm.target.Target("ascend"):
+        artifact = lower(inside_simtvf_kernel, target="ascend")
     source = artifact.kernel_source
     print("=== test_ascend_copy_inside_simtvf ===")
     print(source)
@@ -79,7 +81,8 @@ def test_ascend_copy_mixed_outside_dma_inside_simt():
                 for i in T.Parallel(256):
                     temp[i] = A[i] * B[i]
 
-    artifact = lower(mixed_copy_kernel, target="ascend")
+    with tvm.target.Target("ascend"):
+        artifact = lower(mixed_copy_kernel, target="ascend")
     source = artifact.kernel_source
     print("=== test_ascend_copy_mixed_outside_dma_inside_simt ===")
     print(source)

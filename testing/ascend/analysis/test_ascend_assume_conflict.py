@@ -1,3 +1,4 @@
+from tilelang import tvm
 import tilelang.ascend.language as T
 
 from tilelang.engine.lower import lower
@@ -191,7 +192,8 @@ def test_assume_conflict_uses_common_projection_domain():
                 if i % 3 == 0:
                     T.copy(consumer, C[i * tile : (i + 1) * tile])
 
-    source = lower(main, target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        source = lower(main, target="ascend").kernel_source
 
     assert "asc_sync_notify(PIPE_V, PIPE_MTE3," in source
     assert "asc_sync_wait(PIPE_V, PIPE_MTE3," in source
@@ -222,7 +224,8 @@ def test_assume_conflict_keeps_same_and_cross_distances_separate():
                     T.copy(same_consumer, C[i * tile : (i + 1) * tile])
                     T.copy(cross_consumer, D[i * tile : (i + 1) * tile])
 
-    source = lower(main, target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        source = lower(main, target="ascend").kernel_source
 
     same_wait = "asc_sync_wait(PIPE_MTE2, PIPE_MTE3,"
     cross_wait = "asc_sync_wait(PIPE_V, PIPE_MTE3,"

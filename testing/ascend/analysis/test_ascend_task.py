@@ -64,7 +64,7 @@ def test_task_recognizes_non_dma_copy_as_vector_pipe():
                 T.copy(A, source)
                 T.copy(source, destination)
 
-    with pytest.raises(tvm.error.InternalError, match="exactly one Ascend hardware pipe"):
+    with tvm.target.Target("ascend"), pytest.raises(tvm.error.InternalError, match="exactly one Ascend hardware pipe"):
         lower(main, target="ascend")
 
 

@@ -3142,7 +3142,8 @@ def _make_for_one_tail_owner_program():
 
 
 def _device_script(program):
-    return lower(program, target="ascend").device_mod.script()
+    with tvm.target.Target("ascend"):
+        return lower(program, target="ascend").device_mod.script()
 
 
 def _pass_snapshots(program, pass_names):
@@ -3154,7 +3155,7 @@ def _pass_snapshots(program, pass_names):
             if info.name in snapshots:
                 snapshots[info.name].append(mod.script())
 
-    with tvm.transform.PassContext(opt_level=3, instruments=[Capture()]):
+    with tvm.target.Target("ascend"), tvm.transform.PassContext(opt_level=3, instruments=[Capture()]):
         lower(program, target="ascend")
     return snapshots
 

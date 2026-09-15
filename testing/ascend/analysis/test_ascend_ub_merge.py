@@ -25,6 +25,7 @@ import os
 import re
 import sys
 
+from tilelang import tvm
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
@@ -90,7 +91,7 @@ def _wait_alias_program(num_cores: int = 64, BB: int = 256):
 
 
 def test_ub_merge_wait_alias_distinct_offset():
-    with tilelang.transform.PassContext(config={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE.value: True}):
+    with tvm.target.Target("ascend"), tilelang.transform.PassContext(config={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE.value: True}):
         artifact = lower(_wait_alias_program(), target="ascend")
     offsets = _shared_offsets(artifact.kernel_source, "int32_t")
     # z_ub and val_ub must NOT be aliased: a wait_flag is an acquire, not a

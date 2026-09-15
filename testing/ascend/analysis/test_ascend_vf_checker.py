@@ -1,3 +1,4 @@
+from tilelang import tvm
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
@@ -34,7 +35,8 @@ def test_copy_dtype_mismatch_inside_vf():
             with T.SimtVF(threads=128):
                 T.copy(A[:256], temp)
 
-    lower(kernel, target="ascend")
+    with tvm.target.Target("ascend"):
+        lower(kernel, target="ascend")
 
 
 def test_parallel_outside_vf():
@@ -45,7 +47,7 @@ def test_parallel_outside_vf():
             for i in T.Parallel(256):
                 temp[i] = A[i]
 
-    with pytest.raises(ValueError, match="Parallel loops outside VF blocks"):
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="Parallel loops outside VF blocks"):
         lower(kernel, target="ascend")
 
 
@@ -58,7 +60,7 @@ def test_simd_vf_load_global():
                 for i in T.Parallel(256):
                     temp[i] = A[i]
 
-    with pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
         lower(kernel, target="ascend")
 
 
@@ -71,7 +73,7 @@ def test_simd_vf_store_global():
                 for i in T.Parallel(256):
                     A[i] = temp[i]
 
-    with pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
         lower(kernel, target="ascend")
 
 
@@ -84,7 +86,7 @@ def test_simd_vf_copy_global():
                 for i in T.Parallel(256):
                     T.copy(A[i], temp[i])
 
-    with pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
+    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
         lower(kernel, target="ascend")
 
 
@@ -97,7 +99,8 @@ def test_simt_vf_access_global_allowed():
                 for i in T.Parallel(256):
                     temp[i] = A[i]
 
-    lower(kernel, target="ascend")
+    with tvm.target.Target("ascend"):
+        lower(kernel, target="ascend")
 
 
 def test_outer_local_var_region_write_inside_vf_rejected():
@@ -174,7 +177,8 @@ def test_outer_shared_allocation_used_inside_and_outside_vf_allowed():
                     temp[i] = T.float32(1)
             T.copy(temp, O)
 
-    lower(kernel, target="ascend")
+    with tvm.target.Target("ascend"):
+        lower(kernel, target="ascend")
 
 
 if __name__ == "__main__":

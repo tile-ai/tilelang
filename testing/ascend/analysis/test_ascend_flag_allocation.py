@@ -731,15 +731,16 @@ def test_cross_core_counter_handshake_reuses_when_over_limit():
 
 def test_cross_core_handshake_with_different_pipes_reuses_when_over_limit():
     versions = 8
-    artifact = lower(
-        _make_cross_core_reuse_program(
-            versions,
-            add_vector_stage=True,
-            reserve_last_slot=True,
-        ),
-        target="ascend",
-    )
-    source = artifact.kernel_source
+    with tvm.target.Target("ascend"):
+        artifact = lower(
+            _make_cross_core_reuse_program(
+                versions,
+                add_vector_stage=True,
+                reserve_last_slot=True,
+            ),
+            target="ascend",
+        )
+        source = artifact.kernel_source
 
     assert "asc_sync_inter_arrive(PIPE_FIX, 15);" in source
     ids = _constant_cross_core_flag_ids(source)
