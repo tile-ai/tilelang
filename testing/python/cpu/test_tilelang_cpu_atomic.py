@@ -16,7 +16,8 @@ import pytest
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.cpu.language as T
+import tilelang.cuda.language as Tcuda
 from tilelang import tvm
 
 
@@ -366,7 +367,7 @@ def test_cpu_atomic_add_use_tma_rejected():
     @T.prim_func
     def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(1):
-            T.atomic_add(B, A, use_tma=True)
+            Tcuda.atomic_add(B, A, use_tma=True)
 
     with pytest.raises(Exception, match="use_tma"):
         _compile_c(main, out_idx=[1])
