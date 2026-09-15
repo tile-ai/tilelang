@@ -813,5 +813,66 @@ def test_cpu_parallel_zero_trip_reset_stays_serial():
     assert "#pragma omp" not in kernel.get_kernel_source()
 
 
+def _bx_kind_after_parallel_grid_pass(func):
+    """Loop kind of the `bx` grid loop after MaterializeCPUParallelGrid."""
+    mod = tvm.IRModule.from_expr(func.with_attr({"target": Target("c"), "global_symbol": "main"}))
+    out = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)["main"]
+    kinds = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        out.body, lambda n: kinds.append(n.kind) if isinstance(n, tirx.For) and n.loop_var.name == "bx" else None
+    )
+    assert len(kinds) == 1
+    return kinds[0]
+
+
+def _ramp_test_buffers(local_numel=None, param_numel=256):
+    A = tirx.decl_buffer((256,), "float32", name="A")
+    B = tirx.decl_buffer((param_numel,), "float32", name="B")
+    s = tirx.decl_buffer((local_numel,), "float32", name="s", scope="local") if local_numel else None
+    return A, B, s
+
+
+def test_cpu_parallel_strided_ramp_reset_stays_serial():
+    # A stride-0 ramp store s[Ramp(4t,0,4)] writes only s[0],s[4],s[8] — not
+    # a per-iteration reset. If the ramp stride were dropped in the affine
+    # analysis, the store would be misjudged as a full reset and the buffer
+    # sunk into the parallel region with cross-iteration state in s[9].
+    bx = tirx.Var("bx", "int32")
+    t = tirx.Var("t", "int32")
+    A, B, s = _ramp_test_buffers(local_numel=12)
+    one = tirx.Broadcast(tirx.FloatImm("float32", 1.0), 4)
+    fake_reset = tirx.For(t, 0, 3, tirx.ForKind.SERIAL, tirx.BufferStore(s, one, [tirx.Ramp(4 * t, 0, 4)]))
+    read_carried = tirx.BufferStore(B, tirx.BufferLoad(s, [9]) + tirx.BufferLoad(s, [0]), [bx])
+    write9 = tirx.BufferStore(s, tirx.BufferLoad(A, [bx]), [9])
+    grid = tirx.For(
+        bx,
+        0,
+        256,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt([fake_reset, read_carried, write9]),
+        annotations={"tl.cpu_grid_dim": 0},
+    )
+    func = tirx.PrimFunc([A.data, B.data], tirx.SeqStmt([tirx.AllocBuffer(s), grid]), buffer_map={A.data: A, B.data: B})
+    assert _bx_kind_after_parallel_grid_pass(func) == tirx.ForKind.SERIAL
+
+
+def test_cpu_parallel_strided_ramp_overlap_stays_serial():
+    # B[Ramp(4bx,2,4)]: iteration bx and bx+1 collide at B[4bx+4]. Dropping
+    # the stride would prove 4bx+lane injective and parallelize the race.
+    bx = tirx.Var("bx", "int32")
+    A, B2, _ = _ramp_test_buffers(param_numel=4 * 256 + 4)
+    one = tirx.Broadcast(tirx.FloatImm("float32", 1.0), 4)
+    grid = tirx.For(
+        bx,
+        0,
+        256,
+        tirx.ForKind.SERIAL,
+        tirx.BufferStore(B2, one, [tirx.Ramp(bx * 4, 2, 4)]),
+        annotations={"tl.cpu_grid_dim": 0},
+    )
+    func = tirx.PrimFunc([A.data, B2.data], grid, buffer_map={A.data: A, B2.data: B2})
+    assert _bx_kind_after_parallel_grid_pass(func) == tirx.ForKind.SERIAL
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

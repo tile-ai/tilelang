@@ -189,7 +189,7 @@ PrimExpr ScalarizedIndex(const PrimExpr &index, ffi::Map<Var, Range> *ranges) {
     Var lane("affine_lane", DataType::Int(32));
     ranges->Set(
         lane, Range::FromMinExtent(IntImm(DataType::Int(32), 0), ramp->lanes));
-    return ramp->base + lane;
+    return ramp->base + lane * ramp->stride;
   }
   return index;
 }
