@@ -526,7 +526,7 @@ class Builder(BaseBuilder):
         with self.with_frame(tirx.While(cond_v_unwrap)):
             yield None
 
-    def bind(self, name, value, annot=BaseBuilder.empty):
+    def bind(self, name, value, annot=BaseBuilder.empty, *, loop_target=False):
         self.check_continue_break()
 
         # in prim func, before T.match_buffer
@@ -567,7 +567,9 @@ class Builder(BaseBuilder):
             else:
                 return orig_value
 
-        orig_value = locals.get(name, self.empty)
+        # A loop target introduces a new induction binding, not a store into
+        # an existing Ref/alloc_var with the same Python name.
+        orig_value = self.empty if loop_target else locals.get(name, self.empty)
 
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
