@@ -17,7 +17,6 @@
 *.swp
 *.swo
 
-OPPROF_*
 debug/
 build/
 *dist/
@@ -99,7 +98,6 @@ tilelang/jit/adapter/cython/.cycache
 
 # claude (keep local settings ignored, but track the skills symlinks)
 **/.claude
-CLAUDE.md
 !/.claude
 /.claude/*
 !/.claude/skills
@@ -126,18 +124,9 @@ maint/host_checks/logs/*
 
 # perf regression test
 .perf_regression/
-.perf_regression_ascend/
 
 # agent skills folder
 .humanize*
 
 # uv Lockfile
 uv.lock
-
-# clangd
-.clangd
-
-# cann-sim
-.cannsim_work/
-
-measure_vf_latency.py
