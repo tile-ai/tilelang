@@ -71,5 +71,31 @@ def test_bitwise_not_values(dtype, explicit_intrinsic):
     torch.testing.assert_close(c, expected.to(torch.int32))
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [f"{sign}{bits}" for sign in ("int", "uint") for bits in (8, 16, 32, 64)])
+@pytest.mark.parametrize("elements_per_thread", [1, 2, 4, 8])
+@pytest.mark.parametrize("explicit_intrinsic", [False, True])
+def test_integer_vector_bitwise_not_values(dtype, elements_per_thread, explicit_intrinsic):
+    n = 32 * elements_per_thread
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), dtype), B: T.Tensor((n,), dtype)):
+        with T.Kernel(1, threads=32):
+            for i in T.Parallel(n):
+                B[i] = T.bitwise_not(A[i]) if explicit_intrinsic else ~A[i]
+
+    bits = torch.iinfo(getattr(torch, dtype)).bits
+    mask = (1 << bits) - 1
+
+    def as_value(value):
+        return value - (1 << bits) if dtype.startswith("int") and value >= (1 << (bits - 1)) else value
+
+    patterns = [0, mask, 1, 1 << (bits - 1), (1 << (bits - 1)) - 1, mask // 3, 2 * (mask // 3), mask - 1]
+    values = patterns * (n // len(patterns))
+    a = torch.tensor([as_value(x) for x in values], dtype=getattr(torch, dtype), device="cuda")
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda", execution_backend="tvm_ffi")
+    assert kernel(a).cpu().tolist() == [as_value(x ^ mask) for x in values]
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

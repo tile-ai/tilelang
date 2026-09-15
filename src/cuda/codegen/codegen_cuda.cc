@@ -2541,6 +2541,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrintExpr(Not(op->args[0]), os);
     return;
   }
+  if (op->op.same_as(builtin::bitwise_not()) &&
+      op->dtype.is_fixed_length_vector() &&
+      (op->dtype.is_int() || op->dtype.is_uint())) {
+    ICHECK_EQ(op->args.size(), 1U);
+    // CUDA vector carriers have no operator~. Reuse lane-wise XOR with
+    // an all-ones mask, including the existing packed integer handling.
+    DataType scalar_type = op->dtype.element_of();
+    PrimExpr mask = scalar_type.is_uint() ? max_value(scalar_type)
+                                          : make_const(scalar_type, -1);
+    PrintVecBinaryOp("^", op->dtype, op->args[0],
+                     Broadcast(mask, op->dtype.lanes()), os);
+    return;
+  }
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
     // Cache context into a private ss, otherwise the let node may generate
