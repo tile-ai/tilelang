@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "cuda/op/builtin.h"
 #include "layout/layout.h"
 #include "layout/utils.h"
 #include "op/gemm.h"
@@ -24,10 +25,9 @@
 #include "op/operator.h"
 #include "op/utils.h"
 #include "span_utils.h"
-#include "cuda/op/builtin.h"
 
-#include "op/reducer.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "op/reducer.h"
 #include "transform/common/attr.h"
 #include "transform/common/mbarrier.h"
 #include "transform/common/pipeline_utils.h"

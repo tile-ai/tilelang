@@ -1,18 +1,13 @@
 from __future__ import annotations
 import ctypes
-import json
 import logging
 import os
-import shlex
 import subprocess
 import sys
 import tempfile
-import textwrap
 from typing import Any
-from pathlib import Path
 
 from tvm.target import Target
-from tvm.contrib import utils
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
@@ -23,7 +18,7 @@ from tilelang.contrib.nvcc import (
     get_target_arch_and_code,
 )
 from tilelang.contrib.rocm import find_hipcc, find_rocm_path, get_rocm_arch
-from tilelang.env import TILELANG_TEMPLATE_PATH, env
+from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.contrib.hip_resource_info import filter_and_record
 
 from .utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target

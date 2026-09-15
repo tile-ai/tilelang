@@ -101,6 +101,7 @@ requires_ascend = Feature(
     run_time_check=_ascend_device_available,
 )
 
+
 def requires_cdna(func):
     """Skip the test unless the ROCm device is a CDNA GPU."""
     is_cdna = _check_is_cdna()

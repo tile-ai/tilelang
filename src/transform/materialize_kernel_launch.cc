@@ -312,10 +312,10 @@ MaterializeKernelLaunch(bool lower_grid_binding, bool lower_thread_binding,
   Array<ffi::String> unsupported =
       unsupported_annotations.value_or(Array<ffi::String>());
   Array<ffi::String> dim_tags = launch_dim_tags.value_or(Array<ffi::String>());
-  auto pass_func = [lower_grid_binding, lower_thread_binding, default_threads,
-                    unsupported, dim_tags](
-                       PrimFunc func, const IRModule &mod,
-                       const tvm::transform::PassContext &ctx) -> PrimFunc {
+  auto pass_func =
+      [lower_grid_binding, lower_thread_binding, default_threads, unsupported,
+       dim_tags](PrimFunc func, const IRModule &mod,
+                 const tvm::transform::PassContext &ctx) -> PrimFunc {
     ffi::String target_name = "<unbound>";
     if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
       target_name = target.value()->kind->name;
