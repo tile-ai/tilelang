@@ -282,10 +282,21 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                             for key in dynamic_symbolic_map:
                                 if str(s) == str(key):
                                     ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = dynamic_symbolic_map[key]
-                                    if ref_id == 2:
-                                        shape.append(inputs[ref_tensor_idx])
-                                        continue
+                                    # ref_tensor_idx is a PrimFunc parameter index. `inputs` holds only
+                                    # the non-output parameters, so an output-before-input signature
+                                    # ([out, in, n]) would read the wrong slot or run off the end;
+                                    # `tensor_list` is sized and indexed by parameter position.
                                     ref_tensor = tensor_list[ref_tensor_idx]
+                                    if ref_id == 2:
+                                        if ref_tensor is None:
+                                            param_name = self.params[i].name if hasattr(self.params[i], "name") else f"parameter_{i}"
+                                            raise ValueError(
+                                                f"Cannot resolve symbolic dimension {s} of output parameter {param_name}: "
+                                                f"it is taken from scalar parameter {ref_tensor_idx}, which has not "
+                                                f"been supplied."
+                                            )
+                                        shape.append(ref_tensor)
+                                        continue
                                     if ref_tensor is None:
                                         param_name = self.params[i].name if hasattr(self.params[i], "name") else f"parameter_{i}"
                                         raise ValueError(
