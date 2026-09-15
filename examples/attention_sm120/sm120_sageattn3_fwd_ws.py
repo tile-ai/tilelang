@@ -12,28 +12,38 @@ keys and the C-fragment -> A-fragment relabeling is the identity; V^T and P ther
 original key order. Inputs: packed fp4 (2 elem/byte, low nibble first) and row-major uint32 scale
 words (4 e4m3 bytes = 4 consecutive 16-groups, LSB first).
 
-Kernel structure (warp specialization): 384 threads = one producer warp group (tx >= 256) and
-eight consumer warps (tx < 256, FullRow: 16 rows per warp). Putting the producer at the *high*
-thread ids keeps the consumer's thread numbering starting at 0, so every fragment layout is the
-same as in the non-specialized kernel.
+Kernel structure (persistent + warp specialization): a persistent grid of one CTA per SM, each
+running 384 threads = one producer warp group (tx >= 256) and eight consumer warps (tx < 256,
+FullRow: 16 rows per warp). Putting the producer at the *high* thread ids keeps the consumer's
+thread numbering starting at 0, so every fragment layout is the same as in the non-specialized
+kernel.
 
-The producer owns all global loads. Q/K/V/delta_s go through TMA (`T.tma_copy` with a
-user-managed mbarrier); the scale words need the per-lane row swizzle, which TMA cannot express,
-so the producer gathers those with ordinary vectorized global->shared stores. Synchronization is
-a numbered full/empty mbarrier pair over the `num_stages` K/V versions (`loaded` carries the TMA
-transaction bytes, `consumed` is released by the 256 consumer threads) plus a one-shot barrier
-for the Q tile.
+Each role runs its own T.PersistentTileScheduler over (q_block, head*batch); the default
+column-major order makes the q block the fast axis, so the CTAs resident in one wave work on
+neighbouring q blocks of the same (head, batch) and share the same K/V stream through L2.
 
-`T.set_max_nreg` hands the producer's registers to the consumers. The split must leave at least
-one warp granule free: producer_warps*32*producer_regs + consumer_warps*32*consumer_regs must be
-strictly below 65536, or `setmaxnreg.inc` blocks forever and the kernel hangs (24/240, 32/232 and
+The producer owns all global loads. Q/K/V/delta_s go through TMA (T.tma_copy with a user-managed
+mbarrier); the scale words need the per-lane row swizzle, which TMA cannot express, so the
+producer gathers those with ordinary vectorized global->shared stores. Synchronization is
+numbered mbarrier pairs: loaded/consumed over the num_stages K/V versions (loaded also carries
+the TMA transaction bytes) and q_ready/q_free over the q_stages Q versions. Q has to be
+multi-buffered across waves -- with a single Q slot the producer stalls at every wave boundary
+waiting for the consumer to drain the whole wave, which costs more than the persistent grid
+saves.
+
+Both pipelines want to be shallow here: at 4K, num_stages=2 measures 979 TOPS against 948 for
+num_stages=3, and num_stages=4 no longer fits the 99 KiB shared-memory budget. q_stages=2 beats
+3 and 4 as well.
+
+T.set_max_nreg hands the producer's registers to the consumers. The split must leave at least one
+warp granule free: producer_warps*32*producer_regs + consumer_warps*32*consumer_regs must be
+strictly below 65536, or setmaxnreg.inc blocks forever and the kernel hangs (24/240, 32/232 and
 40/224 all work; 32/240 is exactly 65536 and deadlocks).
 
-The output is stored in `store_block_N`-wide column chunks: under the producer/consumer branch the
-O tile can no longer share its shared-memory address with the Q tile, and a full 128x128 O buffer
-would not fit under the 99 KiB per-block limit.
+The output is stored in store_block_N-wide column chunks: under the producer/consumer branch the
+O tile can no longer share its shared-memory address with the Q tile.
 
-kernel-only usage: python sm120_sageattn3_fwd.py --seq 4096 --verify --bench
+kernel-only usage: python sm120_sageattn3_fwd_ws.py --seq 4096 --verify --bench
 """
 
 from __future__ import annotations
@@ -47,6 +57,7 @@ import torch
 
 import tilelang
 import tilelang.language as T
+from tilelang.carver.arch import driver
 from tilelang.layout import Fragment
 from tilelang.profiler import do_bench
 
@@ -135,11 +146,12 @@ def build_sm120_sageattn3_fwd(
     dim: int = 128,
     block_M: int = 128,
     block_N: int = 128,
-    num_stages: int = 3,
+    num_stages: int = 2,
     threads: int = 384,
     producer_regs: int = 24,
     consumer_regs: int = 240,
     store_block_N: int = 64,
+    q_stages: int = 2,
     out_dtype=T.bfloat16,
 ):
     assert dim == 128, "v4 supports head_dim = 128"
@@ -300,15 +312,13 @@ def build_sm120_sageattn3_fwd(
         DS: T.Tensor((batch, heads, seq_len // block_M, seq_len), accum),
         O: T.Tensor((batch, heads, seq_len, dim), out_dtype),
     ):
-        with T.Kernel(seq_len // block_M, heads, batch, threads=threads) as (bx, by, bz):
+        with T.Kernel(driver.get_num_sms(), threads=threads) as block_id:
             T.import_source(CVT_E2M1_SRC)
             tx = T.get_thread_binding()
-            Q_sh = T.alloc_shared((block_M, dim), fp4)
+            Q_sh = T.alloc_shared((q_stages, block_M, dim), fp4)
             K_sh = T.alloc_shared((num_stages, block_N, dim), fp4)
             V_sh = T.alloc_shared((num_stages, dim, block_N), fp4)
-            SFQ_sh = T.alloc_shared((block_M, sf_words_qk), T.uint32)
-            # scale rows are pre-swizzled by the quantizer; one pad row per 8-row lane block keeps
-            # the lane-block stride off a bank row (144 B instead of 128 B).
+            SFQ_sh = T.alloc_shared((q_stages, block_M, sf_words_qk), T.uint32)
             SFK_sh = T.alloc_shared((num_stages, block_N // 2 + 8, 2 * sf_words_qk), T.uint32)
             SFV_sh = T.alloc_shared((num_stages, dim // 2 + 8, 2 * sf_words_pv), T.uint32)
             SFP_sh = T.alloc_shared((block_M, sf_words_pv), T.uint32)
@@ -316,48 +326,67 @@ def build_sm120_sageattn3_fwd(
             DS_sh = T.alloc_shared((num_stages, block_N), accum)
             O_sh = T.alloc_shared((block_M, store_block_N), out_dtype)
 
-            # full/empty pair over the num_stages K/V versions, plus a one-shot barrier for the
-            # Q tile. `loaded` also carries the TMA transaction bytes.
             loaded = T.alloc_barrier([128] * num_stages)
             consumed = T.alloc_barrier([n_consumer_threads] * num_stages)
-            q_ready = T.alloc_barrier([128])
+            q_ready = T.alloc_barrier([128] * q_stages)
+            q_free = T.alloc_barrier([n_consumer_threads] * q_stages)
 
             if tx >= n_consumer_threads:  # ---- producer warp group ----
                 if producer_regs > 0:
                     T.set_max_nreg(producer_regs, 0)
-                T.tma_copy(Q[bz, by, bx * block_M, 0], Q_sh, barrier=q_ready, leader_scope_threads=128)
-                for r, w in T.Parallel(block_M, sf_words_qk):
-                    SFQ_sh[r, w] = SFQ[bz, by, bx * block_M + r, w]
-                T.barrier_arrive(q_ready)
+                sched_p = T.PersistentTileScheduler(seq_len // block_M, heads * batch, name="sp")
+                sched_p.init(block_id)
+                while sched_p.valid():
+                    bx = sched_p.m_idx
+                    by = sched_p.n_idx % heads
+                    bz = sched_p.n_idx // heads
+                    wave = sched_p.current_iter
+                    # Q is multi-buffered across waves: the producer fetches wave w+1's Q while
+                    # the consumer is still draining wave w (without this the whole producer
+                    # stalls at every wave boundary).
+                    qs = wave % q_stages
+                    qp = (wave // q_stages) & 1
+                    T.barrier_wait(q_free[qs], qp ^ 1)
+                    T.tma_copy(Q[bz, by, bx * block_M, 0], Q_sh[qs, :, :], barrier=q_ready[qs], leader_scope_threads=128)
+                    for r, w in T.Parallel(block_M, sf_words_qk):
+                        SFQ_sh[qs, r, w] = SFQ[bz, by, bx * block_M + r, w]
+                    T.barrier_arrive(q_ready[qs])
 
-                for kt in T.serial(n_kv_blocks):
-                    stage = kt % num_stages
-                    parity = (kt // num_stages) & 1
-                    T.barrier_wait(consumed[stage], parity ^ 1)
-                    T.tma_copy(K[bz, by, kt * block_N, 0], K_sh[stage, :, :], barrier=loaded[stage], leader_scope_threads=128)
-                    T.tma_copy(VT[bz, by, 0, kt * block_N], V_sh[stage, :, :], barrier=loaded[stage], leader_scope_threads=128)
-                    T.tma_copy(
-                        DS[bz, by, bx, kt * block_N : (kt + 1) * block_N], DS_sh[stage, :], barrier=loaded[stage], leader_scope_threads=128
-                    )
-                    for r, w in T.Parallel(block_N // 2, 2 * sf_words_qk):
-                        SFK_sh[stage, (r // 8) * 9 + r % 8, w] = SFK[bz, by, kt * block_N + 2 * r + w // sf_words_qk, w % sf_words_qk]
-                    for r, w in T.Parallel(dim // 2, 2 * sf_words_pv):
-                        SFV_sh[stage, (r // 8) * 9 + r % 8, w] = SFV[bz, by, 2 * r + w // sf_words_pv, kt * sf_words_pv + w % sf_words_pv]
-                    T.barrier_arrive(loaded[stage])
+                    for kt in T.serial(n_kv_blocks):
+                        phase = wave * n_kv_blocks + kt
+                        stage = phase % num_stages
+                        parity = (phase // num_stages) & 1
+                        T.barrier_wait(consumed[stage], parity ^ 1)
+                        T.tma_copy(K[bz, by, kt * block_N, 0], K_sh[stage, :, :], barrier=loaded[stage], leader_scope_threads=128)
+                        T.tma_copy(VT[bz, by, 0, kt * block_N], V_sh[stage, :, :], barrier=loaded[stage], leader_scope_threads=128)
+                        T.tma_copy(
+                            DS[bz, by, bx, kt * block_N : (kt + 1) * block_N],
+                            DS_sh[stage, :],
+                            barrier=loaded[stage],
+                            leader_scope_threads=128,
+                        )
+                        for r, w in T.Parallel(block_N // 2, 2 * sf_words_qk):
+                            SFK_sh[stage, (r // 8) * 9 + r % 8, w] = SFK[bz, by, kt * block_N + 2 * r + w // sf_words_qk, w % sf_words_qk]
+                        for r, w in T.Parallel(dim // 2, 2 * sf_words_pv):
+                            SFV_sh[stage, (r // 8) * 9 + r % 8, w] = SFV[
+                                bz, by, 2 * r + w // sf_words_pv, kt * sf_words_pv + w % sf_words_pv
+                            ]
+                        T.barrier_arrive(loaded[stage])
+                    sched_p.next_tile()
 
-            else:  # ---- consumer: 8 warps, 16 rows each, layouts identical to the ping-pong kernel ----
+            else:  # ---- consumer: 8 warps, 16 rows each ----
                 if consumer_regs > 0:
                     T.set_max_nreg(consumer_regs, 1)
                 acc_s = T.alloc_fragment((block_M, block_N), accum)
-                G = T.alloc_fragment((block_M, n_groups, 16), accum)  # S regrouped by original 16-key group
+                G = T.alloc_fragment((block_M, n_groups, 16), accum)
                 smax = T.alloc_fragment((block_M, n_groups), accum)
                 absmax = T.alloc_fragment((block_M, n_groups), accum)
-                coff = T.alloc_fragment((block_M, n_groups), accum)  # exponent offset smax*sl2 + log2(6)
+                coff = T.alloc_fragment((block_M, n_groups), accum)
                 rowsum8 = T.alloc_fragment((block_M, n_groups), accum)
-                Pw = T.alloc_fragment((block_M, block_N // 8), T.uint32)  # P-hat words; layout set by the PV GEMM
-                Ev = T.alloc_fragment((block_M, n_groups, 8), accum)  # scaled P of even keys
-                Od = T.alloc_fragment((block_M, n_groups, 8), accum)  # scaled P of odd keys
-                Es = T.alloc_fragment((block_M, n_groups, 8), accum)  # Ev + Od (row-sum partials)
+                Pw = T.alloc_fragment((block_M, block_N // 8), T.uint32)
+                Ev = T.alloc_fragment((block_M, n_groups, 8), accum)
+                Od = T.alloc_fragment((block_M, n_groups, 8), accum)
+                Es = T.alloc_fragment((block_M, n_groups, 8), accum)
                 acc_o = T.alloc_fragment((block_M, dim), accum)
                 m_i = T.alloc_fragment((block_M,), accum)
                 m_prev = T.alloc_fragment((block_M,), accum)
@@ -367,52 +396,64 @@ def build_sm120_sageattn3_fwd(
                 l_i = T.alloc_fragment((block_M,), accum)
                 T.annotate_layout({G: g_layout, Ev: ph_layout, Od: ph_layout, Es: ph_layout})
 
-                T.fill(acc_o, 0)
-                T.fill(acc_s, 0)
-                T.fill(Pw, 0)
-                T.fill(l_i, 0)
-                for i in T.Parallel(block_M):  # explicit (T.fill with -inf is dropped by lowering)
-                    m_i[i] = -T.infinity(accum)
-                T.barrier_wait(q_ready[0], 0)
+                sched_c = T.PersistentTileScheduler(seq_len // block_M, heads * batch, name="sc")
+                sched_c.init(block_id)
+                while sched_c.valid():
+                    bx = sched_c.m_idx
+                    by = sched_c.n_idx % heads
+                    bz = sched_c.n_idx // heads
+                    wave = sched_c.current_iter
+                    T.fill(acc_o, 0)
+                    T.fill(acc_s, 0)
+                    T.fill(Pw, 0)
+                    T.fill(l_i, 0)
+                    for i in T.Parallel(block_M):
+                        m_i[i] = -T.infinity(accum)
+                    qs = wave % q_stages
+                    qp = (wave // q_stages) & 1
+                    T.barrier_wait(q_ready[qs], qp)
 
-                for kt in T.serial(n_kv_blocks):
-                    stage = kt % num_stages
-                    parity = (kt // num_stages) & 1
-                    T.barrier_wait(loaded[stage], parity)
-                    qk_seed(DS_sh, stage, acc_s)
-                    qk_gemm(Q_sh, K_sh[stage, :, :], SFQ_sh, SFK_sh[stage, :, :], acc_s)
-                    softmax_quant(
-                        True,
-                        DS_sh,
-                        V_sh[stage, :, :],
-                        SFV_sh[stage, :, :],
-                        SFP_sh,
-                        SFP_u8,
-                        acc_s,
-                        G,
-                        smax,
-                        absmax,
-                        coff,
-                        rowsum8,
-                        Pw,
-                        Ev,
-                        Od,
-                        Es,
-                        acc_o,
-                        m_i,
-                        m_prev,
-                        ms,
-                        rescale,
-                        l_tile,
-                        l_i,
-                    )
-                    T.barrier_arrive(consumed[stage])
+                    for kt in T.serial(n_kv_blocks):
+                        phase = wave * n_kv_blocks + kt
+                        stage = phase % num_stages
+                        parity = (phase // num_stages) & 1
+                        T.barrier_wait(loaded[stage], parity)
+                        qk_seed(DS_sh, stage, acc_s)
+                        qk_gemm(Q_sh[qs, :, :], K_sh[stage, :, :], SFQ_sh[qs, :, :], SFK_sh[stage, :, :], acc_s)
+                        softmax_quant(
+                            True,
+                            DS_sh,
+                            V_sh[stage, :, :],
+                            SFV_sh[stage, :, :],
+                            SFP_sh,
+                            SFP_u8,
+                            acc_s,
+                            G,
+                            smax,
+                            absmax,
+                            coff,
+                            rowsum8,
+                            Pw,
+                            Ev,
+                            Od,
+                            Es,
+                            acc_o,
+                            m_i,
+                            m_prev,
+                            ms,
+                            rescale,
+                            l_tile,
+                            l_i,
+                        )
+                        T.barrier_arrive(consumed[stage])
 
-                for i, j in T.Parallel(block_M, dim):
-                    acc_o[i, j] = acc_o[i, j] / l_i[i]
-                for sb in T.serial(dim // store_block_N):
-                    T.copy(acc_o[:, sb * store_block_N : (sb + 1) * store_block_N], O_sh)
-                    T.copy(O_sh, O[bz, by, bx * block_M, sb * store_block_N])
+                    for i, j in T.Parallel(block_M, dim):
+                        acc_o[i, j] = acc_o[i, j] / l_i[i]
+                    for sb in T.serial(dim // store_block_N):
+                        T.copy(acc_o[:, sb * store_block_N : (sb + 1) * store_block_N], O_sh)
+                        T.copy(O_sh, O[bz, by, bx * block_M, sb * store_block_N])
+                    T.barrier_arrive(q_free[qs])  # this Q slot is free for a later wave
+                    sched_c.next_tile()
 
     return main
 
