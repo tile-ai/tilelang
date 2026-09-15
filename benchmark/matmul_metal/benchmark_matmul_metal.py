@@ -6,6 +6,7 @@ import torch
 
 import tilelang
 import tilelang.language as T
+from tilelang.profiler import do_bench
 
 logging.getLogger("tilelang").setLevel(logging.WARNING)
 
@@ -142,14 +143,7 @@ def _tflops(M, N, K, seconds):
 
 
 def _bench(fn, warmup, repeats):
-    for _ in range(warmup):
-        fn()
-    torch.mps.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(repeats):
-        fn()
-    torch.mps.synchronize()
-    return (time.perf_counter() - t0) / repeats
+    return do_bench(fn, backend="wall", device="mps", _n_warmup=warmup, _n_repeat=repeats) * 1e-3
 
 
 def bench_torch_mps(M, N, K, warmup, repeats):

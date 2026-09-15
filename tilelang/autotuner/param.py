@@ -103,7 +103,7 @@ class ProfileArgs:
         warmup: Number of warmup iterations.
         rep: Number of repetitions for timing.
         timeout: Maximum time per configuration.
-        backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+        backend: Timing method: "event", "cupti", "cudagraph", or "wall" (CPU/Metal).
         supply_type: Type of tensor supply mechanism.
         ref_prog: Reference program for correctness validation.
         supply_prog: Supply program for input tensors.
@@ -122,7 +122,7 @@ class ProfileArgs:
     warmup: int = 25
     rep: int = 100
     timeout: int = 30
-    backend: Literal["event", "cupti", "cudagraph"] = "event"
+    backend: Literal["event", "cupti", "cudagraph", "wall"] = "event"
     supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
     ref_prog: Callable = None
     supply_prog: Callable = None

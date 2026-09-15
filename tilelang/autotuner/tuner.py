@@ -35,6 +35,7 @@ from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.utils.device import get_available_cpu_count
+from tilelang.profiler.device import resolve_device
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang import __version__
 
@@ -222,7 +223,7 @@ class AutoTuner:
         skip_check: bool = False,
         manual_check_prog: Callable = None,
         cache_input_tensors: bool = False,
-        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
     ):
         """Set profiling arguments for the auto-tuner.
 
@@ -239,7 +240,7 @@ class AutoTuner:
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+            backend: Timing method: "event", "cupti", "cudagraph", or "wall" (CPU/Metal).
         Returns:
             AutoTuner: Self for method chaining.
         """
@@ -255,16 +256,13 @@ class AutoTuner:
 
             def supply_prog(device, _frozen_inputs=frozen_inputs, _cached_tensors_by_device=cached_tensors_by_device):
                 if not isinstance(device, (int, str, torch.device)):
-                    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+                    target = self.compile_args.target
+                    device = resolve_device(target=target if isinstance(target, Target) else None)
+                else:
+                    device = resolve_device(device)
                 if device not in _cached_tensors_by_device:
-                    if isinstance(device, torch.device):
-                        target_device = device
-                    elif isinstance(device, str):
-                        target_device = torch.device(device)
-                    else:
-                        target_device = torch.device(f"cuda:{device}") if torch.cuda.is_available() else torch.device("cpu")
                     _cached_tensors_by_device[device] = [
-                        tensor.to(device=target_device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
+                        tensor.to(device=device).clone() if isinstance(tensor, torch.Tensor) else tensor for tensor in _frozen_inputs
                     ]
                 return _cached_tensors_by_device[device]
 
@@ -665,7 +663,7 @@ class AutoTuner:
                 if supply_prog is not None:
                     return supply_prog(profiler._get_params(with_output=with_output))
                 else:
-                    return profiler._get_inputs(with_output=with_output)
+                    return profiler._get_inputs(with_output=with_output, device=benchmark_device)
 
             return func
 
@@ -719,6 +717,7 @@ class AutoTuner:
             n_repeat=rep,
             input_tensors=jit_input_tensors_cache,
             backend=backend,
+            device=benchmark_device,
             early_stop_baseline=(
                 benchmark_state.shared_best_latency[0] * early_stop_factor if benchmark_state.shared_best_latency is not None else None
             ),

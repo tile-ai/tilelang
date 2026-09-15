@@ -1,7 +1,7 @@
 """The profiler and convert to torch utils"""
 
 from __future__ import annotations
-from typing import Any, Literal
+from typing import Any
 from collections.abc import Callable
 from functools import partial
 import torch
@@ -15,7 +15,10 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
+from tilelang.profiler._common import BenchMethod, ReturnMode
+from tilelang.profiler.device import get_backend, resolve_device
 from tvm import tirx
+from tvm.target import Target
 
 
 @dataclass
@@ -27,12 +30,14 @@ class Profiler:
         result_idx: Indices indicating which parameters are output tensors
         supply_type: Type of tensor supply to use (e.g., random, zeros, etc.)
         adapter: Optional kernel adapter for interfacing with different backends
+        target: Optional resolved kernel target used to select the input device
     """
 
     params: list[KernelParam]
     result_idx: list[int]
     supply_type: TensorSupplyType
     adapter: BaseKernelAdapter | None = None
+    target: Target | None = None
 
     def __post_init__(self):
         """Initialize tensor supply after dataclass initialization"""
@@ -59,14 +64,20 @@ class Profiler:
         self.adapter = adapter
         return self
 
-    def _get_inputs(self, with_output=False, dynamic_symbolic_constraints: dict[str, int] | None = None):
+    def _get_inputs(
+        self,
+        with_output=False,
+        dynamic_symbolic_constraints: dict[str, int] | None = None,
+        device: int | str | torch.device | None = None,
+    ):
+        device = resolve_device(device, target=self.target)
         ins = []
         for i in range(len(self.params)):
             if with_output or i not in self.result_idx:
                 param = self.params[i]
                 if dynamic_symbolic_constraints:
                     param = self._substitute_dynamic_symbols(param, dynamic_symbolic_constraints)
-                ins.append(self.supply(param))
+                ins.append(self.supply(param, device=device))
         return ins
 
     def _substitute_dynamic_symbols(self, param: KernelParam, constraints: dict[str, int]) -> KernelParam:
@@ -101,6 +112,17 @@ class Profiler:
                 params.append(self.params[i])
         return params
 
+    def _run_reference(self, reference_program: Callable, input_tensors: list[torch.Tensor] | None):
+        device = resolve_device(inputs=input_tensors, target=self.target)
+        implementation = get_backend(device)
+        with implementation.device_scope(device):
+            ins = self._get_inputs(device=device) if input_tensors is None else input_tensors
+            ref_outs = reference_program(*ins)
+            implementation.synchronize(device)
+            lib_outs = self.func(*ins)
+            implementation.synchronize(device)
+        return ref_outs, lib_outs
+
     def assert_allclose(
         self,
         reference_program: Callable,
@@ -118,11 +140,7 @@ class Profiler:
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
-        ins = self._get_inputs() if input_tensors is None else input_tensors
-        ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
-        lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        ref_outs, lib_outs = self._run_reference(reference_program, input_tensors)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -176,11 +194,7 @@ class Profiler:
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
-        ins = self._get_inputs() if input_tensors is None else input_tensors
-        ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
-        lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        ref_outs, lib_outs = self._run_reference(reference_program, input_tensors)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -225,33 +239,34 @@ class Profiler:
         n_warmup: int = 0,
         n_repeat: int = 0,
         input_tensors: list[torch.Tensor] = None,
-        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        backend: BenchMethod = "event",
         quantiles: list[float] | None = None,
-        return_mode: Literal["min", "max", "mean", "median"] = "mean",
+        return_mode: ReturnMode = "mean",
         dynamic_symbolic_constraints: dict[str, int] | None = None,
-        device: int | torch.device | None = None,
+        device: int | str | torch.device | None = None,
         early_stop_baseline: float | None = None,
-    ) -> float:
+    ) -> float | list[float]:
         """Benchmarks the execution time of a given function.
 
         Args:
             func: Function to benchmark (uses adapter if None)
             warmup: Warmup time in milliseconds
-            rep: Number of repetitions for timing
-            n_warmup: Number of warmup iterations
-            n_repeat: Number of timing iterations
-            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
+            rep: Target benchmark time in milliseconds
+            n_warmup: Override warmup iterations (zero selects automatically)
+            n_repeat: Override timing iterations (per batch for graph/wall methods)
+            backend: Timing method: "event", "cupti", "cudagraph", or "wall" (CPU/Metal).
             input_tensors: Optional pre-generated input tensors
             dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
                 names to concrete int values. Use this when benchmarking kernels with
                 dynamic shapes, e.g., {"m": 2048, "n": 1024}
-            device: Optional CUDA device to benchmark on.
+            device: Optional device, otherwise inferred from inputs or the kernel target.
 
         Returns:
-            float: Average execution time in milliseconds
+            Execution time in milliseconds, or requested quantiles.
         """
 
-        def run_bench():
+        device = resolve_device(device, inputs=input_tensors, target=self.target)
+        with get_backend(device).device_scope(device):
             if func is None:
                 assert self.adapter is not None, "benchmarking function should be provided"
                 bench_target = self.adapter
@@ -260,9 +275,9 @@ class Profiler:
             if input_tensors is not None:
                 ins = input_tensors
             elif dynamic_symbolic_constraints is not None:
-                ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
+                ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints, device=device)
             else:
-                ins = self._get_inputs()
+                ins = self._get_inputs(device=device)
             bench_func = partial(bench_target, *ins)
             return do_bench(
                 bench_func,
@@ -276,11 +291,6 @@ class Profiler:
                 device=device,
                 early_stop_baseline=early_stop_baseline,
             )
-
-        if device is None:
-            return run_bench()
-        with torch.cuda.device(device):
-            return run_bench()
 
     @property
     def func(self):
