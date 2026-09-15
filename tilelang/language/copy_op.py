@@ -145,7 +145,7 @@ def copy(
             value = tirx.Cast(dst.dtype, src)
         return tirx.BufferStore(dst.buffer, value, dst.indices)
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann if ann else None)
+    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
 
 def copy_cluster(
