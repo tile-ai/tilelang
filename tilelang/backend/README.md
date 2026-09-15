@@ -94,34 +94,6 @@ The native side mirrors target-backend ownership under `src/<backend>/`, where
 C++ op lowering, codegen, runtime modules, toolchain stubs, and backend-local
 CMake files live. `src/backend/` is reserved for shared native backend helpers.
 
-## Profiling Helpers
-
-The existing CUDA/ROCm benchmark implementation stays in
-`tilelang/profiler/bench.py`. The public `tilelang.profiler.do_bench` and
-backend-local `tilelang/cuda/profiler.py` and `tilelang/rocm/profiler.py`
-re-exports all reuse this entry point. The existing Metal matmul benchmark
-helper lives in `tilelang/metal/profiler.py`. Timing methods, defaults, units,
-iteration counts, and device handling are unchanged.
-
-Profiling methods are described by `ProfilerBackendSpec`, independently of
-target backends and execution backends. A `BackendModule` declares its compatible
-methods in `profiler_backends`, just as it declares `execution_backends`.
-CUDA, the CuTeDSL target variant, and ROCm share the existing `event`, `cupti`,
-and `cudagraph` implementations. These declarations do not probe runtime
-availability or initialize profiling resources.
-
-`context.profiler("cupti")` resolves one declared method on demand. Unlike the
-execution backend, the timing method is not fixed during compilation: successive
-`Profiler.do_bench(backend=...)` calls can use different methods on the same
-kernel. `JITKernel.get_profiler()` privately binds the already-resolved context;
-no public profiler constructor or benchmark argument changes. Manually created
-profilers and standalone `do_bench` calls retain the legacy GPU entry point.
-
-CPU, Metal, and WebGPU do not declare methods for the common profiler yet.
-Unsupported methods are rejected rather than selecting a different method.
-Metal's independent benchmark helper keeps its original interface and seconds
-unit; it is not implicitly routed through the common profiler.
-
 ## Backend Manifest
 
 Each backend's `backend.py` publishes a `BackendModule`, the typed manifest used
@@ -153,7 +125,6 @@ The manifest currently declares:
 - one pass pipeline and one device-codegen entry for every owned target kind;
 - optional host-codegen entries and pre-codegen hooks;
 - the compatible shared execution backends in `auto` preference order;
-- optional compatible profiling methods, selected per benchmark call;
 - FFI callbacks used by backend validation or target-toolchain integration.
 
 `register_backend()` validates the complete declaration and publishes it once.
@@ -334,7 +305,6 @@ tilelang/backend/
   device_codegen.py
   host_codegen.py
   execution_backend.py
-  profiler_backend.py
   pass_pipeline/
     __init__.py
     pipeline.py
@@ -349,8 +319,6 @@ tilelang/backend/
   shared global-function helpers.
 - `execution_backend.py` defines the current execution-backend selection and
   capability descriptor.
-- `profiler_backend.py` defines profiling descriptors and lazy adapters to the
-  shared CUDA/ROCm timing implementation.
 - `pass_pipeline/pipeline_utils.py` contains small shared helpers for pass
   configuration, visualization, vectorization gates, and shared-memory reuse.
 

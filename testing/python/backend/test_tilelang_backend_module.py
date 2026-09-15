@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from tilelang import tvm
-from tilelang.backend import BackendContext, ProfilerBackendSpec, create_backend_context, get_backend, list_backends, register_backend
+from tilelang.backend import BackendContext, create_backend_context, get_backend, list_backends, register_backend
 
 
 def test_builtin_backend_modules_are_explicit():
@@ -121,79 +121,3 @@ def test_create_backend_context_binds_compile_state():
 
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
-
-
-def test_builtin_profiler_backend_declarations():
-    gpu_methods = ("event", "cupti", "cudagraph")
-    expected = {
-        "cuda": gpu_methods,
-        "cutedsl": gpu_methods,
-        "rocm": gpu_methods,
-        "cpu": (),
-        "metal": (),
-        "webgpu": (),
-    }
-
-    assert {name: tuple(spec.name for spec in backend.profiler_backends) for name, backend in list_backends().items()} == expected
-    assert get_backend("cuda").profiler_backends is get_backend("rocm").profiler_backends
-    assert get_backend("cuda").profiler_backends is get_backend("cutedsl").profiler_backends
-
-
-@pytest.mark.parametrize(
-    ("backend_name", "target_attrs"),
-    [
-        ("cuda", {"kind": "cuda", "arch": "sm_80"}),
-        ("cutedsl", {"kind": "cuda", "arch": "sm_80", "keys": ["cuda", "gpu", "cutedsl"]}),
-        ("rocm", {"kind": "hip", "mcpu": "gfx942"}),
-    ],
-)
-@pytest.mark.parametrize("method", ["event", "cupti", "cudagraph"])
-def test_context_resolves_declared_gpu_profiler(backend_name, target_attrs, method):
-    backend = get_backend(backend_name)
-    context = BackendContext(backend, tvm.target.Target(target_attrs), tvm.target.Target("c"), backend.execution_backends[0])
-
-    assert context.profiler(method).name == method
-    assert context.profiler().name == "event"
-
-
-@pytest.mark.parametrize("duplicate", [False, True])
-def test_backend_rejects_invalid_profiler_names(duplicate):
-    backend = get_backend("cuda")
-    spec = backend.profiler_backends[0]
-    specs = (spec, spec) if duplicate else (replace(spec, name=""),)
-
-    with pytest.raises(ValueError, match="profiler backend names must be non-empty and unique"):
-        replace(backend, profiler_backends=specs)
-
-
-def test_profiler_policy_filters_target_predicates():
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    supported = ProfilerBackendSpec("event", lambda *args, **kwargs: 1.0)
-    unsupported = replace(supported, name="cupti", supports_target=lambda target: False)
-    backend = replace(get_backend("cuda"), profiler_backends=[supported, unsupported])
-
-    assert isinstance(backend.profiler_backends, tuple)
-    assert backend.allowed_profiler_backends(target) == ("event",)
-    assert backend.resolve_profiler_backend("event", target) is supported
-    with pytest.raises(ValueError, match="Allowed: event"):
-        backend.resolve_profiler_backend("cupti", target)
-    with pytest.raises(ValueError, match="does not match target"):
-        backend.resolve_profiler_backend("event", tvm.target.Target("llvm"))
-
-
-@pytest.mark.parametrize("requested", ["tvm_ffi", "nvrtc", "auto", "wall", "EVENT"])
-def test_profiler_policy_does_not_change_or_fall_back_from_requested_method(requested):
-    context = create_backend_context({"kind": "cuda", "arch": "sm_80"}, "c", "tvm_ffi")
-
-    with pytest.raises(ValueError, match="Allowed: event, cupti, cudagraph"):
-        context.profiler(requested)
-
-
-@pytest.mark.parametrize("target_kind", ["c", "llvm", "metal", "webgpu"])
-def test_context_without_common_profiler_remains_usable_for_compilation(target_kind):
-    context = create_backend_context(target_kind, "c", "auto")
-
-    assert context.module.allowed_profiler_backends(context.target) == ()
-    assert context.execution_backend.name in context.module.allowed_execution_backends(context.target)
-    with pytest.raises(ValueError, match="Allowed: <none>"):
-        context.profiler()

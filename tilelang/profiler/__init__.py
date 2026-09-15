@@ -1,11 +1,11 @@
 """The profiler and convert to torch utils"""
 
 from __future__ import annotations
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 from collections.abc import Callable
 from functools import partial
 import torch
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
@@ -16,9 +16,6 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
 from tvm import tirx
-
-if TYPE_CHECKING:
-    from tilelang.backend.module import BackendContext
 
 
 @dataclass
@@ -36,7 +33,6 @@ class Profiler:
     result_idx: list[int]
     supply_type: TensorSupplyType
     adapter: BaseKernelAdapter | None = None
-    _backend_context: BackendContext | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         """Initialize tensor supply after dataclass initialization"""
@@ -229,7 +225,7 @@ class Profiler:
         n_warmup: int = 0,
         n_repeat: int = 0,
         input_tensors: list[torch.Tensor] = None,
-        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
         dynamic_symbolic_constraints: dict[str, int] | None = None,
@@ -244,18 +240,17 @@ class Profiler:
             rep: Number of repetitions for timing
             n_warmup: Number of warmup iterations
             n_repeat: Number of timing iterations
-            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
+            backend: Which profiling backend to use - "event", "cupti", "cudagraph", or "wall"
             input_tensors: Optional pre-generated input tensors
             dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
                 names to concrete int values. Use this when benchmarking kernels with
                 dynamic shapes, e.g., {"m": 2048, "n": 1024}
-            device: Optional CUDA device to benchmark on.
+            device: Optional device to benchmark on. Non-CUDA devices require
+                "wall"; asynchronous wall timing needs an explicit device.
 
         Returns:
             float: Average execution time in milliseconds
         """
-
-        benchmark = do_bench if self._backend_context is None else self._backend_context.profiler(backend).do_bench
 
         def run_bench():
             if func is None:
@@ -270,7 +265,7 @@ class Profiler:
             else:
                 ins = self._get_inputs()
             bench_func = partial(bench_target, *ins)
-            return benchmark(
+            return do_bench(
                 bench_func,
                 warmup=warmup,
                 rep=rep,
@@ -283,7 +278,7 @@ class Profiler:
                 early_stop_baseline=early_stop_baseline,
             )
 
-        if device is None:
+        if device is None or (backend == "wall" and not isinstance(device, int) and torch.device(device).type != "cuda"):
             return run_bench()
         with torch.cuda.device(device):
             return run_bench()

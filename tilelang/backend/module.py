@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from tilelang.backend.execution_backend import ExecutionBackendSpec
     from tilelang.backend.host_codegen import HostCodegen, HostCodegenHook
     from tilelang.backend.pass_pipeline import PassPipeline
-    from tilelang.backend.profiler_backend import ProfilerBackendSpec
 
 BackendCallback = Callable[..., object]
 TargetPredicate = Callable[[Target], bool]
@@ -39,7 +38,6 @@ class BackendModule:
     host_codegens: Mapping[str, HostCodegen] = field(default_factory=dict)
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
     callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
-    profiler_backends: tuple[ProfilerBackendSpec, ...] = ()
 
     def __post_init__(self) -> None:
         target_kinds = tuple(self.target_kinds)
@@ -81,11 +79,6 @@ class BackendModule:
         if any(spec.enable_host_codegen for spec in execution_backends) and not host_codegens:
             raise ValueError(f"BackendModule {self.name!r} enables host codegen but defines no host codegen targets")
 
-        profiler_backends = tuple(self.profiler_backends)
-        profiler_names = [spec.name for spec in profiler_backends]
-        if not all(profiler_names) or len(set(profiler_names)) != len(profiler_names):
-            raise ValueError(f"BackendModule {self.name!r} profiler backend names must be non-empty and unique: {profiler_names}")
-
         callbacks = MappingProxyType(dict(self.callbacks))
         if any(not name for name in callbacks):
             raise ValueError(f"BackendModule {self.name!r} callback names must not be empty")
@@ -94,7 +87,6 @@ class BackendModule:
         object.__setattr__(self, "pipelines", pipelines)
         object.__setattr__(self, "device_codegens", device_codegens)
         object.__setattr__(self, "execution_backends", execution_backends)
-        object.__setattr__(self, "profiler_backends", profiler_backends)
         object.__setattr__(self, "host_codegens", host_codegens)
         object.__setattr__(self, "host_codegen_hooks", host_codegen_hooks)
         object.__setattr__(self, "callbacks", callbacks)
@@ -192,22 +184,6 @@ class BackendModule:
             )
         return spec
 
-    def allowed_profiler_backends(self, target: Target) -> tuple[str, ...]:
-        """Return declared timing methods compatible with the target."""
-
-        self._require_target(target)
-        return tuple(spec.name for spec in self.profiler_backends if spec.matches(target))
-
-    def resolve_profiler_backend(self, requested: str, target: Target) -> ProfilerBackendSpec:
-        """Select a declared timing method without probing profiling runtimes."""
-
-        self._require_target(target)
-        for spec in self.profiler_backends:
-            if spec.name == requested and spec.matches(target):
-                return spec
-        allowed = ", ".join(self.allowed_profiler_backends(target)) or "<none>"
-        raise ValueError(f"Invalid profiler backend {requested!r} for target {target.kind.name!r}. Allowed: {allowed}.")
-
 
 @dataclass(frozen=True, slots=True)
 class BackendContext:
@@ -231,11 +207,6 @@ class BackendContext:
         """Return the selected backend module name."""
 
         return self.module.name
-
-    def profiler(self, backend: str = "event") -> ProfilerBackendSpec:
-        """Resolve a timing method when profiling, not when compiling."""
-
-        return self.module.resolve_profiler_backend(backend, self.target)
 
     def lower(self, mod: IRModule) -> IRModule:
         """Run the selected backend's lowering pipeline."""
