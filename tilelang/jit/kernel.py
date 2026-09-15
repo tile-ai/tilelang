@@ -521,7 +521,9 @@ class JITKernel(Generic[_P, _T]):
         Profiler
             A Profiler instance for benchmarking the runtime module.
         """
-        return Profiler(self.params, self.out_idx, tensor_supply_type).with_default_adapter(self.adapter)
+        profiler = Profiler(self.params, self.out_idx, tensor_supply_type).with_default_adapter(self.adapter)
+        profiler._backend_context = self.backend_context
+        return profiler
 
     def get_kernel_source(self, kernel_only: bool = True) -> str:
         """

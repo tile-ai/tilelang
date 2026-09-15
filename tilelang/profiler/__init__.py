@@ -1,11 +1,11 @@
 """The profiler and convert to torch utils"""
 
 from __future__ import annotations
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from collections.abc import Callable
 from functools import partial
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
@@ -16,6 +16,9 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
 from tvm import tirx
+
+if TYPE_CHECKING:
+    from tilelang.backend.module import BackendContext
 
 
 @dataclass
@@ -33,6 +36,7 @@ class Profiler:
     result_idx: list[int]
     supply_type: TensorSupplyType
     adapter: BaseKernelAdapter | None = None
+    _backend_context: BackendContext | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         """Initialize tensor supply after dataclass initialization"""
@@ -251,6 +255,8 @@ class Profiler:
             float: Average execution time in milliseconds
         """
 
+        benchmark = do_bench if self._backend_context is None else self._backend_context.profiler(backend).do_bench
+
         def run_bench():
             if func is None:
                 assert self.adapter is not None, "benchmarking function should be provided"
@@ -264,7 +270,7 @@ class Profiler:
             else:
                 ins = self._get_inputs()
             bench_func = partial(bench_target, *ins)
-            return do_bench(
+            return benchmark(
                 bench_func,
                 warmup=warmup,
                 rep=rep,

@@ -2,6 +2,7 @@
 
 from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.module import BackendModule, register_backend
+from tilelang.backend.profiler_backend import TORCH_GPU_PROFILER_BACKENDS
 
 from . import codegen, execution_backend, pipeline
 
@@ -19,5 +20,6 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.CUTEDSL_EXECUTION_BACKENDS,
+        profiler_backends=TORCH_GPU_PROFILER_BACKENDS,
     )
 )

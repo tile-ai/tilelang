@@ -4,6 +4,7 @@ from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.module import BackendModule, register_backend
+from tilelang.backend.profiler_backend import TORCH_GPU_PROFILER_BACKENDS
 from tilelang.contrib import hipcc
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.rocm.target import target_get_mcpu
@@ -39,6 +40,7 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.EXECUTION_BACKENDS,
+        profiler_backends=TORCH_GPU_PROFILER_BACKENDS,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={"tilelang_callback_hip_compile": tilelang_callback_hip_compile},
     )
