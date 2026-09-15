@@ -2534,6 +2534,13 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
  *            member stream instead).
  */
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
+  if (op->op.same_as(builtin::bitwise_not()) && op->dtype.is_bool()) {
+    ICHECK_EQ(op->args.size(), 1U);
+    // C++ promotes bool to int for ~, producing -1/-2 instead of a bool.
+    // Reuse logical negation, including its elementwise vector handling.
+    PrintExpr(Not(op->args[0]), os);
+    return;
+  }
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
     // Cache context into a private ss, otherwise the let node may generate
