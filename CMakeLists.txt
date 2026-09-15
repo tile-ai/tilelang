@@ -672,8 +672,37 @@ endif()
 # dependency and matches Cython's own suggested workaround. See #2125.
 target_compile_definitions(tilelang_cython_wrapper PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
 
+# Ascend Torch-NPU stream exchange extension. Pure CPython/DLPack (no CANN
+# dependency), so it builds on every configuration like the other
+# TILE_LANG_ASCEND_ALWAYS sources; torch_npu is imported lazily at call time.
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_ascend_npu_exchange.cpp"
+  COMMENT
+    "Cythoning tilelang/ascend/torch_npu_exchange.pyx"
+  COMMAND Python::Interpreter -m cython
+          "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/ascend/torch_npu_exchange.pyx"
+          --module-name tilelang_ascend_npu_exchange
+          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_ascend_npu_exchange.cpp"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/ascend/torch_npu_exchange.pyx"
+  VERBATIM)
+
+python_add_library(tilelang_ascend_npu_exchange MODULE "${CMAKE_BINARY_DIR}/tilelang_ascend_npu_exchange.cpp" ${USE_SABI} WITH_SOABI)
+if(WIN32)
+  target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_ascend_npu_exchange PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
+target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+
 # Ensure dev builds drop the extension into build/lib alongside other shared libs
 set_target_properties(tilelang_cython_wrapper PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+set_target_properties(tilelang_ascend_npu_exchange PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
@@ -681,6 +710,10 @@ set_target_properties(tilelang_cython_wrapper PROPERTIES
 
 # Install the extension into tilelang/lib inside the wheel
 install(TARGETS tilelang_cython_wrapper
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
+install(TARGETS tilelang_ascend_npu_exchange
         LIBRARY DESTINATION tilelang/lib
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)

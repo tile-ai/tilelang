@@ -28,6 +28,20 @@ except ImportError:
     raise
 
 
+def _device_providers(target):
+    """Device/raw-stream providers for the wrapper, chosen by compile target.
+
+    The wrapper defaults to the CUDA accessors; Ascend supplies its own so
+    output allocation and the stream fallback follow the compile target
+    rather than whatever accelerator the host happens to expose.
+    """
+    if not is_ascend_target(target):
+        return None, None
+    from tilelang.ascend.torch_exchange import npu_current_device, npu_current_raw_stream
+
+    return npu_current_device, npu_current_raw_stream
+
+
 def is_symbolic_expr(expr) -> bool:
     """Check if the expression is a symbolic expression.
     A symbolic expression can be a simple tvm.Var, or an tvm.PrimExpr containing tvm.Var.
@@ -142,7 +156,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg += f"\n{self.lib_code}"
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, self.target)
+        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers(self.target))
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
@@ -206,7 +220,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg = adapter.lib.get_last_error().decode("utf-8")
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, adapter.target)
+        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, *_device_providers(adapter.target))
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
