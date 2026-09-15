@@ -16,6 +16,21 @@ from .annotations import (  # noqa: F401
 from .copy_op import copy, dual_copy  # noqa: F401
 from .gemm_op import blockscaled_gemm, gemm  # noqa: F401
 
+# T.reduce and its thin wrappers shadow the common surface: inside SimdVF a
+# shared-to-shared reduce is emitted directly on the UB regions (no fragment
+# round-trip exists there); see ascend/language/reduce_op.py.
+from .reduce_op import (  # noqa: F401
+    reduce,
+    reduce_abssum,
+    reduce_absmax,
+    reduce_bitand,
+    reduce_bitor,
+    reduce_bitxor,
+    reduce_max,
+    reduce_min,
+    reduce_sum,
+)
+
 # Ascend owns the unroll-factor knob: the Ascend codegen lowers the
 # "pragma_unroll_factor" annotation to `#pragma unroll N`.
 from .loop import unroll  # noqa: F401

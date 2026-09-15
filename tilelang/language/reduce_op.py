@@ -100,45 +100,28 @@ def reduce(
         buf_scope = _get_buffer(buffer).scope()
         out_scope = _get_buffer(out).scope()
         if is_shared(buffer) and is_shared(out):
-            # Deferred: the Ascend dialect package imports tilelang.language.common,
-            # which imports this module, so a module-scope import would cycle.
-            from tilelang.ascend.language.frame import inside_simdvf
+            red_frag_in = alloc_fragment(buf_shape, buf_dtype)
+            red_frag_out = alloc_fragment(out_shape, out_dtype)
 
-            if inside_simdvf():
-                # Inside SimdVF: reduce directly on shared buffers (no fragment wrapping)
-                tirx.call_intrin(
-                    "handle",
-                    tirx.op.Op.get(_REDUCE_OP_KEY),
-                    to_tile_region(buffer, access_type="r"),
-                    to_tile_region(out, access_type="w"),
-                    reduce_type,
-                    dim,
-                    clear,
-                    annotations=annotations,
-                )
-            else:
-                red_frag_in = alloc_fragment(buf_shape, buf_dtype)
-                red_frag_out = alloc_fragment(out_shape, out_dtype)
+            # rename buffers
+            IRBuilder.name(buf_name + "_frag", red_frag_in)
+            IRBuilder.name(out_name + "_frag", red_frag_out)
 
-                # rename buffers
-                IRBuilder.name(buf_name + "_frag", red_frag_in)
-                IRBuilder.name(out_name + "_frag", red_frag_out)
+            if not clear:
+                copy(out, red_frag_out)
 
-                if not clear:
-                    copy(out, red_frag_out)
-
-                copy(buffer, red_frag_in)
-                tirx.call_intrin(
-                    "handle",
-                    tirx.op.Op.get(_REDUCE_OP_KEY),
-                    to_tile_region(red_frag_in, access_type="r"),
-                    to_tile_region(red_frag_out, access_type="w"),
-                    reduce_type,
-                    dim,
-                    clear,
-                    annotations=annotations,
-                )
-                copy(red_frag_out, out)
+            copy(buffer, red_frag_in)
+            tirx.call_intrin(
+                "handle",
+                tirx.op.Op.get(_REDUCE_OP_KEY),
+                to_tile_region(red_frag_in, access_type="r"),
+                to_tile_region(red_frag_out, access_type="w"),
+                reduce_type,
+                dim,
+                clear,
+                annotations=annotations,
+            )
+            copy(red_frag_out, out)
         elif is_shared(buffer) and is_fragment(out):
             red_frag_in = alloc_fragment(buf_shape, buf_dtype)
             IRBuilder.name(buf_name + "_frag", red_frag_in)
