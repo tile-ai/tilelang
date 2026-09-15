@@ -11,6 +11,8 @@ from typing import Literal
 
 import torch
 
+from tilelang.utils.device import IS_CUDA, Event, device_synchronize
+
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
     _cuda_synchronize as _cuda_synchronize,
@@ -23,7 +25,6 @@ from .wall import bench_with_wall
 
 logger = logging.getLogger(__name__)
 
-IS_CUDA = torch.cuda.is_available()
 device = "cuda:0" if IS_CUDA else "mps:0"
 
 
@@ -46,7 +47,7 @@ def do_bench(
     The existing GPU timing methods provide accurate kernel timing by:
     - Clearing L2 cache between runs for consistent measurements
     - Auto-calculating warmup and repeat counts based on kernel runtime
-    - Supporting multiple profiling backends (CUDA events, CUPTI, or CUDA graph replay)
+    - Supporting multiple profiling backends (CUDA/MPS events, CUPTI, or CUDA graph replay)
     - Offering flexible result aggregation (mean/median/min/max/quantiles)
 
     Wall timing measures host elapsed time without cache flushing. With no
@@ -64,9 +65,9 @@ def do_bench(
         fast_flush: Use faster GPU L2 cache flush with int32 vs int8 (default: True); ignored by "wall"
         backend: Timing method - "event", "cupti", "cudagraph", or "wall" (default: "event")
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
-        device: Optional device to benchmark on. GPU methods require a CUDA/HIP
-            device and scope events, streams, cache buffers, and synchronization
-            to it. Wall timing also accepts CPU and MPS devices.
+        device: Optional device to benchmark on. CUDA/HIP events, streams,
+            cache buffers, and synchronization are scoped to that device.
+            Event timing also accepts MPS; wall timing accepts CPU and MPS.
         cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
 
     Returns:
@@ -88,11 +89,10 @@ def do_bench(
         if resolved_device is not None:
             if resolved_device.type == "cuda":
                 device_context = torch.cuda.device(resolved_device)
-                synchronize = partial(torch.cuda.synchronize, resolved_device)
-            elif resolved_device.type == "mps":
-                synchronize = torch.mps.synchronize
-            elif resolved_device.type != "cpu":
+            elif resolved_device.type not in ("cpu", "mps"):
                 raise ValueError(f"Wall timing supports CPU, CUDA/HIP, or MPS devices, got {resolved_device}")
+            if resolved_device.type in ("cuda", "mps"):
+                synchronize = partial(device_synchronize, resolved_device)
 
         with device_context:
             fn()
@@ -118,8 +118,11 @@ def do_bench(
 
     assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 
-    device_idx = _normalize_cuda_device(device)
-    if device_idx is not None:
+    if device is not None and not isinstance(device, int) and torch.device(device).type == "mps":
+        device_idx = torch.device(device)
+    else:
+        device_idx = _normalize_cuda_device(device)
+    if isinstance(device_idx, int):
         with torch.cuda.device(device_idx):
             return _do_bench_impl(
                 fn,
@@ -146,7 +149,7 @@ def do_bench(
         fast_flush=fast_flush,
         backend=backend,
         return_mode=return_mode,
-        device_idx=None,
+        device_idx=device_idx,
         cache_size=cache_size,
         early_stop_baseline=early_stop_baseline,
     )
@@ -167,9 +170,11 @@ def _normalize_cuda_device(benchmark_device: int | torch.device | None) -> int |
     return torch_device.index
 
 
-def _cache_device(device_idx: int | None) -> str | torch.device:
+def _cache_device(device_idx: int | torch.device | None) -> str | torch.device:
     if device_idx is None:
         return device
+    if isinstance(device_idx, torch.device):
+        return device_idx
     return torch.device("cuda", device_idx)
 
 
@@ -183,10 +188,13 @@ def _do_bench_impl(
     fast_flush: bool,
     backend: Literal["event", "cupti", "cudagraph"],
     return_mode: Literal["min", "max", "mean", "median"],
-    device_idx: int | None,
+    device_idx: int | torch.device | None,
     cache_size: int,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
+    if backend in ("cupti", "cudagraph") and torch.device(_cache_device(device_idx)).type == "mps":
+        raise ValueError(f'{backend} timing requires CUDA/HIP; use "event" or "wall" for MPS')
+
     # Initial function call and synchronization
     fn()
     _cuda_synchronize(device_idx)
@@ -199,8 +207,8 @@ def _do_bench_impl(
     cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
 
     # Estimate kernel runtime with 5 iterations
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = Event(enable_timing=True)
+    end_event = Event(enable_timing=True)
     start_event.record()
     for _ in range(5):
         cache.zero_()

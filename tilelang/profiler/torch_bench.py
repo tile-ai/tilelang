@@ -8,6 +8,8 @@ from collections.abc import Callable
 
 import torch
 
+from tilelang.utils.device import Event, device_synchronize as _cuda_synchronize
+
 _CACHE_FLUSH_ID = "tilelang::cache_flush"
 
 
@@ -58,25 +60,18 @@ class suppress_stdout_stderr:
         self.errnull_file.close()
 
 
-def _cuda_synchronize(device_idx: int | None = None) -> None:
-    if device_idx is None:
-        torch.cuda.synchronize()
-    else:
-        torch.cuda.synchronize(device_idx)
-
-
 def bench_with_cuda_events(
     fn: Callable,
     cache: torch.Tensor,
     n_repeat: int,
     quantiles: list[float] | None,
     return_mode: str,
-    device_idx: int | None,
+    device_idx: int | torch.device | None,
 ) -> float | list[float]:
-    """Benchmark using CUDA events for timing."""
+    """Benchmark using CUDA/HIP or MPS events for timing."""
     # Create timing events
-    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
+    start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
+    end_events = [Event(enable_timing=True) for _ in range(n_repeat)]
 
     # Run benchmark iterations
     for i in range(n_repeat):

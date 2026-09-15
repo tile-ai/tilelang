@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from functools import partial
 from inspect import Parameter, signature
 
 import pytest
@@ -155,8 +156,32 @@ def test_profiler_wall_non_cuda_device(monkeypatch, device):
     instance = profiler.Profiler([], [], profiler.TensorSupplyType.Auto, lambda: None)
 
     assert instance.do_bench(backend="wall", device=device, input_tensors=[], n_warmup=1, n_repeat=2) == 1.0
-    expected_sync = synchronize if device.type == "mps" else None
+    expected_sync = calls[0]["synchronize"] if device.type == "mps" else None
+    if expected_sync is not None:
+        assert isinstance(expected_sync, partial)
+        assert expected_sync.func is bench.device_synchronize
+        assert expected_sync.args == (device,)
     assert calls == [
         {"n_repeat": 5, "synchronize": expected_sync},
         {"n_repeat": 2, "quantiles": None, "return_mode": "mean", "synchronize": expected_sync},
     ]
+
+
+def test_profiler_event_metal_device(monkeypatch):
+    calls = []
+
+    def benchmark(fn, **kwargs):
+        fn()
+        calls.append(kwargs)
+        return 1.0
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("MPS event timing must not enter a CUDA context")
+
+    monkeypatch.setattr(bench, "_do_bench_impl", benchmark)
+    monkeypatch.setattr(torch.cuda, "device", unexpected)
+    instance = profiler.Profiler([], [], profiler.TensorSupplyType.Auto, lambda: None)
+
+    assert instance.do_bench(backend="event", device=torch.device("mps"), input_tensors=[]) == 1.0
+    assert calls[0]["backend"] == "event"
+    assert calls[0]["device_idx"] == torch.device("mps")

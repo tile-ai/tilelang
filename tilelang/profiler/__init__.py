@@ -245,8 +245,9 @@ class Profiler:
             dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
                 names to concrete int values. Use this when benchmarking kernels with
                 dynamic shapes, e.g., {"m": 2048, "n": 1024}
-            device: Optional device to benchmark on. Non-CUDA devices require
-                "wall"; asynchronous wall timing needs an explicit device.
+            device: Optional device to benchmark on. MPS supports "event" and
+                "wall"; CPU requires "wall". Asynchronous wall timing needs
+                an explicit device.
 
         Returns:
             float: Average execution time in milliseconds
@@ -278,7 +279,7 @@ class Profiler:
                 early_stop_baseline=early_stop_baseline,
             )
 
-        if device is None or (backend == "wall" and not isinstance(device, int) and torch.device(device).type != "cuda"):
+        if device is None or (not isinstance(device, int) and torch.device(device).type != "cuda"):
             return run_bench()
         with torch.cuda.device(device):
             return run_bench()
