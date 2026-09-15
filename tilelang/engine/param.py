@@ -140,16 +140,6 @@ class KernelParam:
         """
         return T.dtype(self.dtype).as_torch()
 
-    def storage_shape(self, *, target=None) -> list[int | IntImm | Var]:
-        """Return the shape expected by the Torch storage dtype.
-
-        TIR and PyTorch agree element for element for every dtype this backend
-        emits, so this is the logical shape unchanged.  It stays as a named hook
-        because it is the one place that would need to change if a backend ever
-        introduced a packed storage ABI.
-        """
-        return list(self.shape)
-
     def tilelang_dtype(self) -> T.dtype:
         """
         Converts the TVM DataType to TileLang dtype.
