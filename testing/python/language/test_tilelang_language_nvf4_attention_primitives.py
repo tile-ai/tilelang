@@ -189,5 +189,96 @@ def test_blockscaled_register_a_packed_words_matches_shared_a(M, N, K, threads):
     assert src.count("sm120_mma_sync_blockscaled") >= 2
 
 
+def _swizzled_sfb_kernel(M: int, N: int, K: int, threads: int):
+    """One tile computed twice: row-major B scales, and the swizzled layout that lets each lane
+    load its scale rows contiguously (T.mma_gemm_blockscaled(..., sf_b_swizzled=True))."""
+    fp4 = T.float4_e2m1fn
+    words = K // 64
+    rows = N // 2  # the swizzled buffer holds 4 words (2 original rows) per row
+    padded = rows + rows // 8  # one pad row per lane block, to keep the blocks off the same banks
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), fp4),
+        B: T.Tensor((N, K), fp4),
+        SFA: T.Tensor((M, words), T.uint32),
+        SFB: T.Tensor((N, words), T.uint32),
+        SFB_sw: T.Tensor((N, words), T.uint32),
+        C_plain: T.Tensor((M, N), T.float32),
+        C_sw: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            A_sh = T.alloc_shared((M, K), fp4)
+            B_sh = T.alloc_shared((N, K), fp4)
+            SFA_sh = T.alloc_shared((M, words), T.uint32)
+            SFB_sh = T.alloc_shared((N, words), T.uint32)
+            SFB_sw_sh = T.alloc_shared((padded, 2 * words), T.uint32)
+            acc_plain = T.alloc_fragment((M, N), T.float32)
+            acc_sw = T.alloc_fragment((M, N), T.float32)
+            T.copy(A, A_sh)
+            T.copy(B, B_sh)
+            T.copy(SFA, SFA_sh)
+            T.copy(SFB, SFB_sh)
+            for r, w in T.Parallel(rows, 2 * words):
+                SFB_sw_sh[(r // 8) * 9 + r % 8, w] = SFB_sw[2 * r + w // words, w % words]
+            T.clear(acc_plain)
+            T.mma_gemm_blockscaled(
+                A_sh,
+                B_sh,
+                acc_plain,
+                SFA_sh,
+                SFB_sh,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+            )
+            T.clear(acc_sw)
+            T.mma_gemm_blockscaled(
+                A_sh,
+                B_sh,
+                acc_sw,
+                SFA_sh,
+                SFB_sw_sh,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+                sf_b_swizzled=True,
+            )
+            T.copy(acc_plain, C_plain)
+            T.copy(acc_sw, C_sw)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_blockscaled_swizzled_b_scales_match_rowmajor():
+    M = N = K = 128
+    threads = 256
+    kernel = tilelang.jit(out_idx=[5, 6])(_swizzled_sfb_kernel)(M, N, K, threads)
+    torch.manual_seed(0)
+    a = torch.randint(0, 255, (M, K // 2), dtype=torch.uint8, device="cuda")
+    b = torch.randint(0, 255, (N, K // 2), dtype=torch.uint8, device="cuda")
+
+    def _scale_words(rows, cols):  # four ue4m3 bytes per word, all finite (1.0 .. 3.5)
+        by = torch.randint(0x38, 0x42, (rows, cols, 4), dtype=torch.int64, device="cuda")
+        return (by[..., 0] | (by[..., 1] << 8) | (by[..., 2] << 16) | (by[..., 3] << 24)).to(torch.uint32)
+
+    sfa = _scale_words(M, K // 64)
+    sfb = _scale_words(N, K // 64)
+    # row n of the B scales moves to (n % 8) * 16 + n // 8, i.e. gather new[p] = old[(p % 16) * 8 + p // 16]
+    p_idx = torch.arange(N, device="cuda")
+    sfb_sw = sfb.index_select(0, (p_idx % 16) * 8 + p_idx // 16).contiguous()
+    c_plain, c_sw = kernel(a.view(torch.int8), b.view(torch.int8), sfa, sfb, sfb_sw)
+    assert torch.equal(c_plain, c_sw), (c_plain - c_sw).abs().max()
+    assert c_plain.abs().sum() > 0
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -37,6 +37,10 @@ class GemmMMASm120BlockScaled(GemmMMA):
         if _is_explicit_non_sm120_cuda(target):
             raise ValueError("T.mma_gemm_blockscaled requires SM120 CUDA target")
 
+    def _sf_b_swizzled(self) -> bool:
+        annotations = getattr(self.gemm_node, "annotations", {})
+        return bool(int(annotations.get("sf_b_swizzled", 0)))
+
     def _a_packed_words(self) -> bool:
         annotations = getattr(self.gemm_node, "annotations", {})
         return bool(int(annotations.get("a_packed_words", 0)))
@@ -172,6 +176,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
 
             n_ksteps = int(block_K // micro_size_k)
             use_words = mma_emitter.supports_scale_words(int(sf_a_granularity_k), int(sf_b_granularity_k))
+            sfb_swizzled = self._sf_b_swizzled()
+            sfb_words_len = (2 * warp_cols * n_ksteps) if sfb_swizzled else (warp_cols * n_ksteps)
 
             @T.prim_func
             def _gemm_rs_blockscaled() -> None:
@@ -181,7 +187,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                 if use_words:
                     # one vector load per atom row fetches the scale words of every k step
                     SFA_words = T.alloc_local((warp_rows * n_ksteps), "uint32")
-                    SFB_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                    SFB_words = T.alloc_local((sfb_words_len), "uint32")
                     SFB_rep_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
                     mma_emitter.ldscale_words(
                         SFA_words,
@@ -193,6 +199,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                         k_start=self.sf_k_start,
                         sf_a_granularity_k=int(sf_a_granularity_k),
                         sf_b_granularity_k=int(sf_b_granularity_k),
+                        sfb_swizzled=sfb_swizzled,
                     )
                     for ki in T.unroll(n_ksteps):
                         mma_emitter.ldmatrix_b(B_local, B_region, ki)
@@ -210,6 +217,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_words=SFB_words,
                             SFB_rep_words=SFB_rep_words,
                             n_ksteps=n_ksteps,
+                            sfb_swizzled=sfb_swizzled,
                         )
                 else:
                     for ki in T.serial(0, n_ksteps):
@@ -382,6 +390,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
 
         n_ksteps = int(block_K // micro_size_k)
         use_words = mma_emitter.supports_scale_words(int(sf_a_granularity_k), int(sf_b_granularity_k))
+        sfb_swizzled = self._sf_b_swizzled()
+        sfb_words_len = (2 * warp_cols * n_ksteps) if sfb_swizzled else (warp_cols * n_ksteps)
 
         @T.prim_func
         def _gemm_ss_blockscaled() -> None:
@@ -392,7 +402,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
             if use_words:
                 # one vector load per atom row fetches the scale words of every k step
                 SFA_words = T.alloc_local((warp_rows * n_ksteps), "uint32")
-                SFB_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                SFB_words = T.alloc_local((sfb_words_len), "uint32")
                 SFB_rep_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
                 mma_emitter.ldscale_words(
                     SFA_words,
@@ -404,6 +414,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                     k_start=self.sf_k_start,
                     sf_a_granularity_k=int(sf_a_granularity_k),
                     sf_b_granularity_k=int(sf_b_granularity_k),
+                    sfb_swizzled=sfb_swizzled,
                 )
                 for ki in T.unroll(n_ksteps):
                     mma_emitter.ldmatrix_a(A_local, A_region, ki)
@@ -422,6 +433,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                         SFB_words=SFB_words,
                         SFB_rep_words=SFB_rep_words,
                         n_ksteps=n_ksteps,
+                        sfb_swizzled=sfb_swizzled,
                     )
             else:
                 for ki in T.serial(0, n_ksteps):

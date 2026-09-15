@@ -473,6 +473,7 @@ def mma_gemm_blockscaled(
     sf_layout: str | None = None,
     scale_dtype: str | None = None,
     a_packed_words: bool = False,
+    sf_b_swizzled: bool = False,
 ) -> tirx.PrimExpr:
     """Explicit SM120 warp-level block-scaled MMA GEMM.
 
@@ -499,6 +500,10 @@ def mma_gemm_blockscaled(
 
     ``scale_dtype=None`` infers ``"ue4m3"`` for granularity 16 and
     ``"ue8m0"`` for granularity 32.
+
+    ``sf_b_swizzled=True`` expects the B scale factors with their rows permuted (row ``n`` stored
+    at ``(n % 8) * 16 + n // 8``) and reshaped to 4 words per row, so that every lane's scale rows
+    -- the atom rows and their replicates -- are contiguous and load in half as many instructions.
 
     ``a_packed_words=True`` takes A as a register fragment of ``uint32`` words
     (shape ``[M, K // 8]``) holding 8 packed e2m1 elements each, in the MMA
@@ -533,6 +538,8 @@ def mma_gemm_blockscaled(
         ann["sf_layout"] = sf_layout
     if a_packed_words:
         ann["a_packed_words"] = 1
+    if sf_b_swizzled:
+        ann["sf_b_swizzled"] = 1
 
     def legalize(arg):
         if isinstance(arg, tirx.Var) and T.has_let_value(arg):

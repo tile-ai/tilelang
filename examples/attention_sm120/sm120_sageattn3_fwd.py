@@ -202,6 +202,7 @@ def build_sm120_sageattn3_fwd(
             sf_b_granularity_k=16,
             sf_layout="rowmajor",
             scale_dtype="ue4m3",
+            sf_b_swizzled=True,
         )
 
     @T.macro
@@ -221,6 +222,7 @@ def build_sm120_sageattn3_fwd(
             sf_layout="rowmajor",
             scale_dtype="ue4m3",
             a_packed_words=True,
+            sf_b_swizzled=True,
         )
 
     @T.macro
@@ -318,8 +320,8 @@ def build_sm120_sageattn3_fwd(
             K_sh = T.alloc_shared((block_N, dim), fp4)
             V_sh = T.alloc_shared((dim, block_N), fp4)
             SFQ_sh = T.alloc_shared((block_M, sf_words_qk), T.uint32)
-            SFK_sh = T.alloc_shared((block_N, sf_words_qk), T.uint32)
-            SFV_sh = T.alloc_shared((dim, sf_words_pv), T.uint32)
+            SFK_sh = T.alloc_shared((block_N // 2 + 8, 2 * sf_words_qk), T.uint32)  # swizzled, 4 words/row, one pad row per lane block
+            SFV_sh = T.alloc_shared((dim // 2 + 8, 2 * sf_words_pv), T.uint32)  # swizzled, 4 words/row, one pad row per lane block
             SFP_sh = T.alloc_shared((block_M, sf_words_pv), T.uint32)
             SFP_u8 = T.view(SFP_sh, (block_M, n_groups), dtype=T.uint8)
             DS_sh = T.alloc_shared((block_N,), accum)
@@ -357,10 +359,10 @@ def build_sm120_sageattn3_fwd(
             for kt in T.Pipelined(n_kv_blocks, order=order, stage=stage, annotations=pipe_ann):
                 T.copy(K[bz, by, kt * block_N, 0], K_sh)
                 T.copy(VT[bz, by, 0, kt * block_N], V_sh)
-                for r, w in T.Parallel(block_N, sf_words_qk):
-                    SFK_sh[r, w] = SFK[bz, by, kt * block_N + r, w]
-                for r, w in T.Parallel(dim, sf_words_pv):
-                    SFV_sh[r, w] = SFV[bz, by, r, kt * sf_words_pv + w]
+                for r, w in T.Parallel(block_N // 2, 2 * sf_words_qk):  # rows already swizzled; pad every 8
+                    SFK_sh[(r // 8) * 9 + r % 8, w] = SFK[bz, by, kt * block_N + 2 * r + w // sf_words_qk, w % sf_words_qk]
+                for r, w in T.Parallel(dim // 2, 2 * sf_words_pv):
+                    SFV_sh[(r // 8) * 9 + r % 8, w] = SFV[bz, by, 2 * r + w // sf_words_pv, kt * sf_words_pv + w % sf_words_pv]
                 T.copy(DS[bz, by, bx, kt * block_N : (kt + 1) * block_N], DS_sh)
 
                 if tx // group_threads == 1:  # B: PV of the previous tile, while A is in its softmax

@@ -608,6 +608,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         SFB_words=None,
         SFB_rep_words=None,
         n_ksteps: int = 1,
+        sfb_swizzled: bool = False,
     ):
         # Keep the base-class positional signature (A, B, C, k_inner): the
         # non-blockscaled gemm lowering calls mma(A_local, B_local, C_buf, ki).
@@ -669,7 +670,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
                 if use_words:
                     scale_a_ptr = T.access_ptr(SFA_words[i * n_ksteps + k_inner], "r")
-                    scale_b_ptr = T.access_ptr(SFB_words[j * n_ksteps + k_inner], "r")
+                    # With a swizzled B-scale layout one contiguous load per lane covers both the
+                    # atom row and its replicate, so they sit at 2j and 2j+1 of the same array.
+                    b_word = ((2 * j) * n_ksteps + k_inner) if sfb_swizzled else (j * n_ksteps + k_inner)
+                    scale_b_ptr = T.access_ptr(SFB_words[b_word], "r")
                 else:
                     scale_a_ptr = T.access_ptr(
                         SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + scale_a_word_k)],
@@ -704,7 +708,8 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 )
                 if replicate_b:
                     if use_words:
-                        scale_b_rep_ptr = T.access_ptr(SFB_rep_words[j * n_ksteps + k_inner], "r")
+                        rep_word = ((2 * j + 1) * n_ksteps + k_inner) if sfb_swizzled else (j * n_ksteps + k_inner)
+                        scale_b_rep_ptr = T.access_ptr((SFB_words if sfb_swizzled else SFB_rep_words)[rep_word], "r")
                     else:
                         scale_b_rep_ptr = T.access_ptr(
                             SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + scale_b_word_k)],
@@ -821,6 +826,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         k_start: PrimExpr = 0,
         sf_a_granularity_k: int | None = None,
         sf_b_granularity_k: int | None = None,
+        sfb_swizzled: bool = False,
     ):
         """Preload the rowmajor scale words of all ``n_ksteps`` k64 steps into registers with one
         vector load per atom row (``[atom][k step]`` order). Requires one scale word per k step,
@@ -836,6 +842,9 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         sf_b_granularity_k = sf_vec_size if sf_b_granularity_k is None else sf_b_granularity_k
         if not self.supports_scale_words(sf_a_granularity_k, sf_b_granularity_k):
             raise ValueError("ldscale_words requires one scale word per k step (granularity 16)")
+        rows_per_lane = (2 * warp_cols * n_ksteps) // 4
+        if sfb_swizzled and (self.n_dim != 16 or (2 * warp_cols * n_ksteps) % 4 != 0):
+            raise ValueError("swizzled B scales require replicated B and a multiple of 4 words per lane")
         word0_a = self._scale_word_k(k_start, 0, sf_a_granularity_k)
         word0_b = self._scale_word_k(k_start, 0, sf_b_granularity_k)
         thread_binding = self.get_thread_binding()
@@ -852,13 +861,24 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 for v in T.vectorized(n_ksteps):
                     SFA_words[i * n_ksteps + v] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + word0_a + v)]
-            for j in T.unroll(warp_cols):
-                scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
-                for v in T.vectorized(n_ksteps):
-                    SFB_words[j * n_ksteps + v] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + word0_b + v)]
-                if replicate_b:
+            if sfb_swizzled:
+                # The B scales are stored with their rows permuted (row n at position
+                # (n % 8) * 16 + n // 8), reshaped to 4 words per row, and each lane's block of
+                # rows padded by one row: contiguous rows per lane, and the pad keeps the eight
+                # lane blocks off the same banks (a bare 128-byte stride puts them all on four).
+                for g in T.unroll(rows_per_lane):
+                    for v in T.vectorized(4):
+                        SFB_words[g * 4 + v] = SFB_data[tuple(SFB_other) + (SFB_base_n + sfb_col * (rows_per_lane + 1) + g, SFB_base_k + v)]
+            else:
+                for j in T.unroll(warp_cols):
+                    scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
                     for v in T.vectorized(n_ksteps):
-                        SFB_rep_words[j * n_ksteps + v] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + word0_b + v)]
+                        SFB_words[j * n_ksteps + v] = SFB_data[tuple(SFB_other) + (SFB_base_n + scale_n, SFB_base_k + word0_b + v)]
+                    if replicate_b:
+                        for v in T.vectorized(n_ksteps):
+                            SFB_rep_words[j * n_ksteps + v] = SFB_data[
+                                tuple(SFB_other) + (SFB_base_n + scale_n + 8, SFB_base_k + word0_b + v)
+                            ]
 
         return _warp_ldscale_words(SFA_words, SFB_words, SFB_rep_words, SFA_data, SFB_data, thread_binding)
 

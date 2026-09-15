@@ -224,8 +224,27 @@ def export_for_sage(c: dict) -> dict:
     )
 
 
+def swizzle_sf_rows(w: torch.Tensor, dim: int = -2, block: int = 128) -> torch.Tensor:
+    """Permute scale-word rows so each lane's rows become contiguous.
+
+    A lane of the block-scaled MMA reads the scale rows ``c, c+8, c+16, ... c+120`` of a 128-row
+    B tile (``c = lane // 4``), i.e. 16 rows at stride 8, which costs 16 separate loads. Moving row
+    ``n`` to position ``(n % 8) * 16 + n // 8`` makes those 16 rows contiguous, so they load as
+    four-word groups (``T.mma_gemm_blockscaled(..., sf_b_swizzled=True)``).
+    """
+    d = dim % w.dim()
+    n = w.shape[d]
+    assert n % block == 0, f"scale rows {n} must be a multiple of {block}"
+    p_in = torch.arange(block)
+    within = (p_in % 16) * 8 + p_in // 16  # new[p] = old[(p % 16) * 8 + p // 16]
+    base = (torch.arange(n) // block) * block
+    src = (base + within.repeat(n // block)).to(w.device)
+    return w.index_select(d, src).contiguous()
+
+
 def export_for_tilelang(c: dict) -> dict:
-    """Inputs of the TileLang kernel: packed nibbles + row-major uint32 scale words; K permuted."""
+    """Inputs of the TileLang kernel: packed nibbles + row-major uint32 scale words; K permuted,
+    B-operand scale rows swizzled (see swizzle_sf_rows)."""
     k_codes_p = permute_keys(c["k_codes"], dim=-2)
     k_sf_p = permute_keys(c["k_sf"], dim=-2)
     return dict(
@@ -233,8 +252,8 @@ def export_for_tilelang(c: dict) -> dict:
         k=pack_codes_to_nibbles(k_codes_p),
         vt=pack_codes_to_nibbles(c["vt_codes"]),
         sfq=sf_to_rowmajor_words(c["q_sf"]),
-        sfk=sf_to_rowmajor_words(k_sf_p),
-        sfv=sf_to_rowmajor_words(c["vt_sf"]),
+        sfk=swizzle_sf_rows(sf_to_rowmajor_words(k_sf_p)),  # B-operand scales of the QK GEMM
+        sfv=swizzle_sf_rows(sf_to_rowmajor_words(c["vt_sf"])),  # B-operand scales of the PV GEMM
     )
 
 
