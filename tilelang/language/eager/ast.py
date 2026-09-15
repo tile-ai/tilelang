@@ -8,6 +8,7 @@ from contextlib import AbstractContextManager, contextmanager
 from collections.abc import Iterable
 
 import inspect
+import textwrap
 
 # from .utils import get_ast, get_compiled_object
 from . import utils
@@ -298,6 +299,34 @@ def _try_eval(node: ast.expr, nonlocals: dict[str, Any], globals: dict[str, Any]
         return _empty
 
 
+class LoopControlFinder(ast.NodeVisitor):
+    """Find exits targeting a loop, without attributing nested loops' exits to it."""
+
+    def __init__(self):
+        self.depth = 0
+        self.has_control = False
+        self.has_return = False
+
+    def visit_For(self, node):
+        self.depth += 1
+        self.generic_visit(node)
+        self.depth -= 1
+
+    visit_While = visit_For
+
+    def visit_Break(self, node):
+        if self.depth == 0:
+            self.has_control = True
+
+    visit_Continue = visit_Break
+
+    def visit_Return(self, node):
+        self.has_return = True
+
+    def visit_FunctionDef(self, node):
+        pass
+
+
 class DSLMutator(ast.NodeTransformer):
     def __init__(self, nonlocals: dict[str, Any], globals: dict[str, Any], filename: str):
         self.tmp_counter = 0
@@ -352,6 +381,9 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_For(self, node: ast.For):
         self._reject_loop_else(node)
+        exits = LoopControlFinder()
+        for stmt in node.body:
+            exits.visit(stmt)
         node = self.generic_visit(node)
         if isinstance(node.iter, ast.Call):
             call = ast.Call(
@@ -366,12 +398,17 @@ class DSLMutator(ast.NodeTransformer):
         var = ast.Name(tmp, ctx=ast.Load())
         ast_set_span(var, ast_get_span(node.target))
         stmts = self._emit_assign_target(node.target, var)
+        # Most device loops need no Python control-flow machinery. Adding
+        # with/try blocks unconditionally exhausts CPython's nesting limit in
+        # otherwise valid deeply nested kernels.
+        body = "pass\n"
+        if exits.has_control:
+            body = "try:\n  pass\nexcept __tb.PythonLoopBreak:\n  break\nexcept __tb.PythonLoopContinue:\n  continue\n"
+        source = f"for {tmp} in __tb.ctx_for(range):\n" + textwrap.indent(body, "  ")
+        if exits.has_control or exits.has_return:
+            source = f"with __tb.loop(range) as {tmp}_iter:\n  for {tmp} in {tmp}_iter:\n" + textwrap.indent(body, "    ")
         return quote(
-            f"with __tb.loop(range) as {tmp}_iter:\n"
-            f"  for {tmp} in {tmp}_iter:\n"
-            "    try:\n      pass\n"
-            "    except __tb.PythonLoopBreak:\n      break\n"
-            "    except __tb.PythonLoopContinue:\n      continue\n",
+            source,
             target=node.target,
             range=node.iter,
             passes=[stmts + node.body],
@@ -529,7 +566,12 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_While(self, node):
         self._reject_loop_else(node)
+        exits = LoopControlFinder()
+        for stmt in node.body:
+            exits.visit(stmt)
         node = self.generic_visit(node)
+        if not exits.has_control:
+            return quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
         return quote1(
             "for _ in __tb.ctx_while(lambda: cond):\n"
             "  try:\n    pass\n"
