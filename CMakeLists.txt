@@ -538,6 +538,9 @@ endif()
 # Provide the custom LogMessageImpl / LogFatalImpl implementation to TVM,
 # since TVM_LOG_CUSTOMIZE=1 requires them to be supplied by the user.
 target_sources(tvm_runtime_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/logging.cc")
+# Host-side magic-number division helper (TileLangHostFastDivmodU32), resolved
+# as an extern symbol from JIT host modules.
+target_sources(tvm_runtime_objs PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/magic_div.cc")
 if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tvm_runtime_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()

@@ -14,6 +14,8 @@ Key design:
 """
 
 from __future__ import annotations
+
+import re
 from typing import Any, ClassVar
 
 from tvm import IRModule
@@ -366,6 +368,18 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
             # Analyze the function declaration to prepare for argument extraction
             declaration = code[index:].split(";")[0]
+
+            # tl.enable_magic_div threads host-precomputed magic constants as
+            # extra scalar kernel params. The NVRTC dispatcher assembles
+            # arguments by name from call() params and would silently drop
+            # them, producing a launch ABI mismatch; fail loudly instead.
+            magic_params = sorted(set(re.findall(r"\b(tl_magic_\w+)\b", declaration)))
+            if magic_params:
+                raise NotImplementedError(
+                    f"Kernel '{function_name}' has host-precomputed magic-division parameters {magic_params} "
+                    "(tl.enable_magic_div), which the NVRTC execution backend does not support yet. "
+                    "Use the tvm_ffi execution backend or disable tl.enable_magic_div."
+                )
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)

@@ -10,6 +10,7 @@
 #include <tvm/tirx/stmt.h>
 
 #include "../../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
+#include "../../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -53,6 +54,18 @@ public:
   PrimExpr VisitExpr_(const tirx::BufferLoadNode *op) final {
     auto node = Downcast<tirx::BufferLoad>(Parent::VisitExpr_(op));
     return std::move(node);
+  }
+
+  PrimExpr VisitExpr_(const tirx::CallNode *op) final {
+    // tl.magic_div has a fixed 32-bit contract (uint32 mul-high semantics).
+    // Promoting its operands or result would break the bit-pattern of the
+    // magic multiplier and leave widen/narrow pairs in device code, so the
+    // whole call subtree is left untouched; the surrounding index expression
+    // widens the int32 quotient with an explicit cast if needed.
+    if (op->op.same_as(tl::magic_div()) || op->op.same_as(tl::magic_mod())) {
+      return ffi::GetRef<PrimExpr>(op);
+    }
+    return Parent::VisitExpr_(op);
   }
 };
 

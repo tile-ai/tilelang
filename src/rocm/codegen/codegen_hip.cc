@@ -1509,8 +1509,57 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     this->stream << ");\n";
   };
-  if (op->op.same_as(builtin::reinterpret()) && op->args.size() == 1U &&
-      !op->dtype.is_float4() && !op->args[0].dtype().is_float4()) {
+  if (op->op.same_as(tl::magic_mod()) || op->op.same_as(tl::magic_div())) {
+    if (!emitted_magic_div_helpers_) {
+      emitted_magic_div_helpers_ = true;
+      decl_stream
+          << "static __device__ __noinline__ int tl_magic_floordiv_i32(int a, "
+             "int b) {\n"
+             "  int q = a / b;\n"
+             "  return q - ((((a % b) != 0) && ((a < 0) != (b < 0))) ? 1 : "
+             "0);\n"
+             "}\n"
+             "static __device__ __noinline__ int tl_magic_floormod_i32(int a, "
+             "int b) {\n"
+             "  int r = a % b;\n"
+             "  return r + (((r != 0) && ((r < 0) != (b < 0))) ? b : 0);\n"
+             "}\n";
+    }
+  }
+  if (op->op.same_as(tl::magic_mod())) {
+    // floormod(x, d) with host-precomputed magic constants, same runtime
+    // validity guard as magic_div (fallback keeps floormod semantics).
+    ICHECK_EQ(op->args.size(), 4U);
+    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0) && ((unsigned)(("
+       << this->PrintExpr(op->args[1]) << ") - 1) <= 0x7FFFFFFE)) ? ((("
+       << this->PrintExpr(op->args[1]) << ") == 1) ? 0 : (("
+       << this->PrintExpr(op->args[0]) << ") - ((int)(__umulhi((unsigned)("
+       << this->PrintExpr(op->args[0]) << "), (unsigned)("
+       << this->PrintExpr(op->args[2]) << ")) >> (unsigned)("
+       << this->PrintExpr(op->args[3]) << "))) * ("
+       << this->PrintExpr(op->args[1]) << "))) : tl_magic_floormod_i32(("
+       << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
+       << ")))";
+    return;
+  } else if (op->op.same_as(tl::magic_div())) {
+    // floor(x / d) with host-precomputed magic constants. Runtime validity
+    // guard: magic form requires x >= 0 and 1 <= d <= INT32_MAX; anything
+    // else (int32-wrapped d, negative x, d == 0) falls back to a floordiv
+    // with sign correction, preserving the original TIR semantics for every
+    // runtime value.
+    ICHECK_EQ(op->args.size(), 4U);
+    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0) && ((unsigned)(("
+       << this->PrintExpr(op->args[1]) << ") - 1) <= 0x7FFFFFFE)) ? ((("
+       << this->PrintExpr(op->args[1]) << ") == 1) ? ("
+       << this->PrintExpr(op->args[0]) << ") : ((int)(__umulhi((unsigned)("
+       << this->PrintExpr(op->args[0]) << "), (unsigned)("
+       << this->PrintExpr(op->args[2]) << ")) >> (unsigned)("
+       << this->PrintExpr(op->args[3]) << ")))) : tl_magic_floordiv_i32(("
+       << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
+       << ")))";
+    return;
+  } else if (op->op.same_as(builtin::reinterpret()) && op->args.size() == 1U &&
+             !op->dtype.is_float4() && !op->args[0].dtype().is_float4()) {
     ICHECK_EQ(op->dtype.lanes() * op->dtype.bits(),
               op->args[0].dtype().lanes() * op->args[0].dtype().bits())
         << "reinterpret expects source and target to have the same number of "

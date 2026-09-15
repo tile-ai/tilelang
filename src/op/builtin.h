@@ -131,6 +131,9 @@ static constexpr const char *kDumpIRDir = "tl.dump_ir_path";
 static constexpr const char *kPassProfile = "tl.pass_profile";
 static constexpr const char *kPassProfileThresholdMs =
     "tl.pass_profile_threshold_ms";
+/*! \brief Enable host-precomputed magic-number division for divisions by
+ * launch-invariant dynamic shapes (see tl.LowerMagicDiv). Default: false. */
+static constexpr const char *kEnableMagicDiv = "tl.enable_magic_div";
 
 /*!
  * \brief Call a TVM-FFI packed function with an existing argument array and
@@ -164,6 +167,35 @@ TVM_DLL const Op &tvm_ffi_call_with_result();
  * - rw_mask: 1=read, 2=write, 3=read-write.
  */
 TVM_DLL const Op &access_ptr();
+
+/*!
+ * \brief TileLang intrinsic for host-precomputed magic-number division.
+ *
+ * magic_div(x, d, m, s) computes floor(x / d) for x >= 0 and d >= 1, where
+ * (m, s) are the CUTLASS FastDivmod magic constants precomputed on the host:
+ * q = umulhi(uint32(x), uint32(m)) >> s, with a d == 1 fallback to x.
+ *
+ * This op is opaque until device codegen, where it expands to a mul-high +
+ * shift sequence (e.g. __umulhi on CUDA/HIP). It is introduced by
+ * tl.LowerMagicDiv; users are not expected to write it directly.
+ *
+ * - x: dividend (int32, non-negative, scalar).
+ * - d: divisor (int32, positive, launch-invariant).
+ * - m: magic multiplier (uint32 semantics; 0 when d == 1).
+ * - s: shift (int32; 0 when d == 1).
+ */
+TVM_DLL const Op &magic_div();
+
+/*!
+ * \brief TileLang intrinsic for host-precomputed magic-number modulus.
+ *
+ * magic_mod(x, d, m, s) computes x - floor(x / d) * d for x >= 0 and d >= 1,
+ * i.e. floormod(x, d), using the same host-precomputed magic constants as
+ * magic_div. Kept as a single opaque intrinsic (rather than x - q * d in
+ * TIR) so rewrite rules never see a distributable Sub/Mul form; device
+ * codegen expands it with a d == 1 fallback to 0.
+ */
+TVM_DLL const Op &magic_mod();
 
 /*!
  * \brief Tile memory region descriptor: a transport-only bridge that carries
