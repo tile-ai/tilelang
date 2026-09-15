@@ -8,39 +8,18 @@ import pytest
 from tilelang import profiler, tvm
 from tilelang.backend import BackendContext, ProfilerBackendSpec, get_backend
 from tilelang.jit.kernel import JITKernel
-from tilelang.profiler import _torch_gpu, bench
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "IS_CUDA",
-        "_CACHE_FLUSH_ID",
-        "_bench_with_cuda_events",
-        "_bench_with_cudagraph",
-        "_bench_with_cupti",
-        "_cache_device",
-        "_cuda_synchronize",
-        "_do_bench_impl",
-        "_normalize_cuda_device",
-        "device",
-        "do_bench",
-        "logger",
-        "suppress_stdout_stderr",
-    ],
-)
-def test_legacy_benchmark_reexports(name):
-    assert getattr(bench, name) is getattr(_torch_gpu, name)
+from tilelang.profiler import bench
 
 
 def test_public_benchmark_reexports():
-    assert profiler.do_bench is _torch_gpu.do_bench
+    assert profiler.do_bench is bench.do_bench
+    assert bench.do_bench.__module__ == "tilelang.profiler.bench"
 
 
 @pytest.mark.parametrize("backend", ["cuda", "rocm"])
 def test_gpu_backend_reexports_shared_benchmark(backend):
     implementation = import_module(f"tilelang.{backend}.profiler")
-    assert implementation.do_bench is _torch_gpu.do_bench
+    assert implementation.do_bench is bench.do_bench
 
 
 @pytest.mark.parametrize("warmup,repeats", [(0, 1), (2, 4)])
@@ -80,7 +59,7 @@ def test_context_profiler_lazily_forwards_to_unchanged_gpu_bench(monkeypatch, me
         calls.append((args, kwargs))
         return result
 
-    monkeypatch.setattr(_torch_gpu, "do_bench", benchmark)
+    monkeypatch.setattr(bench, "do_bench", benchmark)
     context = _make_context(get_backend("cuda"))
     spec = context.profiler(method)
     assert calls == []

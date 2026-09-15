@@ -19,14 +19,14 @@ class ProfilerBackendSpec:
         return True if self.supports_target is None else self.supports_target(target)
 
 
-def _torch_gpu_do_bench(*args, **kwargs) -> float | list[float]:
-    from tilelang.profiler._torch_gpu import do_bench
+def _do_bench(*args, **kwargs) -> float | list[float]:
+    from tilelang.profiler.bench import do_bench
 
     return do_bench(*args, **kwargs)
 
 
-EVENT_PROFILER_BACKEND = ProfilerBackendSpec("event", partial(_torch_gpu_do_bench, backend="event"))
-CUPTI_PROFILER_BACKEND = ProfilerBackendSpec("cupti", partial(_torch_gpu_do_bench, backend="cupti"))
-CUDAGRAPH_PROFILER_BACKEND = ProfilerBackendSpec("cudagraph", partial(_torch_gpu_do_bench, backend="cudagraph"))
+EVENT_PROFILER_BACKEND = ProfilerBackendSpec("event", partial(_do_bench, backend="event"))
+CUPTI_PROFILER_BACKEND = ProfilerBackendSpec("cupti", partial(_do_bench, backend="cupti"))
+CUDAGRAPH_PROFILER_BACKEND = ProfilerBackendSpec("cudagraph", partial(_do_bench, backend="cudagraph"))
 
 TORCH_GPU_PROFILER_BACKENDS = (EVENT_PROFILER_BACKEND, CUPTI_PROFILER_BACKEND, CUDAGRAPH_PROFILER_BACKEND)

@@ -96,12 +96,12 @@ CMake files live. `src/backend/` is reserved for shared native backend helpers.
 
 ## Profiling Helpers
 
-The existing CUDA/ROCm benchmark implementation lives in
-`tilelang/profiler/_torch_gpu.py` and is re-exported by
-`tilelang/cuda/profiler.py`, `tilelang/rocm/profiler.py`, and the legacy
-`tilelang/profiler/bench.py` entry point. The existing Metal matmul benchmark
-helper lives in `tilelang/metal/profiler.py`. This separation does not change
-timing methods, defaults, units, iteration counts, or device handling.
+The existing CUDA/ROCm benchmark implementation stays in
+`tilelang/profiler/bench.py`. The public `tilelang.profiler.do_bench` and
+backend-local `tilelang/cuda/profiler.py` and `tilelang/rocm/profiler.py`
+re-exports all reuse this entry point. The existing Metal matmul benchmark
+helper lives in `tilelang/metal/profiler.py`. Timing methods, defaults, units,
+iteration counts, and device handling are unchanged.
 
 Profiling methods are described by `ProfilerBackendSpec`, independently of
 target backends and execution backends. A `BackendModule` declares its compatible
