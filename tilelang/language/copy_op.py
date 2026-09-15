@@ -14,13 +14,11 @@ import tvm
 from tvm import ir, tirx
 
 
-def _normalize_copy_regions_with_extents(
+def _normalize_copy_regions(
     src: BufferLikeType, dst: BufferLikeType
 ) -> tuple[
     tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
     tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
-    list[tirx.PrimExpr] | None,
-    list[tirx.PrimExpr] | None,
 ]:
     # If both side are buffers, check total element counts match.  Shape
     # equality is NOT required: Ascend fractal copies between differently-
@@ -49,7 +47,7 @@ def _normalize_copy_regions_with_extents(
     # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
     # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
     if src_is_scalar_load and dst_is_scalar_load:
-        return src, dst, None, None
+        return src, dst
 
     assert src_extent or dst_extent, "Can't deduce copy extents from args. Both src and dst miss extents info."
     # Treat missing extent as length-matched ones for convenience. This provides limited
@@ -64,19 +62,11 @@ def _normalize_copy_regions_with_extents(
     # Use legalized extents for src and dst respectively.
     src = to_buffer_region(src, access_type="r", extents=src_extent)
     dst = to_buffer_region(dst, access_type="w", extents=dst_extent)
-    return src, dst, src_extent, dst_extent
-
-
-def _normalize_copy_regions(
-    src: BufferLikeType, dst: BufferLikeType
-) -> tuple[
-    tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
-    tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
-]:
-    src, dst, _, _ = _normalize_copy_regions_with_extents(src, dst)
     return src, dst
 
 
+# Cache eviction priority names -> integer ids used in the tile-op call
+# protocol (consumed by CUDA codegen; see the CUDA dialect's copy/im2col).
 EVICTION_POLICY_IDS = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}
 
 
@@ -132,8 +122,7 @@ def copy(
       destination allocation must reserve one padding row, and the copied region
       must exclude that row (for example, ``T.copy(src, dst[:rows, :])``).
     """
-    dst_orig = dst
-    src, dst, src_extent, dst_extent = _normalize_copy_regions_with_extents(src, dst)
+    src, dst = _normalize_copy_regions(src, dst)
 
     # Build annotations dict before selecting the scalar fast path: a scalar
     # copy with metadata must remain a tile op so the metadata is preserved.
@@ -146,7 +135,6 @@ def copy(
     # Parallel loop layout hint (Fragment). Mirrors T.Parallel(loop_layout=...)
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
-
 
     if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
         # Scalar fast path. Mirror the dtype conversion the region path applies

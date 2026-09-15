@@ -197,7 +197,7 @@ def register_var_scope_frame(frame_type: type) -> None:
 
 
 def is_var(v: Any) -> bool:
-    return isinstance(v, Buffer) and v.scope() in ("local.var", "local.simd.var")
+    return isinstance(v, Buffer) and v.scope() == "local.var"
 
 
 # phase1: eager jit obtain function signature

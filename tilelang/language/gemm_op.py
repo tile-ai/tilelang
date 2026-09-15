@@ -29,9 +29,6 @@ def _gemm_impl(
     clear_accum: bool = False,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
-    sfa: BufferLikeType | None = None,
-    sfb: BufferLikeType | None = None,
-    sf_k_start: int | tirx.PrimExpr = 0,
 ) -> tirx.PrimExpr:
     """Shared GEMM implementation.
 
@@ -62,8 +59,6 @@ def _gemm_impl(
     B = legalize_arguments(B)
     C = legalize_arguments(C)
     mbar = legalize_arguments(mbar) if mbar is not None else None
-    sfa = legalize_arguments(sfa) if sfa is not None else None
-    sfb = legalize_arguments(sfb) if sfb is not None else None
 
     # Normalize A/B/C to BufferRegion for shape/stride/offset analysis
     A_region = to_buffer_region(A)
@@ -132,17 +127,6 @@ def _gemm_impl(
     # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
     # correctly ignored.
     mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
-    extra_args = []
-    if sfa is not None or sfb is not None:
-        assert sfa is not None and sfb is not None, "block-scaled GEMM requires both sfa and sfb"
-        sfa_region = to_buffer_region(sfa, access_type="r")
-        sfb_region = to_buffer_region(sfb, access_type="r")
-        sfa_arg = buffer_region_to_tile_region(sfa_region, "r", list(retrieve_shape(sfa_region)))
-        sfb_arg = buffer_region_to_tile_region(sfb_region, "r", list(retrieve_shape(sfb_region)))
-        if not isinstance(sf_k_start, tirx.PrimExpr):
-            sf_k_start = tirx.const(sf_k_start, dtype="int32")
-        extra_args = [sfa_arg, sfb_arg, sf_k_start]
-
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get(op_key),
@@ -159,7 +143,6 @@ def _gemm_impl(
         mbar_arg,
         C_coords[-2],
         C_coords[-1],
-        *extra_args,
         annotations=annotations,
     )
 

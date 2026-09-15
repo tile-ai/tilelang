@@ -6,7 +6,7 @@ from typing import Any
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.copy_op import (
-    _normalize_copy_regions_with_extents,
+    _normalize_copy_regions,
     copy as _common_copy,
 )
 from tilelang.language.utils import _normalize_annotations, get_extent
@@ -337,7 +337,7 @@ def copy(  # noqa: A001
     # as a third positional region so the backend can derive the scale L1 pointer
     # and emit asc_copy_l12l0a_mx / asc_copy_l12l0b_mx alongside the data load.
     if scale is not None:
-        src_region, dst_region, _, _ = _normalize_copy_regions_with_extents(src, dst)
+        src_region, dst_region = _normalize_copy_regions(src, dst)
         scale_region = to_buffer_region(scale, access_type="r", extents=get_extent(scale))
         return tirx.call_intrin(
             "handle",

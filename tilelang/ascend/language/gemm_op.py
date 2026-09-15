@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.gemm_op import _gemm_impl
+from tilelang.language.utils import buffer_region_to_tile_region
 from tilelang.tileop.base import GemmWarpPolicy
+from tilelang.utils.language import retrieve_shape, to_buffer_region
 from tvm import tirx
 
 __all__ = ["gemm", "blockscaled_gemm"]
@@ -30,7 +32,7 @@ def blockscaled_gemm(
     ann = {"blockscaled": 1}
     if unit_flag_ctrl is not None:
         ann["unit_flag_ctrl"] = unit_flag_ctrl
-    return _gemm_impl(
+    call = _gemm_impl(
         "tl.tileop.gemm",
         A,
         B,
@@ -40,9 +42,27 @@ def blockscaled_gemm(
         policy=GemmWarpPolicy.Square,
         clear_accum=clear_accum,
         mbar=None,
-        sfa=sfa,
-        sfb=sfb,
         annotations=ann,
+    )
+    if sfa is None and sfb is None:
+        return call
+    assert sfa is not None and sfb is not None, "block-scaled GEMM requires both sfa and sfb"
+    # Mirror T.tcgen05_gemm_blockscaled's wire format: the scale-factor
+    # regions ride as trailing tl.tileop.gemm args (SFA, SFB, sf_k_start),
+    # parsed into GemmNode's sfaRegion/sfbRegion. Appending to the common
+    # builder's call keeps the positional contract in one place.
+    sfa_region = to_buffer_region(sfa, access_type="r")
+    sfb_region = to_buffer_region(sfb, access_type="r")
+    sfa_arg = buffer_region_to_tile_region(sfa_region, "r", list(retrieve_shape(sfa_region)))
+    sfb_arg = buffer_region_to_tile_region(sfb_region, "r", list(retrieve_shape(sfb_region)))
+    return tirx.call_intrin(
+        "handle",
+        call.op,
+        *call.args,
+        sfa_arg,
+        sfb_arg,
+        tirx.const(0, dtype="int32"),
+        annotations=call.annotations,
     )
 
 
