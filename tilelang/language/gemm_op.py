@@ -77,11 +77,6 @@ def _gemm_impl(
             assert shape[i] == 1, (
                 f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
             )
-    if len(C_shape) > 2:
-        assert C_region.buffer.scope() in ("shared.l0c", "shared.l0c.dyn"), (
-            "higher-order C regions are only supported for Ascend L0C buffers"
-        )
-
     M, N = C_shape[-2], C_shape[-1]
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     K = A_shape[-2] if transpose_A else A_shape[-1]
@@ -96,20 +91,7 @@ def _gemm_impl(
     else:
         assert prove_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
 
-    # Ascend L0 regions describe one operation-local compact MAD tile.  Keep
-    # the positional M/N/K fields static because GemmNode and the non-Ascend
-    # instruction selectors use them as compile-time tile metadata; the
-    # Ascend L0 lowering reads the actual (possibly symbolic) geometry from the
-    # three BufferRegions instead.
-    is_ascend_l0_gemm = (
-        A_region.buffer.scope() == "shared.l0a" and B_region.buffer.scope() == "shared.l0b" and C_region.buffer.scope() == "shared.l0c"
-    )
-    node_M, node_N, node_K = M, N, K
-    if is_ascend_l0_gemm:
-        node_M, node_N = C_region.buffer.shape[-2:]
-        node_K = A_region.buffer.shape[-2] if transpose_A else A_region.buffer.shape[-1]
-
-    for name, dim in (("M", node_M), ("N", node_N), ("K", node_K)):
+    for name, dim in (("M", M), ("N", N), ("K", K)):
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
@@ -135,14 +117,14 @@ def _gemm_impl(
         C_arg,
         transpose_A,
         transpose_B,
-        node_M,
-        node_N,
-        node_K,
+        M,
+        N,
+        K,
         policy,
         clear_accum,
         mbar_arg,
-        C_coords[-2],
-        C_coords[-1],
+        C_coords[0],
+        C_coords[1],
         annotations=annotations,
     )
 
@@ -163,13 +145,6 @@ def gemm(
     selects WGMMA lowering, TileLang inserts the corresponding wait implicitly.
     On Blackwell TCGEN5MMA, TileLang inserts the corresponding
     `mbarrier_wait_parity(...)` implicitly after issue.
-
-    On Ascend, L0 operand regions specify the effective MAD M/N/K. Their
-    trailing matrix dimensions must start at zero and describe a compact
-    tile. L0 allocations and producer copies may be padded for hardware
-    alignment; for example, a transposed FP32 load can copy K32 while GEMM
-    consumes ``A[:, :24]`` and ``B[:, :24]``. Copy regions must cover the
-    physical transfer. Allocation padding remains part of the storage budget.
 
     For manual asynchronous scheduling, use `T.wgmma_gemm(...)` with
     `T.wait_wgmma(...)` on Hopper, or `T.tcgen05_gemm(...)` with
@@ -193,7 +168,6 @@ def gemm(
     Returns:
         tirx.Call: A handle to the GEMM operation.
     """
-
     return _gemm_impl(
         "tl.tileop.gemm",
         A,
