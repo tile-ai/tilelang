@@ -189,6 +189,135 @@ def test_blockscaled_register_a_packed_words_matches_shared_a(M, N, K, threads):
     assert src.count("sm120_mma_sync_blockscaled") >= 2
 
 
+def _register_sfa_kernel(M: int, N: int, K: int, threads: int):
+    """One tile computed twice: A and its scale words in shared memory, and both copied into
+    register fragments (A words with a_packed_words, A scales as a uint32 word fragment whose
+    layout the GEMM dictates), the way a kernel keeps one Q tile in registers across many K tiles."""
+    fp4 = T.float4_e2m1fn
+    words = K // 64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), fp4),
+        B: T.Tensor((N, K), fp4),
+        SFA: T.Tensor((M, words), T.uint32),
+        SFB: T.Tensor((N, words), T.uint32),
+        C_sh: T.Tensor((M, N), T.float32),
+        C_reg: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            A_sh = T.alloc_shared((M, K), fp4)
+            B_sh = T.alloc_shared((N, K), fp4)
+            SFA_sh = T.alloc_shared((M, words), T.uint32)
+            SFB_sh = T.alloc_shared((N, words), T.uint32)
+            A_words = T.view(A_sh, (M, K // 8), dtype=T.uint32)
+            Aw = T.alloc_fragment((M, K // 8), T.uint32)
+            SFAw = T.alloc_fragment((M, words), T.uint32)
+            acc_sh = T.alloc_fragment((M, N), T.float32)
+            acc_reg = T.alloc_fragment((M, N), T.float32)
+            T.copy(A, A_sh)
+            T.copy(B, B_sh)
+            T.copy(SFA, SFA_sh)
+            T.copy(SFB, SFB_sh)
+            T.clear(acc_sh)
+            T.mma_gemm_blockscaled(
+                A_sh,
+                B_sh,
+                acc_sh,
+                SFA_sh,
+                SFB_sh,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+            )
+            T.copy(A_words, Aw)
+            T.copy(SFA_sh, SFAw)
+            T.clear(acc_reg)
+            T.mma_gemm_blockscaled(
+                Aw,
+                B_sh,
+                acc_reg,
+                SFAw,
+                SFB_sh,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+                a_packed_words=True,
+            )
+            T.copy(acc_sh, C_sh)
+            T.copy(acc_reg, C_reg)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("M,N,K,threads", [(16, 32, 64, 32), (32, 32, 128, 32), (128, 128, 128, 256)])
+def test_blockscaled_register_a_scales_match_shared_scales(M, N, K, threads):
+    torch.manual_seed(0)
+    a = torch.randint(-128, 128, (M, K // 2), device="cuda", dtype=torch.int8)
+    b = torch.randint(-128, 128, (N, K // 2), device="cuda", dtype=torch.int8)
+
+    def _scale_words(rows, cols):  # four ue4m3 bytes per word, all finite; distinct per row and group
+        by = torch.randint(0x30, 0x48, (rows, cols, 4), dtype=torch.int64, device="cuda")
+        return (by[..., 0] | (by[..., 1] << 8) | (by[..., 2] << 16) | (by[..., 3] << 24)).to(torch.uint32).contiguous()
+
+    sfa = _scale_words(M, K // 64)
+    sfb = _scale_words(N, K // 64)
+    kernel = tilelang.compile(_register_sfa_kernel(M, N, K, threads), target="cuda", out_idx=[4, 5])
+    c_sh, c_reg = kernel(a, b, sfa, sfb)
+    assert torch.isfinite(c_sh).all() and float(c_sh.abs().max()) > 0
+    assert torch.equal(c_sh.view(torch.int32), c_reg.view(torch.int32)), (c_sh - c_reg).abs().max()
+
+
+def test_blockscaled_register_a_scales_require_register_a():
+    """Register A scales are only wired into the register-A (a_packed_words) lowering."""
+    M = N = K = 128
+    fp4 = T.float4_e2m1fn
+
+    @T.prim_func
+    def main(A: T.Tensor((M, K), fp4), B: T.Tensor((N, K), fp4), SFB: T.Tensor((N, K // 64), T.uint32), C: T.Tensor((M, N), T.float32)):
+        with T.Kernel(1, threads=256) as _:
+            A_sh = T.alloc_shared((M, K), fp4)
+            B_sh = T.alloc_shared((N, K), fp4)
+            SFB_sh = T.alloc_shared((N, K // 64), T.uint32)
+            SFAw = T.alloc_fragment((M, K // 64), T.uint32)
+            acc = T.alloc_fragment((M, N), T.float32)
+            T.copy(A, A_sh)
+            T.copy(B, B_sh)
+            T.copy(SFB, SFB_sh)
+            for i, w in T.Parallel(M, K // 64):
+                SFAw[i, w] = 0x40404040
+            T.clear(acc)
+            T.mma_gemm_blockscaled(
+                A_sh,
+                B_sh,
+                acc,
+                SFAw,
+                SFB_sh,
+                transpose_B=True,
+                policy=T.GemmWarpPolicy.FullRow,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+            )
+            T.copy(acc, C)
+
+    tilelang.disable_cache()  # a cached kernel from an older, permissive build would skip lowering
+    try:
+        with pytest.raises(Exception, match="register A scales"):
+            tilelang.compile(main, target="cuda")
+    finally:
+        tilelang.enable_cache()
+
+
 def _swizzled_sfb_kernel(M: int, N: int, K: int, threads: int):
     """One tile computed twice: row-major B scales, and the swizzled layout that lets each lane
     load its scale rows contiguously (T.mma_gemm_blockscaled(..., sf_b_swizzled=True))."""

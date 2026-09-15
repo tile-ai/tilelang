@@ -7,7 +7,7 @@ from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang.transform.simplify import _Simplify
 from tilelang.layout.swizzle import make_swizzled_layout
-from tilelang.utils.language import is_full_region
+from tilelang.utils.language import is_fragment, is_full_region
 from tvm import tirx
 from tvm.ir import Range
 from tvm.target import Target
@@ -45,6 +45,12 @@ class GemmMMASm120BlockScaled(GemmMMA):
         annotations = getattr(self.gemm_node, "annotations", {})
         return bool(int(annotations.get("a_packed_words", 0)))
 
+    def _sfa_in_registers(self) -> bool:
+        """A-operand scale words given as a register fragment (e.g. computed in-lane) rather than
+        loaded from shared memory."""
+        region = self.SFARegion
+        return region is not None and is_fragment(region.buffer)
+
     def __post_init__(self) -> None:
         # A uint32 fragment of packed e2m1 words is a storage form of float4_e2m1fn, not a
         # mixed-dtype GEMM: skip the base A/B dtype validation for that case.
@@ -55,11 +61,19 @@ class GemmMMASm120BlockScaled(GemmMMA):
         super().__post_init__()
 
     def _validate_operands(self) -> None:
+        if self._sfa_in_registers() and not (self.is_gemm_rs() and self._a_packed_words()):
+            # checked before the shared-operand early return: the shared lowering would otherwise
+            # load scale words from the fragment as if it were shared memory
+            raise ValueError("register A scales are supported with a register-A packed-word operand only")
         if self.is_gemm_ss():
             return
         if self.is_gemm_rs() and self._a_packed_words():
             if str(self.a_dtype) != "uint32":
                 raise ValueError("T.mma_gemm_blockscaled(a_packed_words=True) requires a uint32 A fragment")
+            if self._sfa_in_registers():
+                granularity, _ = self._scale_mode()
+                if granularity != 16 or str(self.SFARegion.buffer.dtype) != "uint32":
+                    raise ValueError("register A scales require uint32 scale words at granularity 16 (scale_vec::4X)")
             return
         raise ValueError(
             "T.mma_gemm_blockscaled supports shared-memory A/B operands, or a uint32 register-A "
@@ -119,11 +133,15 @@ class GemmMMASm120BlockScaled(GemmMMA):
         self._validate_operands()
         if self.is_gemm_rs() and self._a_packed_words():
             mma_emitter = self._make_mma_emitter(target, thread_nums)
-            return {
+            layouts = {
                 self.A: mma_emitter.make_mma_load_word_layout(self.A),
                 self.B: make_swizzled_layout(self.B),
                 self.C: mma_emitter.make_mma_store_layout(self.C),
             }
+            if self._sfa_in_registers():
+                n_ksteps = int(mma_emitter.chunk // mma_emitter.micro_size_k)
+                layouts[self.SFARegion.buffer] = mma_emitter.make_sfa_register_layout(self.SFARegion.buffer, n_ksteps)
+            return layouts
         return super().infer_layout(target, thread_nums)
 
     def lower(
@@ -178,6 +196,10 @@ class GemmMMASm120BlockScaled(GemmMMA):
             use_words = mma_emitter.supports_scale_words(int(sf_a_granularity_k), int(sf_b_granularity_k))
             sfb_swizzled = self._sf_b_swizzled()
             sfb_words_len = (2 * warp_cols * n_ksteps) if sfb_swizzled else (warp_cols * n_ksteps)
+            sfa_in_registers = self._sfa_in_registers()
+            if sfa_in_registers and not use_words:
+                raise ValueError("register A scales require one scale word per k64 step")
+            SFA_register_buf = self.SFARegion.buffer if sfa_in_registers else None
 
             @T.prim_func
             def _gemm_rs_blockscaled() -> None:
@@ -200,6 +222,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                         sf_a_granularity_k=int(sf_a_granularity_k),
                         sf_b_granularity_k=int(sf_b_granularity_k),
                         sfb_swizzled=sfb_swizzled,
+                        sfa_in_registers=sfa_in_registers,
                     )
                     for ki in T.unroll(n_ksteps):
                         mma_emitter.ldmatrix_b(B_local, B_region, ki)
@@ -218,6 +241,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_words=SFB_rep_words,
                             n_ksteps=n_ksteps,
                             sfb_swizzled=sfb_swizzled,
+                            SFA_register_buf=SFA_register_buf,
                         )
                 else:
                     for ki in T.serial(0, n_ksteps):

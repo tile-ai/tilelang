@@ -609,6 +609,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         SFB_rep_words=None,
         n_ksteps: int = 1,
         sfb_swizzled: bool = False,
+        SFA_register_buf=None,
     ):
         # Keep the base-class positional signature (A, B, C, k_inner): the
         # non-blockscaled gemm lowering calls mma(A_local, B_local, C_buf, ki).
@@ -656,6 +657,17 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         # Scale words preloaded by ldscale_words(): one word per k64 step (granularity 16), laid
         # out [atom][k step] in registers, so the MMA reads them without further shared loads.
         use_words = SFA_words is not None
+        SFA_register_flat = None
+        if SFA_register_buf is not None:
+            # A register fragment is a plain lane-local array after lowering; a 1-D alias over its
+            # data var lets the MMA address word ``atom * n_ksteps + k`` directly.
+            SFA_register_flat = tvm.tirx.decl_buffer(
+                (warp_rows * n_ksteps,),
+                "uint32",
+                name=f"{SFA_register_buf.name}_flat",
+                data=SFA_register_buf.data,
+                scope=SFA_register_buf.scope(),
+            )
         if use_words and (SFB_words is None or (replicate_b and SFB_rep_words is None)):
             raise ValueError("preloaded scale words require SFA_words, SFB_words (and SFB_rep_words for n_dim=16)")
 
@@ -669,7 +681,11 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
                 scale_n = warp_n * warp_col_tiles + j * micro_size_y + sfb_col
                 if use_words:
-                    scale_a_ptr = T.access_ptr(SFA_words[i * n_ksteps + k_inner], "r")
+                    if SFA_register_flat is not None:
+                        # scale words already in registers (see make_sfa_register_layout)
+                        scale_a_ptr = T.access_ptr(SFA_register_flat[i * n_ksteps + k_inner], "r")
+                    else:
+                        scale_a_ptr = T.access_ptr(SFA_words[i * n_ksteps + k_inner], "r")
                     # With a swizzled B-scale layout one contiguous load per lane covers both the
                     # atom row and its replicate, so they sit at 2j and 2j+1 of the same array.
                     b_word = ((2 * j) * n_ksteps + k_inner) if sfb_swizzled else (j * n_ksteps + k_inner)
@@ -759,6 +775,34 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
         return Fragment((rows, words), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
 
+    def make_sfa_register_layout(self, sfa_buf: Buffer, n_ksteps: int) -> Fragment:
+        """Layout of an A-operand scale-word register fragment ``[rows, K // 64]`` (4X, one word
+        per k64 step), for scales computed in registers instead of loaded from shared memory.
+
+        CUTLASS SFALayout for k64 is ((2,2,8),64) stride ((8,0,1),16): lane L issues its MMAs
+        with the scale row ``8 * (L % 2) + L // 4`` of its atom, and the two lanes of an xor-2
+        pair use the same row. Each word is therefore replicated on both lanes of the pair; the
+        local index is ``atom * n_ksteps + word`` (the ``SFA_words`` order of ``mma``).
+        The lane is taken from the A-operand layout: row ``i`` at key ``16 * rep + 8 * ((i % 16) // 8)``
+        sits on the lane with bits (i % 8, rep, (i % 16) // 8).
+        """
+        rows, words = sfa_buf.shape
+        elem_buf = tvm.tirx.decl_buffer((rows, words * 64), T.float4_e2m1fn, name=f"{sfa_buf.name}_e2m1", scope="local.fragment")
+        elem_layout = self.make_mma_load_layout(elem_buf, matrix="A")
+        warp_row_tiles = self.warp_row_tiles
+        micro_size_x = self.micro_size_x
+
+        def _scalar(x):
+            return x if isinstance(x, tvm.tirx.PrimExpr) else x[0]
+
+        def fwd_thread(i, w, rep):
+            return _scalar(elem_layout.map_forward_thread([i, w * 64 + rep * 16 + ((i % 16) // 8) * 8]))
+
+        def fwd_index(i, w):  # the replicate var only enters the thread map
+            return ((i % warp_row_tiles) // micro_size_x) * n_ksteps + w
+
+        return Fragment((rows, words), forward_thread_fn=fwd_thread, replicate=2, forward_index_fn=fwd_index)
+
     def ldscale(
         self,
         SFA_local_buf,
@@ -827,6 +871,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         sf_a_granularity_k: int | None = None,
         sf_b_granularity_k: int | None = None,
         sfb_swizzled: bool = False,
+        sfa_in_registers: bool = False,
     ):
         """Preload the rowmajor scale words of all ``n_ksteps`` k64 steps into registers with one
         vector load per atom row (``[atom][k step]`` order). Requires one scale word per k step,
@@ -857,10 +902,11 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             sfa_row = self._sfa_row_in_atom(tx)
             sfb_col = self._sfb_col_in_atom(tx)
-            for i in T.unroll(warp_rows):
-                scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
-                for v in T.vectorized(n_ksteps):
-                    SFA_words[i * n_ksteps + v] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + word0_a + v)]
+            if not sfa_in_registers:
+                for i in T.unroll(warp_rows):
+                    scale_m = warp_m * warp_row_tiles + i * micro_size_x + sfa_row
+                    for v in T.vectorized(n_ksteps):
+                        SFA_words[i * n_ksteps + v] = SFA_data[tuple(SFA_other) + (SFA_base_m + scale_m, SFA_base_k + word0_a + v)]
             if sfb_swizzled:
                 # The B scales are stored with their rows permuted (row n at position
                 # (n % 8) * 16 + n // 8), reshaped to 4 words per row, and each lane's block of
