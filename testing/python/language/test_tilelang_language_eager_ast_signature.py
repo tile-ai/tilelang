@@ -2,11 +2,6 @@ from tilelang.language.eager.ast import BaseBuilder, mutate
 
 
 class _TestBuilder(BaseBuilder):
-    def override(self, name: str):
-        if name == "range":
-            return range
-        return super().override(name)
-
     def set_fileline(self, filename: str, lineno: int, name: str):
         pass
 
