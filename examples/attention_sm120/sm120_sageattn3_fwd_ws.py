@@ -43,6 +43,26 @@ strictly below 65536, or setmaxnreg.inc blocks forever and the kernel hangs (24/
 The output is stored in store_block_N-wide column chunks: under the producer/consumer branch the
 O tile can no longer share its shared-memory address with the Q tile.
 
+Per kv tile the consumer does what the original does, with fewer instructions (702 per lane
+against its 860; both issue the same 64 blockscaled MMAs):
+
+* Q and its scale words are copied into register fragments once per q tile and feed the QK
+  GEMM from there (``a_packed_words=True`` plus a register SFA operand), instead of being
+  reloaded from shared memory for every kv tile.
+* P is packed four key pairs at a time into one uint32 word with a single inline-asm sequence
+  (four ``cvt.rn.satfinite.e2m1x2.f32`` into byte registers and one concatenating move), the way
+  the original packs it.
+* The softmax row sum stays in the lane: every lane accumulates its half of each group scaled
+  by that group's absmax, and the cross-lane reduction runs once per q tile before the division.
+  This changes the float summation order, so the output is no longer bit-identical to
+  sm120_sageattn3_fwd.py (max |diff| < 1e-3; golden and original alignment unchanged).
+
+ptxas is compiled with ``--register-usage-level=8``. Levels 6-10 produce the same code and that
+code is 0.6-1.1% faster than the default level 5 on this kernel (same arithmetic, bit-identical
+output). The issue order ptxas picks for the kv loop moves throughput by a few percent in either
+direction and reacts to unrelated edits, so changes to this file should be re-measured rather
+than assumed neutral.
+
 kernel-only usage: python sm120_sageattn3_fwd_ws.py --seq 4096 --verify --bench
 """
 
@@ -68,28 +88,39 @@ LOG2E = 1.4426950408889634
 LOG2_P1 = math.log2(1.0 / (448.0 * 6.0))  # two-level: P2 = P * 2688 (softmax_fused.h)
 LOG2_FP4 = math.log2(1.0 / 6.0)  # per-16 scale = max16(P2) / 6
 
-# Two fp32 -> one byte of two e2m1 nibbles (even key in the low nibble), via the same
-# cvt.rn.satfinite.e2m1x2.f32 the original uses (utils.h packed_float_to_e2m1).
+# Device helpers issued as inline asm: P packing, the warp-private P-scale store, and a warp sync.
 CVT_E2M1_SRC = r"""
-__device__ __forceinline__ unsigned int tl_cvt_e2m1x2_rn(float lo, float hi) {
+// Four key pairs -> one uint32 of e2m1 nibbles (byte t = keys 2t, 2t+1; even key in the low nibble),
+// issued exactly like the original's packed_float_to_e2m1 (utils.h): four e2m1x2 conversions into
+// byte registers and a single concatenating move, instead of per-pair zero-extend/shift/or.
+__device__ __forceinline__ unsigned int tl_cvt_e2m1x8_rn(float e0, float o0, float e1, float o1,
+                                                        float e2, float o2, float e3, float o3) {
   unsigned int out;
   asm volatile(
       "{\n"
-      ".reg .b8 b;\n"
-      "cvt.rn.satfinite.e2m1x2.f32 b, %1, %2;\n"
-      "cvt.u32.u8 %0, b;\n"
+      ".reg .b8 b0;\n"
+      ".reg .b8 b1;\n"
+      ".reg .b8 b2;\n"
+      ".reg .b8 b3;\n"
+      "cvt.rn.satfinite.e2m1x2.f32 b0, %2, %1;\n"
+      "cvt.rn.satfinite.e2m1x2.f32 b1, %4, %3;\n"
+      "cvt.rn.satfinite.e2m1x2.f32 b2, %6, %5;\n"
+      "cvt.rn.satfinite.e2m1x2.f32 b3, %8, %7;\n"
+      "mov.b32 %0, {b0, b1, b2, b3};\n"
       "}"
       : "=r"(out)
-      : "f"(hi), "f"(lo));
+      : "f"(e0), "f"(o0), "f"(e1), "f"(o1), "f"(e2), "f"(o2), "f"(e3), "f"(o3));
   return out;
 }
 
-// Warp-private shared-memory byte store for the P-scale bytes: a warp writes and later reads
-// only its own rows, so no block barrier is needed. Issued as inline asm so the automatic
-// barrier insertion does not see a shared-memory write (a __syncwarp() precedes the PV GEMM).
-__device__ __forceinline__ int tl_sts_u8(unsigned char* p, unsigned int v) {
+// P-scale byte: e4m3 RN satfinite conversion straight into a warp-private shared-memory store
+// (a warp writes and later reads only its own rows; issued as asm so the automatic block barrier
+// is not inserted -- the __syncwarp() before the PV GEMM makes the bytes visible). The pair
+// converter with both sources = f yields {f, f}; st.shared.u8 keeps the low byte. Replaces the
+// reinterpret-cast form, which cost a zero-extension mask and a constant move per byte.
+__device__ __forceinline__ int tl_sts_ue4m3(unsigned char* p, float f) {
   unsigned int a = static_cast<unsigned int>(__cvta_generic_to_shared(p));
-  asm volatile("st.shared.u8 [%0], %1;" :: "r"(a), "r"(v) : "memory");
+  asm volatile("{\n.reg .b16 d;\ncvt.rn.satfinite.e4m3x2.f32 d, %1, %1;\nst.shared.u8 [%0], d;\n}" :: "r"(a), "f"(f) : "memory");
   return 0;
 }
 __device__ __forceinline__ int tl_syncwarp() {
@@ -131,8 +162,34 @@ def _p_half_layout(block_m: int, n_groups: int, warp_rows: int = 32) -> Fragment
     return Fragment((block_m, n_groups, 8), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
 
 
+def _p_gsum_layout(block_m: int, n_groups: int, warp_rows: int = 32) -> Fragment:
+    """gs[row, group, half]: the in-lane sum of the P2/absmax values of one key half of a group."""
+
+    def fwd_thread(i, m, h):
+        return (i // warp_rows) * 32 + (i % 8) * 4 + (m % 2) * 2 + h
+
+    def fwd_index(i, m, h):
+        return (m // 4) * 4 + ((i % 16) // 8) * 2 + (m % 4) // 2
+
+    return Fragment((block_m, n_groups, 2), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
+
+
+def _p_lane_sum_layout(block_m: int, warp_rows: int = 32) -> Fragment:
+    """lacc[row, group parity, half]: per-lane running row sum (rows i and i+8 share a lane)."""
+
+    def fwd_thread(i, p, h):
+        return (i // warp_rows) * 32 + (i % 8) * 4 + p * 2 + h
+
+    def fwd_index(i, p, h):
+        return (i % 16) // 8
+
+    return Fragment((block_m, 2, 2), forward_thread_fn=fwd_thread, forward_index_fn=fwd_index)
+
+
 DEFAULT_PASS_CONFIGS = {
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    # ptxas --register-usage-level=8: +0.6~1.1% over the default 5 at 8K-32K (identical output).
+    tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 8,
     # The kernel writes its own producer/consumer split with explicit mbarriers and
     # T.tma_copy, so the automatic producer/consumer warp specialization stays off.
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
@@ -174,6 +231,8 @@ def build_sm120_sageattn3_fwd(
     assert seq_len % block_N == 0, "seq_len must be a multiple of 128 (pad like the original)"
     g_layout = _p_group_layout(block_M, n_groups, warp_rows)
     ph_layout = _p_half_layout(block_M, n_groups, warp_rows)
+    gs_layout = _p_gsum_layout(block_M, n_groups, warp_rows)
+    lacc_layout = _p_lane_sum_layout(block_M, warp_rows)
 
     @T.macro
     def qk_seed(DS_sh, stage, acc_s):
@@ -202,6 +261,7 @@ def build_sm120_sageattn3_fwd(
             sf_layout="rowmajor",
             scale_dtype="ue4m3",
             sf_b_swizzled=True,
+            a_packed_words=True,  # Q words live in registers for the whole q tile
         )
 
     @T.macro
@@ -237,18 +297,22 @@ def build_sm120_sageattn3_fwd(
         smax,
         absmax,
         coff,
-        rowsum8,
+        gs,
         Pw,
         Ev,
         Od,
-        Es,
+        Ev1,
+        Ev2,
+        Ev3,
+        Od1,
+        Od2,
+        Od3,
         acc_o,
         m_i,
         m_prev,
         ms,
         rescale,
-        l_tile,
-        l_i,
+        lacc,
     ):
         # Regroup S columns (permuted-K order) into original-key 16-groups: a pure in-lane
         # renaming under the K permutation.
@@ -269,19 +333,30 @@ def build_sm120_sageattn3_fwd(
             Ev[i, m, t] = T.exp2(G[i, m, 2 * t] * sl2 - coff[i, m])
         for i, m, t in T.Parallel(block_M, n_groups, 8):
             Od[i, m, t] = T.exp2(G[i, m, 2 * t + 1] * sl2 - coff[i, m])
-        for i, m, t in T.Parallel(block_M, n_groups, 8):
-            Es[i, m, t] = Ev[i, m, t] + Od[i, m, t]
-        T.reduce_sum(Es, rowsum8, dim=2, clear=True)
-        for i, m in T.Parallel(block_M, n_groups):
-            rowsum8[i, m] = rowsum8[i, m] * absmax[i, m]  # rowsum(P2) = sum_m absmax_m * sum_k (P2/absmax)
-        T.reduce_sum(rowsum8, l_tile, dim=1, clear=True)
+        # Row sum kept lane-local, like the original's in-lane row_sum: each lane adds its own half
+        # of every group, scaled by that group's absmax; the cross-lane reduction happens once per
+        # q tile, just before the division (no per-tile shuffles).
+        for i, m, h in T.Parallel(block_M, n_groups, 2):
+            gs[i, m, h] = 0.0
+            for t4 in T.serial(4):
+                gs[i, m, h] = gs[i, m, h] + Ev[i, m, 4 * h + t4] + Od[i, m, 4 * h + t4]
+        for i, p, h in T.Parallel(block_M, 2, 2):
+            lacc[i, p, h] = lacc[i, p, h] * rescale[i]
+            for mm in T.serial(4):
+                lacc[i, p, h] = lacc[i, p, h] + gs[i, 2 * mm + p, h] * absmax[i, 2 * mm + p]
         for i, m, k8 in T.Parallel(block_M, n_groups, 2):  # e2m1 nibbles, 8 keys per uint32
-            Pw[i, 2 * m + k8] = 0
-            for t2 in T.serial(4):
-                Pw[i, 2 * m + k8] = Pw[i, 2 * m + k8] | T.shift_left(
-                    T.call_extern("uint32", "tl_cvt_e2m1x2_rn", Ev[i, m, 4 * k8 + t2], Od[i, m, 4 * k8 + t2]),
-                    T.cast(8 * t2, T.uint32),
-                )
+            Pw[i, 2 * m + k8] = T.call_extern(
+                "uint32",
+                "tl_cvt_e2m1x8_rn",
+                Ev[i, m, 4 * k8],
+                Od[i, m, 4 * k8],
+                Ev1[i, m, 4 * k8 + 1],
+                Od1[i, m, 4 * k8 + 1],
+                Ev2[i, m, 4 * k8 + 2],
+                Od2[i, m, 4 * k8 + 2],
+                Ev3[i, m, 4 * k8 + 3],
+                Od3[i, m, 4 * k8 + 3],
+            )
         for i, j in T.Parallel(block_M, dim):
             acc_o[i, j] *= rescale[i]
         # P-scale bytes (e4m3 RN satfinite), warp-private store: a warp reads back only its own
@@ -290,16 +365,14 @@ def build_sm120_sageattn3_fwd(
             T.evaluate(
                 T.call_extern(
                     "int32",
-                    "tl_sts_u8",
+                    "tl_sts_ue4m3",
                     T.address_of(SFP_u8[i, m]),
-                    T.cast(T.reinterpret(T.cast(absmax[i, m], T.float8_e4m3fn), T.uint8), T.uint32),
+                    absmax[i, m],
                 )
             )
         T.evaluate(T.call_extern("int32", "tl_syncwarp"))
         if with_pv:
             pv_gemm(Pw, V_sh, acc_o, SFP_sh, SFV_sh)
-        for i in T.Parallel(block_M):
-            l_i[i] = l_i[i] * rescale[i] + l_tile[i]
 
     @T.prim_func
     def main(
@@ -316,6 +389,7 @@ def build_sm120_sageattn3_fwd(
             T.import_source(CVT_E2M1_SRC)
             tx = T.get_thread_binding()
             Q_sh = T.alloc_shared((q_stages, block_M, dim), fp4)
+            Q_words = T.view(Q_sh, (q_stages, block_M, dim // 8), dtype=T.uint32)  # 8 e2m1 elements per word
             K_sh = T.alloc_shared((num_stages, block_N, dim), fp4)
             V_sh = T.alloc_shared((num_stages, dim, block_N), fp4)
             SFQ_sh = T.alloc_shared((q_stages, block_M, sf_words_qk), T.uint32)
@@ -382,19 +456,27 @@ def build_sm120_sageattn3_fwd(
                 smax = T.alloc_fragment((block_M, n_groups), accum)
                 absmax = T.alloc_fragment((block_M, n_groups), accum)
                 coff = T.alloc_fragment((block_M, n_groups), accum)
-                rowsum8 = T.alloc_fragment((block_M, n_groups), accum)
+                gs = T.alloc_fragment((block_M, n_groups, 2), accum)  # in-lane group half sums
                 Pw = T.alloc_fragment((block_M, block_N // 8), T.uint32)
+                Qw = T.alloc_fragment((block_M, dim // 8), T.uint32)  # Q words; layout set by the QK GEMM
+                SFQw = T.alloc_fragment((block_M, sf_words_qk), T.uint32)  # Q scale words in registers
                 Ev = T.alloc_fragment((block_M, n_groups, 8), accum)
                 Od = T.alloc_fragment((block_M, n_groups, 8), accum)
-                Es = T.alloc_fragment((block_M, n_groups, 8), accum)
                 acc_o = T.alloc_fragment((block_M, dim), accum)
                 m_i = T.alloc_fragment((block_M,), accum)
                 m_prev = T.alloc_fragment((block_M,), accum)
                 ms = T.alloc_fragment((block_M,), accum)
                 rescale = T.alloc_fragment((block_M,), accum)
-                l_tile = T.alloc_fragment((block_M,), accum)
+                lacc = T.alloc_fragment((block_M, 2, 2), accum)  # per-lane running row sums
+                lsum_p = T.alloc_fragment((block_M, 2), accum)
                 l_i = T.alloc_fragment((block_M,), accum)
-                T.annotate_layout({G: g_layout, Ev: ph_layout, Od: ph_layout, Es: ph_layout})
+                Ev1 = T.view(Ev, (block_M, n_groups, 8))
+                Ev2 = T.view(Ev, (block_M, n_groups, 8))
+                Ev3 = T.view(Ev, (block_M, n_groups, 8))
+                Od1 = T.view(Od, (block_M, n_groups, 8))
+                Od2 = T.view(Od, (block_M, n_groups, 8))
+                Od3 = T.view(Od, (block_M, n_groups, 8))
+                T.annotate_layout({G: g_layout, Ev: ph_layout, Od: ph_layout, gs: gs_layout, lacc: lacc_layout})
 
                 sched_c = T.PersistentTileScheduler(seq_len // block_M, heads * batch, name="sc")
                 sched_c.init(block_id)
@@ -406,12 +488,14 @@ def build_sm120_sageattn3_fwd(
                     T.fill(acc_o, 0)
                     T.fill(acc_s, 0)
                     T.fill(Pw, 0)
-                    T.fill(l_i, 0)
+                    T.fill(lacc, 0)
                     for i in T.Parallel(block_M):
                         m_i[i] = -T.infinity(accum)
                     qs = wave % q_stages
                     qp = (wave // q_stages) & 1
                     T.barrier_wait(q_ready[qs], qp)
+                    T.copy(Q_words[qs, :, :], Qw)  # Q into registers once per q tile (the original does the same)
+                    T.copy(SFQ_sh[qs, :, :], SFQw)  # and its scale words (layout set by the QK GEMM)
 
                     for kt in T.serial(n_kv_blocks):
                         phase = wave * n_kv_blocks + kt
@@ -419,7 +503,7 @@ def build_sm120_sageattn3_fwd(
                         parity = (phase // num_stages) & 1
                         T.barrier_wait(loaded[stage], parity)
                         qk_seed(DS_sh, stage, acc_s)
-                        qk_gemm(Q_sh[qs, :, :], K_sh[stage, :, :], SFQ_sh[qs, :, :], SFK_sh[stage, :, :], acc_s)
+                        qk_gemm(Qw, K_sh[stage, :, :], SFQw, SFK_sh[stage, :, :], acc_s)
                         softmax_quant(
                             True,
                             DS_sh,
@@ -432,21 +516,27 @@ def build_sm120_sageattn3_fwd(
                             smax,
                             absmax,
                             coff,
-                            rowsum8,
+                            gs,
                             Pw,
                             Ev,
                             Od,
-                            Es,
+                            Ev1,
+                            Ev2,
+                            Ev3,
+                            Od1,
+                            Od2,
+                            Od3,
                             acc_o,
                             m_i,
                             m_prev,
                             ms,
                             rescale,
-                            l_tile,
-                            l_i,
+                            lacc,
                         )
                         T.barrier_arrive(consumed[stage])
 
+                    T.reduce_sum(lacc, lsum_p, dim=2, clear=True)
+                    T.reduce_sum(lsum_p, l_i, dim=1, clear=True)
                     for i, j in T.Parallel(block_M, dim):
                         acc_o[i, j] = acc_o[i, j] / l_i[i]
                     for sb in T.serial(dim // store_block_N):
@@ -492,8 +582,8 @@ def main():
     ap.add_argument("--heads", type=int, default=2)
     ap.add_argument("--seq", type=int, default=1024)
     ap.add_argument("--dim", type=int, default=128)
-    ap.add_argument("--num-stages", type=int, default=3)
-    ap.add_argument("--threads", type=int, default=256)
+    ap.add_argument("--num-stages", type=int, default=2)
+    ap.add_argument("--threads", type=int, default=384)
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--bench", action="store_true")
     ap.add_argument("--dump-source", action="store_true")

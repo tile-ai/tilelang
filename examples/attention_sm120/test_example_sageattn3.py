@@ -86,18 +86,45 @@ def test_sageattn3_fwd_perf_smoke():
 @tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 @pytest.mark.parametrize("n", [256, 512, 1024, 4096])
 def test_sageattn3_ws_matches_base(n):
-    """The persistent warp-specialized kernel is bit-identical to the plain one.
+    """The persistent warp-specialized kernel computes what the plain one computes.
 
-    256 and 512 stay in the matrix on purpose: sequences shorter than the pipeline depth are
-    where prologue/epilogue range bugs show up.
+    Not bit for bit: the fast kernel keeps the softmax row sum lane-local, which changes the float
+    summation order (measured max |diff| <= 1.4e-3 of max |O|, cos 1.0 to 8 digits). 256 and 512
+    stay in the matrix on purpose: sequences shorter than the pipeline depth are where
+    prologue/epilogue range bugs show up, and those show up as large errors, not rounding.
     """
     torch.manual_seed(0)
     b, h, d = 1, 2, 128
     q, k, v = (torch.randn(b, h, n, d, device="cuda", dtype=torch.bfloat16) for _ in range(3))
-    _, kargs, _ = prepare_inputs(q, k, v)
-    base = sm120_sageattn3_fwd(b, h, n, d)(*kargs)
-    out = ws.sm120_sageattn3_fwd(b, h, n, d)(*kargs)
-    assert torch.equal(base, out)
+    canon, kargs, delta_s = prepare_inputs(q, k, v)
+    base = sm120_sageattn3_fwd(b, h, n, d)(*kargs).float()
+    kernel = ws.sm120_sageattn3_fwd(b, h, n, d)
+    out = kernel(*kargs).float()
+    assert torch.equal(out, kernel(*kargs).float())  # deterministic
+    assert float((out - base).abs().max()) <= 5e-3 * float(base.abs().max())
+    assert sq.cos_sim(out, base) > 0.99999
+    o_ref = sq.reference_attention(q, k, v, d**-0.5)
+    o_gold = sq.golden_attention(canon, delta_s, d**-0.5)
+    ratio = sq.alignment_ratio(out, o_gold, o_ref)
+    assert ratio < 0.02, ratio  # measured 0.0086-0.0087, same as the plain kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+def test_sageattn3_ws_matches_original_kernel():
+    """Alignment to the original kernel on the same inputs, at a batch with more tiles than SMs."""
+    fp4attn_cuda = pytest.importorskip("fp4attn_cuda")
+    torch.manual_seed(0)
+    b, h, n, d = 4, 32, 1024, 128
+    q, k, v = (torch.randn(b, h, n, d, device="cuda", dtype=torch.bfloat16) for _ in range(3))
+    canon, kargs, delta_s = prepare_inputs(q, k, v)
+    out = ws.sm120_sageattn3_fwd(b, h, n, d)(*kargs).float()
+    s = sq.export_for_sage(canon)
+    o_sage, _ = fp4attn_cuda.fwd(s["q"], s["k"], s["v"], s["sfq"], s["sfk"], s["sfv"], delta_s, n, None, d**-0.5, False, True, True)
+    o_ref = sq.reference_attention(q, k, v, d**-0.5)
+    ratio = sq.alignment_ratio(out, o_sage.float(), o_ref)
+    assert ratio < 0.25, ratio  # measured 0.165
+    assert abs(sq.cos_sim(out, o_ref) - sq.cos_sim(o_sage.float(), o_ref)) < 1e-3
 
 
 @tilelang.testing.requires_cuda
@@ -114,8 +141,12 @@ def test_sageattn3_ws_codegen_contract():
     assert "tl::warpgroup_reg_dealloc<" in src and "tl::warpgroup_reg_alloc<" in src
     assert "__launch_bounds__(384, 1)" in src  # the second argument is what makes setmaxnreg bind
     assert "SM120MmaBlockScaledKind::kMxf4nvf4, 4, tl::SM120MmaScaleType::kUE4M3" in src
-    assert "tl_cvt_e2m1x2_rn(" in src
-    assert "tl_sts_u8(" in src and "tl_syncwarp()" in src
+    assert src.count("tl::tma_load(") == 4  # Q, K, V^T, delta_s
+    assert "tl_cvt_e2m1x8_rn(" in src  # four key pairs per packed P word, one asm sequence
+    assert "tl_sts_ue4m3(" in src and "tl_syncwarp()" in src  # warp-private P-scale store, no block barrier
+    # Q and its scale words enter registers once per q tile and feed the QK MMAs from there
+    assert "reinterpret_cast<const uint32_t*>(Qw" in src and "(&(SFQw[" in src
+    assert ws.DEFAULT_PASS_CONFIGS[tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL] == 8
 
 
 def test_sageattn3_ws_register_split_leaves_slack():
