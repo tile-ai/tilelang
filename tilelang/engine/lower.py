@@ -93,6 +93,12 @@ def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tirx.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
+    # Rebind duplicated magic calls once per thread. Must run after the last
+    # Simplify in the lowering path: Simplify substitutes Bind values into use
+    # sites unconditionally, so any earlier hoisting is re-inlined.
+    pass_ctx = tilelang.transform.get_pass_context()
+    if pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_MAGIC_DIV, False):
+        device_mod = tilelang.transform.MagicCallHoist()(device_mod)
     return device_mod
 
 

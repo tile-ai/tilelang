@@ -14,6 +14,7 @@ Key design:
 """
 
 from __future__ import annotations
+
 from typing import Any, ClassVar
 
 from tvm import IRModule
@@ -399,10 +400,21 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
             function_params = function_info["function_params"]
 
+            # Magic division adds host-precomputed scalars that NVRTC cannot
+            # evaluate. Inspect the IR parameters before collecting call args.
+            device_params = self.device_mod[function_name].params
+            magic_params = sorted({param.name for param in device_params if param.name.startswith("tl_magic_")})
+            if magic_params:
+                raise NotImplementedError(
+                    f"Kernel '{function_name}' has host-precomputed magic-division parameters {magic_params} "
+                    "(tl.enable_magic_div), which the NVRTC execution backend does not support yet. "
+                    "Use the tvm_ffi execution backend or disable tl.enable_magic_div."
+                )
+
             call_args = self._collect_kernel_call_args(function_params, function_args, desc_name_map, desc_name_var_map)
             # Launch extents refer to device Vars, whose identities differ from
             # the original host Vars. Bind them through this exact call site.
-            for device_param, host_param in zip(self.device_mod[function_name].params, function_params, strict=True):
+            for device_param, host_param in zip(device_params, function_params, strict=True):
                 if str(device_param.dtype) != "handle":
                     self._argument_names[device_param] = f"({self._pythonic_expr(host_param)})"
 

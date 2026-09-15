@@ -96,6 +96,7 @@ private:
   bool need_mma_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
+  bool emitted_magic_div_helpers_{false};
   // The name of the barrier array in shared memory
   const std::string barrier_name_ = "barrier";
   // The alignment of the barrier array in shared memory
