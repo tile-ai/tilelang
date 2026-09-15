@@ -65,23 +65,34 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
   if (IsSharedBuffer(buffer)) {
-    int replicate_extent = 1;
-    Array<PrimExpr> buffer_shape = buffer->shape;
-    int buffer_extent = 1;
-    int layout_extent = 1;
-    for (size_t i = 0; i < buffer_shape.size(); i++) {
-      auto shape = buffer_shape[i].as<IntImmNode>();
-      buffer_extent *= shape->value;
+    arith::Analyzer analyzer;
+    // Symbolic layout bounds may contain sign-dependent expressions. Buffer
+    // dimensions are positive whenever the allocation is accessed.
+    PrimExpr nonempty = Bool(true);
+    for (const auto &shape : buffer->shape) {
+      nonempty = And(nonempty, shape > 0);
     }
-    for (size_t i = 0; i < layout_shape.size(); i++) {
-      auto shape = layout_shape[i].as<IntImmNode>();
-      ICHECK(shape) << "Layout output shape must be constant integer, but got: "
-                    << layout_shape[i];
-      layout_extent *= shape->value;
+    With<arith::ConstraintContext> constraint(&analyzer, nonempty);
+    output_shape = output_shape.Map(
+        [&](const PrimExpr &shape) { return analyzer.Simplify(shape); });
+    PrimExpr buffer_extent = Integer(1);
+    PrimExpr layout_extent = Integer(1);
+    for (const auto &shape : buffer->shape) {
+      buffer_extent = buffer_extent * shape;
     }
-    replicate_extent = buffer_extent / layout_extent;
-    if (replicate_extent > 1) {
-      output_shape.insert(output_shape.begin(), replicate_extent);
+    for (const auto &shape : output_shape) {
+      layout_extent = layout_extent * shape;
+    }
+    PrimExpr replicate_extent =
+        analyzer.Simplify(floordiv(buffer_extent, layout_extent));
+    if (const auto *replicate = replicate_extent.as<IntImmNode>()) {
+      if (replicate->value > 1) {
+        output_shape.insert(output_shape.begin(), replicate_extent);
+      }
+    } else {
+      ICHECK(analyzer.CanProve(replicate_extent <= 1))
+          << "Cannot determine shared buffer replication for " << buffer->name
+          << ": " << replicate_extent;
     }
   }
   return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
