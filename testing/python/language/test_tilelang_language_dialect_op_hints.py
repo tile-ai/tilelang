@@ -190,6 +190,20 @@ def test_cuda_hints_do_not_block_cpu_compilation():
     torch.testing.assert_close(mod(x), x)
 
 
+def test_cuda_atomic_add_use_tma_rejected_on_cpu():
+    """Unlike droppable hints, ``use_tma`` has no CPU fallback: a CUDA-dialect
+    atomic_add carrying it must be rejected by the CPU backend with a readable
+    error rather than silently ignored."""
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 8), "float32"), B: T.Tensor((4, 8), "float32")):
+        with T.Kernel(1):
+            T.atomic_add(B, A, use_tma=True)
+
+    with pytest.raises(Exception, match="does not support use_tma"):
+        tilelang.compile(main, target="c", out_idx=[1])
+
+
 @tilelang.testing.requires_cuda
 def test_cuda_hinted_copy_compiles_and_runs():
     @tilelang.jit(out_idx=[-1])
