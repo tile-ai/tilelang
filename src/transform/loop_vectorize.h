@@ -43,11 +43,13 @@ using namespace tirx;
 // the cap the vectorizer will later enforce on it.
 int MaxVectorLoadBits(const Target &target, bool global_only_access);
 
-// Normalize the addressed element of an atomic, including access_ptr forms.
+// Extract an existing BufferLoad, optionally wrapped in address_of/access_ptr.
+// tvm_access_ptr carries a flat offset instead and must be handled separately.
 ffi::Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr);
 
 // Target/dtype/address-space capability; access legality is checked separately.
-int GetMaxAtomicVectorSize(const Buffer &destination, const Target &target);
+int GetMaxAtomicVectorSize(DataType dtype, const ffi::String &storage_scope,
+                           const Target &target);
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 

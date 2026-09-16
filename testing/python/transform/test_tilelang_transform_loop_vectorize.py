@@ -180,10 +180,12 @@ def test_atomic_destination_width_is_planned(index, width, pointer_form):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("pointer_form", ["access_ptr", "address_of", "tvm_access_ptr"])
 @pytest.mark.parametrize(
     "dtype,scope,target,width",
     [
         ("float32", "global", _SM90_TARGET, 4),
+        ("float32", "", _SM90_TARGET, 4),
         ("float32", "shared", _SM90_TARGET, 1),
         ("float32", "global", _SM89_TARGET, 1),
         ("float16", "global", _SM90_TARGET, 2),
@@ -191,11 +193,16 @@ def test_atomic_destination_width_is_planned(index, width, pointer_form):
         ("bfloat16", "global", _SM90_TARGET, 2),
     ],
 )
-def test_atomic_capability_limits_the_plan(dtype, scope, target, width):
-    mod = _plan_atomic_loop(lambda i, _: i, dtype=dtype, scope=scope)
+def test_atomic_capability_limits_the_plan(dtype, scope, target, width, pointer_form):
+    mod = _plan_atomic_loop(lambda i, _: i, pointer_form=pointer_form, dtype=dtype, scope=scope)
     with target:
         planned = tl.transform.LegalizeVectorizedLoop()(mod)
-    assert _vectorized_extents(planned["main"]) == ([width] if width > 1 else [])
+        assert _vectorized_extents(planned["main"]) == ([width] if width > 1 else [])
+        lowered = tl.transform.LowerAccessPtr()(planned)
+        lowered = tl.transform.FlattenBuffer()(lowered)
+        emitted = tl.transform.VectorizeLoop()(lowered)
+    op = f"tl.atomic_addx{width}_elem_op" if width > 1 else "tl.atomic_add_elem_op"
+    assert _atomic_op_names(emitted["main"]) == [op]
 
 
 @tilelang.testing.requires_cuda

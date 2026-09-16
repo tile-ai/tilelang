@@ -33,6 +33,7 @@
 #include "common/int64_promoter.h"
 #include "common/loop_vectorization_utils.h"
 #include "support/check.h"
+#include "tir/transforms/ir_utils.h"
 #include <iostream>
 #include <optional>
 #include <tvm/arith/iter_affine_map.h>
@@ -158,19 +159,11 @@ Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
       !call->args.empty()) {
     return call->args[0].as<BufferLoad>();
   }
-  if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
-    // This pointer already carries a flat element offset. The data Var's
-    // pointer type preserves the address space for the capability check.
-    Var data = Downcast<Var>(call->args[1]);
-    Buffer buffer(data, call->args[0].dtype(), {Integer(1)}, {}, Integer(0),
-                  data->name_hint, 0, 0, kDefault);
-    return BufferLoad(buffer, {call->args[2]});
-  }
   return std::nullopt;
 }
 
-int GetMaxAtomicVectorSize(const Buffer &destination, const Target &target) {
-  DataType dtype = destination->dtype;
+int GetMaxAtomicVectorSize(DataType dtype, const String &storage_scope,
+                           const Target &target) {
   if (dtype.lanes() != 1) {
     return 1;
   }
@@ -178,8 +171,11 @@ int GetMaxAtomicVectorSize(const Buffer &destination, const Target &target) {
     return 2;
   }
   if (dtype.is_float() && dtype.bits() == 32 &&
-      TargetHasSMVersionGE(target, 90) && IsGlobalBuffer(destination)) {
+      TargetHasSMVersionGE(target, 90) &&
+      (storage_scope.empty() || storage_scope == "global")) {
     // CUDA's float2/float4 atomicAdd overloads support global memory only.
+    // An empty pointer storage scope denotes global memory, as in
+    // Buffer::scope.
     return 4;
   }
   return 1;
@@ -661,35 +657,10 @@ private:
       ICHECK(node->args.size() >= 2)
           << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
-      int vectorize_length = 1;
-      Optional<BufferLoad> destination =
-          ExtractBufferLoadForAtomic(node->args[0]);
-      if (destination.defined() && inner_for_) {
-        const Buffer &buffer = destination.value()->buffer;
-        vectorize_length = arith::ZeroAwareGCD(
-            loop_extent_vector_size_,
-            GetMaxAtomicVectorSize(buffer, Target::Current(false)));
-        Array<PrimExpr> indices =
-            TransformIndices(destination.value()->indices, buffer);
-        Array<PrimExpr> strides = GetBufferStrides(buffer);
-        PrimExpr offset = buffer->elem_offset;
-        for (size_t i = 0; i < indices.size(); ++i) {
-          offset = offset + indices[i] * strides[i];
-        }
-        // A wide atomic updates distinct consecutive elements. Unlike a load,
-        // its destination cannot broadcast. Search smaller widths here, before
-        // partitioning/layout choices and before rewriting the loop body.
-        while (vectorize_length > 1 &&
-               !IndicesCanVectorize(offset, inner_for_->loop_var,
-                                    inner_for_->extent, vectorize_length,
-                                    analyzer_, /*allow_broadcast=*/false)) {
-          vectorize_length /= 2;
-        }
-      }
-
       // Keep this as a call constraint: simple-memory planning must not defer
       // the atomic's legality together with local or broadcast-load accesses.
-      buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
+      buffer_vector_infos_.push_back(
+          {Buffer(), ComputeAtomicVectorSize(node->args[0]), false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::ptx_cp_async()) ||
                node->op.same_as(tl::ptx_cp_async())) {
@@ -794,6 +765,52 @@ private:
     buffer_vector_infos_.push_back(
         {Buffer(), call_node_vector_size, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+  }
+
+  int ComputeAtomicVectorSize(const PrimExpr &destination) {
+    if (!inner_for_) {
+      return 1;
+    }
+
+    DataType dtype;
+    String storage_scope;
+    PrimExpr offset;
+    if (auto load = ExtractBufferLoadForAtomic(destination); load.defined()) {
+      const Buffer &buffer = load.value()->buffer;
+      dtype = buffer->dtype;
+      storage_scope = buffer.scope();
+      // Keep the original Buffer identity for layout lookup.
+      Array<PrimExpr> indices = TransformIndices(load.value()->indices, buffer);
+      Array<PrimExpr> strides = GetBufferStrides(buffer);
+      offset = buffer->elem_offset;
+      for (size_t i = 0; i < indices.size(); ++i) {
+        offset = offset + indices[i] * strides[i];
+      }
+    } else {
+      const auto *ptr = destination.as<CallNode>();
+      if (ptr == nullptr || !ptr->op.same_as(builtin::tvm_access_ptr()) ||
+          ptr->args.size() < 3) {
+        return 1;
+      }
+      dtype = ptr->args[0].dtype();
+      storage_scope = GetPtrStorageScope(Downcast<Var>(ptr->args[1]));
+      // tvm_access_ptr already carries the physical element offset.
+      offset = ptr->args[2];
+    }
+
+    int vector_size = arith::ZeroAwareGCD(
+        loop_extent_vector_size_,
+        GetMaxAtomicVectorSize(dtype, storage_scope, Target::Current(false)));
+    // A wide atomic updates distinct consecutive elements. Unlike a load,
+    // its destination cannot broadcast. Search smaller widths here, before
+    // partitioning/layout choices and before rewriting the loop body.
+    while (vector_size > 1 &&
+           !IndicesCanVectorize(offset, inner_for_->loop_var,
+                                inner_for_->extent, vector_size, analyzer_,
+                                /*allow_broadcast=*/false)) {
+      vector_size /= 2;
+    }
+    return vector_size;
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {

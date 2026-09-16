@@ -27,6 +27,7 @@
 #include "backend/common/target_utils.h"
 #include "loop_vectorize.h"
 #include "tir/analysis/check_contains.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -583,11 +584,22 @@ public:
       src = BroadcastTo(src, vector_size, src.dtype().is_scalable_vector());
     }
 
-    // Check if dtype supports this vector size
-    auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
+    // The emitter only needs the destination dtype and address space.
     Target target = Target::Current(false);
-    int max_vec_size =
-        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer, target);
+    int max_vec_size;
+    if (auto load = ExtractBufferLoadForAtomic(dst); load.defined()) {
+      const Buffer &buffer = load.value()->buffer;
+      max_vec_size =
+          GetMaxAtomicVectorSize(buffer->dtype, buffer.scope(), target);
+    } else {
+      const auto *ptr = dst.as<CallNode>();
+      ICHECK(ptr && ptr->op.same_as(builtin::tvm_access_ptr()))
+          << "Unsupported atomic destination: " << dst;
+      ICHECK_GE(ptr->args.size(), 3U);
+      max_vec_size = GetMaxAtomicVectorSize(
+          ptr->args[0].dtype(), GetPtrStorageScope(Downcast<Var>(ptr->args[1])),
+          target);
+    }
     if (vector_size > max_vec_size) {
       // Keep the loop binder when this atomic requires scalar lanes.
       need_scalarize_ = true;
