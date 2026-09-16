@@ -167,6 +167,7 @@ def _make_nvf4_matmul_codegen_kernel(
     warp_row_tiles=32,
     warp_col_tiles=32,
     sf_layout=None,
+    gemm_api="mma_gemm_blockscaled",
 ):
     assert K % 64 == 0
     in_dtype = T.float4_e2m1fn
@@ -193,6 +194,9 @@ def _make_nvf4_matmul_codegen_kernel(
 
     warp_size = 32
     threads = warp_size * (block_row_warps * block_col_warps)
+    # `T.gemm_blockscaled` must resolve to the same SM120 mma.sync lowering
+    # as the explicit `T.mma_gemm_blockscaled` when C lives in a fragment.
+    gemm_fn = getattr(T, gemm_api)
 
     @T.prim_func
     def main(
@@ -226,7 +230,7 @@ def _make_nvf4_matmul_codegen_kernel(
                 for j, k in T.Parallel(block_N, block_K // micro_size_k):
                     SFB_shared[j, k] = SFB[bx * block_N + j, ko * (block_K // micro_size_k) + k]
 
-                T.mma_gemm_blockscaled(
+                gemm_fn(
                     A_shared,
                     B_shared,
                     C_local,
@@ -622,9 +626,10 @@ def test_sm120_fulltile_package_contract_rejects_odd_warp_atom_grid():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(12, 0)
 @pytest.mark.parametrize("K", [64, 128, 256])
-def test_nvf4_mma_block_scale_codegen(K):
+@pytest.mark.parametrize("gemm_api", ["mma_gemm_blockscaled", "gemm_blockscaled"])
+def test_nvf4_mma_block_scale_codegen(K, gemm_api):
     kernel = tilelang.compile(
-        _make_nvf4_matmul_codegen_kernel(128, 128, K),
+        _make_nvf4_matmul_codegen_kernel(128, 128, K, gemm_api=gemm_api),
         target="cuda",
         out_idx=[4],
     )
@@ -752,13 +757,14 @@ def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units():
         (256, "random"),
     ],
 )
-def test_nvf4_mma_block_scale_constant_scale_correctness(K, input_mode):
+@pytest.mark.parametrize("gemm_api", ["mma_gemm_blockscaled", "gemm_blockscaled"])
+def test_nvf4_mma_block_scale_constant_scale_correctness(K, input_mode, gemm_api):
     import torch
 
     torch.manual_seed(0)
     M = N = 128
     kernel = tilelang.compile(
-        _make_nvf4_matmul_codegen_kernel(M, N, K),
+        _make_nvf4_matmul_codegen_kernel(M, N, K, gemm_api=gemm_api),
         target="cuda",
         out_idx=[4],
     )

@@ -105,6 +105,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
         sf_a_granularity_k = annotations.get("sf_a_granularity_k")
         sf_b_granularity_k = annotations.get("sf_b_granularity_k")
         sf_layout = annotations.get("sf_layout", "rowmajor")
+        if isinstance(sf_layout, tirx.StringImm):
+            sf_layout = sf_layout.value
         if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
         if sf_a_granularity_k is None or sf_b_granularity_k is None:

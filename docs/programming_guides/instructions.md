@@ -91,6 +91,12 @@ GEMM and sparse GEMM
 - `T.gemm(A_shared, B_shared, C_fragment)`: computes a tile GEMM using shared
   inputs and a fragment accumulator; lowered to target‑specific tensor cores.
 - `T.gemm_sp(...)`: 2:4 sparse tensor core variant (see examples and README).
+- `T.gemm_blockscaled(A, B, C, SFA, SFB, k_start=..., sf_a_granularity_k=...,
+  sf_b_granularity_k=...)`: block‑scaled (MXFP8/NVFP4) GEMM; the compiler picks
+  the block‑scaled instruction from the target and the accumulator scope
+  (TCGEN05 on SM100 with `C` in tensor memory, `mma.sync` on SM120 with `C` in
+  a fragment) and never falls back to a dense instruction. The explicit
+  variants are `T.tcgen05_gemm_blockscaled` and `T.mma_gemm_blockscaled`.
 
 Reductions and scans
 - `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp
@@ -169,6 +175,9 @@ Memory allocation and descriptors
 Compute primitives
 - `T.gemm(A_s, B_s, C_f)`: Tile GEMM into fragment accumulator.
 - `T.gemm_sp(...)`: Sparse (2:4) tensor core GEMM.
+- `T.gemm_blockscaled(A_s, B_s, C, SFA, SFB, ...)`: Block‑scaled GEMM with
+  target‑selected instruction; explicit `T.tcgen05_gemm_blockscaled` /
+  `T.mma_gemm_blockscaled`.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.

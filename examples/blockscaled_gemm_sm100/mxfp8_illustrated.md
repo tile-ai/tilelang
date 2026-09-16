@@ -115,5 +115,6 @@ serves four adjacent `block_K=128` MMA iterations.
 - TileLang kernels: [`gemm_mxfp8_blockscaled_1d1d.py`](gemm_mxfp8_blockscaled_1d1d.py)
 - Grouped kernels: [`grouped_gemm_mxfp8_blockscaled_1d1d.py`](grouped_gemm_mxfp8_blockscaled_1d1d.py)
 - TileLang helpers: `T.tcgen05_cp_warpx4`, `T.tcgen05_sf_warp_transpose`, and
-  `T.tcgen05_gemm_blockscaled`
+  `T.tcgen05_gemm_blockscaled` (or the auto-dispatching `T.gemm_blockscaled`,
+  which selects this TCGEN05 path whenever `C` lives in tensor memory on SM100)
 - PTX document: https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#tcgen05-block-scaling

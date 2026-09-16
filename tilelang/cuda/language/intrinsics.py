@@ -51,6 +51,7 @@ from tilelang.language.builtin import (
 )
 from tilelang.language.experimental.gemm_sp_op import tcgen05_gemm_sp, wgmma_gemm_sp
 from tilelang.language.gemm_op import (
+    gemm_blockscaled,
     make_blockscaled_gemm_layout,
     mma_gemm_blockscaled,
     tcgen05_gemm,
@@ -98,6 +99,7 @@ __all__ = [
     "compute_umma_descriptor",
     "cp_async_barrier_noinc",
     "device_assert",
+    "gemm_blockscaled",
     "get_ldmatrix_offset",
     "get_mma_micro_size",
     "get_swizzle_layout",

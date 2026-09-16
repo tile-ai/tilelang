@@ -359,18 +359,33 @@ struct Gemm {
       return kCudaTCGEN05;
     }
 
-    if (op.sfaRegion_.defined() || op.sfbRegion_.defined()) {
-      if (!op.sfaRegion_.defined() || !op.sfbRegion_.defined()) {
-        LOG(FATAL) << "T.mma_gemm_blockscaled() requires both SFA and SFB "
-                      "scale-factor regions.";
-      }
-      if (!TargetIsSM120(target)) {
-        LOG(FATAL) << "T.mma_gemm_blockscaled() requires an SM120 CUDA target, "
-                      "but got target="
-                   << target << "."
+    // Block-scaled GEMM carries SFA/SFB operands whose semantics no dense
+    // instruction can honour, so there is no fallback: the instruction is
+    // fixed by the target and the accumulator scope (TMEM => TCGEN5MMA on
+    // SM100, fragment => warp-level mma.sync on SM120).
+    const bool has_sfa = op.sfaRegion_.defined();
+    const bool has_sfb = op.sfbRegion_.defined();
+    if (has_sfa || has_sfb) {
+      if (!(has_sfa && has_sfb)) {
+        LOG(FATAL) << "Block-scaled GEMM requires both SFA and SFB "
+                      "scale-factor regions."
                    << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
       }
-      return kCudaMMABlockScaled;
+      if (AllowTcgen5Mma(op, target)) {
+        return kCudaTCGEN05;
+      }
+      if (TargetIsSM120(target) && IsSharedBuffer(op.a_) &&
+          IsSharedBuffer(op.b_) && IsFragmentBuffer(op.c_)) {
+        return kCudaMMABlockScaled;
+      }
+      LOG(FATAL) << "Block-scaled GEMM requires either Blackwell SM100 "
+                    "TCGEN5MMA (A/B in shared memory, C in tensor memory) or "
+                    "SM120 mma.sync (A/B in shared memory, C in a fragment), "
+                    "but got target="
+                 << target << ", A scope=" << op.a_.scope()
+                 << ", B scope=" << op.b_.scope()
+                 << ", C scope=" << op.c_.scope() << "."
+                 << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
     }
 
     if (AllowTcgen5Mma(op, target)) {

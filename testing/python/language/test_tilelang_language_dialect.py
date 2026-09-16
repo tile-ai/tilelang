@@ -19,6 +19,7 @@ from tilelang.language.tir.exports import (
 CUDA_ONLY_NAMES = {
     "ClusterKernel",
     "CUDASourceCodeKernel",
+    "gemm_blockscaled",
     "pdl_trigger",
     "rng_init",
     "tcgen05_mma",
