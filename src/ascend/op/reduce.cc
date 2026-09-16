@@ -3,6 +3,7 @@
  * \brief Ascend implementation for tl.reduce AllReduce lowering.
  */
 
+#include "ascend/op/reduce.h"
 #include "backend/common/op/reduce.h"
 
 #include "backend/common/target_utils.h"
@@ -32,7 +33,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   // here and only the universal checks apply.
   static void CheckAllReduceWidth(int reducing_threads, int scale,
                                   const char *op_name, Target) {
-    backend::reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
+    ascend::CheckAllReduceWidth(reducing_threads, scale, op_name);
   }
 
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }

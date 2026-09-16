@@ -23,14 +23,6 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return reducing_threads > 32;
   }
 
-  // The XOR-butterfly shuffle all-reduce has no arbitrary-width fallback, so
-  // the power-of-two rule applies on top of the universal checks.
-  static void CheckAllReduceWidth(int reducing_threads, int scale,
-                                  const char *op_name, Target) {
-    backend::reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
-    backend::reduce::CheckXorButterflyWidth(reducing_threads, scale);
-  }
-
   static bool IsFAdd2Enabled(const ReduceOpNode &op) {
     auto pass_ctx = tvm::transform::PassContext::Current();
     bool globally_enabled =

@@ -3,6 +3,7 @@
  * \brief Ascend implementation for tl.finalize_reducer AllReduce lowering.
  */
 
+#include "ascend/op/reduce.h"
 #include "backend/common/op/reduce.h"
 #include "backend/common/target_utils.h"
 #include "op/reducer.h"
@@ -91,8 +92,7 @@ Stmt LowerFinalizeReducer(const FinalizeReducerOpNode &op,
     // Same policy as ascend::Reduce::CheckAllReduceWidth: AscendAllReduce gates
     // its butterfly and hardware-reduce paths on a power-of-two thread count,
     // so the XOR-butterfly rule is vacuous and only the universal checks apply.
-    backend::reduce::CheckAllReduceWidth(reducing_threads, scale,
-                                         "tl.finalize_reducer");
+    ascend::CheckAllReduceWidth(reducing_threads, scale, "tl.finalize_reducer");
 
     std::stringstream ss;
     ss << "tl::AscendAllReduce<" << op_str << ", " << reducing_threads << ", "

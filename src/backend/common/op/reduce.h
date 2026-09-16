@@ -185,19 +185,6 @@ inline int GetPreferredVectorizedSize(DataType dt,
   return 1;
 }
 
-// The width preconditions of an all-reduce step, split in two:
-//
-//   CheckAllReduceWidth    holds for every all-reduce lowering;
-//   CheckXorButterflyWidth is the extra requirement of the XOR-butterfly
-//                          shuffle all-reduce, which has no fallback for
-//                          widths that are not powers of two.
-//
-// A backend states which of the two apply to it by implementing
-// Impl::CheckAllReduceWidth, which the shared lowerers call as soon as the
-// reducing width is known. Keeping the call there rather than in the
-// Make*AllReduce emit helpers puts it ahead of the lowering steps that can
-// report an unrelated problem first. No target branching appears here: the
-// shared code only forwards to Impl.
 inline void CheckAllReduceWidth(int reducing_threads, int scale,
                                 const char *op_name) {
   ICHECK_GT(reducing_threads, 0)
@@ -208,17 +195,11 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
   ICHECK_EQ(reducing_threads % scale, 0)
       << op_name << ": AllReduce threads (" << reducing_threads
       << ") must be divisible by scale (" << scale << ")";
-}
-
-// Deliberately not part of CheckAllReduceWidth: a backend that lowers to an
-// all-reduce with an arbitrary-width fallback has nothing to satisfy here, so
-// it simply does not call this from its Impl::CheckAllReduceWidth.
-inline void CheckXorButterflyWidth(int reducing_threads, int scale) {
   int logical_width = reducing_threads / scale;
   int shift = 0;
   ICHECK(tirx::is_const_power_of_two_integer(Integer(logical_width), &shift))
-      << "XOR-butterfly all-reduce requires logical_width (threads / scale) to "
-         "be a positive power of two, got "
+      << op_name << ": XOR-butterfly AllReduce requires logical_width "
+      << "(threads / scale) to be a positive power of two, got "
       << logical_width << " (threads=" << reducing_threads
       << ", scale=" << scale << ")";
 }
@@ -652,6 +633,11 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
+  static void CheckAllReduceWidth(int reducing_threads, int scale,
+                                  const char *op_name, Target) {
+    reduce::CheckAllReduceWidth(reducing_threads, scale, op_name);
+  }
+
   static Stmt LowerLocal(const ReduceOpNode &op, const Buffer &src_buffer,
                          const Buffer &dst_buffer,
                          const LowerArgs &lower_args) {
