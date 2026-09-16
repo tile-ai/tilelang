@@ -169,7 +169,10 @@ def test_npu_shared_path_and_timing_backend(monkeypatch, accelerator, backend, e
     def unexpected(*args, **kwargs):
         raise AssertionError("NPU profiling must not call CUDA APIs")
 
-    monkeypatch.setattr(bench, "_bench_with_msprof", msprof)
+    if backend != "event":
+        from tilelang.profiler import msprof as msprof_module
+
+        monkeypatch.setattr(msprof_module, "bench_with_msprof", msprof)
     for name in ("Event", "device", "current_device", "synchronize", "Stream", "CUDAGraph"):
         monkeypatch.setattr(torch.cuda, name, unexpected)
     result = bench.do_bench(state.function, device=selected_device, backend=backend, _n_warmup=1, _n_repeat=2, cache_size=2)
