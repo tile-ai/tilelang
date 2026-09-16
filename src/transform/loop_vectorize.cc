@@ -147,19 +147,14 @@ Array<PrimExpr> GetBufferStrides(const Buffer &buffer) {
 }
 
 Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
-  if (const auto *load = expr.as<BufferLoadNode>()) {
-    return GetRef<BufferLoad>(load);
+  if (const auto *call = expr.as<CallNode>();
+      call != nullptr && (call->op.same_as(builtin::address_of()) ||
+                          call->op.same_as(tl::access_ptr()))) {
+    ICHECK_EQ(call->args.size(),
+              call->op.same_as(builtin::address_of()) ? 1U : 3U);
+    return Downcast<BufferLoad>(call->args[0]);
   }
-  const auto *call = expr.as<CallNode>();
-  if (call == nullptr) {
-    return std::nullopt;
-  }
-  if ((call->op.same_as(builtin::address_of()) ||
-       call->op.same_as(tl::access_ptr())) &&
-      !call->args.empty()) {
-    return call->args[0].as<BufferLoad>();
-  }
-  return std::nullopt;
+  return expr.as<BufferLoad>();
 }
 
 int GetMaxAtomicVectorSize(DataType dtype, const String &storage_scope,
@@ -653,8 +648,7 @@ private:
       HandleTvmAccessPtr(node);
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == tl::atomic_add_elem_op()) {
-      // Assert at least 2 args (dst_ptr and src)
-      ICHECK(node->args.size() >= 2)
+      ICHECK_GE(node->args.size(), 2U)
           << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
       // Keep this as a call constraint: simple-memory planning must not defer
@@ -768,9 +762,8 @@ private:
   }
 
   int ComputeAtomicVectorSize(const PrimExpr &destination) {
-    if (!inner_for_) {
-      return 1;
-    }
+    ICHECK(inner_for_)
+        << "Atomic vectorization analysis requires a loop context";
 
     DataType dtype;
     String storage_scope;
@@ -787,11 +780,11 @@ private:
         offset = offset + indices[i] * strides[i];
       }
     } else {
-      const auto *ptr = destination.as<CallNode>();
-      if (ptr == nullptr || !ptr->op.same_as(builtin::tvm_access_ptr()) ||
-          ptr->args.size() < 3) {
-        return 1;
-      }
+      Call ptr = Downcast<Call>(destination);
+      ICHECK(ptr->op.same_as(builtin::tvm_access_ptr()))
+          << "Unsupported atomic destination: " << destination;
+      ICHECK_EQ(ptr->args.size(), 5U)
+          << "tvm_access_ptr expects (dtype, data, offset, extent, rw_mask)";
       dtype = ptr->args[0].dtype();
       storage_scope = GetPtrStorageScope(Downcast<Var>(ptr->args[1]));
       // tvm_access_ptr already carries the physical element offset.

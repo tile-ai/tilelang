@@ -563,10 +563,8 @@ public:
   PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(atomic_add_elem_op()));
 
-    // Must have at least 2 args (dst_ptr and src)
-    if (op->args.size() < 2) {
-      return GetRef<PrimExpr>(op);
-    }
+    ICHECK_GE(op->args.size(), 2U)
+        << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
     // Get the vector size from var_lanes_
     auto lanes_ptr = as_const_int(var_lanes_);
@@ -592,10 +590,11 @@ public:
       max_vec_size =
           GetMaxAtomicVectorSize(buffer->dtype, buffer.scope(), target);
     } else {
-      const auto *ptr = dst.as<CallNode>();
-      ICHECK(ptr && ptr->op.same_as(builtin::tvm_access_ptr()))
+      Call ptr = Downcast<Call>(dst);
+      ICHECK(ptr->op.same_as(builtin::tvm_access_ptr()))
           << "Unsupported atomic destination: " << dst;
-      ICHECK_GE(ptr->args.size(), 3U);
+      ICHECK_EQ(ptr->args.size(), 5U)
+          << "tvm_access_ptr expects (dtype, data, offset, extent, rw_mask)";
       max_vec_size = GetMaxAtomicVectorSize(
           ptr->args[0].dtype(), GetPtrStorageScope(Downcast<Var>(ptr->args[1])),
           target);
