@@ -198,6 +198,15 @@ TVM_DLL const Op &magic_div();
 TVM_DLL const Op &magic_mod();
 
 /*!
+ * \brief TileLang intrinsic for modulus derived from a shared quotient.
+ *
+ * magic_mod_from_quotient(x, d, q) computes x - q*d when the magic-division
+ * validity contract holds, and otherwise uses the same floormod fallback as
+ * magic_mod. It is introduced by MagicCallHoist when div and mod share (x,d).
+ */
+TVM_DLL const Op &magic_mod_from_quotient();
+
+/*!
  * \brief Tile memory region descriptor: a transport-only bridge that carries
  * a BufferRegion (plus an access mask) through Call args.
  *

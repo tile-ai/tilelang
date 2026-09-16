@@ -61,6 +61,11 @@ TIR_DEFINE_TL_BUILTIN(magic_div).set_num_inputs(4).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(magic_mod).set_num_inputs(4).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(magic_mod_from_quotient)
+    .set_num_inputs(3)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(region).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 

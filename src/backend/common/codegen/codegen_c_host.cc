@@ -347,7 +347,8 @@ std::string CodeGenCHost::GetPackedName(const tvm::tirx::CallNode *op) {
 void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
                               std::ostream &os) { // NOLINT(*)
   using namespace tvm::tirx;
-  if (op->op.same_as(tl::magic_mod()) || op->op.same_as(tl::magic_div())) {
+  if (op->op.same_as(tl::magic_mod()) || op->op.same_as(tl::magic_div()) ||
+      op->op.same_as(tl::magic_mod_from_quotient())) {
     if (!emitted_magic_div_helpers_) {
       emitted_magic_div_helpers_ = true;
       decl_stream
@@ -362,7 +363,17 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
              "}\n";
     }
   }
-  if (op->op.same_as(tl::magic_mod())) {
+  if (op->op.same_as(tl::magic_mod_from_quotient())) {
+    ICHECK_EQ(op->args.size(), 3U);
+    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0) && ((unsigned)(("
+       << this->PrintExpr(op->args[1]) << ") - 1) <= 0x7FFFFFFE)) ? (("
+       << this->PrintExpr(op->args[0]) << ") - ("
+       << this->PrintExpr(op->args[2]) << ") * ("
+       << this->PrintExpr(op->args[1]) << ")) : tl_magic_floormod_i32(("
+       << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
+       << ")))";
+    return;
+  } else if (op->op.same_as(tl::magic_mod())) {
     // floormod(x, d) with host-precomputed magic constants, same runtime
     // validity guard as magic_div (fallback keeps floormod semantics).
     ICHECK_EQ(op->args.size(), 4U);

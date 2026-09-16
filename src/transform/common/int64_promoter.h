@@ -62,7 +62,8 @@ public:
     // magic multiplier and leave widen/narrow pairs in device code, so the
     // whole call subtree is left untouched; the surrounding index expression
     // widens the int32 quotient with an explicit cast if needed.
-    if (op->op.same_as(tl::magic_div()) || op->op.same_as(tl::magic_mod())) {
+    if (op->op.same_as(tl::magic_div()) || op->op.same_as(tl::magic_mod()) ||
+        op->op.same_as(tl::magic_mod_from_quotient())) {
       return ffi::GetRef<PrimExpr>(op);
     }
     return Parent::VisitExpr_(op);

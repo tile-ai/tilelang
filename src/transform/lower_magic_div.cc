@@ -215,6 +215,40 @@ public:
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    // Keep a complete mixed-radix unflatten chain visible until
+    // FlattenBuffer.  Replacing its quotient/remainder pieces with opaque
+    // magic calls prevents the flattened store offset from simplifying back
+    // to the original linear index.
+    if (!IsLinearIndexUnflatten(op->indices, op->buffer->shape)) {
+      return IRMutatorWithAnalyzer::VisitStmt_(op);
+    }
+
+    PrimExpr value = VisitExpr(op->value);
+    Optional<PrimExpr> predicate = op->predicate;
+    if (predicate.defined()) {
+      predicate = VisitExpr(predicate.value());
+    }
+    if (value.same_as(op->value) && predicate.same_as(op->predicate)) {
+      return GetRef<Stmt>(op);
+    }
+    return BufferStore(op->buffer, value, op->indices, predicate, op->span);
+  }
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    if (!IsLinearIndexUnflatten(op->indices, op->buffer->shape)) {
+      return IRMutatorWithAnalyzer::VisitExpr_(op);
+    }
+    Optional<PrimExpr> predicate = op->predicate;
+    if (predicate.defined()) {
+      predicate = VisitExpr(predicate.value());
+    }
+    if (predicate.same_as(op->predicate)) {
+      return GetRef<PrimExpr>(op);
+    }
+    return BufferLoad(op->buffer, op->indices, predicate, op->span);
+  }
+
   bool HasMagicDivisors() const { return !entries_.empty(); }
 
   // Bind the magic constants on the host: one libtvm_runtime helper call per
@@ -249,6 +283,76 @@ public:
   }
 
 private:
+  bool IsMatchingDiv(const PrimExpr &expr, const PrimExpr &dividend,
+                     const std::vector<PrimExpr> &divisor_factors) const {
+    PrimExpr lhs;
+    PrimExpr rhs;
+    if (const FloorDivNode *div = expr.as<FloorDivNode>()) {
+      lhs = div->a;
+      rhs = div->b;
+    } else if (const DivNode *div = expr.as<DivNode>()) {
+      lhs = div->a;
+      rhs = div->b;
+    } else {
+      return false;
+    }
+    return ExprDeepEqual()(lhs, dividend) &&
+           FactorMultisetEqual(CollectFactors(rhs), divisor_factors);
+  }
+
+  bool IsMatchingMod(const PrimExpr &expr, const PrimExpr &dividend,
+                     const std::vector<PrimExpr> &divisor_factors) const {
+    PrimExpr lhs;
+    PrimExpr rhs;
+    if (const FloorModNode *mod = expr.as<FloorModNode>()) {
+      lhs = mod->a;
+      rhs = mod->b;
+    } else if (const ModNode *mod = expr.as<ModNode>()) {
+      lhs = mod->a;
+      rhs = mod->b;
+    } else {
+      return false;
+    }
+    return ExprDeepEqual()(lhs, dividend) &&
+           FactorMultisetEqual(CollectFactors(rhs), divisor_factors);
+  }
+
+  bool IsLinearIndexUnflatten(const Array<PrimExpr> &indices,
+                              const Array<PrimExpr> &shape) const {
+    if (indices.size() < 2 || indices.size() != shape.size()) {
+      return false;
+    }
+
+    const auto *outer_div = indices[0].as<FloorDivNode>();
+    if (outer_div == nullptr) {
+      return false;
+    }
+    PrimExpr linear_index = outer_div->a;
+    PrimExpr remainder;
+    for (size_t i = 0; i + 1 < indices.size(); ++i) {
+      std::vector<PrimExpr> stride_factors;
+      for (size_t j = i + 1; j < shape.size(); ++j) {
+        std::vector<PrimExpr> shape_factors = CollectFactors(shape[j]);
+        stride_factors.insert(stride_factors.end(), shape_factors.begin(),
+                              shape_factors.end());
+      }
+      const PrimExpr &dividend = i == 0 ? linear_index : remainder;
+      if (!IsMatchingDiv(indices[i], dividend, stride_factors)) {
+        return false;
+      }
+      if (i + 1 == indices.size() - 1) {
+        return IsMatchingMod(indices.back(), dividend, stride_factors);
+      }
+      const auto *next_div = indices[i + 1].as<FloorDivNode>();
+      if (next_div == nullptr ||
+          !IsMatchingMod(next_div->a, dividend, stride_factors)) {
+        return false;
+      }
+      remainder = next_div->a;
+    }
+    return false;
+  }
+
   bool ProvePositive(const PrimExpr &e) {
     try {
       if (analyzer_->CanProve(e > 0, arith::ProofStrength::kSymbolicBound)) {
@@ -404,22 +508,21 @@ private:
 
 namespace {
 
-// Post-rewrite CSE for magic calls: identical (op, x, d) calls (duplicated by
-// let-inlining across index/guard sites) are bound once per thread as
-// tl_magic_q_i at the top of the innermost thread_extent AttrStmt, so the
-// per-site runtime guard and fallback are emitted only a handful of times
-// instead of once per inlined copy.
+// Post-rewrite CSE for magic calls: calls with the same (x, d), including a
+// div/mod pair duplicated by let-inlining, share one quotient per thread.
 class MagicCallHoister {
 public:
   static Stmt Apply(const Stmt &body) {
-    // 1. Collect groups of identical magic calls in post-order (inner first).
+    // 1. Collect groups with the same (x, d) in post-order (inner first).
+    // Div and mod share one quotient; the remainder is derived as x - q*d.
     struct Group {
-      const CallNode *repr = nullptr;
-      std::vector<const CallNode *> calls;
+      Call repr;
+      std::vector<Call> div_calls;
+      std::vector<Call> mod_calls;
       PrimExpr x;
       PrimExpr d;
       Var q;
-      bool is_mod = false;
+      Var r;
     };
     std::vector<Group> groups;
     ExprDeepEqual deep_equal;
@@ -432,21 +535,21 @@ public:
       if (!is_mod && !call->op.same_as(tl::magic_div())) {
         return;
       }
+      Call call_ref = GetRef<Call>(call);
       ICHECK_EQ(call->args.size(), 4U);
       for (Group &g : groups) {
-        if (g.is_mod == is_mod && deep_equal(g.d, call->args[1]) &&
-            deep_equal(g.x, call->args[0])) {
-          g.calls.push_back(call);
+        if (deep_equal(g.d, call->args[1]) && deep_equal(g.x, call->args[0])) {
+          (is_mod ? g.mod_calls : g.div_calls).push_back(call_ref);
           return;
         }
       }
       Group g;
-      g.repr = call;
-      g.calls.push_back(call);
+      g.repr = call_ref;
       g.x = call->args[0];
       g.d = call->args[1];
       g.q = Var("tl_magic_q_" + std::to_string(groups.size()), call->dtype);
-      g.is_mod = is_mod;
+      g.r = Var("tl_magic_r_" + std::to_string(groups.size()), call->dtype);
+      (is_mod ? g.mod_calls : g.div_calls).push_back(call_ref);
       groups.push_back(std::move(g));
     });
     if (groups.empty()) {
@@ -454,16 +557,20 @@ public:
     }
 
     // 2. Find the innermost thread_extent AttrStmt containing all groups.
-    std::unordered_set<const Object *> targets;
+    std::unordered_set<Call, ObjectPtrHash, ObjectPtrEqual> targets;
     for (const Group &g : groups) {
-      for (const CallNode *c : g.calls) {
+      for (const Call &c : g.div_calls) {
+        targets.insert(c);
+      }
+      for (const Call &c : g.mod_calls) {
         targets.insert(c);
       }
     }
     auto contains_all = [&](const Stmt &root) {
       std::unordered_set<const Object *> seen;
       PostOrderVisit(root, [&](const ObjectRef &n) {
-        if (targets.count(n.get())) {
+        if (const auto *call = n.as<CallNode>();
+            call != nullptr && targets.count(GetRef<Call>(call))) {
           seen.insert(n.get());
         }
       });
@@ -471,11 +578,12 @@ public:
     };
     // Thread bindings are thread_extent AttrStmts at this pipeline stage;
     // pick the innermost one containing every group.
-    const AttrStmtNode *scope = nullptr;
+    Optional<AttrStmt> scope;
     std::function<void(const Stmt &)> walk = [&](const Stmt &cur_s) {
       if (const AttrStmtNode *a = cur_s.as<AttrStmtNode>()) {
         if (a->attr_key == tirx::attr::thread_extent && contains_all(a->body)) {
-          scope = a; // walk continues deeper; the last hit is the innermost
+          scope = GetRef<AttrStmt>(a);
+          // Walk continues deeper; the last hit is the innermost.
         }
         walk(a->body);
         return;
@@ -498,7 +606,7 @@ public:
       }
     };
     walk(body);
-    if (scope == nullptr) {
+    if (!scope.defined()) {
       return body; // no uniform thread scope covers every use; leave inline
     }
 
@@ -506,15 +614,16 @@ public:
     // groups substitute first), and prepend the binds to the scope body.
     class Replacer : public StmtExprMutator {
     public:
-      std::unordered_map<const CallNode *, Var> replace_;
-      const AttrStmtNode *scope_;
-      explicit Replacer(const AttrStmtNode *scope) : scope_(scope) {}
+      std::unordered_map<Call, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+          replace_;
+      AttrStmt scope_;
+      explicit Replacer(AttrStmt scope) : scope_(std::move(scope)) {}
 
       PrimExpr Apply(const PrimExpr &e) { return VisitExpr(e); }
       Stmt Apply(const Stmt &s) { return VisitStmt(s); }
 
       PrimExpr VisitExpr_(const CallNode *op) final {
-        auto it = replace_.find(op);
+        auto it = replace_.find(GetRef<Call>(op));
         if (it != replace_.end()) {
           return it->second;
         }
@@ -522,7 +631,7 @@ public:
       }
 
       Stmt VisitStmt_(const AttrStmtNode *op) final {
-        if (op == scope_) {
+        if (GetRef<AttrStmt>(op).same_as(scope_)) {
           Stmt new_body = VisitStmt(op->body);
           std::vector<Stmt> seq;
           for (const auto &[var, value] : binds_) {
@@ -539,23 +648,37 @@ public:
       std::vector<std::pair<Var, PrimExpr>> binds_;
     };
 
-    Replacer replacer(scope);
+    Replacer replacer(scope.value());
     for (const Group &g : groups) {
-      for (const CallNode *c : g.calls) {
+      for (const Call &c : g.div_calls) {
         replacer.replace_[c] = g.q;
+      }
+      for (const Call &c : g.mod_calls) {
+        replacer.replace_[c] = g.r;
       }
     }
     for (const Group &g : groups) {
-      // Bind values are built by mutating the args only, so the group call
-      // itself is kept while a group nested inside its x refers to the
-      // inner q var.
+      // Bind values are built by mutating the args only, so a group nested
+      // inside x refers to the already-bound inner quotient/remainder.
       Array<PrimExpr> new_args;
       for (const PrimExpr &arg : g.repr->args) {
         new_args.push_back(replacer.Apply(arg));
       }
-      replacer.binds_.emplace_back(g.q,
-                                   Call(g.repr->dtype, g.repr->op, new_args,
-                                        g.repr->annotations, g.repr->span));
+      if (g.div_calls.empty()) {
+        replacer.binds_.emplace_back(g.r, Call(g.repr->dtype, tl::magic_mod(),
+                                               new_args, g.repr->annotations,
+                                               g.repr->span));
+        continue;
+      }
+      replacer.binds_.emplace_back(g.q, Call(g.repr->dtype, tl::magic_div(),
+                                             new_args, g.repr->annotations,
+                                             g.repr->span));
+      if (!g.mod_calls.empty()) {
+        replacer.binds_.emplace_back(
+            g.r, Call(g.repr->dtype, tl::magic_mod_from_quotient(),
+                      {new_args[0], new_args[1], g.q}, g.repr->annotations,
+                      g.repr->span));
+      }
     }
     return replacer.Apply(body);
   }
