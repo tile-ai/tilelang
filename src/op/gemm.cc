@@ -76,13 +76,13 @@ void RegisterGemmImpl(GemmImpl impl) {
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      (optional) mbar (BufferLoad or const-0 placeholder),
- *      cCoord_y (PrimExpr), cCoord_x (PrimExpr),
- *      (optional, blockscaled) SFA, SFB regions, k_start (PrimExpr)]
+ *      cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
+ *   Block-scaled GEMM appends [SFA, SFB regions, k_start (PrimExpr)] and is
+ *   built through tl.tileop.gemm_blockscaled (GemmBlockScaled) instead.
  *   Backend lowering knobs (k_pack, wg_wait) ride in the annotations map.
  */
-Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<GemmNode> node = make_object<GemmNode>();
-
+void GemmNode::InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
+                                 const Map<String, ObjectRef> &annotations) {
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto b_access = NormalizeToAccessRegion(args[1], kAccessRead);
   auto c_access = NormalizeToAccessRegion(args[2], kAccessReadWrite);
@@ -132,16 +132,32 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[11].as<PrimExpr>().value(), args[12].as<PrimExpr>().value()});
-  if (args.size() > 13) {
-    node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
-  }
-  if (args.size() > 14) {
-    node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
-  }
-  if (args.size() > 15) {
-    node->sfKStart_ = args[15].as<PrimExpr>().value();
-  }
   node->annotations_ = annotations;
+}
+
+Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ICHECK_LE(args.size(), 13)
+      << "tl.tileop.gemm takes at most 13 positional slots; a block-scaled "
+         "GEMM (SFA, SFB, k_start) must be built as tl.tileop.gemm_blockscaled "
+         "so the scale factors are not silently ignored.";
+  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+  GemmNode::InitFromDenseArgs(node.get(), args, annotations);
+  data_ = std::move(node);
+}
+
+GemmBlockScaled::GemmBlockScaled(Array<PrimExpr> args,
+                                 Map<String, ObjectRef> annotations) {
+  ICHECK_EQ(args.size(), 16)
+      << "tl.tileop.gemm_blockscaled expects the 13 dense GEMM slots followed "
+         "by SFA, SFB and k_start, but got "
+      << args.size() << " arguments.";
+  ObjectPtr<GemmBlockScaledNode> node = make_object<GemmBlockScaledNode>();
+  GemmNode::InitFromDenseArgs(node.get(), args, annotations);
+  node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
+  node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
+  node->sfKStart_ = args[15].as<PrimExpr>().value();
+  ICHECK(node->sfaRegion_.defined() && node->sfbRegion_.defined())
+      << "Block-scaled GEMM requires both SFA and SFB scale-factor regions.";
   data_ = std::move(node);
 }
 
@@ -152,12 +168,6 @@ AccessRegions GemmNode::GetAccessRegions() const {
   if (!is_one(clearAccum_)) {
     result.reads.push_back(cRegion_);
   }
-  if (sfaRegion_.defined()) {
-    result.reads.push_back(sfaRegion_);
-  }
-  if (sfbRegion_.defined()) {
-    result.reads.push_back(sfbRegion_);
-  }
   result.writes.push_back(cRegion_);
   return result;
 }
@@ -166,12 +176,6 @@ ffi::Array<BufferRegion> GemmNode::GetReadBeforeWriteRegions() const {
   ffi::Array<BufferRegion> result;
   result.push_back(aRegion_);
   result.push_back(bRegion_);
-  if (sfaRegion_.defined()) {
-    result.push_back(sfaRegion_);
-  }
-  if (sfbRegion_.defined()) {
-    result.push_back(sfbRegion_);
-  }
   // The accumulator's old contents are consumed only when the clear is
   // provably absent. GetAccessRegions() uses !is_one() because a clear that
   // cannot be proven still creates a read dependency for pipelining; here the
@@ -188,10 +192,34 @@ TileOperator GemmNode::Clone() const {
   return Gemm(op);
 }
 
+AccessRegions GemmBlockScaledNode::GetAccessRegions() const {
+  AccessRegions result = GemmNode::GetAccessRegions();
+  result.reads.push_back(sfaRegion_);
+  result.reads.push_back(sfbRegion_);
+  return result;
+}
+
+ffi::Array<BufferRegion>
+GemmBlockScaledNode::GetReadBeforeWriteRegions() const {
+  ffi::Array<BufferRegion> result = GemmNode::GetReadBeforeWriteRegions();
+  result.push_back(sfaRegion_);
+  result.push_back(sfbRegion_);
+  return result;
+}
+
+TileOperator GemmBlockScaledNode::Clone() const {
+  auto op = make_object<GemmBlockScaledNode>(*this);
+  return GemmBlockScaled(op);
+}
+
 String GemmNode::GetGemmInstructionKey(int block_size, Target target) const {
+  return ResolveGemmImpl(target).select_inst(*this, block_size, target);
+}
+
+String GemmBlockScaledNode::GetGemmInstructionKey(int block_size,
+                                                  Target target) const {
   const GemmImpl &impl = ResolveGemmImpl(target);
-  if ((sfaRegion_.defined() || sfbRegion_.defined()) &&
-      !impl.supports_blockscaled) {
+  if (!impl.supports_blockscaled) {
     LOG(FATAL) << "Block-scaled GEMM is not supported by the " << impl.name
                << " backend (target=" << target->str()
                << "); a dense GEMM lowering would silently drop the SFA/SFB "
@@ -209,7 +237,7 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
 
 Stmt GemmNode::Lower(const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) const {
-  if (const auto f = Function::GetGlobal("tl.gemm.lower")) {
+  if (const auto f = Function::GetGlobal(LowerGlobalFunc())) {
     PrimExpr mbar_phase = lower_args.mbar_phase_expr;
     if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
       mbar_phase = explicit_phase.value();
@@ -247,7 +275,7 @@ Stmt GemmNode::Lower(const LowerArgs &lower_args,
                /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
                /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
-    LOG(FATAL) << "No lower function found for gemm";
+    LOG(FATAL) << "No lower function found for gemm: " << LowerGlobalFunc();
     return Stmt();
   }
 }
@@ -257,7 +285,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
   if (completed_)
     return {};
   LayoutMap results;
-  if (const auto f = Function::GetGlobal("tl.gemm.infer_layout")) {
+  if (const auto f = Function::GetGlobal(InferLayoutGlobalFunc())) {
     auto inferred_layouts = Downcast<LayoutMap>((*f)(
         GetRef<Gemm>(this), layout_args.target, layout_args.thread_bounds));
     // For MMA instructions, skip shared buffer layouts that are already
@@ -285,7 +313,8 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
       }
     }
   } else {
-    LOG(FATAL) << "No infer layout function found for gemm";
+    LOG(FATAL) << "No infer layout function found for gemm: "
+               << InferLayoutGlobalFunc();
   }
 
   completed_ = true;
@@ -325,20 +354,12 @@ TVM_REGISTER_OP("tl.tileop.tcgen05_gemm")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-// Block-scaled GEMM shares GemmNode with the dense op (the SFA/SFB/k_start
-// slots are the only addition), but gets its own op so the printed IR and
-// name-based pass matching do not have to count call arguments. The explicit
-// ISA variants ride on the same op via the is_tcgen05 annotation.
-TVM_REGISTER_OP("tl.tileop.gemm_blockscaled")
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "gemm_blockscaled")
-    .set_attr<OpBuilderFunc>("TLOpBuilder",
-                             [](Array<PrimExpr> args,
-                                Map<String, ObjectRef> annotations) {
-                               ICHECK(args.size() >= 16)
-                                   << "tl.tileop.gemm_blockscaled expects the "
-                                      "SFA, SFB and k_start slots";
-                               return Gemm(args, annotations);
-                             })
+// Block-scaled GEMM is its own tile op (GemmBlockScaledNode, a GemmNode
+// subclass): the printed IR is self-describing, passes that need the scale
+// factors match the subclass, and passes that only care about "a GEMM" keep
+// matching through GemmNode. The explicit ISA variants ride on the same op
+// via the is_tcgen05 annotation.
+TIR_REGISTER_TL_TILE_OP(GemmBlockScaled, gemm_blockscaled)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
@@ -348,6 +369,7 @@ TVM_REGISTER_OP("tl.GemmWarpPolicy")
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   GemmNode::RegisterReflection();
+  GemmBlockScaledNode::RegisterReflection();
   GemmWarpPolicyNode::RegisterReflection();
   namespace refl = reflection;
   refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",

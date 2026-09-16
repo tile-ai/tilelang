@@ -362,28 +362,24 @@ private:
           VisitExpr(range->min);
           VisitExpr(range->extent);
         }
-        if (gemm->sfaRegion_.defined()) {
-          if (IsBranchPrivateBuffer(gemm->sfaRegion_->buffer)) {
-            summary_.read_buffers.insert(gemm->sfaRegion_->buffer);
+        if (const auto *bs = AsGemmBlockScaled(*gemm)) {
+          if (IsBranchPrivateBuffer(bs->sfaRegion_->buffer)) {
+            summary_.read_buffers.insert(bs->sfaRegion_->buffer);
           }
-          for (const auto &range : gemm->sfaRegion_->region) {
+          for (const auto &range : bs->sfaRegion_->region) {
             VisitExpr(range->min);
             VisitExpr(range->extent);
           }
-        }
-        if (gemm->sfbRegion_.defined()) {
-          if (IsBranchPrivateBuffer(gemm->sfbRegion_->buffer)) {
-            summary_.read_buffers.insert(gemm->sfbRegion_->buffer);
+          if (IsBranchPrivateBuffer(bs->sfbRegion_->buffer)) {
+            summary_.read_buffers.insert(bs->sfbRegion_->buffer);
           }
-          for (const auto &range : gemm->sfbRegion_->region) {
+          for (const auto &range : bs->sfbRegion_->region) {
             VisitExpr(range->min);
             VisitExpr(range->extent);
           }
+          VisitExpr(bs->sfKStart_);
         }
         VisitExpr(gemm->clearAccum_);
-        if (gemm->sfKStart_.defined()) {
-          VisitExpr(gemm->sfKStart_);
-        }
         return;
       }
     }

@@ -363,14 +363,7 @@ struct Gemm {
     // instruction can honour, so there is no fallback: the instruction is
     // fixed by the target and the accumulator scope (TMEM => TCGEN5MMA on
     // SM100, fragment => warp-level mma.sync on SM120).
-    const bool has_sfa = op.sfaRegion_.defined();
-    const bool has_sfb = op.sfbRegion_.defined();
-    if (has_sfa || has_sfb) {
-      if (!(has_sfa && has_sfb)) {
-        LOG(FATAL) << "Block-scaled GEMM requires both SFA and SFB "
-                      "scale-factor regions."
-                   << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
-      }
+    if (AsGemmBlockScaled(op) != nullptr) {
       if (AllowTcgen5Mma(op, target)) {
         return kCudaTCGEN05;
       }

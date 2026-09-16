@@ -73,6 +73,55 @@ def test_gemm_blockscaled_emits_dispatching_call():
     assert "use_2cta" not in ann
 
 
+def test_gemm_blockscaled_parses_to_its_own_tile_op():
+    """tl.tileop.gemm_blockscaled builds a GemmBlockScaled node.
+
+    The node is a Gemm subclass: passes that only care about "a GEMM" keep
+    matching it, while the scale-factor operands are first-class fields
+    instead of trailing optional slots on the dense op.
+    """
+    from tilelang.tileop import Gemm, GemmBlockScaled
+
+    @T.prim_func
+    def main(A: T.Tensor((128, 128), T.float8_e4m3fn), B: T.Tensor((128, 128), T.float8_e4m3fn)):
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            b = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            c = T.alloc_tmem([128, 128], T.float32)
+            sfa = T.alloc_tmem([128, 4], T.uint32)
+            sfb = T.alloc_tmem([128, 4], T.uint32)
+            done = T.alloc_barrier([1])
+            T.gemm_blockscaled(
+                a,
+                b,
+                c,
+                sfa,
+                sfb,
+                transpose_B=True,
+                mbar=done[0],
+                k_start=256,
+                sf_a_granularity_k=128,
+                sf_b_granularity_k=128,
+            )
+
+    (call,) = _gemm_calls(main)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    assert isinstance(op, GemmBlockScaled)
+    assert isinstance(op, Gemm)
+    assert op.is_blockscaled
+    # Inherited dense fields and the block-scaled fields both resolve.
+    assert (int(op.m), int(op.n), int(op.k)) == (128, 128, 128)
+    assert op.sfaRegion.buffer.name == "sfa"
+    assert op.sfbRegion.buffer.name == "sfb"
+    assert int(op.sfKStart) == 256
+    assert op.transB and not op.transA
+
+    # The dense op refuses the 16-slot protocol rather than ignoring SFA/SFB.
+    dense_builder = tvm.ir.Op.get("tl.tileop.gemm").get_attr("TLOpBuilder")
+    with pytest.raises(Exception, match="at most 13 positional slots"):
+        dense_builder(call.args, call.annotations)
+
+
 def test_gemm_blockscaled_records_use_2cta_and_sf_layout():
     @T.prim_func
     def main(A: T.Tensor((128, 128), T.float8_e4m3fn), B: T.Tensor((128, 128), T.float8_e4m3fn)):

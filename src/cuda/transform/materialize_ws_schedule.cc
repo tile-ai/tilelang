@@ -2281,8 +2281,13 @@ private:
           Call(call->dtype, call->op, call->args, std::move(ann), call->span));
     } else if (op.atom == OpAtom::kTcgen05Gemm) {
       ann.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
-      return Evaluate(Call(call->dtype, Tcgen05GemmOp(), call->args,
-                           std::move(ann), call->span));
+      // A block-scaled GEMM keeps its own op: the explicit TCGEN05 form is
+      // the same op plus the is_tcgen05 annotation.
+      const Op &target_op = call->op.same_as(GemmBlockScaled::Get())
+                                ? GemmBlockScaled::Get()
+                                : Tcgen05GemmOp();
+      return Evaluate(
+          Call(call->dtype, target_op, call->args, std::move(ann), call->span));
     }
     LOG(FATAL) << "ws_schedule: unknown async atom "
                << static_cast<int>(op.atom);

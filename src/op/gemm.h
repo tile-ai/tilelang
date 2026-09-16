@@ -118,10 +118,8 @@ public:
   bool isTcgen05_ = false;
   mutable GemmWarpPolicy policy_;
   Map<String, ObjectRef> annotations_;
-  BufferRegion sfaRegion_, sfbRegion_;
-  PrimExpr sfKStart_;
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = reflection;
@@ -145,10 +143,7 @@ public:
         .def_ro("isWgmma", &GemmNode::isWgmma_)
         .def_ro("isTcgen05", &GemmNode::isTcgen05_)
         .def_ro("policy", &GemmNode::policy_)
-        .def_ro("annotations", &GemmNode::annotations_)
-        .def_ro("sfaRegion", &GemmNode::sfaRegion_)
-        .def_ro("sfbRegion", &GemmNode::sfbRegion_)
-        .def_ro("sfKStart", &GemmNode::sfKStart_);
+        .def_ro("annotations", &GemmNode::annotations_);
   }
 
   Stmt Lower(const LowerArgs &lower_args,
@@ -158,14 +153,79 @@ public:
   AccessRegions GetAccessRegions() const override;
   ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
 
-  TileOperator Clone() const;
+  TileOperator Clone() const override;
 
   // Target-specific GEMM instruction key.
-  String GetGemmInstructionKey(int block_size, Target target) const;
+  virtual String GetGemmInstructionKey(int block_size, Target target) const;
+
+  // Parse the 13 positional slots shared by every GEMM flavour
+  // (see the protocol documented at Gemm::Gemm) into `node`. Used by the
+  // Gemm and GemmBlockScaled constructors.
+  static void InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
+                                const Map<String, ObjectRef> &annotations);
+
+protected:
+  // Global functions the Python side registers for layout inference and
+  // lowering. Subclasses point these at their own tile-op class.
+  virtual const char *InferLayoutGlobalFunc() const {
+    return "tl.gemm.infer_layout";
+  }
+  virtual const char *LowerGlobalFunc() const { return "tl.gemm.lower"; }
 
 private:
   mutable bool completed_ = false;
 };
+
+/*!
+ * \brief Block-scaled GEMM: C (+)= (A * SFA) @ (B * SFB).
+ *
+ * Extends the dense GEMM with the two scale-factor operands and the logical
+ * K-axis start offset that the instruction-level scale-factor IDs are derived
+ * from. Everything else (operand layouts, warp partition, pipeline and
+ * warp-specialization handling) is inherited, so passes that only care about
+ * "a GEMM" keep matching it through GemmNode; passes and backends that need
+ * the scale factors match GemmBlockScaledNode.
+ */
+class GemmBlockScaledNode : public GemmNode {
+public:
+  BufferRegion sfaRegion_, sfbRegion_;
+  PrimExpr sfKStart_;
+
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmBlockScaled", GemmBlockScaledNode,
+                                    GemmNode);
+
+  static void RegisterReflection() {
+    namespace refl = reflection;
+    refl::ObjectDef<GemmBlockScaledNode>()
+        .def_ro("sfaRegion", &GemmBlockScaledNode::sfaRegion_)
+        .def_ro("sfbRegion", &GemmBlockScaledNode::sfbRegion_)
+        .def_ro("sfKStart", &GemmBlockScaledNode::sfKStart_);
+  }
+
+  AccessRegions GetAccessRegions() const override;
+  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
+
+  TileOperator Clone() const override;
+
+  // Rejects backends whose GemmImpl does not declare block-scaled support
+  // before delegating to their instruction selection.
+  String GetGemmInstructionKey(int block_size, Target target) const override;
+
+protected:
+  const char *InferLayoutGlobalFunc() const override {
+    return "tl.gemm_blockscaled.infer_layout";
+  }
+  const char *LowerGlobalFunc() const override {
+    return "tl.gemm_blockscaled.lower";
+  }
+};
+
+/*! \brief Downcast helper for backend code that receives a GemmNode. */
+inline const GemmBlockScaledNode *AsGemmBlockScaled(const GemmNode &op) {
+  return op.IsInstance<GemmBlockScaledNode>()
+             ? static_cast<const GemmBlockScaledNode *>(&op)
+             : nullptr;
+}
 
 using GemmTargetPredicate = bool (*)(Target target);
 
@@ -195,6 +255,16 @@ public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
   TVM_DLL Gemm(Array<PrimExpr> args,
                Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  static const Op &Get();
+};
+
+class GemmBlockScaled : public Gemm {
+public:
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmBlockScaled, Gemm,
+                                             GemmBlockScaledNode);
+  TVM_DLL GemmBlockScaled(
+      Array<PrimExpr> args,
+      Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 

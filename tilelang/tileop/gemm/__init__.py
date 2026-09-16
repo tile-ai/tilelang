@@ -98,10 +98,6 @@ class Gemm(Node, Scriptable):
     def is_tcgen05(self):
         return getattr(self, "isTcgen05", False)
 
-    @property
-    def sf_k_start(self):
-        return self.sfKStart
-
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
@@ -156,3 +152,51 @@ class Gemm(Node, Scriptable):
             ValueError: If the instruction key is unknown
         """
         return resolve_gemm_impl(gemm_inst, target)
+
+
+@tvm_ffi.register_global_func("tl.gemm_blockscaled.infer_layout")
+def gemm_blockscaled_infer_layout(gemm, target: Target, thread_bounds: Range):
+    thread_nums = thread_bounds.extent
+    return gemm.infer_layout(target, thread_nums)
+
+
+@tvm_ffi.register_global_func("tl.gemm_blockscaled.lower")
+def gemm_blockscaled_lower(
+    gemm,
+    layout_map,
+    target: Target,
+    thread_bounds: Range,
+    thread_index: tirx.PrimExpr,
+    mbar_phase_expr: tirx.PrimExpr,
+):
+    return gemm.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
+
+
+@tvm_ffi.register_object("tl.GemmBlockScaled")
+class GemmBlockScaled(Gemm):
+    """Block-scaled GEMM tile op: ``C (+)= (A * SFA) @ (B * SFB)``.
+
+    A ``GemmNode`` subclass on the C++ side, so it shares the dense GEMM's
+    operand layouts, warp partition and scheduling; the extra FFI fields are
+    ``sfaRegion``, ``sfbRegion`` and ``sfKStart``. Instruction selection and
+    lowering go through the same backend registry as ``Gemm``; the backend
+    implementations branch on ``is_blockscaled``.
+    """
+
+    # FFI fields added on top of Gemm: sfaRegion, sfbRegion, sfKStart
+
+    @property
+    def SFARegion(self):
+        return self.sfaRegion
+
+    @property
+    def SFBRegion(self):
+        return self.sfbRegion
+
+    @property
+    def sf_k_start(self):
+        return self.sfKStart
+
+    @property
+    def is_blockscaled(self) -> bool:
+        return True
