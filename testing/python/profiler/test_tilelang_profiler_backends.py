@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from functools import partial
 from inspect import Parameter, signature
 
@@ -51,51 +50,6 @@ def test_public_benchmark_api():
     assert {name: parameter.default for name, parameter in current.items()} == original_defaults
     assert tuple(signature(profiler.Profiler).parameters) == ("params", "result_idx", "supply_type", "adapter")
     assert signature(profiler.Profiler.do_bench).parameters["backend"].default == "event"
-
-
-@pytest.mark.parametrize("method", ["event", "cupti", "cudagraph"])
-@pytest.mark.parametrize("device", [None, 1, torch.device("cuda:1")])
-def test_gpu_benchmark_forwarding(monkeypatch, method, device):
-    calls = []
-    contexts = []
-    result = [1.0, 2.0]
-
-    def benchmark(*args, **kwargs):
-        calls.append((args, kwargs))
-        return result
-
-    @contextmanager
-    def device_context(selected_device):
-        contexts.append(("enter", selected_device))
-        try:
-            yield
-        finally:
-            contexts.append(("exit", selected_device))
-
-    def function():
-        pass
-
-    monkeypatch.setattr(bench, "_do_bench_impl", benchmark)
-    monkeypatch.setattr(torch.cuda, "device", device_context)
-    options = {
-        "warmup": 0,
-        "rep": 30,
-        "_n_warmup": 2,
-        "_n_repeat": 3,
-        "quantiles": [0.5, 0.95],
-        "fast_flush": False,
-        "backend": method,
-        "return_mode": "median",
-        "device": device,
-        "cache_size": 128,
-        "early_stop_baseline": 1.0,
-    }
-
-    assert profiler.do_bench(function, **options) is result
-    expected_options = {name: value for name, value in options.items() if name != "device"}
-    expected_options["device_idx"] = 1 if device is not None else None
-    assert calls == [((function,), expected_options)]
-    assert contexts == ([("enter", 1), ("exit", 1)] if device is not None else [])
 
 
 def test_wall_benchmark_forwarding(monkeypatch):

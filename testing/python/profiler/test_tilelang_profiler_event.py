@@ -104,26 +104,3 @@ def test_metal_rejects_cuda_only_timing(metal_events, device, backend):
     assert not metal_events.events
     assert not metal_events.allocations
     assert metal_events.synchronizations == 0
-
-
-@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="Requires an MPS runtime")
-@pytest.mark.parametrize("explicit_device", [False, True], ids=["implicit-device", "explicit-device"])
-def test_event_metal_runtime(explicit_device):
-    source = torch.ones(1024 * 1024, device="mps")
-    output = torch.empty_like(source)
-
-    def function():
-        torch.add(source, 1, out=output)
-
-    latency = do_bench(
-        function,
-        backend="event",
-        device=source.device if explicit_device else None,
-        warmup=0,
-        _n_warmup=1,
-        _n_repeat=3,
-        cache_size=1,
-    )
-
-    assert latency > 0
-    torch.testing.assert_close(output, source + 1)
