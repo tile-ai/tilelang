@@ -287,10 +287,11 @@ def _gemm_blockscaled_impl(
 ) -> tirx.PrimExpr:
     """Shared block-scaled GEMM implementation.
 
-    Emits the 16-slot GEMM call protocol: the 13 dense slots followed by the
-    SFA region, the SFB region and the logical K-axis start offset. Which
-    instruction consumes it is decided by the backend from the target and the
-    operand scopes; the wrappers only pin extra annotations.
+    Emits the 16-slot ``tl.tileop.gemm_blockscaled`` call: the 13 dense GEMM
+    slots followed by the SFA region, the SFB region and the logical K-axis
+    start offset. Which instruction consumes it is decided by the backend from
+    the target and the operand scopes; the wrappers only pin extra annotations
+    (``is_tcgen05`` for the explicit TCGEN05 variant).
     """
 
     ann = _normalize_annotations(annotations)
@@ -454,7 +455,7 @@ def gemm_blockscaled(
     if sf_layout is not None:
         ann["sf_layout"] = sf_layout
     return _gemm_blockscaled_impl(
-        "tl.tileop.gemm",
+        "tl.tileop.gemm_blockscaled",
         A,
         B,
         C,
@@ -536,7 +537,7 @@ def tcgen05_gemm_blockscaled(
     if wg_wait != 0:
         ann["wg_wait"] = wg_wait
     return _gemm_blockscaled_impl(
-        "tl.tileop.tcgen05_gemm",
+        "tl.tileop.gemm_blockscaled",
         A,
         B,
         C,
@@ -589,7 +590,7 @@ def mma_gemm_blockscaled(
     if sf_layout is not None:
         ann["sf_layout"] = sf_layout
     return _gemm_blockscaled_impl(
-        "tl.tileop.gemm",
+        "tl.tileop.gemm_blockscaled",
         A,
         B,
         C,

@@ -147,7 +147,7 @@ class Analyzer:
                     if isinstance(value, tvm.tirx.Call):
                         if value.op.name in ("tl.copy", "tl.tileop.copy"):
                             self._analyze_copy(value)
-                        elif value.op.name in ("tl.gemm", "tl.tileop.gemm"):
+                        elif value.op.name in ("tl.gemm", "tl.tileop.gemm", "tl.tileop.gemm_blockscaled"):
                             self._analyze_gemm(value)
                 return None
 

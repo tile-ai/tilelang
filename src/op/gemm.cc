@@ -325,6 +325,24 @@ TVM_REGISTER_OP("tl.tileop.tcgen05_gemm")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+// Block-scaled GEMM shares GemmNode with the dense op (the SFA/SFB/k_start
+// slots are the only addition), but gets its own op so the printed IR and
+// name-based pass matching do not have to count call arguments. The explicit
+// ISA variants ride on the same op via the is_tcgen05 annotation.
+TVM_REGISTER_OP("tl.tileop.gemm_blockscaled")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "gemm_blockscaled")
+    .set_attr<OpBuilderFunc>("TLOpBuilder",
+                             [](Array<PrimExpr> args,
+                                Map<String, ObjectRef> annotations) {
+                               ICHECK(args.size() >= 16)
+                                   << "tl.tileop.gemm_blockscaled expects the "
+                                      "SFA, SFB and k_start slots";
+                               return Gemm(args, annotations);
+                             })
+    .set_num_inputs(-1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TVM_REGISTER_OP("tl.GemmWarpPolicy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
 

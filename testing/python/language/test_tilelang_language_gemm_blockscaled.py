@@ -61,8 +61,8 @@ def test_gemm_blockscaled_emits_dispatching_call():
             )
 
     (call,) = _gemm_calls(main)
-    # The unified op rides the plain gemm op without pinning an ISA.
-    assert str(call.op.name) == "tl.tileop.gemm"
+    # The unified op has its own op key but does not pin an ISA.
+    assert str(call.op.name) == "tl.tileop.gemm_blockscaled"
     # 13 dense slots + SFA + SFB + k_start.
     assert len(call.args) == 16
     assert int(call.args[15]) == 256
@@ -157,7 +157,9 @@ def test_tcgen05_gemm_blockscaled_pins_tcgen05_path():
             )
 
     (call,) = _gemm_calls(main)
-    assert str(call.op.name) == "tl.tileop.tcgen05_gemm"
+    # Same op as T.gemm_blockscaled; the ISA is pinned through the annotation,
+    # exactly like T.tcgen05_gemm relative to T.gemm.
+    assert str(call.op.name) == "tl.tileop.gemm_blockscaled"
     assert len(call.args) == 16
     assert int(_annotations(call)["is_tcgen05"]) == 1
 
@@ -209,7 +211,7 @@ def test_mma_gemm_blockscaled_records_sf_layout():
             )
 
     (call,) = _gemm_calls(main)
-    assert str(call.op.name) == "tl.tileop.gemm"
+    assert str(call.op.name) == "tl.tileop.gemm_blockscaled"
     assert len(call.args) == 16
     # No mbarrier for the synchronous warp-level path: the slot holds the
     # integer placeholder the C++ side ignores.
