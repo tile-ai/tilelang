@@ -101,6 +101,20 @@ def test_persistent_group_order_and_tail_coverage(domain, wave_size, group_size,
     assert sorted(coordinates for _, coordinates in events) == list(itertools.product(*(range(extent) for extent in domain)))
 
 
+@pytest.mark.parametrize("wave_size", [1, 5, 128, None])
+def test_persistent_guards_body_without_loop_break(wave_size):
+    workers = tvm.tirx.Var("workers", "int32") if wave_size is None else wave_size
+    _, _, body = _make_persistent([2, 3, 10], workers, group_size=3, num_stages=2)
+
+    def check_no_loop_break(node):
+        if isinstance(node, tvm.tirx.Call):
+            assert node.op.name != "tl.loop_break"
+
+    tvm.tirx.stmt_functor.post_order_visit(body, check_no_loop_break)
+    assert isinstance(body, tvm.tirx.IfThenElse)
+    assert body.else_case is None
+
+
 @pytest.mark.parametrize("domain", [(2, 4), (3, 10), (2, 3, 10)])
 def test_persistent_full_last_dimension_group_preserves_row_major_order(domain):
     loop, worker, body = _make_persistent(list(domain), 3, group_size=domain[-1])

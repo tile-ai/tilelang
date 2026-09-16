@@ -210,17 +210,14 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     PrimExpr last_coord =
         idxs[0] * group_size + idxs[grouped_domain.size() - 1];
     PrimExpr in_range = last_coord < domain[domain.size() - 1];
-    auto out_if = tvm::tirx::IfThenElse(
-        padded_domain_size <= (loop_var * wave_size + index),
-        tvm::tirx::Evaluate(
-            tvm::tirx::Call(DataType::Handle(), tvm::tl::loop_break(), {})),
-        Stmt());
     Stmt guarded_body = tvm::tirx::IfThenElse(in_range, body, Stmt());
 
     arith::Analyzer analyzer;
     Stmt new_body = guarded_body;
     if (analyzer.CanProveGreaterEqual(waves, 2)) {
-      new_body = SeqStmt({out_if, guarded_body});
+      PrimExpr in_padded_domain =
+          (loop_var * wave_size + index) < padded_domain_size;
+      new_body = tvm::tirx::IfThenElse(in_padded_domain, guarded_body, Stmt());
     }
     Optional<PrimExpr> step =
         !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
