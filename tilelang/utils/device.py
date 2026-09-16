@@ -45,15 +45,28 @@ def get_current_device():
     return device
 
 
-def device_synchronize() -> None:
-    if IS_CUDA:
-        torch.cuda.synchronize()
-    elif IS_NPU:
-        torch.npu.synchronize()
-    elif IS_MPS:
+def device_synchronize(device: int | torch.device | None = None) -> None:
+    """Synchronize CUDA/HIP, MPS, or NPU, preferring CUDA when no device is given."""
+    if device is None:
+        if IS_CUDA:
+            torch.cuda.synchronize()
+        elif IS_NPU:
+            torch.npu.synchronize()
+        elif IS_MPS:
+            torch.mps.synchronize()
+        else:
+            raise RuntimeError("No device is available")
+        return
+
+    device_type = "cuda" if isinstance(device, int) else torch.device(device).type
+    if device_type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device_type == "npu":
+        torch.npu.synchronize(device)
+    elif device_type == "mps":
         torch.mps.synchronize()
     else:
-        raise RuntimeError("No device is available")
+        raise ValueError(f"device_synchronize only supports CUDA/HIP, MPS, or NPU devices, got {device}")
 
 
 def get_available_cpu_count() -> int:
