@@ -1,68 +1,31 @@
-"""Profiler and benchmarking utilities for PyTorch functions."""
+"""Common entry point for GPU and wall-clock benchmarking."""
 
 from __future__ import annotations
 
 import logging
-import os
-import sys
-from typing import Literal
 from collections.abc import Callable
+from contextlib import nullcontext
+from functools import partial
+from math import isfinite
+from typing import Literal
 
 import torch
 
+from tilelang.utils.device import IS_CUDA, Event, device_synchronize
+
+from .torch_bench import (
+    _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
+    _cuda_synchronize as _cuda_synchronize,
+    bench_with_cuda_events as _bench_with_cuda_events,
+    bench_with_cudagraph as _bench_with_cudagraph,
+    bench_with_cupti as _bench_with_cupti,
+    suppress_stdout_stderr as suppress_stdout_stderr,
+)
+from .wall import bench_with_wall
+
 logger = logging.getLogger(__name__)
 
-
-class suppress_stdout_stderr:
-    """Context manager to suppress stdout and stderr output.
-
-    Source: https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/testing/bench.py
-    """
-
-    def __enter__(self):
-        # Open null device files
-        self.outnull_file = open(os.devnull, "w")
-        self.errnull_file = open(os.devnull, "w")
-
-        # Save original file descriptors
-        self.old_stdout_fileno_undup = sys.stdout.fileno()
-        self.old_stderr_fileno_undup = sys.stderr.fileno()
-        self.old_stdout_fileno = os.dup(sys.stdout.fileno())
-        self.old_stderr_fileno = os.dup(sys.stderr.fileno())
-
-        # Save original stdout/stderr objects
-        self.old_stdout = sys.stdout
-        self.old_stderr = sys.stderr
-
-        # Redirect file descriptors and streams to null device
-        os.dup2(self.outnull_file.fileno(), self.old_stdout_fileno_undup)
-        os.dup2(self.errnull_file.fileno(), self.old_stderr_fileno_undup)
-        sys.stdout = self.outnull_file
-        sys.stderr = self.errnull_file
-
-        return self
-
-    def __exit__(self, *_):
-        # Restore original stdout/stderr objects
-        sys.stdout = self.old_stdout
-        sys.stderr = self.old_stderr
-
-        # Restore original file descriptors
-        os.dup2(self.old_stdout_fileno, self.old_stdout_fileno_undup)
-        os.dup2(self.old_stderr_fileno, self.old_stderr_fileno_undup)
-
-        # Close duplicated file descriptors
-        os.close(self.old_stdout_fileno)
-        os.close(self.old_stderr_fileno)
-
-        # Close null device files
-        self.outnull_file.close()
-        self.errnull_file.close()
-
-
-IS_CUDA = torch.cuda.is_available()
 device = "cuda:0" if IS_CUDA else "mps:0"
-_CACHE_FLUSH_ID = "tilelang::cache_flush"
 
 
 def do_bench(
@@ -73,19 +36,24 @@ def do_bench(
     _n_repeat: int = 0,
     quantiles: list[float] | None = None,
     fast_flush: bool = True,
-    backend: Literal["event", "cupti", "cudagraph"] = "event",
+    backend: Literal["event", "cupti", "cudagraph", "wall"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     device: int | torch.device | None = None,
     cache_size: int = 256,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
-    """Benchmark the runtime of a PyTorch function with L2 cache management.
+    """Benchmark a callable with GPU timing or host wall-clock timing.
 
-    This function provides accurate GPU kernel timing by:
+    The existing GPU timing methods provide accurate kernel timing by:
     - Clearing L2 cache between runs for consistent measurements
     - Auto-calculating warmup and repeat counts based on kernel runtime
-    - Supporting multiple profiling backends (CUDA events, CUPTI, or CUDA graph replay)
+    - Supporting multiple profiling backends (CUDA/MPS events, CUPTI, or CUDA graph replay)
     - Offering flexible result aggregation (mean/median/min/max/quantiles)
+
+    Wall timing measures host elapsed time without cache flushing. With no
+    device or a CPU device, the callable is assumed to be synchronous. An
+    explicit CUDA/HIP or MPS device enables synchronization before and after
+    each wall-clock sample, including launch and synchronization overhead.
 
     Args:
         fn: Function to benchmark
@@ -94,21 +62,67 @@ def do_bench(
         _n_warmup: Manual override for warmup iterations (default: 0 = auto)
         _n_repeat: Manual override for benchmark iterations (default: 0 = auto)
         quantiles: Performance percentiles to compute (e.g., [0.5, 0.95])
-        fast_flush: Use faster L2 cache flush with int32 vs int8 (default: True)
-        backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph" (default: "event")
+        fast_flush: Use faster GPU L2 cache flush with int32 vs int8 (default: True); ignored by "wall"
+        backend: Timing method - "event", "cupti", "cudagraph", or "wall" (default: "event")
         return_mode: Result aggregation method - "mean", "median", "min", or "max"
-        device: Optional CUDA device to benchmark on. When provided, CUDA
-            events, streams, cache buffers, and synchronizations are scoped to
-            that device.
-        cache_size: L2 cache flush buffer size in MB (default: 256)
+        device: Optional device to benchmark on. CUDA/HIP events, streams,
+            cache buffers, and synchronization are scoped to that device.
+            Event timing also accepts MPS; wall timing accepts CPU and MPS.
+        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
     """
+    if backend == "wall":
+        if return_mode not in ("min", "max", "mean", "median"):
+            raise ValueError(f"Invalid return_mode: {return_mode}")
+        if any(not isfinite(duration) or duration < 0 for duration in (warmup, rep)):
+            raise ValueError("warmup and rep must be finite, non-negative millisecond budgets")
+        if _n_warmup < 0 or _n_repeat < 0:
+            raise ValueError("Iteration overrides must be non-negative")
+        if quantiles is not None and any(not 0 <= quantile <= 1 for quantile in quantiles):
+            raise ValueError("quantiles must be between 0 and 1")
+
+        resolved_device = torch.device("cuda", device) if isinstance(device, int) else torch.device(device) if device is not None else None
+        device_context = nullcontext()
+        synchronize = None
+        if resolved_device is not None:
+            if resolved_device.type == "cuda":
+                device_context = torch.cuda.device(resolved_device)
+            elif resolved_device.type not in ("cpu", "mps"):
+                raise ValueError(f"Wall timing supports CPU, CUDA/HIP, or MPS devices, got {resolved_device}")
+            if resolved_device.type in ("cuda", "mps"):
+                synchronize = partial(device_synchronize, resolved_device)
+
+        with device_context:
+            fn()
+            if synchronize is not None:
+                synchronize()
+
+            estimate_ms = bench_with_wall(fn, n_repeat=5, synchronize=synchronize)
+            if early_stop_baseline is not None and estimate_ms > early_stop_baseline:
+                if quantiles is not None:
+                    return estimate_ms if len(quantiles) == 1 else [estimate_ms] * len(quantiles)
+                return estimate_ms
+
+            estimate_ms = max(estimate_ms, 1e-6)
+            n_warmup = _n_warmup if _n_warmup > 0 else int(warmup / estimate_ms)
+            n_repeat = _n_repeat if _n_repeat > 0 else max(1, int(rep / estimate_ms))
+
+            for _ in range(n_warmup):
+                fn()
+            if synchronize is not None:
+                synchronize()
+
+            return bench_with_wall(fn, n_repeat=n_repeat, quantiles=quantiles, return_mode=return_mode, synchronize=synchronize)
+
     assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 
-    device_idx = _normalize_cuda_device(device)
-    if device_idx is not None:
+    if device is not None and not isinstance(device, int) and torch.device(device).type == "mps":
+        device_idx = torch.device(device)
+    else:
+        device_idx = _normalize_cuda_device(device)
+    if isinstance(device_idx, int):
         with torch.cuda.device(device_idx):
             return _do_bench_impl(
                 fn,
@@ -135,7 +149,7 @@ def do_bench(
         fast_flush=fast_flush,
         backend=backend,
         return_mode=return_mode,
-        device_idx=None,
+        device_idx=device_idx,
         cache_size=cache_size,
         early_stop_baseline=early_stop_baseline,
     )
@@ -156,16 +170,11 @@ def _normalize_cuda_device(benchmark_device: int | torch.device | None) -> int |
     return torch_device.index
 
 
-def _cuda_synchronize(device_idx: int | None = None) -> None:
-    if device_idx is None:
-        torch.cuda.synchronize()
-    else:
-        torch.cuda.synchronize(device_idx)
-
-
-def _cache_device(device_idx: int | None) -> str | torch.device:
+def _cache_device(device_idx: int | torch.device | None) -> str | torch.device:
     if device_idx is None:
         return device
+    if isinstance(device_idx, torch.device):
+        return device_idx
     return torch.device("cuda", device_idx)
 
 
@@ -179,10 +188,13 @@ def _do_bench_impl(
     fast_flush: bool,
     backend: Literal["event", "cupti", "cudagraph"],
     return_mode: Literal["min", "max", "mean", "median"],
-    device_idx: int | None,
+    device_idx: int | torch.device | None,
     cache_size: int,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
+    if backend in ("cupti", "cudagraph") and torch.device(_cache_device(device_idx)).type == "mps":
+        raise ValueError(f'{backend} timing requires CUDA/HIP; use "event" or "wall" for MPS')
+
     # Initial function call and synchronization
     fn()
     _cuda_synchronize(device_idx)
@@ -195,8 +207,8 @@ def _do_bench_impl(
     cache = torch.empty(cache_numel, dtype=cache_dtype, device=_cache_device(device_idx))
 
     # Estimate kernel runtime with 5 iterations
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = Event(enable_timing=True)
+    end_event = Event(enable_timing=True)
     start_event.record()
     for _ in range(5):
         cache.zero_()
@@ -234,137 +246,3 @@ def _do_bench_impl(
         return _bench_with_cudagraph(fn, cache, n_repeat, quantiles, return_mode, device_idx)
     else:
         raise ValueError(f"Unknown profiler backend: {backend}")
-
-
-def _bench_with_cuda_events(
-    fn: Callable,
-    cache: torch.Tensor,
-    n_repeat: int,
-    quantiles: list[float] | None,
-    return_mode: str,
-    device_idx: int | None,
-) -> float | list[float]:
-    """Benchmark using CUDA events for timing."""
-    # Create timing events
-    start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]
-
-    # Run benchmark iterations
-    for i in range(n_repeat):
-        cache.zero_()  # Clear L2 cache
-        start_events[i].record()
-        fn()
-        end_events[i].record()
-
-    # Synchronize and collect timings
-    _cuda_synchronize(device_idx)
-    times = torch.tensor(
-        [s.elapsed_time(e) for s, e in zip(start_events, end_events)],
-        dtype=torch.float,
-    )
-
-    # Return quantiles if requested
-    if quantiles is not None:
-        quantile_values = torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
-        return quantile_values[0] if len(quantile_values) == 1 else quantile_values
-
-    # Return aggregated result
-    return getattr(torch, return_mode)(times).item()
-
-
-def _bench_with_cupti(
-    fn: Callable,
-    cache: torch.Tensor,
-    n_repeat: int,
-) -> float:
-    """Benchmark using CUPTI profiler for detailed kernel timing."""
-    with suppress_stdout_stderr():
-        schedule = torch.profiler.schedule(wait=1, warmup=0, active=1, repeat=1)
-        profiler = torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            schedule=schedule,
-        )
-
-        with profiler:
-            for _ in range(2):
-                for _ in range(n_repeat):
-                    with torch.profiler.record_function(_CACHE_FLUSH_ID):
-                        cache.zero_()
-                    fn()
-                profiler.step()
-
-    # `cache.zero_()` and user code such as `torch.zeros` can share the same
-    # generated kernel name, so exclude only the annotated cache flush range.
-    def is_cuda_event(event):
-        return getattr(getattr(event, "device_type", None), "name", "") == "CUDA"
-
-    total_cuda_time = 0.0
-    excluded_time = 0.0
-
-    for event in profiler.events():
-        if not is_cuda_event(event):
-            continue
-
-        if not event.is_user_annotation:
-            total_cuda_time += event.self_device_time_total
-        elif event.key == _CACHE_FLUSH_ID:
-            excluded_time += event.self_device_time_total
-
-    kernel_time_us = (total_cuda_time - excluded_time) / n_repeat
-    return kernel_time_us * 1e-3  # Convert microseconds to milliseconds
-
-
-def _bench_with_cudagraph(
-    fn: Callable,
-    cache: torch.Tensor,
-    n_repeat: int,
-    quantiles: list[float] | None,
-    return_mode: str,
-    device_idx: int | None,
-) -> float | list[float]:
-    """Benchmark using CUDA graph for minimal launch overhead.
-
-    This implementation follows triton.testing.do_bench_cudagraph.
-    It captures the kernel execution in a CUDA graph and replays it multiple
-    times to minimize host overhead and provide accurate timing measurements.
-
-    Note: Cache flushing is done before graph replay, not within the graph,
-    since CUDA graphs require fixed execution patterns.
-    """
-    n_retries = 10
-    stream = torch.cuda.Stream(device=device_idx) if device_idx is not None else torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        # Construct a CUDA graph with `n_repeat` unrolled function calls to minimize host overhead.
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            for _ in range(n_repeat):
-                fn()
-
-        _cuda_synchronize(device_idx)
-
-        # Measure time by replaying the graph multiple times.
-        # Clear cache before each replay for consistent measurements.
-        start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
-        end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
-        for i in range(n_retries):
-            cache.zero_()  # Clear L2 cache before replay
-            start_events[i].record()
-            g.replay()
-            end_events[i].record()
-
-        _cuda_synchronize(device_idx)
-        times = torch.tensor(
-            [s.elapsed_time(e) / n_repeat for s, e in zip(start_events, end_events)],
-            dtype=torch.float,
-        )
-
-        # Return quantiles if requested
-        if quantiles is not None:
-            quantile_values = torch.quantile(times, torch.tensor(quantiles, dtype=torch.float)).tolist()
-            return quantile_values[0] if len(quantile_values) == 1 else quantile_values
-
-        # Return aggregated result
-        return getattr(torch, return_mode)(times).item()
