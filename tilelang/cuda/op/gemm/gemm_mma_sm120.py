@@ -6,7 +6,8 @@ from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
 )
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang.transform.simplify import _Simplify
-from tilelang.utils.language import is_full_region
+from tilelang.layout.swizzle import make_swizzled_layout
+from tilelang.utils.language import is_fragment, is_full_region
 from tvm import tirx
 from tvm.ir import Range
 from tvm.target import Target
@@ -36,9 +37,67 @@ class GemmMMASm120BlockScaled(GemmMMA):
         if _is_explicit_non_sm120_cuda(target):
             raise ValueError("T.mma_gemm_blockscaled requires SM120 CUDA target")
 
+    def _sf_b_swizzled(self) -> bool:
+        annotations = getattr(self.gemm_node, "annotations", {})
+        return bool(int(annotations.get("sf_b_swizzled", 0)))
+
+    def _a_packed_words(self) -> bool:
+        annotations = getattr(self.gemm_node, "annotations", {})
+        return bool(int(annotations.get("a_packed_words", 0)))
+
+    def _sfa_in_registers(self) -> bool:
+        """A-operand scale words given as a register fragment (e.g. computed in-lane) rather than
+        loaded from shared memory."""
+        region = self.SFARegion
+        return region is not None and is_fragment(region.buffer)
+
+    def __post_init__(self) -> None:
+        # A uint32 fragment of packed e2m1 words is a storage form of float4_e2m1fn, not a
+        # mixed-dtype GEMM: skip the base A/B dtype validation for that case.
+        if self._a_packed_words():
+            if str(self.B.dtype) != "float4_e2m1fn":
+                raise ValueError(f"a_packed_words requires a packed float4_e2m1fn B operand, got {self.B.dtype}")
+            return
+        super().__post_init__()
+
     def _validate_operands(self) -> None:
-        if not self.is_gemm_ss():
-            raise ValueError("T.mma_gemm_blockscaled supports shared-memory A/B operands only")
+        if self._sfa_in_registers() and not (self.is_gemm_rs() and self._a_packed_words()):
+            # checked before the shared-operand early return: the shared lowering would otherwise
+            # load scale words from the fragment as if it were shared memory
+            raise ValueError("register A scales are supported with a register-A packed-word operand only")
+        if self.is_gemm_ss():
+            return
+        if self.is_gemm_rs() and self._a_packed_words():
+            if str(self.a_dtype) != "uint32":
+                raise ValueError("T.mma_gemm_blockscaled(a_packed_words=True) requires a uint32 A fragment")
+            if self._sfa_in_registers():
+                granularity, _ = self._scale_mode()
+                if granularity != 16 or str(self.SFARegion.buffer.dtype) != "uint32":
+                    raise ValueError("register A scales require uint32 scale words at granularity 16 (scale_vec::4X)")
+            return
+        raise ValueError(
+            "T.mma_gemm_blockscaled supports shared-memory A/B operands, or a uint32 register-A "
+            "fragment of packed e2m1 words with a_packed_words=True"
+        )
+
+    def _scale_mode(self) -> tuple[int, str]:
+        annotations = getattr(self.gemm_node, "annotations", {})
+        sf_a_granularity_k = annotations.get("sf_a_granularity_k")
+        sf_b_granularity_k = annotations.get("sf_b_granularity_k")
+        if sf_a_granularity_k is None or sf_b_granularity_k is None:
+            raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
+        if int(sf_a_granularity_k) != int(sf_b_granularity_k):
+            raise ValueError(
+                "Block-scaled MMA GEMM requires matching A/B scale granularities, got "
+                f"{int(sf_a_granularity_k)} and {int(sf_b_granularity_k)}"
+            )
+        sf_dtype = annotations.get("sf_dtype")
+        if sf_dtype is None:
+            sf_dtype = "ue4m3"
+        else:
+            # The language layer stores a StringImm (see mma_gemm_blockscaled).
+            sf_dtype = str(getattr(sf_dtype, "value", sf_dtype))
+        return int(sf_a_granularity_k), sf_dtype
 
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(
@@ -48,8 +107,10 @@ class GemmMMASm120BlockScaled(GemmMMA):
             target,
             GEMM_INST_MMA_BLOCK_SCALED,
         )
+        granularity, sf_dtype = self._scale_mode()
+        a_dtype = T.float4_e2m1fn if self._a_packed_words() else self.a_dtype
         return self.intrin_emitter_cls(
-            a_dtype=self.a_dtype,
+            a_dtype=a_dtype,
             b_dtype=self.b_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
@@ -61,11 +122,26 @@ class GemmMMASm120BlockScaled(GemmMMA):
             chunk=self.chunk,
             thread_var=thread_var,
             is_blockscaled=True,
+            kind="mxf4nvf4",
+            # One k64 MMA atom consumes 64 // granularity scale bytes.
+            scale_vec_size=64 // granularity,
+            stype=sf_dtype,
         )
 
     def infer_layout(self, target: Target, thread_nums: int):
         self._validate_target(target)
         self._validate_operands()
+        if self.is_gemm_rs() and self._a_packed_words():
+            mma_emitter = self._make_mma_emitter(target, thread_nums)
+            layouts = {
+                self.A: mma_emitter.make_mma_load_word_layout(self.A),
+                self.B: make_swizzled_layout(self.B),
+                self.C: mma_emitter.make_mma_store_layout(self.C),
+            }
+            if self._sfa_in_registers():
+                n_ksteps = int(mma_emitter.chunk // mma_emitter.micro_size_k)
+                layouts[self.SFARegion.buffer] = mma_emitter.make_sfa_register_layout(self.SFARegion.buffer, n_ksteps)
+            return layouts
         return super().infer_layout(target, thread_nums)
 
     def lower(
@@ -110,6 +186,80 @@ class GemmMMASm120BlockScaled(GemmMMA):
         if sf_a_granularity_k is None or sf_b_granularity_k is None:
             raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
 
+        if self.is_gemm_rs():
+            if sf_layout != "rowmajor":
+                raise ValueError("register-A blockscaled GEMM supports sf_layout='rowmajor' only")
+            assert is_full_region(A_region), "Fragment input A must be a full region"
+            A_buf = A_region.buffer
+
+            n_ksteps = int(block_K // micro_size_k)
+            use_words = mma_emitter.supports_scale_words(int(sf_a_granularity_k), int(sf_b_granularity_k))
+            sfb_swizzled = self._sf_b_swizzled()
+            sfb_words_len = (2 * warp_cols * n_ksteps) if sfb_swizzled else (warp_cols * n_ksteps)
+            sfa_in_registers = self._sfa_in_registers()
+            if sfa_in_registers and not use_words:
+                raise ValueError("register A scales require one scale word per k64 step")
+            SFA_register_buf = self.SFARegion.buffer if sfa_in_registers else None
+
+            @T.prim_func
+            def _gemm_rs_blockscaled() -> None:
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
+                if clear_accum:
+                    T.clear(C_buf)
+                if use_words:
+                    # one vector load per atom row fetches the scale words of every k step
+                    SFA_words = T.alloc_local((warp_rows * n_ksteps), "uint32")
+                    SFB_words = T.alloc_local((sfb_words_len), "uint32")
+                    SFB_rep_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                    mma_emitter.ldscale_words(
+                        SFA_words,
+                        SFB_words,
+                        SFB_rep_words,
+                        self.SFARegion,
+                        self.SFBRegion,
+                        n_ksteps,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        sfb_swizzled=sfb_swizzled,
+                        sfa_in_registers=sfa_in_registers,
+                    )
+                    for ki in T.unroll(n_ksteps):
+                        mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                        mma_emitter.mma(
+                            A_buf,
+                            B_local,
+                            C_buf,
+                            ki,
+                            SFA_buf=self.SFARegion,
+                            SFB_buf=self.SFBRegion,
+                            k_start=self.sf_k_start,
+                            sf_a_granularity_k=int(sf_a_granularity_k),
+                            sf_b_granularity_k=int(sf_b_granularity_k),
+                            SFA_words=SFA_words,
+                            SFB_words=SFB_words,
+                            SFB_rep_words=SFB_rep_words,
+                            n_ksteps=n_ksteps,
+                            sfb_swizzled=sfb_swizzled,
+                            SFA_register_buf=SFA_register_buf,
+                        )
+                else:
+                    for ki in T.serial(0, n_ksteps):
+                        mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                        mma_emitter.mma(
+                            A_buf,
+                            B_local,
+                            C_buf,
+                            ki,
+                            SFA_buf=self.SFARegion,
+                            SFB_buf=self.SFBRegion,
+                            k_start=self.sf_k_start,
+                            sf_a_granularity_k=int(sf_a_granularity_k),
+                            sf_b_granularity_k=int(sf_b_granularity_k),
+                        )
+
+            return _Simplify(_gemm_rs_blockscaled, inline_let=True)
+
         if sf_layout == "blockscaled_chunk_kmajor":
 
             @T.prim_func
@@ -128,6 +278,11 @@ class GemmMMASm120BlockScaled(GemmMMA):
             return _Simplify(_gemm_ss_blockscaled_kmajor, inline_let=True)
 
         if int(block_K // micro_size_k) == 4:
+            # ki parity decides the consumed byte pair inside a scale word for
+            # scale_vec::2X; 4X keeps the literal 0. Blocks reusing fragment
+            # set 0 issue even ki, set 1 issues odd ki.
+            scale_byte_even = mma_emitter._scale_byte_id(self.sf_k_start, 0)
+            scale_byte_odd = mma_emitter._scale_byte_id(self.sf_k_start, 1)
 
             @T.prim_func
             def _gemm_ss_blockscaled_static_kblock() -> None:
@@ -183,6 +338,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_0,
                             i,
                             j,
+                            scale_byte_id=scale_byte_even,
                         )
 
                 mma_emitter.ldmatrix_a(A_local_0, A_region, 2)
@@ -210,6 +366,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_1,
                             i,
                             j,
+                            scale_byte_id=scale_byte_odd,
                         )
 
                 mma_emitter.ldmatrix_a(A_local_1, A_region, 3)
@@ -237,6 +394,7 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_0,
                             i,
                             j,
+                            scale_byte_id=scale_byte_even,
                         )
                 for i in T.unroll(warp_rows):
                     for j in T.unroll(warp_cols):
@@ -249,9 +407,15 @@ class GemmMMASm120BlockScaled(GemmMMA):
                             SFB_rep_local_1,
                             i,
                             j,
+                            scale_byte_id=scale_byte_odd,
                         )
 
             return _Simplify(_gemm_ss_blockscaled_static_kblock, inline_let=True)
+
+        n_ksteps = int(block_K // micro_size_k)
+        use_words = mma_emitter.supports_scale_words(int(sf_a_granularity_k), int(sf_b_granularity_k))
+        sfb_swizzled = self._sf_b_swizzled()
+        sfb_words_len = (2 * warp_cols * n_ksteps) if sfb_swizzled else (warp_cols * n_ksteps)
 
         @T.prim_func
         def _gemm_ss_blockscaled() -> None:
@@ -259,19 +423,56 @@ class GemmMMASm120BlockScaled(GemmMMA):
             B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
             if clear_accum:
                 T.clear(C_buf)
-            for ki in T.serial(0, (block_K // micro_size_k)):
-                mma_emitter.ldmatrix_a(A_local, A_region, ki)
-                mma_emitter.ldmatrix_b(B_local, B_region, ki)
-                mma_emitter.mma(
-                    A_local,
-                    B_local,
-                    C_buf,
-                    ki,
-                    SFA_buf=self.SFARegion,
-                    SFB_buf=self.SFBRegion,
+            if use_words:
+                # one vector load per atom row fetches the scale words of every k step
+                SFA_words = T.alloc_local((warp_rows * n_ksteps), "uint32")
+                SFB_words = T.alloc_local((sfb_words_len), "uint32")
+                SFB_rep_words = T.alloc_local((warp_cols * n_ksteps), "uint32")
+                mma_emitter.ldscale_words(
+                    SFA_words,
+                    SFB_words,
+                    SFB_rep_words,
+                    self.SFARegion,
+                    self.SFBRegion,
+                    n_ksteps,
                     k_start=self.sf_k_start,
                     sf_a_granularity_k=int(sf_a_granularity_k),
                     sf_b_granularity_k=int(sf_b_granularity_k),
+                    sfb_swizzled=sfb_swizzled,
                 )
+                for ki in T.unroll(n_ksteps):
+                    mma_emitter.ldmatrix_a(A_local, A_region, ki)
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma(
+                        A_local,
+                        B_local,
+                        C_buf,
+                        ki,
+                        SFA_buf=self.SFARegion,
+                        SFB_buf=self.SFBRegion,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                        SFA_words=SFA_words,
+                        SFB_words=SFB_words,
+                        SFB_rep_words=SFB_rep_words,
+                        n_ksteps=n_ksteps,
+                        sfb_swizzled=sfb_swizzled,
+                    )
+            else:
+                for ki in T.serial(0, n_ksteps):
+                    mma_emitter.ldmatrix_a(A_local, A_region, ki)
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma(
+                        A_local,
+                        B_local,
+                        C_buf,
+                        ki,
+                        SFA_buf=self.SFARegion,
+                        SFB_buf=self.SFBRegion,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=int(sf_a_granularity_k),
+                        sf_b_granularity_k=int(sf_b_granularity_k),
+                    )
 
         return _Simplify(_gemm_ss_blockscaled, inline_let=True)

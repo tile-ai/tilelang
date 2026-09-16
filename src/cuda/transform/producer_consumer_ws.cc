@@ -1919,6 +1919,56 @@ private:
     Map<Var, Array<PrimExpr>> barrier_init_map;
     barrier_init_map.Set(barrier_buf->data, arrive_counts);
     auto ann = block_ptr->annotations;
+
+    // Bind user-annotated fragment layouts to the WS partition that uses them.
+    // LayoutInference expresses every fragment it infers inside a WS branch in
+    // that branch's absolute thread coordinates via Fragment::thread_range_
+    // (e.g. [producer_extent, producer_extent + consumer_extent) for the
+    // consumer), and LowerTileOp/PartitionLoop normalizes threadIdx.x against
+    // that range.  A layout coming from T.annotate_layout has no thread range
+    // and is therefore implicitly [0, ThreadExtent()).  Once the consumer
+    // branch is moved to threadIdx.x >= producer_extent, every parallel loop,
+    // reduce or copy whose loop layout derives from such a fragment is
+    // partitioned against the wrong thread domain: the inverse-mapped loop
+    // indices fall outside the loop extents for all consumer threads, the
+    // guard folds to `false` and the statement silently disappears.  Bind the
+    // consumer range here so annotated fragments follow the same convention
+    // as inferred ones.
+    if (auto lm_ref = ann.Get(attr::kLayoutMap)) {
+      if (auto lm_opt = lm_ref.value().as<Map<Var, Layout>>()) {
+        Map<Var, Layout> layout_map = lm_opt.value();
+        Stmt consumer_branch = FindWSConsumerBranch(new_block_body);
+        LocalAccessSummary consumer_access;
+        if (consumer_branch.defined()) {
+          consumer_access = LocalAccessCollector::Collect(
+              consumer_branch, buffer_data_to_buffer_);
+        }
+        VarSet consumer_vars;
+        for (const auto &buffer : consumer_access.read_buffers) {
+          consumer_vars.insert(buffer->data);
+        }
+        for (const auto &buffer : consumer_access.write_buffers) {
+          consumer_vars.insert(buffer->data);
+        }
+        Range consumer_range =
+            Range::FromMinExtent(producer_extent, consumer_extent);
+        bool changed = false;
+        for (const auto &[var, layout] : lm_opt.value()) {
+          auto frag = layout.as<Fragment>();
+          if (!frag.has_value() || frag.value()->ThreadRange().defined()) {
+            continue;
+          }
+          if (!consumer_vars.count(var)) {
+            continue;
+          }
+          layout_map.Set(var, frag.value()->BindThreadRange(consumer_range));
+          changed = true;
+        }
+        if (changed) {
+          ann.Set(attr::kLayoutMap, layout_map);
+        }
+      }
+    }
     if (ann.count("barrier_init")) {
       auto existing =
           Downcast<Map<Var, Array<PrimExpr>>>(ann.Get("barrier_init").value());
@@ -1938,6 +1988,31 @@ private:
     SBlockRealize new_realize = GetRef<SBlockRealize>(orig_realize);
     new_realize.CopyOnWrite()->block = new_block;
     return new_realize;
+  }
+
+  /// Return the consumer branch (else-case) of the warp-specialized
+  /// IfThenElse emitted by BuildWSBlock, or an undefined Stmt.
+  static Stmt FindWSConsumerBranch(const Stmt &stmt) {
+    class Finder : public StmtVisitor {
+    public:
+      Stmt consumer;
+
+    private:
+      void VisitStmt_(const AttrStmtNode *op) final {
+        if (op->attr_key == attr::kWarpSpecializationScope) {
+          if (const auto *ite = op->body.as<IfThenElseNode>()) {
+            if (ite->else_case.defined()) {
+              consumer = ite->else_case.value();
+            }
+          }
+          return;
+        }
+        StmtVisitor::VisitStmt_(op);
+      }
+    };
+    Finder finder;
+    finder(stmt);
+    return finder.consumer;
   }
 
   class PipelineLoopFinder : public StmtVisitor {

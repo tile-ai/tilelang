@@ -22,3 +22,9 @@ from .nvfp4 import (  # noqa: F401
     swizzle_blockscaled_chunk_kmajor_scale_words,
     unswizzle_blockscaled_chunk_kmajor_scale_words,
 )
+from .mxfp4 import (  # noqa: F401
+    decode_ue8m0_scale_bytes,
+    encode_ue8m0_scale_bytes,
+    pack_blockscaled_chunk_kmajor_ue8m0_scale_bytes,
+    quantize_bf16_to_mxfp4_blockscaled,
+)

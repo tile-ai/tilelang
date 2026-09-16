@@ -1,13 +1,13 @@
-"""SM120 NVFP4 block-scaled GEMM example.
+"""SM120 MXFP4 block-scaled GEMM example.
 
-This example keeps the user-facing kernel small: a non-persistent tiled GEMM
-that stages FP4 operands and packed scale words into shared memory, then calls
-``T.mma_gemm_blockscaled``.  The SM120 MMA package implementation is selected by
-the existing TileLang lowering for ``sf_layout="blockscaled_chunk_kmajor"``.
+Same shape as the NVFP4 example, with the MXFP4 scale mode: every 32
+consecutive K elements share one UE8M0 (power-of-two) scale byte, so one
+uint32 scale word covers K=128 and the ``mma.sync`` instruction is
+``kind::mxf4nvf4.block_scale.scale_vec::2X ... ue8m0``.
 
 Run from the repository root:
 
-    python examples/gemm_sm120/sm120_nvfp4_blockscaled_gemm.py --m 2048 --n 2048 --k 2048 --verify
+    python examples/gemm_sm120/sm120_mxfp4_blockscaled_gemm.py --m 2048 --n 2048 --k 2048 --verify
 """
 
 import argparse
@@ -20,7 +20,7 @@ import tilelang.language as T
 from tilelang.profiler import do_bench
 
 
-def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, block_words: int = 4):
+def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, block_words: int = 2):
     """Pack semantic scale words in SM120 BlockScaledBasicChunk K-major order."""
 
     if block_rows != 128 or block_words not in (1, 2, 4):
@@ -37,7 +37,9 @@ def swizzle_blockscaled_chunk_kmajor_scale_words(words, block_rows: int = 128, b
 
     rows, cols = words.shape
     if cols % block_words != 0:
-        raise ValueError(f"blockscaled_chunk_kmajor scale storage requires K/64 words multiple of {block_words}, got {tuple(words.shape)}")
+        raise ValueError(
+            f"blockscaled_chunk_kmajor scale storage requires K-word columns multiple of {block_words}, got {tuple(words.shape)}"
+        )
     if rows % block_rows != 0:
         padded_rows = (rows + block_rows - 1) // block_rows * block_rows
         padded = torch.zeros((padded_rows, cols), dtype=words.dtype, device=words.device)
@@ -55,7 +57,7 @@ def _tflops(m: int, n: int, k: int, latency_ms: float) -> float:
 
 
 @tilelang.jit
-def sm120_nvfp4_blockscaled_gemm(
+def sm120_mxfp4_blockscaled_gemm(
     M: int,
     N: int,
     K: int,
@@ -65,12 +67,8 @@ def sm120_nvfp4_blockscaled_gemm(
     num_stages: int = 2,
     out_dtype=T.bfloat16,
 ):
-    # Tail tiles: TMA loads zero-fill out-of-bounds rows and the C store is
-    # predicated, so M (or N) may be arbitrary as long as the other dimension
-    # is a multiple of its tile. The scale source is padded to full 128-row
-    # tiles (the local scale swizzle helper does this automatically).
-    # N must keep 16-byte aligned bf16 rows, the same contiguous-dim rule as
-    # CuTeDSL's is_valid_tensor_alignment.
+    # Same tail-tile rules as the NVFP4 example: one of M/N may be arbitrary,
+    # scale sources are padded to whole 128-row atoms by the swizzle helper.
     assert N % 8 == 0, "N must be a multiple of 8 (16-byte aligned output rows)"
     if M % block_M != 0 and N % block_N != 0:
         raise ValueError(
@@ -78,27 +76,28 @@ def sm120_nvfp4_blockscaled_gemm(
             "boundary bug is tracked upstream); pad M or N to a multiple of 128"
         )
     assert K % block_K == 0
+    # block_M/N are pinned to one 128-row packer atom: this example's
+    # tile-rows staging (SFA[(by * k_blocks + ko) * block_M + r, w]) only
+    # matches the packed layout for single-atom tiles. block_M=256 needs
+    # atom-major indexing (((by * 2 + r // 128) * k_blocks + ko) * 128 +
+    # r % 128) instead - see the kmajor dual-atom sweep in the KB tools.
     assert block_M == 128
     assert block_N == 128
-    assert block_K in (64, 128, 256), "the scale packer supports block_K // 64 in (1, 2, 4)"
+    # block_K in (128, 256) also keeps K a multiple of 32, the packed-fp4
+    # TMA (16U4_ALIGN8B) inner-dim requirement.
+    assert block_K in (128, 256), "one scale_vec::2X word covers K=128"
     assert num_stages >= 2
 
     in_dtype = T.float4_e2m1fn
     accum_dtype = T.float32
-    sf_words_per_block_k = block_K // 64
-    sf_granularity_k = 16
+    sf_words_per_block_k = block_K // 128
+    sf_granularity_k = 32
     M_pad = -(-M // block_M) * block_M
     N_pad = -(-N // block_N) * block_N
     k_blocks = K // block_K
 
-    # The blockscaled_chunk_kmajor scale source stores each (mn_block, k_block)
-    # tile of block_MN x (block_K // 64) uint32 words contiguously, so the
-    # honest tensor shape is "tile rows": [n_mn_blocks * n_k_blocks * block_MN,
-    # words_per_kblock]. Each tile is then a plain rectangular slice and
-    # staging it is an ordinary T.copy. The host obtains this view zero-copy
-    # via swizzle_blockscaled_chunk_kmajor_scale_words(...).reshape(
-    #     -1, sf_words_per_block_k
-    # ).
+    # Tile-rows view of the packed K-major scale source, same convention as
+    # the NVFP4 example: [n_mn_blocks * n_k_blocks * block_MN, words_per_kblock].
     @T.prim_func
     def main(
         A: T.Tensor((M, K), in_dtype),
@@ -140,6 +139,7 @@ def sm120_nvfp4_blockscaled_gemm(
                     sf_a_granularity_k=sf_granularity_k,
                     sf_b_granularity_k=sf_granularity_k,
                     sf_layout="blockscaled_chunk_kmajor",
+                    scale_dtype="ue8m0",
                 )
 
             T.copy(C_local, C[by * block_M, bx * block_N])
@@ -162,21 +162,13 @@ def _pack_scale_words(scale_bytes: torch.Tensor) -> torch.Tensor:
     return words.to(torch.uint32).contiguous()
 
 
-def _make_binary_scale_words(rows: int, k: int, *, seed: int) -> torch.Tensor:
+def _make_pow2_scale_words(rows: int, k: int, *, seed: int) -> torch.Tensor:
+    # Scales from {0.5, 1, 2} (exact powers of two) so verification is bitwise.
     generator = torch.Generator(device="cuda")
     generator.manual_seed(seed)
-    scale_bytes = (
-        torch.randint(
-            0,
-            2,
-            (rows, k // 16),
-            device="cuda",
-            dtype=torch.int64,
-            generator=generator,
-        )
-        * 0x38
-    )
-    return _pack_scale_words(scale_bytes)
+    choices = torch.tensor([0x7E, 0x7F, 0x80], device="cuda", dtype=torch.int64)
+    idx = torch.randint(0, choices.numel(), (rows, k // 32), device="cuda", dtype=torch.int64, generator=generator)
+    return _pack_scale_words(choices[idx])
 
 
 def _decode_rowmajor_fp4(packed: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
@@ -206,14 +198,14 @@ def _decode_rowmajor_fp4(packed: torch.Tensor, rows: int, cols: int) -> torch.Te
     return out
 
 
-def _decode_binary_scale_words(words: torch.Tensor, k: int) -> torch.Tensor:
+def _decode_ue8m0_scale_words(words: torch.Tensor, k: int) -> torch.Tensor:
     w = words.to(torch.int64)
-    scale_bytes = torch.empty((words.shape[0], k // 16), device=words.device, dtype=torch.int64)
+    scale_bytes = torch.empty((words.shape[0], k // 32), device=words.device, dtype=torch.int64)
     scale_bytes[:, 0::4] = w & 0xFF
     scale_bytes[:, 1::4] = (w >> 8) & 0xFF
     scale_bytes[:, 2::4] = (w >> 16) & 0xFF
     scale_bytes[:, 3::4] = (w >> 24) & 0xFF
-    return (scale_bytes != 0).to(torch.float32)
+    return torch.pow(2.0, (scale_bytes - 127).to(torch.float32))
 
 
 def _verify(
@@ -226,12 +218,12 @@ def _verify(
 ) -> None:
     A_full = _decode_rowmajor_fp4(A, A.shape[0], A.shape[1] * 2)
     B_full = _decode_rowmajor_fp4(B, B.shape[0], B.shape[1] * 2)
-    sfa = _decode_binary_scale_words(SFA, A_full.shape[1])
-    sfb = _decode_binary_scale_words(SFB, B_full.shape[1])
+    sfa = _decode_ue8m0_scale_words(SFA, A_full.shape[1])
+    sfb = _decode_ue8m0_scale_words(SFB, B_full.shape[1])
     ref = torch.zeros((A_full.shape[0], B_full.shape[0]), device=C.device, dtype=torch.float32)
-    for k_sf in range(A_full.shape[1] // 16):
-        k0 = k_sf * 16
-        k1 = k0 + 16
+    for k_sf in range(A_full.shape[1] // 32):
+        k0 = k_sf * 32
+        k1 = k0 + 32
         ref += (A_full[:, k0:k1] * sfa[:, k_sf].unsqueeze(1)) @ (B_full[:, k0:k1] * sfb[:, k_sf].unsqueeze(1)).T
     torch.testing.assert_close(C, ref.to(out_dtype), rtol=0.0, atol=0.0)
 
@@ -240,7 +232,7 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
     out_torch_dtype = torch.bfloat16 if args.out_dtype == "bfloat16" else torch.float32
     out_tilelang_dtype = T.bfloat16 if args.out_dtype == "bfloat16" else T.float32
 
-    kernel = sm120_nvfp4_blockscaled_gemm(
+    kernel = sm120_mxfp4_blockscaled_gemm(
         args.m,
         args.n,
         args.k,
@@ -257,22 +249,49 @@ def run_tilelang(args: argparse.Namespace) -> tuple[float, float]:
         source_path.write_text(kernel.get_kernel_source())
         print(f"TileLang CUDA source: {source_path}")
 
-    A = _make_packed_fp4(args.m, args.k, seed=args.seed)
-    B = _make_packed_fp4(args.n, args.k, seed=args.seed + 1)
-    SFA_semantic = _make_binary_scale_words(args.m, args.k, seed=args.seed + 100)
-    SFB_semantic = _make_binary_scale_words(args.n, args.k, seed=args.seed + 200)
+    sf_words_per_block_k = args.block_k // 128
+    if args.from_bf16:
+        # Full quantization flow: bf16 activations -> packed FP4 + packed
+        # UE8M0 scales -> GEMM, verified against the dequantized product.
+        import sys
 
-    # Zero-copy tile-rows view of the packed layout (see the kernel docstring).
-    sf_words_per_block_k = args.block_k // 64
-    SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
-    SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from examples.dequantize_gemm.quantize import quantize_bf16_to_mxfp4_blockscaled
+
+        x_a = (torch.randn(args.m, args.k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+        x_b = (torch.randn(args.n, args.k, device="cuda", dtype=torch.float32) * 2.0).to(torch.bfloat16)
+        A, SFA_packed, sfa_bytes = quantize_bf16_to_mxfp4_blockscaled(x_a, block_words=sf_words_per_block_k, return_scale_bytes=True)
+        B, SFB_packed, sfb_bytes = quantize_bf16_to_mxfp4_blockscaled(x_b, block_words=sf_words_per_block_k, return_scale_bytes=True)
+        SFA = SFA_packed.reshape(-1, sf_words_per_block_k)
+        SFB = SFB_packed.reshape(-1, sf_words_per_block_k)
+    else:
+        A = _make_packed_fp4(args.m, args.k, seed=args.seed)
+        B = _make_packed_fp4(args.n, args.k, seed=args.seed + 1)
+        SFA_semantic = _make_pow2_scale_words(args.m, args.k, seed=args.seed + 100)
+        SFB_semantic = _make_pow2_scale_words(args.n, args.k, seed=args.seed + 200)
+
+        # Zero-copy tile-rows view of the packed layout (see the kernel docstring).
+        SFA = swizzle_blockscaled_chunk_kmajor_scale_words(SFA_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
+        SFB = swizzle_blockscaled_chunk_kmajor_scale_words(SFB_semantic, block_words=sf_words_per_block_k).reshape(-1, sf_words_per_block_k)
     C = torch.empty((args.m, args.n), device="cuda", dtype=out_torch_dtype)
 
     kernel(A, B, SFA, SFB, C)
     torch.cuda.synchronize()
 
     if args.verify:
-        _verify(A, B, SFA_semantic, SFB_semantic, C, out_torch_dtype)
+        if args.from_bf16:
+            a_deq = _decode_rowmajor_fp4(A, args.m, args.k) * torch.pow(
+                2.0, (sfa_bytes.to(torch.int32) - 127).to(torch.float32)
+            ).repeat_interleave(32, dim=1)
+            b_deq = _decode_rowmajor_fp4(B, args.n, args.k) * torch.pow(
+                2.0, (sfb_bytes.to(torch.int32) - 127).to(torch.float32)
+            ).repeat_interleave(32, dim=1)
+            ref = a_deq @ b_deq.T
+            # Quantized math is exact; the only divergence is the bf16
+            # output rounding (2^-8 relative).
+            torch.testing.assert_close(C.float(), ref, rtol=8e-3, atol=1e-2)
+        else:
+            _verify(A, B, SFA_semantic, SFB_semantic, C, out_torch_dtype)
         print("TileLang correctness: passed")
 
     latency_ms = do_bench(
@@ -305,6 +324,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-repeat", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--from-bf16", action="store_true", help="quantize bf16 inputs instead of synthetic fp4 data")
     parser.add_argument("--dump-source")
     return parser.parse_args()
 
@@ -321,7 +341,7 @@ def main() -> None:
     print(
         f"TileLang tile: {args.block_m}x{args.block_n}x{args.block_k}, "
         f"threads=128, stages={args.num_stages}, output={args.out_dtype}, "
-        "inputs=random fp4 / random binary scales"
+        "inputs=random fp4 / random power-of-two ue8m0 scales"
     )
     latency_ms, tflops = run_tilelang(args)
     print(f"TileLang latency: {latency_ms:.4f} ms")

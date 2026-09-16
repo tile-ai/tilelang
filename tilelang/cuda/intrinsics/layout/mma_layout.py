@@ -208,7 +208,7 @@ def mma_load_b_32x8_to_shared_16x16_layout(thread_id, local_id):
 def shared_16x64_to_mma_a_32x32_layout(i, j):
     """A fragment layout for m16n8k64 e2m1 row-major operand."""
     thread_id = 4 * (i % 8) + (j % 32) // 8
-    local_id = 16 * (i // 8) + 8 * (j // 32) + j % 8
+    local_id = 8 * (i // 8) + 16 * (j // 32) + j % 8
     return thread_id, local_id
 
 
