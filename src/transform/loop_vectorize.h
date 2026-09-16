@@ -43,6 +43,12 @@ using namespace tirx;
 // the cap the vectorizer will later enforce on it.
 int MaxVectorLoadBits(const Target &target, bool global_only_access);
 
+// Normalize the addressed element of an atomic, including access_ptr forms.
+ffi::Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr);
+
+// Target/dtype/address-space capability; access legality is checked separately.
+int GetMaxAtomicVectorSize(const Buffer &destination, const Target &target);
+
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 
 int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
@@ -64,9 +70,27 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, Var var,
                                      int target_vectorized_size,
                                      arith::Analyzer *analyzer);
 
+/*!
+ * \brief Check whether an element-offset expression supports a vector width.
+ *
+ * With allow_broadcast=true, offsets invariant within a vector group are
+ * accepted. For example, loading A[i // 4] at width 4 can load one element and
+ * broadcast its value. This preserves the existing access analysis; callers
+ * must separately check write-side ordering constraints.
+ *
+ * For widths greater than one, allow_broadcast=false requires every group to
+ * simplify to a unit-stride Ramp whose base is divisible by the vector width.
+ * Atomic destinations use this mode: four atomic additions to B[i // 4] update
+ * the same element, whereas AtomicAddx4 would update four consecutive elements.
+ * Alignment must hold for every group, not just at var == 0.
+ *
+ * The flag applies only to the analyzed address; an atomic's source value may
+ * still broadcast. If the check fails, the planner can try a smaller width.
+ */
 bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                          const PrimExpr &iter_var_size,
-                         int target_vectorized_size, arith::Analyzer *analyzer);
+                         int target_vectorized_size, arith::Analyzer *analyzer,
+                         bool allow_broadcast = true);
 
 } // namespace tl
 } // namespace tvm

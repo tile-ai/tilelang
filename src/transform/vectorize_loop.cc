@@ -25,6 +25,7 @@
 #include "../op/utils.h"
 #include "arith/scalable_expression.h"
 #include "backend/common/target_utils.h"
+#include "loop_vectorize.h"
 #include "tir/analysis/check_contains.h"
 
 namespace tvm {
@@ -100,41 +101,6 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
 }
 
 /*!
- * \brief Extract BufferLoad from an expression that may be wrapped in
- * address_of.
- */
-inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
-  if (const auto *load = expr.as<BufferLoadNode>()) {
-    return GetRef<BufferLoad>(load);
-  }
-  if (const auto *call = expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::address_of()) && !call->args.empty()) {
-      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-        return GetRef<BufferLoad>(load);
-      }
-    }
-    if (call->op.same_as(tl::access_ptr()) && !call->args.empty()) {
-      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-        return GetRef<BufferLoad>(load);
-      }
-    }
-    // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent,
-    // access_mask)
-    if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
-      DataType dtype = call->args[0].dtype();
-      Var data_var = Downcast<Var>(call->args[1]);
-      PrimExpr offset = call->args[2];
-      // Create a dummy buffer with the correct dtype and a BufferLoad from data
-      // + offset
-      Buffer dummy_buf(data_var, dtype, {Integer(1)}, {}, Integer(0),
-                       data_var->name_hint, 0, 0, kDefault);
-      return BufferLoad(dummy_buf, {offset});
-    }
-  }
-  return Optional<BufferLoad>();
-}
-
-/*!
  * \brief Get the vectorized atomic add op based on vector size.
  */
 inline Op GetVectorizedAtomicOp(int vector_size) {
@@ -146,22 +112,6 @@ inline Op GetVectorizedAtomicOp(int vector_size) {
   default:
     return atomic_add_elem_op();
   }
-}
-
-/*!
- * \brief Get the max vector size supported by the destination for atomic ops.
- */
-inline int GetMaxAtomicVectorSize(const Buffer &destination, Target target) {
-  DataType dtype = destination->dtype;
-  if (dtype.is_float16() || dtype.is_bfloat16()) {
-    return 2;
-  }
-  if (dtype.is_float() && dtype.bits() == 32 &&
-      TargetHasSMVersionGE(target, 90) && IsGlobalBuffer(destination)) {
-    // CUDA's float2/float4 atomicAdd overloads support global memory only.
-    return 4;
-  }
-  return 1;
 }
 
 // Rewrite vectorized allocation access
@@ -608,44 +558,6 @@ public:
       }
     }
   }
-  // Whether the (unvisited) atomic destination advances exactly one element
-  // per lane so it can be widened to an `AtomicAddxN(&B[base], vec)`.
-  //
-  // Reuse the vectorizer itself as the analysis: visiting an index expression
-  // turns `var_` into `Ramp(0, 1, lanes)`, and Add/Sub/Mul keep the Ramp form
-  // (with the stride scaled), while FloorDiv/FloorMod/Select/... fold into a
-  // generic vector. So the destination is widenable iff every leading index
-  // stays scalar (lane-invariant) and the innermost index is a unit-stride
-  // Ramp whose base is provably aligned to `vector_size`.
-  //   B[i]           -> Ramp(0, 1)            ok
-  //   B[bx * 8 + i]  -> Ramp(bx * 8, 1)       ok, base % vector_size == 0
-  //   B[i // 2]      -> floordiv(Ramp, ...)   not a Ramp   -> scalar
-  //   B[2 * i]       -> Ramp(0, 2)            stride != 1  -> scalar
-  //   B[0]           -> scalar                no lane axis -> scalar
-  // Unlike a per-lane Substitute+CanProveEqual sweep this costs one visit per
-  // index plus a single alignment proof, and it is the same Ramp/stride test
-  // `IndicesCanVectorize` uses when planning ordinary loads and stores.
-  bool AtomicTargetIsContiguous(const PrimExpr &original_dst, int vector_size) {
-    auto load = ExtractBufferLoadForAtomic(original_dst);
-    if (!load.defined() || load.value()->buffer->dtype.lanes() != 1 ||
-        load.value()->indices.empty()) {
-      return false;
-    }
-    const Array<PrimExpr> &indices = load.value()->indices;
-    for (size_t k = 0; k + 1 < indices.size(); ++k) {
-      if (!this->VisitExpr(indices[k]).dtype().is_scalar()) {
-        return false;
-      }
-    }
-    PrimExpr last = this->VisitExpr(indices.back());
-    const auto *ramp = last.as<RampNode>();
-    if (ramp == nullptr || !is_one(ramp->stride)) {
-      return false;
-    }
-    return analyzer_.CanProve(
-        floormod(ramp->base, make_const(ramp->base.dtype(), vector_size)) == 0);
-  }
-
   // Atomic add vectorization
   PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(atomic_add_elem_op()));
@@ -673,26 +585,11 @@ public:
 
     // Check if dtype supports this vector size
     auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
-    if (!dst_buffer_load.defined()) {
-      need_scalarize_ = true;
-      return GetRef<PrimExpr>(op);
-    }
     Target target = Target::Current(false);
     int max_vec_size =
         GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer, target);
     if (vector_size > max_vec_size) {
       // Keep the loop binder when this atomic requires scalar lanes.
-      need_scalarize_ = true;
-      return GetRef<PrimExpr>(op);
-    }
-
-    // The widened atomic writes `vector_size` contiguous elements at the
-    // destination base address, so only emit it when the destination index
-    // advances exactly one element per lane and the base is aligned to the
-    // atomic width. An invariant/broadcast destination (`B[i // 2]`, `B[0]`),
-    // a strided one, or an odd base would silently corrupt neighbours or fault
-    // with a misaligned address, so fall back to scalar atomics.
-    if (!AtomicTargetIsContiguous(op->args[0], vector_size)) {
       need_scalarize_ = true;
       return GetRef<PrimExpr>(op);
     }
@@ -1273,7 +1170,9 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.VectorizeLoop", VectorizeLoop);
+  refl::GlobalDef().def(
+      "tl.transform.VectorizeLoop",
+      [](bool enable_vectorize) { return VectorizeLoop(enable_vectorize); });
 }
 
 } // namespace tl

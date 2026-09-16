@@ -145,6 +145,46 @@ Array<PrimExpr> GetBufferStrides(const Buffer &buffer) {
   return Array<PrimExpr>{strides.rbegin(), strides.rend()};
 }
 
+Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
+  if (const auto *load = expr.as<BufferLoadNode>()) {
+    return GetRef<BufferLoad>(load);
+  }
+  const auto *call = expr.as<CallNode>();
+  if (call == nullptr) {
+    return std::nullopt;
+  }
+  if ((call->op.same_as(builtin::address_of()) ||
+       call->op.same_as(tl::access_ptr())) &&
+      !call->args.empty()) {
+    return call->args[0].as<BufferLoad>();
+  }
+  if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
+    // This pointer already carries a flat element offset. The data Var's
+    // pointer type preserves the address space for the capability check.
+    Var data = Downcast<Var>(call->args[1]);
+    Buffer buffer(data, call->args[0].dtype(), {Integer(1)}, {}, Integer(0),
+                  data->name_hint, 0, 0, kDefault);
+    return BufferLoad(buffer, {call->args[2]});
+  }
+  return std::nullopt;
+}
+
+int GetMaxAtomicVectorSize(const Buffer &destination, const Target &target) {
+  DataType dtype = destination->dtype;
+  if (dtype.lanes() != 1) {
+    return 1;
+  }
+  if (dtype.is_float16() || dtype.is_bfloat16()) {
+    return 2;
+  }
+  if (dtype.is_float() && dtype.bits() == 32 &&
+      TargetHasSMVersionGE(target, 90) && IsGlobalBuffer(destination)) {
+    // CUDA's float2/float4 atomicAdd overloads support global memory only.
+    return 4;
+  }
+  return 1;
+}
+
 class VectorizeFindMemoryAccess : public StmtExprVisitor {
 public:
   VectorizeFindMemoryAccess() = default;
@@ -621,37 +661,34 @@ private:
       ICHECK(node->args.size() >= 2)
           << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
-      // Get dst dtype from args[0] (tvm_access_ptr or address_of(BufferLoad))
-      const CallNode *dst_ptr_call = node->args[0].as<CallNode>();
-      ICHECK(dst_ptr_call) << "atomic_add_elem_op first arg must be a call";
-
-      DataType dtype;
-      if (dst_ptr_call->op.same_as(builtin::address_of())) {
-        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
-        ICHECK(buffer_load) << "address_of arg must be BufferLoad";
-        dtype = buffer_load->buffer->dtype;
-      } else if (dst_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
-        ICHECK(!dst_ptr_call->args.empty());
-        dtype = dst_ptr_call->args[0].dtype();
-      } else if (dst_ptr_call->op.same_as(tl::access_ptr())) {
-        ICHECK_EQ(dst_ptr_call->args.size(), 3U)
-            << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
-        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
-        ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
-        dtype = buffer_load->buffer->dtype;
-      } else {
-        LOG(FATAL) << "atomic_add_elem_op first arg must be tvm_access_ptr, "
-                      "tl.access_ptr, or address_of call, but got "
-                   << node->args[0];
-      }
       int vectorize_length = 1;
-      if (dtype.is_float16() || dtype.is_bfloat16()) {
-        vectorize_length = 2;
-      } else if (dtype.is_float() && dtype.bits() == 32 &&
-                 TargetHasSMVersionGE(Target::Current(false), 90)) {
-        vectorize_length = 4;
+      Optional<BufferLoad> destination =
+          ExtractBufferLoadForAtomic(node->args[0]);
+      if (destination.defined() && inner_for_) {
+        const Buffer &buffer = destination.value()->buffer;
+        vectorize_length = arith::ZeroAwareGCD(
+            loop_extent_vector_size_,
+            GetMaxAtomicVectorSize(buffer, Target::Current(false)));
+        Array<PrimExpr> indices =
+            TransformIndices(destination.value()->indices, buffer);
+        Array<PrimExpr> strides = GetBufferStrides(buffer);
+        PrimExpr offset = buffer->elem_offset;
+        for (size_t i = 0; i < indices.size(); ++i) {
+          offset = offset + indices[i] * strides[i];
+        }
+        // A wide atomic updates distinct consecutive elements. Unlike a load,
+        // its destination cannot broadcast. Search smaller widths here, before
+        // partitioning/layout choices and before rewriting the loop body.
+        while (vectorize_length > 1 &&
+               !IndicesCanVectorize(offset, inner_for_->loop_var,
+                                    inner_for_->extent, vectorize_length,
+                                    analyzer_, /*allow_broadcast=*/false)) {
+          vectorize_length /= 2;
+        }
       }
 
+      // Keep this as a call constraint: simple-memory planning must not defer
+      // the atomic's legality together with local or broadcast-load accesses.
       buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::ptx_cp_async()) ||
@@ -1210,8 +1247,8 @@ int MaxVectorLoadBits(const Target &target, bool global_only_access) {
 
 bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                          const PrimExpr &iter_var_size,
-                         int target_vectorized_size,
-                         arith::Analyzer *analyzer) {
+                         int target_vectorized_size, arith::Analyzer *analyzer,
+                         bool allow_broadcast) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)
     return true;
@@ -1233,7 +1270,8 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                                0))
     return false;
 
-  if (IsExprInvariantInVectorBoundary(analysis_expr, var,
+  if (allow_broadcast &&
+      IsExprInvariantInVectorBoundary(analysis_expr, var,
                                       target_vectorized_size, analyzer)) {
     return true;
   }
@@ -1262,14 +1300,18 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
   expr_vectorized = analyzer->Simplify(expr_vectorized);
   auto ramp_node = expr_vectorized.as<RampNode>();
   if (!ramp_node) {
-    // Broadcast value
-    if (expr_vectorized.dtype().lanes() == 1)
-      return true;
-    else
-      return false;
-  } else {
-    return is_one(ramp_node->stride);
+    return allow_broadcast && expr_vectorized.dtype().lanes() == 1;
   }
+  if (!is_one(ramp_node->stride)) {
+    return false;
+  }
+  // The var == 0 check above only covers the first group. For example,
+  // (var // 4) * 6 + var % 4 has group bases 0, 6, ... at width 4: the first
+  // group is aligned, but the second is not. Atomic destinations must align
+  // every group's base; the planner can retry this example at width 2.
+  return allow_broadcast ||
+         analyzer->CanProveEqual(
+             FloorMod(ramp_node->base, target_size_for_expr), zero_expr);
 }
 
 namespace {

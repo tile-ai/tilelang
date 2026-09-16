@@ -1421,7 +1421,7 @@ def test_atomic_add_bf16_compiles_for_sm75():
 # ======================= Invariant atomic destination =======================
 
 _INV_N = 64
-_INV_EXTENT = 2
+_INV_EXTENT = 8
 
 
 def _invariant_index(which, i):
@@ -1511,26 +1511,60 @@ def _invariant_reference(which, a):
 
 
 @tilelang.testing.requires_cuda
-def test_atomic_add_invariant_destination():
-    def run(which, dtype, max_width):
-        kernel = atomic_add_invariant_program(which, dtype)
-        widths = [int(w) for w in re.findall(r"AtomicAddx(\d)", kernel.get_kernel_source())]
-        assert all(w <= max_width for w in widths), (which, widths, max_width)
-        a = torch.arange(1, _INV_EXTENT + 1, dtype=getattr(torch, dtype), device="cuda")
-        b = torch.zeros(_INV_N, dtype=getattr(torch, dtype), device="cuda")
-        kernel(a, b)
-        torch.testing.assert_close(b, _invariant_reference(which, a), atol=0, rtol=0)
+@pytest.mark.parametrize("which,dtype,max_width", _INVARIANT_CASES + [(2, T.float32, 1), (5, T.float32, 1)])
+def test_atomic_add_invariant_destination(which, dtype, max_width):
+    kernel = atomic_add_invariant_program(which, dtype)
+    widths = [int(w) for w in re.findall(r"AtomicAddx(\d)", kernel.get_kernel_source())]
+    assert all(w <= max_width for w in widths), (which, widths, max_width)
+    a = torch.arange(1, _INV_EXTENT + 1, dtype=getattr(torch, dtype), device="cuda")
+    b = torch.zeros(_INV_N, dtype=getattr(torch, dtype), device="cuda")
+    kernel(a, b)
+    torch.testing.assert_close(b, _invariant_reference(which, a), atol=0, rtol=0)
 
-    for which, dtype, max_width in _INVARIANT_CASES:
-        run(which, dtype, max_width)
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("program", [atomic_add_invariant_shared_program, atomic_add_invariant_memory_order_program])
+def test_atomic_add_invariant_shared_and_memory_order(program):
     a = torch.arange(1, _INV_EXTENT + 1, dtype=torch.float16, device="cuda")
-    for program in (atomic_add_invariant_shared_program, atomic_add_invariant_memory_order_program):
-        kernel = program()
-        assert "AtomicAddx" not in kernel.get_kernel_source()
-        b = torch.zeros(_INV_N, dtype=torch.float16, device="cuda")
-        kernel(a, b)
-        torch.testing.assert_close(b, _invariant_reference(2, a), atol=0, rtol=0)
+    kernel = program()
+    assert "AtomicAddx" not in kernel.get_kernel_source()
+    b = torch.zeros(_INV_N, dtype=torch.float16, device="cuda")
+    kernel(a, b)
+    torch.testing.assert_close(b, _invariant_reference(2, a), atol=0, rtol=0)
+
+
+@tilelang.jit
+def atomic_add_dynamic_rows_program(indirect):
+    rows = T.dynamic("rows")
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 256), T.bfloat16), B: T.Tensor((rows, 256), T.float32), indices: T.Tensor((4,), T.int64)):
+        with T.Kernel(1, threads=128):
+            values = T.alloc_fragment((4, 256), T.float32)
+            for i, j in T.Parallel(4, 256):
+                values[i, j] = A[i, j]
+                if indirect:
+                    T.atomic_add(B[indices[i], j], values[i, j])
+                else:
+                    T.atomic_add(B[i, j], values[i, j])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("indirect", [False, True])
+def test_atomic_add_dynamic_rows_keep_x4(indirect):
+    """Dynamic/indirect row offsets need int64 arithmetic but retain x4 lanes."""
+    kernel = atomic_add_dynamic_rows_program(indirect)
+    assert "AtomicAddx4" in kernel.get_kernel_source()
+    a = torch.randint(1, 5, (4, 256), device="cuda").to(torch.bfloat16)
+    b = torch.zeros((8, 256), dtype=torch.float32, device="cuda")
+    indices = torch.tensor([0, 1, 0, 1], dtype=torch.int64, device="cuda")
+    kernel(a, b, indices)
+    ref = torch.zeros_like(b)
+    ref.index_add_(0, indices if indirect else torch.arange(4, device="cuda"), a.float())
+    torch.testing.assert_close(b, ref, atol=0, rtol=0)
 
 
 if __name__ == "__main__":
