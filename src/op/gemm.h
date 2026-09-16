@@ -180,6 +180,12 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
+
+  // Whether select_inst understands the SFA/SFB scale-factor operands. A
+  // backend that does not declare this never sees a block-scaled GEMM: the
+  // base op rejects it before dispatch, so the scale factors cannot be dropped
+  // by a dense lowering.
+  bool supports_blockscaled = false;
 };
 
 void RegisterGemmImpl(GemmImpl impl);

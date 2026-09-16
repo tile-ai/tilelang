@@ -15,6 +15,7 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
+#include "span_utils.h"
 #include "utils.h"
 
 #include <vector>
@@ -188,7 +189,16 @@ TileOperator GemmNode::Clone() const {
 }
 
 String GemmNode::GetGemmInstructionKey(int block_size, Target target) const {
-  return ResolveGemmImpl(target).select_inst(*this, block_size, target);
+  const GemmImpl &impl = ResolveGemmImpl(target);
+  if ((sfaRegion_.defined() || sfbRegion_.defined()) &&
+      !impl.supports_blockscaled) {
+    LOG(FATAL) << "Block-scaled GEMM is not supported by the " << impl.name
+               << " backend (target=" << target->str()
+               << "); a dense GEMM lowering would silently drop the SFA/SFB "
+                  "scale factors."
+               << SpanHintSuffix({a_->span, b_->span, c_->span});
+  }
+  return impl.select_inst(*this, block_size, target);
 }
 
 std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(

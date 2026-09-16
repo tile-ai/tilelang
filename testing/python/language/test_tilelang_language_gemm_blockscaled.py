@@ -12,6 +12,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+from tilelang import tvm
 from tvm import tirx
 from tvm.tirx.stmt_functor import post_order_visit
 
@@ -216,6 +217,50 @@ def test_mma_gemm_blockscaled_records_sf_layout():
     ann = _annotations(call)
     assert "is_tcgen05" not in ann
     assert ann["sf_layout"].value == "blockscaled_chunk_kmajor"
+
+
+def test_blockscaled_gemm_rejected_by_backend_without_support():
+    """Only backends that declare block-scaled support may see SFA/SFB.
+
+    The base op checks the GemmImpl capability before delegating instruction
+    selection, so a backend whose SelectInst knows nothing about scale factors
+    (CPU here) fails loudly instead of lowering a dense GEMM that silently
+    drops SFA/SFB.
+    """
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((128, 128), T.float8_e4m3fn),
+        B: T.Tensor((128, 128), T.float8_e4m3fn),
+        C: T.Tensor((128, 128), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            b = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            sfa = T.alloc_shared((128, 4), T.uint32)
+            sfb = T.alloc_shared((128, 4), T.uint32)
+            c = T.alloc_fragment((128, 128), T.float32)
+            T.copy(A, a)
+            T.copy(B, b)
+            T.gemm_blockscaled(
+                a,
+                b,
+                c,
+                sfa,
+                sfb,
+                transpose_B=True,
+                k_start=0,
+                sf_a_granularity_k=32,
+                sf_b_granularity_k=32,
+            )
+            T.copy(c, C)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target("c")
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    with target, pytest.raises(Exception, match="Block-scaled GEMM is not supported by the cpu.Gemm backend"):
+        tilelang.transform.LayoutInference()(mod)
 
 
 # ---------------------------------------------------------------------------

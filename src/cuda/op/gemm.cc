@@ -444,6 +444,7 @@ bool RegisterCudaGemm() {
       cuda::Gemm::SelectInst,
       cuda::Gemm::ComputeWarpPartition,
       cuda::Gemm::ReuseExistingSharedLayout,
+      /*supports_blockscaled=*/true,
   });
   return true;
 }
