@@ -38,8 +38,6 @@ cdef class CythonKernelWrapper:
         self.param_dtypes = [param.torch_dtype() for param in params]
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
-        # Device/stream selection is the adapter's call (it knows the compile
-        # target); the defaults preserve the CUDA behavior.
         self.get_current_device = get_current_device if get_current_device is not None else torch.cuda.current_device
         self.get_current_stream = get_current_stream
         for param in params:
@@ -184,10 +182,11 @@ cdef class CythonKernelWrapper:
                 f"Expected {len(self.params)} inputs, got {len(inputs) + len(self.result_idx)} with {len(inputs)} inputs and {len(self.result_idx)} outputs"
             )
 
-        # Use current device stream if none specified
+        device = None
         if stream == -1:
             if self.get_current_stream is not None:
-                stream = self.get_current_stream()
+                device = self._infer_output_device(inputs)
+                stream = self.get_current_stream(device)
             elif torch.cuda.is_available():
                 try:
                     stream = torch._C._cuda_getCurrentRawStream(torch.cuda.current_device())
@@ -198,7 +197,6 @@ cdef class CythonKernelWrapper:
 
         cdef int ins_idx = 0
         cdef list tensor_list = []
-        device = None
 
         # Prepare input and output tensors
         for i in range(len(self.params)):

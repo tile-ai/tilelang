@@ -43,8 +43,6 @@ def test_tvm_ffi_uses_torch_current_npu_stream() -> None:
         is_torch_npu_stream_exchange_installed,
     )
 
-    assert is_torch_npu_stream_exchange_installed()
-
     size = 1024
     source = torch.full(
         (size, size),
@@ -72,6 +70,7 @@ def test_tvm_ffi_uses_torch_current_npu_stream() -> None:
     prepared.copy_(source)
     torch.npu.synchronize()
     copy_kernel(prepared.view(-1)[:PROBE_ELEMENTS], observed)
+    assert is_torch_npu_stream_exchange_installed()
     torch.npu.synchronize()
 
     prepared.zero_()

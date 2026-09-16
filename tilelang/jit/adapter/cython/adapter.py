@@ -28,18 +28,26 @@ except ImportError:
     raise
 
 
-def _device_providers(target):
-    """Device/raw-stream providers for the wrapper, chosen by compile target.
+def _device_providers():
+    """Resolve Torch devices and their current streams lazily at runtime."""
+    current_device_functor = None
+    current_stream_functors = {}
 
-    The wrapper defaults to the CUDA accessors; Ascend supplies its own so
-    output allocation and the stream fallback follow the compile target
-    rather than whatever accelerator the host happens to expose.
-    """
-    if not is_ascend_target(target):
-        return None, None
-    from tilelang.ascend.torch_exchange import npu_current_device, npu_current_raw_stream
+    def current_device():
+        nonlocal current_device_functor
+        if current_device_functor is None:
+            current_device_functor = BaseKernelAdapter.get_current_device_functor()
+        return current_device_functor()
 
-    return npu_current_device, npu_current_raw_stream
+    def current_stream(device: torch.device):
+        device_key = (device.type, device.index)
+        stream_functor = current_stream_functors.get(device_key)
+        if stream_functor is None:
+            stream_functor = BaseKernelAdapter.get_current_stream_functor(device)
+            current_stream_functors[device_key] = stream_functor
+        return stream_functor()
+
+    return current_device, current_stream
 
 
 def is_symbolic_expr(expr) -> bool:
@@ -156,7 +164,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg += f"\n{self.lib_code}"
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers(self.target))
+        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
@@ -220,7 +228,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg = adapter.lib.get_last_error().decode("utf-8")
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, *_device_providers(adapter.target))
+        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, *_device_providers())
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
