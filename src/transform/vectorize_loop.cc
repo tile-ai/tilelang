@@ -164,64 +164,6 @@ inline int GetMaxAtomicVectorSize(const Buffer &destination, Target target) {
   return 1;
 }
 
-/*!
- * \brief Whether a scalar atomic_add target can be widened to a vectorized
- * atomic. The wide atomic writes `vector_size` contiguous elements from the
- * base, so the loop var must advance one element per lane in a single innermost
- * index and the base must be aligned to the atomic width.
- */
-inline bool CanVectorizeAtomicTarget(const PrimExpr &original_dst,
-                                     const PrimExpr &visited_dst,
-                                     const Var &vectorized_var, int vector_size,
-                                     arith::Analyzer *analyzer) {
-  auto orig_load = ExtractBufferLoadForAtomic(original_dst);
-  auto visited_load = ExtractBufferLoadForAtomic(visited_dst);
-  if (!orig_load.defined() || !visited_load.defined()) {
-    return false;
-  }
-  if (orig_load.value()->buffer->dtype.lanes() != 1 || vector_size <= 1 ||
-      orig_load.value()->indices.size() !=
-          visited_load.value()->indices.size()) {
-    return false;
-  }
-
-  auto at_lane = [&](const PrimExpr &idx, int lane) {
-    return analyzer->Simplify(Substitute(
-        idx, {{vectorized_var, IntImm(vectorized_var->dtype, lane)}}));
-  };
-
-  // Exactly one innermost index must advance one element per lane; every other
-  // index must stay constant across all lanes. Check every lane transition, not
-  // just 0 -> 1: `B[i % 2]` agrees on lanes 0/1 but repeats for larger widths.
-  int lane_index = -1;
-  for (size_t k = 0; k < orig_load.value()->indices.size(); ++k) {
-    PrimExpr base = at_lane(orig_load.value()->indices[k], 0);
-    bool is_constant = true;
-    bool is_unit_stride = true;
-    for (int lane = 1; lane < vector_size; ++lane) {
-      PrimExpr value = at_lane(orig_load.value()->indices[k], lane);
-      is_constant = is_constant && analyzer->CanProveEqual(value, base);
-      is_unit_stride =
-          is_unit_stride &&
-          analyzer->CanProveEqual(value, base + make_const(base.dtype(), lane));
-    }
-    if (is_constant) {
-      continue;
-    }
-    if (!is_unit_stride || lane_index >= 0) {
-      return false;
-    }
-    lane_index = static_cast<int>(k);
-  }
-  if (lane_index != static_cast<int>(orig_load.value()->indices.size()) - 1) {
-    return false;
-  }
-
-  PrimExpr base_idx = visited_load.value()->indices[lane_index];
-  return analyzer->CanProve(
-      floormod(base_idx, make_const(base_idx.dtype(), vector_size)) == 0);
-}
-
 // Rewrite vectorized allocation access
 // This is necessary for making each vector component containing its own
 // workspace. Originates from Halide's loop vectorizer
@@ -666,6 +608,44 @@ public:
       }
     }
   }
+  // Whether the (unvisited) atomic destination advances exactly one element
+  // per lane so it can be widened to an `AtomicAddxN(&B[base], vec)`.
+  //
+  // Reuse the vectorizer itself as the analysis: visiting an index expression
+  // turns `var_` into `Ramp(0, 1, lanes)`, and Add/Sub/Mul keep the Ramp form
+  // (with the stride scaled), while FloorDiv/FloorMod/Select/... fold into a
+  // generic vector. So the destination is widenable iff every leading index
+  // stays scalar (lane-invariant) and the innermost index is a unit-stride
+  // Ramp whose base is provably aligned to `vector_size`.
+  //   B[i]           -> Ramp(0, 1)            ok
+  //   B[bx * 8 + i]  -> Ramp(bx * 8, 1)       ok, base % vector_size == 0
+  //   B[i // 2]      -> floordiv(Ramp, ...)   not a Ramp   -> scalar
+  //   B[2 * i]       -> Ramp(0, 2)            stride != 1  -> scalar
+  //   B[0]           -> scalar                no lane axis -> scalar
+  // Unlike a per-lane Substitute+CanProveEqual sweep this costs one visit per
+  // index plus a single alignment proof, and it is the same Ramp/stride test
+  // `IndicesCanVectorize` uses when planning ordinary loads and stores.
+  bool AtomicTargetIsContiguous(const PrimExpr &original_dst, int vector_size) {
+    auto load = ExtractBufferLoadForAtomic(original_dst);
+    if (!load.defined() || load.value()->buffer->dtype.lanes() != 1 ||
+        load.value()->indices.empty()) {
+      return false;
+    }
+    const Array<PrimExpr> &indices = load.value()->indices;
+    for (size_t k = 0; k + 1 < indices.size(); ++k) {
+      if (!this->VisitExpr(indices[k]).dtype().is_scalar()) {
+        return false;
+      }
+    }
+    PrimExpr last = this->VisitExpr(indices.back());
+    const auto *ramp = last.as<RampNode>();
+    if (ramp == nullptr || !is_one(ramp->stride)) {
+      return false;
+    }
+    return analyzer_.CanProve(
+        floormod(ramp->base, make_const(ramp->base.dtype(), vector_size)) == 0);
+  }
+
   // Atomic add vectorization
   PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(atomic_add_elem_op()));
@@ -712,8 +692,7 @@ public:
     // atomic width. An invariant/broadcast destination (`B[i // 2]`, `B[0]`),
     // a strided one, or an odd base would silently corrupt neighbours or fault
     // with a misaligned address, so fall back to scalar atomics.
-    if (!CanVectorizeAtomicTarget(op->args[0], dst, var_, vector_size,
-                                  &analyzer_)) {
+    if (!AtomicTargetIsContiguous(op->args[0], vector_size)) {
       need_scalarize_ = true;
       return GetRef<PrimExpr>(op);
     }
