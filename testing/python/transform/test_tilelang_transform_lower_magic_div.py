@@ -55,6 +55,16 @@ def test_magic_div_cuda_codegen():
     assert "tl_magic_m_1" in src and "tl_magic_s_1" in src
     # d == 1 select is emitted in the expansion
     assert "== 1) ?" in src or "== 1 ?" in src
+    # Each div/mod pair shares one quotient instead of issuing two mul-highs.
+    assert src.count("__umulhi") == 2
+    assert "tl_magic_r_0" in src and "tl_magic_r_1" in src
+    remainder_bind = next(line for line in src.splitlines() if "tl_magic_r_0" in line)
+    assert "tl_magic_floormod_i32" in remainder_bind
+    # Keep the complete output unflatten chain transparent to FlattenBuffer;
+    # opaque magic values here prevent NVCC from recovering the linear idx.
+    output_store = next(line for line in src.splitlines() if "out_scales[" in line)
+    output_index = output_store.split("out_scales[", 1)[1].split("]", 1)[0]
+    assert "tl_magic" not in output_index
 
 
 def test_magic_div_cpu_codegen():
@@ -82,14 +92,40 @@ def _fallback_kernel():
     return kernel
 
 
+def _mod_only_kernel():
+    @tilelang.jit(pass_configs=MAGIC_CONFIG)
+    def kernel(A, B, block: int = 128):
+        n = T.dynamic("n")
+        divisor = T.dynamic("divisor")
+        A: T.Tensor[(n,), T.int32]
+        B: T.Tensor[(divisor,), T.int32]
+        with T.Kernel(T.ceildiv(n, block), threads=block) as bx:
+            for i in T.Parallel(block):
+                idx = bx * block + i
+                if idx < n:
+                    A[idx] = idx % divisor
+
+    return kernel
+
+
 def test_magic_div_fallback_sites_untouched():
     src = _lower(_fallback_kernel().get_tir(), "cuda -arch=sm_90")
     assert "tl_magic_m_0" not in src
     assert "__umulhi" not in src
 
 
+def test_magic_mod_without_div_keeps_direct_mod_path():
+    src = _lower(_mod_only_kernel().get_tir(), "cuda -arch=sm_90")
+    assert "__umulhi" in src
+    assert "tl_magic_floormod_i32" in src
+    assert "int tl_magic_q_" not in src
+    remainder_bind = next(line for line in src.splitlines() if "int tl_magic_r_" in line)
+    assert "__umulhi" in remainder_bind
+
+
 if __name__ == "__main__":
     test_magic_div_cuda_codegen()
     test_magic_div_cpu_codegen()
     test_magic_div_fallback_sites_untouched()
+    test_magic_mod_without_div_keeps_direct_mod_path()
     print("ALL PASS")
