@@ -66,7 +66,10 @@ def test_out_of_vf_fill_issues_on_scalar_pipe():
             T.fill(temp[0:n], 0)
             T.copy(temp, A)
 
-    source = lower(main, target="ascend").kernel_source
+    # tilelang.lower expects the caller to hold the target scope; the
+    # vectorize planner consults Target.current().
+    with tvm.target.Target("ascend"):
+        source = lower(main, target="ascend").kernel_source
     assert "asc_sync_notify(PIPE_S, PIPE_MTE3," in source
     assert "asc_sync_wait(PIPE_S, PIPE_MTE3," in source
 
@@ -79,7 +82,10 @@ def test_statically_shaped_out_of_vf_fill_is_still_scalar():
             T.fill(temp, 0)
             T.copy(temp, A)
 
-    source = lower(main, target="ascend").kernel_source
+    # tilelang.lower expects the caller to hold the target scope; the
+    # vectorize planner consults Target.current().
+    with tvm.target.Target("ascend"):
+        source = lower(main, target="ascend").kernel_source
     assert "asc_sync_notify(PIPE_S, PIPE_MTE3," in source
     assert "asc_sync_wait(PIPE_S, PIPE_MTE3," in source
 
