@@ -183,10 +183,13 @@ def test_gemm_blockscaled_parses_to_its_own_tile_op():
     assert int(op.sfKStart) == 256
     assert op.transB and not op.transA
 
-    # The dense op refuses the 16-slot protocol rather than ignoring SFA/SFB.
+    # The dense op refuses the 16-slot protocol rather than ignoring SFA/SFB,
+    # and a short call is rejected up front instead of indexing out of range.
     dense_builder = tvm.ir.Op.get("tl.tileop.gemm").get_attr("TLOpBuilder")
-    with pytest.raises(Exception, match="at most 13 positional slots"):
+    with pytest.raises(Exception, match="exactly 13 positional slots, but got 16"):
         dense_builder(call.args, call.annotations)
+    with pytest.raises(Exception, match="exactly 13 positional slots, but got 12"):
+        dense_builder(call.args[:12], call.annotations)
 
 
 def test_gemm_blockscaled_records_use_2cta_and_sf_layout():

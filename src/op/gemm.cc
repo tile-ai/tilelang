@@ -135,10 +135,12 @@ void GemmNode::InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
 }
 
 Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ICHECK_LE(args.size(), 13)
-      << "tl.tileop.gemm takes at most 13 positional slots; a block-scaled "
-         "GEMM (SFA, SFB, k_start) must be built as tl.tileop.gemm_blockscaled "
-         "so the scale factors are not silently ignored.";
+  ICHECK_EQ(args.size(), 13)
+      << "tl.tileop.gemm expects exactly 13 positional slots, but got "
+      << args.size()
+      << "; a block-scaled GEMM (SFA, SFB, k_start) must be built as "
+         "tl.tileop.gemm_blockscaled so the scale factors are not silently "
+         "ignored.";
   ObjectPtr<GemmNode> node = make_object<GemmNode>();
   GemmNode::InitFromDenseArgs(node.get(), args, annotations);
   data_ = std::move(node);
