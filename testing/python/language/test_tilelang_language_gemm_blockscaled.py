@@ -63,16 +63,28 @@ def _make_blockscaled_op(gemm_api="gemm_blockscaled", *, a_scope="shared", c_sco
 @pytest.mark.parametrize(
     "gemm_api, arch, c_scope, use_2cta, expected",
     [
-        ("gemm_blockscaled", "sm_100", "shared.tmem", False, "cuda.tcgen05"),
-        ("gemm_blockscaled", "sm_100", "shared.tmem", True, "cuda.tcgen05"),
-        ("tcgen05_gemm_blockscaled", "sm_100", "shared.tmem", False, "cuda.tcgen05"),
+        ("gemm_blockscaled", "sm_100", "shared.tmem", False, "cuda.tcgen05.blockscaled"),
+        ("gemm_blockscaled", "sm_100", "shared.tmem", True, "cuda.tcgen05.blockscaled"),
+        ("tcgen05_gemm_blockscaled", "sm_100", "shared.tmem", False, "cuda.tcgen05.blockscaled"),
         ("gemm_blockscaled", "sm_120", "local.fragment", False, "cuda.mma.blockscaled"),
         ("mma_gemm_blockscaled", "sm_120", "local.fragment", False, "cuda.mma.blockscaled"),
     ],
 )
 def test_blockscaled_instruction_selection(gemm_api, arch, c_scope, use_2cta, expected):
+    """The selector returns a block-scaled instruction key and the registry
+    maps it to an implementation built on GemmBlockScaledMixin; the dense
+    implementation classes never receive a block-scaled op."""
+    from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
+
     op = _make_blockscaled_op(gemm_api, c_scope=c_scope, use_2cta=use_2cta)
-    assert op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": arch})) == expected
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    inst = op._select_gemm_instruction(128, target)
+    assert inst == expected
+    impl_class = op._get_implementation_class(inst, target)
+    assert issubclass(impl_class, GemmBlockScaledMixin), impl_class
+    impl = impl_class(op)
+    assert impl.SFARegion.buffer.name == "SFA" and impl.SFBRegion.buffer.name == "SFB"
+    assert (impl.sf_a_granularity_k, impl.sf_b_granularity_k) == ((128, 128) if c_scope == "shared.tmem" else (16, 16))
 
 
 @tilelang.testing.requires_cuda

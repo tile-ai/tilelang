@@ -21,16 +21,6 @@ from tvm.arith import Analyzer
 from collections.abc import Callable
 
 
-_FLOAT8_DTYPES = {
-    "float8_e4m3",
-    "float8_e4m3fn",
-    "float8_e4m3fnuz",
-    "float8_e5m2",
-    "float8_e5m2fn",
-    "float8_e5m2fnuz",
-}
-
-
 def _shared_layout_continuity(buffer, is_k_major: bool, k_extent: int, mn_extent: int) -> int:
     dtype_bits = buffer.dtype.bits
     if dtype_bits < 8:
@@ -44,15 +34,62 @@ GEMM_INST_TCGEN05 = "cuda.tcgen05"
 class GemmTCGEN5(GemmBase):
     """GEMM operator for Blackwell (SM100) TCGEN5MMA instructions.
 
-    Supports the SS (Shared-Shared) and TS (TensorMemory-Shared) variants,
-    as well as block-scaled MXFP8 GEMM when SFA/SFB scale factors are present.
+    Supports the SS (Shared-Shared) and TS (TensorMemory-Shared) variants.
     Layout inference and lowering are dispatched based on the memory scopes
-    of operands A and B.
+    of operands A and B. The block-scaled variant lives in
+    ``GemmTCGEN5BlockScaled`` and reuses the emitter and layout plumbing
+    through the hooks below.
     """
+
+    # Whether the TCGEN5MMA meta lookup may pick the .ws (weight-stationary)
+    # instruction shapes.
+    tcgen05_allow_ws = True
 
     @property
     def allow_f8f6f4_mixed_dtypes(self) -> bool:
         return True
+
+    @property
+    def use_2cta(self) -> bool:
+        annotations = getattr(self.gemm_node, "annotations", {})
+        return bool(annotations.get("use_2cta", 0))
+
+    def _warp_partition(self, target: Target, thread_nums: int) -> tuple[int, int]:
+        return self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_TCGEN05)
+
+    def _make_mma_emitter(self, target: Target, thread_nums: int) -> TensorCoreIntrinEmitter:
+        m_warp, n_warp = self._warp_partition(target, thread_nums)
+        return TensorCoreIntrinEmitter(
+            a_dtype=self.a_dtype,
+            b_dtype=self.b_dtype,
+            accum_dtype=self.accum_dtype,
+            a_transposed=self.trans_A,
+            b_transposed=self.trans_B,
+            block_row_warps=m_warp,
+            block_col_warps=n_warp,
+            warp_row_tiles=int(self.M // m_warp),
+            warp_col_tiles=int(self.N // n_warp),
+            chunk=self.chunk,
+        )
+
+    def _assign_layouts(self, mma_emitter: TensorCoreIntrinEmitter, layout_map: dict) -> None:
+        if self.A in layout_map:
+            if self.A.scope() == "shared.tmem":
+                mma_emitter._assign_a_tmem_layout(layout_map[self.A])
+            else:
+                mma_emitter._assign_a_shared_layout(layout_map[self.A])
+        if self.B in layout_map:
+            mma_emitter._assign_b_shared_layout(layout_map[self.B])
+        if self.C in layout_map:
+            mma_emitter._assign_c_tmem_layout(layout_map[self.C])
+
+    def _check_warp_aligned_thread_bounds(self, thread_bounds: Range, analyzer: Analyzer) -> None:
+        # Since TCGEN5MMA atoms provided by CUTLASS always have an internal
+        # `elect_one_sync()`, we check if we are calling it using full warps
+        warp_size = 32
+        assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), (
+            "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
+        )
 
     def infer_shared_layout(self, buffer: tirx.Buffer, continuity: int) -> Callable[[tirx.Buffer], Layout]:
         """Infer a standard shared-memory swizzle layout for TCGEN05 operands."""
@@ -72,36 +109,15 @@ class GemmTCGEN5(GemmBase):
 
         For SS: both A and B get swizzled shared-memory layouts.
         For TS: A and C get TMEM store layouts, B gets a swizzled shared-memory layout.
-        For block-scaled: same as SS (A and B get swizzle, C gets TMEM store layout).
         """
-        # Block-scaled GEMM keeps a 1x1 warp partition even when using cta_group::2.
-        if self.is_blockscaled:
-            m_warp, n_warp = 1, 1
-        else:
-            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_TCGEN05)
-        warp_row_tiles = int(self.M // m_warp)
-        warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
-            a_dtype=self.a_dtype,
-            b_dtype=self.b_dtype,
-            accum_dtype=self.accum_dtype,
-            a_transposed=self.trans_A,
-            b_transposed=self.trans_B,
-            block_row_warps=m_warp,
-            block_col_warps=n_warp,
-            warp_row_tiles=warp_row_tiles,
-            warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
-        )
+        mma_emitter = self._make_mma_emitter(target, thread_nums)
         a_is_k_major = not self.trans_A
         b_is_k_major = self.trans_B
 
-        annotations = getattr(self.gemm_node, "annotations", {})
-        use_2cta = bool(annotations.get("use_2cta", 0))
         k = int(self.chunk)
-        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=self.is_blockscaled)
+        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not self.use_2cta, disable_ws=not self.tcgen05_allow_ws)
 
-        if self.is_blockscaled or self.is_gemm_ss():
+        if self.is_gemm_ss():
             a_continuity = _shared_layout_continuity(self.A, a_is_k_major, self.K, self.M)
             b_continuity = _shared_layout_continuity(self.B, b_is_k_major, self.K, int(self.B.shape[-1]))
 
@@ -130,44 +146,13 @@ class GemmTCGEN5(GemmBase):
     ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent
-        # Block-scaled GEMM keeps a 1x1 warp partition even when using cta_group::2.
-        if self.is_blockscaled:
-            m_warp, n_warp = 1, 1
-        else:
-            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_TCGEN05)
-        warp_row_tiles = int(self.M // m_warp)
-        warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
-            a_dtype=self.a_dtype,
-            b_dtype=self.b_dtype,
-            accum_dtype=self.accum_dtype,
-            a_transposed=self.trans_A,
-            b_transposed=self.trans_B,
-            block_row_warps=m_warp,
-            block_col_warps=n_warp,
-            warp_row_tiles=warp_row_tiles,
-            warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
-        )
-
-        if self.A in layout_map:
-            if self.A.scope() == "shared.tmem":
-                mma_emitter._assign_a_tmem_layout(layout_map[self.A])
-            else:
-                mma_emitter._assign_a_shared_layout(layout_map[self.A])
-        if self.B in layout_map:
-            mma_emitter._assign_b_shared_layout(layout_map[self.B])
-        if self.C in layout_map:
-            mma_emitter._assign_c_tmem_layout(layout_map[self.C])
-
-        if self.is_blockscaled:
-            return self._lower_blockscaled(mma_emitter, thread_bounds, thread_index, mbar_phase_expr)
+        mma_emitter = self._make_mma_emitter(target, thread_nums)
+        self._assign_layouts(mma_emitter, layout_map)
 
         if not (self.is_gemm_ss() or self.is_gemm_ts()):
             raise ValueError(f"TCGEN5MMA supports gemm_ss and gemm_ts, got A scope {self.A.scope()}, B scope {self.B.scope()}")
 
-        annotations = getattr(self.gemm_node, "annotations", {})
-        use_2cta = bool(annotations.get("use_2cta", 0))
+        use_2cta = self.use_2cta
         if use_2cta and not self.is_tcgen05:
             raise ValueError("2CTA TCGEN5MMA is only available through the explicit T.tcgen05_gemm(use_2cta=True) path")
         k = int(self.chunk)
@@ -205,13 +190,9 @@ class GemmTCGEN5(GemmBase):
         clear_accum = self.clear_accum
         mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
-        # Since TCGEN5MMA atoms provided by CUTLASS always have an internal
-        # `elect_one_sync()`, we check if we are calling it using full warps
         analyzer = Analyzer()
         warp_size = 32
-        assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), (
-            "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
-        )
+        self._check_warp_aligned_thread_bounds(thread_bounds, analyzer)
 
         cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
 
@@ -233,86 +214,4 @@ class GemmTCGEN5(GemmBase):
             _Simplify(_gemm_ss, inline_let=True)
             if analyzer.can_prove(thread_bounds.extent == warp_size)
             else _Simplify(_gemm_ss_cond, inline_let=True)
-        )
-
-    def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_index, mbar_phase_expr: tirx.PrimExpr | None = None):
-        """Lower block-scaled MXFP8 GEMM to TIR.
-
-        Follows the same completion protocol as the dense TCGEN05 lowering:
-        the synchronous `T.gemm_blockscaled` posts completion to `mbar` and
-        waits on it right after issue, while the explicit `is_tcgen05` op
-        never waits and may omit `mbar` when the caller or WS schedule emits
-        a later completion arrival.
-        """
-        mbar = self.mbar
-        if mbar is None and not self.is_tcgen05:
-            raise ValueError("Synchronous block-scaled TCGEN5MMA requires a valid mbarrier")
-        mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else None
-
-        A_shared = self.ARegion
-        B_shared = self.BRegion
-        C_local = self.CRegion
-        clear_accum = self.clear_accum
-        SFA_tmem = self.SFARegion.buffer
-        SFB_tmem = self.SFBRegion.buffer
-        sf_k_start = self.sf_k_start
-        mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
-
-        annotations = getattr(self.gemm_node, "annotations", {})
-        use_2cta = bool(annotations.get("use_2cta", 0))
-        sf_a_granularity_k = annotations.get("sf_a_granularity_k")
-        sf_b_granularity_k = annotations.get("sf_b_granularity_k")
-        if sf_a_granularity_k is None or sf_b_granularity_k is None:
-            raise ValueError("Block-scaled GEMM requires sf_a_granularity_k and sf_b_granularity_k")
-        k = int(self.chunk)
-        mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not use_2cta, disable_ws=True)
-        enable_2cta = mma_emitter.tcgen05_meta.enable_2cta
-
-        analyzer = Analyzer()
-        warp_size = 32
-        assert analyzer.can_prove(thread_bounds.min % warp_size == 0 and thread_bounds.extent % warp_size == 0), (
-            "Block-scaled GEMM requires thread bounds aligned to warps."
-        )
-        cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
-
-        @T.prim_func
-        def _gemm_blockscaled_cond() -> None:
-            if cluster_cond and thread_index // 32 == thread_bounds.min // warp_size:
-                mma_emitter.tcgen05mma_blockscaled(
-                    A_shared,
-                    B_shared,
-                    C_local,
-                    SFA_tmem,
-                    SFB_tmem,
-                    mbarptr,
-                    sf_k_start=sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
-                    clear_accum=clear_accum,
-                )
-            if not self.is_tcgen05:
-                T.mbarrier_wait_parity(mbar, mbar_phase)
-
-        @T.prim_func
-        def _gemm_blockscaled() -> None:
-            if cluster_cond:
-                mma_emitter.tcgen05mma_blockscaled(
-                    A_shared,
-                    B_shared,
-                    C_local,
-                    SFA_tmem,
-                    SFB_tmem,
-                    mbarptr,
-                    sf_k_start=sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
-                    clear_accum=clear_accum,
-                )
-            if not self.is_tcgen05:
-                T.mbarrier_wait_parity(mbar, mbar_phase)
-
-        return (
-            _Simplify(_gemm_blockscaled, inline_let=True)
-            if analyzer.can_prove(thread_bounds.extent == warp_size)
-            else _Simplify(_gemm_blockscaled_cond, inline_let=True)
         )

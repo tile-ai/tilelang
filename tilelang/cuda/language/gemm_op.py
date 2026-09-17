@@ -490,7 +490,7 @@ def make_blockscaled_gemm_layout(
         warp_col_tiles=N,
         chunk=K,
     )
-    # Block-scaled GEMM is 1CTA dense (no .ws), matching _lower_blockscaled.
+    # Block-scaled GEMM is 1CTA dense (no .ws), matching GemmTCGEN5BlockScaled.
     emitter.get_tcgen5_mma_meta(M, N, K, disable_2cta=True, disable_ws=True)
 
     c_buf = C_region.buffer if isinstance(C_region, tirx.BufferRegion) else C

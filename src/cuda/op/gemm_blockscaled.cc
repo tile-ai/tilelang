@@ -22,6 +22,11 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
+// Instruction keys resolved by the Python registry
+// (tilelang/cuda/op/gemm/__init__.py) to block-scaled implementation classes.
+constexpr const char *kCudaTCGEN05BlockScaled = "cuda.tcgen05.blockscaled";
+constexpr const char *kCudaMMABlockScaled = "cuda.mma.blockscaled";
+
 TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_blockscaled")
     .set_attr<tirx::TScriptPrinterName>("TScriptPrinterName",
                                         "tcgen05_gemm_blockscaled")
@@ -57,13 +62,13 @@ ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
   if (TargetIsSm100(target) && shared_operands && IsTmemBuffer(op->c_) &&
       GetTCGEN5MMAMeta(op->m_, op->n_, op->k_, op->a_->dtype, op->c_->dtype)
           .first) {
-    return "cuda.tcgen05";
+    return kCudaTCGEN05BlockScaled;
   }
 
   bool requires_tcgen05 = op->isTcgen05_ || use_2cta;
   if (!requires_tcgen05 && TargetIsSM120(target) && shared_operands &&
       IsFragmentBuffer(op->c_)) {
-    return "cuda.mma.blockscaled";
+    return kCudaMMABlockScaled;
   }
 
   const char *requirement =

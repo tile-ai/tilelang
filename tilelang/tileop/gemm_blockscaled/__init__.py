@@ -13,9 +13,11 @@ class GemmBlockScaled(Gemm):
     operand layouts, warp partition and scheduling, and is lowered through the
     same ``tl.gemm.infer_layout`` / ``tl.gemm.lower`` entry points, which
     dispatch on this Python class. The extra FFI fields are ``sfaRegion``,
-    ``sfbRegion`` and ``sfKStart``. Instruction selection goes through the
-    same backend registry as ``Gemm``; the backend implementations branch on
-    ``is_blockscaled``.
+    ``sfbRegion`` and ``sfKStart``. The C++ selector returns a block-scaled
+    instruction key (``cuda.tcgen05.blockscaled``, ``cuda.mma.blockscaled``)
+    that the backend registry maps to an implementation class built on
+    ``GemmBlockScaledMixin``, so dense implementation classes never see the
+    scale factors.
     """
 
     # FFI fields added on top of Gemm: sfaRegion, sfbRegion, sfKStart
