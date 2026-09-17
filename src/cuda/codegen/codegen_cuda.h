@@ -60,6 +60,7 @@ public:
   void VisitExpr_(const MaxNode *op, std::ostream &os) final;
   void VisitExpr_(const NotNode *op, std::ostream &os) final;
   void VisitStmt_(const EvaluateNode *op) final;
+  void VisitStmt_(const BindNode *op) final;
   void VisitStmt_(const AllocBufferNode *op) final;
   void VisitStmt_(const AttrStmtNode *op) final;
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
