@@ -8,7 +8,6 @@
 #include <tvm/runtime/logging.h>
 
 #include "cuda/op/builtin.h"
-#include "cuda/op/gemm_blockscaled.h"
 #include "cuda/target_utils.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
@@ -416,7 +415,6 @@ bool RegisterCudaGemm() {
       cuda::Gemm::SelectInst,
       cuda::Gemm::ComputeWarpPartition,
       cuda::Gemm::ReuseExistingSharedLayout,
-      cuda::SelectBlockScaledGemmInst,
   });
   return true;
 }

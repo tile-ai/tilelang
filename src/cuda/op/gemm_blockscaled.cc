@@ -3,7 +3,7 @@
  * \brief CUDA instruction selection for block-scaled GEMM.
  */
 
-#include "gemm_blockscaled.h"
+#include "op/gemm_blockscaled.h"
 
 #include <cstdint>
 #include <utility>
@@ -40,6 +40,8 @@ TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_blockscaled")
     .set_num_inputs(-1)
     .set_attr<tirx::TCallEffectKind>("TCallEffectKind",
                                      Integer(tirx::CallEffectKind::kOpaque));
+
+namespace {
 
 ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
                                       int /*block_size*/,
@@ -85,6 +87,23 @@ ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
              << SpanHintSuffix({op->a_->span, op->b_->span, op->c_->span});
   return {};
 }
+
+bool MatchCudaBlockScaledGemmTarget(Target target) {
+  return TargetIsCuda(target) || TargetIsCuTeDSL(target);
+}
+
+bool RegisterCudaGemmBlockScaled() {
+  RegisterGemmBlockScaledImpl(GemmBlockScaledImpl{
+      "cuda.GemmBlockScaled",
+      MatchCudaBlockScaledGemmTarget,
+      SelectBlockScaledGemmInst,
+  });
+  return true;
+}
+
+const bool cuda_gemm_blockscaled_registered = RegisterCudaGemmBlockScaled();
+
+} // namespace
 
 } // namespace cuda
 

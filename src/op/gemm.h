@@ -159,8 +159,8 @@ public:
   virtual String GetGemmInstructionKey(int block_size, Target target) const;
 
   // Parse the 13 positional slots shared by every GEMM flavour
-  // (see the protocol documented at Gemm::Gemm) into `node`. Used by the
-  // Gemm and GemmBlockScaled constructors.
+  // (see the protocol documented at Gemm::Gemm) into `node`. Shared by the
+  // constructors of every GEMM flavour.
   static void InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
                                 const Map<String, ObjectRef> &annotations);
 
@@ -169,8 +169,6 @@ private:
 };
 
 using GemmTargetPredicate = bool (*)(Target target);
-
-class GemmBlockScaled;
 
 struct GemmImpl {
   const char *name;
@@ -183,11 +181,6 @@ struct GemmImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
-
-  // A missing selector means block-scaled GEMM is unsupported. Never send
-  // scale-factor operands through the dense instruction selector.
-  String (*select_blockscaled_inst)(const GemmBlockScaled &op, int block_size,
-                                    const Target &target) = nullptr;
 };
 
 void RegisterGemmImpl(GemmImpl impl);

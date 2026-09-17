@@ -6,6 +6,7 @@
 #include "gemm_blockscaled.h"
 
 #include <utility>
+#include <vector>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
@@ -16,6 +17,36 @@
 
 namespace tvm {
 namespace tl {
+
+namespace {
+
+std::vector<GemmBlockScaledImpl> &GemmBlockScaledImplRegistry() {
+  static std::vector<GemmBlockScaledImpl> registry;
+  return registry;
+}
+
+} // namespace
+
+void RegisterGemmBlockScaledImpl(GemmBlockScaledImpl impl) {
+  ICHECK(impl.name != nullptr);
+  ICHECK(impl.match_target != nullptr);
+  ICHECK(impl.select_inst != nullptr);
+  GemmBlockScaledImplRegistry().push_back(impl);
+}
+
+const GemmBlockScaledImpl *ResolveGemmBlockScaledImpl(const Target &target) {
+  const GemmBlockScaledImpl *matched = nullptr;
+  for (const GemmBlockScaledImpl &impl : GemmBlockScaledImplRegistry()) {
+    if (impl.match_target(target)) {
+      ICHECK(matched == nullptr)
+          << "tl.gemm_blockscaled found multiple target-specific "
+             "implementations for "
+          << target->str() << ": " << matched->name << " and " << impl.name;
+      matched = &impl;
+    }
+  }
+  return matched;
+}
 
 GemmBlockScaled::GemmBlockScaled(
     ffi::Array<PrimExpr> args,
@@ -56,16 +87,19 @@ TileOperator GemmBlockScaledNode::Clone() const {
 
 ffi::String GemmBlockScaledNode::GetGemmInstructionKey(int block_size,
                                                        Target target) const {
-  const GemmImpl &impl = ResolveGemmImpl(target);
-  if (impl.select_blockscaled_inst == nullptr) {
-    LOG(FATAL) << "Block-scaled GEMM is not supported by the " << impl.name
+  const GemmBlockScaledImpl *impl = ResolveGemmBlockScaledImpl(target);
+  if (impl == nullptr) {
+    // Name the dense backend that owns this target so the message says which
+    // backend lacks block-scaled support.
+    LOG(FATAL) << "Block-scaled GEMM is not supported by the "
+               << ResolveGemmImpl(target).name
                << " backend (target=" << target->str()
                << "); a dense GEMM lowering would silently drop the SFA/SFB "
                   "scale factors."
                << SpanHintSuffix({a_->span, b_->span, c_->span});
   }
-  return impl.select_blockscaled_inst(ffi::GetRef<GemmBlockScaled>(this),
-                                      block_size, target);
+  return impl->select_inst(ffi::GetRef<GemmBlockScaled>(this), block_size,
+                           target);
 }
 
 TIR_REGISTER_TL_TILE_OP(GemmBlockScaled, gemm_blockscaled)

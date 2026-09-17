@@ -54,6 +54,26 @@ public:
   static const Op &Get();
 };
 
+/*!
+ * \brief Backend implementation of block-scaled GEMM instruction selection.
+ *
+ * Registered separately from the dense GemmImpl so the dense GEMM contract
+ * carries no block-scaled knowledge. A target without a registered
+ * implementation cannot lower block-scaled GEMM; there is deliberately no
+ * dense fallback, which would silently drop the scale factors.
+ */
+struct GemmBlockScaledImpl {
+  const char *name;
+  GemmTargetPredicate match_target;
+  ffi::String (*select_inst)(const GemmBlockScaled &op, int block_size,
+                             const Target &target);
+};
+
+void RegisterGemmBlockScaledImpl(GemmBlockScaledImpl impl);
+
+/*! \brief The registered implementation for `target`, or nullptr. */
+const GemmBlockScaledImpl *ResolveGemmBlockScaledImpl(const Target &target);
+
 /*! \brief Inspect scale operands when handling a generic GEMM node. */
 inline const GemmBlockScaledNode *AsGemmBlockScaled(const GemmNode &op) {
   return op.IsInstance<GemmBlockScaledNode>()
