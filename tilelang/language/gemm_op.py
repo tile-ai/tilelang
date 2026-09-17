@@ -32,6 +32,93 @@ def _legalize_buffer_arg(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
     return arg
 
 
+def _gemm_dense_slots(
+    api_name: str,
+    A: BufferLikeType,
+    B: BufferLikeType,
+    C: BufferLikeType,
+    transpose_A: bool,
+    transpose_B: bool,
+    policy: GemmWarpPolicy,
+    clear_accum: bool,
+    mbar: BarrierType | None,
+    use_2cta: bool,
+) -> list:
+    """Validate the A/B/C operands and build the 13 positional slots every GEMM
+    tile op starts with (see the protocol documented at ``Gemm::Gemm``).
+
+    ``api_name`` names the user-facing entry point in error messages.
+    """
+
+    A = _legalize_buffer_arg(A)
+    B = _legalize_buffer_arg(B)
+    C = _legalize_buffer_arg(C)
+    mbar = _legalize_buffer_arg(mbar) if mbar is not None else None
+
+    # Normalize A/B/C to BufferRegion for shape/stride/offset analysis
+    A_region = to_buffer_region(A)
+    B_region = to_buffer_region(B)
+    C_region = to_buffer_region(C)
+
+    A_shape = retrieve_shape(A_region)
+    B_shape = retrieve_shape(B_region)
+    C_shape = retrieve_shape(C_region)
+
+    for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
+        assert len(shape) >= 2, f"current only support {name} as a 2D or higher-order tensor"
+        for i in range(len(shape) - 2):
+            assert shape[i] == 1, (
+                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+            )
+
+    M, N = C_shape[-2], C_shape[-1]
+    M_A = A_shape[-1] if transpose_A else A_shape[-2]
+    K = A_shape[-2] if transpose_A else A_shape[-1]
+    N_B = B_shape[-2] if transpose_B else B_shape[-1]
+    K_B = B_shape[-1] if transpose_B else B_shape[-2]
+    assert prim_expr_equal(M_A, M), f"{api_name} M shape check failed: M_A = {M_A}, M_C = {M}"
+    assert prim_expr_equal(K, K_B), f"{api_name} K shape check failed: K_A = {K}, K_B = {K_B}"
+    if use_2cta:
+        # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
+        assert prim_expr_equal(N_B * 2, N), f"{api_name} N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
+    else:
+        assert prim_expr_equal(N_B, N), f"{api_name} N shape check failed: N_B = {N_B}, N_C = {N}"
+
+    for name, dim in (("M", M), ("N", N), ("K", K)):
+        if not isinstance(dim, tirx.IntImm):
+            raise ValueError(f"{api_name} requires static tile dimensions, but {name} is symbolic: {dim}")
+
+    if mbar is not None:
+        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
+            f"mbar for {api_name} must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
+        )
+        mbar = to_buffer_region(mbar, access_type="rw")
+    C_coords = [r.min for r in C_region.region[-2:]]
+    # Convert BufferRegion to tl.region calls for arguments
+    A_arg = buffer_region_to_tile_region(A_region, "r", list(A_shape))
+    B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))
+    C_arg = buffer_region_to_tile_region(C_region, "rw", list(C_shape))
+    # When mbar is None, pass a placeholder constant (0). The C++ side only
+    # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
+    # correctly ignored.
+    mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
+    return [
+        A_arg,
+        B_arg,
+        C_arg,
+        transpose_A,
+        transpose_B,
+        M,
+        N,
+        K,
+        policy,
+        clear_accum,
+        mbar_arg,
+        C_coords[0],
+        C_coords[1],
+    ]
+
+
 def _gemm_impl(
     op_key: str,
     A: BufferLikeType,
@@ -52,80 +139,19 @@ def _gemm_impl(
     """
 
     annotations = _normalize_annotations(annotations)
-
-    A = _legalize_buffer_arg(A)
-    B = _legalize_buffer_arg(B)
-    C = _legalize_buffer_arg(C)
-    mbar = _legalize_buffer_arg(mbar) if mbar is not None else None
-
-    # Normalize A/B/C to BufferRegion for shape/stride/offset analysis
-    A_region = to_buffer_region(A)
-    B_region = to_buffer_region(B)
-    C_region = to_buffer_region(C)
-
-    A_shape = retrieve_shape(A_region)
-    B_shape = retrieve_shape(B_region)
-    C_shape = retrieve_shape(C_region)
-
-    assert len(C_shape) >= 2, "current only support C as a 2D or higher-order tensor"
-    assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
-    assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
-    for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
-        for i in range(len(shape) - 2):
-            assert shape[i] == 1, (
-                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
-            )
-
-    M, N = C_shape[-2], C_shape[-1]
-    M_A = A_shape[-1] if transpose_A else A_shape[-2]
-    K = A_shape[-2] if transpose_A else A_shape[-1]
-    N_B = B_shape[-2] if transpose_B else B_shape[-1]
-    K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert prim_expr_equal(M_A, M), f"T.gemm M shape check failed: M_A = {M_A}, M_C = {M}"
-    assert prim_expr_equal(K, K_B), f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
-    use_2cta = annotations.get("use_2cta", 0)
-    if use_2cta:
-        # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
-        assert prim_expr_equal(N_B * 2, N), f"T.gemm N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
-    else:
-        assert prim_expr_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
-
-    for name, dim in (("M", M), ("N", N), ("K", K)):
-        if not isinstance(dim, tirx.IntImm):
-            raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
-
-    if mbar is not None:
-        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
-            f"mbar for tcgen5mma must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
-        )
-        mbar = to_buffer_region(mbar, access_type="rw")
-    C_coords = [r.min for r in C_region.region[-2:]]
-    # Convert BufferRegion to tl.region calls for arguments
-    A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
-    B_arg = buffer_region_to_tile_region(B_region, "r", [r for r in B_shape])
-    C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
-    # When mbar is None, pass a placeholder constant (0). The C++ side only
-    # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
-    # correctly ignored.
-    mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
-    return tirx.call_intrin(
-        "handle",
-        tirx.op.Op.get(op_key),
-        A_arg,
-        B_arg,
-        C_arg,
+    slots = _gemm_dense_slots(
+        "T.gemm",
+        A,
+        B,
+        C,
         transpose_A,
         transpose_B,
-        M,
-        N,
-        K,
         policy,
         clear_accum,
-        mbar_arg,
-        C_coords[0],
-        C_coords[1],
-        annotations=annotations,
+        mbar,
+        use_2cta=bool(annotations.get("use_2cta", 0)),
     )
+    return tirx.call_intrin("handle", tirx.op.Op.get(op_key), *slots, annotations=annotations)
 
 
 def gemm(
@@ -298,80 +324,30 @@ def _gemm_blockscaled_impl(
     ann["sf_a_granularity_k"] = int(sf_a_granularity_k)
     ann["sf_b_granularity_k"] = int(sf_b_granularity_k)
 
-    A = _legalize_buffer_arg(A)
-    B = _legalize_buffer_arg(B)
-    C = _legalize_buffer_arg(C)
-    SFA = _legalize_buffer_arg(SFA)
-    SFB = _legalize_buffer_arg(SFB)
-    mbar = _legalize_buffer_arg(mbar) if mbar is not None else None
+    slots = _gemm_dense_slots(
+        "T.gemm_blockscaled",
+        A,
+        B,
+        C,
+        transpose_A,
+        transpose_B,
+        policy,
+        clear_accum,
+        mbar,
+        use_2cta=bool(ann.get("use_2cta", 0)),
+    )
 
-    A_region = to_buffer_region(A)
-    B_region = to_buffer_region(B)
-    C_region = to_buffer_region(C)
-    SFA_region = to_buffer_region(SFA)
-    SFB_region = to_buffer_region(SFB)
-
-    A_shape = retrieve_shape(A_region)
-    B_shape = retrieve_shape(B_region)
-    C_shape = retrieve_shape(C_region)
-
-    for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
-        assert len(shape) >= 2, f"current only support {name} as a 2D or higher-order tensor"
-        for i in range(len(shape) - 2):
-            assert shape[i] == 1, (
-                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
-            )
-
-    M, N = C_shape[-2], C_shape[-1]
-    M_A = A_shape[-1] if transpose_A else A_shape[-2]
-    K = A_shape[-2] if transpose_A else A_shape[-1]
-    N_B = B_shape[-2] if transpose_B else B_shape[-1]
-    K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert prim_expr_equal(M_A, M), f"T.gemm_blockscaled M shape check failed: M_A = {M_A}, M_C = {M}"
-    assert prim_expr_equal(K, K_B), f"T.gemm_blockscaled K shape check failed: K_A = {K}, K_B = {K_B}"
-    if ann.get("use_2cta", 0):
-        # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
-        assert prim_expr_equal(N_B * 2, N), f"T.gemm_blockscaled N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
-    else:
-        assert prim_expr_equal(N_B, N), f"T.gemm_blockscaled N shape check failed: N_B = {N_B}, N_C = {N}"
-
-    for name, dim in (("M", M), ("N", N), ("K", K)):
-        if not isinstance(dim, tirx.IntImm):
-            raise ValueError(f"T.gemm_blockscaled requires static tile dimensions, but {name} is symbolic: {dim}")
-
-    if mbar is not None:
-        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
-            f"mbar for block-scaled gemm must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
-        )
-        mbar = to_buffer_region(mbar, access_type="rw")
-    mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
-
-    if not isinstance(k_start, tirx.PrimExpr):
-        k_start = tirx.const(k_start, dtype="int32")
-
-    C_coords = [r.min for r in C_region.region[-2:]]
-    A_arg = buffer_region_to_tile_region(A_region, "r", list(A_shape))
-    B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))
-    C_arg = buffer_region_to_tile_region(C_region, "rw", list(C_shape))
+    SFA_region = to_buffer_region(_legalize_buffer_arg(SFA))
+    SFB_region = to_buffer_region(_legalize_buffer_arg(SFB))
     SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
     SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
+    if not isinstance(k_start, tirx.PrimExpr):
+        k_start = tirx.const(k_start, dtype="int32")
 
     return tirx.call_intrin(
         "handle",
         tirx.op.Op.get(op_key),
-        A_arg,
-        B_arg,
-        C_arg,
-        transpose_A,
-        transpose_B,
-        M,
-        N,
-        K,
-        policy,
-        clear_accum,
-        mbar_arg,
-        C_coords[0],
-        C_coords[1],
+        *slots,
         SFA_arg,
         SFB_arg,
         k_start,
