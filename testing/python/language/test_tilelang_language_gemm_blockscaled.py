@@ -1,10 +1,10 @@
 """Block-scaled GEMM surface.
 
-`T.gemm_blockscaled` is the auto-dispatching entry: the backend picks the
-block-scaled instruction from the target and the accumulator scope (TMEM on
-SM100 => TCGEN5MMA, fragment on SM120 => warp-level mma.sync) and refuses to
-fall back to a dense instruction. `T.tcgen05_gemm_blockscaled` and
-`T.mma_gemm_blockscaled` are the explicit, non-dispatching variants.
+`T.gemm_blockscaled` is a common, auto-dispatching entry. CUDA picks the
+block-scaled instruction from the target and accumulator scope (TMEM on
+SM100 => TCGEN5MMA, fragment on SM120 => warp-level mma.sync). Backends
+without block-scaled support reject the op. `T.tcgen05_gemm_blockscaled`
+and `T.mma_gemm_blockscaled` are explicit CUDA variants.
 """
 
 import pytest
@@ -338,11 +338,12 @@ def test_mma_gemm_blockscaled_records_sf_layout():
 
 
 def test_blockscaled_gemm_rejected_by_backend_without_support():
-    """Only backends with a block-scaled selector may see SFA/SFB.
+    """The common API can express block-scaled GEMM for any backend.
 
     A backend without a dedicated block-scaled selector (CPU here) fails
     loudly instead of invoking its dense selector and dropping SFA/SFB.
     """
+    from tilelang.cpu import language as T
 
     @T.prim_func
     def main(
@@ -350,7 +351,7 @@ def test_blockscaled_gemm_rejected_by_backend_without_support():
         B: T.Tensor((128, 128), T.float8_e4m3fn),
         C: T.Tensor((128, 128), T.float32),
     ):
-        with T.Kernel(1, threads=128):
+        with T.Kernel(1):
             a = T.alloc_shared((128, 128), T.float8_e4m3fn)
             b = T.alloc_shared((128, 128), T.float8_e4m3fn)
             sfa = T.alloc_shared((128, 4), T.uint32)

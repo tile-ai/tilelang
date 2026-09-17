@@ -19,9 +19,10 @@ from tilelang.language.tir.exports import (
 CUDA_ONLY_NAMES = {
     "ClusterKernel",
     "CUDASourceCodeKernel",
-    "gemm_blockscaled",
+    "mma_gemm_blockscaled",
     "pdl_trigger",
     "rng_init",
+    "tcgen05_gemm_blockscaled",
     "tcgen05_mma",
     "tma_copy",
     "wgmma_mma",
@@ -57,6 +58,7 @@ def test_default_language_is_static_cuda_facade():
 
 def test_common_language_preserves_special_dsl_exports():
     assert T_comm.__tilelang_dialect__ == "common"
+    assert "gemm_blockscaled" in T_comm.__all__
     # Packed-x2 math is target-neutral and stays on the common surface; the
     # CUDA-only fast-math family (dunder names like __log) moved to the CUDA
     # dialect, whose export machinery must keep supporting them.
@@ -185,6 +187,8 @@ def test_non_cuda_dialects_do_not_export_cuda_symbols(module_name):
     module = importlib.import_module(module_name)
     assert CUDA_ONLY_NAMES.isdisjoint(module.__all__)
     assert CUDA_ONLY_TIR_EXPORTS.isdisjoint(module.__all__)
+    assert "gemm_blockscaled" in module.__all__
+    assert module.gemm_blockscaled is T_comm.gemm_blockscaled
 
 
 @pytest.mark.parametrize(

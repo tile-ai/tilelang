@@ -393,67 +393,36 @@ def gemm_blockscaled(
     k_start: int | tirx.PrimExpr,
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
-    mbar: BarrierType | None = None,
-    use_2cta: bool = False,
-    sf_layout: str | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
-    """TileLang block-scaled GEMM operator: ``C (+)= (A * SFA) @ (B * SFB)``.
+    """Target-neutral block-scaled GEMM: ``C (+)= (A * SFA) @ (B * SFB)``.
 
-    This is the block-scaled counterpart of `T.gemm(...)`: the compiler picks
-    the block-scaled tensor-core instruction from the target and the operand
-    scopes, and compilation fails if no block-scaled instruction fits. There
-    is deliberately no dense fallback, because dropping the scale factors
-    would silently change the result.
+    Scale factors apply to blocks along the reduction axis: ``k_start`` is
+    the logical K-axis start of this tile and ``sf_*_granularity_k`` gives
+    the number of K elements covered by one scale factor. The backend owns
+    the supported dtypes, operand scopes, scale representation and lowering.
+    Compilation fails when the backend has no block-scaled implementation;
+    lowering to an unscaled GEMM would change the result.
 
-    Dispatch:
-
-    - Blackwell SM100, ``C`` in tensor memory: ``tcgen05.mma.kind::mxf8f6f4
-      .block_scale``. ``A``/``B`` are FP8/FP6/FP4 in shared memory and
-      ``SFA``/``SFB`` are E8M0 scale factors already resident in tensor
-      memory (see `T.tcgen05_cp_warpx4`). The issue is explicit-async, so
-      ``mbar`` is required: the MMA arrives on it and the user schedule waits.
-      ``use_2cta=True`` selects the ``cta_group::2`` variant and requires
-      ``cluster_dims`` of ``(2,1,1)`` or ``(1,2,1)``.
-    - SM120, ``C`` in a fragment: warp-level ``mma.sync.m16n8k64.kind::
-      mxf4nvf4.block_scale`` with E2M1 operands, UE4M3 scale factors and FP32
-      accumulation. ``A``/``B`` and the packed scale words live in shared
-      memory; ``sf_layout`` selects how the scale words are arranged there.
-      This path is synchronous and ignores ``mbar``.
-
-    Scale-factor addressing is target-neutral: ``k_start`` is the logical
-    K-axis start offset of this MMA tile and ``sf_*_granularity_k`` is how
-    many K elements one scale factor covers. The lowering derives the
-    instruction-level scale-factor IDs from these values.
-
-    For the explicit, non-dispatching variants use
-    `T.tcgen05_gemm_blockscaled(...)` or `T.mma_gemm_blockscaled(...)`.
+    The CUDA dialect extends this signature with ``mbar``, ``use_2cta`` and
+    ``sf_layout``. Its TCGEN05 path requires the CUDA entry point with an
+    explicit completion barrier and leaves waiting to the caller.
 
     Args:
-        A: Left operand tile (shared memory).
-        B: Right operand tile (shared memory).
-        C: Accumulator tile (tensor memory on SM100, fragment on SM120).
+        A: Left operand tile.
+        B: Right operand tile.
+        C: Accumulator tile.
         SFA: Scale factors for A.
         SFB: Scale factors for B.
-        transpose_A: Whether A is MN-major. Default: False (K-major).
-        transpose_B: Whether B is K-major. Default: False (MN-major).
-        policy: Warp partition policy; only consulted by the warp-level path.
+        transpose_A: Whether to transpose A. Defaults to False.
+        transpose_B: Whether to transpose B. Defaults to False.
+        policy: GEMM warp partition policy.
         clear_accum: Whether to zero the accumulator before accumulating.
-        k_start: Logical K-axis start offset for this MMA tile.
+        k_start: Logical K-axis start offset for this tile.
         sf_a_granularity_k: K elements covered by one A scale factor.
         sf_b_granularity_k: K elements covered by one B scale factor.
-        mbar: Completion mbarrier (required when lowering to TCGEN05).
-        use_2cta: Request the 2CTA TCGEN05 variant.
-        sf_layout: Shared-memory scale layout for the SM120 path
-            (``"rowmajor"`` or ``"blockscaled_chunk_kmajor"``).
         annotations: Additional annotations.
     """
-
-    ann = dict(annotations or {})
-    if use_2cta:
-        ann["use_2cta"] = 1
-    if sf_layout is not None:
-        ann["sf_layout"] = sf_layout
     return _gemm_blockscaled_impl(
         "tl.tileop.gemm_blockscaled",
         A,
@@ -465,11 +434,11 @@ def gemm_blockscaled(
         transpose_B,
         policy,
         clear_accum,
-        mbar,
+        None,
         k_start=k_start,
         sf_a_granularity_k=sf_a_granularity_k,
         sf_b_granularity_k=sf_b_granularity_k,
-        annotations=ann,
+        annotations=annotations,
     )
 
 

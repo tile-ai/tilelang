@@ -92,11 +92,16 @@ GEMM and sparse GEMM
   inputs and a fragment accumulator; lowered to target‑specific tensor cores.
 - `T.gemm_sp(...)`: 2:4 sparse tensor core variant (see examples and README).
 - `T.gemm_blockscaled(A, B, C, SFA, SFB, k_start=..., sf_a_granularity_k=...,
-  sf_b_granularity_k=...)`: block‑scaled (MXFP8/NVFP4) GEMM; the compiler picks
-  the block‑scaled instruction from the target and the accumulator scope
-  (TCGEN05 on SM100 with `C` in tensor memory, `mma.sync` on SM120 with `C` in
-  a fragment) and never falls back to a dense instruction. The explicit
-  variants are `T.tcgen05_gemm_blockscaled` and `T.mma_gemm_blockscaled`.
+  sf_b_granularity_k=...)`: common, target-neutral block-scaled GEMM,
+  `C (+)= (A * SFA) @ (B * SFB)`, with scale factors covering blocks along K.
+  Each backend owns its supported dtypes, operand scopes and lowering;
+  a backend without an implementation rejects the op instead of dropping
+  the scale factors. Current CUDA implementations select TCGEN05 on SM100
+  with `C` in tensor memory or `mma.sync` on SM120 with `C` in a fragment.
+  The CUDA dialect adds `mbar`, `use_2cta` and `sf_layout`; TCGEN05 requires
+  an explicit completion barrier and a caller-managed wait. The explicit
+  variants `T.tcgen05_gemm_blockscaled` and `T.mma_gemm_blockscaled` remain
+  CUDA-only.
 
 Reductions and scans
 - `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp
