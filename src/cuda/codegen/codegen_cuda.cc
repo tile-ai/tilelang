@@ -5312,6 +5312,21 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), alloc_dtype);
 }
 
+void CodeGenTileLangCUDA::VisitStmt_(const BindNode *op) {
+  // tl.rng_init is a side-effect-only intrinsic: it initialises the kernel's
+  // curand state and produces no value. Binding its result would emit
+  // `void state = ;`, which nvcc rejects as an incomplete type. Diagnose the
+  // misuse here instead of letting malformed CUDA escape the codegen.
+  const CallNode *value = op->value.as<CallNode>();
+  ICHECK(value == nullptr || !value->op.same_as(tl::rng_init()))
+      << "The result of `T.rng_init(...)` cannot be bound to variable \""
+      << op->var->name_hint
+      << "\": the call initialises the kernel's curand state as a side "
+         "effect and has no value. Call it as a statement instead, for "
+         "example `T.rng_init(seed)` without assigning the result.";
+  CodeGenC::VisitStmt_(op);
+}
+
 void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
   if (is_const_int(op->value))
     return;
@@ -6520,17 +6535,40 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   // Emit the function-entry #line before the pre-scan output below.
   this->PreFunctionBody(f);
   rng_state_name_map_.clear();
-  tirx::PostOrderVisit(f->body, [this](const ObjectRef &n) {
+  // The curand state is local to this function. Dropping the previously
+  // registered name means a draw that has no rng_init of its own can never
+  // silently reference the state of an earlier function in the same module.
+  this->curand_random_generator_state.clear();
+  this->curand_random_generator_state_type.clear();
+  bool has_rng_init = false;
+  bool has_rng_consumer = false;
+  tirx::PostOrderVisit(f->body, [this, &has_rng_init,
+                                 &has_rng_consumer](const ObjectRef &n) {
     const auto *call = n.as<CallNode>();
-    if (call == nullptr || !call->op.same_as(tl::rng_init())) {
+    if (call == nullptr) {
       return;
     }
-    this->need_curand_kernel_h_ = true;
-    std::string name = name_supply_->FreshName("__random_generator_state");
-    this->stream << "  " << call->args[3].as<StringImmNode>()->value << " "
-                 << name << ";\n";
-    rng_state_name_map_.emplace(call, std::move(name));
+    if (call->op.same_as(tl::rng_init())) {
+      has_rng_init = true;
+      this->need_curand_kernel_h_ = true;
+      std::string name = name_supply_->FreshName("__random_generator_state");
+      this->stream << "  " << call->args[3].as<StringImmNode>()->value << " "
+                   << name << ";\n";
+      rng_state_name_map_.emplace(call, std::move(name));
+    } else if (call->op.same_as(tl::rng_rand()) ||
+               call->op.same_as(tl::rng_rand_float())) {
+      has_rng_consumer = true;
+    }
   });
+  // A draw with no rng_init anywhere in the function has no curand stream to
+  // read from. Diagnose that here rather than emitting `curand(&)` and letting
+  // nvcc report a syntax error inside generated code. This is intentionally a
+  // function-scoped check, not control-flow-sensitive definite-initialisation
+  // analysis: an rng_init inside a runtime branch still counts as an init.
+  ICHECK(!has_rng_consumer || has_rng_init)
+      << "`T.rng_rand()`/`T.rng_rand_float()` requires a preceding "
+         "`T.rng_init(...)` in the same kernel: this function initialises no "
+         "curand state, so there is no stream to draw from.";
   int func_scope = this->BeginScope();
   this->PrintStmt(f->body);
   this->EndScope(func_scope);
