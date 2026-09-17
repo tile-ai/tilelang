@@ -1907,17 +1907,23 @@ def test_unscheduled_kernel_untouched():
 
 
 @tilelang.testing.requires_cuda
-def test_tcgen05_async_arrive_count():
+@pytest.mark.parametrize("blockscaled", [False, True])
+def test_tcgen05_async_arrive_count(blockscaled):
     """A gemm accumulating into TMEM signals with tcgen05.commit: the full
     barrier of the accumulator pipeline gets arrive count 1, and the smem
     release below the gemm becomes a tcgen05_mma_arrive."""
+    tile = 128 if blockscaled else 64
+    dtype = T.float8_e4m3fn if blockscaled else T.float16
 
     @T.prim_func
-    def kernel(A: T.Tensor((256, 64), T.float16), B: T.Tensor((256, 64), T.float16)):
+    def kernel(A: T.Tensor((4 * tile, tile), dtype), B: T.Tensor((tile, tile), T.float32)):
         with T.Kernel(1, threads=128) as _:
-            A_shared = T.alloc_shared((64, 64), T.float16)
-            C_tmem = T.alloc_tmem((64, 64), T.float32)
-            C_frag = T.alloc_fragment((64, 64), T.float32)
+            A_shared = T.alloc_shared((tile, tile), dtype)
+            C_tmem = T.alloc_tmem((tile, tile), T.float32)
+            C_frag = T.alloc_fragment((tile, tile), T.float32)
+            if blockscaled:
+                SFA = T.alloc_tmem((tile, 4), T.uint32)
+                SFB = T.alloc_tmem((tile, 4), T.uint32)
 
             T.annotate_ws_schedule(
                 T.WSSchedule(
@@ -1971,22 +1977,61 @@ def test_tcgen05_async_arrive_count():
             )
 
             for i in T.Pipelined(4, num_stages=2, annotations={T.WSID: "loop_k"}):
-                T.copy(A[i * 64, 0], A_shared, annotations={T.WSID: "copy_in"})
-                T.gemm(
-                    A_shared,
-                    A_shared,
-                    C_tmem,
-                    transpose_B=True,
-                    clear_accum=i == 0,
-                    annotations={T.WSID: "gemm_C"},
-                )
+                T.copy(A[i * tile, 0], A_shared, annotations={T.WSID: "copy_in"})
+                if blockscaled:
+                    T.gemm_blockscaled(
+                        A_shared,
+                        A_shared,
+                        C_tmem,
+                        SFA,
+                        SFB,
+                        transpose_B=True,
+                        clear_accum=i == 0,
+                        k_start=i * tile,
+                        sf_a_granularity_k=128,
+                        sf_b_granularity_k=128,
+                        annotations={T.WSID: "gemm_C"},
+                    )
+                else:
+                    T.gemm(
+                        A_shared,
+                        A_shared,
+                        C_tmem,
+                        transpose_B=True,
+                        clear_accum=i == 0,
+                        annotations={T.WSID: "gemm_C"},
+                    )
             T.copy(C_tmem, C_frag, annotations={T.WSID: "copy_C"})
             T.copy(C_frag, B[0, 0], annotations={T.WSID: "copy_out"})
 
     func = _materialize(kernel)
     script = str(func)
-    # The gemm is converted to the async tcgen05 form.
-    assert "T.tcgen05_gemm(" in script
+    calls = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.Call) and "gemm" in str(getattr(node.op, "name", "")):
+            calls.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
+    (call,) = calls
+    # Scheduling preserves the mathematical op and marks explicit async issue.
+    assert call.op.name == ("tl.tileop.gemm_blockscaled" if blockscaled else "tl.tileop.gemm")
+    gemm = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    assert gemm.isTcgen05
+    assert gemm.mbar is None
+    if blockscaled:
+        assert gemm.sfaRegion.buffer.name == "SFA"
+        assert gemm.sfbRegion.buffer.name == "SFB"
+
+    # The scheduled op must lower without a per-op barrier or an implicit
+    # wait/arrival: the schedule's synchronization points publish completion.
+    with _TARGET:
+        layouts = gemm.infer_layout(_TARGET, 32)
+        lowered = gemm.lower(layouts, _TARGET, tvm.ir.Range(32, 64), tvm.tirx.Var("tx", "int32"), tvm.tirx.const(0, "int32"))
+    assert "mbarrier_wait_parity" not in str(lowered)
+    assert "tcgen05_mma_arrive" not in str(lowered)
+    mma_op = "ptx_tcgen05_mma_blockscaled_ss" if blockscaled else "ptx_tcgen05_mma_ss"
+    assert mma_op in str(lowered)
     # smem_empty and acc_full are signaled by the tensor core: count 1 each.
     assert "smem_empty: [1, 1]" in script
     assert "acc_full: [1]" in script

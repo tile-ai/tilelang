@@ -238,19 +238,15 @@ class GemmTCGEN5(GemmBase):
     def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_index, mbar_phase_expr: tirx.PrimExpr | None = None):
         """Lower block-scaled MXFP8 GEMM to TIR.
 
-        Block-scaled GEMM follows explicit-async TCGEN5MMA semantics: the MMA
-        issue posts completion to `mbar`, and the user (or pipeline pass) is
-        responsible for waiting on that barrier at the consumption point. We
-        therefore never auto-emit `mbarrier_wait_parity` here. This mirrors the
-        `is_tcgen05=True` branch of `_gemm_ss`. `mbar_phase_expr` is accepted
-        for API consistency with the rest of the `GemmPyNode.Lower` chain and
-        so that a future synchronous block-scaled path can use it without
-        needing another signature change.
+        Completion is asynchronous: an explicit TCGEN05 op may omit `mbar`
+        when the caller or WS schedule emits a later completion arrival.
+        Otherwise the MMA posts completion to `mbar`. Waiting belongs to the
+        caller in both cases; this lowering never inserts an implicit wait.
         """
         mbar = self.mbar
-        if mbar is None:
+        if mbar is None and not self.is_tcgen05:
             raise ValueError("Block-scaled GEMM requires a valid mbarrier")
-        mbarptr = retrieve_ptr(mbar, "rw")
+        mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else None
 
         A_shared = self.ARegion
         B_shared = self.BRegion
@@ -259,10 +255,7 @@ class GemmTCGEN5(GemmBase):
         SFA_tmem = self.SFARegion.buffer
         SFB_tmem = self.SFBRegion.buffer
         sf_k_start = self.sf_k_start
-        # NOTE: mbar_phase_expr is intentionally unused in the current
-        # frontend, which always requests explicit-async semantics. Keep the
-        # parameter so the signature matches `_gemm_ss` and the call site in
-        # `lower()` does not need a special case.
+        # No implicit wait consumes the barrier phase.
         del mbar_phase_expr
 
         annotations = getattr(self.gemm_node, "annotations", {})

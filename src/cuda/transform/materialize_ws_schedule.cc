@@ -87,7 +87,6 @@
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
-#include "op/gemm_blockscaled.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
@@ -138,10 +137,6 @@ Map<String, V> FilterAnnotations(const Map<String, V> &ann, Pred keep) {
 // ---------------------------------------------------------------------------
 const Op &TmaCopyOp() {
   static const Op &op = Op::Get("tl.tileop.tma_copy");
-  return op;
-}
-const Op &Tcgen05GemmOp() {
-  static const Op &op = Op::Get("tl.tileop.tcgen05_gemm");
   return op;
 }
 
@@ -2246,8 +2241,7 @@ private:
     return rewriter(std::move(expr));
   }
 
-  // Rewrite an asynchronous atom's call: swap it to its explicit async
-  // op (TMA, tcgen05) or annotate it (cp.async).
+  // Wire asynchronous atoms to the schedule's completion protocol.
   Stmt ConvertAtomCall(const RoleCtx &ctx, const Operation &op,
                        Stmt stmt) const {
     const auto *ev = stmt.as<EvaluateNode>();
@@ -2281,14 +2275,11 @@ private:
       return Evaluate(
           Call(call->dtype, call->op, call->args, std::move(ann), call->span));
     } else if (op.atom == OpAtom::kTcgen05Gemm) {
+      // Preserve the GEMM's operands and semantics. The schedule emits
+      // completion arrivals separately, so the op must not wait implicitly.
       ann.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
-      // A block-scaled GEMM keeps its own op: the explicit TCGEN05 form is
-      // the same op plus the is_tcgen05 annotation.
-      const Op &target_op = call->op.same_as(GemmBlockScaled::Get())
-                                ? GemmBlockScaled::Get()
-                                : Tcgen05GemmOp();
       return Evaluate(
-          Call(call->dtype, target_op, call->args, std::move(ann), call->span));
+          Call(call->dtype, call->op, call->args, std::move(ann), call->span));
     }
     LOG(FATAL) << "ws_schedule: unknown async atom "
                << static_cast<int>(op.atom);

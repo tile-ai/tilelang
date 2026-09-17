@@ -101,7 +101,9 @@ GEMM and sparse GEMM
   The CUDA dialect adds `mbar`, `use_2cta` and `sf_layout`; TCGEN05 requires
   an explicit completion barrier and a caller-managed wait. The explicit
   variants `T.tcgen05_gemm_blockscaled` and `T.mma_gemm_blockscaled` remain
-  CUDA-only.
+  CUDA-only. `T.tcgen05_gemm_blockscaled(..., mbar=None)` defers the completion
+  arrival to a later TCGEN05 operation or an explicit `T.tcgen05_mma_arrive`;
+  the caller must wait for that completion before consuming the result.
 
 Reductions and scans
 - `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp

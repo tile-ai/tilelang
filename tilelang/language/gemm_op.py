@@ -467,6 +467,10 @@ def tcgen05_gemm_blockscaled(
     instead of silently falling back if that path is unavailable. It never
     auto-emits an inlined `mbarrier_wait_parity`.
 
+    ``mbar=None`` omits the completion arrival for this issue. The caller
+    must publish completion with a later TCGEN05 operation or an explicit
+    ``T.tcgen05_mma_arrive`` before waiting and consuming the result.
+
     With ``use_2cta=True``, this lowers to the true 2CTA block-scaled TCGEN05
     path only; there is no fallback or emulation. That mode requires
     ``cluster_dims`` to be ``(2,1,1)`` or ``(1,2,1)``.
@@ -491,14 +495,12 @@ def tcgen05_gemm_blockscaled(
         transpose_B: Whether B is K-major. Default: False (MN-major).
         clear_accum: Whether to zero the accumulator.
         wg_wait: Warp group wait identifier.
-        mbar: Mbarrier for MMA completion signaling (required).
+        mbar: Completion barrier, or None to defer the completion arrival.
         k_start: Logical K-axis start offset for this MMA tile.
         sf_a_granularity_k: K elements covered by one A scale factor.
         sf_b_granularity_k: K elements covered by one B scale factor.
         use_2cta: Whether to request true ``cta_group::2`` lowering.
     """
-
-    assert mbar is not None, "mbar is required for tcgen05_gemm_blockscaled"
 
     ann: dict = {"is_tcgen05": 1}
     if use_2cta:

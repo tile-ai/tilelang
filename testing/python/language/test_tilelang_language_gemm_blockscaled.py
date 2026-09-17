@@ -280,28 +280,46 @@ def test_tcgen05_gemm_blockscaled_pins_tcgen05_path():
     assert int(_annotations(call)["is_tcgen05"]) == 1
 
 
-def test_tcgen05_gemm_blockscaled_requires_mbar():
-    with pytest.raises(AssertionError, match="mbar is required"):
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("gemm_api", ["gemm_blockscaled", "tcgen05_gemm_blockscaled"])
+def test_blockscaled_gemm_without_mbar_requires_explicit_async(gemm_api):
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            b = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            c = T.alloc_tmem([128, 128], T.float32)
+            sfa = T.alloc_tmem([128, 4], T.uint32)
+            sfb = T.alloc_tmem([128, 4], T.uint32)
+            getattr(T, gemm_api)(
+                a,
+                b,
+                c,
+                sfa,
+                sfb,
+                transpose_B=True,
+                k_start=0,
+                sf_a_granularity_k=128,
+                sf_b_granularity_k=128,
+            )
 
-        @T.prim_func
-        def main(A: T.Tensor((128, 128), T.float8_e4m3fn), B: T.Tensor((128, 128), T.float8_e4m3fn)):
-            with T.Kernel(1, threads=128):
-                a = T.alloc_shared((128, 128), T.float8_e4m3fn)
-                b = T.alloc_shared((128, 128), T.float8_e4m3fn)
-                c = T.alloc_tmem([128, 128], T.float32)
-                sfa = T.alloc_tmem([128, 4], T.uint32)
-                sfb = T.alloc_tmem([128, 4], T.uint32)
-                T.tcgen05_gemm_blockscaled(
-                    a,
-                    b,
-                    c,
-                    sfa,
-                    sfb,
-                    transpose_B=True,
-                    k_start=0,
-                    sf_a_granularity_k=128,
-                    sf_b_granularity_k=128,
-                )
+    (call,) = _gemm_calls(main)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+    with target:
+        layouts = op.infer_layout(target, 128)
+
+        def lower():
+            return op.lower(layouts, target, tvm.ir.Range(0, 128), tirx.Var("tx", "int32"), tirx.const(0, "int32"))
+
+        if gemm_api == "gemm_blockscaled":
+            with pytest.raises(ValueError, match="requires a valid mbarrier"):
+                lower()
+        else:
+            lowered = str(lower())
+            assert "ptx_tcgen05_mma_blockscaled_ss" in lowered
+            assert "tcgen05_mma_arrive" not in lowered
+            assert "mbarrier_wait_parity" not in lowered
 
 
 def test_mma_gemm_blockscaled_records_sf_layout():
@@ -385,7 +403,9 @@ def test_blockscaled_gemm_rejected_by_backend_without_support():
 # ---------------------------------------------------------------------------
 
 
-def _make_mxfp8_1cta_kernel(gemm_api: str, block_M: int, block_N: int, block_K: int, num_stages: int, sf_granularity_k: int):
+def _make_mxfp8_1cta_kernel(
+    gemm_api: str, block_M: int, block_N: int, block_K: int, num_stages: int, sf_granularity_k: int, defer_arrival: bool = False
+):
     """1-CTA MXFP8 block-scaled GEMM (A [M, K], B [N, K], group-major packed E8M0 SF).
 
     Mirrors examples/blockscaled_gemm_sm100/gemm_mxfp8_blockscaled_1d1d.py but
@@ -472,12 +492,14 @@ def _make_mxfp8_1cta_kernel(gemm_api: str, block_M: int, block_N: int, block_K: 
                         SFA_tmem,
                         SFB_tmem,
                         transpose_B=True,
-                        mbar=consumed[stage],
+                        mbar=None if defer_arrival else consumed[stage],
                         clear_accum=k == 0,
                         k_start=k * block_K,
                         sf_a_granularity_k=sf_granularity_k,
                         sf_b_granularity_k=sf_granularity_k,
                     )
+                    if defer_arrival:
+                        T.tcgen05_mma_arrive(consumed[stage])
                 T.tcgen05_mma_arrive(tmem_full)
 
             elif tx < 96:
@@ -537,14 +559,17 @@ def _make_mxfp8_inputs(M, N, K, sf_granularity_k):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
-@pytest.mark.parametrize("gemm_api", ["gemm_blockscaled", "tcgen05_gemm_blockscaled"])
-def test_sm100_1cta_blockscaled_gemm_lowers_to_tcgen05(gemm_api):
+@pytest.mark.parametrize(
+    "gemm_api, defer_arrival",
+    [("gemm_blockscaled", False), ("tcgen05_gemm_blockscaled", False), ("tcgen05_gemm_blockscaled", True)],
+)
+def test_sm100_1cta_blockscaled_gemm_lowers_to_tcgen05(gemm_api, defer_arrival):
     import torch
 
     torch.manual_seed(0)
     M, N, K = 256, 256, 512
     sf_granularity_k = 128
-    kernel = _make_mxfp8_1cta_kernel(gemm_api, 128, 128, 128, 2, sf_granularity_k)
+    kernel = _make_mxfp8_1cta_kernel(gemm_api, 128, 128, 128, 2, sf_granularity_k, defer_arrival)
 
     a, b, sfa_u8, sfb_u8 = _make_mxfp8_inputs(M, N, K, sf_granularity_k)
     sfa, sfb = _pack_sf_words(sfa_u8), _pack_sf_words(sfb_u8)
