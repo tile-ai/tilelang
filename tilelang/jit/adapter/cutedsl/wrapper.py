@@ -924,7 +924,9 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         "float32": "cutlass.Float32",
         "float16": "cutlass.Float16",
         "bfloat16": "cutlass.BFloat16",
-        "float8_e4m3": "cutlass.Float8E4M3",
+        # The TIR dtype string for float8_e4m3fn is "float8_e4m3", and the
+        # CuTeDSL codegen only emits Float8E4M3FN, so both keys must agree.
+        "float8_e4m3": "cutlass.Float8E4M3FN",
         "float8_e4m3fn": "cutlass.Float8E4M3FN",
         "float8_e5m2": "cutlass.Float8E5M2",
         "float4_e2m1fn": "cutlass.Float4E2M1FN",
