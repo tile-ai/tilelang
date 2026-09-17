@@ -359,10 +359,6 @@ struct Gemm {
       return kCudaTCGEN05;
     }
 
-    // Block-scaled GEMM carries SFA/SFB operands whose semantics no dense
-    // instruction can honour, so there is no fallback: the instruction is
-    // fixed by the target and the accumulator scope (TMEM => TCGEN5MMA on
-    // SM100, fragment => warp-level mma.sync on SM120).
     if (AsGemmBlockScaled(op) != nullptr) {
       if (AllowTcgen5Mma(op, target)) {
         return kCudaTCGEN05;
