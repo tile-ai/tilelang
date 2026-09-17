@@ -189,7 +189,7 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
 
 Stmt GemmNode::Lower(const LowerArgs &lower_args,
                      arith::Analyzer *analyzer) const {
-  if (const auto f = Function::GetGlobal(LowerGlobalFunc())) {
+  if (const auto f = Function::GetGlobal("tl.gemm.lower")) {
     PrimExpr mbar_phase = lower_args.mbar_phase_expr;
     if (auto explicit_phase = GetAnnotatedMbarPhaseExpr(annotations_)) {
       mbar_phase = explicit_phase.value();
@@ -227,7 +227,7 @@ Stmt GemmNode::Lower(const LowerArgs &lower_args,
                /*init=*/Optional<Stmt>(), /*alloc_buffers=*/{},
                /*match_buffers=*/{}, /*annotations=*/block_annotations));
   } else {
-    LOG(FATAL) << "No lower function found for gemm: " << LowerGlobalFunc();
+    LOG(FATAL) << "No lower function found for gemm";
     return Stmt();
   }
 }
@@ -237,7 +237,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
   if (completed_)
     return {};
   LayoutMap results;
-  if (const auto f = Function::GetGlobal(InferLayoutGlobalFunc())) {
+  if (const auto f = Function::GetGlobal("tl.gemm.infer_layout")) {
     auto inferred_layouts = Downcast<LayoutMap>((*f)(
         GetRef<Gemm>(this), layout_args.target, layout_args.thread_bounds));
     // For MMA instructions, skip shared buffer layouts that are already
@@ -265,8 +265,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &layout_args,
       }
     }
   } else {
-    LOG(FATAL) << "No infer layout function found for gemm: "
-               << InferLayoutGlobalFunc();
+    LOG(FATAL) << "No infer layout function found for gemm";
   }
 
   completed_ = true;

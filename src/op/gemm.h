@@ -164,14 +164,6 @@ public:
   static void InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
                                 const Map<String, ObjectRef> &annotations);
 
-protected:
-  // Global functions the Python side registers for layout inference and
-  // lowering. Subclasses point these at their own tile-op class.
-  virtual const char *InferLayoutGlobalFunc() const {
-    return "tl.gemm.infer_layout";
-  }
-  virtual const char *LowerGlobalFunc() const { return "tl.gemm.lower"; }
-
 private:
   mutable bool completed_ = false;
 };

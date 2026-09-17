@@ -41,14 +41,6 @@ public:
   // rejects the operation if that selector is not registered.
   ffi::String GetGemmInstructionKey(int block_size,
                                     Target target) const override;
-
-protected:
-  const char *InferLayoutGlobalFunc() const override {
-    return "tl.gemm_blockscaled.infer_layout";
-  }
-  const char *LowerGlobalFunc() const override {
-    return "tl.gemm_blockscaled.lower";
-  }
 };
 
 /*! \brief Block-scaled GEMM with explicit scale-factor operands. */

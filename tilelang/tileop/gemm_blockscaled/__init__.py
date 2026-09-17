@@ -1,29 +1,8 @@
-"""Common block-scaled GEMM tile op and FFI entry points."""
+"""Common block-scaled GEMM tile op."""
 
 import tvm_ffi
-from tvm import tirx
-from tvm.ir import Range
-from tvm.target import Target
 
 from ..gemm import Gemm
-
-
-@tvm_ffi.register_global_func("tl.gemm_blockscaled.infer_layout")
-def gemm_blockscaled_infer_layout(gemm, target: Target, thread_bounds: Range):
-    thread_nums = thread_bounds.extent
-    return gemm.infer_layout(target, thread_nums)
-
-
-@tvm_ffi.register_global_func("tl.gemm_blockscaled.lower")
-def gemm_blockscaled_lower(
-    gemm,
-    layout_map,
-    target: Target,
-    thread_bounds: Range,
-    thread_index: tirx.PrimExpr,
-    mbar_phase_expr: tirx.PrimExpr,
-):
-    return gemm.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
 
 
 @tvm_ffi.register_object("tl.GemmBlockScaled")
@@ -31,10 +10,12 @@ class GemmBlockScaled(Gemm):
     """Block-scaled GEMM tile op: ``C (+)= (A * SFA) @ (B * SFB)``.
 
     A ``GemmNode`` subclass on the C++ side, so it shares the dense GEMM's
-    operand layouts, warp partition and scheduling; the extra FFI fields are
-    ``sfaRegion``, ``sfbRegion`` and ``sfKStart``. Instruction selection and
-    lowering go through the same backend registry as ``Gemm``; the backend
-    implementations branch on ``is_blockscaled``.
+    operand layouts, warp partition and scheduling, and is lowered through the
+    same ``tl.gemm.infer_layout`` / ``tl.gemm.lower`` entry points, which
+    dispatch on this Python class. The extra FFI fields are ``sfaRegion``,
+    ``sfbRegion`` and ``sfKStart``. Instruction selection goes through the
+    same backend registry as ``Gemm``; the backend implementations branch on
+    ``is_blockscaled``.
     """
 
     # FFI fields added on top of Gemm: sfaRegion, sfbRegion, sfKStart
