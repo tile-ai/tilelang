@@ -8,6 +8,7 @@ import tvm_ffi
 from .registry import resolve_gemm_impl
 from tilelang import _ffi_api
 
+
 def _is_mma_sync_dtype_supported(node, target) -> bool:
     if not _ffi_api.TargetIsAmpere(target):
         return True
@@ -35,6 +36,7 @@ def _is_mma_sync_dtype_supported(node, target) -> bool:
         return c == "float64"
     return False
 
+
 def _raise_mma_sync_dtype_unsupported(self, target):
     raise tvm.error.InternalError(
         f"T.gemm requires native mma.sync lowering on Ampere/Ada, "
@@ -45,6 +47,7 @@ def _raise_mma_sync_dtype_unsupported(self, target):
         f"C(scope={self.c.scope()}, dtype={self.c.dtype}), "
         f"M={self.m}, N={self.n}, K={self.k}."
     )
+
 
 @tvm_ffi.register_global_func("tl.gemm.infer_layout")
 def gemm_infer_layout(gemm, target: Target, thread_bounds: Range):

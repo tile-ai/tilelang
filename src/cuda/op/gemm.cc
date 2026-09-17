@@ -146,22 +146,24 @@ bool AllowTuringMma(const GemmNode &op) {
 bool AllowMmaSync(const GemmNode &op, Target target) {
   DataType a = op.a_->dtype, b = op.b_->dtype, c = op.c_->dtype;
   if (a.is_float8() && b.is_float8()) {
-    return TargetHasSMVersionGE(target, 89) && (c == DataType::Float(16) ||
-           c == DataType::Float(32));
+    return TargetHasSMVersionGE(target, 89) &&
+           (c == DataType::Float(16) || c == DataType::Float(32));
   }
   if (a != b) {
     return false;
   }
   if (a == DataType::Float(16)) {
-    return c == DataType::Float(16) ||
-           c == DataType::Float(32);
+    return c == DataType::Float(16) || c == DataType::Float(32);
   }
   if ((a.is_int() || a.is_uint()) && (a.bits() == 8 || a.bits() == 4)) {
     return c == DataType::Int(32);
   }
-  if (a == DataType::BFloat(16)) return c == DataType::Float(32);
-  if (a == DataType::Float(32)) return c == DataType::Float(32);
-  if (a == DataType::Float(64)) return c == DataType::Float(64);
+  if (a == DataType::BFloat(16))
+    return c == DataType::Float(32);
+  if (a == DataType::Float(32))
+    return c == DataType::Float(32);
+  if (a == DataType::Float(64))
+    return c == DataType::Float(64);
   return false;
 }
 
@@ -188,14 +190,14 @@ void FatalTcgen5Unavailable(const GemmNode &op, Target target) {
 }
 
 void FatalMmaSyncUnavailable(const GemmNode &op, Target target) {
-  LOG(FATAL) << "T.gemm requires native mma.sync lowering on Ampere/Ada, "
-                "but the operand dtype configuration is not supported. Got target="
-             << target << ", A(scope=" << op.a_.scope()
-             << ", dtype=" << op.a_->dtype << "), B(scope=" << op.b_.scope()
-             << ", dtype=" << op.b_->dtype << "), C(scope=" << op.c_.scope()
-             << ", dtype=" << op.c_->dtype << "), M=" << op.m_
-             << ", N=" << op.n_ << ", K=" << op.k_ << "."
-             << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+  LOG(FATAL)
+      << "T.gemm requires native mma.sync lowering on Ampere/Ada, "
+         "but the operand dtype configuration is not supported. Got target="
+      << target << ", A(scope=" << op.a_.scope() << ", dtype=" << op.a_->dtype
+      << "), B(scope=" << op.b_.scope() << ", dtype=" << op.b_->dtype
+      << "), C(scope=" << op.c_.scope() << ", dtype=" << op.c_->dtype
+      << "), M=" << op.m_ << ", N=" << op.n_ << ", K=" << op.k_ << "."
+      << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
 }
 
 std::pair<int, int>

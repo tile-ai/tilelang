@@ -10,9 +10,7 @@ def _make_gemm_kernel(dtype, accum_dtype):
     M = N = K = 64
 
     @T.prim_func
-    def main(A: T.Tensor((M, K), dtype),
-             B: T.Tensor((K, N), dtype),
-             C: T.Tensor((M, N), accum_dtype)):
+    def main(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype), C: T.Tensor((M, N), accum_dtype)):
         with T.Kernel(1, 1, threads=128):
             As = T.alloc_shared((M, K), dtype)
             Bs = T.alloc_shared((K, N), dtype)
