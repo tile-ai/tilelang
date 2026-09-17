@@ -104,7 +104,7 @@ build() {
         return
     fi
     echo "Building libtvm.so (ninja -j${NINJA_JOBS})..."
-    USE_CUDA=OFF cmake -B build -S . -GNinja >/dev/null
+    USE_CUDA=OFF USE_ASCEND=ON cmake -B build -S . -GNinja >/dev/null
     ninja -j"${NINJA_JOBS}" -C build
 }
 

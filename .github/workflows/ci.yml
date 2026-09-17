@@ -223,6 +223,7 @@ jobs:
       - name: Install project (wheel form)
         env:
           USE_CUDA: "OFF"
+          USE_ASCEND: "ON"
         run: |
           python -m pip install -v .
 
