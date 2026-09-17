@@ -137,54 +137,12 @@ class KernelCache:
         return None
 
     @staticmethod
-    @functools.cache
-    def _get_tilelang_pipeline_stamp() -> str | None:
-        """Return a content hash for Python lowering pipeline files.
-
-        Native library changes are already part of the cache key, but Python
-        pipeline changes can also alter generated kernels during development.
-        Include the backend pipeline sources so stale disk cache entries are not
-        reused after a pipeline edit.
-        """
-        package_root = os.path.dirname(os.path.dirname(__file__))
-        rel_paths = [
-            "backend/pass_pipeline/pipeline.py",
-            "backend/pass_pipeline/pipeline_utils.py",
-            "ascend/analysis/vf_checker.py",
-            "ascend/pipeline.py",
-            "ascend/target.py",
-            "ascend/transform/z3_scheduler.py",
-            "cpu/pipeline.py",
-            "cuda/pipeline.py",
-            "rocm/pipeline.py",
-            "metal/pipeline.py",
-        ]
-
-        stamps: list[str] = []
-        for rel_path in rel_paths:
-            path = os.path.join(package_root, rel_path)
-            if not os.path.exists(path):
-                continue
-            file_hash = sha256()
-            with open(path, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    file_hash.update(chunk)
-            stamps.append(f"{rel_path}:{file_hash.hexdigest()}")
-        if stamps:
-            return "|".join(stamps)
-        return None
-
-    @staticmethod
-    @functools.cache
     def _get_base_key() -> dict:
         base = {"version": __version__, "platform": platform.machine()}
         if env.should_use_kernel_cache_lib_stamp():
             lib_stamp = KernelCache._get_tilelang_lib_stamp()
             if lib_stamp:
                 base["tilelang_lib"] = lib_stamp
-        pipeline_stamp = KernelCache._get_tilelang_pipeline_stamp()
-        if pipeline_stamp:
-            base["tilelang_pipeline"] = pipeline_stamp
         if sys.platform == "darwin":
             import torch
 
