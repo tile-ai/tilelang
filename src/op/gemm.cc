@@ -15,7 +15,6 @@
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/op_attr_types.h>
 
-#include "span_utils.h"
 #include "utils.h"
 
 #include <vector>
@@ -33,7 +32,9 @@ std::vector<GemmImpl> &GemmImplRegistry() {
   return registry;
 }
 
-const GemmImpl &ResolveGemmImpl(Target target) {
+} // namespace
+
+const GemmImpl &ResolveGemmImpl(const Target &target) {
   const auto &registry = GemmImplRegistry();
   const GemmImpl *matched_impl = nullptr;
   for (const GemmImpl &impl : registry) {
@@ -51,8 +52,6 @@ const GemmImpl &ResolveGemmImpl(Target target) {
       << target->str();
   return *matched_impl;
 }
-
-} // namespace
 
 void RegisterGemmImpl(GemmImpl impl) {
   ICHECK(impl.name != nullptr);
@@ -145,22 +144,6 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   data_ = std::move(node);
 }
 
-GemmBlockScaled::GemmBlockScaled(Array<PrimExpr> args,
-                                 Map<String, ObjectRef> annotations) {
-  ICHECK_EQ(args.size(), 16)
-      << "tl.tileop.gemm_blockscaled expects the 13 dense GEMM slots followed "
-         "by SFA, SFB and k_start, but got "
-      << args.size() << " arguments.";
-  ObjectPtr<GemmBlockScaledNode> node = make_object<GemmBlockScaledNode>();
-  GemmNode::InitFromDenseArgs(node.get(), args, annotations);
-  node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
-  node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
-  node->sfKStart_ = args[15].as<PrimExpr>().value();
-  ICHECK(node->sfaRegion_.defined() && node->sfbRegion_.defined())
-      << "Block-scaled GEMM requires both SFA and SFB scale-factor regions.";
-  data_ = std::move(node);
-}
-
 AccessRegions GemmNode::GetAccessRegions() const {
   AccessRegions result;
   result.reads.push_back(aRegion_);
@@ -192,41 +175,8 @@ TileOperator GemmNode::Clone() const {
   return Gemm(op);
 }
 
-AccessRegions GemmBlockScaledNode::GetAccessRegions() const {
-  AccessRegions result = GemmNode::GetAccessRegions();
-  result.reads.push_back(sfaRegion_);
-  result.reads.push_back(sfbRegion_);
-  return result;
-}
-
-ffi::Array<BufferRegion>
-GemmBlockScaledNode::GetReadBeforeWriteRegions() const {
-  ffi::Array<BufferRegion> result = GemmNode::GetReadBeforeWriteRegions();
-  result.push_back(sfaRegion_);
-  result.push_back(sfbRegion_);
-  return result;
-}
-
-TileOperator GemmBlockScaledNode::Clone() const {
-  auto op = make_object<GemmBlockScaledNode>(*this);
-  return GemmBlockScaled(op);
-}
-
 String GemmNode::GetGemmInstructionKey(int block_size, Target target) const {
   return ResolveGemmImpl(target).select_inst(*this, block_size, target);
-}
-
-String GemmBlockScaledNode::GetGemmInstructionKey(int block_size,
-                                                  Target target) const {
-  const GemmImpl &impl = ResolveGemmImpl(target);
-  if (!impl.supports_blockscaled) {
-    LOG(FATAL) << "Block-scaled GEMM is not supported by the " << impl.name
-               << " backend (target=" << target->str()
-               << "); a dense GEMM lowering would silently drop the SFA/SFB "
-                  "scale factors."
-               << SpanHintSuffix({a_->span, b_->span, c_->span});
-  }
-  return impl.select_inst(*this, block_size, target);
 }
 
 std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
@@ -354,22 +304,11 @@ TVM_REGISTER_OP("tl.tileop.tcgen05_gemm")
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-// Block-scaled GEMM is its own tile op (GemmBlockScaledNode, a GemmNode
-// subclass): the printed IR is self-describing, passes that need the scale
-// factors match the subclass, and passes that only care about "a GEMM" keep
-// matching through GemmNode. The explicit ISA variants ride on the same op
-// via the is_tcgen05 annotation.
-TIR_REGISTER_TL_TILE_OP(GemmBlockScaled, gemm_blockscaled)
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-
 TVM_REGISTER_OP("tl.GemmWarpPolicy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   GemmNode::RegisterReflection();
-  GemmBlockScaledNode::RegisterReflection();
   GemmWarpPolicyNode::RegisterReflection();
   namespace refl = reflection;
   refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",

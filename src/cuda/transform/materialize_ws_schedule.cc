@@ -87,6 +87,7 @@
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"

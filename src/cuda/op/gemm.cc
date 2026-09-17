@@ -8,6 +8,7 @@
 #include <tvm/runtime/logging.h>
 
 #include "cuda/op/builtin.h"
+#include "cuda/op/gemm_blockscaled.h"
 #include "cuda/target_utils.h"
 #include "op/tcgen5_meta.h"
 #include "op/utils.h"
@@ -359,24 +360,6 @@ struct Gemm {
       return kCudaTCGEN05;
     }
 
-    if (AsGemmBlockScaled(op) != nullptr) {
-      if (AllowTcgen5Mma(op, target)) {
-        return kCudaTCGEN05;
-      }
-      if (TargetIsSM120(target) && IsSharedBuffer(op.a_) &&
-          IsSharedBuffer(op.b_) && IsFragmentBuffer(op.c_)) {
-        return kCudaMMABlockScaled;
-      }
-      LOG(FATAL) << "Block-scaled GEMM requires either Blackwell SM100 "
-                    "TCGEN5MMA (A/B in shared memory, C in tensor memory) or "
-                    "SM120 mma.sync (A/B in shared memory, C in a fragment), "
-                    "but got target="
-                 << target << ", A scope=" << op.a_.scope()
-                 << ", B scope=" << op.b_.scope()
-                 << ", C scope=" << op.c_.scope() << "."
-                 << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
-    }
-
     if (AllowTcgen5Mma(op, target)) {
       return kCudaTCGEN05;
     }
@@ -433,7 +416,7 @@ bool RegisterCudaGemm() {
       cuda::Gemm::SelectInst,
       cuda::Gemm::ComputeWarpPartition,
       cuda::Gemm::ReuseExistingSharedLayout,
-      /*supports_blockscaled=*/true,
+      cuda::SelectBlockScaledGemmInst,
   });
   return true;
 }
@@ -468,16 +451,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         uint32_t desc = GetTCGEN5InstrDesc(
             atom_m, atom_n, atom_k, a_dtype, b_dtype, c_dtype, a_is_k_major,
             b_is_k_major, scale_in_a, scale_in_b);
-        return Integer(static_cast<int64_t>(desc));
-      });
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_blockscaled_instr_desc",
-      [](int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
-         bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
-         int a_sf_id, int b_sf_id) {
-        uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
-            atom_m, atom_n, a_dtype, b_dtype, a_is_k_major, b_is_k_major,
-            scale_in_a, scale_in_b, a_sf_id, b_sf_id);
         return Integer(static_cast<int64_t>(desc));
       });
 }

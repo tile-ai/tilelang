@@ -32,6 +32,73 @@ def _annotations(call: tirx.Call) -> dict:
     return {str(k): v for k, v in call.annotations.items()}
 
 
+def _make_blockscaled_op(gemm_api="gemm_blockscaled", *, a_scope="shared", c_scope="shared.tmem", use_2cta=False, **kwargs):
+    ab_dtype = "float8_e4m3fn" if c_scope == "shared.tmem" else "float4_e2m1fn"
+    sf_scope = "shared.tmem" if c_scope == "shared.tmem" else "shared"
+    sf_granularity = 128 if c_scope == "shared.tmem" else 16
+    a = tirx.decl_buffer((128, 128), ab_dtype, name="A", scope=a_scope)
+    b = tirx.decl_buffer((128, 128), ab_dtype, name="B", scope="shared")
+    c = tirx.decl_buffer((128, 256 if use_2cta else 128), "float32", name="C", scope=c_scope)
+    sfa = tirx.decl_buffer((128, 4), "uint32", name="SFA", scope=sf_scope)
+    sfb = tirx.decl_buffer((128, 8 if use_2cta else 4), "uint32", name="SFB", scope=sf_scope)
+    if gemm_api != "mma_gemm_blockscaled":
+        done = tirx.decl_buffer((1,), "uint64", name="done", scope="shared")
+        kwargs.update(mbar=done[0], use_2cta=use_2cta)
+    call = getattr(T, gemm_api)(
+        a,
+        b,
+        c,
+        sfa,
+        sfb,
+        transpose_B=True,
+        k_start=0,
+        sf_a_granularity_k=sf_granularity,
+        sf_b_granularity_k=sf_granularity,
+        **kwargs,
+    )
+    return call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "gemm_api, arch, c_scope, use_2cta, expected",
+    [
+        ("gemm_blockscaled", "sm_100", "shared.tmem", False, "cuda.tcgen05"),
+        ("gemm_blockscaled", "sm_100", "shared.tmem", True, "cuda.tcgen05"),
+        ("tcgen05_gemm_blockscaled", "sm_100", "shared.tmem", False, "cuda.tcgen05"),
+        ("gemm_blockscaled", "sm_120", "local.fragment", False, "cuda.mma.blockscaled"),
+        ("mma_gemm_blockscaled", "sm_120", "local.fragment", False, "cuda.mma.blockscaled"),
+    ],
+)
+def test_blockscaled_instruction_selection(gemm_api, arch, c_scope, use_2cta, expected):
+    op = _make_blockscaled_op(gemm_api, c_scope=c_scope, use_2cta=use_2cta)
+    assert op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": arch})) == expected
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("gemm_api", ["gemm_blockscaled", "tcgen05_gemm_blockscaled"])
+@pytest.mark.parametrize("use_2cta", [False, True])
+def test_blockscaled_tcgen05_rejects_tmem_a(gemm_api, use_2cta):
+    op = _make_blockscaled_op(gemm_api, a_scope="shared.tmem", use_2cta=use_2cta)
+    with pytest.raises(Exception, match="Block-scaled GEMM requires.*A/B in shared memory"):
+        op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": "sm_100"}))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("gemm_api, use_2cta", [("tcgen05_gemm_blockscaled", False), ("gemm_blockscaled", True)])
+def test_blockscaled_tcgen05_request_cannot_select_sm120_mma(gemm_api, use_2cta):
+    op = _make_blockscaled_op(gemm_api, c_scope="local.fragment", use_2cta=use_2cta)
+    with pytest.raises(Exception, match="Block-scaled GEMM requires Blackwell SM100 TCGEN5MMA"):
+        op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": "sm_120"}))
+
+
+@tilelang.testing.requires_cuda
+def test_blockscaled_gemm_rejects_wgmma_annotation():
+    op = _make_blockscaled_op(annotations={"is_wgmma": 1})
+    with pytest.raises(Exception, match="Block-scaled GEMM does not support WGMMA"):
+        op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": "sm_100"}))
+
+
 # ---------------------------------------------------------------------------
 # Call protocol (hardware-free)
 # ---------------------------------------------------------------------------
@@ -271,12 +338,10 @@ def test_mma_gemm_blockscaled_records_sf_layout():
 
 
 def test_blockscaled_gemm_rejected_by_backend_without_support():
-    """Only backends that declare block-scaled support may see SFA/SFB.
+    """Only backends with a block-scaled selector may see SFA/SFB.
 
-    The base op checks the GemmImpl capability before delegating instruction
-    selection, so a backend whose SelectInst knows nothing about scale factors
-    (CPU here) fails loudly instead of lowering a dense GEMM that silently
-    drops SFA/SFB.
+    A backend without a dedicated block-scaled selector (CPU here) fails
+    loudly instead of invoking its dense selector and dropping SFA/SFB.
     """
 
     @T.prim_func

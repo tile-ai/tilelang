@@ -176,58 +176,9 @@ private:
   mutable bool completed_ = false;
 };
 
-/*!
- * \brief Block-scaled GEMM: C (+)= (A * SFA) @ (B * SFB).
- *
- * Extends the dense GEMM with the two scale-factor operands and the logical
- * K-axis start offset that the instruction-level scale-factor IDs are derived
- * from. Everything else (operand layouts, warp partition, pipeline and
- * warp-specialization handling) is inherited, so passes that only care about
- * "a GEMM" keep matching it through GemmNode; passes and backends that need
- * the scale factors match GemmBlockScaledNode.
- */
-class GemmBlockScaledNode : public GemmNode {
-public:
-  BufferRegion sfaRegion_, sfbRegion_;
-  PrimExpr sfKStart_;
-
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmBlockScaled", GemmBlockScaledNode,
-                                    GemmNode);
-
-  static void RegisterReflection() {
-    namespace refl = reflection;
-    refl::ObjectDef<GemmBlockScaledNode>()
-        .def_ro("sfaRegion", &GemmBlockScaledNode::sfaRegion_)
-        .def_ro("sfbRegion", &GemmBlockScaledNode::sfbRegion_)
-        .def_ro("sfKStart", &GemmBlockScaledNode::sfKStart_);
-  }
-
-  AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
-
-  TileOperator Clone() const override;
-
-  // Rejects backends whose GemmImpl does not declare block-scaled support
-  // before delegating to their instruction selection.
-  String GetGemmInstructionKey(int block_size, Target target) const override;
-
-protected:
-  const char *InferLayoutGlobalFunc() const override {
-    return "tl.gemm_blockscaled.infer_layout";
-  }
-  const char *LowerGlobalFunc() const override {
-    return "tl.gemm_blockscaled.lower";
-  }
-};
-
-/*! \brief Downcast helper for backend code that receives a GemmNode. */
-inline const GemmBlockScaledNode *AsGemmBlockScaled(const GemmNode &op) {
-  return op.IsInstance<GemmBlockScaledNode>()
-             ? static_cast<const GemmBlockScaledNode *>(&op)
-             : nullptr;
-}
-
 using GemmTargetPredicate = bool (*)(Target target);
+
+class GemmBlockScaled;
 
 struct GemmImpl {
   const char *name;
@@ -241,30 +192,22 @@ struct GemmImpl {
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
 
-  // Whether select_inst understands the SFA/SFB scale-factor operands. A
-  // backend that does not declare this never sees a block-scaled GEMM: the
-  // base op rejects it before dispatch, so the scale factors cannot be dropped
-  // by a dense lowering.
-  bool supports_blockscaled = false;
+  // A missing selector means block-scaled GEMM is unsupported. Never send
+  // scale-factor operands through the dense instruction selector.
+  String (*select_blockscaled_inst)(const GemmBlockScaled &op, int block_size,
+                                    const Target &target) = nullptr;
 };
 
 void RegisterGemmImpl(GemmImpl impl);
+
+/*! \brief Resolve the shared backend implementation for the GEMM family. */
+const GemmImpl &ResolveGemmImpl(const Target &target);
 
 class Gemm : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
   TVM_DLL Gemm(Array<PrimExpr> args,
                Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
-  static const Op &Get();
-};
-
-class GemmBlockScaled : public Gemm {
-public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmBlockScaled, Gemm,
-                                             GemmBlockScaledNode);
-  TVM_DLL GemmBlockScaled(
-      Array<PrimExpr> args,
-      Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
   static const Op &Get();
 };
 
