@@ -188,22 +188,25 @@ jobs:
           uv cache clean
 
       - name: Run performance regression test
+        id: perf-regression
         run: |
           # The script rebuilds libtvm.so via ninja for each ref (baseline = upstream/asc,
           # current = the PR merge), keeps the Ascend examples and maintenance driver
           # constant across both, and writes the speedup table to
-          # .perf_regression_ascend/regression_result.md.
+          # a temporary directory outside the checkout (exposed as result_md).
           bash ./maint/scripts/run_perf_regression_ascend.sh
 
       - name: Post test results as PR comment
         if: ${{ !cancelled() }}
         uses: actions/github-script@v9
+        env:
+          PERF_RESULT_MD: ${{ steps.perf-regression.outputs.result_md }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const path = '.perf_regression_ascend/regression_result.md';
-            const md = fs.existsSync(path)
+            const path = process.env.PERF_RESULT_MD;
+            const md = path && fs.existsSync(path)
               ? fs.readFileSync(path, 'utf8')
               : '_No results produced (the run failed before generating a report)._';
 

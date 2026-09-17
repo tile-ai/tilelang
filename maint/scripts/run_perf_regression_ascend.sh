@@ -8,22 +8,40 @@
 #   BASELINE_URL    - remote URL to fetch the baseline from
 #                     (default: https://github.com/tile-ai/tilelang-deepseek.git)
 #   BASELINE_BRANCH - branch on BASELINE_URL to compare against (default: asc)
-#   WORK_DIR        - Working directory for results (default: .perf_regression_ascend)
+#   WORK_DIR        - Directory outside the checkout for snapshots and results
+#                     (default: unique directory under RUNNER_TEMP, TMPDIR or /tmp)
 #   SKIP_BUILD      - Set to 1 to skip the ninja rebuild between checkouts
 #   NINJA_JOBS      - Parallelism for ninja (default: 64)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 
 BASELINE_URL="${BASELINE_URL:-https://github.com/tile-ai/tilelang-deepseek.git}"
 BASELINE_BRANCH="${BASELINE_BRANCH:-asc}"
-WORK_DIR="${WORK_DIR:-${REPO_ROOT}/.perf_regression_ascend}"
 NINJA_JOBS="${NINJA_JOBS:-64}"
+
+cd "${REPO_ROOT}"
+# Keep snapshots outside the checkout so stash and ref switches cannot remove them.
+if [[ -z "${WORK_DIR:-}" ]]; then
+    WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tilelang-perf-regression-ascend.XXXXXX")"
+fi
+mkdir -p "${WORK_DIR}"
+WORK_DIR="$(cd "${WORK_DIR}" && pwd -P)"
+case "${WORK_DIR}/" in
+    "${REPO_ROOT}/"*)
+        echo "WORK_DIR must be outside the repository: ${WORK_DIR}" >&2
+        exit 1
+        ;;
+esac
+
 OLD_JSON="${WORK_DIR}/old.json"
 NEW_JSON="${WORK_DIR}/new.json"
 RESULT_MD="${WORK_DIR}/regression_result.md"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "result_md=${RESULT_MD}" >> "${GITHUB_OUTPUT}"
+fi
 
 MARKER="__TILELANG_PERF_RESULTS_JSON__="
 
@@ -33,9 +51,6 @@ MARKER="__TILELANG_PERF_RESULTS_JSON__="
 # onto each checkout.
 HARNESS_DIR="examples/ascend"
 DRIVER_PATH="maint/scripts/ascend_perf_regression.py"
-
-cd "${REPO_ROOT}"
-mkdir -p "${WORK_DIR}"
 
 echo "============================================"
 echo "Ascend Performance Regression Test"
