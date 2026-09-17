@@ -8,6 +8,43 @@ import tvm_ffi
 from .registry import resolve_gemm_impl
 from tilelang import _ffi_api
 
+def _is_mma_sync_dtype_supported(node, target) -> bool:
+    if not _ffi_api.TargetIsAmpere(target):
+        return True
+    a = str(node.a.dtype)
+    b = str(node.b.dtype)
+    c = str(node.c.dtype)
+    arch = str(target.attrs.get("arch", ""))
+    try:
+        sm = int(arch.split("_")[-1])
+    except (ValueError, IndexError):
+        sm = 0
+    if a.startswith("float8") and b.startswith("float8"):
+        return sm >= 89 and (c in ("float16", "float32"))
+    if a != b:
+        return False
+    if a == "float16":
+        return c in ("float16", "float32")
+    if a in ("int4", "int8", "uint4", "uint8"):
+        return c == "int32"
+    if a == "bfloat16":
+        return c == "float32"
+    if a == "float32":
+        return c == "float32"
+    if a == "float64":
+        return c == "float64"
+    return False
+
+def _raise_mma_sync_dtype_unsupported(self, target):
+    raise tvm.error.InternalError(
+        f"T.gemm requires native mma.sync lowering on Ampere/Ada, "
+        f"but the operand dtype configuration is not supported. "
+        f"Got target={target}, "
+        f"A(scope={self.a.scope()}, dtype={self.a.dtype}), "
+        f"B(scope={self.b.scope()}, dtype={self.b.dtype}), "
+        f"C(scope={self.c.scope()}, dtype={self.c.dtype}), "
+        f"M={self.m}, N={self.n}, K={self.k}."
+    )
 
 @tvm_ffi.register_global_func("tl.gemm.infer_layout")
 def gemm_infer_layout(gemm, target: Target, thread_bounds: Range):
@@ -120,6 +157,8 @@ class Gemm(Node, Scriptable):
 
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
+        if not _is_mma_sync_dtype_supported(self, target):
+            _raise_mma_sync_dtype_unsupported(self, target)
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
@@ -133,6 +172,8 @@ class Gemm(Node, Scriptable):
         mbar_phase_expr: tirx.PrimExpr,
     ):
         """Lower the GEMM operation to TIR statements based on target architecture."""
+        if not _is_mma_sync_dtype_supported(self, target):
+            _raise_mma_sync_dtype_unsupported(self, target)
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)
