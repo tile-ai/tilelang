@@ -228,6 +228,7 @@ class TLCUDASourceWrapper:
         "float8_e5m2": "fp8_e5_t",
         "float64": "double",
         "int64": "int64_t",
+        "uint64": "uint64_t",
         "int32": "int",
         "uint32": "unsigned int",
         "bool": "int8_t",
