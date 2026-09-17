@@ -85,15 +85,18 @@ def gemm_blockscaled(
     """Block-scaled GEMM for CUDA: ``C (+)= (A * SFA) @ (B * SFB)``.
 
     Extends :func:`tilelang.language.gemm_op.gemm_blockscaled` with CUDA
-    completion and scale-layout parameters. The compiler selects the
-    block-scaled instruction from the target and operand scopes:
+    completion and scale-layout parameters. Like ``T.gemm``, this is the
+    synchronous interface. The compiler selects the block-scaled instruction
+    from the target and operand scopes:
 
     - Blackwell SM100, ``C`` in tensor memory: TCGEN05
       ``kind::mxf8f6f4.block_scale``. A/B are FP8/FP6/FP4 in shared memory,
-      and SFA/SFB are E8M0 scale factors already in tensor memory. This path
-      is explicit-async: ``mbar`` is required and the caller waits for
-      completion. ``use_2cta=True`` requests ``cta_group::2`` and requires
-      ``cluster_dims`` of ``(2,1,1)`` or ``(1,2,1)``.
+      and SFA/SFB are E8M0 scale factors already in tensor memory. ``mbar``
+      is required: the MMA posts completion to it and TileLang inserts the
+      matching ``mbarrier_wait_parity`` implicitly after issue, so the
+      barrier must flip once per call. ``use_2cta=True`` requests
+      ``cta_group::2`` and requires ``cluster_dims`` of ``(2,1,1)`` or
+      ``(1,2,1)``.
     - SM120, ``C`` in a fragment: synchronous
       ``mma.sync.m16n8k64.kind::mxf4nvf4.block_scale`` with E2M1 operands,
       UE4M3 scale factors and FP32 accumulation. A/B and packed scale words
@@ -101,8 +104,9 @@ def gemm_blockscaled(
       this path ignores ``mbar``.
 
     Unsupported combinations fail compilation instead of dropping scales.
-    Use ``T.tcgen05_gemm_blockscaled`` or ``T.mma_gemm_blockscaled`` for an
-    explicit instruction family.
+    Use ``T.tcgen05_gemm_blockscaled`` for explicit asynchronous TCGEN05
+    scheduling without the implicit wait, or ``T.mma_gemm_blockscaled`` to
+    pin the warp-level path.
 
     Args:
         A: Left operand tile in shared memory.
@@ -117,7 +121,7 @@ def gemm_blockscaled(
         k_start: Logical K-axis start offset of this tile.
         sf_a_granularity_k: K elements covered by one A scale factor.
         sf_b_granularity_k: K elements covered by one B scale factor.
-        mbar: Completion barrier, required by TCGEN05.
+        mbar: Completion barrier, required by TCGEN05; waited on implicitly.
         use_2cta: Request the 2CTA TCGEN05 variant.
         sf_layout: SM120 scale layout, ``"rowmajor"`` or
             ``"blockscaled_chunk_kmajor"``.

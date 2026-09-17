@@ -380,9 +380,12 @@ def gemm_blockscaled(
     Compilation fails when the backend has no block-scaled implementation;
     lowering to an unscaled GEMM would change the result.
 
-    The CUDA dialect extends this signature with ``mbar``, ``use_2cta`` and
-    ``sf_layout``. Its TCGEN05 path requires the CUDA entry point with an
-    explicit completion barrier and leaves waiting to the caller.
+    Like `T.gemm(...)`, this is the synchronous interface: the result is
+    complete when the call returns. On Blackwell TCGEN5MMA, TileLang inserts
+    the corresponding `mbarrier_wait_parity(...)` implicitly after issue, so
+    that path needs a completion barrier, which the CUDA dialect accepts as
+    ``mbar`` (it also adds ``use_2cta`` and ``sf_layout``). For manual
+    asynchronous scheduling use `T.tcgen05_gemm_blockscaled(...)`.
 
     Args:
         A: Left operand tile.

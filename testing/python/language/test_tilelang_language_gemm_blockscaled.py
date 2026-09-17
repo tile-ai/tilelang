@@ -331,6 +331,54 @@ def test_blockscaled_gemm_without_mbar_requires_explicit_async(gemm_api):
             assert "mbarrier_wait_parity" not in lowered
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("gemm_api", ["gemm_blockscaled", "tcgen05_gemm_blockscaled"])
+def test_gemm_blockscaled_waits_implicitly_like_gemm(gemm_api):
+    """`T.gemm_blockscaled` is synchronous like `T.gemm`: the TCGEN05 lowering
+    issues the MMA, posts completion to `mbar` and waits on it with the phase
+    LowerTileOp derives from the enclosing loop. The explicit
+    `T.tcgen05_gemm_blockscaled` issues and arrives but never waits."""
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            b = T.alloc_shared((128, 128), T.float8_e4m3fn)
+            c = T.alloc_tmem([128, 128], T.float32)
+            sfa = T.alloc_tmem([128, 4], T.uint32)
+            sfb = T.alloc_tmem([128, 4], T.uint32)
+            done = T.alloc_barrier([1])
+            getattr(T, gemm_api)(
+                a,
+                b,
+                c,
+                sfa,
+                sfb,
+                transpose_B=True,
+                mbar=done[0],
+                k_start=0,
+                sf_a_granularity_k=128,
+                sf_b_granularity_k=128,
+            )
+
+    (call,) = _gemm_calls(main)
+    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+    loop_phase = tirx.Var("loop_phase", "int32")
+    with target:
+        layouts = op.infer_layout(target, 128)
+        lowered = str(op.lower(layouts, target, tvm.ir.Range(0, 128), tirx.Var("tx", "int32"), loop_phase))
+
+    assert "ptx_tcgen05_mma_blockscaled_ss" in lowered
+    assert "tcgen05_mma_arrive" in lowered
+    if gemm_api == "gemm_blockscaled":
+        assert lowered.count("mbarrier_wait_parity") == 1
+        assert "loop_phase" in lowered
+        assert lowered.index("tcgen05_mma_arrive") < lowered.index("mbarrier_wait_parity")
+    else:
+        assert "mbarrier_wait_parity" not in lowered
+
+
 def test_mma_gemm_blockscaled_records_sf_layout():
     @T.prim_func
     def main(A: T.Tensor((128, 128), T.float4_e2m1fn), B: T.Tensor((128, 128), T.float4_e2m1fn)):
@@ -421,8 +469,18 @@ def _make_mxfp8_1cta_kernel(
     parametrized on the GEMM entry point. The 1-CTA path is the one that has
     no `use_2cta` short-circuit in instruction selection, so it exercises the
     scope/target driven block-scaled dispatch.
+
+    The MMA warp follows each entry point's completion contract. The explicit
+    `T.tcgen05_gemm_blockscaled` lets the MMA commit straight to the stage's
+    `consumed` barrier (or defers that arrival to `T.tcgen05_mma_arrive`).
+    The synchronous `T.gemm_blockscaled` waits implicitly on a single
+    `mma_done` barrier that flips once per iteration, so the MMA warp itself
+    releases the stage afterwards; an omitted wait would let the producer
+    overwrite shared memory the MMA is still reading.
     """
     gemm_fn = getattr(T, gemm_api)
+    sync_gemm = gemm_api == "gemm_blockscaled"
+    assert not (sync_gemm and defer_arrival), "the synchronous entry always publishes completion to its mbar"
 
     @tilelang.jit
     def kernel(A, B, SFA, SFB):
@@ -452,8 +510,12 @@ def _make_mxfp8_1cta_kernel(
 
             loaded = T.alloc_barrier([32] * num_stages)
             with_sf_full = T.alloc_barrier([32] * num_stages)
-            consumed = T.alloc_barrier([1] * num_stages)
+            # The tensor core commits to `consumed` with one arrival; the MMA
+            # warp releases it thread-wise after the synchronous wait.
+            consumed = T.alloc_barrier([32 if sync_gemm else 1] * num_stages)
             tmem_full = T.alloc_barrier([1])
+            if sync_gemm:
+                mma_done = T.alloc_barrier([1])
 
             tx = T.get_thread_binding()
 
@@ -494,21 +556,37 @@ def _make_mxfp8_1cta_kernel(
                     if k % sf_load_period == 0:
                         T.tcgen05_cp_warpx4(SFA_shared[stage, :], SFA_tmem)
                         T.tcgen05_cp_warpx4(SFB_shared[stage, :], SFB_tmem)
-                    gemm_fn(
-                        A_shared[stage, :, :],
-                        B_shared[stage, :, :],
-                        C_tmem,
-                        SFA_tmem,
-                        SFB_tmem,
-                        transpose_B=True,
-                        mbar=None if defer_arrival else consumed[stage],
-                        clear_accum=k == 0,
-                        k_start=k * block_K,
-                        sf_a_granularity_k=sf_granularity_k,
-                        sf_b_granularity_k=sf_granularity_k,
-                    )
-                    if defer_arrival:
-                        T.tcgen05_mma_arrive(consumed[stage])
+                    if sync_gemm:
+                        gemm_fn(
+                            A_shared[stage, :, :],
+                            B_shared[stage, :, :],
+                            C_tmem,
+                            SFA_tmem,
+                            SFB_tmem,
+                            transpose_B=True,
+                            mbar=mma_done,
+                            clear_accum=k == 0,
+                            k_start=k * block_K,
+                            sf_a_granularity_k=sf_granularity_k,
+                            sf_b_granularity_k=sf_granularity_k,
+                        )
+                        T.mbarrier_arrive(consumed[stage])
+                    else:
+                        gemm_fn(
+                            A_shared[stage, :, :],
+                            B_shared[stage, :, :],
+                            C_tmem,
+                            SFA_tmem,
+                            SFB_tmem,
+                            transpose_B=True,
+                            mbar=None if defer_arrival else consumed[stage],
+                            clear_accum=k == 0,
+                            k_start=k * block_K,
+                            sf_a_granularity_k=sf_granularity_k,
+                            sf_b_granularity_k=sf_granularity_k,
+                        )
+                        if defer_arrival:
+                            T.tcgen05_mma_arrive(consumed[stage])
                 T.tcgen05_mma_arrive(tmem_full)
 
             elif tx < 96:

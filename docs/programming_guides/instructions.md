@@ -98,10 +98,12 @@ GEMM and sparse GEMM
   a backend without an implementation rejects the op instead of dropping
   the scale factors. Current CUDA implementations select TCGEN05 on SM100
   with `C` in tensor memory or `mma.sync` on SM120 with `C` in a fragment.
-  The CUDA dialect adds `mbar`, `use_2cta` and `sf_layout`; TCGEN05 requires
-  an explicit completion barrier and a caller-managed wait. The explicit
-  variants `T.tcgen05_gemm_blockscaled` and `T.mma_gemm_blockscaled` remain
-  CUDA-only. `T.tcgen05_gemm_blockscaled(..., mbar=None)` defers the completion
+  The CUDA dialect adds `mbar`, `use_2cta` and `sf_layout`. Like `T.gemm`,
+  the op is synchronous: the TCGEN05 path requires a completion barrier and
+  TileLang inserts the matching `mbarrier_wait_parity` implicitly after
+  issue. The explicit variants `T.tcgen05_gemm_blockscaled` and
+  `T.mma_gemm_blockscaled` remain CUDA-only; `T.tcgen05_gemm_blockscaled`
+  never waits implicitly, and with `mbar=None` it defers the completion
   arrival to a later TCGEN05 operation or an explicit `T.tcgen05_mma_arrive`;
   the caller must wait for that completion before consuming the result.
 

@@ -238,14 +238,15 @@ class GemmTCGEN5(GemmBase):
     def _lower_blockscaled(self, mma_emitter, thread_bounds, thread_index, mbar_phase_expr: tirx.PrimExpr | None = None):
         """Lower block-scaled MXFP8 GEMM to TIR.
 
-        Completion is asynchronous: an explicit TCGEN05 op may omit `mbar`
-        when the caller or WS schedule emits a later completion arrival.
-        Otherwise the MMA posts completion to `mbar`. Waiting belongs to the
-        caller in both cases; this lowering never inserts an implicit wait.
+        Follows the same completion protocol as the dense TCGEN05 lowering:
+        the synchronous `T.gemm_blockscaled` posts completion to `mbar` and
+        waits on it right after issue, while the explicit `is_tcgen05` op
+        never waits and may omit `mbar` when the caller or WS schedule emits
+        a later completion arrival.
         """
         mbar = self.mbar
         if mbar is None and not self.is_tcgen05:
-            raise ValueError("Block-scaled GEMM requires a valid mbarrier")
+            raise ValueError("Synchronous block-scaled TCGEN5MMA requires a valid mbarrier")
         mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else None
 
         A_shared = self.ARegion
@@ -255,8 +256,7 @@ class GemmTCGEN5(GemmBase):
         SFA_tmem = self.SFARegion.buffer
         SFB_tmem = self.SFBRegion.buffer
         sf_k_start = self.sf_k_start
-        # No implicit wait consumes the barrier phase.
-        del mbar_phase_expr
+        mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
         annotations = getattr(self.gemm_node, "annotations", {})
         use_2cta = bool(annotations.get("use_2cta", 0))
@@ -290,6 +290,8 @@ class GemmTCGEN5(GemmBase):
                     sf_b_granularity_k=int(sf_b_granularity_k),
                     clear_accum=clear_accum,
                 )
+            if not self.is_tcgen05:
+                T.mbarrier_wait_parity(mbar, mbar_phase)
 
         @T.prim_func
         def _gemm_blockscaled() -> None:
@@ -306,6 +308,8 @@ class GemmTCGEN5(GemmBase):
                     sf_b_granularity_k=int(sf_b_granularity_k),
                     clear_accum=clear_accum,
                 )
+            if not self.is_tcgen05:
+                T.mbarrier_wait_parity(mbar, mbar_phase)
 
         return (
             _Simplify(_gemm_blockscaled, inline_let=True)
