@@ -32,7 +32,9 @@ std::vector<GemmImpl> &GemmImplRegistry() {
   return registry;
 }
 
-const GemmImpl &ResolveGemmImpl(Target target) {
+} // namespace
+
+const GemmImpl &ResolveGemmImpl(const Target &target) {
   const auto &registry = GemmImplRegistry();
   const GemmImpl *matched_impl = nullptr;
   for (const GemmImpl &impl : registry) {
@@ -50,8 +52,6 @@ const GemmImpl &ResolveGemmImpl(Target target) {
       << target->str();
   return *matched_impl;
 }
-
-} // namespace
 
 void RegisterGemmImpl(GemmImpl impl) {
   ICHECK(impl.name != nullptr);
@@ -75,13 +75,13 @@ void RegisterGemmImpl(GemmImpl impl) {
  *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
  *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
  *      (optional) mbar (BufferLoad or const-0 placeholder),
- *      cCoord_y (PrimExpr), cCoord_x (PrimExpr),
- *      (optional, blockscaled) SFA, SFB regions, k_start (PrimExpr)]
+ *      cCoord_y (PrimExpr), cCoord_x (PrimExpr)]
+ *   Block-scaled GEMM appends [SFA, SFB regions, k_start (PrimExpr)] and is
+ *   built through tl.tileop.gemm_blockscaled (GemmBlockScaled) instead.
  *   Backend lowering knobs (k_pack, wg_wait) ride in the annotations map.
  */
-Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<GemmNode> node = make_object<GemmNode>();
-
+void GemmNode::InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
+                                 const Map<String, ObjectRef> &annotations) {
   auto a_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto b_access = NormalizeToAccessRegion(args[1], kAccessRead);
   auto c_access = NormalizeToAccessRegion(args[2], kAccessReadWrite);
@@ -131,16 +131,18 @@ Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   }
   node->cCoords_ = Array<PrimExpr>(
       {args[11].as<PrimExpr>().value(), args[12].as<PrimExpr>().value()});
-  if (args.size() > 13) {
-    node->sfaRegion_ = NormalizeToBufferRegion(args[13]);
-  }
-  if (args.size() > 14) {
-    node->sfbRegion_ = NormalizeToBufferRegion(args[14]);
-  }
-  if (args.size() > 15) {
-    node->sfKStart_ = args[15].as<PrimExpr>().value();
-  }
   node->annotations_ = annotations;
+}
+
+Gemm::Gemm(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+  ICHECK_EQ(args.size(), 13)
+      << "tl.tileop.gemm expects exactly 13 positional slots, but got "
+      << args.size()
+      << "; a block-scaled GEMM (SFA, SFB, k_start) must be built as "
+         "tl.tileop.gemm_blockscaled so the scale factors are not silently "
+         "ignored.";
+  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+  GemmNode::InitFromDenseArgs(node.get(), args, annotations);
   data_ = std::move(node);
 }
 
@@ -151,12 +153,6 @@ AccessRegions GemmNode::GetAccessRegions() const {
   if (!is_one(clearAccum_)) {
     result.reads.push_back(cRegion_);
   }
-  if (sfaRegion_.defined()) {
-    result.reads.push_back(sfaRegion_);
-  }
-  if (sfbRegion_.defined()) {
-    result.reads.push_back(sfbRegion_);
-  }
   result.writes.push_back(cRegion_);
   return result;
 }
@@ -165,12 +161,6 @@ ffi::Array<BufferRegion> GemmNode::GetReadBeforeWriteRegions() const {
   ffi::Array<BufferRegion> result;
   result.push_back(aRegion_);
   result.push_back(bRegion_);
-  if (sfaRegion_.defined()) {
-    result.push_back(sfaRegion_);
-  }
-  if (sfbRegion_.defined()) {
-    result.push_back(sfbRegion_);
-  }
   // The accumulator's old contents are consumed only when the clear is
   // provably absent. GetAccessRegions() uses !is_one() because a clear that
   // cannot be proven still creates a read dependency for pipelining; here the
