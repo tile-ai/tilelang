@@ -11,6 +11,11 @@ H_per_block=64, num_ctas=1, and num_worker_warps=8 with the other defaults.
 Use --heads 64 --topk 512 --head-tile 64 --num-ctas 1 --worker-warps 8
 with the command-line example; set --seq-len 512 for the Flash reference point.
 
+The current cuTile 1.5 bridge uses signed 32-bit tensor strides. Contiguous
+Q/Output with seq_len * heads * dim >= 2**31 cannot launch through this
+bridge; Pro at S=32768, H=128, D=512 hits this limit. Flash at S=32768
+has been validated with the schedule above.
+
 The scheduling parameters are exposed for other shapes and GPUs; the defaults
 are a measured B200 tuning point, not a universal optimum. Requires the TileIR
 optional dependencies and a supported NVIDIA GPU.
