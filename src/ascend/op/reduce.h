@@ -19,8 +19,8 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
       << ") must be divisible by scale (" << scale << ")";
 }
 
-}
-}
-}
+} // namespace ascend
+} // namespace tl
+} // namespace tvm
 
 #endif
