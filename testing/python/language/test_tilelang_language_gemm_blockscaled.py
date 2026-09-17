@@ -249,6 +249,7 @@ def test_gemm_blockscaled_checks_2cta_n_extent():
                 )
 
 
+@tilelang.testing.requires_cuda
 def test_tcgen05_gemm_blockscaled_pins_tcgen05_path():
     @T.prim_func
     def main(A: T.Tensor((128, 128), T.float8_e4m3fn), B: T.Tensor((128, 128), T.float8_e4m3fn)):
@@ -273,11 +274,19 @@ def test_tcgen05_gemm_blockscaled_pins_tcgen05_path():
             )
 
     (call,) = _gemm_calls(main)
-    # Same op as T.gemm_blockscaled; the ISA is pinned through the annotation,
-    # exactly like T.tcgen05_gemm relative to T.gemm.
-    assert str(call.op.name) == "tl.tileop.gemm_blockscaled"
+    assert str(call.op.name) == "tl.tileop.tcgen05_gemm_blockscaled"
     assert len(call.args) == 16
-    assert int(_annotations(call)["is_tcgen05"]) == 1
+    # The explicit op's builder enforces TCGEN05 even if call annotations
+    # omit the frontend's marker, and still constructs the common scale-aware node.
+    from tilelang.tileop import GemmBlockScaled
+
+    annotations = _annotations(call)
+    annotations.pop("is_tcgen05")
+    op = call.op.get_attr("TLOpBuilder")(call.args, annotations)
+    assert isinstance(op, GemmBlockScaled)
+    assert op.isTcgen05
+    assert op.sfaRegion.buffer.name == "sfa"
+    assert op.sfbRegion.buffer.name == "sfb"
 
 
 @tilelang.testing.requires_cuda

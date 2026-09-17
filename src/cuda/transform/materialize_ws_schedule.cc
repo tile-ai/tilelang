@@ -87,6 +87,7 @@
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
@@ -2275,11 +2276,16 @@ private:
       return Evaluate(
           Call(call->dtype, call->op, call->args, std::move(ann), call->span));
     } else if (op.atom == OpAtom::kTcgen05Gemm) {
-      // Preserve the GEMM's operands and semantics. The schedule emits
-      // completion arrivals separately, so the op must not wait implicitly.
+      // The schedule publishes completion separately from each MMA issue.
+      Op async_op = Downcast<Op>(call->op);
+      if (async_op.same_as(Gemm::Get())) {
+        async_op = Op::Get("tl.tileop.tcgen05_gemm");
+      } else if (async_op.same_as(GemmBlockScaled::Get())) {
+        async_op = Op::Get("tl.tileop.tcgen05_gemm_blockscaled");
+      }
       ann.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
       return Evaluate(
-          Call(call->dtype, call->op, call->args, std::move(ann), call->span));
+          Call(call->dtype, async_op, call->args, std::move(ann), call->span));
     }
     LOG(FATAL) << "ws_schedule: unknown async atom "
                << static_cast<int>(op.atom);

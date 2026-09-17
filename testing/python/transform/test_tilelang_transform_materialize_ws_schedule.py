@@ -2014,8 +2014,10 @@ def test_tcgen05_async_arrive_count(blockscaled):
 
     tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
     (call,) = calls
-    # Scheduling preserves the mathematical op and marks explicit async issue.
-    assert call.op.name == ("tl.tileop.gemm_blockscaled" if blockscaled else "tl.tileop.gemm")
+    # Scheduling converts each GEMM to its explicit asynchronous CUDA op.
+    explicit_op = "tcgen05_gemm_blockscaled" if blockscaled else "tcgen05_gemm"
+    assert call.op.name == "tl.tileop." + explicit_op
+    assert "T." + explicit_op + "(" in script
     gemm = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
     assert gemm.isTcgen05
     assert gemm.mbar is None

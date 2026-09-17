@@ -68,7 +68,6 @@ ffi::String GemmBlockScaledNode::GetGemmInstructionKey(int block_size,
                                       block_size, target);
 }
 
-// Explicit ISA variants use this same op with an is_tcgen05 annotation.
 TIR_REGISTER_TL_TILE_OP(GemmBlockScaled, gemm_blockscaled)
     .set_num_inputs(-1)
     .set_attr<tirx::TCallEffectKind>("TCallEffectKind",

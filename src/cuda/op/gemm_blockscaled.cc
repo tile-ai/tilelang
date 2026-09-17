@@ -6,10 +6,12 @@
 #include "gemm_blockscaled.h"
 
 #include <cstdint>
+#include <utility>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/expr.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/op_attr_types.h>
 
 #include "cuda/target_utils.h"
 #include "op/tcgen5_meta.h"
@@ -19,6 +21,20 @@
 namespace tvm {
 namespace tl {
 namespace cuda {
+
+TVM_REGISTER_OP("tl.tileop.tcgen05_gemm_blockscaled")
+    .set_attr<tirx::TScriptPrinterName>("TScriptPrinterName",
+                                        "tcgen05_gemm_blockscaled")
+    .set_attr<OpBuilderFunc>(
+        "TLOpBuilder",
+        [](ffi::Array<PrimExpr> args,
+           ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
+          annotations.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
+          return GemmBlockScaled(std::move(args), std::move(annotations));
+        })
+    .set_num_inputs(-1)
+    .set_attr<tirx::TCallEffectKind>("TCallEffectKind",
+                                     Integer(tirx::CallEffectKind::kOpaque));
 
 ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
                                       int /*block_size*/,
