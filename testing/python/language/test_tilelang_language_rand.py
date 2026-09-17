@@ -123,5 +123,32 @@ def test_rand_init_in_split_guard(generator):
     assert (A[n:] == sentinel).all(), "rows outside the guard must stay untouched"
 
 
+
+# --- RNG hardening regressions (#3029) ---
+
+# Binding the void `rng_init` result is rejected either by the eager frontend
+# ("value-less expression") or, on paths that bypass it, by the CUDA codegen
+# ("cannot be bound to variable"). Either diagnostic is acceptable; the contract
+# is that malformed CUDA never reaches nvcc.
+_VOID_BINDING_MATCH = "value-less expression|cannot be bound to variable"
+
+
+def _bind_init_result_kernel(seed=1234):
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "uint32")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            _state = T.rng_init(seed)
+            Out[tx] = T.rng_rand()
+
+    return rand_kernel
+
+
+@tilelang.testing.requires_cuda
+def test_rand_init_result_cannot_be_bound():
+    """#3029: binding the void rng_init result is rejected before nvcc."""
+    with pytest.raises(Exception, match=_VOID_BINDING_MATCH):
+        tilelang.compile(_bind_init_result_kernel())
+
 if __name__ == "__main__":
     tilelang.testing.main()
