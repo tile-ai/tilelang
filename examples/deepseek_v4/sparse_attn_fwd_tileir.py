@@ -6,6 +6,11 @@ TopK indices are staged once and reused by masking and KV gather, with TMA
 explicitly disabled for the index copy. Indices must be -1 (padding) or valid
 KV row indices. An all-padding query produces zero output through its sink.
 
+For Flash shapes (H=64, D=512, topk=512), B200 measurements favor
+H_per_block=64, num_ctas=1, and num_worker_warps=8 with the other defaults.
+Use --heads 64 --topk 512 --head-tile 64 --num-ctas 1 --worker-warps 8
+with the command-line example; set --seq-len 512 for the Flash reference point.
+
 The scheduling parameters are exposed for other shapes and GPUs; the defaults
 are a measured B200 tuning point, not a universal optimum. Requires the TileIR
 optional dependencies and a supported NVIDIA GPU.

@@ -12,22 +12,23 @@ from sparse_attn_fwd_tileir import check_output, sparse_attn_fwd
 @tilelang.testing.requires_cuda_compute_version(9)
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 @pytest.mark.parametrize(
-    "heads,head_tile,seq_len,dim,num_ctas,padded",
+    "heads,head_tile,seq_len,dim,topk,num_ctas,worker_warps,padded",
     [
-        (128, 128, 8, 128, 2, False),
-        (256, 128, 7, 64, 2, True),
-        (128, 64, 5, 128, 1, True),
-        (16, 16, 1, 256, 2, True),
-        (32, 32, 3, 128, 2, True),
+        (128, 128, 8, 128, 128, 2, 4, False),
+        (256, 128, 7, 64, 128, 2, 4, True),
+        (128, 64, 5, 128, 128, 1, 4, True),
+        (16, 16, 1, 256, 128, 2, 4, True),
+        (32, 32, 3, 128, 128, 2, 4, True),
+        (64, 64, 7, 512, 512, 1, 8, True),
     ],
 )
-def test_sparse_attn_fwd_tileir(dtype, heads, head_tile, seq_len, dim, num_ctas, padded):
+def test_sparse_attn_fwd_tileir(dtype, heads, head_tile, seq_len, dim, topk, num_ctas, worker_warps, padded):
     try:
         check_tileir_available()
     except TileIRDependencyError as exc:
         pytest.skip(str(exc))
     torch.manual_seed(42)
-    batch, seq_len_kv, topk = 2, 256, 128
+    batch, seq_len_kv = 2, 256
     torch_dtype = getattr(torch, dtype)
     q = torch.randn(batch, seq_len, heads, dim, device="cuda", dtype=torch_dtype)
     kv = torch.randn(batch, seq_len_kv, dim, device="cuda", dtype=torch_dtype)
@@ -46,6 +47,7 @@ def test_sparse_attn_fwd_tileir(dtype, heads, head_tile, seq_len, dim, num_ctas,
         dtype=T.dtype(dtype),
         H_per_block=head_tile,
         num_ctas=num_ctas,
+        num_worker_warps=worker_warps,
     )
     output = kernel(q, kv, indices, sinks)
     check_output(output, q, kv, indices, sinks)
