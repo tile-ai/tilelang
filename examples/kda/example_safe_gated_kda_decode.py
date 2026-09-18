@@ -15,6 +15,23 @@ import tilelang
 import tilelang.language as T
 
 
+def validate_safe_gated_kda_state_indices(
+    state_indices: torch.Tensor,
+    *,
+    batch: int,
+    num_slots: int,
+) -> None:
+    """Validate state-slot ownership before launching a decode kernel."""
+    if state_indices.shape != (batch,):
+        raise ValueError("state_indices must have shape [batch]")
+
+    active_indices = state_indices[state_indices >= 0].to(torch.int64)
+    if active_indices.numel() and int(active_indices.max()) >= num_slots:
+        raise ValueError("state index is outside the state pool")
+    if active_indices.numel() and torch.unique(active_indices).numel() != active_indices.numel():
+        raise ValueError("active state indices must be unique within a batch")
+
+
 def safe_gated_kda_decode_reference(
     mixed_qkv: torch.Tensor,
     a: torch.Tensor,
@@ -53,14 +70,11 @@ def safe_gated_kda_decode_reference(
         raise ValueError("A_log must have shape [value_heads]")
     if dt_bias.shape != (num_value_heads * key_dim,):
         raise ValueError("dt_bias must have shape [value_heads * key_dim]")
-    if state_indices.shape != (batch,):
-        raise ValueError("state_indices must have shape [batch]")
-
-    active_indices = state_indices[state_indices >= 0].to(torch.int64)
-    if active_indices.numel() and torch.unique(active_indices).numel() != active_indices.numel():
-        raise ValueError("active state indices must be unique within a batch")
-    if active_indices.numel() and int(active_indices.max()) >= state.shape[0]:
-        raise ValueError("state index is outside the state pool")
+    validate_safe_gated_kda_state_indices(
+        state_indices,
+        batch=batch,
+        num_slots=state.shape[0],
+    )
 
     if scale is None:
         scale = key_dim**-0.5
@@ -230,6 +244,25 @@ def safe_gated_kda_decode(
     return kernel
 
 
+def run_safe_gated_kda_decode(
+    kernel,
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state: torch.Tensor,
+    state_indices: torch.Tensor,
+) -> torch.Tensor:
+    """Validate mutable-slot ownership and launch a specialized KDA kernel."""
+    validate_safe_gated_kda_state_indices(
+        state_indices,
+        batch=mixed_qkv.shape[0],
+        num_slots=state.shape[0],
+    )
+    return kernel(mixed_qkv, a, b, A_log, dt_bias, state, state_indices)
+
+
 def _run_example() -> None:
     """Run one GLM-5.3-shaped correctness check on the active accelerator."""
     torch.manual_seed(0)
@@ -278,7 +311,16 @@ def _run_example() -> None:
         key_dim,
         value_dim,
     )
-    actual = kernel(mixed_qkv, a, b, A_log, dt_bias, actual_state, state_indices)
+    actual = run_safe_gated_kda_decode(
+        kernel,
+        mixed_qkv,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        actual_state,
+        state_indices,
+    )
 
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(actual_state, expected_state, rtol=2e-3, atol=2e-3)

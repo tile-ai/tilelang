@@ -25,6 +25,8 @@ request owns one mutable state slot.
 Positive indices outside the configured state pool are invalid: the reference
 rejects them, while the device kernel defensively produces zero output without
 reading or writing state so a bypassed host check cannot corrupt GPU memory.
+Call `run_safe_gated_kda_decode` at the host launch boundary to validate both
+the range and uniqueness contracts before parallel state updates begin.
 
 The default activation/state types are BF16/FP32. GLM-5.3-Flash with TP8 uses
 eight local Q/K/V heads with `key_dim=value_dim=128` and `lower_bound=-5.0`.

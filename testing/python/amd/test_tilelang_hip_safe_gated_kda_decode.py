@@ -11,6 +11,7 @@ _EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "examples" / "kda"
 sys.path.insert(0, str(_EXAMPLE_DIR))
 
 from example_safe_gated_kda_decode import (  # noqa: E402
+    run_safe_gated_kda_decode,
     safe_gated_kda_decode,
     safe_gated_kda_decode_reference,
 )
@@ -98,7 +99,16 @@ def _assert_step(
         num_q_heads=num_q_heads,
         lower_bound=lower_bound,
     )
-    actual = kernel(mixed_qkv, a, b, A_log, dt_bias, actual_state, state_indices)
+    actual = run_safe_gated_kda_decode(
+        kernel,
+        mixed_qkv,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        actual_state,
+        state_indices,
+    )
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(actual_state, expected_state, rtol=2e-3, atol=2e-3)
     return actual
@@ -252,6 +262,42 @@ def test_safe_gated_kda_decode_out_of_range_slot_is_guarded():
         block_v=8,
         threads=128,
     )
+    with pytest.raises(ValueError, match="outside the state pool"):
+        run_safe_gated_kda_decode(kernel, *inputs[:-1], actual_state, state_indices)
+
+    # The raw kernel also prevents an invalid slot from reaching State if a
+    # trusted caller bypasses the host-side contract check.
     actual = kernel(*inputs[:-1], actual_state, state_indices)
     torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
     torch.testing.assert_close(actual_state, initial_state, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_rocm
+def test_safe_gated_kda_decode_duplicate_active_slots_are_rejected():
+    """Reject duplicate active slots before launching parallel state updates."""
+    batch, num_slots = 2, 2
+    num_q_heads = num_value_heads = 2
+    key_dim = value_dim = 32
+    inputs = _make_inputs(
+        batch=batch,
+        num_slots=num_slots,
+        num_q_heads=num_q_heads,
+        num_value_heads=num_value_heads,
+        key_dim=key_dim,
+        value_dim=value_dim,
+        seed=89,
+    )
+    state_indices = torch.tensor([0, 0], device="cuda", dtype=torch.int32)
+    kernel = safe_gated_kda_decode(
+        batch,
+        num_slots,
+        num_q_heads,
+        num_value_heads,
+        key_dim,
+        value_dim,
+        block_v=8,
+        threads=128,
+    )
+
+    with pytest.raises(ValueError, match="unique within a batch"):
+        run_safe_gated_kda_decode(kernel, *inputs[:-1], inputs[-1], state_indices)
