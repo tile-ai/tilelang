@@ -56,6 +56,20 @@ def ref_program(logits, top_k):
     return top_k_gates, top_k_indices.to(torch.int32)
 
 
+def validate_topk(logits, topk, blk_m, threads=None):
+    """Compare one explicit Top-K launch configuration with PyTorch."""
+    kwargs = {"blk_m": blk_m}
+    if threads is not None:
+        kwargs["threads"] = threads
+
+    tl_gates, tl_indices = tl_topk(logits, topk, **kwargs)
+    torch_gates, torch_indices = ref_program(logits, topk)
+
+    torch.testing.assert_close(tl_gates, torch_gates)
+    torch.testing.assert_close(tl_indices, torch_indices)
+    return tl_gates, tl_indices
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--M", type=int, default=320, help="num_tokens")
@@ -67,13 +81,7 @@ def main(argv=None):
 
     logits = torch.rand((M, N), device="cuda", dtype=torch.float32)
 
-    tl_gates, tl_indices = tl_topk(logits, topk, blk_m=blk_m)
-
-    torch_gates, torch_indices = ref_program(logits, topk)
-
-    # test accuracy
-    torch.testing.assert_close(tl_gates, torch_gates)
-    torch.testing.assert_close(tl_indices, torch_indices)
+    validate_topk(logits, topk, blk_m)
 
     # profile
     from tilelang.profiler import do_bench
