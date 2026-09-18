@@ -19,6 +19,7 @@ from sparse_attn_fwd_tileir import check_output, sparse_attn_fwd
         (128, 64, 5, 128, 128, 1, 4, True),
         (16, 16, 1, 256, 128, 2, 4, True),
         (32, 32, 3, 128, 128, 2, 4, True),
+        (128, 128, 7, 512, 1024, 2, 4, True),
         (64, 64, 7, 512, 512, 1, 8, True),
     ],
 )
@@ -37,6 +38,9 @@ def test_sparse_attn_fwd_tileir(dtype, heads, head_tile, seq_len, dim, topk, num
     if padded:
         indices[:, :, ::3] = -1
         indices[0, 0, :] = -1
+        if seq_len >= 3:
+            indices[0, 1, :64] = -1
+            indices[0, 2, -64:] = -1
     kernel = sparse_attn_fwd(
         batch,
         heads,

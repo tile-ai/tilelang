@@ -1,13 +1,25 @@
 """DeepSeek V4 MQA sparse attention with a TileIR-specific schedule.
 
-For shapes (H=64, D=512, topk=512), B200 measurements favor
+The defaults are tuned for Pro shapes (H=128, D=512, topk=1024) on B200
+with bf16. Each program handles one query position and a tile of heads.
+Indices must be -1 (padding) or valid KV row indices. Padding indices are
+clamped before gathering KV and masked out of softmax.
+
+For Flash shapes (H=64, D=512, topk=512), B200 measurements favor
 H_per_block=64, num_ctas=1, and num_worker_warps=8 with the other defaults.
 Use --heads 64 --topk 512 --head-tile 64 --num-ctas 1 --worker-warps 8
 with the command-line example; set --seq-len 512 for the DSV4 Flash config
 reference point.
 
-Might need to autotune for other shape.
+The cuTile 1.5 runtime requires non-singleton tensor strides to fit signed
+32-bit integers. For contiguous Pro Q/Output at S=32768, the batch stride
+is 2**31 elements: B=8 fails with ``OverflowError: stride is too big``.
+B=1 passes with the tested runtime because the batch dimension is a
+singleton. Flash at S=32768 passes for B=1 and B=8. Both SKV=8192 and
+SKV=32768 were checked; no stride rewriting or batching workaround is used.
 
+Other shapes and GPUs may require tuning. Requires the optional TileIR
+dependencies and a supported NVIDIA GPU.
 """
 
 import argparse
