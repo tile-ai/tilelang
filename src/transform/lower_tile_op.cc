@@ -65,34 +65,37 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
   if (IsSharedBuffer(buffer)) {
-    arith::Analyzer analyzer;
-    // Symbolic layout bounds may contain sign-dependent expressions. Buffer
-    // dimensions are positive whenever the allocation is accessed.
-    PrimExpr nonempty = Bool(true);
-    for (const auto &shape : buffer->shape) {
-      nonempty = And(nonempty, shape > 0);
-    }
-    With<arith::ConstraintContext> constraint(&analyzer, nonempty);
-    output_shape = output_shape.Map(
-        [&](const PrimExpr &shape) { return analyzer.Simplify(shape); });
-    PrimExpr buffer_extent = Integer(1);
-    PrimExpr layout_extent = Integer(1);
-    for (const auto &shape : buffer->shape) {
-      buffer_extent = buffer_extent * shape;
-    }
-    for (const auto &shape : output_shape) {
-      layout_extent = layout_extent * shape;
-    }
-    PrimExpr replicate_extent =
-        analyzer.Simplify(floordiv(buffer_extent, layout_extent));
-    if (const auto *replicate = replicate_extent.as<IntImmNode>()) {
-      if (replicate->value > 1) {
-        output_shape.insert(output_shape.begin(), replicate_extent);
+    // A shared tile only carries a layout with compile-time extents: the
+    // replication factor below, swizzles, TMA boxes and the shared-memory
+    // budget all need constant sizes. Symbolic extents reach here both from
+    // T.annotate_layout and from ops that infer shared layouts (scan), so the
+    // check lives at the remap site rather than on the annotation path.
+    int buffer_extent = 1;
+    for (const PrimExpr &shape : buffer->shape) {
+      const auto *extent = shape.as<IntImmNode>();
+      if (extent == nullptr) {
+        TVM_FFI_THROW(ValueError)
+            << "Shared buffer `" << buffer->name << "` has symbolic extent "
+            << shape << ", but a layout on a shared buffer requires "
+            << "compile-time constant tile extents. Allocate the tile with "
+            << "static extents, or drop the layout on it.";
       }
-    } else {
-      ICHECK(analyzer.CanProve(replicate_extent <= 1))
-          << "Cannot determine shared buffer replication for " << buffer->name
-          << ": " << replicate_extent;
+      buffer_extent *= extent->value;
+    }
+    int layout_extent = 1;
+    for (const PrimExpr &shape : layout_shape) {
+      const auto *extent = shape.as<IntImmNode>();
+      if (extent == nullptr) {
+        TVM_FFI_THROW(ValueError)
+            << "Layout for shared buffer `" << buffer->name
+            << "` has symbolic output extent " << shape
+            << ", but shared layouts require compile-time constant extents.";
+      }
+      layout_extent *= extent->value;
+    }
+    int replicate_extent = buffer_extent / layout_extent;
+    if (replicate_extent > 1) {
+      output_shape.insert(output_shape.begin(), replicate_extent);
     }
   }
   return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
