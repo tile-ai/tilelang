@@ -33,6 +33,7 @@
 #include "transform/common/pipeline_utils.h"
 #include "transform/loop_partition.h"
 
+#include "ascend/transform/buffer_alias.h"
 #include "ascend/transform/buffer_version.h"
 #include "ascend/transform/vf_regions.h"
 
@@ -1231,6 +1232,16 @@ private:
       }
     }
     Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    if (op->attr_key == tl::kBufferAliasMap) {
+      auto aliases = op->node.try_cast<BufferAliasMap>();
+      ICHECK(aliases.has_value())
+          << "'" << tl::kBufferAliasMap
+          << "' AttrStmt node must be a buffer alias map";
+      AttrStmt attr = Downcast<AttrStmt>(std::move(stmt));
+      attr.CopyOnWrite()->node =
+          RemapBufferAliasMap(aliases.value(), var_remap_);
+      return attr;
+    }
     // Buffer version metadata keys buffer data vars, which this pass
     // rewrites; remap the keys so the multi-buffer passes downstream keep
     // finding their storages. The map deliberately keys by Var identity:

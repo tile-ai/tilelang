@@ -406,6 +406,7 @@ SBlock EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
   annotations.erase(kManualMultiBuffer);
   annotations.erase(kBufferVersionMode);
   annotations.erase(kUnlimitMemoryScopes);
+  annotations.erase(kBufferAliasMap);
   annotations.erase(kVectorCount);
   annotations.erase(kRootConflictHints);
   if (!scheduled_tir.metadata.buffer_versions.empty()) {
@@ -423,6 +424,11 @@ SBlock EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
   if (!scheduled_tir.metadata.unlimit_memory_scopes.empty()) {
     annotations.Set(kUnlimitMemoryScopes,
                     std::move(scheduled_tir.metadata.unlimit_memory_scopes));
+  }
+  if (scheduled_tir.metadata.has_buffer_aliases) {
+    ValidateBufferAliasMap(scheduled_tir.metadata.buffer_aliases);
+    annotations.Set(kBufferAliasMap,
+                    std::move(scheduled_tir.metadata.buffer_aliases));
   }
   if (scheduled_tir.metadata.num_aiv_subcores.has_value()) {
     annotations.Set(kVectorCount,
@@ -462,6 +468,12 @@ ScheduledTIR DecodeScheduledTIR(const SBlock &root, const ConstrSet &outer_ctx,
   if (auto value = root->annotations.Get(kUnlimitMemoryScopes)) {
     scheduled_tir.metadata.unlimit_memory_scopes =
         value.value().cast<Array<String>>();
+  }
+  if (auto value = root->annotations.Get(kBufferAliasMap)) {
+    scheduled_tir.metadata.buffer_aliases =
+        value.value().cast<BufferAliasMap>();
+    ValidateBufferAliasMap(scheduled_tir.metadata.buffer_aliases);
+    scheduled_tir.metadata.has_buffer_aliases = true;
   }
   if (auto value = root->annotations.Get(kVectorCount)) {
     const auto *count = value.value().as<IntImmNode>();

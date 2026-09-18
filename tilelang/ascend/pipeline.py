@@ -16,6 +16,8 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 
 from . import transform as ascend_transform
 
+_MERGE_UB_ALIGNMENT = 32
+
 
 def allow_autoschedule(pass_ctx=None) -> bool:
     """Whether the Ascend auto-scheduler should run for this pass context.
@@ -48,6 +50,8 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         launch_dim_tags=["cthread"],
     )(mod)
     pass_ctx = tilelang.transform.get_pass_context()
+    auto_schedule_enabled = allow_autoschedule(pass_ctx=pass_ctx)
+    disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
 
     if should_force_let_inline(pass_ctx=pass_ctx):
         mod = tilelang.transform.LetInline()(mod)
@@ -96,7 +100,7 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # asc_fill_l1. Must run before AutoSchedule.
     mod = ascend_transform.AscendInsertOOBPadding()(mod)
 
-    if allow_autoschedule(pass_ctx=pass_ctx):
+    if auto_schedule_enabled:
         mod = ascend_transform.NormalizeControlFlowForSchedule()(mod)
         mod = ascend_transform.NormalizeConflictHints()(mod)
         mod = ascend_transform.MaterializeScheduleUnits()(mod)
@@ -162,9 +166,10 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.SplitHostDevice()(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
-    disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
+    if not auto_schedule_enabled:
+        mod = ascend_transform.InferBufferAliases()(mod)
     mod = ascend_transform.MergeUBAllocations(
-        align_bytes=32,
+        align_bytes=_MERGE_UB_ALIGNMENT,
         disable_reuse=disable_reuse,
     )(mod)
 

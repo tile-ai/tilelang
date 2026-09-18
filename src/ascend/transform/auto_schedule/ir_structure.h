@@ -109,6 +109,25 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
   return true;
 }
 
+// Return true only when every point in `inner` is provably contained in
+// `outer`. This is stricter than overlap and is suitable for checking whether
+// one task's declared write footprint fully defines another task's read.
+inline bool RegionCovers(const Region &outer, const Region &inner) {
+  if (outer.size() != inner.size())
+    return false;
+
+  arith::Analyzer analyzer;
+  for (size_t i = 0; i < outer.size(); ++i) {
+    PrimExpr outer_end = outer[i]->min + outer[i]->extent;
+    PrimExpr inner_end = inner[i]->min + inner[i]->extent;
+    if (!analyzer.CanProve(outer[i]->min <= inner[i]->min) ||
+        !analyzer.CanProve(inner_end <= outer_end)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 constexpr int64_t kDynamicSerialTripCountFallback = 100;
 
 inline int64_t GetSerialTripCount(const For &loop,
@@ -355,7 +374,7 @@ public:
   // only TaskNode stores a settable mask.
   virtual uint16_t GetHbmMask() const = 0;
 
-  // Memory access regions (collected during analysis)
+  // Logical access regions. Physical footprints are derived from current IR.
   virtual std::vector<BufferRegion> GetReadRegions() const = 0;
   virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
 
@@ -502,7 +521,7 @@ public:
   // A copy that stores to GM in this leaf reads the atomic-mode register.
   bool ReadsAtomicRegister() const override { return reads_atomic_; }
 
-  // Memory access regions (collected during analysis)
+  // Logical access regions. Physical footprints are derived from current IR.
   std::vector<BufferRegion> GetReadRegions() const override {
     return read_regions_;
   }
@@ -627,10 +646,9 @@ private:
   // inferred or explicitly marked candidate.
   bool is_per_core_task_{false};
 
-  // Memory access regions (collected during analysis)
+  // Logical access regions. Physical footprints are derived from current IR.
   std::vector<BufferRegion> read_regions_;
   std::vector<BufferRegion> write_regions_;
-
   std::vector<Var> read_vars_;
   std::vector<Var> write_vars_;
 

@@ -7,8 +7,11 @@ synchronization, corrupting kernels.
 These tests assert the reuse decisions on the MergeUBAllocations-after IR.
 """
 
+import pytest
+
 import tilelang
 import tilelang.ascend.language as T
+from tilelang.ascend import transform as ascend_transform
 from tilelang import tvm
 from tilelang.engine.lower import lower
 from tvm import tirx
@@ -75,15 +78,18 @@ def _make_two_gemm_program(M=512, K=128, N=128, dtype="bfloat16"):
 
 
 def _merge_after_module():
-    """Lower the two-gemm program and return the MergeUBAllocations-after
-    IRModule.
+    """Run manual alias inference on the final lowered two-gemm program.
+
+    The program requires AutoSchedule to lower ``T.MixedKernel``. Capture the
+    unified merge pass's input, replace AutoSchedule's contract with the manual
+    inference result, then run the common allocator.
     """
 
     snapshots = {}
 
     @tvm.ir.instrument.pass_instrument
     class CaptureMerge:
-        def run_after_pass(self, mod, info):
+        def run_before_pass(self, mod, info):
             if info.name == "tl.MergeUBAllocations":
                 snapshots["mod"] = mod
 
@@ -98,7 +104,8 @@ def _merge_after_module():
 
     assert "mod" in snapshots, "tl.MergeUBAllocations pass not observed"
 
-    return snapshots["mod"]
+    mod = ascend_transform.InferBufferAliases()(snapshots["mod"])
+    return ascend_transform.MergeUBAllocations(align_bytes=32)(mod)
 
 
 def _var_name(x):
@@ -340,7 +347,8 @@ def test_set_copy_pad_value_buffer_load_uses_scalar_pipe():
     )
 
 
-def test_pipe_all_barrier_is_full_core_fence():
+@pytest.mark.parametrize("disable_reuse", [False, True])
+def test_pipe_all_barrier_is_full_core_fence(disable_reuse):
     """PIPE_ALL must be modeled as a full-core fence (kAll).
 
     The fence serializes the lifetimes it separates.
@@ -350,18 +358,23 @@ def test_pipe_all_barrier_is_full_core_fence():
     """
 
     snapshots = {}
+    scripts = {}
 
     @tvm.ir.instrument.pass_instrument
     class CaptureMerge:
         def run_after_pass(self, mod, info):
+            if info.name == "tl.InferBufferAliases":
+                scripts[info.name] = mod.script()
             if info.name == "tl.MergeUBAllocations":
                 snapshots["mod"] = mod
+                scripts[info.name] = mod.script()
 
     with tvm.transform.PassContext(
         opt_level=3,
         instruments=[CaptureMerge()],
         config={
             tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False,
+            tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE.value: disable_reuse,
         },
     ):
         lower(
@@ -370,12 +383,14 @@ def test_pipe_all_barrier_is_full_core_fence():
         )
 
     assert "mod" in snapshots, "tl.MergeUBAllocations pass not observed"
+    assert "tl.buffer_alias_map" in scripts["tl.InferBufferAliases"]
+    assert "tl.buffer_alias_map" not in scripts["tl.MergeUBAllocations"]
 
     arena = _dyn_shmem_arena_bytes(snapshots["mod"])
-    single_slot = 64 * 4  # one float32 staging buffer
+    expected_arena = 64 * 4 * (2 if disable_reuse else 1)
 
-    assert arena == single_slot, (
-        f"PIPE_ALL fence dropped by MergeUBAllocations (u1/u2 not reused): UB arena={arena}B, expected {single_slot}B (one shared slot)"
+    assert arena == expected_arena, (
+        f"Incorrect PIPE_ALL reuse layout with disable_reuse={disable_reuse}: UB arena={arena}B, expected {expected_arena}B"
     )
 
 

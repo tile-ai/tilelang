@@ -21,10 +21,18 @@ def PerCoreTask():
     The compiler preserves explicit ``T.Task()`` candidates and infers markers
     for the remaining supported dependency-bearing candidate boundaries.
     Explicit and inferred candidates may therefore be mixed in one region.
-    Every candidate must use the same single hardware pipe and access the same
-    logical read/write buffers. Exactly one candidate must execute on each core
-    in each dynamic invocation of the PerCoreTask; this dynamic property is a
-    user control-flow contract.
+    Every candidate must use the same single hardware pipe and represent the
+    same logical read/write role. For every dynamic invocation and every
+    participating block index, the candidate guards must be mutually exclusive
+    and collectively exhaustive: exactly one candidate must execute on each
+    core. Conditions inside this scope may dispatch by block/core ID, but must
+    not make the operation data-dependent, optional, or executable more than
+    once on one core. This exact-once property is a user control-flow contract.
+
+    Keep the complete block-index dispatch inside one ``T.PerCoreTask()``. Do
+    not put separate ``T.PerCoreTask()`` regions in sibling conditional branches:
+    the scheduler would treat those as unrelated logical tasks rather than
+    alternative sites of one operation.
 
     Scalar bindings may remain outside candidate markers when they do not
     access buffers and therefore cannot form buffer dependencies with statements

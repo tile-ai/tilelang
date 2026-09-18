@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "../buffer_alias.h"
 #include "../buffer_version.h"
 #include "../core_mask.h"
 #include "./ir_structure.h"
@@ -87,6 +88,10 @@ struct ScheduledTIRMetadata {
   BufferVersionModeMap buffer_version_modes;
   // Memory scopes whose scheduler capacity limit is disabled.
   ffi::Array<ffi::String> unlimit_memory_scopes;
+  // Positive storage-alias proof produced by InsertSync. An explicit presence
+  // bit distinguishes a valid empty contract from pre-InsertSync snapshots.
+  BufferAliasMap buffer_aliases;
+  bool has_buffer_aliases{false};
   // Number of AIV subcores requested by T.MixedKernel. Absent for T.Kernel.
   std::optional<int> num_aiv_subcores;
   // Conflict declarations attached to the kernel's outermost sequence.

@@ -24,6 +24,7 @@
 
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/scheduled_tir.h"
+#include "buffer_alias.h"
 
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
@@ -713,8 +714,22 @@ tvm::transform::Pass LowerScheduledTIR() {
               DecodeScheduledTIR(root, context.outer_ctx);
           int vector_count =
               scheduled_tir.metadata.num_aiv_subcores.value_or(2);
-          root.CopyOnWrite()->body =
+          Optional<BufferAliasMap> aliases;
+          if (auto value = root->annotations.Get(kBufferAliasMap)) {
+            aliases = value.value().cast<BufferAliasMap>();
+            ValidateBufferAliasMap(aliases.value());
+          }
+          Stmt body =
               LowerScheduledKernel(root->body, context.outer_sid, vector_count);
+          SBlockNode *writer = root.CopyOnWrite();
+          if (aliases.has_value()) {
+            Map<String, ffi::Any> annotations = writer->annotations;
+            annotations.erase(kBufferAliasMap);
+            writer->annotations = std::move(annotations);
+            body = AttrStmt(aliases.value(), kBufferAliasMap, Integer(1),
+                            std::move(body));
+          }
+          writer->body = std::move(body);
           return root;
         });
     Stmt body = ReNestAttrStmts(func->body);

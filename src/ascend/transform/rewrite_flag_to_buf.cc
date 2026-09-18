@@ -23,8 +23,10 @@
  * A hard_event whose sync points total <= 8 is left entirely as flags
  * (unchanged); a kernel with no such overflow is a no-op.
  *
- * Must run AFTER MergeUBAllocations, which relies on set_flag/wait_flag as its
- * liveness-graph anchors and cannot model asc_lock/asc_unlock.
+ * Must run after InferBufferAliases for manual schedules, because that pass
+ * relies on set_flag/wait_flag as liveness-graph anchors and cannot model
+ * asc_lock/asc_unlock. The standard pipeline places this after
+ * MergeUBAllocations.
  */
 
 #include <tvm/arith/analyzer.h>

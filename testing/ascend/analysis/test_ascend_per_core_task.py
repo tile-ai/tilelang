@@ -134,6 +134,9 @@ def _assert_per_core_mte2_mte1_sync(source: str):
     wait_flag = "asc_sync_wait(PIPE_MTE2, PIPE_MTE1,"
     assert source.count(set_flag) == 2
     assert source.count(wait_flag) == 1
+    candidate_branches = re.findall(r"  if \([^\n]*block_idx[^\n]*\) \{\n(.*?)\n  \}", source, re.DOTALL)
+    assert len(candidate_branches) == 2
+    assert all(set_flag in branch for branch in candidate_branches)
 
 
 def test_per_core_explicit_tasks_drive_sync_migration():

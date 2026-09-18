@@ -164,11 +164,20 @@ def AscendInsertOOBPadding():
     return _ffi_api.AscendInsertOOBPadding()  # type: ignore
 
 
-def MergeUBAllocations(align_bytes: int = 16, disable_reuse: bool = False):
-    """MergeUBAllocations
+def InferBufferAliases():
+    """Infer which on-chip buffers in a manually scheduled kernel may reuse storage.
 
-    Merge multiple Ascend Unified Buffer (and L0/L1) allocations into one,
-    using synchronization-graph-based liveness analysis for UB reuse.
+    The resulting pairwise compatibility contract is consumed by
+    :func:`MergeUBAllocations`.
+    """
+    return _ffi_api.InferBufferAliases()  # type: ignore
+
+
+def MergeUBAllocations(align_bytes: int = 16, disable_reuse: bool = False):
+    """Merge Ascend on-chip allocations from a pairwise reuse contract.
+
+    AutoSchedule writes this contract during synchronization insertion. Manual
+    schedules must run :func:`InferBufferAliases` first.
 
     Buffer reuse is always performed unless ``disable_reuse`` is set.
 
@@ -206,8 +215,9 @@ def RewriteFlagToBuf():
     get_buf/rls_buf pairs. Hard_events fitting within 8 slots are untouched, and
     a kernel with no overflow is a no-op.
 
-    Must run after MergeUBAllocations (which uses set_flag/wait_flag as its
-    liveness-graph anchors).
+    Must run after InferBufferAliases for manual schedules because alias
+    inference uses set_flag/wait_flag as its liveness-graph anchors. The
+    standard pipeline places this after MergeUBAllocations.
     """
     return _ffi_api.RewriteFlagToBuf()  # type: ignore
 
@@ -226,9 +236,11 @@ __all__ = [
     "InsertSync",
     "LowerScheduledTIR",
     "EstimateLatency",
+    "InferBufferAliases",
     "InsertNd2Nz",
     "LegalizeSimdMerging",
     "MarkScalarDcacheBypass",
+    "MaterializeMultiBuffer",
     "MergeUBAllocations",
     "NormalizeBufferVersion",
     "NormalizeControlFlowForSchedule",

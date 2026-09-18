@@ -90,6 +90,8 @@ def test_auto_schedule_rewrites_every_tilelang_kernel():
     synchronized = snapshots["tl.InsertSync"][0]
     materialized = snapshots["tl.MaterializeMultiBuffer"][0]
     lowered = snapshots["tl.LowerScheduledTIR"][0]
+    assert synchronized.count("tl.buffer_alias_map") == 2
+    assert lowered.count("tl.buffer_alias_map") == 2
     assert '"tl.schedule_unit"' in scheduled
     assert '"tl.schedule_unit"' in first_assigned
     assert '"tl.schedule_unit"' in prepared

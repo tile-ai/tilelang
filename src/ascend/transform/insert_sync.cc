@@ -51,6 +51,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include "./auto_schedule/buffer_alias_analysis.h"
 #include "./auto_schedule/dependency_analysis.h"
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/multi_buffer.h"
@@ -59,6 +60,7 @@
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/op/builtin.h"
 #include "ascend/transform/attr.h"
+#include "buffer_alias.h"
 #include "buffer_version.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -398,6 +400,32 @@ public:
         });
   }
 
+  template <typename Visitor>
+  void ForEachMatchingPhysicalSitePair(size_t src_site_id, size_t dst_site_id,
+                                       const Visitor &visit) const {
+    std::vector<size_t> src_variants = PhysicalSiteVariants(src_site_id);
+    std::vector<size_t> dst_variants = PhysicalSiteVariants(dst_site_id);
+    ForEachMatchingDomainSitePair(src_variants, dst_variants, visit);
+  }
+
+  size_t FindParentSiteInDomain(size_t site_id, int domain_id) const {
+    ICHECK_LT(site_id, parent_site_ids_.size());
+    std::optional<size_t> result;
+    for (size_t parent_site_id : parent_site_ids_[site_id]) {
+      if (sites_[parent_site_id].EpochDomainId() != domain_id)
+        continue;
+      ICHECK(!result.has_value())
+          << "Synchronization insertion site has multiple parents in epoch "
+             "domain "
+          << domain_id;
+      result = parent_site_id;
+    }
+    ICHECK(result.has_value())
+        << "Synchronization insertion site has no parent in epoch domain "
+        << domain_id;
+    return result.value();
+  }
+
   const SyncInsertionSite &Src(const DepEdge &edge) const {
     return sites_[edge.src];
   }
@@ -731,10 +759,18 @@ std::string GetHardEvent(const std::string &producer_pipe,
   return event;
 }
 
+// These are the same-pipe dependencies the materializer satisfies without a
+// barrier. MTE/FIX issue order alone does not protect overlapping accesses.
+// SyncInsertionSite stores raw GetResourcePipeName values; the PIPE_ prefix
+// belongs only to names emitted for flags and barriers.
+bool HasImplicitSamePipeOrder(const std::string &pipe) {
+  return pipe == "S" || pipe == "V" || pipe == "M";
+}
+
 // ============================================================================
 // Recursive dependency analysis and reuse planning
 // ============================================================================
-class SyncAnalyzer {
+class SyncAnalyzer : public BufferAliasAnalysisContext {
 public:
   explicit SyncAnalyzer(const MultiBufferPlan &multi_buffer_plan,
                         const EpochDomainRegistry &domains,
@@ -759,13 +795,33 @@ public:
   SyncAnalyzer &operator=(const SyncAnalyzer &) = delete;
 
   void Analyze(const std::vector<std::shared_ptr<IRStructure>> &root) {
+    disable_buffer_reuse_ =
+        tvm::transform::PassContext::Current()
+            ->GetConfig<Bool>(kDisableSharedMemoryReuse, Bool(false))
+            .value();
     std::vector<IRStructure *> nodes;
     nodes.reserve(root.size());
     for (const std::shared_ptr<IRStructure> &child : root)
       nodes.push_back(child.get());
 
     site_registry_.Collect(nodes);
-    AnalyzeNodeList(nodes, /*loop=*/nullptr);
+    scope_closures_.clear();
+    lifetime_orders_.clear();
+    SyncAnalysisResult root_result = AnalyzeNodeList(nodes, /*loop=*/nullptr);
+    scope_closures_.insert_or_assign(nullptr, std::move(root_result.closure));
+
+    // The contract's presence still enables sequential allocation downstream.
+    // Synchronization and flag reuse above remain necessary in this mode.
+    if (disable_buffer_reuse_) {
+      buffer_aliases_ = {};
+      return;
+    }
+
+    BufferAliasAnalyzer buffer_alias_analyzer(*this);
+    buffer_alias_analyzer.Collect(root);
+    buffer_alias_analyzer.Analyze(root);
+    buffer_alias_analyzer.Validate();
+    buffer_aliases_ = buffer_alias_analyzer.GetAliases();
   }
 
   const SyncSiteRegistry &SiteRegistry() const { return site_registry_; }
@@ -776,7 +832,148 @@ public:
     return reusable_pairs_;
   }
 
+  const BufferAliasMap &BufferAliases() const { return buffer_aliases_; }
+
 private:
+  std::vector<size_t> ResolveLifetimeEndpoints(const Var &storage,
+                                               TaskNode *task,
+                                               bool at_beginning,
+                                               ControlNode *scope) const final {
+    IRStructure *path_begin = task;
+    while (path_begin->GetParent() != scope) {
+      path_begin = path_begin->GetParent();
+      ICHECK(path_begin != nullptr)
+          << "Task is not nested in its buffer-lifetime owner scope";
+    }
+
+    int domain_id = domains_.DomainForStorage(storage, scope);
+
+    std::vector<size_t> endpoints;
+    for (CoreMask core : kConcreteCores) {
+      if (!HasCore(task->GetCoreMask(), core))
+        continue;
+      endpoints.push_back(site_registry_.FindSiteId(SyncInsertionSiteKey{
+          path_begin, task, at_beginning, core, domain_id}));
+    }
+    std::sort(endpoints.begin(), endpoints.end());
+    endpoints.erase(std::unique(endpoints.begin(), endpoints.end()),
+                    endpoints.end());
+    return endpoints;
+  }
+
+  size_t PromoteLifetimeSite(const Var &storage, size_t site_id,
+                             ControlNode *control) const final {
+    ICHECK_LT(site_id, site_registry_.Size());
+    int parent_domain_id =
+        domains_.DomainForStorage(storage, control->GetParentControl());
+    size_t parent_site =
+        site_registry_.FindParentSiteInDomain(site_id, parent_domain_id);
+    ICHECK_EQ(site_registry_.Sites()[parent_site].path_begin, control);
+    return parent_site;
+  }
+
+  std::optional<StorageIterationPeriod>
+  StoragePeriod(const Var &storage, ControlNode *scope) const final {
+    if (const MultiBufferInfo *info = multi_buffer_plan_.Find(storage)) {
+      // A counter epoch can skip lexical iterations or span multiple owners.
+      // No implicit conversion to this query's lexical clock is valid.
+      if (info->UsesCounter())
+        return std::nullopt;
+      if (scope != nullptr) {
+        if (const auto *owner = info->FindOwner(scope)) {
+          if (owner->loop == scope)
+            return StorageIterationPeriod{info->num_versions, true};
+        }
+      }
+    }
+    if (auto versions = manual_.Get(storage))
+      return StorageIterationPeriod{versions.value(), false};
+    return StorageIterationPeriod{};
+  }
+
+  std::optional<int64_t> MinimumDistance(ControlNode *scope, size_t src,
+                                         size_t dst) const final {
+    if (scope == nullptr)
+      return SameIterationHappensBefore(scope, src, dst)
+                 ? std::optional<int64_t>(0)
+                 : std::nullopt;
+    const auto &sites = site_registry_.Sites();
+    if (sites[src].EpochDomainId() != sites[dst].EpochDomainId())
+      return std::nullopt;
+    const EpochDomain &domain = site_registry_.Domain(sites[src]);
+    if (domain.IsCounter() || domain.owner != scope ||
+        UsesVar(domain.active_guard, [&](const VarNode *var) {
+          return scope->control->loop_var.same_as(GetRef<Var>(var));
+        }))
+      return std::nullopt;
+    auto order = lifetime_orders_.find(scope);
+    if (order == lifetime_orders_.end())
+      return std::nullopt;
+    return order->second.MinimumDistance(src, dst);
+  }
+
+  bool HappensBefore(ControlNode *scope, size_t src, size_t dst,
+                     int64_t distance) const final {
+    // A negative query is not the same-iteration query. The nonnegative path
+    // model cannot prove it; retaining that distinction is essential when
+    // subtracting two generation endpoint offsets.
+    if (distance < 0)
+      return false;
+    if (distance == 0)
+      return SameIterationHappensBefore(scope, src, dst);
+    if (scope == nullptr)
+      return false;
+    auto minimum = MinimumDistance(scope, src, dst);
+    return minimum && distance >= *minimum;
+  }
+
+  bool HasImplicitCompletionOrder(size_t src, size_t dst) const {
+    const auto &sites = site_registry_.Sites();
+    return sites[src].core == sites[dst].core &&
+           sites[src].pipe == sites[dst].pipe &&
+           HasImplicitSamePipeOrder(sites[src].pipe);
+  }
+
+  bool HasCompletionEdge(const DepClosure &closure, size_t src,
+                         size_t dst) const {
+    // A composed strong edge may contain weak issue-order segments around a
+    // real synchronization. A path containing only MTE/FIX issue edges cannot
+    // certify that an old allocation's accesses have finished.
+    return closure.Contains(DepEdge(src, dst, 0, true)) ||
+           (HasImplicitCompletionOrder(src, dst) &&
+            closure.Contains(DepEdge(src, dst, 0, false)));
+  }
+
+  bool SameIterationHappensBefore(ControlNode *scope, size_t src,
+                                  size_t dst) const {
+    auto current = scope_closures_.find(scope);
+    ICHECK(current != scope_closures_.end())
+        << "Buffer alias analysis is missing a scope closure";
+    const DepClosure &closure = current->second;
+    if (HasCompletionEdge(closure, src, dst))
+      return true;
+    const SyncInsertionSiteList &sites = site_registry_.Sites();
+    ICHECK_LT(std::max(src, dst), sites.size());
+    const SyncInsertionSite &query_src = sites[src];
+    const SyncInsertionSite &query_dst = sites[dst];
+    ConstrSet proof_ctx =
+        scope != nullptr ? scope->GetLoopBodyContext() : ConstrSet();
+    PrimExpr query_guard = site_registry_.Domain(query_src).active_guard &&
+                           site_registry_.Domain(query_dst).active_guard;
+    bool proven = false;
+    site_registry_.ForEachMatchingPhysicalSitePair(
+        src, dst, [&](size_t physical_src, size_t physical_dst) {
+          if (proven ||
+              !HasCompletionEdge(closure, physical_src, physical_dst)) {
+            return;
+          }
+          PrimExpr candidate_guard =
+              site_registry_.Domain(sites[physical_src]).active_guard;
+          proven = GuardImplies(query_guard, candidate_guard, proof_ctx);
+        });
+    return proven;
+  }
+
   SyncAnalysisResult AnalyzeNodeList(const std::vector<IRStructure *> &nodes,
                                      ControlNode *loop) {
     SyncAnalysisResult result{DepClosure(site_registry_.Size()), {}};
@@ -827,8 +1024,9 @@ private:
                         /*allow_cross_iter=*/false, /*allow_mixed_iter=*/true);
     result.visible_sync_points.insert(result.visible_sync_points.end(),
                                       local_points.begin(), local_points.end());
+    RecordLifetimeOrder(task_site_ids, loop, result.closure);
     if (loop != nullptr)
-      loop_closures_.insert_or_assign(loop, result.closure);
+      scope_closures_.insert_or_assign(loop, result.closure);
     result.closure = result.closure.DistanceZero();
     return result;
   }
@@ -945,8 +1143,8 @@ private:
     auto ordered = [&](ControlNode *owner, size_t src, size_t dst) {
       if (src == dst)
         return true;
-      auto it = loop_closures_.find(owner);
-      ICHECK(it != loop_closures_.end())
+      auto it = scope_closures_.find(owner);
+      ICHECK(it != scope_closures_.end())
           << "Counter owner closure was not recorded";
       return it->second.HasEdge(src, dst, 0);
     };
@@ -1182,6 +1380,41 @@ private:
                                /*max_distance=*/0, projection_scope);
       });
     }
+  }
+
+  void RecordLifetimeOrder(const std::vector<size_t> &task_sites,
+                           ControlNode *scope, const DepClosure &closure) {
+    if (disable_buffer_reuse_)
+      return;
+    IterationOrder order(site_registry_.Size());
+    const auto &sites = site_registry_.Sites();
+    for (const DepEdge &edge : closure.Edges()) {
+      // DepClosure models only forward iteration distances. Keep the check
+      // below to detect violations of this producer invariant.
+      if (sites[edge.src].EpochDomainId() == sites[edge.dst].EpochDomainId())
+        ICHECK(order.AddEdge(
+            edge.src, edge.dst, edge.distance,
+            edge.strict || HasImplicitCompletionOrder(edge.src, edge.dst)));
+    }
+    if (scope != nullptr) {
+      // Keep the primitive same-pipe relation even when its distance exceeds
+      // the flag optimizer's bounded closure. Shortest paths can then compose
+      // arbitrarily large distances without enumerating intermediate epochs.
+      for (size_t src : task_sites) {
+        for (size_t dst : task_sites) {
+          const auto &a = sites[src];
+          const auto &b = sites[dst];
+          if (a.core != b.core || a.pipe != b.pipe ||
+              a.EpochDomainId() != b.EpochDomainId())
+            continue;
+          int64_t distance = int64_t(a.path_begin->GetStage()) -
+                             b.path_begin->GetStage() + (src < dst ? 0 : 1);
+          ICHECK(order.AddEdge(src, dst, std::max<int64_t>(distance, 0),
+                               HasImplicitSamePipeOrder(a.pipe)));
+        }
+      }
+    }
+    lifetime_orders_.insert_or_assign(scope, std::move(order));
   }
 
   void AddSamePipeEdges(DepClosure &closure,
@@ -1448,9 +1681,12 @@ private:
   std::vector<SyncPoint> sync_points_;
   std::set<std::pair<size_t, size_t>> reusable_pairs_;
   DependencyCache dependency_cache_;
-  std::map<ControlNode *, DepClosure> loop_closures_;
+  std::map<ControlNode *, DepClosure> scope_closures_;
+  std::map<ControlNode *, IterationOrder> lifetime_orders_;
   std::unordered_map<ControlNode *, std::map<CounterSyncSignature, int>>
       counter_channel_occurrences_;
+  BufferAliasMap buffer_aliases_;
+  bool disable_buffer_reuse_{false};
 };
 
 // ============================================================================
@@ -2199,6 +2435,8 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
                         std::move(scheduled_tir.metadata.root_conflict_hints));
   scheduled_tir.metadata.root_conflict_hints = {};
   analyzer.Analyze(root);
+  scheduled_tir.metadata.buffer_aliases = analyzer.BufferAliases();
+  scheduled_tir.metadata.has_buffer_aliases = true;
 
   CrossCoreFlagReservation cross_core_flag_reservation =
       CollectExplicitCrossCoreFlags(kernel_body);

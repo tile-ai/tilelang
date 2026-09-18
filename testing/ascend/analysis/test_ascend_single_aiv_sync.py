@@ -46,11 +46,14 @@ def _lower_with_snapshots(program):
     @tvm.ir.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
-            if info.name in {"tl.InsertSync", "tl.LowerScheduledTIR"}:
+            if info.name in {"tl.InsertSync", "tl.LowerScheduledTIR", "tl.MergeUBAllocations"}:
                 snapshots[info.name] = mod.script()
 
     with tvm.transform.PassContext(opt_level=3, instruments=[Capture()]):
         artifact = lower(program, target="ascend")
+    assert "tl.buffer_alias_map" in snapshots["tl.InsertSync"]
+    assert "tl.buffer_alias_map" in snapshots["tl.LowerScheduledTIR"]
+    assert "tl.buffer_alias_map" not in snapshots["tl.MergeUBAllocations"]
     return artifact.kernel_source, snapshots
 
 
@@ -64,6 +67,7 @@ def test_mixed_kernel_single_aiv_lowers_one_subcore_protocol():
     assert "__global__ __mix__(1, 2)" in source
     assert "if (asc_get_sub_block_id() == 0)" in source
     assert "asc_get_sub_block_id()" in source
+    assert '"vector_count": 1' in snapshots["tl.InsertSync"]
     assert '"vector_count": 1' in snapshots["tl.LowerScheduledTIR"]
     assert "asc_sync_intra_arrive(" in source
     assert "asc_sync_intra_wait(" in source
@@ -79,6 +83,7 @@ def test_mixed_kernel_default_keeps_two_subcores():
 
     assert "__global__ __mix__(1, 2)" in source
     assert "asc_get_sub_block_id()" in source
+    assert '"vector_count": 2' in snapshots["tl.InsertSync"]
     assert '"vector_count": 2' in snapshots["tl.LowerScheduledTIR"]
     assert "asc_sync_intra_arrive(" in source
     assert "asc_sync_intra_wait(" in source
