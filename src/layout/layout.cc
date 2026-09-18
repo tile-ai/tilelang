@@ -748,6 +748,13 @@ DetectInjectiveMapping(const Array<PrimExpr> &forward_indices,
   if (exact.status == ExactInjectivityStatus::kNonInjective) {
     return MakeInjectivityError(exact.detail);
   }
+  // The two symbolic proofs have disjoint blind spots, so neither subsumes
+  // the other. CanProveInjective propagates equalities across outputs but
+  // cannot invert floordiv/floormod with a symbolic divisor: it proves
+  // (i, i + j) yet fails the padded partition ((i*n+j)%128, (i*n+j)//128).
+  // CanProveLeftInverse decodes a mixed-radix IterMap digit by digit, which
+  // handles that partition but has no candidate inverse for (i, i + j),
+  // whose second output is not a radix chain. Keep both.
   if (CanProveInjective(forward_indices, input_iters) ||
       CanProveLeftInverse(forward_indices, input_iters)) {
     return arith::IterMapResult();
