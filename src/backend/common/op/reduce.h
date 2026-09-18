@@ -633,6 +633,12 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
+  // Some device languages require the thread index as an explicit argument.
+  static Array<PrimExpr> ThreadReduceArgs(const LowerArgs &, const Fragment &,
+                                          int) {
+    return {};
+  }
+
   static Stmt LowerLocal(const ReduceOpNode &op, const Buffer &src_buffer,
                          const Buffer &dst_buffer,
                          const LowerArgs &lower_args) {
@@ -1093,6 +1099,10 @@ template <typename Impl> struct ReduceLowerer {
               if (need_workspace) {
                 args.push_back(workspace);
               }
+              for (const auto &arg : Impl::ThreadReduceArgs(
+                       lower_args, red_layout, reducing_threads)) {
+                args.push_back(arg);
+              }
               phases.push_back(Evaluate(
                   Call(DataType::Handle(), builtin::call_extern(), args)));
 
@@ -1137,6 +1147,10 @@ template <typename Impl> struct ReduceLowerer {
               Array<PrimExpr> args = {StringImm(allreduce), ptr};
               if (need_workspace) {
                 args.push_back(workspace);
+              }
+              for (const auto &arg : Impl::ThreadReduceArgs(
+                       lower_args, red_layout, reducing_threads)) {
+                args.push_back(arg);
               }
               phases.push_back(Evaluate(
                   Call(DataType::Handle(), builtin::call_extern(), args)));
@@ -1220,6 +1234,10 @@ template <typename Impl> struct ReduceLowerer {
           PrimExpr workspace =
               lower_args.add_workspace(workspace_size, clear_buffer->dtype);
           thread_reduce_args.push_back(workspace);
+        }
+        for (const auto &arg :
+             Impl::ThreadReduceArgs(lower_args, red_layout, reducing_threads)) {
+          thread_reduce_args.push_back(arg);
         }
         auto call = Call(clear_buffer->dtype, builtin::call_extern(),
                          thread_reduce_args);

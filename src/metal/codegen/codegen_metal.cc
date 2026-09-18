@@ -2,6 +2,7 @@
  * \file metal/codegen/codegen_metal.cc
  */
 #include "codegen_metal.h"
+#include "reduce.h"
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -113,6 +114,8 @@ std::string CodeGenTileLangMetal::Finish() {
   code << "#define TILELANG_PRAGMA_UNROLL _Pragma(\"clang loop "
           "unroll(full)\")\n";
   code << "using namespace metal;\n\n";
+  if (uses_allreduce_)
+    code << kMetalReduceSource;
   code << decl_stream.str();
   code << fwd_decl_stream.str();
   code << stream.str();
@@ -1336,7 +1339,12 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
         << "Only 8x8 matrix is supported, but got " << col_val << "x"
         << row_val;
   };
-  if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
+  if (op->op.same_as(builtin::call_extern())) {
+    const auto *name = op->args[0].as<StringImmNode>();
+    if (name && name->value.find("tl::AllReduce<") == 0)
+      uses_allreduce_ = true;
+    CodeGenC::VisitExpr_(op, os);
+  } else if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 5);
     Var var = Downcast<Var>(op->args[0]);
     // Get the data type of the simdgroup matrix
