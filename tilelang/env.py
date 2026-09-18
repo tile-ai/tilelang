@@ -585,14 +585,12 @@ def get_cuda_dll_search_dirs() -> list[str]:
     return [os.path.abspath(p) for p in cands if os.path.isdir(p)]
 
 
-def get_windows_runtime_dll_dirs() -> list[str]:
-    """Return Windows-only DLL directories shipped with sibling Python packages.
+def get_runtime_library_dirs() -> list[str]:
+    """Return library directories shipped with sibling Python packages.
 
-    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their DLLs resolve
+    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their libraries resolve
     when TileLang is imported. Each lookup is best-effort; failures are ignored.
     """
-    if not sys.platform.startswith("win32"):
-        return []
     dirs: list[str] = []
     try:
         from tvm_ffi import libinfo as tvm_ffi_libinfo

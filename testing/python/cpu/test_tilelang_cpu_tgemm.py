@@ -9,7 +9,7 @@ import torch
 import tilelang
 import tilelang.testing
 from tilelang import tvm as tvm
-import tilelang.language as T
+import tilelang.cpu.language as T
 
 
 def matmul(M, N, K, block_M, block_N, block_K, trans_A=False, trans_B=False, dtype=T.float32, accum_dtype=T.float32):
