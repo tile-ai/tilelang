@@ -666,7 +666,12 @@ void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
     }
     return;
   }
-  if (ext_imm && ext_imm->value > 4) {
+  if (op->kind == tirx::ForKind::kUnrolled) {
+    // Loops the UnrollLoop pass marked for unrolling keep their loop form in
+    // TIR; the shader compiler unrolls them, as nvcc does for CUDA.
+    PrintIndent();
+    stream << "TILELANG_PRAGMA_UNROLL\n";
+  } else if (ext_imm && ext_imm->value > 4) {
     PrintIndent();
     stream << "#pragma clang loop unroll(disable)\n";
   }
