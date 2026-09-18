@@ -1134,6 +1134,38 @@ def test_reduce_packed_fp8_to_float16_absmax_runtime():
     torch.testing.assert_close(B, ref, atol=0, rtol=0)
 
 
+def _make_fp8_e4m3_reduce_kernel(reduce_fn, M, N):
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), T.float8_e4m3), B: T.Tensor((M,), T.float8_e4m3)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((M, N), T.float8_e4m3)
+            dst = T.alloc_fragment((M,), T.float8_e4m3)
+            T.copy(A, src)
+            reduce_fn(src, dst, dim=1)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8, 9)
+@pytest.mark.parametrize(("reduce_fn", "torch_op"), [(T.reduce_max, "max"), (T.reduce_min, "min")], ids=["max", "min"])
+def test_reduce_fp8_e4m3_dst_runtime(reduce_fn, torch_op):
+    """reduce_max/reduce_min into a float8_e4m3 dst used to crash nvcc with
+    an undefined `inff` identifier (GH-2998)."""
+    if not hasattr(torch, "float8_e4m3fn"):
+        pytest.skip("torch.float8_e4m3fn is not available")
+
+    M, N = 32, 64
+    k = _compile(_make_fp8_e4m3_reduce_kernel(reduce_fn, M, N))
+
+    a = torch.rand(M, N, device="cuda").to(torch.float8_e4m3fn)
+    out = k(a)
+    # torch has no min/max reduction kernel for float8_e4m3fn; reduce in fp32.
+    ref = getattr(a.float(), torch_op)(dim=1).values
+    assert torch.allclose(out.float(), ref, atol=1e-1)
+
+
 @tilelang.testing.requires_cuda
 def test_reduce_packed_max_nan_propagate_uses_nan_intrinsics():
     k = _compile(_make_nan_reduce_kernel(T.reduce_max, 128, 128, T.float16, threads=256, nan_propagate=True))
