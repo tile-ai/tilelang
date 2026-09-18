@@ -1035,18 +1035,19 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Check if coalesced_width is defined
   if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
     if (const auto *imm = coalesced_width->as<IntImmNode>()) {
-      int expected = imm->value;
+      int64_t expected = imm->value;
       if (expected <= 0) {
         LOG(FATAL) << "coalesced_width must be a positive integer, but got "
                    << expected;
       }
-      int effective = std::gcd(vector_size, expected);
+      int64_t effective =
+          std::gcd(static_cast<int64_t>(vector_size), expected);
       if (effective != expected) {
         LOG(WARNING) << "Requested coalesced_width=" << expected
                      << " exceeds the geometry-supported vector width "
                      << vector_size << "; using " << effective << " instead.";
       }
-      vector_size = effective;
+      vector_size = static_cast<int>(effective);
     } else {
       LOG(FATAL) << "coalesced_width should be an IntImmNode.";
     }
