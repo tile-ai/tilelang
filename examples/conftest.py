@@ -51,6 +51,10 @@ CUTEDSL_KNOWN_FAILURES = {
 # visible in pytest's xfail report. Architecture skips still take precedence;
 # a skipped test does not confirm whether its lowering limitation remains.
 TILEIR_KNOWN_FAILURES = {
+    "aws/test_example_aws.py::test_example_gemm_ws": "explicit tl.tcgen05_mma_arrive and manual producer/consumer barriers are not lowered",
+    "aws/test_example_aws.py::test_example_flash_attention": "lane-indexed tl.any_sync has no structured lowering",
+    "aws/test_example_aws.py::test_example_flash_attention_manual": "lane-indexed tl.any_sync has no structured lowering",
+    "aws/test_example_aws.py::test_example_flash_attention_ws": "explicit tl.fence_proxy_async and manual producer/consumer barriers are not lowered",
     "deepseek_v4/test_tilelang_example_deepseek_v4.py::test_example_fp8_fp4_gemm_1d1d": (
         "tir.assume is not lowered; the kernel also uses direct tcgen05 copies and cluster intrinsics"
     ),
@@ -63,6 +67,7 @@ TILEIR_KNOWN_FAILURES = {
     "gemm/test_example_gemm.py::test_example_gemm_intrinsics": "explicit tl.ptx_ldmatrix / tir.ptx_mma have no structured lowering",
     "gemm_sp/test_example_gemm_sp.py::test_example_gemm_sp": "2:4 sparse MMA has no CUDA Tile IR counterpart",
     "gemv/test_example_gemv.py::test_example_gemv": "per-thread SIMT scatter into shared memory is not supported",
+    "hadamard_transform/test_example_hadamard.py::test_example_hadamard": "tl.shfl_sync with thread-private storage has no structured lowering",
     "flash_attention/test_example_flash_attention.py::test_example_gqa_bwd": "192-wide TileViews require non-power-of-two lowering",
     "flash_attention/test_example_flash_attention.py::test_example_gqa_bwd_tma_reduce_varlen": (
         "non-power-of-two attention tiles require padding or splitting"
