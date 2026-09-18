@@ -301,3 +301,39 @@ def test_safe_gated_kda_decode_duplicate_active_slots_are_rejected():
 
     with pytest.raises(ValueError, match="unique within a batch"):
         run_safe_gated_kda_decode(kernel, *inputs[:-1], inputs[-1], state_indices)
+
+
+def test_safe_gated_kda_decode_rejects_nonnegative_lower_bound():
+    """Keep the reference and kernel factory aligned on the safe-gate bound."""
+    batch = num_slots = num_q_heads = num_value_heads = 1
+    key_dim = value_dim = 2
+    mixed_qkv = torch.zeros((batch, 6), dtype=torch.bfloat16)
+    a = torch.zeros((batch, 2), dtype=torch.bfloat16)
+    b = torch.zeros((batch, 1), dtype=torch.bfloat16)
+    A_log = torch.zeros((1,), dtype=torch.float32)
+    dt_bias = torch.zeros((2,), dtype=torch.float32)
+    state = torch.zeros((num_slots, 1, 2, 2), dtype=torch.float32)
+    state_indices = torch.zeros((batch,), dtype=torch.int32)
+
+    with pytest.raises(ValueError, match="lower_bound must be negative"):
+        safe_gated_kda_decode_reference(
+            mixed_qkv,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            state,
+            state_indices,
+            num_q_heads=num_q_heads,
+            lower_bound=0.0,
+        )
+    with pytest.raises(ValueError, match="lower_bound must be negative"):
+        safe_gated_kda_decode(
+            batch,
+            num_slots,
+            num_q_heads,
+            num_value_heads,
+            key_dim,
+            value_dim,
+            lower_bound=0.0,
+        )

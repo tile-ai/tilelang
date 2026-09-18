@@ -55,6 +55,8 @@ def safe_gated_kda_decode_reference(
         raise ValueError("mixed_qkv must have shape [batch, packed_qkv_dim]")
     if state.ndim != 4:
         raise ValueError("state must have shape [num_slots, value_heads, value_dim, key_dim]")
+    if lower_bound >= 0:
+        raise ValueError("safe-gate lower_bound must be negative")
 
     batch = mixed_qkv.shape[0]
     num_value_heads, value_dim, key_dim = state.shape[1:]
