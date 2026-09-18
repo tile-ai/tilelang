@@ -572,7 +572,7 @@ def _lower_gemm_scaled(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, bu
     # (stmt.call_args), not the stringified attrs dict, so a non-constant
     # k_start expression is never mistaken for a literal zero (mirrors the
     # source-args idiom used by the atomic-CAS lowering for the same reason).
-    k_start_val = _extract_static_int(stmt.call_args[21]) if len(stmt.call_args) > 21 else None
+    k_start_val = _extract_static_int(stmt.call_args[15]) if len(stmt.call_args) > 15 else None
     if k_start_val != 0:
         raise TileIRLoweringNotImplementedError(
             "K-split tcgen05 blockscaled form (k_start != 0) is not yet supported by the TileIR backend; issue a single whole-K gemm."
@@ -657,11 +657,8 @@ def _lower_gemm_scaled(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, bu
 
 
 def _lower_gemm_common(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: IRBuilder, *, tcgen05: bool = False) -> None:
-    # T.tcgen05_gemm_blockscaled (tilelang/language/gemm_op.py) flows its
-    # sf_a_granularity_k / sf_b_granularity_k (and optionally use_2cta)
-    # annotations onto a plain "tl.tileop.gemm" call.  The semantic layer
-    # (tilelang/tileir/semantic.py) extracts SFA/SFB regions (+ k_start) for
-    # any gemm call carrying this annotation, so detect it the same way here.
+    # Both generic and instruction-specific blockscaled calls carry scale
+    # granularities as annotations and append SFA/SFB/k_start to dense slots.
     blockscaled = "annotation.sf_a_granularity_k" in attrs
 
     if blockscaled:
@@ -714,7 +711,7 @@ def _lower_gemm_common(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, bu
     builder.create(op)
 
 
-@tile_op_impl("tl.tileop.gemm", "tl.tileop.wgmma_gemm")
+@tile_op_impl("tl.tileop.gemm", "tl.tileop.wgmma_gemm", "tl.tileop.gemm_blockscaled")
 def _lower_gemm(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: IRBuilder) -> None:
     # "tl.tileop.wgmma_gemm" (T.wgmma_gemm) shares _gemm_impl's exact call
     # layout with "tl.tileop.gemm"; it only pins the Hopper WGMMA instruction
@@ -725,7 +722,7 @@ def _lower_gemm(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: 
     _lower_gemm_common(stmt, attrs, scope, builder, tcgen05=False)
 
 
-@tile_op_impl("tl.tileop.tcgen05_gemm")
+@tile_op_impl("tl.tileop.tcgen05_gemm", "tl.tileop.tcgen05_gemm_blockscaled")
 def _lower_tcgen05_gemm(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: IRBuilder) -> None:
     _lower_gemm_common(stmt, attrs, scope, builder, tcgen05=True)
 

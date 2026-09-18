@@ -328,13 +328,8 @@ def _semantic_tile_op(call: tirx.Call) -> SemanticStmt:
             regions=(_semantic_region(call.args[0]), _semantic_region(call.args[1])),
             **_call_payload(call),
         )
-    # "tl.tileop.wgmma_gemm" (T.wgmma_gemm, tilelang/language/gemm_op.py) is
-    # emitted through the exact same `_gemm_impl` 19-arg call layout as
-    # "tl.tileop.gemm" (regions A/B/C at args 0-2, transpose/M/N/K/policy/
-    # clear_accum/strides/offsets/k_pack/wg_wait at args 3-15); it differs
-    # only in requesting the Hopper WGMMA instruction, which in the TileIR
-    # backend is an instruction-selection decision that belongs to the
-    # downstream cuda_tile optimizer — so treat it as an alias of gemm here.
+    # Dense GEMM and its instruction-specific aliases share the 13-slot
+    # frontend ABI. Instruction selection belongs to the TileIR compiler.
     # 2:4 structured-sparse GEMM and its wgmma/tcgen05 aliases have no CUDA
     # Tile IR sparse-MMA counterpart. A dense-GEMM fallback would be
     # numerically wrong, not just slow: gemm_sp's B operand is stored 2:4
@@ -348,7 +343,13 @@ def _semantic_tile_op(call: tirx.Call) -> SemanticStmt:
             f"possible because the B operand is 2:4-compressed and paired with metadata E. "
             f"Use the CUDA backend for gemm_sp kernels."
         )
-    if op in {"tl.tileop.gemm", "tl.tileop.wgmma_gemm", "tl.tileop.tcgen05_gemm"}:
+    if op in {
+        "tl.tileop.gemm",
+        "tl.tileop.wgmma_gemm",
+        "tl.tileop.tcgen05_gemm",
+        "tl.tileop.gemm_blockscaled",
+        "tl.tileop.tcgen05_gemm_blockscaled",
+    }:
         regions = (
             _semantic_region(call.args[0]),
             _semantic_region(call.args[1]),
@@ -356,27 +357,20 @@ def _semantic_tile_op(call: tirx.Call) -> SemanticStmt:
         )
         annotations = getattr(call, "annotations", None)
         extra_attrs: tuple[tuple[str, str], ...] = ()
-        # T.tcgen05_gemm_blockscaled (tilelang/language/gemm_op.py) marks its
-        # call with sf_a_granularity_k/sf_b_granularity_k; only these tcgen05
-        # blockscaled annotations are recognized here (a bare "blockscaled"
-        # key is not). Also surface k_start (call arg 21): attrs
-        # are stringified text, so a downstream lowering-time k_start==0
-        # check can either compare the stringified value or read
-        # `stmt.call_args[21]` directly (tile_ops.py's _lower_gemm_scaled
-        # uses the latter, for robustness against non-literal expressions);
-        # record it here regardless so it is visible on the SemanticStmt.
+        # Blockscaled GEMM appends SFA, SFB and k_start to the 13 dense
+        # slots. Preserve the raw k_start expression for lowering validation.
         if annotations and "sf_a_granularity_k" in annotations:
-            if len(call.args) <= 21:
+            if len(call.args) <= 15:
                 raise TileLangSemanticError(
-                    f"Blockscaled `{op}` requires SFA/SFB/k_start at call args 19/20/21, but only {len(call.args)} args are present."
+                    f"Blockscaled `{op}` requires SFA/SFB/k_start at call args 13/14/15, but only {len(call.args)} args are present."
                 )
             try:
-                sfa_region = _semantic_region(call.args[19])
-                sfb_region = _semantic_region(call.args[20])
+                sfa_region = _semantic_region(call.args[13])
+                sfb_region = _semantic_region(call.args[14])
             except TileLangSemanticError as exc:
-                raise TileLangSemanticError(f"Blockscaled `{op}` has malformed SFA/SFB regions at call args 19/20: {exc}") from exc
+                raise TileLangSemanticError(f"Blockscaled `{op}` has malformed SFA/SFB regions at call args 13/14: {exc}") from exc
             regions = regions + (sfa_region, sfb_region)
-            extra_attrs = _attrs(k_start=call.args[21])
+            extra_attrs = _attrs(k_start=call.args[15])
         return SemanticStmt(
             "tile_op",
             attrs=attrs
@@ -388,12 +382,6 @@ def _semantic_tile_op(call: tirx.Call) -> SemanticStmt:
                 K=call.args[7],
                 policy=call.args[8],
                 clear_accum=call.args[9],
-                stride_A=call.args[10],
-                stride_B=call.args[11],
-                offset_A=call.args[12],
-                offset_B=call.args[13],
-                k_pack=call.args[14],
-                wg_wait=call.args[15],
             )
             + extra_attrs,
             regions=regions,

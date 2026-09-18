@@ -35,7 +35,7 @@ backend:
 ```python
 import torch
 import tilelang
-import tilelang.language as T
+from tilelang.tileir import language as T
 
 n = 1 << 20
 
@@ -91,6 +91,11 @@ the TileIR backend. The logical block coordinates remain unchanged, and the
 CUDA Tile IR toolchain owns block scheduling.
 
 ### Entry hints
+
+Import `from tilelang.tileir import language as T` to use the TileIR-specific
+`T.Kernel` and `T.copy` keyword hints. The common and CUDA dialects retain their
+own APIs; existing CUDA kernels without TileIR-specific keywords can still be
+compiled with `execution_backend="tileir"` within the supported subset.
 
 The current lowering accepts these entry-scoped hints:
 
@@ -182,6 +187,9 @@ carry the following CUDA tuning parameters into a TileIR search:
 | `T.Kernel(prelude=...)` and arbitrary CUDA C/PTX extern helpers | Not a TileIR escape hatch; injected CUDA source is not compiled and unsupported extern calls are rejected |
 | `T.ClusterKernel(cluster_dims=...)` | `cluster_dims` is not consumed by the TileIR launch path; use `T.Kernel(num_ctas=...)` for the CGA entry hint |
 | CUDA/PTX pass configs and device `compile_flags` | Not consumed by TileIR codegen; examples include register-usage, async-copy, LDG/STG, WGMMA, vectorization, and warp-specialization controls |
+
+The CUDA-only APIs in this table are available when importing the CUDA
+dialect; the TileIR dialect does not re-export them.
 
 An ignored parameter should not be left in the search space: candidates that
 differ only by that value compile to the same TileIR and make tuning results

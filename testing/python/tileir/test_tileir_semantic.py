@@ -465,12 +465,11 @@ def test_tileir_semantic_ir_extracts_gemm_contract_attrs():
     assert len(gemm_attrs) == 1
     assert gemm_attrs[0]["policy"] == "1"
     assert gemm_attrs[0]["clear_accum"] == "1"
-    assert gemm_attrs[0]["stride_A"] == "64"
-    assert gemm_attrs[0]["stride_B"] == "32"
-    assert gemm_attrs[0]["offset_A"] == "0"
-    assert gemm_attrs[0]["offset_B"] == "0"
-    assert gemm_attrs[0]["k_pack"] == "1"
-    assert gemm_attrs[0]["wg_wait"] == "0"
+    assert gemm_attrs[0]["M"] == "32"
+    assert gemm_attrs[0]["N"] == "32"
+    assert gemm_attrs[0]["K"] == "64"
+    assert gemm_attrs[0]["transpose_A"] == "0"
+    assert gemm_attrs[0]["transpose_B"] == "0"
 
 
 def test_tileir_semantic_ir_extracts_mla_paged_control_flow_contract():

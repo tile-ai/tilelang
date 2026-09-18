@@ -7,7 +7,7 @@ import pytest
 
 import tilelang
 import tilelang.testing
-from tilelang import language as T
+from tilelang.tileir import language as T
 from tilelang import tvm as tvm
 from tilelang.tileir import checks
 from tilelang.tileir.errors import _UnsupportedTileIRNode

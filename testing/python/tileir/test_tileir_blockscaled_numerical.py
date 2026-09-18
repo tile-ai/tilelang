@@ -2,7 +2,7 @@
 recognition of ``T.tcgen05_gemm_blockscaled``.
 
 The TileIR backend recognizes ``T.tcgen05_gemm_blockscaled`` calls (a
-``tl.tileop.gemm`` carrying ``sf_a_granularity_k``/``sf_b_granularity_k``
+``tl.tileop.tcgen05_gemm_blockscaled`` carrying ``sf_a_granularity_k``/``sf_b_granularity_k``
 annotations) within a narrow scope:
 
 - ``k_start`` must be statically 0 (a single whole-K MMA; real hardware
@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import pytest
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 
 if TYPE_CHECKING:
     import torch
@@ -100,7 +101,11 @@ def _lower_first_kernel(pf):
 # ---------------------------------------------------------------------------
 
 
-def _tcgen05_blockscaled_gemm_jit(m: int = 64, n: int = 64, k: int = 64, v: int = 32, k_start: int = 0):
+def _tcgen05_blockscaled_gemm_jit(
+    m: int = 64, n: int = 64, k: int = 64, v: int = 32, k_start: int = 0, op_name: str = "tcgen05_gemm_blockscaled"
+):
+    gemm = getattr(T, op_name)
+
     @tilelang.jit
     def make():
         @T.prim_func
@@ -122,7 +127,7 @@ def _tcgen05_blockscaled_gemm_jit(m: int = 64, n: int = 64, k: int = 64, v: int 
                 T.copy(B, B_s)
                 T.copy(SFA, SFA_s)
                 T.copy(SFB, SFB_s)
-                T.tcgen05_gemm_blockscaled(
+                gemm(
                     A_s,
                     B_s,
                     C_f,
@@ -181,7 +186,10 @@ def test_tcgen05_gemm_blockscaled_semantic_regions():
     program = extract_semantic_program(pf)
 
     gemm_stmts = [
-        s for k in program.kernels for s in _semantic_stmts(k.body) if s.kind == "tile_op" and dict(s.attrs).get("op") == "tl.tileop.gemm"
+        s
+        for k in program.kernels
+        for s in _semantic_stmts(k.body)
+        if s.kind == "tile_op" and dict(s.attrs).get("op") == "tl.tileop.tcgen05_gemm_blockscaled"
     ]
     assert len(gemm_stmts) == 1
     stmt = gemm_stmts[0]
@@ -225,13 +233,15 @@ def test_tcgen05_gemm_blockscaled_mxfp8_identity_scale_numerical():
 
 
 @skip_no_cuda_tile
-def test_tcgen05_gemm_blockscaled_mxfp8_numerical():
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name", ["tcgen05_gemm_blockscaled", "gemm_blockscaled"])
+def test_tcgen05_gemm_blockscaled_mxfp8_numerical(op_name):
     _skip_if_tileir_toolchain_unavailable()
     torch, *_ = _setup_sm100_gpu()
     m = n = k = 64
     v = 32
 
-    kernel = tilelang.compile(_tcgen05_blockscaled_gemm_jit(m, n, k, v).get_tir(), execution_backend="tileir")
+    kernel = tilelang.compile(_tcgen05_blockscaled_gemm_jit(m, n, k, v, op_name=op_name).get_tir(), execution_backend="tileir")
 
     a = (torch.randn(m, k, device="cuda") * 0.25).to(torch.float8_e4m3fn)
     b = (torch.randn(k, n, device="cuda") * 0.25).to(torch.float8_e4m3fn)

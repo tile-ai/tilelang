@@ -28,7 +28,7 @@ import math
 import torch
 
 import tilelang
-import tilelang.language as T
+from tilelang.tileir import language as T
 from tilelang.tileir.checks import check_tileir_available
 
 

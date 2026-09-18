@@ -21,7 +21,7 @@ from typing import Any
 import torch
 
 import tilelang
-import tilelang.language as T
+from tilelang.tileir import language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.tileir.checks import check_tileir_available
 from tilelang.transform import PassConfigKey

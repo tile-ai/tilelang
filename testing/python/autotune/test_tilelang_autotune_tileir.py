@@ -2,7 +2,7 @@ import pytest
 
 import tilelang
 import tilelang.testing
-import tilelang.language as T
+from tilelang.tileir import language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.autotuner import autotune
 from tilelang.tileir import checks

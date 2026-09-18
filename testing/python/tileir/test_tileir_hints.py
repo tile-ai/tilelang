@@ -2,7 +2,7 @@
 
 import pytest
 import tilelang
-import tilelang.language as T
+from tilelang.tileir import language as T
 
 from tileir_test_utils import _setup_gpu, _skip_if_tileir_toolchain_unavailable, skip_no_cuda_tile
 
