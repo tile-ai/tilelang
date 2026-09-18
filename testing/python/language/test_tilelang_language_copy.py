@@ -1,9 +1,11 @@
 import tilelang
 import tilelang.language as T
+import pytest
 import torch
 import tilelang.testing
 from tilelang import tvm
 from tilelang.layout import make_gemm_fragment_8x8_transposed
+from tilelang.tools.compile_only import compile_kernel_source, cuda_codegen_available
 
 print(torch.__version__)
 
@@ -451,6 +453,83 @@ def test_tilelang_copy_uses_stmatrix_m16n8_for_sm100_int8_shared_store():
         artifact = tilelang.lower(main, target=target)
 
     assert "tl::ptx_stmatrix_m16n8_x1_trans" in artifact.kernel_source
+
+
+def _sub32bit_g2s_copy_kernel(dtype, n=128, threads=128):
+    """128 threads copy 128 sub-32-bit elements global -> shared.
+
+    Each thread naturally gets a sub-4-byte chunk, which used to fall below
+    the cp.async minimum transfer width and silently lower to a synchronous
+    scalar load. The partitioner now coalesces the chunk to >= 4 bytes.
+    """
+
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), dtype), B: T.Tensor((n,), dtype)):
+        with T.Kernel(1, threads=threads):
+            a_sh = T.alloc_shared((n,), dtype)
+            T.copy(A, a_sh, prefer_instruction="cp_async")
+            T.copy(a_sh, B)
+
+    return kernel
+
+
+@pytest.mark.skipif(
+    not cuda_codegen_available(),
+    reason="CUDA codegen FFI missing (e.g. ROCm or macOS Metal builds)",
+)
+def test_sub32bit_g2s_copy_coalesced_to_cp_async():
+    src = compile_kernel_source(_sub32bit_g2s_copy_kernel(T.float8_e4m3fn), "cuda -arch=sm_80")
+    # 4 fp8 elements per active thread -> cp.async; the 96 threads left idle
+    # by the wider chunk are predicated off.
+    assert "tl::cp_async" in src
+    assert "((int)threadIdx.x) < 32" in src
+
+
+def _atomic_add_kernel(dtype=T.bfloat16, n=128, threads=128):
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), dtype), Out: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=threads):
+            for i in T.Parallel(n):
+                T.atomic_add(Out[0], A[i])
+
+    return kernel
+
+
+@pytest.mark.skipif(
+    not cuda_codegen_available(),
+    reason="CUDA codegen FFI missing (e.g. ROCm or macOS Metal builds)",
+)
+def test_sub32bit_atomic_loop_not_coalesced():
+    # Negative case: a loop containing an atomic (impure) call is not a pure
+    # global->shared copy, so the partition keeps the original one
+    # element/thread distribution (vectorizing the loop once corrupted the
+    # atomic into a half-width update).
+    src = compile_kernel_source(_atomic_add_kernel(), "cuda -arch=sm_80")
+    assert "AtomicAdd" in src
+    assert "((int)threadIdx.x) < 64" not in src
+    assert "A[((int)threadIdx.x)]" in src
+
+
+def _global_compute_store_kernel(dtype=T.float16, n=128, threads=128):
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), dtype), B: T.Tensor((n,), dtype)):
+        with T.Kernel(1, threads=threads):
+            for i in T.Parallel(n):
+                B[i] = A[i] + A[i % 32]
+
+    return kernel
+
+
+@pytest.mark.skipif(
+    not cuda_codegen_available(),
+    reason="CUDA codegen FFI missing (e.g. ROCm or macOS Metal builds)",
+)
+def test_sub32bit_non_copy_store_not_coalesced():
+    # Negative case: a global load feeding a non-copy global store (mixed
+    # compute) is not eligible for coalescing either; one element/thread and
+    # no thread-idling predicate.
+    src = compile_kernel_source(_global_compute_store_kernel(), "cuda -arch=sm_80")
+    assert "((int)threadIdx.x) < 64" not in src
 
 
 if __name__ == "__main__":
