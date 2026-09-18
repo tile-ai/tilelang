@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
+#include <numeric>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <unordered_set>
@@ -1034,13 +1035,19 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Check if coalesced_width is defined
   if (auto coalesced_width = root_->annotations.Get(attr::kCoalescedWidth)) {
     if (const auto *imm = coalesced_width->as<IntImmNode>()) {
-      int expected = imm->value;
-      // Verify that vector_size is divisible by expected
-      if (vector_size % expected != 0) {
-        LOG(FATAL) << "Vector size " << vector_size
-                   << " is not divisible by coalesced width " << expected;
+      int64_t expected = imm->value;
+      if (expected <= 0) {
+        LOG(FATAL) << "coalesced_width must be a positive integer, but got "
+                   << expected;
       }
-      vector_size = expected;
+      int64_t effective = std::gcd(static_cast<int64_t>(vector_size), expected);
+      if (effective != expected) {
+        LOG(WARNING)
+            << "Requested coalesced_width=" << expected
+            << " is incompatible with the geometry-supported vector width "
+            << vector_size << "; using " << effective << " instead.";
+      }
+      vector_size = static_cast<int>(effective);
     } else {
       LOG(FATAL) << "coalesced_width should be an IntImmNode.";
     }
