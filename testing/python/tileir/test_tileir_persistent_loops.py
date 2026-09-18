@@ -81,7 +81,9 @@ def test_persistent_primitive_loop_lowers_to_break_capable_loop_mlir():
     pf = _persistent_gemm_prim_func()
     pf = materialize_launch_nest(pf)
     pf = _split_grid_sync_primfunc(pf)
-    mlir = str(build_tileir_module(pf, arch="sm_100"))
+    module = build_tileir_module(pf, arch="sm_100")
+    assert module.operation.verify()
+    mlir = str(module)
 
     assert "loop iter_values" in mlir
     assert "break" in mlir

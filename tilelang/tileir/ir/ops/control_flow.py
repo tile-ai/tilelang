@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import functools
 import operator
@@ -850,50 +849,34 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
         cond_raw = ctx.lookup(self.cond)
         cond = _as_tile(ctx, cond_raw)
 
-        # Pre-scan the then_block for WRITE-effect ops to find all
-        # buffers that will be written inside the if branch.  Only those
-        # buffers' tokens need to be threaded as IfOp results — read-only
-        # buffers' tokens are already defined outside the if (no SSA violation).
-        # For written buffers not yet in _token_map, emit a sentinel make_token()
-        # before the IfOp so the snapshot includes them.
-        def _collect_write_dsts(block_obj: Any) -> list:
-            """Return the ``dst`` Values of all WRITE/READWRITE ops in block_obj."""
+        # Loads update source-buffer tokens too. Export every global buffer
+        # touched by either branch so branch-local tokens cannot escape their
+        # region or become inputs to the mutually exclusive sibling branch.
+        def _collect_token_buffers(block_obj: Any) -> list:
             if block_obj is None:
                 return []
             result = []
             for op in block_obj.ops:
-                eff = getattr(op, "memory_effect", Effect.NONE)
-                if eff in (Effect.WRITE, Effect.READWRITE):
-                    dst_val = getattr(op, "dst", None)
-                    if dst_val is not None:
-                        result.append(dst_val)
-                # Recurse into nested blocks (e.g. nested if/loop inside the if).
+                if isinstance(op, Loop):
+                    # Only the loop's explicit token results escape its body.
+                    # Read-only scratch loads may have no token carry at all.
+                    carry_ids = getattr(op, "_carry_tile_value_ids", None)
+                    carried = [tile for tile in ctx._tile_map if carry_ids is None or id(tile) in carry_ids]
+                    result.extend(_collect_loop_token_bufs(op.body, carried, aliases=ctx.buffer_aliases))
+                    continue
+                for buf, effect in op.buffer_effects():
+                    if effect != Effect.NONE and buf.type.space == MemSpace.GLOBAL:
+                        result.append(buf)
                 for attr in ("then_block", "else_block", "body"):
                     nested = getattr(op, attr, None)
                     if nested is not None:
-                        result.extend(_collect_write_dsts(nested))
+                        result.extend(_collect_token_buffers(nested))
             return result
 
-        # Collect unique written dst values across then-branch (and else-branch
-        # if present).
-        _written_dsts: list = []
-        _seen_dst_ids: set = set()
-        for _dst_val in _collect_write_dsts(self.then_block):
-            if id(_dst_val) not in _seen_dst_ids:
-                _seen_dst_ids.add(id(_dst_val))
-                _written_dsts.append(_dst_val)
-        if self.else_block is not None:
-            for _dst_val in _collect_write_dsts(self.else_block):
-                if id(_dst_val) not in _seen_dst_ids:
-                    _seen_dst_ids.add(id(_dst_val))
-                    _written_dsts.append(_dst_val)
-
-        # Ensure each written-dst buffer has a sentinel token before the IfOp.
-        for _dst_val in _written_dsts:
-            if _dst_val not in ctx._token_map:
-                # best-effort — skip if make_token unavailable
-                with contextlib.suppress(Exception):
-                    ctx._token_map[_dst_val] = ct.make_token(loc=loc)
+        token_keys = list(dict.fromkeys(_collect_token_buffers(self.then_block) + _collect_token_buffers(self.else_block)))
+        for buf in token_keys:
+            if buf not in ctx._token_map:
+                ctx._token_map[buf] = ct.make_token(loc=loc)
 
         # Snapshot all tile-map entries.  We carry ALL of them as IfOp results
         # (conservative but correct — the optimizer can eliminate unused ones).
@@ -901,10 +884,6 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
         tile_init_mlir = [_as_tile(ctx, ctx._tile_map[k]) for k in tile_keys]
         n_tiles = len(tile_keys)
 
-        # Snapshot ONLY the written-buffer tokens (not all of _token_map).
-        # Read-only buffer tokens are already defined outside the if — no need
-        # to carry them as IfOp results.
-        token_keys = [k for k in _written_dsts if k in ctx._token_map]
         token_init_mlir = [ctx._token_map[k] for k in token_keys]
         n_tokens = len(token_keys)
 
@@ -925,13 +904,9 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
 
         if_op = ct_gen.IfOp(results_=result_types, condition=cond, loc=loc)
 
-        # Snapshot op-token map (keyed by id(op)) before the branch walk.
-        # Any entry added during the then-branch walk will reference MLIR values
-        # defined inside the if region — SSA dominance violation.  We collect
-        # those stale tokens so we can replace them (below) with IfOp results.
-        pre_if_op_token_keys: set = set(getattr(ctx, "_op_token", {}).keys())
-        # Map: id(stale_mlir_value) → index into token_keys (filled during then walk).
-        _stale_id_to_tok_idx: dict[int, int] = {}
+        pre_if_tokens = dict(ctx._token_map)
+        pre_if_op_tokens = dict(ctx._op_token)
+        branch_op_tokens = {}
 
         def _run_branch(block_obj, passthrough: bool) -> None:
             """Walk *block_obj* inside the current InsertionPoint,
@@ -941,11 +916,12 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
             # each branch so both branches start from the same state.
             for k, v in zip(tile_keys, tile_init_mlir):
                 ctx._tile_map[k] = v
-            for k, v in zip(token_keys, token_init_mlir):
-                ctx._token_map[k] = v
+            ctx._token_map = dict(pre_if_tokens)
+            ctx._op_token = dict(pre_if_op_tokens)
 
             if not passthrough and block_obj is not None:
                 _walk_block(block_obj, ctx)
+                branch_op_tokens.update({k: v for k, v in ctx._op_token.items() if k not in pre_if_op_tokens})
 
             # If the walked block ended with a terminator (Break/Continue),
             # the MLIR block already has a terminator op — skip YieldOp insertion.
@@ -953,14 +929,6 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
             # or continue op.
             if not passthrough and block_obj is not None and _block_ends_with_terminator(block_obj):
                 return
-
-            if not passthrough:
-                # After the then-walk, record which token values were updated
-                # (these are MLIR values defined inside the if region).
-                for i, k in enumerate(token_keys):
-                    updated = ctx._token_map.get(k)
-                    if updated is not None and updated is not token_init_mlir[i]:
-                        _stale_id_to_tok_idx[id(updated)] = i
 
             # Build yield values: tiles + tokens.
             yield_tile_vals = [_as_tile(ctx, ctx._tile_map[k]) for k in tile_keys]
@@ -982,8 +950,8 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
         # so the bind below is the sole update.
         for k, v in zip(tile_keys, tile_init_mlir):
             ctx._tile_map[k] = v
-        for k, v in zip(token_keys, token_init_mlir):
-            ctx._token_map[k] = v
+        ctx._token_map = pre_if_tokens
+        ctx._op_token = pre_if_op_tokens | branch_op_tokens
 
         # Bind IfOp tile results (first n_tiles results) back to tile_map.
         for k, result in zip(tile_keys, list(if_op.results)[:n_tiles]):
@@ -1006,20 +974,9 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
             for k, wrapped in zip(token_keys, if_tok_wrapped):
                 ctx._token_map[k] = wrapped
 
-            # Fix up ctx._op_token for ops that ran inside the
-            # then-branch.  Those ops set _op_token[id(op)] = stale_tok (a
-            # value defined inside the if region).  Downstream ops that depend
-            # on them (via the token_plan) would use stale_tok as input — an
-            # SSA dominance violation.  Replace stale values with the IfOp's
-            # token results (now wrapped as ct.Token) so downstream ops use
-            # values defined in the enclosing scope.
-            _op_token_map = getattr(ctx, "_op_token", {})
-            for op_key, op_tok in list(_op_token_map.items()):
-                if op_key in pre_if_op_token_keys:
-                    continue  # op ran before the if — its token is fine
-                idx = _stale_id_to_tok_idx.get(id(op_tok))
-                if idx is not None and idx < len(if_tok_wrapped):
-                    _op_token_map[op_key] = if_tok_wrapped[idx]
+            _redirect_op_token_map(ctx, self.then_block, token_keys)
+            if self.else_block is not None:
+                _redirect_op_token_map(ctx, self.else_block, token_keys)
 
         return None  # side-effect only
 

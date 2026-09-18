@@ -27,6 +27,42 @@ from tileir_test_utils import (
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("with_else", [False, True])
+@pytest.mark.parametrize("disable_tma", [False, True])
+def test_tileir_branch_load_tokens_do_not_escape(monkeypatch, with_else, disable_tma):
+    _skip_if_tileir_toolchain_unavailable()
+    torch = _enable_tileir_runtime(monkeypatch)
+    major, minor = torch.cuda.get_device_capability()
+
+    @tilelang.jit(out_idx=-1, target=f"tileir -arch=sm_{major}{minor}", execution_backend="tileir")
+    def copy_kernel():
+        @T.prim_func
+        def main(A: T.Tensor((4, 32), "float32"), B: T.Tensor((2, 32), "float32")):
+            with T.Kernel(2, threads=128) as bx:
+                selected = T.alloc_shared((32,), "float32")
+                tail = T.alloc_shared((32,), "float32")
+                T.copy(A[2, :], selected, disable_tma=disable_tma)
+                if with_else:
+                    if bx == 0:
+                        T.copy(A[0, :], selected, disable_tma=disable_tma)
+                    else:
+                        T.copy(A[1, :], selected, disable_tma=disable_tma)
+                else:
+                    if bx == 0:
+                        T.copy(A[0, :], selected, disable_tma=disable_tma)
+                T.copy(A[3, :], tail, disable_tma=disable_tma)
+                for i in T.Parallel(32):
+                    B[bx, i] = selected[i] + tail[i]
+
+        return main
+
+    a = torch.arange(128, device="cuda", dtype=torch.float32).reshape(4, 32)
+    expected = torch.stack((a[0] + a[3], a[1 if with_else else 2] + a[3]))
+    torch.testing.assert_close(copy_kernel()(a), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @pytest.mark.parametrize("num_split", [1, 2])
 def test_tileir_runs_deepseek_mla_decode_runtime(monkeypatch, num_split):
     _skip_if_tileir_toolchain_unavailable()
