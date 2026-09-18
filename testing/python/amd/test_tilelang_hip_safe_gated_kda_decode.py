@@ -336,4 +336,5 @@ def test_safe_gated_kda_decode_rejects_nonnegative_lower_bound():
             key_dim,
             value_dim,
             lower_bound=0.0,
+            block_v=2,
         )
