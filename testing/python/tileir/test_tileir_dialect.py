@@ -2,6 +2,8 @@
 
 import inspect
 
+import pytest
+
 import tilelang
 from tilelang import language as Tcuda
 from tilelang.language import common
@@ -27,12 +29,13 @@ def test_tileir_dialect_owns_its_hints():
     assert "latency" not in inspect.signature(Tcuda.copy).parameters
 
 
-def test_tileir_eager_launch_and_copy_annotations():
+@pytest.mark.parametrize("tileir_hints", [None, {}])
+def test_tileir_eager_launch_and_copy_annotations(tileir_hints):
     @tilelang.jit
     def hinted(A, B):
         A: T.Tensor((128,), "float32")
         B: T.Tensor((128,), "float32")
-        with T.Kernel(1, threads=128, num_ctas=2, occupancy=4, num_worker_warps=4) as bx:
+        with T.Kernel(1, threads=128, num_ctas=2, occupancy=4, num_worker_warps=4, tileir_hints=tileir_hints) as bx:
             S = T.alloc_shared((128,), "float32")
             T.copy(A[bx * 128], S, latency=2, disable_tma=True, annotations={"tileir.latency": 6})
             T.copy(S, B[bx * 128])
@@ -51,5 +54,6 @@ def test_tileir_eager_launch_and_copy_annotations():
     assert int(launch_annotations["tileir.num_ctas"]) == 2
     assert int(launch_annotations["tileir.occupancy"]) == 4
     assert int(launch_annotations["tileir.num_worker_warps"]) == 4
+    assert "tileir.hints" not in launch_annotations
     assert int(copy_annotations["tileir.latency"]) == 6
     assert bool(copy_annotations["disable_tma"])

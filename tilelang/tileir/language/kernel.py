@@ -38,7 +38,7 @@ def Kernel(
     ):
         if value is not None:
             attrs[f"tileir.{key}"] = int(value)
-    if tileir_hints is not None:
+    if tileir_hints:
         if not isinstance(tileir_hints, dict):
             raise TypeError(f"tileir_hints must be a dict of per-arch hint dicts; got {type(tileir_hints).__name__}.")
         try:
