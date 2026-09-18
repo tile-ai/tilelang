@@ -5,3 +5,25 @@
 - FLA: commit 9714c5(used for comparison)
 
 We copy the needed files and function from flash-linear-attention to the FLA_KDA/ for easily comparison.
+
+## Packed safe-gated decode
+
+`example_safe_gated_kda_decode.py` implements a one-token packed KDA decode
+primitive for models that use the bounded safe gate:
+
+```text
+g = lower_bound * sigmoid(exp(A_log) * (a + dt_bias))
+beta = sigmoid(b)
+```
+
+The kernel consumes post-convolution packed QKV, applies Q/K L2 normalization,
+updates a slot-indexed `[value_heads, value_dim, key_dim]` recurrent state in
+place, and returns `[batch, 1, value_heads, value_dim]`. A state index of `-1`
+produces zero output without accessing or modifying the state pool.
+Non-negative state indices must be unique within a decode batch, as each active
+request owns one mutable state slot.
+
+The default activation/state types are BF16/FP32. GLM-5.3-Flash with TP8 uses
+eight local Q/K/V heads with `key_dim=value_dim=128` and `lower_bound=-5.0`.
+The implementation is model- and GPU-architecture-independent; callers provide
+the dimensions and gate bound when specializing the kernel.
