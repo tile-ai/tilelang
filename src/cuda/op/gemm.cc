@@ -143,7 +143,7 @@ bool AllowTuringMma(const GemmNode &op) {
   return false;
 }
 
-bool AllowMmaSync(const GemmNode &op, Target target) {
+bool AllowAmpereMMA(const GemmNode &op, Target target) {
   DataType a = op.a_->dtype, b = op.b_->dtype, c = op.c_->dtype;
   if (a.is_float8() && b.is_float8()) {
     return TargetHasSMVersionGE(target, 89) &&
@@ -420,7 +420,7 @@ struct Gemm {
     if (TargetIsTuring(target) && !AllowTuringMma(op)) {
       return kCudaFMA;
     }
-    if (TargetIsAmpere(target) && !AllowMmaSync(op, target)) {
+    if (TargetIsAmpere(target) && !AllowAmpereMMA(op, target)) {
       FatalMmaSyncUnavailable(op, target);
     }
     return kCudaMMA;
