@@ -162,6 +162,19 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   ConstrSet a_local_ctx = a_ctx;
   ConstrSet b_local_ctx = b_ctx;
   ConstrSet loop_ctx;
+  // Scheduled tasks can define condition snapshots outside the constraint
+  // visitor's Bind stack. Rename all variables written in the compared
+  // iteration scope, including these otherwise-free predicates. Sharing one
+  // predicate between producer and consumer would incorrectly make opposite
+  // branches mutually exclusive across different iterations.
+  auto seed_iteration_vars = [&](const ControlNode *scope) {
+    for (const Var &var : scope->GetWriteVars()) {
+      if (!a_sub.count(var))
+        a_sub.Set(var, var.copy_with_suffix("_p"));
+      if (!b_sub.count(var))
+        b_sub.Set(var, var.copy_with_suffix("_c"));
+    }
+  };
   if (cross) {
     if (offset < 0) {
       std::vector<const ControlNode *> iteration_nest =
@@ -169,6 +182,7 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
               ? loop->GetAncestorControls()
               : StorageIterationNest(loop, a_region->buffer->data);
       ICHECK(!iteration_nest.empty());
+      seed_iteration_vars(iteration_nest.front());
       Var pivot_lv = iteration_nest.front()->control->loop_var;
       a_local_ctx = a_local_ctx.RenameFrom("_p", a_sub, pivot_lv);
       b_local_ctx = b_local_ctx.RenameFrom("_c", b_sub, pivot_lv);
@@ -183,6 +197,7 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
         loop_ctx.AddConstr(different_iteration);
       }
     } else {
+      seed_iteration_vars(loop);
       Var iteration = loop->control->loop_var;
       a_local_ctx = a_local_ctx.RenameFrom("_p", a_sub, iteration);
       b_local_ctx = b_local_ctx.RenameFrom("_c", b_sub, iteration);
