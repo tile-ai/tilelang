@@ -1,13 +1,15 @@
 #!/bin/bash
-# Ascend performance regression test: compare current branch vs upstream/asc
+# Ascend performance regression test: compare current checkout vs asc-on-upstream-main
 #
 # Usage:
 #   ./maint/scripts/run_perf_regression_ascend.sh
 #
 # Environment variables:
 #   BASELINE_URL    - remote URL to fetch the baseline from
-#                     (default: https://github.com/tile-ai/tilelang-deepseek.git)
-#   BASELINE_BRANCH - branch on BASELINE_URL to compare against (default: asc)
+#                     (default: https://github.com/deepseek-ai/tilelang.git)
+#   BASELINE_BRANCH - branch on BASELINE_URL to compare against (default: asc-on-upstream-main)
+#   BASELINE_SHA    - Already-fetched baseline commit; skips fetching the branch when set
+#   CURRENT_LABEL   - Current ref label in the report (default: current branch or SHA)
 #   WORK_DIR        - Directory outside the checkout for snapshots and results
 #                     (default: unique directory under RUNNER_TEMP, TMPDIR or /tmp)
 #   SKIP_BUILD      - Set to 1 to skip the ninja rebuild between checkouts
@@ -18,8 +20,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 
-BASELINE_URL="${BASELINE_URL:-https://github.com/tile-ai/tilelang-deepseek.git}"
-BASELINE_BRANCH="${BASELINE_BRANCH:-asc}"
+BASELINE_URL="${BASELINE_URL:-https://github.com/deepseek-ai/tilelang.git}"
+BASELINE_BRANCH="${BASELINE_BRANCH:-asc-on-upstream-main}"
 NINJA_JOBS="${NINJA_JOBS:-64}"
 
 cd "${REPO_ROOT}"
@@ -46,8 +48,8 @@ fi
 MARKER="__TILELANG_PERF_RESULTS_JSON__="
 
 # The Ascend examples plus their maintenance driver form the regression harness. Keep
-# both constant from the current branch across refs, so only the rebuilt libtvm.so
-# varies. The baseline ref may not contain the driver or all examples, so overlay them
+# both constant from the current branch across refs while testing each ref's compiler
+# and runtime. The baseline ref may not contain the driver or all examples, so overlay them
 # onto each checkout.
 HARNESS_DIR="examples/ascend"
 DRIVER_PATH="maint/scripts/ascend_perf_regression.py"
@@ -85,8 +87,10 @@ else
 fi
 
 CURRENT_REF="$(git rev-parse --abbrev-ref HEAD)"
-[[ "${CURRENT_REF}" == "HEAD" ]] && CURRENT_REF="$(git rev-parse HEAD)"
-echo "Current ref: ${CURRENT_REF}"
+CURRENT_SHA="$(git rev-parse HEAD)"
+[[ "${CURRENT_REF}" == "HEAD" ]] && CURRENT_REF="${CURRENT_SHA}"
+CURRENT_LABEL="${CURRENT_LABEL:-${CURRENT_REF}}"
+echo "Current ref: ${CURRENT_LABEL} -> ${CURRENT_SHA}"
 
 cleanup() {
     echo ""
@@ -106,11 +110,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Resolve the baseline into a concrete commit, without depending on any named remote:
-# fetch the branch directly from the URL into FETCH_HEAD and pin its SHA.
-echo "Fetching baseline ${BASELINE_BRANCH} from ${BASELINE_URL} ..."
-git fetch --no-tags "${BASELINE_URL}" "${BASELINE_BRANCH}"
-BASELINE="$(git rev-parse --verify FETCH_HEAD)"
+# CI pins the base commit used by the checked-out PR merge. Local runs fetch the
+# requested branch unless an already-fetched baseline commit was supplied.
+if [[ -n "${BASELINE_SHA:-}" ]]; then
+    BASELINE="$(git rev-parse --verify "${BASELINE_SHA}^{commit}")"
+else
+    echo "Fetching baseline ${BASELINE_BRANCH} from ${BASELINE_URL} ..."
+    git fetch --no-tags "${BASELINE_URL}" "${BASELINE_BRANCH}"
+    BASELINE="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
+fi
 echo "Baseline: ${BASELINE_URL}@${BASELINE_BRANCH} -> ${BASELINE}"
 
 build() {
@@ -143,8 +151,8 @@ run_driver "${OLD_JSON}"
 
 # ---- Current ----
 echo ""
-echo "===== Current (${CURRENT_REF}) ====="
-git checkout -f "${CURRENT_REF}"
+echo "===== Current (${CURRENT_SHA}) ====="
+git checkout -f "${CURRENT_SHA}"
 git submodule update --init --recursive
 build
 restore_harness
@@ -157,7 +165,9 @@ echo "===== Results ====="
 # over the UNION of kernels (speedup = old / new, >1.0 means current is faster). A kernel
 # that failed to run on one side shows "-" there, so failures stay visible instead of
 # silently dropping out of the report.
-OLD_JSON="${OLD_JSON}" NEW_JSON="${NEW_JSON}" RESULT_MD="${RESULT_MD}" python3 - <<'PY'
+BASELINE_LABEL="${BASELINE_URL}@${BASELINE_BRANCH}" BASELINE_SHA="${BASELINE}" \
+    CURRENT_LABEL="${CURRENT_LABEL}" CURRENT_SHA="${CURRENT_SHA}" \
+    OLD_JSON="${OLD_JSON}" NEW_JSON="${NEW_JSON}" RESULT_MD="${RESULT_MD}" python3 - <<'PY'
 import json, os
 
 old = json.load(open(os.environ["OLD_JSON"]))
@@ -182,6 +192,10 @@ for k in sorted(set(old) | set(new)):
 rows.sort(key=lambda r: r[4])  # worst regressions first, missing-side rows last
 
 lines = [
+    f"Baseline: `{os.environ['BASELINE_LABEL']}` (`{os.environ['BASELINE_SHA']}`)",
+    "",
+    f"Current: `{os.environ['CURRENT_LABEL']}` (`{os.environ['CURRENT_SHA']}`)",
+    "",
     "| Kernel | Baseline (ms) | Current (ms) | Speedup (old/new) |",
     "|---|---|---|---|",
 ]

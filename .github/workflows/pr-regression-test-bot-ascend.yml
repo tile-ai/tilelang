@@ -52,7 +52,7 @@ jobs:
           exit 1
 
   pr-regression:
-    name: Performance regression test between PR and asc
+    name: Performance regression test between PR and its base
     needs: [permissions-check]
     runs-on: ${{ matrix.runner.tags }}
     strategy:
@@ -76,6 +76,18 @@ jobs:
           ref: refs/pull/${{ github.event.issue.number }}/merge
           fetch-depth: 0
           submodules: recursive
+
+      - name: Get PR base branch
+        id: pr-base
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.issue.number,
+            });
+            core.setOutput('url', pr.base.repo.clone_url);
+            core.setOutput('branch', pr.base.ref);
 
       - name: Set environment (self-hosted runners)
         if: startsWith(matrix.runner.name, 'self-hosted')
@@ -189,11 +201,17 @@ jobs:
 
       - name: Run performance regression test
         id: perf-regression
+        env:
+          BASELINE_URL: ${{ steps.pr-base.outputs.url }}
+          BASELINE_BRANCH: ${{ steps.pr-base.outputs.branch }}
+          CURRENT_LABEL: refs/pull/${{ github.event.issue.number }}/merge
         run: |
-          # The script rebuilds libtvm.so via ninja for each ref (baseline = upstream/asc,
-          # current = the PR merge), keeps the Ascend examples and maintenance driver
-          # constant across both, and writes the speedup table to
-          # a temporary directory outside the checkout (exposed as result_md).
+          # Pin the first parent of this PR merge, even if the base branch advances
+          # while the job is running. The full checkout already contains this commit.
+          BASELINE_SHA="$(git rev-parse --verify HEAD^1)"
+          export BASELINE_SHA
+          # Rebuild both refs with the same examples and driver, and expose the report
+          # in a temporary directory outside the checkout through result_md.
           bash ./maint/scripts/run_perf_regression_ascend.sh
 
       - name: Post test results as PR comment
