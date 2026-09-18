@@ -1040,12 +1040,12 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
         LOG(FATAL) << "coalesced_width must be a positive integer, but got "
                    << expected;
       }
-      int64_t effective =
-          std::gcd(static_cast<int64_t>(vector_size), expected);
+      int64_t effective = std::gcd(static_cast<int64_t>(vector_size), expected);
       if (effective != expected) {
-        LOG(WARNING) << "Requested coalesced_width=" << expected
-                     << " exceeds the geometry-supported vector width "
-                     << vector_size << "; using " << effective << " instead.";
+        LOG(WARNING)
+            << "Requested coalesced_width=" << expected
+            << " is incompatible with the geometry-supported vector width "
+            << vector_size << "; using " << effective << " instead.";
       }
       vector_size = static_cast<int>(effective);
     } else {
