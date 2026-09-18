@@ -12,7 +12,7 @@ DMA) while the tile/vector unit consumes tile ``by`` in the other stage, so the
 load of the next tile overlaps the compute on the current one. The scale-write
 loop additionally double-buffers the output ``Y_db[2]`` so an in-flight store of
 tile ``by`` is not clobbered by the scale of tile ``by+1``. The actual
-``wait_token`` synchronization is inserted later by ``InjectSunmmioSync`` (after
+hardware-unit synchronization is inserted later by ``InjectSunmmioSync`` (after
 this lower-and-legalize stage); here we only express the staged structure.
 """
 

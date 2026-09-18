@@ -1626,7 +1626,7 @@ bool IsAllGatherBroadcast(const TemplateCommand &cmd) {
   ICHECK(semantic_args == static_cast<size_t>(kBroadcastArgCount) ||
          semantic_args == static_cast<size_t>(kBroadcastArgCount + 1))
       << "tl.broadcast_ expects its fixed arguments and optional src_core";
-  // Before sync-token injection, a broadcast with only the fixed arguments is
+  // Before unit-sync injection, a broadcast with only the fixed arguments is
   // issued by every core and therefore implements an all-gather collective.
   return semantic_args == static_cast<size_t>(kBroadcastArgCount);
 }

@@ -1,4 +1,5 @@
 #include "sunmmio_mlir_function.h"
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -7,107 +8,10 @@
 #include "mlir/IR/Verifier.h"
 #include "npuir/Dialect/SUVM/IR/Attributes.h"
 #include "npuir/Dialect/SUVM/IR/Dialect.h"
-#include "npuir/Dialect/SUVM/IR/Types.h"
-
-#include <algorithm>
-#include <unordered_map>
+#include "npuir/Dialect/SUVM/IR/Ops.h"
 
 namespace tvm {
 namespace codegen {
-
-namespace {
-
-mlir::Value CreateNullToken(SunmmioMlirContext &ctx, SunmmioMlirType &type) {
-  mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx.mlir_ctx);
-  mlir::OperationState st(type.Loc(), "suvm.null_token");
-  st.addTypes(token_ty);
-  mlir::Operation *op = ctx.builder.create(st);
-  return op->getResult(0);
-}
-
-void RestoreSavedTokens(
-    SunmmioMlirContext &ctx,
-    const std::unordered_map<int64_t, SunmmioMlirContext::SavedToken>
-        &saved_tokens) {
-  for (const auto &kv : saved_tokens) {
-    int64_t token_id = kv.first;
-    const SunmmioMlirContext::SavedToken &saved = kv.second;
-    if (saved.existed) {
-      ctx.token_by_id[token_id] = saved.value;
-    } else {
-      ctx.token_by_id.erase(token_id);
-    }
-  }
-}
-
-void SnapshotTokenIfNeeded(SunmmioMlirContext &ctx, int64_t token_id,
-                           SunmmioMlirContext::ControlNode node) {
-  auto snapshot = [&](auto &frame) {
-    if (frame.saved_token_by_id.find(token_id) !=
-        frame.saved_token_by_id.end()) {
-      return;
-    }
-    SunmmioMlirContext::SavedToken saved;
-    auto it = ctx.token_by_id.find(token_id);
-    if (it != ctx.token_by_id.end()) {
-      saved.existed = true;
-      saved.value = it->second;
-    }
-    frame.saved_token_by_id[token_id] = saved;
-  };
-
-  if (node.kind == SunmmioMlirContext::ControlKind::kFor) {
-    snapshot(ctx.for_stack[node.index]);
-  } else if (node.kind == SunmmioMlirContext::ControlKind::kIf) {
-    snapshot(ctx.if_stack[node.index]);
-  } else {
-    snapshot(ctx.while_stack[node.index]);
-  }
-}
-
-void PublishTokenToImmediateParent(SunmmioMlirContext &ctx, int64_t token_id,
-                                   mlir::Value value) {
-  if (token_id < 0 || !value) {
-    return;
-  }
-
-  if (!ctx.control_flow_stack.empty()) {
-    SunmmioMlirContext::ControlNode &node = ctx.control_flow_stack.back();
-    SnapshotTokenIfNeeded(ctx, token_id, node);
-    if (node.kind == SunmmioMlirContext::ControlKind::kFor) {
-      SunmmioMlirContext::ForFrame &parent = ctx.for_stack[node.index];
-      auto tit = parent.token_id_to_index.find(token_id);
-      if (tit != parent.token_id_to_index.end()) {
-        int idx = tit->second;
-        if (idx >= 0 && idx < static_cast<int>(parent.produced_tokens.size())) {
-          parent.produced_tokens[idx] = value;
-        }
-      }
-    } else if (node.kind == SunmmioMlirContext::ControlKind::kIf) {
-      SunmmioMlirContext::IfFrame &parent = ctx.if_stack[node.index];
-      auto tit = parent.token_id_to_index.find(token_id);
-      if (tit != parent.token_id_to_index.end()) {
-        int idx = tit->second;
-        if (idx >= 0 && idx < static_cast<int>(parent.produced_tokens.size())) {
-          parent.produced_tokens[idx] = value;
-        }
-      }
-    } else {
-      SunmmioMlirContext::WhileFrame &parent = ctx.while_stack[node.index];
-      auto tit = parent.token_id_to_index.find(token_id);
-      if (tit != parent.token_id_to_index.end()) {
-        int idx = tit->second;
-        if (idx >= 0 && idx < static_cast<int>(parent.produced_tokens.size())) {
-          parent.produced_tokens[idx] = value;
-        }
-      }
-    }
-  }
-
-  ctx.token_by_id[token_id] = value;
-}
-
-} // namespace
 
 SunmmioMlirFunction::SunmmioMlirFunction(SunmmioMlirContext &ctx)
     : ctx_(ctx), type_(ctx) {}
@@ -170,6 +74,14 @@ void SunmmioMlirFunction::EmitReturn() {
       block->back().hasTrait<mlir::OpTrait::IsTerminator>()) {
     return;
   }
+  if (ctx_.pending_sync_units != SunmmioMlirContext::kNoSyncUnits) {
+    SunmmioMlirContext::SyncUnitMask units_mask = ctx_.pending_sync_units;
+    mlir::suvm::SyncUnits units = SunmmioMlirContext::ToSyncUnits(units_mask);
+    mlir::suvm::SyncOp::create(
+        ctx_.builder, type_.MakeDebugLoc("function_exit_sync"),
+        mlir::suvm::SyncUnitsAttr::get(&ctx_.mlir_ctx, units));
+    ctx_.CompletePendingSyncUnits(units_mask);
+  }
   mlir::func::ReturnOp::create(ctx_.builder, type_.Loc());
 }
 
@@ -177,7 +89,6 @@ void SunmmioMlirFunction::BeginFor(
     const std::string &iv, const SunMMIOValue &lb, const SunMMIOValue &ub,
     const SunMMIOValue &step,
     const ffi::Map<ffi::String, ffi::Any> &annotations,
-    const std::vector<int64_t> &live_out_token_ids,
     const std::vector<SunMMIOValue> &live_out_values) {
   mlir::Value lb_v =
       type_.EnsureIndex(type_.ResolveValue(lb, ctx_.builder.getIndexType()));
@@ -187,20 +98,11 @@ void SunmmioMlirFunction::BeginFor(
       type_.EnsureIndex(type_.ResolveValue(step, ctx_.builder.getIndexType()));
 
   mlir::SmallVector<mlir::Value, 8> init_args;
-  init_args.reserve(live_out_token_ids.size() + live_out_values.size());
-  for (int64_t token_id : live_out_token_ids) {
-    auto it = ctx_.token_by_id.find(token_id);
-    if (it != ctx_.token_by_id.end() && it->second) {
-      init_args.push_back(it->second);
-      continue;
-    }
-    init_args.push_back(CreateNullToken(ctx_, type_));
-  }
+  init_args.reserve(live_out_values.size());
   for (const SunMMIOValue &value : live_out_values) {
-    mlir::Type expected_type = type_.MapType(value.type);
     mlir::Value init = ctx_.LookupMLIRValue(value.value);
     if (!init) {
-      init = type_.ResolveValue(value, expected_type);
+      init = type_.ResolveValue(value, type_.MapType(value.type));
     }
     init_args.push_back(init);
   }
@@ -211,99 +113,57 @@ void SunmmioMlirFunction::BeginFor(
   SunmmioMlirContext::ForFrame frame;
   frame.op = for_op;
   frame.annotations = annotations;
-  frame.live_out_token_ids = live_out_token_ids;
-  frame.value_index_offset = static_cast<int>(live_out_token_ids.size());
+  frame.entry_pending_sync_units = ctx_.pending_sync_units;
   frame.live_out_value_names.reserve(live_out_values.size());
   for (const SunMMIOValue &value : live_out_values) {
     frame.live_out_value_names.push_back(value.value);
   }
-  frame.iter_tokens.assign(for_op.getRegionIterArgs().begin(),
+  frame.iter_values.assign(for_op.getRegionIterArgs().begin(),
                            for_op.getRegionIterArgs().end());
-  frame.produced_tokens.assign(frame.iter_tokens.size(), mlir::Value());
-  for (int i = 0, e = static_cast<int>(live_out_token_ids.size()); i < e; ++i) {
-    frame.token_id_to_index[frame.live_out_token_ids[i]] = i;
-  }
+  frame.produced_values.assign(frame.iter_values.size(), mlir::Value());
   ctx_.for_stack.push_back(std::move(frame));
   ctx_.control_flow_stack.push_back(SunmmioMlirContext::ControlNode{
       SunmmioMlirContext::ControlKind::kFor,
       static_cast<int>(ctx_.for_stack.size()) - 1});
+
   ctx_.PushMLIRValueScope();
   ctx_.BindMLIRValue(iv, for_op.getInductionVar());
   SunmmioMlirContext::ForFrame &active_frame = ctx_.for_stack.back();
-  for (int i = 0, e = static_cast<int>(live_out_token_ids.size()); i < e; ++i) {
-    int64_t token_id = live_out_token_ids[i];
-    if (token_id >= 0) {
-      ctx_.token_by_id[token_id] = active_frame.iter_tokens[i];
-    }
-  }
-  for (int i = 0,
-           e = static_cast<int>(active_frame.live_out_value_names.size());
-       i < e; ++i) {
-    int value_idx = active_frame.value_index_offset + i;
+  for (int i = 0, e = static_cast<int>(active_frame.iter_values.size()); i < e;
+       ++i) {
     ctx_.BindMLIRValue(active_frame.live_out_value_names[i],
-                       active_frame.iter_tokens[value_idx]);
-  }
-  for (int i = 0, e = static_cast<int>(active_frame.live_out_token_ids.size());
-       i < e; ++i) {
-    int64_t token_id = active_frame.live_out_token_ids[i];
-    if (token_id < 0) {
-      continue;
-    }
-    if (active_frame.saved_token_by_id.find(token_id) ==
-        active_frame.saved_token_by_id.end()) {
-      SunmmioMlirContext::SavedToken saved;
-      auto it = ctx_.token_by_id.find(token_id);
-      if (it != ctx_.token_by_id.end()) {
-        saved.existed = true;
-        saved.value = it->second;
-      }
-      active_frame.saved_token_by_id[token_id] = saved;
-    }
-    ctx_.token_by_id[token_id] = active_frame.iter_tokens[i];
+                       active_frame.iter_values[i]);
   }
   ctx_.builder.setInsertionPointToStart(for_op.getBody());
 }
 
 void SunmmioMlirFunction::EndFor() {
-  if (ctx_.for_stack.empty()) {
-    LOG(FATAL) << "EndFor called without a matching BeginFor";
-    ctx_.PopMLIRValueScope();
-    TVM_FFI_UNREACHABLE();
-  }
-
-  if (ctx_.control_flow_stack.empty() ||
-      ctx_.control_flow_stack.back().kind !=
-          SunmmioMlirContext::ControlKind::kFor ||
-      ctx_.control_flow_stack.back().index !=
-          static_cast<int>(ctx_.for_stack.size()) - 1) {
-    LOG(FATAL) << "EndFor control_flow_stack mismatch";
-    TVM_FFI_UNREACHABLE();
-  } else {
-    ctx_.control_flow_stack.pop_back();
-  }
+  ICHECK(!ctx_.for_stack.empty())
+      << "EndFor called without a matching BeginFor";
+  ICHECK(!ctx_.control_flow_stack.empty() &&
+         ctx_.control_flow_stack.back().kind ==
+             SunmmioMlirContext::ControlKind::kFor &&
+         ctx_.control_flow_stack.back().index ==
+             static_cast<int>(ctx_.for_stack.size()) - 1)
+      << "EndFor control_flow_stack mismatch";
+  ctx_.control_flow_stack.pop_back();
 
   SunmmioMlirContext::ForFrame frame = std::move(ctx_.for_stack.back());
   ctx_.for_stack.pop_back();
-  mlir::scf::ForOp for_op = frame.op;
-
-  // Build the values to yield from the loop body:
-  // - Prefer tokens produced inside the body.
-  // - Otherwise, forward the incoming iter_args unchanged.
+  SunmmioMlirContext::SyncUnitMask body_pending_sync_units =
+      ctx_.pending_sync_units;
   mlir::SmallVector<mlir::Value, 8> yielded;
-  yielded.reserve(frame.iter_tokens.size());
-  for (int i = 0, e = static_cast<int>(frame.iter_tokens.size()); i < e; ++i) {
-    mlir::Value v = frame.produced_tokens[i] ? frame.produced_tokens[i]
-                                             : frame.iter_tokens[i];
-    yielded.push_back(v);
+  yielded.reserve(frame.iter_values.size());
+  for (int i = 0, e = static_cast<int>(frame.iter_values.size()); i < e; ++i) {
+    yielded.push_back(frame.produced_values[i] ? frame.produced_values[i]
+                                               : frame.iter_values[i]);
   }
 
-  // Ensure the loop body terminator is an scf.yield with the computed operands.
-  mlir::Block *body = for_op.getBody();
-  mlir::Operation *terminator =
-      body->mightHaveTerminator() ? body->getTerminator() : nullptr;
+  mlir::Block *body = frame.op.getBody();
   mlir::scf::YieldOp yield_op =
-      terminator ? mlir::dyn_cast<mlir::scf::YieldOp>(terminator)
-                 : mlir::scf::YieldOp();
+      body->mightHaveTerminator()
+          ? mlir::dyn_cast<mlir::scf::YieldOp>(body->back())
+          : mlir::scf::YieldOp();
   if (yield_op) {
     yield_op.getOperation()->setOperands(yielded);
   } else {
@@ -311,67 +171,32 @@ void SunmmioMlirFunction::EndFor() {
     mlir::scf::YieldOp::create(ctx_.builder, type_.Loc(), yielded);
   }
 
-  ctx_.builder.setInsertionPointAfter(for_op);
-
-  // Restore token_by_id mappings that were locally overridden inside this loop.
-  for (const auto &kv : frame.saved_token_by_id) {
-    int64_t token_id = kv.first;
-    const SunmmioMlirContext::SavedToken &saved = kv.second;
-    if (saved.existed) {
-      ctx_.token_by_id[token_id] = saved.value;
-    } else {
-      ctx_.token_by_id.erase(token_id);
-    }
-  }
-  for (int i = 0, e = static_cast<int>(frame.live_out_token_ids.size()); i < e;
-       ++i) {
-    int64_t token_id = frame.live_out_token_ids[i];
-    mlir::Value v = for_op.getResult(i);
-    // Publish only to the direct lexical parent.  Skipping an intermediate
-    // control-flow region would leak a value defined inside that region.
-    PublishTokenToImmediateParent(ctx_, token_id, v);
-  }
+  ctx_.builder.setInsertionPointAfter(frame.op);
   ctx_.PopMLIRValueScope();
+  ctx_.pending_sync_units = SunmmioMlirContext::MergeSyncUnits(
+      frame.entry_pending_sync_units, body_pending_sync_units);
   for (int i = 0, e = static_cast<int>(frame.live_out_value_names.size());
        i < e; ++i) {
-    ctx_.BindMLIRValue(frame.live_out_value_names[i],
-                       for_op.getResult(frame.value_index_offset + i));
+    ctx_.BindMLIRValue(frame.live_out_value_names[i], frame.op.getResult(i));
   }
 }
 
 void SunmmioMlirFunction::BeginWhile(
-    const std::vector<int64_t> &live_out_token_ids) {
-  BeginWhile(live_out_token_ids, {});
-}
-
-void SunmmioMlirFunction::BeginWhile(
-    const std::vector<int64_t> &live_out_token_ids,
     const std::vector<SunMMIOValue> &live_out_values) {
   mlir::SmallVector<mlir::Value, 8> init_args;
-  init_args.reserve(live_out_token_ids.size() + live_out_values.size());
-  for (int64_t token_id : live_out_token_ids) {
-    auto it = ctx_.token_by_id.find(token_id);
-    if (it != ctx_.token_by_id.end() && it->second) {
-      init_args.push_back(it->second);
-      continue;
-    }
-    init_args.push_back(CreateNullToken(ctx_, type_));
-  }
+  init_args.reserve(live_out_values.size());
   for (const SunMMIOValue &value : live_out_values) {
-    mlir::Type expected_type = type_.MapType(value.type);
     mlir::Value init = ctx_.LookupMLIRValue(value.value);
     if (!init) {
-      init = type_.ResolveValue(value, expected_type);
+      init = type_.ResolveValue(value, type_.MapType(value.type));
     }
     init_args.push_back(init);
   }
 
   mlir::SmallVector<mlir::Type, 8> result_types;
-  result_types.reserve(init_args.size());
   for (mlir::Value init_arg : init_args) {
     result_types.push_back(init_arg.getType());
   }
-
   auto empty_builder = [](mlir::OpBuilder &, mlir::Location, mlir::ValueRange) {
   };
   mlir::scf::WhileOp while_op =
@@ -380,24 +205,16 @@ void SunmmioMlirFunction::BeginWhile(
 
   SunmmioMlirContext::WhileFrame frame;
   frame.op = while_op;
-  frame.in_body = false;
-  frame.live_out_token_ids = live_out_token_ids;
-  frame.value_index_offset = static_cast<int>(live_out_token_ids.size());
+  frame.entry_pending_sync_units = ctx_.pending_sync_units;
   frame.live_out_value_names.reserve(live_out_values.size());
   for (const SunMMIOValue &value : live_out_values) {
     frame.live_out_value_names.push_back(value.value);
   }
-
-  auto before_args = while_op.getBeforeArguments();
-  auto after_args = while_op.getAfterArguments();
-  frame.before_tokens.assign(before_args.begin(), before_args.end());
-  frame.iter_tokens.assign(after_args.begin(), after_args.end());
-  frame.produced_tokens.assign(frame.iter_tokens.size(), mlir::Value());
-  for (int i = 0, e = static_cast<int>(frame.live_out_token_ids.size()); i < e;
-       ++i) {
-    frame.token_id_to_index[frame.live_out_token_ids[i]] = i;
-  }
-
+  frame.before_values.assign(while_op.getBeforeArguments().begin(),
+                             while_op.getBeforeArguments().end());
+  frame.iter_values.assign(while_op.getAfterArguments().begin(),
+                           while_op.getAfterArguments().end());
+  frame.produced_values.assign(frame.iter_values.size(), mlir::Value());
   ctx_.while_stack.push_back(std::move(frame));
   ctx_.control_flow_stack.push_back(SunmmioMlirContext::ControlNode{
       SunmmioMlirContext::ControlKind::kWhile,
@@ -405,109 +222,74 @@ void SunmmioMlirFunction::BeginWhile(
 
   ctx_.PushMLIRValueScope();
   SunmmioMlirContext::WhileFrame &active_frame = ctx_.while_stack.back();
-  for (int i = 0, e = static_cast<int>(live_out_token_ids.size()); i < e; ++i) {
-    int64_t token_id = live_out_token_ids[i];
-    if (token_id >= 0) {
-      ctx_.token_by_id[token_id] = active_frame.before_tokens[i];
-    }
-  }
-  for (int i = 0,
-           e = static_cast<int>(active_frame.live_out_value_names.size());
+  for (int i = 0, e = static_cast<int>(active_frame.before_values.size());
        i < e; ++i) {
-    int value_idx = active_frame.value_index_offset + i;
     ctx_.BindMLIRValue(active_frame.live_out_value_names[i],
-                       active_frame.before_tokens[value_idx]);
+                       active_frame.before_values[i]);
   }
   ctx_.builder.setInsertionPointToStart(while_op.getBeforeBody());
 }
 
 void SunmmioMlirFunction::BeginWhileBody(const SunMMIOValue &cond) {
-  if (ctx_.while_stack.empty()) {
-    LOG(FATAL) << "BeginWhileBody called without a matching BeginWhile";
-    TVM_FFI_UNREACHABLE();
-  }
-
+  ICHECK(!ctx_.while_stack.empty())
+      << "BeginWhileBody called without a matching BeginWhile";
   SunmmioMlirContext::WhileFrame &frame = ctx_.while_stack.back();
   frame.in_body = true;
+  frame.condition_pending_sync_units = ctx_.pending_sync_units;
   mlir::Value cond_v =
       type_.EnsureI1(type_.ResolveValue(cond, ctx_.builder.getI1Type()));
 
-  mlir::SmallVector<mlir::Value, 8> condition_args;
-  condition_args.append(frame.before_tokens.begin(), frame.before_tokens.end());
-
   mlir::Block *before_body = frame.op.getBeforeBody();
-  mlir::Operation *terminator = before_body->mightHaveTerminator()
-                                    ? before_body->getTerminator()
-                                    : nullptr;
   mlir::scf::ConditionOp condition_op =
-      terminator ? mlir::dyn_cast<mlir::scf::ConditionOp>(terminator)
-                 : mlir::scf::ConditionOp();
+      before_body->mightHaveTerminator()
+          ? mlir::dyn_cast<mlir::scf::ConditionOp>(before_body->back())
+          : mlir::scf::ConditionOp();
   if (condition_op) {
     mlir::SmallVector<mlir::Value, 8> operands;
-    operands.reserve(condition_args.size() + 1);
     operands.push_back(cond_v);
-    operands.append(condition_args.begin(), condition_args.end());
+    operands.append(frame.before_values.begin(), frame.before_values.end());
     condition_op.getOperation()->setOperands(operands);
   } else {
     ctx_.builder.setInsertionPointToEnd(before_body);
     mlir::scf::ConditionOp::create(ctx_.builder, type_.Loc(), cond_v,
-                                   condition_args);
+                                   frame.before_values);
   }
 
   ctx_.PopMLIRValueScope();
   ctx_.PushMLIRValueScope();
-  for (int i = 0, e = static_cast<int>(frame.live_out_token_ids.size()); i < e;
-       ++i) {
-    int64_t token_id = frame.live_out_token_ids[i];
-    if (token_id >= 0) {
-      ctx_.token_by_id[token_id] = frame.iter_tokens[i];
-    }
-  }
-  for (int i = 0, e = static_cast<int>(frame.live_out_value_names.size());
-       i < e; ++i) {
-    int value_idx = frame.value_index_offset + i;
-    ctx_.BindMLIRValue(frame.live_out_value_names[i],
-                       frame.iter_tokens[value_idx]);
+  for (int i = 0, e = static_cast<int>(frame.iter_values.size()); i < e; ++i) {
+    ctx_.BindMLIRValue(frame.live_out_value_names[i], frame.iter_values[i]);
   }
   ctx_.builder.setInsertionPointToStart(frame.op.getAfterBody());
 }
 
 void SunmmioMlirFunction::EndWhile() {
-  if (ctx_.while_stack.empty()) {
-    LOG(FATAL) << "EndWhile called without a matching BeginWhile";
-    ctx_.PopMLIRValueScope();
-    TVM_FFI_UNREACHABLE();
-  }
-
-  if (ctx_.control_flow_stack.empty() ||
-      ctx_.control_flow_stack.back().kind !=
-          SunmmioMlirContext::ControlKind::kWhile ||
-      ctx_.control_flow_stack.back().index !=
-          static_cast<int>(ctx_.while_stack.size()) - 1) {
-    LOG(FATAL) << "EndWhile control_flow_stack mismatch";
-    TVM_FFI_UNREACHABLE();
-  } else {
-    ctx_.control_flow_stack.pop_back();
-  }
+  ICHECK(!ctx_.while_stack.empty())
+      << "EndWhile called without a matching BeginWhile";
+  ICHECK(!ctx_.control_flow_stack.empty() &&
+         ctx_.control_flow_stack.back().kind ==
+             SunmmioMlirContext::ControlKind::kWhile &&
+         ctx_.control_flow_stack.back().index ==
+             static_cast<int>(ctx_.while_stack.size()) - 1)
+      << "EndWhile control_flow_stack mismatch";
+  ctx_.control_flow_stack.pop_back();
 
   SunmmioMlirContext::WhileFrame frame = std::move(ctx_.while_stack.back());
   ctx_.while_stack.pop_back();
-  mlir::scf::WhileOp while_op = frame.op;
-
+  SunmmioMlirContext::SyncUnitMask body_pending_sync_units =
+      ctx_.pending_sync_units;
   mlir::SmallVector<mlir::Value, 8> yielded;
-  yielded.reserve(frame.iter_tokens.size());
-  for (int i = 0, e = static_cast<int>(frame.iter_tokens.size()); i < e; ++i) {
-    mlir::Value v = frame.produced_tokens[i] ? frame.produced_tokens[i]
-                                             : frame.iter_tokens[i];
-    yielded.push_back(v);
+  yielded.reserve(frame.iter_values.size());
+  for (int i = 0, e = static_cast<int>(frame.iter_values.size()); i < e; ++i) {
+    yielded.push_back(frame.produced_values[i] ? frame.produced_values[i]
+                                               : frame.iter_values[i]);
   }
 
-  mlir::Block *after_body = while_op.getAfterBody();
-  mlir::Operation *terminator =
-      after_body->mightHaveTerminator() ? after_body->getTerminator() : nullptr;
+  mlir::Block *after_body = frame.op.getAfterBody();
   mlir::scf::YieldOp yield_op =
-      terminator ? mlir::dyn_cast<mlir::scf::YieldOp>(terminator)
-                 : mlir::scf::YieldOp();
+      after_body->mightHaveTerminator()
+          ? mlir::dyn_cast<mlir::scf::YieldOp>(after_body->back())
+          : mlir::scf::YieldOp();
   if (yield_op) {
     yield_op.getOperation()->setOperands(yielded);
   } else {
@@ -515,94 +297,25 @@ void SunmmioMlirFunction::EndWhile() {
     mlir::scf::YieldOp::create(ctx_.builder, type_.Loc(), yielded);
   }
 
-  ctx_.builder.setInsertionPointAfter(while_op);
-
-  RestoreSavedTokens(ctx_, frame.saved_token_by_id);
-
-  for (int i = 0, e = static_cast<int>(frame.live_out_token_ids.size()); i < e;
-       ++i) {
-    int64_t token_id = frame.live_out_token_ids[i];
-    mlir::Value v = while_op.getResult(i);
-    PublishTokenToImmediateParent(ctx_, token_id, v);
-  }
-
+  ctx_.builder.setInsertionPointAfter(frame.op);
   ctx_.PopMLIRValueScope();
+  ctx_.pending_sync_units = SunmmioMlirContext::MergeSyncUnits(
+      frame.condition_pending_sync_units, body_pending_sync_units);
   for (int i = 0, e = static_cast<int>(frame.live_out_value_names.size());
        i < e; ++i) {
-    ctx_.BindMLIRValue(frame.live_out_value_names[i],
-                       while_op.getResult(frame.value_index_offset + i));
+    ctx_.BindMLIRValue(frame.live_out_value_names[i], frame.op.getResult(i));
   }
-}
-
-void SunmmioMlirFunction::BeginIf(
-    const SunMMIOValue &cond, const std::vector<int64_t> &live_out_token_ids) {
-  BeginIf(cond, live_out_token_ids, {});
 }
 
 void SunmmioMlirFunction::BeginIf(
     const SunMMIOValue &cond,
     const std::vector<SunMMIOValue> &live_out_values) {
-  BeginIf(cond, {}, live_out_values);
-}
-
-void SunmmioMlirFunction::BeginIf(
-    const SunMMIOValue &cond, const std::vector<int64_t> &live_out_token_ids,
-    const std::vector<SunMMIOValue> &live_out_values) {
   mlir::Value cond_v =
       type_.EnsureI1(type_.ResolveValue(cond, ctx_.builder.getI1Type()));
-  mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
   mlir::SmallVector<mlir::Type, 8> result_types;
-  result_types.reserve(live_out_token_ids.size() + live_out_values.size());
-  result_types.assign(live_out_token_ids.size(), token_ty);
+  mlir::SmallVector<mlir::Value, 8> base_values;
   for (const SunMMIOValue &value : live_out_values) {
     result_types.push_back(type_.MapType(value.type));
-  }
-
-  std::vector<mlir::Value> base_values;
-  base_values.reserve(live_out_token_ids.size() + live_out_values.size());
-  for (int i = 0, e = static_cast<int>(live_out_token_ids.size()); i < e; ++i) {
-    int64_t token_id = live_out_token_ids[i];
-    mlir::Value base;
-    auto it = ctx_.token_by_id.find(token_id);
-    if (it != ctx_.token_by_id.end() && it->second) {
-      base = it->second;
-    }
-    if (!base) {
-      for (auto nit = ctx_.control_flow_stack.rbegin();
-           nit != ctx_.control_flow_stack.rend(); ++nit) {
-        if (nit->kind == SunmmioMlirContext::ControlKind::kFor) {
-          SunmmioMlirContext::ForFrame &frame = ctx_.for_stack[nit->index];
-          auto tit = frame.token_id_to_index.find(token_id);
-          if (tit == frame.token_id_to_index.end()) {
-            continue;
-          }
-          int idx = tit->second;
-          if (idx >= 0 && idx < static_cast<int>(frame.iter_tokens.size())) {
-            base = frame.iter_tokens[idx];
-            break;
-          }
-          continue;
-        }
-        if (nit->kind != SunmmioMlirContext::ControlKind::kWhile) {
-          continue;
-        }
-        SunmmioMlirContext::WhileFrame &frame = ctx_.while_stack[nit->index];
-        auto tit = frame.token_id_to_index.find(token_id);
-        if (tit == frame.token_id_to_index.end()) {
-          continue;
-        }
-        int idx = tit->second;
-        const std::vector<mlir::Value> &tokens =
-            frame.in_body ? frame.iter_tokens : frame.before_tokens;
-        if (idx >= 0 && idx < static_cast<int>(tokens.size())) {
-          base = tokens[idx];
-          break;
-        }
-      }
-    }
-    base_values.push_back(base ? base : CreateNullToken(ctx_, type_));
-  }
-  for (const SunMMIOValue &value : live_out_values) {
     mlir::Value base = ctx_.LookupMLIRValue(value.value);
     if (!base) {
       base = type_.ResolveValue(value, type_.MapType(value.type));
@@ -610,173 +323,104 @@ void SunmmioMlirFunction::BeginIf(
     base_values.push_back(base);
   }
 
-  mlir::scf::IfOp if_op = mlir::scf::IfOp::create(ctx_.builder, type_.Loc(),
-                                                  result_types, cond_v, true);
-
-  ctx_.if_stack.emplace_back();
-  SunmmioMlirContext::IfFrame &frame = ctx_.if_stack.back();
+  mlir::scf::IfOp if_op =
+      mlir::scf::IfOp::create(ctx_.builder, type_.Loc(), result_types, cond_v,
+                              /*withElseRegion=*/true);
+  SunmmioMlirContext::IfFrame frame;
   frame.op = if_op;
-  frame.in_else = false;
-  frame.live_out_token_ids = live_out_token_ids;
-  frame.value_index_offset = static_cast<int>(live_out_token_ids.size());
+  frame.entry_pending_sync_units = ctx_.pending_sync_units;
   frame.live_out_value_names.reserve(live_out_values.size());
   for (const SunMMIOValue &value : live_out_values) {
     frame.live_out_value_names.push_back(value.value);
   }
-  frame.base_tokens = std::move(base_values);
-  frame.produced_tokens.reserve(frame.base_tokens.size());
-  for (int i = 0, e = static_cast<int>(live_out_token_ids.size()); i < e; ++i) {
-    frame.token_id_to_index[frame.live_out_token_ids[i]] = i;
-  }
-
+  frame.base_values.assign(base_values.begin(), base_values.end());
+  frame.produced_values = frame.base_values;
+  ctx_.if_stack.push_back(std::move(frame));
   ctx_.control_flow_stack.push_back(SunmmioMlirContext::ControlNode{
       SunmmioMlirContext::ControlKind::kIf,
       static_cast<int>(ctx_.if_stack.size()) - 1});
+
   ctx_.PushMLIRValueScope();
   ctx_.builder.setInsertionPointToStart(&if_op.getThenRegion().front());
-
-  for (int i = 0, e = static_cast<int>(frame.live_out_token_ids.size()); i < e;
+  SunmmioMlirContext::IfFrame &active_frame = ctx_.if_stack.back();
+  for (int i = 0, e = static_cast<int>(active_frame.base_values.size()); i < e;
        ++i) {
-    int64_t token_id = frame.live_out_token_ids[i];
-    mlir::Value tok = frame.base_tokens[i];
-    frame.produced_tokens.push_back(tok);
-    if (token_id >= 0) {
-      ctx_.token_by_id[token_id] = tok;
-    }
-  }
-  for (int i = 0, e = static_cast<int>(frame.live_out_value_names.size());
-       i < e; ++i) {
-    int value_idx = frame.value_index_offset + i;
-    frame.produced_tokens.push_back(frame.base_tokens[value_idx]);
-    ctx_.BindMLIRValue(frame.live_out_value_names[i],
-                       frame.base_tokens[value_idx]);
+    ctx_.BindMLIRValue(active_frame.live_out_value_names[i],
+                       active_frame.base_values[i]);
   }
 }
 
 void SunmmioMlirFunction::BeginElse() {
-  if (ctx_.if_stack.empty()) {
-    LOG(FATAL) << "BeginElse called without a matching BeginIf";
-    TVM_FFI_UNREACHABLE();
-  }
+  ICHECK(!ctx_.if_stack.empty())
+      << "BeginElse called without a matching BeginIf";
   SunmmioMlirContext::IfFrame &frame = ctx_.if_stack.back();
-  if (frame.in_else) {
-    LOG(FATAL) << "BeginElse called twice for the same scf.if";
-    TVM_FFI_UNREACHABLE();
-  }
-  frame.then_yield_tokens = frame.produced_tokens;
-  // Restore ctx_.token_by_id overrides made in the then-branch before entering
-  // else.
-  for (const auto &kv : frame.saved_token_by_id) {
-    int64_t token_id = kv.first;
-    const SunmmioMlirContext::SavedToken &saved = kv.second;
-    if (saved.existed) {
-      ctx_.token_by_id[token_id] = saved.value;
-    } else {
-      ctx_.token_by_id.erase(token_id);
-    }
-  }
-  frame.saved_token_by_id.clear();
+  ICHECK(!frame.in_else) << "BeginElse called twice for the same scf.if";
+  frame.then_yield_values = frame.produced_values;
+  frame.then_pending_sync_units = ctx_.pending_sync_units;
   frame.in_else = true;
+  ctx_.pending_sync_units = frame.entry_pending_sync_units;
+
   ctx_.PopMLIRValueScope();
   ctx_.PushMLIRValueScope();
   ctx_.builder.setInsertionPointToStart(&frame.op.getElseRegion().front());
-  frame.produced_tokens.clear();
-  frame.produced_tokens.reserve(frame.base_tokens.size());
-  for (int i = 0, e = static_cast<int>(frame.live_out_token_ids.size()); i < e;
-       ++i) {
-    int64_t token_id = frame.live_out_token_ids[i];
-    mlir::Value tok = frame.base_tokens[i];
-    ctx_.token_by_id[token_id] = tok;
-    frame.produced_tokens.push_back(tok);
-  }
-  for (int i = 0, e = static_cast<int>(frame.live_out_value_names.size());
-       i < e; ++i) {
-    int value_idx = frame.value_index_offset + i;
-    ctx_.BindMLIRValue(frame.live_out_value_names[i],
-                       frame.base_tokens[value_idx]);
-    frame.produced_tokens.push_back(frame.base_tokens[value_idx]);
+  frame.produced_values = frame.base_values;
+  for (int i = 0, e = static_cast<int>(frame.base_values.size()); i < e; ++i) {
+    ctx_.BindMLIRValue(frame.live_out_value_names[i], frame.base_values[i]);
   }
 }
 
 void SunmmioMlirFunction::EndIf() {
-  if (ctx_.if_stack.empty()) {
-    LOG(FATAL) << "EndIf called without a matching BeginIf";
-    ctx_.PopMLIRValueScope();
-    TVM_FFI_UNREACHABLE();
-  }
-
-  if (ctx_.control_flow_stack.empty() ||
-      ctx_.control_flow_stack.back().kind !=
-          SunmmioMlirContext::ControlKind::kIf ||
-      ctx_.control_flow_stack.back().index !=
-          static_cast<int>(ctx_.if_stack.size()) - 1) {
-    LOG(FATAL) << "EndIf control_flow_stack mismatch";
-    TVM_FFI_UNREACHABLE();
-  } else {
-    ctx_.control_flow_stack.pop_back();
-  }
+  ICHECK(!ctx_.if_stack.empty()) << "EndIf called without a matching BeginIf";
+  ICHECK(!ctx_.control_flow_stack.empty() &&
+         ctx_.control_flow_stack.back().kind ==
+             SunmmioMlirContext::ControlKind::kIf &&
+         ctx_.control_flow_stack.back().index ==
+             static_cast<int>(ctx_.if_stack.size()) - 1)
+      << "EndIf control_flow_stack mismatch";
+  ctx_.control_flow_stack.pop_back();
 
   SunmmioMlirContext::IfFrame frame = std::move(ctx_.if_stack.back());
   ctx_.if_stack.pop_back();
-  mlir::scf::IfOp if_op = frame.op;
-
+  SunmmioMlirContext::SyncUnitMask then_pending_sync_units =
+      frame.in_else ? frame.then_pending_sync_units : ctx_.pending_sync_units;
+  SunmmioMlirContext::SyncUnitMask else_pending_sync_units =
+      frame.in_else ? ctx_.pending_sync_units : frame.entry_pending_sync_units;
   mlir::SmallVector<mlir::Value, 8> then_yield;
   mlir::SmallVector<mlir::Value, 8> else_yield;
   if (frame.in_else) {
-    then_yield.assign(frame.then_yield_tokens.begin(),
-                      frame.then_yield_tokens.end());
-    else_yield.assign(frame.produced_tokens.begin(),
-                      frame.produced_tokens.end());
+    then_yield.append(frame.then_yield_values.begin(),
+                      frame.then_yield_values.end());
+    else_yield.append(frame.produced_values.begin(),
+                      frame.produced_values.end());
   } else {
-    then_yield.assign(frame.produced_tokens.begin(),
-                      frame.produced_tokens.end());
-    else_yield.reserve(frame.base_tokens.size());
-    for (mlir::Value value : frame.base_tokens) {
-      else_yield.push_back(value);
-    }
+    then_yield.append(frame.produced_values.begin(),
+                      frame.produced_values.end());
+    else_yield.append(frame.base_values.begin(), frame.base_values.end());
   }
 
   auto set_yield = [&](mlir::Region &region,
-                       const mlir::SmallVector<mlir::Value, 8> &yielded) {
+                       const mlir::SmallVector<mlir::Value, 8> &values) {
     mlir::Block &body = region.front();
-    mlir::scf::YieldOp yield_op;
-    if (!body.empty()) {
-      // Check whether the last operation is already an scf.yield.
-      yield_op = mlir::dyn_cast<mlir::scf::YieldOp>(body.back());
-    }
+    mlir::scf::YieldOp yield_op =
+        !body.empty() ? mlir::dyn_cast<mlir::scf::YieldOp>(body.back())
+                      : mlir::scf::YieldOp();
     if (yield_op) {
-      yield_op.getOperation()->setOperands(yielded);
+      yield_op.getOperation()->setOperands(values);
     } else {
       ctx_.builder.setInsertionPointToEnd(&body);
-      mlir::scf::YieldOp::create(ctx_.builder, type_.Loc(), yielded);
+      mlir::scf::YieldOp::create(ctx_.builder, type_.Loc(), values);
     }
   };
+  set_yield(frame.op.getThenRegion(), then_yield);
+  set_yield(frame.op.getElseRegion(), else_yield);
 
-  set_yield(if_op.getThenRegion(), then_yield);
-  set_yield(if_op.getElseRegion(), else_yield);
-
-  ctx_.builder.setInsertionPointAfter(if_op);
-  // Restore token_by_id to the state captured before entering this if.
-  for (const auto &kv : frame.saved_token_by_id) {
-    int64_t token_id = kv.first;
-    const SunmmioMlirContext::SavedToken &saved = kv.second;
-    if (saved.existed) {
-      ctx_.token_by_id[token_id] = saved.value;
-    } else {
-      ctx_.token_by_id.erase(token_id);
-    }
-  }
-  for (int i = 0, e = static_cast<int>(frame.live_out_token_ids.size()); i < e;
-       ++i) {
-    int64_t token_id = frame.live_out_token_ids[i];
-    mlir::Value v = if_op.getResult(i);
-    PublishTokenToImmediateParent(ctx_, token_id, v);
-  }
+  ctx_.builder.setInsertionPointAfter(frame.op);
   ctx_.PopMLIRValueScope();
+  ctx_.pending_sync_units = SunmmioMlirContext::MergeSyncUnits(
+      then_pending_sync_units, else_pending_sync_units);
   for (int i = 0, e = static_cast<int>(frame.live_out_value_names.size());
        i < e; ++i) {
-    ctx_.BindMLIRValue(frame.live_out_value_names[i],
-                       if_op.getResult(frame.value_index_offset + i));
+    ctx_.BindMLIRValue(frame.live_out_value_names[i], frame.op.getResult(i));
   }
 }
 

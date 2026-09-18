@@ -77,6 +77,20 @@ def make_scalar_control_kernel():
 
 
 @target("Sunmmio")
+def make_explicit_step_for_kernel():
+    i = tvm.tir.Var("i", "int32")
+    loop = tvm.tir.For(
+        i,
+        0,
+        8,
+        tvm.tir.ForKind.SERIAL,
+        tvm.tir.Evaluate(i),
+        step=tvm.tir.IntImm("int32", 2),
+    )
+    return _primfunc_from_stmt(loop)
+
+
+@target("Sunmmio")
 def make_alloc_scope_kernel():
     bf16 = tvm.ir.PrimType("bfloat16")
     one = tvm.tir.IntImm("bool", 1)
@@ -157,15 +171,10 @@ def make_invalid_dma_shape_kernel():
             tvm.tir.IntImm("int32", n),
         )
 
-    sync_token = tvm.tir.call_intrin(
-        "handle",
-        tvm.ir.Op.get("tl.sync_token_id"),
-        tvm.tir.IntImm("int32", 0),
-    )
     dma = tvm.tir.Call(
         "handle",
         tvm.ir.Op.get("tl.dma_copy"),
-        [region(src_buf, 1, 32, 32), region(dst_buf, 2, 16, 32), tvm.tir.IntImm("int32", 0), sync_token],
+        [region(src_buf, 1, 32, 32), region(dst_buf, 2, 16, 32), tvm.tir.IntImm("int32", 0)],
     )
     stmt = tvm.tir.DeclBuffer(src_buf, tvm.tir.DeclBuffer(dst_buf, tvm.tir.Evaluate(dma)))
     return _to_device_kernel_func(tvm.tir.PrimFunc([src_data, dst_data], stmt))
@@ -192,15 +201,10 @@ def make_layout_transform_kernel():
             tvm.tir.IntImm("int32", 32),
         )
 
-    sync_token = tvm.tir.call_intrin(
-        "handle",
-        tvm.ir.Op.get("tl.sync_token_id"),
-        tvm.tir.IntImm("int32", 0),
-    )
     transform = tvm.tir.Call(
         "handle",
         tvm.ir.Op.get("tl.sunmmio_layout_transform"),
-        [region(src_buf, 1), region(dst_buf, 2), sync_token],
+        [region(src_buf, 1), region(dst_buf, 2)],
     )
     stmt = tvm.tir.DeclBuffer(src_buf, tvm.tir.DeclBuffer(dst_buf, tvm.tir.Evaluate(transform)))
     return _to_device_kernel_func(tvm.tir.PrimFunc([src_data, dst_data], stmt)).with_attr(
@@ -247,11 +251,6 @@ def make_dynamic_broadcast_mask_kernel():
             mask,
             tvm.tir.IntImm("int32", 0),
             bx,
-            tvm.tir.call_intrin(
-                "handle",
-                tvm.ir.Op.get("tl.sync_token_id"),
-                tvm.tir.IntImm("int32", 0),
-            ),
         ],
     )
     stmt = tvm.tir.For(
@@ -420,6 +419,18 @@ def test_sunmmio_codegen_without_compile_emits_nonempty_suvm_source():
     assert "func.func @main" in src
 
 
+def test_sunmmio_codegen_preserves_explicit_for_step():
+    src = build_sunmmio_source_without_compile(make_explicit_step_for_kernel())
+    for_line = next(line.strip() for line in src.splitlines() if "scf.for" in line)
+    step_value = for_line.split(" step ", 1)[1].split(" ", 1)[0]
+    step_definition = next(line.strip() for line in src.splitlines() if line.strip().startswith(f"{step_value} ="))
+    if "arith.index_cast" in step_definition:
+        step_source = step_definition.split("arith.index_cast ", 1)[1].split(" ", 1)[0]
+        assert f"{step_source} = arith.constant 2 : i32" in src
+    else:
+        assert "arith.constant 2 : index" in step_definition
+
+
 def test_sunmmio_codegen_while_emits_scf_while():
     cond = tvm.tir.LT(tvm.tir.IntImm("int32", 0), tvm.tir.IntImm("int32", 1))
     body = tvm.tir.Evaluate(tvm.tir.IntImm("int32", 0))
@@ -466,6 +477,7 @@ def test_sunmmio_codegen_lowers_dynamic_broadcast_mask():
     assert "arith.shli" in src
     assert "arith.ori" in src
     assert "suvm.mcast_tok" in src
+    assert "suvm.sync  hlink" in src
     assert "sunmmio.fake" not in src
 
 
@@ -479,7 +491,7 @@ def test_sunmmio_codegen_rejects_unresolved_odma_unit():
     target = determine_target("Sunmmio", return_object=True)
     mod = tvm.IRModule({"main": make_layout_transform_kernel()})
     builder = tvm.ffi.get_global_func("target.build.tilelang_sunmmio_without_compile")
-    with pytest.raises(Exception, match="expects src region, dst region, odma_unit"):
+    with pytest.raises(Exception, match="expects src region, dst region, and odma_unit"):
         builder(mod, target, "suvm")
 
 

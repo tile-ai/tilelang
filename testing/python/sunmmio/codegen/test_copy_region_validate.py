@@ -293,7 +293,7 @@ def test_singleton_dimension_broadcast_codegen_passes(tmp_path):
         expected_tokens=(
             "suvm.get_partitioned_tile_view",
             "suvm.mcast_tok",
-            "suvm.wait_token",
+            "suvm.sync",
         ),
         opt_args=LOOSE_OPT_ARGS,
     )

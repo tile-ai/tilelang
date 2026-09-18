@@ -205,13 +205,20 @@ def test_comm_broadcast_kernel_codegen_validates_with_npuir_opt(tmp_path):
         expected_tokens=(
             "suvm.copy_async",
             "suvm.mcast_tok",
-            "suvm.wait_token",
+            "suvm.sync",
             "suvm.barrier.arrive_and_wait",
         ),
     )
 
     mcast_lines = find_async_op_lines(src, "suvm.mcast_tok")
     assert all("#suvm.unit<odma1>" in line for line in mcast_lines)
+    lines = src.splitlines()
+    barrier_indices = [i for i, line in enumerate(lines) if "suvm.barrier.arrive_and_wait" in line]
+    mcast_index = next(i for i, line in enumerate(lines) if "suvm.mcast_tok" in line)
+    link_sync_index = next(i for i, line in enumerate(lines) if "suvm.sync" in line and "hlink" in line)
+    consumer_index = next(i for i, line in enumerate(lines) if i > mcast_index and "suvm.copy_async" in line)
+    assert len(barrier_indices) >= 2
+    assert barrier_indices[0] < mcast_index < link_sync_index < barrier_indices[1] < consumer_index
 
 
 def test_comm_put_kernel_codegen_validates_with_npuir_opt(tmp_path):
@@ -219,7 +226,7 @@ def test_comm_put_kernel_codegen_validates_with_npuir_opt(tmp_path):
         comm_put_kernel(),
         tmp_path,
         mlir_filename="comm_put_kernel_suvm.mlir",
-        expected_tokens=("suvm.copy_async", "suvm.mcast_tok", "suvm.barrier.arrive_and_wait"),
+        expected_tokens=("suvm.copy_async", "suvm.mcast_tok", "suvm.sync", "suvm.barrier.arrive_and_wait"),
     )
 
     assert src.count("suvm.mcast_tok") >= 2
@@ -244,7 +251,7 @@ def test_comm_all_gather_kernel_codegen_validates_with_npuir_opt(
         comm_all_gather_kernel(direction=direction, axis=axis),
         tmp_path,
         mlir_filename=f"comm_{case_name}_kernel_suvm.mlir",
-        expected_tokens=("suvm.copy_async", "suvm.mcast_tok"),
+        expected_tokens=("suvm.copy_async", "suvm.mcast_tok", "suvm.sync"),
     )
 
     mcast_lines = find_async_op_lines(src, "suvm.mcast_tok")
@@ -260,12 +267,16 @@ def test_sync_simple_copy_kernel_codegen_validates_with_npuir_opt(tmp_path):
         sync_simple_copy_kernel(),
         tmp_path,
         mlir_filename="sync_simple_copy_kernel_suvm.mlir",
-        expected_tokens=("suvm.copy_async", "suvm.wait_token"),
+        expected_tokens=("suvm.copy_async", "suvm.sync"),
     )
 
     copy_lines = find_async_op_lines(src, "suvm.copy_async")
     assert len(copy_lines) >= 2
     assert all("#suvm.unit<odma0>" in line for line in copy_lines)
+    assert src.count("suvm.sync") == 2
+    final_sync = next(line.strip() for line in reversed(src.splitlines()) if "suvm.sync" in line)
+    assert "odma0" in final_sync
+    assert all(unit not in final_sync for unit in ("odma1", "tc", "vector", "rsram"))
 
 
 def test_sync_mma_kernel_codegen_validates_with_npuir_opt(tmp_path):
@@ -273,7 +284,7 @@ def test_sync_mma_kernel_codegen_validates_with_npuir_opt(tmp_path):
         sync_mma_kernel(),
         tmp_path,
         mlir_filename="sync_mma_kernel_suvm.mlir",
-        expected_tokens=("suvm.copy_async", "suvm.tc.mma", "suvm.wait_token"),
+        expected_tokens=("suvm.copy_async", "suvm.tc.mma", "suvm.sync"),
     )
 
     copy_lines = find_async_op_lines(src, "suvm.copy_async")
@@ -283,6 +294,9 @@ def test_sync_mma_kernel_codegen_validates_with_npuir_opt(tmp_path):
         "odma1",
     }
     assert len(find_async_op_lines(src, "suvm.tc.mma")) == 2
+    final_sync = next(line.strip() for line in reversed(src.splitlines()) if "suvm.sync" in line)
+    assert "odma0" in final_sync
+    assert all(unit not in final_sync for unit in ("odma1", "tc", "vector", "rsram"))
 
 
 def test_sync_if_broadcast_kernel_codegen_validates_with_npuir_opt(tmp_path):
@@ -295,6 +309,7 @@ def test_sync_if_broadcast_kernel_codegen_validates_with_npuir_opt(tmp_path):
             "suvm.copy_async",
             "suvm.tc.mma",
             "suvm.mcast_tok",
+            "suvm.sync",
             "suvm.barrier.arrive_and_wait",
         ),
     )
@@ -307,7 +322,7 @@ def test_sync_loop_broadcast_kernel_codegen_validates_with_npuir_opt(tmp_path):
         sync_loop_broadcast_kernel(),
         tmp_path,
         mlir_filename="sync_loop_broadcast_kernel_suvm.mlir",
-        expected_tokens=("scf.for", "suvm.copy_async", "suvm.mcast_tok", "suvm.barrier.arrive_and_wait"),
+        expected_tokens=("scf.for", "suvm.copy_async", "suvm.mcast_tok", "suvm.sync", "suvm.barrier.arrive_and_wait"),
     )
 
     assert src.count("suvm.mcast_tok") >= 2

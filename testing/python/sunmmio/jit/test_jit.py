@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import re
 import sys
 import types
 from pathlib import Path
@@ -528,6 +527,37 @@ def test_sunmmio_toolchain_resolves_device_ld(tmp_path):
     toolchain = SunmmioToolchain(root=tmp_path, clangxx=tmp_path / "clang++")
 
     assert toolchain.resolve_device_ld("sunmmio-a4e") == device_ld
+
+
+def test_sunmmio_sudeck_linker_script_preserves_runner_owned_symbols(tmp_path):
+    device_ld = tmp_path / "sysroot" / "riscv64-unknown-elf" / "lib" / "sunmmio" / "sunmmio-a4e" / "device.ld"
+    device_ld.parent.mkdir(parents=True)
+    device_ld.write_text(
+        """\
+SECTIONS {
+  .dtcm.scratch (NOLOAD) : { _dtcm_scratch_start = .; } > DTCM_SCRATCH
+  .dtcm.tagtrace (NOLOAD) : { _dtcm_tagtrace_start = .; } > DTCM_TAGTRACE
+  .stack (NOLOAD) : { _stack = .; } > STACK
+}
+PROVIDE(__stack_start = _stack);
+PROVIDE(__stack_end = _stack_end);
+""",
+        encoding="utf-8",
+    )
+    toolchain = SunmmioToolchain(root=tmp_path, clangxx=tmp_path / "clang++")
+
+    output = sunmmio_libgen._write_sudeck_linker_script(toolchain, "sunmmio-a4e", tmp_path / "sudeck.ld")
+    text = output.read_text(encoding="utf-8")
+
+    assert ".dtcm.scratch" not in text
+    assert ".dtcm.tagtrace" not in text
+    assert ".stack (NOLOAD)" not in text
+    assert "PROVIDE(__stack_start = DTCM_STACK_START);" in text
+    assert "PROVIDE(__stack_end = DTCM_STACK_START + DTCM_STACK_SIZE);" in text
+    assert "PROVIDE(_dtcm_scratch_start = DTCM_SCRATCH_START);" in text
+    assert "PROVIDE(_dtcm_scratch_end = DTCM_SCRATCH_START + DTCM_SCRATCH_SIZE);" in text
+    assert "PROVIDE(_dtcm_tagtrace_start = DTCM_TAGTRACE_START);" in text
+    assert "PROVIDE(_dtcm_tagtrace_end = DTCM_TAGTRACE_START + DTCM_TAGTRACE_SIZE);" in text
 
 
 def test_sunmmio_npuir_compile_error_reports_build_dir(tmp_path, monkeypatch):
@@ -1067,7 +1097,7 @@ def test_sunmmio_sunsim_cache_restores_abi_kernel_name_from_metadata(tmp_path):
     ]
 
 
-def test_sunmmio_elementwise_sync_waits_are_not_duplicated():
+def test_sunmmio_elementwise_device_tir_is_tokenless():
     _require_sunmmio_codegen()
 
     static_example = _load_sunmmio_elementwise_example()
@@ -1088,9 +1118,8 @@ def test_sunmmio_elementwise_sync_waits_are_not_duplicated():
     static_source = static_artifact.device_mod.script()
 
     assert static_source.count("T.dma_copy") == 3
-    assert static_source.count("T.wait_token(0)") == 1
-    assert static_source.count("T.wait_token(1)") == 1
-    assert static_source.count("T.wait_token(2)") == 1
+    assert "token" not in static_source
+    assert static_source.count("T.odma_unit(") == 3
 
     static_multi_prim = static_example.elementwise_add.get_tir(
         128,
@@ -1109,10 +1138,8 @@ def test_sunmmio_elementwise_sync_waits_are_not_duplicated():
     static_multi_source = static_multi_artifact.device_mod.script()
 
     assert static_multi_source.count("T.dma_copy") == 3
-    assert static_multi_source.count("T.wait_token(0)") == 1
-    assert static_multi_source.count("T.wait_token(1)") == 1
-    assert static_multi_source.count("T.wait_token(2)") == 2
-    assert "T.sync_null_token(2)" in static_multi_source
+    assert "token" not in static_multi_source
+    assert static_multi_source.count("T.odma_unit(") == 3
 
     dynamic_example = _load_sunmmio_dynamic_elementwise_example()
     dynamic_prim = dynamic_example.elementwise_add_dynamic.get_tir(
@@ -1130,13 +1157,11 @@ def test_sunmmio_elementwise_sync_waits_are_not_duplicated():
     dynamic_source = dynamic_artifact.device_mod.script()
 
     assert dynamic_source.count("T.dma_copy") == 3
-    assert dynamic_source.count("T.wait_token(0)") == 1
-    assert dynamic_source.count("T.wait_token(1)") == 1
-    assert dynamic_source.count("T.wait_token(2)") == 2
-    assert "T.sync_null_token(2)" in dynamic_source
+    assert "token" not in dynamic_source
+    assert dynamic_source.count("T.odma_unit(") == 3
 
 
-def test_sunmmio_softmax_output_dma_wait_is_hoisted_before_tile_store_loop():
+def test_sunmmio_softmax_device_tir_preserves_odma_units_without_tokens():
     _require_sunmmio_codegen()
 
     example = _load_sunmmio_online_softmax_example()
@@ -1155,34 +1180,20 @@ def test_sunmmio_softmax_output_dma_wait_is_hoisted_before_tile_store_loop():
     )
     lines = artifact.device_mod.script().splitlines()
 
-    output_dma_idx, output_dma_line = next(
-        (idx, line) for idx, line in enumerate(lines) if "T.dma_copy(T.region(Y_shared[0, 0]" in line and "T.sync_token_id(" in line
-    )
-    output_token = int(re.search(r"T\.sync_token_id\((\d+)\)", output_dma_line).group(1))
-    wait_marker = f"T.wait_token({output_token})"
-    null_marker = f"T.sync_null_token({output_token})"
+    source = "\n".join(lines)
+    assert "token" not in source
 
+    output_dma_idx, output_dma_line = next((idx, line) for idx, line in enumerate(lines) if "T.dma_copy(T.region(Y_shared[0, 0]" in line)
     store_idx = max(idx for idx, line in enumerate(lines[:output_dma_idx]) if "Y_shared[" in line and "] =" in line)
-    input_dma_idx = max(
-        idx for idx, line in enumerate(lines[:store_idx]) if "T.dma_copy(T.region(X_" in line and "T.sync_token_id(" in line
-    )
+    input_dma_idx, input_dma_line = max((idx, line) for idx, line in enumerate(lines[:store_idx]) if "T.dma_copy(T.region(X_" in line)
     tile_store_loop_idx = next(
         idx
         for idx, line in enumerate(lines[input_dma_idx:store_idx], start=input_dma_idx)
         if "for i in T.serial" in line and "tile.domain" in line
     )
-    output_pipeline_loop_idx = max(
-        idx for idx, line in enumerate(lines[:input_dma_idx]) if re.search(r"\bfor by in (?:range|T\.serial)\(", line)
-    )
-    prologue_null_idx = max(idx for idx, line in enumerate(lines[:output_pipeline_loop_idx]) if null_marker in line)
-
-    # The previous output DMA and the next input DMA both use ODMA0. Its
-    # loop-carried wait must run after the prologue null-init but before the
-    # next input submission, or the channel-wide wait would drain that input.
-    assert all(null_marker not in line for line in lines[output_pipeline_loop_idx:output_dma_idx])
-    assert any(wait_marker in line for line in lines[output_pipeline_loop_idx:input_dma_idx])
-    assert all(wait_marker not in line for line in lines[input_dma_idx:output_dma_idx])
-    assert prologue_null_idx < output_pipeline_loop_idx < input_dma_idx < tile_store_loop_idx < output_dma_idx
+    assert 'T.odma_unit("odma0")' in input_dma_line
+    assert 'T.odma_unit("odma0")' in output_dma_line
+    assert input_dma_idx < tile_store_loop_idx < store_idx < output_dma_idx
 
 
 def test_sunmmio_base_adapter_does_not_expose_sunsim_runtime_surface(tmp_path):

@@ -259,18 +259,18 @@ def test_alloc_var_copy_mma_control_flow_kernel_codegen_validates_with_npuir_opt
             "scf.if",
             "scf.while",
             "scf.condition",
-            "-> (!suvm.token, !suvm.token, f32, i32)",
-            "-> (!suvm.token, f32, i32, i1)",
-            "!suvm.token",
+            "-> (f32, i32)",
+            ": (f32, i32) -> (f32, i32)",
             "suvm.copy_async",
             "suvm.tc.mma",
-            "suvm.wait_token",
+            "suvm.sync",
             "arith.addi",
             "arith.addf",
             "arith.mulf",
         ),
     )
     assert "sunmmio.fake" not in src
+    assert "!suvm.token" not in src
 
 
 def test_alloc_var_inside_tiles_codegen_validates_with_npuir_opt(tmp_path):
@@ -295,7 +295,7 @@ def test_alloc_var_conditional_loop_extent_copy_codegen_validates_with_npuir_opt
             "arith.select",
             "scf.for",
             "suvm.copy_async",
-            "suvm.wait_token",
+            "suvm.sync",
         ),
     )
     assert "sunmmio.fake" not in src

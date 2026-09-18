@@ -108,6 +108,7 @@ def test_simple_global_copy_gemm_codegen_validates_with_npuir_opt(tmp_path, monk
             "suvm.copy_async",
             "suvm.tile.reduce",
             "suvm.mcast_tok",
+            "suvm.sync",
         ),
     )
     assert_source_contains(

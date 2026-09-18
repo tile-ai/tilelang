@@ -238,73 +238,22 @@ public:
     }
   }
 
-  // 处理异步操作（dma_copy/mma_sunmmio/broadcast）和其对应的等待操作（wait_token）
   void VisitExpr_(const CallNode *op) final {
     StmtExprVisitor::VisitExpr_(op);
-    // 识别异步操作：dma_copy/mma_sunmmio/broadcast，提取sync_token_id和关联buffer
     if (op->op.same_as(tl::dma_copy()) || op->op.same_as(tl::broadcast_()) ||
         op->op.same_as(tl::mma_sunmmio()) ||
         op->op.same_as(tl::sunmmio_layout_transform()) ||
         op->op.same_as(tl::sunmmio_transpose())) {
-
-      // 提取sync_token_id（最后一个参数为T.sync_token_id(id)）
-      ICHECK_GE(op->args.size(), 1) << "异步操作必须包含sync_token_id参数";
-      bool t_flag = false;
-      int token_id = -1;
-      if (auto sync_call = op->args.back().as<CallNode>()) {
-        if (sync_call->op.same_as(tl::sync_token_id())) {
-          const IntImmNode *token_id_node = sync_call->args[0].as<IntImmNode>();
-          if (token_id_node) {
-            token_id = token_id_node->value;
-            t_flag = true;
-          }
-        }
-      }
-      // 确保获取到sync_token_id
-      ICHECK(t_flag) << "sync op get sync_token_id error";
-
-      // 提取关联的buffer（遍历参数，除了最后一个）
-      // 采用获取bufferRegion的方式获取参数中的buffer
-      for (size_t i = 0; i < op->args.size() - 1; ++i) {
-        if (auto arg_c = op->args[i].as<CallNode>()) {
-          if (arg_c->op.same_as(RegionOp::Get())) {
-            // 也可以直接解参数里的bufferLoad来获取varNode
-            BufferRegion br = NormalizeToBufferRegion(op->args[i]);
+      for (const PrimExpr &arg : op->args) {
+        if (const auto *arg_call = arg.as<CallNode>()) {
+          if (arg_call->op.same_as(RegionOp::Get())) {
+            BufferRegion br = NormalizeToBufferRegion(arg);
             const VarNode *buf_var = br->buffer->data.get();
             if (buf_var &&
                 IsAppropriateSharedMemory(tvm::ffi::GetRef<Var>(buf_var))) {
-              alive_wait_token_set.insert(token_id);
-              token_id_to_buffers_[token_id].push_back(buf_var);
+              pending_async_buffers_.insert(buf_var);
             }
           }
-        }
-      }
-    }
-
-    // 2. 识别同步操作：wait_token，补充对应buffer的触及标记
-    if (op->op.same_as(tl::wait_token())) {
-      ICHECK_EQ(op->args.size(), 1) << "wait_token必须传入唯一的int类型id参数";
-      const IntImmNode *token_id_node = op->args[0].as<IntImmNode>();
-      ICHECK(token_id_node) << "wait_token args error:" << op->args[0]->dtype;
-      int token_id = token_id_node->value;
-      auto it = token_id_to_buffers_.find(token_id);
-      // 可能有token_id的先使用再定义，仅在循环中出现
-      // 循环中禁aggressive,颠倒的buffer后面肯定会出现，还会触及计入for,所以可以不用管
-      if (it == token_id_to_buffers_.end()) {
-        return;
-      }
-      alive_wait_token_set.erase(token_id);
-      // 为异步操作中的buffer补充触及标记
-      for (const VarNode *buf_var : it->second) {
-        auto alloc_it = alloc_info_.find(buf_var);
-        if (alloc_it == alloc_info_.end())
-          continue;
-        // wait_token在EvalateNode里，所以直接操作即可
-        if (enable_aggressive_merge_ && loop_level_ == 0) {
-          scope_[scope_.size() - 1].touched.push_back(buf_var);
-        } else {
-          // wait在evaluateNode中,必然在allocateNode层级内，所以直接去alloc层级即可
-          scope_[alloc_it->second.level].touched.push_back(buf_var);
         }
       }
     }
@@ -338,17 +287,10 @@ public:
       in_thread_env_ = true;
       VisitNewScope(op);
 
-      // 最后，将未释放的token对应的buffer加到最后
-      for (int token_id : alive_wait_token_set) {
-        auto it = token_id_to_buffers_.find(token_id);
-        if (it == token_id_to_buffers_.end()) {
-          continue;
-        }
-        const std::vector<const VarNode *> &buffers = it->second;
-        for (const VarNode *buf : buffers) {
-          if (buf == nullptr) {
-            continue;
-          }
+      // Unit synchronization is inserted after this TIR pass, so conservatively
+      // keep every asynchronously used shared buffer live to device-scope exit.
+      for (const VarNode *buf : pending_async_buffers_) {
+        if (buf != nullptr) {
           linear_seq_.back().touched.push_back(buf);
         }
       }
@@ -407,10 +349,7 @@ private:
   std::vector<StmtEntry> scope_;
   // The size of the loop. 循环嵌套层级
   size_t loop_level_{0};
-  // 异步操作，wait_token id 对应的buffers
-  std::unordered_map<int, std::vector<const VarNode *>> token_id_to_buffers_;
-  // 异步操作，还每执行wait的tokens
-  std::unordered_set<int> alive_wait_token_set;
+  std::unordered_set<const VarNode *> pending_async_buffers_;
 };
 
 class SharedMemoryAlignmentPlannerSunmmio : public StmtExprVisitor {

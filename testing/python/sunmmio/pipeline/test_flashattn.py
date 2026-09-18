@@ -121,209 +121,14 @@ def kernel_flashattn(
 def test_flashattn(is_log=False):
     func = kernel_flashattn(8, 32, 4096, 128, False, block_M=128, block_N=128, num_stages=1, threads=1)
 
-    script_device_mode = """
-        with T.launch_thread("blockIdx.x", 16) as bx:
-            with T.decl_buffer((128, 128), "bfloat16", data=Q_shared.data, scope="shared.asram") as Q_shared:
-                K_shared = T.decl_buffer((1, 128, 128), "bfloat16", data=K_shared.data, scope="shared.wsram")
-                V_shared = T.decl_buffer((1, 128, 128), "bfloat16", data=V_shared.data, scope="shared.wsram")
-                O_shared = T.decl_buffer((128, 128), "bfloat16", data=O_shared.data, scope="shared.rsram")
-                acc_s = T.decl_buffer((1, 128, 128), "bfloat16", data=acc_s.data, scope="shared.rsram")
-                acc_s_cast = T.decl_buffer((1, 128, 128), "bfloat16", data=acc_s_cast.data, scope="shared.asram")
-                acc_o = T.decl_buffer((128, 128), "bfloat16", data=acc_o.data, scope="shared.rsram")
-                scores_max = T.decl_buffer((128,), "bfloat16", data=scores_max.data, scope="shared.rsram")
-                scores_max_prev = T.decl_buffer((128,), "bfloat16", data=scores_max_prev.data, scope="shared.rsram")
-                scores_scale = T.decl_buffer((128,), "bfloat16", data=scores_scale.data, scope="shared.rsram")
-                scores_sum = T.decl_buffer((128,), "bfloat16", data=scores_sum.data, scope="shared.rsram")
-                logsum = T.decl_buffer((128,), "bfloat16", data=logsum.data, scope="shared.rsram")
-                Q_rsram_stage = T.decl_buffer((1, 128, 1, 128), "bfloat16", data=Q_rsram_stage.data, scope="shared.rsram")
-                Q_layout_stage = T.decl_buffer((1, 128, 1, 128), "bfloat16", data=Q_layout_stage.data, scope="shared.rsram")
-                Output_layout_stage = T.decl_buffer((128, 128), "bfloat16", data=Output_layout_stage.data, scope="shared.rsram")
-                T.sync_null_token(21)
-                T.sync_null_token(23)
-                for bz in range(2):
-                    T.sync_null_token(21)
-                    T.sync_null_token(23)
-                    for by in range(8):
-                        T.sync_null_token(21)
-                        T.sync_null_token(23)
-                        for bx_1 in range(32):
-                            T.dma_copy(T.region(Q_1[bz, bx_1 * 128, by, 0], 1, 1, 128, 1, 128), T.region(Q_layout_stage[0, 0, 0, 0], 2, 1, 128, 1, 128), 0, T.sync_token_id(0))
-                            T.wait_token(0)
-                            T.sunmmio_layout_transform(T.region(Q_layout_stage[0, 0, 0, 0], 1, 1, 128, 1, 128), T.region(Q_rsram_stage[0, 0, 0, 0], 2, 1, 128, 1, 128), T.sync_token_id(1))
-                            for i0 in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                for i1 in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                    for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                            acc_o[i0 * 8 + ki, i1 * 32 + kj] = T.bfloat16(0.0)
-                            for i0 in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                    logsum[ki] = T.bfloat16(0.0)
-                            for i0 in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                    scores_max[ki] = T.infinity("bfloat16") * T.bfloat16(-1.0)
-                            T.dma_copy(T.region(K_1[bz, 0, by, 0], 1, 1, 128, 1, 128), T.region(K_shared[0, 0, 0], 2, 1, 128, 128), 0, T.sync_token_id(2))
-                            for i in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                for j in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                    for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                            acc_s[0, i * 8 + ki, j * 32 + kj] = T.bfloat16(0.0)
-                            T.wait_token(21)
-                            T.dma_copy(T.region(V_1[bz, 0, by, 0], 1, 1, 128, 1, 128), T.region(V_shared[0, 0, 0], 2, 1, 128, 128), 0, T.sync_token_id(3))
-                            T.sync_null_token(8)
-                            T.sync_null_token(13)
-                            T.wait_token(1)
-                            T.wait_token(2)
-                            T.wait_token(3)
-                            for k in range(31):
-                                T.dma_copy(T.region(Q_rsram_stage[0, 0, 0, 0], 1, 1, 128, 1, 128), T.region(Q_shared[0, 0], 2, 128, 128), 0, T.sync_token_id(4))
-                                for i in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                    for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        scores_max_prev[ki] = scores_max[ki]
-                                T.wait_token(8)
-                                T.wait_token(4)
-                                T.mma_sunmmio(T.region(Q_shared[0, 0], 1, 128, 128), T.region(K_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_s[0, 0, 0], 3, 1, 128, 128), T.bool(False), T.bool(True), T.bool(False), 0, T.sync_token_id(5))
-                                T.wait_token(5)
-                                T.dma_copy(T.region(Q_rsram_stage[0, 0, 0, 0], 1, 1, 128, 1, 128), T.region(Q_shared[0, 0], 2, 128, 128), 1024, T.sync_token_id(6))
-                                T.wait_token(6)
-                                T.mma_sunmmio(T.region(Q_shared[0, 0], 1, 128, 128), T.region(K_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_s[0, 0, 0], 3, 1, 128, 128), T.bool(False), T.bool(True), T.bool(False), 1024, T.sync_token_id(7))
-                                with T.decl_buffer((8, 32), "bfloat16", scope="shared.rsram") as scores_max_acc:
-                                    scores_max_res = T.decl_buffer((8,), "bfloat16", scope="shared.rsram")
-                                    T.wait_token(7)
-                                    for i0 in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                        for i1 in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                            if i1 == 0:
-                                                for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                                    for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                        scores_max_acc[ki, kj] = T.bfloat16("-inf")
-                                            for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                                for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                    scores_max_acc[ki, kj] = T.max(scores_max_acc[ki, kj], acc_s[0, i0 * 8 + ki, i1 * 32 + kj])
-                                            if i1 == 3:
-                                                T.vector_core_in_tile_reduce("max", T.region(scores_max_res[0], 1, 8), T.region(scores_max_acc[0, 0], 1, 8, 32), 1)
-                                                for ki in T.vectorized(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                                    scores_max[i0 * 8 + ki] = T.max(scores_max[i0 * 8 + ki], scores_max_res[ki])
-                                T.dma_copy(T.region(K_1[bz, k * 128 + 128, by, 0], 1, 1, 128, 1, 128), T.region(K_shared[0, 0, 0], 2, 1, 128, 128), 0, T.sync_token_id(8))
-                                for i in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                    for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        scores_max[ki] = T.max(scores_max[ki], scores_max_prev[ki])
-                                    for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        scores_scale[ki] = T.Cast("bfloat16", T.exp2(T.Cast("float32", scores_max_prev[ki]) * T.float32(0.1275174307460247) - T.Cast("float32", scores_max[ki]) * T.float32(0.1275174307460247)))
-                                for i in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                    for j in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                        for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                acc_s[0, i * 8 + ki, j * 32 + kj] = T.Cast("bfloat16", T.exp2(T.Cast("float32", acc_s[0, i * 8 + ki, j * 32 + kj]) * T.float32(0.1275174307460247) - T.Cast("float32", scores_max[i * 8 + ki]) * T.float32(0.1275174307460247)))
-                                        scores_sum_acc = T.decl_buffer((8, 32), "bfloat16", scope="shared.rsram")
-                                        if j == 0:
-                                            for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                                for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                    scores_sum_acc[ki, kj] = T.bfloat16(0.0)
-                                        for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                scores_sum_acc[ki, kj] = scores_sum_acc[ki, kj] + acc_s[0, i * 8 + ki, j * 32 + kj]
-                                        if j == 3:
-                                            T.vector_core_in_tile_reduce("sum", T.region(scores_sum[i * 8], 2, 8), T.region(scores_sum_acc[0, 0], 1, 8, 32), 1)
-                                T.dma_copy(T.region(acc_s[0, 0, 0], 1, 1, 128, 128), T.region(acc_s_cast[0, 0, 0], 2, 1, 128, 128), 0, T.sync_token_id(9))
-                                for i in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                    for j in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                        for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                acc_o[i * 8 + ki, j * 32 + kj] = acc_o[i * 8 + ki, j * 32 + kj] * scores_scale[i * 8 + ki]
-                                for i in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                    for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        logsum[ki] = logsum[ki] * scores_scale[ki] + scores_sum[ki]
-                                T.wait_token(13)
-                                T.wait_token(9)
-                                T.mma_sunmmio(T.region(acc_s_cast[0, 0, 0], 1, 1, 128, 128), T.region(V_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_o[0, 0], 3, 128, 128), T.bool(False), T.bool(False), T.bool(False), 0, T.sync_token_id(10))
-                                T.wait_token(10)
-                                T.dma_copy(T.region(acc_s[0, 0, 0], 1, 1, 128, 128), T.region(acc_s_cast[0, 0, 0], 2, 1, 128, 128), 1024, T.sync_token_id(11))
-                                T.wait_token(11)
-                                T.mma_sunmmio(T.region(acc_s_cast[0, 0, 0], 1, 1, 128, 128), T.region(V_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_o[0, 0], 3, 128, 128), T.bool(False), T.bool(False), T.bool(False), 1024, T.sync_token_id(12))
-                                for i in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                    for j in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                        for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                acc_s[0, i * 8 + ki, j * 32 + kj] = T.bfloat16(0.0)
-                                T.wait_token(12)
-                                T.dma_copy(T.region(V_1[bz, k * 128 + 128, by, 0], 1, 1, 128, 1, 128), T.region(V_shared[0, 0, 0], 2, 1, 128, 128), 0, T.sync_token_id(13))
-                            T.dma_copy(T.region(Q_rsram_stage[0, 0, 0, 0], 1, 1, 128, 1, 128), T.region(Q_shared[0, 0], 2, 128, 128), 0, T.sync_token_id(14))
-                            for i in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                    scores_max_prev[ki] = scores_max[ki]
-                            T.wait_token(14)
-                            T.wait_token(8)
-                            T.mma_sunmmio(T.region(Q_shared[0, 0], 1, 128, 128), T.region(K_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_s[0, 0, 0], 3, 1, 128, 128), T.bool(False), T.bool(True), T.bool(False), 0, T.sync_token_id(15))
-                            T.wait_token(15)
-                            T.dma_copy(T.region(Q_rsram_stage[0, 0, 0, 0], 1, 1, 128, 1, 128), T.region(Q_shared[0, 0], 2, 128, 128), 1024, T.sync_token_id(16))
-                            T.wait_token(16)
-                            T.mma_sunmmio(T.region(Q_shared[0, 0], 1, 128, 128), T.region(K_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_s[0, 0, 0], 3, 1, 128, 128), T.bool(False), T.bool(True), T.bool(False), 1024, T.sync_token_id(17))
-                            with T.decl_buffer((8, 32), "bfloat16", scope="shared.rsram") as scores_max_acc:
-                                scores_max_res = T.decl_buffer((8,), "bfloat16", scope="shared.rsram")
-                                T.wait_token(17)
-                                for i0 in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                    for i1 in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                        if i1 == 0:
-                                            for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                                for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                    scores_max_acc[ki, kj] = T.bfloat16("-inf")
-                                        for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                scores_max_acc[ki, kj] = T.max(scores_max_acc[ki, kj], acc_s[0, i0 * 8 + ki, i1 * 32 + kj])
-                                        if i1 == 3:
-                                            T.vector_core_in_tile_reduce("max", T.region(scores_max_res[0], 1, 8), T.region(scores_max_acc[0, 0], 1, 8, 32), 1)
-                                            for ki in T.vectorized(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                                scores_max[i0 * 8 + ki] = T.max(scores_max[i0 * 8 + ki], scores_max_res[ki])
-                            for i in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                    scores_max[ki] = T.max(scores_max[ki], scores_max_prev[ki])
-                                for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                    scores_scale[ki] = T.Cast("bfloat16", T.exp2(T.Cast("float32", scores_max_prev[ki]) * T.float32(0.1275174307460247) - T.Cast("float32", scores_max[ki]) * T.float32(0.1275174307460247)))
-                            for i in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                for j in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                    for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                            acc_s[0, i * 8 + ki, j * 32 + kj] = T.Cast("bfloat16", T.exp2(T.Cast("float32", acc_s[0, i * 8 + ki, j * 32 + kj]) * T.float32(0.1275174307460247) - T.Cast("float32", scores_max[i * 8 + ki]) * T.float32(0.1275174307460247)))
-                                    scores_sum_acc = T.decl_buffer((8, 32), "bfloat16", scope="shared.rsram")
-                                    if j == 0:
-                                        for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                                scores_sum_acc[ki, kj] = T.bfloat16(0.0)
-                                    for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                            scores_sum_acc[ki, kj] = scores_sum_acc[ki, kj] + acc_s[0, i * 8 + ki, j * 32 + kj]
-                                    if j == 3:
-                                        T.vector_core_in_tile_reduce("sum", T.region(scores_sum[i * 8], 2, 8), T.region(scores_sum_acc[0, 0], 1, 8, 32), 1)
-                            T.dma_copy(T.region(acc_s[0, 0, 0], 1, 1, 128, 128), T.region(acc_s_cast[0, 0, 0], 2, 1, 128, 128), 0, T.sync_token_id(18))
-                            for i in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                for j in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                    for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                            acc_o[i * 8 + ki, j * 32 + kj] = acc_o[i * 8 + ki, j * 32 + kj] * scores_scale[i * 8 + ki]
-                            for i in T.serial(1, annotations={"tile.domain": [128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0], "tile.scope_entry": 1, "tile.tile_size": [128]}):
-                                for ki in T.vectorized(128, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                    logsum[ki] = logsum[ki] * scores_scale[ki] + scores_sum[ki]
-                            T.wait_token(18)
-                            T.wait_token(13)
-                            T.mma_sunmmio(T.region(acc_s_cast[0, 0, 0], 1, 1, 128, 128), T.region(V_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_o[0, 0], 3, 128, 128), T.bool(False), T.bool(False), T.bool(False), 0, T.sync_token_id(19))
-                            T.wait_token(19)
-                            T.dma_copy(T.region(acc_s[0, 0, 0], 1, 1, 128, 128), T.region(acc_s_cast[0, 0, 0], 2, 1, 128, 128), 1024, T.sync_token_id(20))
-                            T.wait_token(20)
-                            T.mma_sunmmio(T.region(acc_s_cast[0, 0, 0], 1, 1, 128, 128), T.region(V_shared[0, 0, 0], 1, 1, 128, 128), T.region(acc_o[0, 0], 3, 128, 128), T.bool(False), T.bool(False), T.bool(False), 1024, T.sync_token_id(21))
-                            for i in T.serial(16, annotations={"tile.domain": [128, 128], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [8, 32]}):
-                                for j in T.serial(4, annotations={"tile.execution_axis": 1}):
-                                    for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                            acc_o[i * 8 + ki, j * 32 + kj] = acc_o[i * 8 + ki, j * 32 + kj] / logsum[i * 8 + ki]
-                                    for ki in T.serial(8, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                                        for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                            O_shared[i * 8 + ki, j * 32 + kj] = acc_o[i * 8 + ki, j * 32 + kj]
-                            T.wait_token(23)
-                            T.sunmmio_layout_transform(T.region(O_shared[0, 0], 1, 128, 128), T.region(Output_layout_stage[0, 0], 2, 128, 128), T.sync_token_id(22))
-                            T.wait_token(22)
-                            T.dma_copy(T.region(Output_layout_stage[0, 0], 1, 128, 128), T.region(Output_1[bz, bx_1 * 128, by, 0], 2, 1, 128, 1, 128), 0, T.sync_token_id(23))
-            T.wait_token(23)
-        return 0
-    """
+    script_device_mode = [
+        "with T.launch_thread",
+        "T.odma_unit(",
+        "T.sunmmio_sync(",
+        "T.dma_copy(",
+        "T.sunmmio_layout_transform(",
+        "T.mma_sunmmio(",
+    ]
 
     script_lower_tile_op = [
         """
@@ -343,25 +148,12 @@ def test_flashattn(is_log=False):
     ]
 
     script_inject_sunmmio_sync = [
-        """
-        Output_1 = T.decl_buffer((2, 4096, 8, 128), "bfloat16", data=Output, strides=(4194304, 1024, 128, 1))
-        V_1 = T.decl_buffer((2, 4096, 8, 128), "bfloat16", data=V, strides=(4194304, 1024, 128, 1))
-        K_1 = T.decl_buffer((2, 4096, 8, 128), "bfloat16", data=K, strides=(4194304, 1024, 128, 1))
-        Q_1 = T.decl_buffer((2, 4096, 8, 128), "bfloat16", data=Q, strides=(4194304, 1024, 128, 1))
-        with T.launch_thread("blockIdx.x", 16) as bx:
-        """,
-        "for bz in range(2):",
-        "for by in range(8):",
-        "for bx_1 in range(32):",
-        "T.dma_copy(T.region(Q_1[bz, bx_1 * 128, by, 0], 1, 1, 128, 1, 128), T.region(Q_layout_stage[0, 0, 0, 0], 2, 1, 128, 1, 128), 0, T.sync_token_id(0))",
-        "T.sunmmio_layout_transform(T.region(Q_layout_stage[0, 0, 0, 0], 1, 1, 128, 1, 128), T.region(Q_rsram_stage[0, 0, 0, 0], 2, 1, 128, 1, 128), T.sync_token_id(1))",
-        "T.dma_copy(T.region(Q_rsram_stage[0, 0, 0, 0], 1, 1, 128, 1, 128), T.region(Q_shared[0, 0], 2, 128, 128), 0, T.sync_token_id(",
-        """
-        Q = T.match_buffer(Q_handle, (2, 4096, 8, 128), "bfloat16", data=Q.data, strides=(4194304, 1024, 128, 1))
-        K = T.match_buffer(K_handle, (2, 4096, 8, 128), "bfloat16", data=K.data, strides=(4194304, 1024, 128, 1))
-        V = T.match_buffer(V_handle, (2, 4096, 8, 128), "bfloat16", data=V.data, strides=(4194304, 1024, 128, 1))
-        Output = T.match_buffer(Output_handle, (2, 4096, 8, 128), "bfloat16", data=Output.data, strides=(4194304, 1024, 128, 1))
-        """,
+        "with T.launch_thread",
+        "T.odma_unit(",
+        "T.sunmmio_sync(",
+        "T.dma_copy(",
+        "T.sunmmio_layout_transform(",
+        "T.mma_sunmmio(",
     ]
 
     test_config = {

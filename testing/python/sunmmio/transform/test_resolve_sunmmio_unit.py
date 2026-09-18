@@ -62,14 +62,6 @@ def _odma_unit(name):
     )
 
 
-def _sync_token(token_id):
-    return tvm.tir.call_intrin(
-        "handle",
-        tvm.ir.Op.get("tl.sync_token_id"),
-        tvm.tir.IntImm("int32", token_id),
-    )
-
-
 def _broadcast_args(direction):
     return (
         tvm.tir.IntImm("int32", direction),
@@ -198,20 +190,6 @@ def test_resolve_sunmmio_unit_is_idempotent():
     twice = tilelang.transform.ResolveSunmmioUnit()(once)
     assert tvm.ir.structural_equal(once, twice)
     assert _resolved_unit(twice) == "odma0"
-
-
-def test_resolve_sunmmio_unit_inserts_before_sync_token():
-    mod = _make_transfer_module(
-        "tl.dma_copy",
-        "global",
-        "shared.rsram",
-        _dma_offset(),
-        _sync_token(7),
-    )
-    resolved = tilelang.transform.ResolveSunmmioUnit()(mod)
-    call = _find_transfer_call(resolved)
-    assert call.args[-2].op.name == "tl.odma_unit"
-    assert call.args[-1].op.name == "tl.sync_token_id"
 
 
 def test_resolve_sunmmio_unit_rejects_mismatched_existing_unit():

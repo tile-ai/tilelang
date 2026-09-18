@@ -713,7 +713,7 @@ Stmt AllgatherOpNode::Lower(const LowerArgs &T,
 
   // Propagate src_offset_byte (read from this op's annotations) into each
   // BroadcastOp we construct, so every emitted broadcast_() carries it before
-  // the optional src_core and sync_token_id args. No AttrStmt wrapping needed.
+  // the optional src_core and target metadata. No AttrStmt wrapping needed.
   int src_offset_byte = GetSrcOffsetByte();
   PrimExpr src_offset_imm = IntImm(DataType::Int(32), src_offset_byte);
 

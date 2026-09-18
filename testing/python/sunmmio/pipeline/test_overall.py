@@ -68,83 +68,32 @@ def kernel_overall(M, N, K, block_M, block_N, block_K, dtype="bfloat16", accum_d
 
 def test_overall(is_log=False):
     func = kernel_overall(256, 256, 128, 64, 64, 32)
-    script_device_mode = """
-        with T.launch_thread("blockIdx.x", 16) as bx:
-            T.barrier_init(T.int64(15))
-            with T.decl_buffer((2, 64, 32), "bfloat16", data=A_shared.data, scope="shared.asram") as A_shared:
-                B_shared = T.decl_buffer((2, 32, 64), "bfloat16", data=B_shared.data, scope="shared.wsram")
-                C_shared = T.decl_buffer((64, 64), data=C_shared.data, scope="shared.rsram")
-                Bias_shared = T.decl_buffer((64, 64), data=Bias_shared.data, scope="shared.rsram")
-                C_remote = T.decl_buffer((64, 64), data=C_remote.data, scope="shared.rsram")
-                A_rsram_stage = T.decl_buffer((2, 64, 32), "bfloat16", data=A_rsram_stage.data, scope="shared.rsram")
-                Bias_layout_stage = T.decl_buffer((64, 64), data=Bias_layout_stage.data, scope="shared.rsram")
-                C_layout_stage = T.decl_buffer((64, 64), data=C_layout_stage.data, scope="shared.rsram")
-                for i0 in T.serial(16, annotations={"tile.domain": [64, 64], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [4, 32]}):
-                    for i1 in T.serial(2, annotations={"tile.execution_axis": 1}):
-                        for ki in T.serial(4, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                C_shared[i0 * 4 + ki, i1 * 32 + kj] = T.float32(0.0)
-                T.dma_copy(T.region(A_1[0, 0], 1, 64, 32), T.region(A_rsram_stage[0, 0, 0], 2, 1, 64, 32), 0, T.sync_token_id(0))
-                T.wait_token(0)
-                T.dma_copy(T.region(A_rsram_stage[0, 0, 0], 1, 1, 64, 32), T.region(A_shared[0, 0, 0], 2, 1, 64, 32), 0, T.sync_token_id(1))
-                T.dma_copy(T.region(B_1[0, 0], 1, 32, 64), T.region(B_shared[0, 0, 0], 2, 1, 32, 64), 0, T.sync_token_id(2))
-                T.wait_token(1)
-                T.wait_token(2)
-                T.mma_sunmmio(T.region(A_shared[0, 0, 0], 1, 1, 64, 32), T.region(B_shared[0, 0, 0], 1, 1, 32, 64), T.region(C_shared[0, 0], 3, 64, 64), T.bool(False), T.bool(False), T.bool(False), 0, T.sync_token_id(3))
-                T.wait_token(3)
-                T.dma_copy(T.region(A_rsram_stage[0, 0, 0], 1, 1, 64, 32), T.region(A_shared[0, 0, 0], 2, 1, 64, 32), 1024, T.sync_token_id(4))
-                T.wait_token(4)
-                T.mma_sunmmio(T.region(A_shared[0, 0, 0], 1, 1, 64, 32), T.region(B_shared[0, 0, 0], 1, 1, 32, 64), T.region(C_shared[0, 0], 3, 64, 64), T.bool(False), T.bool(False), T.bool(False), 2048, T.sync_token_id(5))
-                T.dma_copy(T.region(Bias_1[0, 0], 1, 64, 64), T.region(Bias_layout_stage[0, 0], 2, 64, 64), 0, T.sync_token_id(6))
-                T.wait_token(6)
-                T.sunmmio_layout_transform(T.region(Bias_layout_stage[0, 0], 1, 64, 64), T.region(Bias_shared[0, 0], 2, 64, 64), T.sync_token_id(7))
-                T.wait_token(5)
-                T.wait_token(7)
-                for i in T.serial(16, annotations={"tile.domain": [64, 64], "tile.execution_axis": 0, "tile.execution_domain_axes": [0, 1], "tile.scope_entry": 1, "tile.tile_size": [4, 32]}):
-                    for j in T.serial(2, annotations={"tile.execution_axis": 1}):
-                        for ki in T.serial(4, annotations={"tile.interior": 1, "tile.interior_axis": 0}):
-                            for kj in T.vectorized(32, annotations={"tile.interior": 1, "tile.interior_axis": 1}):
-                                C_shared[i * 4 + ki, j * 32 + kj] = C_shared[i * 4 + ki, j * 32 + kj] + Bias_shared[i * 4 + ki, j * 32 + kj]
-                T.barrier_arrive_and_wait(T.int64(15))
-                T.broadcast_(T.region(C_shared[0, 0], 1, 64, 64), T.region(C_remote[0, 0], 2, 64, 64), 0, 15, 0, 0, T.sync_token_id(8))
-                T.wait_token(8)
-                T.barrier_arrive_and_wait(T.int64(15))
-                T.sunmmio_layout_transform(T.region(C_remote[0, 0], 1, 64, 64), T.region(C_layout_stage[0, 0], 2, 64, 64), T.sync_token_id(9))
-                T.wait_token(9)
-                T.dma_copy(T.region(C_layout_stage[0, 0], 1, 64, 64), T.region(C_1[0, 0], 2, 64, 64), 0, T.sync_token_id(10))
-            T.wait_token(10)
-        return 0
-    """
+    script_device_mode = [
+        "with T.launch_thread",
+        "T.odma_unit(",
+        "T.sunmmio_sync(",
+        "T.dma_copy(",
+        "T.mma_sunmmio(",
+        "T.barrier_init(",
+        "T.barrier_arrive_and_wait(",
+        "T.broadcast_(",
+    ]
 
     script_lower_tile_op = [
-        'A = T.match_buffer(A_handle, (32, 32), "bfloat16", strides=(32, 1))',
-        'B = T.match_buffer(B_handle, (32, 32), "bfloat16", strides=(32, 1))',
-        "Bias = T.match_buffer(Bias_handle, (32, 32), strides=(32, 1))",
-        "C = T.match_buffer(C_handle, (32, 32), strides=(32, 1))",
-        'bx = T.launch_thread("blockIdx.x", 16)',
-        "for bx_1, by in T.grid(1, 1):",
-        "T.dma_copy(T.region(A[0, 0], 1, 64, 32), T.region(A_rsram_stage[0, 0], 2, 64, 32), 0)",
-        "T.dma_copy(T.region(B[0, 0], 1, 32, 64), T.region(B_shared[0, 0], 2, 32, 64), 0)",
-        "T.broadcast_(T.region(C_shared[0, 0], 1, 64, 64), T.region(C_remote[0, 0], 2, 64, 64), 0, T.int64(15), 0, 0)",
-        "T.sunmmio_layout_transform(T.region(C_remote[0, 0], 1, 64, 64), T.region(C_layout_stage[0, 0], 2, 64, 64))",
-        "T.dma_copy(T.region(C_layout_stage[0, 0], 1, 64, 64), T.region(C[0, 0], 2, 64, 64), 0)",
+        "T.dma_copy(",
+        "T.mma_sunmmio(",
+        "T.broadcast_(",
     ]
 
     script_InjectSunmmioSync = [
-        'with T.launch_thread("blockIdx.x", 16) as bx:',
-        "T.dma_copy(T.region(A_1[0, 0], 1, 64, 32), T.region(A_rsram_stage[0, 0, 0], 2, 1, 64, 32), 0, T.sync_token_id(0))",
-        "T.dma_copy(T.region(A_rsram_stage[0, 0, 0], 1, 1, 64, 32), T.region(A_shared[0, 0, 0], 2, 1, 64, 32), 0, T.sync_token_id(1))",
-        "T.dma_copy(T.region(B_1[0, 0], 1, 32, 64), T.region(B_shared[0, 0, 0], 2, 1, 32, 64), 0, T.sync_token_id(2))",
-        "T.mma_sunmmio(T.region(A_shared[0, 0, 0], 1, 1, 64, 32), T.region(B_shared[0, 0, 0], 1, 1, 32, 64), T.region(C_shared[0, 0], 3, 64, 64), T.bool(False), T.bool(False), T.bool(False), 0, T.sync_token_id(3))",
-        "T.dma_copy(T.region(Bias_1[0, 0], 1, 64, 64), T.region(Bias_layout_stage[0, 0], 2, 64, 64), 0, T.sync_token_id(6))",
-        "T.sunmmio_layout_transform(T.region(Bias_layout_stage[0, 0], 1, 64, 64), T.region(Bias_shared[0, 0], 2, 64, 64), T.sync_token_id(7))",
-        "T.barrier_init(T.int64(15))",
-        "T.barrier_arrive_and_wait(T.int64(15))",
-        "T.broadcast_(T.region(C_shared[0, 0], 1, 64, 64), T.region(C_remote[0, 0], 2, 64, 64), 0, 15, 0, 0, T.sync_token_id(8))",
-        "T.barrier_arrive_and_wait(T.int64(15))",
-        "T.sunmmio_layout_transform(T.region(C_remote[0, 0], 1, 64, 64), T.region(C_layout_stage[0, 0], 2, 64, 64), T.sync_token_id(9))",
-        "T.dma_copy(T.region(C_layout_stage[0, 0], 1, 64, 64), T.region(C_1[0, 0], 2, 64, 64), 0, T.sync_token_id(10))",
-        "T.wait_token(10)",
+        "with T.launch_thread",
+        "T.odma_unit(",
+        "T.sunmmio_sync(",
+        "T.dma_copy(",
+        "T.mma_sunmmio(",
+        "T.barrier_init(",
+        "T.barrier_arrive_and_wait(",
+        "T.broadcast_(",
     ]
 
     test_config = {

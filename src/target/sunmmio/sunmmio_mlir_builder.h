@@ -202,31 +202,15 @@ public:
   void BeginFor(const std::string &iv, const SunMMIOValue &lb,
                 const SunMMIOValue &ub, const SunMMIOValue &step,
                 const ffi::Map<ffi::String, ffi::Any> &annotations,
-                const std::vector<int64_t> &live_out_token_ids) final;
-  void BeginFor(const std::string &iv, const SunMMIOValue &lb,
-                const SunMMIOValue &ub, const SunMMIOValue &step,
-                const ffi::Map<ffi::String, ffi::Any> &annotations,
-                const std::vector<SunMMIOValue> &live_out_values) final;
-  void BeginFor(const std::string &iv, const SunMMIOValue &lb,
-                const SunMMIOValue &ub, const SunMMIOValue &step,
-                const ffi::Map<ffi::String, ffi::Any> &annotations,
-                const std::vector<int64_t> &live_out_token_ids,
                 const std::vector<SunMMIOValue> &live_out_values) final;
   void EndFor() final;
 
   void BeginIf(const SunMMIOValue &cond,
-               const std::vector<int64_t> &live_out_token_ids) final;
-  void BeginIf(const SunMMIOValue &cond,
-               const std::vector<SunMMIOValue> &live_out_values) final;
-  void BeginIf(const SunMMIOValue &cond,
-               const std::vector<int64_t> &live_out_token_ids,
                const std::vector<SunMMIOValue> &live_out_values) final;
   void BeginElse() final;
   void EndIf() final;
 
-  void BeginWhile(const std::vector<int64_t> &live_out_token_ids) final;
-  void BeginWhile(const std::vector<int64_t> &live_out_token_ids,
-                  const std::vector<SunMMIOValue> &live_out_values) final;
+  void BeginWhile(const std::vector<SunMMIOValue> &live_out_values) final;
   void BeginWhileBody(const SunMMIOValue &cond) final;
   void EndWhile() final;
 

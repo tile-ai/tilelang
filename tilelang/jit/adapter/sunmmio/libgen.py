@@ -286,11 +286,17 @@ _RUNNER_OWNED_SECTIONS = (
     (r"[ \t]*\.dtcm\.tagtrace\s*\(NOLOAD\)\s*:\s*\{.*?\}\s*>\s*DTCM_TAGTRACE\s*", "DTCM_TAGTRACE"),
     (r"[ \t]*\.stack\s*\(NOLOAD\)\s*:\s*\{.*?\}\s*>\s*STACK\s*", "STACK"),
 )
+_RUNNER_OWNED_SYMBOLS = (
+    ("_dtcm_scratch_start", "DTCM_SCRATCH_START"),
+    ("_dtcm_scratch_end", "DTCM_SCRATCH_START + DTCM_SCRATCH_SIZE"),
+    ("_dtcm_tagtrace_start", "DTCM_TAGTRACE_START"),
+    ("_dtcm_tagtrace_end", "DTCM_TAGTRACE_START + DTCM_TAGTRACE_SIZE"),
+)
 
 
 def _write_sudeck_linker_script(toolchain: SunmmioToolchain, mcpu: str, out_path: Path) -> Path:
     """Derive a runner-compatible linker script by dropping the runner-owned
-    DTCM sections from the toolchain's default device.ld."""
+    DTCM sections while preserving their compiler-visible address symbols."""
     text = toolchain.resolve_device_ld(mcpu).read_text(encoding="utf-8")
     for pattern, region in _RUNNER_OWNED_SECTIONS:
         text, count = re.subn(pattern, "\n", text, flags=re.DOTALL)
@@ -299,6 +305,8 @@ def _write_sudeck_linker_script(toolchain: SunmmioToolchain, mcpu: str, out_path
     # _stack/_stack_end no longer exist; point the provided symbols at the runner's stack region.
     text = re.sub(r"PROVIDE\(__stack_start\s*=\s*_stack\);", "PROVIDE(__stack_start = DTCM_STACK_START);", text)
     text = re.sub(r"PROVIDE\(__stack_end\s*=\s*_stack_end\);", "PROVIDE(__stack_end = DTCM_STACK_START + DTCM_STACK_SIZE);", text)
+    symbol_provides = "\n".join(f"PROVIDE({name} = {value});" for name, value in _RUNNER_OWNED_SYMBOLS)
+    text = f"{text.rstrip()}\n{symbol_provides}\n"
     out_path.write_text(text, encoding="utf-8")
     return out_path
 

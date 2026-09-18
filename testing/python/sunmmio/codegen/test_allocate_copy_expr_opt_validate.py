@@ -338,6 +338,7 @@ def test_basic_allocate_copy_mma_codegen_validates_with_npuir_opt(tmp_path):
             "#suvm.memory_space<asram>",
             "#suvm.memory_space<wsram>",
             "suvm.mcast_tok",
+            "suvm.sync",
             "suvm.copy_async",
             "suvm.tc.mma",
         ),
@@ -365,6 +366,7 @@ def test_pipelined_allocate_copy_mma_codegen_propagates_ping_pong(tmp_path):
             "#suvm.memory_space<asram>",
             "#suvm.memory_space<wsram>",
             "suvm.mcast_tok",
+            "suvm.sync",
             "suvm.ping_pong = #suvm.ping_pong<ping>",
         ),
     )

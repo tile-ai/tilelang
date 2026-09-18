@@ -31,11 +31,6 @@ using npuir::sdk::DeviceQuery;
 using NpuMemorySpace = mlir::suvm::MemorySpace;
 using NpuUnit = mlir::suvm::Unit;
 
-bool IsSyncTokenExpr(const PrimExpr &expr) {
-  const auto *call = expr.as<CallNode>();
-  return call && call->op.same_as(sync_token_id());
-}
-
 NpuMemorySpace ToNpuMemorySpace(const Buffer &buffer) {
   const ffi::String &scope = buffer.scope();
   if (scope.empty() || scope == "global") {
@@ -94,20 +89,8 @@ private:
     }
 
     SunmmioOdmaUnit unit = ResolveUnit(call);
-    Array<PrimExpr> args;
-    size_t insert_at = call->args.size();
-    if (insert_at > 0 && IsSyncTokenExpr(call->args.back())) {
-      --insert_at;
-    }
-    for (size_t i = 0; i < call->args.size(); ++i) {
-      if (i == insert_at) {
-        args.push_back(MakeSunmmioOdmaUnitExpr(unit));
-      }
-      args.push_back(call->args[i]);
-    }
-    if (insert_at == call->args.size()) {
-      args.push_back(MakeSunmmioOdmaUnitExpr(unit));
-    }
+    Array<PrimExpr> args = call->args;
+    args.push_back(MakeSunmmioOdmaUnitExpr(unit));
     return Call(call->dtype, call->op, std::move(args), call->annotations,
                 call->span);
   }

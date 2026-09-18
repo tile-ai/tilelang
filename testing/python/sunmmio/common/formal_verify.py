@@ -239,8 +239,6 @@ def verify_comm_lower(func: tir.PrimFunc):
 
         def strip_broadcast_metadata(args):
             fixed_args = list(args)
-            if fixed_args and fixed_args[-1].startswith("T.sync_token_id("):
-                fixed_args.pop()
             if fixed_args and fixed_args[-1].startswith("T.odma_unit("):
                 fixed_args.pop()
             return fixed_args
@@ -277,7 +275,7 @@ def verify_comm_lower(func: tir.PrimFunc):
             else:
                 # Match the dynamic allgather form without src_core:
                 # T.broadcast_(src_region, dst_region, direction, mask,
-                #              src_offset_byte[, odma_unit][, sync_token_id])
+                #              src_offset_byte[, odma_unit])
                 message = f"Expected broadcast_ without src_core, direction={direction}, mask={mask} not found in IRModule"
                 found = False
                 for args in broadcast_arg_lists:
@@ -300,37 +298,29 @@ def verify_comm_lower(func: tir.PrimFunc):
 def verify_SunmmioSync(mod: IRModule):
     script = mod.script()
     lines = [l.strip() for l in script.split("\n")]
-
-    token_ids = [int(l.split("sync_token_id(")[1].split(")")[0]) for l in lines if "sync_token_id" in l]
-    null_token_ids = [int(l.split("sync_null_token(")[1].split(")")[0]) for l in lines if "sync_null_token" in l]
-    wait_ids = [int(l.split("(")[1].split(")")[0]) for l in lines if "wait_token" in l]
-    declared_token_ids = set(token_ids) | set(null_token_ids)
-    all_token_ids = declared_token_ids | set(wait_ids)
-
-    def check_dense_ids(ids, name):
-        if not ids:
-            return
-        expected_ids = set(range(max(ids) + 1))
-        assert ids == expected_ids, f"{name} ids should be continuous from 0, got {sorted(ids)}"
-
-    check_dense_ids(all_token_ids, "token")
+    assert "sync_token_id" not in script
+    assert "sync_null_token" not in script
+    assert "wait_token" not in script
 
     barrier_init_masks = [l.split("barrier_init(", 1)[1].rsplit(")", 1)[0] for l in lines if "barrier_init(" in l]
     initialized_masks = set(barrier_init_masks)
     barrier_init_calls = []
     barrier_arrive_calls = []
+    unit_sync_calls = []
 
-    def collect_barrier_calls(node):
+    def collect_sync_calls(node):
         if not isinstance(node, tir.Call) or not hasattr(node.op, "name"):
             return
         if node.op.name == "tl.barrier_init":
             barrier_init_calls.append(node)
         elif node.op.name == "tl.barrier_arrive_and_wait":
             barrier_arrive_calls.append(node)
+        elif node.op.name == "tl.sunmmio_sync":
+            unit_sync_calls.append(node)
 
     for func in mod.functions.values():
         if isinstance(func, tir.PrimFunc):
-            tir.stmt_functor.post_order_visit(func.body, collect_barrier_calls)
+            tir.stmt_functor.post_order_visit(func.body, collect_sync_calls)
 
     def structurally_equal_args(lhs, rhs):
         return len(lhs) == len(rhs) and all(ir.structural_equal(a, b) for a, b in zip(lhs, rhs))
@@ -342,22 +332,14 @@ def verify_SunmmioSync(mod: IRModule):
         # arrive_and_wait(runtime_expr, candidates...).
         return any(len(init.args) > 1 and structurally_equal_args(init.args[1:], arrive.args[1:]) for init in barrier_init_calls)
 
-    # Check count of wait_lines and arrive_lines
-    assert len(wait_ids) >= len(set(token_ids)), "wait_lines should be greater than token_lines"
-    for i in wait_ids:
-        assert i in declared_token_ids, f"wait_token({i}) does not have sync_token_id or sync_null_token"
     for arrive in barrier_arrive_calls:
         assert has_matching_barrier_init(arrive), f"{arrive} does not have a matching barrier_init"
-
-    # Check order of sync_token_id(id) (or sync_null_token(id)) and wait_token(id)
-    for i in declared_token_ids:
-        idx_token = script.find(f"sync_token_id({i})")
-        idx_null = script.find(f"sync_null_token({i})")
-        idx_first_token = min(idx for idx in (idx_token, idx_null) if idx != -1)
-        idx_wait = script.find(f"wait_token({i})")
-        assert idx_first_token != -1, f"sync_token_id({i}) or sync_null_token({i}) is not found in script"
-        assert idx_wait != -1, f"wait_token({i}) is not found in script"
-        assert idx_first_token < idx_wait, f"wait_token({i}) is before sync_token_id or sync_null_token({i})"
+    known_sync_units = (1 << 7) - 1
+    for sync in unit_sync_calls:
+        assert len(sync.args) == 1 and isinstance(sync.args[0], tir.IntImm), f"invalid unit sync marker close to {sync}"
+        mask = int(sync.args[0])
+        assert mask > 0, f"unit sync mask must be nonzero, got {mask}"
+        assert mask & ~known_sync_units == 0, f"unit sync mask contains unknown bits: {mask}"
     # Check order of barrier_init(mask) and barrier_arrive_and_wait(mask).
     for mask in initialized_masks:
         idx_barrier = script.find(f"barrier_init({mask})")

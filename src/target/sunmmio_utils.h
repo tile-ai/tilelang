@@ -6,6 +6,7 @@
 #ifndef TVM_TL_TARGET_SUNMMIO_UTILS_H_
 #define TVM_TL_TARGET_SUNMMIO_UTILS_H_
 
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -84,6 +85,18 @@ enum class SunmmioOdmaUnit {
   kOdma0,
   kOdma1,
 };
+
+// TileLang-side hardware completion mask. Keep these values independent from
+// NPU-IR's enum representation and translate them explicitly in SUVM codegen.
+using SunmmioSyncUnits = uint32_t;
+constexpr SunmmioSyncUnits kSunmmioSyncNone = 0;
+constexpr SunmmioSyncUnits kSunmmioSyncOdma0 = 1U << 0;
+constexpr SunmmioSyncUnits kSunmmioSyncOdma1 = 1U << 1;
+constexpr SunmmioSyncUnits kSunmmioSyncTc = 1U << 2;
+constexpr SunmmioSyncUnits kSunmmioSyncHlink = 1U << 3;
+constexpr SunmmioSyncUnits kSunmmioSyncVlink = 1U << 4;
+constexpr SunmmioSyncUnits kSunmmioSyncVector = 1U << 5;
+constexpr SunmmioSyncUnits kSunmmioSyncRsram = 1U << 6;
 
 const char *StringifySunmmioOdmaUnit(SunmmioOdmaUnit unit);
 PrimExpr MakeSunmmioOdmaUnitExpr(SunmmioOdmaUnit unit);

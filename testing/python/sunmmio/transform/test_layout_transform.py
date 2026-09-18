@@ -601,8 +601,7 @@ def test_aligned_rsram_copy_already_32_multiple_stays_plain():
         assert names.count("tl.dma_copy") == 2, names
 
 
-def test_sync_injected_between_dma_and_transform():
-    """InjectSunmmioSync inserts a wait_token for the staging-buffer dependency."""
+def test_dma_transform_dependency_inserts_unit_sync():
     target = determine_target("Sunmmio", return_object=True)
     mod = mismatched_copy_kernel()
     with tvm.target.Target(target):
@@ -616,10 +615,13 @@ def test_sync_injected_between_dma_and_transform():
         func = list(mod.functions.values())[0]
 
         names = collect_call_names(func)
-        # The transform reads the staging buffer the dma_copy wrote -> RAW.
-        assert "tl.wait_token" in names, names
-        # The async op itself is tagged with a sync token.
-        assert "tl.sync_token_id" in names, names
+        assert "tl.dma_copy" in names, names
+        assert "tl.sunmmio_layout_transform" in names, names
+        assert "tl.sunmmio_sync" in names, names
+        assert not any("token" in name for name in names), names
+
+        script = func.script()
+        assert script.index("T.dma_copy") < script.index("T.sunmmio_sync") < script.index("T.sunmmio_layout_transform")
 
 
 def test_end_to_end_zz_dram_reduce_roundtrip():

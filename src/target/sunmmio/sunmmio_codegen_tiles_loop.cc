@@ -317,23 +317,6 @@ SunMMIOType MakeTileViewType(DataType dtype,
   return type;
 }
 
-bool IsTokenLikeTileStmt(const Stmt &stmt) {
-  const auto *eval = stmt.as<EvaluateNode>();
-  if (!eval) {
-    return false;
-  }
-  const auto *call = eval->value.as<CallNode>();
-  if (!call) {
-    return false;
-  }
-  const auto *op_node = call->op.as<tvm::OpNode>();
-  if (!op_node) {
-    return false;
-  }
-  return op_node->name == "tl.wait_token" ||
-         op_node->name == "tl.sync_token_id";
-}
-
 std::pair<const ForNode *, const ForNode *>
 FindInteriorLoops(const Stmt &stmt) {
   if (const auto *loop = stmt.as<ForNode>()) {
@@ -727,24 +710,6 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
         << "Tiles scope is missing interior axis 0 loop";
     scope.tile_block_body = tile_scope_stmt;
   }
-
-  auto warn_token_stmt = [&](const Stmt &body) {
-    if (!body.defined()) {
-      return;
-    }
-    if (const auto *seq = body.as<SeqStmtNode>()) {
-      for (const Stmt &stmt : seq->seq) {
-        if (IsTokenLikeTileStmt(stmt)) {
-          LOG(WARNING) << "Ignoring token-related Evaluate inside T.Tiles body "
-                          "per current integration contract";
-        }
-      }
-    } else if (IsTokenLikeTileStmt(body)) {
-      LOG(WARNING) << "Ignoring token-related Evaluate inside T.Tiles body per "
-                      "current integration contract";
-    }
-  };
-  warn_token_stmt(scope.tile_block_body);
 
   SunmmioMlirContext *mlir_ctx = TryGetMlirContext(builder_);
   ICHECK(mlir_ctx != nullptr)
@@ -3760,9 +3725,6 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
   };
 
   lower_stmt = [&](const Stmt &stmt, TileBlockState *state) {
-    if (IsTokenLikeTileStmt(stmt)) {
-      return;
-    }
     MarkVisitedNodeType(stmt->GetTypeKey());
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
       for (const Stmt &s : seq->seq) {
@@ -3811,7 +3773,7 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       auto saved_locals = state->local_tile_values;
       auto saved_local_axes = state->local_unit_tile_axes;
 
-      builder_->BeginIf(cond, std::vector<int64_t>{});
+      builder_->BeginIf(cond, std::vector<SunMMIOValue>{});
       TileBlockState then_state = *state;
       lower_stmt(ifs->then_case, &then_state);
       if (ifs->else_case.defined()) {
@@ -4108,7 +4070,8 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
           return;
         }
         if (op_node && (op_node->name == "tl.barrier_init" ||
-                        op_node->name == "tl.barrier_arrive_and_wait")) {
+                        op_node->name == "tl.barrier_arrive_and_wait" ||
+                        op_node->name == "tl.sunmmio_sync")) {
           (void)EvalExpr(eval->value);
           return;
         }
@@ -4257,9 +4220,6 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
   };
 
   lower_reduce_stmt = [&](const Stmt &stmt, TileBlockState *state) {
-    if (IsTokenLikeTileStmt(stmt)) {
-      return;
-    }
     MarkVisitedNodeType(stmt->GetTypeKey());
     if (const auto *seq = stmt.as<SeqStmtNode>()) {
       for (const Stmt &s : seq->seq) {
@@ -4604,7 +4564,7 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       };
 
       SunMMIOValue cond = build_full_tile_condition();
-      builder_->BeginIf(cond, std::vector<int64_t>{});
+      builder_->BeginIf(cond, std::vector<SunMMIOValue>{});
       TileBlockState full_state = *state;
       full_state.tile_mask.reset();
       full_state.interior_axis0_loop = scope.interior_axis0_loop;
@@ -4637,8 +4597,8 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       ICHECK_EQ(scope.tile_shape.size(), 2U)
           << "Tail tile lowering supports rank-1 or rank-2 tile scopes";
       TailMaskInfo mask_info = build_tail_mask_info(state);
-      builder_->BeginIf(mask_info.row_tail_cond, std::vector<int64_t>{});
-      builder_->BeginIf(mask_info.col_tail_cond, std::vector<int64_t>{});
+      builder_->BeginIf(mask_info.row_tail_cond, std::vector<SunMMIOValue>{});
+      builder_->BeginIf(mask_info.col_tail_cond, std::vector<SunMMIOValue>{});
       SunMMIOValue rect_mask = builder_->TileRectMask(
           NewValueName(), mask_info.valid_rows, mask_info.valid_cols,
           mask_info.mask_type, tail_mask_index_dtype);
@@ -4688,7 +4648,7 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
                          live_out_values);
     } else {
       builder_->BeginFor(iv, min, upper, step, loop->annotations,
-                         std::vector<int64_t>{});
+                         std::vector<SunMMIOValue>{});
     }
     EnterScope();
     BindVar(

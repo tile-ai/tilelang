@@ -669,27 +669,6 @@ CodeGenTileLangSunMMIO::NormalizeRegionTracked(const tvm::PrimExpr &expr) {
                                      });
 }
 
-bool CodeGenTileLangSunMMIO::TryConsumeSyncTokenId(const tvm::PrimExpr &expr,
-                                                   SunMMIOCallAttrs *attrs) {
-  const auto *call = expr.as<tir::CallNode>();
-  if (!call) {
-    return false;
-  }
-  const auto *op_node = call->op.as<OpNode>();
-  if (!op_node || op_node->name != "tl.sync_token_id") {
-    return false;
-  }
-
-  MarkVisitedExprRoot(expr);
-  ICHECK_EQ(call->args.size(), 1)
-      << "tl.sync_token_id expects exactly one argument";
-  const auto *imm = call->args[0].as<IntImmNode>();
-  ICHECK(imm) << "tl.sync_token_id expects an IntImm token id";
-  MarkVisitedNodeType(imm->GetTypeKey());
-  (*attrs)[SunMMIOCallAttrKey::kTokenId] = static_cast<int64_t>(imm->value);
-  return true;
-}
-
 bool CodeGenTileLangSunMMIO::TryConsumeSunmmioOdmaUnit(
     const tvm::PrimExpr &expr, SunMMIOCallAttrs *attrs) {
   std::optional<tl::SunmmioOdmaUnit> unit = tl::ParseSunmmioOdmaUnitExpr(expr);
@@ -1369,264 +1348,22 @@ AppendUniqueLocalVarLiveOutValues(std::vector<SunMMIOValue> *dst,
   }
 }
 
-namespace {
-struct TokenSummary {
-  std::vector<int64_t> live_out;
-};
-
-struct IterState {
-  std::unordered_set<int64_t> avail_tokens;
-
-  std::vector<int64_t> produced_order;
-  std::unordered_set<int64_t> produced_seen;
-
-  void MarkProduced(int64_t token_id) {
-    if (token_id < 0) {
-      return;
-    }
-    avail_tokens.insert(token_id);
-    if (produced_seen.insert(token_id).second) {
-      produced_order.push_back(token_id);
-    }
-  }
-};
-
-struct TokenAnalyzer {
-  static int64_t ParseTokenIdFromArgs(const ffi::Array<PrimExpr> &args) {
-    for (const PrimExpr &arg : args) {
-      if (const auto *call = arg.as<CallNode>()) {
-        if (const auto *op_node = call->op.as<OpNode>()) {
-          if (op_node->name == "tl.sync_token_id" && call->args.size() == 1) {
-            if (const auto *imm = call->args[0].as<IntImmNode>()) {
-              return static_cast<int64_t>(imm->value);
-            }
-          }
-        }
-      }
-    }
-    for (const PrimExpr &arg : args) {
-      if (const auto *imm = arg.as<IntImmNode>()) {
-        return static_cast<int64_t>(imm->value);
-      }
-    }
-    return -1;
-  }
-
-  static void MergeProducedOrder(IterState &dst,
-                                 const std::vector<int64_t> &order) {
-    for (int64_t t : order) {
-      if (t < 0) {
-        continue;
-      }
-      if (dst.produced_seen.insert(t).second) {
-        dst.produced_order.push_back(t);
-      }
-    }
-  }
-
-  TokenSummary AnalyzeFor(const tir::ForNode *for_op) {
-    IterState st;
-    AnalyzeStmt(for_op->body, st);
-
-    std::vector<int64_t> live_out_order;
-    live_out_order.reserve(st.produced_order.size());
-    for (int64_t t : st.produced_order) {
-      if (t >= 0 && st.avail_tokens.count(t) != 0) {
-        live_out_order.push_back(t);
-      }
-    }
-
-    TokenSummary summary;
-    summary.live_out = std::move(live_out_order);
-    return summary;
-  }
-
-  TokenSummary AnalyzeWhile(const tir::WhileNode *while_op) {
-    IterState st;
-    AnalyzeStmt(while_op->body, st);
-
-    std::vector<int64_t> live_out_order;
-    live_out_order.reserve(st.produced_order.size());
-    for (int64_t t : st.produced_order) {
-      if (t >= 0 && st.avail_tokens.count(t) != 0) {
-        live_out_order.push_back(t);
-      }
-    }
-
-    TokenSummary summary;
-    summary.live_out = std::move(live_out_order);
-    return summary;
-  }
-
-  TokenSummary AnalyzeIf(const tir::IfThenElseNode *if_op) {
-    IterState then_st;
-    AnalyzeStmt(if_op->then_case, then_st);
-    IterState else_st;
-    if (if_op->else_case.defined()) {
-      AnalyzeStmt(if_op->else_case.value(), else_st);
-    }
-
-    std::vector<int64_t> live_out_order;
-    std::unordered_set<int64_t> live_out_set;
-    for (int64_t t : then_st.produced_order) {
-      if (t >= 0 && then_st.avail_tokens.count(t) != 0) {
-        if (live_out_set.insert(t).second) {
-          live_out_order.push_back(t);
-        }
-      }
-    }
-    for (int64_t t : else_st.produced_order) {
-      if (t >= 0 && else_st.avail_tokens.count(t) != 0) {
-        if (live_out_set.insert(t).second) {
-          live_out_order.push_back(t);
-        }
-      }
-    }
-
-    TokenSummary summary;
-    summary.live_out = std::move(live_out_order);
-    return summary;
-  }
-
-  void AnalyzeStmt(const Stmt &stmt, IterState &st) {
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const Stmt &s : seq->seq) {
-        AnalyzeStmt(s, st);
-      }
-      return;
-    }
-
-    if (const auto *inner_for = stmt.as<ForNode>()) {
-      TokenSummary inner = AnalyzeFor(inner_for);
-      for (int64_t t : inner.live_out) {
-        st.MarkProduced(t);
-      }
-
-      return;
-    }
-
-    if (const auto *inner_while = stmt.as<WhileNode>()) {
-      TokenSummary inner = AnalyzeWhile(inner_while);
-      for (int64_t t : inner.live_out) {
-        st.MarkProduced(t);
-      }
-
-      return;
-    }
-
-    if (const auto *block = stmt.as<BlockNode>()) {
-      if (block->init.defined()) {
-        AnalyzeStmt(block->init.value(), st);
-      }
-      AnalyzeStmt(block->body, st);
-      return;
-    }
-
-    if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-      AnalyzeStmt(realize->block, st);
-      return;
-    }
-
-    if (const auto *alloc = stmt.as<AllocateNode>()) {
-      AnalyzeStmt(alloc->body, st);
-      return;
-    }
-
-    if (const auto *alloc_const = stmt.as<AllocateConstNode>()) {
-      AnalyzeStmt(alloc_const->body, st);
-      return;
-    }
-
-    if (const auto *buf_realize = stmt.as<BufferRealizeNode>()) {
-      AnalyzeStmt(buf_realize->body, st);
-      return;
-    }
-
-    if (const auto *decl_buf = stmt.as<DeclBufferNode>()) {
-      AnalyzeStmt(decl_buf->body, st);
-      return;
-    }
-
-    if (const auto *asserts = stmt.as<AssertStmtNode>()) {
-      AnalyzeStmt(asserts->body, st);
-      return;
-    }
-
-    if (const auto *eval = stmt.as<EvaluateNode>()) {
-      if (const auto *call = eval->value.as<CallNode>()) {
-        if (const auto *op_node = call->op.as<OpNode>()) {
-          if (op_node->name == "tl.dma_copy" ||
-              op_node->name == "tl.sunmmio_layout_transform" ||
-              op_node->name == "tl.sunmmio_transpose" ||
-              op_node->name == "tl.mma_sunmmio" ||
-              op_node->name == "tl.broadcast_" ||
-              op_node->name == "tl.sync_null_token") {
-            int64_t token_id = ParseTokenIdFromArgs(call->args);
-            st.MarkProduced(token_id);
-            return;
-          }
-          if (op_node->name == "tl.wait_token") {
-            int64_t token_id = ParseTokenIdFromArgs(call->args);
-            if (token_id >= 0) {
-              st.avail_tokens.erase(token_id);
-            }
-            return;
-          }
-        }
-      }
-      return;
-    }
-
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      AnalyzeStmt(attr->body, st);
-      return;
-    }
-
-    if (const auto *let = stmt.as<LetStmtNode>()) {
-      AnalyzeStmt(let->body, st);
-      return;
-    }
-
-    if (const auto *ifs = stmt.as<IfThenElseNode>()) {
-      IterState then_st = st;
-      AnalyzeStmt(ifs->then_case, then_st);
-      IterState else_st = st;
-      if (ifs->else_case.defined()) {
-        AnalyzeStmt(ifs->else_case.value(), else_st);
-      }
-
-      st.avail_tokens = then_st.avail_tokens;
-      st.avail_tokens.insert(else_st.avail_tokens.begin(),
-                             else_st.avail_tokens.end());
-
-      MergeProducedOrder(st, then_st.produced_order);
-      MergeProducedOrder(st, else_st.produced_order);
-      return;
-    }
-  }
-};
-} // namespace
-
 void CodeGenTileLangSunMMIO::EmitFor(const tir::ForNode *op) {
-  TokenAnalyzer analyzer;
-  TokenSummary summary = analyzer.AnalyzeFor(op);
   std::vector<SunMMIOValue> local_live_out_values =
       CollectLocalVarLiveOutValues(op->body);
 
   SunMMIOValue min = EnsureIndex(EvalExpr(op->min));
   SunMMIOValue extent = EnsureIndex(EvalExpr(op->extent));
-  SunMMIOValue step = EmitConstIndex(1);
+  SunMMIOValue step = op->step.has_value()
+                          ? EnsureIndex(EvalExpr(op->step.value()))
+                          : EmitConstIndex(1);
   SunMMIOValue upper = builder_->Binary(
       NewValueName(), BinaryOp::kAdd, ArithmeticFlavor::kIndex, min, extent,
       SunMMIOType{SunMMIOType::Kind::kIndex, DataType::Int(32), 1, {}},
       DataType::Int(32));
   std::string iv = "%" + op->loop_var->name_hint;
-  if (!local_live_out_values.empty()) {
-    builder_->BeginFor(iv, min, upper, step, op->annotations, summary.live_out,
-                       local_live_out_values);
-  } else {
-    builder_->BeginFor(iv, min, upper, step, op->annotations, summary.live_out);
-  }
+  builder_->BeginFor(iv, min, upper, step, op->annotations,
+                     local_live_out_values);
   EnterScope();
   BindVar(
       op->loop_var,
@@ -1643,8 +1380,6 @@ void CodeGenTileLangSunMMIO::EmitIf(const tir::IfThenElseNode *op) {
       EvalExpr(op->condition),
       SunMMIOType{SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}},
       DataType::Bool());
-  TokenAnalyzer analyzer;
-  TokenSummary summary = analyzer.AnalyzeIf(op);
   std::vector<SunMMIOValue> local_live_out_values =
       CollectLocalVarLiveOutValues(op->then_case);
   if (op->else_case.defined()) {
@@ -1653,11 +1388,7 @@ void CodeGenTileLangSunMMIO::EmitIf(const tir::IfThenElseNode *op) {
     AppendUniqueLocalVarLiveOutValues(&local_live_out_values,
                                       else_live_out_values);
   }
-  if (!local_live_out_values.empty()) {
-    builder_->BeginIf(cond, summary.live_out, local_live_out_values);
-  } else {
-    builder_->BeginIf(cond, summary.live_out);
-  }
+  builder_->BeginIf(cond, local_live_out_values);
   VisitStmtTracked(op->then_case);
   if (op->else_case.defined()) {
     builder_->BeginElse();
@@ -1681,15 +1412,9 @@ void CodeGenTileLangSunMMIO::VisitStmt_(const tir::ForNode *op) {
 }
 
 void CodeGenTileLangSunMMIO::EmitWhile(const tir::WhileNode *op) {
-  TokenAnalyzer analyzer;
-  TokenSummary summary = analyzer.AnalyzeWhile(op);
   std::vector<SunMMIOValue> local_live_out_values =
       CollectLocalVarLiveOutValues(op->body);
-  if (!local_live_out_values.empty()) {
-    builder_->BeginWhile(summary.live_out, local_live_out_values);
-  } else {
-    builder_->BeginWhile(summary.live_out);
-  }
+  builder_->BeginWhile(local_live_out_values);
   SunMMIOValue cond = EnsureType(
       EvalExpr(op->condition),
       SunMMIOType{SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}},
@@ -1789,7 +1514,7 @@ void CodeGenTileLangSunMMIO::VisitStmt_(const tir::BufferStoreNode *op) {
     SunMMIOType bool_ty{SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}};
     SunMMIOValue cond =
         EnsureType(EvalExpr(op->predicate.value()), bool_ty, DataType::Bool());
-    builder_->BeginIf(cond, std::vector<int64_t>{});
+    builder_->BeginIf(cond, std::vector<SunMMIOValue>{});
     EmitScalarTileSet(op);
     builder_->EndIf();
     return;
@@ -2469,7 +2194,7 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitMXPackOrUnpack(const tir::CallNode *op,
   auto begin_for = [&](const std::string &iv_name, int64_t upper) {
     builder_->BeginFor(iv_name, EmitConstIndex(0), EmitConstIndex(upper),
                        EmitConstIndex(1), ffi::Map<ffi::String, ffi::Any>(),
-                       std::vector<int64_t>{});
+                       std::vector<SunMMIOValue>{});
   };
   auto make_memtensor_value = [](const BufferBinding &binding, DataType dtype) {
     return SunMMIOValue{CanonicalizeSuvmDType(dtype).with_lanes(1),
@@ -2824,23 +2549,6 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     return EmitMXPackOrUnpack(op, /*is_pack=*/true);
   } else if (callee == "tl.mx_unpack") {
     return EmitMXPackOrUnpack(op, /*is_pack=*/false);
-  } else if (callee == "tl.sync_null_token" || callee == "tl.wait_token") {
-    for (int i = 0, e = static_cast<int>(op->args.size()); i < e; ++i) {
-      const PrimExpr &arg = op->args[i];
-      if (i == 0) {
-        if (const auto *imm = arg.as<IntImmNode>()) {
-          MarkVisitedNodeType(imm->GetTypeKey());
-          attrs[SunMMIOCallAttrKey::kTokenId] =
-              static_cast<int64_t>(imm->value);
-          continue;
-        }
-      }
-      if (const auto *s = arg.as<StringImmNode>()) {
-        MarkVisitedNodeType(s->GetTypeKey());
-        continue;
-      }
-      operands.push_back(EvalExpr(arg));
-    }
   } else if (callee == "tl.barrier_init" ||
              callee == "tl.barrier_arrive_and_wait") {
     ICHECK_GE(op->args.size(), 1U)
@@ -2871,10 +2579,19 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     if (!candidate_masks.empty()) {
       attrs[SunMMIOCallAttrKey::kCandidateMasks] = std::move(candidate_masks);
     }
+  } else if (callee == "tl.sunmmio_sync") {
+    ICHECK_EQ(op->args.size(), 1U)
+        << "tl.sunmmio_sync expects one constant unit mask";
+    const auto *units = op->args[0].as<IntImmNode>();
+    ICHECK(units) << "tl.sunmmio_sync unit mask must be an IntImm";
+    ICHECK_GE(units->value, 0)
+        << "tl.sunmmio_sync unit mask must be non-negative";
+    MarkVisitedNodeType(units->GetTypeKey());
+    attrs[SunMMIOCallAttrKey::kSyncUnits] = static_cast<int64_t>(units->value);
   } else if (callee == "tl.dma_copy") {
-    ICHECK_EQ(op->args.size(), 5)
+    ICHECK_EQ(op->args.size(), 4)
         << "tl.dma_copy expects src region, dst region, src_offset_byte, "
-           "odma_unit, and sync_token_id";
+           "and odma_unit";
     auto count_tiled_dims = [](const PrimExpr &region_expr) -> int {
       BufferRegion region = tl::NormalizeToBufferRegion(region_expr);
       int count = 0;
@@ -2903,15 +2620,13 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
 
     ICHECK(TryConsumeSunmmioOdmaUnit(op->args[3], &attrs))
         << "tl.dma_copy expects fourth argument to be tl.odma_unit";
-    ICHECK(TryConsumeSyncTokenId(op->args[4], &attrs))
-        << "tl.dma_copy expects fifth argument to be tl.sync_token_id";
 
     operands.push_back(EmitRegionCall(op->args[0], src_offset_byte));
     operands.push_back(EmitRegionCall(op->args[1]));
   } else if (callee == "tl.sunmmio_layout_transform") {
-    ICHECK_EQ(op->args.size(), 4)
-        << "tl.sunmmio_layout_transform expects src region, dst region, "
-           "odma_unit, and sync_token_id";
+    ICHECK_EQ(op->args.size(), 3)
+        << "tl.sunmmio_layout_transform expects src region, dst region, and "
+           "odma_unit";
     struct LayoutTransformRegionInfo {
       int rank{0};
       int tiled_dims{0};
@@ -2955,13 +2670,10 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     ICHECK(TryConsumeSunmmioOdmaUnit(op->args[2], &attrs))
         << "tl.sunmmio_layout_transform expects third argument to be "
            "tl.odma_unit";
-    ICHECK(TryConsumeSyncTokenId(op->args[3], &attrs))
-        << "tl.sunmmio_layout_transform expects fourth argument to be "
-           "tl.sync_token_id";
   } else if (callee == "tl.sunmmio_transpose") {
-    ICHECK_EQ(op->args.size(), 4)
-        << "tl.sunmmio_transpose expects src region, dst region, odma_unit, "
-           "and sync_token_id";
+    ICHECK_EQ(op->args.size(), 3)
+        << "tl.sunmmio_transpose expects src region, dst region, and "
+           "odma_unit";
     auto validate_region = [](const PrimExpr &region_expr,
                               const char *operand) {
       BufferRegion region = tl::NormalizeToBufferRegion(region_expr);
@@ -2982,9 +2694,6 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     operands.push_back(EmitRegionCall(op->args[1]));
     ICHECK(TryConsumeSunmmioOdmaUnit(op->args[2], &attrs))
         << "tl.sunmmio_transpose expects third argument to be tl.odma_unit";
-    ICHECK(TryConsumeSyncTokenId(op->args[3], &attrs))
-        << "tl.sunmmio_transpose expects fourth argument to be "
-           "tl.sync_token_id";
   } else if (callee == "tir.bitwise_and" || callee == "tir.bitwise_or" ||
              callee == "tir.bitwise_xor" || callee == "tir.shift_left" ||
              callee == "tir.shift_right") {
@@ -3003,21 +2712,17 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     }
     return EmitBinary("shr", op->args[0], op->args[1], op->dtype);
   } else if (callee == "tl.broadcast_") {
-    size_t non_token_args = op->args.size();
-    bool has_sync_token =
-        non_token_args > 0 && TryConsumeSyncTokenId(op->args.back(), &attrs);
-    ICHECK(has_sync_token)
-        << "tl.broadcast_ expects last argument to be tl.sync_token_id";
-    --non_token_args;
-    ICHECK(non_token_args > 0 &&
-           TryConsumeSunmmioOdmaUnit(op->args[non_token_args - 1], &attrs))
-        << "tl.broadcast_ expects tl.odma_unit immediately before "
-           "tl.sync_token_id";
-    --non_token_args;
-    ICHECK(non_token_args == static_cast<size_t>(tl::kBroadcastArgCount) ||
-           non_token_args == static_cast<size_t>(tl::kBroadcastArgCount + 1))
+    size_t fixed_and_source_args = op->args.size();
+    ICHECK(fixed_and_source_args > 0 &&
+           TryConsumeSunmmioOdmaUnit(op->args.back(), &attrs))
+        << "tl.broadcast_ expects tl.odma_unit as its final argument";
+    --fixed_and_source_args;
+    ICHECK(fixed_and_source_args ==
+               static_cast<size_t>(tl::kBroadcastArgCount) ||
+           fixed_and_source_args ==
+               static_cast<size_t>(tl::kBroadcastArgCount + 1))
         << "tl.broadcast_ expects src region, dst region, direction, mask, "
-           "src_offset_byte, optional src_core, and sync_token_id";
+           "src_offset_byte, optional src_core, and odma_unit";
 
     const auto *direction_imm =
         op->args[tl::kBroadcastArgDirection].as<IntImmNode>();
@@ -3044,16 +2749,17 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
         EmitRegionCall(op->args[tl::kBroadcastArgSrc], src_offset_byte));
     operands.push_back(EmitRegionCall(op->args[tl::kBroadcastArgDst]));
     operands.push_back(EvalExpr(op->args[tl::kBroadcastArgMask]));
-    if (non_token_args == static_cast<size_t>(tl::kBroadcastArgCount + 1)) {
+    if (fixed_and_source_args ==
+        static_cast<size_t>(tl::kBroadcastArgCount + 1)) {
       operands.push_back(EvalExpr(op->args[tl::kBroadcastArgSrcCore]));
     }
 
     attrs[SunMMIOCallAttrKey::kDirection] =
         std::string(direction == 0 ? "row" : "col");
   } else if (callee == "tl.mma_sunmmio") {
-    ICHECK_EQ(op->args.size(), 8) << "tl.mma_sunmmio expects A/B/C regions, "
-                                     "three flag operands, acc_offset_byte, "
-                                     "and sync_token_id";
+    ICHECK_EQ(op->args.size(), 7) << "tl.mma_sunmmio expects A/B/C regions, "
+                                     "three flag operands, and "
+                                     "acc_offset_byte";
     auto parse_bool_arg = [&](const PrimExpr &arg,
                               const char *arg_name) -> bool {
       const auto *imm = arg.as<IntImmNode>();
@@ -3087,14 +2793,9 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     attrs[SunMMIOCallAttrKey::kTransB] =
         parse_bool_arg(op->args[4], "tl.mma_sunmmio transB");
 
-    ICHECK(TryConsumeSyncTokenId(op->args[7], &attrs))
-        << "tl.mma_sunmmio expects last argument to be tl.sync_token_id";
   } else {
     for (int i = 0, e = static_cast<int>(op->args.size()); i < e; ++i) {
       const PrimExpr &arg = op->args[i];
-      if (TryConsumeSyncTokenId(arg, &attrs)) {
-        continue;
-      }
       if (TryConsumeSunmmioOdmaUnit(arg, &attrs)) {
         continue;
       }

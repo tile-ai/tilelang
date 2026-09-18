@@ -84,16 +84,13 @@ def test_summa(is_log=False):
     func = summa_matmul(128, 128, 128, 32, 32, 32)
 
     script_device_mode = [
-        'with T.launch_thread("blockIdx.x", 16) as bx:',
-        'with T.decl_buffer((32, 32), "float16", data=A_broadcast.data, scope="shared.rsram") as A_broadcast:',
-        'A_shared = T.decl_buffer((32, 32), "float16", data=A_shared.data, scope="shared.asram")',
-        'B_shared = T.decl_buffer((32, 32), "float16", data=B_shared.data, scope="shared.wsram")',
-        "for k_tile in range(4):",
-        "bx // 4 * 4 + k_tile",
-        "k_tile * 4 + bx % 4",
+        "with T.launch_thread",
+        "T.odma_unit(",
+        "T.sunmmio_sync(",
+        "T.dma_copy(",
+        "T.broadcast_(",
         "T.mma_sunmmio(",
-        "T.wait_token(",
-        "T.dma_copy(T.region(C_local[0, 0]",
+        "T.barrier_init(",
     ]
 
     script_lower_tile_op = [
@@ -111,16 +108,13 @@ def test_summa(is_log=False):
     ]
 
     script_InjectSunmmioSync = [
-        'with T.launch_thread("blockIdx.x", 16) as bx:',
-        "T.barrier_init(",
-        "for k_tile in range(4):",
-        "bx // 4 * 4 + k_tile",
-        "k_tile * 4 + bx % 4",
+        "with T.launch_thread",
+        "T.odma_unit(",
+        "T.sunmmio_sync(",
+        "T.dma_copy(",
         "T.broadcast_(",
         "T.mma_sunmmio(",
-        "T.sync_token_id(",
-        "T.wait_token(",
-        "T.dma_copy(T.region(C_local[0, 0]",
+        "T.barrier_init(",
     ]
 
     test_config = {

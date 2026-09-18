@@ -267,6 +267,12 @@ def test_mx_pack_result_can_feed_gemm_codegen(tmp_path, mx_dtype, data_dtype, mx
     )
 
     assert_source_contains(src, ("suvm.unpack", "suvm.copy_async", "suvm.tc.mma"))
+    lines = src.splitlines()
+    first_copy = next(i for i, line in enumerate(lines) if "suvm.copy_async" in line)
+    pack_stores = [i for i, line in enumerate(lines[:first_copy]) if "suvm.tile.store" in line]
+    pack_sync = next(i for i, line in enumerate(lines[:first_copy]) if "suvm.sync" in line and "vector" in line and "rsram" in line)
+    assert pack_stores
+    assert max(pack_stores) < pack_sync < first_copy
 
 
 @pytest.mark.parametrize("mx_dtype,data_dtype,mx_token", MX_DTYPE_CASES)

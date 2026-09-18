@@ -354,34 +354,11 @@ void SuvmSunmmioBuilder::BeginFor(
     const std::string &iv, const SunMMIOValue &lb, const SunMMIOValue &ub,
     const SunMMIOValue &step,
     const ffi::Map<ffi::String, ffi::Any> &annotations,
-    const std::vector<int64_t> &live_out_token_ids) {
-  function_->BeginFor(iv, lb, ub, step, annotations, live_out_token_ids, {});
-}
-
-void SuvmSunmmioBuilder::BeginFor(
-    const std::string &iv, const SunMMIOValue &lb, const SunMMIOValue &ub,
-    const SunMMIOValue &step,
-    const ffi::Map<ffi::String, ffi::Any> &annotations,
     const std::vector<SunMMIOValue> &live_out_values) {
-  function_->BeginFor(iv, lb, ub, step, annotations, {}, live_out_values);
-}
-
-void SuvmSunmmioBuilder::BeginFor(
-    const std::string &iv, const SunMMIOValue &lb, const SunMMIOValue &ub,
-    const SunMMIOValue &step,
-    const ffi::Map<ffi::String, ffi::Any> &annotations,
-    const std::vector<int64_t> &live_out_token_ids,
-    const std::vector<SunMMIOValue> &live_out_values) {
-  function_->BeginFor(iv, lb, ub, step, annotations, live_out_token_ids,
-                      live_out_values);
+  function_->BeginFor(iv, lb, ub, step, annotations, live_out_values);
 }
 
 void SuvmSunmmioBuilder::EndFor() { function_->EndFor(); }
-
-void SuvmSunmmioBuilder::BeginIf(
-    const SunMMIOValue &cond, const std::vector<int64_t> &live_out_token_ids) {
-  function_->BeginIf(cond, live_out_token_ids);
-}
 
 void SuvmSunmmioBuilder::BeginIf(
     const SunMMIOValue &cond,
@@ -389,25 +366,13 @@ void SuvmSunmmioBuilder::BeginIf(
   function_->BeginIf(cond, live_out_values);
 }
 
-void SuvmSunmmioBuilder::BeginIf(
-    const SunMMIOValue &cond, const std::vector<int64_t> &live_out_token_ids,
-    const std::vector<SunMMIOValue> &live_out_values) {
-  function_->BeginIf(cond, live_out_token_ids, live_out_values);
-}
-
 void SuvmSunmmioBuilder::BeginElse() { function_->BeginElse(); }
 
 void SuvmSunmmioBuilder::EndIf() { function_->EndIf(); }
 
 void SuvmSunmmioBuilder::BeginWhile(
-    const std::vector<int64_t> &live_out_token_ids) {
-  function_->BeginWhile(live_out_token_ids);
-}
-
-void SuvmSunmmioBuilder::BeginWhile(
-    const std::vector<int64_t> &live_out_token_ids,
     const std::vector<SunMMIOValue> &live_out_values) {
-  function_->BeginWhile(live_out_token_ids, live_out_values);
+  function_->BeginWhile(live_out_values);
 }
 
 void SuvmSunmmioBuilder::BeginWhileBody(const SunMMIOValue &cond) {

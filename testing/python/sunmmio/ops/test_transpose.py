@@ -159,7 +159,7 @@ def test_transpose_codegen_matrix(
         expected_tokens=(
             "suvm.copy_async",
             "suvm.transpose_async",
-            "suvm.wait_token",
+            "suvm.sync",
         ),
     )
 
@@ -191,7 +191,7 @@ def test_transpose_loop_codegen(
             "scf.for",
             "suvm.copy_async",
             "suvm.transpose_async",
-            "suvm.wait_token",
+            "suvm.sync",
         ),
     )
 
@@ -216,7 +216,7 @@ def test_transpose_layout_inference_is_order_independent(
         expected_tokens=(
             "suvm.copy_async",
             "suvm.transpose_async",
-            "suvm.wait_token",
+            "suvm.sync",
         ),
     )
 

@@ -178,7 +178,7 @@ def assert_source_contains(src: str, tokens: Sequence[str]) -> None:
 def find_async_op_lines(src: str, op_name: str) -> tuple[str, ...]:
     lines = tuple(line.strip() for line in src.splitlines() if f"{op_name} " in line)
     assert lines, f"missing async SUVM operation: {op_name}\n{src}"
-    assert all("-> !suvm.token" in line for line in lines), f"{op_name} must return !suvm.token:\n" + "\n".join(lines)
+    assert "!suvm.token" not in src, f"{op_name} module must be tokenless:\n{src}"
     return lines
 
 

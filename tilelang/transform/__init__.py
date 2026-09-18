@@ -28,7 +28,12 @@ def ClusterPlanning():
 
 
 def InjectSunmmioSync():
-    """InjectSunmmioSync
+    """Inject SunMMIO unit synchronization and collective launch/completion barriers.
+
+    The pass tracks buffer-region dependencies for asynchronous hardware units,
+    emits tokenless unit-sync markers, and initializes reusable barriers for
+    multicast launches.
+
     Returns
     -------
     fpass : tvm.transform.Pass

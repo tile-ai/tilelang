@@ -112,14 +112,15 @@ def test_summa_matmul_codegen_validates_with_npuir_opt(tmp_path, M, N, K):
             "suvm.copy_async",
             "suvm.mcast_tok",
             "suvm.tc.mma",
-            "suvm.wait_token",
+            "suvm.sync",
         ),
     )
 
     assert "sunmmio.fake" not in src
     assert src.count("suvm.mcast_tok") >= 2
     assert src.count("suvm.tc.mma") >= 1
-    assert src.count("suvm.wait_token") >= 4
+    assert src.count("suvm.sync") >= 3
+    assert "!suvm.token" not in src
 
 
 def test_summa_matmul_codegen_contains_broadcast_sync_sequence(tmp_path):
@@ -136,7 +137,7 @@ def test_summa_matmul_codegen_contains_broadcast_sync_sequence(tmp_path):
         ),
     )
 
-    assert_source_contains(src, ("suvm.wait_token", "suvm.tile.fill"))
+    assert_source_contains(src, ("suvm.sync", "suvm.tile.fill"))
 
 
 if __name__ == "__main__":

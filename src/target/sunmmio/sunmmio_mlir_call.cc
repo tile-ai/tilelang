@@ -1,5 +1,6 @@
 #include "sunmmio_mlir_call.h"
 
+#include "../sunmmio_utils.h"
 #include "sunmmio_mlir_type.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -50,6 +51,31 @@ void VerifyA4EMulticastOp(OpType op, const char *callee) {
   VerifyAsyncOp(op, callee);
   ICHECK(llvm::succeeded(op.verifyWithDeviceArch(mlir::suvm::DeviceArch::a4e)))
       << callee << " violates A4E multicast data-path constraints";
+}
+
+SunmmioMlirContext::SyncUnitMask MapSyncUnits(int64_t mask) {
+  constexpr tl::SunmmioSyncUnits kKnownUnits =
+      tl::kSunmmioSyncOdma0 | tl::kSunmmioSyncOdma1 | tl::kSunmmioSyncTc |
+      tl::kSunmmioSyncHlink | tl::kSunmmioSyncVlink | tl::kSunmmioSyncVector |
+      tl::kSunmmioSyncRsram;
+  ICHECK_GE(mask, 0) << "Sunmmio sync unit mask must be non-negative";
+  ICHECK_EQ(static_cast<tl::SunmmioSyncUnits>(mask) & ~kKnownUnits, 0U)
+      << "Sunmmio sync unit mask contains unsupported bits: " << mask;
+
+  SunmmioMlirContext::SyncUnitMask units = SunmmioMlirContext::kNoSyncUnits;
+  auto add = [&](tl::SunmmioSyncUnits bit, mlir::suvm::SyncUnits unit) {
+    if ((static_cast<tl::SunmmioSyncUnits>(mask) & bit) != 0) {
+      units |= SunmmioMlirContext::ToSyncUnitMask(unit);
+    }
+  };
+  add(tl::kSunmmioSyncOdma0, mlir::suvm::SyncUnits::odma0);
+  add(tl::kSunmmioSyncOdma1, mlir::suvm::SyncUnits::odma1);
+  add(tl::kSunmmioSyncTc, mlir::suvm::SyncUnits::tc);
+  add(tl::kSunmmioSyncHlink, mlir::suvm::SyncUnits::hlink);
+  add(tl::kSunmmioSyncVlink, mlir::suvm::SyncUnits::vlink);
+  add(tl::kSunmmioSyncVector, mlir::suvm::SyncUnits::vector);
+  add(tl::kSunmmioSyncRsram, mlir::suvm::SyncUnits::rsram);
+  return units;
 }
 
 SunMMIOType ConvertMemTensorType(mlir::suvm::MemTensorType memtensor_type,
@@ -264,9 +290,6 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     }
     return masks;
   };
-  auto parse_token_id = [&]() -> int64_t {
-    return get_int_attr(SunMMIOCallAttrKey::kTokenId).value_or(-1);
-  };
   auto parse_participant_mask = [&]() -> int64_t {
     return get_int_attr(SunMMIOCallAttrKey::kParticipantMask).value_or(-1);
   };
@@ -304,74 +327,6 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     return mlir::arith::TruncIOp::create(ctx_.builder, type.Loc(), i64_ty,
                                          value)
         .getResult();
-  };
-  auto record_token_by_id = [&](int64_t token_id, mlir::Value produced) {
-    if (token_id < 0 || !produced) {
-      return;
-    }
-    bool recorded = false;
-    if (!ctx_.control_flow_stack.empty()) {
-      SunmmioMlirContext::ControlNode &node = ctx_.control_flow_stack.back();
-      if (node.kind == SunmmioMlirContext::ControlKind::kFor) {
-        SunmmioMlirContext::ForFrame &frame = ctx_.for_stack[node.index];
-        auto tit = frame.token_id_to_index.find(token_id);
-        if (tit != frame.token_id_to_index.end()) {
-          int idx = tit->second;
-          if (idx >= 0 &&
-              idx < static_cast<int>(frame.produced_tokens.size())) {
-            frame.produced_tokens[idx] = produced;
-          }
-          recorded = true;
-        }
-      } else if (node.kind == SunmmioMlirContext::ControlKind::kIf) {
-        SunmmioMlirContext::IfFrame &frame = ctx_.if_stack[node.index];
-        auto tit = frame.token_id_to_index.find(token_id);
-        if (tit != frame.token_id_to_index.end()) {
-          int idx = tit->second;
-          if (idx >= 0 &&
-              idx < static_cast<int>(frame.produced_tokens.size())) {
-            frame.produced_tokens[idx] = produced;
-          }
-          recorded = true;
-        }
-      } else {
-        SunmmioMlirContext::WhileFrame &frame = ctx_.while_stack[node.index];
-        auto tit = frame.token_id_to_index.find(token_id);
-        if (tit != frame.token_id_to_index.end()) {
-          int idx = tit->second;
-          if (idx >= 0 &&
-              idx < static_cast<int>(frame.produced_tokens.size())) {
-            frame.produced_tokens[idx] = produced;
-          }
-          recorded = true;
-        }
-      }
-    }
-
-    if (!recorded && !ctx_.control_flow_stack.empty()) {
-      SunmmioMlirContext::ControlNode &node = ctx_.control_flow_stack.back();
-      auto snapshot_if_needed = [&](auto &frame) {
-        if (frame.saved_token_by_id.find(token_id) ==
-            frame.saved_token_by_id.end()) {
-          SunmmioMlirContext::SavedToken saved;
-          auto it = ctx_.token_by_id.find(token_id);
-          if (it != ctx_.token_by_id.end()) {
-            saved.existed = true;
-            saved.value = it->second;
-          }
-          frame.saved_token_by_id[token_id] = saved;
-        }
-      };
-      if (node.kind == SunmmioMlirContext::ControlKind::kFor) {
-        snapshot_if_needed(ctx_.for_stack[node.index]);
-      } else if (node.kind == SunmmioMlirContext::ControlKind::kIf) {
-        snapshot_if_needed(ctx_.if_stack[node.index]);
-      } else {
-        snapshot_if_needed(ctx_.while_stack[node.index]);
-      }
-    }
-
-    ctx_.token_by_id[token_id] = produced;
   };
   auto require_bool_attr = [&](const char *key, const char *arg_name) -> bool {
     std::optional<bool> value = get_bool_attr(key);
@@ -469,77 +424,7 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
         emit_case(0);
       };
 
-  if (callee == "tl.sync_null_token") {
-    int64_t token_id = parse_token_id();
-    if (token_id < 0) {
-      LOG(FATAL) << "tl.sync_null_token requires token_id";
-      TVM_FFI_UNREACHABLE();
-    }
-    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
-    mlir::OperationState st(type.Loc(), "suvm.null_token");
-    st.addTypes(token_ty);
-    mlir::Operation *op = ctx_.builder.create(st);
-    if (!result_name.empty() && op && op->getNumResults() == 1) {
-      ctx_.BindMLIRValue(result_name, op->getResult(0));
-    }
-    if (op && op->getNumResults() == 1) {
-      record_token_by_id(token_id, op->getResult(0));
-    }
-    return SunMMIOValue{ret_dtype, result_name, ret_type};
-  } else if (callee == "tl.wait_token") {
-    int64_t token_id = parse_token_id();
-    if (token_id < 0) {
-      LOG(FATAL) << "tl.wait_token requires token_id";
-      TVM_FFI_UNREACHABLE();
-    }
-    mlir::Value tok;
-    auto it = ctx_.token_by_id.find(token_id);
-    if (it != ctx_.token_by_id.end() && it->second) {
-      tok = it->second;
-    }
-    if (!tok) {
-      for (auto nit = ctx_.control_flow_stack.rbegin();
-           nit != ctx_.control_flow_stack.rend(); ++nit) {
-        if (nit->kind == SunmmioMlirContext::ControlKind::kFor) {
-          SunmmioMlirContext::ForFrame &frame = ctx_.for_stack[nit->index];
-          auto tit = frame.token_id_to_index.find(token_id);
-          if (tit == frame.token_id_to_index.end()) {
-            continue;
-          }
-          int idx = tit->second;
-          if (idx >= 0 && idx < static_cast<int>(frame.iter_tokens.size())) {
-            tok = frame.iter_tokens[idx];
-            break;
-          }
-          continue;
-        }
-        if (nit->kind != SunmmioMlirContext::ControlKind::kWhile) {
-          continue;
-        }
-        SunmmioMlirContext::WhileFrame &frame = ctx_.while_stack[nit->index];
-        auto tit = frame.token_id_to_index.find(token_id);
-        if (tit == frame.token_id_to_index.end()) {
-          continue;
-        }
-        int idx = tit->second;
-        const std::vector<mlir::Value> &tokens =
-            frame.in_body ? frame.iter_tokens : frame.before_tokens;
-        if (idx >= 0 && idx < static_cast<int>(tokens.size())) {
-          tok = tokens[idx];
-          break;
-        }
-      }
-    }
-    if (!tok) {
-      LOG(FATAL) << "tl.wait_token token_id=" << token_id
-                 << " has no corresponding sync_token.";
-      TVM_FFI_UNREACHABLE();
-    }
-    mlir::OperationState st(type.Loc(), "suvm.wait_token");
-    st.addOperands(tok);
-    (void)ctx_.builder.create(st);
-    return SunMMIOValue{ret_dtype, result_name, ret_type};
-  } else if (callee == "tl.barrier_init") {
+  if (callee == "tl.barrier_init") {
     std::string barrier_key = parse_barrier_mask_key();
     int64_t participant_mask = parse_participant_mask();
     std::vector<int64_t> candidates = parse_candidate_masks();
@@ -591,6 +476,17 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
       emit_barrier_arrive_and_wait(barrier_it->second);
     }
     return SunMMIOValue{ret_dtype, result_name, ret_type};
+  } else if (callee == "tl.sunmmio_sync") {
+    int64_t mask = get_int_attr(SunMMIOCallAttrKey::kSyncUnits).value_or(0);
+    SunmmioMlirContext::SyncUnitMask units_mask = MapSyncUnits(mask);
+    ICHECK_NE(units_mask, SunmmioMlirContext::kNoSyncUnits)
+        << "tl.sunmmio_sync requires at least one hardware unit";
+    mlir::suvm::SyncUnits units = SunmmioMlirContext::ToSyncUnits(units_mask);
+    mlir::suvm::SyncOp::create(
+        ctx_.builder, type.MakeDebugLoc("sunmmio_sync"),
+        mlir::suvm::SyncUnitsAttr::get(&ctx_.mlir_ctx, units));
+    ctx_.CompletePendingSyncUnits(units_mask);
+    return SunMMIOValue{ret_dtype, result_name, ret_type};
   } else if (callee == "tl.dma_copy") {
     ICHECK_GE(operands.size(), 2)
         << "tl.dma_copy expects src and dst tile views";
@@ -607,21 +503,13 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     auto dst_ty = mlir::dyn_cast<mlir::suvm::TileViewType>(dst.getType());
     ICHECK(dst_ty) << "tl.dma_copy expects destination to be a suvm.tile_view";
 
-    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto copy_op = mlir::suvm::CopyAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("dma_copy"), token_ty, src, dst,
+        ctx_.builder, type.MakeDebugLoc("dma_copy"), mlir::Type(), src, dst,
         require_odma_unit());
     VerifyAsyncOp(copy_op, "tl.dma_copy");
-
-    ICHECK(!result_name.empty()) << "tl.dma_copy expects a token result";
-    ICHECK(copy_op && copy_op->getNumResults() == 1)
-        << "tl.dma_copy lowering expects one token result";
-    mlir::Value produced = copy_op->getResult(0);
-    ctx_.BindMLIRValue(result_name, produced);
-
-    int64_t token_id = parse_token_id();
-    ICHECK_GE(token_id, 0) << "tl.dma_copy requires sync_token_id";
-    record_token_by_id(token_id, produced);
+    ctx_.AddPendingSyncUnits(copy_op.getUnit() == mlir::suvm::Unit::Odma0
+                                 ? mlir::suvm::SyncUnits::odma0
+                                 : mlir::suvm::SyncUnits::odma1);
 
     return SunMMIOValue{ret_dtype, result_name, ret_type};
   } else if (callee == "tl.sunmmio_layout_transform") {
@@ -644,23 +532,11 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     ICHECK(dst_ty) << "tl.sunmmio_layout_transform expects destination to be a "
                       "suvm.tile_view";
 
-    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto transform_op = mlir::suvm::TransformAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("sunmmio_layout_transform"), token_ty,
-        src, dst, mlir::suvm::PadModeAttr{}, require_odma_unit());
+        ctx_.builder, type.MakeDebugLoc("sunmmio_layout_transform"),
+        mlir::Type(), src, dst, mlir::suvm::PadModeAttr{}, require_odma_unit());
     VerifyAsyncOp(transform_op, "tl.sunmmio_layout_transform");
-
-    ICHECK(!result_name.empty())
-        << "tl.sunmmio_layout_transform expects a token result";
-    ICHECK(transform_op && transform_op->getNumResults() == 1)
-        << "tl.sunmmio_layout_transform lowering expects one token result";
-    mlir::Value produced = transform_op->getResult(0);
-    ctx_.BindMLIRValue(result_name, produced);
-
-    int64_t token_id = parse_token_id();
-    ICHECK_GE(token_id, 0)
-        << "tl.sunmmio_layout_transform requires sync_token_id";
-    record_token_by_id(token_id, produced);
+    ctx_.AddPendingSyncUnits(mlir::suvm::SyncUnits::odma1);
 
     return SunMMIOValue{ret_dtype, result_name, ret_type};
   } else if (callee == "tl.sunmmio_transpose") {
@@ -682,22 +558,11 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     ICHECK(dst_ty)
         << "tl.sunmmio_transpose expects destination to be a suvm.tile_view";
 
-    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto transpose_op = mlir::suvm::TransposeAsyncOp::create(
-        ctx_.builder, type.MakeDebugLoc("sunmmio_transpose"), token_ty, src,
+        ctx_.builder, type.MakeDebugLoc("sunmmio_transpose"), mlir::Type(), src,
         dst, require_odma_unit());
     VerifyAsyncOp(transpose_op, "tl.sunmmio_transpose");
-
-    ICHECK(!result_name.empty())
-        << "tl.sunmmio_transpose expects a token result";
-    ICHECK(transpose_op && transpose_op->getNumResults() == 1)
-        << "tl.sunmmio_transpose lowering expects one token result";
-    mlir::Value produced = transpose_op->getResult(0);
-    ctx_.BindMLIRValue(result_name, produced);
-
-    int64_t token_id = parse_token_id();
-    ICHECK_GE(token_id, 0) << "tl.sunmmio_transpose requires sync_token_id";
-    record_token_by_id(token_id, produced);
+    ctx_.AddPendingSyncUnits(mlir::suvm::SyncUnits::odma1);
 
     return SunMMIOValue{ret_dtype, result_name, ret_type};
   } else if (callee == "tl.broadcast_") {
@@ -731,16 +596,21 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     auto direction = direction_name == "row" ? mlir::suvm::McastDirection::row
                                              : mlir::suvm::McastDirection::col;
 
-    auto create_mcast = [&]() -> mlir::Value {
-      mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
+    auto create_mcast = [&]() {
       auto mcast_op = mlir::suvm::MulticastTokOp::create(
-          ctx_.builder, type.MakeDebugLoc("broadcast"), token_ty, src, dst,
+          ctx_.builder, type.MakeDebugLoc("broadcast"), mlir::Type(), src, dst,
           mask, direction, require_odma_unit());
       VerifyA4EMulticastOp(mcast_op, "tl.broadcast_");
-      return mcast_op->getResult(0);
+    };
+    auto emit_link_sync = [&]() {
+      mlir::suvm::SyncUnits link = direction == mlir::suvm::McastDirection::row
+                                       ? mlir::suvm::SyncUnits::hlink
+                                       : mlir::suvm::SyncUnits::vlink;
+      mlir::suvm::SyncOp::create(
+          ctx_.builder, type.MakeDebugLoc("broadcast_sync"),
+          mlir::suvm::SyncUnitsAttr::get(&ctx_.mlir_ctx, link));
     };
 
-    mlir::Value produced;
     if (operands.size() == 4) {
       mlir::Value src_core = ctx_.LookupMLIRValue(operands[3].value);
       if (!src_core) {
@@ -756,35 +626,22 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
           ctx_.builder, type.Loc(), mlir::arith::CmpIPredicate::eq, core_id,
           src_core);
 
-      mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
-      auto if_op = mlir::scf::IfOp::create(ctx_.builder, type.Loc(), token_ty,
-                                           is_src, /*withElseRegion=*/true);
+      auto if_op = mlir::scf::IfOp::create(ctx_.builder, type.Loc(),
+                                           mlir::TypeRange{}, is_src,
+                                           /*withElseRegion=*/false);
 
       mlir::Block &then_block = if_op.getThenRegion().front();
       ctx_.builder.setInsertionPointToStart(&then_block);
-      mlir::Value mcast_token = create_mcast();
-      mlir::scf::YieldOp::create(ctx_.builder, type.Loc(), mcast_token);
-
-      mlir::Block &else_block = if_op.getElseRegion().front();
-      ctx_.builder.setInsertionPointToStart(&else_block);
-      mlir::Value null_token =
-          mlir::suvm::NullTokenOp::create(ctx_.builder,
-                                          type.MakeDebugLoc("broadcast_null"))
-              .getResult();
-      mlir::scf::YieldOp::create(ctx_.builder, type.Loc(), null_token);
+      create_mcast();
+      emit_link_sync();
 
       ctx_.builder.setInsertionPointAfter(if_op);
-      produced = if_op.getResult(0);
     } else {
-      produced = create_mcast();
+      create_mcast();
+      ctx_.AddPendingSyncUnits(direction == mlir::suvm::McastDirection::row
+                                   ? mlir::suvm::SyncUnits::hlink
+                                   : mlir::suvm::SyncUnits::vlink);
     }
-
-    ICHECK(!result_name.empty()) << "tl.broadcast_ expects a token result";
-    ICHECK(produced) << "tl.broadcast_ lowering expects one token result";
-    ctx_.BindMLIRValue(result_name, produced);
-    int64_t token_id = parse_token_id();
-    ICHECK_GE(token_id, 0) << "tl.broadcast_ requires sync_token_id";
-    record_token_by_id(token_id, produced);
 
     return SunMMIOValue{ret_dtype, result_name, ret_type};
   } else if (callee == "tl.mma_sunmmio") {
@@ -825,20 +682,11 @@ SunMMIOValue SunmmioMlirCall::Call(const std::string &result_name,
     mlir::UnitAttr trans_attr =
         trans_b ? ctx_.builder.getUnitAttr() : mlir::UnitAttr();
 
-    mlir::Type token_ty = mlir::suvm::TokenType::get(&ctx_.mlir_ctx);
     auto mma_op = mlir::suvm::TcMmaOp::create(
-        ctx_.builder, type.MakeDebugLoc("mma_sunmmio"), token_ty, c, a, w, c,
-        accumulate, trans_attr);
-
-    ICHECK(!result_name.empty()) << "tl.mma_sunmmio expects a token result";
-    ICHECK(mma_op && mma_op->getNumResults() == 1)
-        << "tl.mma_sunmmio lowering expects one token result";
-    mlir::Value produced = mma_op->getResult(0);
-    ctx_.BindMLIRValue(result_name, produced);
-
-    int64_t token_id = parse_token_id();
-    ICHECK_GE(token_id, 0) << "tl.mma_sunmmio requires sync_token_id";
-    record_token_by_id(token_id, produced);
+        ctx_.builder, type.MakeDebugLoc("mma_sunmmio"), mlir::Type(), c, a, w,
+        c, accumulate, trans_attr);
+    VerifyAsyncOp(mma_op, "tl.mma_sunmmio");
+    ctx_.AddPendingSyncUnits(mlir::suvm::SyncUnits::tc);
 
     return SunMMIOValue{ret_dtype, result_name, ret_type};
   } else if (callee == "tir.ret") {

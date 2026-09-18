@@ -551,20 +551,12 @@ TIR_DEFINE_TL_BUILTIN(barrier_arrive_and_wait)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_BUILTIN(sunmmio_sync)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(odma_unit).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
-TIR_DEFINE_TL_BUILTIN(sync_token_id)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-TIR_DEFINE_TL_BUILTIN(sync_null_token)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
-TIR_DEFINE_TL_BUILTIN(wait_token)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
 
 } // namespace tl
 } // namespace tvm

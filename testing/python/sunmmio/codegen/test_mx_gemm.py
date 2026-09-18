@@ -136,7 +136,7 @@ def test_mx_gemm_only_b_codegen_validates(tmp_path, b_dtype, mx_token, n, block_
     )
 
     assert "sunmmio.fake" not in src
-    assert_source_contains(src, (mx_token, "suvm.mcast_tok", "suvm.tc.mma"))
+    assert_source_contains(src, (mx_token, "suvm.mcast_tok", "suvm.tc.mma", "suvm.sync"))
 
 
 @pytest.mark.parametrize("a_dtype,mx_token,n,block_n", MX_DTYPE_CASES)
@@ -193,7 +193,7 @@ def test_mx_gemm_both_a_b_codegen_validates(tmp_path, mx_dtype, mx_token, n, blo
     )
 
     assert "sunmmio.fake" not in src
-    assert_source_contains(src, (mx_token, "suvm.mcast_tok", "suvm.tc.mma"))
+    assert_source_contains(src, (mx_token, "suvm.mcast_tok", "suvm.tc.mma", "suvm.sync"))
 
 
 if __name__ == "__main__":

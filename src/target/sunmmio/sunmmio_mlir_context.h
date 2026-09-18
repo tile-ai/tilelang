@@ -12,11 +12,13 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/Value.h"
+#include "npuir/Dialect/SUVM/IR/Attributes.h"
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/optional.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,6 +30,9 @@ struct SunmmioMlirContext {
   SunmmioMlirContext();
 
   using TirLayoutMap = ffi::Map<tir::Buffer, tl::Layout>;
+  // Empty and combined states are masks, not named SyncUnits enumerators.
+  using SyncUnitMask = uint32_t;
+  static constexpr SyncUnitMask kNoSyncUnits = 0U;
 
   mlir::MLIRContext mlir_ctx;
   mlir::OpBuilder builder;
@@ -36,31 +41,41 @@ struct SunmmioMlirContext {
   using MLIRValueTable = std::unordered_map<std::string, mlir::Value>;
   std::vector<MLIRValueTable> mlir_value_table_stack;
 
-  std::unordered_map<int64_t, mlir::Value> token_by_id;
   std::unordered_map<std::string, mlir::Value> barrier_by_mask;
   std::unordered_map<int64_t, mlir::Value> static_barrier_by_mask;
+  SyncUnitMask pending_sync_units{kNoSyncUnits};
 
-  struct SavedToken {
-    bool existed{false};
-    mlir::Value value;
-  };
+  static SyncUnitMask ToSyncUnitMask(mlir::suvm::SyncUnits units) {
+    return static_cast<SyncUnitMask>(units);
+  }
+
+  static mlir::suvm::SyncUnits ToSyncUnits(SyncUnitMask mask) {
+    std::optional<mlir::suvm::SyncUnits> units =
+        mlir::suvm::symbolizeSyncUnits(mask);
+    ICHECK(units) << "Invalid SUVM synchronization unit mask: " << mask;
+    return *units;
+  }
+
+  static SyncUnitMask MergeSyncUnits(SyncUnitMask lhs, SyncUnitMask rhs) {
+    return lhs | rhs;
+  }
+
+  void AddPendingSyncUnits(mlir::suvm::SyncUnits units) {
+    pending_sync_units =
+        MergeSyncUnits(pending_sync_units, ToSyncUnitMask(units));
+  }
+
+  void CompletePendingSyncUnits(SyncUnitMask units) {
+    pending_sync_units &= ~units;
+  }
 
   struct ForFrame {
     mlir::scf::ForOp op;
     ffi::Map<ffi::String, ffi::Any> annotations;
     std::vector<std::string> live_out_value_names;
-    int value_index_offset{0};
-    // Token ids that must be carried by scf.for and materialized after the
-    // loop.
-    std::vector<int64_t> live_out_token_ids;
-    // token_id -> index into iter_tokens / produced_tokens.
-    std::unordered_map<int64_t, int> token_id_to_index;
-    // Region iter_args of scf.for (initially seeded by init_args).
-    std::vector<mlir::Value> iter_tokens;
-    // Tokens produced in the loop body; falls back to iter_tokens when empty.
-    std::vector<mlir::Value> produced_tokens;
-    // Snapshots of ctx.token_by_id to restore when closing the loop.
-    std::unordered_map<int64_t, SavedToken> saved_token_by_id;
+    std::vector<mlir::Value> iter_values;
+    std::vector<mlir::Value> produced_values;
+    SyncUnitMask entry_pending_sync_units{kNoSyncUnits};
   };
   std::vector<ForFrame> for_stack;
   std::vector<TirLayoutMap> layout_map_stack;
@@ -70,20 +85,11 @@ struct SunmmioMlirContext {
     mlir::scf::WhileOp op;
     bool in_body{false};
     std::vector<std::string> live_out_value_names;
-    int value_index_offset{0};
-    // Token ids that must be carried by scf.while and materialized after the
-    // loop.
-    std::vector<int64_t> live_out_token_ids;
-    // token_id -> index into iter_tokens / produced_tokens.
-    std::unordered_map<int64_t, int> token_id_to_index;
-    // Region arguments in scf.while before/after regions.  Token live-outs are
-    // stored first, followed by scalar value live-outs.
-    std::vector<mlir::Value> before_tokens;
-    std::vector<mlir::Value> iter_tokens;
-    // Values produced in the loop body; falls back to iter_tokens when empty.
-    std::vector<mlir::Value> produced_tokens;
-    // Snapshots of ctx.token_by_id to restore when closing the loop.
-    std::unordered_map<int64_t, SavedToken> saved_token_by_id;
+    std::vector<mlir::Value> before_values;
+    std::vector<mlir::Value> iter_values;
+    std::vector<mlir::Value> produced_values;
+    SyncUnitMask entry_pending_sync_units{kNoSyncUnits};
+    SyncUnitMask condition_pending_sync_units{kNoSyncUnits};
   };
   std::vector<WhileFrame> while_stack;
 
@@ -91,22 +97,11 @@ struct SunmmioMlirContext {
     mlir::scf::IfOp op;
     bool in_else{false};
     std::vector<std::string> live_out_value_names;
-    int value_index_offset{0};
-    // Token ids that must be carried by scf.if and materialized after the if.
-    std::vector<int64_t> live_out_token_ids;
-    // token_id -> index into base_tokens / produced_tokens / then_yield_tokens.
-    std::unordered_map<int64_t, int> token_id_to_index;
-    // The token values seen before entering the if (used as defaults for both
-    // branches).
-    std::vector<mlir::Value> base_tokens;
-    // Tokens produced by the active branch; merged into the surrounding scope
-    // after EndIf.
-    std::vector<mlir::Value> produced_tokens;
-    // Tokens yielded from the then branch (cached to build consistent yields
-    // across branches).
-    std::vector<mlir::Value> then_yield_tokens;
-    // Snapshots of ctx.token_by_id to restore when closing the if.
-    std::unordered_map<int64_t, SavedToken> saved_token_by_id;
+    std::vector<mlir::Value> base_values;
+    std::vector<mlir::Value> produced_values;
+    std::vector<mlir::Value> then_yield_values;
+    SyncUnitMask entry_pending_sync_units{kNoSyncUnits};
+    SyncUnitMask then_pending_sync_units{kNoSyncUnits};
   };
   std::vector<IfFrame> if_stack;
 
@@ -127,9 +122,9 @@ struct SunmmioMlirContext {
 
   void ClearFunctionState() {
     mlir_value_table_stack.clear();
-    token_by_id.clear();
     barrier_by_mask.clear();
     static_barrier_by_mask.clear();
+    pending_sync_units = kNoSyncUnits;
     for_stack.clear();
     if_stack.clear();
     while_stack.clear();
@@ -188,9 +183,8 @@ struct SunmmioMlirContext {
         }
         int idx = static_cast<int>(
             std::distance(frame.live_out_value_names.begin(), vit));
-        idx += frame.value_index_offset;
-        if (idx >= 0 && idx < static_cast<int>(frame.produced_tokens.size())) {
-          frame.produced_tokens[idx] = v;
+        if (idx >= 0 && idx < static_cast<int>(frame.produced_values.size())) {
+          frame.produced_values[idx] = v;
         }
         break;
       }
@@ -206,9 +200,8 @@ struct SunmmioMlirContext {
         }
         int idx = static_cast<int>(
             std::distance(frame.live_out_value_names.begin(), vit));
-        idx += frame.value_index_offset;
-        if (idx >= 0 && idx < static_cast<int>(frame.produced_tokens.size())) {
-          frame.produced_tokens[idx] = v;
+        if (idx >= 0 && idx < static_cast<int>(frame.produced_values.size())) {
+          frame.produced_values[idx] = v;
         }
         break;
       }
@@ -220,9 +213,8 @@ struct SunmmioMlirContext {
       }
       int idx = static_cast<int>(
           std::distance(frame.live_out_value_names.begin(), vit));
-      idx += frame.value_index_offset;
-      if (idx >= 0 && idx < static_cast<int>(frame.produced_tokens.size())) {
-        frame.produced_tokens[idx] = v;
+      if (idx >= 0 && idx < static_cast<int>(frame.produced_values.size())) {
+        frame.produced_values[idx] = v;
       }
       break;
     }
