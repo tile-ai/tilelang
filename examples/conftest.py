@@ -70,7 +70,6 @@ TILEIR_KNOWN_FAILURES = {
     "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_bwd": (
         "576-wide gradient tiles require non-power-of-two lowering"
     ),
-    "deepseek_mhc/test_example_mhc.py::test_mhc_pre": "flattened shared-buffer indices j * 4 + k + 8 are not lowered in parallel stores",
     "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_fwd_pipelined": (
         "warp-specialized ptx_cp_async / set_max_nreg have no structured counterpart"
     ),

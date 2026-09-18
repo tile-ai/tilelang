@@ -488,6 +488,15 @@ def _semantic_stmt(stmt: tirx.Stmt) -> SemanticStmt:
                 children=(_semantic_stmt(stmt.body),),
                 value=stmt.value,
             )
+        if stmt.attr_key in {"tl.ws_pipeline_depth", "tl.ws_op_id"}:
+            # These annotate the sequential source program consumed by CUDA's
+            # WS scheduler; they do not introduce barriers or concurrent roles.
+            return SemanticStmt(
+                "ws_schedule_hint",
+                attrs=_attrs(key=stmt.attr_key, value=stmt.value),
+                children=(_semantic_stmt(stmt.body),),
+                value=stmt.value,
+            )
         if stmt.attr_key == "warp_specialize":
             # warp_specialize marks warp-group sections in a producer/consumer kernel.
             # The cuda_tile dialect owns warp specialization scheduling downstream;

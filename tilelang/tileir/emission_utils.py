@@ -421,6 +421,7 @@ def _materialize_buffer(
     elem_ty = _mlir_element_type(ctx, tile_ty)
     ndim = len(tile_ty.shape)
     dtype_name = tile_ty.dtype.name
+    packing_factor = 2 if dtype_name == "float4_e2m1fn" else 1
 
     ptr_type = ct.PointerType.get(elem_ty)
     tile_ptr_type = ct.TileType.get([], ptr_type)
@@ -499,6 +500,8 @@ def _materialize_buffer(
                 # Static dimension: emit as constant (matching assume_bounded logic).
                 shape_tiles.append(ct.constant(int(dim_val), ct.Int32, loc=loc))
             else:
+                if packing_factor != 1 and i == ndim - 1:
+                    raw_dim = ct.mul(raw_dim, ct.constant(packing_factor, ct.Int32, loc=loc), loc=loc)
                 dim = ct.assume_bounded(raw_dim, 0, None, loc=loc)
                 shape_tiles.append(dim)
 
@@ -525,6 +528,8 @@ def _materialize_buffer(
                     stride_tile = raw_stride
                 stride_tiles.append(stride_tile)
             else:
+                if packing_factor != 1 and i != ndim - 1:
+                    raw_str = ct.mul(raw_str, ct.constant(packing_factor, ct.Int32, loc=loc), loc=loc)
                 s = ct.assume_bounded(raw_str, 0, None, loc=loc)
                 stride_tiles.append(s)
 
@@ -543,7 +548,10 @@ def _materialize_buffer(
             int_strides = [sv for sv in static_strides_int]
             view = ct.make_tensor_view(ptr, elem_ty, shape_tiles, int_strides, loc=loc)
         else:
-            view = ct.make_tensor_view(ptr, elem_ty, shape_tiles, stride_tiles, loc=loc)
+            # Preserve known strides in mixed layouts as well. In particular,
+            # FP4 views require the contiguous dimension to have static stride 1.
+            view_strides = [static if static is not None else dynamic for static, dynamic in zip(static_strides_int, stride_tiles)]
+            view = ct.make_tensor_view(ptr, elem_ty, shape_tiles, view_strides, loc=loc)
 
     ctx._buffer_map[param_val] = _BufferInfo(
         dtype_name=dtype_name,

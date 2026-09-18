@@ -187,7 +187,7 @@ def test_tileir_single_artifact_cache_round_trip_preserves_argument_metadata(tmp
     restored = _read_round_trip(tmp_path, artifact)
 
     assert envelope["format"] == "tilelang.tileir.artifact"
-    assert envelope["version"] == 3
+    assert envelope["version"] == 4
     assert envelope["compatibility"]["target_arch"] == "sm_120"
     assert envelope["compatibility"]["cuda_tile_runtime_version"] == "1.5.0"
     assert restored.kernel_name == artifact.kernel_name
@@ -275,6 +275,10 @@ def test_tileir_multi_artifact_cache_round_trip_preserves_argument_metadata(tmp_
         (
             json.dumps({"format": "tilelang.tileir.artifact", "version": 2, "artifact": {}}).encode(),
             "Unsupported TileIR cache artifact version 2",
+        ),
+        (
+            json.dumps({"format": "tilelang.tileir.artifact", "version": 3, "artifact": {}}).encode(),
+            "Unsupported TileIR cache artifact version 3",
         ),
     ],
 )

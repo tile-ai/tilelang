@@ -415,21 +415,20 @@ def test_break_loop_global_write_lowers_with_token_iterargs_mlir():
 
     assert "loop iter_values" in mlir
     assert "break" in mlir
-    # The break-capable loop's iter_values signature carries 2 extra
-    # `token` typed iter-args (LAST_OP/LAST_STORE for `C`) alongside the
-    # `i32` counter -- i.e. 3 iter-args, not just the bare counter.
+    # Export the load and store token pairs alongside the induction value.
     assert "loop iter_values(" in mlir
     loop_sig = mlir.split("loop iter_values(", 1)[1].split(")", 1)[0]
-    assert loop_sig.count(",") == 2, f"expected 3 iter-args (counter + 2 tokens), got signature: {loop_sig!r}"
-    # Every `break` inside the loop must forward all 3 iter-args too.
+    assert loop_sig.count(",") == 4, f"expected counter + 4 tokens, got signature: {loop_sig!r}"
+    # Every break forwards the same five values.
     for line in mlir.splitlines():
         if "break %" in line:
             operands = line.split("break", 1)[1].split(":", 1)[0]
-            assert operands.count(",") == 2, f"break did not forward all iter-args: {line!r}"
+            assert operands.count(",") == 4, f"break did not forward all iter-args: {line!r}"
     # The post-loop uses of `C` must reference the loop's OWN result token
-    # (e.g. `%3#1`), not a raw in-region SSA value -- confirms the
+    # (result 3 follows the counter and input token pair), not an in-region
+    # SSA value -- confirms the
     # `ctx._op_token` redirect (not just `ctx._token_map`) took effect.
-    assert "#1" in mlir
+    assert "#3" in mlir
 
 
 @skip_no_cuda_tile

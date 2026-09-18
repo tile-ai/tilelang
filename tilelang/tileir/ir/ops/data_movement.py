@@ -789,6 +789,26 @@ class Load(TileOp, opcode="load", effect=Effect.READ):
         # the element at the runtime-computed position instead of the whole tile.
         if ctx.is_tile_buffer(self.src):
             full_tile = _as_tile(ctx, ctx.get_tile(self.src))
+            if self.elem_view:
+                # A flat slice can cross an extract partition boundary (e.g.
+                # elements [8:24] of a 32-element tile). Split into aligned
+                # power-of-two pieces, then concatenate in source order.
+                if len(self.tile_shape) != 1 or len(self.indices) != 1 or not isinstance(self.indices[0], int):
+                    raise _UnsupportedTileIRNode("register element-view loads require a constant one-dimensional slice")
+                start, size = self.indices[0], self.tile_shape[0]
+                if len(full_tile.tile_type.shape) != 1 or start < 0 or start + size > full_tile.tile_type.shape[0]:
+                    raise _UnsupportedTileIRNode(
+                        f"register element-view slice {self.src.name}[{start}:{start + size}] is outside source tile {full_tile.tile_type.shape}"
+                    )
+
+                def extract_slice(offset, extent):
+                    if offset % extent == 0:
+                        ty = ct.TileType.get([extent], full_tile.element_type)
+                        return ct.extract(ty, full_tile, [ct.constant(offset // extent, ct.Int32, loc=loc)], loc=loc)
+                    half = extent // 2
+                    return ct.cat(extract_slice(offset, half), extract_slice(offset + half, half), 0, loc=loc)
+
+                return extract_slice(start, size)
             is_scalar_load = not bool(self.tile_shape)
             if is_scalar_load and self.indices:
                 # Indexed scalar gather: ct.extract([1]*ndim, full_tile, idx_tiles)
@@ -975,6 +995,11 @@ class Store(TileOp, opcode="store", effect=Effect.WRITE):
         # val axis val_perm[k] (a plain reshape would scramble the data).
         if self.val_perm and list(self.val_perm) != list(range(len(self.val_perm))):
             tile = ct.permute(tile, list(self.val_perm), loc=loc)
+
+        if self.tile_shape and not list(tile.tile_type.shape):
+            # A scalar RHS fills the selected parallel region in either memory
+            # space. Reshaping alone would incorrectly change its element count.
+            tile = ct.broadcast(tile_shape, ct.reshape([1] * len(tile_shape), tile, loc=loc), loc=loc)
 
         # Masked store to GLOBAL: must use a TRUE predicated store — masked
         # lanes are not written. A select(mask, val, zeros) view-store would

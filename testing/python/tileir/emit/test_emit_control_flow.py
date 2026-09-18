@@ -443,39 +443,10 @@ def test_if_inside_for_loop():
 # ---------------------------------------------------------------------------
 # 11. `_loop_break_forward_tiles` isolation across nesting.
 #
-# `_emit_for_with_break` (the LoopOp-based lowering of a `for` loop whose
-# body directly contains a `break`, e.g. T.Persistent's outer wave loop)
-# sets `ctx._loop_break_forward_tiles` to a 1-tuple holding ITS OWN counter
-# tile, for the duration of walking its body, so a `Break` reached inside
-# that body can forward the counter as the LoopOp's sole iter-arg operand.
-#
-# `_emit_for` and `_emit_while` (the OTHER two loop-emission paths) already
-# save/restore `ctx._loop_iter_arg_count` around their own body walk (so a
-# nested loop's Break sees the INNER loop's carry count, not the outer's) --
-# but, before this fix, did NOT do the same for `_loop_break_forward_tiles`.
-# A while-loop (or another for-loop) with exactly ONE genuine iter-arg,
-# nested inside an outer for-with-break loop, would therefore inherit the
-# OUTER's stale forward-tiles tuple: since the inner loop also sets
-# `ctx._loop_iter_arg_count = 1` (matching by coincidence — one true
-# iter-arg), `Break.emit_mlir`'s `len(forward_tiles) != n_carry` guard would
-# NOT fire, and the inner `break` would silently forward the OUTER loop's
-# counter as its own iter-arg operand instead of hitting the loud rejection
-# for "Break inside a loop that carries iter-args (1) is not supported"
-# (there is no legitimate way to forward the INNER loop's real iter-arg,
-# since Break carries no operand information from user code).
-# ---------------------------------------------------------------------------
-
-
 @skip_no_cuda_tile
 def test_break_forward_tiles_isolated_across_nested_loops():
-    """An inner while-loop with ONE iter-arg and a `break` in its body,
-    nested inside an outer for-with-break loop (the LoopOp path
-    `_emit_for_with_break` builds for `T.Persistent`), must hit Break's loud
-    iter-arg-mismatch rejection -- not silently forward the OUTER loop's
-    counter as if it were the inner loop's carried value.
-    """
+    """An inner while break forwards its own state, not the outer counter."""
     from tilelang.tileir.lowering.mlir_emit import emit_module
-    from tilelang.tileir.errors import _UnsupportedTileIRNode
 
     lb_ty = _scalar_type(I32)
     ub_ty = _scalar_type(I32)
@@ -485,10 +456,8 @@ def test_break_forward_tiles_isolated_across_nested_loops():
 
     root = Block(params=[lb_val, ub_val, iter_val])
 
-    # Inner while-loop: ONE genuine iter-arg (iter_val), `break` directly in
-    # its body (no operands -- Break never carries user-level iter-arg
-    # values; only `_emit_for_with_break`'s synthesized counter-forwarding
-    # is special-cased).
+    # Both loops carry one i32; type verification alone cannot detect
+    # accidentally forwarding the outer counter from the inner break.
     inner_body = Block()
     inner_brk = Break()
     inner_brk.results = ()
@@ -513,8 +482,21 @@ def test_break_forward_tiles_isolated_across_nested_loops():
     root.append(outer_loop)
 
     entry_args = _entry_args_for(root)
-    with pytest.raises(_UnsupportedTileIRNode, match="iter-args"):
-        emit_module(root, kernel_name="nested_break_isolation_kernel", entry_args=entry_args)
+    module = emit_module(root, kernel_name="nested_break_isolation_kernel", entry_args=entry_args)
+    assert module.operation.verify()
+
+    def walk(op):
+        yield op
+        for region in op.regions:
+            for block in region.blocks:
+                for child in block.operations:
+                    yield from walk(child)
+
+    loops = [op for op in walk(module.operation) if op.operation.name == "cuda_tile.loop"]
+    inner_block = loops[1].regions[0].blocks[0]
+    inner_break = list(inner_block.operations)[0]
+    assert inner_break.operation.name == "cuda_tile.break"
+    assert inner_break.operands[0] == inner_block.arguments[0]
 
 
 # ---------------------------------------------------------------------------

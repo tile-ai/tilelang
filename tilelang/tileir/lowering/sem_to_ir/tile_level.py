@@ -219,6 +219,31 @@ def _lower_buffer_load_tile(expr: Any, scope: LoweringScope, builder: IRBuilder,
     """Lower a tile-context ``BufferLoad`` by trying each load pattern in order,
     falling back to the scalar ``lower_expr``. Always returns a ``Value``.
     """
+    # Constant element indices remain scalar inside a parallel expression.
+    # Treating e.g. scale[1] as a whole-tile access both loses the offset and
+    # incorrectly broadcasts the scale buffer's extent to the parallel tile.
+    # local.var is participant-private and may have been promoted to the
+    # surrounding parallel shape; its syntactic [0] denotes each lane's value.
+    if expr.buffer.scope() != "local.var" and all(isinstance(index, _tir.IntImm) for index in expr.indices):
+        return lower_expr(expr, scope, builder)
+
+    # A flat local/shared buffer may hold a row-major N-D parallel tile.
+    # Preserve both its element offset and its logical parallel axes.
+    if len(expr.indices) == 1 and ordered_vars and ordered_extents:
+        from .parallel import _split_flattened_parallel_index
+
+        buf = scope.lookup_buffer(expr.buffer.name)
+        if buf.type.space in (MemSpace.SHARED, MemSpace.REGISTER):
+            flat = _split_flattened_parallel_index(expr.indices[0], ordered_vars, ordered_extents)
+            if flat is not None:
+                base, extent = flat
+                if isinstance(base, _tir.IntImm) and int(base) >= 0 and int(base) + extent <= buf.type.shape[0]:
+                    result_ty = TileType(dtype=buf.type.dtype, shape=tuple(ordered_extents), space=MemSpace.REGISTER, layout=None)
+                    return builder.create(
+                        Load(src=buf, tile_shape=(extent,), indices=(int(base),), elem_view=True, reshape_to=tuple(ordered_extents)),
+                        result_types=(result_ty,),
+                    ).results[0]
+
     repeated = _try_lower_parallel_repeat_interleave_load(
         expr,
         scope,

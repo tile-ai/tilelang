@@ -361,6 +361,18 @@ def _lower_copy(stmt: SemanticStmt, attrs: dict, scope: LoweringScope, builder: 
     # to element-offset indexing over a unit-stride strided view.
     src_tir_indices = _extract_tir_region_indices(stmt.call_args, 0)
     dst_tir_indices = _extract_tir_region_indices(stmt.call_args, 1)
+    if src_val.type.space != MemSpace.GLOBAL and dst_val.type.space != MemSpace.GLOBAL:
+        src_logical = scope.buffer_logical_shapes.get(src_val.name)
+        dst_logical = scope.buffer_logical_shapes.get(dst_val.name)
+        if (
+            src_tir_indices is not None
+            and dst_tir_indices is not None
+            and all(isinstance(idx, (int, _tirx.IntImm)) and int(idx) == 0 for idx in (*src_tir_indices, *dst_tir_indices))
+            and src_logical == tile_shape == dst_tile_shape_raw == dst_logical
+            and src_val.type.shape == dst_val.type.shape
+        ):
+            tile_shape = tuple(src_val.type.shape)
+            dst_tile_shape = ()
     # Whole GLOBAL <-> tile copies use the allocation's physical tile shape.
     # Logical TensorView bounds mask padding; partial regions must retain their
     # original shape so this cannot overwrite valid elements outside the copy.

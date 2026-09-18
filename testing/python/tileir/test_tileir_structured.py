@@ -765,7 +765,7 @@ def test_tileir_structured_lowering_keeps_independent_loop_loads_unserialized():
     load_tokens = re.findall(r"load_view_tko weak \S+\[[^\]]*\] token = (%\w+)", source)
     assert len(load_tokens) >= 2
     assert load_tokens[0] == load_tokens[1]
-    assert _loop_result_token_count(source) == 2
+    assert _loop_result_token_count(source) == 6
 
 
 def test_tileir_structured_lowering_keeps_distinct_buffer_loads_independent():

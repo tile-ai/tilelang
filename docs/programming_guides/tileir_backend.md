@@ -66,6 +66,16 @@ Benchmark the kernel without TileIR-specific hints first. Leaving a hint unset
 uses the CUDA Tile IR toolchain default and gives the tuning run a useful
 baseline.
 
+### Packed FP4 tensors
+
+Declare FP4 buffers with the logical `T.float4_e2m1fn` dtype and element shape.
+PyTorch stores two FP4 elements per byte in `torch.float4_e2m1fn_x2`, so its
+innermost tensor dimension is half the logical dimension. TileIR handles this
+packing for dynamic shapes, launch grids, and automatically allocated outputs;
+the innermost logical dimension must be even. The runtime passes a byte view
+to cuTile without copying the tensor. Cache artifacts from earlier ABI versions
+are rejected and rebuilt.
+
 ## Choose a tuning space
 
 Start with the program parameters that define the kernel's algorithm and tiling,
@@ -183,6 +193,7 @@ carry the following CUDA tuning parameters into a TileIR search:
 | `T.copy(coalesced_width=..., eviction_policy=..., prefer_instruction=..., loop_layout=...)` | Not consumed by ordinary TileIR copy lowering; use `latency` and `disable_tma` instead |
 | `T.annotate_layout(...)`, `T.annotate_l2_hit_ratio(...)`, `T.annotate_safe_value(...)` | Not consumed by the current TileIR lowering |
 | `T.set_max_nreg(...)` and the producer/consumer register-allocation annotations | Accepted as scheduling hints but emit no TileIR operation |
+| `T.annotate_ws_pipeline_depth(...)`, `T.annotate_ws_schedule(...)`, and `T.ws_op(...)` | Preserve the sequential source computation; TileIR owns the resulting schedule |
 | `T.annotate_min_blocks_per_sm(...)` | Not supported; use the TileIR `occupancy` entry hint instead |
 | `T.Kernel(prelude=...)` and arbitrary CUDA C/PTX extern helpers | Not a TileIR escape hatch; injected CUDA source is not compiled and unsupported extern calls are rejected |
 | `T.ClusterKernel(cluster_dims=...)` | `cluster_dims` is not consumed by the TileIR launch path; use `T.Kernel(num_ctas=...)` for the CGA entry hint |
@@ -190,6 +201,12 @@ carry the following CUDA tuning parameters into a TileIR search:
 
 The CUDA-only APIs in this table are available when importing the CUDA
 dialect; the TileIR dialect does not re-export them.
+
+Explicit SIMT warp votes and shuffles (`T.any_sync`, `T.shfl_sync`), tcgen05
+arrival instructions, and proxy fences do not have a supported TileIR lowering.
+Kernels using them require the CUDA backend. Accepting a scheduling annotation
+does not imply support for a kernel that already contains manual warp roles and
+hardware synchronization instructions.
 
 An ignored parameter should not be left in the search space: candidates that
 differ only by that value compile to the same TileIR and make tuning results

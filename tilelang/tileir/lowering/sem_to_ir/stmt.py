@@ -180,6 +180,7 @@ def _lower_threadblock_swizzle_pattern(stmt: SemanticStmt, scope: LoweringScope,
 
 
 @impl("reduce_scope")
+@impl("ws_schedule_hint")
 def _lower_reduce_scope(stmt: SemanticStmt, scope: LoweringScope, builder: IRBuilder) -> None:
     for child in stmt.children:
         lower_stmt(child, scope, builder)

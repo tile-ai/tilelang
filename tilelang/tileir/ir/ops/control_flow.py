@@ -16,7 +16,7 @@ from tilelang.tileir.emission_utils import (
 )
 from tilelang.tileir.errors import TileIRLoweringNotImplementedError, _UnsupportedTileIRNode
 from tilelang.tileir.ir.types import MemSpace
-from tilelang.tileir.ir.value import Block
+from tilelang.tileir.ir.value import Block, Value
 from tilelang.tileir.ir.ops._base import (
     Effect,
     TileOp,
@@ -26,47 +26,24 @@ from tilelang.tileir.ir.ops._base import (
 )
 
 
-def _collect_loop_token_bufs(body: Block, carried_tiles=(), aliases: dict | None = None) -> list:
-    """Return GLOBAL buffers written or read to produce a carried local tile.
+def _collect_loop_token_bufs(body: Block) -> list:
+    """Export tokens for every global access, including nested reads.
 
-    Inspect WRITE/READWRITE ops directly in *body* (does not recurse into nested
-    if/loop blocks -- mirrors the scope of the loop-carried-tile analysis
-    elsewhere in this module).
-
-    Shared by ``Loop._emit_for`` (pipelined-loop token iter-args) and
-    ``Loop._emit_for_with_break`` (break-capable loop token iter-args): both
-    need to know which GLOBAL buffers require a per-buffer ordering token
-    threaded through the loop's iter-args so that ordering established
-    inside the loop is not lost once the loop's structured region ends.
+    Even read-only tokens must leave the region through loop results: enclosing
+    control flow may carry them, and a later store may depend on those reads.
+    The dependency plan still permits independent loads to overlap.
     """
-    written: list = []
-    seen: set[int] = set()
-    carried_ids = {id(tile) for tile in carried_tiles}
-    aliases = aliases or {}
-    for op in body.ops:
-        effect = getattr(op, "memory_effect", Effect.NONE)
-        if effect not in (Effect.WRITE, Effect.READWRITE):
-            continue
-        effects = tuple(op.buffer_effects()) if hasattr(op, "buffer_effects") else ()
-        # A load that writes a live-out local tile also leaves an op token
-        # consumed by later copies. Export its source token with the tile;
-        # otherwise the dependency refers to an SSA value inside this loop.
-        # Loop-carry liveness uses backing identities even when a copy writes
-        # through a view. Match that identity before exporting the load token.
-        writes_carried_tile = any(
-            id(aliases.get(buf, buf)) in carried_ids and eff in (Effect.WRITE, Effect.READWRITE) for buf, eff in effects
-        )
-        for buf, buffer_effect in effects:
-            if buffer_effect not in (Effect.WRITE, Effect.READWRITE) and not writes_carried_tile:
-                continue
-            # Only thread tokens for GLOBAL buffers (non-GLOBAL live in _tile_map).
-            space = getattr(getattr(buf, "type", None), "space", None)
-            if space != MemSpace.GLOBAL:
-                continue
-            if id(buf) not in seen:
-                seen.add(id(buf))
-                written.append(buf)
-    return written
+    from tilelang.tileir.passes.base import walk_block
+
+    buffers = []
+
+    def visit(op):
+        for buf, effect in op.buffer_effects():
+            if effect != Effect.NONE and buf.type.space == MemSpace.GLOBAL and buf not in buffers:
+                buffers.append(buf)
+
+    walk_block(body, visit)
+    return buffers
 
 
 def _redirect_op_token_map(ctx: Any, body: Block, written_bufs: list) -> None:
@@ -246,7 +223,7 @@ class Loop(TileOp, opcode="loop", effect=Effect.NONE):
 
         # Thread last-op and last-store tokens for written global buffers to
         # preserve cross-iteration RAW, WAR, and WAW dependencies.
-        _written_global_bufs: list[Any] = _collect_loop_token_bufs(self.body, tile_keys, aliases=ctx.buffer_aliases)
+        _written_global_bufs: list[Any] = _collect_loop_token_bufs(self.body)
 
         # Each written buffer carries separate last-op and last-store tokens.
         _tok_type_mlir = None
@@ -782,52 +759,56 @@ class Loop(TileOp, opcode="loop", effect=Effect.NONE):
         _redirect_op_token_map(ctx, self.body, _written_global_bufs)
 
     def _emit_while(self, ctx: Any, init_list, init_mlir, init_types) -> None:
-        """Emit the scf.while path: an unbounded loop with tile/token iter-args."""
-        ct = ctx.ct
-        ct_gen = ctx.ct_gen
-        ir = ctx.ir
-        loc = ctx.loc
-        # scf.while / LoopOp path
-        # LoopOp carries explicit init values only. Scalar alloc_var tiles use
-        # the shared tile map; multi-element loop-carried tiles remain unsupported.
-        loop_op = ct_gen.LoopOp(
-            resultValues=tuple(init_types),
-            initValues=init_mlir,
-            loc=loc,
-        )
+        """Thread mutable tiles and memory ordering through every while edge."""
+        ct, ir, loc = ctx.ct, ctx.ir, ctx.loc
+        carry_ids = getattr(self, "_carry_tile_value_ids", None)
+        tile_keys = [key for key in ctx._tile_map if carry_ids is None or id(key) in carry_ids]
+        token_keys = _collect_loop_token_bufs(self.body)
+        for key in token_keys:
+            if key not in ctx._token_map:
+                ctx._token_map[key] = ct.make_token(loc=loc)
+        saved_tiles = dict(ctx._tile_map)
+        saved_tokens = dict(ctx._token_map)
+        tile_init = [_as_tile(ctx, ctx.get_tile(key)) for key in tile_keys]
+        # Match the LAST_OP/LAST_STORE pair used by break-capable counted loops.
+        token_init = [ctx._token_map[key] for key in token_keys for _ in range(2)]
+        all_init = list(init_mlir) + tile_init + token_init
+        types = [value.value.type if hasattr(value, "value") else value.type for value in all_init]
+        loop_op = ctx.ct_gen.LoopOp(resultValues=tuple(types), initValues=all_init, loc=loc)
+        body = ir.Block.create_at_start(loop_op.region, types)
+        arguments = list(body.arguments)
+        n_init, n_tiles = len(init_list), len(tile_keys)
+        for key, arg in zip(init_list, arguments[:n_init]):
+            ctx.bind(key, arg)
+        for key, arg in zip(tile_keys, arguments[n_init : n_init + n_tiles]):
+            ctx.set_tile(key, arg)
+        for index, key in enumerate(token_keys):
+            ctx._token_map[key] = _as_token(ctx, arguments[n_init + n_tiles + index * 2])
 
-        # Guard the .value access — init_mlir may hold a raw ir.Value
-        # (no .value attribute) just like the for-path (see all_init_types).
-        body_arg_types = [m.value.type if hasattr(m, "value") else m.type for m in init_mlir]
-        body_block = ir.Block.create_at_start(loop_op.region, body_arg_types)
-
-        iter_args = list(body_block.arguments)
-        for v, mlir_arg in zip(init_list, iter_args):
-            ctx.bind(v, mlir_arg)
-
-        # While-path iter-args are exactly init_list (no tile/token
-        # carries are threaded here).  Expose the count so a Break/Continue
-        # in the body rejects itself if the loop carries iter-args.
-        _saved_iter_arg_count = getattr(ctx, "_loop_iter_arg_count", 0)
-        ctx._loop_iter_arg_count = len(init_list)
-        # Do not inherit break-forward state from an enclosing loop.
-        _saved_forward_tiles = getattr(ctx, "_loop_break_forward_tiles", None)
-        ctx._loop_break_forward_tiles = None
-        _saved_forward_token_bufs = getattr(ctx, "_loop_break_forward_token_bufs", None)
-        ctx._loop_break_forward_token_bufs = None
-
-        with ir.InsertionPoint(body_block):
+        saved_count = getattr(ctx, "_loop_iter_arg_count", 0)
+        saved_forward = getattr(ctx, "_loop_break_forward_tiles", None)
+        saved_token_keys = getattr(ctx, "_loop_break_forward_token_bufs", None)
+        ctx._loop_iter_arg_count = len(all_init)
+        # Values are resolved at each break/continue, after any body updates.
+        ctx._loop_break_forward_tiles = tuple(init_list + tile_keys)
+        ctx._loop_break_forward_token_bufs = tuple(token_keys)
+        with ir.InsertionPoint(body):
             _walk_block(self.body, ctx)
             if not _block_ends_with_terminator(self.body):
-                carry_out = [_as_tile(ctx, ctx.lookup(v)) for v in init_list] if init_list else []
-                ct.loop_continue(carry_out, loc=loc)
-
-        ctx._loop_iter_arg_count = _saved_iter_arg_count  # restore for nesting
-        ctx._loop_break_forward_tiles = _saved_forward_tiles  # restore for nesting
-        ctx._loop_break_forward_token_bufs = _saved_forward_token_bufs  # restore for nesting
-
-        for v, result in zip(init_list, loop_op.results):
-            ctx.bind(v, result)
+                ctx.ct_gen.ContinueOp(operands_=_loop_forward_operands(ctx), loc=loc)
+        ctx._loop_iter_arg_count = saved_count
+        ctx._loop_break_forward_tiles = saved_forward
+        ctx._loop_break_forward_token_bufs = saved_token_keys
+        ctx._tile_map = saved_tiles
+        ctx._token_map = saved_tokens
+        results = list(loop_op.results)
+        for key, result in zip(init_list, results[:n_init]):
+            ctx.bind(key, result)
+        for key, result in zip(tile_keys, results[n_init : n_init + n_tiles]):
+            ctx.set_tile(key, result)
+        for index, key in enumerate(token_keys):
+            ctx._token_map[key] = _as_token(ctx, results[n_init + n_tiles + index * 2])
+        _redirect_op_token_map(ctx, self.body, token_keys)
 
 
 @dataclasses.dataclass(eq=False)
@@ -860,9 +841,7 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
                 if isinstance(op, Loop):
                     # Only the loop's explicit token results escape its body.
                     # Read-only scratch loads may have no token carry at all.
-                    carry_ids = getattr(op, "_carry_tile_value_ids", None)
-                    carried = [tile for tile in ctx._tile_map if carry_ids is None or id(tile) in carry_ids]
-                    result.extend(_collect_loop_token_bufs(op.body, carried, aliases=ctx.buffer_aliases))
+                    result.extend(_collect_loop_token_bufs(op.body))
                     continue
                 for buf, effect in op.buffer_effects():
                     if effect != Effect.NONE and buf.type.space == MemSpace.GLOBAL:
@@ -981,39 +960,29 @@ class IfElse(TileOp, opcode="if_else", effect=Effect.NONE):
         return None  # side-effect only
 
 
+def _loop_forward_operands(ctx):
+    operands = []
+    for value in getattr(ctx, "_loop_break_forward_tiles", None) or ():
+        if isinstance(value, Value):
+            value = ctx.get_tile(value) if ctx.is_tile_buffer(value) else ctx.lookup(value)
+        operands.append(_as_tile(ctx, value).value)
+    for key in getattr(ctx, "_loop_break_forward_token_bufs", None) or ():
+        token = ctx._token_map[key]
+        raw = token.value if hasattr(token, "value") else token
+        operands.extend((raw, raw))
+    return operands
+
+
 @dataclasses.dataclass(eq=False)
 class Break(TileOp, opcode="break", terminator=True, effect=Effect.NONE):
     """Break out of the enclosing loop."""
 
     def emit_mlir(self, ctx: Any) -> None:
-        """Lower Break to MLIR: cuda_tile.break, forwarding iter-args if any.
+        """Forward the enclosing loop's current state through an early exit.
 
-        Break carries no operands by default — structurally correct only for
-        loops with no iter-args.  If the enclosing loop carries iter-args
-        (init / tile / token), an empty break yield count would mismatch the
-        loop's result count and the MLIR verifier would reject it.
-
-        ONE narrow case is handled instead of rejected: `_emit_for_with_break`
-        (the LoopOp-based lowering of a `for` loop whose body directly
-        contains a `break` -- e.g. `T.Persistent`) sets
-        `ctx._loop_iter_arg_count = 1 + 2 * len(written_global_bufs)` and:
-
-        - `ctx._loop_break_forward_tiles`: a 1-tuple holding the loop
-          counter's ct.Tile -- loop-invariant within an iteration, so it is
-          forwarded as-is.
-        - `ctx._loop_break_forward_token_bufs`: a tuple of the GLOBAL buffer
-          Value KEYS written in the loop body (not literal token values) --
-          a buffer's current token may have been updated by a write earlier
-          in the SAME iteration, before this break fires, so it is resolved
-          live via `ctx._token_map[buf]` at the break site rather than
-          captured once at loop entry. Two operands (LAST_OP, LAST_STORE)
-          are forwarded per buffer, both the same live token value (mirrors
-          `_emit_for`'s auto-terminate token carry-out).
-
-        Together these must be forwarded as BreakOp's operands to match the
-        LoopOp's result types. Any OTHER case with a nonzero iter-arg count
-        (e.g. a user-authored `while`+break loop that ALSO carries other
-        iter-args) still raises loudly rather than emit invalid IR.
+        Counted loops supply their induction tile; while loops supply mutable
+        Value keys resolved at this exit. Both supply live global token keys.
+        Reject unconfigured state rather than emitting an invalid empty break.
         """
         n_carry = getattr(ctx, "_loop_iter_arg_count", 0)
         if n_carry:
@@ -1027,16 +996,7 @@ class Break(TileOp, opcode="break", terminator=True, effect=Effect.NONE):
                     "yield 0 operands but the loop expects that many. Thread the "
                     "loop iter-args through Break or remove the carried values."
                 )
-            operands = [_as_tile(ctx, t).value for t in forward_tiles]
-            for _wbuf in forward_token_bufs:
-                cur_tok = ctx._token_map.get(_wbuf)
-                if cur_tok is None:
-                    raise _UnsupportedTileIRNode(
-                        "internal error: a GLOBAL buffer registered for break-forward token threading has no live token at the break site"
-                    )
-                tok_value = _as_token(ctx, cur_tok).value
-                operands.append(tok_value)  # LAST_OP
-                operands.append(tok_value)  # LAST_STORE
+            operands = _loop_forward_operands(ctx)
             ctx.ct_gen.BreakOp(operands_=operands, loc=ctx.loc)
             return None
         ctx.ct_gen.BreakOp(operands_=[], loc=ctx.loc)
@@ -1048,12 +1008,13 @@ class Continue(TileOp, opcode="continue", terminator=True, effect=Effect.NONE):
     """Continue to the next iteration of the enclosing loop."""
 
     def emit_mlir(self, ctx: Any) -> None:
-        """Lower Continue to MLIR: cuda_tile.continue with no carried values.
-
-        A 0-operand continue is only valid when the enclosing loop carries no
-        iter-args; otherwise the yield count mismatches the loop's result
-        count. Raise loudly rather than emit invalid IR.
-        """
+        """Forward mutable while-loop state; reject unsupported counted carries."""
+        forward = getattr(ctx, "_loop_break_forward_tiles", None)
+        if forward is not None and all(isinstance(value, Value) for value in forward):
+            operands = _loop_forward_operands(ctx)
+            if len(operands) == getattr(ctx, "_loop_iter_arg_count", 0):
+                ctx.ct_gen.ContinueOp(operands_=operands, loc=ctx.loc)
+                return None
         if getattr(ctx, "_loop_iter_arg_count", 0):
             raise _UnsupportedTileIRNode(
                 "Continue inside a loop that carries iter-args "

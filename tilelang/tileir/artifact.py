@@ -13,7 +13,8 @@ from tvm import tirx
 
 
 TILEIR_CACHE_FORMAT = "tilelang.tileir.artifact"
-TILEIR_CACHE_FORMAT_VERSION = 3
+# v4 uses byte-storage dimensions for packed FP4 dispatcher arguments.
+TILEIR_CACHE_FORMAT_VERSION = 4
 TILEIR_CACHE_FILENAME = "kernel.tileir.json"
 
 

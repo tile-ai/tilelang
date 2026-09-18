@@ -97,7 +97,7 @@ def _runtime_adapter(artifact, prim_func, dispatchers):
     return types.SimpleNamespace(
         tileir_artifact=artifact,
         prim_func=prim_func,
-        params=[object(), object(), object()],
+        params=[types.SimpleNamespace(dtype="float32") for _ in prim_func.params],
         result_idx=[],
         param_dtypes=[None, None, None],
         param_shapes=[[], [], []],

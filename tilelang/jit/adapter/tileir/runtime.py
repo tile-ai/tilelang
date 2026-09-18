@@ -123,6 +123,8 @@ def make_torch_func(adapter) -> Callable[..., Any]:
     result_idx = tuple(adapter.result_idx)
     param_dtypes = tuple(adapter.param_dtypes)
     param_shapes = tuple(tuple(shape) for shape in adapter.param_shapes)
+    # The kernel ABI counts logical elements; PyTorch stores FP4 in byte pairs.
+    packing_factors = tuple(2 if str(param.dtype) == "float4_e2m1fn" else 1 for param in params)
     current_device = adapter.get_current_device_functor()
     compiled_kernels = adapter.tileir_artifact.kernels
     param_argument_names = tuple(
@@ -156,14 +158,15 @@ def make_torch_func(adapter) -> Callable[..., Any]:
     #   * Values index into the runtime ``inputs`` tuple (outputs excluded), not
     #     the full param list, so allocation stays correct even when an output
     #     param is not the last one.
-    input_dim_by_name: dict[str, tuple[int, int]] = {}
+    input_dim_by_name: dict[str, tuple[int, int, int]] = {}
     input_position = 0
     for param_index in range(len(params)):
         if param_index in result_idx_set:
             continue
         for dim_index, dim in enumerate(param_shapes[param_index]):
             if isinstance(dim, tirx.Var) and dim.name not in input_dim_by_name:
-                input_dim_by_name[dim.name] = (input_position, dim_index)
+                scale = packing_factors[param_index] if dim_index == len(param_shapes[param_index]) - 1 else 1
+                input_dim_by_name[dim.name] = (input_position, dim_index, scale)
         input_position += 1
 
     def _to_scalar(arg: Any) -> Any:
@@ -183,7 +186,18 @@ def make_torch_func(adapter) -> Callable[..., Any]:
 
         if len(args) != len(scalar_flags):
             raise ValueError(f"TileIR launch metadata has {len(scalar_flags)} scalar flags for {len(args)} arguments.")
-        return tuple(_to_scalar(arg) if is_scalar else arg for arg, is_scalar in zip(args, scalar_flags))
+        packed_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        normalized = []
+        for arg, is_scalar in zip(args, scalar_flags):
+            if is_scalar:
+                arg = _to_scalar(arg)
+            elif isinstance(arg, torch.Tensor) and packed_dtype is not None and arg.dtype == packed_dtype:
+                # cuTile 1.5 rejects DLPack lanes=2. A byte view preserves the
+                # pointer and storage dimensions without copying. TileIR's
+                # parameter materialization converts these to logical FP4 units.
+                arg = arg.view(torch.uint8)
+            normalized.append(arg)
+        return tuple(normalized)
 
     def materialize_call_args(inputs: tuple[Any, ...]) -> tuple[Any, ...]:
         if len(inputs) == len(params):
@@ -206,10 +220,15 @@ def make_torch_func(adapter) -> Callable[..., Any]:
                                     f"symbolic dim `{dim.name}` does not appear in any input tensor shape. "
                                     "Pass the output tensor explicitly instead of relying on out_idx allocation."
                                 )
-                            ref_tensor_idx, ref_shape_idx = ref
-                            shape.append(inputs[ref_tensor_idx].shape[ref_shape_idx])
+                            ref_tensor_idx, ref_shape_idx, scale = ref
+                            shape.append(inputs[ref_tensor_idx].shape[ref_shape_idx] * scale)
                         else:
                             shape.append(int(dim))
+                    factor = packing_factors[i]
+                    if factor != 1:
+                        if shape[-1] % factor:
+                            raise ValueError("TileIR packed FP4 outputs require an even innermost logical dimension.")
+                        shape[-1] //= factor
                     device = first_tensor.device if first_tensor is not None else current_device()
                     args_list.append(torch.empty(*shape, dtype=param_dtypes[i], device=device))
                 else:
@@ -240,7 +259,8 @@ def make_torch_func(adapter) -> Callable[..., Any]:
             if expr.name in scalar_param_indices:
                 return int(args[scalar_param_indices[expr.name]])
             ref_tensor_idx, ref_shape_idx = adapter._lookup_dynamic_symbolic(expr)
-            return int(args[ref_tensor_idx].shape[ref_shape_idx])
+            scale = packing_factors[ref_tensor_idx] if ref_shape_idx == len(param_shapes[ref_tensor_idx]) - 1 else 1
+            return int(args[ref_tensor_idx].shape[ref_shape_idx]) * scale
         if isinstance(expr, tirx.Cast):
             return eval_launch_extent(expr.value, args)
         if isinstance(expr, tirx.Add):

@@ -903,6 +903,31 @@ def _lower_serial_for_in_parallel(
     )
 
 
+def _split_flattened_parallel_index(expr, ordered_vars, ordered_extents):
+    """Prove an index is a scalar base plus the row-major parallel coordinate."""
+    from tvm import arith
+
+    variables = {}
+
+    def visit(node):
+        if isinstance(node, _tir.Var) and node.name in ordered_vars:
+            variables[node.name] = node
+
+    _tir.stmt_functor.post_order_visit(expr, visit)
+    if set(variables) != set(ordered_vars) or not ordered_vars:
+        return None
+    analyzer = arith.Analyzer()
+    base = analyzer.simplify(_tir.stmt_functor.substitute(expr, {v: _tir.IntImm(v.dtype, 0) for v in variables.values()}))
+    expected = base
+    extent = 1
+    for name, size in reversed(list(zip(ordered_vars, ordered_extents))):
+        expected = expected + variables[name] * extent
+        extent *= size
+    if not analyzer.can_prove_equal(expr, expected):
+        return None
+    return base, extent
+
+
 def _classify_store_dims(
     store_indices_tir: Any,
     ordered_vars: list[str] | None,
@@ -968,6 +993,12 @@ def _classify_store_dims(
             base_idx_tirs.append(None)
             continue
         idx = indices[ax]
+        flattened = _split_flattened_parallel_index(idx, ov_list, oe_list) if len(ov_list) > 1 else None
+        if flattened is not None:
+            base, extent = flattened
+            tile_sizes.append(extent)
+            base_idx_tirs.append(base)
+            continue
         ext = _get_loop_var_extent(idx)
         if ext is not None and ext > 0:
             # Parallel dim: tile size = loop extent, base = the scalar part of

@@ -82,7 +82,7 @@ memory. The runtime supplies a hidden byte workspace with a disjoint, aligned
 slice for each tile block. This avoids CUDA 13.4's observed duplication of
 `alloca` across producer and consumer warp groups. Workspace allocation follows
 the launch stream and CUDA Graph lifetime; ordinary SSA tiles need no workspace.
-The version 3 cache artifact records the bytes required per block and validates
+The version 4 cache artifact records the bytes required per block and validates
 them against the active TIR before loading a cached cubin.
 
 The semantic model records:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from tilelang.tileir.ir.types import TileType, MemSpace
@@ -22,6 +23,28 @@ from tilelang.tileir.scratch import scratch_layout
 
 
 __all__ = ["EmitContext", "emit_module"]
+
+
+def _referenced_values(block: Block) -> set[Value]:
+    """Collect values used by ops, including index attributes and nested bodies."""
+    values = set()
+
+    def visit(obj):
+        if isinstance(obj, Value):
+            values.add(obj)
+        elif isinstance(obj, Block):
+            for op in obj.ops:
+                for field in dataclasses.fields(op):
+                    visit(getattr(op, field.name))
+        elif isinstance(obj, (tuple, list)):
+            for item in obj:
+                visit(item)
+        elif isinstance(obj, dict):
+            for item in obj.values():
+                visit(item)
+
+    visit(block)
+    return values
 
 
 # EmitContext
@@ -596,8 +619,9 @@ def emit_module(
                     _thread_axes = {"tx", "ty", "tz"}
                     _i32_ty = ir.IntegerType.get_signless(32)
                     _i32_tile_type = ct.TileType.get([], _i32_ty)
+                    _used_values = _referenced_values(root)
                     for _tkey in _thread_axes:
-                        if _tkey in _index_values:
+                        if _tkey in _index_values and _index_values[_tkey] in _used_values:
                             _extent = _thread_extents.get(_tkey, 0)
                             if _extent > 1:
                                 # emit iota(extent) → tile<extent x i32> = [0..extent-1]
