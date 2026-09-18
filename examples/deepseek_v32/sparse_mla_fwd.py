@@ -254,6 +254,11 @@ def test_sparse_mla_fwd(
                 for h in range(HKV):
                     i_i = torch.randperm(max(1, t))[:topk]
                     indices[b, t, h, : len(i_i)] = i_i
+    else:
+        expected_prefix = (B, S, HKV)
+        if tuple(indices.shape[:3]) != expected_prefix:
+            raise ValueError(f"indices must start with shape {expected_prefix}, got {tuple(indices.shape)}")
+        topk = indices.shape[-1]
 
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
 

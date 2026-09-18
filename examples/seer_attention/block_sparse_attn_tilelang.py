@@ -192,9 +192,9 @@ def test_topk_sparse_attention_qlen_lt_klen(batch=1, heads=1, query_length=128, 
 
     downsample_factor = BLOCK
     downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
-    x_ds = torch.randn(BATCH, N_HEADS, downsample_len, downsample_len, device="cuda", dtype=torch.float16)
-    # Force the first column to be high so that the first block is always selected.
-    x_ds[:, :, :, 0] = 100
+    x_ds = torch.full((BATCH, N_HEADS, downsample_len, downsample_len), -100, device="cuda", dtype=torch.float16)
+    diagonal = torch.arange(downsample_len, device="cuda")
+    x_ds[:, :, diagonal, diagonal] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 
     kernel = blocksparse_flashattn(BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True)
@@ -208,7 +208,7 @@ def test_topk_sparse_attention_qlen_lt_klen(batch=1, heads=1, query_length=128, 
     full_mask_full = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device="cuda")).bool()
     full_mask_full = full_mask_full[..., :K_LEN, :K_LEN]
 
-    effective_mask = full_mask_full[..., past_len:K_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
+    effective_mask = full_mask_full[..., :Q_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
 
     i_global = torch.arange(past_len, K_LEN, device=k.device).unsqueeze(1)  # shape: (Q_LEN, 1)
     j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)  # shape: (1, K_LEN)
