@@ -11,6 +11,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tilelang import env
 from tilelang.jit import JITImpl
+from tilelang.jit.compile_phase import compilation_scope
 from tilelang.jit.kernel import JITKernel
 from tvm.tirx import PrimFunc, Var
 from tvm.target import Target
@@ -841,6 +842,13 @@ class AutoTuner:
         if early_stop and early_stop_factor < 1.0:
             raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
 
+        if env.is_explicit_compile_required() and use_pipeline:
+            logger.info(
+                "Disabling pipelined autotune benchmarking because "
+                "TILELANG_REQUIRE_EXPLICIT_COMPILE=1 requires compilation to finish before execution."
+            )
+            use_pipeline = False
+
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
 
@@ -882,11 +890,15 @@ class AutoTuner:
                         "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.",
                         kernel_name,
                     )
+                    if env.is_explicit_compile_required():
+                        cached_result.kernel.prepare_for_execution()
                     return cached_result
 
                 # Then check disk cache
                 result = self._load_result_from_disk(key)
                 if result is not None:
+                    if env.is_explicit_compile_required():
+                        result.kernel.prepare_for_execution()
                     # Populate memory cache with disk result
                     self._memory_cache[key] = result
                     return result
@@ -1104,6 +1116,12 @@ class AutoTuner:
                             logger.debug(f"Compilation failed for config {self.configs[idx]} at index {idx} with error: {error}")
                             continue
                         assert jit_kernel is not None
+                        if env.is_explicit_compile_required():
+                            try:
+                                jit_kernel.prepare_for_execution()
+                            except Exception as e:
+                                logger.debug(f"Backend preparation failed for config {self.configs[idx]} at index {idx} with error: {e}")
+                                continue
                         _enqueue_benchmark_task(jit_kernel=jit_kernel, config=config, idx=idx)
 
                 _drain_benchmark_results(progress_bar=progress_bar, block=False)
@@ -1202,6 +1220,7 @@ class AutoTuneImpl(Generic[_P, _T]):
 
     def __post_init__(self):
         self._tuner_cache = {}
+        self._explicitly_compiled_keys = set()
         self._pass_configs_lock = threading.Lock()
 
     def _make_jit_compile_func(self, mode: str, args: tuple, kwargs: dict) -> Callable[..., JITKernel]:
@@ -1221,7 +1240,7 @@ class AutoTuneImpl(Generic[_P, _T]):
                     self.jit_impl.pass_configs = merged_pc
 
                 try:
-                    if per_config_pass_configs is None and mode == "lazy":
+                    if per_config_pass_configs is None and mode == "lazy" and not env.is_explicit_compile_required():
                         return self.jit_impl(*args, **kwargs, __tune_params=config_arg)
                     merged = dict(kwargs)
                     merged.update(config_arg)
@@ -1266,6 +1285,12 @@ class AutoTuneImpl(Generic[_P, _T]):
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel | _T:
         return_kernel = kwargs.pop("__return_kernel", False)
+        if return_kernel:
+            # AutoTuneImpl.compile() includes benchmark launches, so it cannot
+            # hold a compilation lease for the whole call. Still reject a new
+            # tuning request once another kernel has entered execution phase.
+            with compilation_scope():
+                pass
 
         mode = self.jit_impl.initialize_jit_mode(*args, **kwargs)
         autotuner = self.get_tunner()
@@ -1283,6 +1308,10 @@ class AutoTuneImpl(Generic[_P, _T]):
             norm_args = _normalize_value(args, sort_dict_items=True)
             norm_kwargs = _normalize_value(kwargs, sort_dict_items=True)
         key = (norm_args, norm_kwargs)
+        require_explicit_compile = env.is_explicit_compile_required()
+        if require_explicit_compile and not return_kernel and key not in self._explicitly_compiled_keys:
+            raise self.jit_impl._explicit_compile_error()
+
         if key not in self._tuner_cache:
 
             def jit_elaborate(**config_arg):
@@ -1299,6 +1328,9 @@ class AutoTuneImpl(Generic[_P, _T]):
             self._tuner_cache[key] = artifact.kernel, artifact.config
 
         best_kernel, best_config = self._tuner_cache[key]
+
+        if return_kernel:
+            self._explicitly_compiled_keys.add(key)
 
         if mode == "lazy":
             return best_kernel

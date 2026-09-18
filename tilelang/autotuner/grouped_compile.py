@@ -18,6 +18,7 @@ from tilelang.engine.lower import lower_to_host_device_ir, device_codegen, host_
 from tilelang.engine.param import CompiledArtifact
 from tilelang.jit.adapter import TVMFFIKernelAdapter
 from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
+from tilelang.jit.compile_phase import compilation_guard
 from tilelang.jit.kernel import JITKernel
 from tilelang.transform import PassConfigKey
 from tilelang.transform.pass_config import normalize_pass_configs
@@ -27,6 +28,7 @@ from tilelang.tools.pass_timing import create_pass_timing_tool
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
 
+@compilation_guard
 def compile_grouped_unit_tvm_ffi(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,

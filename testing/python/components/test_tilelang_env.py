@@ -68,3 +68,21 @@ def test_pass_profile_threshold_explicit_zero_overrides_environment():
     key = tilelang.PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS
 
     assert resolve_pass_profile_threshold_ms({key: 0}, key, lambda: 10.0) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, False), ("0", False), ("false", False), ("1", True), ("true", True), (" YES ", True), ("on", True)],
+)
+def test_explicit_compile_required_values(monkeypatch, value, expected):
+    desc = _env_var_descriptor("TILELANG_REQUIRE_EXPLICIT_COMPILE")
+    original_forced_value = desc._forced_value
+    desc._forced_value = None
+    try:
+        if value is None:
+            monkeypatch.delenv("TILELANG_REQUIRE_EXPLICIT_COMPILE", raising=False)
+        else:
+            monkeypatch.setenv("TILELANG_REQUIRE_EXPLICIT_COMPILE", value)
+        assert tilelang.env.is_explicit_compile_required() is expected
+    finally:
+        _restore_forced_value("TILELANG_REQUIRE_EXPLICIT_COMPILE", original_forced_value)
