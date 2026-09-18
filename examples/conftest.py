@@ -55,7 +55,7 @@ TILEIR_KNOWN_FAILURES = {
         "tir.assume is not lowered; the kernel also uses direct tcgen05 copies and cluster intrinsics"
     ),
     "dequantize_gemm/test_example_dequantize_gemm.py::test_example_dequant_gemv_fp16xint4": (
-        "nested thread bindings in a SIMT region are not supported"
+        "thread-local access_ptr lowering fails for the external CUDA dequantization helper"
     ),
     "dequantize_gemm/test_example_dequantize_gemm.py::test_example_dequant_gemm_bf16_mxfp4_hopper": (
         "per-thread SIMT dequantization requires thread-indexed gathers and reductions"
@@ -71,13 +71,13 @@ TILEIR_KNOWN_FAILURES = {
         "576-wide gradient tiles require non-power-of-two lowering"
     ),
     "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_fwd_pipelined": (
-        "warp-specialized ptx_cp_async / set_max_nreg have no structured counterpart"
+        "warp-specialized ptx_cp_async and manual barriers have no structured lowering"
     ),
     "deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_topk_selector": (
         "257-bin histogram tiles and cross-lane prefix scans are not supported"
     ),
     "minference/test_vs_sparse_attn.py::test_vs_sparse_attn": (
-        "staged shared-index gathers and the warp-specialized sparse-attention schedule need lowering fixes"
+        "indirect K/V gathers through staged shared-memory column indices are not lowered"
     ),
 }
 
@@ -105,9 +105,11 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
 
     if target.startswith("tileir"):
         for item in items:
-            nid = item.nodeid
+            # Match an exact test, including all of its parameterizations, but
+            # never another test whose name merely extends the same prefix.
+            nid = item.nodeid.split("[", 1)[0]
             for pattern, reason in TILEIR_KNOWN_FAILURES.items():
-                if pattern in nid:
+                if nid == pattern or nid.endswith("/" + pattern):
                     item.add_marker(
                         pytest.mark.xfail(
                             reason=f"TileIR: {reason}",
