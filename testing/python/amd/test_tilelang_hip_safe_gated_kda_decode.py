@@ -26,6 +26,7 @@ def _make_inputs(
     value_dim: int,
     seed: int,
 ):
+    """Create deterministic BF16 inputs and an FP32 recurrent-state pool."""
     generator = torch.Generator(device="cuda").manual_seed(seed)
     packed_dim = 2 * num_q_heads * key_dim + num_value_heads * value_dim
     mixed_qkv = torch.randn(
@@ -84,6 +85,7 @@ def _assert_step(
     num_q_heads: int,
     lower_bound: float,
 ):
+    """Run one decode step and compare output plus the in-place state update."""
     mixed_qkv, a, b, A_log, dt_bias, _ = inputs
     expected = safe_gated_kda_decode_reference(
         mixed_qkv,
@@ -105,6 +107,7 @@ def _assert_step(
 @tilelang.testing.requires_rocm
 @pytest.mark.parametrize("lower_bound", [-5.0, -3.0])
 def test_safe_gated_kda_decode_state_slots_and_multiple_steps(lower_bound):
+    """Check active, dummy, untouched, and reused slots over two decode steps."""
     batch, num_slots = 4, 7
     num_q_heads, num_value_heads = 2, 4
     key_dim = value_dim = 32
@@ -171,6 +174,7 @@ def test_safe_gated_kda_decode_state_slots_and_multiple_steps(lower_bound):
 
 @tilelang.testing.requires_rocm
 def test_safe_gated_kda_decode_glm53_tp8_shape():
+    """Check the eight-local-head GLM-5.3-Flash TP8 specialization."""
     batch, num_slots = 2, 4
     num_q_heads = num_value_heads = 8
     key_dim = value_dim = 128
@@ -209,3 +213,45 @@ def test_safe_gated_kda_decode_glm53_tp8_shape():
         num_q_heads=num_q_heads,
         lower_bound=lower_bound,
     )
+
+
+@tilelang.testing.requires_rocm
+def test_safe_gated_kda_decode_out_of_range_slot_is_guarded():
+    """Ensure a positive out-of-range slot cannot access or modify state."""
+    batch, num_slots = 1, 2
+    num_q_heads = num_value_heads = 2
+    key_dim = value_dim = 32
+    inputs = _make_inputs(
+        batch=batch,
+        num_slots=num_slots,
+        num_q_heads=num_q_heads,
+        num_value_heads=num_value_heads,
+        key_dim=key_dim,
+        value_dim=value_dim,
+        seed=71,
+    )
+    state_indices = torch.tensor([num_slots], device="cuda", dtype=torch.int32)
+    initial_state = inputs[-1]
+    actual_state = initial_state.clone()
+
+    with pytest.raises(ValueError, match="outside the state pool"):
+        safe_gated_kda_decode_reference(
+            *inputs[:-1],
+            initial_state.clone(),
+            state_indices,
+            num_q_heads=num_q_heads,
+        )
+
+    kernel = safe_gated_kda_decode(
+        batch,
+        num_slots,
+        num_q_heads,
+        num_value_heads,
+        key_dim,
+        value_dim,
+        block_v=8,
+        threads=128,
+    )
+    actual = kernel(*inputs[:-1], actual_state, state_indices)
+    torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
+    torch.testing.assert_close(actual_state, initial_state, rtol=0, atol=0)

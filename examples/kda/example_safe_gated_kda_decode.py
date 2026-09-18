@@ -158,7 +158,10 @@ def safe_gated_kda_decode(
             state_slot = T.Cast(T.int64, StateIndices[i_b])
             value_offset = i_v * block_v
 
-            if state_slot < 0:
+            # The host contract rejects positive indices outside the pool.  Keep
+            # the device path defensive as well: an invalid slot must never be
+            # used to address State, even if a caller bypasses host validation.
+            if state_slot < 0 or state_slot >= num_slots:
                 for i in T.Parallel(block_v):
                     Output[i_b, 0, i_hv, value_offset + i] = T.Cast(input_dtype, 0.0)
             else:
@@ -228,6 +231,7 @@ def safe_gated_kda_decode(
 
 
 def _run_example() -> None:
+    """Run one GLM-5.3-shaped correctness check on the active accelerator."""
     torch.manual_seed(0)
     batch, num_slots = 4, 7
     num_q_heads = num_value_heads = 8

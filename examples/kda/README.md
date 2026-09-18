@@ -22,6 +22,9 @@ place, and returns `[batch, 1, value_heads, value_dim]`. A state index of `-1`
 produces zero output without accessing or modifying the state pool.
 Non-negative state indices must be unique within a decode batch, as each active
 request owns one mutable state slot.
+Positive indices outside the configured state pool are invalid: the reference
+rejects them, while the device kernel defensively produces zero output without
+reading or writing state so a bypassed host check cannot corrupt GPU memory.
 
 The default activation/state types are BF16/FP32. GLM-5.3-Flash with TP8 uses
 eight local Q/K/V heads with `key_dim=value_dim=128` and `lower_bound=-5.0`.
