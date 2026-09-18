@@ -86,17 +86,26 @@ jobs:
         runner:
           - tags: [self-hosted, nvidia]
             name: self-hosted-nvidia
+            pytest-workers: 8
             # Format: CUDA-auto or [Nightly-]CUDA-<major>.<minor>[.<patch>].
             # E.g., "CUDA-auto", "CUDA-13.0", or "Nightly-CUDA-13.0".
             # Use "Nightly-" prefix to use torch nightly builds.
             toolkit: CUDA-auto
           - tags: [self-hosted, amd, gfx942]
             name: self-hosted-amd-gfx942
+            pytest-workers: 8
             # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
             # Use "Nightly-" prefix to use torch nightly builds.
             toolkit: ROCm-7.2
+          - tags: [self-hosted, amd, gfx950]
+            name: self-hosted-amd-gfx950
+            pytest-workers: 4
+            xdist-gpus: 4
+            # MI350X/CDNA4 support requires the ROCm 7.2 userspace image.
+            toolkit: ROCm-7.2
           - tags: [macos-latest]
             name: macos-latest
+            pytest-workers: 8
             toolkit: Metal # or Nightly-Metal
         python-version:
           - "3.12"
@@ -261,6 +270,19 @@ jobs:
             echo "::warning::hipcc not found in PATH!"
           fi
 
+      - name: Set ROCm xdist GPU affinity
+        if: ${{ matrix.runner.xdist-gpus }}
+        env:
+          EXPECTED_GPUS: ${{ matrix.runner.xdist-gpus }}
+        run: |
+          GPU_IDS=$(rocminfo | awk '/^  Uuid:[[:space:]]+GPU-/{print $2}' | paste -sd, -)
+          ACTUAL_GPUS=$(awk -F, '{print NF}' <<<"${GPU_IDS}")
+          if [[ -z "${GPU_IDS}" || "${ACTUAL_GPUS}" -ne "${EXPECTED_GPUS}" ]]; then
+            echo "::error::expected ${EXPECTED_GPUS} visible ROCm GPU UUIDs, found ${ACTUAL_GPUS}: ${GPU_IDS}"
+            exit 1
+          fi
+          echo "TILELANG_XDIST_GPU_IDS=${GPU_IDS}" | tee -a "${GITHUB_ENV}"
+
       - name: Set environment (Metal)
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
@@ -371,7 +393,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=${{ matrix.runner.pytest-workers }} \
             --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
             ../examples
 
@@ -385,20 +407,22 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=${{ matrix.runner.pytest-workers }} \
             ./python
 
       # AMD ROCm tests
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: rocm-tests
         if: contains(matrix.runner.toolkit, 'ROCm')
+        env:
+          TILELANG_XDIST_GPU_COUNT: ${{ matrix.runner.xdist-gpus || '' }}
         run: |
           cd testing
           PYTEST=(
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=${{ matrix.runner.pytest-workers }} \
             ./python
 
       # Apple Metal tests
@@ -411,7 +435,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=${{ matrix.runner.pytest-workers }} \
             -k metal \
             ./python
 
