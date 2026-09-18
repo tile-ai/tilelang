@@ -80,6 +80,8 @@ protected:
                        std::ostream &os) final; // NOLINT(*)
 
 private:
+  void PrintVecUnaryOp_(const std::string &op, DataType dtype,
+                        const PrimExpr &input, std::ostream &os);
   // Handle volatile loads
   void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
                            std::ostream &os) final;
