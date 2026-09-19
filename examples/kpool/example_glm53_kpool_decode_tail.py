@@ -45,7 +45,7 @@ def glm53_kpool_seed_tail_kernel(
         raise ValueError(f"GLM-5.3 k-pool requires head_dim={GLM53_HEAD_DIM}, got {head_dim}")
 
     num_tokens = T.dynamic("num_tokens")
-    num_requests = T.dynamic("num_requests")
+    num_boundaries = T.dynamic("num_boundaries")
     num_tail_blocks = T.dynamic("num_tail_blocks")
 
     @T.prim_func
@@ -53,10 +53,10 @@ def glm53_kpool_seed_tail_kernel(
         key: T.Tensor((num_tokens, head_dim), T.bfloat16),
         slot_score: T.Tensor((num_tokens, head_dim), T.bfloat16),
         tail_slot_mapping: T.Tensor((num_tokens,), T.int32),
-        cu_seqlens: T.Tensor((num_requests + 1,), T.int32),
+        cu_seqlens: T.Tensor((num_boundaries,), T.int32),
         tail_cache: T.Tensor((num_tail_blocks, 2, pool_size, head_dim), T.bfloat16),
     ) -> None:
-        with T.Kernel(num_requests, threads=head_dim) as request_id:
+        with T.Kernel(num_boundaries - 1, threads=head_dim) as request_id:
             dim = T.get_thread_binding(0)
             request_start = cu_seqlens[request_id]
             request_end = cu_seqlens[request_id + 1]
