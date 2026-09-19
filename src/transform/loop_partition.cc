@@ -314,13 +314,10 @@ For PragmaUnrollLoop(For stmt) {
 }
 
 Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
-                       PrimExpr thread_index, arith::Analyzer *analyzer,
+                       PrimExpr thread_index, const arith::Analyzer *analyzer,
                        const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
                        bool require_padding_guard) {
-  // Save analyzer state to prevent conflicted bindings during vectorization
-  auto saved_analyzer = analyzer->Clone();
-
   For result_loop = loop;
   // Strip parallel-loop layout/predicate annotations on the original loop.
   // After partitioning/vectorization, keeping them can confuse later passes.
@@ -335,13 +332,17 @@ Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
 
   // Step 1: Partition the loop based on the layout (if this is a parallel loop)
   if (parallel_loop) {
-    result_loop = PartitionLoop(result_loop, thread_index, analyzer,
-                                loop_layout, require_padding_guard);
+    // Do not carry partitioning's local bindings into vectorization or back to
+    // the caller. Both stages start from the same enclosing analysis context.
+    auto partition_analyzer = analyzer->Clone();
+    result_loop =
+        PartitionLoop(result_loop, thread_index, partition_analyzer.get(),
+                      loop_layout, require_padding_guard);
   }
 
   // Step 2: Vectorize the loop; the planner picks the size per loop
   // (1 = scalar) from its access analysis.
-  result_loop = VectorizeLoop(result_loop, saved_analyzer.get(), layout_map);
+  result_loop = VectorizeLoop(result_loop, analyzer, layout_map);
 
   result_loop = PragmaUnrollLoop(result_loop);
 

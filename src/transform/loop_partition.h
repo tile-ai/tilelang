@@ -61,7 +61,10 @@ For PragmaUnrollLoop(For stmt);
  * \param thread_index The logical thread index expression for partitioning
  *        (the real threadIdx.x Var on GPU, constant 0 without thread
  *        bindings).
- * \param analyzer The arithmetic analyzer.
+ * \param analyzer Enclosing analysis context, before visiting the loop's local
+ *        definitions. Each lowering stage forks this context; region-local
+ *        bindings are not exported back to it. In particular, do not pass an
+ *        analyzer populated by visiting a previous version of this loop body.
  * \param predicate ffi::Optional predicate to wrap the loop with IfThenElse.
  * \param parallel_loop Whether this is a true parallel loop requiring thread
  *        partitioning. False for loops that only operate on local/register
@@ -70,7 +73,7 @@ For PragmaUnrollLoop(For stmt);
  */
 Stmt LowerParallelLoop(
     For loop, const Fragment &loop_layout, PrimExpr thread_index,
-    arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
+    const arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
     ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
     bool parallel_loop = true, bool require_padding_guard = false);
 
