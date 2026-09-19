@@ -22,8 +22,10 @@ def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> t
 
     Returns
     -------
-    state : PrimExpr
-        The random number generator state handle.
+    side_effect : PrimExpr
+        The void-typed expression carrying this call's side effect. The curand
+        state it initialises is owned by the generated kernel; this value is
+        **not** a state handle and must not be bound to a variable.
     """
     assert generator in ["curandStateMRG32k3a_t", "curandStatePhilox4_32_10_t", "curandStateXORWOW_t"]
     seed = tirx.convert(seed)
