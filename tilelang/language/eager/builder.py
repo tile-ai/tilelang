@@ -2,6 +2,7 @@ from __future__ import annotations
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
+import builtins
 
 from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
@@ -130,6 +131,9 @@ class ContinueFrame(Frame): ...
 
 
 class BreakFrame(Frame): ...
+
+
+class PythonLoopFrame(Frame): ...
 
 
 @dataclass
@@ -458,6 +462,23 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
+        if isinstance(it, range):
+            from tilelang.language import serial
+
+            it = serial(it.start, it.stop, it.step)
+        if not isinstance(it, (SerialForWithStep, UnrollForWithStep, tirx.frame.ForFrame)):
+            # Python iterables expand the body at IR construction time.
+            pos = len(self.frames)
+            self.frames.append(PythonLoopFrame())
+            try:
+                # Keep user-owned generators resumable after a loop break.
+                for value in it:  # noqa: UP028
+                    yield value
+            finally:
+                # Python loops do not introduce a lexical scope. Keep emitted
+                # lets/allocations alive for later iterations and following code.
+                self.frames.pop(pos)
+            return
         if isinstance(it, (SerialForWithStep, UnrollForWithStep)):
             # Validate and compute the trip count before constructing the frame
             if isinstance(it.step, (int, IntImm)):
@@ -495,14 +516,30 @@ class Builder(BaseBuilder):
             with self.with_frame(it) as v:
                 yield v
 
+    def _is_python_loop_control(self):
+        idx = self.find_frame_idx((PythonLoopFrame, tirx.frame.ForFrame, tirx.frame.WhileFrame, MacroFrame))
+        if idx is None or not isinstance(self.frames[idx], PythonLoopFrame):
+            return False
+        if self.find_frame_idx(tirx.frame.IfFrame, start=idx + 1) is not None:
+            raise NotImplementedError(
+                "Cannot lower break/continue targeting a compile-time Python iterable loop under a device-side condition: "
+                "the expanded loop has no runtime control-flow target. Use T.serial over runtime-indexable data, "
+                "or a compile-time condition."
+            )
+        return True
+
     def ctx_continue(self):
         self.check_continue_break()
+        if self._is_python_loop_control():
+            raise self.PythonLoopContinue
         # add a dummy frame for checking code after continue/break
         self.enter_frame(ContinueFrame())
         tirx.evaluate(tirx.continue_loop())
 
     def ctx_break(self):
         self.check_continue_break()
+        if self._is_python_loop_control():
+            raise self.PythonLoopBreak
         # add a dummy frame for checking code after continue/break
         self.enter_frame(BreakFrame())
         tirx.evaluate(tirx.break_loop())
@@ -594,6 +631,7 @@ class Builder(BaseBuilder):
 
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
+            self.name_inside_frame.pop(name, None)
             return value
         if isinstance(value, tirx.IntImm) and value.dtype == "int32":
             return value.value
@@ -822,7 +860,7 @@ class Builder(BaseBuilder):
         elif not cond:
             raise AssertionError(msg)
 
-    def rval(self, name: str, value: Any) -> Any:
+    def rval(self, name: str | None, value: Any) -> Any:
         if name in self.name_inside_frame:
             frame = self.name_inside_frame[name]
             if frame not in self.frames:
@@ -877,12 +915,18 @@ class Builder(BaseBuilder):
         else:
             return self.prim_func_arg(name, value)
 
-    def override(self, name: str):
+    def iter_call(self, func, *args, **kwargs):
         from tilelang.language import serial
 
-        if name == "range":
-            return serial
-        raise ValueError(f"Unknown override: {name}")
+        if func is builtins.range:
+            return serial(*args, **kwargs)
+        return func(*args, **kwargs)
+
+    def comprehension_filter(self, cond):
+        cond = unwrap_cond(cond)
+        if isinstance(cond, PrimExpr):
+            raise TypeError("Comprehension filters must be evaluable at compile time; use a serial loop with an if statement instead.")
+        return cond
 
     def constexpr(self, name: str, dtype: str = "int32") -> Var:
         var = tirx.Var(name, dtype)
