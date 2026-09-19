@@ -782,5 +782,68 @@ def test_inject_software_pipeline_replays_scalar_bind_dependencies():
     assert "offset = T.int32()" not in script
 
 
+def test_inject_software_pipeline_clamps_short_symbolic_epilogue():
+    """Symbolic min (blockIdx.y>>1 style) with short remaining trips.
+
+    Mirrors GQA bwd causal ``loop_st``.  When ``by == 14`` or ``15``, the
+    trip count is below the three pipeline stages.  The epilogue must therefore
+    begin at ``loop_st + 2``; otherwise it replays pipeline stages that overlap
+    the prologue.
+    """
+
+    @T.prim_func
+    def before(
+        A: T.Tensor((16, 16), T.float32),
+        C: T.Tensor((16, 16), T.float32),
+    ):
+        for by in T.thread_binding(0, 16, thread="blockIdx.y"):
+            for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
+                B = T.alloc_buffer((16, 1), dtype=T.float32, scope="shared")
+                loop_st = by // 2
+                for i in T.unroll(
+                    loop_st,
+                    8,
+                    annotations={
+                        "software_pipeline_stage": [0, 1, 2],
+                        "software_pipeline_order": [0, 1, 2],
+                    },
+                ):
+                    with T.sblock("copy"):
+                        T.reads(A[tx, i])
+                        T.writes(B[tx, 0])
+                        B[tx, 0] = A[tx, i]
+                    with T.sblock("compute"):
+                        T.reads(B[tx, 0])
+                        T.writes(B[tx, 0])
+                        B[tx, 0] = B[tx, 0] * T.float32(2.0)
+                    with T.sblock("consume"):
+                        T.reads(B[tx, 0])
+                        T.writes(C[tx, i])
+                        C[tx, i] = B[tx, 0]
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    # The clamped tail starts at loop_st + max(remaining_trips, 2).  It is a
+    # drain loop, so it must not retain steady-state pipeline metadata.
+    clamped_tail_loops = []
+
+    def _visit_for(node):
+        if isinstance(node, tvm.tirx.For) and "max(" in str(node.extent):
+            clamped_tail_loops.append(node)
+
+    post_order_visit(mod["main"].body, _visit_for)
+    assert clamped_tail_loops
+    assert all(loop.kind == tvm.tirx.ForKind.SERIAL for loop in clamped_tail_loops)
+    assert all("tl_pipelined_num_stages" not in loop.annotations for loop in clamped_tail_loops)
+    for loop in clamped_tail_loops:
+        stage_distance = tvm.tirx.IntImm(loop.min.dtype, 2)
+        loop_end = tvm.tirx.IntImm(loop.min.dtype, 8)
+        remaining_trips = loop_end - loop.min
+        clamped_drain_start = loop.min + tvm.tirx.max(remaining_trips, stage_distance)
+        pipeline_loop_end = loop.min + remaining_trips
+        expected_drain_extent = pipeline_loop_end + stage_distance - clamped_drain_start
+        tvm.ir.assert_structural_equal(loop.extent, expected_drain_extent)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
