@@ -16,7 +16,7 @@ from tilelang.language.fp8 import determine_fp8_type, determine_torch_fp8_type
 
 
 GLM53_HEAD_DIM = 128
-GLM53_POOL_SIZE = 16
+GLM53_POOL_SIZE = 4
 _HADAMARD128_SCALE = 1.0 / math.sqrt(GLM53_HEAD_DIM)
 
 

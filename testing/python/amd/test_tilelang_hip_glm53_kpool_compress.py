@@ -27,7 +27,7 @@ def _assert_fp8_within_one_ulp(actual, expected):
 
 
 def _make_inputs(num_pools=7, pool_size=GLM53_POOL_SIZE):
-    """Create deterministic GLM-shaped tensors on the active ROCm device."""
+    """Create deterministic published-GLM-shaped tensors on the active ROCm device."""
     torch.manual_seed(20260918)
     slot_k = torch.randn(
         num_pools,
@@ -39,6 +39,12 @@ def _make_inputs(num_pools=7, pool_size=GLM53_POOL_SIZE):
     slot_score = torch.randn_like(slot_k)
     ape = torch.randn(pool_size, GLM53_HEAD_DIM, dtype=torch.float32, device="cuda")
     return slot_k, slot_score, ape
+
+
+def test_glm53_kpool_published_geometry():
+    """Keep the standalone kernel default aligned with the public checkpoint."""
+    assert GLM53_POOL_SIZE == 4
+    assert GLM53_HEAD_DIM == 128
 
 
 @tilelang.testing.requires_rocm

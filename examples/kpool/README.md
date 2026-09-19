@@ -9,9 +9,9 @@ used by the GLM-5.3-Flash sparse-attention indexer:
 4. Round through BF16 again and quantize with one FP32 absmax scale per vector.
 5. Write the FP8 vector and scale to a caller-owned physical cache location.
 
-The real model specialization is `pool_size=16`, `head_dim=128`. The wrapper
-also accepts other positive pool sizes for focused testing, but deliberately
-rejects other head dimensions.
+The published GLM-5.3-Flash specialization is `pool_size=4`, `head_dim=128`.
+The wrapper also accepts other positive pool sizes for focused testing, but
+deliberately rejects other head dimensions.
 
 ## Cache contract
 
