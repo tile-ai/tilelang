@@ -1,8 +1,8 @@
 # GLM-5.3 k-pool compression
 
 These examples contain the standalone fused compressor, paged-cache writer,
-rolling decode-tail maintenance, and pooled-history logits kernel used by the
-GLM-5.3-Flash sparse-attention indexer:
+rolling decode-tail maintenance, pooled-history logits, and pool-level Top-K
+transformation used by the GLM-5.3-Flash sparse-attention indexer:
 
 1. Apply a per-dimension softmax over `slot_score + ape` across each pool.
 2. Pool BF16 K vectors with those probabilities.
@@ -11,6 +11,9 @@ GLM-5.3-Flash sparse-attention indexer:
 5. Write the FP8 vector and scale to a caller-owned physical cache location.
 6. Read the paged FP8 cache and compute weighted 32-head MQA logits for each
    request's valid pool range.
+7. Select 512 pools for the published 2,048-token budget, expand each selected
+   pool to four tokens, append the incomplete tail, and optionally translate
+   the result through a token table or ragged offset.
 
 During prefill, `glm53_kpool_seed_tail_cache` uses cumulative request boundaries
 to copy each request's final four-token rolling window into a caller-owned BF16
@@ -53,8 +56,14 @@ FP8 scales are folded into the per-head FP32 weights by the caller, matching
 the GLM indexer's gated-score contract. Pool starts and ends are specified per
 query row; logits outside those ranges are negative infinity.
 
-This increment intentionally excludes pool Top-K, pool-to-token expansion,
-preshuffled framework cache layouts, and vLLM or SGLang integration.
+`glm53_kpool_topk_transform` reuses the existing TileLang radix Top-K selector.
+Short rows enumerate every valid pool; long rows select 512 pools for the
+published 2,048-token history budget. The transform compacts the incomplete
+tail immediately after the valid history and pads the remaining output with
+`-1`.
+
+This increment intentionally excludes preshuffled framework cache layouts and
+vLLM or SGLang integration.
 
 Run the ROCm correctness tests with:
 
@@ -62,4 +71,5 @@ Run the ROCm correctness tests with:
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_compress.py
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_decode_tail.py
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_fp8_mqa_logits.py
+pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_topk_transform.py
 ```
