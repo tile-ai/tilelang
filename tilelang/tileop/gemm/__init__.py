@@ -30,6 +30,8 @@ def _is_mma_sync_dtype_supported(node, target) -> bool:
         return c == "int32"
     if a == "bfloat16":
         return c == "float32"
+    if a == "custom[tfloat32]":
+        return c == "float32"
     if a == "float32":
         return c == "float32"
     if a == "float64":

@@ -158,6 +158,9 @@ bool AllowAmpereMMA(const GemmNode &op, Target target) {
   if ((a.is_int() || a.is_uint()) && (a.bits() == 8 || a.bits() == 4)) {
     return c == DataType::Int(32);
   }
+  if (a.is_tfloat32() && b.is_tfloat32()) {
+    return c == DataType::Float(32);
+  }
   if (a == DataType::BFloat(16))
     return c == DataType::Float(32);
   if (a == DataType::Float(32))
