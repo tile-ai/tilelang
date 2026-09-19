@@ -86,11 +86,11 @@ static constexpr const char *kReducerForceBaseline =
     "tl.reducer_force_baseline";
 static constexpr const char *kEnableReducerPlanVerbose =
     "tl.enable_reducer_plan_verbose";
-// The cost model that ranks free-mode layout attempts, by name:
-// "register-count" (default) uses total fragment register slots;
-// "io-aware" scores estimated global-memory access cost — vector width /
-// coalescing of every fragment<->global copy, weighted by bytes moved —
-// with register count as the tiebreak.
+// The cost model ranking free-mode layout attempts: "register-count"
+// (default) automatically uses reduction-aware scoring for CUDA reducers
+// and spill/register scoring elsewhere. "io-aware" scores global-memory
+// vector width / coalescing weighted by bytes moved, with registers as
+// the tiebreak.
 static constexpr const char *kLayoutCostModel = "tl.layout_cost_model";
 static constexpr const char *kEnableVectorizePlannerVerbose =
     "tl.enable_vectorize_planner_verbose";
