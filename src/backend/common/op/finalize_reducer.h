@@ -94,7 +94,7 @@ template <typename Impl> struct FinalizeReducerLowerer {
       reduce::CheckAllReduceWidth(reducing_threads, scale,
                                   "tl.finalize_reducer");
 
-      bool use_batch = effective_batch > 1 &&
+      bool use_batch = effective_batch > 1 && layout_batch_size > 0 &&
                        reducing_threads > Impl::WarpSize(lower_args.target);
 
       if (use_batch) {
@@ -106,9 +106,31 @@ template <typename Impl> struct FinalizeReducerLowerer {
             workspace_stride, lower_args.target);
         int ws_size = workspace_stride * static_cast<int>(effective_batch);
         PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
-        Array<PrimExpr> args = {StringImm(allreduce), buffer->data, workspace};
-        step_stmts.push_back(
-            Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
+
+        std::vector<int64_t> shape_values;
+        shape_values.reserve(layout->OutputDim());
+        for (int i = 0; i < layout->OutputDim(); ++i) {
+          shape_values.push_back(*as_const_int(layout->OutputShape()[i]));
+        }
+        std::vector<int64_t> strides(layout->OutputDim(), 1);
+        for (int i = layout->OutputDim() - 2; i >= 0; --i) {
+          strides[i] = strides[i + 1] * shape_values[i + 1];
+        }
+
+        int num_chunks = static_cast<int>(layout_batch_size / effective_batch);
+        for (int chunk = 0; chunk < num_chunks; ++chunk) {
+          int64_t flat_offset = static_cast<int64_t>(chunk) * effective_batch;
+          Array<PrimExpr> chunk_indices;
+          for (int i = 0; i < layout->OutputDim(); ++i) {
+            int64_t index = (flat_offset / strides[i]) % shape_values[i];
+            chunk_indices.push_back(Integer(index));
+          }
+          PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
+                              {BufferLoad(buffer, chunk_indices)});
+          Array<PrimExpr> args = {StringImm(allreduce), ptr, workspace};
+          step_stmts.push_back(
+              Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
+        }
         continue;
       }
 
