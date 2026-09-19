@@ -438,6 +438,13 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                         shape.append(self._resolve_dynamic_symbolic_value(s, param_values))
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
+                # Sub-byte dtypes are stored packed in torch (float4_e2m1fn_x2 holds two
+                # FP4 elements per byte), so the logical element shape has to be divided
+                # by the packing factor, exactly as the CUDA adapters do.
+                element_bits = self.params[i].dtype.bits * self.params[i].dtype.lanes
+                pack = 8 // element_bits if element_bits < 8 else 1
+                if pack > 1 and shape and isinstance(shape[-1], int):
+                    shape = [*shape[:-1], shape[-1] // pack]
                 tensor = torch.empty(*shape, dtype=dtype, device=first_tensor.device)
                 param_values[i] = tensor
             else:
