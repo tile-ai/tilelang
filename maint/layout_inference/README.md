@@ -110,6 +110,7 @@ nest's `parallel_loop_layout` annotation (see `common.py`).
 
 | case | what it pins |
 |---|---|
+| `coalesced_width` | Issue #3013. Bare Python integers from both the typed keyword and generic annotation map must select the requested parallel-loop vector width. |
 | `elementwise_copy` | Baseline: both models must agree on the coalesced, vectorized roundtrip layout. Primary equal-score anchor. |
 | `atomic_destination` | Atomic destination legality selects the loop layout: contiguous fp16 lanes retain width 2, while repeated destinations plan scalar lanes. |
 | `fp8_copy` | 1-byte dtype: the 16-element vector width at the wide end of the shared width policy. |
