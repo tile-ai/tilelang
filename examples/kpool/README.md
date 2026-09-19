@@ -1,14 +1,16 @@
 # GLM-5.3 k-pool compression
 
 These examples contain the standalone fused compressor, paged-cache writer,
-and rolling decode-tail maintenance used by the GLM-5.3-Flash sparse-attention
-indexer:
+rolling decode-tail maintenance, and pooled-history logits kernel used by the
+GLM-5.3-Flash sparse-attention indexer:
 
 1. Apply a per-dimension softmax over `slot_score + ape` across each pool.
 2. Pool BF16 K vectors with those probabilities.
 3. Round the pooled vector through BF16 and apply normalized Hadamard-128.
 4. Round through BF16 again and quantize with one FP32 absmax scale per vector.
 5. Write the FP8 vector and scale to a caller-owned physical cache location.
+6. Read the paged FP8 cache and compute weighted 32-head MQA logits for each
+   request's valid pool range.
 
 During prefill, `glm53_kpool_seed_tail_cache` uses cumulative request boundaries
 to copy each request's final four-token rolling window into a caller-owned BF16
@@ -46,6 +48,11 @@ compressed-cache location is accepted exactly on pool-closing tokens; all
 padding and non-closing tokens use negative sentinels. These checks prevent
 cross-request tail races and duplicate compressed-cache writes.
 
+`glm53_kpool_fp8_mqa_logits` consumes a caller-owned pooled page table. Query
+FP8 scales are folded into the per-head FP32 weights by the caller, matching
+the GLM indexer's gated-score contract. Pool starts and ends are specified per
+query row; logits outside those ranges are negative infinity.
+
 This increment intentionally excludes pool Top-K, pool-to-token expansion,
 preshuffled framework cache layouts, and vLLM or SGLang integration.
 
@@ -54,4 +61,5 @@ Run the ROCm correctness tests with:
 ```bash
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_compress.py
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_decode_tail.py
+pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_fp8_mqa_logits.py
 ```
