@@ -82,6 +82,13 @@ public:
       //   tl.tma_store(address_of(smem[..]), address_of(gmem[..]), ...)
       //   call_extern("AtomicAdd*", address_of(gmem[..]), ...)
       // and avoids over-marking plain BufferLoad used for reads.
+      //
+      // For call_extern specifically, also conservatively mark bare buffer data
+      // vars as written, since we cannot know whether the extern writes through
+      // the pointer. This matches patterns like:
+      //   call_extern("store_val", Out.data, value)
+      const bool is_call_extern = op->op.same_as(builtin::call_extern());
+
       for (const PrimExpr &a : op->args) {
         if (const auto *c = a.as<CallNode>()) {
           if (c->op.same_as(builtin::address_of()) && c->args.size() == 1U) {
@@ -90,6 +97,15 @@ public:
               if (param_or_data_vars_.count(data)) {
                 written_.insert(data);
               }
+            }
+          }
+        } else if (is_call_extern) {
+          // Bare data var passed to call_extern: conservatively assume
+          // the callee may write through it. We only apply this to call_extern,
+          // not to pure intrinsics or other calls with known semantics.
+          if (const auto *v = a.as<VarNode>()) {
+            if (param_or_data_vars_.count(v)) {
+              written_.insert(v);
             }
           }
         }
