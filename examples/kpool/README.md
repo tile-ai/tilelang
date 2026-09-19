@@ -1,8 +1,9 @@
 # GLM-5.3 k-pool compression
 
 These examples contain the standalone fused compressor, paged-cache writer,
-rolling decode-tail maintenance, pooled-history logits, and pool-level Top-K
-transformation used by the GLM-5.3-Flash sparse-attention indexer:
+rolling decode-tail maintenance, pooled-history logits, pool-level Top-K
+transformation, and graph-safe fused selector used by the GLM-5.3-Flash
+sparse-attention indexer:
 
 1. Apply a per-dimension softmax over `slot_score + ape` across each pool.
 2. Pool BF16 K vectors with those probabilities.
@@ -14,6 +15,8 @@ transformation used by the GLM-5.3-Flash sparse-attention indexer:
 7. Select 512 pools for the published 2,048-token budget, expand each selected
    pool to four tokens, append the incomplete tail, and optionally translate
    the result through a token table or ragged offset.
+8. Fuse paged scoring, radix selection, and token transformation into one
+   launch over the production interleaved cache layout.
 
 During prefill, `glm53_kpool_seed_tail_cache` uses cumulative request boundaries
 to copy each request's final four-token rolling window into a caller-owned BF16
@@ -39,6 +42,12 @@ example uses two caller-owned tensors instead:
 - `tail_cache`: `[num_tail_blocks, 2, 4, 128]`, BF16, with K in lane 0
   and gate scores in lane 1.
 
+`glm53_kpool_fused_select` consumes the production-style interleaved form
+directly: `[num_blocks, page_size * (128 + 4)]` bytes, with all FP8 key bytes
+first and all FP32 scale bytes second within each page. The
+`pack_glm53_kpool_cache` helper converts the standalone two-tensor example
+layout into this form for tests.
+
 `loc` contains flat page-major physical slots. An optional Boolean
 `write_mask` disables rows without relying on an invalid address. Before the
 launch, the host wrapper rejects incompatible tensors, out-of-range active
@@ -62,8 +71,19 @@ published 2,048-token history budget. The transform compacts the incomplete
 tail immediately after the valid history and pads the remaining output with
 `-1`.
 
-This increment intentionally excludes preshuffled framework cache layouts and
-vLLM or SGLang integration.
+`glm53_kpool_fused_select` combines scoring with the first radix histogram,
+uses tie-safe radix rescans rather than a bounded candidate bucket, and writes
+the transformed token indices in the same launch. Callers can supply persistent
+FP32 logits scratch and INT32 output buffers, preventing temporary-allocation
+lifetime hazards during CUDA/HIP graph replay. The logits scratch is an
+implementation detail and is not returned as a pipeline result. Capture callers
+must validate inputs before capture, supply both persistent buffers, and call
+with `validate=False` so device-value checks do not synchronize with the host.
+
+The standalone compressor still writes separate typed caches. Framework
+integration may either use its native interleaved writer or add a future
+interleaved TileLang writer. vLLM and SGLang dispatch changes remain outside
+this example.
 
 Run the ROCm correctness tests with:
 
@@ -72,4 +92,5 @@ pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_compress.py
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_decode_tail.py
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_fp8_mqa_logits.py
 pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_topk_transform.py
+pytest -q testing/python/amd/test_tilelang_hip_glm53_kpool_fused_selector.py
 ```
