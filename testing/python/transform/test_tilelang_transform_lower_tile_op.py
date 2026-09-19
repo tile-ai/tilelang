@@ -236,8 +236,8 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
 
 
 @tilelang.testing.requires_cuda
-def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
-    """Reject #2948 instead of silently dropping a fragment index rotation."""
+def test_layout_inference_rejects_shifted_modulo_fragment_index():
+    """Reject #2948 during inference before lowering can drop the rotation."""
     size = 128
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 
@@ -255,10 +255,8 @@ def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
     mod = tvm.IRModule.from_expr(before)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
-    with target:
-        mod = tl.transform.LayoutInference()(mod)
-        with pytest.raises(Exception, match="non-round-tripping inverse"):
-            tl.transform.LowerTileOp()(mod)
+    with target, pytest.raises(ValueError, match="non-round-tripping inverse"):
+        tl.transform.LayoutInference()(mod)
 
 
 def test_lower_tile_op_preserves_ragged_parallel_padding_guard():

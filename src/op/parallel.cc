@@ -10,6 +10,10 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <unordered_set>
@@ -18,6 +22,7 @@
 #include "../layout/utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "arith/const_fold.h"
 #include "arith/int_operator.h"
 #include "backend/common/target_utils.h"
 #include "builtin.h"
@@ -32,6 +37,190 @@ using namespace tirx;
 using namespace ffi;
 
 namespace {
+
+constexpr int64_t kMaxEnumeratedParallelAccessChecks = int64_t{1} << 20;
+
+enum class ParallelFragmentAccessStatus { kValid, kInvalid, kUnavailable };
+
+struct ParallelFragmentAccessResult {
+  ParallelFragmentAccessStatus status;
+  std::string detail;
+};
+
+PrimExpr PhysicalThread(const Fragment &fragment,
+                        const Array<PrimExpr> &indices,
+                        const PrimExpr &replicate) {
+  PrimExpr thread_base = fragment->ThreadRange().defined()
+                             ? fragment->ThreadRange()->min
+                             : make_zero(fragment->GetForwardThread()->dtype);
+  return fragment->ForwardThread(indices, replicate) + thread_base;
+}
+
+ParallelFragmentAccessResult EnumerateParallelFragmentAccess(
+    const Fragment &loop_layout, const Fragment &fragment,
+    const Array<IterVar> &loop_vars, const Map<Var, IterVar> &inner_vars,
+    const Array<PrimExpr> &access_indices, bool is_write,
+    bool check_forward_index, arith::Analyzer *analyzer) {
+  ICHECK(loop_layout.defined());
+  ICHECK(fragment.defined());
+  ICHECK(analyzer != nullptr);
+  if (loop_layout->InputDim() != loop_vars.size() ||
+      fragment->InputDim() != access_indices.size()) {
+    return {ParallelFragmentAccessStatus::kUnavailable, ""};
+  }
+
+  Array<IterVar> logical_domain = loop_vars;
+  for (const auto &[var, iter_var] : inner_vars) {
+    bool is_used = false;
+    for (const PrimExpr &index : access_indices) {
+      if (tirx::UsesVar(index, [&](const VarNode *node) {
+            return GetRef<Var>(node).same_as(var);
+          })) {
+        is_used = true;
+        break;
+      }
+    }
+    if (is_used) {
+      logical_domain.push_back(iter_var);
+    }
+  }
+
+  std::vector<Var> variables;
+  std::vector<int64_t> domain_mins;
+  std::vector<int64_t> domain_extents;
+  variables.reserve(logical_domain.size() + 2);
+  domain_mins.reserve(logical_domain.size());
+  domain_extents.reserve(logical_domain.size());
+  int64_t logical_volume = 1;
+  for (const IterVar &iter_var : logical_domain) {
+    std::optional<int64_t> min =
+        EvaluateConstantInteger(analyzer->Simplify(iter_var->dom->min));
+    std::optional<int64_t> extent =
+        EvaluateConstantInteger(analyzer->Simplify(iter_var->dom->extent));
+    if (!min || !extent || *extent <= 0 ||
+        *extent > kMaxEnumeratedParallelAccessChecks / logical_volume) {
+      return {ParallelFragmentAccessStatus::kUnavailable, ""};
+    }
+    variables.push_back(iter_var->var);
+    domain_mins.push_back(*min);
+    domain_extents.push_back(*extent);
+    logical_volume *= *extent;
+  }
+
+  std::optional<int64_t> loop_replicas = EvaluateConstantInteger(
+      analyzer->Simplify(loop_layout->ReplicateExtent()));
+  std::optional<int64_t> fragment_replicas =
+      EvaluateConstantInteger(analyzer->Simplify(fragment->ReplicateExtent()));
+  if (!loop_replicas || !fragment_replicas || *loop_replicas <= 0 ||
+      *fragment_replicas <= 0 ||
+      *loop_replicas > kMaxEnumeratedParallelAccessChecks / logical_volume ||
+      *fragment_replicas >
+          kMaxEnumeratedParallelAccessChecks / logical_volume ||
+      *loop_replicas + *fragment_replicas >
+          kMaxEnumeratedParallelAccessChecks / logical_volume) {
+    return {ParallelFragmentAccessStatus::kUnavailable, ""};
+  }
+
+  Var loop_rep("__tl_parallel_access_loop_rep",
+               loop_layout->ReplicateExtent()->dtype);
+  Var fragment_rep("__tl_parallel_access_fragment_rep",
+                   fragment->ReplicateExtent()->dtype);
+  Array<PrimExpr> loop_indices = loop_vars.Map(
+      [](const IterVar &iter_var) { return PrimExpr(iter_var->var); });
+  PrimExpr loop_thread = PhysicalThread(loop_layout, loop_indices, loop_rep);
+  PrimExpr fragment_thread =
+      PhysicalThread(fragment, access_indices, fragment_rep);
+  Array<PrimExpr> loop_physical = loop_layout->Forward(loop_indices);
+  Array<PrimExpr> fragment_physical = fragment->Forward(access_indices);
+  if (check_forward_index && loop_physical.size() != fragment_physical.size()) {
+    return {ParallelFragmentAccessStatus::kInvalid,
+            "the loop and fragment have different physical-index ranks"};
+  }
+
+  variables.push_back(loop_rep);
+  variables.push_back(fragment_rep);
+  std::vector<int64_t> values(variables.size(), 0);
+  const size_t loop_rep_position = logical_domain.size();
+  const size_t fragment_rep_position = logical_domain.size() + 1;
+
+  using OwnerSet = std::set<int64_t>;
+  std::set<std::vector<int64_t>> written_logical_elements;
+
+  for (int64_t linear = 0; linear < logical_volume; ++linear) {
+    int64_t residual = linear;
+    for (size_t rev = domain_extents.size(); rev > 0; --rev) {
+      size_t i = rev - 1;
+      values[i] = domain_mins[i] + residual % domain_extents[i];
+      residual /= domain_extents[i];
+    }
+
+    std::vector<int64_t> logical_access;
+    logical_access.reserve(access_indices.size());
+    for (const PrimExpr &index : access_indices) {
+      std::optional<int64_t> value =
+          EvaluateIntegerExpression(index, variables, values);
+      if (!value) {
+        return {ParallelFragmentAccessStatus::kUnavailable, ""};
+      }
+      logical_access.push_back(*value);
+    }
+    if (is_write && !written_logical_elements.insert(logical_access).second) {
+      return {ParallelFragmentAccessStatus::kInvalid,
+              "the fragment write is not one-to-one: multiple logical "
+              "executions address the same fragment element"};
+    }
+
+    if (check_forward_index) {
+      for (size_t i = 0; i < loop_physical.size(); ++i) {
+        std::optional<int64_t> loop_index =
+            EvaluateIntegerExpression(loop_physical[i], variables, values);
+        std::optional<int64_t> fragment_index =
+            EvaluateIntegerExpression(fragment_physical[i], variables, values);
+        if (!loop_index || !fragment_index) {
+          return {ParallelFragmentAccessStatus::kUnavailable, ""};
+        }
+        if (*loop_index != *fragment_index) {
+          return {ParallelFragmentAccessStatus::kInvalid,
+                  "the loop and fragment physical indices differ"};
+        }
+      }
+    }
+
+    OwnerSet fragment_owners;
+    for (int64_t rep = 0; rep < *fragment_replicas; ++rep) {
+      values[fragment_rep_position] = rep;
+      std::optional<int64_t> thread =
+          EvaluateIntegerExpression(fragment_thread, variables, values);
+      if (!thread) {
+        return {ParallelFragmentAccessStatus::kUnavailable, ""};
+      }
+      fragment_owners.insert(*thread);
+    }
+
+    OwnerSet loop_owners;
+    for (int64_t rep = 0; rep < *loop_replicas; ++rep) {
+      values[loop_rep_position] = rep;
+      std::optional<int64_t> thread =
+          EvaluateIntegerExpression(loop_thread, variables, values);
+      if (!thread) {
+        return {ParallelFragmentAccessStatus::kUnavailable, ""};
+      }
+      loop_owners.insert(*thread);
+    }
+
+    if (!std::includes(fragment_owners.begin(), fragment_owners.end(),
+                       loop_owners.begin(), loop_owners.end())) {
+      return {ParallelFragmentAccessStatus::kInvalid,
+              "a loop thread does not own the accessed fragment element"};
+    }
+    if (is_write && loop_owners != fragment_owners) {
+      return {ParallelFragmentAccessStatus::kInvalid,
+              "the loop does not update every owner of an accessed fragment "
+              "element"};
+    }
+  }
+  return {ParallelFragmentAccessStatus::kValid, ""};
+}
 
 class IfBufferRemapLoopGenerator : public StmtExprMutator {
 public:
@@ -118,6 +307,142 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
     }
   }
   return best_vector_size;
+}
+
+std::optional<std::string>
+GetFragmentForwardMapError(const Fragment &fragment, const Range &thread_bounds,
+                           arith::Analyzer *analyzer) {
+  ICHECK(fragment.defined());
+  ICHECK(thread_bounds.defined());
+  ICHECK(analyzer != nullptr);
+
+  Range declared_range = fragment->ThreadRange().defined()
+                             ? fragment->ThreadRange()
+                             : thread_bounds;
+  if (!analyzer->CanProve(declared_range->extent > 0)) {
+    return "the declared thread range must have positive extent";
+  }
+  if (!analyzer->CanProve(declared_range->min >= thread_bounds->min) ||
+      !analyzer->CanProve(declared_range->min + declared_range->extent <=
+                          thread_bounds->min + thread_bounds->extent)) {
+    std::ostringstream os;
+    os << "declared thread range " << declared_range
+       << " is outside the current participant range " << thread_bounds;
+    return os.str();
+  }
+  auto scoped_analyzer = analyzer->Clone();
+  for (size_t i = 0; i < fragment->InputDim(); ++i) {
+    scoped_analyzer->Bind(InputPlaceholder(i),
+                          Range(0, fragment->InputShape()[i]), true);
+  }
+  scoped_analyzer->Bind(ReplicationPlaceholder(),
+                        Range(0, fragment->ReplicateExtent()), true);
+  arith::IntSet thread_set =
+      scoped_analyzer->int_set(fragment->GetForwardThread());
+  if (thread_set.IsNothing()) {
+    return "the fragment thread image is empty";
+  }
+  if (arith::is_neg_inf(thread_set.min()) ||
+      arith::is_pos_inf(thread_set.max())) {
+    // A symbolic loop extent can make interval analysis inconclusive even
+    // when the thread expression itself is valid.  Keep the pre-existing
+    // symbolic injectivity check as the authority in that case.
+    return std::nullopt;
+  }
+  PrimExpr thread_extent =
+      analyzer->Simplify(thread_set.max() - thread_set.min() + 1);
+  if (!analyzer->CanProve(thread_extent <= declared_range->extent)) {
+    std::ostringstream os;
+    os << "normalized thread extent " << thread_extent
+       << " exceeds the declared participant extent " << declared_range->extent;
+    return os.str();
+  }
+  for (const PrimExpr &extent : fragment->InputShape()) {
+    if (!EvaluateConstantInteger(analyzer->Simplify(extent))) {
+      return std::nullopt;
+    }
+  }
+  if (!EvaluateConstantInteger(
+          analyzer->Simplify(fragment->ReplicateExtent()))) {
+    return std::nullopt;
+  }
+  if (auto error = GetFragmentBijectionError(fragment, analyzer)) {
+    return error;
+  }
+
+  // PartitionLoop consumes this inverse directly.  A forward map can be an
+  // exact bijection while TVM's iter-map solver still synthesizes a wrong
+  // inverse for cyclic floor-div/mod expressions, so validate the same static
+  // round trip before accepting the inferred candidate.
+  try {
+    (void)fragment->InverseWithLevel();
+  } catch (const NormalizeIterException &err) {
+    return err.what();
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> GetFragmentWriteInjectivityError(
+    const Fragment &loop_layout, const Fragment &fragment,
+    const Array<IterVar> &loop_vars, const Map<Var, IterVar> &inner_vars,
+    const Array<PrimExpr> &access_indices, arith::Analyzer *analyzer) {
+  Var rep("__tl_parallel_write_rep", loop_layout->ReplicateExtent()->dtype);
+  Array<PrimExpr> loop_indices = loop_vars.Map(
+      [](const IterVar &iter_var) { return PrimExpr(iter_var->var); });
+  Array<PrimExpr> physical_coordinates{
+      loop_layout->ForwardThread(loop_indices, rep)};
+  Array<PrimExpr> physical_indices = fragment->Forward(access_indices);
+  physical_coordinates.insert(physical_coordinates.end(),
+                              physical_indices.begin(), physical_indices.end());
+
+  Array<IterVar> logical_domain = loop_vars;
+  for (const auto &[var, iter_var] : inner_vars) {
+    bool is_used = false;
+    for (const PrimExpr &coordinate : physical_coordinates) {
+      if (tirx::UsesVar(coordinate, [&](const VarNode *node) {
+            return GetRef<Var>(node).same_as(var);
+          })) {
+        is_used = true;
+        break;
+      }
+    }
+    if (is_used) {
+      logical_domain.push_back(iter_var);
+    }
+  }
+  logical_domain.push_back(IterVar(Range(0, loop_layout->ReplicateExtent()),
+                                   rep, IterVarType::kDataPar));
+
+  // DetectInjective reports both proven collisions and unsupported symbolic
+  // maps as errors.  A symbolic Parallel extent therefore cannot justify
+  // rejecting the program; bounded concrete cases are checked by the exact
+  // owner check in ValidateCandidateAgainstFragments.
+  for (const IterVar &iter_var : logical_domain) {
+    if (!EvaluateConstantInteger(analyzer->Simplify(iter_var->dom->extent))) {
+      return std::nullopt;
+    }
+  }
+
+  Array<IterVar> normalized_domain;
+  Map<Var, PrimExpr> normalization;
+  for (size_t i = 0; i < logical_domain.size(); ++i) {
+    const IterVar &iter_var = logical_domain[i];
+    Var normalized_var("__tl_write_i" + std::to_string(i),
+                       iter_var->var.dtype());
+    normalized_domain.push_back(IterVar(Range(0, iter_var->dom->extent),
+                                        normalized_var, IterVarType::kDataPar));
+    normalization.Set(iter_var->var, normalized_var + iter_var->dom->min);
+  }
+  arith::IterMapResult injectivity =
+      Layout(normalized_domain, Substitute(physical_coordinates, normalization))
+          ->DetectInjective();
+  if (injectivity->errors.empty()) {
+    return std::nullopt;
+  }
+  std::ostringstream os;
+  os << "the fragment write is not one-to-one. Details: "
+     << injectivity->errors;
+  return os.str();
 }
 
 } // anonymous namespace
@@ -340,9 +665,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     // LayoutConflictException lets free mode discard the attempt. Strict and
     // common levels have no discard channel, so they keep the early-out.
     if (level == InferLevel::kFree && loop_layout_.defined()) {
-      ValidateCandidateAgainstFragments(loop_layout_, layout_args,
-                                        /*throw_on_error=*/true,
-                                        /*check_forward_index=*/false);
+      ValidateInferredLayout(layout_args);
     }
     return {};
   }
@@ -594,9 +917,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
       /*check_forward_index=*/false, source_buffer);
 
   // Step 3: Build replication guards
-  BuildReplicationGuardsIfNeeded(
-      layout_args, store_shared_global_buffers_, store_fragment_buffers_,
-      has_cross_thread_access_, const_index_fragment_buffer);
+  BuildReplicationGuardsIfNeeded(layout_args, store_fragment_buffers_,
+                                 has_cross_thread_access_);
 
   // Step 4: Collect buffer fragments
   LayoutMap results;
@@ -614,6 +936,19 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   // whose induced layouts disagree.
   for (const auto &update : reducer_updates_) {
     results.Set(update.buffer, ProposeReducerPartial(update, layout_args));
+  }
+
+  if (level == InferLevel::kFree) {
+    LayoutMap completed_layout_map = layout_args.layout_map;
+    for (const auto &[buffer, layout] : results) {
+      completed_layout_map.Set(buffer, layout);
+    }
+    ValidateInferredLayout(LayoutInferArgs{
+        layout_args.target, layout_args.thread_bounds, completed_layout_map,
+        layout_args.analyzer, layout_args.buffer_remap,
+        layout_args.bind_var_to_expr, layout_args.in_pipeline,
+        layout_args.strict_layout_map, layout_args.candidate_vector_size_limit,
+        layout_args.allocated_fragment_buffers});
   }
 
   loop_layout_inferred_ = true;
@@ -782,6 +1117,49 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
   return Fragment();
 }
 
+void ParallelOpNode::ValidateInferredLayout(
+    const LayoutInferArgs &layout_args) const {
+  if (!loop_layout_.defined()) {
+    throw LayoutConflictException(
+        "T.Parallel has no loop layout after free layout inference.");
+  }
+
+  if (indice_map_.empty()) {
+    return;
+  }
+
+  if (auto error = GetFragmentForwardMapError(
+          loop_layout_, layout_args.thread_bounds, layout_args.analyzer)) {
+    std::ostringstream os;
+    os << "T.Parallel inferred an invalid loop layout for fragment access: "
+       << *error << ". Layout: " << loop_layout_->DebugOutput();
+    throw LayoutConflictException(os.str());
+  }
+
+  ValidateCandidateAgainstFragments(
+      loop_layout_, layout_args, /*throw_on_error=*/true,
+      /*check_forward_index=*/false, /*source_buffer=*/Buffer());
+
+  for (const Buffer &buffer : access_order_) {
+    const BufferAccessInfo &access = GetAccessInfo(buffer);
+    if (!access.is_write || !layout_args.layout_map.count(buffer)) {
+      continue;
+    }
+    Optional<Fragment> fragment = layout_args.layout_map[buffer].as<Fragment>();
+    if (!fragment.defined()) {
+      continue;
+    }
+    if (auto error = GetFragmentWriteInjectivityError(
+            loop_layout_, fragment.value(), loop_vars_, inner_vars_,
+            access.indices, layout_args.analyzer)) {
+      std::ostringstream os;
+      os << "T.Parallel cannot write fragment buffer `" << buffer->name
+         << "`: " << *error;
+      throw LayoutConflictException(os.str());
+    }
+  }
+}
+
 Optional<PrimExpr> ParallelOpNode::GetPredicate(PrimExpr thread_index) const {
   if (predicate_.defined()) {
     return Substitute(predicate_.value(),
@@ -887,8 +1265,6 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     const Fragment &candidate, const LayoutInferArgs &layout_args,
     bool throw_on_error, bool check_forward_index,
     const Buffer &source_buffer) const {
-  auto vars =
-      loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
   for (const auto &buffer : access_order_) {
     const auto &access = GetAccessInfo(buffer);
     if (!layout_args.layout_map.count(buffer))
@@ -896,30 +1272,19 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
     auto fragment = layout_args.layout_map[buffer].as<Fragment>().value();
     std::ostringstream oss;
     bool success = true;
-    if (access.is_read &&
-        !ProveFragmentContains(candidate, fragment, vars, access.indices,
-                               analyzer_, check_forward_index)) {
+    ParallelFragmentAccessResult result = EnumerateParallelFragmentAccess(
+        candidate, fragment, loop_vars_, inner_vars_, access.indices,
+        access.is_write, check_forward_index, &analyzer_);
+    // Enumeration returning unavailable means the relationship is not proven
+    // invalid (for example, a legal dynamic loop or a domain above the bounded
+    // fallback limit).  Keep the candidate and let normal lowering handle it.
+    if (result.status == ParallelFragmentAccessStatus::kInvalid) {
       if (throw_on_error) {
         oss << "Layout infer conflict between " << buffer << " and "
             << source_buffer << " in T.Parallel loop:" << '\n'
             << "    loop " << candidate->DebugOutput() << '\n'
-            << "    fragment " << fragment->DebugOutput() << '\n';
-      }
-      success = false;
-    }
-    // Fragment writes need exact owner-thread compatibility. Coverage alone
-    // allows extra loop threads to write local slots that belong to different
-    // logical fragment elements under the buffer layout.
-    if (access.is_write &&
-        (!ProveFragmentContains(fragment, candidate, access.indices, vars,
-                                analyzer_, check_forward_index) ||
-         !ProveFragmentContains(candidate, fragment, vars, access.indices,
-                                analyzer_, check_forward_index))) {
-      if (throw_on_error) {
-        oss << "Layout infer conflict between " << buffer << " and "
-            << source_buffer << " in T.Parallel loop:" << '\n'
-            << "    loop " << candidate->DebugOutput() << '\n'
-            << "    fragment " << fragment->DebugOutput() << '\n';
+            << "    fragment " << fragment->DebugOutput() << '\n'
+            << "    reason " << result.detail << '\n';
       }
       success = false;
     }
@@ -967,9 +1332,42 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
       }
     });
 
+    Map<Var, arith::IntSet> varying_domains;
+    for (const IterVar &loop_var : loop_vars_) {
+      varying_domains.Set(loop_var->var,
+                          arith::IntSet::FromRange(loop_var->dom));
+    }
+    varying_domains.Set(rep, arith::IntSet::FromRange(rep_iter->dom));
+    arith::IntSet accessed_threads =
+        arith::EvalSet(loop_var_to_thread, varying_domains);
+    if (accessed_threads.IsNothing() ||
+        arith::is_neg_inf(accessed_threads.min()) ||
+        arith::is_pos_inf(accessed_threads.max())) {
+      std::ostringstream os;
+      os << "Cannot determine the thread range used to access fragment buffer `"
+         << buffer->name << "` (thread map: " << loop_var_to_thread << ").";
+      throw LayoutConflictException(os.str());
+    }
+    PrimExpr accessed_thread_min =
+        layout_args.analyzer->Simplify(accessed_threads.min());
+    PrimExpr accessed_thread_max =
+        layout_args.analyzer->Simplify(accessed_threads.max());
+    PrimExpr accessed_thread_extent = layout_args.analyzer->Simplify(
+        accessed_thread_max - accessed_thread_min + 1);
+    PrimExpr source_thread_base = src_layout->ThreadRange().defined()
+                                      ? src_layout->ThreadRange()->min
+                                      : make_zero(accessed_thread_min.dtype());
+    Range accessed_thread_range =
+        Range::FromMinExtent(layout_args.analyzer->Simplify(
+                                 source_thread_base + accessed_thread_min),
+                             accessed_thread_extent);
+
     try {
-      result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
-                   ->BindThreadRange(layout_args.thread_bounds);
+      result = Fragment(loop_vars_, {},
+                        layout_args.analyzer->Simplify(loop_var_to_thread -
+                                                       accessed_thread_min),
+                        rep_iter)
+                   ->BindThreadRange(accessed_thread_range);
     } catch (const Error &err) {
       std::ostringstream msg;
       msg << "Layout inference for buffer `" << buffer->name
@@ -1056,43 +1454,17 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
 
 void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     const LayoutInferArgs &layout_args,
-    const std::vector<Buffer> &store_shared_global_buffers,
     const std::vector<Buffer> &store_fragment_buffers,
-    bool has_cross_thread_access,
-    const std::vector<Buffer> &const_index_fragment_buffer) const {
+    bool has_cross_thread_access) const {
   if (is_one(loop_layout_->ReplicateExtent()))
     return;
   if (!has_cross_thread_access)
     return;
 
   if (!store_fragment_buffers.empty()) {
-    bool replicate_is_from_dynamic_index_fragment = false;
-    for (const auto &fragment : store_fragment_buffers) {
-      if (!layout_args.layout_map.count(fragment)) {
-        continue;
-      }
-
-      auto fragment_layout =
-          layout_args.layout_map[fragment].as<Fragment>().value();
-      if (is_one(fragment_layout->ReplicateExtent()))
-        continue;
-
-      if (analyzer_.CanProveEqual(fragment_layout->ReplicateExtent(),
-                                  loop_layout_->ReplicateExtent()))
-        continue;
-      if (std::find(const_index_fragment_buffer.begin(),
-                    const_index_fragment_buffer.end(),
-                    fragment) == const_index_fragment_buffer.end()) {
-        replicate_is_from_dynamic_index_fragment = true;
-      }
-    }
-
-    if (!replicate_is_from_dynamic_index_fragment)
-      return;
-
-    ICHECK(store_shared_global_buffers.empty())
-        << "Invalid layout: cannot have both fragment and shared store buffers "
-           "in replicated loop layout.";
+    // Fragment writes require every replica to execute. Any coexisting
+    // shared/global stores therefore execute once per replica as well;
+    // duplicate same-value stores are permitted by CUDA instruction semantics.
     return;
   } else {
     auto inv = loop_layout_->Inverse();
@@ -1217,14 +1589,13 @@ FragmentThreadIndexProbe::FragmentThreadIndexProbe(
   }
   partition_vars.push_back(thread_var_);
   if (loop_layout->ThreadRange().defined()) {
-    analyzer->Bind(thread_var_,
-                   Range::FromMinExtent(loop_layout->ThreadRange()->min,
-                                        loop_layout->ThreadRange()->extent));
+    thread_domain_ = Range::FromMinExtent(loop_layout->ThreadRange()->min,
+                                          loop_layout->ThreadRange()->extent);
   } else {
-    analyzer->Bind(thread_var_,
-                   Range::FromMinExtent(make_zero(DataType::Int(32)),
-                                        loop_layout->ThreadExtent()));
+    thread_domain_ = Range::FromMinExtent(make_zero(DataType::Int(32)),
+                                          loop_layout->ThreadExtent());
   }
+  analyzer->Bind(thread_var_, thread_domain_);
 
   Array<PrimExpr> recovered_indices;
   try {
@@ -1262,8 +1633,16 @@ bool FragmentThreadIndexProbe::AccessUsesThread(
   for (const auto &index : physical_indices) {
     PrimExpr simplified = analyzer_->Simplify(index);
     if (tirx::UsesVar(simplified, [&](const VarNode *var_node) {
-          return GetRef<Var>(var_node).same_as(thread_var_);
+          return GetRef<Var>(var_node).same_as(ReplicationPlaceholder());
         })) {
+      return true;
+    }
+    Map<Var, arith::IntSet> varying_domain;
+    varying_domain.Set(thread_var_, arith::IntSet::FromRange(thread_domain_));
+    arith::IntSet values = arith::EvalSet(simplified, varying_domain);
+    if (values.IsNothing() || arith::is_neg_inf(values.min()) ||
+        arith::is_pos_inf(values.max()) ||
+        !analyzer_->CanProveEqual(values.min(), values.max())) {
       return true;
     }
   }
