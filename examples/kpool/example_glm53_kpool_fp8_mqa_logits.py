@@ -86,9 +86,12 @@ def glm53_kpool_fp8_mqa_logits_kernel(
                     if logical_pool >= pool_start and logical_pool < pool_end:
                         page = logical_pool // page_size
                         page_offset = logical_pool % page_size
-                        physical_block = pool_page_table[page_table_row, page]
-                        if physical_block >= 0 and physical_block < num_blocks:
-                            key_shared[pool_lane, dim] = k_cache[physical_block, page_offset, dim]
+                        if page_table_row >= 0 and page_table_row < num_page_rows and page >= 0 and page < max_pages:
+                            physical_block = pool_page_table[page_table_row, page]
+                            if physical_block >= 0 and physical_block < num_blocks:
+                                key_shared[pool_lane, dim] = k_cache[physical_block, page_offset, dim]
+                            else:
+                                key_shared[pool_lane, dim] = T.cast(0, fp8_dtype)
                         else:
                             key_shared[pool_lane, dim] = T.cast(0, fp8_dtype)
                     else:
@@ -99,9 +102,12 @@ def glm53_kpool_fp8_mqa_logits_kernel(
                     if logical_pool >= pool_start and logical_pool < pool_end:
                         page = logical_pool // page_size
                         page_offset = logical_pool % page_size
-                        physical_block = pool_page_table[page_table_row, page]
-                        if physical_block >= 0 and physical_block < num_blocks:
-                            key_scales[pool_lane] = scale_cache[physical_block, page_offset]
+                        if page_table_row >= 0 and page_table_row < num_page_rows and page >= 0 and page < max_pages:
+                            physical_block = pool_page_table[page_table_row, page]
+                            if physical_block >= 0 and physical_block < num_blocks:
+                                key_scales[pool_lane] = scale_cache[physical_block, page_offset]
+                            else:
+                                key_scales[pool_lane] = 0.0
                         else:
                             key_scales[pool_lane] = 0.0
                     else:
@@ -126,9 +132,12 @@ def glm53_kpool_fp8_mqa_logits_kernel(
                     if logical_pool < max_num_pools:
                         if logical_pool >= pool_start and logical_pool < pool_end:
                             page = logical_pool // page_size
-                            physical_block = pool_page_table[page_table_row, page]
-                            if physical_block >= 0 and physical_block < num_blocks:
-                                logits[row, logical_pool] = row_logits[pool_lane]
+                            if page_table_row >= 0 and page_table_row < num_page_rows and page >= 0 and page < max_pages:
+                                physical_block = pool_page_table[page_table_row, page]
+                                if physical_block >= 0 and physical_block < num_blocks:
+                                    logits[row, logical_pool] = row_logits[pool_lane]
+                                else:
+                                    logits[row, logical_pool] = -T.infinity(T.float32)
                             else:
                                 logits[row, logical_pool] = -T.infinity(T.float32)
                         else:
