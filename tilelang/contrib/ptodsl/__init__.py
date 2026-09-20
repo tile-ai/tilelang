@@ -23,7 +23,12 @@ from .dcache_bypass import (
 from .gemm import PTOBlockscaledGemmL1Template, PTOGemmL1Template
 from .mixed_kernel import finalize_mixed_kernel, mixed_kernel_section
 from .rng import PhiloxRNG
-from .simd_inst import vdiv_precise_f32
+from .simd_inst import (
+    vdiv_precise_f32,
+    vexp_1ulp_ftz_false,
+    vln_1ulp_ftz_false,
+    vsqrt_0ulp_ftz_false,
+)
 from .simt import (
     scalar_div,
     scalar_rsqrt,
@@ -61,6 +66,9 @@ __all__ = [
     "unwrap_surface_value",
     "ushr",
     "vdiv_precise_f32",
+    "vexp_1ulp_ftz_false",
+    "vln_1ulp_ftz_false",
+    "vsqrt_0ulp_ftz_false",
     "wrap_surface_value",
     "write_gm_bypass_dcache",
     "scalar_div",

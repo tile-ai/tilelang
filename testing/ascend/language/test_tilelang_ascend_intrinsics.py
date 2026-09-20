@@ -110,7 +110,7 @@ def test_ascend_simd_mem_bar_pto_codegen():
             T.simd.mem_bar("VST_VLD")
 
     source = lower(func, target="pto").kernel_source
-    assert "pto.mem_bar(pto.BarrierType.VST_VLD)" in source
+    assert 'pto.mem_bar("VST_VLD")' in source
 
 
 def test_ascend_set_wait_flag():
@@ -356,6 +356,12 @@ def test_ascend_simd_vaddc_codegen(dtype):
 
 
 def test_ascend_simd_vdiv_precision_override():
+    """Per-op precision annotation overrides the fast-math default on both backends.
+
+    PTO maps the exact tier to the tl.vdiv_precise_f32 software wrapper with
+    the same priority as AscendC: annotation (exact > hw) > fast-math default.
+    """
+
     @T.prim_func
     def func(
         A: T.Buffer((64,), "float32"),
@@ -388,8 +394,15 @@ def test_ascend_simd_vdiv_precision_override():
     assert fast_default_source.count("simd_inst::vdiv_0ulp_ftz_true(") == 1
     assert fast_default_source.count("simd_inst::vdiv(") == 2
 
-    with pytest.raises(Exception, match="requires a newer PTOAS version"):
-        lower(func, target="pto")
+    with tilelang.transform.PassContext(config={config_key: False}):
+        pto_precise_default_source = lower(func, target="pto").kernel_source
+    with tilelang.transform.PassContext(config={config_key: True}):
+        pto_fast_default_source = lower(func, target="pto").kernel_source
+
+    assert pto_precise_default_source.count("tl.vdiv_precise_f32(") == 2
+    assert pto_precise_default_source.count("pto.vdiv(") == 1
+    assert pto_fast_default_source.count("tl.vdiv_precise_f32(") == 1
+    assert pto_fast_default_source.count("pto.vdiv(") == 2
 
 
 def test_ascend_simd_sfu_precision_merging():
@@ -426,6 +439,43 @@ def test_ascend_simd_sfu_precision_merging():
 
     with pytest.raises(Exception, match="MODE_MERGING"):
         lower(func, target="pto")
+
+
+def test_pto_simd_sfu_precision_source():
+    """PTO vexp/vln/vsqrt consume the per-op precision annotation.
+
+    precision="ftz_false" routes to the subnormal-preserving software
+    wrappers (tl.*_ftz_false); precision="ftz_true" and the annotation-less
+    default keep the bare SFU call regardless of the fast-math setting.
+    """
+
+    @T.prim_func
+    def func(
+        A: T.Buffer((64,), "float32"),
+        C: T.Buffer((320,), "float32"),
+    ):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((64,), "float32")
+            c_ub = T.alloc_shared((320,), "float32")
+            T.copy(A, a_ub)
+            with T.SimdVF():
+                full = T.simd.pset(32)
+                src = T.simd.vld(a_ub[0])
+                T.simd.vsts(c_ub[0], ascend_simd.vexp(src, full, precision="ftz_false"), full)
+                T.simd.vsts(c_ub[64], ascend_simd.vexp(src, full, precision="ftz_true"), full)
+                T.simd.vsts(c_ub[128], ascend_simd.vexp(src, full), full)
+                T.simd.vsts(c_ub[192], ascend_simd.vln(src, full, precision="ftz_false"), full)
+                T.simd.vsts(c_ub[256], ascend_simd.vsqrt(src, full, precision="ftz_false"), full)
+            T.copy(c_ub, C)
+
+    config_key = tilelang.PassConfigKey.TL_ENABLE_FAST_MATH.value
+    for fast_math in (False, True):
+        with tilelang.transform.PassContext(config={config_key: fast_math}):
+            source = lower(func, target="pto").kernel_source
+        assert source.count("tl.vexp_1ulp_ftz_false(") == 1
+        assert source.count("pto.vexp(") == 2
+        assert source.count("tl.vln_1ulp_ftz_false(") == 1
+        assert source.count("tl.vsqrt_0ulp_ftz_false(") == 1
 
 
 def test_ascend_simd_vsstb_threads_pointer_state():
@@ -476,12 +526,14 @@ def test_ascend_simd_vsstb_threads_pointer_state():
     pto_source = lower(func, target="pto").kernel_source
     assert "dst_ptr = None" in pto_source
     assert pto_source.count("pto.vsstb(") == 2
-    assert "((196609 >> 16) & 65535), (196609 & 65535)" in pto_source
+    # The packed stride (3 << 16) | 1 == 196609 is constant-folded into the
+    # separate block/repeat stride fields (3, 1).
+    assert "dst_ptr, 3, 1, " in pto_source
     assert 'dist="1PT_B32"' in pto_source
     assert "ONEPT_B32" not in pto_source
     assert "_tl_coerce_i64(pto.addptr(" not in pto_source
     assert "_tl_coerce_i64(pto.vsstb(" not in pto_source
-    assert "pto.mem_bar(pto.BarrierType.VST_VLD)" in pto_source
+    assert 'pto.mem_bar("VST_VLD")' in pto_source
 
 
 def test_ascend_simd_vld2_dintlv_b16_codegen():

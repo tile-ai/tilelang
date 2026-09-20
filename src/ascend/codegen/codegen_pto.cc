@@ -3,6 +3,7 @@
  * \brief Utility to generate PTO Python source.
  */
 #include "ascend/codegen/codegen_pto.h"
+#include "ascend/codegen/sfu_precision.h"
 
 #include "ascend/op/builtin.h"
 #include "backend/common/codegen/codegen_utils.h"
@@ -4788,13 +4789,26 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd binary vector op expects 4 arguments (src0, src1, mask, "
            "mode)";
-    if (op->op.same_as(tl::simd_vdiv()) && !enable_fast_math_ &&
-        op->dtype.element_of().is_float() &&
-        op->dtype.element_of().bits() == 32) {
-      ValidateVecMode_(op, 3);
-      os << "tl.vdiv_precise_f32(" << PrintExpr_(op->args[0]) << ", "
-         << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
-      return;
+    if (op->op.same_as(tl::simd_vdiv())) {
+      // Per-op "precision" annotation (0=hw, 1=exact) wins over the global
+      // fast-math default via the shared SFU precision resolver. Non-fp32
+      // always uses the hardware instruction regardless of annotations.
+      const bool is_f32 = op->dtype.element_of().is_float() &&
+                          op->dtype.element_of().bits() == 32;
+      const SfuPrecision prec = ResolveSfuPrecision(
+          GetRef<Call>(op), op->dtype,
+          (is_f32 && !enable_fast_math_) ? SfuPrecision::kExact
+                                         : SfuPrecision::kHw);
+      ICHECK_NE(static_cast<int>(prec),
+                static_cast<int>(SfuPrecision::kKeepSub))
+          << "PTO tl.simd.vdiv has no ftz_false precision tier; use "
+             "precision=\"ftz_true\" or \"exact\"";
+      if (prec == SfuPrecision::kExact) {
+        ValidateVecMode_(op, 3);
+        os << "tl.vdiv_precise_f32(" << PrintExpr_(op->args[0]) << ", "
+           << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
+        return;
+      }
     }
     const char *name = nullptr;
     if (op->op.same_as(tl::simd_vadd()))
@@ -4830,8 +4844,17 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
       op->op.same_as(tl::simd_vln()) || op->op.same_as(tl::simd_vsqrt()) ||
       op->op.same_as(tl::simd_vneg()) || op->op.same_as(tl::simd_vrelu()) ||
       op->op.same_as(tl::simd_vnot())) {
-    ICHECK_EQ(op->args.size(), 3U)
-        << "tl.simd unary op expects 3 arguments (src, mask, mode)";
+    // LegalizeSimdMerging rewrites `dst[0] = op(src, mask, MODE_MERGING)` into
+    // a void call carrying dst as an explicit read-write first argument.
+    const bool has_explicit_dst = op->args.size() == 4U;
+    ICHECK(op->args.size() == 3U || has_explicit_dst)
+        << "tl.simd unary op expects 3 arguments (src, mask, mode) or the "
+           "legalized MODE_MERGING form (dst, src, mask, mode), got "
+        << op->args.size() << " arguments";
+    if (has_explicit_dst) {
+      LOG(FATAL) << "PTO codegen does not support MODE_MERGING for "
+                 << Downcast<Op>(op->op)->name << " yet";
+    }
     ValidateVecMode_(op, 2);
     const char *name = op->op.same_as(tl::simd_vabs())    ? "vabs"
                        : op->op.same_as(tl::simd_vexp())  ? "vexp"
@@ -4849,6 +4872,28 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
                        RemoveOutermostParentheses(PrintExpr_(op->args[1])) +
                        ", pto.mask_type(\"b" + std::to_string(input_bits) +
                        "\"))";
+    // Per-op SFU precision annotation (vexp/vln/vsqrt only; vabs/vneg/vrelu
+    // have no precision tiers). 0 (hw) keeps the bare SFU call; 2 (ftz_false)
+    // routes to the subnormal-preserving software wrapper. The shared
+    // resolver guarantees ftz_false only applies to float32 operands.
+    if (op->op.same_as(tl::simd_vexp()) || op->op.same_as(tl::simd_vln()) ||
+        op->op.same_as(tl::simd_vsqrt())) {
+      const SfuPrecision prec =
+          ResolveSfuPrecision(GetRef<Call>(op), op->dtype, SfuPrecision::kHw);
+      if (prec == SfuPrecision::kKeepSub) {
+        const char *helper =
+            op->op.same_as(tl::simd_vexp())    ? "tl.vexp_1ulp_ftz_false"
+            : op->op.same_as(tl::simd_vln())   ? "tl.vln_1ulp_ftz_false"
+                                               : "tl.vsqrt_0ulp_ftz_false";
+        os << helper << "(" << PrintExpr_(op->args[0]) << ", " << mask
+           << ")";
+        return;
+      }
+      ICHECK_EQ(static_cast<int>(prec), static_cast<int>(SfuPrecision::kHw))
+          << "PTO tl.simd." << name
+          << " only supports precision 0 (hw) and 2 (ftz_false), got "
+          << static_cast<int>(prec);
+    }
     os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ", " << mask
        << ")";
     return;

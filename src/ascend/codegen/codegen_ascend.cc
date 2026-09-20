@@ -22,6 +22,8 @@
 #include "backend/common/target_utils.h"
 #include "transform/common/attr.h"
 
+#include "ascend/codegen/sfu_precision.h"
+
 namespace tvm {
 namespace codegen {
 using ffi::GetRef;
@@ -103,45 +105,10 @@ bool SupportsNativeSimdMerging(const std::string &name, DataType dtype) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-op SFU precision resolution.
-//
-// Priority (high -> low):
-//   1. per-op "precision" annotation (Python `precision=` kwarg)
-//   2. `fallback` (legacy: fast_math for vdiv; bare SFU otherwise)
-//
-// The Python side (tilelang/ascend/language/simd.py) is the single source
-// of truth for alias resolution: string aliases are normalized to integer
-// codes (0=hw, 1=exact, 2=ftz_false) before they reach codegen, so no
-// alias table lives here (mirrors the l2_cache_ctrl pattern).
+// Per-op SFU precision resolution lives in ascend/codegen/sfu_precision.h and
+// is shared with the PTO backend (priority: per-op "precision" annotation,
+// then the fast-math/bare-SFU fallback).
 // ---------------------------------------------------------------------------
-enum class SfuPrecision { kHw, kExact, kKeepSub };
-
-static SfuPrecision PrecisionFromCode(int code) {
-  if (code == 1)
-    return SfuPrecision::kExact;
-  if (code == 2)
-    return SfuPrecision::kKeepSub;
-  return SfuPrecision::kHw;
-}
-
-// MODE_MERGING calls are legalized to void calls, so use the explicit result
-// dtype supplied by the caller rather than reading op->dtype here.
-SfuPrecision ResolveSfuPrecision(const Call &op, DataType result_dtype,
-                                 SfuPrecision fallback) {
-  // Precise paths (vdiv_0ulp_ftz_true, *_ftz_false wrappers) are float32-only:
-  // non-fp32 keeps the hardware instruction regardless of annotations
-  // (historical UsePreciseVdiv contract: "non-fp32 always uses hardware").
-  if (!result_dtype.is_float() || result_dtype.bits() != 32) {
-    return fallback;
-  }
-  // Per-op "precision" annotation (int code from the Python side,
-  // normalized from the string aliases in tilelang/ascend/language/simd.py
-  // -- no alias table here, mirroring the l2_cache_ctrl pattern).
-  if (auto p = op->annotations.Get("precision")) {
-    return PrecisionFromCode(Downcast<IntImm>(p.value())->value);
-  }
-  return fallback;
-}
 
 bool IsAscendWarpReduceDType(DataType dtype) {
   return dtype.is_scalar() &&
