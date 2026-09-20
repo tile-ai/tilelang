@@ -35,6 +35,42 @@ using namespace tirx;
 
 namespace {
 
+constexpr const char *kModeMerging = "MODE_MERGING";
+constexpr const char *kModeZeroing = "MODE_ZEROING";
+constexpr const char *kSimdOpPrefix = "tl.simd.";
+
+bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
+  if (auto call_op = op->op.as<Op>()) {
+    const std::string &name = call_op.value()->name;
+    if (name.rfind(kSimdOpPrefix, 0) == 0) {
+      if (op_name != nullptr) {
+        *op_name = name;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsSimdMergingCall(const CallNode *op,
+                       std::string *intrinsic_name = nullptr) {
+  if (!op->dtype.is_void() || op->args.empty()) {
+    return false;
+  }
+  const auto *mode = op->args.back().as<StringImmNode>();
+  if (mode == nullptr || mode->value != kModeMerging) {
+    return false;
+  }
+  std::string op_name;
+  if (!IsSimdOp(op, &op_name)) {
+    return false;
+  }
+  if (intrinsic_name != nullptr) {
+    *intrinsic_name = op_name.substr(std::string(kSimdOpPrefix).size());
+  }
+  return true;
+}
+
 void ValidateSharedScope(const std::string &scope) {
   if (scope == "shared") {
     LOG(FATAL) << "Static shared memory (scope='shared') is not supported on "
@@ -1558,6 +1594,165 @@ void CodeGenTileLangPTO::ValidateVecMode_(const CallNode *op, size_t mode_idx,
   ICHECK_EQ(mode_str, expected)
       << "PTO codegen currently only supports " << expected
       << " for this SIMD op, got " << mode_str;
+}
+
+bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallNode *op,
+                                              std::ostream &os) { // NOLINT(*)
+  std::string intrinsic_name;
+  if (!IsSimdMergingCall(op, &intrinsic_name)) {
+    return false;
+  }
+
+  ICHECK_GE(op->args.size(), 4U) << "Legalized PTO MODE_MERGING call must "
+                                    "contain a destination, operands, "
+                                    "mask, and mode";
+  const auto *access_ptr = op->args[0].as<CallNode>();
+  ICHECK(access_ptr && ((access_ptr->op.same_as(tl::access_ptr()) &&
+                         access_ptr->args.size() == 3U) ||
+                        (access_ptr->op.same_as(builtin::address_of()) &&
+                         access_ptr->args.size() == 1U)))
+      << "Legalized PTO MODE_MERGING call must carry a vector destination, "
+         "got "
+      << op->args[0];
+  const auto *destination = access_ptr->args[0].as<BufferLoadNode>();
+  ICHECK(destination)
+      << "Legalized PTO MODE_MERGING destination must address a vector buffer";
+
+  const bool is_rmw = op->op.same_as(tl::simd_vmula()) ||
+                      op->op.same_as(tl::simd_vmadd()) ||
+                      op->op.same_as(tl::simd_vaxpy());
+  const bool is_binary =
+      op->op.same_as(tl::simd_vadd()) || op->op.same_as(tl::simd_vsub()) ||
+      op->op.same_as(tl::simd_vmul()) || op->op.same_as(tl::simd_vdiv()) ||
+      op->op.same_as(tl::simd_vabsdif()) || op->op.same_as(tl::simd_vmax()) ||
+      op->op.same_as(tl::simd_vmin()) || op->op.same_as(tl::simd_vand()) ||
+      op->op.same_as(tl::simd_vor()) || op->op.same_as(tl::simd_vxor()) ||
+      op->op.same_as(tl::simd_vshl()) || op->op.same_as(tl::simd_vshr());
+  const bool is_vector_scalar =
+      op->op.same_as(tl::simd_vadds()) || op->op.same_as(tl::simd_vmuls()) ||
+      op->op.same_as(tl::simd_vmaxs()) || op->op.same_as(tl::simd_vmins()) ||
+      op->op.same_as(tl::simd_vshls()) || op->op.same_as(tl::simd_vshrs());
+  const bool is_unary =
+      op->op.same_as(tl::simd_vabs()) || op->op.same_as(tl::simd_vexp()) ||
+      op->op.same_as(tl::simd_vln()) || op->op.same_as(tl::simd_vsqrt()) ||
+      op->op.same_as(tl::simd_vneg()) || op->op.same_as(tl::simd_vrelu()) ||
+      op->op.same_as(tl::simd_vnot());
+  const bool is_broadcast =
+      op->op.same_as(tl::simd_vdup()) || op->op.same_as(tl::simd_vdupv());
+  const bool is_reduction =
+      op->op.same_as(tl::simd_vcpadd()) || op->op.same_as(tl::simd_vcadd()) ||
+      op->op.same_as(tl::simd_vcmax()) || op->op.same_as(tl::simd_vcmin()) ||
+      op->op.same_as(tl::simd_vcgadd()) || op->op.same_as(tl::simd_vcgmax()) ||
+      op->op.same_as(tl::simd_vcgmin());
+  const bool is_vcvt = op->op.same_as(tl::simd_vcvt());
+  ICHECK(is_rmw || is_binary || is_vector_scalar || is_unary || is_broadcast ||
+         is_reduction || is_vcvt)
+      << "PTO codegen does not support software MODE_MERGING for tl.simd."
+      << intrinsic_name;
+
+  size_t mask_idx = 0;
+  if (is_rmw || is_binary || is_vector_scalar) {
+    mask_idx = 3;
+  } else {
+    // Unary, reduction, vdup/vdupv, and vcvt calls all carry the predicate
+    // immediately after their first source operand once the destination is
+    // prepended by LegalizeSimdMerging.
+    mask_idx = 2;
+  }
+  ICHECK_LT(mask_idx, op->args.size() - 1)
+      << "PTO MODE_MERGING call has no predicate operand";
+
+  const DataType result_dtype = destination->dtype;
+  ICHECK_GT(result_dtype.lanes(), 1)
+      << "PTO MODE_MERGING destination must be vector-typed, got "
+      << result_dtype;
+  std::string dst_ref = GetMutableVectorRef(op->args[0], intrinsic_name);
+  std::string mask = PrintExpr_(op->args[mask_idx]);
+  std::string result;
+
+  if (is_rmw) {
+    ICHECK_EQ(op->args.size(), 5U)
+        << "PTO SIMD read-modify-write merging op expects 5 arguments "
+           "(dst, src0, src1/scalar, mask, mode)";
+    std::ostringstream result_os;
+    result_os << "pto." << intrinsic_name << "(";
+    if (op->op.same_as(tl::simd_vaxpy())) {
+      // PTODSL spells vaxpy as alpha * x + y; the mutable destination is y.
+      result_os << PrintExpr_(op->args[2]) << ", " << PrintExpr_(op->args[1])
+                << ", " << dst_ref;
+    } else {
+      result_os << dst_ref << ", " << PrintExpr_(op->args[1]) << ", "
+                << PrintExpr_(op->args[2]);
+    }
+    result_os << ", " << mask << ")";
+    result = result_os.str();
+  } else {
+    ffi::Array<PrimExpr> zeroing_args;
+    zeroing_args.reserve(op->args.size() - 1);
+    for (size_t i = 1; i < op->args.size(); ++i) {
+      zeroing_args.push_back(i + 1 == op->args.size()
+                                 ? PrimExpr(StringImm(kModeZeroing))
+                                 : op->args[i]);
+    }
+    Call zeroing_call(result_dtype, op->op, std::move(zeroing_args),
+                      op->annotations, op->span);
+    result = PrintExpr_(zeroing_call);
+    ICHECK(!result.empty()) << "PTO zeroing form for tl.simd." << intrinsic_name
+                            << " did not produce a vector result";
+  }
+
+  DataType result_elem = result_dtype.element_of();
+  int result_bits = result_elem.bits();
+  if (result_bits < 8) {
+    result_bits = 8;
+  }
+  const std::string input_mask = mask;
+  // Reduction predicates select source lanes. Their results occupy a fixed
+  // low-lane layout, so merge those result lanes rather than the source mask.
+  if (op->op.same_as(tl::simd_vcadd())) {
+    mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL1\")";
+  } else if (op->op.same_as(tl::simd_vcmax()) ||
+             op->op.same_as(tl::simd_vcmin())) {
+    mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL2\")";
+  } else if (op->op.same_as(tl::simd_vcgadd()) ||
+             op->op.same_as(tl::simd_vcgmax()) ||
+             op->op.same_as(tl::simd_vcgmin())) {
+    mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL8\")";
+  } else if (op->op.same_as(tl::simd_vcpadd())) {
+    // Pairwise adjacent-lane sums pack into the low half of the result
+    // register. Write that result region unconditionally (pairs with no
+    // active lanes contribute 0) and preserve the old high half.
+    int half_lanes = result_dtype.lanes() / 2;
+    ICHECK_GE(half_lanes, 1)
+        << "PTO vcpadd merging requires a multi-lane destination, got "
+        << result_dtype;
+    ICHECK_LE(half_lanes, 128)
+        << "PTO vcpadd merging expects at most 256 result lanes, got "
+        << result_dtype;
+    mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL" +
+           std::to_string(half_lanes) + "\")";
+  }
+  std::string selection_mask = mask;
+  if (is_vcvt) {
+    // Conversion changes the element width. Reinterpret the predicate at the
+    // destination granularity before selecting the converted result.
+    selection_mask = "pto.pbitcast(" + input_mask + ", pto.mask_type(\"b" +
+                     std::to_string(result_bits) + "\"))";
+  }
+
+  if (tl::IsAscendVectorizableFP8(result_elem) ||
+      result_elem.is_float4_e2m1fn()) {
+    // pto.vsel intentionally rejects low-precision arithmetic payloads. Select
+    // their byte representation, then restore the authored result element type.
+    result = "pto.vbitcast(pto.vsel(pto.vbitcast(" + result +
+             ", pto.ui8), pto.vbitcast(" + dst_ref + ", pto.ui8), " +
+             selection_mask + "), " + DataTypeName(result_elem) + ")";
+  } else {
+    result =
+        "pto.vsel(" + result + ", " + dst_ref + ", " + selection_mask + ")";
+  }
+  os << dst_ref << " = " << result;
+  return true;
 }
 
 void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
@@ -4144,6 +4339,9 @@ CodeGenTileLangPTO::EmitAllReduceExpr_(const std::string &func_name,
 
 void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
                                     std::ostream &os) { // NOLINT(*)
+  if (EmitSimdMergingCall_(op, os)) {
+    return;
+  }
   if (op->op.same_as(builtin::if_then_else()) ||
       op->op.same_as(tirx::builtin::if_then_else())) {
     ICHECK_EQ(op->args.size(), 3U)
@@ -5010,56 +5208,24 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
   if (op->op.same_as(tl::simd_vadds()) || op->op.same_as(tl::simd_vmuls()) ||
       op->op.same_as(tl::simd_vmaxs()) || op->op.same_as(tl::simd_vmins()) ||
       op->op.same_as(tl::simd_vshls()) || op->op.same_as(tl::simd_vshrs())) {
-    // LegalizeSimdMerging rewrites
-    //   dst = op(src, scalar, mask, MODE_MERGING)
-    // to a void call carrying dst as an explicit read-write first argument.
-    // Keep the ordinary four-argument expression form for zeroing operations.
-    const bool has_explicit_dst = op->args.size() == 5U;
-    ICHECK(op->args.size() == 4U || has_explicit_dst)
-        << "tl.simd vector-scalar op expects (src, scalar, mask, mode) or "
-           "(dst, src, scalar, mask, mode), got "
+    ICHECK_EQ(op->args.size(), 4U)
+        << "tl.simd vector-scalar op expects (src, scalar, mask, mode), got "
         << op->args.size() << " arguments";
-    const size_t arg_base = has_explicit_dst ? 1U : 0U;
-    auto mode = Downcast<StringImm>(op->args[arg_base + 3])->value;
-    ICHECK(mode == "MODE_ZEROING" || mode == "MODE_MERGING")
-        << "PTO vector-scalar op expects MODE_ZEROING or MODE_MERGING, got "
-        << mode;
+    ValidateVecMode_(op, 3);
     const char *name = op->op.same_as(tl::simd_vadds())   ? "vadds"
                        : op->op.same_as(tl::simd_vmuls()) ? "vmuls"
                        : op->op.same_as(tl::simd_vmaxs()) ? "vmaxs"
                        : op->op.same_as(tl::simd_vmins()) ? "vmins"
                        : op->op.same_as(tl::simd_vshls()) ? "vshls"
                                                           : "vshrs";
-    std::string src = PrintExpr_(op->args[arg_base]);
-    DataType result_dtype = op->args[arg_base].dtype();
+    std::string src = PrintExpr_(op->args[0]);
+    DataType result_dtype = op->args[0].dtype();
     std::string scalar = WrapTypedConst(
-        RemoveOutermostParentheses(
-            PrintExpr_(PeelScalarCasts(op->args[arg_base + 1]))),
-        result_dtype, IsImmediateScalar(op->args[arg_base + 1]));
-    std::string mask = PrintExpr_(op->args[arg_base + 2]);
-    std::string result;
-    {
-      std::ostringstream result_os;
-      result_os << "pto." << name << "(" << src << ", " << scalar << ", "
-                << mask << ")";
-      result = result_os.str();
-    }
-    if (mode == "MODE_MERGING") {
-      // PTODSL vector-scalar ops use zeroing semantics for inactive lanes.
-      if (has_explicit_dst) {
-        // Newer pipelines legalize merging to an explicit read-write
-        // destination, which may differ from the source operand.
-        std::string dst_ref = GetMutableVectorRef(op->args[0], name);
-        os << dst_ref << " = pto.vsel(" << result << ", " << dst_ref << ", "
-           << mask << ")";
-      } else {
-        // Compatibility with support_pto_codegen before
-        // LegalizeSimdMerging was added to the Ascend pipeline.
-        os << "pto.vsel(" << result << ", " << src << ", " << mask << ")";
-      }
-    } else {
-      os << result;
-    }
+        RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[1]))),
+        result_dtype, IsImmediateScalar(op->args[1]));
+    std::string mask = PrintExpr_(op->args[2]);
+    os << "pto." << name << "(" << src << ", " << scalar << ", " << mask
+       << ")";
     return;
   }
 

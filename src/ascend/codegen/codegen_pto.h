@@ -135,8 +135,10 @@ private:
                         std::ostream &os) override; // NOLINT(*)
   void ValidateVecMode_(const CallNode *op, size_t mode_idx,
                         const char *expected = "MODE_ZEROING");
+  bool EmitSimdMergingCall_(const CallNode *op,
+                            std::ostream &os); // NOLINT(*)
   void PrintFloatMinMax_(const char *op_name, DataType dtype, PrimExpr lhs,
-                            PrimExpr rhs, std::ostream &os); // NOLINT(*)
+                             PrimExpr rhs, std::ostream &os); // NOLINT(*)
   // Table-driven unary math mapping (sqrt/rsqrt/exp/log, extern C names and
   // tirx intrinsic names). Returns false when `name` is not covered.
   bool TryEmitUnaryMath_(const std::string &name, const PrimExpr &arg,
