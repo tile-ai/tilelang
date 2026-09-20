@@ -3,9 +3,10 @@
 import torch
 cimport cython
 import ctypes
-from libc.stdint cimport int64_t, uintptr_t
+from cpython.pycapsule cimport PyCapsule_GetPointer, PyCapsule_New
+from libc.stdint cimport int32_t, int64_t, uint32_t, uintptr_t
 from libc.stdlib cimport malloc, free
-from tvm import tirx
+from tvm import arith, tirx
 
 
 cdef class CythonKernelWrapper:
@@ -15,8 +16,10 @@ cdef class CythonKernelWrapper:
         object dynamic_symbolic_sources  # Maps dynamic var names to ALL buffer carriers for cascaded None resolution
         object buffer_device_map       # Maps buffer variables to their corresponding devices
         object buffer_dtype_map        # Maps buffer variables to their corresponding dtypes
+        object param_storage_metadata  # Per-parameter (packed_dim, pack_factor) metadata
         object static_shape_map        # Maps buffer variables to their corresponding static shapes
         object static_strides_map      # Maps buffer variables to their corresponding static strides
+        object dynamic_strides_map    # Maps buffers to runtime stride validation metadata
         object static_contiguous_list  # A list contains contiguous buffers
         object ptr_map                 # Maps pointer arguments to their corresponding buffer indices
         list result_idx                # Indices of output tensors in the params list
@@ -36,6 +39,8 @@ cdef class CythonKernelWrapper:
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         self.param_dtypes = [param.torch_dtype() for param in params]
+        self.param_storage_metadata = [(-1, 1) for _ in params]
+        self.dynamic_strides_map = {}
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
         self.get_current_device = get_current_device if get_current_device is not None else torch.cuda.current_device
@@ -63,12 +68,20 @@ cdef class CythonKernelWrapper:
         self.buffer_dtype_map = buffer_dtype_map
         return self
 
+    def set_param_storage_metadata(self, param_storage_metadata):
+        self.param_storage_metadata = param_storage_metadata
+        return self
+
     def set_static_shape_map(self, static_shape_map):
         self.static_shape_map = static_shape_map
         return self
 
     def set_static_strides_map(self, static_strides_map):
         self.static_strides_map = static_strides_map
+        return self
+
+    def set_dynamic_strides_map(self, dynamic_strides_map):
+        self.dynamic_strides_map = dynamic_strides_map
         return self
 
     def set_static_contiguous_list(self, static_contiguous_list):
@@ -103,11 +116,16 @@ cdef class CythonKernelWrapper:
     cpdef void _check_buffer_dtype(self, list tensor_list):
         for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
             tensor = tensor_list[buffer_idx]
-            if isinstance(tensor, torch.Tensor) and tensor.dtype != torch_dtype:
-                raise ValueError(
-                    f"Buffer dtype mismatch for parameter {param}: "
-                    f"expected {torch_dtype}, got {tensor.dtype}"
-                )
+            if isinstance(tensor, torch.Tensor):
+                if isinstance(torch_dtype, (tuple, list, set)):
+                    dtype_match = tensor.dtype in torch_dtype
+                else:
+                    dtype_match = tensor.dtype == torch_dtype
+                if not dtype_match:
+                    raise ValueError(
+                        f"Buffer dtype mismatch for parameter {param}: "
+                        f"expected {torch_dtype}, got {tensor.dtype}"
+                    )
 
     cpdef void _check_static_shape(self, list tensor_list):
         for param, (buffer_idx, shape_list) in self.static_shape_map.items():
@@ -127,11 +145,80 @@ cdef class CythonKernelWrapper:
             # Check each dimension
             for shape_idx, expected_shape in shape_list:
                 actual_shape = tensor.shape[shape_idx]
-                if expected_shape != -1 and actual_shape != expected_shape:
+                if isinstance(expected_shape, (tuple, list, set)):
+                    shape_match = actual_shape in expected_shape
+                else:
+                    shape_match = expected_shape == -1 or actual_shape == expected_shape
+                if not shape_match:
                     raise ValueError(
                         f"Static shape mismatch for parameter {param}: "
                         f"expected {expected_shape} at index {shape_idx}, "
                         f"got {actual_shape}"
+                    )
+
+    cpdef dict _resolve_dynamic_values(self, list tensor_list):
+        """Resolve dynamic shape/stride symbols once for validation and launch."""
+        values = {}
+        for var, (ref_id, buffer_idx, shape_idx, storage_scale) in self.dynamic_symbolic_map.items():
+            # Cascaded resolution across all carrier buffers to handle None
+            var_key = str(var)
+            sources = self.dynamic_symbolic_sources.get(var_key, [(buffer_idx, shape_idx, storage_scale)])
+            value = 0
+            for src_buf_idx, src_dim_idx, src_storage_scale in sources:
+                tensor = tensor_list[src_buf_idx]
+                if tensor is not None:
+                    if ref_id == 0:
+                        value = int(tensor.shape[src_dim_idx]) * src_storage_scale
+                    else:
+                        value = int(tensor.stride(src_dim_idx)) * src_storage_scale
+                    break
+            values[var] = value
+        return values
+
+    cpdef void _check_dynamic_strides(self, list tensor_list, dict dynamic_values):
+        """Validate dynamic packed strides in logical units against Torch storage strides."""
+        if not self.dynamic_strides_map:
+            return
+
+        substitutions = {
+            var: tirx.IntImm(var.dtype, value)
+            for var, value in dynamic_values.items()
+        }
+        analyzer = arith.Analyzer()
+
+        for buffer_name, (buffer_idx, strides) in self.dynamic_strides_map.items():
+            tensor = tensor_list[buffer_idx]
+            if not isinstance(tensor, torch.Tensor):
+                continue
+
+            for stride_idx, stride_expr, packing_factor in strides:
+                if tensor.shape[stride_idx] == 1:
+                    continue
+
+                actual_storage_stride = int(tensor.stride(stride_idx))
+                expected_logical_stride = actual_storage_stride * packing_factor
+                evaluated_stride = analyzer.simplify(
+                    tirx.stmt_functor.substitute(stride_expr, substitutions)
+                )
+                if not isinstance(evaluated_stride, tirx.IntImm):
+                    raise ValueError(
+                        f"Cannot validate dynamic packed stride for {buffer_name}[{stride_idx}]: "
+                        f"expression {stride_expr} did not resolve to a constant"
+                    )
+
+                evaluated_value = int(evaluated_stride.value)
+                if evaluated_value % packing_factor != 0:
+                    raise ValueError(
+                        f"Dynamic packed stride for {buffer_name}[{stride_idx}] is not "
+                        f"storage-aligned: logical stride {evaluated_value} is not divisible by "
+                        f"packing factor {packing_factor}"
+                    )
+                if evaluated_value != expected_logical_stride:
+                    raise ValueError(
+                        f"Dynamic packed stride mismatch for {buffer_name}[{stride_idx}]: "
+                        f"TIR stride is {evaluated_value}, but tensor storage stride "
+                        f"{actual_storage_stride} requires logical stride {expected_logical_stride} "
+                        f"(packing factor {packing_factor})"
                     )
 
     cpdef void _check_static_strides(self, list tensor_list):
@@ -140,6 +227,11 @@ cdef class CythonKernelWrapper:
             if not isinstance(tensor, torch.Tensor):
                 # otherwise, maybe torch.data_ptr() for T.ptr inputs
                 continue
+            # Empty tensors have no addressable elements, so their strides do
+            # not constrain any legal kernel access.  PyTorch may choose a
+            # different valid stride tuple than TIR for zero-sized dimensions.
+            if tensor.numel() == 0:
+                continue
             for stride_idx, expected_stride in strides_list:
                 # Ensure the stride index is within the valid range of tensor dimensions
                 # (stride_idx should be less than the number of dimensions of the tensor)
@@ -147,7 +239,11 @@ cdef class CythonKernelWrapper:
                 if tensor.shape[stride_idx] == 1:
                     continue
                 actual_stride = tensor.stride(stride_idx)
-                if actual_stride != expected_stride:
+                if isinstance(expected_stride, (tuple, list, set)):
+                    stride_match = actual_stride in expected_stride
+                else:
+                    stride_match = actual_stride == expected_stride
+                if not stride_match:
                     raise ValueError(
                         f"Static stride mismatch for parameter {param}: "
                         f"expected {expected_stride} at index {stride_idx}, "
@@ -175,6 +271,7 @@ cdef class CythonKernelWrapper:
         cdef int total_inputs = len(inputs)
         cdef int total_result_idx = len(self.result_idx)
         cdef int total_dynamic_symbolics = len(self.dynamic_symbolic_map)
+        cdef dict resolved_dynamic_values
 
         # Ensure the number of inputs matches expected parameter count
         if total_params != total_inputs + total_result_idx:
@@ -196,17 +293,9 @@ cdef class CythonKernelWrapper:
                 stream = 0
 
         cdef int ins_idx = 0
-        cdef list tensor_list = [None] * len(self.params)
+        cdef list tensor_list = []
 
-        # Inputs are placed first so that a symbolic dimension owned by an input can be
-        # resolved even when the output that needs it comes earlier in the signature;
-        # the outputs are then allocated below, in parameter order.
-        for i in range(len(self.params)):
-            if i not in self.result_idx:
-                tensor_list[i] = inputs[ins_idx]
-                ins_idx += 1
-
-        # Prepare output tensors
+        # Prepare input and output tensors
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
@@ -216,13 +305,30 @@ cdef class CythonKernelWrapper:
                     if isinstance(s, tirx.Var):
                         for key in self.dynamic_symbolic_map:
                             if str(s) == str(key):
-                                ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = self.dynamic_symbolic_map[key]
+                                ref_id, ref_tensor_idx, ref_shape_idx, storage_scale = self.dynamic_symbolic_map[key]
                                 if ref_id == 0:
-                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                                    shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx] * storage_scale)
                                 else:
-                                    shape.append(tensor_list[ref_tensor_idx].stride(ref_shape_idx) * stride_scale)
+                                    shape.append(tensor_list[ref_tensor_idx].stride(ref_shape_idx) * storage_scale)
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
+
+                storage_dim, pack_factor = self.param_storage_metadata[i]
+                if pack_factor > 1 and storage_dim >= 0:
+                    if storage_dim >= len(shape):
+                        param_name = self.params[i].name if hasattr(self.params[i], 'name') else f'parameter_{i}'
+                        raise ValueError(
+                            f"Cannot create output tensor (name={param_name}) - storage dimension {storage_dim} "
+                            f"is outside logical shape {shape}"
+                        )
+                    if shape[storage_dim] % pack_factor != 0:
+                        param_name = self.params[i].name if hasattr(self.params[i], 'name') else f'parameter_{i}'
+                        raise ValueError(
+                            f"Cannot create output tensor (name={param_name}) - logical shape at index "
+                            f"{storage_dim} must be divisible by storage pack factor {pack_factor}, "
+                            f"got {shape[storage_dim]}"
+                        )
+                    shape[storage_dim] = shape[storage_dim] // pack_factor
 
                 if device is None:
                     device = self._infer_output_device(inputs)
@@ -233,16 +339,22 @@ cdef class CythonKernelWrapper:
                         f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                         f"Expected shape: {shape}"
                     )
-                tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
-                # TODO(chenggang): remove this check or rewrite by ourselves?
-                '''
-                if isinstance(tensor_list[i], torch.Tensor) and tensor_list[i]._base is not None and not tensor_list[i].is_contiguous():
-                    base_tensor = tensor_list[i]._base.as_strided(tensor_list[i]._base.shape, tensor_list[i].stride())
-                    if torch._debug_has_internal_overlap(base_tensor):
-                        raise ValueError(f"Cannot use an overlapping tensor"
-                                         f"(shape={tensor_list[i].shape}, strides={tensor_list[i].stride()}, "
-                                         f"overlap={torch._debug_has_internal_overlap(base_tensor)}) as the kernel input")
-                '''
+                tensor = torch.empty(*shape, dtype=dtype, device=device)
+            else:
+                tensor = inputs[ins_idx]
+                ins_idx += 1
+            # TODO(chenggang): remove this check or rewrite by ourselves?
+            '''
+            if isinstance(tensor, torch.Tensor) and tensor._base is not None and not tensor.is_contiguous():
+                base_tensor = tensor._base.as_strided(tensor._base.shape, tensor.stride())
+                if torch._debug_has_internal_overlap(base_tensor):
+                    raise ValueError(f"Cannot use an overlapping tensor"
+                                     f"(shape={tensor.shape}, strides={tensor.stride()}, "
+                                     f"overlap={torch._debug_has_internal_overlap(base_tensor)}) as the kernel input")
+            '''
+            tensor_list.append(tensor)
+
+        resolved_dynamic_values = self._resolve_dynamic_values(tensor_list)
 
         # Convert tensor pointers to C void pointers for kernel call
         cdef dict dtype_to_ctype = {
@@ -253,7 +365,6 @@ cdef class CythonKernelWrapper:
             torch.int16: ctypes.c_int16,
             torch.int32: ctypes.c_int32,
             torch.int64: ctypes.c_int64,
-            torch.uint64: ctypes.c_uint64,
             torch.bool: ctypes.c_bool,
         }
 
@@ -280,23 +391,12 @@ cdef class CythonKernelWrapper:
             self._check_buffer_dtype(tensor_list)
             self._check_static_shape(tensor_list)
             self._check_static_strides(tensor_list)
+            self._check_dynamic_strides(tensor_list, resolved_dynamic_values)
             self._check_static_contiguous(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
-        for var, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():
-            # Cascaded resolution across all carrier buffers to handle None
-            var_key = str(var)
-            sources = self.dynamic_symbolic_sources.get(var_key, [(ref_id, buffer_idx, shape_idx, stride_scale)])
-            value = 0
-            for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in sources:
-                tensor = tensor_list[src_buf_idx]
-                if tensor is not None:
-                    if src_ref_id == 0:
-                        value = tensor.shape[src_dim_idx]
-                    else:
-                        value = tensor.stride(src_dim_idx) * src_stride_scale
-                    break
-            call_args.append(ctypes.c_int64(value))
+        for var in self.dynamic_symbolic_map:
+            call_args.append(ctypes.c_int64(resolved_dynamic_values[var]))
 
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))
