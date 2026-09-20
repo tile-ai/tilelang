@@ -88,6 +88,14 @@ def test_blockscaled_instruction_selection(gemm_api, arch, c_scope, use_2cta, ex
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("gemm_api", ["gemm_blockscaled", "mma_gemm_blockscaled"])
+def test_blockscaled_sm120_selects_fragment_a(gemm_api):
+    op = _make_blockscaled_op(gemm_api, a_scope="local.fragment", c_scope="local.fragment")
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120"})
+    assert op._select_gemm_instruction(256, target) == "cuda.mma.blockscaled"
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("gemm_api", ["gemm_blockscaled", "tcgen05_gemm_blockscaled"])
 @pytest.mark.parametrize("use_2cta", [False, True])
 def test_blockscaled_tcgen05_rejects_tmem_a(gemm_api, use_2cta):

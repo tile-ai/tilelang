@@ -596,27 +596,23 @@ def test_sm120_fulltile_package_contract_describes_omma_sf_issue_schedule():
     assert sum(1 for issue in schedule if issue[4] == 1) == 16
 
 
-def test_sm120_fulltile_package_contract_rejects_odd_warp_atom_grid():
-    emitter = _make_blockscale_emitter(
-        a_dtype=T.float4_e2m1fn,
-        b_dtype=T.float4_e2m1fn,
-        accum_dtype=T.float32,
-        a_transposed=False,
-        b_transposed=True,
-        block_row_warps=2,
-        block_col_warps=2,
-        warp_row_tiles=48,
-        warp_col_tiles=64,
-        chunk=256,
-        reduce_k=1,
-        num_elems_per_byte=2,
-    )
-
-    with pytest.raises(ValueError, match="positive even MMA atom grid"):
-        SM120BlockScaleTile.from_emitter(
-            emitter,
-            sf_layout="blockscaled_chunk_kmajor",
-        )
+@pytest.mark.parametrize("warp_m, warp_n", [(16, 128), (128, 16), (48, 64), (64, 48)])
+def test_sm120_fulltile_package_contract_odd_warp_atom_grid(warp_m, warp_n):
+    contract = _make_sm120_fulltile_contract(warp_row_tiles=warp_m, warp_col_tiles=warp_n)
+    for wm in range(contract.block_row_warps):
+        for wn in range(contract.block_col_warps):
+            for lane in range(32):
+                a_rows, b_rows = contract.compact_selector_scale_rows(lane, wm, wn)
+                assert all(wm * warp_m <= row < (wm + 1) * warp_m for row in a_rows)
+                assert all(wn * warp_n <= row < (wn + 1) * warp_n for row in b_rows)
+                for kb in range(contract.kblocks):
+                    contract.compact_selector_scale_word_offsets(lane, wm, wn, kb)
+                for issue in contract.omma_sf_issue_schedule_per_warp():
+                    i, j, half, *_ = issue
+                    assert contract.compact_selector_effective_rows(lane, wm, wn, issue) == (
+                        wm * warp_m + i * 16 + 8 * (lane % 2) + lane // 4,
+                        wn * warp_n + j * 16 + half * 8 + lane // 4,
+                    )
 
 
 @tilelang.testing.requires_cuda
