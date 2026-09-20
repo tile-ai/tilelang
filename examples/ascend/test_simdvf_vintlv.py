@@ -8,7 +8,7 @@ import tilelang.testing
 from example_simdvf_vintlv import N, simulator_safe_randn, vintlv_kernel
 
 
-@pytest.mark.parametrize("backend", ["asc"])
+@pytest.mark.parametrize("backend", ["asc", pytest.param("pto", marks=pytest.mark.pto)])
 def test_simdvf_vintlv(backend):
     kernel = tilelang.compile(vintlv_kernel(backend), target=backend)
     device = torch.device("npu")

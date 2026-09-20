@@ -255,6 +255,8 @@ def run(m: int, n: int, k: int, target: str) -> float:
 
     program = gemm(m, n, k)
     compile_kwargs = {"out_idx": -1}
+    if target == "pto":
+        compile_kwargs["target"] = "pto"
     kernel = tilelang.compile(program, **compile_kwargs)
     d = kernel(a, b)
     torch.npu.synchronize()
@@ -280,7 +282,7 @@ def run_regression_perf(m=8192, n=8192, k=8192, target: str = "ascend") -> float
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", choices=["ascend"], default="ascend")
+    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
     return parser.parse_args()
 
 

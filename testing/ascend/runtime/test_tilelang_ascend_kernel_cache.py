@@ -26,6 +26,17 @@ def test_ascend_cython_cache_uses_bisheng_source_suffixes():
     assert cache.host_kernel_path == "host_kernel.asc"
 
 
+def test_pto_cache_layout_is_unchanged():
+    cache, context, _ = _resolve_cache_dispatch("pto", None, "cython", False)
+
+    assert cache is _dispatch_map["cython"]
+    assert context.module.name == "pto"
+    assert "pto" in context.target.keys
+    assert context.execution_backend.name == "cython"
+    assert cache.device_kernel_path == "device_kernel.cu"
+    assert cache.host_kernel_path == "host_kernel.cu"
+
+
 def test_cuda_cache_source_suffixes_are_unchanged():
     cache, context, _ = _resolve_cache_dispatch({"kind": "cuda", "arch": "sm_90"}, None, "tvm_ffi", False)
 

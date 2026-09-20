@@ -38,18 +38,22 @@ def cross_core_mte3_to_mte2():
     return main
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_cross_core_mte3_write_visible_to_mte2_read(target):
     kernel = tilelang.compile(cross_core_mte3_to_mte2(), target=target, out_idx=-1)
     source = kernel.get_kernel_source()
 
-    mte3_store = source.index("asc_copy_ub2gm")
-    arrive = source.index("asc_sync_inter_arrive(PIPE_MTE3, 4);")
-    wait = source.index("asc_sync_inter_wait(PIPE_MTE2, 4);")
-    mte2_loads = [match.start() for match in re.finditer("asc_copy_gm2ub", source)]
-    assert len(mte2_loads) == 2
-    assert mte3_store < arrive
-    assert wait < mte2_loads[1]
+    if target == "ascend":
+        mte3_store = source.index("asc_copy_ub2gm")
+        arrive = source.index("asc_sync_inter_arrive(PIPE_MTE3, 4);")
+        wait = source.index("asc_sync_inter_wait(PIPE_MTE2, 4);")
+        mte2_loads = [match.start() for match in re.finditer("asc_copy_gm2ub", source)]
+        assert len(mte2_loads) == 2
+        assert mte3_store < arrive
+        assert wait < mte2_loads[1]
+    else:
+        assert "pto.set_cross_block" in source
+        assert "pto.wait_cross_block" in source
 
     values = torch.arange(
         NUM_VECTOR_CORES * TILE_ELEMS,
@@ -65,6 +69,6 @@ def test_cross_core_mte3_write_visible_to_mte2_read(target):
 
 
 if __name__ == "__main__":
-    for target in ("ascend",):
+    for target in ("ascend", "pto"):
         test_cross_core_mte3_write_visible_to_mte2_read(target)
         print(f"PASS: test_cross_core_mte3_write_visible_to_mte2_read ({target})")

@@ -5,7 +5,7 @@ import tilelang
 import pytest
 from example_gemm import gemm, ref_program
 
-TARGETS = ["ascend"]
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
 
 
 def _test(dtype, thresh, out_dtype="float32", target="ascend", mixed=None, hf32=None):

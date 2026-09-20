@@ -11,6 +11,7 @@ from example_simtvf_rng import rng_fill
     "target",
     [
         "ascend",
+        pytest.param("pto", marks=pytest.mark.pto),
     ],
 )
 def test_simtvf_rng(target):

@@ -25,13 +25,13 @@ def _test_gemm_splitk(deterministic, target):
         assert torch.equal(result, repeated)
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_gemm_splitk(target):
     _test_gemm_splitk(deterministic=False, target=target)
     _test_gemm_splitk(deterministic=False, target=target)
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_gemm_splitk_deterministic(target):
     _test_gemm_splitk(deterministic=True, target=target)
     _test_gemm_splitk(deterministic=True, target=target)

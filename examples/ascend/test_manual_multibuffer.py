@@ -10,9 +10,13 @@ import pytest
 from example_manual_multibuffer import run_manual_multibuffer
 
 
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
+
+
+@pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("num_steps", [1, 7])
-def test_manual_multibuffer(num_steps):
-    run_manual_multibuffer(width=4096, num_steps=num_steps, num_rows=4096, verify=True)
+def test_manual_multibuffer(num_steps, target):
+    run_manual_multibuffer(width=4096, num_steps=num_steps, num_rows=4096, verify=True, target=target)
 
 
 if __name__ == "__main__":

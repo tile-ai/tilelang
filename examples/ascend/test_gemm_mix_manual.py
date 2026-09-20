@@ -9,7 +9,7 @@ import pytest
 
 from example_gemm_mix_manual import gemm, ref_program
 
-TARGETS = ["ascend"]
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
 
 
 def _test_gemm_mix_manual(target):

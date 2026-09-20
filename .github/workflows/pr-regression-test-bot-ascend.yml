@@ -118,6 +118,15 @@ jobs:
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
+          # PTO toolchain
+          export PTO_SOURCE_DIR=/nfs-hg/prod/deepseek/permanent/xuruifan/PTOAS
+          export PTO_INSTALL_DIR=${PTO_SOURCE_DIR}/install
+          echo "PTO_SOURCE_DIR=${PTO_SOURCE_DIR}" | tee -a "${GITHUB_ENV}"
+          echo "PTO_INSTALL_DIR=${PTO_INSTALL_DIR}" | tee -a "${GITHUB_ENV}"
+          echo "MLIR_PYTHON_ROOT=/nfs-hg/prod/deepseek/permanent/xuruifan/llvm-project/tools/mlir/python_packages/mlir_core" | tee -a "${GITHUB_ENV}"
+          echo "PTO_PYTHON_ROOT=${PTO_INSTALL_DIR}/" | tee -a "${GITHUB_ENV}"
+          echo "${PTO_SOURCE_DIR}/build/tools/ptoas:${PTO_SOURCE_DIR}/build/tools/ptobc" | tee -a "${GITHUB_PATH}"
+
           # CANN runtime env for torch_npu autoload (libascendcl.so, liburma.so.0, ...).
           # The runner daemon does not inherit the container-injected CANN environment,
           # so torch_npu fails to load at `import torch` without this.
@@ -126,7 +135,8 @@ jobs:
             # shellcheck disable=SC1090
             source "${CANN_SET_ENV}"
           fi
-          # Propagate the assembled CANN environment to subsequent steps.
+          # Propagate the assembled CANN + PTO/llvm environment to subsequent steps
+          export LD_LIBRARY_PATH="/nfs-hg/prod/deepseek/permanent/xuruifan/llvm-project/lib:${PTO_INSTALL_DIR}/lib:${LD_LIBRARY_PATH}"
           {
             echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME}"
             echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"

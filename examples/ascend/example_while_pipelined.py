@@ -76,6 +76,8 @@ def ref_program(a):
 def run(target: str = "ascend") -> float:
     device = torch.device("npu")
     compile_kwargs = {"out_idx": -1}
+    if target == "pto":
+        compile_kwargs["target"] = "pto"
     kernel = tilelang.compile(while_pipelined(), **compile_kwargs)
 
     print(f"\n--- Generated {target} Source ---")
@@ -99,7 +101,7 @@ def run(target: str = "ascend") -> float:
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", choices=["ascend"], default="ascend")
+    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
     return parser.parse_args()
 
 

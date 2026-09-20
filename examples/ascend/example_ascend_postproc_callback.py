@@ -30,13 +30,17 @@ def vector_add(N):
 
 
 CUSTOM_MARKER = "// [POSTPROC] Modified by register_ascend_postproc_callback"
+CUSTOM_MARKER_PTO = "# [POSTPROC] Modified by register_ascend_postproc_callback"
 
 
 @register_ascend_postproc_callback
 def my_ascend_family_postproc(code, target):
-    """Post-process generated AscendC source."""
-    print(f"\n--- Ascend postproc callback invoked (code length: {len(code)} chars) ---")
-    return CUSTOM_MARKER + "\n" + code
+    """Post-process generated AscendC or PTODSL source."""
+    is_pto = "pto" in target.keys
+    backend = "PTO" if is_pto else "Ascend"
+    marker = CUSTOM_MARKER_PTO if is_pto else CUSTOM_MARKER
+    print(f"\n--- {backend} postproc callback invoked (code length: {len(code)} chars) ---")
+    return marker + "\n" + code
 
 
 if __name__ == "__main__":

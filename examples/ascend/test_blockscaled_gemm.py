@@ -20,7 +20,7 @@ def _make_sf_data(M, K, N, device):
     return sfx, sfw, sfx_e8m0, sfw_e8m0
 
 
-TARGETS = ["ascend"]
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
 
 
 def _test(dtype, thresh, M=8192, K=8192, N=8192, seed=42, target=None):

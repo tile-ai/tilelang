@@ -14,12 +14,14 @@ from example_simdvf_scalar_topk_scalar_write import (
 )
 
 # Include "(" so the assertion matches call sites, not declarations.
+# ASC emits the AscendC template; PTO emits the PTODSL helper call.
 BYPASS_CALLS = {
     "asc": "tl::write_gm_bypass_dcache(",
+    "pto": "tl.write_gm_bypass_dcache(",
 }
 
 
-@pytest.mark.parametrize("backend", ["asc"])
+@pytest.mark.parametrize("backend", ["asc", pytest.param("pto", marks=pytest.mark.pto)])
 def test_simdvf_scalar_topk_scalar_write(backend):
     kernel = make_kernel(backend)
     source = kernel.get_kernel_source()

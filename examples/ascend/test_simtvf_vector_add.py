@@ -7,7 +7,7 @@ import tilelang
 from example_simtvf_vector_add import ref_program, vector_add
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_simtvf_vector_add(target):
     N = 1024
     kernel = tilelang.compile(vector_add(N), target=target, out_idx=-1)

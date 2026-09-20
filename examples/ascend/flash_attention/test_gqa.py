@@ -1,15 +1,21 @@
 """Correctness test for the grouped-query attention kernel."""
 
+import pytest
 import torch
 import tilelang
 
 from example_gqa import gqa, ref_program
 
 
-def test_gqa():
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_gqa(target):
     S1, G, S2, D = 8192, 32, 8192, 128
     kernel = tilelang.compile(
         gqa(S1, G, S2, D),
+        target=target,
         out_idx=-1,
         pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
     )
@@ -29,4 +35,4 @@ def test_gqa():
 
 
 if __name__ == "__main__":
-    test_gqa()
+    test_gqa("ascend")

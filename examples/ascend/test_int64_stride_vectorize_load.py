@@ -7,7 +7,7 @@ import tilelang
 from example_int64_stride_vectorize_load import DIM, repro_kernel
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_int64_stride_vectorize_load(target):
     device = torch.device("npu")
 

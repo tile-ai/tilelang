@@ -73,10 +73,10 @@ def ref_program(inp, delta):
     return (inp.float().unsqueeze(1) + cum).to(inp.dtype)
 
 
-def run_manual_multibuffer(width=4096, num_steps=8, num_rows=8192, *, verify=True, bench=False, print_source=False):
+def run_manual_multibuffer(width=4096, num_steps=8, num_rows=8192, *, verify=True, bench=False, print_source=False, target="ascend"):
     device = torch.device("npu")
     program = manual_multibuffer(width, num_steps)
-    kernel = tilelang.compile(program, target="ascend")
+    kernel = tilelang.compile(program, target=target)
 
     if print_source:
         print(kernel.get_kernel_source())

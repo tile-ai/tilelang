@@ -1665,8 +1665,14 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
         for k in annot:
             # Call callable annotations (e.g., factory functions) to get the actual type.
             # Skip typing generics like Optional[int], Union[...], List[...] which are
-            # callable but cannot be instantiated.
-            if not isinstance(annot[k], type) and callable(annot[k]) and get_origin(annot[k]) is None:
+            # callable but cannot be instantiated, and bare typing special forms
+            # (e.g. Any, NoReturn) which raise on call.
+            if (
+                not isinstance(annot[k], type)
+                and callable(annot[k])
+                and get_origin(annot[k]) is None
+                and type(annot[k]).__name__ != "_SpecialForm"
+            ):
                 annot[k] = annot[k]()
 
         if eager_jit:

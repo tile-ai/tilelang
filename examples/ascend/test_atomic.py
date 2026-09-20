@@ -65,7 +65,7 @@ ATOMIC_RETURN_CASES = [
 
 def _assert_atomic_source(kernel, op_name, target):
     source = kernel.get_kernel_source()
-    expected = f"asc_{op_name}("
+    expected = f"pto.{op_name}(" if target == "pto" else f"asc_{op_name}("
     assert expected in source, f"missing {expected} in generated {target} source"
 
 
@@ -116,7 +116,7 @@ def _run_atomic_return_gm_float(op_name, program_factory, initial, expected, tar
     ("op_name", "program_factory", "initial"),
     ATOMIC_CASES,
 )
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_atomic_gm_float(op_name, program_factory, initial, num_blocks, threads, target):
     _run_atomic_gm_float(
         op_name,
@@ -132,7 +132,7 @@ def test_atomic_gm_float(op_name, program_factory, initial, num_blocks, threads,
     ("op_name", "program_factory", "initial", "expected"),
     ATOMIC_RETURN_CASES,
 )
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_atomic_return_gm_float(op_name, program_factory, initial, expected, target):
     _run_atomic_return_gm_float(
         op_name,
@@ -144,7 +144,7 @@ def test_atomic_return_gm_float(op_name, program_factory, initial, expected, tar
 
 
 if __name__ == "__main__":
-    for target in ("ascend",):
+    for target in ("ascend", "pto"):
         for op_name, program_factory, initial in [
             ("atomic_add", atomic_add_gm_float, 0.0),
             ("atomic_max", atomic_max_gm_float, -float("inf")),

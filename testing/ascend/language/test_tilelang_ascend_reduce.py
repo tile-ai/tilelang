@@ -135,7 +135,7 @@ def test_reducer_v2_multidim_narrow_plan(coalesced_width):
 
 
 @pytest.mark.parametrize("op", ["bitand", "bitor", "bitxor"])
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_reducer_v2_rejects_unsupported_bitwise_collectives(op, target):
     @T.prim_func
     def kernel(A: T.Tensor((32,), "int32"), B: T.Tensor((1,), "int32")):
@@ -152,6 +152,59 @@ def test_reducer_v2_rejects_unsupported_bitwise_collectives(op, target):
     # vectorize planner consults Target.current().
     with tilelang.tvm.target.Target(target), pytest.raises(Exception, match="bitand, bitor, and bitxor are not supported"):
         tilelang.lower(kernel, target=target)
+
+
+@pytest.mark.parametrize(
+    "op,extent",
+    [
+        ("sum", 32),
+        ("max", 32),
+        ("min", 32),
+        ("sum", 8),
+        ("sum", 6),
+        ("sum", 64),
+    ],
+)
+@pytest.mark.pto
+def test_pto_reducer_v2_int32(op, extent):
+    @T.prim_func
+    def kernel(A: T.Tensor((extent,), "int32"), B: T.Tensor((1,), "int32")):
+        with T.Kernel(1) as _, T.SimtVF(threads=extent):
+            partial = T.alloc_reducer((1,), "int32", op=op)
+            T.reducer_init(partial)
+            for i in T.Parallel(extent):
+                T.reducer_update(partial[0], A[i])
+            result = T.alloc_fragment((1,), "int32")
+            T.finalize_reducer(partial, result)
+            T.copy(result, B)
+
+    compiled = tilelang.compile(kernel, target="pto", out_idx=-1)
+    a = torch.randint(-100, 100, (extent,), dtype=torch.int32, device="npu")
+    actual = compiled(a)
+    torch.npu.synchronize()
+    expected = {
+        "sum": a.sum(dtype=torch.int32),
+        "max": a.max(),
+        "min": a.min(),
+    }[op].reshape(1)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.pto
+def test_pto_reducer_v2_rejects_bfloat16_allreduce():
+    @T.prim_func
+    def kernel(A: T.Tensor((32,), "bfloat16"), B: T.Tensor((1,), "bfloat16")):
+        with T.Kernel(1) as _, T.SimtVF(threads=32):
+            partial = T.alloc_reducer((1,), "bfloat16", op="sum")
+            T.reducer_init(partial)
+            for i in T.Parallel(32):
+                T.reducer_update(partial[0], A[i])
+            result = T.alloc_fragment((1,), "bfloat16")
+            T.finalize_reducer(partial, result)
+            T.copy(result, B)
+
+    with pytest.raises(Exception, match="PTO cross-thread allreduce.*got bfloat16"):
+        tilelang.lower(kernel, target="pto")
 
 
 if __name__ == "__main__":

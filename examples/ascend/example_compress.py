@@ -528,7 +528,7 @@ def run_regression_perf(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", choices=["ascend"], default="ascend")
+    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
     args = parser.parse_args()
 
     # Correctness: sparse-compress (few tokens) and dense-compress (all tokens).

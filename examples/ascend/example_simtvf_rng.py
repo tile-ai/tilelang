@@ -46,7 +46,7 @@ if __name__ == "__main__":
     import torch
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", choices=["ascend"], default="ascend")
+    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
     args = parser.parse_args()
 
     N = 8192

@@ -3,11 +3,18 @@
 import torch
 import tilelang
 
+import pytest
+
 from example_while_pipelined import while_pipelined, ref_program, N
 
 
 def test_while_pipelined():
     _run_while_pipelined("ascend")
+
+
+@pytest.mark.pto
+def test_while_pipelined_pto():
+    _run_while_pipelined("pto")
 
 
 def _run_while_pipelined(target):
@@ -26,3 +33,5 @@ def _run_while_pipelined(target):
 if __name__ == "__main__":
     test_while_pipelined()
     print("PASS: test_while_pipelined")
+    test_while_pipelined_pto()
+    print("PASS: test_while_pipelined_pto")

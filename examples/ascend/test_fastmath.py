@@ -1,5 +1,6 @@
 """Test TL_ENABLE_FAST_MATH control for Ascend fp32 division."""
 
+import pytest
 import torch
 import tilelang
 import tilelang.ascend.language as T
@@ -7,15 +8,22 @@ from tilelang.profiler import do_bench
 from tilelang.transform import PassConfigKey
 
 
-def make_div_kernel(N, enable_fast_math=False):
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
+
+
+def make_div_kernel(N, enable_fast_math=False, target=None):
     """Create a kernel that divides two vectors element-wise."""
     n_cores = 64
     num_stages = 2
 
-    @tilelang.jit(
+    jit_kwargs = dict(
         out_idx=[2],
         pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: enable_fast_math},
     )
+    if target is not None:
+        jit_kwargs["target"] = target
+
+    @tilelang.jit(**jit_kwargs)
     def div_kernel_factory(N_val):
         num_tokens = T.dynamic("num_tokens")
 
@@ -85,11 +93,15 @@ def compare_bits(out, ref, label, desc_list=None, max_print=16):
 def check_kernel_sources(kernel_precise, kernel_fast):
     source_precise = kernel_precise.get_kernel_source()
     source_fast = kernel_fast.get_kernel_source()
-    print(f"\n  Precise kernel uses vdiv_precise: {'vdiv_precise' in source_precise}")
-    print(f"  Fast kernel uses plain vdiv:      {'simd_inst::vdiv(' in source_fast}")
+    # ASC emits AscendC (simd_inst::vdiv); PTO emits pto.vdiv.
+    precise_marker = "vdiv_precise" in source_precise
+    fast_marker = ("simd_inst::vdiv(" in source_fast) or ("pto.vdiv(" in source_fast)
+    print(f"\n  Precise kernel uses vdiv_precise: {precise_marker}")
+    print(f"  Fast kernel uses plain vdiv:      {fast_marker}")
 
 
-def test_random_cases():
+@pytest.mark.parametrize("target", TARGETS)
+def test_random_cases(target):
     """Random finite inputs. Precise mode should match torch.npu."""
     print("=" * 70)
     print("  Random Finite Division Test")
@@ -107,8 +119,8 @@ def test_random_cases():
 
     ref_npu = a_npu / b_npu
 
-    kernel_precise = make_div_kernel(N, enable_fast_math=False)
-    kernel_fast = make_div_kernel(N, enable_fast_math=True)
+    kernel_precise = make_div_kernel(N, enable_fast_math=False, target=target)
+    kernel_fast = make_div_kernel(N, enable_fast_math=True, target=target)
     out_precise = kernel_precise(a_npu, b_npu)
     out_fast = kernel_fast(a_npu, b_npu)
 
@@ -144,7 +156,8 @@ def build_special_vectors():
     return [x[0] for x in cases], [x[1] for x in cases], [x[2] for x in cases]
 
 
-def test_special_cases():
+@pytest.mark.parametrize("target", TARGETS)
+def test_special_cases(target):
     """Constructed divide-by-zero, inf, and nan inputs."""
     print("\n" + "=" * 70)
     print("  Special Division Test")
@@ -162,8 +175,8 @@ def test_special_cases():
 
     ref_npu = a_npu / b_npu
 
-    kernel_precise = make_div_kernel(N, enable_fast_math=False)
-    kernel_fast = make_div_kernel(N, enable_fast_math=True)
+    kernel_precise = make_div_kernel(N, enable_fast_math=False, target=target)
+    kernel_fast = make_div_kernel(N, enable_fast_math=True, target=target)
     out_precise = kernel_precise(a_npu, b_npu)
     out_fast = kernel_fast(a_npu, b_npu)
 
@@ -185,8 +198,8 @@ def bench_performance():
     a = torch.randn(M, N, device="npu", dtype=torch.float32)
     b = torch.randn(M, N, device="npu", dtype=torch.float32).clamp(min=0.01)
 
-    kernel_precise = make_div_kernel(N, enable_fast_math=False)
-    kernel_fast = make_div_kernel(N, enable_fast_math=True)
+    kernel_precise = make_div_kernel(N, enable_fast_math=False, target=target)
+    kernel_fast = make_div_kernel(N, enable_fast_math=True, target=target)
 
     kernel_precise(a, b)
     kernel_fast(a, b)

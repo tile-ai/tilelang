@@ -23,6 +23,7 @@ from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
+from tilelang.jit.adapter.utils import is_ascend_target, is_pto_target
 
 
 COMPILE_ARGS = {}
@@ -213,20 +214,23 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Convert TVM shape arrays to native Python lists
         param_shapes = []
 
-        for param in self.params:
-            native_shape = []
-            for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
-                    native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
-                else:
-                    native_shape.append(dim)
-            tl_dtype = param.dtype
-            if tl_dtype.bits < 8:
-                storage_dtype: dtype = dtype(param.torch_dtype())
-                native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
-            param_shapes.append(native_shape)
+        if is_pto_target(self.target):
+            param_shapes = [param.storage_shape(target=self.target) for param in self.params]
+        else:
+            for param in self.params:
+                native_shape = []
+                for dim in param.shape:
+                    if isinstance(dim, tirx.IntImm):
+                        native_shape.append(int(dim))
+                    elif isinstance(dim, tirx.Var):
+                        native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
+                    else:
+                        native_shape.append(dim)
+                tl_dtype = param.dtype
+                if tl_dtype.bits < 8:
+                    storage_dtype: dtype = dtype(param.torch_dtype())
+                    native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
+                param_shapes.append(native_shape)
 
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None

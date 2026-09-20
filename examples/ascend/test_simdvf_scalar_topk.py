@@ -8,7 +8,7 @@ import tilelang.testing
 from example_simdvf_scalar_topk import NUM_EXPERTS, NUM_TOPK, make_kernel, ref_program, simulator_safe_randn
 
 
-@pytest.mark.parametrize("backend", ["asc"])
+@pytest.mark.parametrize("backend", ["asc", pytest.param("pto", marks=pytest.mark.pto)])
 def test_simdvf_scalar_topk(backend):
     kernel = make_kernel(backend)
     device = torch.device("npu")

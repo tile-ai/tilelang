@@ -44,7 +44,19 @@ def serial_vreg_accum_kernel(backend="asc"):
     return main
 
 
-@pytest.mark.parametrize("backend", ["asc"])
+@pytest.mark.pto
+def test_serial_vreg_accum_pto_codegen_carries_local_var():
+    source = lower(serial_vreg_accum_kernel("pto"), target="pto").kernel_source
+    assert "pto.vmula" in source
+    assert "T.unroll" not in source
+    assert "pto.static_range" not in source
+    has_python_range = " in range(" in source
+    has_explicit_carry = ".carry(" in source
+    assert has_python_range or has_explicit_carry, source
+    assert "with pto.for_(" not in source or has_explicit_carry, source
+
+
+@pytest.mark.parametrize("backend", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_serial_vreg_accum(backend):
     kernel = tilelang.compile(serial_vreg_accum_kernel(backend), target=backend, out_idx=[2])
     device = torch.device("npu")

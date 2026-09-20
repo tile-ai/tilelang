@@ -20,20 +20,20 @@ def _run(program, M, N, N_pad, fill, target):
     torch.testing.assert_close(out[:, N:], expected_tail)
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_copy_pad_value_mode(target):
     M, N, N_pad, fill = 4, 30, 32, -1.0
     _run(copy_pad_value(M, N, N_pad, fill), M, N, N_pad, fill, target)
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_copy_data_select_mode(target):
     M, N, N_pad, fill = 4, 30, 32, -1.0
     _run(copy_data_select(M, N, N_pad, fill), M, N, N_pad, fill, target)
 
 
 if __name__ == "__main__":
-    for target in ("ascend",):
+    for target in ("ascend", "pto"):
         test_copy_pad_value_mode(target)
         test_copy_data_select_mode(target)
         print(f"PASS: test_copy_pad_value ({target})")

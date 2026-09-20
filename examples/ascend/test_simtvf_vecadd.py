@@ -7,7 +7,7 @@ import tilelang
 from example_simtvf_vecadd import ref_program, vector_add
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_simtvf_vecadd_auto(target):
     N = 2**30
     kernel = tilelang.compile(vector_add(N), target=target, out_idx=-1)

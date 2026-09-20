@@ -1,14 +1,19 @@
 """pytest test for example_simdvf_vecadd.py — high-level SIMD vector add with auto-schedule."""
 
+import pytest
 import torch
 import tilelang
 
 from example_simdvf_vecadd import ref_program, vector_add
 
 
-def test_simdvf_vecadd():
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_simdvf_vecadd(target):
     N = 2**30
-    kernel = tilelang.compile(vector_add(N), out_idx=-1)
+    kernel = tilelang.compile(vector_add(N), target=target, out_idx=-1)
     device = torch.device("npu")
     a = torch.randn(N, dtype=torch.float32, device=device)
     b = torch.randn(N, dtype=torch.float32, device=device)

@@ -7,7 +7,7 @@ import tilelang
 from example_simtvf_ubuf_multi import ref_program, ubuf_multi
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_simtvf_ubuf_multi(target):
     N = 256
     kernel = tilelang.compile(ubuf_multi(N), target=target, out_idx=-1)

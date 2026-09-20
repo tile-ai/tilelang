@@ -162,6 +162,6 @@ def run_example(target="ascend"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Ascend UB-merge GEMM example.")
-    parser.add_argument("--target", choices=["ascend"], default="ascend")
+    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
     args = parser.parse_args()
     run_example(target=args.target)

@@ -38,18 +38,18 @@ def _run_alias(use_view: bool, target: str):
     assert max_diff < 1e-6, f"max_diff={max_diff:.2e}"
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_autoschedule_reshape_alias_dependency(target):
     _run_alias(use_view=False, target=target)
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_autoschedule_view_alias_dependency(target):
     _run_alias(use_view=True, target=target)
 
 
 if __name__ == "__main__":
-    for target in ("ascend",):
+    for target in ("ascend", "pto"):
         test_autoschedule_reshape_alias_dependency(target)
         print(f"PASS: test_autoschedule_reshape_alias_dependency ({target})")
         test_autoschedule_view_alias_dependency(target)

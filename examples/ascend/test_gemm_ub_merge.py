@@ -1,5 +1,6 @@
 """pytest test for example_gemm_ub_merge.py — UB merge with Cube + Vector."""
 
+import pytest
 import torch
 import tilelang
 
@@ -28,6 +29,13 @@ def test_gemm_ub_merge():
     _run_gemm_ub_merge(target="ascend")
 
 
+@pytest.mark.pto
+def test_gemm_ub_merge_pto():
+    _run_gemm_ub_merge(target="pto")
+
+
 if __name__ == "__main__":
     test_gemm_ub_merge()
     print("PASS: test_gemm_ub_merge")
+    test_gemm_ub_merge_pto()
+    print("PASS: test_gemm_ub_merge_pto")

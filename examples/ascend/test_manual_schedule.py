@@ -1,17 +1,22 @@
 """Correctness test for example_manual_schedule.py."""
 
+import pytest
 import torch
 import tilelang
 
 from example_manual_schedule import NUM_BLOCKS, TILE_ELEMS, manual_schedule_vector_add, ref_program
 
 
-def test_manual_schedule_vector_add():
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_manual_schedule_vector_add(target):
     num_tiles = 4
     n = NUM_BLOCKS * TILE_ELEMS * num_tiles
     kernel = tilelang.compile(
         manual_schedule_vector_add(num_tiles),
-        target="ascend",
+        target=target,
         out_idx=-1,
     )
 

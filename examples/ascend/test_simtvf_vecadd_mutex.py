@@ -7,7 +7,7 @@ import tilelang
 from example_simtvf_vecadd_mutex import ref_program, vector_add
 
 
-@pytest.mark.parametrize("target", ["ascend"])
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 def test_simtvf_vecadd_mutex(target):
     N = 2**30
     kernel = tilelang.compile(
