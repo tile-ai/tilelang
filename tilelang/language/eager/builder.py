@@ -3,6 +3,7 @@ from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
 import builtins
+from functools import partial
 
 from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
@@ -33,6 +34,34 @@ import threading
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Guard iterator/container construction, not reductions (use explicit T.* ops
+# for device reductions). Identity keys avoid hashing or comparing user callables.
+_BUILTIN_ITERABLE_ARG_MAP = {
+    id(func): (func, select_iterables)
+    for funcs, select_iterables in (
+        ((builtins.enumerate,), lambda args, kwargs: args[:1] or ((kwargs["iterable"],) if "iterable" in kwargs else ())),
+        ((builtins.zip,), lambda args, kwargs: args),
+        ((builtins.map,), lambda args, kwargs: args[1:]),
+        ((builtins.filter,), lambda args, kwargs: args[1:2]),
+        # iter(callable, sentinel) does not take an iterable.
+        ((builtins.iter,), lambda args, kwargs: args if len(args) == 1 else ()),
+        (
+            (
+                builtins.reversed,
+                builtins.list,
+                builtins.tuple,
+                builtins.set,
+                builtins.frozenset,
+                builtins.dict,
+                builtins.sorted,
+            ),
+            lambda args, kwargs: args[:1],
+        ),
+    )
+    for func in funcs
+}
 
 
 def unwrap_expr(expr) -> PrimExpr | int | float:
@@ -471,11 +500,7 @@ class Builder(BaseBuilder):
             # values must be excluded explicitly: Var carries an __iter__ shim
             # for single-binding unpacking and Buffer.__getitem__ never raises
             # IndexError, so both would iterate instead of failing.
-            if isinstance(it, (PrimExpr, Buffer)):
-                raise TypeError(
-                    f"Invalid for loop, got {it}({type(it)}): a TIR expression or buffer is not iterable. "
-                    "Use range(n) or T.serial(n) to loop over a runtime extent."
-                )
+            self.python_iterable(it, "Invalid for loop")
             try:
                 iterator = iter(it)
             except TypeError:
@@ -931,11 +956,39 @@ class Builder(BaseBuilder):
         else:
             return self.prim_func_arg(name, value)
 
-    def iter_call(self, func, *args, **kwargs):
+    def iter_call(self, func, /, *args, **kwargs):
         from tilelang.language import serial
 
         if func is builtins.range:
             return serial(*args, **kwargs)
+        return func(*args, **kwargs)
+
+    def python_iterable(self, value, context):
+        """Reject device values before Python can acquire an iterator over them."""
+        if isinstance(value, (PrimExpr, Buffer, BufferRegion, Ref, EqualOp, NotEqualOp)):
+            raise TypeError(
+                f"{context}: a TIR expression or buffer is not iterable (got {type(value).__name__}). "
+                "Use range(n) or T.serial(n) in a for statement to loop over a runtime extent, "
+                "or iterate over a Python container such as [expr] or buffer.shape."
+            )
+        if isinstance(value, (SerialForWithStep, tirx.frame.IRBuilderFrame)):
+            raise TypeError(
+                f"{context}: a TileLang loop or IR builder frame is not a compile-time Python iterable. "
+                "Use TileLang loop constructors directly in a for statement; "
+                "use range with compile-time bounds in a comprehension."
+            )
+        return value
+
+    def resolve_call(self, func):
+        entry = _BUILTIN_ITERABLE_ARG_MAP.get(id(func))
+        if entry is None:
+            return func
+        return partial(self._call_python_builtin, *entry)
+
+    def _call_python_builtin(self, func, select_iterables, /, *args, **kwargs):
+        """Check iterable operands before a builtin hides or consumes them."""
+        for value in select_iterables(args, kwargs):
+            self.python_iterable(value, f"{func.__name__}()")
         return func(*args, **kwargs)
 
     def comprehension_filter(self, cond):

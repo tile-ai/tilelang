@@ -190,8 +190,14 @@ class BaseBuilder:
             if inspect.isgenerator(iterator):
                 iterator.close()
 
-    def iter_call(self, func, *args, **kwargs):
+    def iter_call(self, func, /, *args, **kwargs):
         return func(*args, **kwargs)
+
+    def resolve_call(self, func):
+        return func
+
+    def python_iterable(self, value, context):
+        return value
 
     def comprehension_filter(self, cond):
         return cond
@@ -737,6 +743,13 @@ class DSLMutator(ast.NodeTransformer):
             return quote_expr("__tb.rval(name, node)", name=ast.Constant(name), node=node, span=node)
         return node
 
+    def visit_Call(self, node: ast.Call):
+        node = self.generic_visit(node)
+        # Resolve by callable identity, not spelling, so aliases are checked
+        # without changing shadowed builtins or adding a frame to other calls.
+        node.func = quote_expr("__tb.resolve_call(func)", func=node.func, span=node.func)
+        return node
+
     def visit_ListComp(self, node):
         # Python evaluates the first iterable in the enclosing scope; the
         # targets, filters and result live in a separate comprehension scope.
@@ -749,6 +762,7 @@ class DSLMutator(ast.NodeTransformer):
             for i, gen in enumerate(node.generators):
                 if i:
                     gen.iter = self.visit(gen.iter)
+                gen.iter = quote_expr("__tb.python_iterable(value, 'comprehension')", value=gen.iter, span=gen.iter)
                 gen.ifs = [quote_expr("__tb.comprehension_filter(cond)", cond=self.visit(cond), span=cond) for cond in gen.ifs]
             if isinstance(node, ast.DictComp):
                 node.key = self.visit(node.key)
