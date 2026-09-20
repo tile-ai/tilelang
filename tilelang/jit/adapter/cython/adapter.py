@@ -10,7 +10,7 @@ from collections.abc import Callable
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
-from tvm import tirx
+from tvm import arith, tirx
 from tvm.relax import TensorType
 
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
@@ -18,7 +18,7 @@ from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target, is_metal_target
 from tilelang.backend.target import determine_target
-from tilelang.utils.language import retrieve_func_from_module
+from tilelang.utils.language import prim_expr_equal, retrieve_func_from_module
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,27 @@ def is_symbolic_expr(expr) -> bool:
     return not isinstance(expr, tirx.IntImm) and isinstance(expr, tirx.PrimExpr)
 
 
+def _storage_pack_factor(dtype: tvm.DataType) -> int:
+    """Return the number of logical elements represented by one storage byte."""
+    element_bits = dtype.bits * dtype.lanes
+    return 8 // element_bits if element_bits < 8 else 1
+
+
+def _accepted_storage_dtypes(dtype: tvm.DataType) -> torch.dtype | tuple[torch.dtype, ...]:
+    torch_dtype = dtype.as_torch()
+    if _storage_pack_factor(dtype) > 1 and torch_dtype != torch.int8:
+        return (torch_dtype, torch.int8)
+    return torch_dtype
+
+
+def _pack_static_value(value: int, pack_factor: int, what: str, keep_unit: bool = False) -> int:
+    if pack_factor == 1 or (keep_unit and value == 1):
+        return value
+    if value % pack_factor != 0:
+        raise ValueError(f"{what} must be divisible by storage pack factor {pack_factor}, got {value}")
+    return value // pack_factor
+
+
 class CythonKernelAdapter(BaseKernelAdapter):
     """Adapter class that converts TVM/TIR functions to callable CUDA kernels using cython.
 
@@ -75,14 +96,18 @@ class CythonKernelAdapter(BaseKernelAdapter):
     device_kernel_source: str | None = None
     kernel_global_source: str | None = None  # Alias for device_kernel_source for compatibility
     lib: ctypes.CDLL | None = None  # Compiled library handle
-    # Maps symbolic variables to (kind, buffer_index, dimension, stride_scale)
+    # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
     # Maps symbolic variable names to ALL buffers that carry them, for cascaded None resolution
-    dynamic_symbolic_sources: dict[str, list[tuple[int, int, int, int]]] | None = None
+    dynamic_symbolic_sources: dict[str, list[tuple[int, int, int]]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
     ptr_map: dict[int, str] | None = None
     # Maps buffer variables to their corresponding dtypes
-    buffer_dtype_map: dict[tirx.Var, tuple[int, torch.dtype]] | None = None
+    buffer_dtype_map: dict[tirx.Var, tuple[int, torch.dtype | tuple[torch.dtype, ...]]] | None = None
+    # Per-parameter storage metadata used when the Python wrapper allocates outputs.
+    # The shape in KernelParam is logical, while PyTorch tensors for sub-byte dtypes
+    # are allocated in packed storage elements.
+    param_storage_metadata: list[tuple[int, int]] | None = None
     # Maps buffer variables to their corresponding static shapes and strides,
     # e.g., {
     #     "A": [(0, 16), (1, 16)] -> represents A.shape/strides = (16, 16)
@@ -133,6 +158,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.dynamic_symbolic_sources = self._process_dynamic_symbolic_sources()
         self.buffer_dtype_map = self._process_buffer_dtype()
+        self.param_storage_metadata = self._process_param_storage_metadata()
         self.ptr_map = self._process_ptr_map()
         self.buffer_device_map = self._process_buffer_device()
 
@@ -140,6 +166,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.static_shape_map = static_buffer_infos[0]
         self.static_strides_map = static_buffer_infos[1]
         self.static_contiguous_list = static_buffer_infos[2]
+        self.dynamic_strides_map = static_buffer_infos[3]
 
         self.verbose = verbose
         self.wrapper = TLWrapper(self.target)
@@ -154,6 +181,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.host_kernel_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.host_kernel_source)
+        if self.wrapper.pto_kernel_source is not None:
+            self.lib_generator.update_pto_kernels(self.wrapper.pto_kernel_source, self.wrapper.pto_kernel_names)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
 
@@ -168,8 +197,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
+        self.cython_wrapper.set_param_storage_metadata(self.param_storage_metadata)
         self.cython_wrapper.set_static_shape_map(self.static_shape_map)
         self.cython_wrapper.set_static_strides_map(self.static_strides_map)
+        self.cython_wrapper.set_dynamic_strides_map(self.dynamic_strides_map)
         self.cython_wrapper.set_static_contiguous_list(self.static_contiguous_list)
         self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
         self.cython_wrapper.set_ptr_map(self.ptr_map)
@@ -208,6 +239,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
         adapter.dynamic_symbolic_sources = adapter._process_dynamic_symbolic_sources()
         adapter.buffer_dtype_map = adapter._process_buffer_dtype()
+        adapter.param_storage_metadata = adapter._process_param_storage_metadata()
         adapter.ptr_map = adapter._process_ptr_map()
         adapter.buffer_device_map = adapter._process_buffer_device()
 
@@ -215,6 +247,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.static_shape_map = static_buffer_infos[0]
         adapter.static_strides_map = static_buffer_infos[1]
         adapter.static_contiguous_list = static_buffer_infos[2]
+        adapter.dynamic_strides_map = static_buffer_infos[3]
 
         adapter.verbose = verbose
         adapter.lib_generator = LibraryGenerator(adapter.target, verbose=verbose)
@@ -232,8 +265,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
+        adapter.cython_wrapper.set_param_storage_metadata(adapter.param_storage_metadata)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
         adapter.cython_wrapper.set_static_strides_map(adapter.static_strides_map)
+        adapter.cython_wrapper.set_dynamic_strides_map(adapter.dynamic_strides_map)
         adapter.cython_wrapper.set_static_contiguous_list(adapter.static_contiguous_list)
         adapter.cython_wrapper.set_buffer_device_map(adapter.buffer_device_map)
         adapter.cython_wrapper.set_ptr_map(adapter.ptr_map)
@@ -244,71 +279,68 @@ class CythonKernelAdapter(BaseKernelAdapter):
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
 
-        Maps symbolic variables to their corresponding (id, buffer_index, dimension, stride_scale)
+        Maps symbolic variables to their corresponding (id, buffer_index, dimension, storage_scale)
         for runtime shape resolution.
         id represents shape or stride, 0 represents shape, 1 represents stride.
-        stride_scale compensates for sub-byte dtypes (e.g. float4_e2m1fn) where torch strides
-        are in storage units but the kernel expects logical element strides.
+        storage_scale compensates for sub-byte dtypes (e.g. float4_e2m1fn) where torch
+        reports packed storage units but the kernel expects logical element units.
         """
+
+        def shape_scale(buffer, dim_idx: int) -> int:
+            return _storage_pack_factor(buffer.dtype) if dim_idx == len(buffer.shape) - 1 else 1
+
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
-        # Inputs are visited first. An output's shape is resolved from these entries
-        # while that output is being allocated, so a dimension mentioned by both an
-        # input and an output must be owned by the input; owning it on the output
-        # would make the allocation loop read a slot it has not filled yet.
-        ordered = [i for i in range(len(params)) if i not in self.result_idx]
-        ordered += [i for i in range(len(params)) if i in self.result_idx]
-        for i in ordered:
-            param = params[i]
+        for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
                     if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
-                        dynamic_symbolic_map[shape] = (0, i, j, 1)
-        for i in ordered:
-            param = params[i]
+                        dynamic_symbolic_map[shape] = (0, i, j, shape_scale(buffer, j))
+        for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
-                element_bits = buffer.dtype.bits * buffer.dtype.lanes
-                stride_scale = 8 // element_bits if element_bits < 8 else 1
+                stride_scale = _storage_pack_factor(buffer.dtype)
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
-    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int, int]]]:
+    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int]]]:
         """Build a multi-source map for cascaded None resolution.
 
-        For each dynamic symbol, maps to ALL buffers that carry it as (kind, buffer_idx, dim_idx, stride_scale).
-        Each source retains its own kind: 0 for shape, 1 for stride.
+        For each dynamic symbol, maps to ALL buffers that carry it as (buffer_idx, dim_idx, storage_scale).
         This allows the Cython wrapper to find a non-None carrier when some buffers are None.
         """
+
+        def shape_scale(buffer, dim_idx: int) -> int:
+            return _storage_pack_factor(buffer.dtype) if dim_idx == len(buffer.shape) - 1 else 1
+
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        sources: dict[str, list[tuple[int, int, int, int]]] = {}
+        sources: dict[str, list[tuple[int, int, int]]] = {}
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
-                element_bits = buffer.dtype.bits * buffer.dtype.lanes
-                stride_scale = 8 // element_bits if element_bits < 8 else 1
+                stride_scale = _storage_pack_factor(buffer.dtype)
                 for j, dim in enumerate(buffer.shape):
                     if isinstance(dim, tirx.Var) and dim not in params:
                         key = str(dim)
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((0, i, j, 1))
+                        sources[key].append((i, j, shape_scale(buffer, j)))
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and stride not in params:
                         key = str(stride)
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((1, i, j, stride_scale))
+                        sources[key].append((i, j, stride_scale))
         return sources
 
-    def _process_buffer_dtype(self) -> dict[tirx.Var, tuple[int, torch.dtype]]:
+    def _process_buffer_dtype(self) -> dict[tirx.Var, tuple[int, torch.dtype | tuple[torch.dtype, ...]]]:
         """Extract information about buffer dtypes from the TIR function.
 
         Maps buffer variables to their corresponding dtypes.
@@ -321,8 +353,25 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 name, dtype = buffer.name, buffer.dtype
-                buffer_dtype_map[name] = (i, dtype.as_torch())
+                buffer_dtype_map[name] = (i, _accepted_storage_dtypes(dtype))
         return buffer_dtype_map
+
+    def _process_param_storage_metadata(self) -> list[tuple[int, int]]:
+        """Return (packed_dim, pack_factor) for each parameter.
+
+        KernelParam shapes remain in logical element units. For sub-byte element
+        types, PyTorch represents the backing tensor with packed storage elements,
+        so wrapper-created outputs must divide the packed dimension before calling
+        torch.empty.
+        """
+        metadata = []
+        for param in self.params:
+            pack_factor = _storage_pack_factor(param.dtype)
+            if pack_factor > 1 and len(param.shape) > 0:
+                metadata.append((len(param.shape) - 1, pack_factor))
+            else:
+                metadata.append((-1, 1))
+        return metadata
 
     def _process_ptr_map(self) -> dict[int, str]:
         """Extract information about pointer arguments from the TIR function.
@@ -340,7 +389,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _process_static_buffer_infos(
         self,
-    ) -> tuple[dict[tirx.Var, tuple[int, list[tuple[int, int]]]], dict[tirx.Var, tuple[int, list[tuple[int, int]]]], list[tuple[tirx.Var]]]:
+    ) -> tuple[
+        dict[str, tuple[int, list[tuple[int, int]]]],
+        dict[str, tuple[int, list[tuple[int, int]]]],
+        list[tuple[int, str]],
+        dict[str, tuple[int, list[tuple[int, tirx.PrimExpr, int]]]],
+    ]:
         """Extract information about static shapes from the TIR function.
 
         Maps buffer variables to their corresponding static shapes.
@@ -350,12 +404,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
         buffer_map = func.buffer_map
         static_shape_map = {}
         static_strides_map = {}
+        dynamic_strides_map = {}
         static_contiguous_list = list()
+        analyzer = arith.Analyzer()
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
-                static_shape, static_strides = [], []
-                packing_factor = 1
+                static_shape, static_strides, dynamic_strides = [], [], []
+                packing_factor = KernelParam.from_buffer(buffer).storage_packing_factor(target=self.target)
                 innermost_dim = len(buffer.shape) - 1
                 for j, s in enumerate(buffer.shape):
                     if isinstance(s, tirx.IntImm):
@@ -374,10 +430,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         raise ValueError(f"Unsupported shape type: {type(s)}")
                 for j, s in enumerate(buffer.strides):
                     if j != innermost_dim and packing_factor > 1 and is_symbolic_expr(s):
-                        raise ValueError(
-                            f"Packed {buffer.dtype} buffers do not support dynamic outer strides; "
-                            f"stride index {j} must be a compile-time storage-aligned value"
-                        )
+                        dynamic_strides.append((j, s, packing_factor))
                     if j == innermost_dim and packing_factor > 1 and (not isinstance(s, tirx.IntImm) or s.value != 1):
                         raise ValueError(f"Packed {buffer.dtype} buffers require a static innermost stride of 1")
                     if isinstance(s, tirx.IntImm):
@@ -392,13 +445,17 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         static_strides.append((j, stride))
                 is_contiguous, prod = True, 1
                 for dim, stride in reversed(list(zip(buffer.shape, buffer.strides))):
-                    is_contiguous &= bool(stride == prod)
+                    if not (prim_expr_equal(stride, prod) or analyzer.can_prove_equal(stride, prod)):
+                        is_contiguous = False
+                        break
                     prod *= dim
                 static_shape_map[buffer.name] = (i, static_shape)
                 static_strides_map[buffer.name] = (i, static_strides)
+                if dynamic_strides:
+                    dynamic_strides_map[buffer.name] = (i, dynamic_strides)
                 if is_contiguous:
                     static_contiguous_list.append((i, buffer.name))
-        return static_shape_map, static_strides_map, static_contiguous_list
+        return static_shape_map, static_strides_map, static_contiguous_list, dynamic_strides_map
 
     def _process_buffer_device(self) -> dict[tirx.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.

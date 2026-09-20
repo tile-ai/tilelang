@@ -382,6 +382,7 @@ file(GLOB TILE_LANG_SRCS
   src/backend/common/target_utils.cc
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
+  src/backend/common/codegen/codegen_py.cc
 )
 
 # Always include CPU-safe runtime helpers

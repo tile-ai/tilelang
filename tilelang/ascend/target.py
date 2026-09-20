@@ -17,9 +17,27 @@ def _make_ascend_target(target_dict: dict | None = None) -> Target:
     return Target(target_dict)
 
 
+def _make_pto_target() -> Target:
+    target_dict = {"kind": "ascend"}
+    # The native kind supplies Ascend semantics; "pto" selects PTO codegen,
+    # while "ascend" preserves the target kind's default feature key.
+    target_dict["keys"] = ["pto", "ascend"]
+    return Target(target_dict)
+
+
 def target_is_ascend(target: Target) -> bool:
     """Return whether *target* uses the Ascend architecture."""
     return _target_ffi_api().TargetIsAscend(target)
+
+
+def target_is_pto(target: Target) -> bool:
+    """Return whether *target* selects PTO within the Ascend architecture."""
+    return target_is_ascend(target) and "pto" in target.keys
+
+
+def target_is_plain_ascend(target: Target) -> bool:
+    """Return whether *target* selects AscendC rather than PTO codegen."""
+    return target_is_ascend(target) and "pto" not in target.keys
 
 
 def check_ascend_availability() -> bool:
@@ -47,6 +65,16 @@ def normalize_ascend_target(target: TargetLike) -> Target | None:
         return None
 
 
+def normalize_pto_target(target: TargetLike) -> Target | None:
+    if not isinstance(target, str) or target.strip() != "pto":
+        return None
+
+    try:
+        return _make_pto_target()
+    except Exception:
+        return None
+
+
 def normalize_asc_target(target: TargetLike) -> Target | None:
     """Accept ``asc`` as the concise name for the AscendC backend."""
     if isinstance(target, str) and target.strip() == "asc":
@@ -57,3 +85,4 @@ def normalize_asc_target(target: TargetLike) -> Target | None:
 register_target_detector("ascend", _detect_ascend_target, override=True)
 register_target_normalizer("ascend", normalize_ascend_target, override=True)
 register_target_normalizer("asc", normalize_asc_target, override=True)
+register_target_normalizer("pto", normalize_pto_target, override=True)
