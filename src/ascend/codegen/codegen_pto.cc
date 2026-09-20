@@ -6565,22 +6565,45 @@ void CodeGenTileLangPTO::VisitStmt_(const WhileNode *op) {
 void CodeGenTileLangPTO::VisitStmt_(const SBlockNode *op) {
   if (current_function_is_mixed_ &&
       (op->name_hint == "CUBE" || op->name_hint == "VECTOR")) {
+    bool is_vector_section = op->name_hint == "VECTOR";
+    int64_t vector_count = 2;
+    if (is_vector_section) {
+      if (auto opt = op->annotations.Get("vector_count")) {
+        const auto *count = opt.value().as<IntImmNode>();
+        ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
+            << "Mixed-kernel vector_count must be the constant integer 1 or "
+               "2, got "
+            << opt.value();
+        vector_count = count->value;
+      }
+    }
     // Physical sections are independent SSA regions.  Restore all captured
     // outer local.var bindings both before and after a section so neither a
     // sibling section nor ordinary outer code can observe section-local SSA.
     RestoreMixedSectionVariables(op);
     PrintIndent();
     stream << "with tl.mixed_kernel_section(\""
-           << (op->name_hint == "CUBE" ? "cube" : "vector") << "\"):\n";
+           << (is_vector_section ? "vector" : "cube") << "\"):\n";
     int section_scope = BeginScope();
     bool old_in_mixed_vector_section = in_mixed_vector_section_;
     bool old_inside_mixed_section = inside_mixed_section_;
-    in_mixed_vector_section_ = op->name_hint == "VECTOR";
+    in_mixed_vector_section_ = is_vector_section;
     inside_mixed_section_ = true;
+    int active_aiv_scope = -1;
+    if (is_vector_section && vector_count == 1) {
+      // The physical mixed group still has two AIVs; only AIV0 executes this
+      // section's body, including its cross-core synchronization.
+      PrintIndent();
+      stream << "if pto.get_subblock_idx() == 0:\n";
+      active_aiv_scope = BeginScope();
+    }
     if (op->init.defined()) {
       PrintStmt_(op->init.value());
     }
     PrintStmt_(op->body);
+    if (active_aiv_scope != -1) {
+      EndScope(active_aiv_scope);
+    }
     inside_mixed_section_ = old_inside_mixed_section;
     in_mixed_vector_section_ = old_in_mixed_vector_section;
     EndScope(section_scope);
