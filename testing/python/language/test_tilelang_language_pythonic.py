@@ -296,5 +296,37 @@ def test_device_loop_control_inside_python_loop(loop, control):
         assert kernel(a).cpu().tolist() == [expected, expected]
 
 
+def test_tir_var_is_not_a_loop_iterable():
+    # Var has an __iter__ shim for single-binding unpacking; a bare symbolic
+    # extent in a for header must not silently expand once with `i` aliased to it.
+    n = T.dynamic("n")
+
+    with pytest.raises(TypeError, match="not iterable"):
+
+        @T.prim_func
+        def main(B: T.Tensor((n,), "int32")):
+            for i in n:
+                B[i] = i
+
+
+def test_buffer_is_not_a_loop_iterable():
+    # Buffer.__getitem__ never raises IndexError, so iterating one would never end.
+    with pytest.raises(TypeError, match="not iterable"):
+
+        @T.prim_func
+        def main(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
+            for x in A:
+                B[0] = x
+
+
+def test_non_iterable_loop_target_keeps_diagnostic():
+    with pytest.raises(TypeError, match="Invalid for loop"):
+
+        @T.prim_func
+        def main(B: T.Tensor((4,), "int32")):
+            for i in 4:
+                B[i] = i
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

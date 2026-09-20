@@ -467,12 +467,28 @@ class Builder(BaseBuilder):
 
             it = serial(it.start, it.stop, it.step)
         if not isinstance(it, (SerialForWithStep, UnrollForWithStep, tirx.frame.ForFrame)):
-            # Python iterables expand the body at IR construction time.
+            # Python iterables expand the body at IR construction time. TIR
+            # values must be excluded explicitly: Var carries an __iter__ shim
+            # for single-binding unpacking and Buffer.__getitem__ never raises
+            # IndexError, so both would iterate instead of failing.
+            if isinstance(it, (PrimExpr, Buffer)):
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}): a TIR expression or buffer is not iterable. "
+                    "Use range(n) or T.serial(n) to loop over a runtime extent."
+                )
+            try:
+                iterator = iter(it)
+            except TypeError:
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
+                    "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding, "
+                    "or a Python iterable"
+                ) from None
             pos = len(self.frames)
             self.frames.append(PythonLoopFrame())
             try:
                 # Keep user-owned generators resumable after a loop break.
-                for value in it:  # noqa: UP028
+                for value in iterator:  # noqa: UP028
                     yield value
             finally:
                 # Python loops do not introduce a lexical scope. Keep emitted
