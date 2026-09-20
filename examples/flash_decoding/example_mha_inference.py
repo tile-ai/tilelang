@@ -134,7 +134,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
                 ],
                 lse_local,
             )
-            T.reduce_max(lse_local, lse_max_local, dim=0, clear=False)
+            T.reduce_max(lse_local, lse_max_local, dim=0, clear=True)
             for k in T.Pipelined(num_split):
                 T.copy(lse_local[k, :], lse_local_split)
                 for i in T.Parallel(block_M):

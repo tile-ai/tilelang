@@ -13,7 +13,6 @@ from .utils import (
     is_cuda_target,
     is_hip_target,
     is_cpu_target,
-    get_annotated_mod,
     is_handle_add_byte_offset_call,
     pythonic_expr,
     parse_function_call_args,
@@ -209,6 +208,17 @@ class BaseWrapper(ABC):
 logger = logging.getLogger(__name__)
 
 
+def _require_lowered_modules(
+    device_mod: IRModule | None,
+    host_mod: IRModule | None,
+) -> tuple[IRModule, IRModule]:
+    """Require adapter metadata to come from the compiler's lowering result."""
+    missing = [name for name, mod in (("device_mod", device_mod), ("host_mod", host_mod)) if mod is None]
+    if missing:
+        raise ValueError(f"Adapter source generation requires pre-lowered device_mod and host_mod; missing: {', '.join(missing)}.")
+    return device_mod, host_mod
+
+
 class TLCUDASourceWrapper:
     _TYPE_MAP = {
         "float32": "float",
@@ -219,6 +229,7 @@ class TLCUDASourceWrapper:
         "float8_e5m2": "fp8_e5_t",
         "float64": "double",
         "int64": "int64_t",
+        "uint64": "uint64_t",
         "int32": "int",
         "uint32": "unsigned int",
         "bool": "int8_t",
@@ -471,11 +482,7 @@ class TLCUDASourceWrapper:
         return ""
 
     def parse_source_information(self):
-        if self.device_mod is None or self.host_mod is None:
-            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
-                device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-            self.device_mod = device_mod
-            self.host_mod = host_mod
+        self.device_mod, self.host_mod = _require_lowered_modules(self.device_mod, self.host_mod)
         assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
         assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 
@@ -865,11 +872,7 @@ class TLCPUSourceWrapper:
         return host_func
 
     def parse_source_information(self):
-        if self.device_mod is None or self.host_mod is None:
-            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs), self.target:
-                device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-            self.device_mod = device_mod
-            self.host_mod = host_mod
+        self.device_mod, self.host_mod = _require_lowered_modules(self.device_mod, self.host_mod)
         assert len(self.device_mod.functions) >= 1, "Device module should have at least one function."
         assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 

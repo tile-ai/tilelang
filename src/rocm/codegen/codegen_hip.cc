@@ -806,6 +806,31 @@ void CodeGenTileLangHIP::VisitExpr_(const SelectNode *op, std::ostream &os) {
   os << result;
 }
 
+void CodeGenTileLangHIP::VisitExpr_(const NotNode *op, std::ostream &os) {
+  if (!op->dtype.is_fixed_length_vector()) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+
+  std::string result = name_supply_->FreshName("_");
+  this->PrintIndent();
+  this->PrintType(op->dtype, stream);
+  stream << ' ' << result << ";\n";
+  int ssa_scope = BeginScope();
+  {
+    std::string value = SSAGetID(PrintExpr(op->a), op->a.dtype());
+    for (int i = 0; i < op->dtype.lanes(); ++i) {
+      std::ostringstream lane;
+      lane << "!bool(";
+      PrintVecElemLoad(value, op->a.dtype(), i, lane);
+      lane << ')';
+      PrintVecElemStore(result, op->dtype, i, lane.str());
+    }
+  }
+  EndScope(ssa_scope);
+  os << result;
+}
+
 void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
                                           int i,
                                           std::ostream &os) { // NOLINT(*)
@@ -2076,6 +2101,13 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     ICHECK(!func_name.empty() && panel_size > 0)
         << "threadblock_swizzle_pattern: failed to extract func_name and "
            "panel_size";
+    // Only the row/column rasterizations exist in the HIP device templates;
+    // e.g. T.use_swizzle(order="mlx") is Metal-only and must fail here
+    // instead of surfacing as a missing-symbol error from hipcc.
+    ICHECK(func_name == "rasterization2DRow" ||
+           func_name == "rasterization2DColumn")
+        << "threadblock swizzle pattern `" << func_name
+        << "` is not supported by the ROCm backend";
     this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
                  << panel_size << ">();\n";
     this->VisitStmt(op->body);

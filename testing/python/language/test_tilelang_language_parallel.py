@@ -85,8 +85,9 @@ def _parallel_vectorize_local_and_var():
 
 def test_parallel_vectorize_var():
     source = _parallel_vectorize_local_and_var.get_kernel_source()
-    # do not vectorize if the loop only contains local/fragment and var buffer access
-    assert "float2" not in source
+    # register-register loops vectorize too; the var operand becomes a
+    # scalar broadcast inside the packed multiply
+    assert "float2" in source
 
 
 if __name__ == "__main__":

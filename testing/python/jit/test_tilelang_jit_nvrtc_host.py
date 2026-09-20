@@ -1,5 +1,6 @@
 import torch
 import pytest
+from types import SimpleNamespace
 
 import tilelang
 import tilelang.language as T
@@ -20,8 +21,23 @@ def _make_host_only_adapter(program, result_idx=None):
     adapter.param_dtypes = [param.torch_dtype() for param in adapter.params]
     adapter.param_shapes = [list(param.shape) for param in adapter.params]
     adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
-    adapter.target = "cuda"
+    adapter.target = tilelang.tvm.target.Target({"kind": "cuda", "arch": "sm_120a"})
     return adapter
+
+
+@pytest.mark.parametrize("explicit_stream", [None, 0, 456])
+def test_nvrtc_adapter_uses_current_stream(monkeypatch, explicit_stream):
+    @T.prim_func
+    def main(A: T.Tensor((8,), T.float32)):
+        T.evaluate(0)
+
+    adapter = _make_host_only_adapter(main)
+    forwarded = []
+    adapter._forward_from_prebuild_lib = lambda *args, stream: forwarded.append(stream)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(cuda_stream=123))
+    adapter._wrap_forward_from_prebuild_lib(torch.empty(8), stream=explicit_stream)
+    assert forwarded == [123 if explicit_stream is None else explicit_stream]
 
 
 def test_nvrtc_adapter_forwards_scalar_primfunc_parameters():

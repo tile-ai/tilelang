@@ -8,6 +8,7 @@ deepseek_v32/
 ├── fp8_lighting_indexer.py             # FP8 lighting indexer
 ├── sparse_mla_bwd.py                   # Sparse MLA backward implementation
 ├── sparse_mla_fwd.py                   # Sparse MLA forward implementation
+├── sparse_mla_fwd_fp8.py               # FP8 (e4m3) sparse MLA forward pass
 ├── sparse_mla_fwd_pipelined.py         # Pipelined implementation of sparse MLA forward pass
 ├── topk_selector.py                    # Top-k selector implementation
 ```
@@ -22,7 +23,7 @@ The architecture diagram above highlights three key components (shown in green) 
 
 1. **Lightning Indexer** (`fp8_lighting_indexer.py`) - Efficiently indexes and processes sparse attention patterns using FP8 precision
 2. **Top-k Selector** (`topk_selector.py`) - Selects the top-k most relevant tokens for sparse attention computation
-3. **Multi-Query Attention** (`sparse_mla_fwd.py`, `sparse_mla_fwd_pipelined.py`, and `sparse_mla_bwd.py`) - Core attention mechanism implementation with sparse MLA (Multi-Latent Attention) forward and backward passes
+3. **Multi-Query Attention** (`sparse_mla_fwd.py`, `sparse_mla_fwd_fp8.py`, `sparse_mla_fwd_pipelined.py`, and `sparse_mla_bwd.py`) - Core attention mechanism implementation with sparse MLA (Multi-Latent Attention) forward and backward passes
 
 ### Lightning Indexer
 
@@ -45,9 +46,7 @@ After the matmul, we apply ReLU and aggregate across heads with learned weights:
 
 ```python
 for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
-    s_reshaped[bn_i, bq_i, h_i] = (
-        T.max(s[bn_i, bq_i * heads + h_i], 0) * weights[bq_i, h_i]
-    ) * index_k_scale_fragment[bn_i]
+    s_reshaped[bn_i, bq_i, h_i] = (T.max(s[bn_i, bq_i * heads + h_i], 0) * weights[bq_i, h_i]) * index_k_scale_fragment[bn_i]
 
 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 ```
@@ -71,7 +70,7 @@ The implementation uses a radix-sort-based approach that processes floats as uns
 
 ```python
 for s in T.serial(T.ceildiv(seq_len, BLOCK_SIZE)):
-    input_idx = s*BLOCK_SIZE+tx
+    input_idx = s * BLOCK_SIZE + tx
     if input_idx < l_end_idx and input_idx >= l_start_idx and input_idx < seq_len:
         inval_int16 = convert_to_uint16(input[bx, input_idx])
         T.atomic_add(s_histogram[inval_int16], 1)
@@ -88,7 +87,7 @@ Elements above the threshold go directly to the output. Elements in the threshol
 
 ```python
 if l_bin_id32 > l_threshold_bin_id:
-    pos = T.atomic_add(s_histogram[l_bin_id32+1], 1, return_prev=True)
+    pos = T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
     index[bx, pos] = input_idx
 elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
     pos = T.atomic_add(s_num_input[0], 1, return_prev=True)
@@ -107,7 +106,7 @@ Turning dense MLA into sparse MLA requires surprisingly few changes - essentiall
 # Dense MLA: iterate over full sequence
 loop_range = T.ceildiv(seqlen_kv, block_N)
 for k in T.Pipelined(loop_range, num_stages=2):
-    T.copy(KV[bid, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
+    T.copy(KV[bid, k * block_N : (k + 1) * block_N, cur_kv_head, :], KV_shared)
     # ... compute attention over this block
 ```
 
@@ -168,6 +167,57 @@ for i_i in T.serial(T.ceildiv(NI, num_stages)):
 
 Consumer threads wait on barriers and process buffers as they become ready. This manual orchestration hides memory latency behind compute, which is why it outperforms the simpler auto-pipelined version. The output dimension is also split in half so that the two consumer groups can work in parallel on different parts of the matmul.
 
+### Sparse MLA Forward (FP8)
+
+`sparse_mla_fwd_fp8.py` takes an fp8 e4m3 query and KV cache and returns a bf16
+output. FP8 halves the KV cache footprint, which is why DeepSeek introduced an
+fp8 KV cache for V3.2.
+
+Switching `dtype` to `T.float8_e4m3` in the bf16 kernel is not enough. On SM90
+the fp8 form of `wgmma.mma_async` has no `imm-trans-a` / `imm-trans-b` operands,
+unlike the bf16 form, so both GEMM operands must be K-major:
+
+```
+wgmma.mma_async.sync.aligned.m64n8k16.f32.bf16.bf16 {...}, %a, %b, p, 1, 1, 0, 1;  // ok
+wgmma.mma_async.sync.aligned.m64n8k32.f32.e4m3.e4m3 {...}, %a, %b, p, 1, 1, 0, 1;
+// ptxas: error : Arguments mismatch for instruction 'wgmma.mma_async with FP8 types'
+```
+
+The QK product is fine -- `Q` and `KV` are both contiguous along `dim`. The PV
+product is not: it contracts over `block_I`, while `KV_shared` is laid out
+`[block_I, dim]`. Without a K-major V, `T.gemm` falls back to `mma.sync` and the
+whole kernel runs 1.81x slower.
+
+Storing V column-major in global memory (what FlashAttention-3 does for dense
+fp8 attention) does not work here, because the top-k gather reads one contiguous
+row per selected token; a column-major cache would turn it into per-element
+scattered loads. So the kernel keeps the coalesced gather and transposes V in
+shared memory:
+
+```python
+# 16x16 tiles: read 128-bit vectors along dim, swap in registers, write back
+for bi_o, d_o in T.Parallel(BI // TM, D // TN):
+    for i in T.serial(TM):
+        for j in T.vectorized(TN):
+            kv_t_frag[i, j] = KV_shared[bi_o * TM + i, d_o * TN + j]
+    for j in T.serial(TN):
+        for i in T.serial(TM):
+            KV_T_shared[d_o * TN + j, bi_o * TM + i] = kv_t_frag[i, j]
+...
+T.gemm(S_shared, KV_T_shared, acc_o, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+```
+
+The transpose only depends on `KV_shared`, so it is issued before the QK GEMM
+and overlaps with the asynchronous wgmma that follows. Measured on H800 SXM at
+S=8192, H=128, topk=2048: 25.79 ms with the `mma.sync` fallback, 14.24 ms with a
+K-major V, and 13.77 ms for the bf16 kernel of the same structure.
+
+Two notes on the numbers. FP8 does not beat bf16 here -- the kernel is limited by
+softmax and shared-memory traffic rather than Tensor Core throughput, so the
+gain from FP8 arithmetic has nothing to absorb it; the win is the smaller KV
+cache. And the manually pipelined bf16 kernel above is considerably faster than
+both; applying the same K-major V change there is future work.
+
 ### Sparse MLA Backward
 
 The Sparse MLA backward kernel (`sparse_mla_bwd.py`) computes gradients with respect to queries (dQ) and key-values (dKV) for the sparse attention mechanism. Like the forward pass, it processes only the selected top-k indices, maintaining O(seq_len * topk) complexity.
@@ -178,8 +228,8 @@ The backward pass consists of three main stages:
 
 ```python
 for k in T.Pipelined(T.ceildiv(D, block_ND), num_stages=num_stages):
-    T.copy(O[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND], o)
-    T.copy(dO[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND], do)
+    T.copy(O[bz, by * block_ND : (by + 1) * block_ND, bx, k * block_ND : (k + 1) * block_ND], o)
+    T.copy(dO[bz, by * block_ND : (by + 1) * block_ND, bx, k * block_ND : (k + 1) * block_ND], do)
     for i, j in T.Parallel(block_ND, block_ND):
         acc[i, j] += o[i, j] * do[i, j]
 T.reduce_sum(acc, delta, 1)
@@ -212,8 +262,7 @@ The key gradient computations are:
 ```python
 # Atomically update dKV at selected indices
 for bi_i, d_i in T.Parallel(BI // split_store, D // 4):
-    T.atomic_addx4(dKV[by, Indices[by, s_i, bz, i_i * BI + bi_i + s * (BI // split_store)], bz, d_i * 4],
-                   acc_dkv_shared[bi_i, d_i * 4])
+    T.atomic_addx4(dKV[by, Indices[by, s_i, bz, i_i * BI + bi_i + s * (BI // split_store)], bz, d_i * 4], acc_dkv_shared[bi_i, d_i * 4])
 ```
 
 **Performance**: The sparse MLA backward achieves excellent performance:

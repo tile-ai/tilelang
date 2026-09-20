@@ -354,8 +354,10 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if cache_path is None:
             return
 
+        import contextlib
         import os
         import shutil
+        import uuid
 
         # Source cubin path (in temp directory)
         src_py_path = self.libpath
@@ -372,12 +374,22 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if os.path.exists(dst_cubin_path):
             return
 
-        # Copy cubin to cache
+        # Copy cubin to cache through a fsynced temporary sibling: this writes
+        # into an already-published cache directory, so a partial copy must
+        # never become visible under the final name.
+        temp_cubin_path = os.path.join(cache_path, f".kernel.{os.getpid()}_{uuid.uuid4().hex}.tmp.cubin")
         try:
-            shutil.copy2(src_cubin_path, dst_cubin_path)
+            with open(src_cubin_path, "rb") as src, open(temp_cubin_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+                dst.flush()
+                os.fsync(dst.fileno())
+            os.replace(temp_cubin_path, dst_cubin_path)
             logger.debug(f"Saved CuTeDSL cubin to cache: {dst_cubin_path}")
         except Exception as e:
             logger.warning(f"Failed to save cubin to cache: {e}", exc_info=True)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temp_cubin_path)
 
     def _wrap_forward_from_prebuild_lib(self, *ins: Any, stream: int | None = None):
         """High-level wrapper for kernel execution.

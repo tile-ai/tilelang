@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import torch
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -91,6 +93,18 @@ def _make_state_cache_kernel(
     return kernel
 
 
+def _make_grouped_output_kernel(size: int):
+    @T.prim_func
+    def kernel(A, B):
+        A: T.Tensor[[size], T.float32]
+        B: T.Tensor[[size], T.float32]
+        with T.Kernel(1, threads=1):
+            for i in T.serial(size):
+                B[i] = A[i] + 1.0
+
+    return kernel
+
+
 @tilelang.testing.requires_cuda
 def test_layout_inference_isolated_from_previous_compile_z3_state():
     cache_was_enabled = tilelang.is_cache_enabled()
@@ -127,6 +141,31 @@ def test_grouped_layout_inference_uses_fresh_z3_context_per_kernel():
         if error is not None:
             raise error
         assert kernel is not None
+
+
+@tilelang.testing.requires_cuda
+def test_grouped_tvm_ffi_manual_out_idx_uses_callee_allocation():
+    unit_items = [(0, {"size": 17}), (1, {"size": 23})]
+    compile_args = CompileArgs(
+        out_idx=[1],
+        execution_backend="tvm_ffi",
+        target=tvm.target.Target("cuda"),
+    )
+
+    results = compile_grouped_unit_tvm_ffi(
+        unit_items=unit_items,
+        compile_args=compile_args,
+        elaborate_func=_make_grouped_output_kernel,
+    )
+
+    assert len(results) == len(unit_items)
+    for _, config, kernel, error in results:
+        if error is not None:
+            raise error
+        assert kernel is not None
+        assert kernel.adapter._ffi_callee_allocated_output_abi
+        value = torch.arange(config["size"], dtype=torch.float32, device="cuda")
+        torch.testing.assert_close(kernel(value), value + 1.0)
 
 
 if __name__ == "__main__":

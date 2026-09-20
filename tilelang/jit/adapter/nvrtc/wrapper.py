@@ -245,6 +245,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         "float8_e5m2": "ctypes.c_uint8",
         "float64": "ctypes.c_double",
         "int64": "ctypes.c_int64",
+        "uint64": "ctypes.c_uint64",
         "int32": "ctypes.c_int32",
         "uint32": "ctypes.c_uint32",
         "bool": "ctypes.c_bool",

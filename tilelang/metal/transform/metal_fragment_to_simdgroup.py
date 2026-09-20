@@ -162,7 +162,7 @@ def _metal_fragment_to_simdgroup(func: tir.PrimFunc, mod: IRModule, ctx) -> tir.
         new_ptr = PointerType(ptr_type.element_type, "metal.simdgroup")
         var_map[var] = tir.Var(var.name, new_ptr)
 
-    return func.with_body(_rewrite_scope(func.body, var_map, num_warps))
+    return func.with_body(_rewrite_scope(func.body, var_map, num_warps), span=func.span)
 
 
 MetalFragmentToSimdgroup = prim_func_pass(

@@ -7,11 +7,10 @@ from tvm import tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
-    retrieve_stride,
-    retrieve_offset,
     prim_expr_equal,
 )
 from tilelang.language.utils import (
+    _normalize_annotations,
     buffer_region_to_tile_region,
 )
 from tilelang._typing import BufferLikeType
@@ -28,18 +27,20 @@ def _gemm_sp_impl(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
-    wg_wait: int = 0,
+    annotations: dict | None = None,
 ) -> tirx.Call:
     """Shared sparse GEMM implementation.
 
-    Returns a call_intrin handle for the given op key.
+    Returns a call_intrin handle for the given op key. Backend lowering knobs
+    such as ``wg_wait`` ride in ``annotations``.
     """
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
         if isinstance(arg, tirx.Var) and T.has_let_value(arg):
             return T.get_let_value(arg).buffer
         return arg
+
+    annotations = _normalize_annotations(annotations)
 
     A_sparse = legalize_arguments(A_sparse)
     E = legalize_arguments(E)
@@ -55,9 +56,6 @@ def _gemm_sp_impl(
     E_shape = retrieve_shape(E)
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
-
-    A_stride = retrieve_stride(A_sparse)
-    B_stride = retrieve_stride(B)
 
     assert len(C_shape) == 2, "current only support C as a 2D tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
@@ -78,15 +76,9 @@ def _gemm_sp_impl(
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert prim_expr_equal(K, K_B), f"T.gemm_sp K shape check failed: K_A (wo sparse) = {K}, K_B = {K_B}"
 
-    stride_a = A_stride[-2]
-    stride_b = B_stride[-2]
-
-    A_offset = retrieve_offset(A_sparse)
-    B_offset = retrieve_offset(B)
-    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
-    assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
-    offset_a = A_offset[-1]
-    offset_b = B_offset[-1]
+    for name, dim in (("M", M), ("N", N), ("K", K)):
+        if not isinstance(dim, tirx.IntImm):
+            raise ValueError(f"T.gemm_sp requires static tile dimensions, but {name} is symbolic: {dim}")
 
     A_arg = buffer_region_to_tile_region(A_region, "r", [r for r in A_shape])
     E_arg = buffer_region_to_tile_region(E_region, "r", [r for r in E_shape])
@@ -107,12 +99,7 @@ def _gemm_sp_impl(
         K,
         policy,
         clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
-        k_pack,
-        wg_wait,
+        annotations=annotations,
     )
 
 
@@ -126,8 +113,7 @@ def gemm_sp(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    k_pack: int = 1,
-    wg_wait: int = 0,
+    annotations: dict | None = None,
 ) -> tirx.Call:
     """TileLang sparse GEMM operator.
 
@@ -148,8 +134,11 @@ def gemm_sp(
         transpose_B: Whether to transpose B. Defaults to False.
         policy: Warp partition policy. Defaults to GemmSPWarpPolicy.Square.
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
-        k_pack: Number of K dimensions packed per warp. Defaults to 1.
-        wg_wait: Warp group wait count. Defaults to 0.
+        annotations: Additional annotations. The CUDA dialect
+            (``tilelang.cuda.language.gemm_sp``) additionally exposes
+            ``wg_wait`` (Hopper warpgroup wait count) as a typed keyword. The
+            former ``k_pack`` parameter was parsed but never consumed by any
+            sparse-GEMM lowering and has been removed.
 
     Returns:
         tirx.Call: A handle to the sparse GEMM operation.
@@ -165,8 +154,7 @@ def gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        k_pack,
-        wg_wait,
+        annotations=annotations,
     )
 
 
@@ -180,6 +168,7 @@ def wgmma_gemm_sp(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
+    annotations: dict | None = None,
 ) -> tirx.Call:
     """Explicit Hopper WGMMA sparse GEMM without an implicit wait.
 
@@ -201,10 +190,14 @@ def wgmma_gemm_sp(
         transpose_B: Whether to transpose B. Defaults to False.
         policy: Warp partition policy. Defaults to GemmSPWarpPolicy.Square.
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
+        annotations: Additional annotations.
 
     Returns:
         tirx.Call: A handle to the sparse GEMM operation.
     """
+    ann = dict(annotations) if annotations is not None else {}
+    # Explicit async WGMMA SP: never auto-emit the warpgroup wait.
+    ann.setdefault("wg_wait", -1)
     return _gemm_sp_impl(
         "tl.tileop.wgmma_gemm_sp",
         A_sparse,
@@ -216,8 +209,7 @@ def wgmma_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        1,
-        -1,
+        annotations=ann,
     )
 
 
@@ -231,6 +223,7 @@ def tcgen05_gemm_sp(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
+    annotations: dict | None = None,
 ) -> tirx.Call:
     """Explicit Blackwell TCGEN05 sparse GEMM without an implicit wait.
 
@@ -254,6 +247,7 @@ def tcgen05_gemm_sp(
         transpose_B: Whether to transpose B. Defaults to False.
         policy: Warp partition policy. Defaults to GemmSPWarpPolicy.Square.
         clear_accum: Whether to zero the accumulator before computation. Defaults to False.
+        annotations: Additional annotations.
 
     Returns:
         tirx.Call: A handle to the sparse GEMM operation.
@@ -269,6 +263,5 @@ def tcgen05_gemm_sp(
         transpose_B,
         policy,
         clear_accum,
-        1,
-        0,
+        annotations=annotations,
     )

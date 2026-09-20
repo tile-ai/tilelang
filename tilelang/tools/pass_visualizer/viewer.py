@@ -32,6 +32,7 @@ from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.jit import JITImpl
 from tilelang.transform.pass_config import normalize_pass_configs
+from tilelang.instrumentation import compile_pass_instrumentation, create_pass_instruments
 
 from . import core as M
 
@@ -67,8 +68,7 @@ _STY_TY = "color:#c586c0"
 # 1) Tile ops — the authoritative set: every operator registered in C++ via
 #    TIR_REGISTER_TL_TILE_OP ("tl.tileop.*") in src/op/*.cc. These are the
 #    high-level tile/fragment operators LowerTileOp consumes. ('region' is a
-#    TileOperator too but appears as an argument everywhere, so we leave it plain
-#    to avoid noise.)
+#    plain builtin argument bridge, not a TileOperator, so it stays unhighlighted.)
 _TILE_OPS = (
     "gemm",
     "gemm_sp",
@@ -184,14 +184,30 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
         pass_configs.update(kernel.pass_configs)
     pass_configs = normalize_pass_configs(pass_configs)
 
-    # Semantic checks are part of the real pre-lower path but are not lowering
-    # stages. Run them under the same config without adding them to the browser.
-    with tvm.transform.PassContext(opt_level=3, config=pass_configs), resolved_target:
-        PreLowerSemanticCheck(mod)
+    # Use the shared compile-session lifecycle, but keep the viewer isolated
+    # from globally enabled tools such as LowerTrace. Semantic checks are part
+    # of the real pre-lower path but are intentionally not browser stages.
+    visualizer_tool = M.StructureTreePassTool()
+    with compile_pass_instrumentation(
+        name=f"pass-visualizer:{name}",
+        tools=[visualizer_tool],
+        include_default_tools=False,
+        reuse_existing=False,
+    ):
+        with tvm.transform.PassContext(opt_level=3, config=pass_configs), resolved_target:
+            PreLowerSemanticCheck(mod)
+        with (
+            tvm.transform.PassContext(
+                opt_level=3,
+                config=pass_configs,
+                instruments=create_pass_instruments(),
+            ),
+            resolved_target,
+        ):
+            mod = CUDAPassPipelineBodyPrologue(mod, resolved_target)
 
-    instrument = M.StructureTreePassInstrument()
-    with tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=[instrument]), resolved_target:
-        mod = CUDAPassPipelineBodyPrologue(mod, resolved_target)
+    instrument = visualizer_tool.instrument
+    assert instrument is not None
 
     captured: list[dict] = []
 

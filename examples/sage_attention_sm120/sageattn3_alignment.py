@@ -14,6 +14,7 @@ from pathlib import Path
 import statistics
 import sys
 import time
+import warnings
 from typing import Any, Callable
 
 import torch
@@ -66,15 +67,27 @@ def _bench(fn: Callable[[], Any], *, warmup: int, rep: int) -> dict[str, float]:
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
+    # Compare GPU raw-core latency, not Python/FFI launch overhead. Both
+    # implementations replay the same number of calls from a CUDA graph.
+    calls_per_graph = 16
+    graph = torch.cuda.CUDAGraph()
+    with warnings.catch_warnings():
+        # Never accept timings from launches that escaped to another stream.
+        warnings.filterwarnings("error", message="The CUDA Graph is empty.*")
+        with torch.cuda.graph(graph):
+            for _ in range(calls_per_graph):
+                fn()
+    graph.replay()
+    torch.cuda.synchronize()
     times: list[float] = []
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
     for _ in range(rep):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
         start.record()
-        fn()
+        graph.replay()
         end.record()
         end.synchronize()
-        times.append(float(start.elapsed_time(end)))
+        times.append(float(start.elapsed_time(end)) / calls_per_graph)
     return {
         "min_ms": float(min(times)),
         "p50_ms": float(statistics.median(times)),
@@ -397,8 +410,8 @@ def main() -> None:
     parser.add_argument(
         "--min-speedup",
         type=float,
-        default=0.9,
-        help="Minimum TileLang/official raw-core p50 throughput ratio.",
+        default=1 / 1.05,
+        help="Minimum official/TileLang raw-core p50 latency ratio (default: at most 5% slower).",
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()

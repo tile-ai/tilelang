@@ -14,12 +14,12 @@
 #include <string>
 #include <unordered_map>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_line_directives.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangHIP final : public CodeGenC {
+class CodeGenTileLangHIP final : public CodeGenCWithLineDirectives {
 public:
   CodeGenTileLangHIP();
   std::string Finish();
@@ -50,6 +50,7 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CallNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
+  void VisitExpr_(const NotNode *op, std::ostream &os) final;
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;
   void VisitExpr_(const ShuffleNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final;

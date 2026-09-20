@@ -388,7 +388,13 @@ class Builder(BaseBuilder):
                 self.current_file,
                 self.current_line,
             )
-        yield self.enter_frame(frame)
+        try:
+            yield self.enter_frame(frame)
+        except BaseException as exc:
+            # Unwind Python frame state without finalizing incomplete TIR.
+            while len(self.frames) > pop_idx:
+                self.frames.pop().__exit__(type(exc), exc, exc.__traceback__)
+            raise
         if self._spans_enabled:
             # Flush leaf stmts of the frame being exited before its __exit__
             # moves them into the produced node.
@@ -742,6 +748,13 @@ class Builder(BaseBuilder):
             raise RuntimeError(f"Unsupported boolean operator: {op}")
         else:
             return super().boolop(op, left, right)
+
+    def unaryop(self, op, operand):
+        if op == "UAdd" and isinstance(operand, PrimExpr):
+            # PrimExpr overloads unary minus and invert but not unary plus.
+            # Unary plus is the identity on numbers, so hand back the operand.
+            return operand
+        return super().unaryop(op, operand)
 
     def ifexp(self, cond, then, otherwise):
         cond = unwrap_cond(cond)

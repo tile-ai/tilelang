@@ -6,6 +6,7 @@
 #include "span_utils.h"
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm {
 namespace tl {
@@ -45,6 +46,19 @@ Span GetPrimFuncSpan(const PrimFunc &func) {
 
 String SpanToString(const Span &span) { return FormatSpan(span); }
 
+void StampSubtreeSpans(const Stmt &stmt, const Span &span) {
+  if (!stmt.defined() || !span.defined()) {
+    return;
+  }
+  PostOrderVisit(stmt, [&span](const ObjectRef &obj) {
+    if (const auto *node = obj.as<StmtNode>()) {
+      if (!node->span.defined()) {
+        const_cast<StmtNode *>(node)->span = span;
+      }
+    }
+  });
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
@@ -54,6 +68,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.ir.GetBufferSpan", &GetBufferSpan)
       .def("tl.ir.SetPrimFuncSpan", &SetPrimFuncSpan)
       .def("tl.ir.GetPrimFuncSpan", &GetPrimFuncSpan)
+      .def("tl.ir.StampSubtreeSpans", &StampSubtreeSpans)
       .def("tl.ir.SpanToString", &SpanToString);
 }
 

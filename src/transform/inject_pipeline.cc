@@ -36,7 +36,6 @@
 #include "op/copy.h"
 #include "op/gemm.h"
 #include "op/operator.h"
-#include "op/region.h"
 #include "op/utils.h"
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
@@ -335,11 +334,24 @@ private:
     return Call(call->dtype, call->op, call->args, annotations, call->span);
   }
 
+  // Ops that auto-emit a paired arrive+wait on an explicit (user-allocated)
+  // mbarrier: sync gemm with an mbar (isTcgen05_ marks the explicit-async
+  // T.tcgen05_gemm op, which never waits) and copies with an explicit
+  // "barrier". The paired wait assumes the slot flips once per op invocation,
+  // so the parity is the op's logical iteration parity. Pipeline-managed TMA
+  // copies (is_tma_copy) carry their ring parity in explicit waits, and
+  // compiler-generated copy/im2col barriers are allocated per emitted site,
+  // so LowerTileOp derives their phase from that site's enclosing loop.
   bool IsMbarPhaseConsumer(const Call &call) const {
     auto tile_op = ParseOperator(call);
-    return tile_op.defined() && (tile_op.as<CopyNode>() != nullptr ||
-                                 tile_op.as<Im2ColOpNode>() != nullptr ||
-                                 tile_op.as<GemmNode>() != nullptr);
+    if (const auto *gemm = tile_op.as<GemmNode>()) {
+      return gemm->mbar_.defined() && !gemm->isTcgen05_;
+    }
+    if (const auto *copy = tile_op.as<CopyNode>()) {
+      return !GetIsTmaCopy(*copy) &&
+             copy->annotations.Get("barrier").has_value();
+    }
+    return false;
   }
 
   PrimExpr phase_expr_;
@@ -473,7 +485,9 @@ SBlock MakeBlock(const Stmt &body,
   }
   if (!block.defined()) {
     block = SBlock(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-                   /*name_hint=*/"", /*body*/ body);
+                   /*name_hint=*/"", /*body*/ body, /*init=*/std::nullopt,
+                   /*alloc_buffers=*/{}, /*match_buffers=*/{},
+                   /*annotations=*/{}, /*span=*/body->span);
   }
   Array<Array<BufferRegion>> access =
       GetSBlockReadWriteRegion(block, buffer_data_to_buffer);
@@ -1133,7 +1147,7 @@ private:
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       return RewriteBufferAccess(call, {1});
     }
-    if (call->op.same_as(RegionOp::Get()) && call->args.size() >= 2) {
+    if (call->op.same_as(region()) && call->args.size() >= 2) {
       if (auto load = call->args[0].as<BufferLoadNode>()) {
         size_t num_extents = call->args.size() - 2;
         if (load->indices.size() == num_extents + 1) {
@@ -1740,25 +1754,6 @@ private:
 
     const PipelineRewriter *rewriter_;
   };
-
-  Optional<PrimExpr>
-  ComputePipelineMbarPhaseExpr(const PrimExpr &normalized_access_index,
-                               const Optional<Integer> &pipeline_num_stages) {
-    if (!pipeline_num_stages) {
-      return Optional<PrimExpr>();
-    }
-    PrimExpr parity_expr;
-    if (pipeline_num_stages.value().IntValue() <= 1) {
-      parity_expr =
-          FloorMod(normalized_access_index, IntImm(DataType::Int(32), 2));
-    } else {
-      PrimExpr ns =
-          IntImm(DataType::Int(32), pipeline_num_stages.value().IntValue());
-      parity_expr = FloorMod(FloorDiv(normalized_access_index, ns),
-                             IntImm(DataType::Int(32), 2));
-    }
-    return analyzer_.Simplify(parity_expr);
-  }
 
   static bool IsAsyncCommitQueueScope(const AttrStmtNode *attr) {
     return attr && attr->attr_key == s_tir::attr::async_commit_queue_scope;
@@ -2833,6 +2828,11 @@ private:
     PrimExpr extent = end - start;
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
+    // Written against the original loop var; the per-block Substitute below
+    // specializes it into each op's logical iteration parity.
+    PrimExpr mbar_phase = analyzer_.Simplify(
+        FloorMod(pipeline_loop_->loop_var - pipeline_loop_->min,
+                 make_const(pipeline_loop_->loop_var.dtype(), 2)));
     auto make_nop = []() {
       return SBlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -2898,9 +2898,11 @@ private:
             pipeline_loop_->min <= skewed_loop_var,
             (skewed_loop_var < pipeline_loop_->min + pipeline_loop_->extent));
 
-      SBlock new_block = Downcast<SBlock>(
-          PipelineBodyRewriter(buffer_data_to_buffer_, buffer_remap_,
-                               pipeline_loop_, max_stage_ != 1)(block));
+      SBlock annotated_block =
+          Downcast<SBlock>(AnnotateTileOpMbarPhase(block, mbar_phase));
+      SBlock new_block = Downcast<SBlock>(PipelineBodyRewriter(
+          buffer_data_to_buffer_, buffer_remap_, pipeline_loop_,
+          max_stage_ != 1)(annotated_block));
 
       PrimExpr delta = start - pipeline_loop_->min;
       PrimExpr normalized_access_index =
@@ -2924,8 +2926,6 @@ private:
       new_block = ReplayScalarBindings(new_block, normalized_access_index);
 
       Stmt rewritten_stmt = SBlockRealize({}, inbound, new_block);
-      Optional<PrimExpr> pipeline_mbar_phase = ComputePipelineMbarPhaseExpr(
-          normalized_access_index, pipeline_num_stages);
 
       bool is_async = pipeline_anno.async;
       if (is_async) {
@@ -2973,11 +2973,6 @@ private:
         }
         rewritten_stmt = AnnotateSimtProducer(rewritten_stmt, target_);
       }
-      if (pipeline_mbar_phase) {
-        rewritten_stmt = AnnotateTileOpMbarPhase(rewritten_stmt,
-                                                 pipeline_mbar_phase.value());
-      }
-
       new_stmts.push_back({stage, inbound, new_block->reads, new_block->writes,
                            normalized_access_index, is_async, rewritten_stmt});
 
@@ -3035,7 +3030,8 @@ private:
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
-                     std::move(new_loop), std::nullopt, preserved_annotations);
+                     std::move(new_loop), std::nullopt, preserved_annotations,
+                     std::nullopt, pipeline_loop_->span);
     }
     Stmt result = SBlockRealize({}, Bool(true),
                                 MakeBlock(new_loop, buffer_data_to_buffer_));

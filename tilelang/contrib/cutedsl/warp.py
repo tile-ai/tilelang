@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """
 Warp-level primitives for CuTeDSL backend.
-Re-exports from cutlass.cute.arch with TileLang naming conventions.
+TileLang-compatible wrappers over CUTLASS primitives.
 """
 
 __all__ = [
@@ -20,79 +20,89 @@ __all__ = [
     "warp_reduce_bitor",
 ]
 
-from cutlass._mlir.dialects import llvm, arith
-from cutlass.base_dsl.typing import Uint32, Int32
-from cutlass.cutlass_dsl import T, dsl_user_op
-from cutlass.cute.arch import shuffle_sync, shuffle_sync_down, shuffle_sync_up, shuffle_sync_bfly
+from cutlass.experimental import primitives as prims
+from cutlass._mlir.dialects import arith, math as _math
+from cutlass._mlir_helpers.arith import ArithValue
+from cutlass.base_dsl.typing import BFloat16, Float16, Int16, Int32, Numeric, Uint32
+from cutlass.cutlass_dsl import dsl_user_op
 
 
 FULL_MASK = 0xFFFFFFFF
 WARP_SIZE = 32
 
 
+def _as_shfl_value(val):
+    if isinstance(val, ArithValue):
+        return Numeric.from_mlir_type(val.type)(val)
+    return val
+
+
+@dsl_user_op
+def _shfl_sync_typed(mask, val, offset, mask_and_clamp, kind, *, loc=None, ip=None):
+    val = _as_shfl_value(val)
+    val_type = type(val)
+    if val_type in (Float16, BFloat16):
+        val_i16 = val.bitcast(Int16, loc=loc, ip=ip)
+        val_i32 = Int32(arith.extui(Int32.mlir_type, val_i16.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+        shuffled_i32 = prims.shfl_sync(mask, val_i32, offset, mask_and_clamp, kind, loc=loc, ip=ip)
+        shuffled_i16 = Int16(arith.trunci(Int16.mlir_type, shuffled_i32.ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
+        return shuffled_i16.bitcast(val_type, loc=loc, ip=ip)
+    return prims.shfl_sync(mask, val, offset, mask_and_clamp, kind, loc=loc, ip=ip)
+
+
 @dsl_user_op
 def __activemask(*, loc=None, ip=None) -> Uint32:
     """
     Returns a 32-bit integer mask of all currently active threads in the calling warp.
-
-    PTX: activemask.b32 %mask;
     """
-    result = llvm.inline_asm(
-        T.i32(),
-        [],
-        "activemask.b32 $0;",
-        "=r",
-        has_side_effects=False,
-        is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
-        loc=loc,
-        ip=ip,
+    return Uint32(
+        prims.inline_ptx(
+            "activemask.b32 {$w0};",
+            write_only_types=[Uint32],
+            loc=loc,
+            ip=ip,
+        )
     )
-    return Uint32(result)
 
 
 def __shfl_down_sync(mask, val, delta, width=32):
     """
     Shuffle down within warp.
 
-    Uses CuTeDSL's shuffle_sync_down with proper mask_and_clamp calculation.
     Matches CUDA: c = ((warpSize - width) << 8) | 0x1f
     """
     mask_and_clamp = ((WARP_SIZE - width) << 8) | 0x1F
-    return shuffle_sync_down(val, offset=delta, mask=mask, mask_and_clamp=mask_and_clamp)
+    return _shfl_sync_typed(mask, val, delta, mask_and_clamp, "down")
 
 
 def __shfl_up_sync(mask, val, delta, width=32):
     """
     Shuffle up within warp.
 
-    Uses CuTeDSL's shuffle_sync_up with proper mask_and_clamp calculation.
     Matches CUDA: c = (warpSize - width) << 8
     """
     mask_and_clamp = (WARP_SIZE - width) << 8
-    return shuffle_sync_up(val, offset=delta, mask=mask, mask_and_clamp=mask_and_clamp)
+    return _shfl_sync_typed(mask, val, delta, mask_and_clamp, "up")
 
 
 def __shfl_sync(mask, val, srcLane, width=32):
     """
     Broadcast from a specific lane within warp.
 
-    Uses CuTeDSL's shuffle_sync (idx mode) with proper mask_and_clamp.
     Matches CUDA: c = ((warpSize - width) << 8) | (width - 1)
     """
     mask_and_clamp = ((WARP_SIZE - width) << 8) | ((width - 1) & 0x1F)
-    return shuffle_sync(val, offset=srcLane, mask=mask, mask_and_clamp=mask_and_clamp)
+    return _shfl_sync_typed(mask, val, srcLane, mask_and_clamp, "idx")
 
 
 def __shfl_xor_sync(mask, val, lane_mask, width=32):
     """
     Butterfly (XOR) shuffle within warp.
 
-    Uses CuTeDSL's shuffle_sync_bfly with the same clamp encoding as CUDA
-    __shfl_xor_sync.
+    Uses the same clamp encoding as CUDA __shfl_xor_sync.
     """
     mask_and_clamp = ((WARP_SIZE - width) << 8) | ((width - 1) & 0x1F)
-    return shuffle_sync_bfly(val, offset=lane_mask, mask=mask, mask_and_clamp=mask_and_clamp)
+    return _shfl_sync_typed(mask, val, lane_mask, mask_and_clamp, "bfly")
 
 
 @dsl_user_op
@@ -100,24 +110,9 @@ def __match_any_sync(mask, val, *, loc=None, ip=None) -> Uint32:
     """
     Return a bitmask of lanes whose value matches the calling lane.
 
-    PTX: match.any.sync.b32 d, a, membermask;
+    Uses the primitive match wrapper.
     """
-    return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [
-                Int32(val).ir_value(loc=loc, ip=ip),
-                Int32(mask).ir_value(loc=loc, ip=ip),
-            ],
-            "match.any.sync.b32 $0, $1, $2;",
-            "=r,r,r",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return Uint32(prims.match_sync(mask, Int32(val), "any", loc=loc, ip=ip))
 
 
 @dsl_user_op
@@ -125,26 +120,14 @@ def __popc(val, *, loc=None, ip=None) -> Int32:
     """
     Count set bits in a 32-bit value.
 
-    PTX: popc.b32 d, a;
+    Uses MLIR math.ctpop; no inline PTX is needed for the unpredicated form.
     """
-    return Int32(
-        llvm.inline_asm(
-            T.i32(),
-            [Int32(val).ir_value(loc=loc, ip=ip)],
-            "popc.b32 $0, $1;",
-            "=r,r",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    )
+    return Int32(_math.ctpop(Int32(val).ir_value(loc=loc, ip=ip), loc=loc, ip=ip))
 
 
 def _shfl_xor_sync(val, lane_mask):
     """Butterfly (XOR) shuffle within full warp."""
-    return shuffle_sync_bfly(val, offset=lane_mask, mask=FULL_MASK, mask_and_clamp=0x1F)
+    return _shfl_sync_typed(FULL_MASK, val, lane_mask, 0x1F, "bfly")
 
 
 def warp_reduce_sum(value):

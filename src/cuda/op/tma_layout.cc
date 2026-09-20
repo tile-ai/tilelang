@@ -12,6 +12,8 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
+using namespace tirx;
+
 TMASharedLayoutAnalysis AnalyzeTMASharedLayout(const Layout &layout,
                                                DataType dtype) {
   ffi::Optional<cute::ComposedLayout> composed =
@@ -45,6 +47,34 @@ void RequireTMASmemAlignment(const LowerArgs &lower_args,
   }
   lower_args.require_smem_alignment(shared_tensor->data,
                                     swizzle_mode.SmemAlignment());
+}
+
+Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
+                           const ffi::Array<Range> &region) {
+  ICHECK(region.empty() || region.size() == shape.size());
+
+  // Physical order is [fixed slice, repeated boxes, box contents]. A fixed
+  // pipeline version therefore owns one contiguous run of complete TMA boxes.
+  ffi::Array<PrimExpr> fixed, outer, inner;
+  for (size_t i = 0; i < shape.size(); i++) {
+    Var v = InputPlaceholder(i);
+    if (!region.empty() && is_one(region[i]->extent)) {
+      fixed.push_back(v);
+      continue;
+    }
+    const int64_t *s = as_const_int(shape[i]);
+    if (s != nullptr && *s > kTmaMaxBoxDim && *s % kTmaMaxBoxDim == 0) {
+      outer.push_back(FloorDiv(v, Integer(kTmaMaxBoxDim)));
+      inner.push_back(FloorMod(v, Integer(kTmaMaxBoxDim)));
+    } else {
+      inner.push_back(v);
+    }
+  }
+  ffi::Array<PrimExpr> forward;
+  forward.insert(forward.end(), fixed.begin(), fixed.end());
+  forward.insert(forward.end(), outer.begin(), outer.end());
+  forward.insert(forward.end(), inner.begin(), inner.end());
+  return Layout(shape, forward);
 }
 
 } // namespace cuda

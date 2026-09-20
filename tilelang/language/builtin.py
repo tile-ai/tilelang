@@ -7,7 +7,6 @@ from tilelang._typing import BufferLikeType, BufferLikeTypeTuple, BarrierType, D
 from tilelang import tvm as tvm
 from tilelang.language.common import ptx_arrive_barrier, evaluate
 from tilelang.language.eager.builder import macro
-from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import DataType, DataTypeCode, tirx
 from tvm.runtime import convert
 from tvm.tirx import PrimExpr, Var, Call, BufferLoad, BufferRegion
@@ -1179,15 +1178,6 @@ def match_all_sync(
     return tirx.call_intrin("uint32", tirx.op.Op.get("tl.match_all_sync"), _as_uint32_mask(mask), value)
 
 
-def sync_global():
-    """Synchronize all threads in the entire grid."""
-    tx, ty, tz = get_thread_bindings()
-    ex, ey, ez = get_block_extents()
-    print(tx, ty, tz, ex, ey, ez)
-    args = ["global", tx == 0 and ty == 0 and tz == 0, ex * ey * ez]
-    return evaluate(tirx.Call("handle", "tirx.tvm_storage_sync", args))
-
-
 def sync_grid():
     """Synchronize all threads in a grid."""
     return tirx.call_intrin("handle", tirx.op.Op.get("tl.sync_grid"))
@@ -1391,11 +1381,6 @@ def cooperative_tensor_multiply_accumulate(
             trans_b,
         )
     )
-
-
-def loop_break():
-    """Break out of the innermost loop."""
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.loop_break"))
 
 
 def cp_async_barrier_noinc(barrier: BarrierType):

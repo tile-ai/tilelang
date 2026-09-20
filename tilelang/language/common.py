@@ -16,7 +16,7 @@ from . import overrides as _overrides  # noqa: F401
 
 from .eager import *  # noqa: F401,F403
 from .tir.ir import *  # noqa: F401,F403
-from tilelang.layout import Layout, Fragment  # noqa: F401
+from tilelang.layout import Layout, Fragment, PartialFragment  # noqa: F401
 from .proxy import ptr, make_tensor, make_tensor_from_addr, Buffer, Tensor, StridedTensor, FragmentBuffer, SharedBuffer, LocalBuffer  # noqa: F401
 from .loop import (
     Parallel,  # noqa: F401
@@ -30,7 +30,15 @@ from .loop import (
     Vectorized,  # noqa: F401
 )
 from .frame import has_let_value, get_let_value  # noqa: F401
-from .math_intrinsics import *  # noqa: F401,F403
+from .math_intrinsics import (  # noqa: F401
+    abs2,
+    add2,
+    fma2,
+    max2,
+    min2,
+    mul2,
+    sub2,
+)
 from .kernel import (
     Kernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
@@ -42,6 +50,12 @@ from .kernel import (
     get_block_bindings,  # noqa: F401
     get_block_extent,  # noqa: F401
     get_block_extents,  # noqa: F401
+    get_cluster_dims,  # noqa: F401
+    get_cluster_size,  # noqa: F401
+    get_cluster_id,  # noqa: F401
+    get_cluster_ids,  # noqa: F401
+    get_cluster_extent,  # noqa: F401
+    get_cluster_extents,  # noqa: F401
 )
 from .allocate import (
     alloc_var,  # noqa: F401
@@ -64,6 +78,7 @@ from .copy_op import (  # noqa: F401
 from tilelang.tileop.base import GemmWarpPolicy  # noqa: F401
 from .gemm_op import (  # noqa: F401
     gemm,
+    gemm_blockscaled,
 )
 from .experimental.gemm_sp_op import (  # noqa: F401
     gemm_sp,
@@ -79,6 +94,8 @@ from .reduce_op import (
     reduce_bitand,  # noqa: F401
     reduce_bitor,  # noqa: F401
     reduce_bitxor,  # noqa: F401
+    reducer_init,  # noqa: F401
+    reducer_update,  # noqa: F401
     finalize_reducer,  # noqa: F401
     warp_reduce_sum,  # noqa: F401
     warp_reduce_max,  # noqa: F401
@@ -110,21 +127,10 @@ from .builtin import (  # noqa: F401
     any_sync,
     ballot,
     ballot_sync,
-    barrier_arrive,
-    barrier_wait,
-    get_lane_idx,
-    get_warp_idx,
-    get_warp_idx_sync,
-    mbarrier_arrive,
-    mbarrier_arrive_expect_tx,
-    mbarrier_expect_tx,
-    mbarrier_wait_parity,
-    no_set_max_nreg,
     shfl_down,
     shfl_sync,
     shfl_up,
     shfl_xor,
-    sync_global,
     sync_grid,
     sync_threads,
     sync_warp,
@@ -137,10 +143,25 @@ from .utils import index_to_coordinates  # noqa: F401
 
 from .symbolics import dynamic, symbolic  # noqa: F401
 from .annotations import (  # noqa: F401
+    WSID,
     use_swizzle,
     annotate_layout,
     annotate_safe_value,
     annotate_restrict_buffers,
+    annotate_ws_pipeline_depth,
+    annotate_ws_schedule,
+    ws_op,
+)
+
+from .warp_specialize import (  # noqa: F401
+    WSRole,
+    WSPipeline,
+    WSInstr,
+    WSOpRef,
+    WSSync,
+    WSSyncKind,
+    WSScope,
+    WSSchedule,
 )
 
 from .meta import (
@@ -166,12 +187,13 @@ def import_source(source: str | None = None):
 from .tir.common import __all__ as _TIR_COMMON_ALL  # noqa: E402
 from .eager import __all__ as _EAGER_ALL  # noqa: E402
 from .tir.ir import __all__ as _TIR_IR_ALL  # noqa: E402
-from .math_intrinsics import __all__ as _MATH_ALL  # noqa: E402
+from .math_intrinsics import COMMON_MATH_INTRINSICS as _MATH_ALL  # noqa: E402
 
 _LOCAL_EXPORTS = (
     "BaseTileScheduler",
     "Fragment",
     "FragmentBuffer",
+    "PartialFragment",
     "GemmWarpPolicy",
     "Kernel",
     "KernelLaunchFrame",
@@ -187,6 +209,15 @@ _LOCAL_EXPORTS = (
     "Tensor",
     "Unroll",
     "Vectorized",
+    "WSID",
+    "WSInstr",
+    "WSOpRef",
+    "WSPipeline",
+    "WSRole",
+    "WSSchedule",
+    "WSScope",
+    "WSSync",
+    "WSSyncKind",
     "access_ptr",
     "activemask",
     "all_of",
@@ -202,6 +233,9 @@ _LOCAL_EXPORTS = (
     "annotate_layout",
     "annotate_restrict_buffers",
     "annotate_safe_value",
+    "annotate_ws_pipeline_depth",
+    "annotate_ws_schedule",
+    "ws_op",
     "any_of",
     "any_sync",
     "async_copy",
@@ -215,8 +249,6 @@ _LOCAL_EXPORTS = (
     "atomic_store",
     "ballot",
     "ballot_sync",
-    "barrier_arrive",
-    "barrier_wait",
     "c2d_im2col",
     "clamp",
     "clear",
@@ -224,23 +256,30 @@ _LOCAL_EXPORTS = (
     "cummax",
     "cumsum",
     "dynamic",
+    "symbolic",
     "empty",
     "fill",
+    "reducer_init",
+    "reducer_update",
     "finalize_reducer",
     "gemm",
+    "gemm_blockscaled",
     "gemm_sp",
     "get_block_binding",
     "get_block_bindings",
     "get_block_extent",
     "get_block_extents",
-    "get_lane_idx",
+    "get_cluster_dims",
+    "get_cluster_extent",
+    "get_cluster_extents",
+    "get_cluster_id",
+    "get_cluster_ids",
+    "get_cluster_size",
     "get_let_value",
     "get_thread_binding",
     "get_thread_bindings",
     "get_thread_extent",
     "get_thread_extents",
-    "get_warp_idx",
-    "get_warp_idx_sync",
     "has_let_value",
     "im2col",
     "import_source",
@@ -249,12 +288,7 @@ _LOCAL_EXPORTS = (
     "loop_break",
     "make_tensor",
     "make_tensor_from_addr",
-    "mbarrier_arrive",
-    "mbarrier_arrive_expect_tx",
-    "mbarrier_expect_tx",
-    "mbarrier_wait_parity",
     "meta_class",
-    "no_set_max_nreg",
     "reduce",
     "reduce_absmax",
     "reduce_abssum",
@@ -269,8 +303,6 @@ _LOCAL_EXPORTS = (
     "shfl_sync",
     "shfl_up",
     "shfl_xor",
-    "symbolic",
-    "sync_global",
     "sync_grid",
     "sync_threads",
     "sync_warp",

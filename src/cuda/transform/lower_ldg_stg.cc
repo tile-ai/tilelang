@@ -38,6 +38,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 
 class LowerLDGSTGRewriter : public StmtExprMutator {
 public:

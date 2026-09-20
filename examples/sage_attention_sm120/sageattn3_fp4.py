@@ -268,7 +268,7 @@ def sage3_packed_fp4_attention_raw_kernel(
             scale_g = scale_lane >> 2
             scale_sublane = scale_lane & 0x3
             with T.ws(2):
-                T.annotate_producer_reg_dealloc(24)
+                T.dec_max_nreg(24)
                 if producer_warp_role == 0:
                     for qb, qh in T.Persistent(
                         [q_blocks, num_qh],
@@ -377,7 +377,7 @@ def sage3_packed_fp4_attention_raw_kernel(
                         T.mbarrier_arrive(o_empty)
 
             with T.ws(0, 1):
-                T.annotate_consumer_reg_alloc(240)
+                T.inc_max_nreg(240)
                 q_regs = T.alloc_local((2, warp_M_tiles, 4), "uint32", role_scoped=True)
                 a_regs = T.alloc_local((warp_M_tiles, 4), "uint32", role_scoped=True)
                 b_regs = T.alloc_local((8,), "uint32", role_scoped=True)

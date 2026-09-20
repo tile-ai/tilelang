@@ -11,17 +11,11 @@ MAYFLY_IMAGE_GENERATION_CASES = ((4128, 4224), (4608, 4608))
 
 
 def _lower_full_scale_case(valid_tokens: int, padded_tokens: int) -> str:
-    factory = sage3_packed_fp4_attention_raw_kernel
-    old_mode = factory.func.mode
-    try:
-        factory.func.mode = "lazy"
-        with mock.patch(
-            "examples.sage_attention_sm120.sageattn3_fp4.driver.get_num_sms",
-            return_value=1,
-        ):
-            program = factory.func(padded_tokens, padded_tokens, valid_tokens, 30, 30, 128)
-    finally:
-        factory.func.mode = old_mode
+    with mock.patch(
+        "examples.sage_attention_sm120.sageattn3_fp4.driver.get_num_sms",
+        return_value=1,
+    ):
+        program = sage3_packed_fp4_attention_raw_kernel.get_tir(padded_tokens, padded_tokens, valid_tokens, 30, 30, 128)
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_120a"})
     with tvm.transform.PassContext(), target:

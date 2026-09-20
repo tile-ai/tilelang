@@ -8,7 +8,7 @@
 
 ## Get started
 
- The [chunk_delta_h](common/chunk_delta_h.py) implements the most critical forward kernel of GDN. It's a good start to understand the GDN logic and the TileLang optimization.
+ The [chunk_delta_h](example_chunk_delta_h.py) implements the most critical forward kernel of GDN. It's a good start to understand the GDN logic and the TileLang optimization.
 
 ## Acknowledgments
 

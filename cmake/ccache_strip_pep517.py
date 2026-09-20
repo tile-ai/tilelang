@@ -1,10 +1,13 @@
 """ccache prefix_command_cpp wrapper for PEP 517 build-isolation tempdir names.
 
-uv (and pip) materialize each PEP 517 build into a freshly-named tempdir like
-``<UV_CACHE_DIR>/builds-v0/.tmpXXXXXXXX``. That ``.tmpXXX`` segment shows up in
-``-I`` flags (NVIDIA cu13, z3, ...) and is preserved inside cl.exe's
-preprocessor output as ``#line N "...\\.tmpXXX\\..."`` directives. ccache hashes
-the preprocessed text to derive its result key, so the random tempdir name
+PEP 517 frontends materialize each build into a freshly-named tempdir:
+uv uses ``<UV_CACHE_DIR>/builds-v0/.tmpXXXXXXXX``, pypa/build (cibuildwheel's
+default frontend) uses ``%TEMP%\\build-env-XXXXXXXX``, pip uses
+``pip-build-env-XXXXXXXX``, and cibuildwheel itself nests everything under
+``cibw-run-XXXXXXXX``. Those random segments show up in include flags
+(NVIDIA cu13, z3, ...) and are preserved inside cl.exe's preprocessor output
+as ``#line N "...\\build-env-XXX\\..."`` directives. ccache hashes the
+preprocessed text to derive its result key, so the random tempdir name
 defeats cache hits across rebuilds.
 
 This wrapper is plugged into ccache via ``prefix_command_cpp``. ccache invokes
@@ -13,9 +16,11 @@ it as::
     python ccache_strip_pep517.py <cl.exe path> <cl.exe args including /Fi...>
 
 We forward the call to cl.exe unchanged, then post-process the file cl.exe
-wrote to (the path given via ``/Fi`` or ``-Fi``) by replacing every
-``.tmpXXXXXXXX`` token with a stable ``_pep517`` placeholder. ccache then sees
-identical preprocessed bytes across rebuilds and the result-key lookup hits.
+wrote to (the path given via ``/Fi`` or ``-Fi``) by replacing every random
+tempdir token (``.tmpXXXXXXXX`` / ``build-env-XXXXXXXX`` / ``cibw-run-XXXXXXXX``)
+with a stable ``_pep517`` placeholder. ccache then sees identical preprocessed
+bytes across rebuilds and the result-key lookup hits. The rewritten text is
+only ever hashed, never compiled, so the substitution cannot miscompile.
 
 Note this only stabilizes ccache's *result key* (preprocessor mode). The
 *manifest key* still embeds the raw command line, so direct-mode lookup keeps
@@ -31,7 +36,8 @@ import re
 import subprocess
 import sys
 
-_TMP_PATTERN = re.compile(rb"\.tmp[A-Za-z0-9]+")
+# tempfile's random suffix alphabet includes "_" (e.g. build-env-gna_6ikk).
+_TMP_PATTERN = re.compile(rb"(?:\.tmp|build-env-|cibw-run-)[A-Za-z0-9_]+")
 _STABLE_TOKEN = b"_pep517"
 
 

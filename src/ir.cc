@@ -5,8 +5,11 @@
  */
 
 #include "./transform/common/attr.h"
+#include "./transform/common/warp_specialize.h"
 #include "op/builtin.h"
 #include "support/check.h"
+#include <tvm/ffi/reflection/creator.h>
+#include <tvm/ffi/reflection/enum_def.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/stmt.h>
@@ -24,10 +27,10 @@ using namespace script::ir_builder::tirx;
 using namespace ffi;
 
 // Build a ForFrame that emits a target-neutral kThreadBinding loop for one
-// kernel-launch dimension. The launch nest is materialized into the
-// target-specific form (thread_extent AttrStmt on GPU, serial For on CPU) by
-// the tl.MaterializeKernelLaunch pass once the Target is known at compile
-// time.
+// grid (program index) axis of a kernel launch. The launch nest is
+// materialized into the target-specific form (thread_extent AttrStmt on GPU,
+// serial For on CPU) by the tl.MaterializeKernelLaunch pass once the Target is
+// known at compile time.
 static ForFrame MakeThreadBindingFrame(const std::string &name,
                                        const String &thread_tag,
                                        const PrimExpr &extent) {
@@ -99,8 +102,7 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
 ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
                       const Array<PrimExpr> &order,
                       const Array<PrimExpr> &stages,
-                      const Array<Array<PrimExpr>> &sync,
-                      const Array<Array<PrimExpr>> &groups) {
+                      const Map<String, Any> &annotations) {
   using namespace tvm::tirx;
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   DataType dtype = stop.dtype();
@@ -112,15 +114,13 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
     ICHECK_EQ(vars.size(), doms.size());
     int n = vars.size();
     ICHECK(n == 1);
-    Map<String, Any> anno;
+    Map<String, Any> anno = annotations;
     if (num_stages > 0)
       anno.Set("num_stages", PrimExpr(num_stages));
     if (!order.empty())
       anno.Set("tl_pipeline_order", order);
     if (!stages.empty())
       anno.Set("tl_pipeline_stage", stages);
-    if (!groups.empty())
-      anno.Set("tl_pipeline_group", groups);
     Optional<PrimExpr> step =
         !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
@@ -212,6 +212,38 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
   return ForFrame(n);
 }
 
+// Build a frame whose exit prefixes the body with
+// `tx = tl.launch_thread_idx(0); ty = ...; tz = ...` Bind statements. The
+// launch nest is traced before the Target is known, so the thread indices are
+// only placeholders here: the Vars keep their identity through
+// tl.MaterializeKernelLaunch, which rebinds them as threadIdx.* thread_extent
+// scopes on SIMT backends and drops them elsewhere.
+static ForFrame MakeLaunchThreadFrame() {
+  using namespace tvm::tirx;
+  static const char *kThreadVarNames[3] = {"tx", "ty", "tz"};
+  DataType dtype = DataType::Int(32);
+  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
+  for (int axis = 0; axis < 3; axis++) {
+    n->vars.push_back(Var(kThreadVarNames[axis], dtype));
+    // The extent is decided by the backend at materialization; this dom only
+    // keeps the ForFrame invariants satisfied.
+    n->doms.push_back(Range(make_const(dtype, 0), make_const(dtype, 1)));
+  }
+  n->f_make_for_loop = [](const Array<Var> &vars, const Array<Range> &doms,
+                          const Array<Optional<PrimExpr>> &steps,
+                          Stmt body) -> Stmt {
+    Array<Stmt> seq;
+    for (int axis = 0; axis < static_cast<int>(vars.size()); axis++) {
+      PrimExpr thread_idx = Call(vars[axis]->dtype, launch_thread_idx(),
+                                 {IntImm(DataType::Int(32), axis)});
+      seq.push_back(tvm::tirx::Bind(vars[axis], thread_idx));
+    }
+    seq.push_back(body);
+    return SeqStmt::Flatten(seq);
+  };
+  return ForFrame(n);
+}
+
 /*!
  * \brief A frame that represents a kernel launch.
  *
@@ -219,12 +251,26 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
  */
 class KernelLaunchFrameNode : public TIRFrameNode {
 public:
+  /*! \brief Grid loops, thread placeholders and the root block, outer to
+   * inner. */
   Array<TIRFrame> frames;
+  /*! \brief Program (grid) index vars, one per launch axis. */
+  Array<tvm::tirx::Var> grid_vars;
+  /*! \brief Grid extents, one per launch axis. */
+  Array<PrimExpr> grid_extents;
+  /*! \brief Placeholder thread index vars for the x, y and z axes. */
+  Array<tvm::tirx::Var> thread_vars;
+  /*! \brief Requested SIMT thread-block extents, when threads= was given. */
+  Optional<Array<PrimExpr>> thread_extents;
 
   static void RegisterReflection() {
     namespace refl = reflection;
-    refl::ObjectDef<KernelLaunchFrameNode>().def_ro(
-        "frames", &KernelLaunchFrameNode::frames);
+    refl::ObjectDef<KernelLaunchFrameNode>()
+        .def_ro("frames", &KernelLaunchFrameNode::frames)
+        .def_ro("grid_vars", &KernelLaunchFrameNode::grid_vars)
+        .def_ro("grid_extents", &KernelLaunchFrameNode::grid_extents)
+        .def_ro("thread_vars", &KernelLaunchFrameNode::thread_vars)
+        .def_ro("thread_extents", &KernelLaunchFrameNode::thread_extents);
   }
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.KernelLaunchFrame",
@@ -266,30 +312,40 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
                                const Map<String, Any> &attrs) {
   ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
-  auto block_size = block_size_opt.value_or(Array<PrimExpr>());
   ICHECK(grid_size.size() <= 3);
-  ICHECK(block_size.size() <= 3);
 
   static const char *kBlockVarNames[3] = {"bx", "by", "bz"};
   static const char *kBlockTags[3] = {"blockIdx.x", "blockIdx.y", "blockIdx.z"};
-  static const char *kThreadVarNames[3] = {"tx", "ty", "tz"};
-  static const char *kThreadTags[3] = {"threadIdx.x", "threadIdx.y",
-                                       "threadIdx.z"};
 
   for (size_t i = 0; i < grid_size.size(); i++) {
-    n->frames.push_back(
-        MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]));
+    ForFrame frame =
+        MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]);
+    n->grid_vars.push_back(frame->vars[0]);
+    n->grid_extents.push_back(grid_size[i]);
+    n->frames.push_back(frame);
   }
-  for (size_t i = 0; i < block_size.size(); i++) {
-    n->frames.push_back(MakeThreadBindingFrame(kThreadVarNames[i],
-                                               kThreadTags[i], block_size[i]));
+  // Thread placeholders are always emitted so the body may reference a thread
+  // index regardless of whether threads= was given; the backend decides what
+  // they mean.
+  ForFrame thread_frame = MakeLaunchThreadFrame();
+  n->thread_vars = thread_frame->vars;
+  n->frames.push_back(thread_frame);
+
+  Map<String, Any> block_annotations =
+      attrs.defined() ? attrs : Map<String, Any>{};
+  if (block_size_opt.defined()) {
+    Array<PrimExpr> block_size = block_size_opt.value();
+    ICHECK(block_size.size() <= 3);
+    while (block_size.size() < 3) {
+      block_size.push_back(IntImm(DataType::Int(32), 1));
+    }
+    n->thread_extents = block_size;
+    block_annotations.Set(attr::kLaunchThreads, block_size);
   }
 
   auto empty_block = tvm::script::ir_builder::tirx::Block(DeviceMainBlockName);
   empty_block->reads = Array<tvm::tirx::BufferRegion>();
   empty_block->writes = Array<tvm::tirx::BufferRegion>();
-  Map<String, Any> block_annotations =
-      attrs.defined() ? attrs : Map<String, Any>{};
   empty_block->annotations = block_annotations;
   n->frames.push_back(empty_block);
 
@@ -392,6 +448,165 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.SideEffect", tirx::SideEffect);
   KernelLaunchFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
+}
+
+// ---------------------------------------------------------------------------
+// Warp-specialization schedule objects (transform/common/warp_specialize.h).
+// These are frontend IR constructs, not transformations: T.WSSchedule and
+// friends are built by the tracer and attached as a block annotation for the
+// MaterializeWSSchedule pass to consume.
+// ---------------------------------------------------------------------------
+
+WSRole::WSRole(String name, int64_t warp_lo, int64_t warp_hi,
+               int64_t max_nreg) {
+  auto n = make_object<WSRoleNode>();
+  n->name = std::move(name);
+  n->warp_lo = warp_lo;
+  n->warp_hi = warp_hi;
+  n->max_nreg = max_nreg;
+  data_ = std::move(n);
+}
+
+void WSRoleNode::RegisterReflection() {
+  namespace refl = reflection;
+  refl::ObjectDef<WSRoleNode>()
+      .def_ro("name", &WSRoleNode::name)
+      .def_ro("warp_lo", &WSRoleNode::warp_lo)
+      .def_ro("warp_hi", &WSRoleNode::warp_hi)
+      .def_ro("max_nreg", &WSRoleNode::max_nreg);
+}
+
+WSPipeline::WSPipeline(String name, Array<tirx::Buffer> buffers,
+                       int64_t depth) {
+  auto n = make_object<WSPipelineNode>();
+  n->name = std::move(name);
+  n->buffers = std::move(buffers);
+  n->depth = depth;
+  data_ = std::move(n);
+}
+
+void WSPipelineNode::RegisterReflection() {
+  namespace refl = reflection;
+  refl::ObjectDef<WSPipelineNode>()
+      .def_ro("name", &WSPipelineNode::name)
+      .def_ro("buffers", &WSPipelineNode::buffers)
+      .def_ro("depth", &WSPipelineNode::depth);
+}
+
+void WSInstrNode::RegisterReflection() {
+  namespace refl = reflection;
+  refl::ObjectDef<WSInstrNode>();
+}
+
+WSOpRef::WSOpRef(String id) {
+  auto n = make_object<WSOpRefNode>();
+  n->id = std::move(id);
+  data_ = std::move(n);
+}
+
+void WSOpRefNode::RegisterReflection() {
+  namespace refl = reflection;
+  refl::ObjectDef<WSOpRefNode>().def_ro("id", &WSOpRefNode::id);
+}
+
+WSSync::WSSync(WSSyncKind kind, String pipeline, int64_t stage) {
+  auto n = make_object<WSSyncNode>();
+  n->kind = std::move(kind);
+  n->pipeline = std::move(pipeline);
+  n->stage = stage;
+  data_ = std::move(n);
+}
+
+void WSSyncNode::RegisterReflection() {
+  namespace refl = reflection;
+  refl::ObjectDef<WSSyncNode>()
+      .def_ro("kind", &WSSyncNode::kind)
+      .def_ro("pipeline", &WSSyncNode::pipeline)
+      .def_ro("stage", &WSSyncNode::stage);
+}
+
+WSScope::WSScope(String id, Map<String, Array<WSInstr>> bodies) {
+  auto n = make_object<WSScopeNode>();
+  n->id = std::move(id);
+  n->bodies = std::move(bodies);
+  data_ = std::move(n);
+}
+
+void WSScopeNode::RegisterReflection() {
+  namespace refl = reflection;
+  refl::ObjectDef<WSScopeNode>()
+      .def_ro("id", &WSScopeNode::id)
+      .def_ro("bodies", &WSScopeNode::bodies);
+}
+
+WSSchedule::WSSchedule(int64_t num_warps, Array<WSRole> roles,
+                       Array<WSPipeline> pipelines, Array<WSScope> scopes) {
+  auto n = make_object<WSScheduleNode>();
+  n->num_warps = num_warps;
+  n->roles = std::move(roles);
+  n->pipelines = std::move(pipelines);
+  n->scopes = std::move(scopes);
+  data_ = std::move(n);
+}
+
+void WSScheduleNode::RegisterReflection() {
+  namespace refl = reflection;
+  refl::ObjectDef<WSScheduleNode>()
+      .def_ro("num_warps", &WSScheduleNode::num_warps)
+      .def_ro("roles", &WSScheduleNode::roles)
+      .def_ro("pipelines", &WSScheduleNode::pipelines)
+      .def_ro("scopes", &WSScheduleNode::scopes);
+}
+
+// Register the sync-kind enum and its variants. Declaration order fixes the
+// dense ordinals (0..3) consumed by WSSyncKind::CanonicalOrdinal().
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = reflection;
+  // EnumObj subclasses have no __ffi_init__; allocate via init(false).
+  refl::ObjectDef<WSSyncKindObj>(
+      refl::init(false)); // NOLINT(bugprone-unused-raii)
+  refl::TypeAttrDef<WSSyncKindObj>().def(
+      refl::type_attr::kConvert,
+      &refl::details::FFIConvertFromAnyViewToObjectRef<WSSyncKind>);
+  refl::EnumDef<WSSyncKindObj>("PRODUCER_ACQUIRE"); // ordinal 0
+  refl::EnumDef<WSSyncKindObj>("PRODUCER_COMMIT");  // ordinal 1
+  refl::EnumDef<WSSyncKindObj>("CONSUMER_WAIT");    // ordinal 2
+  refl::EnumDef<WSSyncKindObj>("CONSUMER_RELEASE"); // ordinal 3
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = reflection;
+  WSRoleNode::RegisterReflection();
+  WSPipelineNode::RegisterReflection();
+  WSInstrNode::RegisterReflection();
+  WSOpRefNode::RegisterReflection();
+  WSSyncNode::RegisterReflection();
+  WSScopeNode::RegisterReflection();
+  WSScheduleNode::RegisterReflection();
+  refl::GlobalDef()
+      .def("tl.WSRole",
+           [](String name, int64_t warp_lo, int64_t warp_hi, int64_t max_nreg) {
+             return WSRole(std::move(name), warp_lo, warp_hi, max_nreg);
+           })
+      .def("tl.WSPipeline",
+           [](String name, Array<tirx::Buffer> buffers, int64_t depth) {
+             return WSPipeline(std::move(name), std::move(buffers), depth);
+           })
+      .def("tl.WSOpRef", [](String id) { return WSOpRef(std::move(id)); })
+      .def("tl.WSSync",
+           [](WSSyncKind kind, String pipeline, int64_t stage) {
+             return WSSync(std::move(kind), std::move(pipeline), stage);
+           })
+      .def("tl.WSScope",
+           [](String id, Map<String, Array<WSInstr>> bodies) {
+             return WSScope(std::move(id), std::move(bodies));
+           })
+      .def("tl.WSSchedule",
+           [](int64_t num_warps, Array<WSRole> roles,
+              Array<WSPipeline> pipelines, Array<WSScope> scopes) {
+             return WSSchedule(num_warps, std::move(roles),
+                               std::move(pipelines), std::move(scopes));
+           });
 }
 
 } // namespace tl

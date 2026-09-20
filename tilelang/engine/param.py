@@ -164,3 +164,25 @@ class CompiledArtifact:
     rt_mod: tvm.runtime.Module | None = None  # Runtime module for execution, may be lazily initialized
     target: tvm.target.Target | None = None  # Normalized device target used for lowering
     target_host: tvm.target.Target | None = None  # Normalized host target used for host codegen/export
+
+
+def dump_kernel_params(params: list[KernelParam]) -> str:
+    """Serialize kernel parameters to JSON text.
+
+    Uses TVM's JSON reflection (``tvm.ir.save_json``) so symbolic shape
+    expressions round-trip, including shared ``Var`` identity across params.
+    The result contains only IR node data and can be loaded without executing
+    any code, unlike a pickle.
+    """
+    records = [{"dtype": str(param.dtype), "shape": list(param.shape)} for param in params]
+    return tvm.ir.save_json(tvm.runtime.convert(records))
+
+
+def load_kernel_params(text: str) -> list[KernelParam]:
+    """Reconstruct kernel parameters written by :func:`dump_kernel_params`."""
+    params = []
+    for record in tvm.ir.load_json(text):
+        dtype = tvm.DataType(str(record["dtype"]))
+        shape = [dim if isinstance(dim, PrimExpr) else int(dim) for dim in record["shape"]]
+        params.append(KernelParam(dtype, shape))
+    return params

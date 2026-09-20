@@ -134,7 +134,7 @@ def test_autotune_matmul_compile():
 
 
 def test_autotune_matmul_symbolic_m():
-    run_autotune(T.symbolic("m"), 1024, 1024, M_value=1024)
+    run_autotune(T.dynamic("m"), 1024, 1024, M_value=1024)
 
 
 if __name__ == "__main__":

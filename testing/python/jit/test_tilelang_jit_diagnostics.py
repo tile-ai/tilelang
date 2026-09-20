@@ -267,11 +267,8 @@ def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, c
     from tilelang.env import env
 
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     monkeypatch.setenv("TILELANG_JIT_DIAGNOSTICS", "1")
 
     class _FakeKernel:

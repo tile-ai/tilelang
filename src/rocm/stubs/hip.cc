@@ -104,6 +104,8 @@ HIPDriverAPI CreateHIPDriverAPI() {
     return api;
   }
 
+#define TILELANG_STRINGIFY_IMPL(symbol) #symbol
+#define TILELANG_STRINGIFY(symbol) TILELANG_STRINGIFY_IMPL(symbol)
 #define LOOKUP(member, symbol)                                                 \
   api.member = GetSymbol<decltype(api.member)>(handle, symbol);                \
   if (api.member == nullptr) {                                                 \
@@ -118,7 +120,10 @@ HIPDriverAPI CreateHIPDriverAPI() {
   LOOKUP(hipGetDeviceCount_, "hipGetDeviceCount")
   LOOKUP(hipDeviceGetAttribute_, "hipDeviceGetAttribute")
   LOOKUP(hipDeviceGetName_, "hipDeviceGetName")
-  LOOKUP(hipGetDeviceProperties_, "hipGetDeviceProperties")
+  // ROCm 6+ maps this API to an ABI-versioned symbol such as
+  // hipGetDevicePropertiesR0600. Resolve the symbol selected by the build
+  // headers instead of casting the legacy entrypoint to the new struct type.
+  LOOKUP(hipGetDeviceProperties_, TILELANG_STRINGIFY(hipGetDeviceProperties))
   LOOKUP(hipMalloc_, "hipMalloc")
   LOOKUP(hipFree_, "hipFree")
   LOOKUP(hipHostMalloc_, "hipHostMalloc")
@@ -141,6 +146,8 @@ HIPDriverAPI CreateHIPDriverAPI() {
   LOOKUP(hipModuleLaunchKernel_, "hipModuleLaunchKernel")
   LOOKUP(hipModuleLaunchCooperativeKernel_, "hipModuleLaunchCooperativeKernel")
 #undef LOOKUP
+#undef TILELANG_STRINGIFY
+#undef TILELANG_STRINGIFY_IMPL
 
   return api;
 }

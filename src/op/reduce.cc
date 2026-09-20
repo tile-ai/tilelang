@@ -70,6 +70,7 @@ void RegisterReduceImpl(ReduceImpl impl) {
 
 ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
+  node->annotations = annotations;
   // Accept BufferRegion/BufferLoad for src/dst
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);

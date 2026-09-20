@@ -168,13 +168,7 @@ def _run_case(
         True,
     )[0]
 
-    factory = sage3_packed_fp4_attention_raw_kernel
-    old_mode = factory.func.mode
-    try:
-        factory.func.mode = "lazy"
-        program = factory.func(query_tokens, kv_tokens, valid_k_tokens, heads, heads, 128)
-    finally:
-        factory.func.mode = old_mode
+    program = sage3_packed_fp4_attention_raw_kernel.get_tir(query_tokens, kv_tokens, valid_k_tokens, heads, heads, 128)
     kernel = tilelang.compile(
         program,
         out_idx=[7, 8],

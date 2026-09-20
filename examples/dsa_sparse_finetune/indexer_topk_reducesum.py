@@ -32,8 +32,8 @@ def tl_indexer_topk_reducesum_impl(
     assert topk % block_K == 0
     assert heads <= 64 and heads % 8 == 0
     assert num_stages == 0
-    batch_plus_one = T.symbolic("batch_plus_one")
-    seq_len = T.symbolic("seq_len")
+    batch_plus_one = T.dynamic("batch_plus_one")
+    seq_len = T.dynamic("seq_len")
 
     index_q_shape = [seq_len, heads, dim]
     weights_shape = [seq_len, heads]

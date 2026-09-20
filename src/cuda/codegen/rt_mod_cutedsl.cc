@@ -29,9 +29,18 @@ static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
       arg_types.push_back(f->params[i].dtype());
     }
     Array<String> launch_param_tags;
+    if (f->GetAttr<Array<Integer>>("cluster_dims").defined()) {
+      launch_param_tags.push_back(runtime::launch_param::kClusterDimX);
+      launch_param_tags.push_back(runtime::launch_param::kClusterDimY);
+      launch_param_tags.push_back(runtime::launch_param::kClusterDimZ);
+    }
     if (auto opt = f->GetAttr<Array<String>>(tirx::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
-        launch_param_tags.push_back(tag);
+        if (tag != runtime::launch_param::kClusterDimX &&
+            tag != runtime::launch_param::kClusterDimY &&
+            tag != runtime::launch_param::kClusterDimZ) {
+          launch_param_tags.push_back(tag);
+        }
       }
     }
     auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);

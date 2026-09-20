@@ -1,9 +1,15 @@
 import threading
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+from tilelang import tvm
+from tilelang.jit.kernel import JITKernel
+from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
+
+tirx = tvm.tirx
 
 
 class _FakeKernelParam:
@@ -31,6 +37,8 @@ def _make_adapter():
         buffer_map={tir_param: SimpleNamespace(dtype="float32")},
     )
     adapter._process_dynamic_symbolic = lambda: {}
+    adapter.dynamic_symbolic_map = {}
+    adapter._ffi_callee_allocated_output_abi = False
     adapter.executable = None
     adapter._executable_lock = threading.Lock()
 
@@ -90,3 +98,113 @@ def test_preloaded_executable_is_reused():
     assert adapter._get_executable() is preloaded_executable
     assert adapter.get_exportable_executable() is preloaded_executable
     assert created == []
+
+
+def test_disk_cached_library_can_be_exported(tmp_path):
+    cached_library = tmp_path / "cache" / "kernel_lib.so"
+    cached_library.parent.mkdir()
+    cached_library.write_bytes(b"cached-library")
+
+    kernel = JITKernel.__new__(JITKernel)
+    kernel.artifact = None
+    kernel.adapter = SimpleNamespace(libpath=str(cached_library))
+    kernel.execution_backend = "tvm_ffi"
+
+    exported_library = tmp_path / "export" / "kernel.so"
+    kernel.export_library(str(exported_library))
+
+    assert exported_library.read_bytes() == cached_library.read_bytes()
+
+
+def test_exporting_disk_cached_library_to_its_own_path_succeeds(tmp_path):
+    cached_library = tmp_path / "kernel_lib.so"
+    cached_library.write_bytes(b"cached-library")
+
+    kernel = JITKernel.__new__(JITKernel)
+    kernel.artifact = None
+    kernel.adapter = SimpleNamespace(libpath=str(cached_library))
+    kernel.execution_backend = "tvm_ffi"
+
+    kernel.export_library(str(cached_library))
+
+    assert cached_library.read_bytes() == b"cached-library"
+
+
+def test_callee_allocated_output_dispatch_uses_single_main_entry():
+    adapter, _ = _make_adapter()
+    adapter.params = [_FakeKernelParam(), _FakeKernelParam()]
+    adapter.result_idx = [1]
+    adapter._ffi_callee_allocated_output_abi = True
+    calls = []
+    expected = object()
+
+    def main(*args):
+        calls.append(args)
+        return expected
+
+    adapter.executable = main
+    tensor = torch.empty(1)
+
+    assert adapter._convert_torch_func()(tensor) is expected
+    assert calls == [(tensor, tensor)]
+
+
+def test_subbyte_output_uses_callee_allocated_abi():
+    adapter, _ = _make_adapter()
+    adapter.params = [SimpleNamespace(dtype=SimpleNamespace(bits=4))]
+    adapter.result_idx = [0]
+    output_param = tirx.Var("output", "handle")
+    source = tirx.PrimFunc([output_param], tirx.Evaluate(0))
+    adapter._test_prim_func, _ = prepare_tvm_ffi_callee_allocated_outputs(source, 0, supports_callee_allocated_outputs=True)
+
+    assert adapter._uses_ffi_callee_allocated_output_abi()
+
+
+def test_unsupported_backend_keeps_preallocated_output_abi():
+    adapter, _ = _make_adapter()
+    adapter.result_idx = [0]
+    output_param = tirx.Var("output", "handle")
+    source = tirx.PrimFunc([output_param], tirx.Evaluate(0))
+    adapter._test_prim_func, _ = prepare_tvm_ffi_callee_allocated_outputs(source, 0, supports_callee_allocated_outputs=False)
+
+    assert not adapter._uses_ffi_callee_allocated_output_abi()
+
+
+def test_capability_flag_gates_callee_allocated_attr():
+    input_param = tirx.Var("input", "handle")
+    output_param = tirx.Var("output", "handle")
+    source = tirx.PrimFunc([input_param, output_param], tirx.Evaluate(0))
+
+    prepared, _ = prepare_tvm_ffi_callee_allocated_outputs(source, -1)
+    assert "tilelang_callee_allocated_outputs" not in prepared.attrs
+
+    prepared, _ = prepare_tvm_ffi_callee_allocated_outputs(source, -1, supports_callee_allocated_outputs=True)
+    assert int(prepared.attrs["tilelang_callee_allocated_outputs"]) != 0
+    assert list(prepared.attrs["tilelang_out_idx"]) == [-1]
+
+    # Pre-attributed functions (e.g. eager builder) get the decision stamped
+    # without disturbing the declarative out_idx attribute.
+    attributed = source.with_attr("tilelang_out_idx", [-1])
+    prepared, _ = prepare_tvm_ffi_callee_allocated_outputs(attributed, None, supports_callee_allocated_outputs=True)
+    assert int(prepared.attrs["tilelang_callee_allocated_outputs"]) != 0
+    assert list(prepared.attrs["tilelang_out_idx"]) == [-1]
+
+
+def test_manual_out_idx_is_exposed_to_tvm_ffi_lowering_without_mutating_source():
+    input_param = tirx.Var("input", "handle")
+    output_param = tirx.Var("output", "handle")
+    source = tirx.PrimFunc([input_param, output_param], tirx.Evaluate(0))
+
+    prepared, output_indices = prepare_tvm_ffi_callee_allocated_outputs(source, -1)
+
+    assert source.attrs is None or "tilelang_out_idx" not in source.attrs
+    assert list(prepared.attrs["tilelang_out_idx"]) == [-1]
+    assert output_indices == [-1]
+
+    attributed = source.with_attr("tilelang_out_idx", [-1])
+    prepared, output_indices = prepare_tvm_ffi_callee_allocated_outputs(attributed, [1])
+    assert prepared.same_as(attributed)
+    assert output_indices == [-1]
+
+    with pytest.raises(ValueError, match="does not match"):
+        prepare_tvm_ffi_callee_allocated_outputs(attributed, [0])

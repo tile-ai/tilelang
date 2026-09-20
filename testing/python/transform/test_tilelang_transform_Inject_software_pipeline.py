@@ -59,6 +59,20 @@ def _collect_attr_value_nodes(func, attr_key):
     return values
 
 
+def _collect_call_annotation_values(root, op_name, annotation_key):
+    values = []
+
+    def _visit(node):
+        if not isinstance(node, tvm.tirx.Call) or not isinstance(node.op, tvm.ir.Op):
+            return
+        if str(node.op.name) != op_name or annotation_key not in node.annotations:
+            return
+        values.append(node.annotations[annotation_key])
+
+    post_order_visit(root.body if hasattr(root, "body") else root, _visit)
+    return values
+
+
 def _collect_wait_args(func):
     wait_args = []
     stmt = func.body if hasattr(func, "body") else func
@@ -338,6 +352,41 @@ def test_async_pipeline_marks_copy_ops_for_pipeline_managed_cp_async_sync():
     annotated, total = _count_copy_calls_with_annotation(mod["main"], "no_implicit_async_commit_wait")
     assert total > 0
     assert annotated == total
+
+
+@pytest.mark.parametrize("num_stages", [2, 3])
+def test_pipeline_explicit_gemm_mbar_uses_logical_epoch(num_stages):
+    @T.prim_func
+    def before(
+        A: T.Tensor((9, 16, 16), T.float16),
+        B: T.Tensor((9, 16, 16), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((16, 16), T.float16)
+            B_shared = T.alloc_shared((16, 16), T.float16)
+            C_local = T.alloc_fragment((16, 16), T.float32)
+            mbar = T.alloc_barrier(1)
+            for i in T.serial(
+                3,
+                9,
+                annotations={
+                    "software_pipeline_stage": [0, 0, num_stages - 1],
+                    "software_pipeline_order": [0, 1, 2],
+                    "tl_pipelined_num_stages": T.int32(num_stages),
+                },
+            ):
+                T.copy(A[i, 0:16, 0:16], A_shared)
+                T.copy(B[i, 0:16, 0:16], B_shared)
+                T.gemm(A_shared, B_shared, C_local, mbar=mbar)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    loop = _find_pipelined_loop(mod["main"])
+    phases = _collect_call_annotation_values(loop, "tl.tileop.gemm", "tl.pipeline_mbar_phase_expr")
+
+    assert len(phases) == 1
+    expected = (loop.loop_var - loop.min) % 2
+    assert tvm.arith.Analyzer().can_prove_equal(phases[0], expected)
 
 
 def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():

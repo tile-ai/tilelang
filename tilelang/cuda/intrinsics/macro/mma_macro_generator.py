@@ -348,6 +348,8 @@ class TensorCoreIntrinEmitter:
         A_base0 = A_region.region[-2].min
         A_base1 = A_region.region[-1].min
         A_other = [r.min for r in A_region.region[:-2]]
+        A_ext0 = A_region.region[-2].extent
+        A_ext1 = A_region.region[-1].extent
         A_stride_last = A_buf.shape[-1]
 
         @T.macro
@@ -367,11 +369,12 @@ class TensorCoreIntrinEmitter:
 
                 if ldmatrix_available:
                     row_off, col_off = get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed)
-                    src_indices = (
-                        tuple(A_other) + (A_base0 + wk + row_off, A_base1 + wi + col_off)
-                        if a_transposed
-                        else tuple(A_other) + (A_base0 + wi + row_off, A_base1 + wk + col_off)
-                    )
+                    rel_row, rel_col = (wk + row_off, wi + col_off) if a_transposed else (wi + row_off, wk + col_off)
+                    # Some lane maps cross the region boundary on the final
+                    # micro tile. Wrap the row-major in-region offset so column
+                    # overflow carries into the row.
+                    lin = T.floormod(rel_row * A_ext1 + rel_col, A_ext0 * A_ext1)
+                    src_indices = tuple(A_other) + (A_base0 + lin // A_ext1, A_base1 + T.floormod(lin, A_ext1))
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         4,
@@ -444,6 +447,8 @@ class TensorCoreIntrinEmitter:
         B_base0 = B_region.region[-2].min
         B_base1 = B_region.region[-1].min
         B_other = [r.min for r in B_region.region[:-2]]
+        B_ext0 = B_region.region[-2].extent
+        B_ext1 = B_region.region[-1].extent
         B_stride_last = B_buf.shape[-1]
         replicate_b = self.n_dim == 16
         # ldmatrix cannot be used for int8 + trans case.
@@ -484,11 +489,10 @@ class TensorCoreIntrinEmitter:
                 if ldmatrix_available:
                     num = 4 if replicate_b else 2
                     row_off, col_off = get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed)
-                    src_indices = (
-                        tuple(B_other) + (B_base0 + wi + row_off, B_base1 + wk + col_off)
-                        if b_transposed
-                        else tuple(B_other) + (B_base0 + wk + row_off, B_base1 + wi + col_off)
-                    )
+                    rel_row, rel_col = (wi + row_off, wk + col_off) if b_transposed else (wk + row_off, wi + col_off)
+                    # Apply the same region-local linear wrap as ldmatrix_a.
+                    lin = T.floormod(rel_row * B_ext1 + rel_col, B_ext0 * B_ext1)
+                    src_indices = tuple(B_other) + (B_base0 + lin // B_ext1, B_base1 + T.floormod(lin, B_ext1))
                     T.ptx_ldmatrix(
                         T.bool(trans),
                         num,

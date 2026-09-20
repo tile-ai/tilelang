@@ -670,8 +670,7 @@ template <typename Impl> struct ReduceLowerer {
       return indices;
     };
 
-    int vsize =
-        Impl::GetPreferredVectorizedSize(dst_buffer->dtype, lower_args.target);
+    int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
     const int64_t *reduce_extent = as_const_int(op.src->shape[op.dim]);
     bool can_pack = op.clear && vsize == 2 && reduce_extent &&
                     *reduce_extent >= vsize && *reduce_extent % vsize == 0 &&
@@ -855,8 +854,7 @@ template <typename Impl> struct ReduceLowerer {
       Buffer clear_buffer_packed;
       Buffer clear_batch_pack_buffer;
       {
-        int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
-                                                     lower_args.target);
+        int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
           auto *ext = src_var_compressed.back()->dom->extent.as<IntImmNode>();
           if (ext && ext->value >= vsize && ext->value % vsize == 0 &&
@@ -1013,8 +1011,7 @@ template <typename Impl> struct ReduceLowerer {
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
 
-          int vsize = Impl::GetPreferredVectorizedSize(clear_buffer->dtype,
-                                                       lower_args.target);
+          int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
           bool can_batch_pack =
               vsize > 1 && batch >= vsize && batch % vsize == 0 &&
               reduce::MakeCodegenReducer(op, vsize).has_value();

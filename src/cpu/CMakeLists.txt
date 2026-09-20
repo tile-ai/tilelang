@@ -8,6 +8,7 @@ file(GLOB TILE_LANG_CPU_SRCS
   src/cpu/codegen/codegen_c.cc
   src/cpu/codegen/rt_mod_c.cc
   src/cpu/op/*.cc
+  src/cpu/transform/*.cc
   src/cpu/target_utils.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_CPU_SRCS})

@@ -18,10 +18,7 @@ def dequant_matmul(
         Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
 
         T.clear(Ct_local)
-        for k in T.Pipelined(
-            T.ceildiv(K, block_K),
-            num_stages=num_stages
-        ):
+        for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
             T.copy(A[by * block_M, k * block_K], A_shared)
             T.copy(B[bx * block_N, k * block_K // num_elems_per_byte], B_shared)
             T.copy(B_shared, B_local)

@@ -1,3 +1,5 @@
+import pytest
+
 import tilelang.testing
 from tilelang import language as T
 
@@ -111,6 +113,89 @@ def test_clamp():
     run_clamp(1024, 128, T.float32, -0.06, 0.05)
     run_clamp_value_range(1024, 128, T.float16)
     run_clamp_value_range(1024, 128, T.float32)
+
+
+FP8_OPS = {
+    "max": lambda a, b, dtype: T.max(a, b),
+    "min": lambda a, b, dtype: T.min(a, b),
+    "clamp": lambda a, b, dtype: T.clamp(a, T.cast(-1.0, dtype), T.cast(1.0, dtype)),
+}
+
+
+def fp8_operand_kernel(N, block_N, dtype, op):
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
+        C: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            for i in T.Parallel(block_N):
+                C[bx * block_N + i] = FP8_OPS[op](A[bx * block_N + i], B[bx * block_N + i], dtype)
+
+    return main
+
+
+def run_fp8_min_max_clamp(N, block_N, dtype, op):
+    import torch
+
+    kernel = tilelang.compile(fp8_operand_kernel(N, block_N, dtype, op))
+    torch_dtype = dtype.as_torch()
+
+    # Integers are exactly representable in both float8 formats, so the
+    # reference comparison can be exact.
+    a = torch.randint(-4, 5, (N,), device="cuda").to(torch.float32)
+    b = torch.randint(-4, 5, (N,), device="cuda").to(torch.float32)
+    if op == "max":
+        ref = torch.maximum(a, b)
+    elif op == "min":
+        ref = torch.minimum(a, b)
+    else:
+        ref = a.clamp(-1.0, 1.0)
+
+    # Allocate the output here instead of using out_idx: rebuilding a torch
+    # tensor from an fp8 DLPack tensor is not supported on every torch version.
+    C = torch.empty(N, device="cuda", dtype=torch_dtype)
+    kernel(a.to(torch_dtype), b.to(torch_dtype), C)
+    torch.testing.assert_close(C.float(), ref.to(torch_dtype).float(), atol=0, rtol=0)
+
+
+def fp8_operand_vectorized_kernel(N, block_N, dtype, op, vec=4):
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N,), dtype),
+        C: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N // vec) as bx:
+            for i in T.Parallel(block_N // vec):
+                for v in T.vectorized(vec):
+                    idx = bx * block_N + i * vec + v
+                    C[idx] = FP8_OPS[op](A[idx], B[idx], dtype)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float8_e4m3, T.float8_e5m2])
+@pytest.mark.parametrize("op", list(FP8_OPS))
+def test_fp8_min_max_clamp(dtype, op):
+    run_fp8_min_max_clamp(1024, 128, dtype, op)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", list(FP8_OPS))
+def test_fp8_vectorized_min_max(op):
+    # Vectorizing reaches the per-lane fallback, a separate overload-resolution
+    # context from the scalar expression.
+    tilelang.compile(fp8_operand_vectorized_kernel(1024, 128, T.float8_e4m3, op), out_idx=[2], target="cuda")
+
+
+@tilelang.testing.requires_cuda
+def test_fp8_e4m3fn_min_max():
+    # float8_e4m3fn shares the emitted CUDA type with float8_e4m3; clamp covers
+    # both min and max.
+    tilelang.compile(fp8_operand_kernel(1024, 128, T.float8_e4m3fn, "clamp"), out_idx=[2], target="cuda")
 
 
 if __name__ == "__main__":

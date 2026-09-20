@@ -154,14 +154,6 @@ class TensorProxy(BaseTensorProxy):
     the tensor should be by default contiguous.
     """
 
-    @staticmethod
-    def _construct_strides(shape: tuple[Any]):
-        s, strides = 1, [1]
-        for dim in shape[:0:-1]:
-            s *= dim
-            strides.append(s)
-        return tuple(reversed(strides))
-
     def __call__(
         self,
         shape: ShapeType | PrimExpr | int,
@@ -174,7 +166,9 @@ class TensorProxy(BaseTensorProxy):
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
         if strides is None:
-            strides = TensorProxy._construct_strides(shape)
+            from tilelang.language.eager.utils import construct_strides
+
+            strides = construct_strides(shape)
         elif len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
         return super().__call__(

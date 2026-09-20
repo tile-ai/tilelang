@@ -174,7 +174,7 @@ freely compose that surface with extensions under
 `tilelang/<backend>/language`:
 
 ```python
-from tilelang import language as T       # common + CUDA compatibility facade
+from tilelang import language as T  # common + CUDA compatibility facade
 from tilelang.cuda import language as T  # common + CUDA extensions
 from tilelang.rocm import language as T  # common + ROCm extensions
 ```
@@ -202,6 +202,12 @@ the shared semantic checks:
 PreLowerSemanticCheck(mod)  # shared frontend boundary
 mod = context.lower(mod)    # selected backend pipeline
 ```
+
+The complete compiler entry point owns any pass-instrumentation session.
+`BackendContext.lower` and `PassPipeline.lower` never create one implicitly;
+the pipeline only contributes its backend-specific phase scope when a session
+is already active. Calling the backend interface without a session still runs
+the lowering pipeline normally, without developer-tool instrumentation.
 
 The ordered pass list lives in `tilelang/<backend>/pipeline.py`. Backend-only
 passes must be called there rather than dispatched from

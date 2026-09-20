@@ -510,18 +510,18 @@ typedef enum CUstreamWaitValue_flags_enum {
       0x3, /**< Wait until ~(*addr | value) != 0. Support for this operation can
               be queried with ::cuDeviceGetAttribute() and
                 ::CU_DEVICE_ATTRIBUTE_CAN_USE_STREAM_WAIT_VALUE_NOR.*/
-  CU_STREAM_WAIT_VALUE_FLUSH =
-      1 << 30 /**< Follow the wait operation with a flush of outstanding remote
-                 writes. This means that, if a remote write operation is
-                 guaranteed to have reached the device before the wait can be
-                 satisfied, that write is guaranteed to be visible to downstream
-                 device work. The device is permitted to reorder remote writes
-                 internally. For example, this flag would be required if two
-                 remote writes arrive in a defined order, the wait is satisfied
-                 by the second write, and downstream work needs to observe the
-                 first write. Support for this operation is restricted to
-                 selected platforms and can be queried with
-                 ::CU_DEVICE_ATTRIBUTE_CAN_FLUSH_REMOTE_WRITES.*/
+  CU_STREAM_WAIT_VALUE_FLUSH = 1
+      << 30 /**< Follow the wait operation with a flush of outstanding remote
+               writes. This means that, if a remote write operation is
+               guaranteed to have reached the device before the wait can be
+               satisfied, that write is guaranteed to be visible to downstream
+               device work. The device is permitted to reorder remote writes
+               internally. For example, this flag would be required if two
+               remote writes arrive in a defined order, the wait is satisfied
+               by the second write, and downstream work needs to observe the
+               first write. Support for this operation is restricted to
+               selected platforms and can be queried with
+               ::CU_DEVICE_ATTRIBUTE_CAN_FLUSH_REMOTE_WRITES.*/
 } CUstreamWaitValue_flags;
 
 /**
@@ -1801,8 +1801,8 @@ typedef enum CUjit_target_enum {
   CU_TARGET_COMPUTE_90 = 90, /**< Compute device class 9.0.*/
 
   /**< Compute device class 9.0. with accelerated features.*/
-  CU_TARGET_COMPUTE_90A =
-      CU_COMPUTE_ACCELERATED_TARGET_BASE + CU_TARGET_COMPUTE_90,
+  CU_TARGET_COMPUTE_90A = CU_COMPUTE_ACCELERATED_TARGET_BASE +
+      CU_TARGET_COMPUTE_90,
 } CUjit_target;
 
 /**
@@ -2240,7 +2240,7 @@ typedef struct CUgraphEdgeData_st {
                          cases        means        the        entirety of the
                          downstream        node        is        dependent on the
                          upstream        work.        <br>        Currently        no
-                         node        types define        non-zero ports.        Accordingly,
+                         node        types define        non-zero ports. Accordingly,
                          this        field        must be        set to        zero. */
   unsigned char type; /**< This should be populated with a value from
                          ::CUgraphDependencyType. (It is typed as char due to
@@ -2659,10 +2659,10 @@ typedef CUstreamAttrValue_v1 CUstreamAttrValue;
 typedef enum CUdriverProcAddress_flags_enum {
   CU_GET_PROC_ADDRESS_DEFAULT =
       0, /**< Default search mode for driver symbols. */
-  CU_GET_PROC_ADDRESS_LEGACY_STREAM =
-      1 << 0, /**< Search for legacy versions of driver symbols. */
-  CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM =
-      1 << 1 /**< Search for per-thread versions of driver symbols. */
+  CU_GET_PROC_ADDRESS_LEGACY_STREAM = 1
+      << 0, /**< Search for legacy versions of driver symbols. */
+  CU_GET_PROC_ADDRESS_PER_THREAD_DEFAULT_STREAM = 1
+      << 1 /**< Search for per-thread versions of driver symbols. */
 } CUdriverProcAddress_flags;
 
 /**
@@ -5040,13 +5040,13 @@ typedef struct CUgraphNodeParams_st {
  * Bitmasks for ::CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_FLUSH_WRITES_OPTIONS
  */
 typedef enum CUflushGPUDirectRDMAWritesOptions_enum {
-  CU_FLUSH_GPU_DIRECT_RDMA_WRITES_OPTION_HOST =
-      1 << 0, /**< ::cuFlushGPUDirectRDMAWrites() and its CUDA Runtime API
-                 counterpart are supported on the device. */
-  CU_FLUSH_GPU_DIRECT_RDMA_WRITES_OPTION_MEMOPS =
-      1 << 1 /**< The ::CU_STREAM_WAIT_VALUE_FLUSH flag and the
-                ::CU_STREAM_MEM_OP_FLUSH_REMOTE_WRITES MemOp are supported on
-                the device. */
+  CU_FLUSH_GPU_DIRECT_RDMA_WRITES_OPTION_HOST = 1
+      << 0, /**< ::cuFlushGPUDirectRDMAWrites() and its CUDA Runtime API
+               counterpart are supported on the device. */
+  CU_FLUSH_GPU_DIRECT_RDMA_WRITES_OPTION_MEMOPS = 1
+      << 1 /**< The ::CU_STREAM_WAIT_VALUE_FLUSH flag and the
+              ::CU_STREAM_MEM_OP_FLUSH_REMOTE_WRITES MemOp are supported on
+              the device. */
 } CUflushGPUDirectRDMAWritesOptions;
 
 /**
@@ -5089,41 +5089,41 @@ typedef enum CUflushGPUDirectRDMAWritesTarget_enum {
  * The additional write options for ::cuGraphDebugDotPrint
  */
 typedef enum CUgraphDebugDot_flags_enum {
-  CU_GRAPH_DEBUG_DOT_FLAGS_VERBOSE =
-      1 << 0, /**< Output all debug data as if every debug flag is enabled */
-  CU_GRAPH_DEBUG_DOT_FLAGS_RUNTIME_TYPES =
-      1 << 1, /**< Use CUDA Runtime structures for output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_PARAMS =
-      1 << 2, /**< Adds CUDA_KERNEL_NODE_PARAMS values to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_MEMCPY_NODE_PARAMS =
-      1 << 3, /**< Adds CUDA_MEMCPY3D values to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_MEMSET_NODE_PARAMS =
-      1 << 4, /**< Adds CUDA_MEMSET_NODE_PARAMS values to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_HOST_NODE_PARAMS =
-      1 << 5, /**< Adds CUDA_HOST_NODE_PARAMS values to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_EVENT_NODE_PARAMS =
-      1 << 6, /**< Adds CUevent handle from record and wait nodes to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_SIGNAL_NODE_PARAMS =
-      1 << 7, /**< Adds CUDA_EXT_SEM_SIGNAL_NODE_PARAMS values to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_WAIT_NODE_PARAMS =
-      1 << 8, /**< Adds CUDA_EXT_SEM_WAIT_NODE_PARAMS values to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_ATTRIBUTES =
-      1 << 9, /**< Adds CUkernelNodeAttrValue values to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_HANDLES =
-      1 << 10, /**< Adds node handles and every kernel function handle to output
-                */
-  CU_GRAPH_DEBUG_DOT_FLAGS_MEM_ALLOC_NODE_PARAMS =
-      1 << 11, /**< Adds memory alloc node parameters to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_MEM_FREE_NODE_PARAMS =
-      1 << 12, /**< Adds memory free node parameters to output */
-  CU_GRAPH_DEBUG_DOT_FLAGS_BATCH_MEM_OP_NODE_PARAMS =
-      1 << 13 /**< Adds batch mem op node parameters to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_VERBOSE = 1
+      << 0, /**< Output all debug data as if every debug flag is enabled */
+  CU_GRAPH_DEBUG_DOT_FLAGS_RUNTIME_TYPES = 1
+      << 1, /**< Use CUDA Runtime structures for output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_PARAMS = 1
+      << 2, /**< Adds CUDA_KERNEL_NODE_PARAMS values to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_MEMCPY_NODE_PARAMS = 1
+      << 3, /**< Adds CUDA_MEMCPY3D values to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_MEMSET_NODE_PARAMS = 1
+      << 4, /**< Adds CUDA_MEMSET_NODE_PARAMS values to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_HOST_NODE_PARAMS = 1
+      << 5, /**< Adds CUDA_HOST_NODE_PARAMS values to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_EVENT_NODE_PARAMS = 1
+      << 6, /**< Adds CUevent handle from record and wait nodes to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_SIGNAL_NODE_PARAMS = 1
+      << 7, /**< Adds CUDA_EXT_SEM_SIGNAL_NODE_PARAMS values to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_EXT_SEMAS_WAIT_NODE_PARAMS = 1
+      << 8, /**< Adds CUDA_EXT_SEM_WAIT_NODE_PARAMS values to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_KERNEL_NODE_ATTRIBUTES = 1
+      << 9, /**< Adds CUkernelNodeAttrValue values to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_HANDLES = 1
+      << 10, /**< Adds node handles and every kernel function handle to output
+              */
+  CU_GRAPH_DEBUG_DOT_FLAGS_MEM_ALLOC_NODE_PARAMS = 1
+      << 11, /**< Adds memory alloc node parameters to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_MEM_FREE_NODE_PARAMS = 1
+      << 12, /**< Adds memory free node parameters to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_BATCH_MEM_OP_NODE_PARAMS = 1
+      << 13 /**< Adds batch mem op node parameters to output */
   ,
-  CU_GRAPH_DEBUG_DOT_FLAGS_EXTRA_TOPO_INFO =
-      1 << 14 /**< Adds edge numbering information */
+  CU_GRAPH_DEBUG_DOT_FLAGS_EXTRA_TOPO_INFO = 1
+      << 14 /**< Adds edge numbering information */
   ,
-  CU_GRAPH_DEBUG_DOT_FLAGS_CONDITIONAL_NODE_PARAMS =
-      1 << 15 /**< Adds conditional node parameters to output */
+  CU_GRAPH_DEBUG_DOT_FLAGS_CONDITIONAL_NODE_PARAMS = 1
+      << 15 /**< Adds conditional node parameters to output */
 } CUgraphDebugDot_flags;
 
 /**

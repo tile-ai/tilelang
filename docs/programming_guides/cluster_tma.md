@@ -20,8 +20,8 @@ memory via the `shared::cluster` address space.
 
 ```python
 with T.ClusterKernel(grid_x, grid_y, threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
-    rank  = T.block_rank_in_cluster()   # 0..3 within this cluster
-    T.cluster_sync()                     # barrier across all CTAs in cluster
+    rank = T.block_rank_in_cluster()  # 0..3 within this cluster
+    T.cluster_sync()  # barrier across all CTAs in cluster
 ```
 
 ---
@@ -61,6 +61,7 @@ outside the mask perform a regular TMA load for their own tile.
 import tilelang
 import tilelang.language as T
 
+
 def make_tma_multicast_kernel(M, N, block_M, block_N, cluster_mask):
     @T.prim_func
     def kernel(
@@ -68,19 +69,13 @@ def make_tma_multicast_kernel(M, N, block_M, block_N, cluster_mask):
         B: T.Tensor((M, N), "float16"),
     ):
         # 4 CTAs per cluster; ranks 0 and 1 share the same tile via multicast.
-        with T.ClusterKernel(
-            T.ceildiv(N, block_N),
-            T.ceildiv(M, block_M),
-            threads=128,
-            cluster_dims=(4, 1, 1)
-        ) as (bx, by):
+        with T.ClusterKernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128, cluster_dims=(4, 1, 1)) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), "float16")
 
             # cluster_mask=0b0011: ranks 0 and 1 participate.
             # Rank 0 issues tma_load_multicast; rank 1 receives passively.
             # Ranks 2 and 3 each issue a regular tma_load.
-            T.copy_cluster(A[by * block_M, bx * block_N], A_shared,
-                           cluster_mask=cluster_mask)
+            T.copy_cluster(A[by * block_M, bx * block_N], A_shared, cluster_mask=cluster_mask)
 
             T.copy(A_shared, B[by * block_M, bx * block_N])
 
@@ -159,6 +154,7 @@ Steps:
 import tilelang
 import tilelang.language as T
 
+
 @tilelang.jit(execution_backend="cython")
 def make_cluster_copy_kernel(N: int):
     @T.prim_func
@@ -167,8 +163,8 @@ def make_cluster_copy_kernel(N: int):
         B: T.Tensor((N,), "float32"),
     ):
         with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as pid:
-            s_src     = T.alloc_shared((N,), "float32")
-            s_dst     = T.alloc_shared((N,), "float32")
+            s_src = T.alloc_shared((N,), "float32")
+            s_dst = T.alloc_shared((N,), "float32")
             s_barrier = T.alloc_cluster_barrier([1])
 
             T.fill(s_src, 0.0)
@@ -182,8 +178,7 @@ def make_cluster_copy_kernel(N: int):
                     s_src[i] = A[i]
 
                 # Async-push s_src → s_dst in CTA 1, signal CTA 1's barrier.
-                T.copy_cluster(s_src, s_dst, dst_block=1,
-                               remote_barrier=s_barrier[0])
+                T.copy_cluster(s_src, s_dst, dst_block=1, remote_barrier=s_barrier[0])
 
             if pid == 1:
                 # Wait until CTA 0 finishes writing.
@@ -218,7 +213,7 @@ completes only after all rows are transferred.
 # 2-D non-contiguous copy: N_tile < N_full → compiler emits M TMA calls
 s_src = T.alloc_shared((M, N_full), "float32")
 s_dst = T.alloc_shared((M, N_full), "float32")
-s_barrier = T.alloc_cluster_barrier([1])   # arrive_count updated to M at compile time
+s_barrier = T.alloc_cluster_barrier([1])  # arrive_count updated to M at compile time
 
 T.copy_cluster(
     s_src[0:M, 0:N_tile],
@@ -301,11 +296,11 @@ SM-to-SM copy (saving global-memory round trips).
 @T.prim_func
 def split_k_gemm(A, B, C):
     with T.ClusterKernel(grid_x, grid_y, threads=256, cluster_dims=(4, 1, 1)) as (bx, by):
-        rank    = T.block_rank_in_cluster()
-        A_s     = T.alloc_shared((BM, BK), "float16")
-        B_s     = T.alloc_shared((BK, BN), "float16")
-        C_f     = T.alloc_fragment((BM, BN), "float32")
-        C_s     = T.alloc_shared((BM, BN), "float32")
+        rank = T.block_rank_in_cluster()
+        A_s = T.alloc_shared((BM, BK), "float16")
+        B_s = T.alloc_shared((BK, BN), "float16")
+        C_f = T.alloc_fragment((BM, BN), "float32")
+        C_s = T.alloc_shared((BM, BN), "float32")
         barrier = T.alloc_cluster_barrier([3])
         T.clear(C_f)
 
@@ -333,8 +328,7 @@ def split_k_gemm(A, B, C):
         if rank != 0:
             # Push this rank's slot to the *same* slot index in rank 0's
             # C_parts — different offsets, so no destination race.
-            T.copy_cluster(C_parts[rank], C_parts[rank],
-                           dst_block=0, remote_barrier=barrier[0])
+            T.copy_cluster(C_parts[rank], C_parts[rank], dst_block=0, remote_barrier=barrier[0])
 
         if rank == 0:
             T.mbarrier_wait_parity(barrier[0], 0)  # wakes after all 3 arrivals

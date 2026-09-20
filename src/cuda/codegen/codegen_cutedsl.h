@@ -10,7 +10,9 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 
+#include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -80,6 +82,9 @@ protected:
                         std::ostream &os) override; // NOLINT(*)
 
   std::string GetBufferPtr_(const BufferNode *buffer, PrimExpr index);
+  std::string GetSubByteBufferPtrAsByte_(const BufferNode *buffer,
+                                         PrimExpr index);
+  std::string PrintBytePointerExpr_(const PrimExpr &expr);
   std::string GetBufferRef_(DataType t, const BufferNode *buffer,
                             PrimExpr index) override;
   PrimExpr LinearizeBufferIndices_(const BufferNode *buffer,
@@ -110,6 +115,8 @@ private:
 
   std::vector<std::string> eviction_policy_names_ = {
       "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
+
+  std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims_;
 
   // Fastmath configuration (read from PassContext)
   bool enable_fastmath_ = false;

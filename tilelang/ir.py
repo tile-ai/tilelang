@@ -64,10 +64,6 @@ class CumSumOp(Node, Scriptable): ...
 class CumMaxOp(Node, Scriptable): ...
 
 
-@tvm_ffi.register_object("tl.RegionOp")
-class RegionOp(Node, Scriptable): ...
-
-
 @tvm_ffi.register_object("tl.ReduceType")
 class ReduceType(Node, Scriptable): ...
 
@@ -122,6 +118,19 @@ def get_buffer_span(buffer) -> Span | None:
 
 def set_prim_func_span(func, span: Span) -> None:
     _span_ffi("SetPrimFuncSpan")(func, span)
+
+
+def stamp_stmt_spans(stmt, span: Span | None) -> None:
+    """Fill in `span` on every Stmt in the subtree whose span is undefined.
+
+    Nodes that already carry a span are left untouched. Intended for passes
+    that rebuild a user statement into a fresh subtree: stamping the result
+    with the original statement's span keeps source-line information alive
+    through lowering.
+    """
+    if span is None:
+        return
+    _span_ffi("StampSubtreeSpans")(stmt, span)
 
 
 def get_prim_func_span(func) -> Span | None:

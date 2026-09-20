@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Layout System"
+  short_description: "Layout/Fragment types, inference, cost model, CuTe algebra"
+  default_prompt: "Use $tilelang-layout when reading or changing TileLang layouts, layout inference, the layout cost model, or TileLang-to-CuTe layout conversions."
