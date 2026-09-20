@@ -12,26 +12,6 @@ from tilelang.layout import (
 )
 
 
-@pytest.mark.parametrize("mn", [16, 32])
-def test_small_uint16_sf_keeps_semantic_kind(mn):
-    buf = tirx.decl_buffer((mn, 1), "uint16", name="SF", scope="shared")
-    info = try_extract_fractal_layout(make_ascend_sf_layout(buf), buf)
-
-    assert info.kind == 2
-    assert info.c0_axis == 1
-    assert info.row16_axis == 0
-
-
-def test_ambiguous_small_shape_distinguishes_canonical_layouts():
-    buf = tirx.decl_buffer((16, 1), "uint16", name="A", scope="shared")
-
-    sf_info = try_extract_fractal_layout(make_ascend_sf_layout(buf), buf)
-    major_info = try_extract_fractal_layout(make_ascend_major_k_layout(buf), buf)
-
-    assert sf_info.kind == 2
-    assert major_info.kind == 0
-
-
 @pytest.mark.parametrize(
     "factory,shape,dtype,expected",
     [
@@ -39,6 +19,9 @@ def test_ambiguous_small_shape_distinguishes_canonical_layouts():
         (make_ascend_major_mn_layout, (32, 16), "float8_e4m3fn", (3, 0, 1)),
         (make_ascend_l0c_layout, (16, 16), "float32", (1, 1, 0)),
         (make_ascend_sf_layout, (16, 1), "uint16", (2, 1, 0)),
+        (make_ascend_sf_layout, (32, 1), "uint16", (2, 1, 0)),
+        # The same small shape has different semantics despite identical indices.
+        (make_ascend_major_k_layout, (16, 1), "uint16", (0, 1, 0)),
     ],
 )
 def test_canonical_layout_tags(factory, shape, dtype, expected):

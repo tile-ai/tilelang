@@ -5,6 +5,14 @@ import tilelang.ascend.language as T
 import tilelang.testing
 
 
+def _source(program):
+    with (
+        tilelang.tvm.target.Target("ascend"),
+        tilelang.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False}),
+    ):
+        return tilelang.lower(program, target="ascend").kernel_source
+
+
 def test_device_assert():
     """T.device_assert(cond, no_stack_info=True) → device_assert via template."""
 
@@ -13,10 +21,8 @@ def test_device_assert():
         with T.Kernel(32) as bx:
             T.device_assert(bx >= 0)
 
-    kernel = tilelang.compile(program)
-    source = kernel.get_kernel_source()
+    source = _source(program)
     assert "device_assert" in source
-    print("PASS: test_device_assert")
 
 
 def test_device_assert_in_vf():
@@ -32,10 +38,8 @@ def test_device_assert_in_vf():
                 tid = T.get_thread_binding()
                 T.device_assert(tid >= 0)
 
-    kernel = tilelang.compile(program)
-    source = kernel.get_kernel_source()
+    source = _source(program)
     assert "device_assert" in source
-    print("PASS: test_device_assert_in_vf")
 
 
 if __name__ == "__main__":

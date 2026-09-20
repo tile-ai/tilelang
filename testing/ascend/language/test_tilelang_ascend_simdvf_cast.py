@@ -28,7 +28,7 @@ FP4_E2M1_VALUES = torch.tensor(
 )
 
 
-@tilelang.jit(out_idx=[1])
+@tilelang.jit(target="ascend", out_idx=[1])
 def cast_kernel(n: int, in_dtype: T.dtype, out_dtype: T.dtype):
     is_fp8_in = in_dtype in FP8_TYPES
     is_fp8_out = out_dtype in FP8_TYPES
@@ -174,24 +174,6 @@ def make_input(n: int, torch_dtype: torch.dtype, value_kind: str) -> torch.Tenso
     return x.to(torch_dtype)
 
 
-def compare_result(name: str, x: torch.Tensor, y: torch.Tensor, ref: torch.Tensor) -> bool:
-    if y.dtype in FP8_TORCH_DTYPES:
-        y = y.view(torch.uint8)
-        ref = ref.view(torch.uint8)
-
-    ok = torch.equal(y, ref)
-    if not ok:
-        y_cpu = y.cpu()
-        ref_cpu = ref.cpu()
-        mismatch = torch.nonzero(y_cpu != ref_cpu).flatten()
-        first = int(mismatch[0].item()) if mismatch.numel() else -1
-        print(f"{name}: first mismatch index: {first}")
-        print(f"input: {x[first : first + 8].cpu()}")
-        print(f"tilelang: {y_cpu[first : first + 8]}")
-        print(f"torch: {ref_cpu[first : first + 8]}")
-    return ok
-
-
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 def test_simdvf_cast(case):
     name, in_tl_dtype, out_tl_dtype, in_torch_dtype, out_torch_dtype, value_kind = case
@@ -211,7 +193,9 @@ def test_simdvf_cast(case):
         ref = FP4_E2M1_VALUES[idx].to(device=y.device, dtype=y.dtype)
     else:
         ref = x.to(out_torch_dtype)
-    assert compare_result(name, x, y, ref), f"SimdVF {name} failed"
+    if y.dtype in FP8_TORCH_DTYPES:
+        y, ref = y.view(torch.uint8), ref.view(torch.uint8)
+    torch.testing.assert_close(y, ref, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

@@ -5,15 +5,14 @@ import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import transform
-from tilelang.engine.lower import lower
 from tvm import tirx
 
 
 @T.prim_func
 def merging_assignment(
-    A: T.Buffer((64,), "float32"),
-    B: T.Buffer((64,), "float32"),
-    C: T.Buffer((64,), "float32"),
+    A: T.Tensor((64,), "float32"),
+    B: T.Tensor((64,), "float32"),
+    C: T.Tensor((64,), "float32"),
 ):
     with T.Kernel(1):
         a_ub = T.alloc_shared((64,), "float32")
@@ -40,8 +39,8 @@ def merging_assignment(
 
 @T.prim_func
 def merging_without_mutable_destination(
-    A: T.Buffer((64,), "float32"),
-    C: T.Buffer((64,), "float32"),
+    A: T.Tensor((64,), "float32"),
+    C: T.Tensor((64,), "float32"),
 ):
     with T.Kernel(1):
         a_ub = T.alloc_shared((64,), "float32")
@@ -91,21 +90,12 @@ def test_legalize_simd_merging_marks_destination_read_write():
     assert destination_load.buffer.name == "dst"
 
 
-def test_simd_merging_codegen_updates_existing_destination():
-    source = lower(merging_assignment, target="ascend").kernel_source
-
-    assert "::vadds(*((&(dst[0]))), src," in source
-    assert "simd_inst::vadds(" not in source
-    assert "MODE_MERGING" in source
-    assert source.index("dst[0] = simd_inst::vlds") < source.index("::vadds(*") < source.index("simd_inst::vsts")
-
-
 def _inplace_vadds(dtype, mode):
     bits = tvm.DataType(dtype).bits
     lanes = 2048 // bits
 
     @T.prim_func
-    def kernel(A: T.Buffer((lanes,), dtype)):
+    def kernel(A: T.Tensor((lanes,), dtype)):
         with T.Kernel(1):
             a_ub = T.alloc_shared((lanes,), dtype)
             T.copy(A, a_ub)
@@ -123,20 +113,24 @@ def _inplace_vadds(dtype, mode):
 
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int8", "uint8", "int16", "uint16", "int32", "uint32"])
 @pytest.mark.parametrize("mode", ["MODE_MERGING", "MODE_ZEROING"])
-def test_simd_vadds_inplace_codegen(dtype, mode):
-    source = lower(_inplace_vadds(dtype, mode), target="ascend").kernel_source
+def test_simd_vadds_inplace_destination(dtype, mode):
+    before = _as_module(_inplace_vadds(dtype, mode))
+    after = transform.LegalizeSimdMerging()(before)
+    if mode == "MODE_ZEROING":
+        tvm.ir.assert_structural_equal(after, before)
+        return
+    from testing.ascend._ir import calls
 
-    assert mode in source
-    if mode == "MODE_MERGING":
-        assert "::vadds(*((&(acc[0]))), acc[0]," in source
-        assert "simd_inst::vadds(" not in source
-    else:
-        assert "acc[0] = simd_inst::vadds(acc[0]," in source
+    (call,) = calls(after, "tl.simd.vadds")
+    destination, source = call.args[:2]
+    assert destination.op.name == "tl.access_ptr"
+    assert int(destination.args[2]) == 3
+    tvm.ir.assert_structural_equal(destination.args[0], source)
 
 
 def test_simd_merging_requires_mutable_destination():
     with pytest.raises(tvm.error.InternalError, match="read-modify-write"):
-        lower(merging_without_mutable_destination, target="ascend")
+        transform.LegalizeSimdMerging()(_as_module(merging_without_mutable_destination))
 
 
 if __name__ == "__main__":

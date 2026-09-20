@@ -143,7 +143,7 @@ def test_simtvf_preserves_legacy_broadcast_carriers(dtype, expected):
 
 def test_simtvf_capture_signature_uses_kernel_abi_type():
     @T.prim_func
-    def main(data: T.Buffer((1,), "float8_e4m3fn")):
+    def main(data: T.Tensor((1,), "float8_e4m3fn")):
         with T.Kernel(1):
             captured = T.alloc_var("float8_e4m3fn")
             captured = data[0]
@@ -201,6 +201,23 @@ def test_nested_vf_blocks_are_rejected():
 
     with pytest.raises(tvm.error.InternalError, match=r"Nested Ascend VF blocks"):
         lower(main, target="ascend")
+
+
+def test_simdvf_captures_block_index_used_by_control_flow():
+    @T.prim_func
+    def main(A: T.Tensor((2, 64), "float32"), C: T.Tensor((2, 64), "float32")):
+        with T.Kernel(2) as block:
+            ub = T.alloc_shared((64,), "float32")
+            T.copy(A[block, :], ub)
+            with T.SimdVF():
+                for _ in T.serial(T.min(1, block)):
+                    T.simd.vsts(ub[0], T.simd.vadds(T.simd.vld(ub[0]), 1.0))
+            T.copy(ub, C[block, :])
+
+    source = lower(main, target="ascend").kernel_source
+    helper = re.search(r"__simd_vf__[^\n]*\(([^\n]*)\)\s*\{", source)
+    assert helper is not None
+    assert "block_idx" in helper.group(1)
 
 
 if __name__ == "__main__":

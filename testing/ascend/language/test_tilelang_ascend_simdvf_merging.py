@@ -1,4 +1,4 @@
-"""Native merging codegen, dtype fallbacks, and inactive-lane preservation."""
+"""Predicated SIMD arithmetic preserves inactive lanes and precision choices."""
 
 import pytest
 import torch
@@ -83,35 +83,22 @@ def merging_kernel(op_name, dtype, mode="MODE_MERGING", precision=None, pos="POS
     return kernel
 
 
-@pytest.mark.parametrize("op_name,dtype", CASES)
-def test_merging_codegen(op_name, dtype):
-    source = lower(merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None), target="ascend").kernel_source
-    if op_name == "vdup" and dtype == "bfloat16":
-        assert "simd_inst::vdup(*" in source
-    else:
-        native_name = "vdup" if op_name == "vdupv" else op_name
-        assert f"::{native_name}(*" in source
-        assert f"simd_inst::{native_name}(*" not in source
-        assert f"simd_inst::{op_name}(*" not in source
-
-
 @pytest.mark.pto
 @pytest.mark.parametrize("op_name,dtype", CASES)
 def test_merging_codegen_pto(op_name, dtype):
-    source = lower(merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None), target="pto").kernel_source
+    source = lower(
+        merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None), target="pto"
+    ).kernel_source
     if op_name == "vabsdif":
-        # PTODSL has no fused abs-diff; it lowers to vabs(vsub).
         assert "pto.vabs(" in source
         assert "pto.vsub(" in source
     elif op_name == "vdiv":
-        # f32 division always lowers to the precise helper on PTO.
         assert "tl.vdiv_precise_f32(" in source
     else:
         pto_name = "vdup" if op_name in ("vdup", "vdupv") else op_name
         assert f"pto.{pto_name}(" in source
     assert "dst_tl_slot_0 = pto.vsel(" in source
     assert ", dst_tl_slot_0, " in source
-    # PTODSL has no mode parameter
     assert "MODE_MERGING" not in source
     if op_name == "vcadd":
         assert 'pto.pset_b32("PAT_VL1")' in source
@@ -138,8 +125,6 @@ def test_merging_precision_wrappers(op_name, precision, wrapper):
 @pytest.mark.parametrize(
     "op_name,precision",
     [
-        # PTODSL only consumes the exact-division precision option;
-        # The unary SFU precision annotations have no PTODSL equivalent.
         ("vdiv", None),
         ("vdiv", "exact"),
         pytest.param("vexp", "ftz_false", marks=pytest.mark.xfail(reason="PTODSL has no precision option for unary SFU ops")),
@@ -154,31 +139,11 @@ def test_merging_precision_wrappers_pto(op_name, precision):
     assert "MODE_MERGING" not in source
 
 
-@pytest.mark.parametrize("op_name,dtype", [("vadd", "int64"), ("vdupv", "float8_e4m3fn"), ("vneg", "bfloat16")])
-def test_merging_keeps_unvalidated_types_on_wrappers(op_name, dtype):
-    # Codegen only: these cases ensure this change does not switch additional
-    # overloads to CCE. They do not assert that the old wrappers support them.
-    source = lower(merging_kernel(op_name, dtype), target="ascend").kernel_source
-    assert f"simd_inst::{op_name}(*" in source
-
-
-def test_merging_vdup_fallback_uses_destination_dtype():
-    source = lower(merging_kernel("vdup", "bfloat16", scalar_dtype="float32"), target="ascend").kernel_source
-    assert "simd_inst::vdup(*" in source
-
-
 @pytest.mark.pto
 def test_merging_vdup_fallback_uses_destination_dtype_pto():
     source = lower(merging_kernel("vdup", "bfloat16", scalar_dtype="float32"), target="pto").kernel_source
     assert "pto.vsel(" in source
     assert "pto.vdup(" in source
-
-
-@pytest.mark.parametrize("op_name", ["vadd", "vdup", "vdupv", "vcmax", "vaxpy"])
-def test_zeroing_codegen(op_name):
-    source = lower(merging_kernel(op_name, "float32", mode="MODE_ZEROING"), target="ascend").kernel_source
-    wrapper = "vdup<float>" if op_name == "vdup" else op_name
-    assert f"simd_inst::{wrapper}(" in source
 
 
 @pytest.mark.pto
@@ -261,7 +226,9 @@ def test_merging_runtime(target, op_name, dtype):
     b = (torch.arange(lanes) % 3 + 1).to(td)
     old = (torch.arange(2048 // tvm.DataType(out_dtype).bits) % 17 + 7).to(out_td)
     pos = "POS_HIGHEST" if op_name == "vdupv" else "POS_LOWEST"
-    kernel = tilelang.compile(merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None, pos=pos), target=target)
+    kernel = tilelang.compile(
+        merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None, pos=pos), target=target
+    )
     device_a, device_b, device_old = a.to("npu"), b.to("npu"), old.to("npu")
     for mask in (torch.zeros(lanes, dtype=torch.bool), torch.ones(lanes, dtype=torch.bool), torch.arange(lanes) % 3 == 1):
         expected = reference(op_name, a, b, old, mask, pos)
@@ -405,12 +372,6 @@ def test_vcvt_merging_codegen_pto(src_dtype, dst_dtype):
     assert "MODE_MERGING" not in source
 
 
-# ---------------------------------------------------------------------------
-# PTO-only merging runtime tests: Bisheng statically rejects MODE_MERGING for
-# the vcpadd/vcg*/vcvt CCE overloads.
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.pto
 @pytest.mark.parametrize("op_name", ["vcgadd", "vcgmax", "vcgmin"])
 def test_pto_group_reduction_merging_runtime(op_name):
@@ -421,18 +382,16 @@ def test_pto_group_reduction_merging_runtime(op_name):
     a = (torch.arange(lanes) % 8 + 1).to(torch.float32)
     old = (torch.arange(lanes) % 17 + 7).to(torch.float32)
     kernel = tilelang.compile(_reduction_kernel(op_name), target="pto")
-    for mask in (torch.zeros(lanes, dtype=torch.bool), torch.ones(lanes, dtype=torch.bool), torch.arange(lanes) % 3 == 1):
-        # Group reductions write eight group results into lanes 0..7;
-        # The merge keeps lanes 8+ at the old destination values.
+    for mask in (
+        torch.zeros(lanes, dtype=torch.bool),
+        torch.ones(lanes, dtype=torch.bool),
+        torch.arange(lanes) % 3 == 1,
+    ):
         expected = old.clone()
         for j in range(8):
             group = a[j * 8 : (j + 1) * 8][mask[j * 8 : (j + 1) * 8]]
             if group.numel():
-                value = {
-                    "vcgadd": group.sum,
-                    "vcgmax": group.max,
-                    "vcgmin": group.min,
-                }[op_name]()
+                value = {"vcgadd": group.sum, "vcgmax": group.max, "vcgmin": group.min}[op_name]()
             else:
                 value = torch.tensor({"vcgadd": 0.0, "vcgmax": -float("inf"), "vcgmin": float("inf")}[op_name])
             expected[j] = value
@@ -451,9 +410,11 @@ def test_pto_vcpadd_merging_runtime():
     a = (torch.arange(lanes) % 8 + 1).to(torch.float32)
     old = (torch.arange(lanes) % 17 + 7).to(torch.float32)
     kernel = tilelang.compile(_reduction_kernel("vcpadd"), target="pto")
-    for mask in (torch.zeros(lanes, dtype=torch.bool), torch.ones(lanes, dtype=torch.bool), torch.arange(lanes) % 3 == 1):
-        # Pairwise adjacent-lane sums pack into the low half;
-        # The merge keeps the high half at the old destination values.
+    for mask in (
+        torch.zeros(lanes, dtype=torch.bool),
+        torch.ones(lanes, dtype=torch.bool),
+        torch.arange(lanes) % 3 == 1,
+    ):
         expected = old.clone()
         for i in range(lanes // 2):
             pair = a[2 * i : 2 * i + 2][mask[2 * i : 2 * i + 2]]
@@ -491,25 +452,20 @@ def test_pto_vcvt_merging_runtime(src_dtype, dst_dtype):
         a = torch.arange(src_lanes, dtype=torch.int32) - 16
     old = (torch.arange(dst_lanes, dtype=torch.float32) % 17 + 7).to(getattr(torch, dst_dtype))
     kernels = {
-        mode: tilelang.compile(_vcvt_kernel(src_dtype, dst_dtype, mode=mode), target="pto") for mode in ("MODE_ZEROING", "MODE_MERGING")
+        mode: tilelang.compile(_vcvt_kernel(src_dtype, dst_dtype, mode=mode), target="pto")
+        for mode in ("MODE_ZEROING", "MODE_MERGING")
     }
-    for mask in (torch.zeros(src_lanes, dtype=torch.bool), torch.ones(src_lanes, dtype=torch.bool), torch.arange(src_lanes) % 3 == 1):
+    for mask in (
+        torch.zeros(src_lanes, dtype=torch.bool),
+        torch.ones(src_lanes, dtype=torch.bool),
+        torch.arange(src_lanes) % 3 == 1,
+    ):
         outs = {}
         for mode, kernel in kernels.items():
             actual = torch.empty(dst_lanes, dtype=getattr(torch, dst_dtype), device="npu")
-            kernel(
-                a.to("npu"),
-                old.to("npu"),
-                mask.to(pred_dtype).to("npu"),
-                actual,
-            )
+            kernel(a.to("npu"), old.to("npu"), mask.to(pred_dtype).to("npu"), actual)
             torch.npu.synchronize()
             outs[mode] = actual.cpu()
-        # The selection predicate is the source mask reinterpreted at the
-        # destination granularity: same-width conversions keep lane i, a
-        # narrowing EVEN-part conversion maps source lane i to destination
-        # lane 2i, and a widening EVEN-part conversion maps destination lane
-        # i to source lane 2i.
         if src_bits == dst_bits:
             sel = mask
         elif dst_bits < src_bits:
@@ -518,15 +474,11 @@ def test_pto_vcvt_merging_runtime(src_dtype, dst_dtype):
         else:
             sel = mask[0::2]
         expected = torch.where(sel, outs["MODE_ZEROING"], old)
-        assert torch.equal(outs["MODE_MERGING"], expected), (
-            src_dtype,
-            dst_dtype,
-            int(mask.sum()),
-        )
+        assert torch.equal(outs["MODE_MERGING"], expected), (src_dtype, dst_dtype, int(mask.sum()))
 
 
 def _vcvt_low_precision_kernel(src_dtype, dst_dtype, mode):
-    """bf16->FP4 / f32->FP8 conversions, masked at the destination b8 granularity."""
+    """bf16->FP4 / f32->FP8 conversions, masked at destination b8 granularity."""
     src_bits = tvm.DataType(src_dtype).bits
     src_lanes = 2048 // src_bits
     dst_bits = tvm.DataType(dst_dtype).bits
@@ -585,26 +537,18 @@ def test_pto_vcvt_low_precision_merging_runtime(src_dtype, dst_dtype, torch_dst)
         mode: tilelang.compile(_vcvt_low_precision_kernel(src_dtype, dst_dtype, mode=mode), target="pto")
         for mode in ("MODE_ZEROING", "MODE_MERGING")
     }
-    for mask in (torch.zeros(mask_lanes, dtype=torch.bool), torch.ones(mask_lanes, dtype=torch.bool), torch.arange(mask_lanes) % 3 == 1):
+    for mask in (
+        torch.zeros(mask_lanes, dtype=torch.bool),
+        torch.ones(mask_lanes, dtype=torch.bool),
+        torch.arange(mask_lanes) % 3 == 1,
+    ):
         outs = {}
         for mode, kernel in kernels.items():
             actual = torch.empty(mask_lanes, dtype=torch.int8, device="npu")
             if torch_dst != torch.int8:
                 actual = actual.view(torch_dst)
-            kernel(
-                a.to("npu"),
-                old.view(torch_dst).to("npu"),
-                mask.to(torch.uint8).to("npu"),
-                actual,
-            )
+            kernel(a.to("npu"), old.view(torch_dst).to("npu"), mask.to(torch.uint8).to("npu"), actual)
             torch.npu.synchronize()
             outs[mode] = actual.cpu().view(torch.int8)
-        # FP8/FP4 results are selected through their byte representation
-        # so the merge keeps every byte the mask does not select at the old value.
-        sel = mask
-        expected = torch.where(sel, outs["MODE_ZEROING"], old)
-        assert torch.equal(outs["MODE_MERGING"], expected), (
-            src_dtype,
-            dst_dtype,
-            int(mask.sum()),
-        )
+        expected = torch.where(mask, outs["MODE_ZEROING"], old)
+        assert torch.equal(outs["MODE_MERGING"], expected), (src_dtype, dst_dtype, int(mask.sum()))

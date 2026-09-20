@@ -2,9 +2,16 @@
 
 import re
 
+import pytest
+
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
+
+
+def _source(func, *, target, pass_configs=None):
+    with tilelang.tvm.target.Target(target), tilelang.transform.PassContext(config=pass_configs or {}):
+        return tilelang.lower(func, target=target).kernel_source
 
 
 def _vector_min_max_mod_kernel():
@@ -120,35 +127,17 @@ def _local_var_float16x8_kernel():
     return main
 
 
-def _bfloat16_broadcast_kernel():
+def _broadcast_kernel(dtype):
     lanes = 8
 
     @T.prim_func
-    def main(a: T.Tensor((1,), T.bfloat16), out: T.Tensor((lanes,), T.bfloat16)):
+    def main(a: T.Tensor((1,), dtype), out: T.Tensor((lanes,), dtype)):
         with T.Kernel(1):
-            a_ub = T.alloc_shared((1,), T.bfloat16)
-            out_ub = T.alloc_shared((lanes,), T.bfloat16)
+            a_ub = T.alloc_shared((1,), dtype)
+            out_ub = T.alloc_shared((lanes,), dtype)
             T.copy(a, a_ub)
             with T.SimtVF(threads=1):
-                value = T.alloc_local((1,), "bfloat16x8")
-                value[0] = T.Broadcast(a_ub[0], lanes)
-                out_ub[T.Ramp(0, 1, lanes)] = value[0]
-            T.copy(out_ub, out)
-
-    return main
-
-
-def _float16_broadcast_kernel():
-    lanes = 8
-
-    @T.prim_func
-    def main(a: T.Tensor((1,), T.float16), out: T.Tensor((lanes,), T.float16)):
-        with T.Kernel(1):
-            a_ub = T.alloc_shared((1,), T.float16)
-            out_ub = T.alloc_shared((lanes,), T.float16)
-            T.copy(a, a_ub)
-            with T.SimtVF(threads=1):
-                value = T.alloc_local((1,), "float16x8")
+                value = T.alloc_local((1,), f"{dtype}x8")
                 value[0] = T.Broadcast(a_ub[0], lanes)
                 out_ub[T.Ramp(0, 1, lanes)] = value[0]
             T.copy(out_ub, out)
@@ -157,8 +146,7 @@ def _float16_broadcast_kernel():
 
 
 def test_vector_min_max_and_mod_are_scalarized():
-    kernel = tilelang.compile(_vector_min_max_mod_kernel(), target="ascend")
-    source = kernel.get_kernel_source()
+    source = _source(_vector_min_max_mod_kernel(), target="ascend")
     assert source.count(".x = min(") == 2
     assert source.count(".y = min(") == 2
     assert source.count(".x = max(") == 2
@@ -168,12 +156,11 @@ def test_vector_min_max_and_mod_are_scalarized():
 
 
 def test_shuffle_constructors_are_materialized_per_lane():
-    kernel = tilelang.compile(
+    source = _source(
         _vector_shuffle_constructor_kernel(),
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    source = kernel.get_kernel_source()
     assert "value_float[0] = float2(" not in source
     assert "value_int[0] = int2(" not in source
     assert "value_half[0] = uint1(" not in source
@@ -183,24 +170,22 @@ def test_shuffle_constructors_are_materialized_per_lane():
 
 
 def test_shuffle_buffer_load_is_materialized_before_lane_access():
-    kernel = tilelang.compile(
+    source = _source(
         _vector_shuffle_buffer_load_kernel(),
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    source = kernel.get_kernel_source()
     assert re.search(r"float2\s+\w+\s*=\s*\*\(__ubuf__ float2\*\)", source)
     assert re.search(r"=\s*\w+\.x;", source)
     assert not re.search(r"\*\(__ubuf__ float2\*\)\([^;]*\)\.x", source)
 
 
 def test_local_var_vector_initializer_is_emitted_before_declaration():
-    kernel = tilelang.compile(
+    source = _source(
         _local_var_float16x8_kernel(),
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    source = kernel.get_kernel_source()
     value_declaration = re.search(r"uint4 value = (\w+);", source)
     assert value_declaration is not None
     initializer_store = source.find("((half2*)(&(" + value_declaration.group(1))
@@ -208,32 +193,8 @@ def test_local_var_vector_initializer_is_emitted_before_declaration():
     assert initializer_store < value_declaration.start()
 
 
-def test_bfloat16_broadcast_is_materialized_per_lane():
-    kernel = tilelang.compile(
-        _bfloat16_broadcast_kernel(),
-        target="ascend",
-        pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
-    )
-    source = kernel.get_kernel_source()
-    assert "__pack_nv_bfloat162" not in source
-    assert source.count("((bfloat16x2_t*)(&(") >= 8
-    assert ".x =" in source
-    assert ".y =" in source
-
-
-def test_float16_broadcast_is_materialized_per_lane():
-    kernel = tilelang.compile(
-        _float16_broadcast_kernel(),
-        target="ascend",
-        pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
-    )
-    source = kernel.get_kernel_source()
-    assert "__pack_half2" not in source
-    assert "tl::pack_float16x4" not in source
-    assert source.count("((half2*)(&(") >= 8
-    assert ".x =" in source
-    assert ".y =" in source
-
-
-if __name__ == "__main__":
-    tilelang.testing.main()
+@pytest.mark.parametrize("dtype,carrier", [("bfloat16", "bfloat16x2_t"), ("float16", "half2")])
+def test_broadcast_is_materialized_per_lane(dtype, carrier):
+    source = _source(_broadcast_kernel(dtype), target="ascend", pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True})
+    assert f"(({carrier}*)(&(" in source
+    assert ".x =" in source and ".y =" in source

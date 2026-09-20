@@ -1,185 +1,75 @@
-from tilelang import tvm
-import tilelang
-import tilelang.ascend.language as T
-import tilelang.testing
-from tilelang.engine.lower import lower
+"""VF legality is checked on source TIR, before scheduling or device lowering."""
+
 import pytest
+import tilelang.ascend.language as T
+from tilelang import tvm
+from tilelang.ascend.analysis import VFChecker
+from tvm import tirx
+from testing.ascend._ir import copy, kernel, seq
 
 
-def test_copy_matching_dtypes_outside_vf():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float16")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float16")
-            T.copy(A[:256], temp)
-
-    lower(kernel, target="ascend")
+def _check(before, error=None):
+    if error:
+        with pytest.raises(ValueError, match=error):
+            VFChecker()(before)
+    else:
+        tvm.ir.assert_structural_equal(VFChecker()(before), before)
 
 
-def test_copy_dtype_mismatch_outside_vf():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float16")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float32")
-            T.copy(A[:256], temp)
-
-    with pytest.raises(ValueError, match="DMA copies cannot perform type casting"):
-        lower(kernel, target="ascend")
-
-
-def test_copy_dtype_mismatch_inside_vf():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float16")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float32")
-            with T.SimtVF(threads=128):
-                T.copy(A[:256], temp)
-
-    with tvm.target.Target("ascend"):
-        lower(kernel, target="ascend")
+@pytest.mark.parametrize(
+    "vf, cast, error", [(None, False, None), (None, True, "DMA copies cannot perform type casting"), ("SIMT_VF", True, None)]
+)
+def test_copy_dtype_contract(vf, cast, error):
+    a = tirx.decl_buffer((64,), "float16", name="A")
+    ub = tirx.decl_buffer((64,), "float32" if cast else "float16", name="ub", scope="shared.dyn")
+    body = copy(a, ub)
+    if vf:
+        body = tirx.SBlock([], [], [], vf, body)
+    _check(kernel(body, buffers=[ub], params=[a]), error)
 
 
-def test_parallel_outside_vf():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float32")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float32")
-            for i in T.Parallel(256):
-                temp[i] = A[i]
-
-    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="Parallel loops outside VF blocks"):
-        lower(kernel, target="ascend")
+@pytest.mark.parametrize("vf", [None, "SIMT_VF", "SIMD_VF"])
+def test_parallel_loop_requires_a_vf(vf):
+    ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
+    i = tirx.Var("i", "int32")
+    body = tirx.For(i, 0, 64, tirx.ForKind.PARALLEL, tirx.BufferStore(ub, tirx.const(1, "float32"), [i]))
+    if vf:
+        body = tirx.SBlock([], [], [], vf, body)
+    _check(kernel(body, buffers=[ub]), None if vf else "Parallel loops outside VF blocks")
 
 
-def test_simd_vf_load_global():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float16")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float16")
-            with T.SimdVF():
-                for i in T.Parallel(256):
-                    temp[i] = A[i]
-
-    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
-        lower(kernel, target="ascend")
-
-
-def test_simd_vf_store_global():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float16")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float16")
-            with T.SimdVF():
-                for i in T.Parallel(256):
-                    A[i] = temp[i]
-
-    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
-        lower(kernel, target="ascend")
+@pytest.mark.parametrize("vf", ["SIMT_VF", "SIMD_VF"])
+@pytest.mark.parametrize("access", ["load", "store", "copy"])
+def test_global_memory_access_depends_on_vf_kind(vf, access):
+    a = tirx.decl_buffer((64,), "float32", name="A")
+    ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
+    if access == "copy":
+        body = copy(a, ub)
+    elif access == "load":
+        body = tirx.BufferStore(ub, a[0], [0])
+    else:
+        body = tirx.BufferStore(a, ub[0], [0])
+    _check(
+        kernel(tirx.SBlock([], [], [], vf, body), buffers=[ub], params=[a]),
+        "SIMD_VF blocks cannot access global memory" if vf == "SIMD_VF" else None,
+    )
 
 
-def test_simd_vf_copy_global():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float16")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float16")
-            with T.SimdVF():
-                for i in T.Parallel(256):
-                    T.copy(A[i], temp[i])
-
-    with tvm.target.Target("ascend"), pytest.raises(ValueError, match="SIMD_VF blocks cannot access global memory"):
-        lower(kernel, target="ascend")
+@pytest.mark.parametrize("vf", ["SIMT_VF", "SIMD_VF"])
+@pytest.mark.parametrize("outside", [False, True])
+def test_local_scalar_writes_cannot_require_pointer_capture(vf, outside):
+    value = tirx.decl_buffer((1,), "int32", name="value", scope="local.var")
+    body = tirx.SBlock([], [], [], vf, tirx.Evaluate(T.fill(value, 1)), alloc_buffers=[] if outside else [value])
+    _check(kernel(body, buffers=[value] if outside else []), "pointer-type capture" if outside else None)
 
 
-def test_simt_vf_access_global_allowed():
-    @T.prim_func
-    def kernel(A: T.Buffer((256,), "float16")):
-        with T.Kernel(1) as _:
-            temp = T.alloc_shared((256,), "float16")
-            with T.SimtVF(threads=128):
-                for i in T.Parallel(256):
-                    temp[i] = A[i]
-
-    with tvm.target.Target("ascend"):
-        lower(kernel, target="ascend")
-
-
-def test_outer_local_var_region_write_inside_vf_rejected():
-    @T.prim_func
-    def kernel(O: T.Buffer((1,), "int32")):
-        with T.Kernel(1):
-            value = T.alloc_var("int32")
-            with T.SimtVF(threads=32):
-                T.fill(value, 1)
-            O[0] = value
-
-    with pytest.raises(ValueError, match="pointer-type capture"):
-        lower(kernel, target="ascend")
-
-
-def test_simdvf_shared_allocation_escape_rejected():
-    with pytest.raises(RuntimeError, match=r"Immutable variable `temp` is used outside its defining region"):
-
-        @T.prim_func
-        def kernel(O: T.Buffer((64,), "float32")):
-            with T.Kernel(1):
-                with T.SimdVF():
-                    temp = T.alloc_shared((64,), "float32")
-                    for i in T.Parallel(64):
-                        temp[i] = T.float32(1)
-                T.copy(temp, O)
-
-
-def test_simtvf_shared_allocation_escape_rejected():
-    with pytest.raises(RuntimeError, match=r"Immutable variable `temp` is used outside its defining region"):
-
-        @T.prim_func
-        def kernel(O: T.Buffer((64,), "float32")):
-            with T.Kernel(1):
-                with T.SimtVF(threads=32):
-                    temp = T.alloc_shared((64,), "float32")
-                    for i in T.Parallel(64):
-                        temp[i] = T.float32(1)
-                T.copy(temp, O)
-
-
-def test_simtvf_local_allocation_escape_rejected():
-    with pytest.raises(RuntimeError, match=r"Immutable variable `temp` is used outside its defining region"):
-
-        @T.prim_func
-        def kernel(O: T.Buffer((64,), "float32")):
-            with T.Kernel(1):
-                with T.SimtVF(threads=32):
-                    temp = T.alloc_local((64,), "float32")
-                    for i in T.Parallel(64):
-                        temp[i] = T.float32(1)
-                O[0] = temp[0]
-
-
-def test_nested_buffer_load_checks_vf_allocation_escape():
-    with pytest.raises(RuntimeError, match=r"Immutable variable `index` is used outside its defining region"):
-
-        @T.prim_func
-        def kernel(A: T.Buffer((64,), "int32"), O: T.Buffer((64,), "int32")):
-            with T.Kernel(1):
-                with T.SimtVF(threads=32):
-                    index = T.alloc_shared((1,), "int32")
-                    index[0] = 0
-                O[0] = A[index[0]]
-
-
-def test_outer_shared_allocation_used_inside_and_outside_vf_allowed():
-    @T.prim_func
-    def kernel(O: T.Buffer((64,), "float32")):
-        with T.Kernel(1):
-            temp = T.alloc_shared((64,), "float32")
-            with T.SimdVF():
-                for i in T.Parallel(64):
-                    temp[i] = T.float32(1)
-            T.copy(temp, O)
-
-    with tvm.target.Target("ascend"):
-        lower(kernel, target="ascend")
-
-
-if __name__ == "__main__":
-    tilelang.testing.main()
+@pytest.mark.parametrize("vf, scope", [("SIMD_VF", "shared.dyn"), ("SIMT_VF", "shared.dyn"), ("SIMT_VF", "local")])
+@pytest.mark.parametrize("outside", [False, True])
+def test_vf_allocation_lifetime(vf, scope, outside):
+    # Construct IR directly so this exercises VFChecker's scope rule rather
+    # than the parser's generic immutable-variable visibility check.
+    temp = tirx.decl_buffer((1,), "int32", name="temp", scope=scope)
+    out = tirx.decl_buffer((1,), "int32", name="out")
+    block = tirx.SBlock([], [], [], vf, tirx.BufferStore(temp, 1, [0]), alloc_buffers=[] if outside else [temp])
+    before = kernel(seq(block, tirx.BufferStore(out, temp[0], [0])), buffers=[temp] if outside else [], params=[out])
+    _check(before, None if outside else "accessed outside its allocation scope")
