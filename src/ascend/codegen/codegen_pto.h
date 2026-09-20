@@ -64,11 +64,6 @@ protected:
   void VisitExpr_(const DivNode *op, std::ostream &os) override; // NOLINT(*)
 
 private:
-  struct FragmentInfo {
-    int lanes{0};
-    DataType dtype;
-  };
-
   struct PTOGemmEmitContext {
     bool blockscaled{false};
     int64_t tile_m{0};
@@ -130,6 +125,7 @@ private:
   void EmitScalarStore(const BufferNode *buffer, const std::string &value,
                           const PrimExpr &index);
   void EmitBufferAllocation(const Buffer &buffer);
+  void EmitLocalVarInitialization_(const Buffer &buffer, std::string vid);
   void EmitScalarizedLoad(const BufferLoadNode *op, std::ostream &os);
   void EmitScalarizedStore(const BufferStoreNode *op);
   bool TryEmitRngBroadcastStore(const BufferStoreNode *op);
@@ -216,7 +212,6 @@ private:
   // A single function-wide constant pad value is safe to materialize directly
   // at a guarded copy when scheduling split its setter into an earlier guard.
   PrimExpr uniform_const_copy_pad_value_;
-  std::unordered_map<const VarNode *, FragmentInfo> fragment_info_;
   std::unordered_set<const VarNode *> local_var_buffers_;
   std::unordered_map<Call, int64_t, ObjectPtrHash, ObjectPtrEqual>
       hf32_mode_by_gemm_;

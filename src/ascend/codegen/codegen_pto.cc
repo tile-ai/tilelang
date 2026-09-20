@@ -108,24 +108,6 @@ std::string DataTypeName(DataType t) {
   return "";
 }
 
-std::string SignedIntegerTypeName(DataType t) {
-  ICHECK(t.is_scalar() && t.is_int())
-      << "PTO signed integer scalar type expected, got " << t;
-  switch (t.bits()) {
-  case 8:
-    return "pto.si8";
-  case 16:
-    return "pto.si16";
-  case 32:
-    return "pto.si32";
-  case 64:
-    return "pto.si64";
-  default:
-    LOG(FATAL) << "Unsupported PTO signed integer type: " << t;
-  }
-  return "";
-}
-
 std::string AtomicTypeSuffix(DataType t) {
   ICHECK(t.is_scalar()) << "PTO store atomic type must be scalar, got " << t;
   if (t.is_float() && t.bits() == 32) {
@@ -644,17 +626,6 @@ std::string AccStoreUnitFlagArg(int64_t unit_flag_ctrl) {
   return "None";
 }
 
-std::string MadUnitFlagArg(int64_t unit_flag_ctrl) {
-  if (unit_flag_ctrl == 0)
-    return "None";
-  if (unit_flag_ctrl == 2)
-    return "pto.MadUnitFlagMode.CHECK_ONLY";
-  if (unit_flag_ctrl == 3)
-    return "pto.MadUnitFlagMode.CHECK_AND_SET";
-  LOG(FATAL) << "PTO MAD unsupported unit_flag_ctrl=" << unit_flag_ctrl;
-  return "None";
-}
-
 bool IsSupportedGemmInputDtype(DataType dtype) {
   return dtype.is_bfloat16() ||
          (dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32)) ||
@@ -992,17 +963,6 @@ static bool ContainsLoopBreak(const Stmt &stmt) {
   LoopBreakDetector det;
   det(stmt);
   return det.found;
-}
-bool ContainsSimdVectorStore(const Stmt &stmt) {
-  bool found = false;
-  tirx::PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    if (found)
-      return;
-    if (const auto *call = node.as<CallNode>()) {
-      found = call->op.same_as(tl::simd_vsts());
-    }
-  });
-  return found;
 }
 
 class SimtPersistentBufferCollector final : public StmtExprVisitor {
@@ -1608,7 +1568,6 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   name_supply_->ReserveName("scalar");
   name_supply_->ReserveName("tl");
   ValidateKernelCapabilities(func);
-  fragment_info_.clear();
   local_var_buffers_.clear();
   current_unroll_factor_loop_var_ = Optional<Var>();
   current_unroll_factor_ = 0;
@@ -2254,6 +2213,46 @@ void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
   LOG(FATAL) << "Unsupported PTO scalar store scope: " << scope;
 }
 
+void CodeGenTileLangPTO::EmitLocalVarInitialization_(const Buffer &buffer,
+                                                     std::string vid) {
+  DataType dtype = buffer->dtype;
+  if (vid.rfind("__cond_", 0) == 0) {
+    vid = "tl_cond_" + vid.substr(7);
+    var_idmap_[buffer->data.get()] = vid;
+  } else if (!vid.empty() && vid.front() == '_') {
+    // PTODSL rewrites native Python if statements through BranchHandle,
+    // whose underscore-prefixed attributes are reserved for internals.
+    // Give local.var values such as `_tmp_id` a unique public name so they
+    // can be carried out of nested branches.
+    vid = name_supply_->FreshName("tl" + vid, false);
+    var_idmap_[buffer->data.get()] = vid;
+  }
+  if (current_function_has_gemm_) {
+    // Keep authored PTO surface values (not Python ints) so AST-rewritten
+    // `if` / br.assign can merge tile indices across branches.
+    if (IsVectorLocalVarDtype(dtype) || dtype.is_handle()) {
+      stream << vid << " = None\n";
+    } else {
+      stream << vid << " = pto.const(" << (dtype.is_float() ? "0.0" : "0")
+             << ", dtype=" << DataTypeName(dtype) << ")\n";
+    }
+    RegisterHandleType_(buffer->data.get(), buffer->dtype);
+    EmitMixedEntrySnapshot(buffer->data.get());
+    return;
+  }
+  // Wide vector SSA; scalar values stay as PTO surface values.
+  if (IsVectorLocalVarDtype(dtype) || dtype.is_handle()) {
+    stream << vid << " = None\n";
+  } else if (IsSurfaceScalarLocalVarDtype(dtype)) {
+    stream << vid << " = pto.const(" << (dtype.is_float() ? "0.0" : "0")
+           << ", dtype=" << DataTypeName(dtype) << ")\n";
+  } else {
+    LOG(FATAL) << "Unsupported PTO local.var dtype: " << dtype;
+  }
+  EmitMixedEntrySnapshot(buffer->data.get());
+  RegisterHandleType_(buffer->data.get(), buffer->dtype);
+}
+
 void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
   std::string scope = GetPtrStorageScope(buffer->data);
   alloc_storage_scope_[buffer->data.get()] = scope;
@@ -2331,46 +2330,11 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const Buffer &buffer) {
       return;
     }
     local_var_buffers_.insert(buffer->data.get());
-    DataType dtype = buffer->dtype;
     std::string vid = var_idmap_.count(buffer->data.get())
                           ? GetVarID(buffer->data.get())
                           : AllocVarID(buffer->data.get());
-    if (vid.rfind("__cond_", 0) == 0) {
-      vid = "tl_cond_" + vid.substr(7);
-      var_idmap_[buffer->data.get()] = vid;
-    } else if (!vid.empty() && vid.front() == '_') {
-      // PTODSL rewrites native Python if statements through BranchHandle,
-      // whose underscore-prefixed attributes are reserved for internals.
-      // Give local.var values such as `_tmp_id` a unique public name so they
-      // can be carried out of nested branches.
-      vid = name_supply_->FreshName("tl" + vid, false);
-      var_idmap_[buffer->data.get()] = vid;
-    }
-    if (current_function_has_gemm_) {
-      // Keep authored PTO surface values (not Python ints) so AST-rewritten
-      // `if` / br.assign can merge tile indices across branches.
-      if (IsVectorLocalVarDtype(dtype) || dtype.is_handle()) {
-        stream << vid << " = None\n";
-      } else {
-        stream << vid << " = pto.const(" << (dtype.is_float() ? "0.0" : "0")
-               << ", dtype=" << DataTypeName(dtype) << ")\n";
-      }
-      RegisterHandleType_(buffer->data.get(), buffer->dtype);
-      EmitMixedEntrySnapshot(buffer->data.get());
-      return;
-    }
-    // Wide vector SSA; scalar values stay as PTO surface values.
-    if (IsVectorLocalVarDtype(dtype) || dtype.is_handle()) {
-      stream << vid << " = None\n";
-    } else if (IsSurfaceScalarLocalVarDtype(dtype)) {
-      stream << vid << " = pto.const(" << (dtype.is_float() ? "0.0" : "0")
-             << ", dtype="
-             << DataTypeName(dtype)
-             << ")\n";
-    } else {
-      LOG(FATAL) << "Unsupported PTO local.var dtype: " << dtype;
-    }
-    EmitMixedEntrySnapshot(buffer->data.get());
+    EmitLocalVarInitialization_(buffer, std::move(vid));
+    return;
   }
 
   RegisterHandleType_(buffer->data.get(), buffer->dtype);
@@ -5584,8 +5548,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
     if (from.is_float() && from.bits() == 32 && from.lanes() == 2 && to_fp8) {
       os << "pto.convert(";
       PrintExpr_(op->value, os);
-      os << ", " << FP8TypeName(to)
-         << ", rounding=\"r\", saturation=\"sat\")";
+      os << ", " << FP8TypeName(to) << ", rounding=\"r\", saturation=\"sat\")";
       return;
     }
     LOG(FATAL) << "PTO SIMT FP8 cast currently supports float32x2 to "
@@ -5593,14 +5556,14 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
                << from << " -> " << to;
   }
 
-  bool from_integer = from.is_int() || from.is_uint() || from.is_bool();
-  bool to_integer = to.is_int() || to.is_uint() || to.is_bool();
-  bool from_float = from.is_float() || from.is_bfloat16();
-  bool to_float = to.is_float() || to.is_bfloat16();
-  bool immediate_value = op->value.as<IntImmNode>() != nullptr ||
-                         op->value.as<FloatImmNode>() != nullptr;
-  bool scalar_value = from.is_scalar() && to.is_scalar();
-  if (from.is_scalar() && to.is_scalar() && from_integer && to.is_float() &&
+  const bool from_integer = from.is_int() || from.is_uint() || from.is_bool();
+  const bool to_integer = to.is_int() || to.is_uint() || to.is_bool();
+  const bool from_float = from.is_float() || from.is_bfloat16();
+  const bool to_float = to.is_float() || to.is_bfloat16();
+  const bool immediate_value = op->value.as<IntImmNode>() != nullptr ||
+                               op->value.as<FloatImmNode>() != nullptr;
+  const bool scalar_value = from.is_scalar() && to.is_scalar();
+  if (scalar_value && from_integer && to.is_float() &&
       (from.is_bool() || from.bits() == 1)) {
     // Python float(runtime_i1) tries to coerce a device SSA value at trace
     // time.  Materialize the numeric boolean conversion on the device.
@@ -5612,35 +5575,28 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
   if (!immediate_value && scalar_value &&
       ((from_float && to_integer) ||
        (from_integer && to_float && !inside_simtvf_body_))) {
-    os << "tl.scalar_cast(" << PrintExpr_(op->value) << ", "
-       << DataTypeName(to) << ", context=\"PTO scalar cast\")";
+    os << ScalarCastExpr(PrintExpr_(op->value), to, "PTO scalar cast");
     return;
   }
-  if (!immediate_value && from_float && to_float &&
-      from.lanes() == to.lanes() &&
-      from.element_of() != to.element_of()) {
+  if (!immediate_value && from_float && to_float) {
     // Keep MLIR implementation details inside PTODSL.  scalar.cast preserves
     // the shape of builtin vectors while replacing their element dtype.  Use
     // the full element dtype instead of bit width so same-width conversions
     // such as float16 <-> bfloat16 are also lowered on the device.
-    os << "tl.scalar_cast(" << PrintExpr_(op->value) << ", "
-       << DataTypeName(to.element_of())
-       << ", context=\"PTO floating-point cast\")";
+    os << ScalarCastExpr(PrintExpr_(op->value), to.element_of(),
+                         "PTO floating-point cast");
     return;
   }
-  if (from.is_scalar() && to.is_scalar() && from_integer && to_integer &&
-      !from.is_bool() && !to.is_bool() &&
+  if (scalar_value && from_integer && to_integer && !from.is_bool() &&
+      !to.is_bool() &&
       (from.bits() != to.bits() || from.is_uint() != to.is_uint())) {
     // Python int(runtime_value) tries to consume a device-side SSA value while
     // PTODSL is tracing. Use scalar.cast for both width changes and same-width
     // signedness changes so later scalar ops see the authored int/uint type.
-    os << "tl.scalar_cast(";
-    PrintExpr_(op->value, os);
-    os << ", " << ScalarType(to)
-       << ", context=\"PTO integer cast\")";
+    os << ScalarCastExpr(PrintExpr_(op->value), to, "PTO integer cast");
     return;
   }
-  if (from_integer && to_integer && from.lanes() == to.lanes() &&
+  if (from_integer && to_integer &&
       (from.bits() <= to.bits() || from.bits() == 1 || to.bits() == 1 ||
        from.is_bool() || to.is_bool())) {
     // Address-index widening and boolean representation casts should not become
@@ -5654,44 +5610,19 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
   if (to.is_bool()) {
     ICHECK(from.is_scalar() && (from_integer || from_float))
         << "PTO bool cast expects a scalar numeric source, got " << from;
-    if (const auto *imm = op->value.as<IntImmNode>()) {
-      os << (imm->value != 0 ? "True" : "False");
-      return;
-    }
-    if (const auto *imm = op->value.as<FloatImmNode>()) {
-      os << (imm->value != 0.0 ? "True" : "False");
-      return;
-    }
-    os << "(";
-    PrintExpr_(op->value, os);
-    os << " != pto.const(0, dtype=" << DataTypeName(from) << "))";
-    return;
-  }
-
-  if (from.is_bool() && to_integer) {
-    ICHECK(from.is_scalar() && to.is_scalar())
-        << "PTO bool-to-integer cast expects scalar types, got " << from
-        << " -> " << to;
-    if (const auto *imm = op->value.as<IntImmNode>()) {
-      os << "pto.const(" << (imm->value != 0 ? 1 : 0)
-         << ", dtype=" << DataTypeName(to) << ")";
-      return;
-    }
-    os << "scalar.select(";
-    PrintExpr_(op->value, os);
-    os << ", pto.const(1, dtype=" << DataTypeName(to)
-       << "), pto.const(0, dtype=" << DataTypeName(to) << "))";
+    // Integer sources already use the representation-preserving path above;
+    // runtime floating-point sources already use ScalarCastExpr.
+    const auto *imm = op->value.as<FloatImmNode>();
+    ICHECK(imm) << "PTO bool cast expected a floating-point immediate";
+    os << (imm->value != 0.0 ? "True" : "False");
     return;
   }
 
   if (from_integer && to_integer) {
-    ICHECK(from.is_scalar() && to.is_scalar())
-        << "PTO integer cast currently supports scalar values only, got "
-        << from << " -> " << to;
-    os << "scalar.cast(";
-    PrintExpr_(op->value, os);
-    os << ", " << DataTypeName(to) << ")";
-    return;
+    // All scalar integer casts were handled above. Only unsupported vector
+    // narrowing remains; preserve its diagnostic instead of emitting a cast.
+    LOG(FATAL) << "PTO integer cast currently supports scalar values only, got "
+               << from << " -> " << to;
   }
 
   if (from_integer && to_float) {
@@ -5703,63 +5634,28 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
       os << "pto.const(" << imm->value << ", dtype=" << DataTypeName(to) << ")";
       return;
     }
-    if (inside_simtvf_body_) {
-      // PTOAS accepts only signless i32/i64 as integer operands of pto.convert;
-      // authored TIR integer values may carry signed/unsigned MLIR types.
-      // Normalize the payload while retaining the authored signedness in the
-      // conversion attribute. Widen narrow integers to the nearest supported
-      // PTO conversion width before emitting the SIMT operation.
-      const std::string pto_convert_src_type =
-          from.bits() > 32 ? "pto.i64" : "pto.i32";
-      os << "pto.convert(scalar.cast(";
-      PrintExpr_(op->value, os);
-      os << ", " << pto_convert_src_type << "), " << DataTypeName(to)
-         << ", rounding=\"r\", saturation=\"nosat\", signedness=\""
-         << (from.is_uint() ? "unsigned" : "signed") << "\")";
-      return;
-    } else {
-      // TODO: Emit scalar.sitofp/uitofp for the corresponding TIR
-      // arith.sitofp/uitofp once the PTODSL scalar.xxx and pto.xxx
-      // interfaces are unified.
-      ICHECK(false)
-          << "PTO dynamic integer-to-float cast outside SIMT is temporarily "
-             "unsupported, got "
-          << from << " -> " << to;
-    }
-  }
-
-  const bool from_float32_pair = IsFloat32Pair(from);
-  const bool to_float32_pair = IsFloat32Pair(to);
-  const bool from_half_pair =
-      from.lanes() == 2 && (from.is_float16() || from.is_bfloat16());
-  const bool to_half_pair =
-      to.lanes() == 2 && (to.is_float16() || to.is_bfloat16());
-  if ((from_float32_pair && to_half_pair) ||
-      (from_half_pair && to_float32_pair)) {
-    ICHECK(inside_simtvf_body_)
-        << "PTO packed float cast is supported only inside SIMT, got " << from
-        << " -> " << to;
-    const char *to_pto_type = to_float32_pair   ? "pto.f32x2"
-                              : to.is_float16() ? "pto.f16x2"
-                                                : "pto.bf16x2";
-    os << "pto.convert(";
+    // Non-immediate scalar integer-to-float casts outside SIMT returned above.
+    // PTOAS accepts only signless i32/i64 as integer operands of pto.convert;
+    // authored TIR integer values may carry signed/unsigned MLIR types.
+    // Normalize the payload while retaining the authored signedness in the
+    // conversion attribute. Widen narrow integers to the nearest supported
+    // PTO conversion width before emitting the SIMT operation.
+    const std::string pto_convert_src_type =
+        from.bits() > 32 ? "pto.i64" : "pto.i32";
+    os << "pto.convert(scalar.cast(";
     PrintExpr_(op->value, os);
-    os << ", " << to_pto_type << ", rounding=\"r\", saturation=\"nosat\")";
+    os << ", " << pto_convert_src_type << "), " << DataTypeName(to)
+       << ", rounding=\"r\", saturation=\"nosat\", signedness=\""
+       << (from.is_uint() ? "unsigned" : "signed") << "\")";
     return;
   }
 
-  const bool supported_float_cast = from.is_scalar() && to.is_scalar() &&
-                                    ((IsFloat32(from) && to.is_bfloat16()) ||
-                                     (from.is_bfloat16() && IsFloat32(to)));
-  if (supported_float_cast) {
-    if (const auto *imm = op->value.as<FloatImmNode>()) {
-      os << "pto.const(float.fromhex('" << FlexibleHexFormat(imm->value)
-         << "'), dtype=" << DataTypeName(to) << ")";
-      return;
-    }
-    os << "scalar.cast(";
-    PrintExpr_(op->value, os);
-    os << ", " << DataTypeName(to) << ")";
+  if (const auto *imm = op->value.as<FloatImmNode>();
+      imm && scalar_value &&
+      ((IsFloat32(from) && to.is_bfloat16()) ||
+       (from.is_bfloat16() && IsFloat32(to)))) {
+    os << "pto.const(float.fromhex('" << FlexibleHexFormat(imm->value)
+       << "'), dtype=" << DataTypeName(to) << ")";
     return;
   }
 
@@ -6031,14 +5927,9 @@ void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
   if (const auto *call = op->value.as<CallNode>()) {
     if (IsOpName(call->op, "tl.simd.alloc")) {
       AllocVarID(op->var.get());
-      DataType elem_dtype = op->var.dtype().element_of();
       ICHECK_GT(op->var.dtype().lanes(), 1)
           << "tl.simd.alloc should bind a vector-typed Var, got "
           << op->var.dtype();
-      FragmentInfo info;
-      info.lanes = op->var.dtype().lanes();
-      info.dtype = elem_dtype;
-      fragment_info_[op->var.get()] = info;
       return;
     }
 
@@ -6219,51 +6110,14 @@ void CodeGenTileLangPTO::VisitStmt_(const AllocBufferNode *op) {
     auto opt_size = alloc_ref.ConstantAllocationSize();
     ICHECK(opt_size.has_value())
         << "PTO local.fragment allocation expects a constant size";
-    FragmentInfo info;
-    info.lanes = static_cast<int>(opt_size.value());
-    info.dtype = op->buffer->dtype;
-    fragment_info_[buffer_var.get()] = info;
   } else if (scope == "local.var") {
     // Scalar alloc_var is used by GEMM tile mapping; vector alloc_var is a
     // mutable SIMD register and is emitted as a PTODSL Vec value.
     CheckLocalVarBuffer(op->buffer.get());
     PrintIndent();
     local_var_buffers_.insert(buffer_var.get());
-    DataType dtype = op->buffer->dtype;
-    std::string vid = AllocVarID(buffer_var.get());
-    if (vid.rfind("__cond_", 0) == 0) {
-      vid = "tl_cond_" + vid.substr(7);
-      var_idmap_[buffer_var.get()] = vid;
-    } else if (!vid.empty() && vid.front() == '_') {
-      // See EmitBufferAllocation: BranchHandle result names may not start
-      // with an underscore.
-      vid = name_supply_->FreshName("tl" + vid, false);
-      var_idmap_[buffer_var.get()] = vid;
-    }
-    if (current_function_has_gemm_) {
-      // Keep authored PTO surface values (not Python ints) so AST-rewritten
-      // `if` / br.assign can merge tile indices across branches.
-      if (IsVectorLocalVarDtype(dtype) || dtype.is_handle()) {
-        stream << vid << " = None\n";
-      } else {
-        stream << vid << " = pto.const(" << (dtype.is_float() ? "0.0" : "0")
-               << ", dtype=" << DataTypeName(dtype) << ")\n";
-      }
-      RegisterHandleType_(buffer_var.get(), op->buffer->dtype);
-      EmitMixedEntrySnapshot(buffer_var.get());
-      return;
-    }
-    if (IsVectorLocalVarDtype(dtype) || dtype.is_handle()) {
-      stream << vid << " = None\n";
-    } else if (IsSurfaceScalarLocalVarDtype(dtype)) {
-      stream << vid << " = pto.const(" << (dtype.is_float() ? "0.0" : "0")
-             << ", dtype="
-             << DataTypeName(dtype)
-             << ")\n";
-    } else {
-      LOG(FATAL) << "Unsupported PTO local.var dtype: " << dtype;
-    }
-    EmitMixedEntrySnapshot(buffer_var.get());
+    EmitLocalVarInitialization_(op->buffer, AllocVarID(buffer_var.get()));
+    return;
   }
 
   RegisterHandleType_(buffer_var.get(), op->buffer->dtype);
