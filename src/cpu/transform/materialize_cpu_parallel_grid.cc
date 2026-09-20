@@ -30,10 +30,12 @@
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/buffer.h>
 #include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op_attr_types.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -194,11 +196,14 @@ PrimExpr ScalarizedIndex(const PrimExpr &index, ffi::Map<Var, Range> *ranges) {
   return index;
 }
 
-/*! \brief Replace every integer cast of a variable by a fresh variable of
- * the cast's dtype (the expression stays well-typed; DetectIterMap rejects
- * Cast nodes). The fresh variable inherits the original variable's range. */
+/*! \brief Normalize lossless integer variable casts for DetectIterMap.
+ * Narrowing is allowed only when the bound fits the destination dtype. */
 class CastVarFreshener : public StmtExprMutator {
 public:
+  explicit CastVarFreshener(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
+
+  bool IsValid() const { return valid_; }
+
   const std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual> &
   FreshVars() const {
     return fresh_;
@@ -208,7 +213,21 @@ public:
     if (const auto *var = op->value.as<VarNode>();
         var && op->dtype.is_int() && var->dtype.is_int()) {
       Var orig = GetRef<Var>(var);
+      if (op->dtype.bits() < var->dtype.bits()) {
+        arith::ConstIntBound bound = analyzer_->const_int_bound(orig);
+        int64_t limit = int64_t{1} << (op->dtype.bits() - 1);
+        if (bound->min_value < -limit || bound->max_value >= limit) {
+          valid_ = false;
+          return GetRef<PrimExpr>(op);
+        }
+      }
       auto it = fresh_.find(orig);
+      if (it != fresh_.end() && it->second.dtype() != op->dtype) {
+        // One original variable cannot stand for independent iterators of
+        // different dtypes. Keep the expression well-typed and refuse proof.
+        valid_ = false;
+        return GetRef<PrimExpr>(op);
+      }
       if (it == fresh_.end()) {
         it = fresh_
                  .emplace(orig, Var(orig->name_hint + "_i" +
@@ -222,6 +241,8 @@ public:
   }
 
 private:
+  arith::Analyzer *analyzer_;
+  bool valid_ = true;
   std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual> fresh_;
 };
 
@@ -230,8 +251,22 @@ private:
 bool ProveInjectiveIndex(const PrimExpr &index,
                          const ffi::Map<Var, Range> &ranges) {
   arith::Analyzer analyzer;
-  CastVarFreshener freshener;
-  PrimExpr normalized = analyzer.Simplify(freshener(index));
+  for (const auto &[var, range] : ranges) {
+    analyzer.Bind(var, range);
+  }
+  CastVarFreshener freshener(&analyzer);
+  PrimExpr normalized = freshener(index);
+  if (!freshener.IsValid()) {
+    return false;
+  }
+  // A remaining use of the original iterator must not become an unrelated
+  // symbolic parameter when its range is moved to the fresh iterator.
+  if (UsesVar(normalized, [&](const VarNode *var) {
+        return freshener.FreshVars().count(GetRef<Var>(var)) > 0;
+      })) {
+    return false;
+  }
+  normalized = analyzer.Simplify(normalized);
   ffi::Map<Var, Range> norm_ranges;
   for (const auto &[var, range] : ranges) {
     auto it = freshener.FreshVars().find(var);
@@ -246,7 +281,7 @@ bool ProveInjectiveIndex(const PrimExpr &index,
   return res->errors.empty();
 }
 
-bool StoreReadsSameBuffer(const BufferStoreNode *op) {
+bool StoreReadsSameBuffer(const BufferStore &op) {
   bool reads = false;
   PostOrderVisit(op->value, [&](const ObjectRef &node) {
     if (const auto *load = node.as<BufferLoadNode>();
@@ -257,117 +292,165 @@ bool StoreReadsSameBuffer(const BufferStoreNode *op) {
   return reads;
 }
 
-/*! \brief Prove that a store rewrites the whole buffer once per execution of
- * some non-empty enclosing loop suffix: constant extents, unit steps,
+/*! \brief Find the scope at whose completion a store covers the whole buffer.
+ * A loop suffix must have constant extents, unit steps,
  * trip×lanes == numel, and an injective flat index. Partial writes, dynamic
- * or zero-trip loops, and non-affine indices do not count as a reset. Outer
- * loops may repeat the full rewrite (e.g. per-stage shared-buffer copies). */
-bool StoreCoversWholeBuffer(const BufferStoreNode *op,
-                            const std::vector<const ForNode *> &enclosing) {
+ * or zero-trip loops, and non-affine indices do not count as a reset.
+ * Returning enclosing.size() means the store itself covers the buffer. */
+std::optional<size_t> FullRewriteScope(const BufferStore &op,
+                                       const std::vector<For> &enclosing) {
+  if (op->predicate.defined() && !is_one(op->predicate.value())) {
+    return std::nullopt;
+  }
   int64_t numel = 1;
   for (const PrimExpr &dim : op->buffer->shape) {
     const auto *imm = dim.as<IntImmNode>();
     if (!imm || imm->value <= 0) {
-      return false;
+      return std::nullopt;
     }
     numel *= imm->value;
   }
   if (op->indices.size() != 1) {
-    return false;
+    return std::nullopt;
   }
   PrimExpr index = op->indices[0];
   int64_t lanes = 1;
   if (const auto *ramp = index.as<RampNode>()) {
     const int64_t *l = as_const_int(ramp->lanes);
     if (l == nullptr || *l <= 0) {
-      return false;
+      return std::nullopt;
     }
     lanes = *l;
   } else if (index.as<BroadcastNode>()) {
-    return false;
+    return std::nullopt;
   }
 
-  if (enclosing.empty()) {
-    // The store always executes; it is a reset only for a scalar buffer.
-    return numel == 1;
-  }
-
-  // Any non-empty suffix of the enclosing nest may be the level that fully
-  // rewrites the buffer; check innermost-outward.
-  for (size_t start = 0; start < enclosing.size(); ++start) {
+  // Prefer the innermost completed scope. An empty suffix also handles a
+  // scalar store or a single contiguous vector store covering the buffer.
+  for (size_t start = enclosing.size() + 1; start-- > 0;) {
     ffi::Map<Var, Range> ranges;
     int64_t trip = 1;
     bool ok = true;
     for (size_t i = start; i < enclosing.size(); ++i) {
-      const ForNode *loop = enclosing[i];
+      const For &loop = enclosing[i];
       const auto *extent = loop->extent.as<IntImmNode>();
       if (!extent || extent->value <= 0 || !is_zero(loop->min) ||
-          !is_one(NormalizedStep(loop))) {
+          !is_one(NormalizedStep(loop.get()))) {
         ok = false;
         break;
       }
-      ranges.Set(loop->loop_var, Range::FromMinExtent(
-                                     IntImm(DataType::Int(32), 0),
-                                     IntImm(DataType::Int(32), extent->value)));
+      ranges.Set(loop->loop_var, Range::FromMinExtent(loop->min, loop->extent));
+      if (trip > numel / extent->value) {
+        ok = false;
+        break;
+      }
       trip *= extent->value;
     }
-    if (!ok || trip * lanes != numel) {
+    if (!ok || numel % lanes != 0 || trip != numel / lanes) {
       continue;
     }
     if (ProveInjectiveIndex(ScalarizedIndex(index, &ranges), ranges)) {
-      return true;
+      return start;
     }
   }
-  return false;
+  return std::nullopt;
 }
 
 /*! \brief Per-nest check: does a buffer read observe the previous grid
- * iteration's value? A load is iteration-private only when a store that
- * covers the whole buffer, neither reads the buffer nor is if-guarded,
- * precedes it in the sink body (e.g. the T.clear before gemm's RMW
- * accumulation). */
+ * iteration's value? Publish whole-buffer initialization only after its
+ * covering loop completes, and never propagate it out of a possibly empty
+ * loop or conditional region. */
 class IterationPrivacyChecker : public StmtExprVisitor {
 public:
   bool ReadsPrevious(const Var &data) const {
-    auto it = state_.find(data);
-    return it != state_.end() && it->second.reads_previous;
+    return reads_previous_.count(data) > 0;
   }
 
 private:
-  struct St {
-    bool reset_seen = false;
-    bool reads_previous = false;
-  };
+  using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+
   void VisitStmt_(const ForNode *op) override {
-    loop_stack_.push_back(op);
+    VarSet before = initialized_;
+    loop_stack_.push_back(GetRef<For>(op));
+    loop_resets_.emplace_back();
     StmtExprVisitor::VisitStmt_(op);
+    const auto *extent = op->extent.as<IntImmNode>();
+    if (extent && extent->value > 0 && is_one(NormalizedStep(op))) {
+      initialized_.insert(loop_resets_.back().begin(),
+                          loop_resets_.back().end());
+    } else {
+      initialized_ = std::move(before);
+    }
+    loop_resets_.pop_back();
     loop_stack_.pop_back();
   }
   void VisitStmt_(const IfThenElseNode *op) override {
-    ++if_depth_;
+    ++conditional_depth_;
     StmtExprVisitor::VisitStmt_(op);
-    --if_depth_;
+    --conditional_depth_;
+  }
+  void VisitStmt_(const WhileNode *op) override {
+    ++conditional_depth_;
+    StmtExprVisitor::VisitStmt_(op);
+    --conditional_depth_;
+  }
+  void VisitStmt_(const SBlockRealizeNode *op) override {
+    // Direct pass callers may retain blocks. Their predicates, and the
+    // first-reduction-iteration semantics of init, can skip initialization.
+    bool conditional = !is_one(op->predicate) || op->block->init.defined();
+    conditional_depth_ += conditional;
+    StmtExprVisitor::VisitStmt_(op);
+    conditional_depth_ -= conditional;
   }
   void VisitStmt_(const BufferStoreNode *op) override {
     StmtExprVisitor::VisitStmt_(op);
-    if (StoreReadsSameBuffer(op) || if_depth_ > 0) {
+    BufferStore store = GetRef<BufferStore>(op);
+    if (StoreReadsSameBuffer(store) || conditional_depth_ > 0) {
       return;
     }
-    St &st = state_[op->buffer->data];
-    if (!st.reset_seen && StoreCoversWholeBuffer(op, loop_stack_)) {
-      st.reset_seen = true;
+    if (auto scope = FullRewriteScope(store, loop_stack_)) {
+      if (*scope == loop_stack_.size()) {
+        initialized_.insert(op->buffer->data);
+      } else {
+        loop_resets_[*scope].insert(op->buffer->data);
+      }
     }
   }
   void VisitExpr_(const BufferLoadNode *op) override {
-    if (!state_[op->buffer->data].reset_seen) {
-      state_[op->buffer->data].reads_previous = true;
+    if (!initialized_.count(op->buffer->data)) {
+      reads_previous_.insert(op->buffer->data);
     }
     StmtExprVisitor::VisitExpr_(op);
   }
-  std::unordered_map<Var, St, ObjectPtrHash, ObjectPtrEqual> state_;
-  std::vector<const ForNode *> loop_stack_;
-  int if_depth_ = 0;
+  VarSet initialized_;
+  VarSet reads_previous_;
+  std::vector<For> loop_stack_;
+  std::vector<VarSet> loop_resets_;
+  int conditional_depth_ = 0;
 };
+
+/*! \brief Find calls whose effects cannot be proven safe to parallelize.
+ * No pointer arguments does not imply purity: an extern may mutate its own
+ * static state. Unknown callees/effects take the same conservative path. */
+Optional<Call> FindUnsafeCall(const Stmt &body) {
+  static const auto effect_map =
+      Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
+  Optional<Call> unsafe_call;
+  PostOrderVisit(body, [&](const ObjectRef &node) {
+    if (unsafe_call.defined()) {
+      return;
+    }
+    if (auto call = node.as<Call>()) {
+      auto op = call.value()->op.as<Op>();
+      if (!op || !effect_map.count(op.value()) ||
+          effect_map[op.value()]->value >
+              static_cast<int>(CallEffectKind::kPure)) {
+        unsafe_call = call.value();
+      }
+    }
+  });
+  return unsafe_call;
+}
 
 /*! \brief Per-nest check for parameter/global buffers (those without an
  * AllocBuffer): every write-relevant access must be provably race-free.
@@ -381,8 +464,8 @@ private:
 class OverlapStoreChecker : public StmtExprVisitor {
 public:
   OverlapStoreChecker(const GridAccessAnalysis &analysis,
-                      std::vector<std::pair<Var, PrimExpr>> parallel_scope,
-                      std::vector<std::pair<Var, PrimExpr>> outer_serial_scope)
+                      std::vector<std::pair<Var, Range>> parallel_scope,
+                      std::vector<std::pair<Var, Range>> outer_serial_scope)
       : analysis_(analysis), parallel_scope_(std::move(parallel_scope)),
         outer_serial_scope_(std::move(outer_serial_scope)) {}
 
@@ -458,16 +541,16 @@ private:
     ffi::Map<Var, Range> ranges;
     for (const auto *scope :
          {&parallel_scope_, &outer_serial_scope_, &serial_scope_}) {
-      for (const auto &[var, extent] : *scope) {
-        ranges.Set(var,
-                   Range::FromMinExtent(IntImm(DataType::Int(32), 0), extent));
+      for (const auto &[var, range] : *scope) {
+        ranges.Set(var, range);
       }
     }
     return ranges;
   }
 
   void VisitStmt_(const ForNode *op) override {
-    serial_scope_.push_back({op->loop_var, op->extent});
+    serial_scope_.push_back(
+        {op->loop_var, Range::FromMinExtent(op->min, op->extent)});
     StmtExprVisitor::VisitStmt_(op);
     serial_scope_.pop_back();
   }
@@ -521,9 +604,9 @@ private:
   }
 
   const GridAccessAnalysis &analysis_;
-  std::vector<std::pair<Var, PrimExpr>> parallel_scope_;
-  std::vector<std::pair<Var, PrimExpr>> outer_serial_scope_;
-  std::vector<std::pair<Var, PrimExpr>> serial_scope_;
+  std::vector<std::pair<Var, Range>> parallel_scope_;
+  std::vector<std::pair<Var, Range>> outer_serial_scope_;
+  std::vector<std::pair<Var, Range>> serial_scope_;
   std::unordered_map<Var, BufAccess, ObjectPtrHash, ObjectPtrEqual> access_;
   int in_call_ = 0;
   bool found_ = false;
@@ -778,15 +861,25 @@ struct GridRewriter : public StmtMutator {
       }
     }
 
+    if (auto call = FindUnsafeCall(loops.back()->body)) {
+      LOG(WARNING) << "tl.cpu_parallel: call `" << call.value()->op
+                   << "` has effects that cannot be proven safe across grid "
+                      "iterations; grid loop `"
+                   << head->loop_var->name_hint << "` stays serial";
+      return rebuild_serial();
+    }
+
     // Refuse writes to parameter/global buffers that cannot be proven
     // race-free across grid iterations.
     {
-      std::vector<std::pair<Var, PrimExpr>> parallel_scope, outer_serial;
+      std::vector<std::pair<Var, Range>> parallel_scope, outer_serial;
       for (size_t i = 0; i < loops.size(); ++i) {
         bool parallel_dim =
             collapse_all_dims_ || static_cast<size_t>(i) == parallel_idx;
         (parallel_dim ? parallel_scope : outer_serial)
-            .emplace_back(loops[i]->loop_var, loops[i]->extent);
+            .emplace_back(
+                loops[i]->loop_var,
+                Range::FromMinExtent(loops[i]->min, loops[i]->extent));
       }
       OverlapStoreChecker overlap(analysis_, std::move(parallel_scope),
                                   std::move(outer_serial));
