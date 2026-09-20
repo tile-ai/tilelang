@@ -46,12 +46,12 @@ protected:
   void VisitExpr_(const BroadcastNode *op,
                   std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const BufferLoadNode *op,
-                  std::ostream &os) override;                     // NOLINT(*)
+                  std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const LetNode *op,
                   std::ostream &os) override;                     // NOLINT(*)
   void VisitExpr_(const CastNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op,
-                  std::ostream &os) override; // NOLINT(*)
+                  std::ostream &os) override;                     // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const NotNode *op, std::ostream &os) override;  // NOLINT(*)
   void VisitExpr_(const SelectNode *op,
@@ -59,7 +59,7 @@ protected:
   void VisitExpr_(const MinNode *op,
                   std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const MaxNode *op,
-                  std::ostream &os) override; // NOLINT(*)
+                  std::ostream &os) override;                    // NOLINT(*)
   void VisitExpr_(const ModNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const DivNode *op, std::ostream &os) override; // NOLINT(*)
 
@@ -84,18 +84,17 @@ private:
    *         as elem_dtype.  Handles PTO type-name equivalence (e.g.
    *         UInt(8) and Int(8) both map to pto.i8). */
   bool NeedsCastptr_(const VarNode *buffer_var, DataType elem_dtype) const;
-  std::string ScalarPointerBase_(const VarNode *buffer_var,
-                                    DataType elem_dtype, const std::string &scope);
+  std::string ScalarPointerBase_(const VarNode *buffer_var, DataType elem_dtype,
+                                 const std::string &scope);
   std::string GetAccessPtrExpr_(const CallNode *op);
   std::string GetPointerExpr(const VarNode *buffer_var, DataType elem_dtype,
-                                const PrimExpr &index);
-  std::string GetPointerExpr(const BufferNode *buffer,
-                                const PrimExpr &index);
+                             const PrimExpr &index);
+  std::string GetPointerExpr(const BufferNode *buffer, const PrimExpr &index);
   std::string GetVectorLocalRef(const VarNode *buffer_var,
-                                   const PrimExpr &index,
-                                   const std::string &context);
+                                const PrimExpr &index,
+                                const std::string &context);
   std::string GetMutableVectorRef(const PrimExpr &address,
-                                     const std::string &op_name);
+                                  const std::string &op_name);
   std::string PrintCondition(const PrimExpr &condition);
   std::string GetAddressOfExpr_(const CallNode *op);
   std::string GetAscendCopyGmUbExpr_(const CallNode *op);
@@ -105,17 +104,17 @@ private:
   void EmitCopyPadMerge_(int merged_value_id, DataType expected_dtype);
   std::string GetCopyPadValueExpr_(const PrimExpr &value);
   void GetCopyEndpoint_(const PrimExpr &expr, const char *context,
-                           const VarNode **buffer_var, PrimExpr *index,
-                           DataType *dtype, std::string *scope) const;
+                        const VarNode **buffer_var, PrimExpr *index,
+                        DataType *dtype, std::string *scope) const;
   void ValidateUBCopyLayout_(const PrimExpr &index, DataType dtype,
-                                const PrimExpr &burst_num,
-                                const PrimExpr &burst_len,
-                                const PrimExpr &ub_stride,
-                                const PrimExpr &left_padding,
-                                const PrimExpr &right_padding,
-                                bool uses_padding, const char *context) const;
+                             const PrimExpr &burst_num,
+                             const PrimExpr &burst_len,
+                             const PrimExpr &ub_stride,
+                             const PrimExpr &left_padding,
+                             const PrimExpr &right_padding, bool uses_padding,
+                             const char *context) const;
   std::string EmitAllReduceExpr_(const std::string &func_name,
-                                    const CallNode *op);
+                                 const CallNode *op);
   void EmitInlineSimtVF(const SBlockNode *op, int64_t thread_x,
                         int64_t thread_y, int64_t thread_z);
   void ExtractSimtThreadExtents(const SBlockNode *op, int64_t *thread_x,
@@ -123,7 +122,7 @@ private:
   std::string ScalarLoad(const BufferNode *buffer, const PrimExpr &index);
   std::string LocalVarStoreValue(const PrimExpr &value, DataType dtype);
   void EmitScalarStore(const BufferNode *buffer, const std::string &value,
-                          const PrimExpr &index);
+                       const PrimExpr &index);
   void EmitBufferAllocation(const Buffer &buffer);
   void EmitLocalVarInitialization_(const Buffer &buffer, std::string vid);
   void EmitScalarizedLoad(const BufferLoadNode *op, std::ostream &os);
@@ -138,11 +137,11 @@ private:
   bool EmitSimdMergingCall_(const CallNode *op,
                             std::ostream &os); // NOLINT(*)
   void PrintFloatMinMax_(const char *op_name, DataType dtype, PrimExpr lhs,
-                             PrimExpr rhs, std::ostream &os); // NOLINT(*)
+                         PrimExpr rhs, std::ostream &os); // NOLINT(*)
   // Table-driven unary math mapping (sqrt/rsqrt/exp/log, extern C names and
   // tirx intrinsic names). Returns false when `name` is not covered.
   bool TryEmitUnaryMath_(const std::string &name, const PrimExpr &arg,
-                            std::ostream &os); // NOLINT(*)
+                         std::ostream &os); // NOLINT(*)
 
   std::string current_function_name_;
   bool inside_simtvf_body_{false};
@@ -151,17 +150,15 @@ private:
   // ownership key because lowering can leave duplicate name hints behind.
   std::unordered_set<const VarNode *> persistent_buffer_vars_;
   std::string GetLocalPtrExpr(const PrimExpr &expr, const std::string &space,
-                                 DataType fallback_dtype);
+                              DataType fallback_dtype);
   std::string GetE8M0ScalePtrExpr(const PrimExpr &expr);
-  std::string GetLocalByteAddrExpr(const PrimExpr &index,
-                                      DataType elem_dtype,
-                                      const std::string &context);
+  std::string GetLocalByteAddrExpr(const PrimExpr &index, DataType elem_dtype,
+                                   const std::string &context);
   std::string GetAccPtrExpr(const PrimExpr &expr, DataType dtype);
   const PTOGemmEmitContext &EnsureGemmHelper(const CallNode *op);
   const PTOGemmEmitContext &EnsureBlockscaledGemmHelper(const CallNode *op);
-  void ValidateFractalAddressAlignment_(const PrimExpr &index,
-                                           DataType dtype,
-                                           const char *context) const;
+  void ValidateFractalAddressAlignment_(const PrimExpr &index, DataType dtype,
+                                        const char *context) const;
   void EmitAscendCopyGmToCbuf(const CallNode *op);
   void EmitAscendFillL1(const CallNode *op);
   void EmitAscendLoadCbufToL0(const CallNode *op, bool is_ca);
@@ -174,19 +171,17 @@ private:
   void EmitAscendCopyUbufToCbuf(const CallNode *op);
   void EmitAscendNd2NzPostCopy(const CallNode *op);
   void EmitAscendNd2NzScatter(const CallNode *op);
-  void EmitGemmRun(const PTOGemmEmitContext &ctx,
-                      const std::string &a_mat, const std::string &b_mat,
-                      const std::string &acc, const std::string &clear_accum,
-                      const std::string &unit_flag_ctrl, int64_t hf32_mode);
-  void EmitBlockscaledGemmRun(const PTOGemmEmitContext &ctx,
-                                 const std::string &a_mat,
-                                 const std::string &b_mat,
-                                 const std::string &sfa_mat,
-                                 const std::string &sfb_mat,
-                                 const std::string &acc,
-                                 const std::string &clear_accum,
-                                 const std::string &sf_k_offset,
-                                 const std::string &unit_flag_ctrl);
+  void EmitGemmRun(const PTOGemmEmitContext &ctx, const std::string &a_mat,
+                   const std::string &b_mat, const std::string &acc,
+                   const std::string &clear_accum,
+                   const std::string &unit_flag_ctrl, int64_t hf32_mode);
+  void
+  EmitBlockscaledGemmRun(const PTOGemmEmitContext &ctx,
+                         const std::string &a_mat, const std::string &b_mat,
+                         const std::string &sfa_mat, const std::string &sfb_mat,
+                         const std::string &acc, const std::string &clear_accum,
+                         const std::string &sf_k_offset,
+                         const std::string &unit_flag_ctrl);
   std::string LocalVarID(const VarNode *var);
   bool IsLocalVarBuffer(const VarNode *var) const;
   void EmitMixedEntrySnapshot(const VarNode *var);
@@ -225,8 +220,7 @@ private:
   // of each outer local.var captured by any section and restore it at every
   // section boundary so definitions cannot leak between sibling regions.
   std::unordered_set<const VarNode *> mixed_captured_local_vars_;
-  std::unordered_map<const SBlockNode *,
-                     std::unordered_set<const VarNode *>>
+  std::unordered_map<const SBlockNode *, std::unordered_set<const VarNode *>>
       mixed_external_vars_by_section_;
   std::unordered_map<const VarNode *, std::string> mixed_entry_snapshot_ids_;
   // Pair-producing simd ops (vintlv/vdintlv/vld2) bind a tuple value; each
