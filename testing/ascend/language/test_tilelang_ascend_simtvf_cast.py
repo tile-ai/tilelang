@@ -15,7 +15,7 @@ FP8_E5M2 = "float8_e5m2"
 FP8_TORCH_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
 
 
-@tilelang.jit(out_idx=[1])
+@tilelang.jit(target="ascend", out_idx=[1])
 def cast_kernel(n: int, in_dtype: T.dtype, out_dtype: T.dtype):
     @T.prim_func
     def main(
@@ -63,24 +63,6 @@ def make_input(n: int, torch_dtype: torch.dtype, value_kind: str) -> torch.Tenso
     return x.to(torch_dtype)
 
 
-def compare_result(name: str, x: torch.Tensor, y: torch.Tensor, ref: torch.Tensor) -> bool:
-    if y.dtype in FP8_TORCH_DTYPES:
-        y = y.view(torch.uint8)
-        ref = ref.view(torch.uint8)
-
-    ok = torch.equal(y, ref)
-    if not ok:
-        y_cpu = y.cpu()
-        ref_cpu = ref.cpu()
-        mismatch = torch.nonzero(y_cpu != ref_cpu).flatten()
-        first = int(mismatch[0].item()) if mismatch.numel() else -1
-        print(f"{name}: first mismatch index: {first}")
-        print(f"input: {x[first : first + 8].cpu()}")
-        print(f"tilelang: {y_cpu[first : first + 8]}")
-        print(f"torch: {ref_cpu[first : first + 8]}")
-    return ok
-
-
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 @pytest.mark.parametrize("elems_per_thread", COUNTS)
 def test_simtvf_cast(case, elems_per_thread):
@@ -93,8 +75,40 @@ def test_simtvf_cast(case, elems_per_thread):
     torch.npu.synchronize()
 
     ref = x.to(out_torch_dtype)
-    assert compare_result(name, x, y, ref), f"{name}, elems_per_thread={elems_per_thread}: FAIL"
+    if y.dtype in FP8_TORCH_DTYPES:
+        y, ref = y.view(torch.uint8), ref.view(torch.uint8)
+    torch.testing.assert_close(y, ref, rtol=0, atol=0)
 
 
-if __name__ == "__main__":
-    tilelang.testing.main()
+def _broadcast_cast_arithmetic():
+    @T.prim_func
+    def main(
+        x: T.Tensor((64,), "float32"),
+        y: T.Tensor((128,), "bfloat16"),
+    ):
+        with T.Kernel(1):
+            x_ub = T.alloc_shared((64,), "float32")
+            y_ub = T.alloc_shared((128,), "bfloat16")
+            T.copy(x, x_ub)
+            with T.SimtVF(threads=64):
+                tx = T.get_thread_binding()
+                for i in T.vectorized(2):
+                    y_ub[tx * 2 + i] = T.cast(x_ub[tx] * x_ub[tx] + 1.0, "bfloat16")
+            T.copy(y_ub, y)
+
+    return main
+
+
+def test_broadcast_cast_arbitrary_expression_uses_vector_cast():
+    kernel = tilelang.compile(_broadcast_cast_arithmetic(), target="ascend")
+    source = kernel.get_kernel_source()
+    assert "make_float2" in source
+    assert "__float22bfloat162_rn" in source
+
+    x = torch.linspace(-2, 2, 64, dtype=torch.float32, device="npu")
+    y = torch.empty(128, dtype=torch.bfloat16, device="npu")
+    kernel(x, y)
+    torch.npu.synchronize()
+
+    expected = (x.cpu() * x.cpu() + 1).to(torch.bfloat16).repeat_interleave(2)
+    torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0)

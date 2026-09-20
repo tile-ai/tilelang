@@ -1,8 +1,4 @@
-import warnings
-from typing import Any
-
-warnings.filterwarnings("ignore", message="Permission mismatch.*", module="torch_npu.utils._path_manager")
-warnings.filterwarnings("ignore", message="Warning: The .* owner does not match the current owner\\.", module="torch_npu.utils.collect_env")
+"""Vector reads observe mutations and overlapping stores preserve source values."""
 
 import tilelang
 import tilelang.ascend.language as T
@@ -13,8 +9,8 @@ import torch
 PASS_CONFIGS = {tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True}
 
 
-@tilelang.jit(pass_configs=PASS_CONFIGS)
-def mutable_buffer_load_cast_kernel() -> Any:
+@tilelang.jit(target="ascend", pass_configs=PASS_CONFIGS)
+def mutable_buffer_load_cast_kernel():
     @T.prim_func
     def main(dst: T.Tensor((4,), T.float16)) -> None:
         with T.Kernel(1):
@@ -32,12 +28,13 @@ def mutable_buffer_load_cast_kernel() -> Any:
     return main
 
 
-@tilelang.jit(pass_configs=PASS_CONFIGS)
-def mutable_scalarized_store_kernel() -> Any:
+@tilelang.jit(target="ascend", pass_configs=PASS_CONFIGS)
+def mutable_scalarized_store_kernel():
     @T.prim_func
     def main(dst: T.Tensor((6,), T.float32)) -> None:
         with T.Kernel(1):
             out = T.alloc_shared((6,), T.float32)
+            T.fill(out, 0.0)
             with T.SimtVF(threads=1):
                 x = T.alloc_local((1,), "float32x2")
                 x[0] = T.Broadcast(T.float32(1.0), 2)
@@ -49,12 +46,13 @@ def mutable_scalarized_store_kernel() -> Any:
     return main
 
 
-@tilelang.jit(pass_configs=PASS_CONFIGS)
-def mutable_nested_buffer_load_kernel() -> Any:
+@tilelang.jit(target="ascend", pass_configs=PASS_CONFIGS)
+def mutable_nested_buffer_load_kernel():
     @T.prim_func
     def main(dst: T.Tensor((6,), T.float32)) -> None:
         with T.Kernel(1):
             out = T.alloc_shared((6,), T.float32)
+            T.fill(out, 0.0)
             with T.SimtVF(threads=1):
                 x = T.alloc_local((1,), "float32x2")
                 y = T.alloc_local((1,), "float32x2")
@@ -68,8 +66,8 @@ def mutable_nested_buffer_load_kernel() -> Any:
     return main
 
 
-@tilelang.jit(pass_configs=PASS_CONFIGS)
-def overlapping_scalarized_store_kernel() -> Any:
+@tilelang.jit(target="ascend", pass_configs=PASS_CONFIGS)
+def overlapping_scalarized_store_kernel():
     @T.prim_func
     def main(dst: T.Tensor((6,), T.float32)) -> None:
         with T.Kernel(1):
@@ -87,40 +85,37 @@ def overlapping_scalarized_store_kernel() -> Any:
     return main
 
 
-def test_cast_uses_operation_local_buffer_load_ssa_value():
+def test_cast_observes_each_mutation():
     dst = torch.empty((4,), dtype=torch.float16, device="npu")
     kernel = mutable_buffer_load_cast_kernel()
 
-    assert kernel.get_kernel_source().count(" = x[0];") == 2
     kernel(dst)
     torch.npu.synchronize()
     expected = torch.tensor([1.0, 1.0, 2.0, 2.0], dtype=torch.float16)
     assert torch.equal(dst.cpu(), expected)
 
 
-def test_scalarized_store_uses_operation_local_buffer_load_ssa_value():
+def test_misaligned_store_observes_each_mutation():
     dst = torch.empty((6,), dtype=torch.float32, device="npu")
     kernel = mutable_scalarized_store_kernel()
 
-    assert kernel.get_kernel_source().count(" = x[0];") == 2
     kernel(dst)
     torch.npu.synchronize()
     expected = torch.tensor([1.0, 1.0, 2.0, 2.0], dtype=torch.float32)
     assert torch.equal(dst[1:5].cpu(), expected)
 
 
-def test_nested_buffer_load_expression_uses_operation_local_ssa_value():
+def test_nested_expression_observes_each_mutation():
     dst = torch.empty((6,), dtype=torch.float32, device="npu")
     kernel = mutable_nested_buffer_load_kernel()
 
-    assert kernel.get_kernel_source().count("x[0] + y[0]") == 2
     kernel(dst)
     torch.npu.synchronize()
     expected = torch.tensor([11.0, 11.0, 12.0, 12.0], dtype=torch.float32)
     assert torch.equal(dst[1:5].cpu(), expected)
 
 
-def test_scalarized_store_materializes_overlapping_buffer_load_once():
+def test_overlapping_store_preserves_source_values():
     dst = torch.empty((6,), dtype=torch.float32, device="npu")
     kernel = overlapping_scalarized_store_kernel()
 

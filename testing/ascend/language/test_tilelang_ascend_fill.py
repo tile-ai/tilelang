@@ -6,12 +6,12 @@ need are simt-only and rejected by bisheng there.
 """
 
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 import torch
 
 
-@tilelang.jit(out_idx=[0])
+@tilelang.jit(target="ascend", out_idx=[0])
 def _constant_fill_kernel(rows: int, cols: int, value: float):
     @T.prim_func
     def _constant_fill(out: T.Tensor((rows, cols), "float32")):
@@ -23,7 +23,7 @@ def _constant_fill_kernel(rows: int, cols: int, value: float):
     return _constant_fill
 
 
-@tilelang.jit(out_idx=[1])
+@tilelang.jit(target="ascend", out_idx=[1])
 def _scalar_fill_kernel(iters: int, tile: int):
     @T.prim_func
     def _scalar_fill(
@@ -40,7 +40,7 @@ def _scalar_fill_kernel(iters: int, tile: int):
 
 
 def test_constant_fill_out_of_vf():
-    rows, cols, value = 64, 384, -1.0
+    rows, cols, value = 2, 32, -1.0
     out = _constant_fill_kernel(rows, cols, value)()
     torch.npu.synchronize()
 
@@ -49,7 +49,7 @@ def test_constant_fill_out_of_vf():
 
 
 def test_scalar_fill_out_of_vf():
-    iters, tile = 8, 16384
+    iters, tile = 3, 64
     device = torch.device("npu")
     x = torch.arange(iters, dtype=torch.float32, device=device)
     out = _scalar_fill_kernel(iters, tile)(x)

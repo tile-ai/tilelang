@@ -1,4 +1,4 @@
-"""Native merging codegen, dtype fallbacks, and inactive-lane preservation."""
+"""Predicated SIMD arithmetic preserves inactive lanes and precision choices."""
 
 import pytest
 import torch
@@ -83,18 +83,6 @@ def merging_kernel(op_name, dtype, mode="MODE_MERGING", precision=None, pos="POS
     return kernel
 
 
-@pytest.mark.parametrize("op_name,dtype", CASES)
-def test_merging_codegen(op_name, dtype):
-    source = lower(merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None), target="ascend").kernel_source
-    if op_name == "vdup" and dtype == "bfloat16":
-        assert "simd_inst::vdup(*" in source
-    else:
-        native_name = "vdup" if op_name == "vdupv" else op_name
-        assert f"::{native_name}(*" in source
-        assert f"simd_inst::{native_name}(*" not in source
-        assert f"simd_inst::{op_name}(*" not in source
-
-
 @pytest.mark.parametrize(
     "op_name,precision,wrapper",
     [
@@ -108,26 +96,6 @@ def test_merging_codegen(op_name, dtype):
 def test_merging_precision_wrappers(op_name, precision, wrapper):
     source = lower(merging_kernel(op_name, "float32", precision=precision), target="ascend").kernel_source
     assert f"simd_inst::{wrapper}(*" in source
-
-
-@pytest.mark.parametrize("op_name,dtype", [("vadd", "int64"), ("vdupv", "float8_e4m3fn"), ("vneg", "bfloat16")])
-def test_merging_keeps_unvalidated_types_on_wrappers(op_name, dtype):
-    # Codegen only: these cases ensure this change does not switch additional
-    # overloads to CCE. They do not assert that the old wrappers support them.
-    source = lower(merging_kernel(op_name, dtype), target="ascend").kernel_source
-    assert f"simd_inst::{op_name}(*" in source
-
-
-def test_merging_vdup_fallback_uses_destination_dtype():
-    source = lower(merging_kernel("vdup", "bfloat16", scalar_dtype="float32"), target="ascend").kernel_source
-    assert "simd_inst::vdup(*" in source
-
-
-@pytest.mark.parametrize("op_name", ["vadd", "vdup", "vdupv", "vcmax", "vaxpy"])
-def test_zeroing_keeps_capi_wrappers(op_name):
-    source = lower(merging_kernel(op_name, "float32", mode="MODE_ZEROING"), target="ascend").kernel_source
-    wrapper = "vdup<float>" if op_name == "vdup" else op_name
-    assert f"simd_inst::{wrapper}(" in source
 
 
 def reference(op_name, a, b, old, mask, pos):

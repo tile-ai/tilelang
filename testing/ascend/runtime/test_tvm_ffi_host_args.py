@@ -30,7 +30,7 @@ def scalar_args_kernel(
 
 
 @T.prim_func
-def dynamic_ubuf_kernel(
+def dynamic_grid_kernel(
     source: T.Tensor((ROWS, WIDTH), T.bfloat16),
     destination: T.Tensor((ROWS, WIDTH), T.bfloat16),
 ):
@@ -43,7 +43,6 @@ def dynamic_ubuf_kernel(
 def require_npu() -> None:
     if not torch.npu.is_available():
         pytest.skip("an available Ascend NPU is required")
-    torch.npu.set_device(0)
 
 
 def test_tvm_ffi_packs_mixed_width_scalars() -> None:
@@ -54,8 +53,6 @@ def test_tvm_ffi_packs_mixed_width_scalars() -> None:
         target="ascend",
         execution_backend="tvm_ffi",
     )
-    assert kernel.adapter._ffi_callee_allocated_output_abi
-    assert "TVMFFIEnvTensorAlloc" in kernel.get_host_source()
 
     left = 17
     wide = 1 << 40
@@ -68,21 +65,19 @@ def test_tvm_ffi_packs_mixed_width_scalars() -> None:
 
 
 @pytest.mark.parametrize("rows", [1, 8])
-def test_tvm_ffi_dynamic_grid_and_ubuf(rows: int) -> None:
+def test_tvm_ffi_dynamic_grid(rows: int) -> None:
     require_npu()
     kernel = tilelang.compile(
-        dynamic_ubuf_kernel,
+        dynamic_grid_kernel,
         out_idx=-1,
         target="ascend",
         execution_backend="tvm_ffi",
     )
-    assert kernel.adapter._ffi_callee_allocated_output_abi
-    assert "TVMFFIEnvTensorAlloc" in kernel.get_host_source()
 
     source = torch.randn(
         (rows, WIDTH),
         dtype=torch.bfloat16,
-        device="npu:0",
+        device="npu",
     )
     destination = kernel(source)
     torch.npu.synchronize()

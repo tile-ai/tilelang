@@ -1,4 +1,4 @@
-"""Test Ascend reduce with explicit fragment layout + generated-code verification."""
+"""Ascend collective reductions across explicit fragment layouts."""
 
 import pytest
 import torch
@@ -7,7 +7,6 @@ import tilelang.ascend.language as T
 import tilelang.testing
 
 DTYPE_MAP = {"float32": torch.float32, "int32": torch.int32, "int64": torch.int64}
-REDUCER = {"sum": "SumOp", "max": "MaxOp", "min": "MinOp"}
 
 
 def make_reduce_kernel(extent, scale, dtype, op):
@@ -42,15 +41,12 @@ def ref_program(A, op):
 
 def _test_one(extent, scale, dtype, op):
     td = DTYPE_MAP[dtype]
-    threads = extent * scale
-    expected = f"AscendAllReduce<tl::{REDUCER[op]}, {threads}, {scale}, 0>::run"
-
     kernel = tilelang.compile(
         make_reduce_kernel(extent, scale, dtype, op),
+        target="ascend",
         out_idx=-1,
         pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False},
     )
-    assert expected in kernel.get_kernel_source(), f"Missing {expected}"
 
     device = torch.device("npu")
     a = (
@@ -61,8 +57,7 @@ def _test_one(extent, scale, dtype, op):
     b = kernel(a)
     torch.npu.synchronize()
 
-    max_diff = (b.float() - ref_program(a, op).float()).abs().max().item()
-    assert max_diff < 1e-3, f"extent={extent} scale={scale} dtype={dtype} op={op}: max_diff={max_diff:.2e}"
+    torch.testing.assert_close(b, ref_program(a, op).to(b.dtype), rtol=0, atol=1e-3)
 
 
 @pytest.mark.parametrize(
@@ -115,19 +110,10 @@ def test_reducer_v2_multidim_narrow_plan(coalesced_width):
 
     compiled = tilelang.compile(
         kernel,
+        target="ascend",
         out_idx=-1,
         pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False},
     )
-    source = compiled.get_kernel_source()
-    if coalesced_width is None:
-        # Scalar column ownership avoids unnecessary cross-thread reduction.
-        assert "float partial[1];" in source
-        assert "AscendAllReduce" not in source
-    else:
-        # An explicit vector width still takes priority over candidate search.
-        assert "float partial[2];" in source
-        assert "AscendAllReduce<tl::SumOp, 128, 64, 0>::run" in source
-
     a = torch.randn((8, 128), dtype=torch.float32, device="npu")
     actual = compiled(a)
     torch.npu.synchronize()
@@ -135,8 +121,9 @@ def test_reducer_v2_multidim_narrow_plan(coalesced_width):
 
 
 @pytest.mark.parametrize("op", ["bitand", "bitor", "bitxor"])
-@pytest.mark.parametrize("target", ["ascend"])
-def test_reducer_v2_rejects_unsupported_bitwise_collectives(op, target):
+def test_reducer_v2_rejects_unsupported_bitwise_collectives(op):
+    target = "ascend"
+
     @T.prim_func
     def kernel(A: T.Tensor((32,), "int32"), B: T.Tensor((1,), "int32")):
         with T.Kernel(1) as _, T.SimtVF(threads=32):

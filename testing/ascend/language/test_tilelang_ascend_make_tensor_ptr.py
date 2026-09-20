@@ -1,110 +1,39 @@
-"""Tests for T.make_tensor pointer-table reconstruction on Ascend."""
+"""GM pointer tables reconstruct DMA buffers, including conditional accesses."""
 
+import pytest
 import torch
 import tilelang
-import tilelang.ascend.language as T
-import tilelang.testing
+from tilelang.ascend import language as T
 
 
-def make_tensor_copy(n):
-    """Copy src addressed through a pointer table to out, staging through UB."""
-
-    @T.prim_func
-    def main(
-        src_ptrs: T.Tensor((1,), T.ptr),
-        out: T.Tensor((n,), "float32"),
-    ):
-        with T.Kernel(1) as _:
-            src = T.make_tensor(src_ptrs[0], (n,), "float32")
-            buf = T.alloc_shared(n, "float32")
-            T.copy(src[0], buf)
-            T.copy(buf, out)
-
-    return main
-
-
-def make_tensor_copy_both(n):
-    """Both src and out are addressed through pointer tables."""
+def _copy_from_pointer_table(output_table, guarded):
+    out_shape = (1,) if output_table else (64,)
+    out_dtype = T.ptr if output_table else "float32"
 
     @T.prim_func
-    def main(
-        src_ptrs: T.Tensor((1,), T.ptr),
-        out_ptrs: T.Tensor((1,), T.ptr),
-    ):
-        with T.Kernel(1) as _:
-            src = T.make_tensor(src_ptrs[0], (n,), "float32")
-            out = T.make_tensor(out_ptrs[0], (n,), "float32")
-            buf = T.alloc_shared(n, "float32")
-            T.copy(src[0], buf)
-            T.copy(buf, out[0])
+    def copy(src_ptrs: T.Tensor((1,), T.ptr), out: T.Tensor(out_shape, out_dtype), enabled: T.int32):
+        with T.Kernel(1):
+            ub = T.alloc_shared((64,), "float32")
+            if not guarded or enabled > 0:
+                src = T.make_tensor(src_ptrs[0], (64,), "float32")
+                T.copy(src, ub)
+                if output_table:
+                    dst = T.make_tensor(out[0], (64,), "float32")
+                    T.copy(ub, dst)
+                else:
+                    T.copy(ub, out)
 
-    return main
-
-
-def make_tensor_copy_guarded(n):
-    """T.make_tensor under a runtime if guard."""
-
-    @T.prim_func
-    def main(
-        src_ptrs: T.Tensor((1,), T.ptr),
-        out: T.Tensor((n,), "float32"),
-        sel: T.int32,
-    ):
-        with T.Kernel(1) as _:
-            buf = T.alloc_shared(n, "float32")
-            if sel > 0:
-                src = T.make_tensor(src_ptrs[0], (n,), "float32")
-                T.copy(src[0], buf)
-                T.copy(buf, out)
-
-    return main
+    return copy
 
 
-def make_ptr_table(tensors):
-    device = tensors[0].device
-    return torch.tensor([t.data_ptr() for t in tensors], device=device, dtype=torch.int64)
-
-
-def test_make_tensor_ptr():
-    n = 64
-    kernel = tilelang.compile(make_tensor_copy(n), target="ascend")
-    device = torch.device("npu")
-    src = torch.randn(n, dtype=torch.float32, device=device)
-    out = torch.empty(n, dtype=torch.float32, device=device)
-    src_ptrs = make_ptr_table([src])
-    kernel(src_ptrs, out)
-    torch.npu.synchronize()
-    assert torch.equal(out, src)
-
-
-def test_make_tensor_ptr_both():
-    n = 64
-    kernel = tilelang.compile(make_tensor_copy_both(n), target="ascend")
-    device = torch.device("npu")
-    src = torch.randn(n, dtype=torch.float32, device=device)
-    out = torch.empty(n, dtype=torch.float32, device=device)
-    kernel(make_ptr_table([src]), make_ptr_table([out]))
-    torch.npu.synchronize()
-    assert torch.equal(out, src)
-
-
-def test_make_tensor_ptr_guarded():
-    n = 64
-    kernel = tilelang.compile(make_tensor_copy_guarded(n), target="ascend")
-    device = torch.device("npu")
-    src = torch.randn(n, dtype=torch.float32, device=device)
-    src_ptrs = make_ptr_table([src])
-
-    out = torch.zeros(n, dtype=torch.float32, device=device)
-    kernel(src_ptrs, out, 1)
-    torch.npu.synchronize()
-    assert torch.equal(out, src)
-
-    out = torch.zeros(n, dtype=torch.float32, device=device)
-    kernel(src_ptrs, out, 0)
-    torch.npu.synchronize()
-    assert torch.equal(out, torch.zeros(n, dtype=torch.float32, device=device))
-
-
-if __name__ == "__main__":
-    tilelang.testing.main()
+@pytest.mark.parametrize("output_table,guarded", [(False, False), (True, False), (False, True)], ids=["source", "both", "guarded-source"])
+def test_dma_from_pointer_tables(output_table, guarded):
+    kernel = tilelang.compile(_copy_from_pointer_table(output_table, guarded), target="ascend")
+    src = torch.arange(64, dtype=torch.float32, device="npu")
+    out = torch.empty_like(src)
+    src_ptrs = torch.tensor([src.data_ptr()], device=src.device, dtype=torch.int64)
+    destination = torch.tensor([out.data_ptr()], device=out.device, dtype=torch.int64) if output_table else out
+    for enabled in (0, 1) if guarded else (1,):
+        out.fill_(-1)
+        kernel(src_ptrs, destination, enabled)
+        torch.testing.assert_close(out, src if enabled else torch.full_like(out, -1), rtol=0, atol=0)

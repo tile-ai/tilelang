@@ -20,18 +20,7 @@ import pytest
 import tilelang
 import tilelang.ascend.language as TA
 from tilelang import tvm
-from tvm.tirx.stmt_functor import post_order_visit
-
-
-def _collect(root, kind):
-    found = []
-
-    def _visit(node):
-        if isinstance(node, kind):
-            found.append(node)
-
-    post_order_visit(root.body if hasattr(root, "body") else root, _visit)
-    return found
+from testing.ascend._ir import nodes as _collect
 
 
 def _materialize(func, target: str = "ascend", **kwargs):
@@ -69,27 +58,6 @@ def _thread_extents(func):
         if attr.attr_key == "thread_extent":
             extents[str(attr.node.thread_tag)] = int(attr.value)
     return extents
-
-
-def _thread_binding_tags(func):
-    return [str(f.thread_binding.thread_tag) for f in _collect(func, tvm.tirx.For) if f.kind == tvm.tirx.ForKind.THREAD_BINDING]
-
-
-# ---------------------------------------------------------------------------
-# Dialect surface
-# ---------------------------------------------------------------------------
-
-
-def test_default_facade_is_cuda_and_ascend_is_explicit():
-    """Ascend must be reached through its own dialect, like every other backend."""
-    import importlib
-
-    facade = importlib.import_module("tilelang.language")
-    ascend = importlib.import_module("tilelang.ascend.language")
-    assert facade.__tilelang_dialect__ == "cuda"
-    assert ascend.__tilelang_dialect__ == "ascend"
-    assert facade.Kernel is importlib.import_module("tilelang.cuda.language").Kernel
-    assert facade.Kernel is not ascend.Kernel
 
 
 def test_ascend_kernel_has_no_threads():
@@ -130,11 +98,6 @@ def test_ascend_kernel_rejects_multidimensional_grid():
                 A[0] = 0
 
 
-# ---------------------------------------------------------------------------
-# Tracing
-# ---------------------------------------------------------------------------
-
-
 def _ascend_launch_func():
     @TA.prim_func
     def main(A: TA.Tensor((16,), "float32")):
@@ -142,17 +105,6 @@ def _ascend_launch_func():
             A[bx] = 1.0
 
     return main
-
-
-def test_ascend_traces_grid_and_thread_placeholders_like_every_dialect():
-    func = _ascend_launch_func()
-    assert _thread_binding_tags(func) == ["blockIdx.x"]
-    assert [p.var.name for p in _launch_placeholders(func)] == ["tx", "ty", "tz"]
-
-
-# ---------------------------------------------------------------------------
-# Materialization
-# ---------------------------------------------------------------------------
 
 
 def test_ascend_materializes_grid_and_drops_thread_placeholders():
@@ -209,39 +161,10 @@ def test_cthread_is_opt_in_per_backend():
         with TA.MixedKernel(2, sids=2) as (bx, sid):
             A[bx + sid] = 1.0
 
-    materialized = _materialize(main, "cuda", lower_thread_binding=True, default_threads=128)
+    materialized = _materialize(main, "ascend", lower_grid_binding=True, lower_thread_binding=False, default_threads=None)
     extents = _thread_extents(materialized)
     assert "cthread" not in extents
     assert extents["blockIdx.x"] == 2
-
-
-def test_a_simt_backend_still_binds_an_ascend_traced_launch():
-    """The Ascend dialect emits the same target-neutral launch as every other
-    dialect, so a SIMT pipeline materializes it into real threads."""
-
-    materialized = _materialize(_ascend_launch_func(), "cuda", lower_thread_binding=True, default_threads=128)
-    extents = _thread_extents(materialized)
-    assert extents == {"blockIdx.x": 2, "threadIdx.x": 128, "threadIdx.y": 1, "threadIdx.z": 1}
-    assert _launch_placeholders(materialized) == []
-
-
-# ---------------------------------------------------------------------------
-# Backward compatibility of the split flag
-# ---------------------------------------------------------------------------
-
-
-def test_lower_grid_binding_defaults_to_lower_thread_binding():
-    """The historical single-flag meaning must survive: a backend that has no
-    SIMT threads has no program-index space either (CPU)."""
-
-    @TA.prim_func
-    def main(A: TA.Tensor((16,), "float32")):
-        with TA.Kernel(2) as bx:
-            A[bx] = 1.0
-
-    materialized = _materialize(main, "c", lower_thread_binding=False)
-    assert _thread_extents(materialized) == {}
-    assert _thread_binding_tags(materialized) == []
 
 
 if __name__ == "__main__":

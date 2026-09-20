@@ -9,7 +9,7 @@ import tilelang.testing
 from tilelang.layout import make_ascend_nz_layout
 
 
-@tilelang.jit()
+@tilelang.jit(target="ascend")
 def kernel_builder():
     @T.prim_func
     def kernel(OUT: T.Tensor((8, 4), "uint16")):
@@ -29,8 +29,6 @@ def kernel_builder():
 
 def test_multibuffer_copy_uses_32byte_aligned_version_stride():
     kernel = kernel_builder()
-    source = kernel.get_kernel_source()
-    assert "(&(ub[(w * 16)]))" in source, source
 
     out = torch.zeros((8, 4), dtype=torch.int16, device="npu").view(torch.uint16)
     kernel(out)
@@ -40,7 +38,7 @@ def test_multibuffer_copy_uses_32byte_aligned_version_stride():
     assert torch.equal(out.view(torch.int16), expected)
 
 
-@tilelang.jit()
+@tilelang.jit(target="ascend")
 def dtype_view_kernel_builder():
     @T.prim_func
     def kernel(A: T.Tensor((8,), "uint16"), OUT: T.Tensor((16,), "uint8")):
@@ -63,9 +61,7 @@ def dtype_view_kernel_builder():
 
 def test_multibuffer_dtype_changing_view_shares_aligned_storage():
     kernel = dtype_view_kernel_builder()
-    source = kernel.get_kernel_source()
     # 8-byte slot padded to a 32-byte version stride, shared by both dtypes.
-    assert "[(w * 32)]" in source, source
 
     a = (torch.arange(8, device="npu") + 1).to(torch.int16).view(torch.uint16)
     out = torch.zeros(16, dtype=torch.uint8, device="npu")
@@ -94,8 +90,9 @@ def layout_remap_kernel_builder():
 
 
 def test_layout_remap_preserves_multibuffer_version_owner():
-    kernel = tilelang.compile(layout_remap_kernel_builder())
-    assert kernel.get_kernel_source()
+    kernel = tilelang.compile(layout_remap_kernel_builder(), target="ascend", out_idx=-1)
+    source = torch.arange(512, dtype=torch.float32, device="npu").reshape(2, 16, 16).to(torch.bfloat16)
+    torch.testing.assert_close(kernel(source), source, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

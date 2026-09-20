@@ -5,6 +5,14 @@ import tilelang.ascend.language as T
 import tilelang.testing
 
 
+def _source(program):
+    with (
+        tilelang.tvm.target.Target("ascend"),
+        tilelang.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False}),
+    ):
+        return tilelang.lower(program, target="ascend").kernel_source
+
+
 def test_prim_expr_with_msg():
     """T.print(expr, msg=...) → debug_print_var via template."""
 
@@ -13,11 +21,9 @@ def test_prim_expr_with_msg():
         with T.Kernel(32) as bx:
             T.print(bx + 42, msg="block_val")
 
-    kernel = tilelang.compile(program, target="ascend", pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False})
-    source = kernel.get_kernel_source()
+    source = _source(program)
     assert "debug_print_var" in source
     assert "block_val" in source
-    print("PASS: test_prim_expr_with_msg")
 
 
 def test_shared_print():
@@ -32,12 +38,10 @@ def test_shared_print():
                     shared_buf[i, j] = bx
             T.print(shared_buf)
 
-    kernel = tilelang.compile(program, target="ascend", pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False})
-    source = kernel.get_kernel_source()
+    source = _source(program)
     assert "debug_print_buffer_value" in source
     assert "AscendC::DumpTensor" not in source
     assert "AscendC::printf" not in source
-    print("PASS: test_shared_print")
 
 
 def test_global_print():
@@ -52,12 +56,10 @@ def test_global_print():
             if bx == 0:
                 T.print(Q)
 
-    kernel = tilelang.compile(program, target="ascend", pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False})
-    source = kernel.get_kernel_source()
+    source = _source(program)
     assert "debug_print_buffer_value" in source
     assert "AscendC::DumpTensor" not in source
     assert "AscendC::printf" not in source
-    print("PASS: test_global_print")
 
 
 def test_simtvf_inside():
@@ -73,10 +75,8 @@ def test_simtvf_inside():
                 tid = T.get_thread_binding()
                 T.print(tid, msg="tid")
 
-    kernel = tilelang.compile(program, target="ascend", pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False})
-    source = kernel.get_kernel_source()
+    source = _source(program)
     assert "debug_print_var" in source
-    print("PASS: test_simtvf_inside")
 
 
 def test_float_var():
@@ -88,10 +88,8 @@ def test_float_var():
             val = bx * 3.14
             T.print(val, msg="float_val")
 
-    kernel = tilelang.compile(program, target="ascend", pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False})
-    source = kernel.get_kernel_source()
+    source = _source(program)
     assert "debug_print_var" in source
-    print("PASS: test_float_var")
 
 
 if __name__ == "__main__":

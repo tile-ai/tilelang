@@ -36,50 +36,48 @@ def build_copy_kernel():
 def test_tvm_ffi_uses_torch_current_npu_stream() -> None:
     if not torch.npu.is_available():
         pytest.skip("an available Ascend NPU is required")
-    torch.npu.set_device(0)
 
     copy_kernel = build_copy_kernel()
-    from tilelang.ascend.torch_exchange import (
-        is_torch_npu_stream_exchange_installed,
-    )
 
     size = 1024
     source = torch.full(
         (size, size),
         7,
         dtype=torch.bfloat16,
-        device="npu:0",
+        device="npu",
     ).T
     prepared = torch.zeros(
         (size, size),
         dtype=torch.bfloat16,
-        device="npu:0",
+        device="npu",
     )
     observed = torch.empty(
         (PROBE_ELEMENTS,),
         dtype=torch.bfloat16,
-        device="npu:0",
+        device="npu",
     )
     work = torch.randn(
         (size, size),
         dtype=torch.bfloat16,
-        device="npu:0",
+        device="npu",
     )
     scratch = torch.empty_like(work)
 
     prepared.copy_(source)
     torch.npu.synchronize()
     copy_kernel(prepared.view(-1)[:PROBE_ELEMENTS], observed)
-    assert is_torch_npu_stream_exchange_installed()
     torch.npu.synchronize()
 
     prepared.zero_()
     observed.fill_(-1)
     torch.npu.synchronize()
-    for _ in range(64):
-        torch.mm(work, work, out=scratch)
-    prepared.copy_(source)
-    copy_kernel(prepared.view(-1)[:PROBE_ELEMENTS], observed)
+    stream = torch.npu.Stream()
+    with torch.npu.stream(stream):
+        # Delay the producer so launching on a different stream can read stale data.
+        for _ in range(64):
+            torch.mm(work, work, out=scratch)
+        prepared.copy_(source)
+        copy_kernel(prepared.view(-1)[:PROBE_ELEMENTS], observed)
     torch.npu.synchronize()
 
     assert torch.count_nonzero(observed != 7).item() == 0

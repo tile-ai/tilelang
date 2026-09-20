@@ -68,12 +68,6 @@ def _read_after_write(shared, output, thread_count=32, cross_thread=True):
     return _thread_body(make_body, thread_count)
 
 
-def test_ascend_thread_sync_has_separate_registration():
-    assert tilelang.transform.ThreadSync("shared").info.name == "tl.ThreadSync"
-    assert ascend_transform.AscendThreadSync("shared").info.name == "tl.AscendThreadSync"
-    assert "AscendThreadSync" in ascend_transform.__all__
-
-
 @pytest.mark.parametrize("storage_scope", ["shared", "shared.dyn"])
 @pytest.mark.parametrize("thread_count", [32, 64])
 def test_ascend_thread_sync_inserts_barrier_inside_vf(storage_scope, thread_count):

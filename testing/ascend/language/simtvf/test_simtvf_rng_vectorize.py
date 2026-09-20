@@ -37,47 +37,13 @@ def _rng_fill(groups, dtype, distribution, seed=42, seq=7, off=12):
     return main
 
 
-def _broadcast_cast_arithmetic():
-    @T.prim_func
-    def main(
-        x: T.Tensor((64,), "float32"),
-        y: T.Tensor((128,), "bfloat16"),
-    ):
-        with T.Kernel(1):
-            x_ub = T.alloc_shared((64,), "float32")
-            y_ub = T.alloc_shared((128,), "bfloat16")
-            T.copy(x, x_ub)
-            with T.SimtVF(threads=64):
-                tx = T.get_thread_binding()
-                for i in T.vectorized(2):
-                    y_ub[tx * 2 + i] = T.cast(x_ub[tx] * x_ub[tx] + 1.0, "bfloat16")
-            T.copy(y_ub, y)
-
-    return main
-
-
-def test_broadcast_cast_arbitrary_expression_uses_vector_cast():
-    kernel = tilelang.compile(_broadcast_cast_arithmetic())
-    source = kernel.get_kernel_source()
-    assert "make_float2" in source
-    assert "__float22bfloat162_rn" in source
-
-    x = torch.linspace(-2, 2, 64, dtype=torch.float32, device="npu")
-    y = torch.empty(128, dtype=torch.bfloat16, device="npu")
-    kernel(x, y)
-    torch.npu.synchronize()
-
-    expected = (x.cpu() * x.cpu() + 1).to(torch.bfloat16).repeat_interleave(2)
-    torch.testing.assert_close(y.cpu(), expected, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("distribution", ["uniform", "normal"])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_parallel_rng_is_implicitly_fused_and_bitwise_equal_up_to_layout(dtype, distribution):
     groups = 16
     threads = 64
     n = groups * 2 * threads
-    kernel = tilelang.compile(_rng_fill(groups, dtype, distribution))
+    kernel = tilelang.compile(_rng_fill(groups, dtype, distribution), target="ascend")
     source = kernel.get_kernel_source()
 
     vector_name = f"philox_rand_{distribution}2"

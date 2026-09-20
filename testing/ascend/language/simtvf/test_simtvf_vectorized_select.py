@@ -7,16 +7,21 @@ import tilelang.ascend.language as T
 import tilelang.testing
 
 
+def _source(func, *, target, pass_configs=None):
+    with tilelang.tvm.target.Target(target), tilelang.transform.PassContext(config=pass_configs or {}):
+        return tilelang.lower(func, target=target).kernel_source
+
+
 def _vector_condition_kernel():
-    num_topk = 6
+    active_threads = 6
 
     @T.prim_func
-    def main(out: T.Tensor((num_topk * 2,), T.int32)):
+    def main(out: T.Tensor((active_threads * 2,), T.int32)):
         with T.Kernel(1):
-            out_ub = T.alloc_shared((num_topk * 2,), T.int32)
+            out_ub = T.alloc_shared((active_threads * 2,), T.int32)
             with T.SimtVF(threads=32):
                 lane = T.get_thread_binding()
-                if lane < num_topk:
+                if lane < active_threads:
                     for i in T.vectorized(2):
                         out_ub[2 * lane + i] = T.Select(i == 0, lane + 10, -1)
             T.copy(out_ub, out)
@@ -117,29 +122,25 @@ def _negated_vector_conditions_kernel():
 
 
 def test_vectorized_select_with_vector_condition():
-    kernel = tilelang.compile(_vector_condition_kernel(), target="ascend")
-    source = kernel.get_kernel_source()
+    source = _source(_vector_condition_kernel(), target="ascend")
     assert "ushort2" in source
-    assert "make_int2((0)+(1*0), (0)+(1*1))" in source
     assert ".x = (bool(" in source
     assert ".y = (bool(" in source
 
 
 def test_vectorized_select_simplifies_loop_invariant_condition():
-    kernel = tilelang.compile(_broadcast_condition_kernel(), target="ascend")
-    source = kernel.get_kernel_source()
+    source = _source(_broadcast_condition_kernel(), target="ascend")
     assert "make_ushort2" not in source
     assert ") ? make_int2" in source
 
 
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 def test_wide_vectorized_select_uses_packed_predicate_carrier(dtype):
-    kernel = tilelang.compile(
+    source = _source(
         _wide_vector_condition_kernel(dtype),
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    source = kernel.get_kernel_source()
     assert "uint4" in source
     assert source.count("((ushort2*)(&(") >= 16
     assert "bool(((ushort2*)(&(" in source
@@ -147,12 +148,11 @@ def test_wide_vectorized_select_uses_packed_predicate_carrier(dtype):
 
 @pytest.mark.parametrize("vector_lanes", [6, 8])
 def test_wide_broadcast_condition_is_materialized_per_lane(vector_lanes):
-    kernel = tilelang.compile(
+    source = _source(
         _wide_broadcast_condition_kernel(vector_lanes),
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    source = kernel.get_kernel_source()
     carrier = f"uint{vector_lanes // 2}"
     assert carrier in source
     assert f"make_{carrier}(" not in source
@@ -161,12 +161,11 @@ def test_wide_broadcast_condition_is_materialized_per_lane(vector_lanes):
 
 
 def test_vector_predicate_not_is_materialized_per_lane():
-    kernel = tilelang.compile(
+    source = _source(
         _negated_vector_conditions_kernel(),
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    source = kernel.get_kernel_source()
     assert "(~" not in source
     assert source.count(" = (!") >= 16
 

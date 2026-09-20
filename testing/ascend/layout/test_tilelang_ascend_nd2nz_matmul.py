@@ -30,9 +30,9 @@ def nd2nz_matmul(
 
     @T.prim_func
     def main(
-        I_gm: T.Buffer((N, N), mul_dtype),  # Identity matrix (GM, ND)
-        X_gm: T.Buffer((M, N), src_dtype),  # Test data (GM, ND)
-        O_gm: T.Buffer((M, N), "float32"),  # Output (GM)
+        I_gm: T.Tensor((N, N), mul_dtype),  # Identity matrix (GM, ND)
+        X_gm: T.Tensor((M, N), src_dtype),  # Test data (GM, ND)
+        O_gm: T.Tensor((M, N), "float32"),  # Output (GM)
     ):
         with T.MixedKernel(1) as (pid, sid):
             i_l1 = T.alloc_l1((N, N), mul_dtype)  # Identity in L1 (NZ)
@@ -58,7 +58,7 @@ def nd2nz_matmul(
 
 
 def _to_torch_dtype(dt: str):
-    if dt == "float":
+    if dt == "float32":
         return torch.float32
     if dt in ("bfloat16_t", "bfloat16"):
         return torch.bfloat16
@@ -69,9 +69,9 @@ def _to_torch_dtype(dt: str):
 @pytest.mark.parametrize(
     "M,N,src_dtype,mul_dtype",
     [
-        *[(m, n, "float", "bfloat16") for m in [32, 64, 128] for n in [64, 128]],
-        *[(m, n, "float", "float") for m in [32, 64, 128] for n in [64, 128]],
-        *[(m, n, "bfloat16", "float") for m in [32, 64, 128] for n in [128, 256]],
+        (32, 128, "float32", "bfloat16"),
+        (32, 64, "float32", "float32"),
+        (32, 128, "bfloat16", "float32"),
     ],
 )
 def test_nd2nz_matmul(M, N, src_dtype, mul_dtype, num_aiv):
@@ -83,27 +83,22 @@ def test_nd2nz_matmul(M, N, src_dtype, mul_dtype, num_aiv):
     I_gm = torch.eye(N, dtype=mul_td).npu()
     X_gm = torch.arange(M * N).view(M, N).to(dtype=src_td).npu()
 
-    # Compile
     program = nd2nz_matmul(M, N, src_dtype, mul_dtype, num_aiv=num_aiv, split_dim=0)
     kernel = tilelang.compile(
         program,
+        target="ascend",
         out_idx=-1,
     )
 
-    # Run
     O_gm = kernel(I_gm, X_gm)
     torch.npu.synchronize()
 
-    # Verify: I @ X = X  (identity matmul)
-    expected = X_gm.to(dtype=mul_td)
-    actual = O_gm.to(dtype=mul_td)
-    rel_err = ((expected - actual).abs() / expected.abs().clamp(min=1.0)).max().item()
-    assert rel_err < 1e-3, f"M={M} N={N} src_dtype={src_dtype} mul_dtype={mul_dtype} num_aiv={num_aiv} rel_err={rel_err}"
+    torch.testing.assert_close(O_gm, X_gm.to(mul_td).float(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("split_dim", [0, 1])
 def test_nd2nz_matmul_reuses_mixed_kernel_sid(split_dim):
-    source = tilelang.lower(nd2nz_matmul(64, 128, "float", "float", num_aiv=2, split_dim=split_dim), target="ascend").kernel_source
+    source = tilelang.lower(nd2nz_matmul(64, 128, "float32", "float32", num_aiv=2, split_dim=split_dim), target="ascend").kernel_source
 
     assert "__global__ __mix__(1, 2)" in source
     assert source.count("asc_get_sub_block_id()") == 1

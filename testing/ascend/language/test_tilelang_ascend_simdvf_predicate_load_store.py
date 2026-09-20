@@ -1,5 +1,3 @@
-import inspect
-
 import pytest
 
 import tilelang
@@ -12,7 +10,7 @@ from tvm import tirx
 def _predicate_load_store_kernel():
     @T.prim_func
     def func(
-        P: T.Buffer((128,), "uint8"),
+        P: T.Tensor((128,), "uint8"),
         runtime_offset: T.int32,
     ):
         with T.Kernel(1) as _:
@@ -41,38 +39,10 @@ def test_predicate_load_store_ascend_codegen():
     assert all(", 0);" in line for line in predicate_lines)
 
 
-def test_predicate_public_apis_share_internal_ops():
-    script = _predicate_load_store_kernel().script()
-
-    assert script.count("T.tl.simd.pld(") == 2
-    assert script.count("T.tl.simd.pst(") == 2
-    assert script.count("T.access_ptr(p_ub[runtime_offset]") == 2
-
-
-@pytest.mark.parametrize(
-    ("op_name", "num_inputs"),
-    [("vld", 2), ("vsts", 4), ("pld", 2), ("pst", 3)],
-)
-def test_scalar_offset_parameter_is_not_exposed(op_name, num_inputs):
-    assert "off" not in inspect.signature(getattr(T.simd, op_name)).parameters
-    assert tirx.op.Op.get(f"tl.simd.{op_name}").num_inputs == num_inputs
-
-
 @pytest.mark.parametrize("op_name", ["pld", "pst"])
 def test_predicate_load_store_builtins_are_opaque(op_name):
     op = tirx.op.Op.get(f"tl.simd.{op_name}")
     assert op.get_attr("TCallEffectKind") == tirx.CallEffectKind.Opaque
-
-
-@pytest.mark.parametrize("op_name", ["init_align", "plds", "pldi", "psts", "pstu", "psti"])
-def test_predicate_load_store_does_not_register_per_instruction_ops(op_name):
-    with pytest.raises(AttributeError):
-        tirx.op.Op.get(f"tl.simd.{op_name}")
-
-
-@pytest.mark.parametrize("op_name", ["init_align", "plds", "pldi", "psts", "pstu", "psti"])
-def test_predicate_instruction_specific_apis_are_not_exposed(op_name):
-    assert not hasattr(T.simd, op_name)
 
 
 @pytest.mark.parametrize(

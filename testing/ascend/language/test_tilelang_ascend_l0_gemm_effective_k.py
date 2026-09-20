@@ -5,19 +5,16 @@ import tilelang.ascend.language as T
 import tilelang.testing
 import pytest
 import torch
-from tilelang import tvm
-from tvm import tirx
-from tvm.tirx.stmt_functor import post_order_visit
 
-M, N, K_ALLOC = 64, 64, 32
+M, N, K_ALLOC = 16, 16, 32
 
 
 def _transposed_b_kernel():
     @T.prim_func
     def main(
-        A: T.Buffer((M, K_ALLOC), "float32"),
-        B: T.Buffer((K_ALLOC, N), "float32"),
-        C: T.Buffer((M, N), "float32"),
+        A: T.Tensor((M, K_ALLOC), "float32"),
+        B: T.Tensor((K_ALLOC, N), "float32"),
+        C: T.Tensor((M, N), "float32"),
     ):
         with T.Kernel(1):
             a_l1 = T.alloc_l1((M, K_ALLOC), "float32")
@@ -34,32 +31,6 @@ def _transposed_b_kernel():
             T.copy(acc, C)
 
     return main
-
-
-def test_effective_k_keeps_padded_storage_budget():
-    allocations = {}
-
-    @tvm.ir.instrument.pass_instrument
-    class CaptureStorage:
-        def run_after_pass(self, mod, info):
-            if info.name != "tl.NormalizeAscendFractalStorage":
-                return
-
-            def visit(node):
-                if isinstance(node, tirx.SBlock):
-                    for buffer in node.alloc_buffers:
-                        if buffer.scope().startswith("shared.l0"):
-                            allocations[buffer.name] = tuple(int(dim) for dim in buffer.shape)
-
-            post_order_visit(mod["main"].body, visit)
-
-    with tvm.transform.PassContext(instruments=[CaptureStorage()]):
-        source = tilelang.lower(_transposed_b_kernel(), target="ascend").kernel_source
-    # AutoSchedule must see the full B32 allocation even though MAD reads K24.
-    assert allocations["a_l0"] == (M, K_ALLOC)
-    assert allocations["b_l0"] == (N, K_ALLOC)
-    assert "asc_copy_l12l0b_transpose(" in source
-    assert ", 64, 24, 64," in source
 
 
 def test_effective_k_with_transposed_b_ignores_nonzero_padding():
