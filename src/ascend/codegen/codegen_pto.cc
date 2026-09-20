@@ -2624,6 +2624,12 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallNode *op) {
                         ? GetLocalPtrExpr(op->args[0], "ub", dst_dtype)
                         : RemoveOutermostParentheses(PrintExpr_(op->args[0]));
   std::string src = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
+  // Match the Ascend target's no-padding GM->UB behavior, which emits uint8_t
+  // pointers when no padding is requested
+  if (data_select == 0) {
+    src = "pto.castptr(" + src + ", pto.ptr(pto.ui8, \"gm\"))";
+    dst = "pto.castptr(" + dst + ", pto.ptr(pto.ui8, \"ub\"))";
+  }
   std::string burst_num = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
   std::string burst_len = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
   std::string src_stride = RemoveOutermostParentheses(PrintExpr_(op->args[9]));
