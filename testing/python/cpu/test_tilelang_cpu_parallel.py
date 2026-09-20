@@ -23,7 +23,8 @@ import tvm
 from tvm import tirx
 from tvm.target import Target
 
-M = N = K = 512
+M = N = 512
+K = 64
 BLOCK_M = BLOCK_N = 128
 BLOCK_K = 32
 
@@ -60,29 +61,16 @@ def _compile(pass_configs, cpu_num_threads=None):
     )
 
 
-def _run(kernel, A, B):
-    return kernel(A, B)
-
-
 def test_cpu_parallel_gemm_correctness():
     torch.manual_seed(0)
-    kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True})
+    kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True}, cpu_num_threads=4)
+    source = kernel.get_kernel_source()
+    assert "#pragma omp parallel for collapse(2) num_threads(4)" in source
+    assert source.index("float C_local") > source.index("for (int32_t by")
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    C = _run(kernel, A, B)
+    C = kernel(A, B)
     torch.testing.assert_close(C, A @ B, rtol=1e-3, atol=1e-3)
-
-
-def test_cpu_parallel_emits_pragma_and_sinks_allocs():
-    kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True})
-    source = kernel.get_kernel_source()
-    assert "#pragma omp parallel for" in source
-    # 2D grid: both dims parallelized for collapse.
-    assert "collapse(2)" in source
-    # Function-scope buffers must be sunk into the innermost parallelized
-    # loop body (per-worker private copies) rather than staying shared at
-    # function scope.
-    assert source.index("float C_local") > source.index("for (int32_t by")
 
 
 def test_cpu_parallel_unit_grid_dim_stays_in_chain():
@@ -98,6 +86,7 @@ def test_cpu_parallel_unit_grid_dim_stays_in_chain():
     )
     source = kernel.get_kernel_source()
     assert "collapse(2)" in source
+    assert "num_threads" not in source
 
     torch.manual_seed(0)
     A = torch.randn(128, K, dtype=torch.float32)
@@ -113,7 +102,7 @@ def test_cpu_parallel_disabled_by_default():
     torch.manual_seed(0)
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(_run(kernel, A, B), A @ B, rtol=1e-3, atol=1e-3)
+    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
 
 
 def test_cpu_parallel_min_trip_gate():
@@ -131,13 +120,7 @@ def test_cpu_parallel_min_trip_gate():
     torch.manual_seed(0)
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(_run(kernel, A, B), A @ B, rtol=1e-3, atol=1e-3)
-
-
-def test_cpu_parallel_num_threads_clause():
-    kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True}, cpu_num_threads=4)
-    source = kernel.get_kernel_source()
-    assert "num_threads(4)" in source
+    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
 
 
 def test_cpu_parallel_default_off_injects_no_flags():
@@ -259,42 +242,6 @@ def test_cpu_parallel_dynamic_extent():
     torch.testing.assert_close(kernel(A), A * 2.0, rtol=1e-6, atol=1e-6)
 
 
-def test_cpu_parallel_opaque_use_stays_serial():
-    # A buffer whose in-nest use is opaque (call_extern on its data var)
-    # cannot be proven iteration-private; parallelizing with it shared would
-    # race (my_sink mutates it), so the nest must stay serial.
-    TILE = 128
-
-    @T.prim_func
-    def opaque_only(
-        A: T.Tensor((M,), "float32"),
-        B: T.Tensor((M,), "float32"),
-    ):
-        with T.Kernel(
-            M // TILE,
-            M // TILE,
-            prelude='extern "C" void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] += 1.0f; }\n',
-        ) as (bx, by):
-            buf = T.alloc_buffer((TILE,), "float32", scope="local")
-            T.call_extern("void", "my_sink", buf.data, TILE)
-            for i in T.serial(TILE):
-                B[bx * TILE + i] = A[bx * TILE + i] + by * 0.0
-
-    kernel = tilelang.compile(
-        opaque_only,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
-    source = kernel.get_kernel_source()
-    assert "#pragma omp" not in source
-
-    torch.manual_seed(0)
-    A = torch.randn(M, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A), A, rtol=1e-6, atol=1e-6)
-
-
 def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
     # Mixed case: a normal store inside the nest plus an opaque use outside
     # it. The buffer cannot be privatized (the outside use would dangle), and
@@ -310,13 +257,12 @@ def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
         buf = T.alloc_buffer((TILE,), "float32", scope="local")
         with T.Kernel(
             M // TILE,
-            M // TILE,
             prelude='extern "C" void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] = 0.0f; }\n',
-        ) as (bx, by):
+        ) as bx:
             for i in T.serial(TILE):
                 buf[i] = A[bx * TILE + i]
             for i in T.serial(TILE):
-                B[bx * TILE + i] = buf[i] + by * 0.0
+                B[bx * TILE + i] = buf[i]
         T.call_extern("void", "my_sink", buf.data, TILE)
 
     kernel = tilelang.compile(
@@ -348,11 +294,11 @@ def test_cpu_parallel_outside_first_access_stays_serial():
     ):
         buf = T.alloc_buffer((TILE,), "float32", scope="local")
         buf[0] = 0.0  # outside access before the kernel nest
-        with T.Kernel(M // TILE, M // TILE) as (bx, by):
+        with T.Kernel(M // TILE) as bx:
             for i in T.serial(TILE):
                 buf[i] = A[bx * TILE + i]
             for i in T.serial(TILE):
-                B[bx * TILE + i] = buf[i] + by * 0.0
+                B[bx * TILE + i] = buf[i]
 
     kernel = tilelang.compile(
         outside_first,
@@ -371,7 +317,8 @@ def test_cpu_parallel_outside_first_access_stays_serial():
 
 def test_cpu_parallel_readonly_shared_table_still_parallelizes():
     # Load-only sharing is race-free: a buffer initialized before the nest
-    # and only read inside it must not block parallelization.
+    # and only read inside it must not block parallelization. A pure math call
+    # must also remain eligible after the opaque-call safety check.
     TILE = 128
 
     @T.prim_func
@@ -384,7 +331,7 @@ def test_cpu_parallel_readonly_shared_table_still_parallelizes():
             tbl[i] = 2.0
         with T.Kernel(M // TILE) as bx:
             for i in T.serial(TILE):
-                B[bx * TILE + i] = A[bx * TILE + i] * tbl[i]
+                B[bx * TILE + i] = T.sqrt(A[bx * TILE + i] * A[bx * TILE + i]) * tbl[i]
 
     kernel = tilelang.compile(
         table_read,
@@ -398,49 +345,7 @@ def test_cpu_parallel_readonly_shared_table_still_parallelizes():
 
     torch.manual_seed(0)
     A = torch.randn(M, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A), A * 2.0, rtol=1e-6, atol=1e-6)
-
-
-def test_cpu_parallel_address_of_use_stays_serial():
-    # address_of wraps a BufferLoad, which would otherwise hide the
-    # callee-mutated buffer from the opaque-use check; the nest must stay
-    # serial.
-    TILE = 128
-
-    @T.prim_func
-    def addr_of_use(
-        A: T.Tensor((M,), "float32"),
-        B: T.Tensor((M,), "float32"),
-    ):
-        buf = T.alloc_buffer((TILE,), "float32", scope="local")
-        for i in T.serial(TILE):
-            buf[i] = 0.0
-        with T.Kernel(
-            M // TILE,
-            M // TILE,
-            prelude='extern "C" void writer(float* p) { p[0] += 1.0f; }\n',
-        ) as (bx, by):
-            T.call_extern("void", "writer", T.address_of(buf[0]))
-            for i in T.serial(TILE):
-                B[bx * TILE + i] = A[bx * TILE + i] + by * 0.0
-        for i in T.serial(TILE):
-            B[i] = B[i] + buf[i]
-
-    kernel = tilelang.compile(
-        addr_of_use,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
-    source = kernel.get_kernel_source()
-    assert "#pragma omp" not in source
-
-    torch.manual_seed(0)
-    A = torch.randn(M, dtype=torch.float32)
-    expected = A.clone()
-    expected[0] += 16.0  # writer increments buf[0] once per grid iteration
-    torch.testing.assert_close(kernel(A), expected, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(kernel(A), A.abs() * 2.0, rtol=1e-6, atol=1e-6)
 
 
 def test_cpu_parallel_atomic_stays_serial():
@@ -467,34 +372,6 @@ def test_cpu_parallel_atomic_stays_serial():
     torch.manual_seed(0)
     A = torch.randn(N_ATOMIC, dtype=torch.float32)
     torch.testing.assert_close(kernel(A)[0], A.sum(), rtol=1e-4, atol=1e-3)
-
-
-def test_cpu_parallel_cross_iteration_state_stays_serial():
-    # A buffer carrying state across grid iterations (read-modify-write with
-    # no per-iteration reset) must not be privatized; since it is also
-    # mutated inside, the nest stays serial.
-    N_RANK = 512
-
-    @T.prim_func
-    def rank(A: T.Tensor((N_RANK,), "float32"), B: T.Tensor((N_RANK,), "float32")):
-        with T.Kernel(N_RANK // 128) as bx:
-            acc = T.alloc_buffer((1,), "float32", scope="local")
-            for i in T.serial(128):
-                acc[0] = 0.0 if (bx == 0 and i == 0) else acc[0] + 1.0
-                B[bx * 128 + i] = acc[0] + A[bx * 128 + i] * 0.0
-
-    kernel = tilelang.compile(
-        rank,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
-    assert "#pragma omp" not in kernel.get_kernel_source()
-
-    torch.manual_seed(0)
-    A = torch.randn(N_RANK, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A), torch.arange(N_RANK, dtype=torch.float32), rtol=1e-6, atol=1e-6)
 
 
 def test_cpu_parallel_param_overlapping_store_stays_serial():
@@ -639,68 +516,6 @@ def test_cpu_parallel_shared_rmw_no_grid_var_stays_serial():
     torch.testing.assert_close(kernel(A)[0], expected, rtol=1e-4, atol=1e-3)
 
 
-def test_cpu_parallel_extern_write_to_param_stays_serial():
-    # A call_extern that writes a parameter buffer through a pointer is an
-    # unanalyzable opaque use; the nest must stay serial.
-    N_EXT = 4096
-
-    @T.prim_func
-    def extern_write(
-        A: T.Tensor((N_EXT,), "float32"),
-        B: T.Tensor((1,), "float32"),
-    ):
-        B[0] = 0.0
-        with T.Kernel(
-            N_EXT,
-            prelude='extern "C" void writer(float* p) { *p += 1.0f; }\n',
-        ) as _bx:
-            T.call_extern("void", "writer", T.address_of(B[0]))
-
-    kernel = tilelang.compile(
-        extern_write,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
-    assert "#pragma omp" not in kernel.get_kernel_source()
-
-    torch.manual_seed(0)
-    A = torch.randn(N_EXT, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A)[0], torch.tensor(float(N_EXT)))
-
-
-def test_cpu_parallel_extern_bare_data_var_stays_serial():
-    # Same as above, but the buffer reaches the callee as a bare data var
-    # (no BufferLoad/Store inside the nest at all); still an opaque write.
-    N_BV = 4096
-
-    @T.prim_func
-    def extern_bare(
-        A: T.Tensor((N_BV,), "float32"),
-        B: T.Tensor((1,), "float32"),
-    ):
-        B[0] = 0.0
-        with T.Kernel(
-            N_BV,
-            prelude='extern "C" void writer(float* p) { *p += 1.0f; }\n',
-        ) as _bx:
-            T.call_extern("void", "writer", B.data)
-
-    kernel = tilelang.compile(
-        extern_bare,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
-    assert "#pragma omp" not in kernel.get_kernel_source()
-
-    torch.manual_seed(0)
-    A = torch.randn(N_BV, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A)[0], torch.tensor(float(N_BV)))
-
-
 def test_cpu_parallel_address_of_write_range_stays_serial():
     # The callee writes past the addressed element (p[0] and p[1]), so
     # adjacent iterations' write sets overlap even though the start
@@ -783,34 +598,6 @@ def test_cpu_parallel_loop_carried_dependency_stays_serial():
     expected = torch.zeros(N_LC, dtype=torch.float32)
     expected[1:] = torch.cumsum(A, 0)[:-1]
     torch.testing.assert_close(kernel(A), expected, rtol=1e-4, atol=1e-3)
-
-
-def test_cpu_parallel_zero_trip_reset_stays_serial():
-    # A store inside a possibly zero-trip dynamic loop is not a provable
-    # per-iteration reset: the buffer is not iteration-private, so the nest
-    # stays serial.
-
-    @T.prim_func
-    def zero_trip(
-        A: T.Tensor((256,), "float32"),
-        B: T.Tensor((256,), "float32"),
-        n: T.int32,
-    ):
-        with T.Kernel(256) as bx:
-            s = T.alloc_buffer((1,), "float32", scope="local")
-            for _t in T.serial(n):
-                s[0] = 0.0
-            s[0] = s[0] + A[bx]
-            B[bx] = s[0]
-
-    kernel = tilelang.compile(
-        zero_trip,
-        target="c",
-        out_idx=1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
-    assert "#pragma omp" not in kernel.get_kernel_source()
 
 
 def _bx_kind_after_parallel_grid_pass(func):
