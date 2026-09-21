@@ -1,0 +1,12 @@
+# Generated project entrypoints and platform runtime files
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.codex/
+/.opencode/
+/.claude/
+
+# Local tuning outputs and Python caches
+/operators/
+__pycache__/
+*.pyc

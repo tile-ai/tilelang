@@ -1,0 +1,107 @@
+{
+  "eval_mode": "text",
+  "evals": [
+    {
+      "id": 1,
+      "title": "Evidence-driven PTO optimization plans for each case",
+      "config": {
+        "max_tokens": 120000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "Use tilelang-perf-optimize to develop performance optimization plans for a PTO Reduction kernel in the current repository. Latency and profiling metrics are available for every case, but different shapes enter different dispatch branches. Explain the analysis sequence, how to invoke tilelang-performance-best-practices, and what the final plans must contain. Do not execute external tools.",
+      "expected_output": "First fix the repository, actual TileLang/PTOAS environment, and measurement methodology. Then map every case to its real dispatch branch and group cases by semantics, dtype, tail handling, and bottleneck. Build models for core count, tiles, buffer versions, padding, reads/writes, and reduction state. Candidates must be supported by evidence and checked against the APIs and lowering through tilelang-performance-best-practices; when reusing a bundled reference, also verify its actual Python path and template maturity. Output at most three admitted plans with status IMPLEMENTABLE or EXPERIMENT, covering all cases and including parameters, validation commands, performance methodology, and rollback conditions. List DESIGN_ONLY items separately as non-admitted candidates; they do not count toward the limit and must not be handed off for implementation.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "maps_every_case_to_real_branch",
+          "description": "Analyze each case using its real execution path",
+          "assertion_text": "Every case is mapped to its actual dispatch/kernel branch and appears in the coverage table"
+        },
+        {
+          "name": "uses_tilelang_feasibility_gate",
+          "description": "Use the implementation-knowledge skill to verify feasibility",
+          "assertion_text": "Load tilelang-performance-best-practices and filter candidates against the target repository, actual TileLang source, and PTO lowering; maturity verification is mandatory only when reusing a bundled reference"
+        },
+        {
+          "name": "limits_and_validates_plans",
+          "description": "State plan-count limits and validation conditions clearly",
+          "assertion_text": "Provide at most three admitted IMPLEMENTABLE/EXPERIMENT plans, each with evidence, parameters, applicable cases, correctness and performance validation, and rollback conditions; list DESIGN_ONLY items separately and do not hand them off for implementation"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Do not speculate when profiling evidence is missing",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "Use tilelang-perf-optimize to analyze a TileLang/PTO elementwise kernel. The user provided only the source and the statement 'performance is very poor'; they supplied no per-case latency, profiling data, or test cases. How should you proceed? Do not execute external tools.",
+      "expected_output": "Explain that the available evidence is insufficient. First collect the public interface and complete target case set, confirm baseline correctness and PTO compilation, verify the target kernel, and then collect per-case latency and available profiling under identical conditions. Until the data is available, provide only a collection plan or hypotheses to validate; do not claim a VEC/MEM/SCALAR bound or prescribe definitive tile parameters or an expected speedup.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "does_not_invent_bottleneck",
+          "description": "Do not conclude a bound without evidence",
+          "assertion_text": "Without per-case profiling, do not claim a specific bound; output only a data-collection plan and hypotheses to validate"
+        },
+        {
+          "name": "requires_complete_case_scope",
+          "description": "Establish the target cases and baseline first",
+          "assertion_text": "Require the complete case set, baseline correctness, PTO compilation status, and per-case latency collected under identical conditions"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Do not treat a lower-level capability as a TileLang API",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "An optimization proposal proves only that PTOAS internally supports an instruction, but no corresponding frontend API or lowering example can be found in the current TileLang source, examples/ascend, or the current repository. Use tilelang-perf-optimize to decide whether this proposal may enter a directly implementable plan. Do not execute external tools.",
+      "expected_output": "It cannot enter a directly implementable plan. PTOAS capability does not prove that the TileLang frontend can express it. Continue verification in the actually imported TileLang source, lowering, and runnable Python implementations. If no evidence is found, mark it DESIGN_ONLY, list it separately as a non-admitted candidate, do not count it toward the maximum of three admitted plans, and specify the API, lowering, correctness, and performance evidence still required.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "separates_frontend_from_backend",
+          "description": "Distinguish the TileLang frontend from PTOAS",
+          "assertion_text": "An internal PTOAS capability does not imply that the TileLang frontend already exposes a usable API"
+        },
+        {
+          "name": "marks_unverified_as_design_only",
+          "description": "Do not directly implement an unverified candidate",
+          "assertion_text": "When no current-source or lowering evidence exists, mark the item DESIGN_ONLY, list it separately as a non-admitted candidate, exclude it from the admitted-plan limit, and require additional validation evidence"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Current source evidence is not restricted by template registration",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "The current branch of the repository contains a runnable TileLang/PTO implementation: its API and lowering can be located in the actual TileLang source, and it passes correctness checks on the target cases, but tilelang-performance-best-practices has not yet registered it in template_status.md. Use tilelang-perf-optimize to determine whether it can support an optimization plan. Do not execute external tools.",
+      "expected_output": "Do not downgrade it to DESIGN_ONLY solely because it is absent from the template status table. The current repository and actual TileLang source are direct factual sources. If the bottleneck evidence, API, lowering, correctness, applicable cases, and validation method are complete, classify it independently as IMPLEMENTABLE or EXPERIMENT. The path and maturity are mandatory only when reusing a bundled reference. An unregistered implementation must not be presented as a validated template.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "prefers_direct_source_evidence",
+          "description": "Prefer current direct source evidence over template registration",
+          "assertion_text": "API, lowering, and correctness evidence from the current repository or actual TileLang source can independently admit a plan; absence from template_status.md must not automatically downgrade it to DESIGN_ONLY"
+        },
+        {
+          "name": "still_gates_bundled_templates",
+          "description": "The template-maturity gate still applies only to bundled references",
+          "assertion_text": "When reusing a tilelang-performance-best-practices bundled reference, still read its actual path and maturity; an unregistered implementation must not masquerade as a validated template"
+        }
+      ]
+    }
+  ],
+  "skill_name": "tilelang-perf-optimize"
+}
