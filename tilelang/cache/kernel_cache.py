@@ -385,22 +385,17 @@ class KernelCache:
         if verbose:
             self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
 
-        if execution_backend == "torch":
-            # Metal's torch backend does not support cache yet
-            env.disable_cache()
-            kernel = None
-        else:
-            # Disk loads can be expensive for large kernel sets; keep them outside
-            # the global cache lock so independent cache hits can proceed in parallel.
-            kernel = self._load_kernel_from_disk(
-                key,
-                backend_context,
-                out_idx,
-                pass_configs,
-                compile_flags,
-                func,
-                verbose,
-            )
+        # Disk loads can be expensive for large kernel sets; keep them outside
+        # the global cache lock so independent cache hits can proceed in parallel.
+        kernel = self._load_kernel_from_disk(
+            key,
+            backend_context,
+            out_idx,
+            pass_configs,
+            compile_flags,
+            func,
+            verbose,
+        )
         if kernel is not None:
             if verbose:
                 self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
@@ -598,6 +593,9 @@ class KernelCache:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
             KernelCache._safe_write_file(params_path, "w", lambda file: file.write(dump_kernel_params(kernel.params)))
 
+            # Backends that relaunch from cached source persist their launch metadata
+            self._save_adapter_metadata_to_disk(kernel, staging_path, verbose)
+
             # Persist HIP kernel-resource-usage remarks
             usage = getattr(kernel, "_resource_usage", None) or {}
             if usage:
@@ -707,6 +705,7 @@ class KernelCache:
                 out_idx=out_idx,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+                adapter_metadata=self._load_adapter_metadata_from_disk(cache_path, verbose),
             )
         except Exception as err:
             self.logger.warning(
@@ -869,6 +868,14 @@ class KernelCache:
     def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):
         return
 
+    def _save_adapter_metadata_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
+        """Persist launch metadata for adapters that relaunch from cached source."""
+        return
+
+    def _load_adapter_metadata_from_disk(self, cache_path: str, verbose: bool = False) -> dict | None:
+        """Read the launch metadata written by ``_save_adapter_metadata_to_disk``."""
+        return None
+
     def _build_kernel(
         self,
         func: Callable | None,
@@ -880,6 +887,7 @@ class KernelCache:
         out_idx: list[int] | None,
         pass_configs: dict | None,
         compile_flags: list[str] | str | None,
+        adapter_metadata: dict | None = None,
     ) -> JITKernel | None:
         # Check all required components and report specific failures
         missing_components = []
@@ -903,4 +911,5 @@ class KernelCache:
             pass_configs=pass_configs,
             compile_flags=compile_flags,
             backend_context=backend_context,
+            adapter_metadata=adapter_metadata,
         )

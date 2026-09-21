@@ -467,6 +467,7 @@ descriptor shape described in Section 1.3.
 | simdgroup GEMM | Implemented | Compatibility path, Section 3.2 |
 | simdgroup id / lane id lowering | Implemented | Also used by cooperative tensor kernels |
 | `const` / `__restrict` parameter emission | Implemented | Improves MSL alias information |
+| Torch backend kernel cache | Implemented | Entries hold the Metal source, kernel parameters, and launch metadata; reloads recreate the adapter without lowering |
 
 ### 5.5 Known Limitations and Roadmap
 
@@ -568,6 +569,8 @@ MLX-style swizzle is correct but is not currently the fastest default strategy.
 | Metal op lowering | `src/metal/op/gemm.cc`, `src/metal/op/utils.h` | `SelectInst`, validation, scope utilities |
 | Metal codegen | `src/metal/codegen/codegen_metal.cc`, `.h` | MSL emission |
 | TVM runtime | `3rdparty/tvm/src/runtime/metal/metal_module.mm` | guarded `MTLLanguageVersion4_0` selection |
+| Kernel cache | `tilelang/jit/adapter/torch/kernel_cache.py` | torch backend cache entries and launch metadata |
+| Cache tests | `testing/python/metal/test_metal_kernel_cache.py` | memory hits, disk reloads, fresh-process reloads, repair |
 | Runtime tests | `testing/python/metal/test_metal_gemm_v2.py` | Metal correctness |
 | Codegen tests | `testing/python/metal/test_metal_gemm_v2_linux.py` | source-level Metal codegen |
 | Simdgroup tests | `testing/python/metal/test_metal_simdgroup_store.py` | simdgroup direct store |
