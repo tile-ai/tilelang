@@ -18,11 +18,11 @@ from typing import Any, ClassVar
 
 from tvm import IRModule
 from tvm.target import Target
-from tvm.tirx.stmt_functor import post_order_visit
 
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.wrapper import TLCUDASourceWrapper
-from tilelang.jit.adapter.utils import match_declare_kernel, pythonic_expr, parse_function_call_args, parse_tma_descriptor_args
+from tilelang.jit.adapter.utils import pythonic_expr, parse_tma_descriptor_args
+from .host import HostScalarEmitter, collect_host_launches
 
 PREDEF_HOST_FUNC_PY = """
 from cuda.bindings.driver import (
@@ -341,7 +341,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
         # Check if any function needs L2 Persistent Map
         has_l2_persistent_map = False
-        for function_name, _ in function_informations.items():
+        for function_info in function_informations:
+            function_name = function_info["function_name"]
             if function_name in self.l2_persistent_map:
                 has_l2_persistent_map = True
                 break
@@ -349,41 +350,76 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         desc_name_map: dict[str, str] = {}
         desc_name_var_map: dict[str, tvm.tirx.Var] = {}
         device_index = 0
-        kernel_launch_code = """"""
+        kernel_launch_code = "\n"
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE_PY
 
-        # First pass: collect all TMA descriptors from all kernels to avoid duplication
+        # Resolve original host inputs by IR identity. Device parameter names
+        # may differ after SSA conversion and are not an argument protocol.
+        host_inputs = {}
+        tensor_names = []
+        for param in self.prim_func.params:
+            if param in self.prim_func.buffer_map:
+                buffer = self.prim_func.buffer_map[param]
+                name = buffer.data.name
+                tensor_names.append(name)
+                host_inputs[param] = host_inputs[buffer.data] = f"{name}.data_ptr()"
+                for dim in (*buffer.shape, *buffer.strides):
+                    if isinstance(dim, tvm.tirx.Var):
+                        host_inputs[dim] = f"{self._lookup_type(dim.dtype)}({dim.name}).value"
+            else:
+                host_inputs[param] = param.name
+                if str(param.dtype).startswith(("int", "uint")) or str(param.dtype) == "bool":
+                    host_inputs[param] = f"{self._lookup_type(param.dtype)}({param.name}).value"
+
+        # First pass: resolve each call site and collect TMA descriptors.
         kernel_info_list = []
-        for function_name, function_info in function_informations.items():
+        for launch_index, function_info in enumerate(function_informations):
+            function_name = function_info["function_name"]
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
             function_params = function_info["function_params"]
 
-            # Find the location of the global kernel function in the code
-            index = match_declare_kernel(code, function_name + "(")
+            host_launch = function_info["host_launch"]
+            device_params = self.device_mod[function_name].params
+            if len(function_params) != len(device_params):
+                raise ValueError(f"NVRTC launch {function_name} argument count does not match its device signature")
+            prefix = f"__tl_launch_{launch_index}_scalar_"
+            while any(arg["name"].startswith(prefix) for arg in function_args):
+                prefix = "_" + prefix
+            emitter = HostScalarEmitter(host_launch.bindings, host_inputs, self._TYPE_MAP, prefix)
+            preparation = ""
+            indentation = "    "
+            for condition, take_then in host_launch.conditions:
+                condition_code = emitter.emit(condition)
+                preparation += "".join(indentation + stmt + "\n" for stmt in emitter.take_statements())
+                preparation += f"{indentation}if {condition_code if take_then else f'not ({condition_code})'}:\n"
+                indentation += "    "
+            call_args = []
+            for param, argument in zip(device_params, function_params):
+                if self.tma_descriptor_args is not None and argument in self.tma_descriptor_args:
+                    name = argument.name
+                    desc_name_map[name] = name
+                    desc_name_var_map[name] = argument
+                    call_args.append((name, "None"))
+                else:
+                    arg_type = "ctypes.c_void_p" if str(param.dtype) == "handle" else self._lookup_type(param.dtype)
+                    call_args.append((emitter.emit(argument), arg_type))
+            # Launch geometry can also depend on host scalar bindings.
+            remap = dict(zip(device_params, function_params))
 
-            # Analyze the function declaration to prepare for argument extraction
-            declaration = code[index:].split(";")[0]
+            def host_extent(value, emitter=emitter, remap=remap):
+                if isinstance(value, tvm.tirx.PrimExpr):
+                    value = tvm.tirx.stmt_functor.substitute(value, remap)
+                return emitter.emit(value)
 
-            # Identify the start of the function body to insert arguments
-            index = code.index("{", index)
-
-            # Transform function for NVRTC: returns (arg_value, arg_type) tuples
-            def transform_nvrtc_arg(name: str, arg_type: str):
-                if arg_type == "ctypes.c_void_p":
-                    return (f"{name}.data_ptr()", arg_type)
-                return (name, arg_type)
-
-            call_args = parse_function_call_args(
-                declaration, function_args, function_params, desc_name_map, desc_name_var_map, transform_nvrtc_arg
-            )
-
-            for arg_name, arg_type in call_args:
-                if arg_type == "ctypes.c_void_p":
-                    device_index = f"{arg_name.replace('.data_ptr()', '')}.device.index"
-                    break
+            block_info = [host_extent(value) for value in block_info]
+            grid_info = [host_extent(value) for value in grid_info]
+            if dynamic_smem_buf is not None:
+                dynamic_smem_buf = host_extent(dynamic_smem_buf)
+            preparation += "".join(indentation + stmt + "\n" for stmt in emitter.take_statements())
+            device_index = f"{tensor_names[0]}.device.index" if tensor_names else 0
 
             # Store kernel info for second pass
             kernel_info_list.append(
@@ -394,6 +430,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     "dynamic_smem_buf": dynamic_smem_buf,
                     "call_args": call_args,
                     "device_index": device_index,
+                    "preparation": preparation,
+                    "guard_depth": len(host_launch.conditions),
                 }
             )
 
@@ -409,18 +447,17 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             call_args = kernel_info["call_args"]
             device_index = kernel_info["device_index"]
 
-            arg_names = ", ".join([arg[0] for arg in call_args])
-            arg_types = ", ".join([arg[1] for arg in call_args])
+            arg_names = "(" + ", ".join([arg[0] for arg in call_args]) + ("," if call_args else "") + ")"
+            arg_types = "(" + ", ".join([arg[1] for arg in call_args]) + ("," if call_args else "") + ")"
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
 
             # Generate L2 persistent map initialization for this function
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
-            kernel_launch_code += init_l2_persistent_map
 
             pdl_sync_code = self.generate_pdl_sync_code(function_name)
 
             # Generate kernel launch code
-            kernel_launch_code += KERNEL_LAUNCH_FUNC_PY.format(
+            launch_code = init_l2_persistent_map + KERNEL_LAUNCH_FUNC_PY.format(
                 function_name,
                 self._pythonic_expr(grid_info[0]),
                 self._pythonic_expr(grid_info[1]),
@@ -434,13 +471,17 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 device_index,
                 pdl_sync_code,
             )
+            kernel_launch_code += kernel_info["preparation"]
+            kernel_launch_code += "\n".join(
+                "    " * kernel_info["guard_depth"] + line if line.strip() else line for line in launch_code.split("\n")
+            )
 
         # Reset L2 persistent map after all kernel execution
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE_PY
 
         # Wrap the kernel dispatch logic in an external C function
-        host_func = PREDEF_HOST_FUNC_PY.format(repr(list(function_informations.keys())), def_args, kernel_launch_code)
+        host_func = PREDEF_HOST_FUNC_PY.format(repr(self.function_names), def_args, kernel_launch_code)
         return host_func
 
     def generate_l2_persistent_map(self, function_name: str) -> str:
@@ -560,39 +601,24 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         self.lib_code = code
 
         # Organize function information for code generation
-        function_informations = {}
-        for function_name in self.function_names:
-            # Do not update function with dispatch host function
-            if (function_name not in self.block_info) or (function_name not in self.grid_info):
-                continue
-
-            assert function_name in self.device_mod, f"Function {function_name} not found in device module"
-            device_func = self.device_mod[function_name]
-            kernel_params_cnt = len(device_func.params)
-            function_params: list[str] | None = None
-
-            def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
-                nonlocal function_params
-                if isinstance(node, tvm.tirx.Call):
-                    if not (hasattr(node, "op") and node.op == tvm.ir.Op.get("tirx.tvm_call_packed")):
-                        return
-                    args = node.args
-                    if not args or args[0] != fn:
-                        return
-                    if len(args) < 1 + param_cnt:
-                        raise AssertionError("tvm_call_packed should have at least 1 argument and match device function parameters")
-                    function_params = args[1 : 1 + param_cnt]
-
-            post_order_visit(self.host_func.body, visitor)
-            assert function_params is not None, "function_params should not be None"
-
-            function_informations[function_name] = {
-                "function_name": function_name,
-                "block_info": self.block_info[function_name],
-                "grid_info": self.grid_info[function_name],
-                "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
-                "function_params": function_params,
-            }
+        parameter_counts = {name: len(self.device_mod[name].params) for name in self.function_names}
+        host_launches = collect_host_launches(self.host_func.body, parameter_counts)
+        missing = set(self.function_names) - {launch.name for launch in host_launches}
+        if missing:
+            raise ValueError(f"Cannot find NVRTC host launch sites for {sorted(missing)}")
+        function_informations = []
+        for launch in host_launches:
+            function_name = launch.name
+            function_informations.append(
+                {
+                    "function_name": function_name,
+                    "block_info": self.block_info[function_name],
+                    "grid_info": self.grid_info[function_name],
+                    "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
+                    "function_params": launch.arguments,
+                    "host_launch": launch,
+                }
+            )
 
         # Create the host function wrapper for the CUDA kernel
         self.host_func = self.create_dispatch_func(code, function_informations)
