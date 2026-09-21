@@ -167,6 +167,10 @@ def _make_nvf4_matmul_codegen_kernel(
     warp_row_tiles=32,
     warp_col_tiles=32,
     sf_layout=None,
+    fragment_a=False,
+    fragment_scales=False,
+    transpose_a=False,
+    policy=T.GemmWarpPolicy.Square,
 ):
     assert K % 64 == 0
     in_dtype = T.float4_e2m1fn
@@ -182,11 +186,11 @@ def _make_nvf4_matmul_codegen_kernel(
     block_N = block_col_warps * warp_col_tiles
     block_K = chunk
 
-    A_shape = (M, K)
+    A_shape = (K, M) if transpose_a else (M, K)
     B_shape = (N, K)
     SFA_shape = (M, K // micro_size_k)
     SFB_shape = (N, K // micro_size_k)
-    A_shared_shape = (block_M, block_K)
+    A_shared_shape = (block_K, block_M) if transpose_a else (block_M, block_K)
     B_shared_shape = (block_N, block_K)
     SFA_shared_shape = (block_M, block_K // micro_size_k)
     SFB_shared_shape = (block_N, block_K // micro_size_k)
@@ -206,16 +210,29 @@ def _make_nvf4_matmul_codegen_kernel(
             bx,
             by,
         ):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+            A_shared = (
+                T.alloc_fragment(A_shared_shape, in_dtype) if fragment_a else T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+            )
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
-            SFA_shared = T.alloc_shared(SFA_shared_shape, T.uint32, scope=shared_scope)
-            SFB_shared = T.alloc_shared(SFB_shared_shape, T.uint32, scope=shared_scope)
+            SFA_shared = (
+                T.alloc_fragment(SFA_shared_shape, T.uint32)
+                if fragment_scales
+                else T.alloc_shared(SFA_shared_shape, T.uint32, scope=shared_scope)
+            )
+            SFB_shared = (
+                T.alloc_fragment(SFB_shared_shape, T.uint32)
+                if fragment_scales
+                else T.alloc_shared(SFB_shared_shape, T.uint32, scope=shared_scope)
+            )
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.use_swizzle(panel_size=10)
 
             for ko in T.Pipelined((K // block_K), num_stages=num_stages):
                 for i, k in T.Parallel(block_M, block_K):
-                    A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
+                    if transpose_a:
+                        A_shared[k, i] = A[ko * block_K + k, by * block_M + i]
+                    else:
+                        A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
 
                 for j, k in T.Parallel(block_N, block_K):
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
@@ -226,13 +243,15 @@ def _make_nvf4_matmul_codegen_kernel(
                 for j, k in T.Parallel(block_N, block_K // micro_size_k):
                     SFB_shared[j, k] = SFB[bx * block_N + j, ko * (block_K // micro_size_k) + k]
 
-                T.mma_gemm_blockscaled(
+                T.gemm_blockscaled(
                     A_shared,
                     B_shared,
                     C_local,
                     SFA_shared,
                     SFB_shared,
+                    transpose_A=transpose_a,
                     transpose_B=True,
+                    policy=policy,
                     clear_accum=True,
                     k_start=ko * block_K,
                     sf_a_granularity_k=16,
@@ -789,6 +808,70 @@ def test_nvf4_mma_block_scale_varying_scale_correctness():
     C = kernel(A, B, SFA, SFB)
     ref = _reference_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, M, N, K)
     torch.testing.assert_close(C, ref, rtol=0.0, atol=0.0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize(
+    "K, fragment_a, fragment_scales, transpose_a, compact, policy",
+    [
+        (64, True, False, False, False, T.GemmWarpPolicy.FullRow),
+        (128, True, True, False, False, T.GemmWarpPolicy.FullCol),
+        (256, False, True, False, False, T.GemmWarpPolicy.Square),
+        (128, True, True, True, False, T.GemmWarpPolicy.FullRow),
+        (64, False, False, False, True, T.GemmWarpPolicy.FullRow),
+        (256, False, False, False, True, T.GemmWarpPolicy.FullCol),
+    ],
+)
+def test_nvf4_mma_block_scale_fragments_and_odd_warps(K, fragment_a, fragment_scales, transpose_a, compact, policy):
+    import torch
+
+    torch.manual_seed(42)
+    A, B = _make_packed_fp4_inputs(128, 128, K, "random")
+    SFA, sfa_bytes = _make_varying_power_of_two_scale_words(128, K)
+    SFB, sfb_bytes = _make_varying_power_of_two_scale_words(128, K)
+    ref = _reference_blockscaled_gemm(A, B, sfa_bytes, sfb_bytes, 128, 128, K)
+    if transpose_a:
+        nibbles = torch.stack((A.to(torch.uint8) & 15, A.to(torch.uint8) >> 4), dim=-1).reshape(128, K).T
+        A = (nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)).contiguous().view(torch.int8)
+    if compact:
+        SFA = SFA.reshape(4, 32, K // 64).permute(2, 1, 0).contiguous().reshape(128, K // 64)
+        SFB = SFB.reshape(4, 32, K // 64).permute(2, 1, 0).contiguous().reshape(128, K // 64)
+    kernel = tilelang.compile(
+        _make_nvf4_matmul_codegen_kernel(
+            128,
+            128,
+            K,
+            num_stages=0,
+            block_col_warps=4,
+            warp_row_tiles=64,
+            fragment_a=fragment_a,
+            fragment_scales=fragment_scales,
+            transpose_a=transpose_a,
+            sf_layout="blockscaled_chunk_kmajor" if compact else "rowmajor",
+            policy=policy,
+        ),
+        target={"kind": "cuda", "arch": "sm_120a"},
+        out_idx=[4],
+    )
+    torch.testing.assert_close(kernel(A, B, SFA, SFB), ref, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("fragment_a, fragment_scales", [(True, False), (False, True)])
+def test_nvf4_mma_block_scale_compact_fragment_diagnostic(fragment_a, fragment_scales):
+    program = _make_nvf4_matmul_codegen_kernel(
+        128,
+        128,
+        128,
+        num_stages=0,
+        fragment_a=fragment_a,
+        fragment_scales=fragment_scales,
+        sf_layout="blockscaled_chunk_kmajor",
+    )
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120a"})
+    with target, pytest.raises(Exception, match="currently require.*sf_layout='rowmajor'"):
+        tilelang.lower(program, target=target, enable_device_compile=False)
 
 
 # ---------------------------------------------------------------------------
