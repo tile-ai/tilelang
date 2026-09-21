@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <type_traits>
 
 #include "c_api/asc_simd.h"
 
@@ -15,12 +16,16 @@
                                                                                \
   template <typename T> struct PrintTraits {                                   \
     static ATTR inline void print_var(__gm__ const char *msg, T val) {         \
+      static_assert(!std::is_same_v<T, double>,                                \
+                    "TileLang Ascend T.print does not support float64");       \
       printf("msg='%s' BlockIdx=%d: dtype=unknown value=%p\n", msg, BLOCK_IDX, \
              reinterpret_cast<const void *>(&val));                            \
     }                                                                          \
     static ATTR inline void print_buffer(__gm__ const char *msg,               \
                                          __gm__ const char *buf_name,          \
                                          int index, T val) {                   \
+      static_assert(!std::is_same_v<T, double>,                                \
+                    "TileLang Ascend T.print does not support float64");       \
       printf("msg='%s' BlockIdx=%d: buffer=%s, index=%d, dtype=unknown "       \
              "value=%p\n",                                                     \
              msg, BLOCK_IDX, buf_name, index,                                  \

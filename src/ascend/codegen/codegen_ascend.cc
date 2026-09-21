@@ -883,8 +883,9 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
         }
       }
     }
-    std::string helper_name =
-        current_function_name_ + "_simd_vf_" + std::to_string(vf_idx);
+    // Unrolling can clone a VF region while preserving its source index.
+    std::string helper_name = name_supply_->FreshName(
+        current_function_name_ + "_simd_vf_" + std::to_string(vf_idx));
     EmitVFFunction(op, captures, helper_name, "__simd_vf__ inline void",
                    VFMode::kSimd);
 
@@ -936,8 +937,9 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
         }
       }
     }
-    std::string helper_name =
-        current_function_name_ + "_simt_vf_" + std::to_string(vf_idx);
+    // Unrolling can clone a VF region while preserving its source index.
+    std::string helper_name = name_supply_->FreshName(
+        current_function_name_ + "_simt_vf_" + std::to_string(vf_idx));
 
     int64_t total_threads = thread_x * thread_y * thread_z;
     std::string func_attrs = "__simt_vf__ ";
@@ -3536,6 +3538,10 @@ void CodeGenTileLangAscend::PrintVecElemLoad(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     os << "((bfloat16x2_t*)(&(" << vec << ")))[" << (i / 2) << "]."
        << access[i % 2];
+  } else if (tl::IsAscendVectorizableFP8(t)) {
+    // Lanes are packed one byte each, so byte i is lane i.
+    os << GetAscendFP8ScalarValueType(t) << "::from_bits(((uint8_t*)(&(" << vec
+       << ")))[" << i << "])";
   } else if (t.is_vector_bool() && t.lanes() > 4) {
     os << "((ushort2*)(&(" << vec << ")))[" << (i / 2) << "]." << access[i % 2];
   } else if (t.lanes() <= 4) {
@@ -3568,6 +3574,11 @@ void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
   } else if (t.is_bfloat16()) {
     stream << "((bfloat16x2_t*)(&(" << vec << ")))[" << (i / 2) << "]."
            << access[i % 2] << " = " << value << ";\n";
+  } else if (tl::IsAscendVectorizableFP8(t)) {
+    // Round arithmetic results to fp8; copying an fp8 value preserves its bits.
+    stream << "((uint8_t*)(&(" << vec << ")))[" << i
+           << "] = " << GetAscendFP8ScalarValueType(t) << "(" << value
+           << ").data;\n";
   } else if (t.is_vector_bool() && t.lanes() > 4) {
     stream << "((ushort2*)(&(" << vec << ")))[" << (i / 2) << "]."
            << access[i % 2] << " = " << value << ";\n";
@@ -3596,15 +3607,14 @@ void CodeGenTileLangAscend::PrintVecBinaryOp(const std::string &op, DataType t,
                                              PrimExpr lhs, PrimExpr rhs,
                                              std::ostream &os) {
   ValidateGenericVectorType("binary operation", t);
-  // Vector comparisons need per-lane predicate values for vector Select.
-  // Division, remainder, min/max, and packed 16-bit arithmetic also require
-  // scalarization because Bisheng has no matching small-vector operation.
+  // Comparisons need per-lane predicates for Select. Scalarize operations
+  // without a native vector form and FP16/BF16/FP8 values carried in integers.
   const bool lacks_vector_operation = op == "/" || op == "%" || op == "fmodf" ||
                                       op == "fmod" || op == "min" ||
                                       op == "max";
-  bool needs_scalarization = t.is_vector_bool() ||
-                             (lacks_vector_operation && t.lanes() > 1) ||
-                             t.is_float16() || t.is_bfloat16();
+  bool needs_scalarization =
+      t.is_vector_bool() || (lacks_vector_operation && t.lanes() > 1) ||
+      t.is_float16() || t.is_bfloat16() || tl::IsAscendVectorizableFP8(t);
   if (!needs_scalarization) {
     CodeGenC::PrintVecBinaryOp(op, t, lhs, rhs, os);
     return;
