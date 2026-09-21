@@ -585,7 +585,9 @@ TVM_DLL const Op &warp_reduce_bitor();
  */
 TVM_DLL const Op &__ldg();
 
-// Host-prepared integer arithmetic. Validity operands select exact fallbacks.
+// Host-prepared integer arithmetic. Validity guards a zero divisor; the final
+// fast_div/fast_rem/barrett_reduce operand records a proven nonnegative
+// dividend.
 TVM_DLL const Op &fast_div();
 TVM_DLL const Op &fast_rem();
 TVM_DLL const Op &exact_div();

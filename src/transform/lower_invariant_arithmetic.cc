@@ -9,6 +9,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <unordered_set>
 
 #include "../op/builtin.h"
@@ -46,8 +47,8 @@ struct ArithmeticFacts {
   ffi::Map<Var, PrimExpr> aliases;
   ExprSet seen;
   ExprSet exact;
+  ExprSet nonzero_divisor;
   ExprSet nonnegative;
-  ExprSet positive_divisor;
   ExprSet fits_signed32;
   ExprSet fits_unsigned32;
   std::vector<PrimExpr> fast_divisors;
@@ -140,7 +141,21 @@ public:
     if (facts_->CanPrepare(value)) {
       facts_->aliases.Set(op->var, value);
     }
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt result = IRMutatorWithAnalyzer::VisitStmt_(op);
+    arith::Analyzer type_analyzer;
+    arith::Analyzer *range_analyzer =
+        SideEffect(value) == CallEffectKind::kPure ? analyzer_ : &type_analyzer;
+    if (!facts_->HasOpaqueRange(value) && FitsSigned32(value, range_analyzer)) {
+      // Bind captures a value even when its RHS reads mutable memory. Retain
+      // type-derived bounds on that captured value, not on subsequent reloads.
+      auto bound = analyzer_->const_int_bound(op->var);
+      analyzer_->const_int_bound.Update(
+          op->var,
+          arith::ConstIntBound(std::max(bound->min_value, int64_t{-2147483648}),
+                               std::min(bound->max_value, int64_t{2147483647})),
+          true);
+    }
+    return result;
   }
 
 #define TL_ANALYZE_DIVMOD(Node, is_remainder)                                  \
@@ -155,6 +170,41 @@ public:
 #undef TL_ANALYZE_DIVMOD
 
 private:
+  bool FitsSigned32(const PrimExpr &expr, arith::Analyzer *analyzer) const {
+    if (!IsSupportedInteger(expr.dtype())) {
+      return false;
+    }
+    if (expr.dtype().bits() < 32 ||
+        (expr.dtype().is_int() && expr.dtype().bits() == 32)) {
+      return true;
+    }
+    if ((expr.dtype().is_uint() ||
+         analyzer->CanProve(expr >=
+                            make_const(expr.dtype(), int64_t{-2147483648}))) &&
+        analyzer->CanProve(expr <=
+                           make_const(expr.dtype(), int64_t{2147483647}))) {
+      return true;
+    }
+    // For either floor or truncating remainder, a signed-int32 divisor bounds
+    // every defined result to int32, even when the dividend is wide. Generic
+    // interval analysis loses this bound when the divisor interval spans zero.
+    if (const auto *mod = expr.as<FloorModNode>()) {
+      return facts_->ResolveDivisor(mod->b).dtype() == DataType::Int(32);
+    }
+    if (const auto *mod = expr.as<ModNode>()) {
+      return facts_->ResolveDivisor(mod->b).dtype() == DataType::Int(32);
+    }
+    if (const auto *call = expr.as<CallNode>();
+        call && (call->op.same_as(builtin::bitwise_xor()) ||
+                 call->op.same_as(builtin::bitwise_and()) ||
+                 call->op.same_as(builtin::bitwise_or()))) {
+      // Bitwise operations preserve sign extension when both operands fit.
+      return FitsSigned32(call->args[0], analyzer) &&
+             FitsSigned32(call->args[1], analyzer);
+    }
+    return false;
+  }
+
   void Record(const PrimExpr &expr, const PrimExpr &x, const PrimExpr &divisor,
               bool remainder) {
     PrimExpr d = facts_->ResolveDivisor(divisor);
@@ -190,16 +240,17 @@ private:
     record_proof(&facts_->fits_signed32,
                  x.dtype().bits() < 32 ||
                      (x.dtype().bits() == 32 && x.dtype().is_int()) ||
-                     (range_safe &&
-                      range_analyzer->CanProve(
-                          x <= make_const(x.dtype(), int64_t{2147483647}))));
+                     (range_safe && FitsSigned32(x, range_analyzer)));
     record_proof(&facts_->fits_unsigned32,
-                 x.dtype().bits() <= 32 ||
+                 x.dtype().bits() <= 32 || facts_->fits_signed32.count(expr) ||
                      (range_safe &&
+                      (x.dtype().is_uint() ||
+                       range_analyzer->CanProve(
+                           x >= make_const(x.dtype(), int64_t{-4294967295}))) &&
                       range_analyzer->CanProve(
                           x <= make_const(x.dtype(), uint64_t{4294967295}))));
-    record_proof(&facts_->positive_divisor,
-                 divisor_safe && analyzer_->CanProve(divisor > 0));
+    record_proof(&facts_->nonzero_divisor,
+                 divisor_safe && analyzer_->CanProve(divisor != 0));
     if ((!exact || x.dtype().bits() == 64) && !remainder &&
         d.dtype() == DataType::Int(32) && !facts_->HasFastDivisor(d)) {
       facts_->fast_divisors.push_back(d);
@@ -226,32 +277,44 @@ public:
 #undef TL_REWRITE_DIVMOD
 
 private:
+  PrimExpr Magnitude(const PrimExpr &value) const {
+    DataType word = DataType::UInt(value.dtype().bits());
+    PrimExpr bits = cast(word, value);
+    return value.dtype().is_uint()
+               ? bits
+               : Select(value < 0, make_zero(word) - bits, bits);
+  }
+
   PrimExpr FastDiv(const PrimExpr &x, const PrimExpr &d, bool remainder,
-                   const PrimExpr &valid, bool truncating) {
+                   const PrimExpr &valid, bool truncating, bool nonnegative) {
     DataType i32 = DataType::Int(32);
     DataType u32 = DataType::UInt(32);
     DataType u64 = DataType::UInt(64);
-    Var safe = plan_->Prepare(max(d, make_const(i32, 1)), "fastdiv_d");
+    Var safe =
+        plan_->Prepare(max(Magnitude(d), make_const(u32, 1)), "fastdiv_d");
     Var k = plan_->Prepare(
-        32 - cast(i32, clz(cast(u32, max(safe, make_const(i32, 2)) - 1))),
+        32 - cast(i32, clz(cast(u32, max(safe, make_const(u32, 2)) - 1))),
         "fastdiv_k");
     Var shift = plan_->Prepare(max(k - 1, make_const(i32, 0)), "fastdiv_shift");
     PrimExpr power = make_const(u64, 1) << cast(u64, shift + 32);
     Var multiplier = plan_->Prepare(
         cast(u32, floordiv(power + cast(u64, safe) - 1, cast(u64, safe))),
         "fastdiv_multiplier");
-    return Call(x.dtype(), remainder ? tl::fast_rem() : tl::fast_div(),
-                {x, d, multiplier, shift, valid, Bool(truncating)});
+    return Call(
+        x.dtype(), remainder ? tl::fast_rem() : tl::fast_div(),
+        {x, d, multiplier, shift, valid, Bool(truncating), Bool(nonnegative)});
   }
 
-  // mu = floor(2^word_bits / d). For a dividend in that word's range,
-  // the quotient is at most one too small, even if d is wider than the word.
+  // mu = floor(2^word_bits / abs(d)). For a magnitude in that word's range,
+  // the quotient is at most one too small, even if abs(d) is wider than the
+  // word.
   PrimExpr BarrettReduction(const PrimExpr &x, const PrimExpr &d,
                             bool remainder, const PrimExpr &valid,
-                            bool truncating, int word_bits) {
+                            bool truncating, int word_bits, bool nonnegative) {
     DataType word = DataType::UInt(word_bits);
     DataType u64 = DataType::UInt(64);
-    PrimExpr safe = cast(u64, max(d, make_const(d.dtype(), 1)));
+    PrimExpr magnitude = Magnitude(d);
+    PrimExpr safe = cast(u64, max(magnitude, make_const(magnitude.dtype(), 1)));
     PrimExpr reciprocal_expr;
     if (word.bits() == 64) {
       // floor(2^64 / d), represented modulo 2^64 for d == 1. Compute
@@ -266,13 +329,22 @@ private:
     }
     PrimExpr reciprocal =
         plan_->PrepareArgument(reciprocal_expr, "barrett_reciprocal");
+    // Widen only the device operand, after canonical host preparation. This
+    // preserves sharing with equivalent narrow uses and selects the Barrett
+    // helper rather than the signed-int32 magic-divisor overload.
+    PrimExpr device_d =
+        word_bits == 64 || (!remainder && d.dtype() == DataType::Int(32) &&
+                            x.dtype().bits() == 64)
+            ? cast(x.dtype(), d)
+            : d;
     if (remainder) {
       return Call(x.dtype(), tl::barrett_reduce(),
-                  {x, d, reciprocal, valid, Bool(truncating)});
+                  {x, device_d, reciprocal, valid, Bool(truncating),
+                   Bool(nonnegative)});
     }
     return Call(x.dtype(), tl::fast_div(),
-                {x, d, reciprocal, make_const(DataType::Int(32), 0), valid,
-                 Bool(truncating)});
+                {x, device_d, reciprocal, make_const(DataType::Int(32), 0),
+                 valid, Bool(truncating), Bool(nonnegative)});
   }
 
   // For an exactly divisible x, remove d's power-of-two factor and multiply
@@ -281,8 +353,8 @@ private:
   PrimExpr ExactDiv(const PrimExpr &x, const PrimExpr &d,
                     const PrimExpr &valid) {
     DataType u32 = DataType::UInt(32);
-    Var safe =
-        plan_->Prepare(cast(u32, max(d, make_const(d.dtype(), 1))), "exact_d");
+    Var safe = plan_->Prepare(max(cast(u32, Magnitude(d)), make_const(u32, 1)),
+                              "exact_d");
     PrimExpr lowbit = bitwise_and(safe, make_const(u32, 0) - safe);
     Var shift =
         plan_->Prepare(make_const(u32, 31) - clz(lowbit), "exact_shift");
@@ -314,30 +386,23 @@ private:
             : x.dtype();
     PrimExpr value = cast(compute_type, x);
     bool exact = facts_.exact.count(site) && compute_type.bits() == 32;
-    bool fast32 = d.dtype() == DataType::Int(32) && facts_.HasFastDivisor(d);
-    PrimExpr valid = facts_.positive_divisor.count(site) ? const_true() : d > 0;
-    if (!exact && !facts_.nonnegative.count(site)) {
-      valid = valid && (value >= 0);
-    }
-    if (d.dtype().bits() == 32 && compute_type.bits() == 64) {
-      const ExprSet &bounded =
-          fast32 ? facts_.fits_signed32 : facts_.fits_unsigned32;
-      if (!bounded.count(site)) {
-        uint64_t limit = fast32 ? uint64_t{2147483647} : uint64_t{4294967295};
-        valid = valid && (value <= make_const(compute_type, limit));
-      }
-    }
+    // Select the algorithm from the dividend range before preparing parameters.
+    // A narrow divisor does not imply a narrow quotient or dividend.
+    bool fast32 = d.dtype() == DataType::Int(32) && facts_.HasFastDivisor(d) &&
+                  facts_.fits_signed32.count(site);
+    // Every nonzero divisor is handled by the selected magnitude algorithm.
+    // Keep only the original zero-divisor behavior, not a per-lane sign guard.
+    PrimExpr valid = facts_.nonzero_divisor.count(site) ? const_true() : d != 0;
     PrimExpr result;
     if (exact) {
       result = remainder ? make_zero(compute_type) : ExactDiv(value, d, valid);
     } else if (fast32) {
-      result = FastDiv(value, d, remainder, valid, truncating);
+      result = FastDiv(value, d, remainder, valid, truncating,
+                       facts_.nonnegative.count(site));
     } else {
-      int word_bits =
-          d.dtype().bits() == 32 || facts_.fits_unsigned32.count(site) ? 32
-                                                                       : 64;
-      result =
-          BarrettReduction(value, d, remainder, valid, truncating, word_bits);
+      int word_bits = facts_.fits_unsigned32.count(site) ? 32 : 64;
+      result = BarrettReduction(value, d, remainder, valid, truncating,
+                                word_bits, facts_.nonnegative.count(site));
     }
     return cast(x.dtype(), result);
   }
