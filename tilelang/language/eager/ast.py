@@ -4,10 +4,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generic, Any, Literal, ParamSpec, TypeVar, TypeAlias, cast
 from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from collections.abc import Iterable
 
 import inspect
+import textwrap
 
 # from .utils import get_ast, get_compiled_object
 from . import utils
@@ -174,6 +175,33 @@ class _empty: ...
 
 
 class BaseBuilder:
+    class PythonLoopBreak(BaseException):
+        pass
+
+    class PythonLoopContinue(BaseException):
+        pass
+
+    @contextmanager
+    def loop(self, iterable):
+        iterator = self.ctx_for(iterable)
+        try:
+            yield iterator
+        finally:
+            if inspect.isgenerator(iterator):
+                iterator.close()
+
+    def iter_call(self, func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    def resolve_call(self, func):
+        return func
+
+    def python_iterable(self, value, context):
+        return value
+
+    def comprehension_filter(self, cond):
+        return cond
+
     empty = _empty
 
     def get_parent_locals(self):
@@ -205,13 +233,15 @@ class BaseBuilder:
         pass
 
     def ctx_for(self, range: Iterable[Any]) -> Iterable[Any]:
-        return range
+        # Do not forward close() to a user-owned generator on loop break.
+        for value in range:  # noqa: UP028
+            yield value
 
     def ctx_continue(self) -> bool:
-        return True
+        raise self.PythonLoopContinue
 
     def ctx_break(self) -> bool:
-        return True
+        raise self.PythonLoopBreak
 
     def ctx_while(self, cond: Callable[[], Any]) -> Iterable[None]:
         while cond():
@@ -260,14 +290,11 @@ class BaseBuilder:
     def assert_expr(self, cond: Any, msg: Any):
         assert cond, msg
 
-    def rval(self, name: str, value: Any):
+    def rval(self, name: str | None, value: Any):
         return value
 
     def arg(self, name: str, value: Any):
         return value
-
-    def override(self, name: str):
-        return globals()[name]
 
 
 def _try_eval(node: ast.expr, nonlocals: dict[str, Any], globals: dict[str, Any]) -> Any:
@@ -278,6 +305,34 @@ def _try_eval(node: ast.expr, nonlocals: dict[str, Any], globals: dict[str, Any]
         return _empty
 
 
+class LoopControlFinder(ast.NodeVisitor):
+    """Find exits targeting a loop, without attributing nested loops' exits to it."""
+
+    def __init__(self):
+        self.depth = 0
+        self.has_control = False
+        self.has_return = False
+
+    def visit_For(self, node):
+        self.depth += 1
+        self.generic_visit(node)
+        self.depth -= 1
+
+    visit_While = visit_For
+
+    def visit_Break(self, node):
+        if self.depth == 0:
+            self.has_control = True
+
+    visit_Continue = visit_Break
+
+    def visit_Return(self, node):
+        self.has_return = True
+
+    def visit_FunctionDef(self, node):
+        pass
+
+
 class DSLMutator(ast.NodeTransformer):
     def __init__(self, nonlocals: dict[str, Any], globals: dict[str, Any], filename: str):
         self.tmp_counter = 0
@@ -285,6 +340,7 @@ class DSLMutator(ast.NodeTransformer):
         self.globals = globals
         self.extra_type_hints: dict[str, Any] = {}
         self.filename = filename
+        self.comprehension_locals: set[str] = set()
 
     def get_tmp(self) -> str:
         name = f"__{self.tmp_counter}"
@@ -331,14 +387,34 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_For(self, node: ast.For):
         self._reject_loop_else(node)
+        exits = LoopControlFinder()
+        for stmt in node.body:
+            exits.visit(stmt)
         node = self.generic_visit(node)
+        if isinstance(node.iter, ast.Call):
+            call = ast.Call(
+                func=quote_expr("__tb.iter_call"),
+                args=[node.iter.func, *node.iter.args],
+                keywords=node.iter.keywords,
+            )
+            ast.copy_location(call, node.iter)
+            node.iter = call
         tmp = self.get_tmp()
         # names = self._parse_names(node.target)
         var = ast.Name(tmp, ctx=ast.Load())
         ast_set_span(var, ast_get_span(node.target))
         stmts = self._emit_assign_target(node.target, var)
+        # Most device loops need no Python control-flow machinery. Adding
+        # with/try blocks unconditionally exhausts CPython's nesting limit in
+        # otherwise valid deeply nested kernels.
+        body = "pass\n"
+        if exits.has_control:
+            body = "try:\n  pass\nexcept __tb.PythonLoopBreak:\n  break\nexcept __tb.PythonLoopContinue:\n  continue\n"
+        source = f"for {tmp} in __tb.ctx_for(range):\n" + textwrap.indent(body, "  ")
+        if exits.has_control or exits.has_return:
+            source = f"with __tb.loop(range) as {tmp}_iter:\n  for {tmp} in {tmp}_iter:\n" + textwrap.indent(body, "    ")
         return quote(
-            f"for {tmp} in __tb.ctx_for(range):\n  pass\n",
+            source,
             target=node.target,
             range=node.iter,
             passes=[stmts + node.body],
@@ -496,8 +572,21 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_While(self, node):
         self._reject_loop_else(node)
+        exits = LoopControlFinder()
+        for stmt in node.body:
+            exits.visit(stmt)
         node = self.generic_visit(node)
-        return quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
+        if not exits.has_control:
+            return quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
+        return quote1(
+            "for _ in __tb.ctx_while(lambda: cond):\n"
+            "  try:\n    pass\n"
+            "  except __tb.PythonLoopBreak:\n    break\n"
+            "  except __tb.PythonLoopContinue:\n    continue\n",
+            cond=node.test,
+            passes=[node.body],
+            span=node,
+        )
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         stmts = []
@@ -529,7 +618,6 @@ class DSLMutator(ast.NodeTransformer):
             f"  def {name}(__tb):\n"
             f"    __tb_fl = {self.filename!r}\n"
             f"    __tb_fn = {name!r}\n"
-            "    range = __tb.override('range')\n"
             "    pass\n"
             f"    return {name}\n"
             f"  return {name}",
@@ -651,8 +739,43 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_Name(self, node: ast.Name):
         if isinstance(node.ctx, ast.Load):
-            return quote_expr(f"__tb.rval('{node.id}', node)", node=node, span=node)
+            name = None if node.id in self.comprehension_locals else node.id
+            return quote_expr("__tb.rval(name, node)", name=ast.Constant(name), node=node, span=node)
         return node
+
+    def visit_Call(self, node: ast.Call):
+        node = self.generic_visit(node)
+        # Resolve by callable identity, not spelling, so aliases are checked
+        # without changing shadowed builtins or adding a frame to other calls.
+        node.func = quote_expr("__tb.resolve_call(func)", func=node.func, span=node.func)
+        return node
+
+    def visit_ListComp(self, node):
+        # Python evaluates the first iterable in the enclosing scope; the
+        # targets, filters and result live in a separate comprehension scope.
+        node.generators[0].iter = self.visit(node.generators[0].iter)
+        saved = self.comprehension_locals
+        self.comprehension_locals = saved | {
+            name.id for gen in node.generators for name in ast.walk(gen.target) if isinstance(name, ast.Name)
+        }
+        try:
+            for i, gen in enumerate(node.generators):
+                if i:
+                    gen.iter = self.visit(gen.iter)
+                gen.iter = quote_expr("__tb.python_iterable(value, 'comprehension')", value=gen.iter, span=gen.iter)
+                gen.ifs = [quote_expr("__tb.comprehension_filter(cond)", cond=self.visit(cond), span=cond) for cond in gen.ifs]
+            if isinstance(node, ast.DictComp):
+                node.key = self.visit(node.key)
+                node.value = self.visit(node.value)
+            else:
+                node.elt = self.visit(node.elt)
+            return node
+        finally:
+            self.comprehension_locals = saved
+
+    visit_SetComp = visit_ListComp
+    visit_DictComp = visit_ListComp
+    visit_GeneratorExp = visit_ListComp
 
 
 class SpanAttacher(ast.NodeTransformer):
