@@ -74,7 +74,7 @@ struct ArithmeticFacts {
       return false;
     }
     if (const auto *var = expr.as<VarNode>()) {
-      return inputs.count(GetRef<Var>(var));
+      return inputs.count(ffi::GetRef<Var>(var));
     }
     if (expr.as<IntImmNode>()) {
       return true;
@@ -108,7 +108,7 @@ struct ArithmeticFacts {
           opaque = true;
         }
       } else if (const auto *var = node.as<VarNode>()) {
-        opaque = opaque || range_opaque.count(GetRef<Var>(var));
+        opaque = opaque || range_opaque.count(ffi::GetRef<Var>(var));
       }
     });
     return opaque;
@@ -144,7 +144,7 @@ public:
 
 #define TL_ANALYZE_DIVMOD(Node, is_remainder)                                  \
   PrimExpr VisitExpr_(const Node *op) final {                                  \
-    Record(GetRef<PrimExpr>(op), op->a, op->b, is_remainder);                  \
+    Record(ffi::GetRef<PrimExpr>(op), op->a, op->b, is_remainder);             \
     return IRMutatorWithAnalyzer::VisitExpr_(op);                              \
   }
   TL_ANALYZE_DIVMOD(FloorDivNode, false)
@@ -215,8 +215,8 @@ public:
 
 #define TL_REWRITE_DIVMOD(Node, remainder, truncating)                         \
   PrimExpr VisitExpr_(const Node *op) final {                                  \
-    return Rewrite(GetRef<PrimExpr>(op), VisitExpr(op->a), VisitExpr(op->b),   \
-                   remainder, truncating);                                     \
+    return Rewrite(ffi::GetRef<PrimExpr>(op), VisitExpr(op->a),                \
+                   VisitExpr(op->b), remainder, truncating);                   \
   }
   TL_REWRITE_DIVMOD(FloorDivNode, false, false)
   TL_REWRITE_DIVMOD(FloorModNode, true, false)
@@ -354,12 +354,12 @@ public:
     for (const auto &entry : func->buffer_map) {
       for (const PrimExpr &extent : entry.second->shape) {
         if (const auto *var = extent.as<VarNode>()) {
-          inputs_.insert(GetRef<Var>(var));
+          inputs_.insert(ffi::GetRef<Var>(var));
         }
       }
       for (const PrimExpr &stride : entry.second->strides) {
         if (const auto *var = stride.as<VarNode>()) {
-          inputs_.insert(GetRef<Var>(var));
+          inputs_.insert(ffi::GetRef<Var>(var));
         }
       }
     }
@@ -380,7 +380,7 @@ public:
     ffi::Map<Var, PrimExpr> abi_values;
     PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
       if (const auto *vn = node.as<VarNode>()) {
-        Var var = GetRef<Var>(vn);
+        Var var = ffi::GetRef<Var>(vn);
         if (inputs_.count(var) && IsSupportedInteger(var.dtype()) &&
             (var.dtype().bits() < 32 || var.dtype() == DataType::UInt(64)) &&
             !abi_values.count(var)) {
