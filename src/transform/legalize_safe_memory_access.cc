@@ -41,6 +41,16 @@ bool AccessMaskMayUse(const PrimExpr &expr, int required_mask) {
   return (GetConstAccessMask(expr) & required_mask) != 0;
 }
 
+// Integer division and modulo are total only when a compile-time divisor is
+// strictly positive.  In particular, a negative divisor can still expose the
+// signed-minimum / -1 overflow case, while a zero or runtime divisor may
+// trap.  Keep this predicate deliberately narrow because it controls whether
+// a short-circuiting safety guard may be flattened into one conjunction.
+bool IsPositiveConst(const PrimExpr &expr) {
+  const auto *imm = expr.as<IntImmNode>();
+  return imm != nullptr && imm->value > 0;
+}
+
 // Extract a scalar lane from vector expressions used in bounds predicates.
 // This intentionally expands Ramp/Broadcast/Shuffle by structure instead of
 // using Shuffle::ExtractElement, because the arithmetic prover handles the
@@ -640,13 +650,31 @@ private:
         return false;
       }
 
+      // Positive constant divisors make Div, Mod, FloorDiv, and FloorMod
+      // total. Zero or symbolic divisors may trap, while negative divisors
+      // (especially -1) can overflow for the signed minimum value, so only
+      // positive constant divisors are safe to flatten.
       bool is_total = true;
       PostOrderVisit(condition, [&](const ObjectRef &node) {
         if (node.as<CallNode>() || node.as<BufferLoadNode>() ||
-            node.as<ProducerLoadNode>() || node.as<DivNode>() ||
-            node.as<ModNode>() || node.as<FloorDivNode>() ||
-            node.as<FloorModNode>()) {
+            node.as<ProducerLoadNode>()) {
           is_total = false;
+        } else if (const auto *div = node.as<DivNode>()) {
+          if (!IsPositiveConst(div->b)) {
+            is_total = false;
+          }
+        } else if (const auto *mod = node.as<ModNode>()) {
+          if (!IsPositiveConst(mod->b)) {
+            is_total = false;
+          }
+        } else if (const auto *div = node.as<FloorDivNode>()) {
+          if (!IsPositiveConst(div->b)) {
+            is_total = false;
+          }
+        } else if (const auto *mod = node.as<FloorModNode>()) {
+          if (!IsPositiveConst(mod->b)) {
+            is_total = false;
+          }
         }
       });
       if (!is_total) {

@@ -1,6 +1,7 @@
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+import pytest
 from tilelang import tvm as tvm
 from tvm.tirx.stmt_functor import ir_transform, post_order_visit
 
@@ -91,6 +92,77 @@ def _apply_negative_index_then_safe_memory(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.LegalizeNegativeIndex()(mod)
     return tl.transform.LegalizeSafeMemoryAccess()(mod)
+
+
+_DIV_OPS = {
+    "truncdiv": T.truncdiv,
+    "truncmod": T.truncmod,
+    "floordiv": T.floordiv,
+    "floormod": T.floormod,
+}
+
+
+def _make_division_index_load(op_name, divisor):
+    div_op = _DIV_OPS[op_name]
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((8, 8), T.float32),
+        out: T.Tensor((1,), T.float32),
+        index: T.int32,
+    ):
+        # Keep the computed index potentially out of bounds so legalization
+        # has to form lower/upper conditions around the load.
+        out[0] = A[div_op(index, divisor), index]
+
+    return main
+
+
+def _make_symbolic_division_index_load(op_name):
+    div_op = _DIV_OPS[op_name]
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((8, 8), T.float32),
+        out: T.Tensor((1,), T.float32),
+        index: T.int32,
+        divisor: T.int32,
+    ):
+        out[0] = A[div_op(index, divisor), index]
+
+    return main
+
+
+def _division_load_guards(func):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    return _collect_call_nodes(transformed["main"].body, "tirx.if_then_else")
+
+
+def _python_div_mod_index_load():
+    @T.prim_func
+    def main(
+        A: T.Tensor((8, 4), T.float32),
+        out: T.Tensor((1,), T.float32),
+        tid: T.int32,
+        j: T.int32,
+    ):
+        out[0] = A[tid // 2, j % 8]
+
+    return main
+
+
+def _python_div_symbolic_index_load():
+    @T.prim_func
+    def main(
+        A: T.Tensor((8,), T.float32),
+        out: T.Tensor((1,), T.float32),
+        tid: T.int32,
+        n: T.int32,
+    ):
+        out[0] = A[tid // n]
+
+    return main
 
 
 def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2):
@@ -903,6 +975,52 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert all(not _collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[:2])
     assert all(_collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[2:])
     assert _collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
+
+
+def test_python_div_mod_positive_constant_divisors_flatten_load_guard():
+    guards = _division_load_guards(_python_div_mod_index_load())
+
+    assert len(guards) == 1
+    assert isinstance(guards[0].args[0], tvm.tirx.And)
+    assert isinstance(guards[0].args[1], tvm.tirx.BufferLoad)
+
+
+def test_python_div_symbolic_divisor_keeps_load_guards_nested():
+    guards = _division_load_guards(_python_div_symbolic_index_load())
+
+    assert len(guards) > 1
+    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
+
+
+@pytest.mark.parametrize("op_name", ["truncdiv", "truncmod", "floordiv", "floormod"])
+def test_positive_constant_divisors_flatten_safe_load_guards(op_name):
+    guards = _division_load_guards(_make_division_index_load(op_name, 16))
+
+    # Integer div/mod with a positive compile-time constant divisor is total,
+    # so the legalizer may combine bounds into one guard instead of a nested
+    # lazy-evaluation chain.
+    assert len(guards) == 1
+    assert not _collect_call_nodes(guards[0].args[0], "tirx.if_then_else")
+    assert isinstance(guards[0].args[1], tvm.tirx.BufferLoad)
+
+
+@pytest.mark.parametrize("op_name", ["truncdiv", "truncmod", "floordiv", "floormod"])
+def test_negative_constant_divisors_keep_safe_load_guards_nested(op_name):
+    guards = _division_load_guards(_make_division_index_load(op_name, -16))
+
+    # Negative divisors are not total integer operations. Keep the conservative
+    # nested form so short-circuit evaluation is preserved.
+    assert len(guards) > 1
+    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
+
+
+@pytest.mark.parametrize("op_name", ["truncdiv", "truncmod", "floordiv", "floormod"])
+def test_symbolic_divisors_keep_safe_load_guards_nested(op_name):
+    guards = _division_load_guards(_make_symbolic_division_index_load(op_name))
+
+    # A runtime divisor is not proven positive, so flattening remains disabled.
+    assert len(guards) > 1
+    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
 
 
 if __name__ == "__main__":
