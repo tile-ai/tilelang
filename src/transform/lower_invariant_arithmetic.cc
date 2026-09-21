@@ -84,6 +84,26 @@ public:
   explicit InvariantRemainderNormalizer(arith::Analyzer *analyzer)
       : IRMutatorWithAnalyzer(analyzer) {}
 
+  static PrimExpr ReuseRemainder(const PrimExpr &product,
+                                 const std::vector<PrimExpr> &remainders) {
+    if (!IsSupportedInteger(product.dtype()) ||
+        SideEffect(product) != CallEffectKind::kPure) {
+      return product;
+    }
+    for (const PrimExpr &expr : remainders) {
+      const auto *mod = expr.as<FloorModNode>();
+      if (product.dtype() != expr.dtype()) {
+        continue;
+      }
+      if (auto divisor = MatchProduct_(product, mod->a);
+          divisor && ffi::StructuralEqual()(divisor.value(), mod->b)) {
+        // q*d = x-r also holds under word wrapping; retain the input width.
+        return mod->a - expr;
+      }
+    }
+    return product;
+  }
+
   PrimExpr VisitExpr_(const FloorModNode *op) final {
     PrimExpr value = StmtExprMutator::VisitExpr_(op);
     const auto *mod = value.as<FloorModNode>();
@@ -441,6 +461,43 @@ public:
     });
   }
 
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    auto outer = std::move(remainders_);
+    remainders_.clear();
+    bool conditional = op->predicate.defined();
+    // Only reuse within this load's address. A remainder in another statement
+    // or a lazy arm does not justify changing the address's arithmetic recipe.
+    for (const PrimExpr &index : op->indices) {
+      PostOrderVisit(index, [&](const ffi::ObjectRef &node) {
+        const auto *call = node.as<CallNode>();
+        conditional |= node.as<SelectNode>() || node.as<LetNode>() ||
+                       node.as<AndNode>() || node.as<OrNode>() ||
+                       (call && call->op.same_as(builtin::if_then_else()));
+        if (const auto *mod = node.as<FloorModNode>()) {
+          PrimExpr expr = ffi::GetRef<PrimExpr>(mod);
+          if (SideEffect(expr) == CallEffectKind::kPure &&
+              std::none_of(remainders_.begin(), remainders_.end(),
+                           [&](const PrimExpr &other) {
+                             return ffi::StructuralEqual()(expr, other);
+                           })) {
+            remainders_.push_back(expr);
+          }
+        }
+      });
+    }
+    if (conditional) {
+      remainders_.clear();
+    }
+    PrimExpr value = IRMutatorWithAnalyzer::VisitExpr_(op);
+    remainders_ = std::move(outer);
+    return value;
+  }
+
+  PrimExpr VisitExpr_(const MulNode *op) final {
+    PrimExpr value = IRMutatorWithAnalyzer::VisitExpr_(op);
+    return InvariantRemainderNormalizer::ReuseRemainder(value, remainders_);
+  }
+
   PrimExpr VisitExpr_(const FloorDivNode *op) final {
     PrimExpr value = IRMutatorWithAnalyzer::VisitExpr_(op);
     const auto *div = value.as<FloorDivNode>();
@@ -470,6 +527,7 @@ public:
 
 private:
   std::vector<std::pair<PrimExpr, PrimExpr>> quotients_;
+  std::vector<PrimExpr> remainders_;
 };
 
 // Collect proofs before rewriting predicates: replacing x % d in a condition

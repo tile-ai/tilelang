@@ -23,10 +23,12 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def permute_moe_mxfp4_scales(in_scales, out_scales, use_full_perm: int, use_quad_shuffle: int, block: int = 256):
-    num_experts = T.dynamic("num_experts")
-    size_n = T.dynamic("size_n")
-    num_groups = T.dynamic("num_groups")
+def permute_moe_mxfp4_scales(
+    in_scales, out_scales, use_full_perm: int, use_quad_shuffle: int, block: int = 256, shape: tuple | None = None
+):
+    num_experts = T.dynamic("num_experts") if shape is None else shape[0]
+    size_n = T.dynamic("size_n") if shape is None else shape[1]
+    num_groups = T.dynamic("num_groups") if shape is None else shape[2]
     in_scales: T.Tensor[(num_experts, size_n, num_groups), T.uint8]
     out_scales: T.Tensor[(num_experts, num_groups, size_n), T.uint8]
     total = num_experts * num_groups * size_n
@@ -102,12 +104,17 @@ def main():
         y = torch.empty((e, ng, n), device="cuda", dtype=torch.uint8)
         expected = ref_permute(x, n, full, quad)
         variants = []
-        for enabled in [False, True]:
-            mode = "on" if enabled else "off"
+        for mode in ["off", "on", "const"]:
+            enabled = mode == "on"
+            selected_func = (
+                permute_moe_mxfp4_scales.get_tir(use_full_perm=int(full), use_quad_shuffle=int(quad), shape=(e, n, ng))
+                if mode == "const"
+                else func
+            )
             print(name, mode, "compiling", flush=True)
             t = time.perf_counter()
             kernel = tilelang.compile(
-                func,
+                selected_func,
                 target="cuda",
                 target_host="c",
                 execution_backend="tvm_ffi",
