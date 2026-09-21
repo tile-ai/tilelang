@@ -694,15 +694,10 @@ class Builder(BaseBuilder):
         if isinstance(res, Buffer):
             self.with_buffer_span(res)
 
-        # 4. Check variable scope and shadowing
+        # 4. Check variable scope
         if name != "_":
             frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-            if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
-                logger.warning(
-                    f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
-                    stacklevel=2,
-                )
             self.name_inside_frame[name] = self.frames[frame]
         return res
 
@@ -777,9 +772,6 @@ class Builder(BaseBuilder):
         elif isinstance(target, Var):
             # Treat augmented assignment on immutable vars (SSA) as re-binding:
             #   x -= y  ==>  x = x - y
-            #
-            # This matches user expectations and avoids hard failures, while still
-            # warning about re-binding immutable values (same as `x = x - y`).
             name = name or getattr(target, "orig_name", None) or target.name  # type: ignore[attr-defined]
             res = eval_op(op, target, aug_value)
 
@@ -797,11 +789,6 @@ class Builder(BaseBuilder):
             if name != "_":
                 frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
                 assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-                if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
-                    logger.warning(
-                        f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
-                        stacklevel=2,
-                    )
                 self.name_inside_frame[name] = self.frames[frame]
             return res
         else:
