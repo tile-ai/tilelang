@@ -916,8 +916,9 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
         }
       }
     }
-    std::string helper_name =
-        current_function_name_ + "_simd_vf_" + std::to_string(vf_idx);
+    // Unrolling can clone a VF region while preserving its source index.
+    std::string helper_name = name_supply_->FreshName(
+        current_function_name_ + "_simd_vf_" + std::to_string(vf_idx));
     EmitVFFunction(op, captures, helper_name, "__simd_vf__ inline void",
                    VFMode::kSimd);
 
@@ -969,8 +970,9 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
         }
       }
     }
-    std::string helper_name =
-        current_function_name_ + "_simt_vf_" + std::to_string(vf_idx);
+    // Unrolling can clone a VF region while preserving its source index.
+    std::string helper_name = name_supply_->FreshName(
+        current_function_name_ + "_simt_vf_" + std::to_string(vf_idx));
 
     int64_t total_threads = thread_x * thread_y * thread_z;
     std::string func_attrs = "__simt_vf__ ";

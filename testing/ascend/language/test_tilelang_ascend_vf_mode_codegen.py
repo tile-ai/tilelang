@@ -220,5 +220,27 @@ def test_simdvf_captures_block_index_used_by_control_flow():
     assert "block_idx" in helper.group(1)
 
 
+def test_vf_helpers_are_unique_after_explicit_unroll():
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            for i in T.Unroll(0, 2, explicit=True):
+                with T.SimdVF():
+                    T.evaluate(i)
+                with T.SimtVF(threads=1):
+                    T.evaluate(i)
+
+    source = lower(main, target="ascend").kernel_source
+
+    assert source.count("__simd_vf__ inline void main_kernel_simd_vf_0(") == 1
+    assert source.count("__simd_vf__ inline void main_kernel_simd_vf_0_1(") == 1
+    assert source.count("__simt_vf__ __launch_bounds__(1) inline void main_kernel_simt_vf_0(") == 1
+    assert source.count("__simt_vf__ __launch_bounds__(1) inline void main_kernel_simt_vf_0_1(") == 1
+    assert source.count("main_kernel_simd_vf_0();") == 1
+    assert source.count("main_kernel_simd_vf_0_1();") == 1
+    assert source.count("main_kernel_simt_vf_0>(cce::dim3(1));") == 1
+    assert source.count("main_kernel_simt_vf_0_1>(cce::dim3(1));") == 1
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
