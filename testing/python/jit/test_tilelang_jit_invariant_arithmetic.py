@@ -1333,5 +1333,39 @@ def test_invariant_recovers_nonnegative_range_after_wrap(mask):
             torch.testing.assert_close(out, ((x ^ (lanes % 8)) // e).to(torch.int32))
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+@pytest.mark.parametrize("radix", [4, 32, 64, 31])
+def test_invariant_recovers_reassociated_layout_remainder(dtype, radix):
+    @T.prim_func
+    def main(B: T.Tensor((384,), dtype), base: T.int64, d: T.int32):
+        with T.Kernel(3, threads=128) as bx:
+            for lane in T.Parallel(128):
+                x = T.cast(bx * 128 + lane, dtype) + T.cast(base, dtype)
+                # The omitted block offset is divisible by each power-of-two
+                # radix, but not by 31. Keep that negative control.
+                B[bx * 128 + lane] = (T.cast(lane, dtype) + T.cast(base, dtype) - (x // T.cast(d, dtype)) * T.cast(d, dtype)) % radix
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    bits = 32 if dtype == "int32" else 64
+    modulus = 1 << bits
+
+    def wrap(value):
+        return (value + modulus // 2) % modulus - modulus // 2
+
+    out = torch.empty(384, dtype=getattr(torch, dtype), device="cuda")
+    for base in [0, -257, 2**31 - 64, -(2**31), 2**48 - 31]:
+        for d in [1, 3, -3, 7, -7, 2**31 - 1, -(2**31)]:
+            expected = torch.tensor(
+                [wrap(i % 128 + wrap(base) - (wrap(i + wrap(base)) // d) * d) % radix for i in range(384)],
+                dtype=out.dtype,
+                device="cuda",
+            )
+            kernel(out, base, d)
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

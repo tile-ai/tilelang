@@ -84,6 +84,20 @@ public:
   explicit InvariantRemainderNormalizer(arith::Analyzer *analyzer)
       : IRMutatorWithAnalyzer(analyzer) {}
 
+  PrimExpr VisitExpr_(const FloorModNode *op) final {
+    PrimExpr value = StmtExprMutator::VisitExpr_(op);
+    const auto *mod = value.as<FloorModNode>();
+    const auto *radix = mod ? mod->b.as<IntImmNode>() : nullptr;
+    if (radix && radix->value > 0 && (radix->value & (radix->value - 1)) == 0 &&
+        IsSupportedInteger(value.dtype()) &&
+        SideEffect(value) == CallEffectKind::kPure) {
+      if (auto reduced = RecoverRemainder_(mod->a, mod->b)) {
+        return floormod(reduced.value(), mod->b);
+      }
+    }
+    return value;
+  }
+
   PrimExpr VisitExpr_(const SubNode *op) final {
     PrimExpr value = StmtExprMutator::VisitExpr_(op);
     const auto *sub = value.as<SubNode>();
@@ -95,6 +109,9 @@ public:
       return floormod(sub->a, divisor.value());
     }
     if (auto reduced = CancelTerm_(sub->a, sub->b)) {
+      return reduced.value();
+    }
+    if (auto reduced = RecoverRemainder_(value)) {
       return reduced.value();
     }
     return value;
@@ -123,6 +140,81 @@ public:
   }
 
 private:
+  // Simplification can interleave a swizzle's offsets with x - (x/d)*d.
+  // Recover the remainder without distributing products or crossing casts.
+  static void CollectTerms_(const PrimExpr &value, bool negative,
+                            std::vector<std::pair<PrimExpr, bool>> *terms) {
+    if (const auto *add = value.as<AddNode>()) {
+      CollectTerms_(add->a, negative, terms);
+      CollectTerms_(add->b, negative, terms);
+    } else if (const auto *sub = value.as<SubNode>()) {
+      CollectTerms_(sub->a, negative, terms);
+      CollectTerms_(sub->b, !negative, terms);
+    } else {
+      terms->emplace_back(value, negative);
+    }
+  }
+
+  ffi::Optional<PrimExpr>
+  RecoverRemainder_(const PrimExpr &value,
+                    ffi::Optional<PrimExpr> modulus = std::nullopt) {
+    std::vector<std::pair<PrimExpr, bool>> terms;
+    CollectTerms_(value, false, &terms);
+    if (terms.size() > 32) {
+      return std::nullopt;
+    }
+    for (size_t i = 0; i < terms.size(); ++i) {
+      if (!terms[i].second) {
+        continue;
+      }
+      std::vector<PrimExpr> factors;
+      CollectFactors_(terms[i].first, &factors);
+      for (const PrimExpr &factor : factors) {
+        const auto *div = factor.as<FloorDivNode>();
+        if (!div || !MatchProduct_(terms[i].first, div->a)) {
+          continue;
+        }
+        std::vector<std::pair<PrimExpr, bool>> dividend;
+        CollectTerms_(div->a, false, &dividend);
+        std::vector<bool> used(terms.size(), false);
+        used[i] = true;
+        bool matched = true;
+        for (const auto &term : dividend) {
+          size_t j = 0;
+          for (; j < terms.size(); ++j) {
+            if (!used[j] && term.second == terms[j].second &&
+                ffi::StructuralEqual()(term.first, terms[j].first)) {
+              used[j] = true;
+              break;
+            }
+          }
+          if (j == terms.size()) {
+            // A power-of-two outer modulus also discards word overflow.
+            // Missing multiples of it can be restored before matching x-q*d.
+            if (modulus.defined() &&
+                analyzer_->CanProve(floormod(term.first, modulus.value()) ==
+                                    0)) {
+              continue;
+            }
+            matched = false;
+            break;
+          }
+        }
+        if (matched) {
+          PrimExpr result = floormod(div->a, div->b);
+          for (size_t j = 0; j < terms.size(); ++j) {
+            if (!used[j]) {
+              result = terms[j].second ? result - terms[j].first
+                                       : result + terms[j].first;
+            }
+          }
+          return result;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
   static ffi::Optional<PrimExpr> CancelTerm_(const PrimExpr &sum,
                                              const PrimExpr &term) {
     std::vector<PrimExpr> left, right;
