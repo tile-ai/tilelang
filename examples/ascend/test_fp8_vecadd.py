@@ -1,32 +1,50 @@
+"""fp8 vector add, swept over the storage dtype and the per-thread element count.
+
+A thread owns ``num_fp8_per_thread`` fp8 elements, so the width the vectorizer
+picks ranges from a single fp8 up to a full small vector. Ascend carries small
+fp8 vectors as packed integer typedefs with no arithmetic, so every width past
+one element goes through the lane-wise scalarization in the Ascend codegen
+rather than a native vector add. Regressing that emits a packed *integer* add
+and silently produces wrong values, so each width and dtype is pinned here.
+"""
+
+import pytest
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.ascend.language as T
 
 
 THREADS = 128
 
+# (TileLang dtype, torch dtype)
+FP8_DTYPES = [
+    pytest.param(T.float8_e4m3fn, torch.float8_e4m3fn, id="e4m3"),
+    pytest.param(T.float8_e5m2, torch.float8_e5m2, id="e5m2"),
+]
+
 
 @tilelang.jit(
     out_idx=[2],
 )
-def fp8_vecadd_kernel(n: int):
+def fp8_vecadd_kernel(n: int, dtype):
     @T.prim_func
     def main(
-        A: T.Tensor((n,), T.float8_e4m3fn),
-        B: T.Tensor((n,), T.float8_e4m3fn),
-        C: T.Tensor((n,), T.float8_e4m3fn),
+        A: T.Tensor((n,), dtype),
+        B: T.Tensor((n,), dtype),
+        C: T.Tensor((n,), dtype),
     ):
         with T.Kernel(1):
-            a_ub = T.alloc_shared((n,), T.float8_e4m3fn)
-            b_ub = T.alloc_shared((n,), T.float8_e4m3fn)
-            c_ub = T.alloc_shared((n,), T.float8_e4m3fn)
+            a_ub = T.alloc_shared((n,), dtype)
+            b_ub = T.alloc_shared((n,), dtype)
+            c_ub = T.alloc_shared((n,), dtype)
 
             T.copy(A, a_ub)
             T.copy(B, b_ub)
             with T.SimtVF(threads=THREADS):
-                a_local = T.alloc_fragment((n,), T.float8_e4m3fn)
-                b_local = T.alloc_fragment((n,), T.float8_e4m3fn)
-                c_local = T.alloc_fragment((n,), T.float8_e4m3fn)
+                a_local = T.alloc_fragment((n,), dtype)
+                b_local = T.alloc_fragment((n,), dtype)
+                c_local = T.alloc_fragment((n,), dtype)
 
                 T.copy(a_ub, a_local)
                 T.copy(b_ub, b_local)
@@ -45,29 +63,27 @@ def _raw_prefix(tensor: torch.Tensor, count: int = 16) -> str:
         return "<raw view unavailable>"
 
 
-def run_case(num_fp8_per_thread: int) -> bool:
+def run_case(num_fp8_per_thread: int, tl_dtype, torch_dtype) -> bool:
     n = THREADS * num_fp8_per_thread
-    print(f"\n=== num_fp8_per_thread={num_fp8_per_thread}, n={n} ===")
 
-    kernel = fp8_vecadd_kernel(n)
-    source = kernel.get_kernel_source()
-
-    print(source)
+    kernel = fp8_vecadd_kernel(n, tl_dtype)
 
     a_f32 = torch.linspace(-128.0, 128.0, n, device="npu", dtype=torch.float32)
     b_f32 = torch.linspace(64.0, -64.0, n, device="npu", dtype=torch.float32)
-    a = a_f32.to(torch.float8_e4m3fn)
-    b = b_f32.to(torch.float8_e4m3fn)
+    a = a_f32.to(torch_dtype)
+    b = b_f32.to(torch_dtype)
 
     c = kernel(a, b)
     torch.npu.synchronize()
 
-    ref = (a.to(torch.float32) + b.to(torch.float32)).to(torch.float8_e4m3fn)
+    ref = (a.to(torch.float32) + b.to(torch.float32)).to(torch_dtype)
     c_f32 = c.to(torch.float32)
     ref_f32 = ref.to(torch.float32)
     ok = torch.equal(c_f32, ref_f32)
 
     if not ok:
+        print(f"\n=== {torch_dtype}, num_fp8_per_thread={num_fp8_per_thread}, n={n} ===")
+        print(kernel.get_kernel_source())
         mismatch = torch.nonzero(c_f32 != ref_f32).flatten()
         first = int(mismatch[0].item()) if mismatch.numel() else -1
         print(f"first mismatch index: {first}")
@@ -80,14 +96,13 @@ def run_case(num_fp8_per_thread: int) -> bool:
     return ok
 
 
-def main():
-    results = {num_fp8_per_thread: run_case(num_fp8_per_thread) for num_fp8_per_thread in (16, 8, 4, 2, 1)}
-    print("\n=== summary ===")
-    for num_fp8_per_thread, ok in results.items():
-        print(f"num_fp8_per_thread={num_fp8_per_thread}: {'PASS' if ok else 'FAIL'}")
-    if not all(results.values()):
-        raise SystemExit(1)
+@pytest.mark.parametrize("tl_dtype, torch_dtype", FP8_DTYPES)
+@pytest.mark.parametrize("num_fp8_per_thread", [16, 8, 4, 2, 1])
+def test_fp8_vecadd(num_fp8_per_thread, tl_dtype, torch_dtype):
+    assert run_case(num_fp8_per_thread, tl_dtype, torch_dtype), (
+        f"{torch_dtype} vector add mismatch at num_fp8_per_thread={num_fp8_per_thread}"
+    )
 
 
 if __name__ == "__main__":
-    main()
+    tilelang.testing.main()
