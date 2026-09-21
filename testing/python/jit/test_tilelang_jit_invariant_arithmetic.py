@@ -1,0 +1,631 @@
+import re
+import random
+
+import pytest
+import torch
+
+import tilelang
+import tilelang.language as T
+import tilelang.testing
+
+
+def divmod_kernel(size=4096):
+    @T.prim_func
+    def main(A: T.Tensor((size,), "int32"), Q: T.Tensor((size,), "int32"), R: T.Tensor((size,), "int32"), d: T.int32):
+        with T.Kernel(T.ceildiv(size, 128), threads=128) as bx:
+            for i in T.Parallel(128):
+                x = A[bx * 128 + i]
+                Q[bx * 128 + i] = x // d
+                R[bx * 128 + i] = x % d
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div():
+    kernel = tilelang.compile(
+        divmod_kernel(), target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    source = kernel.get_kernel_source()
+    signature = re.search(r"void main_kernel\((.*?)\)", source).group(1)
+    assert signature.count("fastdiv_multiplier") == 1
+    assert signature.count("fastdiv_shift") == 1
+    assert "fastdiv_k" not in source and "fastdiv_d" not in source
+    a = torch.randint(-(2**31) + 1, 2**31, (4096,), dtype=torch.int32, device="cuda")
+    a[:7] = torch.tensor([0, 1, -1, 2**31 - 1, -(2**31), 7, -7], device="cuda", dtype=torch.int32)
+    q, r = torch.empty_like(a), torch.empty_like(a)
+    for d in (1, 2, 3, 7, 31, 65536, 65537, 2**30 + 1, 2**31 - 1, -3, -(2**31), 7):
+        kernel(a, q, r, d)
+        expected_q = torch.div(a.to(torch.int64), d, rounding_mode="floor").to(torch.int32)
+        expected_r = (a.to(torch.int64) % d).to(torch.int32)
+        torch.testing.assert_close(q, expected_q)
+        torch.testing.assert_close(r, expected_r)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div_skips_device_divisor():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32")):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = i // A[i]
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "fastdiv_multiplier" not in kernel.get_kernel_source()
+    a = torch.arange(1, 129, dtype=torch.int32, device="cuda")
+    b = torch.empty_like(a)
+    kernel(a, b)
+    torch.testing.assert_close(b, torch.zeros_like(b))
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div_guarded_launch():
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), d: T.int32):
+        if d > 0:
+            with T.Kernel(1, threads=128):
+                for i in T.Parallel(128):
+                    B[i] = i // d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "fastdiv_multiplier" in kernel.get_kernel_source()
+    b = torch.full((128,), -999, dtype=torch.int32, device="cuda")
+    kernel(b, 0)
+    torch.testing.assert_close(b, torch.full_like(b, -999))
+    kernel(b, 7)
+    torch.testing.assert_close(b, torch.arange(128, dtype=torch.int32, device="cuda") // 7)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div_dynamic_shape():
+    n = T.dynamic("n")
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), "int32"), B: T.Tensor((128,), "int32")):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = i // n + A[0]
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "fastdiv_multiplier" in kernel.get_kernel_source()
+    b = torch.empty(128, dtype=torch.int32, device="cuda")
+    for n in (1, 7, 31):
+        a = torch.ones(n, dtype=torch.int32, device="cuda")
+        kernel(a, b)
+        torch.testing.assert_close(b, torch.arange(128, dtype=torch.int32, device="cuda") // n + 1)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div_multiple_divisors():
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), d: T.int32, e: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = i // d + i % d + i // e + i % e
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    signature = re.search(r"void main_kernel\((.*?)\)", kernel.get_kernel_source()).group(1)
+    assert signature.count("fastdiv_multiplier") == 2
+    assert signature.count("fastdiv_shift") == 2
+    b = torch.empty(128, dtype=torch.int32, device="cuda")
+    x = torch.arange(128, dtype=torch.int32, device="cuda")
+    for d, e in ((3, 7), (7, 3), (1, 31), (31, 31)):
+        kernel(b, d, e)
+        torch.testing.assert_close(b, x // d + x % d + x // e + x % e)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div_rejects_unsupported_adapter():
+    with pytest.raises(ValueError, match="tl.enable_invariant_arithmetic requires CUDA"):
+        tilelang.compile(
+            divmod_kernel(),
+            target="cuda",
+            target_host="c",
+            execution_backend="cython",
+            pass_configs={"tl.enable_invariant_arithmetic": True},
+        )
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div_int64():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int64"), B: T.Tensor((128,), "int64"), d: T.int64):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = A[i] // d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "barrett_reciprocal" in kernel.get_kernel_source()
+    a = torch.arange(128, dtype=torch.int64, device="cuda") + 2**40
+    b = torch.empty_like(a)
+    kernel(a, b, 7)
+    torch.testing.assert_close(b, a // 7)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_div_leaves_constant_divisor_unchanged():
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32")):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = i // 7
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "fastdiv_multiplier" not in kernel.get_kernel_source()
+    b = torch.empty(128, dtype=torch.int32, device="cuda")
+    kernel(b)
+    torch.testing.assert_close(b, torch.arange(128, dtype=torch.int32, device="cuda") // 7)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("unsigned", [False, True])
+def test_barrett_remainder(unsigned):
+    dtype = "uint32" if unsigned else "int32"
+
+    @T.prim_func
+    def main(A: T.Tensor((1024,), dtype), B: T.Tensor((1024,), dtype), d: T.dtype(dtype)):
+        with T.Kernel(8, threads=128) as bx:
+            for i in T.Parallel(128):
+                B[bx * 128 + i] = A[bx * 128 + i] % d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "barrett_reciprocal" in kernel.get_kernel_source()
+    values = torch.randint(0 if unsigned else -(2**31), 2**32 if unsigned else 2**31, (1024,), dtype=torch.int64, device="cuda")
+    values[:5] = torch.tensor([0, 1, 2**31 - 1, 2**32 - 1 if unsigned else -1, 2**31 if unsigned else -(2**31)], device="cuda")
+    a = values.to(torch.uint32 if unsigned else torch.int32)
+    b = torch.empty_like(a)
+    divisors = [1, 2, 3, 7, 65535, 65536, 65537, 2**31 - 1]
+    divisors += [2**31, 2**32 - 1] if unsigned else [-3, -(2**31)]
+    for d in divisors:
+        kernel(a, b, d)
+        torch.testing.assert_close(b.to(torch.int64), values % d)
+
+
+@tilelang.testing.requires_cuda
+def test_proven_exact_division():
+    @T.prim_func
+    def main(A: T.Tensor((1024,), "int32"), B: T.Tensor((1024,), "int32"), d: T.int32):
+        with T.Kernel(8, threads=128) as bx:
+            for i in T.Parallel(128):
+                x = T.bind(A[bx * 128 + i])
+                if x % d == 0:
+                    B[bx * 128 + i] = x // d
+                else:
+                    B[bx * 128 + i] = -777
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    source = kernel.get_kernel_source()
+    assert "exact_inverse" in source and "exact_shift" in source
+    a = torch.arange(-512, 512, dtype=torch.int32, device="cuda")
+    a[:2] = torch.tensor([-(2**31), 2**31 - 1], dtype=torch.int32, device="cuda")
+    b = torch.empty_like(a)
+    for d in (1, 2, 3, 6, 7, 12, 128, 65536, 2**30, 2**31 - 1, -3, -(2**31)):
+        kernel(a, b, d)
+        values = a.to(torch.int64)
+        expected = torch.where(values % d == 0, values // d, -777).to(torch.int32)
+        torch.testing.assert_close(b, expected)
+
+
+@tilelang.testing.requires_cuda
+def test_composite_layout_divisors():
+    @T.prim_func
+    def main(B: T.Tensor((1024,), "int32"), height: T.int32, width: T.int32):
+        with T.Kernel(8, threads=128) as bx:
+            for i in T.Parallel(128):
+                linear = bx * 128 + i
+                B[linear] = linear // (height * width) + linear % (height * width)
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    signature = re.search(r"void main_kernel\((.*?)\)", kernel.get_kernel_source()).group(1)
+    assert signature.count("fastdiv_multiplier") == 1
+    b = torch.empty(1024, dtype=torch.int32, device="cuda")
+    x = torch.arange(1024, dtype=torch.int32, device="cuda")
+    for h, w in ((3, 7), (1, 31), (7, 3)):
+        kernel(b, h, w)
+        torch.testing.assert_close(b, x // (h * w) + x % (h * w))
+
+
+@tilelang.testing.requires_cuda
+def test_unsigned_fast_div_and_rem():
+    @T.prim_func
+    def main(A: T.Tensor((1024,), "uint32"), Q: T.Tensor((1024,), "uint32"), R: T.Tensor((1024,), "uint32"), d: T.uint32):
+        with T.Kernel(8, threads=128) as bx:
+            for i in T.Parallel(128):
+                Q[bx * 128 + i] = A[bx * 128 + i] // d
+                R[bx * 128 + i] = A[bx * 128 + i] % d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    signature = re.search(r"void main_kernel\((.*?)\)", kernel.get_kernel_source()).group(1)
+    assert signature.count("barrett_reciprocal") == 1
+    values = torch.randint(0, 2**32, (1024,), dtype=torch.int64, device="cuda")
+    values[:4] = torch.tensor([0, 1, 2**31, 2**32 - 1], device="cuda")
+    a = values.to(torch.uint32)
+    q, r = torch.empty_like(a), torch.empty_like(a)
+    for d in (1, 2, 3, 7, 65537, 2**31 - 1, 2**31, 2**32 - 1):
+        kernel(a, q, r, d)
+        torch.testing.assert_close(q.to(torch.int64), values // d)
+        torch.testing.assert_close(r.to(torch.int64), values % d)
+
+
+@tilelang.testing.requires_cuda
+def test_truncating_division_and_remainder():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int32"), Q: T.Tensor((128,), "int32"), R: T.Tensor((128,), "int32"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                Q[i] = T.truncdiv(A[i], d)
+                R[i] = T.truncmod(A[i], d)
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "fastdiv_multiplier" in kernel.get_kernel_source()
+    a = torch.arange(-64, 64, dtype=torch.int32, device="cuda")
+    q, r = torch.empty_like(a), torch.empty_like(a)
+    for d in (1, 3, 7, -3, -7):
+        kernel(a, q, r, d)
+        expected_q = torch.div(a, d, rounding_mode="trunc")
+        torch.testing.assert_close(q, expected_q)
+        torch.testing.assert_close(r, a - expected_q * d)
+
+
+@tilelang.testing.requires_cuda
+def test_exact_proof_does_not_escape_branch():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                x = T.bind(A[i])
+                if x % d == 0:
+                    B[i] = x // d + 10
+                else:
+                    B[i] = x // d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    source = kernel.get_kernel_source()
+    assert "exact_inverse" in source and "fastdiv_multiplier" in source
+    a = torch.arange(-64, 64, dtype=torch.int32, device="cuda")
+    b = torch.empty_like(a)
+    for d in (3, 6, 7):
+        kernel(a, b, d)
+        torch.testing.assert_close(b, a // d + (a % d == 0).to(torch.int32) * 10)
+
+
+@tilelang.testing.requires_cuda
+def test_unsigned_exact_division():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "uint32"), B: T.Tensor((128,), "uint32"), d: T.uint32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                x = T.bind(A[i])
+                if x % d == 0:
+                    B[i] = x // d
+                else:
+                    B[i] = T.uint32(0xFFFFFFFF)
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "exact_inverse" in kernel.get_kernel_source()
+    b = torch.empty(128, dtype=torch.uint32, device="cuda")
+    for d in (1, 2, 3, 6, 7, 65536, 2**31, 2**32 - 1):
+        values = torch.arange(128, dtype=torch.int64, device="cuda") * d
+        values &= 0xFFFFFFFF
+        values[-1] = 2**32 - 1
+        a = values.to(torch.uint32)
+        kernel(a, b, d)
+        expected = torch.where(values % d == 0, values // d, 0xFFFFFFFF)
+        torch.testing.assert_close(b.to(torch.int64), expected)
+
+
+@tilelang.testing.requires_cuda
+def test_exact_proof_does_not_apply_to_mutated_buffer():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                if A[i] % d == 0:
+                    A[i] = A[i] + 1
+                    B[i] = A[i] // d
+                else:
+                    B[i] = -777
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "exact_inverse" not in kernel.get_kernel_source()
+    a = torch.arange(128, dtype=torch.int32, device="cuda") * 3
+    expected = (a + 1) // 3
+    b = torch.empty_like(a)
+    kernel(a, b, 3)
+    torch.testing.assert_close(b, expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("remainder_only", [False, True])
+@pytest.mark.parametrize("truncating", [False, True])
+def test_widened_divisor_preserves_int64_arithmetic(remainder_only, truncating):
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int64"), Q: T.Tensor((128,), "int64"), R: T.Tensor((128,), "int64"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                if not remainder_only:
+                    Q[i] = T.truncdiv(A[i], T.int64(d)) if truncating else A[i] // T.int64(d)
+                R[i] = T.truncmod(A[i], T.int64(d)) if truncating else A[i] % T.int64(d)
+
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        target_host="c",
+        execution_backend="tvm_ffi",
+        pass_configs={"tl.enable_invariant_arithmetic": True},
+    )
+    source = kernel.get_kernel_source()
+    assert ("barrett_reciprocal" if remainder_only else "fastdiv_multiplier") in source
+    values = [-(2**63) + 1, -(2**40), -(2**31), -1, 0, 1, 2**31 - 1, 2**31, 2**32, 2**40, 2**63 - 1]
+    a = torch.tensor((values * 12)[:128], device="cuda", dtype=torch.int64)
+    q, r = torch.empty_like(a), torch.empty_like(a)
+    for d in (1, 2, 3, 7, 65537, 2**31 - 1, -1, -3, -(2**31)):
+        kernel(a, q, r, d)
+        expected_q = torch.div(a, d, rounding_mode="trunc" if truncating else "floor")
+        if not remainder_only:
+            torch.testing.assert_close(q, expected_q)
+        torch.testing.assert_close(r, a - expected_q * d)
+
+
+@tilelang.testing.requires_cuda
+def test_widened_layout_gather():
+    @T.prim_func
+    def main(
+        A: T.Tensor((8192,), "float32"),
+        Offsets: T.Tensor((128,), "int32"),
+        B: T.Tensor((128,), "float32"),
+        d: T.int32,
+        width: T.int32,
+        pitch: T.int32,
+    ):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                offset = T.bind(Offsets[i])
+                if offset % d == 0:
+                    element = offset // d
+                    B[i] = A[element // width * pitch + element % width]
+                else:
+                    B[i] = -1.0
+
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        target_host="c",
+        execution_backend="tvm_ffi",
+        pass_configs={"tl.enable_invariant_arithmetic": True},
+    )
+    source = kernel.get_kernel_source()
+    assert "tl::fast_div(((int64_t)" in source
+    a = torch.arange(8192, device="cuda", dtype=torch.float32)
+    b = torch.empty(128, device="cuda", dtype=torch.float32)
+    for d, width, pitch in ((12, 7, 11), (3, 13, 17), (1, 5, 9)):
+        offsets = torch.arange(128, device="cuda", dtype=torch.int32) * d
+        offsets[::3] += 1
+        kernel(a, offsets, b, d, width, pitch)
+        element = offsets.long() // d
+        expected = torch.where(offsets % d == 0, a[element // width * pitch + element % width], -1.0)
+        torch.testing.assert_close(b, expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int64", "uint64"])
+@pytest.mark.parametrize("truncating", [False, True])
+@pytest.mark.parametrize("remainder_only", [False, True])
+def test_native_wide_divmod(dtype, truncating, remainder_only):
+    # TVM-FFI's Python scalar ABI is signed int64. Exercise the full unsigned
+    # domain through an explicit bit-preserving input cast, not a smaller range.
+    signed_abi = dtype == "uint64"
+    parameter_dtype = "int64" if signed_abi else dtype
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), Q: T.Tensor((128,), dtype), R: T.Tensor((128,), dtype), d: T.dtype(parameter_dtype)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                divisor = T.cast(d, dtype)
+                if not remainder_only:
+                    Q[i] = T.truncdiv(A[i], divisor) if truncating else A[i] // divisor
+                R[i] = T.truncmod(A[i], divisor) if truncating else A[i] % divisor
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    signature = re.search(r"void main_kernel\((.*?)\)", kernel.get_kernel_source()).group(1)
+    assert signature.count("barrett_reciprocal") == 1
+    unsigned = dtype == "uint64"
+    limit = 2**64 - 1 if unsigned else 2**63 - 1
+    values = [0, 1, 2, 3, 2**31 - 1, 2**32, 2**40, limit - 1, limit]
+    if not unsigned:
+        values += [-1, -7, -(2**40), -(2**63) + 1]
+    rng = random.Random(0)
+    values += [rng.randrange(0 if unsigned else -(2**63) + 1, limit + 1) for _ in range(128 - len(values))]
+    a = torch.tensor(values, dtype=getattr(torch, dtype), device="cuda")
+    q, r = torch.empty_like(a), torch.empty_like(a)
+    divisors = [1, 2, 3, 7, 65537, 2**32 - 1, 2**32, 2**32 + 1, 2**62, 2**63 - 1]
+    if unsigned:
+        divisors += [2**63, 2**64 - 1]
+    else:
+        divisors += [-1, -3, -(2**63)]
+    divisors += [rng.randrange(1, limit + 1) for _ in range(12)]
+    for d in divisors:
+        kernel(a, q, r, d - 2**64 if signed_abi and d >= 2**63 else d)
+        quotients = [(abs(x) // abs(d)) * (-1 if (x < 0) != (d < 0) else 1) if truncating else x // d for x in values]
+        if not remainder_only:
+            assert q.cpu().tolist() == quotients
+        assert r.cpu().tolist() == [x - quotient * d for x, quotient in zip(values, quotients)]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int8", "uint8", "int16", "uint16"])
+def test_narrow_divmod(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), Q: T.Tensor((128,), dtype), R: T.Tensor((128,), dtype), d: T.dtype(dtype)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                Q[i] = A[i] // d
+                R[i] = A[i] % d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    signed = dtype.startswith("int")
+    bits = 8 if "8" in dtype else 16
+    high = 2 ** (bits - int(signed)) - 1
+    low = -(2 ** (bits - 1)) if signed else 0
+    values = ([low, low + 1, 0, 1, 7, high - 1, high] * 19)[:128]
+    a = torch.tensor(values, dtype=getattr(torch, dtype), device="cuda")
+    q, r = torch.empty_like(a), torch.empty_like(a)
+    for d in [1, 2, 3, 7, high, -3, low] if signed else [1, 2, 3, 7, high]:
+        kernel(a, q, r, d)
+        assert q.cpu().tolist() == [x // d for x in values]
+        assert r.cpu().tolist() == [x % d for x in values]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype,wide", [("int32", "int64"), ("uint32", "uint64"), ("uint32", "int64"), ("int32", "uint64")])
+def test_divmod_preparation_shared_across_widths(dtype, wide):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), B: T.Tensor((4, 128), wide), d: T.dtype(dtype)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                x = T.bind(A[i])
+                B[0, i] = T.cast(x // d, wide)
+                B[1, i] = T.cast(x % d, wide)
+                wide_x = T.bind(T.cast(x, wide))
+                B[2, i] = wide_x // T.cast(d, wide)
+                B[3, i] = wide_x % T.cast(d, wide)
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    source = kernel.get_kernel_source()
+    signature = re.search(r"void main_kernel\((.*?)\)", source).group(1)
+    if dtype == "uint32":
+        assert signature.count("barrett_reciprocal") == 1
+        # Zero extension proves the whole dividend lies in the uint32 range.
+        assert "4294967295" not in source
+    else:
+        assert signature.count("fastdiv_multiplier") == 1
+        assert signature.count("fastdiv_shift") == 1
+        # Signed-to-unsigned conversion is not a value-preserving extension.
+        assert signature.count("barrett_reciprocal") == int(wide == "uint64")
+    values = [0, 1, 7, 2**31 - 1]
+    values += [-(2**31), -7, -1] if dtype == "int32" else [2**31, 2**32 - 1]
+    values = (values * 26)[:128]
+    a = torch.tensor(values, dtype=getattr(torch, dtype), device="cuda")
+    b = torch.empty((4, 128), dtype=getattr(torch, wide), device="cuda")
+    divisors = [1, 3, 7, -3] if dtype == "int32" else [1, 3, 7, 2**31 + 1, 2**32 - 1]
+
+    def convert(x):
+        return x & (2**64 - 1) if wide == "uint64" else x
+
+    for d in divisors:
+        kernel(a, b, d)
+        expected = [
+            [convert(x // d) for x in values],
+            [convert(x % d) for x in values],
+            [convert(x) // convert(d) for x in values],
+            [convert(x) % convert(d) for x in values],
+        ]
+        assert b.cpu().tolist() == expected
+
+
+@tilelang.testing.requires_cuda
+def test_wide_range_proof_does_not_survive_buffer_mutation():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "uint64"), B: T.Tensor((128,), "uint64"), d: T.uint32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                if A[i] < T.uint64(2**32):
+                    A[i] = A[i] + T.uint64(2**40)
+                    B[i] = A[i] // T.uint64(d)
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    a = torch.arange(128, device="cuda", dtype=torch.int64).to(torch.uint64)
+    b = torch.empty_like(a)
+    kernel(a, b, 7)
+    assert b.cpu().tolist() == [(x + 2**40) // 7 for x in range(128)]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("wide", ["int64", "uint64"])
+def test_narrow_dividend_wide_divisor(wide):
+    @T.prim_func
+    def main(A: T.Tensor((128,), "uint32"), Q: T.Tensor((128,), wide), R: T.Tensor((128,), wide), bits: T.int64):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                d = T.cast(bits, wide)
+                Q[i] = T.cast(A[i], wide) // d
+                R[i] = T.cast(A[i], wide) % d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    signature = re.search(r"void main_kernel\((.*?)\)", kernel.get_kernel_source()).group(1)
+    assert signature.count("barrett_reciprocal") == 1
+    assert "uint barrett_reciprocal" in signature
+    values = ([0, 1, 7, 2**31, 2**32 - 2, 2**32 - 1] * 22)[:128]
+    a = torch.tensor(values, dtype=torch.uint32, device="cuda")
+    q = torch.empty(128, dtype=getattr(torch, wide), device="cuda")
+    r = torch.empty_like(q)
+    divisors = [1, 2, 3, 7, 2**32 - 1, 2**32, 2**32 + 1, 2**63 - 1]
+    divisors += [2**63, 2**64 - 1] if wide == "uint64" else [-3, -(2**63)]
+    for d in divisors:
+        kernel(a, q, r, d - 2**64 if d >= 2**63 else d)
+        assert q.cpu().tolist() == [x // d for x in values]
+        assert r.cpu().tolist() == [x % d for x in values]
+
+
+@tilelang.testing.requires_cuda
+def test_dedup_keeps_widened_product_distinct():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "uint32"), B: T.Tensor((2, 128), "uint64"), h: T.uint32, w: T.uint32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[0, i] = T.uint64(A[i] // (h * w))
+                B[1, i] = T.uint64(A[i]) // (T.uint64(h) * T.uint64(w))
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    signature = re.search(r"void main_kernel\((.*?)\)", kernel.get_kernel_source()).group(1)
+    assert signature.count("barrett_reciprocal") == 2
+    values = [0, 1, 2**31, 2**32 - 1] * 32
+    a = torch.tensor(values, dtype=torch.uint32, device="cuda")
+    b = torch.empty((2, 128), dtype=torch.uint64, device="cuda")
+    for h, w in ((7, 3), (65537, 65537), (2**31, 3), (2**32 - 1, 2**32 - 1)):
+        kernel(a, b, h, w)
+        assert b.cpu().tolist() == [[x // ((h * w) & 0xFFFFFFFF) for x in values], [x // (h * w) for x in values]]
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

@@ -237,6 +237,8 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
+    if pass_ctx.config.get("tl.enable_invariant_arithmetic", False):
+        mod = tilelang.transform.LowerInvariantArithmetic()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
 
     # @CUDA-specific

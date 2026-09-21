@@ -700,6 +700,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_atomic_h_) {
     decl_stream << "#include <tl_templates/cuda/atomic.h>\n";
   }
+  if (need_invariant_arithmetic_h_) {
+    decl_stream << "#include <tl_templates/cuda/invariant_arithmetic.h>\n";
+  }
   if (need_math_h_) {
     decl_stream << "#include <tl_templates/cuda/math.h>\n";
   }
@@ -2581,6 +2584,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     os << ")";
   };
+  if (op->op.same_as(tl::fast_div()) || op->op.same_as(tl::fast_rem()) ||
+      op->op.same_as(tl::exact_div()) || op->op.same_as(tl::barrett_reduce())) {
+    need_invariant_arithmetic_h_ = true;
+    const char *name = op->op.same_as(tl::fast_div())    ? "tl::fast_div"
+                       : op->op.same_as(tl::fast_rem())  ? "tl::fast_rem"
+                       : op->op.same_as(tl::exact_div()) ? "tl::exact_div"
+                                                         : "tl::barrett_reduce";
+    print_extern_call_expr(os, name);
+    return;
+  }
   if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(op->args.size(), 2);
     const bool is_max = op->op.same_as(tl::max_nan());

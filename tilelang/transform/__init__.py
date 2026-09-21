@@ -458,3 +458,13 @@ def UnrollLoop():
         The result pass
     """
     return _ffi_api.UnrollLoop()  # type: ignore
+
+
+def LowerInvariantArithmetic():
+    """Lower launch-invariant scalar integer division and remainder.
+
+    Includes fast div/rem, proven-exact division, and Barrett reduction.
+    Requires annotated device regions. Run after device arithmetic simplification
+    so host bindings remain outside the kernel. Currently lowered by CUDA codegen.
+    """
+    return _ffi_api.LowerInvariantArithmetic()

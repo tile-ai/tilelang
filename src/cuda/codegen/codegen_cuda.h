@@ -130,6 +130,7 @@ private:
   bool need_math_constants_h_{false};
   // whether need tl CUDA math helpers
   bool need_math_h_{false};
+  bool need_invariant_arithmetic_h_{false};
   // whether need tl copy helpers
   bool need_copy_h_{false};
   // whether need tl SM90 TMA copy helpers

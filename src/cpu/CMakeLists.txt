@@ -6,6 +6,7 @@
 
 file(GLOB TILE_LANG_CPU_SRCS
   src/cpu/codegen/codegen_c.cc
+  src/cpu/codegen/intrin_rule_c.cc
   src/cpu/codegen/rt_mod_c.cc
   src/cpu/op/*.cc
   src/cpu/transform/*.cc

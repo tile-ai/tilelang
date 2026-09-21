@@ -133,6 +133,10 @@ def lower_to_host_device_ir(
             # Run backend-independent semantic checks before target-specific lowering.
             PreLowerSemanticCheck(mod)
 
+            if tilelang.transform.get_pass_context().config.get("tl.enable_invariant_arithmetic", False) and (
+                target.kind.name != "cuda" or context.execution_backend.name != "tvm_ffi"
+            ):
+                raise ValueError("tl.enable_invariant_arithmetic requires CUDA with execution_backend='tvm_ffi'.")
             mod = context.lower(mod)
 
             host_mod = tirx.transform.Filter(_is_host_call)(mod)

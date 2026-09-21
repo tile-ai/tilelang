@@ -585,6 +585,12 @@ TVM_DLL const Op &warp_reduce_bitor();
  */
 TVM_DLL const Op &__ldg();
 
+// Host-prepared integer arithmetic. Validity operands select exact fallbacks.
+TVM_DLL const Op &fast_div();
+TVM_DLL const Op &fast_rem();
+TVM_DLL const Op &exact_div();
+TVM_DLL const Op &barrett_reduce();
+
 } // namespace tl
 } // namespace tvm
 
