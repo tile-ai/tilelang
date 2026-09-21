@@ -241,8 +241,13 @@ def test_ascend_simd_sfu_precision_merging():
     assert "::vln(" not in source
     assert "::vsqrt(" not in source
 
-    with pytest.raises(Exception, match="MODE_MERGING"):
-        lower(func, target="pto")
+    # PTO lowers merging to a zeroing SFU call wrapped in pto.vsel; the
+    # ftz_false precision tier selects the subnormal-preserving helpers.
+    pto_source = lower(func, target="pto").kernel_source
+    assert "pto.vsel(" in pto_source
+    for wrapper in ("tl.vexp_1ulp_ftz_false", "tl.vln_1ulp_ftz_false", "tl.vsqrt_0ulp_ftz_false"):
+        assert f"{wrapper}(" in pto_source
+    assert "MODE_MERGING" not in pto_source
 
 
 def test_pto_simd_sfu_precision_source():

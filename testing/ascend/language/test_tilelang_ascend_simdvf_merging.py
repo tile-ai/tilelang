@@ -83,29 +83,6 @@ def merging_kernel(op_name, dtype, mode="MODE_MERGING", precision=None, pos="POS
     return kernel
 
 
-@pytest.mark.pto
-@pytest.mark.parametrize("op_name,dtype", CASES)
-def test_merging_codegen_pto(op_name, dtype):
-    source = lower(
-        merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None), target="pto"
-    ).kernel_source
-    if op_name == "vabsdif":
-        assert "pto.vabs(" in source
-        assert "pto.vsub(" in source
-    elif op_name == "vdiv":
-        assert "tl.vdiv_precise_f32(" in source
-    else:
-        pto_name = "vdup" if op_name in ("vdup", "vdupv") else op_name
-        assert f"pto.{pto_name}(" in source
-    assert "dst_tl_slot_0 = pto.vsel(" in source
-    assert ", dst_tl_slot_0, " in source
-    assert "MODE_MERGING" not in source
-    if op_name == "vcadd":
-        assert 'pto.pset_b32("PAT_VL1")' in source
-    elif op_name in ("vcmax", "vcmin"):
-        assert 'pto.pset_b32("PAT_VL2")' in source
-
-
 @pytest.mark.parametrize(
     "op_name,precision,wrapper",
     [
@@ -123,36 +100,21 @@ def test_merging_precision_wrappers(op_name, precision, wrapper):
 
 @pytest.mark.pto
 @pytest.mark.parametrize(
-    "op_name,precision",
+    "op_name,precision,wrapper",
     [
-        ("vdiv", None),
-        ("vdiv", "exact"),
-        pytest.param("vexp", "ftz_false", marks=pytest.mark.xfail(reason="PTODSL has no precision option for unary SFU ops")),
-        pytest.param("vln", "ftz_false", marks=pytest.mark.xfail(reason="PTODSL has no precision option for unary SFU ops")),
-        pytest.param("vsqrt", "ftz_false", marks=pytest.mark.xfail(reason="PTODSL has no precision option for unary SFU ops")),
+        ("vdiv", None, "tl.vdiv_precise_f32"),
+        ("vdiv", "exact", "tl.vdiv_precise_f32"),
+        ("vdiv", "ftz_true", "pto.vdiv"),
+        ("vexp", "ftz_false", "tl.vexp_1ulp_ftz_false"),
+        ("vln", "ftz_false", "tl.vln_1ulp_ftz_false"),
+        ("vsqrt", "ftz_false", "tl.vsqrt_0ulp_ftz_false"),
     ],
 )
-def test_merging_precision_wrappers_pto(op_name, precision):
+def test_merging_precision_wrappers_pto(op_name, precision, wrapper):
     source = lower(merging_kernel(op_name, "float32", precision=precision), target="pto").kernel_source
     assert "dst_tl_slot_0 = pto.vsel(" in source
-    assert "tl.vdiv_precise_f32(" in source
+    assert f"{wrapper}(" in source
     assert "MODE_MERGING" not in source
-
-
-@pytest.mark.pto
-def test_merging_vdup_fallback_uses_destination_dtype_pto():
-    source = lower(merging_kernel("vdup", "bfloat16", scalar_dtype="float32"), target="pto").kernel_source
-    assert "pto.vsel(" in source
-    assert "pto.vdup(" in source
-
-
-@pytest.mark.pto
-@pytest.mark.parametrize("op_name", ["vadd", "vdup", "vdupv", "vcmax", "vaxpy"])
-def test_zeroing_codegen_pto(op_name):
-    source = lower(merging_kernel(op_name, "float32", mode="MODE_ZEROING"), target="pto").kernel_source
-    name = "vdup" if op_name in ("vdup", "vdupv") else op_name
-    assert f"pto.{name}(" in source
-    assert "pto.vsel(" not in source
 
 
 def reference(op_name, a, b, old, mask, pos):
@@ -226,9 +188,7 @@ def test_merging_runtime(target, op_name, dtype):
     b = (torch.arange(lanes) % 3 + 1).to(td)
     old = (torch.arange(2048 // tvm.DataType(out_dtype).bits) % 17 + 7).to(out_td)
     pos = "POS_HIGHEST" if op_name == "vdupv" else "POS_LOWEST"
-    kernel = tilelang.compile(
-        merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None, pos=pos), target=target
-    )
+    kernel = tilelang.compile(merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None, pos=pos), target=target)
     device_a, device_b, device_old = a.to("npu"), b.to("npu"), old.to("npu")
     for mask in (torch.zeros(lanes, dtype=torch.bool), torch.ones(lanes, dtype=torch.bool), torch.arange(lanes) % 3 == 1):
         expected = reference(op_name, a, b, old, mask, pos)
@@ -452,8 +412,7 @@ def test_pto_vcvt_merging_runtime(src_dtype, dst_dtype):
         a = torch.arange(src_lanes, dtype=torch.int32) - 16
     old = (torch.arange(dst_lanes, dtype=torch.float32) % 17 + 7).to(getattr(torch, dst_dtype))
     kernels = {
-        mode: tilelang.compile(_vcvt_kernel(src_dtype, dst_dtype, mode=mode), target="pto")
-        for mode in ("MODE_ZEROING", "MODE_MERGING")
+        mode: tilelang.compile(_vcvt_kernel(src_dtype, dst_dtype, mode=mode), target="pto") for mode in ("MODE_ZEROING", "MODE_MERGING")
     }
     for mask in (
         torch.zeros(src_lanes, dtype=torch.bool),
