@@ -627,5 +627,66 @@ def test_dedup_keeps_widened_product_distinct():
         assert b.cpu().tolist() == [[x // ((h * w) & 0xFFFFFFFF) for x in values], [x // (h * w) for x in values]]
 
 
+@tilelang.testing.requires_cuda
+def test_invariant_arithmetic_materialization_preserves_lazy_guards():
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), d: T.int32, e: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                if d != 0 and e != 0:
+                    q = i // d
+                    r = q % e
+                    B[i] = T.if_then_else(q + r >= 0 and q + r < 128, q + r, -1)
+                else:
+                    B[i] = -9
+
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        target_host="c",
+        execution_backend="tvm_ffi",
+        pass_configs={"tl.enable_invariant_arithmetic": True},
+    )
+    source = kernel.get_kernel_source()
+    assert "invariant_value" in source
+    assert "tl::fast_div" in source  # Materialization must not expand fallback math.
+    out = torch.empty(128, dtype=torch.int32, device="cuda")
+    x = torch.arange(128, dtype=torch.int32, device="cuda")
+    for d, e in ((0, 0), (0, 7), (7, 0), (1, 1), (7, 3), (-3, 7), (7, -3)):
+        kernel(out, d, e)
+        if d and e:
+            value = x // d + (x // d) % e
+            expected = torch.where((value >= 0) & (value < 128), value, -1)
+        else:
+            expected = torch.full_like(x, -9)
+        torch.testing.assert_close(out, expected)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_arithmetic_materialization_does_not_cache_loads():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                B[i] = A[i] // d
+                A[i] = -A[i]
+                B[i] = B[i] + A[i] % d
+
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        target_host="c",
+        execution_backend="tvm_ffi",
+        pass_configs={"tl.enable_invariant_arithmetic": True},
+    )
+    values = torch.arange(-64, 64, dtype=torch.int32, device="cuda")
+    out = torch.empty_like(values)
+    for d in (1, 7, -3):
+        data = values.clone()
+        kernel(data, out, d)
+        torch.testing.assert_close(data, -values)
+        torch.testing.assert_close(out, values // d + (-values) % d)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

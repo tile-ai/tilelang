@@ -4,6 +4,7 @@
  */
 #include <tvm/arith/analyzer.h>
 #include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -395,6 +396,123 @@ public:
 private:
   VarSet inputs_;
 };
+
+// Keep arithmetic opaque through symbolic simplification, then share calls only
+// inside the statement/branch where they execute. Never extract fallback math.
+bool IsInvariantArithmetic(const PrimExpr &expr) {
+  const auto *call = expr.as<CallNode>();
+  return call && (call->op.same_as(tl::fast_div()) ||
+                  call->op.same_as(tl::fast_rem()) ||
+                  call->op.same_as(tl::barrett_reduce()) ||
+                  call->op.same_as(tl::exact_div()));
+}
+
+class ArithmeticCallBinder : public ExprMutator {
+public:
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    // Do not move expressions out of a lazy arm or cache mutable loads.
+    if (op->op.same_as(builtin::if_then_else()) ||
+        SideEffect(ffi::GetRef<PrimExpr>(op)) != CallEffectKind::kPure) {
+      return ffi::GetRef<PrimExpr>(op);
+    }
+    PrimExpr value = ExprMutator::VisitExpr_(op);
+    if (!IsInvariantArithmetic(value)) {
+      return value;
+    }
+    for (const auto &entry : values_) {
+      if (ffi::StructuralEqual()(entry.first, value)) {
+        return entry.second;
+      }
+    }
+    Var var("invariant_value", value.dtype());
+    values_.emplace_back(value, var);
+    bindings_.push_back(Bind(var, value, op->span));
+    return var;
+  }
+
+  // The caller can lower statement conditions into separate branches. Within
+  // other expressions these nodes remain barriers to speculative evaluation.
+  PrimExpr VisitExpr_(const AndNode *op) final {
+    return ffi::GetRef<PrimExpr>(op);
+  }
+  PrimExpr VisitExpr_(const OrNode *op) final {
+    return ffi::GetRef<PrimExpr>(op);
+  }
+  PrimExpr VisitExpr_(const LetNode *op) final {
+    return ffi::GetRef<PrimExpr>(op);
+  }
+  PrimExpr VisitExpr_(const SelectNode *op) final {
+    return ffi::GetRef<PrimExpr>(op);
+  }
+
+  Stmt Materialize(const Stmt &stmt) {
+    bindings_.push_back(stmt);
+    return SeqStmt::Flatten(bindings_);
+  }
+
+private:
+  std::vector<std::pair<PrimExpr, Var>> values_;
+  ffi::Array<Stmt> bindings_;
+};
+
+class InvariantArithmeticMaterializer : public StmtMutator {
+public:
+  Stmt VisitStmt_(const BindNode *op) final {
+    ArithmeticCallBinder binder;
+    PrimExpr value = binder(op->value);
+    return binder.Materialize(Bind(op->var, value, op->span));
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    // Predicated stores may suppress evaluation of their operands.
+    if (op->predicate.defined()) {
+      return ffi::GetRef<Stmt>(op);
+    }
+    if (const auto *call = op->value.as<CallNode>();
+        call && call->op.same_as(builtin::if_then_else()) &&
+        ContainsArithmetic(op->value)) {
+      Stmt yes = VisitStmt(BufferStore(op->buffer, call->args[1], op->indices,
+                                       op->predicate, op->span));
+      Stmt no = VisitStmt(BufferStore(op->buffer, call->args[2], op->indices,
+                                      op->predicate, op->span));
+      return MaterializeCondition(call->args[0], yes, no, op->span);
+    }
+    ArithmeticCallBinder binder;
+    PrimExpr value = binder(op->value);
+    return binder.Materialize(
+        BufferStore(op->buffer, value, op->indices, op->predicate, op->span));
+  }
+
+private:
+  static bool ContainsArithmetic(const PrimExpr &expr) {
+    bool found = false;
+    PostOrderVisit(expr, [&](const ffi::ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        found |= IsInvariantArithmetic(ffi::GetRef<PrimExpr>(call));
+      }
+    });
+    return found;
+  }
+
+  Stmt MaterializeCondition(const PrimExpr &condition, const Stmt &yes,
+                            const Stmt &no, const Span &span) {
+    if (!ContainsArithmetic(condition)) {
+      return IfThenElse(condition, yes, no, span);
+    }
+    // Only split a flat two-term guard around a single store. Do not expand
+    // arbitrary Boolean trees: duplicating their branches can grow
+    // exponentially.
+    if (const auto *op = condition.as<AndNode>();
+        op && !op->a.as<AndNode>() && !op->a.as<OrNode>() &&
+        !op->b.as<AndNode>() && !op->b.as<OrNode>()) {
+      return MaterializeCondition(
+          op->a, MaterializeCondition(op->b, yes, no, span), no, span);
+    }
+    ArithmeticCallBinder binder;
+    PrimExpr value = binder(condition);
+    return binder.Materialize(IfThenElse(value, yes, no, span));
+  }
+};
 } // namespace
 
 namespace transform {
@@ -408,9 +526,24 @@ tvm::transform::Pass LowerInvariantArithmetic() {
                                              "tl.LowerInvariantArithmetic", {});
 }
 
+tvm::transform::Pass MaterializeInvariantArithmetic() {
+  auto pass_func = [](PrimFunc func, const IRModule &,
+                      const tvm::transform::PassContext &) {
+    func.CopyOnWrite()->body = InvariantArithmeticMaterializer()(func->body);
+    return func;
+  };
+  // Splitting short-circuit conditions can duplicate branch-local bindings.
+  return tvm::transform::Sequential(
+      {tirx::transform::CreatePrimFuncPass(
+           pass_func, 0, "tl.MaterializeInvariantArithmetic", {}),
+       tirx::transform::ConvertSSA()});
+}
+
 TVM_FFI_STATIC_INIT_BLOCK() {
-  ffi::reflection::GlobalDef().def("tl.transform.LowerInvariantArithmetic",
-                                   LowerInvariantArithmetic);
+  ffi::reflection::GlobalDef()
+      .def("tl.transform.LowerInvariantArithmetic", LowerInvariantArithmetic)
+      .def("tl.transform.MaterializeInvariantArithmetic",
+           MaterializeInvariantArithmetic);
 }
 } // namespace transform
 } // namespace tl

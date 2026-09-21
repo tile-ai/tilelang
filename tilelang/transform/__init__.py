@@ -468,3 +468,11 @@ def LowerInvariantArithmetic():
     so host bindings remain outside the kernel. Currently lowered by CUDA codegen.
     """
     return _ffi_api.LowerInvariantArithmetic()
+
+
+def MaterializeInvariantArithmetic():
+    """Share invariant arithmetic calls within device statement scopes.
+
+    Run after device simplification; keep fast-path and fallback math opaque.
+    """
+    return _ffi_api.MaterializeInvariantArithmetic()

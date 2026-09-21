@@ -93,6 +93,8 @@ def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tirx.transform.Simplify()(device_mod)
     device_mod = tilelang.transform.HoistBroadcastValues()(device_mod)
+    if tilelang.transform.get_pass_context().config.get("tl.enable_invariant_arithmetic", False):
+        device_mod = tilelang.transform.MaterializeInvariantArithmetic()(device_mod)
     return device_mod
 
 
