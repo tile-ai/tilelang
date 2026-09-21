@@ -8,6 +8,7 @@ import tvm_ffi
 from .registry import resolve_gemm_impl
 from tilelang import _ffi_api
 
+
 @tvm_ffi.register_global_func("tl.gemm.infer_layout")
 def gemm_infer_layout(gemm, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
