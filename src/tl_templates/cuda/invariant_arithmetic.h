@@ -5,6 +5,10 @@
 
 namespace tl {
 
+template <typename T> TL_DEVICE T bounded_rem(T x, T d) {
+  return x >= d ? x - d : x;
+}
+
 template <typename T>
 TL_DEVICE T invariant_div_fallback(T x, T d, bool truncating) {
   T q = x / d;

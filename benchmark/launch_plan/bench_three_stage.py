@@ -39,6 +39,8 @@ def main():
         "gather_positive",
         "gather_bounded",
         "gather_unsigned",
+        "gather_swizzle",
+        "gather_clamped",
     ]
     for size in args.sizes:
         for case in cases:

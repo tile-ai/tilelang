@@ -298,6 +298,11 @@ TIR_DEFINE_TL_BUILTIN(fast_div).set_num_inputs(8).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(fast_rem).set_num_inputs(8).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(bounded_rem)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(exact_div).set_num_inputs(5).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 

@@ -30,23 +30,28 @@ def decode_layout(size, gather, constraints="none", parameter_dtype="int32"):
                 T.assume(h != 0)
                 T.assume(w != 0)
                 T.assume(c != 0)
-            if constraints == "positive" or constraints == "bounded":
+            if constraints == "positive" or constraints == "bounded" or constraints == "swizzle":
                 T.assume(h > 0)
                 T.assume(w > 0)
                 T.assume(c > 0)
-            if constraints == "bounded":
+            if constraints == "bounded" or constraints == "swizzle":
                 T.assume(h <= 1024)
                 T.assume(w <= 1024)
                 T.assume(c <= 1024)
+            if constraints == "swizzle":
+                T.assume(c >= 32)
+            height = T.min(T.max(h, 1), 1024) if constraints == "clamped" else h
+            width = T.min(T.max(w, 1), 1024) if constraints == "clamped" else w
+            channels = T.min(T.max(c, 32), 1024) if constraints == "clamped" else c
             for lane in T.Parallel(128):
                 i = bx * 128 + lane
                 index = T.int64(i) if parameter_dtype == "uint32" else i
-                channel = index % c
-                column = (index // c) % w
-                row = (index // (w * c)) % h
-                batch = index // (h * w * c)
-                swizzled = (channel ^ ((column % 8) * 4)) % c
-                offset = (batch * h + row) * pitch + column * c + swizzled
+                channel = index % channels
+                column = (index // channels) % width
+                row = (index // (width * channels)) % height
+                batch = index // (height * width * channels)
+                swizzled = (channel ^ ((column % 8) * 4)) % channels
+                offset = (batch * height + row) * pitch + column * channels + swizzled
                 if gather:
                     B[i] = A[offset]
                 else:
@@ -112,7 +117,7 @@ def wide_layout(size, remainder_only):
 
 
 def workload(case, size):
-    if case in ("gather_nonzero", "gather_positive", "gather_bounded", "gather_unsigned"):
+    if case in ("gather_nonzero", "gather_positive", "gather_bounded", "gather_unsigned", "gather_swizzle", "gather_clamped"):
         _, inputs, out, expected = workload("gather", size)
         constraint = case.removeprefix("gather_")
         func = decode_layout(
