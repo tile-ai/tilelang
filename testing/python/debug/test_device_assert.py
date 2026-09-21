@@ -16,6 +16,7 @@ def test_device_assert_no_trigger():
     profiler.run_once()
 
 
+@tilelang.testing.requires_cuda
 def test_kernel_body_assert_compiles_and_runs():
     """A plain ``assert`` in a kernel body must lower to a device-legal check.
 
@@ -39,6 +40,7 @@ def test_kernel_body_assert_compiles_and_runs():
     assert torch.equal(b, a + 1)
 
 
+@tilelang.testing.requires_cuda
 def test_kernel_body_assert_without_message_compiles():
     """The message-less form takes the same ``AssertStmt`` path.
 
