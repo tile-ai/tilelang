@@ -245,6 +245,12 @@ struct AllReduce {
   static_assert(((threads / scale) & (threads / scale - 1)) == 0,
                 "AllReduce reduce width (threads / scale) must be a power of "
                 "two");
+  // t ^ (scale * k) only flips the reduce coordinate when the non-reduced
+  // part of the thread index sits below `scale`, which needs scale to be a
+  // power of two; otherwise the pairs straddle reduce groups.
+  static_assert((scale & (scale - 1)) == 0,
+                "AllReduce scale (thread stride between reduce participants) "
+                "must be a power of two");
 
   // Scalar interface (backward-compatible).
   template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
