@@ -12,19 +12,39 @@ import tilelang
 import tilelang.language as T
 
 
-def decode_layout(size, gather):
+def decode_layout(size, gather, constraints="none", parameter_dtype="int32"):
     storage = T.dynamic("storage")
     dtype = "float32" if gather else "int32"
 
     @T.prim_func
-    def main(A: T.Tensor((storage,), "float32"), B: T.Tensor((size,), dtype), h: T.int32, w: T.int32, c: T.int32, pitch: T.int32):
+    def main(
+        A: T.Tensor((storage,), "float32"),
+        B: T.Tensor((size,), dtype),
+        h: T.dtype(parameter_dtype),
+        w: T.dtype(parameter_dtype),
+        c: T.dtype(parameter_dtype),
+        pitch: T.dtype(parameter_dtype),
+    ):
         with T.Kernel(T.ceildiv(size, 128), threads=128) as bx:
+            if constraints == "nonzero":
+                T.assume(h != 0)
+                T.assume(w != 0)
+                T.assume(c != 0)
+            if constraints == "positive" or constraints == "bounded":
+                T.assume(h > 0)
+                T.assume(w > 0)
+                T.assume(c > 0)
+            if constraints == "bounded":
+                T.assume(h <= 1024)
+                T.assume(w <= 1024)
+                T.assume(c <= 1024)
             for lane in T.Parallel(128):
                 i = bx * 128 + lane
-                channel = i % c
-                column = (i // c) % w
-                row = (i // (w * c)) % h
-                batch = i // (h * w * c)
+                index = T.int64(i) if parameter_dtype == "uint32" else i
+                channel = index % c
+                column = (index // c) % w
+                row = (index // (w * c)) % h
+                batch = index // (h * w * c)
                 swizzled = (channel ^ ((column % 8) * 4)) % c
                 offset = (batch * h + row) * pitch + column * c + swizzled
                 if gather:
@@ -92,6 +112,13 @@ def wide_layout(size, remainder_only):
 
 
 def workload(case, size):
+    if case in ("gather_nonzero", "gather_positive", "gather_bounded", "gather_unsigned"):
+        _, inputs, out, expected = workload("gather", size)
+        constraint = case.removeprefix("gather_")
+        func = decode_layout(
+            size, True, "nonzero" if constraint == "unsigned" else constraint, "uint32" if constraint == "unsigned" else "int32"
+        )
+        return func, inputs, out, expected
     i = torch.arange(size, dtype=torch.int64, device="cuda")
     if case in ("decode", "gather"):
         h, w, c = 13, 29, 37
@@ -182,7 +209,22 @@ def measure(graph, call, count):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cases", nargs="+", default=["decode", "gather", "banked", "aligned_gather", "wide_layout", "wide_remainder"])
+    parser.add_argument(
+        "--cases",
+        nargs="+",
+        default=[
+            "decode",
+            "gather",
+            "banked",
+            "aligned_gather",
+            "wide_layout",
+            "wide_remainder",
+            "gather_nonzero",
+            "gather_positive",
+            "gather_bounded",
+            "gather_unsigned",
+        ],
+    )
     parser.add_argument("--sizes", nargs="+", type=int, default=[4096, 1048576])
     parser.add_argument("--rounds", type=int, default=7)
     parser.add_argument("--count", type=int, default=64)

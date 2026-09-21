@@ -48,6 +48,7 @@ struct ArithmeticFacts {
   ExprSet seen;
   ExprSet exact;
   ExprSet nonzero_divisor;
+  ExprSet positive_divisor;
   ExprSet nonnegative;
   ExprSet fits_signed32;
   ExprSet fits_unsigned32;
@@ -170,6 +171,33 @@ public:
 #undef TL_ANALYZE_DIVMOD
 
 private:
+  bool CanProvePositiveDivisor(const PrimExpr &expr) const {
+    if (expr.as<VarNode>() || expr.as<IntImmNode>()) {
+      return analyzer_->CanProve(expr > 0);
+    }
+    if (const auto *cast = expr.as<CastNode>()) {
+      return IsValuePreservingWiden(cast->value.dtype(), cast->dtype) &&
+             CanProvePositiveDivisor(cast->value);
+    }
+    if (const auto *mul = expr.as<MulNode>()) {
+      if (!CanProvePositiveDivisor(mul->a) ||
+          !CanProvePositiveDivisor(mul->b)) {
+        return false;
+      }
+      auto a = analyzer_->const_int_bound(mul->a);
+      auto b = analyzer_->const_int_bound(mul->b);
+      uint64_t limit = expr.dtype().is_int()
+                           ? (uint64_t{1} << (expr.dtype().bits() - 1)) - 1
+                           : (~uint64_t{0} >> (64 - expr.dtype().bits()));
+      // Positivity of the factors is insufficient if their product wraps.
+      return a->max_value > 0 && b->max_value > 0 &&
+             a->max_value != arith::ConstIntBoundNode::kPosInf &&
+             b->max_value != arith::ConstIntBoundNode::kPosInf &&
+             uint64_t(a->max_value) <= limit / uint64_t(b->max_value);
+    }
+    return false;
+  }
+
   bool FitsSigned32(const PrimExpr &expr, arith::Analyzer *analyzer) const {
     if (!IsSupportedInteger(expr.dtype())) {
       return false;
@@ -249,6 +277,8 @@ private:
                            x >= make_const(x.dtype(), int64_t{-4294967295}))) &&
                       range_analyzer->CanProve(
                           x <= make_const(x.dtype(), uint64_t{4294967295}))));
+    record_proof(&facts_->positive_divisor,
+                 divisor_safe && CanProvePositiveDivisor(d));
     record_proof(&facts_->nonzero_divisor,
                  divisor_safe && analyzer_->CanProve(divisor != 0));
     if ((!exact || x.dtype().bits() == 64) && !remainder &&
@@ -286,7 +316,8 @@ private:
   }
 
   PrimExpr FastDiv(const PrimExpr &x, const PrimExpr &d, bool remainder,
-                   const PrimExpr &valid, bool truncating, bool nonnegative) {
+                   const PrimExpr &valid, bool truncating, bool nonnegative,
+                   bool positive_divisor) {
     DataType i32 = DataType::Int(32);
     DataType u32 = DataType::UInt(32);
     DataType u64 = DataType::UInt(64);
@@ -300,9 +331,9 @@ private:
     Var multiplier = plan_->Prepare(
         cast(u32, floordiv(power + cast(u64, safe) - 1, cast(u64, safe))),
         "fastdiv_multiplier");
-    return Call(
-        x.dtype(), remainder ? tl::fast_rem() : tl::fast_div(),
-        {x, d, multiplier, shift, valid, Bool(truncating), Bool(nonnegative)});
+    return Call(x.dtype(), remainder ? tl::fast_rem() : tl::fast_div(),
+                {x, d, multiplier, shift, valid, Bool(truncating),
+                 Bool(nonnegative), Bool(positive_divisor)});
   }
 
   // mu = floor(2^word_bits / abs(d)). For a magnitude in that word's range,
@@ -310,7 +341,8 @@ private:
   // word.
   PrimExpr BarrettReduction(const PrimExpr &x, const PrimExpr &d,
                             bool remainder, const PrimExpr &valid,
-                            bool truncating, int word_bits, bool nonnegative) {
+                            bool truncating, int word_bits, bool nonnegative,
+                            bool positive_divisor) {
     DataType word = DataType::UInt(word_bits);
     DataType u64 = DataType::UInt(64);
     PrimExpr magnitude = Magnitude(d);
@@ -340,11 +372,12 @@ private:
     if (remainder) {
       return Call(x.dtype(), tl::barrett_reduce(),
                   {x, device_d, reciprocal, valid, Bool(truncating),
-                   Bool(nonnegative)});
+                   Bool(nonnegative), Bool(positive_divisor)});
     }
     return Call(x.dtype(), tl::fast_div(),
                 {x, device_d, reciprocal, make_const(DataType::Int(32), 0),
-                 valid, Bool(truncating), Bool(nonnegative)});
+                 valid, Bool(truncating), Bool(nonnegative),
+                 Bool(positive_divisor)});
   }
 
   // For an exactly divisible x, remove d's power-of-two factor and multiply
@@ -398,11 +431,13 @@ private:
       result = remainder ? make_zero(compute_type) : ExactDiv(value, d, valid);
     } else if (fast32) {
       result = FastDiv(value, d, remainder, valid, truncating,
-                       facts_.nonnegative.count(site));
+                       facts_.nonnegative.count(site),
+                       facts_.positive_divisor.count(site));
     } else {
       int word_bits = facts_.fits_unsigned32.count(site) ? 32 : 64;
       result = BarrettReduction(value, d, remainder, valid, truncating,
-                                word_bits, facts_.nonnegative.count(site));
+                                word_bits, facts_.nonnegative.count(site),
+                                facts_.positive_divisor.count(site));
     }
     return cast(x.dtype(), result);
   }

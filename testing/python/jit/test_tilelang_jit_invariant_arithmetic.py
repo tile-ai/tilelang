@@ -864,5 +864,74 @@ def test_exact_division_negative_divisor():
         assert b.cpu().tolist() == [x // d if d and x % d == 0 else 123 for x in values]
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("constraint", ["none", "nonzero", "positive", "branch"])
+def test_invariant_condition_propagation(constraint):
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            if constraint == "positive":
+                T.assume(d > 0)
+            if constraint == "nonzero":
+                T.assume(d != 0)
+            for i in T.Parallel(128):
+                x = T.bind(A[i])
+                if constraint == "branch":
+                    if d > 0:
+                        B[i] = ((x % d) ^ ((x % 8) * 4)) // d
+                    else:
+                        B[i] = ((x % d) ^ ((x % 8) * 4)) // d + 1
+                else:
+                    B[i] = ((x % d) ^ ((x % 8) * 4)) // d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    source = kernel.get_kernel_source()
+    calls = [line for line in source.splitlines() if "tl::fast_div(" in line or "tl::fast_rem(" in line]
+    assert calls
+    if constraint == "positive":
+        assert all(line.rstrip().endswith("(bool)1);") for line in calls)
+    elif constraint in ("none", "nonzero"):
+        assert all(line.rstrip().endswith("(bool)0);") for line in calls)
+    a = torch.arange(-64, 64, dtype=torch.int32, device="cuda") * 1000003
+    b = torch.empty_like(a)
+    divisors = [1, 7, 37, 2**31 - 1]
+    if constraint != "positive":
+        divisors += [-1, -7, -37, -(2**31)]
+    for d in divisors:
+        kernel(a, b, d)
+        expected = ((a.to(torch.int64) % d) ^ ((a.to(torch.int64) % 8) * 4)) // d
+        if constraint == "branch" and d < 0:
+            expected += 1
+        torch.testing.assert_close(b, expected.to(torch.int32), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_positive_factors_do_not_prove_positive_product():
+    @T.prim_func
+    def main(Q: T.Tensor((128,), "int32"), R: T.Tensor((128,), "int32"), a: T.int32, b: T.int32):
+        with T.Kernel(1, threads=128):
+            T.assume(a > 0)
+            T.assume(b > 0)
+            for i in T.Parallel(128):
+                Q[i] = i // (a * b)
+                R[i] = i % (a * b)
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    calls = [line for line in kernel.get_kernel_source().splitlines() if "tl::fast_div(" in line or "tl::fast_rem(" in line]
+    assert calls and all(line.rstrip().endswith("(bool)0);") for line in calls)
+    q = torch.empty(128, dtype=torch.int32, device="cuda")
+    r = torch.empty_like(q)
+    x = torch.arange(128, dtype=torch.int64, device="cuda")
+    for a, b in [(7, 13), (50000, 50000), (65537, 65537)]:
+        d = (a * b + 2**31) % 2**32 - 2**31
+        kernel(q, r, a, b)
+        torch.testing.assert_close(q, (x // d).to(torch.int32), rtol=0, atol=0)
+        torch.testing.assert_close(r, (x % d).to(torch.int32), rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

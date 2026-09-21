@@ -35,6 +35,10 @@ def main():
         "wide_i32_layout",
         "wide_i32_remainder",
         "stress6",
+        "gather_nonzero",
+        "gather_positive",
+        "gather_bounded",
+        "gather_unsigned",
     ]
     for size in args.sizes:
         for case in cases:
