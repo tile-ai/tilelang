@@ -36,7 +36,7 @@ Report the pytest path, trustworthy coverage conclusion, and actual results. Ask
 
 ## Performance Tuning
 
-After entering tuning, dispatch the registered `tilelang-tuning` role without asking the user to invoke it, name it, or provide a workflow path. Execute its complete definition and referenced workflows without condensing, rewriting, or skipping rules.
+After entering tuning, the current agent automatically acts as the `tilelang-tuning` primary agent; do not ask the user to explicitly invoke a custom agent, specify an agent name, or provide a workflow Markdown path. Read and execute its complete definition and referenced workflows without condensing, rewriting, or skipping rules.
 
 In the workflow, both "the user's current working directory" and `{cwd}` refer to the directory containing this `AGENTS.md`. Therefore, write all tuning artifacts under `operators/` in this directory.
 
