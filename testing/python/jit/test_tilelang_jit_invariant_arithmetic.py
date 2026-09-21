@@ -1086,5 +1086,252 @@ def test_invariant_layout_decode_widened_wrapped_product():
         assert out.cpu().tolist() == expected
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int32", "int64"])
+def test_invariant_reassociated_quotient_remainder_identity(dtype):
+    @T.prim_func
+    def main(B: T.Tensor((128,), dtype), base: T.dtype(dtype), a: T.dtype(dtype), b: T.dtype(dtype)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                x = T.cast(i, dtype) + base
+                B[i] = (x // (a * b)) * b * a + x % (a * b)
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert "tl::fast_div" not in kernel.get_kernel_source()
+    out = torch.empty(128, dtype=getattr(torch, dtype), device="cuda")
+    bits = 32 if dtype == "int32" else 64
+    for base in [-(2 ** (bits - 1)), -64, 2 ** (bits - 1) - 128]:
+        for a, b in [(7, 13), (-7, 13), (65537, 65537)]:
+            kernel(out, base, a, b)
+            expected = torch.arange(128, dtype=out.dtype, device="cuda") + base
+            torch.testing.assert_close(out, expected)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_inherits_dynamic_shape_positivity():
+    n = T.dynamic("n")
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), "int32"), B: T.Tensor((n,), "int32")):
+        with T.Kernel(T.ceildiv(n, 128), threads=128) as bx:
+            for lane in T.Parallel(128):
+                i = bx * 128 + lane
+                if i < n:
+                    B[i] = A[i] // n
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    division = next(line for line in kernel.get_kernel_source().splitlines() if "tl::fast_div(" in line)
+    assert ", (bool)1)" in division  # Positive divisor from shape metadata, not T.assume.
+    for size in [1, 7, 129]:
+        a = torch.arange(size, dtype=torch.int32, device="cuda") * 37 - 1000
+        b = torch.empty_like(a)
+        kernel(a, b)
+        torch.testing.assert_close(b, a // size)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_guarded_host_expression():
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), p: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                if p > 0:
+                    B[i] = i // (7 // p + 1) + i // p
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    out = torch.full((128,), -9, dtype=torch.int32, device="cuda")
+    for p in [0, -1, -(2**31)]:
+        kernel(out, p)
+        torch.testing.assert_close(out, torch.full_like(out, -9))
+    for p in [1, 7, 13]:
+        kernel(out, p)
+        i = torch.arange(128, dtype=torch.int32, device="cuda")
+        torch.testing.assert_close(out, i // (7 // p + 1) + i // p)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_partial_block_write_then_read():
+    n = T.dynamic("n")
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), "int32"), B: T.Tensor((n,), "int32")):
+        with T.Kernel(T.ceildiv(n, 128), threads=128) as bx:
+            for lane in T.Parallel(128):
+                i = bx * 128 + lane
+                if i < n:
+                    A[i] = 7 * n
+                    B[i] = T.max(A[i], 0) // n
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    for size in [1, 127, 128, 129]:
+        a = torch.zeros(size, dtype=torch.int32, device="cuda")
+        b = torch.empty_like(a)
+        kernel(a, b)
+        torch.testing.assert_close(b, torch.full_like(b, 7))
+    source = kernel.get_kernel_source()
+    # The load remains after its store, inside the tail guard.
+    body = source[source.index("__launch_bounds__") :]
+    assert body.index("if (") < body.index("A[") < body.index("tl::fast_div")
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_serial_loop_scope():
+    n = T.dynamic("n")
+
+    @T.prim_func
+    def main(B: T.Tensor((n, 128), "int32"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            T.assume(d > 0)
+            for k in T.serial(n):
+                for i in T.Parallel(128):
+                    B[k, i] = k // d + k % d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    out = torch.empty((19, 128), dtype=torch.int32, device="cuda")
+    for d in [1, 7, 23]:
+        kernel(out, d)
+        k = torch.arange(19, dtype=torch.int32, device="cuda")
+        torch.testing.assert_close(out, (k // d + k % d)[:, None].expand_as(out))
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_preserves_index_intermediate_widening():
+    @T.prim_func
+    def main(A: T.Tensor((614000000,), "uint8"), B: T.Tensor((128,), "uint8"), base: T.int32, d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                if d > 0 and base >= 0:
+                    B[i] = A[((i + base) * 4) // d]
+
+    a = torch.full((614000000,), 29, dtype=torch.uint8, device="cuda")
+    a[:128] = 11
+    b = torch.empty(128, dtype=torch.uint8, device="cuda")
+    for enabled in [False, True]:
+        kernel = tilelang.compile(
+            main,
+            target="cuda",
+            target_host="c",
+            execution_backend="tvm_ffi",
+            pass_configs={"tl.enable_invariant_arithmetic": enabled, "tl.disable_safe_memory_legalize": True},
+        )
+        for base, d in [(2**30, 7), (0, 7)]:
+            kernel(a, b, base, d)
+            indices = (torch.arange(128, dtype=torch.int64, device="cuda") + base) * 4 // d
+            torch.testing.assert_close(b, a[indices])
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_launch_extent_bounds_do_not_narrow_wide_indices():
+    n = T.dynamic("n")
+
+    @T.prim_func
+    def main(Q: T.Tensor((n,), "int64"), R: T.Tensor((n,), "int64"), base: T.int64, d: T.int64):
+        with T.Kernel(T.ceildiv(n, 128), threads=128) as bx:
+            for lane in T.Parallel(128):
+                i = bx * 128 + lane
+                x = T.int64(bx) * 128 + T.int64(lane) + base
+                if i < n:
+                    Q[i] = x // d
+                    R[i] = x % d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    q = torch.empty(129, dtype=torch.int64, device="cuda")
+    r = torch.empty_like(q)
+    for base in [0, 2**31, 2**48, -(2**48)]:
+        for d in [7, -7, 2**40, -(2**40)]:
+            kernel(q, r, base, d)
+            x = torch.arange(129, dtype=torch.int64, device="cuda") + base
+            torch.testing.assert_close(q, x // d)
+            torch.testing.assert_close(r, x % d)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_positive_addition_can_wrap():
+    @T.prim_func
+    def main(Q: T.Tensor((128,), "int64"), R: T.Tensor((128,), "int64"), base: T.int32, d: T.int32):
+        with T.Kernel(1, threads=128):
+            T.assume(base > 0)
+            for i in T.Parallel(128):
+                x = base + i
+                Q[i] = x // d
+                R[i] = x % d
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    q = torch.empty(128, dtype=torch.int64, device="cuda")
+    r = torch.empty_like(q)
+    base = 2**31 - 64
+    x = (torch.arange(128, dtype=torch.int64, device="cuda") + base).to(torch.int32).to(torch.int64)
+    for d in [7, -7, 2**31 - 1]:
+        kernel(q, r, base, d)
+        torch.testing.assert_close(q, x // d)
+        torch.testing.assert_close(r, x % d)
+
+
+@tilelang.testing.requires_cuda
+def test_invariant_materialization_reuses_dominating_condition():
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                if i // d > 5:
+                    B[i] = i // d + 1
+                else:
+                    B[i] = i // d - 1
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    assert kernel.get_kernel_source().count("tl::fast_div(") == 1
+    out = torch.empty(128, dtype=torch.int32, device="cuda")
+    x = torch.arange(128, dtype=torch.int32, device="cuda")
+    for d in [1, 7, -7, 2**31 - 1]:
+        kernel(out, d)
+        q = x // d
+        torch.testing.assert_close(out, torch.where(q > 5, q + 1, q - 1))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("mask", [False, True])
+def test_invariant_recovers_nonnegative_range_after_wrap(mask):
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), base: T.int32, d: T.int32, e: T.int32):
+        with T.Kernel(1, threads=128):
+            T.assume(base > 0)
+            T.assume(d > 0)
+            T.assume(e > 0)
+            for i in T.Parallel(128):
+                x = ((base + i) & 255) if mask else (base + i) % d
+                B[i] = (x ^ (i % 8)) // e
+
+    kernel = tilelang.compile(
+        main, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+    )
+    calls = [line for line in kernel.get_kernel_source().splitlines() if "tl::fast_div(" in line]
+    assert len(calls) == 1
+    assert "(bool)1, (bool)0, (bool)1, (bool)1)" in calls[0]
+    out = torch.empty(128, dtype=torch.int32, device="cuda")
+    lanes = torch.arange(128, dtype=torch.int64, device="cuda")
+    for base in [1, 2**31 - 64]:
+        wrapped = (lanes + base).to(torch.int32).to(torch.int64)
+        for d, e in [(7, 3), (2**31 - 1, 7), (1, 1)]:
+            kernel(out, base, d, e)
+            x = (wrapped & 255) if mask else wrapped % d
+            torch.testing.assert_close(out, ((x ^ (lanes % 8)) // e).to(torch.int32))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
