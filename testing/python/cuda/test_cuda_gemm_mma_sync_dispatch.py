@@ -43,6 +43,30 @@ def test_gemm_bf16_accum_fp16_rejected_at_frontend():
         ("float16", "float16"),
         ("float16", "float32"),
         ("bfloat16", "float32"),
+        (T.tfloat32, "float32"),
+        ("float32", "float32"),
+        ("float64", "float64"),
+    ],
+)
+@tilelang.testing.requires_cuda
+def test_gemm_mma_sync_supported_dtype_combo_lowers_on_ampere(dtype, accum_dtype):
+    # Compile-only, pinned to sm_89 so the Ampere mma.sync whitelist (C++
+    # AllowAmpereMMA) is actually exercised regardless of the CI runner's own
+    # architecture. Regression coverage for #3004: tf32/f32/f64 must lower; the
+    # old detection-based target="cuda" never ran this code on non-Ampere CI.
+    tilelang.compile(
+        _make_gemm_kernel(dtype, accum_dtype),
+        out_idx=[2],
+        target={"kind": "cuda", "arch": "sm_89"},
+    )
+
+
+@pytest.mark.parametrize(
+    "dtype,accum_dtype",
+    [
+        ("float16", "float16"),
+        ("float16", "float32"),
+        ("bfloat16", "float32"),
     ],
 )
 @tilelang.testing.requires_cuda
