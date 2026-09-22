@@ -4,11 +4,14 @@ Quant dual lowers to two non-dual FixPipes; same-dtype stays hardware dual.
 Frontend rejects unsupported casts; RewriteDualCopy enforces a 2:1 split.
 """
 
+import re
+
 import pytest
 
 import tilelang
 import tilelang.testing
-from tilelang import language as T
+from tilelang import tvm
+from tilelang.ascend import language as T
 from tilelang.engine.lower import lower
 
 # quant_pre mode for the on-path cast: 1 == F322F16, 16 == F322BF16.
@@ -50,12 +53,22 @@ def gemm_dual_copy(dst_dtype, split, M=256, N=256, K=256, unit_flag_ctrl=None):
 
 
 def _kernel_source(func):
-    return lower(func, target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        return lower(func, target="ascend").kernel_source
+
+
+_CAST_LIT = re.compile(r"static_cast<[^>]+>\((.+)\)\Z")
+
+
+def _unwrap_c_api_arg(arg):
+    """Strip a single ``static_cast<enum>(value)`` wrapper from codegen."""
+    match = _CAST_LIT.fullmatch(arg.strip())
+    return match.group(1) if match else arg
 
 
 def _cc_to_ub_argument_lists(source):
-    """Return every ``copy_matrix_cc_to_ub(...)`` call's top-level arguments."""
-    needle = "copy_matrix_cc_to_ub("
+    """Return every ``asc_copy_l0c2ub(...)`` call's top-level C API arguments."""
+    needle = "asc_copy_l0c2ub("
     calls = []
     start = 0
     while True:
@@ -95,17 +108,28 @@ def _split_top_level_commas(text):
 
 
 def _cc_to_ub_tails(source):
-    """Return the fixed integer-argument tails of every emitted cc_to_ub call."""
+    """Return IR-compatible tails of every ``asc_copy_l0c2ub`` call.
+
+    Current C API order is ``dst, src, inner, rows, dst_stride, src_stride,
+    sub_blockid, dual, unit_flag, quant, relu_pre, split_en, NZ2ND, NZ2DN,
+    clip_relu``. Existing assertions still use the old IR tail indices:
+    ``[0]=dual, [1]=sub_blockid, [3]=unit_flag, [4]=quant, [7]=NZ2ND``.
+    """
     tails = []
     for args in _cc_to_ub_argument_lists(source):
-        assert len(args) == 26, args
-        tails.append(args[-19:])
+        assert len(args) == 15, args
+        dual = _unwrap_c_api_arg(args[7])
+        sub = _unwrap_c_api_arg(args[6])
+        unit = _unwrap_c_api_arg(args[8])
+        quant = _unwrap_c_api_arg(args[9])
+        nz2nd = _unwrap_c_api_arg(args[12])
+        tails.append([dual, sub, "0", unit, quant, "0", "0", nz2nd])
     return tails
 
 
 def _cc_to_ub_sizes(source):
     """Return (copy_inner, copy_rows) for every emitted cc_to_ub call."""
-    return [(args[3], args[4]) for args in _cc_to_ub_argument_lists(source)]
+    return [(_unwrap_c_api_arg(args[2]), _unwrap_c_api_arg(args[3])) for args in _cc_to_ub_argument_lists(source)]
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
@@ -462,7 +486,7 @@ def test_onpath_dual_dynamic_over_half_tail_uses_tile_half(split):
     assert "+" in args[1][1], (args[1][1], source)
     # Full-width M-prefix still walks the 256-row L0C NZ pitch, not the copied 192.
     for call_args in args:
-        assert call_args[6] == "256", (call_args[6], source)
+        assert _unwrap_c_api_arg(call_args[5]) == "256", (call_args[5], source)
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
@@ -502,7 +526,7 @@ def test_column_slice_second_pipe_offset(split):
         assert copy_inner == expected_inner, (copy_inner, expected_inner, source)
         assert copy_rows == expected_rows, (copy_rows, expected_rows, source)
     for call_args in args:
-        assert call_args[6] == str(alloc), (call_args[6], alloc, source)
+        assert _unwrap_c_api_arg(call_args[5]) == str(alloc), (call_args[5], alloc, source)
     assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
     assert "+" in args[1][1], (args[1][1], source)
 
@@ -548,7 +572,7 @@ def test_m_split_compact_2d_uses_alloc_row_stride():
         assert copy_inner == expected_inner, (copy_inner, expected_inner, source)
         assert copy_rows == expected_rows, (copy_rows, expected_rows, source)
     for call_args in args:
-        assert call_args[6] == str(region_m), (call_args[6], region_m, source)
+        assert _unwrap_c_api_arg(call_args[5]) == str(region_m), (call_args[5], region_m, source)
     assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
     assert "+" in args[1][1], (args[1][1], source)
 
@@ -702,7 +726,7 @@ def test_vf_cast_keeps_single_hardware_dual_pipe(dst_dtype, split):
     assert source.count("AscendC::PipeBarrier<pipe_t::PIPE_FIX>()") == 0, source
     assert "simd_inst::vcvt<" in source, source
     assert "simd_inst::vadd(" in source, source
-    assert "PK_B32" in source, source
+    assert "vsts_pack_b32" in source, source
 
 
 if __name__ == "__main__":
