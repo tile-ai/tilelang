@@ -4,7 +4,7 @@ This mode assumes that the initial operator already passes correctness. It runs 
 
 ## Inputs and Outputs
 
-Required inputs: the entry-selected `{backend}`/`{tilelang_target}`, project root, target operator file, existing correctness pytest, complete parameters for performance cases supplied directly by the user, and `full_soc`, `npu_arch`, and complete `evidence` for the same target device. If hardware evidence is missing or incomplete, or if the device or configuration changes, reacquire it according to item 3 under "Establish the Baseline". If any other input is missing, ask only for that input. Do not generate a candidate table or infer cases. Before confirmation, do not create a tuning directory, compile or run code, perform profiling, or modify code.
+Required inputs: the entry-selected `{backend}`/`{tilelang_target}`, project root, target operator file, existing correctness pytest, complete parameters for performance cases supplied directly by the user, and `full_soc`, `npu_arch`, and complete `evidence` for the same target device. Cases used during operator generation, accuracy validation, or system testing (ST) are not performance cases by default. Only cases that the user explicitly submits or confirms for performance tuning satisfy the performance-case input requirement; their presence in source files, pytest, generated artifacts, previous runs, or profiling data does not count as confirmation. If hardware evidence is missing or incomplete, or if the device or configuration changes, reacquire it according to item 3 under "Establish the Baseline". If any other input is missing, ask only for that input. Do not generate a candidate table or infer cases. Before confirmation, do not create a tuning directory, compile or run code, perform profiling, or modify code.
 
 Explicitly use `TILELANG_DEFAULT_TARGET={tilelang_target}` throughout the workflow: `pto` for PTO and `ascend` for AscendC. Defaulting to PTO, silently falling back, or comparing across backends is prohibited.
 
@@ -69,9 +69,11 @@ Cumulative speedup = B0 kernel_time / Ci kernel_time
 
 ### 0. Case Input Gate
 
-1. Validate the user-provided case parameters. If they are missing, ask for them and stop.
-2. Do not generate a candidate table or automatically select, supplement, or group cases from pytest or a benchmark.
-3. After user confirmation, lock the list and record its SHA256. Any change requires reconfirmation. Do not continue until this gate passes.
+1. Build the performance-case set only from cases that the user explicitly submits as performance cases or explicitly confirms for performance tuning.
+2. Treat every case whose only provenance is operator generation, accuracy validation, or ST as unconfirmed. Do not use such a case by default, even when it is already present in source files, pytest, generated artifacts, prior execution records, or profiling data.
+3. Validate the explicitly submitted or confirmed case parameters. If they are missing, ask for them and stop; selecting Flash mode or asking for performance tuning does not itself confirm any existing case.
+4. Do not generate a candidate table or automatically select, supplement, or group cases from pytest or a benchmark.
+5. After user confirmation, lock the list and record its SHA256. Any change requires reconfirmation. Do not continue until this gate passes.
 
 ### 0.5 Historical-Evidence and Validated-Candidate Reuse Gate
 

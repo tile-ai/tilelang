@@ -9,6 +9,7 @@ tilelang-tuning accepts **operators whose accuracy has already passed and that r
 - If the user has not selected a mode: **present every item in the following introduction in full; do not compress it into mode names or a one-sentence summary**:
   - `Flash (lightweight and fast)`
     - **Assume by default that initial operator accuracy has passed; do not perform an initial accuracy check.**
+    - Cases from operator generation, accuracy validation, or ST are not performance cases by default; Flash tuning begins only after the user explicitly submits or confirms the performance cases.
     - A single agent directly completes analysis, implementation, and verification, iterating autonomously until the evidence converges.
     - During iteration, verify only the relevant shapes; do not rerun the full accuracy test suite.
     - Do not impose a fixed number of rounds; stop based on measured gains and evidence convergence.
