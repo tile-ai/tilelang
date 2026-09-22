@@ -133,3 +133,47 @@ def test_dma_row_writes_only_serialize_overlapping_regions(overlap):
     waits = _events(after, "wait", "MTE2_MTE3")
     assert len(releases) == len(waits) == 1
     tvm.ir.assert_structural_equal(releases[0].args[1], waits[0].args[1])
+
+
+def test_equivalent_lexical_epoch_serializes_counter_ring():
+    a = tirx.decl_buffer((64,), "float32", name="A")
+    ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
+    epoch = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var")
+    i = tirx.Var("i", "int32")
+    guard = i % 2 == 0
+    compute = tirx.SBlock([], [], [], "SIMD_VF", tirx.BufferStore(ub, ub[0], [0]))
+    body = seq(
+        unit(copy(a, ub), guard=guard),
+        unit(compute, guard=guard),
+        unit(copy(ub, a), guard=guard),
+        unit(tirx.BufferStore(epoch, epoch[0] + 1, [0]), guard=guard),
+    )
+    owner = tirx.For(
+        i,
+        0,
+        4,
+        tirx.ForKind.SERIAL,
+        body,
+        annotations={
+            "multi_buffer_eligible": [ub.data],
+            "tl.multi_buffer_counter_map": {ub.data: epoch},
+            "tl.storage_epoch_guard_map": {ub.data: guard, a.data: guard},
+        },
+    )
+    before = kernel(
+        seq(unit(tirx.BufferStore(epoch, 0, [0])), unit(owner, core=None)),
+        buffers=[ub, epoch],
+        params=[a],
+        annotations={"tl.buffer_versions_map": {ub.data: 2}},
+    )
+    after = transform.InsertSync()(before)
+    # GM is reused every active epoch, so its lexical MTE3->MTE2 closure
+    # also serializes the equivalent counter domain despite two UB versions.
+    for pipe in ("MTE2_V", "V_MTE3", "MTE3_MTE2"):
+        released = _events(after, "set", pipe)
+        acquired = _events(after, "wait", pipe)
+        assert released and acquired
+        assert all(isinstance(event.args[1], tirx.IntImm) for event in released + acquired)
+        assert sorted(int(event.args[1]) for event in released) == sorted(int(event.args[1]) for event in acquired)
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    assert int(root.annotations["tl.buffer_versions_map"][ub.data]) == 2

@@ -122,3 +122,61 @@ def test_row_writes_and_whole_buffer_read_belong_to_outer_owner():
     after = transform.AnnotateMultiBufferEligible()(before)
     owners = [loop.loop_var for loop in nodes(after, tirx.For) if ub.data in loop.annotations.get("multi_buffer_eligible", [])]
     assert len(owners) == 1 and owners[0].same_as(i)
+
+
+@pytest.mark.parametrize(
+    "versions, mode, explicit",
+    [
+        pytest.param(1, None, False, id="opt-out-inferred"),
+        pytest.param(1, None, True, id="opt-out-explicit"),
+        pytest.param(1, "auto", False, id="single-auto-inferred"),
+        pytest.param(1, "auto", True, id="single-auto-explicit"),
+        pytest.param(1, "iteration", True, id="single-iteration"),
+        pytest.param(1, "counter", True, id="single-counter"),
+        pytest.param(2, None, False, id="fixed-ring"),
+        pytest.param(None, "auto", False, id="automatic-ring"),
+    ],
+)
+def test_version_policy_controls_storage_and_alias_eligibility(versions, mode, explicit, capfd):
+    ub = tirx.decl_buffer((2,), "int32", name="ub", scope="shared.dyn")
+    alias = tirx.decl_buffer((1, 2), "int32", name="view", data=ub.data)
+    out = tirx.decl_buffer((2, 4), "int32", name="out")
+    owners = []
+    for index in range(2):
+        i = tirx.Var(f"owner{index}", "int32")
+        write = tirx.BufferStore(ub, i, [0]) if index == 0 else tirx.BufferStore(alias, i, [0, 0])
+        read = alias[0, 0] if index == 0 else ub[0]
+        owners.append(
+            unit(
+                tirx.For(
+                    i,
+                    0,
+                    4,
+                    tirx.ForKind.SERIAL,
+                    seq(unit(write), unit(tirx.BufferStore(out, read, [index, i]))),
+                    annotations={"multi_buffer_eligible": [ub.data]} if explicit else {},
+                ),
+                core=None,
+            )
+        )
+    annotations = {}
+    if versions is not None:
+        annotations["tl.buffer_versions_map"] = {alias.data: versions}
+    if mode is not None:
+        annotations["tl.buffer_version_mode"] = {alias.data: mode}
+    before = kernel(seq(*owners), buffers=[ub], params=[out], annotations=annotations)
+    capfd.readouterr()
+    after = transform.AnnotateMultiBufferEligible()(before)
+    diagnostic = capfd.readouterr().err
+    warning = "Ignoring explicit 'multi_buffer_eligible' claim"
+    if explicit and versions == 1 and mode is None:
+        assert diagnostic.count(warning) == 1
+        assert "storage ub" in diagnostic
+        assert "T.annotate_buffer_versions({buf: 1})" in diagnostic
+        assert '(1, "auto")' in diagnostic
+    else:
+        assert warning not in diagnostic
+    loops = nodes(after, tirx.For)
+    assert len(loops) == 2
+    expected = versions != 1 or mode is not None
+    assert all((ub.data in loop.annotations.get("multi_buffer_eligible", [])) == expected for loop in loops)

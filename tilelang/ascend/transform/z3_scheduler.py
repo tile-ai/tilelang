@@ -52,32 +52,52 @@ def _find_next_schedule_number(base_dir="debug"):
     return len(existing_numbers)
 
 
+def _convert_int_tuples(values, arity: int) -> list[tuple[int, ...]]:
+    if values is None:
+        return []
+    result = []
+    for value in values:
+        if not hasattr(value, "__len__") or len(value) != arity:
+            actual_arity = len(value) if hasattr(value, "__len__") else "non-sequence"
+            raise ValueError(f"Expected {arity} integers per tuple, got {actual_arity}")
+        result.append(tuple(int(value[i]) for i in range(arity)))
+    return result
+
+
 def z3_schedule_python(
     latencies: list[int],
     iis: list[int],
     resource_flags: list[int],
     data_deps: list[tuple[int, int, int]],
     resource_deps: list[tuple[int, int]],
-    verbose: bool = False,
+    owner_exclusion_deps: list[tuple[int, int, int, int]] | None = None,
     pipe_order_deps: list[tuple[int, int]] | None = None,
+    verbose: bool = False,
 ) -> tuple[list[int], list[int]]:
-    """Z3-based scheduler implemented in Python.
+    """Schedule a straight-line task list.
 
     Parameters
     ----------
     latencies : list[int]
-        Latency for each task in cycles
+        Execution latency of each task in cycles.
     iis : list[int]
-        Initiation interval for each task in cycles
+        Initiation interval of each task in cycles.
     resource_flags : list[int]
         Resource pipe mask for each task (bitmask of ResourcePipe values):
-        MTE1=1, MTE2=2, MTE3=4, Cube=8, Vector=16, Fixpipe=32, Scalar=64
+        MTE1=1, MTE2=2, MTE3=4, Cube=8, Vector=16, Fixpipe=32, Scalar=64.
     data_deps : list[tuple[int, int, int]]
-        Data dependency pairs (i, j, latency) where task j depends on task i and must start after i starts + latency
+        Directed ``(i, j, latency)`` constraints requiring task ``j`` to start
+        at least ``latency`` cycles after task ``i``.
     resource_deps : list[tuple[int, int]]
-        Resource dependency pairs (i, j) where tasks i and j use same resource
+        Unordered task pairs that cannot issue concurrently on one resource.
+    owner_exclusion_deps : list[tuple[int, int, int, int]] | None
+        Undirected shared-storage owner conflicts ``(i, j, latency_i_j,
+        latency_j_i)``. Either owner may run first, but their conflicting
+        storage lifetimes cannot overlap.
     pipe_order_deps : list[tuple[int, int]] | None
         Source-ordered task pairs that share a hardware pipe.
+    verbose : bool
+        Print solver inputs and the selected schedule.
 
     Returns
     -------
@@ -92,6 +112,8 @@ def z3_schedule_python(
         raise RuntimeError("Z3 scheduling failed: n too small")
     if pipe_order_deps is None:
         pipe_order_deps = []
+    if owner_exclusion_deps is None:
+        owner_exclusion_deps = []
 
     if verbose:
         print(f"[Python Z3] Starting scheduling for {n} tasks")
@@ -100,6 +122,7 @@ def z3_schedule_python(
         print(f"[Python Z3] Resource flags: {resource_flags}")
         print(f"[Python Z3] Data dependencies: {data_deps}")
         print(f"[Python Z3] Resource dependencies: {resource_deps}")
+        print(f"[Python Z3] Owner exclusions: {owner_exclusion_deps}")
 
     assert Z3_AVAILABLE, "z3-solver package is required but not installed"
 
@@ -145,6 +168,13 @@ def z3_schedule_python(
 
             if verbose:
                 print(f"[Python Z3] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
+
+    for i, j, latency_i_j, latency_j_i in owner_exclusion_deps:
+        i_before_j = z3.Bool(f"Owner_{i}_{j}", ctx)
+        solver.add(z3.Implies(i_before_j, start_vars[j] - start_vars[i] >= latency_i_j))
+        solver.add(z3.Implies(z3.Not(i_before_j), start_vars[i] - start_vars[j] >= latency_j_i))
+        if verbose:
+            print(f"[Python Z3] Owner exclusion between {i} and {j}: latency_i_j={latency_i_j}, latency_j_i={latency_j_i}")
 
     for previous, current in pipe_order_deps:
         solver.add(start_vars[previous] <= start_vars[current])
@@ -196,7 +226,15 @@ def z3_schedule_python(
 
 # FFI-exposed function that matches C++ interface
 @tvm_ffi.register_global_func("tl.transform.z3_schedule_python")
-def z3_schedule_ffi(latencies, iis, resource_flags, data_deps, resource_deps, pipe_order_deps=None):
+def z3_schedule_ffi(
+    latencies,
+    iis,
+    resource_flags,
+    data_deps,
+    resource_deps,
+    owner_exclusion_deps=None,
+    pipe_order_deps=None,
+):
     """FFI wrapper for z3_schedule_python.
 
     This function accepts TVM containers and converts them to Python lists.
@@ -206,26 +244,10 @@ def z3_schedule_ffi(latencies, iis, resource_flags, data_deps, resource_deps, pi
     iis_list = list(iis)
     resource_flags_list = list(resource_flags)
 
-    # Convert data dependencies
-    data_deps_list = []
-    if data_deps is not None:
-        # Assuming data_deps is a list of triples
-        for i in range(len(data_deps)):
-            if hasattr(data_deps[i], "__len__") and len(data_deps[i]) == 3:
-                data_deps_list.append((int(data_deps[i][0]), int(data_deps[i][1]), int(data_deps[i][2])))
-
-    # Convert resource dependencies
-    resource_deps_list = []
-    if resource_deps is not None:
-        for i in range(len(resource_deps)):
-            if hasattr(resource_deps[i], "__len__") and len(resource_deps[i]) == 2:
-                resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
-
-    pipe_order_deps_list = []
-    if pipe_order_deps is not None:
-        for i in range(len(pipe_order_deps)):
-            if hasattr(pipe_order_deps[i], "__len__") and len(pipe_order_deps[i]) == 2:
-                pipe_order_deps_list.append((int(pipe_order_deps[i][0]), int(pipe_order_deps[i][1])))
+    data_deps_list = _convert_int_tuples(data_deps, 3)
+    resource_deps_list = _convert_int_tuples(resource_deps, 2)
+    pipe_order_deps_list = _convert_int_tuples(pipe_order_deps, 2)
+    owner_exclusion_deps_list = _convert_int_tuples(owner_exclusion_deps, 4)
 
     # Call the actual scheduler (Z3 is not thread-safe, serialize access)
     with _z3_lock:
@@ -235,6 +257,7 @@ def z3_schedule_ffi(latencies, iis, resource_flags, data_deps, resource_deps, pi
             resource_flags_list,
             data_deps_list,
             resource_deps_list,
+            owner_exclusion_deps=owner_exclusion_deps_list,
             pipe_order_deps=pipe_order_deps_list,
         )
 
@@ -249,48 +272,56 @@ def z3_schedule_loop_python(
     resource_flags: list[int],
     data_deps: list[tuple[int, int, int, int]],  # (i, j, distance, latency)
     resource_deps: list[tuple[int, int]],
+    owner_exclusion_deps: list[tuple[int, int, int, int]] | None,
+    pipe_order_deps: list[tuple[int, int]] | None,
     buffer_sizes: list[int],
     memory_groups: list[list[int]],  # [[capacity, idx0, idx1, ...], ...]
     stage_order_deps: list[tuple[int, int]] | None = None,  # (u, w): k_u <= k_w
     recalculate_buffer_versions: bool = True,
     enable_offset: bool = False,
-    verbose: bool = False,
-    seed: int | None = 42,
     manual_stages: list[int] | None = None,
     manual_schedule: bool = False,
-    pipe_order_deps: list[tuple[int, int]] | None = None,
+    seed: int | None = 42,
+    verbose: bool = False,
 ) -> tuple[list[int], list[int], int]:
-    """Z3-based scheduler for loops with distance-aware dependencies.
+    """Schedule a loop body with modulo, stage, and storage constraints.
 
-    New modeling:
-    - Data dependency: start_v - start_u >= latency_u - II * distance
-    - Resource dependency: start_i = k_i * II + r_i, where 0 <= r_i < II
-      delta_i,j: boolean variable for modulo ordering
-      Constraints: r_i - r_j + II * delta_i,j >= ii_i
-                   r_i - r_j + II * (1 - delta_i,j) >= ii_j
-    - Objective: minimize II using binary search
+    Each start time is represented as ``k * II + r``. Directed dependencies
+    constrain absolute start times, while resource and owner exclusions choose
+    a non-overlapping modulo order. The solver finds the minimum feasible II by
+    binary search.
 
     Parameters
     ----------
+    num_stages : int
+        Maximum number of physical versions available to automatic buffers.
     latencies : list[int]
-        Latency for each task in cycles
+        Execution latency of each task in cycles.
     iis : list[int]
-        Initiation interval for each task in cycles
+        Initiation interval of each task in cycles.
     resource_flags : list[int]
         Resource pipe mask for each task (bitmask of ResourcePipe values):
-        MTE1=1, MTE2=2, MTE3=4, Cube=8, Vector=16, Fixpipe=32, Scalar=64
+        MTE1=1, MTE2=2, MTE3=4, Cube=8, Vector=16, Fixpipe=32, Scalar=64.
     data_deps : list[tuple[int, int, int, int]]
-        Data dependency tuples (i, j, distance, latency) where task j depends on task i
-        with distance d (loop iterations distance) and latency l
+        Directed ``(i, j, distance, latency)`` constraints. Negative distances
+        encode automatic buffer-version variables.
     resource_deps : list[tuple[int, int]]
-        Resource dependency pairs (i, j) where tasks i and j use same resource
+        Unordered task pairs that cannot issue concurrently on one resource.
+    owner_exclusion_deps : list[tuple[int, int, int, int]] | None
+        Undirected shared-storage owner conflicts ``(i, j, latency_i_j,
+        latency_j_i)``. The chosen modulo order also constrains the reverse
+        wraparound hand-off.
+    pipe_order_deps : list[tuple[int, int]] | None
+        Source-ordered task pairs sharing a hardware pipe.
     buffer_sizes : list[int]
-        Buffer size for each buffer (for negative distance dependencies)
+        Bytes occupied by one version of each automatic buffer.
     memory_groups : list[list[int]]
-        Memory groups with capacity and buffer indices, e.g. [[capacity, idx0, idx1, ...], ...]
+        Capacity followed by member buffer indices for each memory scope.
     stage_order_deps : list[tuple[int, int]] | None
         Stage-order constraints (u, w) requiring k_u <= k_w (same or earlier
         iteration-stage).
+    recalculate_buffer_versions : bool
+        Recompute the minimum version counts from the selected schedule.
     enable_offset : bool
         When False, constrain each resource so that, among the tasks using that
         resource (pipe bit in resource_flags), max(start_time) - min(start_time) < II.
@@ -304,8 +335,10 @@ def z3_schedule_loop_python(
         Preserve source issue order independently on every hardware pipe and
         constrain every task's Z3 stage to the corresponding
         ``manual_stages`` entry.
-    pipe_order_deps : list[tuple[int, int]] | None
-        Source-ordered task pairs sharing a hardware pipe.
+    seed : int | None
+        Z3 random seed; ``None`` leaves the solver default unchanged.
+    verbose : bool
+        Print solver inputs, search progress, and the selected schedule.
 
     Returns
     -------
@@ -324,6 +357,8 @@ def z3_schedule_loop_python(
         stage_order_deps = []
     if pipe_order_deps is None:
         pipe_order_deps = []
+    if owner_exclusion_deps is None:
+        owner_exclusion_deps = []
     if manual_stages is None:
         manual_stages = [0] * n
     if manual_schedule:
@@ -341,6 +376,7 @@ def z3_schedule_loop_python(
         print(f"[Python Z3 Loop] Resource flags: {resource_flags}")
         print(f"[Python Z3 Loop] Data dependencies with distances: {data_deps}")
         print(f"[Python Z3 Loop] Resource dependencies: {resource_deps}")
+        print(f"[Python Z3 Loop] Owner exclusions: {owner_exclusion_deps}")
         print(f"[Python Z3 Loop] Stage-order dependencies: {stage_order_deps}")
         print(f"[Python Z3 Loop] Pipe-order dependencies: {pipe_order_deps}")
         print(f"[Python Z3 Loop] Manual schedule: {manual_schedule}, stages: {manual_stages}")
@@ -435,6 +471,20 @@ def z3_schedule_loop_python(
 
                 if verbose:
                     print(f"[Python Z3 Loop] Resource dependency between {i} and {j}: ii_i={ii_i}, ii_j={ii_j}")
+
+        # A physical storage ring shared by two disjoint owners is a cyclic
+        # resource. Choose one modulo order and protect both the
+        # forward hand-off and the wrap-around hand-off. Pipeline stage
+        # offsets deliberately do not participate: owners exchange the same
+        # physical slot at their issue phases, not at their logical stages.
+        for i, j, latency_i_j, latency_j_i in owner_exclusion_deps:
+            i_before_j = z3.Bool(f"Owner_{i}_{j}", ctx)
+            solver.add(z3.Implies(i_before_j, r_vars[j] - r_vars[i] >= latency_i_j))
+            solver.add(z3.Implies(i_before_j, r_vars[i] - r_vars[j] + ii_mid >= latency_j_i))
+            solver.add(z3.Implies(z3.Not(i_before_j), r_vars[i] - r_vars[j] >= latency_j_i))
+            solver.add(z3.Implies(z3.Not(i_before_j), r_vars[j] - r_vars[i] + ii_mid >= latency_i_j))
+            if verbose:
+                print(f"[Python Z3 Loop] Owner exclusion between {i} and {j}: latency_i_j={latency_i_j}, latency_j_i={latency_j_i}")
 
         # Add stage-order constraints for copied Let variables.
         # (u, w) requires k_u <= k_w: any unit u that reads a Let-defined var
@@ -565,6 +615,7 @@ def z3_schedule_loop_python(
                 "resource_flags": resource_flags,
                 "data_dependencies": data_deps,
                 "resource_dependencies": resource_deps,
+                "owner_exclusions": owner_exclusion_deps,
                 "manual_schedule": manual_schedule,
                 "manual_stages": manual_stages,
                 "start_times": start_times,
@@ -738,24 +789,24 @@ def z3_schedule_loop_ffi(
     resource_flags,
     data_deps,
     resource_deps,
+    owner_exclusion_deps,
+    pipe_order_deps,
     buffer_sizes,
     memory_groups,
     stage_order_deps=None,
     enable_offset=False,
     manual_stages=None,
     manual_schedule=False,
-    pipe_order_deps=None,
 ):
     """FFI wrapper for z3_schedule_loop_python.
 
     This function accepts TVM containers and converts them to Python lists.
-    Data dependencies are expected as 4-tuples (i, j, distance, latency).
-    memory_groups is a list of lists: [[capacity, idx0, idx1, ...], ...]
-    stage_order_deps is a list of pairs (u, w) meaning k_u <= k_w.
-    enable_offset is a bool sourced from the loop's "enable_offset" annotation.
-    manual_stages contains one frontend stage per materialized task.
-    manual_schedule enables per-pipe source-order and exact-stage constraints.
-    pipe_order_deps is computed from ResourcePipe masks in C++.
+    Dependency arrays are ordered as directed data dependencies, resource
+    exclusions, shared-storage owner exclusions, and source pipe ordering.
+    ``memory_groups`` contains ``[capacity, idx0, idx1, ...]`` entries;
+    ``stage_order_deps`` contains ``(u, w)`` constraints requiring ``k_u <=
+    k_w``. The remaining arguments carry the loop's offset and manual-stage
+    policy from C++.
     """
     # Convert TVM containers to Python lists
     latencies_list = list(latencies)
@@ -767,39 +818,16 @@ def z3_schedule_loop_ffi(
     if memory_groups is not None:
         for i in range(len(memory_groups)):
             memory_groups_list.append(list(memory_groups[i]))
-    # Convert data dependencies (4-tuples)
-    data_deps_list = []
-    if data_deps is not None:
-        # Assuming data_deps is a list of 4-tuples
-        for i in range(len(data_deps)):
-            if hasattr(data_deps[i], "__len__") and len(data_deps[i]) == 4:
-                data_deps_list.append((int(data_deps[i][0]), int(data_deps[i][1]), int(data_deps[i][2]), int(data_deps[i][3])))
-
-    # Convert resource dependencies (pairs)
-    resource_deps_list = []
-    if resource_deps is not None:
-        for i in range(len(resource_deps)):
-            if hasattr(resource_deps[i], "__len__") and len(resource_deps[i]) == 2:
-                resource_deps_list.append((int(resource_deps[i][0]), int(resource_deps[i][1])))
-
-    # Convert stage-order dependencies (pairs)
-    stage_order_deps_list = []
-    if stage_order_deps is not None:
-        for i in range(len(stage_order_deps)):
-            if hasattr(stage_order_deps[i], "__len__") and len(stage_order_deps[i]) == 2:
-                stage_order_deps_list.append((int(stage_order_deps[i][0]), int(stage_order_deps[i][1])))
+    data_deps_list = _convert_int_tuples(data_deps, 4)
+    resource_deps_list = _convert_int_tuples(resource_deps, 2)
+    stage_order_deps_list = _convert_int_tuples(stage_order_deps, 2)
 
     manual_stages_list = []
     if manual_stages is not None:
         manual_stages_list = [int(stage) for stage in manual_stages]
 
-    def convert_pairs(values):
-        result = []
-        if values is not None:
-            for value in values:
-                if hasattr(value, "__len__") and len(value) == 2:
-                    result.append((int(value[0]), int(value[1])))
-        return result
+    pipe_order_deps_list = _convert_int_tuples(pipe_order_deps, 2)
+    owner_exclusion_deps_list = _convert_int_tuples(owner_exclusion_deps, 4)
 
     # Call the actual scheduler (Z3 is not thread-safe, serialize access)
     with _z3_lock:
@@ -810,13 +838,14 @@ def z3_schedule_loop_ffi(
             resource_flags_list,
             data_deps_list,
             resource_deps_list,
+            owner_exclusion_deps_list,
+            pipe_order_deps_list,
             buffer_sizes_list,
             memory_groups_list,
-            stage_order_deps_list,
+            stage_order_deps=stage_order_deps_list,
             enable_offset=bool(enable_offset),
             manual_stages=manual_stages_list,
             manual_schedule=bool(manual_schedule),
-            pipe_order_deps=convert_pairs(pipe_order_deps),
             seed=42,
         )
 

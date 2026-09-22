@@ -23,9 +23,10 @@
  *  Frontend may pre-set the annotation. A storage named by any explicit claim
  *  is excluded from automatic owner inference across the whole kernel; the
  *  explicit claim is preserved unless the storage is already manually
- *  versioned. Other buffers proven eligible are added automatically. A buffer
- *  the user does NOT want multi-buffered can be pinned to a single version via
- *  T.annotate_buffer_versions({buf: 1}) instead of being omitted here.
+ *  versioned or pinned to one version without an explicit mode. Other buffers
+ *  proven eligible are added automatically.
+ *  T.annotate_buffer_versions({buf: 1}) removes the storage from eligibility;
+ *  (1, mode) retains eligibility.
  */
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -99,8 +100,8 @@ Array<Var> NormalizeEligibleStorages(const Any &annotation) {
 // deliberately a storage-granular heuristic: a write to any region is treated
 // as making the storage write-first; it does not prove that every later-read
 // region was overwritten. Kernels carrying untouched regions across iterations
-// must pin the storage to one version or explicitly choose an owner whose epoch
-// overwrites the complete read footprint.
+// must opt out via T.annotate_buffer_versions({buf: 1}) or explicitly choose an
+// owner whose epoch overwrites the complete read footprint.
 // ---------------------------------------------------------------------------
 enum class AccessOrder {
   kUntouched,
@@ -671,22 +672,35 @@ class MultiBufferAnnotator {
 public:
   static void Rewrite(ScheduledTIR *scheduled_tir, StorageSet manual_buffers) {
     ICHECK(scheduled_tir != nullptr);
+    // This pass precedes AutoSchedule: these counts are frontend overrides,
+    // not solver-selected versions. Only a bare frontend 1 means opt-out.
+    StorageSet single_version_buffers;
     StorageSet excluded_storages = manual_buffers;
+    for (const auto &[storage, versions] :
+         scheduled_tir->metadata.buffer_versions) {
+      if (versions == 1 &&
+          !scheduled_tir->metadata.buffer_version_modes.count(storage)) {
+        single_version_buffers.insert(storage);
+        excluded_storages.insert(storage);
+      }
+    }
     CollectExplicitStorages(scheduled_tir->tree, &excluded_storages);
     ControlStorageClaims claims =
         MultiBufferOwnerPlanner::Plan(scheduled_tir->tree, excluded_storages);
-    MultiBufferAnnotator annotator(std::move(claims),
-                                   std::move(manual_buffers));
+    MultiBufferAnnotator annotator(std::move(claims), std::move(manual_buffers),
+                                   std::move(single_version_buffers));
     annotator.RewriteNodes(scheduled_tir->tree);
   }
 
 private:
-  MultiBufferAnnotator(ControlStorageClaims claims, StorageSet manual_buffers)
-      : claims_(std::move(claims)), manual_buffers_(std::move(manual_buffers)) {
-  }
+  MultiBufferAnnotator(ControlStorageClaims claims, StorageSet manual_buffers,
+                       StorageSet single_version_buffers)
+      : claims_(std::move(claims)), manual_buffers_(std::move(manual_buffers)),
+        single_version_buffers_(std::move(single_version_buffers)) {}
 
   ControlStorageClaims claims_;
   StorageSet manual_buffers_;
+  StorageSet single_version_buffers_;
   StorageSet warned_excluded_storages_;
 
   static void CollectExplicitStorages(
@@ -729,6 +743,17 @@ private:
             LOG(WARNING) << "Ignoring explicit '" << kMultiBufferEligible
                          << "' claim for storage " << storage->name_hint
                          << " because it is already manually multi-buffered";
+          }
+          continue;
+        }
+        if (single_version_buffers_.count(storage)) {
+          if (warned_excluded_storages_.insert(storage).second) {
+            LOG(WARNING) << "Ignoring explicit '" << kMultiBufferEligible
+                         << "' claim for storage " << storage->name_hint
+                         << " because T.annotate_buffer_versions({buf: 1}) "
+                            "disables multi-buffer eligibility; use "
+                            "{buf: (1, \"auto\")} to retain eligibility with "
+                            "one version";
           }
           continue;
         }

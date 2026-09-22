@@ -444,8 +444,6 @@ public:
     }
     MultiBufferOwnerMap owners_by_storage = CollectMultiBufferOwners(root_);
     for (StorageState &state : storages_) {
-      if (state.num_versions <= 1)
-        continue;
       auto owners_it = owners_by_storage.find(state.storage);
       if (owners_it != owners_by_storage.end())
         state.owners = owners_it->second;
@@ -453,8 +451,6 @@ public:
 
     std::vector<PreparedStorage> prepared;
     for (StorageState &state : storages_) {
-      if (state.num_versions <= 1)
-        continue;
       ICHECK(!state.owners.empty())
           << "Automatic multi-buffer storage " << state.storage->name_hint
           << " has no annotated owner loop";
@@ -500,7 +496,7 @@ public:
                 << "Counter multi-buffer storage " << state.storage->name_hint
                 << " is accessed at multiple schedule stages in one owner "
                    "loop. Align their T.Stage values, provide a compatible "
-                   "manual owner, or request one buffer version";
+                   "manual owner, or use iteration mode with one owner";
           }
           storage.storage_stages[i] = counter_stages[i].value();
         }
@@ -785,6 +781,9 @@ private:
         ICHECK(state.num_versions <= 1 || !IsL1Storage(state.storage))
             << "Broadcast fill for L1 storage " << state.storage->name_hint
             << " with " << state.num_versions << " versions is not supported";
+        // ResolveCore needs this marker to exempt the owner-external task for
+        // every logical multi-buffer plan. MaterializeMultiBuffer later clears
+        // it without rewriting storage when the selected version count is one.
         AddMultiBufferBroadcastFill(task, state.storage);
         return;
       }

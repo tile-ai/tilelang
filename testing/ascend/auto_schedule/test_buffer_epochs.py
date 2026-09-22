@@ -21,8 +21,9 @@ from testing.ascend.auto_schedule._scheduled_ir import copy_ring
         pytest.param("counter", True, 2, True, id="sparse-siblings"),
     ],
 )
-def test_storage_clock(mode, guarded, owners, uses_counter):
-    before = copy_ring(mode=mode, owners=owners, guarded=guarded)
+@pytest.mark.parametrize("versions", [1, 2], ids=["single-version", "ring"])
+def test_storage_clock(mode, guarded, owners, uses_counter, versions):
+    before = copy_ring(mode=mode, versions=versions, owners=owners, guarded=guarded)
     after = transform.PrepareMultiBuffer()(before)
     ub = allocated_buffer(after, "ub")
     assert tuple(int(dim) for dim in ub.shape) == (64,)  # Preparation does not expand data.
@@ -54,11 +55,6 @@ def test_storage_clock(mode, guarded, owners, uses_counter):
             assert any(
                 isinstance(parent, tirx.IfThenElse) and analyzer.can_prove_equal(parent.condition, expected_guard) for parent in parents
             )
-
-
-def test_single_version_does_not_need_counter():
-    after = transform.PrepareMultiBuffer()(copy_ring(versions=1, guarded=True))
-    assert not any("tl.multi_buffer_counter_map" in loop.annotations for loop in nodes(after, tirx.For))
 
 
 def test_iteration_clock_requires_single_owner():

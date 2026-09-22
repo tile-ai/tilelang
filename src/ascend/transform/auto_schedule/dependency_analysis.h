@@ -43,6 +43,16 @@ using namespace tirx;
 
 using DependencyTaskPair = std::pair<TaskNode *, TaskNode *>;
 
+enum class DependencyKind {
+  // A directed producer-to-consumer data dependency.
+  kData,
+  // Two disjoint owners of one multi-buffer-eligible storage.
+  // `prod_node` and `cons_node` only establish a stable pair orientation;
+  // `task_pairs` stores matching accesses on those two sides. Scheduling must
+  // choose either direction and keep both storage lifetimes disjoint.
+  kOwnerExclusion,
+};
+
 struct DepInfo {
   IRStructure *prod_node;
   IRStructure *cons_node;
@@ -50,8 +60,8 @@ struct DepInfo {
   // dependency. Undefined for an explicit conflict between distinct storage
   // keys; those edges do not participate in buffer versioning.
   ffi::Optional<Var> storage;
-  // Conflicting (producer access, consumer access) pairs. Each pair is a
-  // concrete producer→consumer ordering that needs a sync.
+  // Conflicting access pairs. For kData these are directed producer→consumer
+  // pairs; for kOwnerExclusion they identify the two unordered owner sides.
   std::vector<DependencyTaskPair> task_pairs;
   // Cross-iteration distance of this dependency:
   //   0   : same-iteration dependency.
@@ -59,7 +69,10 @@ struct DepInfo {
   //         resolve it to its ring width; otherwise it means one iteration.
   //   >=1 : dependency on a manually multi-buffered buffer, at the physical
   //         iteration distance solved per access pair.
+  // kOwnerExclusion leaves this as zero during shared analysis. InsertSync
+  // resolves both directed distances from the final stage and physical order.
   int distance;
+  DependencyKind kind{DependencyKind::kData};
 };
 
 // Per-phase dependency-analysis cache. A ControlNode key represents the
@@ -80,9 +93,9 @@ using ConflictHintList = ffi::Array<ffi::Any>;
 // `manual_buffer_versions` maps user-declared manual multi-buffer data Vars to
 // their version count; empty means no manual buffers.
 // `multi_buffer_owners` maps each storage treated as automatic multi-buffered
-// in the current phase to its owner loops.
-// AutoSchedule derives it from eligible owners; InsertSync derives it from the
-// final physical plan, so an eligible-but-unselected storage is absent there.
+// in the current phase to its owner loops. Dependencies between distinct
+// owners are returned as kOwnerExclusion; physical ring size is handled by the
+// owner-local protocol.
 // `dependency_cache` is shared for one scheduling or synchronization phase and
 // is keyed by `loop`. An `i == j` control-node self-dependency whose
 // producer→consumer pairs are already established anywhere inside that node's

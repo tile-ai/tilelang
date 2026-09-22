@@ -314,6 +314,32 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     }
     return owners->second.size();
   };
+  auto find_owner = [](const std::vector<ControlNode *> &owners,
+                       const TaskNode *task) -> ControlNode * {
+    ControlNode *result = nullptr;
+    for (ControlNode *owner : owners) {
+      if (!task->IsWithin(owner))
+        continue;
+      // Nested owners deliberately remain data dependencies here;
+      // PrepareMultiBuffer diagnoses their overlapping ownership.
+      if (result != nullptr)
+        return nullptr;
+      result = owner;
+    }
+    return result;
+  };
+  auto is_owner_exclusion = [&](const ffi::Optional<Var> &storage,
+                                const TaskNode *lhs, const TaskNode *rhs) {
+    if (!storage.has_value())
+      return false;
+    auto owners = multi_buffer_owners.find(storage.value());
+    if (owners == multi_buffer_owners.end() || owners->second.size() <= 1)
+      return false;
+    ControlNode *lhs_owner = find_owner(owners->second, lhs);
+    ControlNode *rhs_owner = find_owner(owners->second, rhs);
+    return lhs_owner != nullptr && rhs_owner != nullptr &&
+           lhs_owner != rhs_owner;
+  };
 
   for (size_t i = 0; i < n; ++i) {
     for (size_t j = 0; j < n; ++j) {
@@ -322,18 +348,21 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
       struct PendingDependency {
         ffi::Optional<Var> storage;
         int distance;
+        DependencyKind kind;
         std::set<DependencyTaskPair> task_pairs;
       };
       std::vector<PendingDependency> pending;
 
       auto add_pair = [&](const ffi::Optional<Var> &storage, int distance,
-                          TaskNode *producer, TaskNode *consumer) {
+                          TaskNode *producer, TaskNode *consumer,
+                          DependencyKind kind = DependencyKind::kData) {
         auto existing = std::find_if(
             pending.begin(), pending.end(), [&](const PendingDependency &dep) {
-              return dep.storage.same_as(storage) && dep.distance == distance;
+              return dep.storage.same_as(storage) && dep.distance == distance &&
+                     dep.kind == kind;
             });
         if (existing == pending.end()) {
-          pending.push_back({storage, distance, {}});
+          pending.push_back({storage, distance, kind, {}});
           existing = std::prev(pending.end());
         }
         existing->task_pairs.emplace(producer, consumer);
@@ -348,8 +377,15 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
             ffi::Optional<Var> storage;
             if (lhs_storage.same_as(rhs_storage))
               storage = lhs_storage;
+            bool owner_exclusion =
+                is_owner_exclusion(storage, lhs.task, rhs.task);
+            // The i<j visit sees every cross-owner write/read, write/write,
+            // and read/write conflict once. Such conflicts are undirected:
+            // the scheduler chooses one physical owner order.
+            if (owner_exclusion && i >= j)
+              continue;
             int manual_versions = get_manual_versions(storage);
-            if (manual_versions) {
+            if (manual_versions && !owner_exclusion) {
               for (int d = (i < j ? 0 : 1); d <= manual_versions; ++d) {
                 if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
                                        rhs.task->outer_ctx, rhs.region, loop, d,
@@ -364,11 +400,16 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
             for (int distance : {0, -1}) {
               if (distance == 0 && i >= j)
                 continue;
+              if (distance < 0 && loop == nullptr)
+                continue;
               if (RegionsMayConflict(lhs.task->outer_ctx, lhs.region,
                                      rhs.task->outer_ctx, rhs.region, loop,
                                      distance, get_num_storage_owners(storage),
                                      root_conflicts)) {
-                add_pair(storage, distance, lhs.task, rhs.task);
+                add_pair(storage, owner_exclusion ? 0 : distance, lhs.task,
+                         rhs.task,
+                         owner_exclusion ? DependencyKind::kOwnerExclusion
+                                         : DependencyKind::kData);
                 break;
               }
             }
@@ -401,7 +442,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
         deps.push_back({nodes[i], nodes[j], std::move(dep.storage),
                         std::vector<DependencyTaskPair>(dep.task_pairs.begin(),
                                                         dep.task_pairs.end()),
-                        dep.distance});
+                        dep.distance, dep.kind});
       }
     }
   }

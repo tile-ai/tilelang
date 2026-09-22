@@ -43,8 +43,13 @@ def test_acquire_dominates_possibly_empty_consumer_loop(counter_mode):
     assert all(any(isinstance(parent, tirx.For) and parent.loop_var.same_as(i) for parent in parents) for _, parents in waits)
 
 
-@pytest.mark.parametrize("nested", [False, True], ids=["sibling-owners", "repeated-siblings"])
-def test_missing_counter_channel_keeps_lexical_handshake(nested):
+@pytest.mark.parametrize(
+    "nested, second_stage",
+    [(False, 0), (True, 0), (True, 1), (True, 2)],
+    ids=["sibling-owners", "repeated-siblings", "uncovered-stage-distance", "wider-stage-distance"],
+)
+@pytest.mark.parametrize("versions", [1, 2], ids=["single-version", "ring"])
+def test_missing_counter_channel_keeps_lexical_handshake(nested, second_stage, versions):
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
     epoch = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var")
     owners = []
@@ -61,22 +66,37 @@ def test_missing_counter_channel_keeps_lexical_handshake(nested):
             "tl.multi_buffer_counter_map": {ub.data: epoch},
             "tl.storage_epoch_guard_map": {ub.data: tirx.const(True, "bool")},
         }
-        owners.append(unit(tirx.For(i, 0, 1, tirx.ForKind.SERIAL, body, annotations=annotations), core=None))
+        owners.append(
+            unit(tirx.For(i, 0, 1, tirx.ForKind.SERIAL, body, annotations=annotations), core=None, stage=second_stage if index else 0)
+        )
     body = seq(*owners)
     if nested:
         outer = tirx.Var("outer", "int32")
         body = unit(tirx.For(outer, 0, 3, tirx.ForKind.SERIAL, body), core=None)
     before = kernel(
-        seq(unit(tirx.BufferStore(epoch, 0, [0])), body), buffers=[ub, epoch], annotations={"tl.buffer_versions_map": {ub.data: 2}}
+        seq(unit(tirx.BufferStore(epoch, 0, [0])), body), buffers=[ub, epoch], annotations={"tl.buffer_versions_map": {ub.data: versions}}
     )
+    if second_stage:
+        with pytest.raises(tvm.error.InternalError, match="owner exclusion at logical distance") as error:
+            transform.InsertSync()(before)
+        message = str(error.value)
+        assert f"logical distance {-second_stage} (paired distance {1 + second_stage})" in message
+        return
     after = transform.InsertSync()(before)
+    forward_ids = []
     for operation in ("set", "wait"):
         forward = list(_flag_sites(after, operation, "V_S"))
+        forward_ids.append([int(call.args[1]) for call, _ in forward])
         assert forward and all(isinstance(call.args[1], tirx.IntImm) for call, _ in forward)
         if nested:
             reverse = list(_flag_sites(after, operation, "S_V"))
             assert reverse
             assert any(not any(isinstance(parent, tirx.For) for parent in parents) for _, parents in reverse)
+    assert forward_ids[0] == forward_ids[1]
+    if nested:
+        assert sorted(int(call.args[1]) for call, _ in _flag_sites(after, "set", "S_V")) == sorted(
+            int(call.args[1]) for call, _ in _flag_sites(after, "wait", "S_V")
+        )
 
 
 def test_narrow_child_handshake_cannot_replace_wider_parent_dependency():

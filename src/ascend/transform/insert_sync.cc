@@ -244,6 +244,7 @@ using CounterChannelKey = std::pair<CounterSyncSignature, int>;
 
 struct SyncPoint {
   DepEdge edge;
+  DependencyKind dependency_kind;
   int num_versions;
   PrimExpr flag_iteration;
   ControlNode *flag_loop;
@@ -251,16 +252,19 @@ struct SyncPoint {
   size_t allocation_index;
   std::optional<CounterChannelKey> counter_channel;
 
-  SyncPoint(DepEdge edge, int num_versions, ControlNode *flag_loop)
-      : edge(std::move(edge)), num_versions(num_versions),
+  SyncPoint(DepEdge edge, DependencyKind dependency_kind, int num_versions,
+            ControlNode *flag_loop)
+      : edge(std::move(edge)), dependency_kind(dependency_kind),
+        num_versions(num_versions),
         flag_iteration(CalculateIterationCount(flag_loop)),
         flag_loop(flag_loop), counter_group_id(0) {}
 
-  SyncPoint(DepEdge edge, int num_versions, PrimExpr flag_iteration,
-            ControlNode *counter_owner, int counter_group_id)
-      : edge(std::move(edge)), num_versions(num_versions),
-        flag_iteration(std::move(flag_iteration)), flag_loop(counter_owner),
-        counter_group_id(counter_group_id) {
+  SyncPoint(DepEdge edge, DependencyKind dependency_kind, int num_versions,
+            PrimExpr flag_iteration, ControlNode *counter_owner,
+            int counter_group_id)
+      : edge(std::move(edge)), dependency_kind(dependency_kind),
+        num_versions(num_versions), flag_iteration(std::move(flag_iteration)),
+        flag_loop(counter_owner), counter_group_id(counter_group_id) {
     ICHECK(this->flag_iteration.defined());
     ICHECK(counter_owner != nullptr);
     ICHECK_GT(counter_group_id, 0);
@@ -1222,6 +1226,44 @@ private:
     std::vector<DepInfo> deps =
         AnalyzeDependencies(nodes, loop, manual_, multi_buffer_owners_,
                             &dependency_cache_, root_conflicts_);
+    if (loop != nullptr) {
+      std::vector<DepInfo> directed_deps;
+      directed_deps.reserve(deps.size() * 2);
+      for (DepInfo &dep : deps) {
+        if (dep.kind != DependencyKind::kOwnerExclusion) {
+          directed_deps.push_back(std::move(dep));
+          continue;
+        }
+
+        ICHECK_EQ(dep.prod_node->GetParent(), loop);
+        ICHECK_EQ(dep.cons_node->GetParent(), loop);
+        ICHECK_NE(dep.prod_node->GetIndex(), dep.cons_node->GetIndex());
+        bool lhs_first = dep.prod_node->GetIndex() < dep.cons_node->GetIndex();
+        IRStructure *first = lhs_first ? dep.prod_node : dep.cons_node;
+        IRStructure *second = lhs_first ? dep.cons_node : dep.prod_node;
+        std::vector<DependencyTaskPair> first_to_second =
+            std::move(dep.task_pairs);
+        if (!lhs_first) {
+          for (auto &[producer, consumer] : first_to_second)
+            std::swap(producer, consumer);
+        }
+        // A stage-s task executes logical iteration (physical_iteration - s).
+        // Therefore two owners ordered in one physical iteration have logical
+        // distances stage(first)-stage(second) and its wraparound complement.
+        int forward_distance = first->GetStage() - second->GetStage();
+        std::vector<DependencyTaskPair> second_to_first;
+        second_to_first.reserve(first_to_second.size());
+        for (const auto &[producer, consumer] : first_to_second)
+          second_to_first.emplace_back(consumer, producer);
+        directed_deps.push_back({first, second, dep.storage,
+                                 std::move(first_to_second), forward_distance,
+                                 DependencyKind::kOwnerExclusion});
+        directed_deps.push_back(
+            {second, first, dep.storage, std::move(second_to_first),
+             1 - forward_distance, DependencyKind::kOwnerExclusion});
+      }
+      deps = std::move(directed_deps);
+    }
 
     auto expand_cores = [](CoreMask task_mask) {
       std::vector<CoreMask> result;
@@ -1286,7 +1328,7 @@ private:
           flag_loop = loop;
         }
       }
-      if (distance < 0)
+      if (distance < 0 && dep.kind == DependencyKind::kData)
         distance = 1;
       ICHECK_EQ(counter_info != nullptr, counter_owner != nullptr);
       std::optional<int> dependency_domain_id;
@@ -1336,11 +1378,11 @@ private:
             if (counter_info != nullptr) {
               PrimExpr iteration = BufferLoad(counter_info->counter,
                                               {IntImm(DataType::Int(32), 0)});
-              sync_points.emplace_back(std::move(edge), num_versions, iteration,
-                                       counter_owner->loop,
+              sync_points.emplace_back(std::move(edge), dep.kind, num_versions,
+                                       iteration, counter_owner->loop,
                                        counter_info->counter_group_id);
             } else {
-              sync_points.emplace_back(std::move(edge), num_versions,
+              sync_points.emplace_back(std::move(edge), dep.kind, num_versions,
                                        flag_loop);
             }
           }
@@ -1461,7 +1503,7 @@ private:
                               ControlNode *projection_scope) const {
     closure.Saturate(
         edge, max_distance, [&](const DepEdge &candidate, const auto &visit) {
-          if (candidate.distance != 0) {
+          if (candidate.distance != 0 && candidate.distance != 1) {
             visit(candidate);
             return;
           }
@@ -1470,8 +1512,16 @@ private:
               candidate, [&](const DepEdge &projected) {
                 int target_domain =
                     site_registry_.Src(projected).EpochDomainId();
-                if (domains_.CanProjectDomain(source_domain, target_domain,
-                                              projection_scope)) {
+                // Same-iteration ordering projects into a narrower active
+                // guard. Unit-distance ordering additionally requires both
+                // domains to describe the same active-epoch sequence.
+                bool can_project =
+                    domains_.CanProjectDomain(source_domain, target_domain,
+                                              projection_scope) &&
+                    (candidate.distance == 0 ||
+                     domains_.CanProjectDomain(target_domain, source_domain,
+                                               projection_scope));
+                if (can_project) {
                   visit(projected);
                 }
               });
@@ -1486,6 +1536,13 @@ private:
     for (SyncPoint &sync_point : sync_points) {
       if (closure.Contains(sync_point.edge))
         continue;
+      if (sync_point.dependency_kind == DependencyKind::kOwnerExclusion &&
+          sync_point.edge.distance != 0 && sync_point.edge.distance != 1) {
+        LOG(FATAL) << "InsertSync cannot materialize an uncovered multi-buffer "
+                      "owner exclusion at logical distance "
+                   << sync_point.edge.distance << " (paired distance "
+                   << 1 - sync_point.edge.distance << ")";
+      }
       SaturateDependencyEdge(closure, sync_point.edge, max_distance,
                              projection_scope);
       emit.push_back(std::move(sync_point));
@@ -2237,8 +2294,10 @@ inline Stmt MakeAscendCrossCoreWaitFlag(int mode_id, const std::string &pipe,
 PrimExpr MakeFlagEventId(const PrimExpr &iteration, int num_versions,
                          int base_id) {
   DataType dtype = iteration.dtype();
-  PrimExpr event_id =
-      indexmod(iteration, IntImm(dtype, num_versions)) + IntImm(dtype, base_id);
+  PrimExpr event_id = num_versions == 1
+                          ? IntImm(dtype, base_id)
+                          : indexmod(iteration, IntImm(dtype, num_versions)) +
+                                IntImm(dtype, base_id);
   return dtype == DataType::Int(32) ? event_id
                                     : cast(DataType::Int(32), event_id);
 }

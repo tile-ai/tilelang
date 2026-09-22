@@ -237,8 +237,7 @@ private:
   }
 
   void MergeSelectedBufferVersion(const Var &storage, int num_versions) {
-    if (num_versions <= 1)
-      return;
+    ICHECK_GT(num_versions, 0);
     auto existing = selected_buffer_versions_.find(storage);
     if (existing != selected_buffer_versions_.end()) {
       // Disjoint owners are scheduled independently but share one physical
@@ -303,13 +302,18 @@ int64_t GetTaskTimestamp(IRStructure *subtree_root, TaskNode *task,
   return timestamp;
 }
 
-int64_t GetDependencyLatency(const DepInfo &dependency) {
+int64_t GetDependencyLatency(const DepInfo &dependency, bool reverse = false) {
   int64_t latency = 0;
-  for (const auto &[producer, consumer] : dependency.task_pairs) {
-    int64_t producer_time =
-        GetTaskTimestamp(dependency.prod_node, producer, true);
-    int64_t consumer_time =
-        GetTaskTimestamp(dependency.cons_node, consumer, false);
+  for (const auto &[forward_producer, forward_consumer] :
+       dependency.task_pairs) {
+    TaskNode *producer = reverse ? forward_consumer : forward_producer;
+    TaskNode *consumer = reverse ? forward_producer : forward_consumer;
+    IRStructure *producer_root =
+        reverse ? dependency.cons_node : dependency.prod_node;
+    IRStructure *consumer_root =
+        reverse ? dependency.prod_node : dependency.cons_node;
+    int64_t producer_time = GetTaskTimestamp(producer_root, producer, true);
+    int64_t consumer_time = GetTaskTimestamp(consumer_root, consumer, false);
     latency = std::max(latency,
                        producer_time + producer->GetLatency() - consumer_time);
   }
@@ -481,6 +485,8 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
     std::vector<int64_t> resource_flags;
     std::vector<std::tuple<int64_t, int64_t, int64_t>> data_deps;
     std::vector<std::pair<int64_t, int64_t>> resource_deps;
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
+        owner_exclusion_deps;
     std::vector<std::pair<int64_t, int64_t>> pipe_order_deps;
 
     latencies.reserve(n);
@@ -540,7 +546,17 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
     for (const auto &dep : deps) {
       size_t i = node_idx[dep.prod_node];
       size_t j = node_idx[dep.cons_node];
-      data_deps.emplace_back(i, j, GetDependencyLatency(dep));
+      if (dep.kind == DependencyKind::kOwnerExclusion) {
+        int64_t forward = GetDependencyLatency(dep);
+        int64_t reverse = GetDependencyLatency(dep, /*reverse=*/true);
+        if (i > j) {
+          std::swap(i, j);
+          std::swap(forward, reverse);
+        }
+        owner_exclusion_deps.emplace_back(i, j, forward, reverse);
+      } else {
+        data_deps.emplace_back(i, j, GetDependencyLatency(dep));
+      }
     }
 
     // Collect resource dependencies
@@ -563,6 +579,7 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
     ffi::Array<int64_t> tvm_resource_flags;
     ffi::Array<ffi::Array<int64_t>> tvm_data_deps;
     ffi::Array<ffi::Array<int64_t>> tvm_resource_deps;
+    ffi::Array<ffi::Array<int64_t>> tvm_owner_exclusion_deps;
     ffi::Array<ffi::Array<int64_t>> tvm_pipe_order_deps;
 
     for (auto val : latencies) {
@@ -587,6 +604,14 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
       pair.push_back(dep.second);
       tvm_resource_deps.push_back(pair);
     }
+    for (const auto &dep : owner_exclusion_deps) {
+      ffi::Array<int64_t> tuple;
+      tuple.push_back(std::get<0>(dep));
+      tuple.push_back(std::get<1>(dep));
+      tuple.push_back(std::get<2>(dep));
+      tuple.push_back(std::get<3>(dep));
+      tvm_owner_exclusion_deps.push_back(tuple);
+    }
     for (const auto &dep : pipe_order_deps) {
       ffi::Array<int64_t> pair;
       pair.push_back(dep.first);
@@ -600,7 +625,8 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
     auto start_times =
         z3_schedule_func
             .value()(tvm_latencies, tvm_iis, tvm_resource_flags, tvm_data_deps,
-                     tvm_resource_deps, tvm_pipe_order_deps)
+                     tvm_resource_deps, tvm_owner_exclusion_deps,
+                     tvm_pipe_order_deps)
             .cast<ffi::Array<int64_t>>();
 
     if (start_times.size() != n) {
@@ -717,6 +743,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
       data_deps; // (i, j, distance, latency)
   std::vector<std::pair<int64_t, int64_t>> resource_deps;
+  std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>>
+      owner_exclusion_deps;
   std::vector<std::pair<int64_t, int64_t>> pipe_order_deps;
   std::vector<std::pair<int64_t, int64_t>> stage_order_deps;
 
@@ -906,6 +934,15 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     size_t i = node_idx[dep.prod_node];
     size_t j = node_idx[dep.cons_node];
     int64_t latency = GetDependencyLatency(dep);
+    if (dep.kind == DependencyKind::kOwnerExclusion) {
+      int64_t reverse_latency = GetDependencyLatency(dep, /*reverse=*/true);
+      if (i > j) {
+        std::swap(i, j);
+        std::swap(latency, reverse_latency);
+      }
+      owner_exclusion_deps.emplace_back(i, j, latency, reverse_latency);
+      continue;
+    }
     if (dep.distance >= 0) {
       data_deps.emplace_back(i, j, dep.distance, latency);
     } else {
@@ -964,6 +1001,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     // Collect WAR consumers per Let node
     std::vector<std::set<size_t>> let_war_consumers(n);
     for (const auto &dep : deps) {
+      if (dep.kind != DependencyKind::kData)
+        continue;
       size_t p = node_idx[dep.prod_node];
       if (let_closure.is_declaration[p]) {
         let_war_consumers[p].insert(node_idx[dep.cons_node]);
@@ -985,8 +1024,9 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   ffi::Array<int64_t> tvm_iis;
   ffi::Array<int64_t> tvm_resource_flags;
   ffi::Array<ffi::Array<int64_t>>
-      tvm_data_deps; // each element is [i, j, distance]
+      tvm_data_deps; // each element is [i, j, distance, latency]
   ffi::Array<ffi::Array<int64_t>> tvm_resource_deps;
+  ffi::Array<ffi::Array<int64_t>> tvm_owner_exclusion_deps;
   ffi::Array<ffi::Array<int64_t>> tvm_pipe_order_deps;
   ffi::Array<int64_t> tvm_storage_sizes;
   ffi::Array<int64_t> tvm_manual_stages;
@@ -1013,6 +1053,14 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     pair.push_back(dep.first);
     pair.push_back(dep.second);
     tvm_resource_deps.push_back(pair);
+  }
+  for (const auto &dep : owner_exclusion_deps) {
+    ffi::Array<int64_t> tuple;
+    tuple.push_back(std::get<0>(dep));
+    tuple.push_back(std::get<1>(dep));
+    tuple.push_back(std::get<2>(dep));
+    tuple.push_back(std::get<3>(dep));
+    tvm_owner_exclusion_deps.push_back(tuple);
   }
   for (const auto &dep : pipe_order_deps) {
     ffi::Array<int64_t> pair;
@@ -1052,9 +1100,10 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   auto return_val =
       z3_schedule_loop_func
           .value()(num_stages, tvm_latencies, tvm_iis, tvm_resource_flags,
-                   tvm_data_deps, tvm_resource_deps, tvm_storage_sizes,
-                   tvm_memory_groups, tvm_stage_order_deps, enable_offset,
-                   tvm_manual_stages, manual_schedule, tvm_pipe_order_deps)
+                   tvm_data_deps, tvm_resource_deps, tvm_owner_exclusion_deps,
+                   tvm_pipe_order_deps, tvm_storage_sizes, tvm_memory_groups,
+                   tvm_stage_order_deps, enable_offset, tvm_manual_stages,
+                   manual_schedule)
           .cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<int>, int64_t>>();
 
   ffi::Array<int64_t> start_times = return_val.get<0>();

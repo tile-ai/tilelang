@@ -29,6 +29,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -111,10 +112,14 @@ class VersionedBufferRegistry {
 public:
   VersionedBufferRegistry(const MultiBufferPlan &plan,
                           const SBlock &kernel_root) {
-    for (const MultiBufferInfo &info : plan.Infos())
-      storage_versions_.emplace(info.storage, info.num_versions);
+    for (const MultiBufferInfo &info : plan.Infos()) {
+      if (info.NeedsVersionDimension())
+        storage_versions_.emplace(info.storage, info.num_versions);
+    }
     CollectAllocationPitches(kernel_root);
     for (const MultiBufferInfo &info : plan.Infos()) {
+      if (!info.NeedsVersionDimension())
+        continue;
       ICHECK(storage_pitch_bits_.count(info.storage))
           << "Cannot find the physical allocation for automatic multi-buffer "
              "storage "
@@ -187,10 +192,13 @@ public:
                             const MultiBufferBroadcastFill &broadcast_storages)
       : plan_(plan), buffers_(buffers) {
     for (const Var &storage : broadcast_storages) {
-      ICHECK(plan_.Find(storage) != nullptr)
-          << "Broadcast initialization refers to non-versioned storage "
+      const MultiBufferInfo *info = plan_.Find(storage);
+      ICHECK(info != nullptr)
+          << "Broadcast initialization refers to storage outside the prepared "
+             "multi-buffer plan: "
           << storage;
-      broadcast_storages_.insert(storage);
+      if (info->NeedsVersionDimension())
+        broadcast_storages_.insert(storage);
     }
   }
 
@@ -228,7 +236,7 @@ private:
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
     const MultiBufferInfo *info = plan_.Find(load->buffer);
-    if (!info)
+    if (!info || !info->NeedsVersionDimension())
       return load;
     Buffer versioned = buffers_->Resolve(load->buffer);
     auto *node = load.CopyOnWrite();
@@ -240,7 +248,7 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     const MultiBufferInfo *info = plan_.Find(store->buffer);
-    if (!info)
+    if (!info || !info->NeedsVersionDimension())
       return store;
     Buffer versioned = buffers_->Resolve(store->buffer);
     auto *node = store.CopyOnWrite();
@@ -263,7 +271,8 @@ private:
     static const Op &region_op = region();
     if (op->op.same_as(region_op) && op->args.size() >= 2) {
       if (const auto *load = op->args[0].as<BufferLoadNode>()) {
-        if (plan_.Find(load->buffer)) {
+        const MultiBufferInfo *info = plan_.Find(load->buffer);
+        if (info != nullptr && info->NeedsVersionDimension()) {
           bool broadcast = IsBroadcastFill(load->buffer);
           Array<PrimExpr> args;
           args.push_back(VisitExpr(op->args[0]));
@@ -429,9 +438,86 @@ void AddBufferVersion(BufferVersionMap *versions, const Var &storage,
   }
 }
 
+void RemoveCounterTasks(
+    std::vector<std::shared_ptr<IRStructure>> *nodes, ControlNode *parent,
+    const std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
+        &counter_storages) {
+  std::vector<std::shared_ptr<IRStructure>> retained;
+  retained.reserve(nodes->size());
+  for (const std::shared_ptr<IRStructure> &node : *nodes) {
+    if (node->IsTask()) {
+      auto *task = static_cast<TaskNode *>(node.get());
+      auto counter = std::find_if(
+          counter_storages.begin(), counter_storages.end(),
+          [&](const Var &storage) { return task->TouchesStorage(storage); });
+      if (counter != counter_storages.end()) {
+        // Only the generated initialization/advance store may disappear.
+        // A reader or a compound task can carry work that must survive.
+        Stmt body = task->stmt;
+        if (const auto *marker = body.as<AttrStmtNode>();
+            marker && marker->attr_key == attr::kAscendTask) {
+          body = marker->body;
+        }
+        while (const auto *guard = body.as<IfThenElseNode>()) {
+          if (guard->else_case.defined())
+            break;
+          body = guard->then_case;
+        }
+        const auto *store = body.as<BufferStoreNode>();
+        ICHECK(store && store->buffer->data.same_as(*counter))
+            << "Cannot elide single-version counter " << (*counter)->name_hint
+            << ": expected a task that only stores to this counter";
+        continue;
+      }
+    } else {
+      auto *control = static_cast<ControlNode *>(node.get());
+      for (const Var &storage : counter_storages) {
+        ICHECK(!control->task->TouchesStorage(storage))
+            << "Cannot elide single-version counter " << storage->name_hint
+            << ": its value is used by loop control";
+      }
+      RemoveCounterTasks(&control->children, control, counter_storages);
+    }
+    node->SetIndex(retained.size());
+    node->SetParent(parent);
+    retained.push_back(node);
+  }
+  *nodes = std::move(retained);
+}
+
+void ElideUnitVersionCounterGroups(ScheduledTIR *scheduled_tir,
+                                   const MultiBufferPlan &plan) {
+  std::unordered_set<int> versioned_counter_groups;
+  for (const MultiBufferInfo &info : plan.Infos()) {
+    if (info.UsesCounter() && info.NeedsVersionDimension())
+      versioned_counter_groups.insert(info.counter_group_id);
+  }
+
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> counter_storages;
+  for (const MultiBufferInfo &info : plan.Infos()) {
+    if (info.UsesCounter() &&
+        !versioned_counter_groups.count(info.counter_group_id))
+      counter_storages.insert(info.counter->data);
+  }
+  if (counter_storages.empty())
+    return;
+
+  RemoveCounterTasks(&scheduled_tir->tree, nullptr, counter_storages);
+  Array<Buffer> alloc_buffers;
+  for (const Buffer &buffer :
+       scheduled_tir->metadata.kernel_root->alloc_buffers) {
+    if (!counter_storages.count(buffer->data))
+      alloc_buffers.push_back(buffer);
+  }
+  SBlock kernel_root = scheduled_tir->metadata.kernel_root;
+  kernel_root.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
+  scheduled_tir->metadata.kernel_root = std::move(kernel_root);
+}
+
 SBlock MaterializeKernel(ScheduledTIR scheduled_tir) {
   MultiBufferPlan plan = ReadMultiBufferPlan(
       scheduled_tir.tree, scheduled_tir.metadata.buffer_versions);
+  ElideUnitVersionCounterGroups(&scheduled_tir, plan);
   VersionedBufferRegistry buffers(plan, scheduled_tir.metadata.kernel_root);
   RewriteScheduledTree(&scheduled_tir.tree, plan, &buffers);
 

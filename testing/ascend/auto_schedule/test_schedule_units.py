@@ -5,7 +5,7 @@ import tilelang.ascend.transform as ascend_transform
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
-from testing.ascend._ir import copy, kernel, seq
+from testing.ascend._ir import copy, kernel, nodes, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
 from testing.ascend.auto_schedule._task_utils import (
     _bind_target,
@@ -115,3 +115,37 @@ def test_auto_schedule_requires_its_input_contract(case, message):
         before = _scheduled_copies(cost=None if case == "missing-cost" else (1, 1), malformed=case == "multiple-tasks")
     with pytest.raises(tvm.error.InternalError, match=message):
         ascend_transform.AutoSchedule()(before)
+
+
+@pytest.mark.parametrize("eligible", [False, True], ids=["ordinary-dependency", "owner-exclusion"])
+@pytest.mark.parametrize("second_stage", [0, 1], ids=["same-stage", "offset-stage"])
+def test_single_version_sibling_owners_preserve_dependency_kind(eligible, second_stage):
+    a = tirx.decl_buffer((1,), "int32", name="A")
+    ub = tirx.decl_buffer((1,), "int32", name="ub", scope="shared.dyn")
+    owners = []
+    for index in range(2):
+        i = tirx.Var(f"owner{index}", "int32")
+        write = tirx.BufferStore(ub, index + 1, [0])
+        if index == 0:
+            write = tirx.SBlock([], [], [], "SIMD_VF", write)
+        # The shared MTE2 pipe fixes physical owner order. Without it, the
+        # ordinary dependency can be satisfied by reversing modulo phases.
+        body = seq(unit(copy(a, ub), core=0, stage=-1, cost=(1, 1)), unit(write, core=0, stage=-1, cost=(1, 1)))
+        owner = tirx.For(i, 0, 1, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ub.data]} if eligible else {})
+        owners.append(unit(owner, core=None, stage=second_stage if index else 0))
+    outer = tirx.For(
+        tirx.Var("outer", "int32"), 0, 4, tirx.ForKind.SERIAL, seq(*owners), annotations={"num_stages": 2, "enable_offset": True}
+    )
+    before = kernel(unit(outer, core=None, stage=-1), buffers=[ub], params=[a], annotations={"tl.buffer_versions_map": {ub.data: 1}})
+    if not eligible and second_stage:
+        with pytest.raises(RuntimeError, match="Manual schedule constraints are infeasible"):
+            ascend_transform.AutoSchedule()(before)
+        return
+    after = ascend_transform.AutoSchedule()(before)
+    (scheduled_outer,) = [loop for loop in nodes(after, tirx.For) if loop.loop_var.same_as(outer.loop_var)]
+    assert _direct_schedule_unit_stages(scheduled_outer.body) == [0, second_stage]
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    versions = root.annotations.get("tl.buffer_versions_map", {})
+    assert (ub.data in versions) == eligible
+    if eligible:
+        assert int(versions[ub.data]) == 1
