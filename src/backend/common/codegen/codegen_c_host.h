@@ -77,6 +77,7 @@ private:
   std::string module_name_;
   /* \brief mapping global packed func to the unique name */
   std::unordered_map<std::string, std::string> declared_globals_;
+  bool emitted_bit_intrinsics_{false};
   /* \brief names of the functions declared in this module */
   Array<String> function_names_;
   /*! \brief whether to emit asserts in the resulting C code */

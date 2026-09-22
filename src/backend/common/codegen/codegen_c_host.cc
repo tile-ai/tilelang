@@ -2,6 +2,7 @@
  * \file codegen_c_host.cc
  */
 #include "codegen_c_host.h"
+#include "c_bit_intrinsics.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -35,6 +36,7 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
+  emitted_bit_intrinsics_ = false;
   decl_stream << "// tilelang target: " << target_str << "\n";
   decl_stream << "#define TVM_EXPORTS\n";
   decl_stream << "#include \"tvm/runtime/base.h\"\n";
@@ -347,7 +349,18 @@ std::string CodeGenCHost::GetPackedName(const tvm::tirx::CallNode *op) {
 void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
                               std::ostream &os) { // NOLINT(*)
   using namespace tvm::tirx;
-  if (op->op.same_as(tl::tvm_ffi_call_with_result())) {
+  if (op->op.same_as(Op::Get("tirx.clz"))) {
+    DataType dtype = op->args[0].dtype();
+    ICHECK(dtype.is_scalar() && (dtype.is_int() || dtype.is_uint()) &&
+           (dtype.bits() == 32 || dtype.bits() == 64));
+    if (!emitted_bit_intrinsics_) {
+      emitted_bit_intrinsics_ = true;
+      decl_stream << codegen::kCBitIntrinsics;
+    }
+    os << "tl_clz" << dtype.bits() << "((uint" << dtype.bits() << "_t)(";
+    PrintExpr(op->args[0], os);
+    os << "))";
+  } else if (op->op.same_as(tl::tvm_ffi_call_with_result())) {
     ICHECK_EQ(op->args.size(), 4U);
     const auto *func_name = op->args[0].as<StringImmNode>();
     const auto *num_args = op->args[2].as<IntImmNode>();
