@@ -88,6 +88,10 @@ def dual_copy(
 
     Hardware L0C→UB requires rank at least two. Its N-split additionally
     requires the full N extent to be a multiple of 32.
+    For fp32→f16/bf16 on-path casts, N-split emits two single-destination
+    NZ→ND copies instead. Each non-empty pipe width must be provably a
+    multiple of 32; a full equal split therefore requires N to be a multiple
+    of 64. Unsupported widths are rejected during lowering.
 
     The larger region is the full logical tile. Each AIV processes the
     corresponding half of that tile along the inferred split dimension.

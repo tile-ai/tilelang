@@ -9,7 +9,7 @@ Run on an Ascend NPU; checks torch accuracy and benches M- and N-split.
 import torch
 
 import tilelang
-import tilelang.language as T
+from tilelang.ascend import language as T
 from tilelang.profiler import do_bench
 
 

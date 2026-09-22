@@ -4,11 +4,14 @@ Quant dual lowers to two non-dual FixPipes; same-dtype stays hardware dual.
 Frontend rejects unsupported casts; RewriteDualCopy enforces a 2:1 split.
 """
 
+import re
+
 import pytest
 
 import tilelang
 import tilelang.testing
-from tilelang import language as T
+from tilelang import tvm
+from tilelang.ascend import language as T
 from tilelang.engine.lower import lower
 
 # quant_pre mode for the on-path cast: 1 == F322F16, 16 == F322BF16.
@@ -50,12 +53,22 @@ def gemm_dual_copy(dst_dtype, split, M=256, N=256, K=256, unit_flag_ctrl=None):
 
 
 def _kernel_source(func):
-    return lower(func, target="ascend").kernel_source
+    with tvm.target.Target("ascend"):
+        return lower(func, target="ascend").kernel_source
+
+
+_CAST_LIT = re.compile(r"static_cast<[^>]+>\((.+)\)\Z")
+
+
+def _unwrap_c_api_arg(arg):
+    """Strip a single ``static_cast<enum>(value)`` wrapper from codegen."""
+    match = _CAST_LIT.fullmatch(arg.strip())
+    return match.group(1) if match else arg
 
 
 def _cc_to_ub_argument_lists(source):
-    """Return every ``copy_matrix_cc_to_ub(...)`` call's top-level arguments."""
-    needle = "copy_matrix_cc_to_ub("
+    """Return every ``asc_copy_l0c2ub(...)`` call's top-level C API arguments."""
+    needle = "asc_copy_l0c2ub("
     calls = []
     start = 0
     while True:
@@ -95,17 +108,28 @@ def _split_top_level_commas(text):
 
 
 def _cc_to_ub_tails(source):
-    """Return the fixed integer-argument tails of every emitted cc_to_ub call."""
+    """Return IR-compatible tails of every ``asc_copy_l0c2ub`` call.
+
+    Current C API order is ``dst, src, inner, rows, dst_stride, src_stride,
+    sub_blockid, dual, unit_flag, quant, relu_pre, split_en, NZ2ND, NZ2DN,
+    clip_relu``. Existing assertions still use the old IR tail indices:
+    ``[0]=dual, [1]=sub_blockid, [3]=unit_flag, [4]=quant, [7]=NZ2ND``.
+    """
     tails = []
     for args in _cc_to_ub_argument_lists(source):
-        assert len(args) == 26, args
-        tails.append(args[-19:])
+        assert len(args) == 15, args
+        dual = _unwrap_c_api_arg(args[7])
+        sub = _unwrap_c_api_arg(args[6])
+        unit = _unwrap_c_api_arg(args[8])
+        quant = _unwrap_c_api_arg(args[9])
+        nz2nd = _unwrap_c_api_arg(args[12])
+        tails.append([dual, sub, "0", unit, quant, "0", "0", nz2nd])
     return tails
 
 
 def _cc_to_ub_sizes(source):
     """Return (copy_inner, copy_rows) for every emitted cc_to_ub call."""
-    return [(args[3], args[4]) for args in _cc_to_ub_argument_lists(source)]
+    return [(_unwrap_c_api_arg(args[2]), _unwrap_c_api_arg(args[3])) for args in _cc_to_ub_argument_lists(source)]
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
@@ -143,9 +167,9 @@ def test_onpath_cast_unit_flag_clears_on_last_pipe(dst_dtype, split):
     assert tails[1][3] == "3", tails
 
 
-@pytest.mark.parametrize("split", ["M", "N"])
-def test_same_dtype_dual_keeps_single_hardware_dual_pipe(split):
-    source = _kernel_source(gemm_dual_copy("float32", split))
+@pytest.mark.parametrize("split,n", [("M", 256), ("N", 256), ("N", 32)])
+def test_same_dtype_dual_keeps_single_hardware_dual_pipe(split, n):
+    source = _kernel_source(gemm_dual_copy("float32", split, N=n))
 
     tails = _cc_to_ub_tails(source)
     assert len(tails) == 1, source
@@ -284,7 +308,7 @@ def test_onpath_dual_tail_uses_src_half_rows():
         _kernel_source(main)
 
 
-def dynamic_prefix_onpath_dual_copy(split, max_units, unit):
+def dynamic_prefix_onpath_dual_copy(split, max_units, unit, dst_dtype="float16"):
     TILE_M = TILE_N = TILE_K = 256
     dst_shape = (TILE_M // 2, TILE_N) if split == "M" else (TILE_M, TILE_N // 2)
 
@@ -294,14 +318,14 @@ def dynamic_prefix_onpath_dual_copy(split, max_units, unit):
         def main(
             A: T.Buffer((TILE_M, TILE_K), "float16"),
             B: T.Buffer((TILE_N, TILE_K), "float16"),
-            C: T.Buffer(dst_shape, "float16"),
+            C: T.Buffer(dst_shape, dst_dtype),
             sizes: T.Buffer((1,), "int32"),
         ):
             with T.Kernel(1):
                 a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
                 b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
                 acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
-                tmp = T.alloc_shared(dst_shape, "float16")
+                tmp = T.alloc_shared(dst_shape, dst_dtype)
                 T.copy(A, a_l1)
                 T.copy(B, b_l1)
                 T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
@@ -317,14 +341,14 @@ def dynamic_prefix_onpath_dual_copy(split, max_units, unit):
     def main(
         A: T.Buffer((TILE_M, TILE_K), "float16"),
         B: T.Buffer((TILE_N, TILE_K), "float16"),
-        C: T.Buffer(dst_shape, "float16"),
+        C: T.Buffer(dst_shape, dst_dtype),
         sizes: T.Buffer((1,), "int32"),
     ):
         with T.Kernel(1):
             a_l1 = T.alloc_l1((TILE_M, TILE_K), "float16")
             b_l1 = T.alloc_l1((TILE_N, TILE_K), "float16")
             acc = T.alloc_l0c((TILE_M, TILE_N), "float32")
-            tmp = T.alloc_shared(dst_shape, "float16")
+            tmp = T.alloc_shared(dst_shape, dst_dtype)
             T.copy(A, a_l1)
             T.copy(B, b_l1)
             T.gemm(a_l1, b_l1, acc, transpose_B=True, clear_accum=True)
@@ -361,11 +385,11 @@ def test_onpath_dual_dynamic_tail_uses_src_half(split):
         assert tile_half in pipe1_inner, (pipe1_inner, source)
 
 
-def dynamic_over_half_onpath_dual_copy(split, unit_flag_ctrl=3):
+def dynamic_over_half_onpath_dual_copy(split, unit_flag_ctrl=3, n_unit=32):
     TILE_M = TILE_N = TILE_K = 256
     tile_half = TILE_M // 2
     dst_shape = (tile_half, TILE_N) if split == "M" else (TILE_M, TILE_N // 2)
-    extra_units, unit = (32, 2) if split == "M" else (2, 32)
+    extra_units, unit = (32, 2) if split == "M" else (2, n_unit)
 
     if split == "M":
 
@@ -462,7 +486,7 @@ def test_onpath_dual_dynamic_over_half_tail_uses_tile_half(split):
     assert "+" in args[1][1], (args[1][1], source)
     # Full-width M-prefix still walks the 256-row L0C NZ pitch, not the copied 192.
     for call_args in args:
-        assert call_args[6] == "256", (call_args[6], source)
+        assert _unwrap_c_api_arg(call_args[5]) == "256", (call_args[5], source)
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
@@ -470,7 +494,7 @@ def test_onpath_dual_dynamic_single_pipe_when_src_fits_tile_half(split):
     if split == "M":
         func = dynamic_prefix_onpath_dual_copy(split, max_units=64, unit=2)
     else:
-        func = dynamic_prefix_onpath_dual_copy(split, max_units=3, unit=16)
+        func = dynamic_prefix_onpath_dual_copy(split, max_units=3, unit=32)
     source = _kernel_source(func)
     sizes = _cc_to_ub_sizes(source)
     assert len(sizes) == 1, source
@@ -483,13 +507,13 @@ def test_onpath_dual_dynamic_single_pipe_when_src_fits_tile_half(split):
     else:
         assert copy_rows == "256", (copy_rows, source)
         assert copy_inner != "128", (copy_inner, source)
-        assert "16" in copy_inner, (copy_inner, source)
+        assert "32" in copy_inner, (copy_inner, source)
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
 def test_column_slice_second_pipe_offset(split):
-    # acc[:, :32] on a 64-wide L0C; second pipe src ptr must be offset.
-    alloc, region_n = 64, 32
+    # Keep the compact N-split's two ND output widths divisible by 32.
+    alloc, region_n = (64, 32) if split == "M" else (128, 64)
     region_m = alloc
     source = _kernel_source(compact_column_slice_dual_copy(split, alloc, region_n))
     args = _cc_to_ub_argument_lists(source)
@@ -502,7 +526,7 @@ def test_column_slice_second_pipe_offset(split):
         assert copy_inner == expected_inner, (copy_inner, expected_inner, source)
         assert copy_rows == expected_rows, (copy_rows, expected_rows, source)
     for call_args in args:
-        assert call_args[6] == str(alloc), (call_args[6], alloc, source)
+        assert _unwrap_c_api_arg(call_args[5]) == str(alloc), (call_args[5], alloc, source)
     assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
     assert "+" in args[1][1], (args[1][1], source)
 
@@ -548,7 +572,7 @@ def test_m_split_compact_2d_uses_alloc_row_stride():
         assert copy_inner == expected_inner, (copy_inner, expected_inner, source)
         assert copy_rows == expected_rows, (copy_rows, expected_rows, source)
     for call_args in args:
-        assert call_args[6] == str(region_m), (call_args[6], region_m, source)
+        assert _unwrap_c_api_arg(call_args[5]) == str(region_m), (call_args[5], region_m, source)
     assert args[0][1] != args[1][1], (args[0][1], args[1][1], source)
     assert "+" in args[1][1], (args[1][1], source)
 
@@ -585,6 +609,36 @@ def test_lowering_rejects_odd_m():
 def test_lowering_rejects_n_not_multiple_of_32():
     with pytest.raises(ValueError, match="multiple of 32"):
         _kernel_source(gemm_dual_copy("float16", "N", N=16))
+
+
+@pytest.mark.parametrize("dst_dtype", ["float16", "bfloat16"])
+@pytest.mark.parametrize("n", [32, 96])
+def test_onpath_n_split_rejects_unaligned_pipe_width(dst_dtype, n):
+    with pytest.raises(ValueError, match="pipe n_size to be a multiple of 32"):
+        _kernel_source(gemm_dual_copy(dst_dtype, "N", M=32, N=n, K=32))
+
+
+@pytest.mark.parametrize("dst_dtype", ["float16", "bfloat16"])
+def test_onpath_n_split_accepts_32_wide_pipes(dst_dtype):
+    source = _kernel_source(gemm_dual_copy(dst_dtype, "N", M=32, N=64, K=32))
+    assert _cc_to_ub_sizes(source) == [("32", "32"), ("32", "32")], source
+    tails = _cc_to_ub_tails(source)
+    for tail in tails:
+        assert tail[0] == "0" and tail[4] == str(QUANT_PRE[dst_dtype]) and tail[7] == "1", tail
+
+
+@pytest.mark.parametrize("dst_dtype", ["float16", "bfloat16"])
+def test_onpath_n_split_rejects_unaligned_dynamic_single_pipe(dst_dtype):
+    func = dynamic_prefix_onpath_dual_copy("N", max_units=3, unit=16, dst_dtype=dst_dtype)
+    with pytest.raises(ValueError, match="pipe n_size to be a multiple of 32"):
+        _kernel_source(func)
+
+
+def test_onpath_n_split_rejects_unaligned_dynamic_second_pipe():
+    # pipe0 is 128 wide; pipe1 can be 16 or 32 wide.
+    func = dynamic_over_half_onpath_dual_copy("N", n_unit=16)
+    with pytest.raises(ValueError, match="cannot prove this for pipe 1"):
+        _kernel_source(func)
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
@@ -702,7 +756,7 @@ def test_vf_cast_keeps_single_hardware_dual_pipe(dst_dtype, split):
     assert source.count("AscendC::PipeBarrier<pipe_t::PIPE_FIX>()") == 0, source
     assert "simd_inst::vcvt<" in source, source
     assert "simd_inst::vadd(" in source, source
-    assert "PK_B32" in source, source
+    assert "vsts_pack_b32" in source, source
 
 
 if __name__ == "__main__":

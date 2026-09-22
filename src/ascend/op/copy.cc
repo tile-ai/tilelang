@@ -809,17 +809,26 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
         CheckSplitExtentDivisible(
             src_row.size, 2,
             "Ascend M-split on-path quant dual_copy needs an even M", analyzer);
-      } else if (analyzer->CanProve(src_extent > tile_half,
-                                    arith::ProofStrength::kSymbolicBound)) {
-        CheckSplitExtentDivisible(
-            src_inner.size, 32,
-            "Ascend N-split on-path quant dual_copy needs N % 32 == 0",
-            analyzer);
       } else {
-        CheckSplitExtentDivisible(
-            src_inner.size, 16,
-            "Ascend N-split on-path quant dual_copy needs N % 16 == 0",
-            analyzer);
+        // These are single-destination NZ2ND calls, so each emitted n_size
+        // must be divisible by 32 independently of the full source N.
+        auto check_pipe_width = [&](const PrimExpr &width, int pipe) {
+          PrimExpr zero = make_const(width.dtype(), 0);
+          if (analyzer->CanProve(!has_data || width <= zero)) {
+            return;
+          }
+          With<arith::ConstraintContext> nonempty_pipe(
+              analyzer, has_data && width > zero);
+          TVM_FFI_CHECK(analyzer->CanProveEqual(
+                            FloorMod(width, make_const(width.dtype(), 32)), zero),
+                        ValueError)
+              << "Ascend N-split on-path cast dual_copy requires each non-empty "
+                 "pipe n_size to be a multiple of 32 for ND output; cannot "
+                 "prove this for pipe "
+              << pipe << " with n_size=" << width << ".";
+        };
+        check_pipe_width(pipe0_inner, 0);
+        check_pipe_width(pipe1_inner, 1);
       }
       bool source_half_exceeds_destination =
           analyzer->CanProve(pipe0_rows > dst_row.size) ||

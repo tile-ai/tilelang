@@ -4,6 +4,8 @@ Covers a compact-N column slice (64x32 GEMM in 64x64 L0C), a dynamic
 over-half tail (192 in a 256 tile), plus a small full-tile smoke check.
 """
 
+import os
+
 import pytest
 import torch
 
@@ -12,7 +14,13 @@ from example_dual_copy_onpath_cast import gemm, ref_program, run_dynamic_tail, r
 
 DST_CASES = (("float16", 2e-2), ("bfloat16", 5e-2))
 
+requires_ascendc_onpath_quant = pytest.mark.skipif(
+    os.environ.get("TILELANG_DEFAULT_TARGET") == "pto",
+    reason="PTO L0C->UB MTE does not support quant_pre != 0 yet",
+)
 
+
+@requires_ascendc_onpath_quant
 @pytest.mark.parametrize("split", ["M", "N"])
 @pytest.mark.parametrize("dst_dtype,thresh", DST_CASES)
 def test_onpath_compact_subregion(split, dst_dtype, thresh):
@@ -20,6 +28,7 @@ def test_onpath_compact_subregion(split, dst_dtype, thresh):
     run_subregion(dtype="float16", dst_dtype=dst_dtype, split=split, thresh=thresh)
 
 
+@requires_ascendc_onpath_quant
 @pytest.mark.parametrize("split", ["M", "N"])
 @pytest.mark.parametrize("dst_dtype,thresh", DST_CASES)
 def test_onpath_dynamic_tail(split, dst_dtype, thresh):
@@ -27,6 +36,7 @@ def test_onpath_dynamic_tail(split, dst_dtype, thresh):
     run_dynamic_tail(dtype="float16", dst_dtype=dst_dtype, split=split, thresh=thresh)
 
 
+@requires_ascendc_onpath_quant
 @pytest.mark.parametrize("split", ["M", "N"])
 def test_onpath_full_tile_small(split):
     """Single-block full-tile smoke check (not the 8192 regression size)."""
@@ -47,11 +57,15 @@ def test_onpath_full_tile_small(split):
 
 
 if __name__ == "__main__":
-    for dst_dtype, thresh in DST_CASES:
+    # Direct runs bypass pytest collection, so apply the PTO guard by hand.
+    if os.environ.get("TILELANG_DEFAULT_TARGET") == "pto":
+        print("SKIP: PTO L0C->UB MTE does not support quant_pre != 0 yet")
+    else:
+        for dst_dtype, thresh in DST_CASES:
+            for split in ["M", "N"]:
+                test_onpath_compact_subregion(split, dst_dtype, thresh)
+            for split in ["M", "N"]:
+                test_onpath_dynamic_tail(split, dst_dtype, thresh)
         for split in ["M", "N"]:
-            test_onpath_compact_subregion(split, dst_dtype, thresh)
-        for split in ["M", "N"]:
-            test_onpath_dynamic_tail(split, dst_dtype, thresh)
-    for split in ["M", "N"]:
-        test_onpath_full_tile_small(split)
-    print("PASS: onpath column-slice / dynamic-tail / small full-tile")
+            test_onpath_full_tile_small(split)
+        print("PASS: onpath column-slice / dynamic-tail / small full-tile")
