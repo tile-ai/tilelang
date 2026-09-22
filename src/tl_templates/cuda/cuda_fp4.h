@@ -126,6 +126,36 @@ template <typename V, typename... Ts> TL_DEVICE V make_fp4_vec(Ts... lanes) {
 } // namespace tl
 
 // ============================================================================
+// FP4 -> FP8 (E4M3) Conversions
+// ============================================================================
+// Every E2M1 value, including -0, is exactly representable in E4M3, so the
+// conversion is a pure bit transcode: result byte n is the E4M3 encoding of
+// nibble n.
+
+// fp4_e2m1x4 (2 bytes) -> fp8_e4m3x4 (4 bytes)
+TL_DEVICE __nv_fp8x4_storage_t
+__tl_cvt_e2m1x4_to_e4m3x4(const __nv_fp4x4_storage_t src) {
+  // The two table words hold E4M3(0, .5, 1, 1.5) and E4M3(2, 3, 4, 6); each
+  // nibble's magnitude bits select one byte. The second permutation lands each
+  // nibble's sign bit in bit 3 of its result byte, shifted up to bit 7.
+  uint32_t magnitude = __byte_perm(0x3c383000, 0x4c484440, src & 0x7777);
+  uint32_t signs = (__byte_perm(src, src >> 4, 0x5140) & 0x08080808) << 4;
+  return magnitude | signs;
+}
+
+// fp4_e2m1x2 (1 byte) -> fp8_e4m3x2 (2 bytes)
+TL_DEVICE __nv_fp8x2_storage_t
+__tl_cvt_e2m1x2_to_e4m3x2(const __nv_fp4x2_storage_t src) {
+  return static_cast<__nv_fp8x2_storage_t>(__tl_cvt_e2m1x4_to_e4m3x4(src));
+}
+
+// fp4_e2m1 -> fp8_e4m3
+TL_DEVICE __nv_fp8_storage_t
+__tl_cvt_e2m1_to_e4m3(const __nv_fp4_storage_t src) {
+  return static_cast<__nv_fp8_storage_t>(__tl_cvt_e2m1x4_to_e4m3x4(src));
+}
+
+// ============================================================================
 // FP4 <-> Half Precision Conversions
 // ============================================================================
 // https://docs.nvidia.com/cuda/cuda-math-api/cuda_math_api/group__CUDA__MATH__FP4__MISC.html
