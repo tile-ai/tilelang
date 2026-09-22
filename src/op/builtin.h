@@ -187,6 +187,15 @@ TVM_DLL const Op &access_ptr();
 TVM_DLL const Op &magic_div();
 
 /*!
+ * \brief Magic division using a caller-computed runtime validity predicate.
+ *
+ * magic_div_with_validity(x, d, m, s, valid) has the same result and fallback
+ * semantics as magic_div. MagicCallHoist uses it so a div/mod pair checks the
+ * shared (x, d) contract only once.
+ */
+TVM_DLL const Op &magic_div_with_validity();
+
+/*!
  * \brief TileLang intrinsic for host-precomputed magic-number modulus.
  *
  * magic_mod(x, d, m, s) computes x - floor(x / d) * d for x >= 0 and d >= 1,
@@ -198,11 +207,20 @@ TVM_DLL const Op &magic_div();
 TVM_DLL const Op &magic_mod();
 
 /*!
+ * \brief Magic modulus using a caller-computed runtime validity predicate.
+ *
+ * magic_mod_with_validity(x, d, m, s, valid) has the same result and fallback
+ * semantics as magic_mod. It is used for hoisted mod-only groups.
+ */
+TVM_DLL const Op &magic_mod_with_validity();
+
+/*!
  * \brief TileLang intrinsic for modulus derived from a shared quotient.
  *
- * magic_mod_from_quotient(x, d, q) computes x - q*d when the magic-division
- * validity contract holds, and otherwise uses the same floormod fallback as
- * magic_mod. It is introduced by MagicCallHoist when div and mod share (x,d).
+ * magic_mod_from_quotient(x, d, q, valid) computes x - q*d when the supplied
+ * magic-division validity predicate holds, and otherwise uses the same
+ * floormod fallback as magic_mod. It is introduced by MagicCallHoist when div
+ * and mod share (x,d).
  */
 TVM_DLL const Op &magic_mod_from_quotient();
 

@@ -58,11 +58,21 @@ TIR_DEFINE_TL_BUILTIN(access_ptr)
 TIR_DEFINE_TL_BUILTIN(magic_div).set_num_inputs(4).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(magic_div_with_validity)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(magic_mod).set_num_inputs(4).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(magic_mod_with_validity)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(magic_mod_from_quotient)
-    .set_num_inputs(3)
+    .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 

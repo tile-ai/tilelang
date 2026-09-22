@@ -57,14 +57,25 @@ public:
   }
 
   PrimExpr VisitExpr_(const tirx::CallNode *op) final {
-    // tl.magic_div has a fixed 32-bit contract (uint32 mul-high semantics).
-    // Promoting its operands or result would break the bit-pattern of the
-    // magic multiplier and leave widen/narrow pairs in device code, so the
-    // whole call subtree is left untouched; the surrounding index expression
-    // widens the int32 quotient with an explicit cast if needed.
-    if (op->op.same_as(tl::magic_div()) || op->op.same_as(tl::magic_mod()) ||
+    // Magic constants and the divisor retain their fixed int32 contract, but
+    // index legalization must still widen the dividend before its arithmetic
+    // can overflow. Codegen selects the uint32 mul-high fast path only when
+    // the widened value fits its contract and otherwise uses an int64 floor
+    // div/mod fallback.
+    if (op->op.same_as(tl::magic_div()) ||
+        op->op.same_as(tl::magic_div_with_validity()) ||
+        op->op.same_as(tl::magic_mod()) ||
+        op->op.same_as(tl::magic_mod_with_validity()) ||
         op->op.same_as(tl::magic_mod_from_quotient())) {
-      return ffi::GetRef<PrimExpr>(op);
+      if (ffi::Optional<ffi::ObjectRef> widen =
+              op->annotations.Get("tl.magic_widen_dividend");
+          !widen.defined() || !Downcast<Bool>(widen.value())->value) {
+        return ffi::GetRef<PrimExpr>(op);
+      }
+      ffi::Array<PrimExpr> args = op->args;
+      args.Set(0, VisitExpr(op->args[0]));
+      return tirx::Call(DataType::Int(64), op->op, args, op->annotations,
+                        op->span);
     }
     return Parent::VisitExpr_(op);
   }
