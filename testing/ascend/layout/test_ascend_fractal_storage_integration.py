@@ -6,7 +6,7 @@ import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
 from tvm import tirx
-from testing.ascend._ir import allocated_buffer, calls, nodes
+from testing.ascend._ir import allocated_buffer, calls, nodes, statements
 
 
 def test_padded_alias_storage_sets_the_physical_version_pitch():
@@ -38,6 +38,44 @@ def test_padded_alias_storage_sets_the_physical_version_pitch():
     pointers = [call for call in calls(flat, "tirx.tvm_access_ptr") if call.args[1].type_annotation.storage_scope == "shared.l1"]
     assert len(pointers) == 2
     tvm.ir.assert_structural_equal(pointers[0].args[2], pointers[1].args[2])
+
+
+def test_dynamic_fixpipe_padding_survives_full_lowering():
+    @T.prim_func
+    def main(A: T.Tensor((16, 16), "bfloat16"), B: T.Tensor((16, 16), "bfloat16"), C: T.Tensor((16, 4), "float32"), n: T.int32):
+        with T.Kernel(1):
+            T.assume(n >= 0)
+            T.assume(n <= 4)
+            a = T.alloc_l1((16, 16), "bfloat16")
+            b = T.alloc_l1((16, 16), "bfloat16")
+            accum = T.alloc_l0c((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            T.gemm(a, b, accum, transpose_B=True, clear_accum=True)
+            T.copy(accum[:, :n], ub[:, :n])
+            T.copy(ub[:, :n], C[:, :n])
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.AscendLowerTileOp":
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        tilelang.lower(main, target="ascend")
+    lowered = snapshots["tl.AscendLowerTileOp"]
+    (copy,) = calls(lowered, "tl.ascend_copy_matrix_cc_to_ub")
+    (parents,) = [ancestors for stmt, ancestors in statements(lowered) if isinstance(stmt, tirx.Evaluate) and stmt.value.same_as(copy)]
+    guard = next(parent.condition for parent in reversed(parents) if isinstance(parent, tirx.IfThenElse))
+    n = lowered["main"].params[-1]
+    analyzer = tvm.arith.Analyzer()
+    for value in range(5):
+        substitute = {n: tirx.IntImm("int32", value)}
+        assert int(analyzer.simplify(tirx.stmt_functor.substitute(copy.args[3], substitute))) == (8 if value else 0)
+        assert bool(analyzer.simplify(tirx.stmt_functor.substitute(guard, substitute))) == (value > 0)
 
 
 @pytest.mark.parametrize("use_alias", [False, True])
