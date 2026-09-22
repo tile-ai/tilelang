@@ -1875,6 +1875,13 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
                                  : "asc_hf32_round_mode::NEAREST_EVEN")
                    << ");\n";
     }
+  } else if (op->op.same_as(tl::ascend_set_mmad_direction())) {
+    ICHECK_EQ(op->args.size(), 1);
+    const auto *direction = op->args[0].as<StringImmNode>();
+    ICHECK(direction && (direction->value == "m" || direction->value == "n"))
+        << "tl.ascend_set_mmad_direction expects 'm' or 'n'";
+    this->PrintIndent();
+    this->stream << "asc_set_mmad_direction_" << direction->value << "();\n";
   } else if (op->op.same_as(tl::ascend_set_atomic())) {
     ICHECK_EQ(op->args.size(), 2)
         << "tl.ascend_set_atomic expects 2 arguments (op_str, typed_zero)";

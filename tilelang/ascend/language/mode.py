@@ -1,8 +1,24 @@
-"""Ascend stateful hardware mode controls: HF32 truncation and store-mode atomics."""
+"""Ascend stateful hardware mode controls for Cube and GM stores."""
 
 from __future__ import annotations
 
 from tvm import tirx
+
+
+def set_mmad_direction(direction: str):
+    """Select whether Cube generates results along M or N first.
+
+    ``direction`` is ``"m"`` or ``"n"``. The setting applies to subsequent
+    GEMMs on the AIC, including block-scaled GEMMs. It changes the traversal
+    within a MAD, independently of the kernel's outer tile-loop order.
+    """
+    if direction not in ("m", "n"):
+        raise ValueError(f"mmad direction must be 'm' or 'n', got {direction!r}")
+    return tirx.call_intrin(
+        "void",
+        tirx.op.Op.get("tl.ascend_set_mmad_direction"),
+        tirx.StringImm(direction),
+    )
 
 
 def set_hf32_mode(mode=None):
@@ -90,6 +106,7 @@ def set_atomic_none():
 
 
 __all__ = [
+    "set_mmad_direction",
     "set_hf32_mode",
     "set_atomic",
     "set_atomic_none",

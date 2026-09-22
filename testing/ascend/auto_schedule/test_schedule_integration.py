@@ -230,3 +230,36 @@ def test_nested_loop_break_is_emitted_on_every_core():
     aiv_start = source.index("if ASC_IS_AIV")
     assert "break;" in source[aic_start:aiv_start]
     assert "break;" in source[aiv_start:]
+
+
+def test_mmad_direction_reaches_only_cube_and_precedes_its_gemm():
+    @T.prim_func
+    def main(A: T.Tensor((16, 16), "bfloat16"), B: T.Tensor((16, 16), "bfloat16"), C: T.Tensor((2, 16, 16), "float32")):
+        with T.MixedKernel(1, sids=1):
+            a = T.alloc_l1((16, 16), "bfloat16")
+            b = T.alloc_l1((16, 16), "bfloat16")
+            a_l0 = T.alloc_l0a((16, 16), "bfloat16")
+            b_l0 = T.alloc_l0b((16, 16), "bfloat16")
+            c0 = T.alloc_l0c((16, 16), "float32")
+            c1 = T.alloc_l0c((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            T.copy(a, a_l0)
+            T.copy(b, b_l0)
+            T.set_mmad_direction("n")
+            T.gemm(a_l0, b_l0, c0, transpose_B=True, clear_accum=True)
+            T.set_mmad_direction("m")
+            T.gemm(a_l0, b_l0, c1, transpose_B=True, clear_accum=True)
+            T.copy(c0, ub)
+            T.copy(ub, C[0, :, :])
+            T.copy(c1, ub)
+            T.copy(ub, C[1, :, :])
+
+    source = tilelang.lower(main, target="ascend").kernel_source
+    aic, aiv = source.split("if ASC_IS_AIC", 1)[1].split("if ASC_IS_AIV", 1)
+    assert aic.count("asc_set_mmad_direction_n();") == 1
+    assert aic.count("asc_set_mmad_direction_m();") == 1
+    assert aic.index("asc_set_mmad_direction_n();") < aic.index("asc_mmad(")
+    assert aic.index("asc_mmad(") < aic.index("asc_set_mmad_direction_m();") < aic.rindex("asc_mmad(")
+    assert "asc_set_mmad_direction" not in aiv
