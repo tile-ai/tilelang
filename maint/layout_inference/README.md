@@ -26,14 +26,72 @@ reductions. Explicit widths and layouts remain authoritative. The opt-in
 `io-aware` model retains its existing candidate search and scoring.
 
 ```bash
-python run.py                # verify all cases against expected/
+python run.py                # verify all cases against the pinned goldens
 python run.py --case NAME    # substring filter
 python run.py --show         # also print the inferred layouts
 python run.py --record       # rewrite goldens from current behavior
+python run.py --target NAME  # pin another target suite (see below)
+python run.py --list-targets # list the pinned suites and their configs
 python run.py --anchor       # lower fully; check per-buffer vector widths
                              # in device TIR against VECTOR_ANCHOR
 python run.py --cute         # compare symbolic scores with the exact oracle
 ```
+
+## Targets are pinned, and goldens are per target
+
+Layout inference is **target-dependent**: the cost model's vector-width
+arithmetic reads `thread_warp_size`, the reduction paths read the target's
+warp/thread geometry, and those differ across `sm_90` / `sm_100` / `Metal`.
+Historically this driver ran `determine_target("auto")`, which resolves to the
+**host GPU's** compute capability — so the same source produced a different
+answer per machine, and a run on an `sm_100`/`sm_103` box drifted across most
+of the suite at once. That is a property of the question, not of the layouts.
+
+So the driver pins a target and stores goldens per suite:
+
+```
+expected/<suite>/<case>.json    # {variant: {model: {"buffers": ..., "loops": ...}}}
+expected/<suite>/target.json    # the config the suite was recorded under
+expected/<suite>/excluded.json  # {case: reason} cases this suite does not cover
+```
+
+`--target` accepts a pinned suite name, `auto` (host-detected, for ad-hoc
+investigation), or an inline JSON target config. Running against a suite whose
+recorded `target.json` does not match the run's target is an error, not a
+drift report, and a suite with no goldens says exactly how to record it. A case
+listed in `excluded.json` is skipped by name with its reason printed, for
+build configurations that cannot produce its answers at all.
+
+| suite | target | notes |
+|---|---|---|
+| `cuda-sm90` (default) | `{"kind": "cuda", "arch": "sm_90"}` | where the original goldens were recorded |
+| `cuda-sm100`, `cuda-sm103` | same, newer arch | layout selection genuinely differs from `sm_90` |
+| `metal` | `{"kind": "metal"}` | host suite for Apple silicon; excludes the reducer-v2 cases |
+
+A non-CUDA build can still run the `cuda-*` suites: layout inference only
+needs the backend's `tl.copy` implementation to be *registered*, not a GPU or
+a toolkit. `src/cuda/CMakeLists.txt` keeps `op/copy.cc` and `op/tma_layout.cc`
+in the always-compiled source list for that reason (≈6 s per file on a
+non-CUDA build, ≈0.6 MB in `libtilelang`). Where a build genuinely cannot
+infer a case, the driver reports it; `--allow-unsupported` downgrades those to
+a counted skip instead of a failure. `--anchor` needs the full lowering
+pipeline and therefore supports fewer builds than the golden check — it
+honours the same flag.
+
+## Build configuration matters too
+
+Pinning the target makes a run reproducible across *machines*, but not across
+*build configurations*: layout inference calls into backend code that a build
+may or may not compile. `-DUSE_CUDA=OFF` leaves `src/cuda/op/copy.cc` out, so an
+`sm_90` target resolves a different `tl.copy` implementation and
+`reducer_scalar_candidates` comes out fully replicated — including the `width=4`
+variant of #3171's unit test, which then reports `combine_size == 128` instead
+of the `4` it asserts. The same assertions pass on a CUDA-enabled build, which
+is where the `cuda-sm90` goldens are meaningful.
+
+So: run the `cuda-*` suites against a CUDA-enabled build (the CI gate does, via
+`if: contains(matrix.runner.toolkit, 'CUDA')`). Drift reported by a non-CUDA
+build on these cases is a build-capability mismatch, not a layout regression.
 
 `--anchor` closes the loop between the model and the real vectorizer: the
 cost model scores a layout assuming a vector width, and the anchor reads
@@ -76,8 +134,8 @@ change to the scoring formulas must keep it green (update `cute_model.py`
 in lockstep with `layout_cost_model.cc`).
 
 Recording is not approval: after `--record`, read the diff under
-`expected/` and convince yourself every changed layout is intended before
-committing. Structural invariants (each case's optional `check`) are
+`expected/<suite>/` and convince yourself every changed layout is intended
+before committing. Structural invariants (each case's optional `check`) are
 enforced even in record mode, so a recording can never bless a layout that
 violates a case's documented contract.
 
