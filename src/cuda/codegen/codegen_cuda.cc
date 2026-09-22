@@ -1682,6 +1682,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   DataType target_ty = op->dtype;
   ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
+  // Cast(e4m3, Cast(f32, e2m1)) with default rounding equals Cast(e4m3, e2m1):
+  // every E2M1 value, including -0, is representable in E4M3, so the f32
+  // detour cannot change the result. Fold it so the direct transcode applies.
+  if (const auto *inner = op->value.as<CastNode>();
+      inner && op->annotations.empty() && inner->annotations.empty() &&
+      from_ty.is_float() && from_ty.bits() == 32 &&
+      inner->value.dtype().is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
+    os << PrintExpr(tirx::Cast(target_ty, inner->value));
+    return;
+  }
+
   // Decode the optional rounding/saturation/rbits hints stashed in
   // `op->annotations` (see CastNode docstring for the convention).
   auto get_str_anno = [&](const char *key) -> std::string {
@@ -1705,51 +1717,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   std::string cast_round = get_str_anno("round");
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
-
-  // The FP32 intermediate preserves every E2M1 value, including signed zero.
-  // Emit packed E4M3 encodings directly for this exact conversion chain.
-  const auto *inner_cast = op->value.as<CastNode>();
-  if (inner_cast && op->annotations.empty() &&
-      inner_cast->annotations.empty() && from_ty.is_float() &&
-      from_ty.bits() == 32 && inner_cast->value.dtype().is_float4_e2m1fn() &&
-      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
-    DataType packed_ty = inner_cast->value.dtype();
-    int lanes = packed_ty.lanes();
-    if (lanes == 1) {
-      this->PrintType(target_ty, os);
-      os << "::bitcast(static_cast<uint8_t>(ConvertE2M1x4ToE4M3x4(("
-         << PrintExpr(inner_cast->value) << ").__x)))";
-      return;
-    }
-    if (lanes == 2 || lanes == 4 || lanes == 8 || lanes == 16 || lanes == 32) {
-      std::string packed = SSAGetID(PrintExpr(inner_cast->value), packed_ty);
-      std::string result = name_supply_->FreshName("fp8_cast");
-      PrintIndent();
-      PrintType(target_ty, stream);
-      stream << " " << result << ";\n";
-      for (int first_lane = 0; first_lane < lanes; first_lane += 4) {
-        std::string converted = name_supply_->FreshName("fp8_bits");
-        PrintIndent();
-        stream << "uint32_t " << converted << " = ConvertE2M1x4ToE4M3x4("
-               << "reinterpret_cast<const uint8_t*>(&" << packed << ")["
-               << first_lane / 2 << "]";
-        if (first_lane + 2 < lanes) {
-          stream << " | (uint16_t(reinterpret_cast<const uint8_t*>(&" << packed
-                 << ")[" << first_lane / 2 + 1 << "]) << 8)";
-        }
-        stream << ");\n";
-        for (int lane = first_lane; lane < first_lane + 4 && lane < lanes;
-             ++lane) {
-          PrintIndent();
-          stream << "reinterpret_cast<uint8_t*>(&" << result << ")[" << lane
-                 << "] = static_cast<uint8_t>(" << converted << " >> "
-                 << (lane - first_lane) * 8 << ");\n";
-        }
-      }
-      os << result;
-      return;
-    }
-  }
 
   // Scalar fp8 <-> half via the __tl_cvt helpers; the default cast detours
   // through fp32.
@@ -1792,6 +1759,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     return;
   }
 
+  // Scalar fp4 (E2M1) -> fp8 (E4M3): exact bit transcode.
+  if (from_ty.is_scalar() && cast_round.empty() && from_ty.is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
+    this->PrintType(target_ty, os);
+    os << "::bitcast(__tl_cvt_e2m1_to_e4m3((" << PrintExpr(op->value)
+       << ").__x))";
+    return;
+  }
+
   // Emit simple C-style type conversion for scalar casts without custom
   // rounding.
   if (from_ty.is_scalar() && cast_round.empty())
@@ -1811,8 +1787,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       [&](const std::string &cast_func, const std::string &src_type,
           const std::string &dst_type, const std::string &extra_args = "",
           bool src_needs_reinterpret = false,
-          bool dst_needs_reinterpret = false) {
-        int num_chunks = lanes / 2;
+          bool dst_needs_reinterpret = false, int chunk_lanes = 2) {
+        int num_chunks = lanes / chunk_lanes;
         std::string src_cast = src_needs_reinterpret
                                    ? "reinterpret_cast<" + src_type + "*>"
                                    : "(" + src_type + "*)";
@@ -2247,6 +2223,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_fp4x2_to_bfloat162", "uint8_t",
                           "__nv_bfloat162", "", true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to float8 (E4M3)
+  if (from_ty.is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
+    // Exact bit transcode; __tl_cvt_e2m1x4_to_e4m3x4 handles four lanes per
+    // __byte_perm pair, so chunk by four wherever the width allows.
+    if (lanes == 2) {
+      PrintVectorizedCast("__tl_cvt_e2m1x2_to_e4m3x2", "__nv_fp4x2_storage_t",
+                          "__nv_fp8x2_storage_t", "", true, true);
+      return;
+    }
+    if (lanes == 4 || lanes == 8 || lanes == 16 || lanes == 32) {
+      PrintVectorizedCast("__tl_cvt_e2m1x4_to_e4m3x4", "__nv_fp4x4_storage_t",
+                          "__nv_fp8x4_storage_t", "", true, true,
+                          /*chunk_lanes=*/4);
       return;
     }
   }

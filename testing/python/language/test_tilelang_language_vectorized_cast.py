@@ -173,45 +173,61 @@ def test_vectorized_cast_fp8_bf16(src_dtype, dst_dtype, check_str, lanes):
     run_vectorized_cast(src_dtype, dst_dtype, check_str, lanes)
 
 
+def fp4_to_fp8_helper(lanes):
+    if lanes == 1:
+        return "__tl_cvt_e2m1_to_e4m3("
+    if lanes == 2:
+        return "__tl_cvt_e2m1x2_to_e4m3x2("
+    return "__tl_cvt_e2m1x4_to_e4m3x4("
+
+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("lanes", [1, 2, 4, 8, 16, 32])
 @pytest.mark.parametrize("destination", ["float8_e4m3", "float8_e4m3fn"])
-def test_fp4_fp32_fp8_codegen(lanes, destination):
+@pytest.mark.parametrize("via_fp32", [False, True])
+def test_fp4_fp8_codegen(lanes, destination, via_fp32):
     build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the CUDA code generator")
     suffix = f"x{lanes}" if lanes > 1 else ""
     value = tirx.Var("value", "float4_e2m1fn" + suffix)
-    converted = tirx.Cast(destination + suffix, tirx.Cast("float32" + suffix, value))
+    source_value = tirx.Cast("float32" + suffix, value) if via_fp32 else value
+    converted = tirx.Cast(destination + suffix, source_value)
     func = tirx.PrimFunc([value], tirx.Evaluate(converted))
     func = func.with_attr("global_symbol", "fp4_fp8_cast")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     source = build(tvm.IRModule({"fp4_fp8_cast": func}), tvm.target.Target("cuda")).inspect_source()
-    assert source.count("ConvertE2M1x4ToE4M3x4(") == max(1, lanes // 4)
+    assert source.count(fp4_to_fp8_helper(lanes)) == max(1, lanes // 4)
     assert "__tl_cvt_fp4x2_to_float2" not in source
     assert "__nv_cvt_float2_to_fp8x2" not in source
 
-    if lanes == 2:
+    if via_fp32 and lanes == 2:
+        # An annotation on either cast keeps the fp32 detour.
         for annotation_owner in ("inner", "outer"):
             annotations = {"sat": tirx.IntImm("bool", 1)}
             intermediate = tirx.Cast("float32" + suffix, value, annotations if annotation_owner == "inner" else None)
             annotated = tirx.Cast(destination + suffix, intermediate, annotations if annotation_owner == "outer" else None)
             annotated_func = func.with_body(tirx.Evaluate(annotated))
             annotated_source = build(tvm.IRModule({"fp4_fp8_cast": annotated_func}), tvm.target.Target("cuda")).inspect_source()
-            assert "ConvertE2M1x4ToE4M3x4" not in annotated_source
+            assert "__tl_cvt_e2m1" not in annotated_source
             assert "__tl_cvt_fp4x2_to_float2" in annotated_source
             assert "__nv_cvt_float2_to_fp8x2" in annotated_source
 
 
-def fp4_fp32_fp8_kernel(elements, lanes):
+def fp4_fp8_kernel(elements, lanes, via_fp32):
     tile = 128 * lanes
+
+    def to_fp8(value):
+        if via_fp32:
+            value = T.Cast("float32", value)
+        return T.Cast("float8_e4m3fn", value)
 
     @T.prim_func
     def main(A: T.Tensor((elements,), "float4_e2m1fn"), B: T.Tensor((elements,), "float8_e4m3fn")):
         with T.Kernel(elements // tile, threads=128) as block:
             for i in T.Parallel(tile):
                 index = block * tile + i
-                B[index] = T.Cast("float8_e4m3fn", T.Cast("float32", A[index]))
+                B[index] = to_fp8(A[index])
 
     return main
 
@@ -220,11 +236,13 @@ def fp4_fp32_fp8_kernel(elements, lanes):
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
 @pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="PyTorch packed FP4 dtype is unavailable")
 @pytest.mark.parametrize("lanes", [1, 2, 4, 8])
-def test_fp4_fp32_fp8_exact(lanes):
+@pytest.mark.parametrize("via_fp32", [False, True])
+def test_fp4_fp8_exact(lanes, via_fp32):
     # Every four-nibble word exercises magnitude, sign, and lane ordering.
     elements = 65536 * 4
-    kernel = tilelang.compile(fp4_fp32_fp8_kernel(elements, lanes), pass_configs={"tirx.disable_vectorize": lanes == 1})
-    assert "ConvertE2M1x4ToE4M3x4" in kernel.get_kernel_source()
+    kernel = tilelang.compile(fp4_fp8_kernel(elements, lanes, via_fp32), pass_configs={"tirx.disable_vectorize": lanes == 1})
+    # The vectorizer splits wider casts into four-lane chunks.
+    assert fp4_to_fp8_helper(min(lanes, 4)) in kernel.get_kernel_source()
     words = torch.arange(65536, dtype=torch.int32, device="cuda")[:, None]
     packed = ((words >> torch.tensor([0, 8], device="cuda")) & 255).to(torch.uint8).flatten()
     nibbles = ((words >> torch.tensor([0, 4, 8, 12], device="cuda")) & 15).flatten().long()
