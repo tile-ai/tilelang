@@ -15,9 +15,18 @@ This Skill targets only the TileLang frontend and PTO backend. Its goal is to co
 - PTOAS receives the result of TileLang lowering. A capability expressible by the lower-level compiler does not imply that the TileLang frontend already exposes a corresponding API.
 - This Skill does not modify kernels directly. When the user requests implementation, pass solutions that cleared the gates to the implementation stage.
 
+## Case Input Gate
+
+Establish the performance-case set before beginning any tuning analysis:
+
+- Cases used during operator generation, accuracy validation, or system testing (ST) are not performance-tuning cases by default.
+- Admit a case to the performance scope only when the user explicitly submits it as a performance case or confirms it for performance tuning. Its presence in tests, prior execution, or available profiling data does not count as user confirmation.
+- If no performance cases have been explicitly submitted or confirmed, stop at this gate and ask the user to provide or confirm them. Do not silently substitute generation, accuracy-validation, or ST cases.
+- Correctness cases remain regression inputs for validating an optimization, but they do not expand the performance-case set.
+
 ## Required Inputs
 
-Before analysis begins, confirm that all of the following are available:
+For the user-confirmed performance-case set, confirm that all of the following are available before analysis begins:
 
 - The complete TileLang kernel to optimize, its dispatch/build entrypoint, and correctness tests.
 - Every target case: case ID, shape, dtype, attributes, and public-interface constraints.

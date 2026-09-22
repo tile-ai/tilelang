@@ -101,6 +101,30 @@
           "assertion_text": "A bundled references/*/code/*_asc.py file may be used as implementation-reading material without maturity, while a bundled executable template still requires its actual path and maturity"
         }
       ]
+    },
+    {
+      "id": 5,
+      "title": "Performance cases require explicit user confirmation",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "Use tilelang-perf-optimize for a kernel that already has cases from operator generation, accuracy validation, and ST. The user asks to start performance tuning but has not submitted or confirmed any performance cases. May those existing cases be used as the performance-case set by default? Explain how to proceed. Do not execute external tools.",
+      "expected_output": "Stop at the Case Input Gate. Cases from operator generation, accuracy validation, or ST are not performance-tuning cases by default, even if they have already run or have profiling data. Ask the user to submit or explicitly confirm the performance cases before tuning analysis begins. Keep existing correctness cases available for regression validation after optimization, but do not let them expand the performance-case set.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "requires_explicit_performance_case_confirmation",
+          "description": "Do not infer the performance workload from correctness-oriented cases",
+          "assertion_text": "Stop at the Case Input Gate and require the user to submit or explicitly confirm performance cases; do not default to generation, accuracy-validation, or ST cases"
+        },
+        {
+          "name": "keeps_correctness_cases_as_regression_only",
+          "description": "Preserve correctness coverage without changing tuning scope",
+          "assertion_text": "Existing correctness cases may remain regression inputs after optimization, but they do not expand the user-confirmed performance-case set"
+        }
+      ]
     }
   ],
   "skill_name": "tilelang-perf-optimize"
