@@ -20,9 +20,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -39,6 +44,8 @@ namespace ascend {
 
 using namespace tvm::runtime;
 
+class AscendModuleNode;
+
 namespace {
 
 using AclError = int32_t;
@@ -47,7 +54,12 @@ using AclFuncHandle = void *;
 using AclStream = void *;
 
 constexpr AclError kAclSuccess = 0;
+constexpr int32_t kAclLaunchKernelAttrSchemMode = 1;
 constexpr int32_t kAclLaunchKernelAttrDynUbufSize = 2;
+constexpr int32_t kAclLaunchKernelAttrBlockTaskPrefetch = 5;
+constexpr int32_t kAclLaunchKernelAttrDataDump = 6;
+constexpr int32_t kAclLaunchKernelAttrTimeout = 7;
+constexpr int32_t kAclLaunchKernelAttrTimeoutUs = 8;
 constexpr size_t kAclArgMinAlignment = 4;
 constexpr size_t kAclArgBufferAlignment = 8;
 
@@ -318,6 +330,10 @@ union AclLaunchKernelAttrValue {
   uint8_t is_block_task_prefetch;
   uint8_t is_data_dump;
   uint16_t timeout;
+  struct {
+    uint32_t timeout_low;
+    uint32_t timeout_high;
+  } timeout_us;
   uint32_t reserved[4];
 };
 
@@ -339,6 +355,188 @@ void CheckAcl(AclError result, const char *operation) {
   TVM_FFI_THROW(RuntimeError)
       << operation << " failed with ACL error " << result
       << (message == nullptr ? "" : std::string(": ") + message);
+}
+
+// ===== Parameter validation and LaunchKernel cfg construction =====
+//
+// Target chip: Ascend 950 (A5). cfg strategy:
+//   - DYN_UBUF_SIZE: filled only when dyn_ubuf_size > 0 (SIMT dynamic UB)
+//   - SCHEM_MODE / TIMEOUT / TIMEOUT_US / DATA_DUMP / BLOCK_TASK_PREFETCH:
+//     filled on demand via env vars
+//   - ENGINE_TYPE / BLOCKDIM_OFFSET: not supported by 950, left unset
+// Env vars: ASCEND_LAUNCH_SCHEM_MODE / ASCEND_LAUNCH_TIMEOUT /
+//           ASCEND_LAUNCH_TIMEOUT_US / ASCEND_LAUNCH_DATA_DUMP /
+//           ASCEND_LAUNCH_BLOCK_TASK_PREFETCH
+//           (all optional; attr omitted if unset)
+// Note: ASCEND_LAUNCH_TIMEOUT and ASCEND_LAUNCH_TIMEOUT_US are mutually
+//       exclusive; setting both is a configuration error.
+
+struct LaunchEnvConfig {
+  bool has_schem_mode = false;
+  uint8_t schem_mode = 0;
+  bool has_timeout = false;
+  uint16_t timeout = 0;
+  bool has_timeout_us = false;
+  uint64_t timeout_us = 0;
+  bool has_data_dump = false;
+  uint8_t is_data_dump = 0;
+  bool has_block_task_prefetch = false;
+  uint8_t is_block_task_prefetch = 0;
+};
+
+const LaunchEnvConfig &GetLaunchEnvConfig() {
+  static const LaunchEnvConfig cfg = [] {
+    LaunchEnvConfig c;
+    if (const char *v = std::getenv("ASCEND_LAUNCH_SCHEM_MODE")) {
+      long val = std::strtol(v, nullptr, 10);
+      if (val >= 0 && val < 2) {
+        c.has_schem_mode = true;
+        c.schem_mode = static_cast<uint8_t>(val);
+      }
+    }
+    if (const char *v = std::getenv("ASCEND_LAUNCH_TIMEOUT")) {
+      long val = std::strtol(v, nullptr, 10);
+      if (val >= 0 && val <= std::numeric_limits<uint16_t>::max()) {
+        c.has_timeout = true;
+        c.timeout = static_cast<uint16_t>(val);
+      }
+    }
+    if (const char *v = std::getenv("ASCEND_LAUNCH_TIMEOUT_US")) {
+      unsigned long long val = std::strtoull(v, nullptr, 10);
+      c.has_timeout_us = true;
+      c.timeout_us = static_cast<uint64_t>(val);
+    }
+    if (c.has_timeout && c.has_timeout_us) {
+      std::cerr
+          << "Warning: ASCEND_LAUNCH_TIMEOUT and ASCEND_LAUNCH_TIMEOUT_US "
+          << "are mutually exclusive; ignoring TIMEOUT_US." << std::endl;
+      c.has_timeout_us = false;
+      c.timeout_us = 0;
+    }
+    if (const char *v = std::getenv("ASCEND_LAUNCH_DATA_DUMP")) {
+      long val = std::strtol(v, nullptr, 10);
+      if (val == 0 || val == 1) {
+        c.has_data_dump = true;
+        c.is_data_dump = static_cast<uint8_t>(val);
+      }
+    }
+    if (const char *v = std::getenv("ASCEND_LAUNCH_BLOCK_TASK_PREFETCH")) {
+      long val = std::strtol(v, nullptr, 10);
+      if (val == 0 || val == 1) {
+        c.has_block_task_prefetch = true;
+        c.is_block_task_prefetch = static_cast<uint8_t>(val);
+      }
+    }
+    return c;
+  }();
+  return cfg;
+}
+
+void ValidateLaunchParams(AclFuncHandle function, uint32_t num_blocks,
+                          void *args, size_t args_size,
+                          const std::string &function_name) {
+  TVM_FFI_CHECK(function != nullptr, RuntimeError)
+      << "Ascend kernel function handle is null for " << function_name;
+  TVM_FFI_CHECK(num_blocks > 0, RuntimeError)
+      << "Ascend launch grid must be positive for " << function_name;
+  TVM_FFI_CHECK(args_size == 0 || args != nullptr, RuntimeError)
+      << "Ascend kernel args buffer is null for " << function_name;
+  TVM_FFI_CHECK(args_size <= std::numeric_limits<uint32_t>::max(), RuntimeError)
+      << "Ascend kernel args size " << args_size << " exceeds uint32 range for "
+      << function_name;
+}
+
+// Build launch cfg. `attrs` points to a caller-provided array (capacity >= 6).
+// Returns the actual number of attrs populated.
+size_t BuildLaunchCfg(AclLaunchKernelAttr *attrs, uint32_t dyn_ubuf_size) {
+  const LaunchEnvConfig &env = GetLaunchEnvConfig();
+  size_t n = 0;
+  if (dyn_ubuf_size != 0) {
+    attrs[n].id = kAclLaunchKernelAttrDynUbufSize;
+    attrs[n].value.dyn_ubuf_size = dyn_ubuf_size;
+    ++n;
+  }
+  if (env.has_schem_mode) {
+    attrs[n].id = kAclLaunchKernelAttrSchemMode;
+    attrs[n].value.schem_mode = env.schem_mode;
+    ++n;
+  }
+  if (env.has_timeout) {
+    attrs[n].id = kAclLaunchKernelAttrTimeout;
+    attrs[n].value.timeout = env.timeout;
+    ++n;
+  }
+  if (env.has_timeout_us) {
+    attrs[n].id = kAclLaunchKernelAttrTimeoutUs;
+    attrs[n].value.timeout_us.timeout_low =
+        static_cast<uint32_t>(env.timeout_us & 0xFFFFFFFFULL);
+    attrs[n].value.timeout_us.timeout_high =
+        static_cast<uint32_t>(env.timeout_us >> 32);
+    ++n;
+  }
+  if (env.has_data_dump) {
+    attrs[n].id = kAclLaunchKernelAttrDataDump;
+    attrs[n].value.is_data_dump = env.is_data_dump;
+    ++n;
+  }
+  if (env.has_block_task_prefetch) {
+    attrs[n].id = kAclLaunchKernelAttrBlockTaskPrefetch;
+    attrs[n].value.is_block_task_prefetch = env.is_block_task_prefetch;
+    ++n;
+  }
+  return n;
+}
+
+AclError LaunchAclKernelWithHostArgs(AclFuncHandle function,
+                                     uint32_t num_blocks, AclStream stream,
+                                     uint32_t dyn_ubuf_size, void *packed_args,
+                                     size_t packed_args_size) {
+  AclLaunchKernelAttr attrs[6];
+  AclLaunchKernelCfg config{};
+  config.attrs = attrs;
+  config.num_attrs = BuildLaunchCfg(attrs, dyn_ubuf_size);
+  AclLaunchKernelCfg *config_ptr = config.num_attrs > 0 ? &config : nullptr;
+
+  return aclrtLaunchKernelWithHostArgs(function, num_blocks, stream, config_ptr,
+                                       packed_args, packed_args_size, nullptr,
+                                       0);
+}
+
+using TaskQueueLaunchFn = int (*)(void *context);
+using TaskQueueDestroyFn = void (*)(void *context);
+using TaskQueueSubmitFn = int (*)(const char *op_name, TaskQueueLaunchFn launch,
+                                  TaskQueueDestroyFn destroy, void *context,
+                                  int sync);
+
+std::atomic<TaskQueueSubmitFn> g_task_queue_submit{nullptr};
+
+struct AscendLaunchTask {
+  // Keep the binary owning `function` loaded until torch_npu destroys the
+  // queued std::function and the adapter calls DestroyTaskQueueContext.
+  ffi::ObjectPtr<ffi::Object> module_ref;
+  std::string function_name;
+  // Raw pointer kept alive by module_ref above.
+  AscendModuleNode *module{nullptr};
+  AclFuncHandle function{nullptr};
+  uint32_t num_blocks{0};
+  AclStream stream{nullptr};
+  uint32_t dyn_ubuf_size{0};
+
+  std::vector<uint64_t> packed_args;
+  size_t packed_args_size{0};
+};
+
+void SetTaskQueueSubmitFn(int64_t address) {
+  TVM_FFI_CHECK(address != 0, ValueError)
+      << "tl.ascend.SetTaskQueueSubmitFn expects a non-null address";
+  g_task_queue_submit.store(reinterpret_cast<TaskQueueSubmitFn>(address),
+                            std::memory_order_release);
+}
+
+int LaunchKernelForTaskQueue(AscendLaunchTask &task) {
+  return static_cast<int>(LaunchAclKernelWithHostArgs(
+      task.function, task.num_blocks, task.stream, task.dyn_ubuf_size,
+      task.packed_args.data(), task.packed_args_size));
 }
 
 } // namespace
@@ -438,6 +636,55 @@ private:
   std::unordered_map<int32_t, DeviceModule> device_modules_;
 };
 
+namespace {
+
+// Runs on the torch_npu task queue worker thread.
+void LogTaskQueueLaunchFailure(const AscendLaunchTask &task, int status,
+                               const char *details) noexcept {
+  try {
+    std::ostringstream error;
+    error << "Ascend task queue launch failed for " << task.function_name
+          << " with status " << status << ", grid=" << task.num_blocks
+          << ", dyn_ubuf_bytes=" << task.dyn_ubuf_size;
+    if (details != nullptr && details[0] != '\0') {
+      error << ": " << details;
+    }
+    if (task.module != nullptr) {
+      ffi::String source = task.module->InspectSource("asc");
+      if (!source.empty()) {
+        error << "\n// Ascend Source\n" << source;
+      }
+    }
+    LOG(ERROR) << error.str();
+  } catch (...) {
+    // Logging must not let an exception escape the task queue callback.
+  }
+}
+
+int LaunchTaskQueueCallback(void *context) noexcept {
+  auto &task = *static_cast<AscendLaunchTask *>(context);
+  try {
+    int result = LaunchKernelForTaskQueue(task);
+    if (result != kAclSuccess) {
+      LogTaskQueueLaunchFailure(task, result, aclGetRecentErrMsg());
+    }
+    return result;
+  } catch (const std::exception &exception) {
+    LogTaskQueueLaunchFailure(task, -1, exception.what());
+  } catch (...) {
+    // Never let a TileLang C++ exception cross the C ABI boundary into an
+    // adapter built with the customer's torch toolchain.
+    LogTaskQueueLaunchFailure(task, -1, "unknown C++ exception");
+  }
+  return -1;
+}
+
+void DestroyTaskQueueContext(void *context) noexcept {
+  delete static_cast<AscendLaunchTask *>(context);
+}
+
+} // namespace
+
 class AscendWrappedFunc {
 public:
   void Init(AscendModuleNode *module, ffi::ObjectPtr<ffi::Object> module_ref,
@@ -475,36 +722,57 @@ public:
     AclFuncHandle function =
         module_->GetFunctionHandle(device_id, function_name_);
     AclStream stream = TVMFFIEnvGetStream(kDLExtDev, device_id);
+    const uint32_t dyn_ubuf_size =
+        static_cast<uint32_t>(workload.dyn_shmem_size);
+    const uint32_t grid = static_cast<uint32_t>(num_blocks);
+    ValidateLaunchParams(function, grid, packed_args, packed_args_size,
+                         function_name_);
 
-    AclLaunchKernelAttr attribute{};
-    AclLaunchKernelCfg config{};
-    AclLaunchKernelCfg *config_ptr = nullptr;
-    if (workload.dyn_shmem_size != 0) {
-      attribute.id = kAclLaunchKernelAttrDynUbufSize;
-      attribute.value.dyn_ubuf_size =
-          static_cast<uint32_t>(workload.dyn_shmem_size);
-      config.attrs = &attribute;
-      config.num_attrs = 1;
-      config_ptr = &config;
-    }
+    TaskQueueSubmitFn submit =
+        g_task_queue_submit.load(std::memory_order_acquire);
+    if (submit == nullptr) {
+      AclError result = LaunchAclKernelWithHostArgs(
+          function, grid, stream, dyn_ubuf_size, packed_args, packed_args_size);
+      if (result != kAclSuccess) {
+        const char *message = aclGetRecentErrMsg();
+        std::ostringstream error;
+        error << "aclrtLaunchKernelWithHostArgs failed for " << function_name_
+              << " with ACL error " << result << ", grid=" << num_blocks
+              << ", dyn_ubuf_bytes=" << workload.dyn_shmem_size;
+        if (message != nullptr) {
+          error << ": " << message;
+        }
+        ffi::String source = module_->InspectSource("asc");
+        if (!source.empty()) {
+          error << "\n// Ascend Source\n" << source;
+        }
+        TVM_FFI_THROW(RuntimeError) << error.str();
+      }
+    } else {
+      auto task = std::make_unique<AscendLaunchTask>();
+      task->module_ref = module_ref_;
+      task->function_name = function_name_;
+      task->module = module_;
+      task->function = function;
+      task->num_blocks = grid;
+      task->stream = stream;
 
-    AclError result = aclrtLaunchKernelWithHostArgs(
-        function, static_cast<uint32_t>(num_blocks), stream, config_ptr,
-        packed_args, packed_args_size, nullptr, 0);
-    if (result != kAclSuccess) {
-      const char *message = aclGetRecentErrMsg();
-      std::ostringstream error;
-      error << "aclrtLaunchKernelWithHostArgs failed for " << function_name_
-            << " with ACL error " << result << ", grid=" << num_blocks
-            << ", dyn_ubuf_bytes=" << workload.dyn_shmem_size;
-      if (message != nullptr) {
-        error << ": " << message;
+      task->dyn_ubuf_size = static_cast<uint32_t>(workload.dyn_shmem_size);
+      task->packed_args_size = packed_args_size;
+      const size_t num_words =
+          (packed_args_size + sizeof(uint64_t) - 1) / sizeof(uint64_t);
+      task->packed_args.resize(std::max<size_t>(num_words, 1), 0);
+      if (packed_args_size != 0) {
+        std::memcpy(task->packed_args.data(), packed_args, packed_args_size);
       }
-      ffi::String source = module_->InspectSource("asc");
-      if (!source.empty()) {
-        error << "\n// Ascend Source\n" << source;
-      }
-      TVM_FFI_THROW(RuntimeError) << error.str();
+
+      AscendLaunchTask *context = task.release();
+      int submit_result =
+          submit(function_name_.c_str(), LaunchTaskQueueCallback,
+                 DestroyTaskQueueContext, context, 0);
+      TVM_FFI_CHECK(submit_result == 0, RuntimeError)
+          << "torch_npu task queue submission failed for " << function_name_
+          << " (submit result " << submit_result << ")";
     }
   }
 
@@ -559,7 +827,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("ffi.Module.load_from_bytes.asc", AscendModuleLoadFromBytes)
-      .def("tl.ascend.ModuleCreate", AscendModuleCreate);
+      .def("tl.ascend.ModuleCreate", AscendModuleCreate)
+      .def("tl.ascend.SetTaskQueueSubmitFn", SetTaskQueueSubmitFn);
 }
 
 } // namespace ascend

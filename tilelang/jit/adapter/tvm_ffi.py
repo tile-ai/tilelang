@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 from collections.abc import Callable
+import logging
 import sys
 import threading
 
@@ -23,6 +24,8 @@ from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
+
+logger = logging.getLogger(__name__)
 
 
 COMPILE_ARGS = {}
@@ -43,6 +46,42 @@ def _install_torch_stream_exchange() -> None:
     )
 
     install_torch_npu_stream_exchange()
+
+
+def _install_task_queue_adapter(target: Target) -> None:
+    from tilelang.jit.adapter.utils import is_ascend_target
+
+    if not is_ascend_target(target):
+        return
+
+    from tilelang.ascend.task_queue import (
+        ensure_task_queue_adapter,
+        is_task_queue_enabled,
+    )
+
+    if not is_task_queue_enabled():
+        return
+
+    from tilelang.ascend.torch_exchange import set_torch_npu_no_wait_stream_query
+
+    try:
+        queue_enabled = ensure_task_queue_adapter()
+    except Exception as error:  # noqa: BLE001
+        queue_enabled = False
+        # The task queue needs a matching torch_npu toolchain and an on-demand
+        # DSO build; keep kernels runnable via direct ACL launches when it is
+        # unavailable. Submissions stay ordered relative to torch_npu only if
+        # torch_npu itself runs without the task queue in that configuration.
+        logger.warning(
+            "torch_npu task queue adapter unavailable; falling back to "
+            "direct ACL launches (%s). Set TASK_QUEUE_ENABLE=0 to skip the "
+            "adapter build entirely.",
+            error,
+        )
+    # Queued launches keep their order through the queue itself and may use
+    # the no-wait stream query; direct ACL launches must keep the draining
+    # query so they stay ordered behind previous torch_npu submissions.
+    set_torch_npu_no_wait_stream_query(queue_enabled)
 
 
 class TVMFFIKernelAdapter(BaseKernelAdapter):
@@ -78,6 +117,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def _prepare_torch_device(self, device: torch.device) -> None:
         if device.type == "npu" and not self._torch_npu_stream_exchange_installed:
             _install_torch_stream_exchange()
+            _install_task_queue_adapter(self.target)
             self._torch_npu_stream_exchange_installed = True
 
     # Stream/device functors are inherited from BaseKernelAdapter
