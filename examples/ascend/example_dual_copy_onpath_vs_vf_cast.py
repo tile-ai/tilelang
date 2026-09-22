@@ -15,7 +15,7 @@ wrap with the ``msprof`` CLI (nested profilers only capture cache-flush).
 import torch
 
 import tilelang
-import tilelang.language as T
+from tilelang.ascend import language as T
 from tilelang.profiler import do_bench
 
 EPILOGUES = ("onpath", "vf_cast")
