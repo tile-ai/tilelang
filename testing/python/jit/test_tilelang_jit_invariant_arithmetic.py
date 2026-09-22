@@ -186,31 +186,6 @@ def test_barrett_remainder(unsigned):
 
 
 @tilelang.testing.requires_cuda
-def test_proven_exact_division():
-    @T.prim_func
-    def main(A: T.Tensor((1024,), "int32"), B: T.Tensor((1024,), "int32"), d: T.int32):
-        with T.Kernel(8, threads=128) as bx:
-            for i in T.Parallel(128):
-                x = T.bind(A[bx * 128 + i])
-                if x % d == 0:
-                    B[bx * 128 + i] = x // d
-                else:
-                    B[bx * 128 + i] = -777
-
-    kernel = _compile_invariant(main)
-    source = kernel.get_kernel_source()
-    assert "exact_inverse" in source and "exact_shift" in source
-    a = torch.arange(-512, 512, dtype=torch.int32, device="cuda")
-    a[:2] = torch.tensor([-(2**31), 2**31 - 1], dtype=torch.int32, device="cuda")
-    b = torch.empty_like(a)
-    for d in (1, 2, 3, 6, 7, 12, 128, 65536, 2**30, 2**31 - 1, -3, -(2**31)):
-        kernel(a, b, d)
-        values = a.to(torch.int64)
-        expected = torch.where(values % d == 0, values // d, -777).to(torch.int32)
-        torch.testing.assert_close(b, expected)
-
-
-@tilelang.testing.requires_cuda
 def test_composite_layout_divisors():
     @T.prim_func
     def main(B: T.Tensor((1024,), "int32"), height: T.int32, width: T.int32):
@@ -269,74 +244,6 @@ def test_truncating_division_and_remainder():
         expected_q = torch.div(a, d, rounding_mode="trunc")
         torch.testing.assert_close(q, expected_q)
         torch.testing.assert_close(r, a - expected_q * d)
-
-
-@tilelang.testing.requires_cuda
-def test_exact_proof_does_not_escape_branch():
-    @T.prim_func
-    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
-        with T.Kernel(1, threads=128):
-            for i in T.Parallel(128):
-                x = T.bind(A[i])
-                if x % d == 0:
-                    B[i] = x // d + 10
-                else:
-                    B[i] = x // d
-
-    kernel = _compile_invariant(main)
-    source = kernel.get_kernel_source()
-    assert "exact_inverse" in source and "fastdiv_multiplier" in source
-    a = torch.arange(-64, 64, dtype=torch.int32, device="cuda")
-    b = torch.empty_like(a)
-    for d in (3, 6, 7):
-        kernel(a, b, d)
-        torch.testing.assert_close(b, a // d + (a % d == 0).to(torch.int32) * 10)
-
-
-@tilelang.testing.requires_cuda
-def test_unsigned_exact_division():
-    @T.prim_func
-    def main(A: T.Tensor((128,), "uint32"), B: T.Tensor((128,), "uint32"), d: T.uint32):
-        with T.Kernel(1, threads=128):
-            for i in T.Parallel(128):
-                x = T.bind(A[i])
-                if x % d == 0:
-                    B[i] = x // d
-                else:
-                    B[i] = T.uint32(0xFFFFFFFF)
-
-    kernel = _compile_invariant(main)
-    assert "exact_inverse" in kernel.get_kernel_source()
-    b = torch.empty(128, dtype=torch.uint32, device="cuda")
-    for d in (1, 2, 3, 6, 7, 65536, 2**31, 2**32 - 1):
-        values = torch.arange(128, dtype=torch.int64, device="cuda") * d
-        values &= 0xFFFFFFFF
-        values[-1] = 2**32 - 1
-        a = values.to(torch.uint32)
-        kernel(a, b, d)
-        expected = torch.where(values % d == 0, values // d, 0xFFFFFFFF)
-        torch.testing.assert_close(b.to(torch.int64), expected)
-
-
-@tilelang.testing.requires_cuda
-def test_exact_proof_does_not_apply_to_mutated_buffer():
-    @T.prim_func
-    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
-        with T.Kernel(1, threads=128):
-            for i in T.Parallel(128):
-                if A[i] % d == 0:
-                    A[i] = A[i] + 1
-                    B[i] = A[i] // d
-                else:
-                    B[i] = -777
-
-    kernel = _compile_invariant(main)
-    assert "exact_inverse" not in kernel.get_kernel_source()
-    a = torch.arange(128, dtype=torch.int32, device="cuda") * 3
-    expected = (a + 1) // 3
-    b = torch.empty_like(a)
-    kernel(a, b, 3)
-    torch.testing.assert_close(b, expected)
 
 
 @tilelang.testing.requires_cuda
@@ -759,31 +666,6 @@ def test_invariant_signed_domain_boundaries(dtype, truncating):
         expected_q = [((abs(x) // abs(d)) * (-1 if (x < 0) != (d < 0) else 1)) if truncating else x // d for x in inputs]
         assert q.cpu().tolist() == expected_q
         assert r.cpu().tolist() == [x - y * d for x, y in zip(inputs, expected_q)]
-
-
-@tilelang.testing.requires_cuda
-def test_exact_division_negative_divisor():
-    @T.prim_func
-    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
-        with T.Kernel(1, threads=128):
-            for i in T.Parallel(128):
-                x = T.bind(A[i])
-                if d != 0:
-                    if x % d == 0:
-                        B[i] = x // d
-                    else:
-                        B[i] = 123
-                else:
-                    B[i] = 123
-
-    kernel = _compile_invariant(main)
-    assert "exact_inverse" in kernel.get_kernel_source()
-    values = [-(2**31), -(2**30), -65536, -42, -1, 0, 42, 2**30] * 16
-    a = torch.tensor(values, dtype=torch.int32, device="cuda")
-    b = torch.empty_like(a)
-    for d in [0, 1, 2, 7, -(2**31), -(2**30), -65536, -7, -3, -2]:
-        kernel(a, b, d)
-        assert b.cpu().tolist() == [x // d if d and x % d == 0 else 123 for x in values]
 
 
 @tilelang.testing.requires_cuda

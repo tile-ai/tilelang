@@ -2585,12 +2585,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << ")";
   };
   if (op->op.same_as(tl::fast_div()) || op->op.same_as(tl::fast_rem()) ||
-      op->op.same_as(tl::exact_div()) || op->op.same_as(tl::barrett_reduce()) ||
+      op->op.same_as(tl::barrett_reduce()) ||
       op->op.same_as(tl::bounded_rem())) {
     need_invariant_arithmetic_h_ = true;
-    const char *name = op->op.same_as(tl::fast_div())    ? "tl::fast_div"
-                       : op->op.same_as(tl::fast_rem())  ? "tl::fast_rem"
-                       : op->op.same_as(tl::exact_div()) ? "tl::exact_div"
+    const char *name = op->op.same_as(tl::fast_div())   ? "tl::fast_div"
+                       : op->op.same_as(tl::fast_rem()) ? "tl::fast_rem"
                        : op->op.same_as(tl::bounded_rem())
                            ? "tl::bounded_rem"
                            : "tl::barrett_reduce";

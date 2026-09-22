@@ -463,7 +463,7 @@ def UnrollLoop():
 def LowerInvariantArithmetic():
     """Lower launch-invariant scalar integer division and remainder.
 
-    Includes fast div/rem, proven-exact division, and Barrett reduction.
+    Includes fast div/rem and Barrett reduction.
     Requires annotated device regions. Run after device arithmetic simplification
     so host bindings remain outside the kernel. Currently lowered by CUDA codegen.
     """

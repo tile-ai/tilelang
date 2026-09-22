@@ -308,7 +308,6 @@ struct ArithmeticFacts {
   VarSet range_opaque;
   ffi::Map<Var, PrimExpr> aliases;
   ExprSet seen;
-  ExprSet exact;
   ExprSet nonzero_divisor;
   ExprSet positive_divisor;
   ExprSet nonnegative;
@@ -530,8 +529,7 @@ private:
   std::vector<PrimExpr> remainders_;
 };
 
-// Collect proofs before rewriting predicates: replacing x % d in a condition
-// must not hide the exact-divisibility fact from its dominated division sites.
+// Collect sign and range proofs before rewriting their supporting predicates.
 class ArithmeticAnalyzer : public arith::IRMutatorWithAnalyzer {
 public:
   ArithmeticAnalyzer(arith::Analyzer *analyzer, ArithmeticFacts *facts)
@@ -742,7 +740,7 @@ private:
         !IsSupportedInteger(x.dtype())) {
       return;
     }
-    // Only stable scalar expressions can inherit divisibility from a predicate.
+    // Only stable scalar expressions can inherit bounds from a predicate.
     // Re-reading a mutable buffer is not the same value as its earlier load.
     bool stable = SideEffect(x) == CallEffectKind::kPure;
     arith::Analyzer type_analyzer;
@@ -750,9 +748,6 @@ private:
     bool range_safe =
         !facts_->HasOpaqueRange(x) && !HasUnprovenWrap_(x, range_analyzer);
     bool divisor_safe = !facts_->HasOpaqueRange(divisor);
-    bool exact = stable && range_safe && divisor_safe &&
-                 !HasUnprovenWrap_(divisor, analyzer_) &&
-                 analyzer_->CanProve(floormod(x, divisor) == 0);
     bool first = facts_->seen.insert(expr).second;
     auto record_proof = [&](ExprSet *set, bool proven) {
       // A shared expression node can occur under different predicates. A
@@ -763,12 +758,11 @@ private:
         set->erase(expr);
       }
     };
-    record_proof(&facts_->exact, exact);
     record_proof(&facts_->bounded_remainder, remainder && stable &&
                                                  range_safe && divisor_safe &&
                                                  CanReduceOnce(x, d));
     // Type-derived bounds remain valid for mutable loads. Predicate-derived
-    // bounds are used only for stable values, just like exactness proofs.
+    // bounds are used only for stable values.
     record_proof(&facts_->nonnegative, CanProveNonnegative_(x, range_analyzer));
     record_proof(&facts_->fits_signed32, FitsSigned32(x, range_analyzer));
     record_proof(&facts_->fits_unsigned32,
@@ -783,8 +777,8 @@ private:
                  divisor_safe && CanProvePositiveDivisor(d, analyzer_));
     record_proof(&facts_->nonzero_divisor,
                  divisor_safe && analyzer_->CanProve(divisor != 0));
-    if ((!exact || x.dtype().bits() == 64) && !remainder &&
-        d.dtype() == DataType::Int(32) && !facts_->HasFastDivisor(d)) {
+    if (!remainder && d.dtype() == DataType::Int(32) &&
+        !facts_->HasFastDivisor(d)) {
       facts_->fast_divisors.push_back(d);
     }
   }
@@ -911,26 +905,6 @@ private:
                  Bool(positive_divisor)});
   }
 
-  // For an exactly divisible x, remove d's power-of-two factor and multiply
-  // by the inverse of its odd part modulo 2^32. Five Newton steps from 1
-  // double the number of correct bits each time (1 -> 2 -> ... -> 32).
-  PrimExpr ExactDiv(const PrimExpr &x, const PrimExpr &d,
-                    const PrimExpr &valid) {
-    DataType u32 = DataType::UInt(32);
-    Var safe = plan_->Prepare(max(cast(u32, Magnitude(d)), make_const(u32, 1)),
-                              "exact_d");
-    PrimExpr lowbit = bitwise_and(safe, make_const(u32, 0) - safe);
-    Var shift =
-        plan_->Prepare(make_const(u32, 31) - clz(lowbit), "exact_shift");
-    Var odd = plan_->Prepare(safe >> shift, "exact_odd");
-    PrimExpr inverse = make_const(u32, 1);
-    for (int i = 0; i < 5; ++i) {
-      inverse = plan_->Prepare(inverse * (make_const(u32, 2) - odd * inverse),
-                               "exact_inverse");
-    }
-    return Call(x.dtype(), tl::exact_div(), {x, d, inverse, shift, valid});
-  }
-
   PrimExpr Rewrite(const PrimExpr &site, const PrimExpr &x,
                    const PrimExpr &divisor, bool remainder, bool truncating) {
     PrimExpr d = facts_.ResolveDivisor(divisor);
@@ -953,7 +927,6 @@ private:
       return cast(x.dtype(), Call(compute_type, tl::bounded_rem(),
                                   {value, cast(compute_type, d)}));
     }
-    bool exact = facts_.exact.count(site) && compute_type.bits() == 32;
     // Select the algorithm from the dividend range before preparing parameters.
     // A narrow divisor does not imply a narrow quotient or dividend.
     bool fast32 = d.dtype() == DataType::Int(32) && facts_.HasFastDivisor(d) &&
@@ -962,9 +935,7 @@ private:
     // Keep only the original zero-divisor behavior, not a per-lane sign guard.
     PrimExpr valid = facts_.nonzero_divisor.count(site) ? const_true() : d != 0;
     PrimExpr result;
-    if (exact) {
-      result = remainder ? make_zero(compute_type) : ExactDiv(value, d, valid);
-    } else if (fast32) {
+    if (fast32) {
       result = FastDiv(value, d, remainder, valid, truncating,
                        facts_.nonnegative.count(site),
                        facts_.positive_divisor.count(site));
@@ -1061,7 +1032,6 @@ bool IsInvariantArithmetic(const PrimExpr &expr) {
   return call && (call->op.same_as(tl::fast_div()) ||
                   call->op.same_as(tl::fast_rem()) ||
                   call->op.same_as(tl::barrett_reduce()) ||
-                  call->op.same_as(tl::exact_div()) ||
                   call->op.same_as(tl::bounded_rem()));
 }
 

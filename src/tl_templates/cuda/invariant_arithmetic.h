@@ -198,17 +198,4 @@ TL_DEVICE T barrett_reduce(T x, T d, uint64_t reciprocal, bool valid,
                                        nonnegative, positive_divisor);
 }
 
-template <typename X, typename D>
-TL_DEVICE X exact_div(X x, D d, unsigned inverse, unsigned shift, bool valid) {
-  if (!valid) {
-    return x / X(d);
-  }
-  // Proven divisibility makes the arithmetic shift exact for signed x too.
-  unsigned quotient = unsigned(x >> shift) * inverse;
-  if constexpr (std::is_signed_v<D>) {
-    quotient = d < 0 ? 0u - quotient : quotient;
-  }
-  return X(quotient);
-}
-
 } // namespace tl
