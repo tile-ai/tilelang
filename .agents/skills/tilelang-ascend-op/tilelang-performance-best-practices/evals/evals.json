@@ -208,6 +208,35 @@
           "assertion_text": "Search geometric candidates and A/B test tile and stage separately; retain a fallback when parallelism, tail handling, UB usage, or measured latency is unfavorable"
         }
       ]
+    },
+    {
+      "id": 8,
+      "title": "Use bundled Ascend implementation references without template maturity",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "The best-practices Skill contains a complete references/reduce/code/sinkhorn_asc.py host-and-kernel implementation. It has target=\"pto\" and is not registered in template_status.md. Explain whether generation and performance tuning may read it, and whether the file itself must be lowered or run on a device merely to remain in the Skill. Do not execute external tools.",
+      "expected_output": "Treat the _asc.py file as an Ascend source-reading implementation reference. target=\"pto\" does not make it CUDA code. Generation may study its host dispatch and kernel structure, while tuning may use its tiling, execution-domain, buffer, pipeline, and fusion choices to form hypotheses. It requires no template maturity entry and no lowering, device correctness, or performance run merely to remain in the Skill. When a target operator adopts an idea, validate that target implementation through its normal workflow and do not inherit a performance claim from the reference file alone.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "accepts_pto_asc_reference",
+          "description": "Recognize PTO-targeted _asc.py as Ascend reference code",
+          "assertion_text": "An _asc.py reference remains eligible when it contains target=\"pto\"; do not classify it as CUDA"
+        },
+        {
+          "name": "separates_code_reference_from_template",
+          "description": "Do not force implementation-reading code into template maturity",
+          "assertion_text": "references/*/code/*_asc.py is source-reading material for generation and tuning and requires neither template-status registration nor separate device validation merely to stay in the Skill"
+        },
+        {
+          "name": "preserves_target_validation",
+          "description": "Do not inherit performance conclusions from reference code",
+          "assertion_text": "When an idea is applied, validate the resulting target operator normally and do not treat the reference file alone as a current performance result"
+        }
+      ]
     }
   ],
   "skill_name": "tilelang-performance-best-practices"

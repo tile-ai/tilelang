@@ -15,10 +15,11 @@
 Confirm APIs in this priority order:
 
 1. The current target operator and `examples/ascend/**/*.py`: implementation structure and API references; determine performance status from each specific example and current validation results.
-2. Locate the actually imported source with `python -c 'import tilelang; print(tilelang.__file__)'`; do not infer the version from a sibling directory name.
-3. `examples/ascend/` and `testing/ascend/` in the actual TileLang source: runnable examples, API boundaries, and lowering regressions.
-4. `tilelang/language/` and PTO lowering in the actual TileLang source: API definitions and backend constraints.
-5. PTO codegen/lowering: confirm that support genuinely exists under `TILELANG_DEFAULT_TARGET=pto`.
+2. Matching `references/*/code/*_asc.py` files in this Skill: complete Ascend host dispatch and kernel structures for generation and optimization ideas; no template maturity is assigned to this source-reading corpus.
+3. Locate the actually imported source with `python -c 'import tilelang; print(tilelang.__file__)'`; do not infer the version from a sibling directory name.
+4. `examples/ascend/` and `testing/ascend/` in the actual TileLang source: runnable examples, API boundaries, and lowering regressions.
+5. `tilelang/language/` and PTO lowering in the actual TileLang source: API definitions and backend constraints.
+6. PTO codegen/lowering: confirm that support genuinely exists under `TILELANG_DEFAULT_TARGET=pto`.
 
 ## Execution Domains
 

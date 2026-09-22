@@ -1,8 +1,12 @@
 # TileLang/PTO Correctness and Performance Gates
 
+## Scope
+
+These gates apply when implementing or changing a target operator and when claiming that an executable template is reusable or faster. The complete `_asc.py` files under `references/*/code/` are source-reading references only; adding or retaining them in the Skill does not require running their launchers, tests, lowering, or device validation.
+
 ## Implementation Order
 
-1. Prefer deriving from a similar operator implementation in the current repository. Before using bundled code, check [Template Maturity](template_status.md).
+1. Prefer deriving from a similar operator implementation in the current repository or the matching `_asc.py` source-reading references. Before using a bundled executable template, check [Template Maturity](template_status.md).
 2. Locate TileLang through its actual import path and verify that every API exists in PTO lowering. Do not use CUDA-only schedules, targets, or pass configurations.
 3. Establish an fp32 or higher-precision PyTorch reference and implement the complete shape/dtype fallback first.
 4. Run targeted correctness tests and fix every numerical, out-of-bounds, compilation, and unimplemented-path failure.

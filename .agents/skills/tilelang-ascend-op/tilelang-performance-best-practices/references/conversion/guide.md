@@ -6,9 +6,9 @@ Select DMA, SIMD gather, or SIMT according to contiguity, dtype byte width, tile
 
 ## PTO Kernel Structure
 
-First merge adjacent contiguous dimensions and select block_x/block_y. Use T.StridedTensor to express dynamic input strides and a contiguous T.Tensor for output. Reuse the baseline kernel directly for common two-dimensional swaps, and generate static indexing variants through a factory for complex layouts.
+First merge adjacent contiguous dimensions and select block_x/block_y. Use T.StridedTensor to express dynamic input strides and a contiguous T.Tensor for output. Read [batched_transpose_asc.py](code/batched_transpose_asc.py) for complete host tiling, multi-axis Persistent mapping, UB padding, and SIMD/SIMT kernel paths. Generate static indexing variants through a factory for complex layouts.
 
-Use `testing/ascend/layout/test_ascend_l0_transpose.py` in the current repository to verify L0 transpose semantics, and use `tilelang/ascend/language/copy_op.py` and `src/ascend/op/copy.cc` to verify transfer and layout restrictions. These files do not constitute a general batched-transpose kernel. When reusing the current operator or implementing a new one, define task assignment, strides, dtype, tail handling, and the UB footprint explicitly. The skill's transpose adapter requires an explicitly supplied kernel factory that has been validated in the current repository.
+Use `testing/ascend/layout/test_ascend_l0_transpose.py` in the current repository to verify L0 transpose semantics, and use `tilelang/ascend/language/copy_op.py` and `src/ascend/op/copy.cc` to verify transfer and layout restrictions. When reusing the reference or implementing a new operator, define task assignment, strides, dtype, tail handling, and the UB footprint explicitly. The skill's transpose adapter requires an explicitly supplied kernel factory that has been validated in the current repository.
 
 ## Correctness Requirements
 

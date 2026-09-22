@@ -28,4 +28,4 @@ First run targeted correctness tests with `TILELANG_DEFAULT_TARGET=pto`, then ru
 
 ## Executable Code and Evidence
 
-See examples/ascend/example_simdvf_vecadd.py and examples/ascend/example_simdvf_per_token_cast_to_fp8.py for executable implementations.
+See `code/swiglu_forward_asc.py`, `code/swiglu_backward_asc.py`, `code/engram_gate_asc.py`, and `code/engram_hash_asc.py` for complete fused and irregular Ascend implementation structures. See `examples/ascend/example_simdvf_vecadd.py` and `examples/ascend/example_simdvf_per_token_cast_to_fp8.py` for compact executable examples.

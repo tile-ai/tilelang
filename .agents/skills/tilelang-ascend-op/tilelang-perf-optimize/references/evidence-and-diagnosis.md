@@ -5,7 +5,8 @@
 1. Tests, public interfaces, dispatch, and the target `_asc.py` in the current repository.
 2. Current-round PTO compilation results, per-case kernel latency, profiling reports, and traces.
 3. Actually imported TileLang source, tests, and `examples/ascend/`.
-4. Maturity-rated references in the Skill named `tilelang-performance-best-practices`.
+4. Matching `references/*/code/*_asc.py` implementation references in the Skill named `tilelang-performance-best-practices`.
+5. Maturity-rated executable templates and structural documents in that Skill.
 
 Lower-priority material cannot override higher-priority measured results. Data from another version, device, or measurement methodology can form only a hypothesis that still requires validation.
 

@@ -6,11 +6,11 @@ Every plan must meet these requirements before implementation:
 
 1. At least one bottleneck finding from the current run supports its hypothesis.
 2. The relevant TileLang APIs and invocation structure can be located in the current repository or the actually imported TileLang source.
-3. When reusing a bundled reference from the Skill named `tilelang-performance-best-practices`, record the Skill name, internal Python file's relative path, and maturity. When a plan relies only on the current repository or actual TileLang source, record the corresponding source paths and direct validation evidence; prior registration in the template status table is not required.
+3. When using `references/*/code/*_asc.py` from the Skill named `tilelang-performance-best-practices`, record its internal relative path as an implementation reference; no maturity label is required. When reusing a bundled executable template, record its internal path and maturity. When a plan relies on the current repository or actual TileLang source, record the corresponding source paths and direct validation evidence; prior registration in the template status table is not required.
 4. Clearly identify covered cases, mutually exclusive branches, accuracy risks, and rollback conditions.
 5. Provide reproducible lowering, accuracy, and performance validation methods.
 
-Mark a plan `DESIGN_ONLY` when it does not meet item 2; it cannot be passed to direct implementation. When reusing a bundled reference without satisfying item 3, do not treat that reference as a directly reusable template. However, if the current repository or actual TileLang source separately provides complete evidence for the API, lowering, accuracy, and applicability, the plan may be admitted independently on that direct evidence.
+Mark a plan `DESIGN_ONLY` when it does not meet item 2; it cannot be passed to direct implementation. A source-reading `_asc.py` reference can supply a concrete implementation structure without becoming a validated template or carrying a performance conclusion. When reusing a bundled executable template without satisfying item 3, do not treat that template as directly reusable. However, if the current repository or actual TileLang source separately provides complete evidence for the API, lowering, accuracy, and applicability, the plan may be admitted independently on that direct evidence.
 
 ## Report Template
 
@@ -37,7 +37,7 @@ Admit at most three plans, using only these statuses:
 - Bottleneck evidence and a falsifiable hypothesis.
 - TileLang files, functions, dispatch branches, and parameters to modify.
 - Current value -> candidate value, with Tiling/buffer calculations.
-- Reference Python path, template maturity, and key TileLang structures.
+- Reference Python path, template maturity when applicable, and key TileLang structures.
 - Per-case coverage table.
 - Compilation, accuracy, and performance acceptance criteria, plus rollback conditions.
 

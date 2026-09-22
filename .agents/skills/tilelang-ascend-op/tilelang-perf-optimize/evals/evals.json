@@ -10,7 +10,7 @@
         "eval_mode": "text"
       },
       "prompt": "Use tilelang-perf-optimize to develop performance optimization plans for a PTO Reduction kernel in the current repository. Latency and profiling metrics are available for every case, but different shapes enter different dispatch branches. Explain the analysis sequence, how to invoke tilelang-performance-best-practices, and what the final plans must contain. Do not execute external tools.",
-      "expected_output": "First fix the repository, actual TileLang/PTOAS environment, and measurement methodology. Then map every case to its real dispatch branch and group cases by semantics, dtype, tail handling, and bottleneck. Build models for core count, tiles, buffer versions, padding, reads/writes, and reduction state. Candidates must be supported by evidence and checked against the APIs and lowering through tilelang-performance-best-practices; when reusing a bundled reference, also verify its actual Python path and template maturity. Output at most three admitted plans with status IMPLEMENTABLE or EXPERIMENT, covering all cases and including parameters, validation commands, performance methodology, and rollback conditions. List DESIGN_ONLY items separately as non-admitted candidates; they do not count toward the limit and must not be handed off for implementation.",
+      "expected_output": "First fix the repository, actual TileLang/PTOAS environment, and measurement methodology. Then map every case to its real dispatch branch and group cases by semantics, dtype, tail handling, and bottleneck. Build models for core count, tiles, buffer versions, padding, reads/writes, and reduction state. Candidates must be supported by evidence and checked against the APIs and lowering through tilelang-performance-best-practices. Matching references/*/code/*_asc.py files may supply host and kernel structures without maturity registration; maturity is required only when reusing an executable template. Output at most three admitted plans with status IMPLEMENTABLE or EXPERIMENT, covering all cases and including parameters, validation commands, performance methodology, and rollback conditions. List DESIGN_ONLY items separately as non-admitted candidates; they do not count toward the limit and must not be handed off for implementation.",
       "files": [],
       "expectations": [
         {
@@ -21,7 +21,7 @@
         {
           "name": "uses_tilelang_feasibility_gate",
           "description": "Use the implementation-knowledge skill to verify feasibility",
-          "assertion_text": "Load tilelang-performance-best-practices and filter candidates against the target repository, actual TileLang source, and PTO lowering; maturity verification is mandatory only when reusing a bundled reference"
+          "assertion_text": "Load tilelang-performance-best-practices and filter candidates against the target repository, actual TileLang source, and PTO lowering; source-reading _asc.py references require no maturity entry, while executable templates retain their maturity gate"
         },
         {
           "name": "limits_and_validates_plans",
@@ -87,7 +87,7 @@
         "eval_mode": "text"
       },
       "prompt": "The current branch of the repository contains a runnable TileLang/PTO implementation: its API and lowering can be located in the actual TileLang source, and it passes correctness checks on the target cases, but tilelang-performance-best-practices has not yet registered it in template_status.md. Use tilelang-perf-optimize to determine whether it can support an optimization plan. Do not execute external tools.",
-      "expected_output": "Do not downgrade it to DESIGN_ONLY solely because it is absent from the template status table. The current repository and actual TileLang source are direct factual sources. If the bottleneck evidence, API, lowering, correctness, applicable cases, and validation method are complete, classify it independently as IMPLEMENTABLE or EXPERIMENT. The path and maturity are mandatory only when reusing a bundled reference. An unregistered implementation must not be presented as a validated template.",
+      "expected_output": "Do not downgrade it to DESIGN_ONLY solely because it is absent from the template status table. The current repository and actual TileLang source are direct factual sources. If the bottleneck evidence, API, lowering, correctness, applicable cases, and validation method are complete, classify it independently as IMPLEMENTABLE or EXPERIMENT. A source-reading _asc.py reference records only its internal path and requires no maturity; path and maturity are mandatory when reusing a bundled executable template. An unregistered implementation must not be presented as a validated template.",
       "files": [],
       "expectations": [
         {
@@ -97,8 +97,8 @@
         },
         {
           "name": "still_gates_bundled_templates",
-          "description": "The template-maturity gate still applies only to bundled references",
-          "assertion_text": "When reusing a tilelang-performance-best-practices bundled reference, still read its actual path and maturity; an unregistered implementation must not masquerade as a validated template"
+          "description": "The template-maturity gate applies to executable templates, not source-reading code references",
+          "assertion_text": "A bundled references/*/code/*_asc.py file may be used as implementation-reading material without maturity, while a bundled executable template still requires its actual path and maturity"
         }
       ]
     }

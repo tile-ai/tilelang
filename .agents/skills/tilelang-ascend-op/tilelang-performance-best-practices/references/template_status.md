@@ -2,6 +2,8 @@
 
 Use this table to assess code availability before reading operator-family documentation. `PRODUCTION_REFERENCE` is a feature-gated status: the current kernel and launcher must contain the core structures summarized in this table and its linked documents. If those structures are missing, downgrade the current path to `EXECUTABLE_BASELINE`; historical optimization knowledge becomes a candidate only, and its performance conclusions do not carry over. The existence of a file does not mean that its optimization strategy has been implemented.
 
+This maturity table applies to executable templates and strategy implementations. Full Ascend host-and-kernel files under `references/*/code/*_asc.py` are a source-reading corpus for generation and optimization work; they are intentionally not registered or classified here.
+
 "Implemented and measured" in a structural document is a knowledge-evidence level, not a code-template maturity status, and does not determine candidate implementation priority. Applying it to the current implementation still requires checking applicability and revalidation.
 
 | Status | Usage Rule |
