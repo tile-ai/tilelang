@@ -388,7 +388,13 @@ class Builder(BaseBuilder):
                 self.current_file,
                 self.current_line,
             )
-        yield self.enter_frame(frame)
+        try:
+            yield self.enter_frame(frame)
+        except BaseException as exc:
+            # Unwind Python frame state without finalizing incomplete TIR.
+            while len(self.frames) > pop_idx:
+                self.frames.pop().__exit__(type(exc), exc, exc.__traceback__)
+            raise
         if self._spans_enabled:
             # Flush leaf stmts of the frame being exited before its __exit__
             # moves them into the produced node.

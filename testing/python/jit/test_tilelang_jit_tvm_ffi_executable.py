@@ -153,9 +153,41 @@ def test_subbyte_output_uses_callee_allocated_abi():
     adapter, _ = _make_adapter()
     adapter.params = [SimpleNamespace(dtype=SimpleNamespace(bits=4))]
     adapter.result_idx = [0]
-    adapter.target = tvm.target.Target("cuda", host="c")
+    output_param = tirx.Var("output", "handle")
+    source = tirx.PrimFunc([output_param], tirx.Evaluate(0))
+    adapter._test_prim_func, _ = prepare_tvm_ffi_callee_allocated_outputs(source, 0, supports_callee_allocated_outputs=True)
 
     assert adapter._uses_ffi_callee_allocated_output_abi()
+
+
+def test_unsupported_backend_keeps_preallocated_output_abi():
+    adapter, _ = _make_adapter()
+    adapter.result_idx = [0]
+    output_param = tirx.Var("output", "handle")
+    source = tirx.PrimFunc([output_param], tirx.Evaluate(0))
+    adapter._test_prim_func, _ = prepare_tvm_ffi_callee_allocated_outputs(source, 0, supports_callee_allocated_outputs=False)
+
+    assert not adapter._uses_ffi_callee_allocated_output_abi()
+
+
+def test_capability_flag_gates_callee_allocated_attr():
+    input_param = tirx.Var("input", "handle")
+    output_param = tirx.Var("output", "handle")
+    source = tirx.PrimFunc([input_param, output_param], tirx.Evaluate(0))
+
+    prepared, _ = prepare_tvm_ffi_callee_allocated_outputs(source, -1)
+    assert "tilelang_callee_allocated_outputs" not in prepared.attrs
+
+    prepared, _ = prepare_tvm_ffi_callee_allocated_outputs(source, -1, supports_callee_allocated_outputs=True)
+    assert int(prepared.attrs["tilelang_callee_allocated_outputs"]) != 0
+    assert list(prepared.attrs["tilelang_out_idx"]) == [-1]
+
+    # Pre-attributed functions (e.g. eager builder) get the decision stamped
+    # without disturbing the declarative out_idx attribute.
+    attributed = source.with_attr("tilelang_out_idx", [-1])
+    prepared, _ = prepare_tvm_ffi_callee_allocated_outputs(attributed, None, supports_callee_allocated_outputs=True)
+    assert int(prepared.attrs["tilelang_callee_allocated_outputs"]) != 0
+    assert list(prepared.attrs["tilelang_out_idx"]) == [-1]
 
 
 def test_manual_out_idx_is_exposed_to_tvm_ffi_lowering_without_mutating_source():

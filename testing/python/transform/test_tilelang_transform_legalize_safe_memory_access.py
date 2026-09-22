@@ -26,6 +26,15 @@ def _strip_block_reads_writes(stmt, strip_annotations: bool = False):
     return ir_transform(stmt, None, _postorder)
 
 
+def _materialize_launch(func):
+    """Run the launch materialization the pipeline performs before
+    LegalizeSafeMemoryAccess, so thread indices carry their extents."""
+    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
+    return mod[func.attrs["global_symbol"]]
+
+
 def _collect_call_nodes(stmt, op_names):
     if isinstance(op_names, str):
         op_names = {op_names}
@@ -115,6 +124,7 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
 
 def assert_vectorize_access(M: int = 64, N: int = 64):
     func, expected = vectorize_access_legalize(M, N)
+    func, expected = _materialize_launch(func), _materialize_launch(expected)
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
 
@@ -160,6 +170,7 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset
 
 def assert_vectorize_access_with_atmoic_add(M: int = 64, N: int = 64):
     func, expected = vectorize_access_with_atmoic_add_legalize(M, N)
+    func, expected = _materialize_launch(func), _materialize_launch(expected)
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     print(transformed)
@@ -198,6 +209,7 @@ def oob_store_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: in
 
 def assert_oob_store_legalize(M: int = 64, N: int = 64):
     func, expected = oob_store_legalize(M, N)
+    func, expected = _materialize_launch(func), _materialize_launch(expected)
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     tvm.ir.assert_structural_equal(

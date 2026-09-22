@@ -2101,6 +2101,13 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     ICHECK(!func_name.empty() && panel_size > 0)
         << "threadblock_swizzle_pattern: failed to extract func_name and "
            "panel_size";
+    // Only the row/column rasterizations exist in the HIP device templates;
+    // e.g. T.use_swizzle(order="mlx") is Metal-only and must fail here
+    // instead of surfacing as a missing-symbol error from hipcc.
+    ICHECK(func_name == "rasterization2DRow" ||
+           func_name == "rasterization2DColumn")
+        << "threadblock swizzle pattern `" << func_name
+        << "` is not supported by the ROCm backend";
     this->stream << "const dim3 blockIdx = tl::" << func_name << "<"
                  << panel_size << ">();\n";
     this->VisitStmt(op->body);

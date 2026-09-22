@@ -13,9 +13,13 @@ level, how they map to hardware concepts, and how to use them correctly.
 
 ## Data Movement
 
-Use `T.copy(src, dst, *, coalesced_width=None, disable_tma=False, eviction_policy=None, loop_layout=None)`
+Use `T.copy(src, dst, *, coalesced_width=None, loop_layout=None)`
 to move tiles between memory scopes. It accepts `tir.Buffer`, `BufferLoad`, or
-`BufferRegion`; extents are inferred or broadcast when possible.
+`BufferRegion`; extents are inferred or broadcast when possible. Backend
+dialects add their lowering hints as extra keywords: the CUDA dialect (the
+default `tilelang.language` facade) accepts `disable_tma`, `eviction_policy`
+and `prefer_instruction`. Hints are recorded on the op and ignored by targets
+that have no use for them.
 
 ```python
 # Global → Shared tiles (extents inferred from dst)
@@ -87,6 +91,21 @@ GEMM and sparse GEMM
 - `T.gemm(A_shared, B_shared, C_fragment)`: computes a tile GEMM using shared
   inputs and a fragment accumulator; lowered to target‑specific tensor cores.
 - `T.gemm_sp(...)`: 2:4 sparse tensor core variant (see examples and README).
+- `T.gemm_blockscaled(A, B, C, SFA, SFB, k_start=..., sf_a_granularity_k=...,
+  sf_b_granularity_k=...)`: common, target-neutral block-scaled GEMM,
+  `C (+)= (A * SFA) @ (B * SFB)`, with scale factors covering blocks along K.
+  Each backend owns its supported dtypes, operand scopes and lowering;
+  a backend without an implementation rejects the op instead of dropping
+  the scale factors. Current CUDA implementations select TCGEN05 on SM100
+  with `C` in tensor memory or `mma.sync` on SM120 with `C` in a fragment.
+  The CUDA dialect adds `mbar`, `use_2cta` and `sf_layout`. Like `T.gemm`,
+  the op is synchronous: the TCGEN05 path requires a completion barrier and
+  TileLang inserts the matching `mbarrier_wait_parity` implicitly after
+  issue. The explicit variants `T.tcgen05_gemm_blockscaled` and
+  `T.mma_gemm_blockscaled` remain CUDA-only; `T.tcgen05_gemm_blockscaled`
+  never waits implicitly, and with `mbar=None` it defers the completion
+  arrival to a later TCGEN05 operation or an explicit `T.tcgen05_mma_arrive`;
+  the caller must wait for that completion before consuming the result.
 
 Reductions and scans
 - `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp
@@ -165,6 +184,9 @@ Memory allocation and descriptors
 Compute primitives
 - `T.gemm(A_s, B_s, C_f)`: Tile GEMM into fragment accumulator.
 - `T.gemm_sp(...)`: Sparse (2:4) tensor core GEMM.
+- `T.gemm_blockscaled(A_s, B_s, C, SFA, SFB, ...)`: Block‑scaled GEMM with
+  target‑selected instruction; explicit `T.tcgen05_gemm_blockscaled` /
+  `T.mma_gemm_blockscaled`.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
@@ -219,7 +241,8 @@ Warp-match (CUDA sm_70+, not supported on HIP). `mask` defaults to `0xFFFFFFFF`.
 > **Note on HIP:** `any_sync`/`all_sync` ignore the mask and call `__any`/`__all` directly. `ballot_sync`, `ballot`, and `activemask` call `__ballot` which returns `uint64` natively on 64-thread wavefronts — no truncation occurs. Shuffle intrinsics lower to `__shfl`/`__shfl_xor`/`__shfl_down`/`__shfl_up` (mask ignored). `syncthreads_count/and/or` have identical signatures on both platforms. `match_any_sync` and `match_all_sync` have no HIP equivalent and will fail to codegen on HIP.
 
 Atomics
-- `T.atomic_add(dst, value, memory_order=None, return_prev=False, use_tma=False)`.
+- `T.atomic_add(dst, value, memory_order=None, return_prev=False)`; the CUDA
+  dialect additionally accepts `use_tma=True` (sm90+ TMA `cp.reduce`).
 - `T.atomic_addx2(dst, value, return_prev=False)`; `T.atomic_addx4(...)`.
 - `T.atomic_max(dst, value, memory_order=None, return_prev=False)`.
 - `T.atomic_min(dst, value, memory_order=None, return_prev=False)`.

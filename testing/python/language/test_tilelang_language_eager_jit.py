@@ -238,5 +238,83 @@ def test_jit2_compile_with_consts():
     transpose.compile(M=1024, N=1024, block_M=64, block_N=64)
 
 
+def _kernel_body_is_skipped_in_phase1(func) -> bool:
+    """Whether the eager rewriter guards the launch body with skip_kernel_ctx,
+    which is what keeps phase-1 signature inference from executing it."""
+    from tilelang.language.eager.ast import mutate
+
+    return "skip_kernel_ctx" in mutate(func).source
+
+
+def test_jit2_recognizes_launch_from_every_dialect():
+    from tilelang.cpu import language as Tcpu
+    from tilelang.cuda import language as Tcuda
+    from tilelang.rocm import language as Trocm
+
+    Launch = T.Kernel
+
+    def default_facade(A):
+        with T.Kernel(1):
+            pass
+
+    def cuda_dialect(A):
+        with Tcuda.Kernel(1, threads=128):
+            pass
+
+    def rocm_dialect(A):
+        with Trocm.Kernel(1, threads=64):
+            pass
+
+    def cpu_dialect(A):
+        with Tcpu.Kernel(1):
+            pass
+
+    def cluster(A):
+        with T.ClusterKernel(2, cluster_dims=2):
+            pass
+
+    def aliased(A):
+        with Launch(1):
+            pass
+
+    def not_a_launch(A):
+        with T.ws(0):
+            pass
+
+    for func in (default_facade, cuda_dialect, rocm_dialect, cpu_dialect, cluster, aliased):
+        assert _kernel_body_is_skipped_in_phase1(func), func.__name__
+    assert not _kernel_body_is_skipped_in_phase1(not_a_launch)
+
+
+@tilelang.testing.requires_cuda
+def test_jit2_phase1_does_not_execute_kernel_body():
+    """Phase 1 infers the signature with symbolic T.const values, so the launch
+    body must not run then: a gemm tile that depends on a const is only valid
+    once the values are bound in phase 2."""
+
+    @tilelang.jit
+    def gemm_full_n(A, B, block_M, block_K):
+        M, N, K = T.const("M, N, K")
+        A: T.Tensor[[M, K], T.float16]
+        B: T.Tensor[[K, N], T.float16]
+        C = T.empty((M, N), T.float16)
+        with T.Kernel(T.ceildiv(M, block_M), threads=128) as bx:
+            A_shared = T.alloc_shared((block_M, block_K), T.float16)
+            B_shared = T.alloc_shared((block_K, N), T.float16)
+            C_local = T.alloc_fragment((block_M, N), T.float32)
+            T.clear(C_local)
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
+                T.copy(A[bx * block_M, k * block_K], A_shared)
+                T.copy(B[k * block_K, 0], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+            T.copy(C_local, C[bx * block_M, 0])
+        return C
+
+    a = torch.randn(256, 128, device="cuda", dtype=torch.float16)
+    b = torch.randn(128, 64, device="cuda", dtype=torch.float16)
+    c = gemm_full_n(a, b, 64, 32)
+    torch.testing.assert_close(c, (a.float() @ b.float()).half(), rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -621,11 +621,21 @@ class DSLMutator(ast.NodeTransformer):
         is_kernel_ctx = False
         for expr in node.items:
             cexpr = expr.context_expr
-            if isinstance(cexpr, ast.Call) and isinstance(cexpr.func, ast.Attribute) and cexpr.func.attr in ("Kernel", "ClusterKernel"):
-                eval_res = self._try_eval(cexpr.func)
-                from tilelang.language.kernel import ClusterKernel, Kernel
+            if isinstance(cexpr, ast.Call) and isinstance(cexpr.func, (ast.Attribute, ast.Name)):
+                # Only resolve plain names and module attribute chains, so no
+                # factory expression such as make_scope().context() is executed
+                # at rewrite time.
+                root = cexpr.func
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if not isinstance(root, ast.Name):
+                    continue
+                # Every dialect's Kernel (and ClusterKernel) is marked as a launch
+                # factory; identity against one implementation would miss the
+                # others, and aliases such as `K = T.Kernel`.
+                from tilelang.language.kernel import is_kernel_launch_factory
 
-                if eval_res is Kernel or eval_res is ClusterKernel:
+                if is_kernel_launch_factory(self._try_eval(cexpr.func)):
                     is_kernel_ctx = True
                     break
         node = self.generic_visit(node)

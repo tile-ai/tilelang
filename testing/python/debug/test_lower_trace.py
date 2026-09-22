@@ -49,9 +49,9 @@ def _simple_program():
 
     @T.prim_func
     def program(A: T.Tensor((128,), "float32"), B: T.Tensor((128,), "float32")):
-        with T.Kernel(threads=128):
-            tid = T.get_thread_binding()
-            B[tid] = A[tid] + 1.0
+        with T.Kernel(1):
+            for i in T.serial(128):
+                B[i] = A[i] + 1.0
 
     return program
 
@@ -186,9 +186,9 @@ def test_multiple_pipelines_share_one_compile_session(monkeypatch, tmp_path):
 
     @T.prim_func
     def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
-        with T.Kernel(32):
-            tid = T.get_thread_binding()
-            B[tid] = A[tid] + 1.0
+        with T.Kernel(1):
+            for i in T.serial(32):
+                B[i] = A[i] + 1.0
 
     mod = tvm.IRModule({"main": tiny})
     context = create_backend_context("c", "c", "cython")
@@ -279,9 +279,9 @@ def test_no_skipped_phantom_records(monkeypatch, tmp_path):
 
     @T.prim_func
     def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
-        with T.Kernel(32):
-            tid = T.get_thread_binding()
-            B[tid] = A[tid] + 1.0
+        with T.Kernel(1):
+            for i in T.serial(32):
+                B[i] = A[i] + 1.0
 
     tilelang.lower(tiny, target="c")
 
@@ -325,9 +325,9 @@ def test_terminal_mode_no_html(monkeypatch, tmp_path):
 
         @T.prim_func
         def tiny(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
-            with T.Kernel(32):
-                tid = T.get_thread_binding()
-                B[tid] = A[tid] + 1.0
+            with T.Kernel(1):
+                for i in T.serial(32):
+                    B[i] = A[i] + 1.0
 
         tilelang.lower(tiny, target="c")
 

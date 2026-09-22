@@ -133,22 +133,6 @@ class GemmBase:
         return getattr(self.gemm_node, "cRegion", None)
 
     @property
-    def stride_A(self) -> int:
-        return getattr(self.gemm_node, "strideA", None)
-
-    @property
-    def stride_B(self) -> int:
-        return getattr(self.gemm_node, "strideB", None)
-
-    @property
-    def offset_A(self) -> int:
-        return getattr(self.gemm_node, "offsetA", None)
-
-    @property
-    def offset_B(self) -> int:
-        return getattr(self.gemm_node, "offsetB", None)
-
-    @property
     def clear_accum(self) -> PrimExpr:
         return getattr(self.gemm_node, "clearAccum", None)
 
@@ -183,22 +167,6 @@ class GemmBase:
             zero = tvm.tirx.const(0, T.int32)
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
-
-    @property
-    def SFARegion(self):
-        return getattr(self.gemm_node, "sfaRegion", None)
-
-    @property
-    def SFBRegion(self):
-        return getattr(self.gemm_node, "sfbRegion", None)
-
-    @property
-    def sf_k_start(self) -> PrimExpr:
-        return getattr(self.gemm_node, "sfKStart", tvm.tirx.const(0, T.int32))
-
-    @property
-    def is_blockscaled(self) -> bool:
-        return self.SFARegion is not None and self.SFBRegion is not None
 
     def get_region_base_offsets(self, region):
         """

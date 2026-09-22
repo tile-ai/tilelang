@@ -87,6 +87,7 @@
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
@@ -137,10 +138,6 @@ Map<String, V> FilterAnnotations(const Map<String, V> &ann, Pred keep) {
 // ---------------------------------------------------------------------------
 const Op &TmaCopyOp() {
   static const Op &op = Op::Get("tl.tileop.tma_copy");
-  return op;
-}
-const Op &Tcgen05GemmOp() {
-  static const Op &op = Op::Get("tl.tileop.tcgen05_gemm");
   return op;
 }
 
@@ -2245,8 +2242,7 @@ private:
     return rewriter(std::move(expr));
   }
 
-  // Rewrite an asynchronous atom's call: swap it to its explicit async
-  // op (TMA, tcgen05) or annotate it (cp.async).
+  // Wire asynchronous atoms to the schedule's completion protocol.
   Stmt ConvertAtomCall(const RoleCtx &ctx, const Operation &op,
                        Stmt stmt) const {
     const auto *ev = stmt.as<EvaluateNode>();
@@ -2280,9 +2276,16 @@ private:
       return Evaluate(
           Call(call->dtype, call->op, call->args, std::move(ann), call->span));
     } else if (op.atom == OpAtom::kTcgen05Gemm) {
+      // The schedule publishes completion separately from each MMA issue.
+      Op async_op = Downcast<Op>(call->op);
+      if (async_op.same_as(Gemm::Get())) {
+        async_op = Op::Get("tl.tileop.tcgen05_gemm");
+      } else if (async_op.same_as(GemmBlockScaled::Get())) {
+        async_op = Op::Get("tl.tileop.tcgen05_gemm_blockscaled");
+      }
       ann.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
-      return Evaluate(Call(call->dtype, Tcgen05GemmOp(), call->args,
-                           std::move(ann), call->span));
+      return Evaluate(
+          Call(call->dtype, async_op, call->args, std::move(ann), call->span));
     }
     LOG(FATAL) << "ws_schedule: unknown async atom "
                << static_cast<int>(op.atom);

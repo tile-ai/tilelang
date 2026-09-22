@@ -67,7 +67,7 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=True, default_threads=128)(mod)
     # Record body-bound global bases before optional let inlining obscures
     # their provenance. CopyAnalysis consumes this marker for every lowering
     # path, independently of whether warp specialization is enabled.

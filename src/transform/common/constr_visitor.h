@@ -4,6 +4,8 @@
 #include "support/check.h"
 #include "tvm/arith/analyzer.h"
 #include "tvm/ir/expr.h"
+#include <cstdint>
+#include <functional>
 #include <ostream>
 #include <string>
 #include <tvm/ffi/extra/structural_hash.h>
@@ -217,7 +219,12 @@ struct Constr {
     Constr c = FreshenReads();
     switch (c.kind) {
     case kConstr:
-      analyzer.EnterConstraint(c.value, c.is_assume);
+      // Simplify against the binds already installed, so a predicate held
+      // in a bound boolean var (`cond` where `cond = (i < n)` is a bind)
+      // expands into the condition it represents before the analyzer
+      // digests it. EnterConstraint evaluates eagerly, exactly like Bind:
+      // an opaque boolean entered as-is contributes nothing.
+      analyzer.EnterConstraint(analyzer.Simplify(c.value), c.is_assume);
       break;
     case kBindValue:
       analyzer.Bind(c.var, c.value);
@@ -315,6 +322,67 @@ struct ConstrSet {
     for (Constr &c : out.constrs_) {
       c.is_assume = false;
     }
+    return out.Normalized();
+  }
+
+  /*!
+   * \brief Restore the bind-before-use invariant after concatenation.
+   *
+   * Lexical collection emits a bind before every entry that reads its
+   * var, so a single set never needs this. `Merge` concatenates two such
+   * sets, and an entry of the first set may read a bind var the second
+   * set defines: replaying that order digests the predicate before the
+   * definition exists, and the fact is lost -- `EnterConstraint`
+   * evaluates eagerly, exactly like `Bind` (see the ordering discussion
+   * in issue #3220).
+   *
+   * Entries stay in their current order, except that a bind is hoisted
+   * (with the binds its own definition reads, recursively) directly
+   * before the first entry that reads its var. Within one
+   * lexically-collected set no entry reads a later bind, so this is a
+   * no-op there and the program-order guarantee of #2805 stays intact.
+   * A hoisted bind can still miss bounds that a first-set predicate
+   * would have tightened; that residue is inherent to eager `Bind` and
+   * only a lazily-evaluated bind (issue #3220, option 3) removes it.
+   */
+  ConstrSet Normalized() const {
+    std::unordered_map<const tirx::VarNode *, size_t> bind_at;
+    for (size_t i = 0; i < constrs_.size(); ++i) {
+      const Constr &c = constrs_[i];
+      if ((c.kind == Constr::kBindValue || c.kind == Constr::kBindRange) &&
+          !bind_at.count(c.var.get())) {
+        bind_at.emplace(c.var.get(), i);
+      }
+    }
+    enum : uint8_t { kNew = 0, kVisiting = 1, kEmitted = 2 };
+    std::vector<uint8_t> state(constrs_.size(), kNew);
+    ConstrSet out;
+    out.constrs_.reserve(constrs_.size());
+    std::function<void(size_t)> emit = [&](size_t index) {
+      if (state[index] == kEmitted) {
+        return;
+      }
+      if (state[index] == kVisiting) {
+        // SSA-form collection cannot produce a definition cycle; if one
+        // arrives anyway, keep the current relative order instead of
+        // crashing the compile.
+        LOG(WARNING) << "ConstrSet::Normalized: cyclic bind definitions; "
+                        "keeping collection order";
+        return;
+      }
+      state[index] = kVisiting;
+      for (const tirx::Var &var : ReadVars(constrs_[index])) {
+        auto it = bind_at.find(var.get());
+        if (it != bind_at.end() && it->second != index) {
+          emit(it->second);
+        }
+      }
+      state[index] = kEmitted;
+      out.constrs_.push_back(constrs_[index]);
+    };
+    for (size_t i = 0; i < constrs_.size(); ++i) {
+      emit(i);
+    }
     return out;
   }
 
@@ -337,10 +405,31 @@ struct ConstrSet {
   void Populate(arith::Analyzer &analyzer) const {
     // Keep program order: `Analyzer::Bind` evaluates the bounds and modular set
     // of the value at bind time, so entering the binds first would widen them
-    // -- a `v = tx` inside `if tx < 64` would lose its upper bound.
+    // -- a `v = tx` inside `if tx < 64` would lose its upper bound. Merged
+    // sets are additionally normalized (see `Normalized`) so a bind always
+    // precedes the entries that read its var.
     for (const auto &c : constrs_) {
       c.Populate(analyzer);
     }
+  }
+
+  /*! \brief Free vars an entry's definition or predicate reads (the bind's
+   *  own var excluded by construction: it does not occur in its value). */
+  static ffi::Array<tirx::Var> ReadVars(const Constr &c) {
+    switch (c.kind) {
+    case Constr::kConstr:
+    case Constr::kBindValue:
+      return tirx::UndefinedVars(c.value);
+    case Constr::kBindRange: {
+      ffi::Array<tirx::Var> vars = tirx::UndefinedVars(c.range->min);
+      for (const tirx::Var &var : tirx::UndefinedVars(c.range->extent)) {
+        vars.push_back(var);
+      }
+      return vars;
+    }
+    }
+    LOG(FATAL) << "Unreachable";
+    return {};
   }
   bool CanProve(const PrimExpr &expr) const {
     arith::Analyzer analyzer;

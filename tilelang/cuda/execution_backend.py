@@ -47,6 +47,7 @@ CUDA_EXECUTION_BACKENDS = [
         supports_target=_is_plain_cuda_execution_target,
         enable_host_codegen=True,
         enable_device_compile=True,
+        supports_callee_allocated_outputs=True,
     ),
     ExecutionBackendSpec(
         "nvrtc",

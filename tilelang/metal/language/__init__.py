@@ -11,6 +11,8 @@ from tilelang.language.builtin import (  # noqa: F401
     cooperative_tensor_store,
 )
 
+from .kernel import *  # noqa: F401,F403
+from .kernel import __all__ as _KERNEL_ALL
 from .tir import *  # noqa: F401,F403
 from .tir import __all__ as _TIR_ALL
 
@@ -19,6 +21,7 @@ __all__ = tuple(
     dict.fromkeys(
         (
             *_COMMON_ALL,
+            *_KERNEL_ALL,
             *_TIR_ALL,
             "cooperative_tensor_fill",
             "cooperative_tensor_load",
@@ -28,4 +31,4 @@ __all__ = tuple(
     )
 )
 
-del _COMMON_ALL, _TIR_ALL
+del _COMMON_ALL, _KERNEL_ALL, _TIR_ALL
