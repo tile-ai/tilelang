@@ -53,13 +53,15 @@ int GetMaxAtomicVectorSize(DataType dtype, const ffi::String &storage_scope,
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
 
-int GetVectorizeSize(const For &loop, arith::Analyzer *analyzer,
+// The supplied context is read-only. Planning adds local bindings only to its
+// own clone; callers must not supply bindings from before a loop rewrite.
+int GetVectorizeSize(const For &loop, const arith::Analyzer *analyzer,
                      const LayoutMap &layout_map = {});
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
                   int vectorize_hint = -1);
 
-For VectorizeLoop(const For &loop, arith::Analyzer *analyzer,
+For VectorizeLoop(const For &loop, const arith::Analyzer *analyzer,
                   const LayoutMap &layout_map = {}, int vectorize_hint = -1);
 
 // Can prove expr is independent with var, i.e. the value of expr doesn't change
