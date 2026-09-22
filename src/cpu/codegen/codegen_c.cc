@@ -366,7 +366,10 @@ CodeGenTileLangC::GetFunctionInfo(const CallNode *op,
 
 void CodeGenTileLangC::VisitExpr_(const CallNode *op,
                                   std::ostream &os) { // NOLINT(*)
-  if (op->op.same_as(tl::magic_mod()) || op->op.same_as(tl::magic_div()) ||
+  if (op->op.same_as(tl::magic_mod()) ||
+      op->op.same_as(tl::magic_mod_with_validity()) ||
+      op->op.same_as(tl::magic_div()) ||
+      op->op.same_as(tl::magic_div_with_validity()) ||
       op->op.same_as(tl::magic_mod_from_quotient())) {
     if (!emitted_magic_div_helpers_) {
       emitted_magic_div_helpers_ = true;
@@ -379,16 +382,48 @@ void CodeGenTileLangC::VisitExpr_(const CallNode *op,
              "static int tl_magic_floormod_i32(int a, int b) {\n"
              "  int r = a % b;\n"
              "  return r + (((r != 0) && ((r < 0) != (b < 0))) ? b : 0);\n"
+             "}\n"
+             "static int64_t tl_magic_floordiv_i64(int64_t a, int b) {\n"
+             "  int64_t q = a / b;\n"
+             "  return q - ((((a % b) != 0) && ((a < 0) != (b < 0))) ? 1 : "
+             "0);\n"
+             "}\n"
+             "static int64_t tl_magic_floormod_i64(int64_t a, int b) {\n"
+             "  int64_t r = a % b;\n"
+             "  return r + (((r != 0) && ((r < 0) != (b < 0))) ? b : 0);\n"
              "}\n";
     }
   }
+  bool magic_is_i64 = op->dtype == DataType::Int(64);
+  ICHECK(!op->op.same_as(tl::magic_mod()) &&
+             !op->op.same_as(tl::magic_mod_with_validity()) &&
+             !op->op.same_as(tl::magic_div()) &&
+             !op->op.same_as(tl::magic_div_with_validity()) &&
+             !op->op.same_as(tl::magic_mod_from_quotient()) ||
+         magic_is_i64 || op->dtype == DataType::Int(32));
+  const char *floor_div_helper =
+      magic_is_i64 ? "tl_magic_floordiv_i64" : "tl_magic_floordiv_i32";
+  const char *floor_mod_helper =
+      magic_is_i64 ? "tl_magic_floormod_i64" : "tl_magic_floormod_i32";
   if (op->op.same_as(tl::magic_mod_from_quotient())) {
-    ICHECK_EQ(op->args.size(), 3U);
-    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0) && ((unsigned)(("
-       << this->PrintExpr(op->args[1]) << ") - 1) <= 0x7FFFFFFE)) ? (("
+    ICHECK_EQ(op->args.size(), 4U);
+    os << "((" << this->PrintExpr(op->args[3]) << ") ? (("
        << this->PrintExpr(op->args[0]) << ") - ("
        << this->PrintExpr(op->args[2]) << ") * ("
-       << this->PrintExpr(op->args[1]) << ")) : tl_magic_floormod_i32(("
+       << this->PrintExpr(op->args[1]) << ")) : " << floor_mod_helper << "(("
+       << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
+       << ")))";
+    return;
+  } else if (op->op.same_as(tl::magic_mod_with_validity())) {
+    ICHECK_EQ(op->args.size(), 5U);
+    os << "((" << this->PrintExpr(op->args[4]) << ") ? ((("
+       << this->PrintExpr(op->args[1]) << ") == 1) ? 0 : (("
+       << this->PrintExpr(op->args[0])
+       << ") - ((int32_t)(((uint64_t)(uint32_t)("
+       << this->PrintExpr(op->args[0]) << ") * (uint64_t)(uint32_t)("
+       << this->PrintExpr(op->args[2]) << ")) >> 32 >> (uint32_t)("
+       << this->PrintExpr(op->args[3]) << "))) * ("
+       << this->PrintExpr(op->args[1]) << "))) : " << floor_mod_helper << "(("
        << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
        << ")))";
     return;
@@ -396,15 +431,32 @@ void CodeGenTileLangC::VisitExpr_(const CallNode *op,
     // floormod(x, d) with host-precomputed magic constants, same runtime
     // validity guard as magic_div (fallback keeps floormod semantics).
     ICHECK_EQ(op->args.size(), 4U);
-    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0) && ((unsigned)(("
-       << this->PrintExpr(op->args[1]) << ") - 1) <= 0x7FFFFFFE)) ? ((("
-       << this->PrintExpr(op->args[1]) << ") == 1) ? 0 : (("
-       << this->PrintExpr(op->args[0])
+    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0)";
+    if (magic_is_i64) {
+      os << " && ((" << this->PrintExpr(op->args[0])
+         << ") <= INT64_C(2147483647))";
+    }
+    os << " && ((unsigned)((" << this->PrintExpr(op->args[1])
+       << ") - 1) <= 0x7FFFFFFE)) ? (((" << this->PrintExpr(op->args[1])
+       << ") == 1) ? 0 : ((" << this->PrintExpr(op->args[0])
        << ") - ((int32_t)(((uint64_t)(uint32_t)("
        << this->PrintExpr(op->args[0]) << ") * (uint64_t)(uint32_t)("
        << this->PrintExpr(op->args[2]) << ")) >> 32 >> (uint32_t)("
        << this->PrintExpr(op->args[3]) << "))) * ("
-       << this->PrintExpr(op->args[1]) << "))) : tl_magic_floormod_i32(("
+       << this->PrintExpr(op->args[1]) << "))) : " << floor_mod_helper << "(("
+       << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
+       << ")))";
+    return;
+  }
+  if (op->op.same_as(tl::magic_div_with_validity())) {
+    ICHECK_EQ(op->args.size(), 5U);
+    os << "((" << this->PrintExpr(op->args[4]) << ") ? ((("
+       << this->PrintExpr(op->args[1]) << ") == 1) ? ("
+       << this->PrintExpr(op->args[0])
+       << ") : ((int32_t)(((uint64_t)(uint32_t)("
+       << this->PrintExpr(op->args[0]) << ") * (uint64_t)(uint32_t)("
+       << this->PrintExpr(op->args[2]) << ")) >> 32 >> (uint32_t)("
+       << this->PrintExpr(op->args[3]) << ")))) : " << floor_div_helper << "(("
        << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
        << ")))";
     return;
@@ -416,14 +468,18 @@ void CodeGenTileLangC::VisitExpr_(const CallNode *op,
     // with sign correction, preserving the original TIR semantics for every
     // runtime value.
     ICHECK_EQ(op->args.size(), 4U);
-    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0) && ((unsigned)(("
-       << this->PrintExpr(op->args[1]) << ") - 1) <= 0x7FFFFFFE)) ? ((("
-       << this->PrintExpr(op->args[1]) << ") == 1) ? ("
-       << this->PrintExpr(op->args[0])
+    os << "((((" << this->PrintExpr(op->args[0]) << ") >= 0)";
+    if (magic_is_i64) {
+      os << " && ((" << this->PrintExpr(op->args[0])
+         << ") <= INT64_C(2147483647))";
+    }
+    os << " && ((unsigned)((" << this->PrintExpr(op->args[1])
+       << ") - 1) <= 0x7FFFFFFE)) ? (((" << this->PrintExpr(op->args[1])
+       << ") == 1) ? (" << this->PrintExpr(op->args[0])
        << ") : ((int32_t)(((uint64_t)(uint32_t)("
        << this->PrintExpr(op->args[0]) << ") * (uint64_t)(uint32_t)("
        << this->PrintExpr(op->args[2]) << ")) >> 32 >> (uint32_t)("
-       << this->PrintExpr(op->args[3]) << ")))) : tl_magic_floordiv_i32(("
+       << this->PrintExpr(op->args[3]) << ")))) : " << floor_div_helper << "(("
        << this->PrintExpr(op->args[0]) << "), (" << this->PrintExpr(op->args[1])
        << ")))";
     return;

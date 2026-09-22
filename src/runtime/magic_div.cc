@@ -10,17 +10,19 @@
 #include <tvm/ffi/c_api.h>
 
 #include <cstdint>
+#include <limits>
 
 namespace {
 
 // CUTLASS FastDivmod magic constants for divisor d >= 1, valid for
 // 0 <= x < 2^31: with k = ceil_log2(d), p = 31 + k, M = ceil(2^p / d) < 2^32
 // and s = p - 32, floor(x / d) == umulhi(uint32(x), M) >> s for d >= 2.
-// d <= 1 returns (M = 0, s = 0): d == 1 is handled by a device-side select,
-// and d == 0 (zero-size dynamic shapes) must never crash the host even
-// though the device will not launch any work for shape-derived divisors.
+// Values outside the signed int32 contract return neutral constants. d == 1
+// is handled by a device-side select, while all other invalid values use the
+// device fallback if the original division executes.
 void HostFastDivmodU32(uint32_t d, uint32_t &mul, uint32_t &shift) {
-  if (d <= 1) {
+  if (d <= 1 ||
+      d > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
     mul = 0;
     shift = 0;
     return;

@@ -4,8 +4,9 @@
  *        magic-number multiply-shift sequences (CUTLASS FastDivmod style).
  *
  * For each FloorDiv/FloorMod/Div/Mod site whose divisor is a launch-invariant
- * positive int32 expression and whose dividend is a provably non-negative
- * int32 expression, rewrite:
+ * positive int32 expression and whose dividend is either provably
+ * non-negative or protected by the intrinsic's exact runtime fallback,
+ * rewrite:
  *
  *   floordiv(x, d)  ->  tl.magic_div(x, d_i, m_i, s_i)
  *   floormod(x, d)  ->  x - tl.magic_div(x, d_i, m_i, s_i) * d_i
@@ -157,6 +158,8 @@ public:
     for (const Var &param : func->params) {
       if (param->dtype.is_int() && param->dtype.lanes() == 1) {
         invariant_vars_.insert(param.get());
+        safe_host_vars_.insert(param.get());
+        non_shape_params_.insert(param.get());
       }
     }
     auto collect_vars = [&](const PrimExpr &e) {
@@ -170,11 +173,24 @@ public:
       const Buffer &buf = kv.second;
       for (const PrimExpr &e : buf->shape) {
         collect_vars(e);
+        PostOrderVisit(e, [&](const ObjectRef &n) {
+          if (const VarNode *v = n.as<VarNode>()) {
+            safe_host_vars_.insert(v);
+            shape_vars_.insert(v);
+            entry_analyzer_.const_int_bound.Update(
+                GetRef<Var>(v),
+                arith::ConstIntBound(1, arith::ConstIntBound::kPosInf),
+                /*allow_override=*/true);
+          }
+        });
       }
       for (const PrimExpr &e : buf->strides) {
         collect_vars(e);
       }
       collect_vars(buf->elem_offset);
+    }
+    for (const VarNode *v : shape_vars_) {
+      non_shape_params_.erase(v);
     }
   }
 
@@ -188,28 +204,32 @@ public:
   // before nested sites inside it are rewritten. Rewritten expressions are
   // then visited to handle nested sites in their operands.
   PrimExpr VisitExpr_(const FloorDivNode *op) final {
-    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/false); r.defined()) {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/false, /*is_floor=*/true);
+        r.defined()) {
       return VisitExpr(r);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
   PrimExpr VisitExpr_(const FloorModNode *op) final {
-    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/true); r.defined()) {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/true, /*is_floor=*/true);
+        r.defined()) {
       return VisitExpr(r);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
   PrimExpr VisitExpr_(const DivNode *op) final {
-    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/false); r.defined()) {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/false, /*is_floor=*/false);
+        r.defined()) {
       return VisitExpr(r);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
 
   PrimExpr VisitExpr_(const ModNode *op) final {
-    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/true); r.defined()) {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/true, /*is_floor=*/false);
+        r.defined()) {
       return VisitExpr(r);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -283,6 +303,29 @@ public:
   }
 
 private:
+  struct ConditionDivModSite {
+    PrimExpr x;
+    PrimExpr d;
+    bool is_mod;
+    bool is_floor;
+  };
+
+  bool CanReuseConditionSite(const PrimExpr &x, const PrimExpr &d,
+                             bool is_mod) const {
+    ExprDeepEqual deep_equal;
+    bool has_floor = false;
+    bool has_trunc = false;
+    for (const ConditionDivModSite &site : condition_sites_) {
+      if (site.is_mod != is_mod || !deep_equal(site.x, x) ||
+          !deep_equal(site.d, d)) {
+        continue;
+      }
+      has_floor |= site.is_floor;
+      has_trunc |= !site.is_floor;
+    }
+    return has_floor && !has_trunc;
+  }
+
   bool IsMatchingDiv(const PrimExpr &expr, const PrimExpr &dividend,
                      const std::vector<PrimExpr> &divisor_factors) const {
     PrimExpr lhs;
@@ -363,6 +406,33 @@ private:
     return analyzer_->const_int_bound(e)->min_value >= 1;
   }
 
+  bool IsSafeHostDivisor(const PrimExpr &d) {
+    bool safe = true;
+    PostOrderVisit(d, [&](const ObjectRef &n) {
+      if (n.as<DivNode>() || n.as<ModNode>() || n.as<FloorDivNode>() ||
+          n.as<FloorModNode>() || n.as<BufferLoadNode>() || n.as<CallNode>()) {
+        safe = false;
+        return;
+      }
+      if (const VarNode *v = n.as<VarNode>();
+          v != nullptr && !safe_host_vars_.count(v)) {
+        safe = false;
+      }
+    });
+    return safe;
+  }
+
+  bool IsEntryPositive(const PrimExpr &d) {
+    try {
+      if (entry_analyzer_.CanProve(d > 0,
+                                   arith::ProofStrength::kSymbolicBound)) {
+        return true;
+      }
+    } catch (const std::exception &) {
+    }
+    return entry_analyzer_.const_int_bound(d)->min_value >= 1;
+  }
+
   // Cheap structural proof for x >= 0 that avoids heavyweight symbolic
   // analysis on large expressions. Covers the shapes of bit-twiddled
   // permutation indices: floormod with a positive divisor, term-wise
@@ -402,6 +472,24 @@ private:
     return false;
   }
 
+  bool ShouldWidenDividend(const PrimExpr &e) {
+    bool widen = false;
+    PostOrderVisit(e, [&](const ObjectRef &n) {
+      const PrimExprNode *expr = n.as<PrimExprNode>();
+      if (expr == nullptr || !expr->dtype.is_int() ||
+          expr->dtype.bits() != 32 ||
+          !(n.as<AddNode>() || n.as<SubNode>() || n.as<MulNode>())) {
+        return;
+      }
+      if (UsesVar(GetRef<PrimExpr>(expr), [&](const VarNode *v) {
+            return non_shape_params_.count(v) != 0;
+          })) {
+        widen = true;
+      }
+    });
+    return widen;
+  }
+
   // A divisor is launch-invariant when it is a positive int32 expression
   // whose only variables are scalar parameters or buffer shape/stride/offset
   // symbols (thread indices and loop variables are never in that set).
@@ -423,21 +511,27 @@ private:
         }
       }
     });
-    if (!ok || !has_var) {
+    if (!ok || !has_var || !IsSafeHostDivisor(d)) {
       return false;
     }
     return ProvePositive(d);
   }
 
   template <typename NodeT>
-  PrimExpr TryRewriteDivMod(const NodeT *node, bool is_mod) {
+  PrimExpr TryRewriteDivMod(const NodeT *node, bool is_mod, bool is_floor) {
     if (skip_nodes_.count(node)) {
       return PrimExpr();
     }
     const PrimExpr &x = node->a;
     const PrimExpr &d = node->b;
+    bool can_reuse_condition_div =
+        is_floor && CanReuseConditionSite(x, d, /*is_mod=*/false);
+    // A condition-associated floor-div may use the guarded magic intrinsic
+    // even when static analysis cannot prove x >= 0.  Its shared runtime
+    // validity predicate selects the exact floor-div fallback for negative x,
+    // while later condition rewriting reuses the same guarded quotient.
     if (x.dtype() != DataType::Int(32) || !IsInvariantDivisor(d) ||
-        !ProveNonNegative(x)) {
+        (!ProveNonNegative(x) && !can_reuse_condition_div)) {
       return PrimExpr();
     }
     size_t idx = GetOrCreateEntry(d);
@@ -447,7 +541,13 @@ private:
     // form and can send it into distribute/collect oscillation on large
     // expressions.
     const Op &op = is_mod ? tl::magic_mod() : tl::magic_div();
-    return Call(DataType::Int(32), op, {x, e.d_var, e.m_var, e.s_var});
+    Map<String, ObjectRef> annotations;
+    annotations.Set("tl.magic_condition_reuse_div",
+                    Bool(can_reuse_condition_div));
+    annotations.Set("tl.magic_widen_dividend", Bool(ShouldWidenDividend(x)));
+    annotations.Set("tl.magic_safe_to_hoist", Bool(IsEntryPositive(d)));
+    return Call(DataType::Int(32), op, {x, e.d_var, e.m_var, e.s_var},
+                annotations);
   }
 
   size_t GetOrCreateEntry(const PrimExpr &d) {
@@ -480,6 +580,21 @@ private:
   void CollectConditionDivMods(const Stmt &body) {
     auto mark = [&](const PrimExpr &cond) {
       PostOrderVisit(cond, [&](const ObjectRef &c) {
+        if (const FloorDivNode *div = c.as<FloorDivNode>()) {
+          condition_sites_.push_back(
+              {div->a, div->b, /*is_mod=*/false, /*is_floor=*/true});
+        } else if (const FloorModNode *mod = c.as<FloorModNode>()) {
+          condition_sites_.push_back(
+              {mod->a, mod->b, /*is_mod=*/true, /*is_floor=*/true});
+        } else if (const DivNode *div = c.as<DivNode>()) {
+          condition_sites_.push_back(
+              {div->a, div->b, /*is_mod=*/false, /*is_floor=*/false});
+        } else if (const ModNode *mod = c.as<ModNode>()) {
+          condition_sites_.push_back(
+              {mod->a, mod->b, /*is_mod=*/true, /*is_floor=*/false});
+        } else {
+          return;
+        }
         if (c->IsInstance<FloorDivNode>() || c->IsInstance<FloorModNode>() ||
             c->IsInstance<DivNode>() || c->IsInstance<ModNode>()) {
           skip_nodes_.insert(static_cast<const BaseExprNode *>(c.get()));
@@ -502,8 +617,13 @@ private:
   }
 
   std::unordered_set<const VarNode *> invariant_vars_;
+  std::unordered_set<const VarNode *> safe_host_vars_;
+  std::unordered_set<const VarNode *> shape_vars_;
+  std::unordered_set<const VarNode *> non_shape_params_;
   std::unordered_set<const BaseExprNode *> skip_nodes_;
+  std::vector<ConditionDivModSite> condition_sites_;
   std::vector<MagicDivisorEntry> entries_;
+  arith::Analyzer entry_analyzer_;
 };
 
 namespace {
@@ -512,7 +632,20 @@ namespace {
 // div/mod pair duplicated by let-inlining, share one quotient per thread.
 class MagicCallHoister {
 public:
-  static Stmt Apply(const Stmt &body) {
+  static Stmt Apply(const PrimFunc &func) {
+    const Stmt &body = func->body;
+    std::unordered_set<const VarNode *> hoistable_vars;
+    for (const Var &param : func->params) {
+      hoistable_vars.insert(param.get());
+    }
+    PostOrderVisit(body, [&](const ObjectRef &n) {
+      if (const AttrStmtNode *attr = n.as<AttrStmtNode>();
+          attr != nullptr && attr->attr_key == tirx::attr::thread_extent) {
+        if (const IterVarNode *iter = attr->node.as<IterVarNode>()) {
+          hoistable_vars.insert(iter->var.get());
+        }
+      }
+    });
     // 1. Collect groups with the same (x, d) in post-order (inner first).
     // Div and mod share one quotient; the remainder is derived as x - q*d.
     struct Group {
@@ -521,8 +654,10 @@ public:
       std::vector<Call> mod_calls;
       PrimExpr x;
       PrimExpr d;
+      Var valid;
       Var q;
       Var r;
+      bool can_reuse_condition_div{false};
     };
     std::vector<Group> groups;
     ExprDeepEqual deep_equal;
@@ -537,9 +672,28 @@ public:
       }
       Call call_ref = GetRef<Call>(call);
       ICHECK_EQ(call->args.size(), 4U);
+      bool safe_to_hoist = false;
+      if (Optional<ObjectRef> safe =
+              call->annotations.Get("tl.magic_safe_to_hoist")) {
+        safe_to_hoist = Downcast<Bool>(safe.value())->value;
+      }
+      if (!safe_to_hoist || SideEffect(call->args[0]) > CallEffectKind::kPure ||
+          SideEffect(call->args[1]) > CallEffectKind::kPure ||
+          UsesVar(call->args[0],
+                  [&](const VarNode *v) { return !hoistable_vars.count(v); }) ||
+          UsesVar(call->args[1],
+                  [&](const VarNode *v) { return !hoistable_vars.count(v); })) {
+        return;
+      }
+      bool can_reuse_condition_div = false;
+      if (Optional<ObjectRef> reuse =
+              call->annotations.Get("tl.magic_condition_reuse_div")) {
+        can_reuse_condition_div = Downcast<Bool>(reuse.value())->value;
+      }
       for (Group &g : groups) {
         if (deep_equal(g.d, call->args[1]) && deep_equal(g.x, call->args[0])) {
           (is_mod ? g.mod_calls : g.div_calls).push_back(call_ref);
+          g.can_reuse_condition_div |= can_reuse_condition_div;
           return;
         }
       }
@@ -547,13 +701,40 @@ public:
       g.repr = call_ref;
       g.x = call->args[0];
       g.d = call->args[1];
+      g.valid = Var("tl_magic_valid_" + std::to_string(groups.size()),
+                    DataType::Bool());
       g.q = Var("tl_magic_q_" + std::to_string(groups.size()), call->dtype);
       g.r = Var("tl_magic_r_" + std::to_string(groups.size()), call->dtype);
       (is_mod ? g.mod_calls : g.div_calls).push_back(call_ref);
+      g.can_reuse_condition_div = can_reuse_condition_div;
       groups.push_back(std::move(g));
     });
     if (groups.empty()) {
       return body;
+    }
+
+    struct DivisorValidity {
+      PrimExpr d;
+      Var valid;
+    };
+    std::vector<DivisorValidity> divisor_validities;
+    std::vector<Var> group_divisor_valid;
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+      const Group &g = groups[group_index];
+      Optional<Var> valid;
+      for (const DivisorValidity &entry : divisor_validities) {
+        if (deep_equal(entry.d, g.d)) {
+          valid = entry.valid;
+          break;
+        }
+      }
+      if (!valid.defined()) {
+        valid = Var("tl_magic_divisor_valid_" +
+                        std::to_string(divisor_validities.size()),
+                    DataType::Bool());
+        divisor_validities.push_back({g.d, valid.value()});
+      }
+      group_divisor_valid.push_back(valid.value());
     }
 
     // 2. Find the innermost thread_extent AttrStmt containing all groups.
@@ -614,6 +795,18 @@ public:
     // groups substitute first), and prepend the binds to the scope body.
     class Replacer : public StmtExprMutator {
     public:
+      struct ConditionMatch {
+        PrimExpr x;
+        PrimExpr d;
+        Var valid;
+        Var q;
+        Var r;
+        bool has_div;
+        bool has_mod;
+        bool can_reuse_div;
+        bool can_reuse_mod;
+      };
+
       std::unordered_map<Call, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
           replace_;
       AttrStmt scope_;
@@ -627,7 +820,58 @@ public:
         if (it != replace_.end()) {
           return it->second;
         }
+        if (op->op.same_as(builtin::if_then_else())) {
+          ICHECK_GE(op->args.size(), 1U);
+          Array<PrimExpr> args;
+          args.push_back(RewriteCondition(op->args[0]));
+          for (size_t i = 1; i < op->args.size(); ++i) {
+            args.push_back(VisitExpr(op->args[i]));
+          }
+          return Call(op->dtype, op->op, args, op->annotations, op->span);
+        }
         return StmtExprMutator::VisitExpr_(op);
+      }
+
+      PrimExpr VisitExpr_(const FloorDivNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/false);
+      }
+
+      PrimExpr VisitExpr_(const FloorModNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/true);
+      }
+
+      PrimExpr VisitExpr_(const DivNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/false);
+      }
+
+      PrimExpr VisitExpr_(const ModNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/true);
+      }
+
+      PrimExpr VisitExpr_(const SelectNode *op) final {
+        PrimExpr condition = RewriteCondition(op->condition);
+        PrimExpr true_value = VisitExpr(op->true_value);
+        PrimExpr false_value = VisitExpr(op->false_value);
+        return Select(condition, true_value, false_value, op->span);
+      }
+
+      Stmt VisitStmt_(const IfThenElseNode *op) final {
+        PrimExpr condition = RewriteCondition(op->condition);
+        Stmt then_case = VisitStmt(op->then_case);
+        Optional<Stmt> else_case = op->else_case;
+        if (else_case.defined()) {
+          else_case = VisitStmt(else_case.value());
+        }
+        return IfThenElse(condition, then_case, else_case, op->span);
+      }
+
+      Stmt VisitStmt_(const AssertStmtNode *op) final {
+        return AssertStmt(RewriteCondition(op->condition), op->error_kind,
+                          op->message_parts, op->span);
       }
 
       Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -646,10 +890,71 @@ public:
       }
 
       std::vector<std::pair<Var, PrimExpr>> binds_;
+      std::vector<ConditionMatch> condition_matches_;
+
+    private:
+      PrimExpr RewriteCondition(const PrimExpr &condition) {
+        bool previous = in_condition_;
+        in_condition_ = true;
+        PrimExpr result = VisitExpr(condition);
+        in_condition_ = previous;
+        return result;
+      }
+
+      PrimExpr RewriteConditionDivMod(const PrimExpr &expr, bool is_mod) {
+        if (!in_condition_) {
+          return expr;
+        }
+        PrimExpr x;
+        PrimExpr d;
+        if (const FloorDivNode *div = expr.as<FloorDivNode>()) {
+          x = div->a;
+          d = div->b;
+        } else if (const FloorModNode *mod = expr.as<FloorModNode>()) {
+          x = mod->a;
+          d = mod->b;
+        } else if (const DivNode *div = expr.as<DivNode>()) {
+          x = div->a;
+          d = div->b;
+        } else if (const ModNode *mod = expr.as<ModNode>()) {
+          x = mod->a;
+          d = mod->b;
+        } else {
+          return expr;
+        }
+        ExprDeepEqual deep_equal;
+        for (const ConditionMatch &match : condition_matches_) {
+          if (!deep_equal(match.x, x) || !deep_equal(match.d, d)) {
+            continue;
+          }
+          if (is_mod && match.has_mod) {
+            if (expr.as<ModNode>() && !match.can_reuse_mod) {
+              return expr;
+            }
+            return match.r;
+          }
+          if (!is_mod && match.has_div) {
+            if (expr.as<DivNode>() && !match.can_reuse_div) {
+              return expr;
+            }
+            return match.q;
+          }
+        }
+        return expr;
+      }
+
+      bool in_condition_{false};
     };
 
     Replacer replacer(scope.value());
-    for (const Group &g : groups) {
+    for (const DivisorValidity &entry : divisor_validities) {
+      PrimExpr divisor_valid =
+          Cast(DataType::UInt(32), entry.d - make_const(entry.d.dtype(), 1)) <=
+          make_const(DataType::UInt(32), 0x7ffffffeU);
+      replacer.binds_.emplace_back(entry.valid, divisor_valid);
+    }
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+      const Group &g = groups[group_index];
       for (const Call &c : g.div_calls) {
         replacer.replace_[c] = g.q;
       }
@@ -657,27 +962,41 @@ public:
         replacer.replace_[c] = g.r;
       }
     }
-    for (const Group &g : groups) {
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+      const Group &g = groups[group_index];
       // Bind values are built by mutating the args only, so a group nested
       // inside x refers to the already-bound inner quotient/remainder.
       Array<PrimExpr> new_args;
       for (const PrimExpr &arg : g.repr->args) {
         new_args.push_back(replacer.Apply(arg));
       }
+      PrimExpr valid =
+          logical_and(new_args[0] >= make_const(new_args[0].dtype(), 0),
+                      group_divisor_valid[group_index]);
+      if (new_args[0].dtype().bits() > 32) {
+        valid = logical_and(
+            valid, new_args[0] <= make_const(new_args[0].dtype(), 0x7fffffff));
+      }
+      replacer.binds_.emplace_back(g.valid, valid);
+      replacer.condition_matches_.push_back(
+          {new_args[0], new_args[1], g.valid, g.q, g.r, !g.div_calls.empty(),
+           !g.mod_calls.empty(), g.can_reuse_condition_div,
+           /*can_reuse_mod=*/false});
+      new_args.push_back(g.valid);
       if (g.div_calls.empty()) {
-        replacer.binds_.emplace_back(g.r, Call(g.repr->dtype, tl::magic_mod(),
-                                               new_args, g.repr->annotations,
-                                               g.repr->span));
+        replacer.binds_.emplace_back(
+            g.r, Call(g.repr->dtype, tl::magic_mod_with_validity(), new_args,
+                      g.repr->annotations, g.repr->span));
         continue;
       }
-      replacer.binds_.emplace_back(g.q, Call(g.repr->dtype, tl::magic_div(),
-                                             new_args, g.repr->annotations,
-                                             g.repr->span));
+      replacer.binds_.emplace_back(
+          g.q, Call(g.repr->dtype, tl::magic_div_with_validity(), new_args,
+                    g.repr->annotations, g.repr->span));
       if (!g.mod_calls.empty()) {
         replacer.binds_.emplace_back(
             g.r, Call(g.repr->dtype, tl::magic_mod_from_quotient(),
-                      {new_args[0], new_args[1], g.q}, g.repr->annotations,
-                      g.repr->span));
+                      {new_args[0], new_args[1], g.q, g.valid},
+                      g.repr->annotations, g.repr->span));
       }
     }
     return replacer.Apply(body);
@@ -722,7 +1041,7 @@ tvm::transform::Pass MagicCallHoist() {
     if (!ctx->GetConfig<Bool>(kEnableMagicDiv, Bool(false)).value()) {
       return f;
     }
-    f.CopyOnWrite()->body = MagicCallHoister::Apply(f->body);
+    f.CopyOnWrite()->body = MagicCallHoister::Apply(f);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MagicCallHoist", {});
