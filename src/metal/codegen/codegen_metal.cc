@@ -97,9 +97,12 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
 
 CodeGenTileLangMetal::CodeGenTileLangMetal(Target target) : target_(target) {
   restrict_keyword_ = "__restrict";
-  decl_stream << "union __TVMArgUnion {\n"
+  decl_stream << "#ifndef __TILELANG_ARGUNION_DEFINED\n"
+              << "#define __TILELANG_ARGUNION_DEFINED\n"
+              << "union __TVMArgUnion {\n"
               << " int v_int[2];\n"
-              << "};\n\n";
+              << "};\n"
+              << "#endif\n\n";
 }
 
 std::string CodeGenTileLangMetal::Finish() {
