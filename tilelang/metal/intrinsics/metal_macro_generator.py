@@ -214,6 +214,11 @@ class MPSIntrinEmitter:
 
     def mma(self, A_local_buf, B_local_buf, C_local_buf, k_inner: int = 0):
         """Perform matrix multiply-accumulate: C += A * B."""
+        from tilelang.utils.language import is_fragment
+
+        a_fragment = is_fragment(A_local_buf)
+        b_fragment = is_fragment(B_local_buf)
+        k_tiles = self.chunk // self.micro_size_k
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         micro_size_x = self.micro_size_x
@@ -248,9 +253,9 @@ class MPSIntrinEmitter:
                         C_local_buf.data,
                         index_c,
                         A_local_buf.data,
-                        i,
+                        i * k_tiles + k_inner if a_fragment else i,
                         B_local_buf.data,
-                        j,
+                        k_inner * warp_cols + j if b_fragment else j,
                         C_local_buf.data,
                         index_c,
                     )

@@ -28,6 +28,23 @@ namespace codegen {
 
 namespace {
 
+class SimdgroupUseCollector : public StmtExprVisitor {
+public:
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::simdgroup_multiply_accumulate())) {
+      for (int i : {0, 2, 4, 6}) {
+        Var var = Downcast<Var>(op->args[i]);
+        if (GetPtrStorageScope(var) == "local") {
+          fragments.insert(var);
+        }
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> fragments;
+};
+
 class CooperativeTensorUseCollector : public StmtExprVisitor {
 public:
   void VisitStmt_(const AllocBufferNode *op) final {
@@ -83,6 +100,9 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
   ct_c_storage_elided_.clear();
   cooperative_tensor_dtype_.clear();
   simdgroup_dtype_.clear();
+  SimdgroupUseCollector simdgroup_collector;
+  simdgroup_collector(f->body);
+  simdgroup_fragments_ = std::move(simdgroup_collector.fragments);
   CooperativeTensorUseCollector ct_collector;
   ct_collector(f->body);
   uses_cooperative_tensor_ = ct_collector.uses_cooperative_tensor;
@@ -740,13 +760,19 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
                   "half, float>()), float>();\n";
       }
     }
-  } else if (scope == "metal.simdgroup") {
+  } else if (scope == "metal.simdgroup" ||
+             simdgroup_fragments_.count(op->buffer->data)) {
+    // Explicit matrices allocate 64 elements per group; inferred fragments
+    // allocate the two scalar elements owned by each lane.
+    int elements_per_matrix = scope == "metal.simdgroup" ? 64 : 2;
+    constant_size *= dtype.lanes();
+    dtype = dtype.element_of();
     TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
                    dtype == DataType::Float(32) ||
                    dtype == DataType::BFloat(16))
         << "Only float16, float32, and bfloat16 are supported, but got "
         << dtype;
-    TVM_FFI_ICHECK(constant_size % 64 == 0)
+    TVM_FFI_ICHECK(constant_size % elements_per_matrix == 0)
         << "Only 8x8 matrix is supported, but got " << constant_size
         << " bytes\n";
 
@@ -755,7 +781,7 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     std::string dtype_str = dtype_os.str();
     simdgroup_dtype_[op->buffer->data] = dtype_str;
     stream << "simdgroup_" << dtype_str << "8x8 " << vid << '['
-           << constant_size / 64 << "];\n";
+           << constant_size / elements_per_matrix << "];\n";
   } else {
     // Apply 16-byte alignment padding to shared/threadgroup memory
     // to avoid bank conflicts on Apple GPUs (following MLX practice).
@@ -788,12 +814,45 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), dtype);
 }
 
+void CodeGenTileLangMetal::PrintSimdgroupElement(const Buffer &buffer,
+                                                 PrimExpr index, int lane,
+                                                 std::ostream &os) {
+  int lanes = buffer->dtype.lanes();
+  if (const auto *ramp = index.as<RampNode>()) {
+    index = ramp->base + ramp->stride * (lane / lanes);
+  } else if (index.dtype().lanes() > 1) {
+    index = Shuffle::ExtractElement(index, lane / lanes);
+  }
+  index = index * lanes + lane % lanes;
+  arith::Analyzer analyzer;
+  os << GetVarID(buffer->data.get()) << "["
+     << PrintExpr(analyzer.Simplify(truncdiv(index, 2)))
+     << "].thread_elements()["
+     << PrintExpr(analyzer.Simplify(truncmod(index, 2))) << "]";
+}
+
 void CodeGenTileLangMetal::VisitExpr_(const BufferLoadNode *op,
                                       std::ostream &os) {
   if (GetPtrStorageScope(op->buffer->data) == "local.var") {
     TVM_FFI_ICHECK_EQ(op->indices.size(), 1)
         << "Load from non-flat local.var not supported.";
     os << GetVarID(op->buffer->data.get());
+    return;
+  }
+  if (simdgroup_fragments_.count(op->buffer->data)) {
+    TVM_FFI_ICHECK_EQ(op->indices.size(), 1);
+    TVM_FFI_ICHECK(!op->predicate.defined());
+    if (op->dtype.lanes() > 1) {
+      PrintType(op->dtype, os);
+      os << "(";
+    }
+    for (int i = 0; i < op->dtype.lanes(); ++i) {
+      if (i)
+        os << ", ";
+      PrintSimdgroupElement(op->buffer, op->indices[0], i, os);
+    }
+    if (op->dtype.lanes() > 1)
+      os << ")";
     return;
   }
   CodeGenC::VisitExpr_(op, os);
@@ -808,6 +867,25 @@ void CodeGenTileLangMetal::VisitStmt_(const BufferStoreNode *op) {
     PrintIndent();
     stream << GetVarID(op->buffer->data.get()) << " = " << PrintExpr(op->value)
            << ";\n";
+    return;
+  }
+  if (simdgroup_fragments_.count(op->buffer->data)) {
+    TVM_FFI_ICHECK_EQ(op->indices.size(), 1);
+    TVM_FFI_ICHECK(!op->predicate.defined());
+    int scope = BeginScope();
+    std::string value = SSAGetID(PrintExpr(op->value), op->value.dtype());
+    for (int i = 0; i < op->value.dtype().lanes(); ++i) {
+      PrintIndent();
+      PrintSimdgroupElement(op->buffer, op->indices[0], i, stream);
+      stream << " = ";
+      if (op->value.dtype().lanes() == 1) {
+        stream << value;
+      } else {
+        PrintVecElemLoad(value, op->value.dtype(), i, stream);
+      }
+      stream << ";\n";
+    }
+    EndScope(scope);
     return;
   }
   CodeGenC::VisitStmt_(op);

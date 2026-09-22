@@ -141,7 +141,7 @@ def assert_metal_gemm_v2_codegen(
     # Verify simdgroup matrix operations are present
     assert "simdgroup_multiply_accumulate" in src_code
     assert "simdgroup_load" in src_code
-    assert "simdgroup_store" in src_code
+    assert ".thread_elements()" in src_code
 
 
 def assert_metal_gemm_v2_cooperative_tensor_codegen(
