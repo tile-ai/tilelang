@@ -129,10 +129,7 @@ def _cc_to_ub_tails(source):
 
 def _cc_to_ub_sizes(source):
     """Return (copy_inner, copy_rows) for every emitted cc_to_ub call."""
-    return [
-        (_unwrap_c_api_arg(args[2]), _unwrap_c_api_arg(args[3]))
-        for args in _cc_to_ub_argument_lists(source)
-    ]
+    return [(_unwrap_c_api_arg(args[2]), _unwrap_c_api_arg(args[3])) for args in _cc_to_ub_argument_lists(source)]
 
 
 @pytest.mark.parametrize("split", ["M", "N"])
