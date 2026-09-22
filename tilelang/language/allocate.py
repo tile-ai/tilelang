@@ -92,6 +92,46 @@ def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Bu
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
+def auto_alloc(shape: ShapeType, dtype: DType) -> Buffer:
+    """Allocate a buffer whose memory scope is inferred by the compiler.
+
+    The buffer is created with the virtual scope "auto"; the
+    ``tl.transform.InferMemoryScope`` pass rewrites it to a concrete scope
+    (``shared.dyn`` / ``local.fragment`` / ``local``) before LayoutInference,
+    based on how the buffer is accessed:
+
+    - a ``T.gemm`` accumulator (C) becomes ``local.fragment``;
+    - ``T.gemm`` A/B operands, ``T.copy`` destinations fed from global memory
+      inside a pipelined (``num_stages``) loop, and ``T.cumsum``/``T.cummax``
+      operands become ``shared.dyn``;
+    - a buffer whose accesses are all plain loads/stores inside ``T.Parallel``
+      nests with a consistent bijective index mapping becomes
+      ``local.fragment``;
+    - a buffer accessed only outside parallel loops becomes ``local`` — unless
+      an access index references a per-thread (``threadIdx``) binding variable
+      or sits under a per-thread condition, which forces ``shared.dyn`` (a
+      per-thread scope would silently break cross-thread reads);
+    - anything ambiguous falls back to ``shared.dyn`` (``shared`` for bool).
+
+    On CPU targets every shared choice degrades to ``local`` (the CPU backend
+    has no shared-memory hierarchy and its op lowerings reject shared scopes).
+
+    Not supported with scope-dispatching frontend macros (``T.reduce_*``,
+    ``T.print``, ``T.tma_gather4``/``T.tma_scatter4``, barrier ops) — use the
+    explicit ``T.alloc_*`` variants there. Conflicting requirements (e.g. one
+    buffer used as both a gemm accumulator and a gemm A/B operand) are a
+    compile-time error.
+
+    Args:
+        shape (tuple): The shape of the buffer to allocate
+        dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
+
+    Returns:
+        T.Buffer: A TVM buffer object whose scope is chosen by the compiler
+    """
+    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="auto"))
+
+
 @overload
 def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
 
