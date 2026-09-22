@@ -151,10 +151,8 @@ def run_tilelang_grouped_gemm(batch_sizes_list, K, M, block_M, block_N, block_K,
     )
     ref_output = torch_gmm(A, B, batch_sizes, batch_offsets, trans_b)
 
-    if torch.allclose(out, ref_output, rtol=0.01, atol=0.01):
-        print("✅ Tilelang and Torch match")
-    else:
-        print("❌ Tilelang and Torch mismatch")
+    torch.testing.assert_close(out, ref_output, rtol=0.01, atol=0.01)
+    print("✅ Tilelang and Torch match")
 
     if profile:
         from tilelang.profiler import do_bench
