@@ -6,18 +6,23 @@ per-site fallback, safe index widening, and control/data dependence safety.
 
 import ctypes
 
+import pytest
 import tilelang
 from tilelang import libinfo
 import tilelang.language as T
 import tilelang.testing
 import torch
 from tilelang.transform import PassConfigKey
+from tilelang.tools.compile_only import cuda_codegen_available
 from tvm.target import Target
 
 MAGIC_CONFIG = {
     PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     PassConfigKey.TL_ENABLE_MAGIC_DIV: True,
 }
+
+requires_cuda_codegen = pytest.mark.skipif(not cuda_codegen_available(), reason="CUDA codegen is not built")
+requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA or ROCm GPU")
 
 
 def _scales_kernel():
@@ -51,7 +56,7 @@ def _lower(func, target_str):
     return artifact.kernel_source
 
 
-@tilelang.testing.requires_cuda
+@requires_cuda_codegen
 def test_magic_div_cuda_codegen():
     src = _lower(_scales_kernel().get_tir(), "cuda -arch=sm_90")
     assert "__umulhi" in src
@@ -64,7 +69,7 @@ def test_magic_div_cuda_codegen():
     assert src.count("__umulhi") == 2
     assert "tl_magic_r_0" in src and "tl_magic_r_1" in src
     remainder_bind = next(line for line in src.splitlines() if "tl_magic_r_0" in line)
-    assert "tl_magic_floormod_i32" in remainder_bind
+    assert "tl_magic_floormod_i64" in remainder_bind
     # Keep the complete output unflatten chain transparent to FlattenBuffer;
     # opaque magic values here prevent NVCC from recovering the linear idx.
     output_store = next(line for line in src.splitlines() if "out_scales[" in line)
@@ -269,14 +274,14 @@ def _loop_dependent_dividend_kernel():
     return kernel()
 
 
-@tilelang.testing.requires_cuda
+@requires_cuda_codegen
 def test_magic_div_fallback_sites_untouched():
     src = _lower(_fallback_kernel().get_tir(), "cuda -arch=sm_90")
     assert "tl_magic_m_0" not in src
     assert "__umulhi" not in src
 
 
-@tilelang.testing.requires_cuda
+@requires_cuda_codegen
 def test_magic_mod_without_div_keeps_direct_mod_path():
     src = _lower(_mod_only_kernel().get_tir(), "cuda -arch=sm_90")
     assert "__umulhi" in src
@@ -286,7 +291,7 @@ def test_magic_mod_without_div_keeps_direct_mod_path():
     assert "__umulhi" in remainder_bind
 
 
-@tilelang.testing.requires_cuda
+@requires_cuda_codegen
 def test_magic_condition_reuses_hoisted_divmod_and_validity():
     src = _lower(_condition_reuse_kernel().get_tir(), "cuda -arch=sm_90")
     lines = src.splitlines()
@@ -309,7 +314,7 @@ def test_magic_condition_reuses_hoisted_divmod_and_validity():
     assert " % divisor" in reused_condition
 
 
-@tilelang.testing.requires_cuda
+@requires_cuda_codegen
 def test_magic_condition_does_not_reuse_truncating_division():
     src = _lower(_trunc_condition_no_reuse_kernel().get_tir(), "cuda -arch=sm_90")
     condition = next(line for line in src.splitlines() if line.lstrip().startswith("if (") and "limit" in line)
@@ -317,7 +322,7 @@ def test_magic_condition_does_not_reuse_truncating_division():
     assert " / divisor" in condition
 
 
-@tilelang.testing.requires_cuda
+@requires_cuda_codegen
 def test_magic_condition_uses_runtime_fallback_when_nonnegative_is_unproven():
     src = _lower(_condition_runtime_fallback_kernel().get_tir(), "cuda -arch=sm_90")
     validity = next(line for line in src.splitlines() if "bool tl_magic_valid_" in line)
@@ -327,10 +332,12 @@ def test_magic_condition_uses_runtime_fallback_when_nonnegative_is_unproven():
     assert ">= 0" in validity
     assert "__umulhi" in quotient and "tl_magic_floordiv_i32" in quotient
     assert "tl_magic_floormod_i32" in remainder
-    assert "tl_magic_q_" in condition and " / divisor" not in condition
+    # LowerIntrin leaves a sign correction around the truncating quotient.
+    # Reusing the floor quotient here would apply that correction twice.
+    assert "tl_magic_q_" not in condition and " / divisor" in condition
 
 
-@tilelang.testing.requires_cuda
+@requires_gpu
 def test_magic_hoist_preserves_write_then_read_and_partial_block_guard():
     kernel = _write_then_read_kernel()
     n = 129
@@ -347,10 +354,10 @@ def test_magic_hoist_preserves_write_then_read_and_partial_block_guard():
     torch.testing.assert_close(B[n:], torch.full_like(B[n:], -1), rtol=0, atol=0)
     source = kernel.get_kernel_source()
     assert "int tl_magic_q_" not in source
-    assert source.index("A[") < source.rindex("__umulhi")
+    assert "__umulhi" not in source
 
 
-@tilelang.testing.requires_cuda
+@requires_gpu
 def test_magic_dividend_widens_before_overflow():
     kernel = _widened_dividend_kernel()
     base = 2**30
@@ -373,7 +380,7 @@ def test_magic_dividend_widens_before_overflow():
     assert "__umulhi" in quotient
 
 
-@tilelang.testing.requires_cuda
+@requires_gpu
 def test_magic_preserves_inactive_unsafe_host_divisor_expression():
     kernel = _unsafe_host_divisor_kernel()
     A = torch.full((32,), 123, dtype=torch.int32, device="cuda")
@@ -406,7 +413,7 @@ def test_magic_host_helper_rejects_out_of_range_divisors():
         assert get_shift(divisor) == 0
 
 
-@tilelang.testing.requires_cuda
+@requires_gpu
 def test_magic_loop_dependent_dividend_stays_inside_loop():
     source = _loop_dependent_dividend_kernel().get_kernel_source()
     loop_pos = source.index("for (int k")

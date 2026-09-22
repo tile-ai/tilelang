@@ -39,7 +39,9 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -111,7 +113,8 @@ public:
   PrimExpr VisitExpr_(const SubNode *op) final {
     PrimExpr expr = IRMutatorWithAnalyzer::VisitExpr_(op);
     const SubNode *sub = expr.as<SubNode>();
-    if (sub == nullptr || !sub->a.dtype().is_int() || !sub->b.as<MulNode>()) {
+    if (sub == nullptr || !sub->a.dtype().is_int() || !sub->b.as<MulNode>() ||
+        SideEffect(expr) > CallEffectKind::kPure) {
       return expr;
     }
     // Decompose the right operand into a product of factors (spine walk,
@@ -159,7 +162,6 @@ public:
       if (param->dtype.is_int() && param->dtype.lanes() == 1) {
         invariant_vars_.insert(param.get());
         safe_host_vars_.insert(param.get());
-        non_shape_params_.insert(param.get());
       }
     }
     auto collect_vars = [&](const PrimExpr &e) {
@@ -176,21 +178,21 @@ public:
         PostOrderVisit(e, [&](const ObjectRef &n) {
           if (const VarNode *v = n.as<VarNode>()) {
             safe_host_vars_.insert(v);
-            shape_vars_.insert(v);
-            entry_analyzer_.const_int_bound.Update(
-                GetRef<Var>(v),
-                arith::ConstIntBound(1, arith::ConstIntBound::kPosInf),
-                /*allow_override=*/true);
           }
         });
+        // A positive shape such as p + 1 does not imply that p is positive.
+        // Only a shape that is itself a Var supplies an entry bound for it.
+        if (const VarNode *v = e.as<VarNode>()) {
+          entry_analyzer_.const_int_bound.Update(
+              GetRef<Var>(v),
+              arith::ConstIntBound(1, arith::ConstIntBound::kPosInf),
+              /*allow_override=*/true);
+        }
       }
       for (const PrimExpr &e : buf->strides) {
         collect_vars(e);
       }
       collect_vars(buf->elem_offset);
-    }
-    for (const VarNode *v : shape_vars_) {
-      non_shape_params_.erase(v);
     }
   }
 
@@ -472,24 +474,6 @@ private:
     return false;
   }
 
-  bool ShouldWidenDividend(const PrimExpr &e) {
-    bool widen = false;
-    PostOrderVisit(e, [&](const ObjectRef &n) {
-      const PrimExprNode *expr = n.as<PrimExprNode>();
-      if (expr == nullptr || !expr->dtype.is_int() ||
-          expr->dtype.bits() != 32 ||
-          !(n.as<AddNode>() || n.as<SubNode>() || n.as<MulNode>())) {
-        return;
-      }
-      if (UsesVar(GetRef<PrimExpr>(expr), [&](const VarNode *v) {
-            return non_shape_params_.count(v) != 0;
-          })) {
-        widen = true;
-      }
-    });
-    return widen;
-  }
-
   // A divisor is launch-invariant when it is a positive int32 expression
   // whose only variables are scalar parameters or buffer shape/stride/offset
   // symbols (thread indices and loop variables are never in that set).
@@ -529,8 +513,11 @@ private:
     // A condition-associated floor-div may use the guarded magic intrinsic
     // even when static analysis cannot prove x >= 0.  Its shared runtime
     // validity predicate selects the exact floor-div fallback for negative x,
-    // while later condition rewriting reuses the same guarded quotient.
-    if (x.dtype() != DataType::Int(32) || !IsInvariantDivisor(d) ||
+    // while later condition rewriting must preserve floor/trunc semantics.
+    // Codegen evaluates x in both the validity check and the selected branch.
+    // Keep reads and effectful expressions at their original evaluation sites.
+    if (x.dtype() != DataType::Int(32) ||
+        SideEffect(x) > CallEffectKind::kPure || !IsInvariantDivisor(d) ||
         (!ProveNonNegative(x) && !can_reuse_condition_div)) {
       return PrimExpr();
     }
@@ -544,7 +531,6 @@ private:
     Map<String, ObjectRef> annotations;
     annotations.Set("tl.magic_condition_reuse_div",
                     Bool(can_reuse_condition_div));
-    annotations.Set("tl.magic_widen_dividend", Bool(ShouldWidenDividend(x)));
     annotations.Set("tl.magic_safe_to_hoist", Bool(IsEntryPositive(d)));
     return Call(DataType::Int(32), op, {x, e.d_var, e.m_var, e.s_var},
                 annotations);
@@ -618,8 +604,6 @@ private:
 
   std::unordered_set<const VarNode *> invariant_vars_;
   std::unordered_set<const VarNode *> safe_host_vars_;
-  std::unordered_set<const VarNode *> shape_vars_;
-  std::unordered_set<const VarNode *> non_shape_params_;
   std::unordered_set<const BaseExprNode *> skip_nodes_;
   std::vector<ConditionDivModSite> condition_sites_;
   std::vector<MagicDivisorEntry> entries_;
@@ -631,18 +615,49 @@ namespace {
 // Post-rewrite CSE for magic calls: calls with the same (x, d), including a
 // div/mod pair duplicated by let-inlining, share one quotient per thread.
 class MagicCallHoister {
+  static bool CanHoistDividend(const PrimExpr &expr) {
+    if (SideEffect(expr) > CallEffectKind::kPure) {
+      return false;
+    }
+    bool safe = true;
+    PostOrderVisit(expr, [&](const ObjectRef &n) {
+      // Pure integer division can still trap when moved out of its guard.
+      if (n.as<DivNode>() || n.as<ModNode>() || n.as<FloorDivNode>() ||
+          n.as<FloorModNode>()) {
+        safe = false;
+      }
+      if (const CallNode *call = n.as<CallNode>()) {
+        // Nested magic calls may carry a proof from their original condition
+        // rather than from function entry. Unknown calls stay in place too.
+        Optional<ObjectRef> entry_safe =
+            call->annotations.Get("tl.magic_safe_to_hoist");
+        if ((!call->op.same_as(tl::magic_div()) &&
+             !call->op.same_as(tl::magic_mod())) ||
+            !entry_safe.defined() ||
+            !Downcast<Bool>(entry_safe.value())->value) {
+          safe = false;
+        }
+      }
+    });
+    return safe;
+  }
+
 public:
   static Stmt Apply(const PrimFunc &func) {
     const Stmt &body = func->body;
-    std::unordered_set<const VarNode *> hoistable_vars;
+    arith::Analyzer entry_analyzer;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> hoistable_vars;
     for (const Var &param : func->params) {
-      hoistable_vars.insert(param.get());
+      hoistable_vars.insert(param);
     }
     PostOrderVisit(body, [&](const ObjectRef &n) {
       if (const AttrStmtNode *attr = n.as<AttrStmtNode>();
           attr != nullptr && attr->attr_key == tirx::attr::thread_extent) {
         if (const IterVarNode *iter = attr->node.as<IterVarNode>()) {
-          hoistable_vars.insert(iter->var.get());
+          hoistable_vars.insert(iter->var);
+          entry_analyzer.Bind(
+              iter->var,
+              Range::FromMinExtent(make_zero(iter->var.dtype()), attr->value));
         }
       }
     });
@@ -677,18 +692,29 @@ public:
               call->annotations.Get("tl.magic_safe_to_hoist")) {
         safe_to_hoist = Downcast<Bool>(safe.value())->value;
       }
-      if (!safe_to_hoist || SideEffect(call->args[0]) > CallEffectKind::kPure ||
+      if (!safe_to_hoist || !CanHoistDividend(call->args[0]) ||
           SideEffect(call->args[1]) > CallEffectKind::kPure ||
           UsesVar(call->args[0],
-                  [&](const VarNode *v) { return !hoistable_vars.count(v); }) ||
-          UsesVar(call->args[1],
-                  [&](const VarNode *v) { return !hoistable_vars.count(v); })) {
+                  [&](const VarNode *v) {
+                    return !hoistable_vars.count(GetRef<Var>(v));
+                  }) ||
+          UsesVar(call->args[1], [&](const VarNode *v) {
+            return !hoistable_vars.count(GetRef<Var>(v));
+          })) {
         return;
       }
       bool can_reuse_condition_div = false;
       if (Optional<ObjectRef> reuse =
               call->annotations.Get("tl.magic_condition_reuse_div")) {
-        can_reuse_condition_div = Downcast<Bool>(reuse.value())->value;
+        // LowerIntrin has already expanded a floor condition to a truncating
+        // quotient plus a sign correction. Replacing just that quotient with
+        // a floor quotient is valid only when x cannot be negative or wrap.
+        // Use entry/thread bounds, not facts from the original body's guard.
+        arith::ConstIntBound bound =
+            entry_analyzer.const_int_bound(call->args[0]);
+        can_reuse_condition_div =
+            Downcast<Bool>(reuse.value())->value && bound->min_value >= 0 &&
+            bound->max_value <= std::numeric_limits<int32_t>::max();
       }
       for (Group &g : groups) {
         if (deep_equal(g.d, call->args[1]) && deep_equal(g.x, call->args[0])) {
