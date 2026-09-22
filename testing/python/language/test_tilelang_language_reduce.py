@@ -739,12 +739,28 @@ def test_finalize_reducer_sm80_uses_named_barrier(batch):
     ids=[f"{op}-{dtype}-{bM}x{bN}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CASES if batch == 1],
 )
 def test_finalize_reducer_correctness(op, dtype, block_M, block_N, batch):
-    """Numerical correctness (batch=1 scalar path; batch>1 blocked by fragment layout bug)."""
+    """Numerical correctness for the scalar finalization path."""
     A = torch.randn(block_M, block_N, dtype=getattr(torch, dtype)).cuda()
     B = tl.compile(
         _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
         out_idx=-1,
         pass_configs=_COMPILE_FLAGS,
+    )(A)
+    torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    ("op", "dtype", "block_M", "block_N", "batch"),
+    [c for c in FINALIZE_REDUCER_CASES if c[4] > 1],
+    ids=[f"{op}-{dtype}-{bM}x{bN}-b{batch}" for op, dtype, bM, bN, batch in FINALIZE_REDUCER_CASES if batch > 1],
+)
+def test_finalize_reducer_batched_correctness(op, dtype, block_M, block_N, batch):
+    """Every output chunk must be processed by the batched wide plan."""
+    A = torch.randn(block_M, block_N, dtype=getattr(torch, dtype)).cuda()
+    B = tl.compile(
+        _make_finalize_reducer_kernel(block_M, block_N, dtype, op, batch),
+        out_idx=-1,
+        pass_configs={**_COMPILE_FLAGS, "tl.reducer_force_baseline": True},
     )(A)
     torch.testing.assert_close(B, _ref(A, op), atol=1e-2, rtol=1e-2)
 
