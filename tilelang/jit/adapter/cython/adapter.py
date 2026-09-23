@@ -57,15 +57,17 @@ def is_symbolic_expr(expr) -> bool:
     return not isinstance(expr, tirx.IntImm) and isinstance(expr, tirx.PrimExpr)
 
 
-def _storage_pack_factor(dtype: tvm.DataType) -> int:
-    """Return the number of logical elements represented by one storage byte."""
-    element_bits = dtype.bits * dtype.lanes
-    return 8 // element_bits if element_bits < 8 else 1
+def _storage_pack_factor(dtype: tvm.DataType, target: Target) -> int:
+    """Return the target-specific host-storage packing factor for ``dtype``."""
+    # Keep the Cython adapter on the same ABI definition as KernelParam.  In
+    # particular, bool is one byte in Torch even though its TIR dtype has one
+    # logical bit, while packed int4/FP4 storage is only enabled for PTO.
+    return KernelParam(dtype, []).storage_packing_factor(target=target)
 
 
-def _accepted_storage_dtypes(dtype: tvm.DataType) -> torch.dtype | tuple[torch.dtype, ...]:
+def _accepted_storage_dtypes(dtype: tvm.DataType, target: Target) -> torch.dtype | tuple[torch.dtype, ...]:
     torch_dtype = dtype.as_torch()
-    if _storage_pack_factor(dtype) > 1 and torch_dtype != torch.int8:
+    if _storage_pack_factor(dtype, target) > 1 and torch_dtype != torch.int8:
         return (torch_dtype, torch.int8)
     return torch_dtype
 
@@ -287,7 +289,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
 
         def shape_scale(buffer, dim_idx: int) -> int:
-            return _storage_pack_factor(buffer.dtype) if dim_idx == len(buffer.shape) - 1 else 1
+            return _storage_pack_factor(buffer.dtype, self.target) if dim_idx == len(buffer.shape) - 1 else 1
 
         func = self.prim_func
         params = func.params
@@ -302,7 +304,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
-                stride_scale = _storage_pack_factor(buffer.dtype)
+                stride_scale = _storage_pack_factor(buffer.dtype, self.target)
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
@@ -316,7 +318,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
 
         def shape_scale(buffer, dim_idx: int) -> int:
-            return _storage_pack_factor(buffer.dtype) if dim_idx == len(buffer.shape) - 1 else 1
+            return _storage_pack_factor(buffer.dtype, self.target) if dim_idx == len(buffer.shape) - 1 else 1
 
         func = self.prim_func
         params = func.params
@@ -325,7 +327,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
-                stride_scale = _storage_pack_factor(buffer.dtype)
+                stride_scale = _storage_pack_factor(buffer.dtype, self.target)
                 for j, dim in enumerate(buffer.shape):
                     if isinstance(dim, tirx.Var) and dim not in params:
                         key = str(dim)
@@ -353,7 +355,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 name, dtype = buffer.name, buffer.dtype
-                buffer_dtype_map[name] = (i, _accepted_storage_dtypes(dtype))
+                buffer_dtype_map[name] = (i, _accepted_storage_dtypes(dtype, self.target))
         return buffer_dtype_map
 
     def _process_param_storage_metadata(self) -> list[tuple[int, int]]:
@@ -366,7 +368,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         metadata = []
         for param in self.params:
-            pack_factor = _storage_pack_factor(param.dtype)
+            pack_factor = param.storage_packing_factor(target=self.target)
             if pack_factor > 1 and len(param.shape) > 0:
                 metadata.append((len(param.shape) - 1, pack_factor))
             else:
