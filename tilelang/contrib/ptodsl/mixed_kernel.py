@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, Literal
+from typing import Literal
+from collections.abc import Iterator
 
 from ptoas.mlir.ir import InsertionPoint
 from ptodsl._ops import _pto
@@ -52,13 +53,9 @@ def finalize_mixed_kernel(kernel):
     if module_spec.module_style == ModuleStyle.FLAT_AICORE:
         return kernel
     if kernel.cached_specializations():
-        raise RuntimeError(
-            "A mixed PTO kernel must select its module layout before compilation"
-        )
+        raise RuntimeError("A mixed PTO kernel must select its module layout before compilation")
     if module_spec.module_style != ModuleStyle.BACKEND_PARTITIONED:
-        raise ValueError(
-            f"Unsupported initial PTODSL module style: {module_spec.module_style!r}"
-        )
+        raise ValueError(f"Unsupported initial PTODSL module style: {module_spec.module_style!r}")
 
     # @pto.jit currently hard-codes BACKEND_PARTITIONED and exposes no
     # module_style argument. KernelModuleSpec is frozen, so replace the spec
