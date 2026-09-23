@@ -1818,6 +1818,10 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   PrintFunctionSignature_(current_function_name_, func, stream);
   stream << ":\n";
   int func_scope = BeginScope();
+  if (!current_function_is_mixed_) {
+    PrintIndent();
+    stream << "pto.init_core()\n";
+  }
   if (func_has_gemm_l1 || func_has_blockscaled_gemm_l1) {
     std::vector<Call> gemm_calls;
     tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
@@ -6504,6 +6508,8 @@ void CodeGenTileLangPTO::VisitStmt_(const SBlockNode *op) {
     bool old_inside_mixed_section = inside_mixed_section_;
     in_mixed_vector_section_ = is_vector_section;
     inside_mixed_section_ = true;
+    PrintIndent();
+    stream << "pto.init_core()\n";
     int active_aiv_scope = -1;
     if (is_vector_section && vector_count == 1) {
       // The physical mixed group still has two AIVs; only AIV0 executes this
