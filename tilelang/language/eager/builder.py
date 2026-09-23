@@ -2,6 +2,8 @@ from __future__ import annotations
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
+import builtins
+from functools import partial
 
 from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
@@ -32,6 +34,34 @@ import threading
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Guard iterator/container construction, not reductions (use explicit T.* ops
+# for device reductions). Identity keys avoid hashing or comparing user callables.
+_BUILTIN_ITERABLE_ARG_MAP = {
+    id(func): (func, select_iterables)
+    for funcs, select_iterables in (
+        ((builtins.enumerate,), lambda args, kwargs: args[:1] or ((kwargs["iterable"],) if "iterable" in kwargs else ())),
+        ((builtins.zip,), lambda args, kwargs: args),
+        ((builtins.map,), lambda args, kwargs: args[1:]),
+        ((builtins.filter,), lambda args, kwargs: args[1:2]),
+        # iter(callable, sentinel) does not take an iterable.
+        ((builtins.iter,), lambda args, kwargs: args if len(args) == 1 else ()),
+        (
+            (
+                builtins.reversed,
+                builtins.list,
+                builtins.tuple,
+                builtins.set,
+                builtins.frozenset,
+                builtins.dict,
+                builtins.sorted,
+            ),
+            lambda args, kwargs: args[:1],
+        ),
+    )
+    for func in funcs
+}
 
 
 def unwrap_expr(expr) -> PrimExpr | int | float:
@@ -130,6 +160,9 @@ class ContinueFrame(Frame): ...
 
 
 class BreakFrame(Frame): ...
+
+
+class PythonLoopFrame(Frame): ...
 
 
 @dataclass
@@ -458,6 +491,35 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
+        if isinstance(it, range):
+            from tilelang.language import serial
+
+            it = serial(it.start, it.stop, it.step)
+        if not isinstance(it, (SerialForWithStep, UnrollForWithStep, tirx.frame.ForFrame)):
+            # Python iterables expand the body at IR construction time. TIR
+            # values must be excluded explicitly: Var carries an __iter__ shim
+            # for single-binding unpacking and Buffer.__getitem__ never raises
+            # IndexError, so both would iterate instead of failing.
+            self.python_iterable(it, "Invalid for loop")
+            try:
+                iterator = iter(it)
+            except TypeError:
+                raise TypeError(
+                    f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
+                    "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding, "
+                    "or a Python iterable"
+                ) from None
+            pos = len(self.frames)
+            self.frames.append(PythonLoopFrame())
+            try:
+                # Keep user-owned generators resumable after a loop break.
+                for value in iterator:  # noqa: UP028
+                    yield value
+            finally:
+                # Python loops do not introduce a lexical scope. Keep emitted
+                # lets/allocations alive for later iterations and following code.
+                self.frames.pop(pos)
+            return
         if isinstance(it, (SerialForWithStep, UnrollForWithStep)):
             # Validate and compute the trip count before constructing the frame
             if isinstance(it.step, (int, IntImm)):
@@ -495,14 +557,30 @@ class Builder(BaseBuilder):
             with self.with_frame(it) as v:
                 yield v
 
+    def _is_python_loop_control(self):
+        idx = self.find_frame_idx((PythonLoopFrame, tirx.frame.ForFrame, tirx.frame.WhileFrame, MacroFrame))
+        if idx is None or not isinstance(self.frames[idx], PythonLoopFrame):
+            return False
+        if self.find_frame_idx(tirx.frame.IfFrame, start=idx + 1) is not None:
+            raise NotImplementedError(
+                "Cannot lower break/continue targeting a compile-time Python iterable loop under a device-side condition: "
+                "the expanded loop has no runtime control-flow target. Use T.serial over runtime-indexable data, "
+                "or a compile-time condition."
+            )
+        return True
+
     def ctx_continue(self):
         self.check_continue_break()
+        if self._is_python_loop_control():
+            raise self.PythonLoopContinue
         # add a dummy frame for checking code after continue/break
         self.enter_frame(ContinueFrame())
         tirx.evaluate(tirx.continue_loop())
 
     def ctx_break(self):
         self.check_continue_break()
+        if self._is_python_loop_control():
+            raise self.PythonLoopBreak
         # add a dummy frame for checking code after continue/break
         self.enter_frame(BreakFrame())
         tirx.evaluate(tirx.break_loop())
@@ -526,7 +604,7 @@ class Builder(BaseBuilder):
         with self.with_frame(tirx.While(cond_v_unwrap)):
             yield None
 
-    def bind(self, name, value, annot=BaseBuilder.empty):
+    def bind(self, name, value, annot=BaseBuilder.empty, *, loop_target=False):
         self.check_continue_break()
 
         # in prim func, before T.match_buffer
@@ -567,7 +645,12 @@ class Builder(BaseBuilder):
             else:
                 return orig_value
 
-        orig_value = locals.get(name, self.empty)
+        # Only a live Ref/alloc_var is a store target; loop targets and the
+        # rewriter's `_` temporaries always bind fresh.
+        if loop_target or name == "_" or self.binding_expired(name):
+            orig_value = self.empty
+        else:
+            orig_value = locals.get(name, self.empty)
 
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
@@ -594,6 +677,7 @@ class Builder(BaseBuilder):
 
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
+            self.name_inside_frame.pop(name, None)
             return value
         if isinstance(value, tirx.IntImm) and value.dtype == "int32":
             return value.value
@@ -615,17 +699,17 @@ class Builder(BaseBuilder):
         if isinstance(res, Buffer):
             self.with_buffer_span(res)
 
-        # 4. Check variable scope and shadowing
+        # 4. Check variable scope
         if name != "_":
             frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-            if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
-                logger.warning(
-                    f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
-                    stacklevel=2,
-                )
             self.name_inside_frame[name] = self.frames[frame]
         return res
+
+    def binding_expired(self, name: str | None) -> bool:
+        """Whether `name` was last bound inside a TIR region that has since closed."""
+        frame = self.name_inside_frame.get(name)
+        return frame is not None and frame not in self.frames
 
     def unwrap_value(self, value):
         """
@@ -705,9 +789,6 @@ class Builder(BaseBuilder):
         elif isinstance(target, Var):
             # Treat augmented assignment on immutable vars (SSA) as re-binding:
             #   x -= y  ==>  x = x - y
-            #
-            # This matches user expectations and avoids hard failures, while still
-            # warning about re-binding immutable values (same as `x = x - y`).
             name = name or getattr(target, "orig_name", None) or target.name  # type: ignore[attr-defined]
             res = eval_op(op, target, aug_value)
 
@@ -725,11 +806,6 @@ class Builder(BaseBuilder):
             if name != "_":
                 frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
                 assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-                if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
-                    logger.warning(
-                        f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
-                        stacklevel=2,
-                    )
                 self.name_inside_frame[name] = self.frames[frame]
             return res
         else:
@@ -829,14 +905,12 @@ class Builder(BaseBuilder):
         elif not cond:
             raise AssertionError(msg)
 
-    def rval(self, name: str, value: Any) -> Any:
-        if name in self.name_inside_frame:
-            frame = self.name_inside_frame[name]
-            if frame not in self.frames:
-                raise RuntimeError(
-                    f"Immutable variable `{name}` is used outside its defining region!\n"
-                    f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
-                )
+    def rval(self, name: str | None, value: Any) -> Any:
+        if self.binding_expired(name):
+            raise RuntimeError(
+                f"Immutable variable `{name}` is used outside its defining region!\n"
+                f"variable `{name}` is defined in frame: {self.name_inside_frame[name]}, current frames: {self.frames}."
+            )
         return self.unwrap_value(value)
 
     def macro_arg(self, name, value):
@@ -884,12 +958,46 @@ class Builder(BaseBuilder):
         else:
             return self.prim_func_arg(name, value)
 
-    def override(self, name: str):
+    def iter_call(self, func, /, *args, **kwargs):
         from tilelang.language import serial
 
-        if name == "range":
-            return serial
-        raise ValueError(f"Unknown override: {name}")
+        if func is builtins.range:
+            return serial(*args, **kwargs)
+        return func(*args, **kwargs)
+
+    def python_iterable(self, value, context):
+        """Reject device values before Python can acquire an iterator over them."""
+        if isinstance(value, (PrimExpr, Buffer, BufferRegion, Ref, EqualOp, NotEqualOp)):
+            raise TypeError(
+                f"{context}: a TIR expression or buffer is not iterable (got {type(value).__name__}). "
+                "Use range(n) or T.serial(n) in a for statement to loop over a runtime extent, "
+                "or iterate over a Python container such as [expr] or buffer.shape."
+            )
+        if isinstance(value, (SerialForWithStep, tirx.frame.IRBuilderFrame)):
+            raise TypeError(
+                f"{context}: a TileLang loop or IR builder frame is not a compile-time Python iterable. "
+                "Use TileLang loop constructors directly in a for statement; "
+                "use range with compile-time bounds in a comprehension."
+            )
+        return value
+
+    def resolve_call(self, func):
+        entry = _BUILTIN_ITERABLE_ARG_MAP.get(id(func))
+        if entry is None:
+            return func
+        return partial(self._call_python_builtin, *entry)
+
+    def _call_python_builtin(self, func, select_iterables, /, *args, **kwargs):
+        """Check iterable operands before a builtin hides or consumes them."""
+        for value in select_iterables(args, kwargs):
+            self.python_iterable(value, f"{func.__name__}()")
+        return func(*args, **kwargs)
+
+    def comprehension_filter(self, cond):
+        cond = unwrap_cond(cond)
+        if isinstance(cond, PrimExpr):
+            raise TypeError("Comprehension filters must be evaluable at compile time; use a serial loop with an if statement instead.")
+        return cond
 
     def constexpr(self, name: str, dtype: str = "int32") -> Var:
         var = tirx.Var(name, dtype)

@@ -1682,6 +1682,18 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   DataType target_ty = op->dtype;
   ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
+  // Cast(e4m3, Cast(f32, e2m1)) with default rounding equals Cast(e4m3, e2m1):
+  // every E2M1 value, including -0, is representable in E4M3, so the f32
+  // detour cannot change the result. Fold it so the direct transcode applies.
+  if (const auto *inner = op->value.as<CastNode>();
+      inner && op->annotations.empty() && inner->annotations.empty() &&
+      from_ty.is_float() && from_ty.bits() == 32 &&
+      inner->value.dtype().is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
+    os << PrintExpr(tirx::Cast(target_ty, inner->value));
+    return;
+  }
+
   // Decode the optional rounding/saturation/rbits hints stashed in
   // `op->annotations` (see CastNode docstring for the convention).
   auto get_str_anno = [&](const char *key) -> std::string {
@@ -1747,6 +1759,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     return;
   }
 
+  // Scalar fp4 (E2M1) -> fp8 (E4M3): exact bit transcode.
+  if (from_ty.is_scalar() && cast_round.empty() && from_ty.is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
+    this->PrintType(target_ty, os);
+    os << "::bitcast(__tl_cvt_e2m1_to_e4m3((" << PrintExpr(op->value)
+       << ").__x))";
+    return;
+  }
+
   // Emit simple C-style type conversion for scalar casts without custom
   // rounding.
   if (from_ty.is_scalar() && cast_round.empty())
@@ -1766,8 +1787,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       [&](const std::string &cast_func, const std::string &src_type,
           const std::string &dst_type, const std::string &extra_args = "",
           bool src_needs_reinterpret = false,
-          bool dst_needs_reinterpret = false) {
-        int num_chunks = lanes / 2;
+          bool dst_needs_reinterpret = false, int chunk_lanes = 2) {
+        int num_chunks = lanes / chunk_lanes;
         std::string src_cast = src_needs_reinterpret
                                    ? "reinterpret_cast<" + src_type + "*>"
                                    : "(" + src_type + "*)";
@@ -2202,6 +2223,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (lanes == 2 || lanes == 4 || lanes == 8) {
       PrintVectorizedCast("__tl_cvt_fp4x2_to_bfloat162", "uint8_t",
                           "__nv_bfloat162", "", true, false);
+      return;
+    }
+  }
+
+  // Handle conversion from float4 (E2M1) to float8 (E4M3)
+  if (from_ty.is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn())) {
+    // Exact bit transcode; __tl_cvt_e2m1x4_to_e4m3x4 handles four lanes per
+    // __byte_perm pair, so chunk by four wherever the width allows.
+    if (lanes == 2) {
+      PrintVectorizedCast("__tl_cvt_e2m1x2_to_e4m3x2", "__nv_fp4x2_storage_t",
+                          "__nv_fp8x2_storage_t", "", true, true);
+      return;
+    }
+    if (lanes == 4 || lanes == 8 || lanes == 16 || lanes == 32) {
+      PrintVectorizedCast("__tl_cvt_e2m1x4_to_e4m3x4", "__nv_fp4x4_storage_t",
+                          "__nv_fp8x4_storage_t", "", true, true,
+                          /*chunk_lanes=*/4);
       return;
     }
   }
@@ -5325,6 +5364,26 @@ void CodeGenTileLangCUDA::VisitStmt_(const BindNode *op) {
          "effect and has no value. Call it as a statement instead, for "
          "example `T.rng_init(seed)` without assigning the result.";
   CodeGenC::VisitStmt_(op);
+}
+
+void CodeGenTileLangCUDA::VisitStmt_(const AssertStmtNode *op) {
+  // Every function this codegen emits is a __global__ kernel, so a tirx
+  // AssertStmt has to lower to the device-legal helper. The inherited CodeGenC
+  // visitor streams a host-only TVMFFI error call plus `return -1`, neither of
+  // which is valid inside a kernel.
+  std::string cond = PrintExpr(op->condition);
+  this->PrintIndent();
+  if (op->message_parts.empty()) {
+    stream << "device_assert(" << cond << ");\n";
+    return;
+  }
+  std::string joined_msg;
+  for (const auto &part : op->message_parts) {
+    joined_msg += part->value;
+  }
+  stream << "device_assert_with_msg(" << cond << ", ";
+  PrintEscapedCString(joined_msg, stream);
+  stream << ");\n";
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {

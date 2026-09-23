@@ -18,8 +18,9 @@ namespace tl {
 // 256-bit load specialization for ulonglong4
 __device__ __forceinline__ void global_load_256(ulonglong4 &D, void const *ptr,
                                                 bool pred_guard) {
-#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
-    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9))
   asm volatile("{\n"
                "  .reg .pred p;\n"
                "  setp.ne.b32 p, %5, 0;\n"
@@ -37,7 +38,7 @@ __device__ __forceinline__ void global_load_256(ulonglong4 &D, void const *ptr,
                : "l"(ptr), "r"((int)pred_guard), "l"(D.x), "l"(D.y), "l"(D.z),
                  "l"(D.w));
 #else
-  // CUDA < 12.9 fallback: two 128-bit loads (may have performance regression)
+  // Pre-SM100 or CUDA < 12.9 fallback: two 128-bit loads.
   uint4 *data = reinterpret_cast<uint4 *>(&D);
   asm volatile("{\n"
                "  .reg .pred p;\n"
@@ -122,8 +123,9 @@ __device__ __forceinline__ T load_global_256_conditional(const T *ptr,
 // 256-bit store specialization for ulonglong4
 __device__ __forceinline__ void global_store_256(ulonglong4 const &D, void *ptr,
                                                  bool pred_guard) {
-#if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
-    (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9)
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
+    ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
+     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9))
   asm volatile("{\n"
                "  .reg .pred p;\n"
                "  setp.ne.b32 p, %5, 0;\n"
@@ -133,8 +135,7 @@ __device__ __forceinline__ void global_store_256(ulonglong4 const &D, void *ptr,
                : "l"(ptr), "l"(D.x), "l"(D.y), "l"(D.z), "l"(D.w),
                  "r"((int)pred_guard));
 #else
-  // CUDA < 12.9 fallback: two 128-bit stores (may have performance
-  // regression)
+  // Pre-SM100 or CUDA < 12.9 fallback: two 128-bit stores.
   uint4 const *data = reinterpret_cast<uint4 const *>(&D);
   asm volatile("{\n"
                "  .reg .pred p;\n"
