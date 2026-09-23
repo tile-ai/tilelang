@@ -247,7 +247,7 @@ class BaseBuilder:
         while cond():
             yield
 
-    def bind(self, name: str, value: Any, annot: Any = empty) -> Any:
+    def bind(self, name: str, value: Any, annot: Any = empty, *, loop_target: bool = False) -> Any:
         return value
 
     def unwrap_value(self, value):
@@ -403,7 +403,7 @@ class DSLMutator(ast.NodeTransformer):
         # names = self._parse_names(node.target)
         var = ast.Name(tmp, ctx=ast.Load())
         ast_set_span(var, ast_get_span(node.target))
-        stmts = self._emit_assign_target(node.target, var)
+        stmts = self._emit_assign_target(node.target, var, loop_target=True)
         # Most device loops need no Python control-flow machinery. Adding
         # with/try blocks unconditionally exhausts CPython's nesting limit in
         # otherwise valid deeply nested kernels.
@@ -429,10 +429,13 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         return quote("if __tb.ctx_break(): break", span=node)
 
-    def _emit_assign_target(self, target: ast.expr, rval: ast.expr, annot: ast.expr | None = None) -> list[ast.stmt]:
+    def _emit_assign_target(
+        self, target: ast.expr, rval: ast.expr, annot: ast.expr | None = None, *, loop_target: bool = False
+    ) -> list[ast.stmt]:
+        bind_options = ", loop_target=True" if loop_target else ""
         if isinstance(target, ast.Name):
             if annot is None:
-                return quote(f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
+                return quote(f"name = __tb.bind('{target.id}', value{bind_options})", name=target, value=rval, span=target)
             else:
                 return quote(f'name = __tb.bind("{target.id}", value, annot)', name=target, value=rval, annot=annot, span=target)
         elif isinstance(target, ast.Attribute):
@@ -511,7 +514,7 @@ class DSLMutator(ast.NodeTransformer):
             for tmp, target in unpacked:
                 if isinstance(target, ast.Name):
                     bind_lvals.append(target.id)
-                    bind_rvals.append(f'__tb.bind("{target.id}", {tmp})')
+                    bind_rvals.append(f'__tb.bind("{target.id}", {tmp}{bind_options})')
                 elif isinstance(target, ast.Subscript):
                     flush_binds()
                     stmts.append(quote1(f"__tb.assign_slice(lval, slice, {tmp})", lval=target.value, slice=target.slice, span=target))
