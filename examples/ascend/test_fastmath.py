@@ -188,7 +188,7 @@ def test_special_cases(target):
         print("  [INFO] Fast special differs from torch.npu for raw vdiv")
 
 
-def bench_performance():
+def bench_performance(target):
     """Benchmark precise vs fast division."""
     print("\n" + "=" * 70)
     print("  Performance Benchmark")
@@ -220,9 +220,10 @@ def bench_performance():
 
 
 if __name__ == "__main__":
-    test_random_cases()
-    test_special_cases()
-    bench_performance()
+    for target in TARGETS:
+        test_random_cases(target)
+        test_special_cases(target)
+        bench_performance(target)
     print("\n" + "=" * 70)
     print("  ALL TESTS PASSED")
     print("=" * 70)

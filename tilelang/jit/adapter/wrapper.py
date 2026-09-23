@@ -1606,9 +1606,7 @@ class TLPTOSourceWrapper:
 
         prototype_source = "#ifndef AICORE\n#define AICORE [aicore]\n#endif\n" + "\n".join(prototypes)
         launch_stub = f'extern "C" TL_EXPORT int call({", ".join(launch_params)}) {{\n' + "\n".join(launches) + "\n  return 0;\n}\n"
-        return "\n\n".join(
-            ["#include <algorithm>", PREDEF_INIT_FUNC.format(""), prototype_source, launch_stub]
-        )
+        return "\n\n".join(["#include <algorithm>", PREDEF_INIT_FUNC.format(""), prototype_source, launch_stub])
 
 
 class TLMetalSourceWrapper:
