@@ -1141,6 +1141,12 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   std::stable_sort(ctrl->children.begin(), ctrl->children.end(),
                    [&](const std::shared_ptr<IRStructure> &a,
                        const std::shared_ptr<IRStructure> &b) {
+                     // At equal physical times, larger stages select earlier
+                     // logical iterations, for automatic and manual schedules.
+                     // Keep source order only when stages also match.
+                     if (phys_time(a) == phys_time(b)) {
+                       return a->GetStage() > b->GetStage();
+                     }
                      return phys_time(a) < phys_time(b);
                    });
 
