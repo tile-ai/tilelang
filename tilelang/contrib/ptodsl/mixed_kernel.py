@@ -6,7 +6,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Literal
-from collections.abc import Iterator
 
 from ptodsl import pto
 from ptodsl._tracing import ModuleStyle

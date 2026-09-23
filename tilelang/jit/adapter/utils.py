@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 from collections.abc import Callable
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -208,11 +208,7 @@ def pythonic_expr(
             if ignore_cast:
                 s = value_str
             else:
-                type_str = (
-                    _target_type(node.dtype)
-                    if dtype_map is not None or expression_style == "cxx"
-                    else node.dtype
-                )
+                type_str = _target_type(node.dtype) if dtype_map is not None or expression_style == "cxx" else node.dtype
                 s = f"({type_str}){value_str}"
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
