@@ -36,8 +36,7 @@ struct Reduce {
     (void)analyzer;
 
     // 1. nan_propagate guard: CPU codegen has no __hmax_nan/__hmin_nan
-    //    equivalent. Only meaningful for fp16/bf16 max/min/absmax; other
-    //    dtypes ignore the flag.
+    //    equivalent for fp16/bf16 max/min/absmax.
     if (op.nan_propagate &&
         (op.dst->dtype.is_float16() || op.dst->dtype.is_bfloat16())) {
       LOG(FATAL) << "CPU reduce does not support nan_propagate=True for "

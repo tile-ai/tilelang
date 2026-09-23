@@ -100,6 +100,14 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
       node->nan_propagate = i.value()->value != 0;
     }
   }
+  if (node->nan_propagate &&
+      (node->type->IsMax() || node->type->IsMin() || node->type->IsAbsMax())) {
+    CHECK(node->dst->dtype.is_float16() || node->dst->dtype.is_bfloat16(),
+          ValueError)
+        << "reduce_" << reduce_type
+        << " with nan_propagate=True requires float16 or bfloat16 output, got "
+        << node->dst->dtype;
+  }
   data_ = std::move(node);
 }
 
