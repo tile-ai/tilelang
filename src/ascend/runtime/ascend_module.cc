@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -361,6 +362,35 @@ enum class AclKernelType : int64_t {
 constexpr int32_t kAclFuncAttrKernelType = 1;
 constexpr int32_t kAclFuncAttrKernelRatio = 2;
 
+bool TryGetLogicDeviceId(int32_t user_device_id, int32_t *logic_device_id) {
+  // The user-to-logic mapping is stable for the process lifetime, so cache it
+  // and avoid an ioctl plus a redundant ACL API report on every launch.
+  static std::mutex cache_mutex;
+  static std::unordered_map<int32_t, int32_t> cache;
+  {
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache.find(user_device_id);
+    if (it != cache.end()) {
+      *logic_device_id = it->second;
+      return true;
+    }
+  }
+  const AclError result =
+      aclrtGetLogicDevIdByUserDevId(user_device_id, logic_device_id);
+  if (result != kAclSuccess) {
+    static std::atomic<bool> warned{false};
+    if (!warned.exchange(true, std::memory_order_relaxed)) {
+      LOG(WARNING) << "Ascend profiling could not map user device "
+                   << user_device_id << " to a logic device: " << result
+                   << "; skipping native reports";
+    }
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(cache_mutex);
+  cache[user_device_id] = *logic_device_id;
+  return true;
+}
+
 AscendProfiler::KernelInfo QueryKernelInfo(AclFuncHandle function,
                                            const std::string &kernel_name) {
   AscendProfiler::KernelInfo info;
@@ -538,7 +568,15 @@ public:
   AclError operator()(Launch &&launch, const std::string &kernel_name,
                       AclFuncHandle function, int32_t device_id,
                       uint32_t num_blocks) const {
-    const uint64_t flags = profiler_->GetCollectionFlags(device_id);
+    if (!profiler_->IsCollecting()) {
+      return launch();
+    }
+    // ACL launches use user IDs, while Msprof callbacks report logic IDs.
+    int32_t logic_device_id = 0;
+    if (!TryGetLogicDeviceId(device_id, &logic_device_id)) {
+      return launch();
+    }
+    const uint64_t flags = profiler_->GetCollectionFlags(logic_device_id);
     if (flags == 0) {
       return launch();
     }

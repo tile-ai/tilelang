@@ -127,6 +127,9 @@ AscendCLAPI CreateAscendCLAPI() {
   api.aclrtGetFunctionAttribute_ =
       GetSymbol<decltype(api.aclrtGetFunctionAttribute_)>(
           handle, "aclrtGetFunctionAttribute");
+  api.aclrtGetLogicDevIdByUserDevId_ =
+      GetSymbol<decltype(api.aclrtGetLogicDevIdByUserDevId_)>(
+          handle, "aclrtGetLogicDevIdByUserDevId");
   return api;
 }
 
@@ -218,6 +221,18 @@ int32_t aclrtGetFunctionAttribute(void *func, int32_t attrType,
     return 1;
   }
   return api->aclrtGetFunctionAttribute_(func, attrType, attrValue);
+}
+
+int32_t aclrtGetLogicDevIdByUserDevId(int32_t userDeviceId,
+                                      int32_t *logicDeviceId) {
+  // Best-effort profiling path: never throw, callers treat nonzero as the
+  // mapping being unavailable.
+  AscendCLAPI *api = AscendCLAPI::get_or_null();
+  if (!AscendCLAPI::is_available() ||
+      api->aclrtGetLogicDevIdByUserDevId_ == nullptr) {
+    return 1;
+  }
+  return api->aclrtGetLogicDevIdByUserDevId_(userDeviceId, logicDeviceId);
 }
 
 } // extern "C"
