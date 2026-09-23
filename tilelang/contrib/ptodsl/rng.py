@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from ptodsl import pto, scalar
-
-from .common import ushr
+from ptodsl import pto
 
 
 class PhiloxRNG:
@@ -29,18 +27,15 @@ class PhiloxRNG:
 
     @staticmethod
     def _as_ui64(value):
-        return scalar.cast(value, pto.ui64)
+        return pto.cast(value, pto.ui64)
 
     @staticmethod
     def _split_ui64(value):
-        value = scalar.cast(value, pto.ui64)
-        low = scalar.cast(value, pto.i32)
-        high = ushr(
-            value,
-            pto.const(32, dtype=pto.i64),
-            pto.i64,
+        value = pto.cast(value, pto.ui64)
+        low = pto.cast(value, pto.i32)
+        high = pto.cast(
+            value >> pto.const(32, dtype=pto.ui64),
             pto.i32,
-            context="philox split ui64",
         )
         return low, high
 
@@ -63,12 +58,12 @@ class PhiloxRNG:
         block_delta = draw_index // four
         lane_offset = self.base_lane + draw_index % four
         lane_block_delta = lane_offset // four
-        lane = scalar.cast(lane_offset % four, pto.i32)
+        lane = pto.cast(lane_offset % four, pto.i32)
 
         counter_before_lane = self.base_counter_lo + block_delta
-        carry = scalar.cast(counter_before_lane < self.base_counter_lo, pto.ui64)
+        carry = pto.cast(counter_before_lane < self.base_counter_lo, pto.ui64)
         counter_lo = counter_before_lane + lane_block_delta
-        carry = carry + scalar.cast(counter_lo < counter_before_lane, pto.ui64)
+        carry = carry + pto.cast(counter_lo < counter_before_lane, pto.ui64)
         counter_hi = self.base_counter_hi + carry
         c0, c1 = self._split_ui64(counter_lo)
         c2, c3 = self._split_ui64(counter_hi)
@@ -92,17 +87,23 @@ class PhiloxRNG:
 
         one = pto.const(1, dtype=pto.i32)
         two = pto.const(2, dtype=pto.i32)
-        result = scalar.select(lane == one, c1, c0)
-        result = scalar.select(lane == two, c2, result)
-        result = scalar.select(lane == pto.const(3, dtype=pto.i32), c3, result)
+        result = pto.select(lane == one, c1, c0)
+        result = pto.select(lane == two, c2, result)
+        result = pto.select(lane == pto.const(3, dtype=pto.i32), c3, result)
         return result, draw_index + pto.const(1, dtype=pto.ui64)
 
     def rand_uniform(self, draw_index):
         _u, draw_index = self.rand(draw_index)
-        _f = pto.convert(_u, pto.f32, rounding="r", saturation="nosat", signedness="unsigned")
-        result = _f * pto.const(self._RAND_2POW32_INV, dtype=pto.f32) + pto.const(
-            self._RAND_2POW32_INV_HALF, dtype=pto.f32
+        # Philox words are carried as i32 bit patterns. Re-author the value as
+        # unsigned before converting so high-bit words map to positive floats.
+        _u = pto.cast(_u, pto.ui32)
+        _f = pto.cast(
+            _u,
+            pto.f32,
+            rounding="to_nearest_even",
+            saturation="nosat",
         )
+        result = _f * pto.const(self._RAND_2POW32_INV, dtype=pto.f32) + pto.const(self._RAND_2POW32_INV_HALF, dtype=pto.f32)
         return result, draw_index
 
     def rand_normal(self, draw_index, normal_cache, has_normal):
@@ -112,11 +113,9 @@ class PhiloxRNG:
         u2, draw_index = self.rand_uniform(draw_index)
 
         eps = pto.const(self._BOX_MULLER_EPS, dtype=pto.f32)
-        u1 = scalar.select(u1 < eps, eps, u1)
+        u1 = pto.select(u1 < eps, eps, u1)
         angle = pto.const(self._BOX_MULLER_TWO_PI, dtype=pto.f32) * u2
-        radius = pto.sqrt(
-            pto.const(-self._BOX_MULLER_TWO, dtype=pto.f32) * pto.log(u1)
-        )
+        radius = pto.sqrt(pto.const(-self._BOX_MULLER_TWO, dtype=pto.f32) * pto.log(u1))
         # AscendC calls sincosf(angle, &normal0, &normal1), whose output
         # pointer order is sine followed by cosine.
         normal0 = radius * pto.sin(angle)
@@ -125,12 +124,12 @@ class PhiloxRNG:
         zero = pto.const(0, dtype=pto.i32)
         one = pto.const(1, dtype=pto.i32)
         use_cache = has_normal != zero
-        result = scalar.select(use_cache, normal_cache, normal0)
-        next_draw_index = scalar.select(
-            use_cache, initial_draw_index, draw_index
-        )
-        next_normal_cache = scalar.select(use_cache, normal_cache, normal1)
-        next_has_normal = scalar.select(use_cache, zero, one)
+        result = pto.select(use_cache, normal_cache, normal0)
+        # pto.select strips integer signedness; re-author as ui64 so the
+        # loop-carried draw index keeps its type.
+        next_draw_index = self._as_ui64(pto.select(use_cache, initial_draw_index, draw_index))
+        next_normal_cache = pto.select(use_cache, normal_cache, normal1)
+        next_has_normal = pto.select(use_cache, zero, one)
         return (
             result,
             next_draw_index,

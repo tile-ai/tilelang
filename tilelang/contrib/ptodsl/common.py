@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from ptodsl import pto, scalar
-from ptoas.mlir.dialects import arith
+from ptodsl import pto
 from ptoas.mlir.ir import IntegerType
 from ptodsl._ops import (
     _coerce_i1,
@@ -83,28 +82,3 @@ def if_then_else(condition, true_fn, false_fn):
         with branch.else_:
             branch.assign(value=false_fn())
     return branch.value
-
-
-def scalar_cast(value, dtype, *, context):
-    """Cast a traced scalar/vector through PTOAS public scalar.cast."""
-    return scalar.cast(value, dtype)
-
-
-def scalar_bitcast(value, bitcast_dtype, *, source_dtype=None, final_dtype=None):
-    """Bitcast a traced scalar while preserving authored integer types."""
-    src = unwrap_surface_value(value)
-    if source_dtype is not None:
-        src = coerce_runtime_integer_value(src, source_dtype.resolve(), context="PTO scalar bitcast input")
-    result = arith.BitcastOp(bitcast_dtype.resolve(), src).result
-    if final_dtype is not None:
-        result = coerce_runtime_integer_value(result, final_dtype.resolve(), context="PTO scalar bitcast result")
-    return wrap_surface_value(result)
-
-
-def ushr(value, shift, bitcast_dtype, final_dtype, *, context):
-    """Emit an unsigned scalar right shift with explicit traced types."""
-    lhs = coerce_runtime_integer_value(unwrap_surface_value(value), bitcast_dtype.resolve(), context=context)
-    rhs = coerce_runtime_integer_value(unwrap_surface_value(shift), bitcast_dtype.resolve(), context=context)
-    result = arith.ShRUIOp(lhs, rhs).result
-    result = coerce_runtime_integer_value(result, final_dtype.resolve(), context=context)
-    return wrap_surface_value(result)
