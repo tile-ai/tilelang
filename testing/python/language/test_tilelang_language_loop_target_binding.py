@@ -1,5 +1,7 @@
 """Loop induction bindings must not assign to older mutable scalar bindings."""
 
+import logging
+
 import pytest
 import torch
 
@@ -45,13 +47,83 @@ def make_kernel(kind, live=False):
 @pytest.mark.parametrize("live", [False, True])
 def test_loop_target_is_not_buffer_store(kind, live):
     kernel = make_kernel(kind, live)
+    # Only initialization writes d; introducing another loop cannot write it.
+    assert count_local_var_stores(kernel) == 1
+
+
+def count_local_var_stores(kernel):
     stores = []
     tvm.tirx.stmt_functor.post_order_visit(
         kernel.body, lambda node: stores.append(node) if isinstance(node, tvm.tirx.BufferStore) else None
     )
-    # Only initialization writes d; introducing another loop cannot write it.
-    local_stores = [node for node in stores if node.buffer.scope() == "local.var"]
-    assert len(local_stores) == 1
+    return len([node for node in stores if node.buffer.scope() == "local.var"])
+
+
+def test_stepped_loop_target_over_live_var_does_not_warn(caplog):
+    # The tilelang logger does not propagate to the root logger caplog listens on.
+    builder_logger = logging.getLogger("tilelang.language.eager.builder")
+    builder_logger.addHandler(caplog.handler)
+    try:
+        make_kernel("stepped", live=True)
+    finally:
+        builder_logger.removeHandler(caplog.handler)
+    assert "re-bound" not in caplog.text
+
+
+def expired_var_kernel():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "int32")):
+        with T.Kernel(1, threads=1):
+            for j in T.serial(2):
+                d = T.alloc_var("int32", init=j)
+                A[j] = d
+            for k in T.serial(2):
+                # `d` from the finished loop is unbound here; this is a fresh
+                # binding, not a store into the old variable.
+                d = k + 10
+                A[2 + k] = d
+
+    return kernel
+
+
+def test_assignment_to_expired_var_is_fresh_binding():
+    assert count_local_var_stores(expired_var_kernel()) == 1
+
+
+@tilelang.testing.requires_cuda
+def test_assignment_to_expired_var_execution():
+    result = torch.full((4,), -1, dtype=torch.int32, device="cuda")
+    tilelang.compile(expired_var_kernel())(result)
+    torch.testing.assert_close(result.cpu(), torch.tensor([0, 1, 10, 11], dtype=torch.int32), rtol=0, atol=0)
+
+
+def test_assignment_to_live_var_in_nested_regions_is_store():
+    @T.prim_func
+    def kernel(A: T.Tensor((1,), "int32")):
+        with T.Kernel(1, threads=1):
+            d = T.alloc_var("int32", init=0)
+            for j in T.serial(2):
+                if j == 1:
+                    d = d + j
+            A[0] = d
+
+    # init plus the conditional update: `d` is bound in an enclosing region
+    # that is still open, so the assignment stays a store.
+    assert count_local_var_stores(kernel) == 2
+
+
+@tilelang.testing.requires_cuda
+def test_tuple_loop_target_ignores_underscore_var():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "int32")):
+        with T.Kernel(1, threads=1):
+            _ = T.alloc_var("int32", init=0)
+            for i, j in T.grid(2, 2):
+                A[i * 2 + j] = i * 2 + j
+
+    result = torch.full((4,), -1, dtype=torch.int32, device="cuda")
+    tilelang.compile(kernel)(result)
+    torch.testing.assert_close(result.cpu(), torch.tensor([0, 1, 2, 3], dtype=torch.int32), rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda

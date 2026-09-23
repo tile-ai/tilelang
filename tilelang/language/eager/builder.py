@@ -567,9 +567,15 @@ class Builder(BaseBuilder):
             else:
                 return orig_value
 
-        # A loop target introduces a new induction binding, not a store into
-        # an existing Ref/alloc_var with the same Python name.
-        orig_value = self.empty if loop_target else locals.get(name, self.empty)
+        # An existing Ref/alloc_var is only a store target while the region
+        # that bound the name is still open; once that region has closed the
+        # name is unbound, exactly as `rval` already treats reads of it. Loop
+        # targets always introduce a fresh induction binding, and `_` is the
+        # rewriter's throwaway name for temporaries.
+        if loop_target or name == "_" or self.binding_expired(name):
+            orig_value = self.empty
+        else:
+            orig_value = locals.get(name, self.empty)
 
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
@@ -621,13 +627,18 @@ class Builder(BaseBuilder):
         if name != "_":
             frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-            if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
+            if not loop_target and name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
                 logger.warning(
                     f"Immutable value `{name}` is re-bound; use T.alloc_var to create a mutable variable.",
                     stacklevel=2,
                 )
             self.name_inside_frame[name] = self.frames[frame]
         return res
+
+    def binding_expired(self, name: str) -> bool:
+        """Whether `name` was last bound inside a TIR region that has since closed."""
+        frame = self.name_inside_frame.get(name)
+        return frame is not None and frame not in self.frames
 
     def unwrap_value(self, value):
         """
@@ -825,13 +836,11 @@ class Builder(BaseBuilder):
             raise AssertionError(msg)
 
     def rval(self, name: str, value: Any) -> Any:
-        if name in self.name_inside_frame:
-            frame = self.name_inside_frame[name]
-            if frame not in self.frames:
-                raise RuntimeError(
-                    f"Immutable variable `{name}` is used outside its defining region!\n"
-                    f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
-                )
+        if self.binding_expired(name):
+            raise RuntimeError(
+                f"Immutable variable `{name}` is used outside its defining region!\n"
+                f"variable `{name}` is defined in frame: {self.name_inside_frame[name]}, current frames: {self.frames}."
+            )
         return self.unwrap_value(value)
 
     def macro_arg(self, name, value):
