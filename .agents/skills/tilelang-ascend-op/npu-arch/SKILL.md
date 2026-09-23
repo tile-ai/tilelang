@@ -39,7 +39,7 @@ Pass `full_soc`, `npu_arch` and full `evidence` to subsequent design, generation
 | **NpuArch** | Chip architecture number, defines the instruction set and microarchitecture, obtained through `GetCurNpuArch()` at runtime |
 | **SocVersion** | System-on-chip version, software naming identifier, obtained through `GetSocVersion()` at runtime |
 | **__NPU_ARCH__** | Device side compilation macro, four-digit value, used for conditional compilation |
-| **archXX** | The abbreviation of the operator warehouse directory, take the first two digits of the DAV number (such as DAV_3510 → arch35) |
+| **archXX** | The abbreviation of the operator warehouse directory, taking the first two digits of the DAV number (`DAV_3510` → `arch35`) |
 | **__DAV_C310__** | Build system internal macro, equivalent to `NpuArch::DAV_3510` / `arch35` / `__NPU_ARCH__=3510`, cannot be inferred numerically |
 
 ## Complete mapping table
@@ -52,7 +52,7 @@ For complete product series / SocVersion / NpuArch / chip model mapping, see [`n
 #include "utils/tiling/platform/platform_ascendc.h"
 
 auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-NpuArch npuArch = ascendcPlatform.GetCurNpuArch();         // DAV_2201 / DAV_3510 / ...
+NpuArch npuArch = ascendcPlatform.GetCurNpuArch();         // DAV_3510 for the supported A5 workflow
 platform_ascendc::SocVersion socVer = ascendcPlatform.GetSocVersion();
 ```
 
@@ -60,30 +60,30 @@ platform_ascendc::SocVersion socVer = ascendcPlatform.GetSocVersion();
 
 These interfaces are used to confirm the runtime architecture and resources on the identified device; `GetSocVersion()` does not replace the `full_soc` probe described above, nor does it alone differentiate between all Ascend950 SKUs.
 
-## Key changes between DAV_3510 and DAV_2201
+## DAV_3510 hardware summary
 
 > For detailed hardware parameter true values, see `references/npu-hardware-params.md`. The actual value must be obtained through the `PlatformAscendC` interface at runtime, and hard coding is prohibited.
 
 ### Buffer (usually consistent within the same architecture)
 
-| Buffer | DAV_2201 | DAV_3510 |
-|--------|----------|----------|
-| L0C | 128 KB | 256 KB |
-| UB | 192 KB | 248 KB |
-| BT | 1 KB | 4 KB |
+| Buffer | DAV_3510 |
+|--------|----------|
+| L0C | 256 KB |
+| UB | 248 KB available per AIV user |
+| BT | 4 KB |
 
 ### Frequency/number of cores/L2/Memory (depends on model/form)
 
-| Parameters | Ascend910B2 (DAV_2201) | Ascend950PR PCIE | Ascend950PR Server |
-|------|------------------------|------------------|-------------------|
-| Cube core count | 24 | 28 | 32 |
-| Frequency | 1.8 GHz | 1.65 GHz | 1.65 GHz |
-| L2 | 192 MB | 112 MB | 128 MB |
-| Memory | 64 GB | 112 GB | 128 GB |
+| Parameters | Ascend950PR PCIE | Ascend950PR Server |
+|------|------------------|-------------------|
+| Cube core count | 28 | 32 |
+| Frequency | 1.65 GHz | 1.65 GHz |
+| L2 | 112 MB | 128 MB |
+| Memory | 112 GB | 128 GB |
 
 > For details, see [Typical SKU Example](references/npu-hardware-params.md#Sub-model change parameters).
 >
-> Memory bandwidth: 950PR has two levels of 1.6/1.4 TB/s, and the recorded specification of 950DT is 4 TB/s; it must match the specific specification file with the complete `full_soc`, and cannot be selected only by the PR/DT product family. The 950 specifications are shown in Table 3-1 of the white paper. The 910B2 is still public information and experience values. For details, see `npu-hardware-params.md` §4.
+> Memory bandwidth: 950PR has two levels of 1.6/1.4 TB/s, and the recorded specification of 950DT is 4 TB/s; it must match the specific specification file with the complete `full_soc`, and cannot be selected only by the PR/DT product family. The 950 specifications are shown in Table 3-1 of the white paper. For details, see `npu-hardware-params.md` §4.
 
 ### Instruction set and microarchitecture
 

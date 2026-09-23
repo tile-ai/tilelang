@@ -29,7 +29,7 @@ This document describes the architectural generational division of Ascend NPU an
 | **NpuArch** | Chip architecture number, defines the instruction set and microarchitecture, obtained through `GetCurNpuArch()` at runtime |
 | **SocVersion** | System-on-chip version, software naming identifier, obtained through `GetSocVersion()` at runtime |
 | **__NPU_ARCH__** | Device side compilation macro, four-digit value, used for conditional compilation |
-| **archXX** | The abbreviation of the operator warehouse architecture directory, take the first two digits of the DAV number, such as arch22, arch35 |
+| **archXX** | The abbreviation of the operator warehouse architecture directory, taking the first two digits of the DAV number, such as `arch35` |
 
 ### Architecture directory abbreviation (archXX)
 
@@ -37,29 +37,26 @@ Directories divided by architecture in the operator warehouse are named using `a
 
 | Catalog | Corresponding to NpuArch | Chip |
 |------|-------------|------|
-| **arch22** | DAV_2201 | Ascend910B series, Ascend910_93 |
 | **arch35** | DAV_3510 | Ascend950DT / Ascend950PR |
 
-> Naming rule: `archXX` = `arch` + the first two digits of the DAV number. For example, DAV_**22**01 → arch22, DAV_**35**10 → arch35.
+> Naming rule: `archXX` = `arch` + the first two digits of the DAV number. For the supported A5 architecture, DAV_**35**10 → arch35.
 
 ### Architecture code alias
 
 | Codename | Corresponds to SocVersion | Corresponds to NpuArch | Description |
 |-----|----------------|-------------|------|
-| **A2** | ASCEND910B | DAV_2201 | Ascend910B1~B4, Ascend910B2C |
-| **A3** | ASCEND910B (including Ascend910_93) | DAV_2201 | Training/inference chip |
 | **A5** | ASCEND950 | DAV_3510 | Ascend950DT (Decode) / Ascend950PR (Prefill) |
 
-**Core relationship: one-to-many**
+**Model relationship**
 
-One NpuArch can correspond to multiple SocVersion. For example, `DAV_2201` corresponds to Ascend910B1~B4, Ascend910B2C, and Ascend910_93.
+The `ASCEND950` / `DAV_3510` architecture identity covers multiple Ascend950PR and Ascend950DT SKUs. Architecture-level capabilities come from `npu_arch=3510`, while SKU-dependent resources and peaks must be selected with the complete `full_soc` and trusted specifications.
 
 > **Note**: For NPU core operator development, it is usually not necessary to be aware of the specific SocVersion. Using NpuArch to distinguish chips is beneficial to ease of use and maintainability.
 
 ### Key details
 
 - `DAV_RESV` is the error return value of `GetCurNpuArch()`: returned when acquisition fails, string conversion fails, or value <= 0
-- For details on the runtime mapping relationship of `Ascend910_93`, see [`npu-hardware-params.md` §0](npu-hardware-params.md#0-product mapping table)
+- `RESERVED_VERSION` is the error return value of `GetSocVersion()`; neither failure value may be treated as A5 evidence
 
 ---
 
@@ -73,26 +70,26 @@ For complete product series / SocVersion / NpuArch / chip model mapping, see [`n
 
 > ⚠️ **Core Principle**: This section serves as the upstream true source of NPU architecture knowledge in the skills warehouse. Downstream skills should consume the data in this section. **Reverse self-reference is considered a risk**.
 >
-> The table shows **typical specification values** (family specifications). Specific SKUs may be tailored (for example, Ascend910B3 / Ascend910B4 both have 20 cores). The visible value of a single instance after vNPU splitting is lower. **The actual value must be obtained through the interface below when the operator is running**. Hard-coding typical values ​​will be out of bounds or wasted.
+> The table shows **typical specification values** for selected A5 SKUs. Other Ascend950PR/DT SKUs and vNPU instances may expose different resources. **The actual value must be obtained through the interface below when the operator is running**. Hard-coding typical values will cause out-of-bounds access or wasted capacity.
 >
 > For complete parameter reference (architecture constants/typical SKUs/based on public information and experience values), see `npu-hardware-params.md`.
 
 ### Computing power and system specifications
 
-| Specifications | Ascend910B2 (DAV_2201) | Ascend950PR PCIE (DAV_3510) | Ascend950PR Server (DAV_3510) |
-|--------|:---:|:---:|:---:|
-| CubeCore core count | **24** | **28** | **32** |
-| Frequency (GHz) | 1.8 | 1.65 | 1.65 |
-| Cube computing power BF16/FP16 | 353T | 378T | 432T |
-| Cube computing power FP8/HiF8/MXFP8 | — | 757T | 865T |
-| Cube computing power MXFP4 | — | 1514T | 1730T |
-| Vector computing power FP16 | 22T | 47T [²](#whitepaper) | 54T [²](#whitepaper) |
-| Memory capacity (GB) | 64 | 112 | 128 |
-| Memory bandwidth | 1.6 TB/s [¹](#unverified) | 1.4 TB/s [²](#whitepaper) | 1.6 TB/s [²](#whitepaper) |
+| Specifications | Ascend950PR PCIE (DAV_3510) | Ascend950PR Server (DAV_3510) |
+|--------|:---:|:---:|
+| CubeCore core count | **28** | **32** |
+| Frequency (GHz) | 1.65 | 1.65 |
+| Cube computing power BF16/FP16 | 378T | 432T |
+| Cube computing power FP8/HiF8/MXFP8 | 757T | 865T |
+| Cube computing power MXFP4 | 1514T | 1730T |
+| Vector computing power FP16 | 47T [²](#whitepaper) | 54T [²](#whitepaper) |
+| Memory capacity (GB) | 112 | 128 |
+| Memory bandwidth | 1.4 TB/s [²](#whitepaper) | 1.6 TB/s [²](#whitepaper) |
 
 > **Contrast with White Paper Table 3-1**: The official specifications of 950PR are Cube 32/28 core and Vector 64/56 core, which are consistent with the two levels of Server/PCIE in this table (PCIE/Server naming comes from INI SKU, and the white paper is not marked according to the form); the derived values of computing power, memory, and L2 in the table are consistent with the official values, only the PCIE of FP8/MXFP4 Files are officially marked by rounding down (see FP8 derivation note).
 
-> **Note**: The above are typical values for selected submodels (true source: `platform_config/*.ini`). **The core number, frequency, L2, Memory, etc. of other sub-models of the same architecture are different** (such as 910B4 core number 20@1.5GHz / L2 96MB / Memory 32GB). For details, see `npu-hardware-params.md` for typical SKU examples.
+> **Note**: The above are typical values for selected submodels (true source: `platform_config/*.ini`). **Core count, frequency, L2, Memory, and peak values may differ among other Ascend950PR/DT SKUs.** For details, see `npu-hardware-params.md` for typical SKU examples.
 
 #### Cube calculation power formula derivation
 
@@ -107,8 +104,8 @@ TFLOPS = M × K × N × number of cores × cube_freq(MHz) × 2 ÷ 10⁶
 | Parameter | Value | Source |
 |------|:--:|------|
 | M × K × N (Cube MAC array) | 16×16×16 = **4096** | INI `cube_m_size=cube_k_size=cube_n_size=16` |
-| AICore core number | 24(910B2) / 28(PCIE) / 32(Server) | INI `[SoCInfo] ai_core_cnt` |
-| cube_freq | 1800(910B2) / 1650(950PR) MHz | INI `[AICoreSpec] cube_freq` |
+| AICore core number | 28(PCIE) / 32(Server) | INI `[SoCInfo] ai_core_cnt` |
+| cube_freq | 1650 MHz for the listed 950PR SKUs | INI `[AICoreSpec] cube_freq` |
 | ×2 | FMA counts as 2 floating point operations | 1 MAC = 1 multiply + 1 add |
 | ÷10⁶ | MAC/s → TFLOPS | TFLOPS = 10¹² FLOPS = 10⁶ × 10⁶ MAC×2 |
 
@@ -117,7 +114,6 @@ TFLOPS = M × K × N × number of cores × cube_freq(MHz) × 2 ÷ 10⁶
 ```
 950PR Server:  4096 × 32 × 1650 × 2 ÷ 10⁶ = 432.54 TFLOPS
 950PR PCIE:    4096 × 28 × 1650 × 2 ÷ 10⁶ = 378.47 TFLOPS
-Ascend910B2:   4096 × 24 × 1800 × 2 ÷ 10⁶ = 353.89 TFLOPS
 ```
 
 > **Cube computing power and Vector computing power**: The Cube computing power in the above table is pure Cube unit computing power, excluding Vector Core contribution. Vector computing power is listed separately, total chip computing power = Cube + Vector. The total computing power of 950PR BF16/FP16 given in Table 3-1 of the 950 white paper is 486/425T, which is the sum of Cube(432/378) + Vector(54/47) - the Vector Core of DAV_3510 has **native support for BF16** (white paper §4.1.2), and there is no restriction that BF16 can only use Cube.
@@ -154,43 +150,39 @@ Vector computing power formula (FP16):
 TFLOPS = vec_calc_size × vector_core_cnt × vec_freq(MHz) × 2(FMA) ÷ 10⁶
 ```
 
-| Parameters | 910B2 | 950PR PCIE | 950PR Server | Source |
-|------|:---:|:---:|:---:|------|
-| vec_calc_size | 128 | 128 | 128 | INI `[AICoreSpec] vec_calc_size` |
-| vector_core_cnt | 48 | 56 | 64 | INI `[SoCInfo] vector_core_cnt` |
-| Frequency (MHz) | 1800 | 1650 | 1650 | 910B2: `cube_freq` (INI no independent `vec_freq`); 950PR: `[VectorCoreSpec] vec_freq` |
-
-**910B2**: 128 × 48 × 1800 × 2 ÷ 10⁶ = **22 TFLOPS**
+| Parameters | 950PR PCIE | 950PR Server | Source |
+|------|:---:|:---:|------|
+| vec_calc_size | 128 | 128 | INI `[AICoreSpec] vec_calc_size` |
+| vector_core_cnt | 56 | 64 | INI `[SoCInfo] vector_core_cnt` |
+| Frequency (MHz) | 1650 | 1650 | INI `[VectorCoreSpec] vec_freq` |
 
 **950PR PCIE**: 128 × 56 × 1650 × 2 ÷ 10⁶ = 23.7T, including Regbase OOO dual-issue (see SIMD-Regbase section) and ×2 = **47 TFLOPS**[²](#whitepaper)
 **950PR Server**: 128 × 64 × 1650 × 2 ÷ 10⁶ = 27T, including Regbase OOO dual-issue (see SIMD-Regbase section) and ×2 = **54 TFLOPS**[²](#whitepaper)
 
-> 950 white paper confirms: Vector Core supports **dual launch + out-of-order execution (OOO)** (see §SIMD-Regbase section for architecture source), and the single-core FP16/FP32 computing power is 100% higher than the previous generation (§4.1.2); Table 3-1 Official Vector computing power FP16/BF16 = 54/47T, FP32 = 27/23T (both are Server/PCIE two-level values, each level (FP16 and BF16 are the same), consistent with the above formula. Note that not all Vector instructions support double firing.
+> The 950 white paper confirms that Vector Core supports **dual launch + out-of-order execution (OOO)** (see the SIMD-Regbase section for the architecture source). Table 3-1 lists official Vector computing power FP16/BF16 = 54/47T and FP32 = 27/23T for the Server/PCIE tiers, consistent with the above formula. Note that not all Vector instructions support dual issue.
 
 ### AIV (Vector) core number
 
-**Applicable to `CubeCore,VectorCore` type architecture**: Each Cube Core is equipped with 2 Vector Cores (DAV_2201 / DAV_3510 verified).
-
-**Not applicable**: `AICore, VectorCore` type (DAV_2002, AICore and VectorCore are not 1:2) and single-core integrated type (DAV_3002 three-in-one, DAV_1001 without independent Vec). See `npu-hardware-params.md` §3 for details.
+For the supported DAV_3510 `CubeCore,VectorCore` architecture, each Cube Core is paired with 2 Vector Cores.
 
 **The actual value is subject to `GetCoreNumAiv()`**, some SKU or vNPU instances may be cut.
 
 ### Buffer capacity (per AI Core)
 
-| Buffer | Ascend910B2 | Ascend950PR | Purpose |
-|--------|:---:|:---:|------|
-| **L1** | 512 KB | 512 KB | Cube input cache |
-| **L0A** | 64 KB | 64 KB | Cube left matrix operand |
-| **L0B** | 64 KB | 64 KB | Cube right matrix operand |
-| **L0C** | 128 KB | **256 KB** | Cube output (doubled by Ascend950PR) |
-| **UB** | 192 KB | **248 KB** | Vector workspace, separate copy for each AIV |
-| **L2** | 192 MB | **128 MB** (Server) / **112 MB** (PCIE) | Cross-core shared cache |
-| **BT** (biasSize) | 1 KB | **4 KB** | FixPipe Bias table |
-| **SSBuffer** | — | 256 KB [¹](#unverified) | **DAV_3510 New** AIC↔AIV inter-core message path |
+| Buffer | Ascend950PR | Purpose |
+|--------|:---:|------|
+| **L1** | 512 KB | Cube input cache |
+| **L0A** | 64 KB | Cube left matrix operand |
+| **L0B** | 64 KB | Cube right matrix operand |
+| **L0C** | **256 KB** | Cube output |
+| **UB** | **248 KB** | Vector workspace, separate copy for each AIV |
+| **L2** | **128 MB** (Server) / **112 MB** (PCIE) | Cross-core shared cache |
+| **BT** (biasSize) | **4 KB** | FixPipe Bias table |
+| **SSBuffer** | 256 KB [¹](#unverified) | AIC↔AIV inter-core message path |
 
 > L1/L0A/L0B/L0C/UB/BT are usually consistent within the same generation architecture, L2 and Memory may vary by model. The runtime will always be based on `GetCoreMemSize`.
 
-**About UB capacity**: 192 KB / 248 KB in the table is the return value of `GetCoreMemSize(CoreMemType::UB, ...)` on the typical SKU of the family. The specific value is subject to the interface return** to avoid hard coding.
+**About UB capacity**: 248 KB in the table is the return value of `GetCoreMemSize(CoreMemType::UB, ...)` on the listed A5 SKUs. The specific value is subject to the interface return to avoid hard coding.
 
 > **Caliber description ("by group" is an inference, the evidence chain is as follows)**: 950 White Paper Table 4-2 The original text annotation UB = **512 KB per AI Core**; the interpretation aligned with INI (available 248 KB per AIV) is: Table 4-2 is based on **AI Core group (1 AIC + 2 AIV) physical capacity**, that is, physical 256 KB × 2 per AIV. Evidence chain:
 > 1. Local CANN INI `[VectorCoreSpec] ub_size = 253952` = **248 KB** for all 950PR/950DT SKUs (available value per AIV user, i.e. `GetCoreMemSize(UB)` return value);
@@ -285,9 +277,9 @@ Determine the LocalTensor allocation location, DataCopy path selection, and pipe
 
 > DAV_3510 has optimized the performance of the scenario where multiple cores simultaneously access Global Memory with the same address. The core split template of the matrix multiplication related operator can be simplified accordingly (it is no longer necessary to design complex misalignment strategies to avoid conflicts with the same address). [¹](#unverified)
 
-### Key data path changes in DAV_3510 compared to DAV_2201
+### DAV_3510 data paths relevant to operators
 
-DAV_3510 adds three new paths so that Cube and Vector can directly exchange data and avoid GM workspace transfer (white paper §4.1.4 confirms CV direct path):
+DAV_3510 exposes three paths that allow Cube and Vector to exchange data directly and avoid GM workspace transfer (white paper §4.1.4 confirms CV direct path):
 
 1. **L0C → UBuffer**: Cube results go directly to Vector, and FixPipe outputs to UB; White Paper §4.1.1 further confirms support for **L0C → UB path quantization** (FP32/INT32 → BF16/FP16/FP8/INT8)
 2. **UBuffer ↔ L1**: Vector and Cube are directly connected in two directions (UB→L1 is a new direction) to avoid GM transfer
@@ -323,7 +315,7 @@ Each execution unit on DAV_3510 has an independent instruction queue: Scalar / C
 **SIMT is not applicable to scenarios**:
 - Large block dense BF16/FP16 matrix multiplication/convolution - SIMD + Cube pipeline is more efficient
 - Long vector sequential calculations - SIMD vectorized instructions for higher throughput
-- Pre-DAV_3510 architecture - SIMT hardware does not exist and cannot be used
+- A target without confirmed `DAV_3510` evidence is outside this Skill's supported SIMT scope
 
 SIMT on DAV_3510 provides `__global__` kernel function syntax and `<<<...>>>` startup mode (equivalent to CUDA style). Pure SIMT mode can be directly scheduled; SIMD VF and SIMT VF can be mixedly called through `__global__ __aicore__` in the same kernel function. Inline SIMT functions are declared using `__simt_vf__`.
 
@@ -413,7 +405,7 @@ DAV_3510 adds a CCU (Collective Communication Unit) dedicated communication engi
 
 ### CCU uses preconditions
 
-- **Architecture**: DAV_3510 only (with CCU on IO-Die); this option is not available on previous generation architectures
+- **Architecture**: DAV_3510 only, with CCU on IO-Die
 - **Algorithm**: general fusion operator (such as AllReduce/AllGather and MatMul fusion)
 - **Topology**: Inter-cluster communication requires hardware interconnection that supports URMA
 

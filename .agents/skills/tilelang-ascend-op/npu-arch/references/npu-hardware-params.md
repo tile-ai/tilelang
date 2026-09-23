@@ -10,25 +10,20 @@
 
 ## 0. Product mapping table
 
-List the product series, SocVersion, and specific chip models for each Ascend NPU generation by NpuArch. **This table is the authoritative source shared by SKILL.md and `npu-arch-guide.md`. Update the chip list only here.**
+List the product series, SocVersion, and specific chip models retained by this reference. **This table is the authoritative source shared by SKILL.md and `npu-arch-guide.md`. Update the chip list only here.**
 
 | Product Series | SocVersion | NpuArch | __NPU_ARCH__ | Chip Model |
 |---------|-----------|---------|:---:|---------|
 | Atlas Training Series | ASCEND910 | DAV_1001 | 1001 | Ascend910 |
 | Atlas reasoning series | ASCEND310P | DAV_2002 | 2002 | Ascend310P1, Ascend310P3, Ascend310P5, Ascend310P7 |
-| Atlas A2 training/inference | ASCEND910B | DAV_2201 | 2201 | Ascend910B1~B4, Ascend910B2C |
-| Atlas A3 Training/Inference | ASCEND910B | DAV_2201 | 2201 | Ascend910_93 |
-| Atlas 200I/500 A2 Reasoning | ASCEND310B | DAV_3002 | 3002 | Ascend310B1~B4 |
 | Atlas A5 Training | ASCEND950 | DAV_3510 | 3510 | Ascend950DT (Decode) |
 | Atlas A5 Inference | ASCEND950 | DAV_3510 | 3510 | Ascend950PR (Prefill) |
 | Mate80, Pura90 and other series | Kirin9030 | DAV_3113 | 3113 | Kirin9030 |
 | MatePad Edge, MateBookPro and other series | KirinX90 | DAV_3003 | 3003 | KirinX90 |
 
-> **One-to-many relationship**: One NpuArch can correspond to multiple SocVersion/chip models. For example, `DAV_2201` corresponds to Ascend910B1~B4, Ascend910B2C, and Ascend910_93.
+> **Model relationship**: `ASCEND950` / `DAV_3510` covers multiple Ascend950PR and Ascend950DT SKUs. Use `npu_arch=3510` for architecture-level capabilities and the complete `full_soc` for SKU-dependent resources and peaks.
 >
 > **950 Series Positioning** (950 White Paper §2/§3): **Ascend950PR** is oriented towards high-performance recommendation, large model **Prefill** and multi-modal reasoning; **Ascend950DT** covers the entire process of pre-training, post-training and inference (including **Decode** and Prefill) (see typical SKU examples for Memory specifications). (Decode)/(Prefill) in the above table are scene-focused annotations and are not the only uses.
->
-> **Runtime mapping**: The SocVersion string of `Ascend910_93` is mapped at runtime to `SocVersion::ASCEND910B` (a dependent enumeration value). Although the `SocVersion::ASCEND910_93` enumeration value (platform_ascendc.h) exists in the source code, `"Ascend910_93"` in convertMap is mapped to `ASCEND910B`, and this enumeration is only used in a few internal modules. NpuArch is also `DAV_2201`.
 
 ---
 
@@ -42,7 +37,7 @@ The following parameters are consistent across all validated **server** Ascend N
 | L0B | `[AICoreSpec] l0_b_size` | 64 KB (65536) | Cube right matrix operand |
 | Cube MAC array | `cube_m_size / cube_k_size / cube_n_size` | 16×16×16 | Complete 4096 MACs in one cycle |
 
-> **Note**: Even if the above parameters are usually the same, they should still be obtained through `GetCoreMemSize` in the code to avoid hard coding. Kirin end-side platform (DAV_3003/DAV_3113) Cube MAC array is different, DAV_3113 L0A/L0B is smaller, see §2.6/§2.7 for details.
+> **Note**: Even if the above parameters are usually the same, they should still be obtained through `GetCoreMemSize` in the code to avoid hard coding. Kirin end-side platform (DAV_3003/DAV_3113) Cube MAC array is different, and DAV_3113 L0A/L0B is smaller; see §2.4/§2.5 for details.
 
 ---
 
@@ -79,34 +74,7 @@ Generally, the following parameter values are consistent with the sub-models of 
 | Core types | `core_type_list` | `AICore,VectorCore` (no independent CubeCore) |
 | Inter-core relationship | — | The Cube function is integrated in AICore, and AICore and VectorCore have a non-1:2 relationship |
 
-### 2.3 DAV_2201 — Ascend910B / Ascend910_93 Series
-
-| Parameters | INI fields | Values |
-|------|---------|:---:|
-| NpuArch | `NpuArch` | 2201 |
-| L1 | `l1_size` | 512 KB (524288) |
-| L0C | `l0_c_size` | 128 KB (131072) |
-| UB | `ub_size` | 192 KB (196608) |
-| BT | `bt_size` | 1 KB (1024) |
-| sparsity | `sparsity` | 1 (supports 4:2) |
-| Core types | `core_type_list` | `CubeCore,VectorCore` |
-| Inter-core relationship | — | CubeCore : VectorCore = 1 : 2 |
-
-### 2.4 DAV_3002 — Ascend310B Series
-
-| Parameters | INI fields | Values |
-|------|---------|:---:|
-| NpuArch | `NpuArch` | 3002 |
-| L1 | `l1_size` | 1 MB (1048576) |
-| L0C | `l0_c_size` | 128 KB (131072) |
-| UB | `ub_size` | 248 KB (253952) |
-| BT | `bt_size` | 1 KB (1024) |
-| L2 | `l2_size` | 4 MB (4194304) |
-| sparsity | `sparsity` | 1 (supports 4:2) |
-| Core type | `core_type_list` | `AICore,VectorCore,CubeCore` (three in one) |
-| Number of cores | `ai_core_cnt / cube_core_cnt / vector_core_cnt` | All are 1 (single-core integration) |
-
-### 2.5 DAV_3510 — Ascend950DT / Ascend950PR Series
+### 2.3 DAV_3510 — Ascend950DT / Ascend950PR Series
 
 | Parameters | INI fields | Values |
 |------|---------|:---:|
@@ -121,7 +89,7 @@ Generally, the following parameter values are consistent with the sub-models of 
 
 > **Contrast with 950 white paper**: The physical capacity in Table 4-2 of the white paper is marked as L1 512KB / L0A/L0B 64KB / L0C 256KB per AI Core, consistent with INI; **UB is marked as 512KB per AI Core**, and the interpretation aligned with INI is the physical capacity (per AI Core group) (1 AIC + 2 AIV) AIV Physics 256KB × 2, "by group" size is extrapolated). INI `ub_size` 248KB is the available value per AIV user - physical 256KB − 8KB reserved = 248KB = 253952B, which exactly matches the INI (all 950PR/950DT SKUs of local CANN have been verified to be consistent). For the complete chain of evidence, see `npu-arch-guide.md` §Buffer capacity.
 
-### 2.6 DAV_3003 — KirinX90 client-side series
+### 2.4 DAV_3003 — KirinX90 client-side series
 
 > **Important Note**: KirinX90 client-side platform is used, the architecture code is `dav-l300`.
 
@@ -131,15 +99,15 @@ Generally, the following parameter values are consistent with the sub-models of 
 | AIC_version | `AIC_version` | AIC-L-300 | End-side specific version identification |
 | Number of cores | `ai_core_cnt` | 1 | **Single core** (server version multi-core) |
 | VectorCore | `vector_core_cnt` | 1 | Single VectorCore |
-| L1 | `l1_size` | 1 MB (1048576) | Same as DAV_1001/2002/3002 |
+| L1 | `l1_size` | 1 MB (1048576) | Client-side local buffer |
 | L0A | `l0_a_size` | 64 KB (65536) | **Same as Server Edition** (32 KB for DAV_3113) |
 | L0B | `l0_b_size` | 64 KB (65536) | **Same as server version** (32 KB for DAV_3113) |
-| L0C | `l0_c_size` | 128 KB (131072) | Same as DAV_2201/3002 |
-| UB | `ub_size` | 128 KB (131072) | **Smaller than server version** (DAV_2201=192KB, DAV_3510=248KB) |
+| L0C | `l0_c_size` | 128 KB (131072) | Client-side capacity |
+| UB | `ub_size` | 128 KB (131072) | **Smaller than DAV_3510 (248KB)** |
 | L2 | `l2_size` | 0 | **No L2 Cache** |
-| BT | `bt_size` | 1 KB (1024) | Same as DAV_2201/3002/3113 |
+| BT | `bt_size` | 1 KB (1024) | Client-side capacity |
 | Cube MAC array | `cube_m/n/k_size` | 16×8×16 | **N dimension is reduced by half, the server version is 16×16×16** |
-| Sparse | `sparsity` | 1 (supports 4:2) | Same as DAV_2201/3002/3113 |
+| Sparse | `sparsity` | 1 (supports 4:2) | Architecture field |
 | Core types | `core_type_list` | `AICore,VectorCore` | Cube functions are integrated in AICore |
 | vec_calc_size | `vec_calc_size` | 128 | Vector calculation unit size |
 
@@ -152,7 +120,7 @@ Generally, the following parameter values are consistent with the sub-models of 
 
 
 
-### 2.7 DAV_3113 — Kirin9030 end-side series
+### 2.5 DAV_3113 — Kirin9030 end-side series
 
 > **Important Note**: The Kirin client-side platform uses the `mobile-station` version of CANN, and development relies on the simulator rather than the actual hardware. Architecture codename `dav-l311`, `__NPU_ARCH__=3113`.
 
@@ -162,15 +130,15 @@ Generally, the following parameter values are consistent with the sub-models of 
 | AIC_version | `AIC_version` | AIC-L-311 | End-side specific version identification |
 | Number of cores | `ai_core_cnt` | 1 | **Single core** (server version multi-core) |
 | VectorCore | `vector_core_cnt` | 1 | Single VectorCore |
-| L1 | `l1_size` | 512 KB (524288) | Same as DAV_2201/3510 |
+| L1 | `l1_size` | 512 KB (524288) | Same capacity as DAV_3510 |
 | L0A | `l0_a_size` | 32 KB (32768) | **Half the size of server version** |
 | L0B | `l0_b_size` | 32 KB (32768) | **Half the size of server version** |
 | L0C | `l0_c_size` | 64 KB (65536) | **Half the size of server version** |
-| UB | `ub_size` | 128 KB (131072) | **Smaller than both DAV_2201(192KB) and DAV_3510(248KB)** |
+| UB | `ub_size` | 128 KB (131072) | **Smaller than DAV_3510 (248KB)** |
 | L2 | `l2_size` | 0 | **No L2 Cache** |
-| BT | `bt_size` | 1 KB (1024) | Same as DAV_2201/3002 |
+| BT | `bt_size` | 1 KB (1024) | Client-side capacity |
 | Cube MAC array | `cube_m/n/k_size` | 16×8×16 | **Server version of 16×16×16 variant, N dimension reduced by half** |
-| Sparse | `sparsity` | 1 (supports 4:2) | Same as DAV_2201/3002 |
+| Sparse | `sparsity` | 1 (supports 4:2) | Architecture field |
 | Core types | `core_type_list` | `AICore,VectorCore` | Cube functions are integrated in AICore |
 | vec_calc_size | `vec_calc_size` | 128 | Vector calculation unit size |
 
@@ -196,11 +164,10 @@ Generally, the following parameter values are consistent with the sub-models of 
 >
 > | Architecture | Example Model | CubeCore | VectorCore | Frequency | L2 | Memory |
 > |------|---------|:---:|:---:|:---:|:---:|:---:|
-> | DAV_2201 | Ascend910B2 | 24 | 48 | 1.8 GHz | 192 MB | 64 GB |
 > | DAV_3510 (PCIE) | Ascend950PR_957b | 28 | 56 | 1.65 GHz | 112 MB | 112 GB |
 > | DAV_3510 (Server) | Ascend950PR_9589 | 32 | 64 | 1.65 GHz | 128 MB | 128 GB |
 >
-> > Note: CubeCore : VectorCore = 1 : 2 in DAV_2201 / DAV_3510.
+> > Note: CubeCore : VectorCore = 1 : 2 in DAV_3510.
 > >
 >
 > **Ascend950DT** (950 White Paper Table 3-1): Cube 36/32/28 core, Vector 72/64/56 core three levels; Memory 144/96 GB @ 4TB/s; L2 128MB; Cube BF16 486/432/378T, FP8 family 973/865/756T, MXFP4 1946/1730/1513T; Vector FP16/BF16 60/54/47T (three gears, each gear FP16=BF16). 950PR is 32/28 core two-tier (128/112GB @ 1.6/1.4TB/s, L2 128/112MB), which is consistent with the INI data in the above table.
@@ -212,18 +179,18 @@ Generally, the following parameter values are consistent with the sub-models of 
 
 ## 3. Quick review of key architectural differences
 
-| Features | DAV_1001 | DAV_2002 | DAV_2201 | DAV_3002 | DAV_3510 | DAV_3003 (Kirin) | DAV_3113 (Kirin) |
-|------|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Core Type | AICore | AICore+VectorCore | CubeCore+VectorCore | AICore+VectorCore+CubeCore | CubeCore+VectorCore | AICore+VectorCore | AICore+VectorCore |
-| Cube:Vec Ratio | N/A (No Vec) | Not 1:2 | 1:2 | N/A (Single Core) | 1:2 | N/A (Single Core) | N/A (Single Core) |
-| L1 | 1 MB | 1 MB | 512 KB | 1 MB | 512 KB | 1 MB | 512 KB |
-| L0A | 64 KB | 64 KB | 64 KB | 64 KB | 64 KB | 64 KB | **32 KB** |
-| L0B | 64 KB | 64 KB | 64 KB | 64 KB | 64 KB | 64 KB | **32 KB** |
-| L0C | 256 KB | 256 KB | 128 KB | 128 KB | 256 KB | 128 KB | 64 KB |
-| UB | 256 KB | 256 KB | 192 KB | 248 KB | 248 KB | 128 KB | 128 KB |
-| BT | — | — | 1 KB | 1 KB | 4 KB | 1 KB | 1 KB |
-| Sparse 4:2 | — | — | Supported | Supported | Not supported | Supported | Supported |
-| Cube Array | 16³ | 16³ | 16³ | 16³ | 16³ | **16×8×16** | **16×8×16** |
+| Features | DAV_1001 | DAV_2002 | DAV_3510 | DAV_3003 (Kirin) | DAV_3113 (Kirin) |
+|------|:--:|:--:|:--:|:--:|:--:|
+| Core Type | AICore | AICore+VectorCore | CubeCore+VectorCore | AICore+VectorCore | AICore+VectorCore |
+| Cube:Vec Ratio | N/A (No Vec) | Not 1:2 | 1:2 | N/A (Single Core) | N/A (Single Core) |
+| L1 | 1 MB | 1 MB | 512 KB | 1 MB | 512 KB |
+| L0A | 64 KB | 64 KB | 64 KB | 64 KB | **32 KB** |
+| L0B | 64 KB | 64 KB | 64 KB | 64 KB | **32 KB** |
+| L0C | 256 KB | 256 KB | 256 KB | 128 KB | 64 KB |
+| UB | 256 KB | 256 KB | 248 KB | 128 KB | 128 KB |
+| BT | — | — | 4 KB | 1 KB | 1 KB |
+| Sparse 4:2 | — | — | Not supported | Supported | Supported |
+| Cube Array | 16³ | 16³ | 16³ | **16×8×16** | **16×8×16** |
 
 ---
 
@@ -237,14 +204,14 @@ The following information cannot be derived directly from the currently installe
 |---|------|---------|---------|
 | 1 | SIMT Register File 128KB | Guide §5 SIMT vs SIMD | Public information / experience value |
 | 2 | SIMT DCache Max 128KB | Guide §5 SIMT vs SIMD | Same as above |
-| 3 | SSBuffer 256KB | Guide §3 Buffer Capacity / SKILL.md §DAV_3510 Key Changes | Same as above |
-| 4 | CV direct path: L0C→UB, UB→L1, SSBuffer message | Guide §4 Key data path changes / SKILL.md §DAV_3510 Key changes | L0C→UB (including path quantization) and L1↔UB direct connection: 950 White Paper §4.1.1/§4.1.4; SSBuffer message path: public information / experience value |
+| 3 | SSBuffer 256KB | Guide §3 Buffer Capacity / SKILL.md §DAV_3510 hardware summary | Same as above |
+| 4 | CV direct path: L0C→UB, UB→L1, SSBuffer message | Guide §4 DAV_3510 data paths / SKILL.md §DAV_3510 hardware summary | L0C→UB (including path quantization) and L1↔UB direct connection: 950 White Paper §4.1.1/§4.1.4; SSBuffer message path: public information / experience value |
 | 5 | L1→GM and GM→L0A/L0B paths removed | Guide §4 Key data path changes | Public information/experience points |
-| 6 | BufferID replaces set/wait synchronization | Guide §4 Instruction sequence and BufferID synchronization / SKILL.md §DAV_3510 Key changes | 950 White Paper §4.1.6 |
+| 6 | BufferID replaces set/wait synchronization | Guide §4 Instruction sequence and BufferID synchronization / SKILL.md §DAV_3510 hardware summary | 950 White Paper §4.1.6 |
 | 7 | Multi-core simultaneous access to GM with the same address performance optimization | Guide §4 MTE data transfer engine | Public information / experience value |
 | 8 | SIMD-Regbase: OOO instruction dual issuance | Guide §6 SIMD-Regbase | 950 White Paper §3/§4.1.2/§4.1.3 |
 | 9 | Warp Scheduler 4 per AIV | Guide §5 SIMT vs SIMD | Public Information / Experience Points |
 | 10 | NDDMA + ND-DMA Cache Specifications | Guide §8 NDDMA High-dimensional DMA | 950 White Paper §4.1.5 |
 | 11 | CCU three communication paradigms and KFC scheduling changes | Guide §9 CCU general computing integration | CCU hardware architecture and algorithm support: 950 white paper §4.6.4; three communication paradigms and KFC scheduling details: public information / experience value |
 | 12 | Vector computing power 950PR Server=54T / PCIE=47T: Baseline 27T/23.7T × Dual-Issue 2, but not all Vector instructions support dual-Issue | Guide §3 Computing power and system specifications → Vector computing power derivation | 950 White Paper Table 3-1 + §3/§4.1.2/§4.1.3 |
-| 13 | Memory bandwidth Server 1.6 TB/s / PCIE 1.4 TB/s | Guide §3 Computing power and system specifications | 950 White Paper Table 3-1/§4.3.1; 910B2 bandwidth is still public information / experience value |
+| 13 | Memory bandwidth Server 1.6 TB/s / PCIE 1.4 TB/s | Guide §3 Computing power and system specifications | 950 White Paper Table 3-1/§4.3.1 |

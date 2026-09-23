@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": 1,
-      "title": "Overview and core concepts of architecture generations",
+      "title": "A5 architecture identity and core concepts",
       "config": {
         "max_tokens": 150000,
         "max_tokens_by_model": {
@@ -11,12 +11,12 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
-      "prompt": "Please introduce the architectural generation division of Ascend NPU, including the meaning and relationship of the core concepts of NpuArch, SocVersion, __NPU_ARCH__, and archXX.",
-      "expected_output": "The reply should explain the core concepts of the Ascend NPU architecture:\n- NpuArch: chip architecture number, defines the instruction set and microarchitecture, obtained through GetCurNpuArch() at runtime\n- SocVersion: system on chip version, software naming identifier, obtained through GetSocVersion() at runtime\n- __NPU_ARCH__: Device side compilation macro, four-digit value, used for conditional compilation\n- archXX: abbreviation of operator warehouse directory, take the first two digits of the DAV number (such as DAV_2201 → arch22, DAV_3510 → arch35)\n- One-to-many relationship: one NpuArch can correspond to multiple SocVersion (such as DAV_2201 corresponds to Ascend910B1~B4, Ascend910B2C, Ascend910_93)",
+      "prompt": "Please explain the A5 architecture identity, including the meaning and relationship of NpuArch, SocVersion, __NPU_ARCH__, archXX, and full_soc.",
+      "expected_output": "The reply should explain the core concepts for the supported A5 workflow:\n- NpuArch: chip architecture number, defines the instruction set and microarchitecture, obtained through GetCurNpuArch() at runtime; A5 uses DAV_3510\n- SocVersion: system-on-chip software identifier, obtained through GetSocVersion(); Ascend950PR/DT use ASCEND950\n- __NPU_ARCH__: device-side compilation macro; A5 uses 3510\n- archXX: operator-repository architecture directory derived from the first two DAV digits; DAV_3510 maps to arch35\n- full_soc: complete native SKU identifier used to select SKU-dependent resources and performance peaks, while npu_arch=3510 selects architecture-level capabilities",
       "files": [],
       "expectations": [
         {
@@ -43,7 +43,7 @@
     },
     {
       "id": 2,
-      "title": "Product Mapping Table Query",
+      "title": "A5 product mapping query",
       "config": {
         "max_tokens": 150000,
         "max_tokens_by_model": {
@@ -51,18 +51,18 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
-      "prompt": "What NpuArch and SocVersion do Ascend910B and Ascend950PR correspond to respectively? What about Ascend910_93?",
-      "expected_output": "The response should give an accurate mapping based on the product mapping table:\n- Ascend910B: SocVersion=ASCEND910B, NpuArch=DAV_2201, __NPU_ARCH__=2201\n- Ascend950PR: SocVersion=ASCEND950, NpuArch=DAV_3510, __NPU_ARCH__=3510\n- Ascend910_93: SocVersion is mapped to ASCEND910B (non-independent enumeration value) at runtime, NpuArch=DAV_2201\n- Description of one-to-many relationship: DAV_2201 corresponds to Ascend910B1~B4, Ascend910B2C, Ascend910_93",
+      "prompt": "What NpuArch, SocVersion, __NPU_ARCH__, and archXX directory do Ascend950PR and Ascend950DT use? How should their different SKUs be distinguished for resource and peak calculations?",
+      "expected_output": "The response should give the A5 mapping based on the product mapping table:\n- Ascend950PR and Ascend950DT use SocVersion=ASCEND950 and NpuArch=DAV_3510\n- The device compilation macro is __NPU_ARCH__=3510 and the operator architecture directory is arch35\n- Architecture-level capabilities are selected with npu_arch=3510\n- SKU-dependent resources and performance peaks require the complete full_soc plus matching runtime or trusted specification evidence; PR/DT family names alone are insufficient",
       "files": [],
       "expectations": [
         {
           "type": "contains",
-          "pattern": "DAV_2201",
-          "description": "DAV_2201 was mentioned in the reply"
+          "pattern": "ASCEND950",
+          "description": "ASCEND950 was mentioned in the reply"
         },
         {
           "type": "contains",
@@ -71,8 +71,8 @@
         },
         {
           "type": "contains",
-          "pattern": "Ascend910_93",
-          "description": "Ascend910_93 was mentioned in the reply"
+          "pattern": "arch35",
+          "description": "arch35 was mentioned in the reply"
         }
       ]
     },
@@ -86,7 +86,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -108,7 +108,7 @@
     },
     {
       "id": 4,
-      "title": "DAV_3510 vs DAV_2201 Key Differences",
+      "title": "DAV_3510 operator-relevant capabilities",
       "config": {
         "max_tokens": 150000,
         "max_tokens_by_model": {
@@ -116,12 +116,12 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
-      "prompt": "What are the key changes in Buffer capacity, instruction set and data path between DAV_3510 and DAV_2201?",
-      "expected_output": "Reply should cover key changes of DAV_3510:\n- Buffer capacity: L0C 128→256 KB, UB 192→248 KB, BT 1→4 KB\n- Data format: Added FP8/MXFP8/MXFP4/HiF8 Cube MMAD\n- CV pass-through: Added L0C→UB, UB→L1, SSBuffer Message channel to avoid GM workspace transfer\n- Synchronization mechanism: BufferID replaces set/wait strong pairing to simplify multi-pipeline operator synchronization\n- Sparse support: DAV_3510 no longer supports 4:2 sparse matrix calculation",
+      "prompt": "What DAV_3510 buffer capacities, data formats, data paths, and synchronization capabilities matter to A5 operator development?",
+      "expected_output": "Reply should cover operator-relevant DAV_3510 facts:\n- Buffer capacity: L0C 256 KB, UB 248 KB available per AIV user, and BT 4 KB, with runtime interfaces remaining authoritative\n- Data format: FP8/MXFP8/MXFP4/HiF8 Cube MMAD support\n- CV pass-through: L0C→UB, UB→L1, and the SSBuffer message channel can avoid GM workspace transfer\n- Synchronization mechanism: BufferID with get_buf/rel_buf semantics simplifies multi-pipeline synchronization\n- Sparse support: DAV_3510 does not support 4:2 sparse matrix calculation",
       "files": [],
       "expectations": [
         {
@@ -156,12 +156,12 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
       "prompt": "What is the difference between SIMT and SIMD programming models in Ascend C? What scenarios are they suitable for?",
-      "expected_output": "Reply should compare the core differences between SIMT and SIMD:\n- SIMT: scalar programming (thread perspective), Warp scheduling (32 thread grouping), 4 Warp Schedulers per AIV\n- SIMD: vector programming (continuous calculation within VF), software unrolled loops\n- SIMT applicable scenarios: Gather/Scatter, Hash insertion, random number, sorting (including atomic operations)\n- SIMD applicable scenarios: large blocks dense BF16/FP16 matrix multiplication/convolution, long vector sequential calculation\n- SIMT is only supported by DAV_3510, the previous generation architecture cannot be used\n- SIMT unique hardware: DCache (maximum 128KB, reuse UB as Cacheline), supports GM discrete access",
+      "expected_output": "Reply should compare the core differences between SIMT and SIMD:\n- SIMT: scalar programming (thread perspective), Warp scheduling (32 thread grouping), 4 Warp Schedulers per AIV\n- SIMD: vector programming (continuous calculation within VF), software unrolled loops\n- SIMT applicable scenarios: Gather/Scatter, Hash insertion, random number, sorting (including atomic operations)\n- SIMD applicable scenarios: large blocks dense BF16/FP16 matrix multiplication/convolution, long vector sequential calculation\n- This Skill admits SIMT only after consistent DAV_3510 evidence is available\n- SIMT unique hardware: DCache (maximum 128KB, reuse UB as Cacheline), supports GM discrete access",
       "files": [],
       "expectations": [
         {
@@ -196,7 +196,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -236,7 +236,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -272,7 +272,7 @@
       "config": {
         "max_tokens": 150000,
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "distractor_skills": [
           "ascendc-env-check",
@@ -281,8 +281,8 @@
         ],
         "eval_mode": "text"
       },
-      "prompt": "What is the difference between the architecture of Ascend910B and Ascend950? What are the UB capacities of DAV_2201 and DAV_3510 respectively?",
-      "expected_output": "Reply should correctly activate npu-arch skill, answer architecture differences and UB capacity:\n- DAV_2201 (Ascend910B): UB = 192 KB\n- DAV_3510 (Ascend950): UB = 248 KB\n- Architecture differences: L0C capacity, BT capacity, data format support, SIMT/SIMD support, etc.\nEven if In an environment where similar skills such as ascendc-env-check and ascendc-api-best-practices coexist, npu-arch should also be selected correctly. ",
+      "prompt": "For an Ascend950PR target, how should I determine the usable UB capacity and core counts, and may I hard-code the family-typical values? Similar environment and API skills are also available.",
+      "expected_output": "Reply should correctly activate npu-arch and explain A5 resource discovery:\n- DAV_3510 commonly exposes 248 KB of UB available per AIV user, but tiling must use GetCoreMemSize(CoreMemType::UB)\n- Query actual Cube and Vector core counts through PlatformAscendC or the runtime interfaces\n- Do not hard-code family-typical values because complete full_soc, SKU, configuration, or vNPU partitioning can change resources\n- Keep complete hardware evidence and require Ascend950PR/DT with npu_arch=3510\nEven when similar skills such as ascendc-env-check and ascendc-api-best-practices coexist, npu-arch should be selected for this hardware-identity and resource question.",
       "files": [],
       "expectations": [
         {
@@ -292,8 +292,8 @@
         },
         {
           "type": "contains",
-          "pattern": "192 KB",
-          "description": "192 KB mentioned in reply"
+          "pattern": "GetCoreMemSize",
+          "description": "The runtime UB-capacity interface was mentioned"
         },
         {
           "type": "contains",
@@ -312,7 +312,7 @@
           "glm-5": 110000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -342,7 +342,7 @@
           "glm-5": 110000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -368,7 +368,7 @@
       "config": {
         "max_tokens": 150000,
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -383,12 +383,12 @@
       "config": {
         "max_tokens": 150000,
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
-      "prompt": "When PlatformAscendC queries the current chip, GetCurNpuArch and GetSocVersion fail. What will be returned? Can I continue to execute according to the default branch of DAV_2201?",
-      "expected_output": "The reply should explain that failure returns NpuArch::DAV_RESV and SocVersion::RESERVED_VERSION respectively. DAV_2201 cannot be silently assumed; unknown architectures should be treated as explicit errors or safe fallback paths, and platform information should be added.",
+      "prompt": "When PlatformAscendC queries the current chip, GetCurNpuArch and GetSocVersion fail. What will be returned? Can I continue by assuming the A5 DAV_3510 branch?",
+      "expected_output": "The reply should explain that failure returns NpuArch::DAV_RESV and SocVersion::RESERVED_VERSION respectively. DAV_3510 cannot be silently assumed; this A5 workflow must stop until consistent Ascend950PR/DT and npu_arch=3510 evidence is obtained.",
       "expectations": [],
       "files": []
     },
@@ -398,7 +398,7 @@
       "config": {
         "max_tokens": 150000,
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -417,7 +417,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -457,7 +457,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -497,7 +497,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -537,12 +537,12 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
-      "prompt": "What are the Memory bandwidths of Ascend950PR Server and PCIE? What about the bandwidth of Ascend910B2? Have the sources of these data been officially confirmed?",
-      "expected_output": "The reply should state the Memory bandwidth and source credibility:\n- 950PR Server 1.6 TB/s, PCIE 1.4 TB/s: confirmed by Ascend 950 NPU architecture white paper Table 3-1/§4.3\n- 950DT up to 4 TB/s: confirmed by the white paper\n- 910B2 1.6 TB/s: Based on public information and experience values, no directly verifiable fields were found in INI and white papers\n- Skills classify information sources: verified items are given white paper chapters, and unverified items are clearly marked as public information/experience values",
+      "prompt": "What are the Memory bandwidth tiers of Ascend950PR Server and PCIE and Ascend950DT? Are these values sufficient to select a denominator for an arbitrary A5 device?",
+      "expected_output": "The reply should state the A5 Memory bandwidth and usage constraints:\n- 950PR Server 1.6 TB/s and PCIE 1.4 TB/s are confirmed by Ascend 950 NPU Architecture White Paper Table 3-1/§4.3\n- 950DT is listed at 4 TB/s in the white paper\n- These family tiers must not be selected from PR/DT naming alone; exact bandwidth utilization requires complete full_soc matched to the corresponding trusted specification tier\n- If the exact SKU tier cannot be confirmed, report the peak as unconfirmed and do not calculate precise utilization",
       "files": [],
       "expectations": [
         {
@@ -562,8 +562,8 @@
         },
         {
           "type": "contains",
-          "pattern": "experience value",
-          "description": "The 910B2 bandwidth marked in the reply is public information/experience value"
+          "pattern": "full_soc",
+          "description": "The reply requires complete SKU evidence before selecting a bandwidth denominator"
         }
       ]
     },
@@ -577,7 +577,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -617,7 +617,7 @@
           "glm-5": 160000
         },
         "ascend_platforms": [
-          "A2"
+          "A5"
         ],
         "eval_mode": "text"
       },
@@ -719,7 +719,7 @@
         ],
         "eval_mode": "text"
       },
-      "prompt": "The JSON reports full_soc=Ascend950DT_9592 but npu_arch=2201, and warnings also includes \"NpuArch is inconsistent\". Can you continue designing this workflow for A5?",
+      "prompt": "The JSON reports full_soc=Ascend950DT_9592 but npu_arch=9999, and warnings also includes \"NpuArch is inconsistent\". Can you continue designing this workflow for A5?",
       "expected_output": "Reply should refuse to continue, stating that Ascend950PR/DT must be consistent with npu_arch=3510, and that NpuArch conflict warning invalidates evidence; full raw evidence should be reported and stopped, and A5, 3510, or any typical spec should not be used by default.",
       "files": [],
       "expectations": [
