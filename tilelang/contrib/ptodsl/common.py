@@ -69,6 +69,13 @@ def as_logical_bool(value):
     return value != 0
 
 
+def wrap_const(value, dtype):
+    """Wrap a Python literal as a traced constant of *dtype*; traced values pass through."""
+    if hasattr(unwrap_surface_value(value), "type"):
+        return value
+    return pto.const(value, dtype=dtype)
+
+
 def logical_not(value):
     """Negate a scalar i1 or byte-backed i8 predicate without Python truthiness."""
     return value == 0
