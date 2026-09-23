@@ -232,7 +232,7 @@ Atomics
 
 Custom intrinsics
 - `T.dp4a(A, B, C)`: 4‑element dot‑product accumulate.
-- `T.clamp(x, lo, hi)`: Clamp to [lo, hi].
+- `T.clamp(x, lo, hi)`: Clamp to [lo, hi], propagating floating-point NaN from any operand. When `lo > hi`, return `hi` unless an operand is NaN.
 - `T.loop_break()`: Break from current loop via intrinsic.
 
 Barriers, TMA, warp‑group
