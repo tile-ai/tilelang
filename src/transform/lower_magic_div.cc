@@ -480,11 +480,16 @@ private:
   }
 
   bool ShouldWidenDividend(const PrimExpr &e) {
+    const int64_t int32_min = std::numeric_limits<int32_t>::min();
+    const int64_t int32_max = std::numeric_limits<int32_t>::max();
     class Visitor : public tirx::ExprVisitor {
     public:
       explicit Visitor(
-          const std::unordered_set<const VarNode *> &non_shape_params)
-          : non_shape_params_(non_shape_params) {}
+          const std::unordered_set<const VarNode *> &non_shape_params,
+          const std::unordered_set<const VarNode *> &shape_vars,
+          arith::Analyzer *analyzer, int64_t int32_min, int64_t int32_max)
+          : non_shape_params_(non_shape_params), shape_vars_(shape_vars),
+            analyzer_(analyzer), int32_min_(int32_min), int32_max_(int32_max) {}
 
       bool widen{false};
       void Visit(const PrimExpr &expr) { VisitExpr(expr); }
@@ -494,16 +499,19 @@ private:
 
       void VisitExpr_(const AddNode *op) final {
         Check(GetRef<PrimExpr>(op));
+        CheckArithmeticRange(GetRef<PrimExpr>(op));
         ExprVisitor::VisitExpr_(op);
       }
 
       void VisitExpr_(const SubNode *op) final {
         Check(GetRef<PrimExpr>(op));
+        CheckArithmeticRange(GetRef<PrimExpr>(op));
         ExprVisitor::VisitExpr_(op);
       }
 
       void VisitExpr_(const MulNode *op) final {
         Check(GetRef<PrimExpr>(op));
+        CheckArithmeticRange(GetRef<PrimExpr>(op));
         ExprVisitor::VisitExpr_(op);
       }
 
@@ -525,17 +533,40 @@ private:
           return;
         }
         if (UsesVar(expr, [&](const VarNode *v) {
-              return non_shape_params_.count(v) != 0 &&
-                     !v->name_hint.starts_with("tl_magic_");
+              return non_shape_params_.count(v) != 0;
             })) {
           widen = true;
         }
       }
 
+      void CheckArithmeticRange(const PrimExpr &expr) {
+        Check(expr);
+        if (!expr.dtype().is_int() || expr.dtype().bits() != 32 ||
+            !UsesVar(expr, [&](const VarNode *v) {
+              return shape_vars_.count(v) != 0;
+            })) {
+          return;
+        }
+        try {
+          arith::ConstIntBound bound = analyzer_->const_int_bound(expr);
+          if (bound.defined() && (bound->min_value < int32_min_ ||
+                                  bound->max_value > int32_max_)) {
+            widen = true;
+          }
+        } catch (const std::exception &) {
+          widen = true;
+        }
+      }
+
       const std::unordered_set<const VarNode *> &non_shape_params_;
+      const std::unordered_set<const VarNode *> &shape_vars_;
+      arith::Analyzer *analyzer_;
+      int64_t int32_min_;
+      int64_t int32_max_;
     };
 
-    Visitor visitor(non_shape_params_);
+    Visitor visitor(non_shape_params_, shape_vars_, analyzer_, int32_min,
+                    int32_max);
     visitor.Visit(e);
     return visitor.widen;
   }
@@ -569,6 +600,13 @@ private:
 
   template <typename NodeT>
   PrimExpr TryRewriteDivMod(const NodeT *node, bool is_mod, bool is_floor) {
+    // The magic ABI and its backend fallback implement floordiv/floormod.
+    // Do not lower truncdiv/truncmod until a truncating intrinsic is available:
+    // using the floor fallback changes both quotient and remainder for negative
+    // operands (and can be exposed after int32 overflow).
+    if (!is_floor) {
+      return PrimExpr();
+    }
     if (skip_nodes_.count(node)) {
       return PrimExpr();
     }
@@ -728,22 +766,10 @@ class MagicCallHoister {
 public:
   static Stmt Apply(const PrimFunc &func) {
     const Stmt &body = func->body;
-    arith::Analyzer entry_analyzer;
-    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> hoistable_vars;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> param_vars;
     for (const Var &param : func->params) {
-      hoistable_vars.insert(param);
+      param_vars.insert(param);
     }
-    PostOrderVisit(body, [&](const ObjectRef &n) {
-      if (const AttrStmtNode *attr = n.as<AttrStmtNode>();
-          attr != nullptr && attr->attr_key == tirx::attr::thread_extent) {
-        if (const IterVarNode *iter = attr->node.as<IterVarNode>()) {
-          hoistable_vars.insert(iter->var);
-          entry_analyzer.Bind(
-              iter->var,
-              Range::FromMinExtent(make_zero(iter->var.dtype()), attr->value));
-        }
-      }
-    });
     // 1. Collect groups with the same (x, d) in post-order (inner first).
     // Div and mod share one quotient; the remainder is derived as x - q*d.
     struct Group {
@@ -776,16 +802,7 @@ public:
         safe_to_hoist = Downcast<Bool>(safe.value())->value;
       }
       if (!safe_to_hoist || !CanHoistDividend(call->args[0]) ||
-          SideEffect(call->args[1]) > CallEffectKind::kPure ||
-          UsesVar(call->args[0],
-                  [&](const VarNode *v) {
-                    return !hoistable_vars.count(GetRef<Var>(v)) &&
-                           !v->name_hint.starts_with("tl_magic_");
-                  }) ||
-          UsesVar(call->args[1], [&](const VarNode *v) {
-            return !hoistable_vars.count(GetRef<Var>(v)) &&
-                   !v->name_hint.starts_with("tl_magic_");
-          })) {
+          SideEffect(call->args[1]) > CallEffectKind::kPure) {
         return;
       }
       bool can_reuse_condition_div = false;
@@ -863,35 +880,120 @@ public:
     // Thread bindings are thread_extent AttrStmts at this pipeline stage;
     // pick the innermost one containing every group.
     Optional<AttrStmt> scope;
-    std::function<void(const Stmt &)> walk = [&](const Stmt &cur_s) {
-      if (const AttrStmtNode *a = cur_s.as<AttrStmtNode>()) {
-        if (a->attr_key == tirx::attr::thread_extent && contains_all(a->body)) {
-          scope = GetRef<AttrStmt>(a);
-          // Walk continues deeper; the last hit is the innermost.
-        }
-        walk(a->body);
-        return;
-      }
-      if (const ForNode *f = cur_s.as<ForNode>()) {
-        walk(f->body);
-        return;
-      }
-      if (const SeqStmtNode *s = cur_s.as<SeqStmtNode>()) {
-        for (const Stmt &c : s->seq) {
-          walk(c);
-        }
-      } else if (const SBlockNode *b = cur_s.as<SBlockNode>()) {
-        walk(b->body);
-      } else if (const IfThenElseNode *i = cur_s.as<IfThenElseNode>()) {
-        walk(i->then_case);
-        if (i->else_case.defined()) {
-          walk(i->else_case.value());
-        }
-      }
-    };
-    walk(body);
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> scope_vars;
+    std::function<void(const Stmt &,
+                       std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>)>
+        walk = [&](const Stmt &cur_s,
+                   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
+                       visible_vars) {
+          if (const AttrStmtNode *a = cur_s.as<AttrStmtNode>()) {
+            bool is_thread_extent = a->attr_key == tirx::attr::thread_extent;
+            if (is_thread_extent) {
+              if (const IterVarNode *iter = a->node.as<IterVarNode>()) {
+                visible_vars.insert(iter->var);
+              }
+            }
+            if (is_thread_extent && contains_all(a->body)) {
+              scope = GetRef<AttrStmt>(a);
+              scope_vars = visible_vars;
+              // Walk continues deeper; the last hit is the innermost.
+            }
+            walk(a->body, std::move(visible_vars));
+            return;
+          }
+          if (const ForNode *f = cur_s.as<ForNode>()) {
+            visible_vars.insert(f->loop_var);
+            walk(f->body, std::move(visible_vars));
+            return;
+          }
+          if (const SeqStmtNode *s = cur_s.as<SeqStmtNode>()) {
+            for (const Stmt &c : s->seq) {
+              walk(c, visible_vars);
+              if (const BindNode *bind = c.as<BindNode>()) {
+                visible_vars.insert(bind->var);
+              }
+            }
+          } else if (const SBlockNode *b = cur_s.as<SBlockNode>()) {
+            walk(b->body, std::move(visible_vars));
+          } else if (const IfThenElseNode *i = cur_s.as<IfThenElseNode>()) {
+            walk(i->then_case, visible_vars);
+            if (i->else_case.defined()) {
+              walk(i->else_case.value(), std::move(visible_vars));
+            }
+          }
+        };
+    walk(body, param_vars);
     if (!scope.defined()) {
       return body; // no uniform thread scope covers every use; leave inline
+    }
+
+    // Moving a division out of a branch that protects its divisor can expose
+    // a zero divisor, including inside a short-circuit condition or
+    // if_then_else expression. Conservatively keep calls inline if a control
+    // predicate uses this divisor and its protected branch contains this
+    // group's calls.
+    for (const Group &g : groups) {
+      bool guarded = false;
+      PostOrderVisit(body, [&](const ObjectRef &n) {
+        if (guarded) {
+          return;
+        }
+        auto contains_group_call = [&](const ObjectRef &root) {
+          bool found = false;
+          PostOrderVisit(root, [&](const ObjectRef &child) {
+            if (const auto *call = child.as<CallNode>()) {
+              for (const Call &c : g.div_calls) {
+                found |= GetRef<Call>(call).same_as(c);
+              }
+              for (const Call &c : g.mod_calls) {
+                found |= GetRef<Call>(call).same_as(c);
+              }
+            }
+          });
+          return found;
+        };
+        auto condition_bounds_divisor = [&](const PrimExpr &condition) {
+          bool bounds_divisor = false;
+          PostOrderVisit(condition, [&](const ObjectRef &predicate) {
+            const auto *lt = predicate.as<LTNode>();
+            if (lt != nullptr && deep_equal(lt->b, g.d)) {
+              bounds_divisor = true;
+            }
+          });
+          return bounds_divisor;
+        };
+        if (const auto *ite = n.as<IfThenElseNode>()) {
+          guarded = condition_bounds_divisor(ite->condition) &&
+                    contains_group_call(ite->then_case);
+        } else if (const auto *sel = n.as<SelectNode>()) {
+          guarded = condition_bounds_divisor(sel->condition) &&
+                    (contains_group_call(sel->true_value) ||
+                     contains_group_call(sel->false_value));
+        } else if (const auto *call = n.as<CallNode>();
+                   call != nullptr &&
+                   call->op.same_as(builtin::if_then_else()) &&
+                   !call->args.empty()) {
+          guarded = condition_bounds_divisor(call->args[0]) &&
+                    contains_group_call(GetRef<PrimExpr>(call));
+        }
+      });
+      if (guarded) {
+        return body;
+      }
+    }
+
+    // Only values already defined at the selected insertion point are
+    // available to the hoisted binds. This includes host magic-parameter
+    // binds, without treating a user's `tl_magic_*` local as an intrinsic.
+    for (const Group &g : groups) {
+      auto uses_undefined_at_scope = [&](const PrimExpr &expr) {
+        return UsesVar(expr, [&](const VarNode *v) {
+          return !scope_vars.count(GetRef<Var>(v));
+        });
+      };
+      if (uses_undefined_at_scope(g.x) || uses_undefined_at_scope(g.d)) {
+        return body;
+      }
     }
 
     // 3. Rewrite: replace each group call with its q var (bottom-up so nested
