@@ -67,8 +67,11 @@ public:
         op->op.same_as(tl::magic_mod()) ||
         op->op.same_as(tl::magic_mod_with_validity()) ||
         op->op.same_as(tl::magic_mod_from_quotient())) {
-      // The caller has already determined that this index needs widening.
-      // Thread, loop and shape variables can overflow just like scalar params.
+      if (ffi::Optional<ffi::ObjectRef> widen =
+              op->annotations.Get("tl.magic_widen_dividend");
+          !widen.defined() || !Downcast<Bool>(widen.value())->value) {
+        return ffi::GetRef<PrimExpr>(op);
+      }
       ffi::Array<PrimExpr> args = op->args;
       args.Set(0, VisitExpr(op->args[0]));
       return tirx::Call(DataType::Int(64), op->op, args, op->annotations,

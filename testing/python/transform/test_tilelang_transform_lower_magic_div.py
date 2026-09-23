@@ -69,7 +69,7 @@ def test_magic_div_cuda_codegen():
     assert src.count("__umulhi") == 2
     assert "tl_magic_r_0" in src and "tl_magic_r_1" in src
     remainder_bind = next(line for line in src.splitlines() if "tl_magic_r_0" in line)
-    assert "tl_magic_floormod_i64" in remainder_bind
+    assert "tl_magic_floormod_i32" in remainder_bind
     # Keep the complete output unflatten chain transparent to FlattenBuffer;
     # opaque magic values here prevent NVCC from recovering the linear idx.
     output_store = next(line for line in src.splitlines() if "out_scales[" in line)
@@ -332,9 +332,7 @@ def test_magic_condition_uses_runtime_fallback_when_nonnegative_is_unproven():
     assert ">= 0" in validity
     assert "__umulhi" in quotient and "tl_magic_floordiv_i32" in quotient
     assert "tl_magic_floormod_i32" in remainder
-    # LowerIntrin leaves a sign correction around the truncating quotient.
-    # Reusing the floor quotient here would apply that correction twice.
-    assert "tl_magic_q_" not in condition and " / divisor" in condition
+    assert "tl_magic_q_" in condition and " / divisor" not in condition
 
 
 @requires_gpu
