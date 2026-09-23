@@ -645,11 +645,8 @@ class Builder(BaseBuilder):
             else:
                 return orig_value
 
-        # An existing Ref/alloc_var is only a store target while the region
-        # that bound the name is still open; once that region has closed the
-        # name is unbound, exactly as `rval` already treats reads of it. Loop
-        # targets always introduce a fresh induction binding, and `_` is the
-        # rewriter's throwaway name for temporaries.
+        # Only a live Ref/alloc_var is a store target; loop targets and the
+        # rewriter's `_` temporaries always bind fresh.
         if loop_target or name == "_" or self.binding_expired(name):
             orig_value = self.empty
         else:
