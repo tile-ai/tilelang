@@ -18,7 +18,7 @@ import struct
 import numpy as np
 import torch
 import tilelang
-import tilelang.language as T
+import tilelang.ascend.language as T
 import tilelang.testing
 
 VEC = 64

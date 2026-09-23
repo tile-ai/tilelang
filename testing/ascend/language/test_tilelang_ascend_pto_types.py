@@ -2,7 +2,7 @@
 
 import pytest
 
-import tilelang.language as T
+import tilelang.ascend.language as T
 from tilelang.engine.lower import lower
 
 
@@ -31,7 +31,7 @@ def test_pto_float32x2_minmax_codegen(op_name, combine):
             T.copy(c_ub, C)
 
     source = lower(func, target="pto").kernel_source
-    assert f"_tl_vectorize_binary_f32x2(pto.{op_name}," in source
+    assert f"tl.vectorize_binary_f32x2(pto.{op_name}," in source
     compile(source, "<pto-float32x2-minmax>", "exec")
 
 
@@ -57,7 +57,7 @@ def test_pto_float32x2_unary_math_codegen(scalar_op, unary):
             T.copy(b_ub, B)
 
     source = lower(func, target="pto").kernel_source
-    assert f"_tl_vectorize_unary_f32x2({scalar_op}," in source
+    assert f"tl.vectorize_unary_f32x2({scalar_op}," in source
     compile(source, "<pto-float32x2-unary-math>", "exec")
 
 
@@ -81,9 +81,9 @@ def test_pto_float32x2_div_codegen():
             T.copy(c_ub, C)
 
     source = lower(func, target="pto").kernel_source
-    assert "from tilelang.contrib.ptodsl.simt import (" in source
-    assert "def _tl_vectorize_binary_f32x2" not in source
-    assert "_tl_vectorize_binary_f32x2(_tl_scalar_div," in source
+    assert "import tilelang.contrib.ptodsl as tl" in source
+    assert "_tl_vectorize_binary_f32x2" not in source
+    assert "tl.vectorize_binary_f32x2(tl.scalar_div," in source
     compile(source, "<pto-float32x2-div>", "exec")
 
 

@@ -23,7 +23,7 @@ def test_cython_adapter_scales_explicit_outer_int4_stride_to_storage_units():
     adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
     adapter.ir_module = tvm.IRModule({main.attrs["global_symbol"]: main})
     adapter.target = PTO_TARGET
-    static_shapes, static_strides, _ = adapter._process_static_buffer_infos()
+    static_shapes, static_strides, _, _ = adapter._process_static_buffer_infos()
 
     assert list(static_shapes.values())[0][1] == [(0, 4), (1, 128)]
     assert list(static_strides.values())[0][1] == [(0, 256), (1, 1)]
@@ -35,7 +35,7 @@ def test_cython_adapter_scales_explicit_outer_int4_stride_to_storage_units():
         wrapper._check_static_strides([torch.empty_strided((4, 128), (512, 1), dtype=torch.int8)])
 
 
-def test_cython_adapter_rejects_dynamic_outer_packed_stride():
+def test_cython_adapter_tracks_dynamic_outer_packed_stride():
     outer_stride = T.dynamic("outer_stride")
 
     @T.prim_func
@@ -45,8 +45,23 @@ def test_cython_adapter_rejects_dynamic_outer_packed_stride():
     adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
     adapter.ir_module = tvm.IRModule({main.attrs["global_symbol"]: main})
     adapter.target = PTO_TARGET
-    with pytest.raises(ValueError, match="do not support dynamic outer strides"):
-        adapter._process_static_buffer_infos()
+    _, _, _, dynamic_strides = adapter._process_static_buffer_infos()
+
+    buffer_index, strides = dynamic_strides["A"]
+    assert buffer_index == 0
+    assert strides == [(0, outer_stride, 2)]
+
+    wrapper = CythonKernelWrapper([], [], None)
+    wrapper.set_dynamic_strides_map(dynamic_strides)
+    wrapper._check_dynamic_strides(
+        [torch.empty_strided((4, 128), (256, 1), dtype=torch.int8)],
+        {outer_stride: 512},
+    )
+    with pytest.raises(ValueError, match="Dynamic packed stride mismatch"):
+        wrapper._check_dynamic_strides(
+            [torch.empty_strided((4, 128), (512, 1), dtype=torch.int8)],
+            {outer_stride: 512},
+        )
 
 
 @pytest.mark.parametrize("dtype", [T.int4, T.dtype("uint4")])
@@ -70,7 +85,7 @@ def test_cython_adapter_leaves_non_packed_int4_abi_unchanged():
     adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
     adapter.ir_module = tvm.IRModule({main.attrs["global_symbol"]: main})
     adapter.target = CUDA_TARGET
-    static_shapes, static_strides, _ = adapter._process_static_buffer_infos()
+    static_shapes, static_strides, _, _ = adapter._process_static_buffer_infos()
 
     assert list(static_shapes.values())[0][1] == [(0, 4), (1, 256)]
     assert list(static_strides.values())[0][1] == [(0, 512), (1, 1)]

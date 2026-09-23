@@ -79,13 +79,13 @@ def _mte_write_kernel():
 
 def _bypass_call_exprs(target):
     if target == "pto":
-        return "_tl_pto_read_gm_bypass_dcache(", "_tl_pto_write_gm_bypass_dcache("
+        return "tl.read_gm_bypass_dcache(", "tl.write_gm_bypass_dcache("
     return "tl::read_gm_bypass_dcache(", "tl::write_gm_bypass_dcache("
 
 
 def _bypass_call_pattern(target):
     if target == "pto":
-        return r"_tl_pto_(?:read|write)_gm_bypass_dcache\([^;\n]+\)"
+        return r"tl\.(?:read|write)_gm_bypass_dcache\([^\n]+\)"
     return r"tl::(?:read|write)_gm_bypass_dcache\([^;]+\)"
 
 
@@ -101,7 +101,8 @@ def test_dcache_bypass_codegen_for_scalar_write(target):
     read_call, write_call = _bypass_call_exprs(target)
     assert read_call in source
     assert write_call in source
-    assert "#include <tl_templates/ascend/dcache_bypass.h>" in source
+    header = "#include <tl_templates/ascend/dcache_bypass.h>"
+    assert (header in source) == (target == "ascend")
     _assert_bypass_calls_only_on_writable(source, target)
     if target == "pto":
         assert any("ro_buf" in call for call in re.findall(r"scalar\.load\([^;\n]+\)", source))
