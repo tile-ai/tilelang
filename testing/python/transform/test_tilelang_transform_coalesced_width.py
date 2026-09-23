@@ -1,3 +1,4 @@
+import pytest
 from tilelang import tvm as tvm
 from tilelang.backend.target import determine_target
 import tilelang as tl
@@ -34,7 +35,10 @@ def test_ragged_copy_coalesced_width_clamps_with_warning(capfd):
     assert artifact.kernel_source
 
 
-def test_full_tile_oversized_coalesced_width_clamps_with_warning(capfd):
+@pytest.mark.parametrize("coalesced_width", [8, 257])
+def test_full_tile_oversized_coalesced_width_clamps_with_warning(capfd, coalesced_width):
+    # A 128x128 fp32 tile over 128 threads vectorizes to 4 elements per thread;
+    # any wider request must fall back to that width, not below it.
     m, n = 128, 128
 
     @T.prim_func
@@ -44,12 +48,12 @@ def test_full_tile_oversized_coalesced_width_clamps_with_warning(capfd):
     ):
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((m, n), T.float32)
-            T.copy(A, shared, coalesced_width=257)
-            T.copy(shared, B, coalesced_width=257)
+            T.copy(A, shared, coalesced_width=coalesced_width)
+            T.copy(shared, B, coalesced_width=coalesced_width)
 
     artifact = _lower_without_device_compile(main)
 
     warnings = capfd.readouterr().err
-    assert "Requested coalesced_width=257" in warnings
-    assert "using " in warnings
-    assert artifact.kernel_source
+    assert f"Requested coalesced_width={coalesced_width}" in warnings
+    assert "using 4 instead" in warnings
+    assert "float4" in artifact.kernel_source

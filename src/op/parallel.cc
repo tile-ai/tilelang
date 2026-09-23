@@ -10,7 +10,6 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
-#include <numeric>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <unordered_set>
@@ -1040,7 +1039,12 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
         LOG(FATAL) << "coalesced_width must be a positive integer, but got "
                    << expected;
       }
-      int64_t effective = std::gcd(static_cast<int64_t>(vector_size), expected);
+      // The hint is an upper bound: take the widest width the geometry
+      // supports without exceeding it. Any divisor of vector_size inherits
+      // the alignment and contiguity already proven for vector_size.
+      int64_t effective = std::min<int64_t>(expected, vector_size);
+      while (vector_size % effective != 0)
+        --effective;
       if (effective != expected) {
         LOG(WARNING)
             << "Requested coalesced_width=" << expected
