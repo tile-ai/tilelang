@@ -7,6 +7,7 @@ import tilelang
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
+    should_enable_magic_div,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -59,6 +60,8 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tirx.transform.NarrowDataType(32)(mod)
+    if should_enable_magic_div(pass_ctx=pass_ctx, target=target):
+        mod = tilelang.transform.LowerMagicDiv()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     # The CPU codegens have no native BF16. Host codegen legalizes BF16 storage
     # to uint16, which requires BF16 arithmetic to have been legalized first;

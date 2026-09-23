@@ -81,6 +81,7 @@ private:
   /*! \brief whether to emit forward function declarations in the resulting C
    * code */
   bool emit_fwd_func_decl_;
+  bool emitted_magic_div_helpers_{false};
 
   FunctionInfo GetFunctionInfo(const CallNode *op, bool has_resource_handle);
   std::string GetPackedName(const CallNode *op);

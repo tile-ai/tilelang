@@ -305,6 +305,32 @@ def ConfigIndexBitwidth():
     return _ffi_api.ConfigIndexBitwidth()  # type: ignore
 
 
+def MagicCallHoist():
+    """Rebind duplicated tl.magic_div/tl.magic_mod calls to one variable per
+    thread (CSE for magic calls; runs late so Simplify no longer re-inlines).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    ----
+    """
+    return _ffi_api.MagicCallHoist()  # type: ignore
+
+
+def LowerMagicDiv():
+    """Lower divisions by launch-invariant dynamic shapes to host-precomputed
+    magic-number multiply-shift sequences.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    ----
+    """
+    return _ffi_api.LowerMagicDiv()  # type: ignore
+
+
 def FlattenBuffer():
     """FlattenBuffer
 

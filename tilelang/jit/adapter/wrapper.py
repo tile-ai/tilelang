@@ -198,6 +198,20 @@ KERNEL_CLUSTER_LAUNCH_FUNC_CODE = """
 """
 
 
+def _reject_magic_div_params(declaration: str, function_name: str) -> None:
+    """Reject kernels with host-precomputed magic-division params on the
+    cython execution backend, whose dispatcher assembles launch arguments by
+    name from call() params and would silently drop them (launch ABI
+    mismatch). tvm_ffi (default) threads these params automatically."""
+    magic_params = sorted(set(re.findall(r"\b(tl_magic_\w+)\b", declaration)))
+    if magic_params:
+        raise NotImplementedError(
+            f"Kernel '{function_name}' has host-precomputed magic-division parameters {magic_params} "
+            "(tl.enable_magic_div), which the cython execution backend does not support yet. "
+            "Use the tvm_ffi execution backend or disable tl.enable_magic_div."
+        )
+
+
 class BaseWrapper(ABC):
     @abstractmethod
     def wrap(self, *args, **kwargs):
@@ -339,6 +353,7 @@ class TLCUDASourceWrapper:
 
             # Analyze the function declaration to prepare for argument extraction
             declaration = self.get_declaration(code[index:])
+            _reject_magic_div_params(declaration, function_name)
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
@@ -841,6 +856,7 @@ class TLCPUSourceWrapper:
 
             # Analyze the function declaration to prepare for argument extraction
             declaration = code[index:].split(";")[0]
+            _reject_magic_div_params(declaration, function_name)
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)

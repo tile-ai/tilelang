@@ -84,6 +84,7 @@ private:
   /*! \brief whether to emit forwarded function declarations in the resulting C
    * code */
   bool emit_fwd_func_decl_;
+  bool emitted_magic_div_helpers_{false};
   /*! \brief whether to generate the entry function if encountered */
   bool has_main_func_ = false;
 
