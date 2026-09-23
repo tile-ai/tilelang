@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import ptodsl._allreduce as _allreduce
 from ptodsl import pto
-from ptodsl._surface_values import VecValue, unwrap_surface_value, wrap_surface_value
+from ptodsl._scalar import _emit_llvm_byte_pointer
+from ptodsl._surface_values import VecValue, unwrap_surface_value, wrap_surface_value, resolve_address_access
 from ptodsl._types import _DType, _integer_signedness, _restore_integer_signedness, _strip_integer_signedness
 from ptoas.mlir.dialects import llvm
 from ptoas.mlir.ir import IntegerType
@@ -52,6 +53,70 @@ def vectorize_binary_f32x2(op, lhs, rhs):
             op(_vector_lane(lhs, 1), _vector_lane(rhs, 1)),
         ),
     )
+
+
+def vectorize_binary_fp8(op, lhs, rhs, dtype):
+    """Compute FP8 vectors through the supported packed two-lane conversions."""
+    if op not in {"+", "-", "*"}:
+        raise ValueError(f"unsupported FP8 binary operation: {op}")
+    if lhs.size != rhs.size or lhs.size not in {2, 4, 8}:
+        raise ValueError("FP8 binary operands must have equal 2, 4, or 8 lanes")
+
+    def compute_pair(a, b):
+        a = pto.cast(a, pto.f32, rounding="r", saturation="nosat")
+        b = pto.cast(b, pto.f32, rounding="r", saturation="nosat")
+        value = {"+": lambda: a + b, "-": lambda: a - b, "*": lambda: a * b}[op]()
+        return pto.cast(value, dtype, rounding="r", saturation="sat")
+
+    if lhs.size == 2:
+        return compute_pair(lhs, rhs)
+
+    # FP8 builtin vectors cannot be split with llvm.extractelement. Local
+    # storage allows the same bit pattern to be reloaded as supported x2 pairs.
+    lhs_local = pto.alloc_buffer((lhs.size,), dtype)
+    rhs_local = pto.alloc_buffer((rhs.size,), dtype)
+    out_local = pto.alloc_buffer((lhs.size,), dtype)
+    pto.store(lhs, lhs_local, 0, contiguous=lhs.size)
+    pto.store(rhs, rhs_local, 0, contiguous=rhs.size)
+    for offset in range(0, lhs.size, 2):
+        a = pto.load(lhs_local, offset, contiguous=2)
+        b = pto.load(rhs_local, offset, contiguous=2)
+        pto.store(compute_pair(a, b), out_local, offset, contiguous=2)
+    return pto.load(out_local, 0, contiguous=lhs.size)
+
+
+def fp8_byte_load(buffer, index, dtype):
+    """Load one FP8 storage byte without materializing an unsupported scalar FP8."""
+    address, offset = resolve_address_access(buffer, index)
+    pointer = _emit_llvm_byte_pointer(address, offset, dtype.resolve())
+    return wrap_surface_value(llvm.LoadOp(IntegerType.get_signless(8), pointer).res)
+
+
+def fp8_byte_store(value, buffer, index, dtype):
+    """Store one FP8 storage byte through its integer representation."""
+    address, offset = resolve_address_access(buffer, index)
+    pointer = _emit_llvm_byte_pointer(address, offset, dtype.resolve())
+    llvm.StoreOp(unwrap_surface_value(value), pointer)
+
+
+def scalar_binary_fp8(op, lhs, rhs, dtype):
+    """Use the packed FP8 conversion primitive for one logical element."""
+    if op not in {"+", "-", "*"}:
+        raise ValueError(f"unsupported FP8 binary operation: {op}")
+    a_local = pto.alloc_buffer((2,), dtype)
+    b_local = pto.alloc_buffer((2,), dtype)
+    out_local = pto.alloc_buffer((2,), dtype)
+    for index in range(2):
+        fp8_byte_store(lhs, a_local, index, dtype)
+        fp8_byte_store(rhs, b_local, index, dtype)
+    a = pto.load(a_local, 0, contiguous=2)
+    b = pto.load(b_local, 0, contiguous=2)
+    a = pto.cast(a, pto.f32, rounding="r", saturation="nosat")
+    b = pto.cast(b, pto.f32, rounding="r", saturation="nosat")
+    value = {"+": lambda: a + b, "-": lambda: a - b, "*": lambda: a * b}[op]()
+    result = pto.cast(value, dtype, rounding="r", saturation="sat")
+    pto.store(result, out_local, 0, contiguous=2)
+    return fp8_byte_load(out_local, 0, dtype)
 
 
 def scalar_div(lhs, rhs):
