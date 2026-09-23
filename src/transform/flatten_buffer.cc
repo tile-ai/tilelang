@@ -240,7 +240,7 @@ private:
     int64_t min_value = int_bound->min_value;
     const int64_t type_max = (1LL << (dtype.bits() - 1));
     const int64_t type_min = -(1LL << (dtype.bits() - 1));
-    return max_value >= (type_max - 1) || min_value < type_min;
+    return max_value > (type_max - 1) || min_value < type_min;
   }
 
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,

@@ -93,7 +93,7 @@ private:
     for (auto index : indices) {
       if (index->dtype.is_int() && index->dtype.bits() < 64) {
         auto int_bound = analyzer_->const_int_bound(index);
-        if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
+        if (int_bound->max_value > (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
           Int64Promoter promoter;
           index = promoter(index);
@@ -115,7 +115,7 @@ private:
     for (auto index : indices) {
       if (index->dtype.is_int() && index->dtype.bits() < 64) {
         auto int_bound = analyzer_->const_int_bound(index);
-        if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
+        if (int_bound->max_value > (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
           Int64Promoter promoter;
           index = promoter(index);
