@@ -803,33 +803,33 @@ public:
 #undef TL_REWRITE_DIVMOD
 
 private:
-  PrimExpr PreserveHostWrap(const PrimExpr &value) const {
+  PrimExpr PreserveWordWrap(const PrimExpr &value) const {
     DataType word = DataType::UInt(value.dtype().bits());
-#define TL_UNSIGNED_HOST_ARITH(Node, Operator)                                 \
+#define TL_UNSIGNED_WORD_ARITH(Node, Operator)                                 \
   if (const auto *op = value.as<Node>()) {                                     \
     return cast(value.dtype(),                                                 \
-                cast(word, PreserveHostWrap(op->a))                            \
-                    Operator cast(word, PreserveHostWrap(op->b)));             \
+                cast(word, PreserveWordWrap(op->a))                            \
+                    Operator cast(word, PreserveWordWrap(op->b)));             \
   }
-    TL_UNSIGNED_HOST_ARITH(AddNode, +)
-    TL_UNSIGNED_HOST_ARITH(SubNode, -)
-    TL_UNSIGNED_HOST_ARITH(MulNode, *)
-#undef TL_UNSIGNED_HOST_ARITH
+    TL_UNSIGNED_WORD_ARITH(AddNode, +)
+    TL_UNSIGNED_WORD_ARITH(SubNode, -)
+    TL_UNSIGNED_WORD_ARITH(MulNode, *)
+#undef TL_UNSIGNED_WORD_ARITH
     if (const auto *op = value.as<CastNode>()) {
-      return cast(op->dtype, PreserveHostWrap(op->value));
+      return cast(op->dtype, PreserveWordWrap(op->value));
     }
     if (const auto *op = value.as<MinNode>()) {
-      return min(PreserveHostWrap(op->a), PreserveHostWrap(op->b));
+      return min(PreserveWordWrap(op->a), PreserveWordWrap(op->b));
     }
     if (const auto *op = value.as<MaxNode>()) {
-      return max(PreserveHostWrap(op->a), PreserveHostWrap(op->b));
+      return max(PreserveWordWrap(op->a), PreserveWordWrap(op->b));
     }
     return value;
   }
 
   PrimExpr Magnitude(const PrimExpr &value) const {
     DataType word = DataType::UInt(value.dtype().bits());
-    PrimExpr bits = cast(word, PreserveHostWrap(value));
+    PrimExpr bits = cast(word, PreserveWordWrap(value));
     if (value.dtype().is_uint()) {
       return bits;
     }
@@ -922,7 +922,9 @@ private:
         x.dtype().bits() < 32
             ? (x.dtype().is_int() ? DataType::Int(32) : DataType::UInt(32))
             : x.dtype();
-    PrimExpr value = cast(compute_type, x);
+    // Preserve evaluated-word semantics when the helper is inlined by C++
+    // codegen. Signed overflow in a swizzle recipe must not erase its sign.
+    PrimExpr value = cast(compute_type, PreserveWordWrap(x));
     if (remainder && facts_.bounded_remainder.count(site)) {
       return cast(x.dtype(), Call(compute_type, tl::bounded_rem(),
                                   {value, cast(compute_type, d)}));

@@ -1210,5 +1210,32 @@ def test_host_clz_cuda_graph_capture(dtype):
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_cuda
+def test_invariant_swizzle_signed_wrap():
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), base: T.int32, modulus: T.int32, d: T.int32):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                f = (base + i) % modulus
+                u = f - f % 64 + (f % 8) * 8 + (f % 64) // 8 + 64
+                if d > 0:
+                    if f >= 0:
+                        B[i] = u // d
+                    else:
+                        B[i] = u // d + 1
+
+    kernel = _compile_invariant(main)
+    out = torch.empty(128, dtype=torch.int32, device="cuda")
+    for base in (-(2**31), -127, 0, 2**31 - 64):
+        x = (base + torch.arange(128, dtype=torch.int64, device="cuda")).to(torch.int32).to(torch.int64)
+        for modulus in (97, -97, 2**31 - 1, -(2**31)):
+            f = x % modulus
+            u = (f - f % 64 + (f % 8) * 8 + (f % 64) // 8 + 64).to(torch.int32).to(torch.int64)
+            for d in (1, 7, 2**31 - 1):
+                kernel(out, base, modulus, d)
+                expected = (u // d + (f < 0)).to(torch.int32)
+                torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
