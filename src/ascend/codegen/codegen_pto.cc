@@ -2325,6 +2325,10 @@ std::string CodeGenTileLangPTO::ScalarLoad(const BufferNode *buffer,
         << buffer->dtype;
     std::string value =
         "pto.load(" + GetVarID(buffer->data.get()) + ", " + index_str + ")";
+    if (tl::IsAscendVectorizableFP8(buffer->dtype)) {
+      return "tl.fp8_byte_load(" + GetVarID(buffer->data.get()) + ", " +
+             index_str + ", " + FP8TypeName(buffer->dtype) + ")";
+    }
     if (IsInteger32(buffer->dtype)) {
       return "pto.cast(" + value + ", " + DataTypeName(buffer->dtype) + ")";
     }
@@ -2335,6 +2339,10 @@ std::string CodeGenTileLangPTO::ScalarLoad(const BufferNode *buffer,
       scope.empty()) {
     std::string base =
         ScalarPointerBase_(buffer->data.get(), buffer->dtype, scope);
+    if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(buffer->dtype)) {
+      return "tl.fp8_byte_load(" + base + ", " + index_str + ", " +
+             FP8TypeName(buffer->dtype) + ")";
+    }
     return "pto.load(" + base + ", " + index_str + ")";
   }
 
@@ -2383,6 +2391,12 @@ void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
              "float32, int8, uint8, int32, uint32, and FP8 only, got "
           << buffer->dtype;
       std::string store_value = value;
+      if (tl::IsAscendVectorizableFP8(buffer->dtype)) {
+        stream << "tl.fp8_byte_store(" << store_value << ", "
+               << GetVarID(buffer->data.get()) << ", " << index_str << ", "
+               << FP8TypeName(buffer->dtype) << ")\n";
+        return;
+      }
       if (IsInteger32(buffer->dtype)) {
         store_value = "pto.cast(" + store_value + ", pto.i32)";
       }
@@ -2399,6 +2413,11 @@ void CodeGenTileLangPTO::EmitScalarStore(const BufferNode *buffer,
       scope.empty()) {
     std::string base =
         ScalarPointerBase_(buffer->data.get(), buffer->dtype, scope);
+    if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(buffer->dtype)) {
+      stream << "tl.fp8_byte_store(" << value << ", " << base << ", "
+             << index_str << ", " << FP8TypeName(buffer->dtype) << ")\n";
+      return;
+    }
     stream << "pto.store(" << value << ", " << base << ", " << index_str
            << ")\n";
     return;
@@ -5782,6 +5801,12 @@ void CodeGenTileLangPTO::VisitExpr_(const LetNode *op,
 
 void CodeGenTileLangPTO::VisitExpr_(const MinNode *op,
                                     std::ostream &os) { // NOLINT(*)
+  if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(op->dtype)) {
+    LOG(FATAL) << "PTO SIMT scalar FP8 min is not supported; only +, -, and * "
+                  "between non-immediate operands of the same FP8 dtype are "
+                  "currently supported, got "
+               << op->a.dtype() << " and " << op->b.dtype();
+  }
   if (op->dtype.is_int() || op->dtype.is_uint()) {
     os << "pto.min(";
     PrintExpr_(op->a, os);
@@ -5795,6 +5820,12 @@ void CodeGenTileLangPTO::VisitExpr_(const MinNode *op,
 
 void CodeGenTileLangPTO::VisitExpr_(const MaxNode *op,
                                     std::ostream &os) { // NOLINT(*)
+  if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(op->dtype)) {
+    LOG(FATAL) << "PTO SIMT scalar FP8 max is not supported; only +, -, and * "
+                  "between non-immediate operands of the same FP8 dtype are "
+                  "currently supported, got "
+               << op->a.dtype() << " and " << op->b.dtype();
+  }
   if (op->dtype.is_int() || op->dtype.is_uint()) {
     os << "pto.max(";
     PrintExpr_(op->a, os);
@@ -5959,6 +5990,29 @@ void CodeGenTileLangPTO::PrintBinaryExpr_(const std::string &opstr,
     return;
   }
   if (dtype.is_scalar()) {
+    DataType lhs_dtype = lhs.dtype();
+    DataType rhs_dtype = rhs.dtype();
+    bool lhs_fp8 = tl::IsAscendVectorizableFP8(lhs_dtype);
+    bool rhs_fp8 = tl::IsAscendVectorizableFP8(rhs_dtype);
+    bool result_fp8 = tl::IsAscendVectorizableFP8(dtype);
+    if (inside_simtvf_body_ && (lhs_fp8 || rhs_fp8 || result_fp8)) {
+      bool supported_op = opstr == "+" || opstr == "-" || opstr == "*";
+      bool has_immediate = lhs.as<IntImmNode>() != nullptr ||
+                           lhs.as<FloatImmNode>() != nullptr ||
+                           rhs.as<IntImmNode>() != nullptr ||
+                           rhs.as<FloatImmNode>() != nullptr;
+      if (supported_op && lhs_fp8 && rhs_fp8 && lhs_dtype == rhs_dtype &&
+          result_fp8 && !has_immediate) {
+        os << "tl.scalar_binary_fp8('" << opstr << "', " << PrintExpr_(lhs)
+           << ", " << PrintExpr_(rhs) << ", " << FP8TypeName(dtype) << ")";
+        return;
+      }
+      LOG(FATAL) << "Unsupported PTO SIMT scalar FP8 binary op '" << opstr
+                 << "' with lhs dtype " << lhs_dtype << ", rhs dtype "
+                 << rhs_dtype << ", and result dtype " << dtype
+                 << "; only +, -, and * between non-immediate operands of "
+                    "the same FP8 dtype are currently supported";
+    }
     CodeGenTileLangPY::PrintBinaryExpr_(opstr, dtype, lhs, rhs, os);
     return;
   }
@@ -5976,6 +6030,12 @@ void CodeGenTileLangPTO::PrintBinaryExpr_(const std::string &opstr,
   }
   if (opstr != "+" && opstr != "-" && opstr != "*") {
     LOG(FATAL) << "Unsupported PTO SIMT vector binary op: " << opstr;
+  }
+  if (tl::IsAscendVectorizableFP8(dtype)) {
+    os << "tl.vectorize_binary_fp8('" << opstr << "', " << PrintExpr_(lhs)
+       << ", " << PrintExpr_(rhs) << ", " << FP8TypeName(dtype.element_of())
+       << ")";
+    return;
   }
   os << "(" << PrintExpr_(lhs) << " " << opstr << " " << PrintExpr_(rhs) << ")";
 }
