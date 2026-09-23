@@ -376,6 +376,7 @@ struct ArithmeticFacts {
                      ffi::ObjectPtrEqual>
       properties;
   std::vector<PrimExpr> fast_divisors;
+  std::vector<PrimExpr> product_divisors;
 
   PrimExpr Resolve(const PrimExpr &expr) const {
     return Substitute(expr, aliases);
@@ -384,13 +385,37 @@ struct ArithmeticFacts {
   PrimExpr ResolveDivisor(const PrimExpr &expr) const {
     PrimExpr d = Resolve(expr);
     while (const auto *cast = d.as<CastNode>()) {
-      if (!IsValuePreservingWiden(cast->value.dtype(), cast->dtype)) {
+      if (cast->value.dtype() != cast->dtype &&
+          !IsValuePreservingWiden(cast->value.dtype(), cast->dtype)) {
         break;
       }
       d = cast->value;
     }
     if (IsSupportedInteger(d.dtype()) && d.dtype().bits() < 32) {
       d = cast(d.dtype().is_int() ? DataType::Int(32) : DataType::UInt(32), d);
+    }
+    // Reassociate only multiplication in one integer word. Casts remain
+    // indivisible factors: widening a wrapped product is not the same as
+    // multiplying widened operands. Reuse an existing expression rather than
+    // asking the mathematical-integer analyzer to prove word equivalence.
+    if (d.as<MulNode>()) {
+      std::vector<PrimExpr> factors;
+      arith::UnpackReduction<MulNode>(
+          d, [&](const PrimExpr &factor) { factors.push_back(factor); });
+      for (const PrimExpr &other : product_divisors) {
+        if (other.dtype() != d.dtype()) {
+          continue;
+        }
+        std::vector<PrimExpr> other_factors;
+        arith::UnpackReduction<MulNode>(other, [&](const PrimExpr &factor) {
+          other_factors.push_back(factor);
+        });
+        if (std::is_permutation(factors.begin(), factors.end(),
+                                other_factors.begin(), other_factors.end(),
+                                ffi::StructuralEqual())) {
+          return other;
+        }
+      }
     }
     return d;
   }
@@ -700,6 +725,14 @@ private:
     if (!facts_->CanPrepare(d) || d.as<IntImmNode>() ||
         !IsSupportedInteger(x.dtype())) {
       return;
+    }
+    if (d.as<MulNode>() && std::none_of(facts_->product_divisors.begin(),
+                                        facts_->product_divisors.end(),
+                                        [&](const PrimExpr &other) {
+                                          return ffi::StructuralEqual()(d,
+                                                                        other);
+                                        })) {
+      facts_->product_divisors.push_back(d);
     }
     // Only stable scalar expressions can inherit bounds from a predicate.
     // Re-reading a mutable buffer is not the same value as its earlier load.
