@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ptodsl import pto, scalar
+from ptodsl import pto
 from ptodsl._ops import _coerce_i64
 
 
@@ -408,11 +408,11 @@ class PTOGemmL1Template:
             sub_k_storage_col = sk * self.sub_k_storage_cols
             a_l0 = pto.addptr(
                 a_l0_0,
-                scalar.muli(l0_stage_i64, pto.const(self.a_l0_stage_elems, dtype=pto.int64)),
+                pto.mul(l0_stage_i64, pto.const(self.a_l0_stage_elems, dtype=pto.int64)),
             )
             b_l0 = pto.addptr(
                 b_l0_0,
-                scalar.muli(l0_stage_i64, pto.const(self.b_l0_stage_elems, dtype=pto.int64)),
+                pto.mul(l0_stage_i64, pto.const(self.b_l0_stage_elems, dtype=pto.int64)),
             )
             pto.wait_flag("M", "MTE1", event_id=l0_stage)
             pto.mte_l1_l0a(
@@ -435,11 +435,11 @@ class PTOGemmL1Template:
             prev_stage_i64 = _coerce_i64(prev_stage, context="previous L0 stage index")
             a_l0_prev = pto.addptr(
                 a_l0_0,
-                scalar.muli(prev_stage_i64, pto.const(self.a_l0_stage_elems, dtype=pto.int64)),
+                pto.mul(prev_stage_i64, pto.const(self.a_l0_stage_elems, dtype=pto.int64)),
             )
             b_l0_prev = pto.addptr(
                 b_l0_0,
-                scalar.muli(prev_stage_i64, pto.const(self.b_l0_stage_elems, dtype=pto.int64)),
+                pto.mul(prev_stage_i64, pto.const(self.b_l0_stage_elems, dtype=pto.int64)),
             )
             pto.wait_flag("MTE1", "M", event_id=prev_stage)
             if self._is_static_int(unit_flag_ctrl):
