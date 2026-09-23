@@ -172,9 +172,10 @@ struct MultiBufferOwnerInfo {
 // guards, and schedule stages may share one physical counter group; iteration
 // mode derives the slot lexically and therefore requires one owner.
 //
-// MultiBufferPlan contains only automatic physical rings. Therefore every info
-// has num_versions > 1 and at least one owner. A missing plan entry covers both
-// non-eligible storage and eligible storage pinned to one version.
+// MultiBufferPlan contains every scheduler-selected storage, including a
+// one-version storage. Every info has at least one owner. Physical buffer
+// rewriting is needed only when num_versions > 1; version-one entries still
+// use the same iteration/counter ownership and synchronization protocols.
 //
 // Entries stored in a plan have exactly one of these forms:
 //   iteration: counter_group_id == 0, counter undefined,
@@ -191,6 +192,7 @@ struct MultiBufferInfo {
   Buffer counter;
 
   bool UsesCounter() const { return counter.defined(); }
+  bool NeedsVersionDimension() const { return num_versions > 1; }
 
   const MultiBufferOwnerInfo *FindOwner(const IRStructure *node) const {
     ICHECK(node != nullptr) << "Cannot find an owner for a null IRStructure";
@@ -208,17 +210,18 @@ struct MultiBufferInfo {
   }
 };
 
-// Physical multi-buffer metadata shared by PrepareMultiBuffer, ResolveCore,
-// InsertSync, and MaterializeMultiBuffer. Logical epoch domains are represented
-// separately by loop annotations and EpochDomainRegistry below; they never
-// participate in physical counter-group identity.
+// Multi-buffer metadata shared by PrepareMultiBuffer, ResolveCore, InsertSync,
+// and MaterializeMultiBuffer. Logical epoch domains are represented separately
+// by loop annotations and EpochDomainRegistry below; they never participate in
+// physical counter-group identity.
 class MultiBufferPlan {
 public:
   const std::vector<MultiBufferInfo> &Infos() const { return infos_; }
 
-  // Null means that this storage has no automatic physical ring. Storage
-  // access/dependency visitors may observe null; code handling a selected ring
-  // must require a non-null result instead of inventing fallback state.
+  // Null means that this storage has no selected automatic multi-buffer plan.
+  // Storage access/dependency visitors may observe null; code handling a
+  // selected plan must require a non-null result instead of inventing fallback
+  // state.
   const MultiBufferInfo *Find(const Var &storage) const {
     auto it = storage_indices_.find(storage);
     return it == storage_indices_.end() ? nullptr : &infos_[it->second];
@@ -230,6 +233,8 @@ public:
 
   // Pass-local builders append resolved storage records through this method.
   void AddInfo(MultiBufferInfo info) {
+    ICHECK_GT(info.num_versions, 0);
+    ICHECK(!info.owners.empty());
     if (info.UsesCounter()) {
       ICHECK_GT(info.counter_group_id, 0);
       auto [group_it, inserted] = counter_group_representatives_.emplace(
@@ -368,8 +373,6 @@ ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> counter_groups;
   int next_counter_group_id = 1;
   for (const auto &[storage, num_versions] : selected_versions) {
-    if (num_versions <= 1)
-      continue;
     // Preserve scheduled order: owner position is part of the shared counter
     // protocol identity and later grouping compares owners pairwise.
     auto owners_it = owners_by_storage.find(storage);

@@ -54,3 +54,44 @@ def test_shared_special_register_writer_covers_both_cores(operation):
     before = kernel(body, buffers=[ub, accum], params=[out, exit_loop])
     after = transform.ResolveCore()(before)
     assert task_core_masks(after, writer.op.name) == {3}
+
+
+def _cube_mode_program(mode):
+    a = tirx.decl_buffer((16, 16), "float32", name="a", scope="shared.l0a")
+    b = tirx.decl_buffer((16, 16), "float32", name="b", scope="shared.l0b")
+    outputs = [tirx.decl_buffer((16, 16), "float32", name=f"c{i}", scope="shared.l0c") for i in range(2)]
+    setters = (
+        [T.set_hf32_mode("nearest_even"), T.set_hf32_mode(None)]
+        if mode == "hf32"
+        else [T.set_mmad_direction("n"), T.set_mmad_direction("m")]
+    )
+    readers = [unit(tirx.Evaluate(T.gemm(a, b, c, transpose_B=True, clear_accum=True)), core=2, cost=(64, 32)) for c in outputs]
+    i = tirx.Var("i", "int32")
+    # Explicit scheduled IR: operand producers are outside this pass's contract.
+    body = seq(
+        unit(tirx.Evaluate(setters[0]), core=3, cost=(1, 1)),
+        unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, readers[0]), core=None),
+        unit(tirx.Evaluate(setters[1]), core=3, cost=(1, 1)),
+        readers[1],
+    )
+    return kernel(body, buffers=[a, b, *outputs]), setters[0].op.name
+
+
+@pytest.mark.parametrize("mode", ["hf32", "mmad-direction"])
+def test_cube_mode_changes_order_nested_and_following_gemms(mode):
+    before, setter = _cube_mode_program(mode)
+    after = transform.AutoSchedule()(before)
+    children = after["main"].body.block.body.seq
+    assert len(children) == 4
+    assert calls(children[0], setter)
+    assert calls(children[1], "tl.tileop.gemm")
+    assert calls(children[2], setter)
+    assert calls(children[3], "tl.tileop.gemm")
+
+
+@pytest.mark.parametrize("mode", ["hf32", "mmad-direction"])
+def test_cube_mode_writers_follow_nested_gemm_core(mode):
+    before, setter = _cube_mode_program(mode)
+    after = transform.ResolveCore()(before)
+    assert len(calls(after, setter)) == 2
+    assert task_core_masks(after, setter) == {2}

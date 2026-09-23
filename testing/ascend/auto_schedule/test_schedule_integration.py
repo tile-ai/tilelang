@@ -230,3 +230,85 @@ def test_nested_loop_break_is_emitted_on_every_core():
     aiv_start = source.index("if ASC_IS_AIV")
     assert "break;" in source[aic_start:aiv_start]
     assert "break;" in source[aiv_start:]
+
+
+def test_single_version_sibling_protocol_survives_reuse_and_lowering():
+    @T.prim_func
+    def main(A: T.Tensor((8, 64), "float32"), C: T.Tensor((8, 64), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({ub: (1, "auto")})
+            for i in T.Pipelined(4, num_stages=2, annotations={"enable_offset": True}):
+                with T.Stage(0):
+                    for _first in T.serial(1):
+                        T.copy(A[2 * i, :], ub)
+                        T.copy(ub, C[2 * i, :])
+                with T.Stage(1):
+                    for _second in T.serial(1):
+                        T.copy(A[2 * i + 1, :], ub)
+                        T.copy(ub, C[2 * i + 1, :])
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.InsertSync", "tl.MaterializeMultiBuffer", "tl.LowerScheduledTIR", "tl.MergeUBAllocations"):
+                snapshots[info.name] = mod
+
+    # This integration boundary protects the single-version counter cleanup
+    # together with the alias contract produced by InsertSync and consumed by packing.
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    inserted = snapshots["tl.InsertSync"]
+    ub = allocated_buffer(inserted, "ub")
+    owners = [loop for loop in nodes(inserted, tirx.For) if ub.data in loop.annotations.get("tl.multi_buffer_counter_map", {})]
+    assert len(owners) == 2
+    counter = owners[0].annotations["tl.multi_buffer_counter_map"][ub.data]
+    assert owners[1].annotations["tl.multi_buffer_counter_map"][ub.data].same_as(counter)
+    for operation in ("set", "wait"):
+        flags = [call for call in calls(inserted, "tl.ascend_" + operation + "_flag") if call.args[0].value == "MTE3_MTE2"]
+        assert flags and all(isinstance(call.args[1], tirx.IntImm) for call in flags)
+    materialized = snapshots["tl.MaterializeMultiBuffer"]
+    assert tuple(int(dim) for dim in allocated_buffer(materialized, "ub").shape) == (64,)
+    assert not any(buffer.data.same_as(counter.data) for block in nodes(materialized, tirx.SBlock) for buffer in block.alloc_buffers)
+    assert not any(
+        node.buffer.data.same_as(counter.data) for kind in (tirx.BufferLoad, tirx.BufferStore) for node in nodes(materialized, kind)
+    )
+    assert any("tl.buffer_alias_map" in block.annotations for block in nodes(materialized, tirx.SBlock))
+    assert any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.LowerScheduledTIR"], tirx.AttrStmt))
+    assert not any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.MergeUBAllocations"], tirx.AttrStmt))
+    assert artifact.kernel_source and artifact.device_mod
+
+
+def test_mmad_direction_reaches_only_cube_and_precedes_its_gemm():
+    @T.prim_func
+    def main(A: T.Tensor((16, 16), "bfloat16"), B: T.Tensor((16, 16), "bfloat16"), C: T.Tensor((2, 16, 16), "float32")):
+        with T.MixedKernel(1, sids=1):
+            a = T.alloc_l1((16, 16), "bfloat16")
+            b = T.alloc_l1((16, 16), "bfloat16")
+            a_l0 = T.alloc_l0a((16, 16), "bfloat16")
+            b_l0 = T.alloc_l0b((16, 16), "bfloat16")
+            c0 = T.alloc_l0c((16, 16), "float32")
+            c1 = T.alloc_l0c((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            T.copy(a, a_l0)
+            T.copy(b, b_l0)
+            T.set_mmad_direction("n")
+            T.gemm(a_l0, b_l0, c0, transpose_B=True, clear_accum=True)
+            T.set_mmad_direction("m")
+            T.gemm(a_l0, b_l0, c1, transpose_B=True, clear_accum=True)
+            T.copy(c0, ub)
+            T.copy(ub, C[0, :, :])
+            T.copy(c1, ub)
+            T.copy(ub, C[1, :, :])
+
+    source = tilelang.lower(main, target="ascend").kernel_source
+    aic, aiv = source.split("if ASC_IS_AIC", 1)[1].split("if ASC_IS_AIV", 1)
+    assert aic.count("asc_set_mmad_direction_n();") == 1
+    assert aic.count("asc_set_mmad_direction_m();") == 1
+    assert aic.index("asc_set_mmad_direction_n();") < aic.index("asc_mmad(")
+    assert aic.index("asc_mmad(") < aic.index("asc_set_mmad_direction_m();") < aic.rindex("asc_mmad(")
+    assert "asc_set_mmad_direction" not in aiv

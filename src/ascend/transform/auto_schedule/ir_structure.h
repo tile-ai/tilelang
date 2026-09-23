@@ -72,6 +72,7 @@ enum class SpecialRegister : uint16_t {
   kPipeVector = 1 << 8,
   kPipeFixpipe = 1 << 9,
   kPipeScalar = 1 << 10,
+  kMmadDirection = 1 << 11, // set_mmad_direction <- read by Cube (MAD) ops
 };
 
 inline uint16_t PipeSpecialRegisterMask(uint16_t pipe_mask) {
@@ -428,15 +429,17 @@ public:
   virtual uint16_t GetSpecialWriteMask() const { return 0; }
 
   // Special scalar registers this node *reads*:
-  //   Cube (MAD)     reads the HF32-mode register (derived from the Cube pipe)
+  //   Cube (MAD) reads HF32 mode and MAD direction (derived from the Cube pipe)
   //   padded GM->UB copies read the pad-value register (only copies that carry
   //     data_select / pad_value)
   //   loop_break is a fence: every node implicitly reads the loop-control
   //     register, so any loop_break write orders against all siblings.
   uint16_t GetSpecialReadMask() const {
     uint16_t mask = static_cast<uint16_t>(SpecialRegister::kLoopControl);
-    if (UsesPipe(ResourcePipe::kCube))
-      mask |= static_cast<uint16_t>(SpecialRegister::kHf32Mode);
+    if (UsesPipe(ResourcePipe::kCube)) {
+      mask |= static_cast<uint16_t>(SpecialRegister::kHf32Mode) |
+              static_cast<uint16_t>(SpecialRegister::kMmadDirection);
+    }
     if (ReadsPadValueRegister())
       mask |= static_cast<uint16_t>(SpecialRegister::kPadValue);
     if (ReadsAtomicRegister())

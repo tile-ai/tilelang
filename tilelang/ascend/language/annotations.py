@@ -23,7 +23,8 @@ def annotate_buffer_versions(buffer_versions_map: dict):
     optimal buffer version counts for each on-chip buffer. Each mapping value
     may be one of:
 
-    - ``num_versions``: use a fixed positive version count and automatic mode;
+    - ``1``: opt out of multi-buffer eligibility, including explicit owner claims;
+    - ``num_versions >= 2``: use a fixed version count and automatic mode;
     - ``(num_versions, mode)``: use a fixed count and explicit mode;
     - ``mode``: select a mode while leaving the version count to the scheduler.
 
@@ -35,6 +36,13 @@ def annotate_buffer_versions(buffer_versions_map: dict):
 
     A fixed count is useful when you want to guarantee double-buffering for a
     critical buffer regardless of the Z3 solver's choice.
+
+    ``{buf: 1}`` removes the storage (including aliases) from multi-buffer
+    eligibility, overriding inferred or explicit owner claims and preserving
+    ordinary dependencies instead of owner-exclusion dependencies. Overriding
+    explicit ``multi_buffer_eligible`` claims emits a warning once per storage.
+    Use this when the eligibility heuristic misses reads of previous data. To keep
+    eligibility with one version, explicitly specify a mode: ``{buf: (1, "auto")}``.
 
     AutoSchedule consumes this map and replaces it with the selected version
     counts, including versions chosen automatically by the solver.

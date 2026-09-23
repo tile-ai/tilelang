@@ -18,6 +18,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -198,19 +199,15 @@ struct StridedLayout {
 ///
 /// The selected pair contains every non-unit axis, preserves size-one matrix
 /// dimensions when needed, and prefers the trailing pair when several pairs
-/// are equivalent. True ND copies need outer-loop lowering and are rejected.
-inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
-                                          const ffi::Array<Range> &range,
-                                          arith::Analyzer *analyzer,
-                                          const std::string &context) {
+/// are equivalent. Return nullopt if no pair can be proven valid; this includes
+/// both unsupported layouts and inconclusive stride/extent proofs.
+inline std::optional<StridedLayout>
+TryNormalizeMTE2DLayout(const Buffer &buf, const ffi::Array<Range> &range,
+                        arith::Analyzer *analyzer) {
   auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
 
-  ICHECK_EQ(range.size(), buf->shape.size())
-      << context << " requires one access range per buffer axis, got ranges "
-      << range << " for buffer " << buf->name << " shape " << buf->shape;
-  ICHECK_GE(range.size(), 2U)
-      << context << " requires at least a 2D region, got buffer " << buf->name
-      << " shape " << buf->shape << " ranges " << range;
+  if (range.size() != buf->shape.size() || range.size() < 2)
+    return std::nullopt;
 
   StridedLayout raw =
       StridedLayout::FromBufferRange(buf, range, buf->dtype.bits());
@@ -245,7 +242,27 @@ inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
     }
   }
 
-  ICHECK_GE(inner_axis, 0)
+  if (inner_axis < 0)
+    return std::nullopt;
+
+  const Mode &inner = raw.modes[ndim - 1 - inner_axis];
+  const Mode &row = raw.modes[ndim - 1 - row_axis];
+  return StridedLayout{{inner, row}, raw.offset, raw.elem_bits};
+}
+
+/// Require a proven 2D layout for lowering an MTE descriptor.
+inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
+                                          const ffi::Array<Range> &range,
+                                          arith::Analyzer *analyzer,
+                                          const std::string &context) {
+  ICHECK_EQ(range.size(), buf->shape.size())
+      << context << " requires one access range per buffer axis, got ranges "
+      << range << " for buffer " << buf->name << " shape " << buf->shape;
+  ICHECK_GE(range.size(), 2U)
+      << context << " requires at least a 2D region, got buffer " << buf->name
+      << " shape " << buf->shape << " ranges " << range;
+  auto layout = TryNormalizeMTE2DLayout(buf, range, analyzer);
+  ICHECK(layout.has_value())
       << context
       << " cannot represent this region with one 2D MTE descriptor: all axes "
          "outside one row/inner pair must have extent 1, and the inner axis "
@@ -254,9 +271,7 @@ inline StridedLayout NormalizeMTE2DLayout(const Buffer &buf,
       << buf->name << " has shape " << buf->shape << ", strides "
       << buf->strides << ", and ranges " << range << ".";
 
-  const Mode &inner = raw.modes[ndim - 1 - inner_axis];
-  const Mode &row = raw.modes[ndim - 1 - row_axis];
-  return StridedLayout{{inner, row}, raw.offset, raw.elem_bits};
+  return layout.value();
 }
 
 /// Normalize a region whose hardware layout assigns matrix semantics to the

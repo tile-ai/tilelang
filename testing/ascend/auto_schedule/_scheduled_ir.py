@@ -32,7 +32,7 @@ def copy_ring(*, mode="counter", versions=2, owners=1, guarded=False, prepared=F
     a = tirx.decl_buffer((owners * 4, 64), "float32", name="A")
     c = tirx.decl_buffer((owners * 4, 64), "float32", name="C")
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
-    counter = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var") if prepared and mode == "counter" and versions > 1 else None
+    counter = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var") if prepared and mode == "counter" else None
     bodies = []
     if counter is not None:
         bodies.append(unit(tirx.BufferStore(counter, 0, [0]), core=core))

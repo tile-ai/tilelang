@@ -15,6 +15,7 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "ascend/layout/ascend_layouts.h"
+#include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
@@ -233,6 +234,134 @@ private:
     original.CopyOnWrite()->args = std::move(args);
     return original;
   }
+  Call NormalizeFixpipeCopy_(Call call) {
+    constexpr int kFixpipeAlignmentBytes = 32;
+    AscendCopy rewritten(call->args, call->annotations);
+    ICHECK_GE(rewritten->src_range.size(), 2U);
+    ICHECK_EQ(rewritten->src_range.size(), rewritten->src->shape.size());
+    // Lowering skips the DMA if any source or destination extent is
+    // nonpositive.
+    for (const Array<Range> &ranges :
+         {rewritten->src_range, rewritten->dst_range}) {
+      for (const Range &range : ranges) {
+        if (analyzer_->CanProve(range->extent <= 0))
+          return call;
+      }
+    }
+    // Canonical L0C matrices use the trailing axes, as required by lowering.
+    const size_t src_inner_axis = rewritten->src_range.size() - 1;
+
+    // Use the same row/inner axes as lowering, including size-one UB views.
+    // An unproven explicit stride must never fall back to dense geometry.
+    auto dst_layout = TryNormalizeMTE2DLayout(rewritten->dst,
+                                              rewritten->dst_range, analyzer_);
+    if (!dst_layout) {
+      LOG(WARNING) << "Ascend L0C->UB copy: cannot prove a contiguous 2D "
+                      "destination layout for "
+                   << rewritten->dst->name << "; automatic padding skipped. "
+                   << "Shape: " << rewritten->dst->shape
+                   << ", strides: " << rewritten->dst->strides << ".";
+      return call;
+    }
+    const size_t dst_inner_axis = dst_layout->modes[0].axis;
+    PrimExpr dst_row_stride = dst_layout->modes[1].stride;
+    const int dst_elem_bits =
+        rewritten->dst->dtype.bits() * rewritten->dst->dtype.lanes();
+    PrimExpr dst_row_stride_bytes = analyzer_->Simplify(
+        AscendMTEBytesFromElements(dst_row_stride, dst_elem_bits));
+    PrimExpr stride_remainder =
+        floormod(dst_row_stride_bytes, make_const(dst_row_stride_bytes.dtype(),
+                                                  kFixpipeAlignmentBytes));
+    // The descriptor's stride must be aligned even for a single-row copy.
+    if (!analyzer_->CanProveEqual(stride_remainder, 0)) {
+      LOG(WARNING) << "Ascend L0C->UB copy: destination "
+                   << rewritten->dst->name << " row stride is "
+                   << dst_row_stride_bytes << " bytes; "
+                   << (analyzer_->CanProve(stride_remainder != 0)
+                           ? "it is not a multiple of "
+                           : "cannot prove it is a multiple of ")
+                   << kFixpipeAlignmentBytes
+                   << " bytes. Pad the UB row stride to a 32-byte boundary.";
+    }
+
+    // Preserve the N split point and its 2:1 region ratio.
+    int dual_dst_ctl = rewritten->dual_dst_ctl;
+    if (dual_dst_ctl == 2)
+      return call;
+
+    ICHECK_GT(dst_elem_bits, 0);
+    ICHECK_LE(dst_elem_bits, kFixpipeAlignmentBytes * 8);
+    ICHECK_EQ((kFixpipeAlignmentBytes * 8) % dst_elem_bits, 0)
+        << "Ascend L0C->UB destination dtype must divide a 32-byte fixpipe "
+           "write unit, got "
+        << rewritten->dst->dtype;
+    PrimExpr source_width = rewritten->src_range[src_inner_axis]->extent;
+    PrimExpr destination_width = rewritten->dst_range[dst_inner_axis]->extent;
+    // Normal copy takes n_size from UB; M-split takes it from L0C.
+    PrimExpr transfer_width =
+        dual_dst_ctl == 1 ? source_width : destination_width;
+    PrimExpr alignment_elements = make_const(
+        transfer_width.dtype(), kFixpipeAlignmentBytes * 8 / dst_elem_bits);
+    if (analyzer_->CanProveEqual(floormod(transfer_width, alignment_elements),
+                                 0))
+      return call;
+
+    PrimExpr padded_width = analyzer_->Simplify(
+        floordiv(transfer_width + alignment_elements - 1, alignment_elements) *
+        alignment_elements);
+    // Keep a larger source tile without enlarging the normal copy's n_size.
+    auto widen_region = [&](const PrimExpr &width) {
+      return analyzer_->Simplify(max(width, cast(width.dtype(), padded_width)));
+    };
+    PrimExpr padded_src =
+        dual_dst_ctl == 1 ? padded_width : widen_region(source_width);
+    PrimExpr padded_dst =
+        dual_dst_ctl == 1 ? widen_region(destination_width) : padded_width;
+    // A padded stride does not authorize writing beyond the logical shape
+    // (in particular, beyond the last allocated row).
+    PrimExpr dst_capacity =
+        min(rewritten->dst->shape[dst_inner_axis], dst_row_stride);
+    auto fits = [&](const Range &range, const PrimExpr &width,
+                    const PrimExpr &capacity) {
+      return analyzer_->CanProve(range->min >= 0 &&
+                                     range->min + width <= capacity,
+                                 arith::ProofStrength::kSymbolicBound);
+    };
+    // L0C's canonical shape already includes fractal padding and bounds reads.
+    if (!fits(rewritten->src_range[src_inner_axis], padded_src,
+              rewritten->src->shape[src_inner_axis]) ||
+        !fits(rewritten->dst_range[dst_inner_axis], padded_dst, dst_capacity)) {
+      LOG(WARNING)
+          << "Ascend L0C->UB copy: cannot prove padding n_size="
+          << transfer_width << " to " << padded_width
+          << " elements fits source " << rewritten->src->name << " (width "
+          << rewritten->src->shape[src_inner_axis] << ") and destination "
+          << rewritten->dst->name << " (row capacity " << dst_capacity
+          << "); automatic padding skipped. Ensure the regions "
+             "fit the buffer shapes and UB row stride after 32-byte alignment.";
+      return call;
+    }
+
+    // Select preserves empty copies and remains analyzable by layout bounds.
+    auto pad_range = [&](const Range &range, const PrimExpr &width) {
+      return Range::FromMinExtent(
+          range->min, analyzer_->Simplify(Select(
+                          range->extent > 0, cast(range->extent.dtype(), width),
+                          range->extent)));
+    };
+    Array<Range> src_ranges = rewritten->src_range;
+    src_ranges.Set(src_inner_axis,
+                   pad_range(src_ranges[src_inner_axis], padded_src));
+    Array<Range> dst_ranges = rewritten->dst_range;
+    dst_ranges.Set(dst_inner_axis,
+                   pad_range(dst_ranges[dst_inner_axis], padded_dst));
+    auto *writer = call.CopyOnWrite();
+    writer->args.Set(0, MakeRegion_(BufferRegion(rewritten->src, src_ranges),
+                                    Downcast<Call>(writer->args[0])));
+    writer->args.Set(1, MakeRegion_(BufferRegion(rewritten->dst, dst_ranges),
+                                    Downcast<Call>(writer->args[1])));
+    return call;
+  }
   Buffer VisitBufferDef(const Buffer &buffer, bool) final {
     return VisitBufferUse(buffer);
   }
@@ -267,6 +396,8 @@ private:
     if (IsAscendCopyCall(op)) {
       Copy copy(op->args, op->annotations);
       Call call = Downcast<Call>(Parent::VisitExpr_(op));
+      if (IsL0CBuffer(copy->src) && IsSharedBuffer(copy->dst))
+        return NormalizeFixpipeCopy_(call);
       if (!IsGlobalBuffer(copy->src) || !IsL1Buffer(copy->dst) ||
           !buffers_.count(copy->dst))
         return call;

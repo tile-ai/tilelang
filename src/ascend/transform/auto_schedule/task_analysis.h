@@ -258,6 +258,8 @@ private:
       Add(SpecialRegister::kLoopControl);
     } else if (op->op.same_as(tl::ascend_set_hf32_mode())) {
       Add(SpecialRegister::kHf32Mode);
+    } else if (op->op.same_as(tl::ascend_set_mmad_direction())) {
+      Add(SpecialRegister::kMmadDirection);
     } else if (op->op.same_as(tl::ascend_set_copy_pad_value())) {
       Add(SpecialRegister::kPadValue);
     } else if (op->op.same_as(tl::ascend_set_atomic()) ||

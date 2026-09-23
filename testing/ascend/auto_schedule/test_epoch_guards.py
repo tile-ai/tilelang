@@ -57,19 +57,30 @@ def test_guard_equivalence_preserves_storage_epochs(relation, share_clock):
         )
 
 
-def test_nested_condition_cannot_escape_into_outer_epoch():
+@pytest.mark.parametrize("case", ["inner-guard", "mutated-bound"])
+def test_nested_condition_cannot_escape_into_outer_epoch(case):
     a = tirx.decl_buffer((64,), "float32", name="A")
     c = tirx.decl_buffer((64,), "float32", name="C")
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
     i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
     extent = tirx.Var("extent", "int32")
-    child = tirx.For(j, 0, extent, tirx.ForKind.SERIAL, seq(unit(copy(a, ub), guard=j % 2 == 0), unit(copy(ub, c), guard=j % 2 == 0)))
-    owner = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, unit(child, core=None), annotations={"multi_buffer_eligible": [ub.data]})
+    bound = tirx.decl_buffer((1,), "int32", name="bound")
+    guard = j % 2 == 0 if case == "inner-guard" else None
+    tasks = [unit(copy(a, ub), guard=guard)]
+    if case == "mutated-bound":
+        tasks.append(unit(tirx.BufferStore(bound, 0, [0])))
+    tasks.append(unit(copy(ub, c), guard=guard))
+    child = unit(tirx.For(j, 0, extent, tirx.ForKind.SERIAL, seq(*tasks)), core=None)
+    body = seq(unit(tirx.Bind(extent, bound[0])), child) if case == "mutated-bound" else child
+    owner = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [ub.data]})
     before = kernel(
         unit(owner, core=None),
         buffers=[ub],
-        params=[a, c, extent],
-        annotations={"tl.buffer_versions_map": {ub.data: 2}, "tl.buffer_version_mode": {ub.data: "counter"}},
+        params=[a, c, bound if case == "mutated-bound" else extent],
+        annotations={
+            "tl.buffer_versions_map": {ub.data: 1 if case == "mutated-bound" else 2},
+            "tl.buffer_version_mode": {ub.data: "counter"},
+        },
     )
     after = transform.PrepareMultiBuffer()(before)
     (owner,) = [loop for loop in nodes(after, tirx.For) if loop.loop_var.same_as(i)]

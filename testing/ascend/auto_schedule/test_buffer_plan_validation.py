@@ -59,7 +59,8 @@ def test_invalid_storage_plans(case, message):
 @pytest.mark.parametrize(
     "tail, partial", [(False, False), (False, True), (True, False)], ids=["initial-fill", "partial-fill", "final-fill"]
 )
-def test_external_fill_is_marked_for_broadcast(tail, partial):
+@pytest.mark.parametrize("versions", [1, 2], ids=["single-version", "ring"])
+def test_external_fill_is_marked_for_broadcast(tail, partial, versions):
     ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
     i = tirx.Var("i", "int32")
     fill = unit(
@@ -78,7 +79,7 @@ def test_external_fill_is_marked_for_broadcast(tail, partial):
         ),
         core=None,
     )
-    before = kernel(seq(loop, fill) if tail else seq(fill, loop), buffers=[ub], annotations={"tl.buffer_versions_map": {ub.data: 2}})
+    before = kernel(seq(loop, fill) if tail else seq(fill, loop), buffers=[ub], annotations={"tl.buffer_versions_map": {ub.data: versions}})
     after = transform.PrepareMultiBuffer()(before)
     broadcast = [
         node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_task" and "tl.multi_buffer_broadcast_fill" in node.node

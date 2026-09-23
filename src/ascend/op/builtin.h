@@ -400,6 +400,12 @@ TVM_DLL const Op &ascend_rls_buf();
 TVM_DLL const Op &ascend_set_hf32_mode();
 
 /*!
+ * \brief Set the preferred M/N result traversal direction for Ascend MAD.
+ * ascend_set_mmad_direction(direction), where direction is "m" or "n".
+ */
+TVM_DLL const Op &ascend_set_mmad_direction();
+
+/*!
  * \brief Ascend arm a hardware store-mode atomic op for GM stores.
  *
  * ascend_set_atomic(op_str, typed_zero)
