@@ -98,10 +98,6 @@ class Gemm(Node, Scriptable):
     def is_tcgen05(self):
         return getattr(self, "isTcgen05", False)
 
-    @property
-    def sf_k_start(self):
-        return self.sfKStart
-
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""
         gemm_inst = self._select_gemm_instruction(thread_nums, target)

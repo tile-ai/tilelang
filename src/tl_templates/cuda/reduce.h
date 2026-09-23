@@ -245,6 +245,12 @@ struct AllReduce {
   static_assert(((threads / scale) & (threads / scale - 1)) == 0,
                 "AllReduce reduce width (threads / scale) must be a power of "
                 "two");
+  // t ^ (scale * k) only flips the reduce coordinate when the non-reduced
+  // part of the thread index sits below `scale`, which needs scale to be a
+  // power of two; otherwise the pairs straddle reduce groups.
+  static_assert((scale & (scale - 1)) == 0,
+                "AllReduce scale (thread stride between reduce participants) "
+                "must be a power of two");
 
   // Scalar interface (backward-compatible).
   template <typename T> static TL_DEVICE T run(T x, T *red_buf = nullptr) {
@@ -349,7 +355,7 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
   }
 #endif
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
-  auto run_reduce_sync = [&]<typename T_cast>(T_cast val) {
+  auto run_reduce_sync = [&](auto val) {
     if constexpr (std::is_same_v<ReduceOp, SumOp>) {
       return __reduce_add_sync(mask, val);
     } else if constexpr (std::is_same_v<ReduceOp, MaxOp>) {

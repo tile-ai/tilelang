@@ -49,6 +49,7 @@ def test_each_dialect_declares_its_own_op_hints():
         "copy": {"disable_tma", "eviction_policy", "prefer_instruction"},
         "im2col": {"eviction_policy"},
         "gemm": {"mbar"},
+        "gemm_blockscaled": {"mbar", "use_2cta", "sf_layout"},
         "gemm_sp": {"wg_wait"},
         "atomic_add": {"use_tma"},
         "Parallel": {"prefer_async"},
@@ -188,6 +189,20 @@ def test_cuda_hints_do_not_block_cpu_compilation():
     mod = tilelang.compile(main, target="c", out_idx=[-1])
     x = torch.arange(64, dtype=torch.float32)
     torch.testing.assert_close(mod(x), x)
+
+
+def test_cuda_atomic_add_use_tma_rejected_on_cpu():
+    """Unlike droppable hints, ``use_tma`` has no CPU fallback: a CUDA-dialect
+    atomic_add carrying it must be rejected by the CPU backend with a readable
+    error rather than silently ignored."""
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 8), "float32"), B: T.Tensor((4, 8), "float32")):
+        with T.Kernel(1):
+            T.atomic_add(B, A, use_tma=True)
+
+    with pytest.raises(Exception, match="does not support use_tma"):
+        tilelang.compile(main, target="c", out_idx=[1])
 
 
 @tilelang.testing.requires_cuda

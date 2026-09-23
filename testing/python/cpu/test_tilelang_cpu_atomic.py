@@ -16,7 +16,7 @@ import pytest
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.cpu.language as T
 from tilelang import tvm
 
 
@@ -357,19 +357,6 @@ def test_cpu_atomic_add_region_memory_order():
     A = _make_input((M, N), dtype)
     out = kernel(A)
     torch.testing.assert_close(out, A, rtol=1e-4, atol=1e-4)
-
-
-def test_cpu_atomic_add_use_tma_rejected():
-    M, N = 4, 8
-    dtype = "float32"
-
-    @T.prim_func
-    def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
-        with T.Kernel(1):
-            T.atomic_add(B, A, use_tma=True)
-
-    with pytest.raises(Exception, match="use_tma"):
-        _compile_c(main, out_idx=[1])
 
 
 def test_cpu_atomic_addx2_return_prev_rejected():

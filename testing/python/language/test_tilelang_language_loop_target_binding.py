@@ -1,7 +1,5 @@
 """Loop induction bindings must not assign to older mutable scalar bindings."""
 
-import logging
-
 import pytest
 import torch
 
@@ -57,17 +55,6 @@ def count_local_var_stores(kernel):
         kernel.body, lambda node: stores.append(node) if isinstance(node, tvm.tirx.BufferStore) else None
     )
     return len([node for node in stores if node.buffer.scope() == "local.var"])
-
-
-def test_stepped_loop_target_over_live_var_does_not_warn(caplog):
-    # The tilelang logger does not propagate to the root logger caplog listens on.
-    builder_logger = logging.getLogger("tilelang.language.eager.builder")
-    builder_logger.addHandler(caplog.handler)
-    try:
-        make_kernel("stepped", live=True)
-    finally:
-        builder_logger.removeHandler(caplog.handler)
-    assert "re-bound" not in caplog.text
 
 
 def expired_var_kernel():

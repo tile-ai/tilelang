@@ -33,6 +33,7 @@
 #include "common/int64_promoter.h"
 #include "common/loop_vectorization_utils.h"
 #include "support/check.h"
+#include "tir/transforms/ir_utils.h"
 #include <iostream>
 #include <optional>
 #include <tvm/arith/iter_affine_map.h>
@@ -143,6 +144,36 @@ Array<PrimExpr> GetBufferStrides(const Buffer &buffer) {
     stride = stride * buffer->shape[i];
   }
   return Array<PrimExpr>{strides.rbegin(), strides.rend()};
+}
+
+Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
+  if (const auto *call = expr.as<CallNode>();
+      call != nullptr && (call->op.same_as(builtin::address_of()) ||
+                          call->op.same_as(tl::access_ptr()))) {
+    ICHECK_EQ(call->args.size(),
+              call->op.same_as(builtin::address_of()) ? 1U : 3U);
+    return Downcast<BufferLoad>(call->args[0]);
+  }
+  return expr.as<BufferLoad>();
+}
+
+int GetMaxAtomicVectorSize(DataType dtype, const String &storage_scope,
+                           const Target &target) {
+  if (dtype.lanes() != 1) {
+    return 1;
+  }
+  if (dtype.is_float16() || dtype.is_bfloat16()) {
+    return 2;
+  }
+  if (dtype.is_float() && dtype.bits() == 32 &&
+      TargetHasSMVersionGE(target, 90) &&
+      (storage_scope.empty() || storage_scope == "global")) {
+    // CUDA's float2/float4 atomicAdd overloads support global memory only.
+    // An empty pointer storage scope denotes global memory, as in
+    // Buffer::scope.
+    return 4;
+  }
+  return 1;
 }
 
 class VectorizeFindMemoryAccess : public StmtExprVisitor {
@@ -617,42 +648,13 @@ private:
       HandleTvmAccessPtr(node);
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op == tl::atomic_add_elem_op()) {
-      // Assert at least 2 args (dst_ptr and src)
-      ICHECK(node->args.size() >= 2)
+      ICHECK_GE(node->args.size(), 2U)
           << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
-      // Get dst dtype from args[0] (tvm_access_ptr or address_of(BufferLoad))
-      const CallNode *dst_ptr_call = node->args[0].as<CallNode>();
-      ICHECK(dst_ptr_call) << "atomic_add_elem_op first arg must be a call";
-
-      DataType dtype;
-      if (dst_ptr_call->op.same_as(builtin::address_of())) {
-        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
-        ICHECK(buffer_load) << "address_of arg must be BufferLoad";
-        dtype = buffer_load->buffer->dtype;
-      } else if (dst_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
-        ICHECK(!dst_ptr_call->args.empty());
-        dtype = dst_ptr_call->args[0].dtype();
-      } else if (dst_ptr_call->op.same_as(tl::access_ptr())) {
-        ICHECK_EQ(dst_ptr_call->args.size(), 3U)
-            << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
-        auto buffer_load = dst_ptr_call->args[0].as<BufferLoadNode>();
-        ICHECK(buffer_load) << "tl.access_ptr arg0 must be BufferLoad";
-        dtype = buffer_load->buffer->dtype;
-      } else {
-        LOG(FATAL) << "atomic_add_elem_op first arg must be tvm_access_ptr, "
-                      "tl.access_ptr, or address_of call, but got "
-                   << node->args[0];
-      }
-      int vectorize_length = 1;
-      if (dtype.is_float16() || dtype.is_bfloat16()) {
-        vectorize_length = 2;
-      } else if (dtype.is_float() && dtype.bits() == 32 &&
-                 TargetHasSMVersionGE(Target::Current(false), 90)) {
-        vectorize_length = 4;
-      }
-
-      buffer_vector_infos_.push_back({Buffer(), vectorize_length, false, {}});
+      // Keep this as a call constraint: simple-memory planning must not defer
+      // the atomic's legality together with local or broadcast-load accesses.
+      buffer_vector_infos_.push_back(
+          {Buffer(), ComputeAtomicVectorSize(node->args[0]), false, {}});
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     } else if (node->op.same_as(builtin::ptx_cp_async()) ||
                node->op.same_as(tl::ptx_cp_async())) {
@@ -757,6 +759,51 @@ private:
     buffer_vector_infos_.push_back(
         {Buffer(), call_node_vector_size, false, {}});
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+  }
+
+  int ComputeAtomicVectorSize(const PrimExpr &destination) {
+    ICHECK(inner_for_)
+        << "Atomic vectorization analysis requires a loop context";
+
+    DataType dtype;
+    String storage_scope;
+    PrimExpr offset;
+    if (auto load = ExtractBufferLoadForAtomic(destination); load.defined()) {
+      const Buffer &buffer = load.value()->buffer;
+      dtype = buffer->dtype;
+      storage_scope = buffer.scope();
+      // Keep the original Buffer identity for layout lookup.
+      Array<PrimExpr> indices = TransformIndices(load.value()->indices, buffer);
+      Array<PrimExpr> strides = GetBufferStrides(buffer);
+      offset = buffer->elem_offset;
+      for (size_t i = 0; i < indices.size(); ++i) {
+        offset = offset + indices[i] * strides[i];
+      }
+    } else {
+      Call ptr = Downcast<Call>(destination);
+      ICHECK(ptr->op.same_as(builtin::tvm_access_ptr()))
+          << "Unsupported atomic destination: " << destination;
+      ICHECK_EQ(ptr->args.size(), 5U)
+          << "tvm_access_ptr expects (dtype, data, offset, extent, rw_mask)";
+      dtype = ptr->args[0].dtype();
+      storage_scope = GetPtrStorageScope(Downcast<Var>(ptr->args[1]));
+      // tvm_access_ptr already carries the physical element offset.
+      offset = ptr->args[2];
+    }
+
+    int vector_size = arith::ZeroAwareGCD(
+        loop_extent_vector_size_,
+        GetMaxAtomicVectorSize(dtype, storage_scope, Target::Current(false)));
+    // A wide atomic updates distinct consecutive elements. Unlike a load,
+    // its destination cannot broadcast. Search smaller widths here, before
+    // partitioning/layout choices and before rewriting the loop body.
+    while (vector_size > 1 &&
+           !IndicesCanVectorize(offset, inner_for_->loop_var,
+                                inner_for_->extent, vector_size, analyzer_,
+                                /*allow_broadcast=*/false)) {
+      vector_size /= 2;
+    }
+    return vector_size;
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {
@@ -1210,8 +1257,8 @@ int MaxVectorLoadBits(const Target &target, bool global_only_access) {
 
 bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                          const PrimExpr &iter_var_size,
-                         int target_vectorized_size,
-                         arith::Analyzer *analyzer) {
+                         int target_vectorized_size, arith::Analyzer *analyzer,
+                         bool allow_broadcast) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)
     return true;
@@ -1233,7 +1280,8 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
                                0))
     return false;
 
-  if (IsExprInvariantInVectorBoundary(analysis_expr, var,
+  if (allow_broadcast &&
+      IsExprInvariantInVectorBoundary(analysis_expr, var,
                                       target_vectorized_size, analyzer)) {
     return true;
   }
@@ -1262,14 +1310,18 @@ bool IndicesCanVectorize(const PrimExpr &expr, Var var,
   expr_vectorized = analyzer->Simplify(expr_vectorized);
   auto ramp_node = expr_vectorized.as<RampNode>();
   if (!ramp_node) {
-    // Broadcast value
-    if (expr_vectorized.dtype().lanes() == 1)
-      return true;
-    else
-      return false;
-  } else {
-    return is_one(ramp_node->stride);
+    return allow_broadcast && expr_vectorized.dtype().lanes() == 1;
   }
+  if (!is_one(ramp_node->stride)) {
+    return false;
+  }
+  // The var == 0 check above only covers the first group. For example,
+  // (var // 4) * 6 + var % 4 has group bases 0, 6, ... at width 4: the first
+  // group is aligned, but the second is not. Atomic destinations must align
+  // every group's base; the planner can retry this example at width 2.
+  return allow_broadcast ||
+         analyzer->CanProveEqual(
+             FloorMod(ramp_node->base, target_size_for_expr), zero_expr);
 }
 
 namespace {

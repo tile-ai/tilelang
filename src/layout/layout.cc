@@ -683,6 +683,43 @@ bool CanProveInjective(const Array<PrimExpr> &forward_indices,
   return injective;
 }
 
+// A left inverse proves injectivity even when symbolic padding prevents a
+// bijective IterMap. NoCheck only constructs the candidate: every logical
+// coordinate must still be recovered on the original input domain.
+bool CanProveLeftInverse(const Array<PrimExpr> &forward_indices,
+                         const Map<Var, Range> &input_iters) {
+  arith::Analyzer analyzer;
+  PrimExpr nonempty = Bool(true);
+  for (const auto &[var, range] : input_iters) {
+    analyzer.Bind(var, range);
+    nonempty = And(nonempty, range->extent > 0);
+  }
+  // Empty input domains are trivially injective. For a nonempty domain all
+  // extents are positive, including symbolic strides in a flattened index.
+  With<arith::ConstraintContext> constraint(&analyzer, nonempty);
+  auto iter_map = arith::DetectIterMap(forward_indices, input_iters, 1,
+                                       arith::IterMapLevel::NoCheck, &analyzer);
+  if (!iter_map->errors.empty()) {
+    return false;
+  }
+  Map<Var, PrimExpr> inverse;
+  try {
+    inverse = arith::InverseAffineIterMap(iter_map->indices, forward_indices);
+  } catch (const Error &) {
+    // NoCheck can produce overlapping iter sums that the inverse builder
+    // cannot invert. Such a candidate supplies no proof of injectivity.
+    return false;
+  }
+  for (const auto &[var, range] : input_iters) {
+    auto it = inverse.find(var);
+    PrimExpr recovered = it == inverse.end() ? range->min : (*it).second;
+    if (!analyzer.CanProveEqual(recovered, var)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 arith::IterMapResult MakeInjectivityError(const std::string &message) {
   arith::IterMapResult result;
   result->errors.push_back(message);
@@ -711,7 +748,15 @@ DetectInjectiveMapping(const Array<PrimExpr> &forward_indices,
   if (exact.status == ExactInjectivityStatus::kNonInjective) {
     return MakeInjectivityError(exact.detail);
   }
-  if (CanProveInjective(forward_indices, input_iters)) {
+  // The two symbolic proofs have disjoint blind spots, so neither subsumes
+  // the other. CanProveInjective propagates equalities across outputs but
+  // cannot invert floordiv/floormod with a symbolic divisor: it proves
+  // (i, i + j) yet fails the padded partition ((i*n+j)%128, (i*n+j)//128).
+  // CanProveLeftInverse decodes a mixed-radix IterMap digit by digit, which
+  // handles that partition but has no candidate inverse for (i, i + j),
+  // whose second output is not a radix chain. Keep both.
+  if (CanProveInjective(forward_indices, input_iters) ||
+      CanProveLeftInverse(forward_indices, input_iters)) {
     return arith::IterMapResult();
   }
   return MakeInjectivityError("injectivity could not be proven: " +
