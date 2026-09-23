@@ -189,6 +189,18 @@ See the [example guide](../../examples/ascend/README.md) for running and benchma
 Each top-level example has one matching correctness test. Small language and
 compiler regressions belong in [testing/ascend](../../testing/ascend/README.md).
 
+## Profiling
+
+Set `TILELANG_ASCEND_PROFILE=1` before importing TileLang and creating kernels
+to enable profiling for Ascend TVM-FFI calls. The Ascend host wrapper adds
+`tilelang::<global_symbol>` ranges to Torch profiling for both newly compiled
+kernels and kernels restored from disk cache. The switch is resolved when the
+callable is created; changing it does not update existing in-memory kernels.
+
+The same switch enables optional native CANN launch reporting when available.
+It does not start a profiling session: use the Torch NPU profiler or CANN
+profiling tools to collect events.
+
 ## Benchmark
 
 We evaluate TileLang against Torch NPU on Ascend 950 using BF16 GEMM, FP8 casting, and GQA backward, with four shapes per operator. GEMM and GQA (compute-bound) are reported in TFLOP/s, and FP8 casting (memory bound) in effective GB/s.

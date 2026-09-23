@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -33,6 +34,10 @@
 #include "runtime/thread_storage_scope.h"
 #include "support/bytes_io.h"
 #include "support/check.h"
+
+#if TILELANG_ASCEND_PROFILER
+#include "ascend_profiling.h"
+#endif
 
 namespace tvm {
 namespace ascend {
@@ -341,6 +346,82 @@ void CheckAcl(AclError result, const char *operation) {
       << (message == nullptr ? "" : std::string(": ") + message);
 }
 
+#if TILELANG_ASCEND_PROFILER
+// Values mirrored from the public aclrtFuncAttribute / aclrtKernelType enums
+// in CANN's acl/acl_rt.h. They are spelled out (rather than included) so the
+// build still works on CANN versions whose headers predate KERNEL_RATIO; the
+// stub resolves the symbols at runtime and profiling degrades gracefully.
+enum class AclKernelType : int64_t {
+  kAiCore = 0,
+  kCube = 1,
+  kVector = 2,
+  kMix = 3,
+  kAiCpu = 100,
+};
+constexpr int32_t kAclFuncAttrKernelType = 1;
+constexpr int32_t kAclFuncAttrKernelRatio = 2;
+
+AscendProfiler::KernelInfo QueryKernelInfo(AclFuncHandle function,
+                                           const std::string &kernel_name) {
+  AscendProfiler::KernelInfo info;
+  if (function == nullptr) {
+    return info;
+  }
+  int64_t kernel_type = 0;
+  if (aclrtGetFunctionAttribute(function, kAclFuncAttrKernelType,
+                                &kernel_type) != kAclSuccess) {
+    return info;
+  }
+  switch (static_cast<AclKernelType>(kernel_type)) {
+  case AclKernelType::kAiCore:
+  case AclKernelType::kCube:
+    info.task_type = MSPROF_GE_TASK_TYPE_AI_CORE;
+    break;
+  case AclKernelType::kVector:
+    info.task_type = MSPROF_GE_TASK_TYPE_AIV;
+    break;
+  case AclKernelType::kAiCpu:
+    info.task_type = MSPROF_GE_TASK_TYPE_AI_CPU;
+    break;
+  case AclKernelType::kMix: {
+    info.is_mix = true;
+    int64_t ratio = 0;
+    const AclError result =
+        aclrtGetFunctionAttribute(function, kAclFuncAttrKernelRatio, &ratio);
+    if (result == kAclSuccess) {
+      // ACL encodes AIC:AIV as two uint16_t values, AIC in the high half.
+      const uint32_t aic_ratio =
+          (static_cast<uint64_t>(ratio) >> 16) & UINT16_MAX;
+      const uint32_t aiv_ratio = static_cast<uint64_t>(ratio) & UINT16_MAX;
+      if (aic_ratio == 1 && (aiv_ratio == 0 || aiv_ratio == 2)) {
+        info.task_type = MSPROF_GE_TASK_TYPE_MIX_AIC;
+        info.mix_ratio = aiv_ratio;
+      } else if (aiv_ratio == 1 && (aic_ratio == 0 || aic_ratio == 2)) {
+        info.task_type = MSPROF_GE_TASK_TYPE_MIX_AIV;
+        info.mix_ratio = aic_ratio;
+      }
+    }
+    if (info.task_type == MSPROF_GE_TASK_TYPE_INVALID) {
+      LOG(WARNING)
+          << "Ascend profiling could not determine the MIX task type and "
+             "core ratio for "
+          << kernel_name
+          << ": aclrtGetFunctionAttribute(ACL_FUNC_ATTR_KERNEL_RATIO) "
+             "returned "
+          << result << ", ratio=" << ratio
+          << "; check runtime support for this attribute and the kernel core "
+             "ratio. Reporting unspecified taskType and blockDim in basic "
+             "metadata";
+    }
+    break;
+  }
+  default:
+    break;
+  }
+  return info;
+}
+#endif
+
 } // namespace
 
 class AscendModuleNode : public ffi::ModuleObj {
@@ -438,8 +519,74 @@ private:
   std::unordered_map<int32_t, DeviceModule> device_modules_;
 };
 
-class AscendWrappedFunc {
+struct DirectLaunchPolicy {
+  template <typename Launch>
+  AclError operator()(Launch &&launch, const std::string &, AclFuncHandle,
+                      int32_t, uint32_t) const {
+    return launch();
+  }
+};
+
+#if TILELANG_ASCEND_PROFILER
+class ProfiledLaunchPolicy {
 public:
+  explicit ProfiledLaunchPolicy(AscendProfiler *profiler)
+      : profiler_(profiler),
+        metadata_cache_(std::make_shared<KernelMetadataCache>()) {}
+
+  template <typename Launch>
+  AclError operator()(Launch &&launch, const std::string &kernel_name,
+                      AclFuncHandle function, int32_t device_id,
+                      uint32_t num_blocks) const {
+    const uint64_t flags = profiler_->GetCollectionFlags(device_id);
+    if (flags == 0) {
+      return launch();
+    }
+    const auto kernel = GetOrQueryKernelInfo(function, kernel_name);
+    const uint64_t begin = profiler_->GetCycleTime();
+    const AclError result = launch();
+    const uint64_t end = profiler_->GetCycleTime();
+    if (result == kAclSuccess) {
+      profiler_->ReportLaunch(kernel_name, begin, end, flags, kernel,
+                              num_blocks);
+    }
+    return result;
+  }
+
+private:
+  struct KernelMetadataCache {
+    std::mutex mutex;
+    std::unordered_map<AclFuncHandle, AscendProfiler::KernelInfo> kernels;
+  };
+
+  AscendProfiler::KernelInfo
+  GetOrQueryKernelInfo(AclFuncHandle function,
+                       const std::string &kernel_name) const {
+    std::lock_guard<std::mutex> lock(metadata_cache_->mutex);
+    auto it = metadata_cache_->kernels.find(function);
+    if (it != metadata_cache_->kernels.end()) {
+      return it->second;
+    }
+    auto info = QueryKernelInfo(function, kernel_name);
+    if (info.task_type == MSPROF_GE_TASK_TYPE_INVALID && !info.is_mix) {
+      LOG(WARNING) << "Ascend profiling could not determine the task type and "
+                      "core ratio for "
+                   << kernel_name << "; reporting unspecified basic metadata";
+    }
+    metadata_cache_->kernels.emplace(function, info);
+    return info;
+  }
+
+  AscendProfiler *profiler_;
+  std::shared_ptr<KernelMetadataCache> metadata_cache_;
+};
+#endif
+
+template <typename LaunchPolicy> class AscendWrappedFunc {
+public:
+  explicit AscendWrappedFunc(LaunchPolicy launch_policy)
+      : launch_policy_(std::move(launch_policy)) {}
+
   void Init(AscendModuleNode *module, ffi::ObjectPtr<ffi::Object> module_ref,
             std::string function_name, size_t num_kernel_args,
             const ffi::Array<ffi::String> &launch_param_tags) {
@@ -488,9 +635,14 @@ public:
       config_ptr = &config;
     }
 
-    AclError result = aclrtLaunchKernelWithHostArgs(
-        function, static_cast<uint32_t>(num_blocks), stream, config_ptr,
-        packed_args, packed_args_size, nullptr, 0);
+    auto launch = [&]() {
+      return aclrtLaunchKernelWithHostArgs(
+          function, static_cast<uint32_t>(num_blocks), stream, config_ptr,
+          packed_args, packed_args_size, nullptr, 0);
+    };
+    const AclError result =
+        launch_policy_(launch, function_name_, function, device_id,
+                       static_cast<uint32_t>(num_blocks));
     if (result != kAclSuccess) {
       const char *message = aclGetRecentErrMsg();
       std::ostringstream error;
@@ -513,6 +665,7 @@ private:
   ffi::ObjectPtr<ffi::Object> module_ref_;
   std::string function_name_;
   LaunchParamConfig launch_param_config_;
+  LaunchPolicy launch_policy_;
 };
 
 ffi::Optional<ffi::Function>
@@ -525,7 +678,16 @@ AscendModuleNode::GetFunction(const ffi::String &name) {
   FunctionInfo info = function_info.value();
   TVM_FFI_CHECK(info->arg_extra_tags.empty(), RuntimeError)
       << "Ascend runtime does not support extra kernel argument tags";
-  AscendWrappedFunc function;
+#if TILELANG_ASCEND_PROFILER
+  if (auto *profiler = AscendProfiler::GetIfEnabled()) {
+    AscendWrappedFunc<ProfiledLaunchPolicy> function{
+        ProfiledLaunchPolicy(profiler)};
+    function.Init(this, std::move(module_ref), name, info->arg_types.size(),
+                  info->launch_param_tags);
+    return PackFuncAclHostArgs(std::move(function), info->arg_types, name);
+  }
+#endif
+  AscendWrappedFunc<DirectLaunchPolicy> function{DirectLaunchPolicy()};
   function.Init(this, std::move(module_ref), name, info->arg_types.size(),
                 info->launch_param_tags);
   return PackFuncAclHostArgs(std::move(function), info->arg_types, name);
@@ -556,6 +718,11 @@ static ffi::Module AscendModuleLoadFromBytes(const ffi::Bytes &bytes) {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
+#if TILELANG_ASCEND_PROFILER
+  // Register when the library loads, before a later profiler.start(). CANN
+  // replays state asynchronously if registration is deferred until launch.
+  AscendProfiler::GetIfEnabled();
+#endif
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("ffi.Module.load_from_bytes.asc", AscendModuleLoadFromBytes)

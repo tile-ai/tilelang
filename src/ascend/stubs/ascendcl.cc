@@ -121,9 +121,12 @@ AscendCLAPI CreateAscendCLAPI() {
   LOOKUP(aclrtLaunchKernelWithHostArgs)
 #undef LOOKUP
 
-  // Optional: wrappers return nullptr when absent.
+  // Optional: wrappers return nullptr / nonzero errors when absent.
   api.aclGetRecentErrMsg_ = GetSymbol<decltype(api.aclGetRecentErrMsg_)>(
       handle, "aclGetRecentErrMsg");
+  api.aclrtGetFunctionAttribute_ =
+      GetSymbol<decltype(api.aclrtGetFunctionAttribute_)>(
+          handle, "aclrtGetFunctionAttribute");
   return api;
 }
 
@@ -203,6 +206,18 @@ const char *aclGetRecentErrMsg(void) {
     return nullptr;
   }
   return api->aclGetRecentErrMsg_();
+}
+
+int32_t aclrtGetFunctionAttribute(void *func, int32_t attrType,
+                                  int64_t *attrValue) {
+  // Best-effort profiling path: never throw, callers treat nonzero as the
+  // attribute being unavailable.
+  AscendCLAPI *api = AscendCLAPI::get_or_null();
+  if (!AscendCLAPI::is_available() ||
+      api->aclrtGetFunctionAttribute_ == nullptr) {
+    return 1;
+  }
+  return api->aclrtGetFunctionAttribute_(func, attrType, attrValue);
 }
 
 } // extern "C"
