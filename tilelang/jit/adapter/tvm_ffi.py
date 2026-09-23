@@ -23,7 +23,7 @@ from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
-from tilelang.jit.adapter.utils import is_ascend_target, is_pto_target
+from tilelang.jit.adapter.utils import is_pto_target
 
 
 COMPILE_ARGS = {}
