@@ -39,13 +39,14 @@ public:
 
   uint64_t GetCycleTime() const { return sys_cycle_time_(); }
 
-  uint64_t GetCollectionFlags(int32_t device_id) const {
+  bool IsCollecting() const {
+    return State().active.load(std::memory_order_acquire);
+  }
+
+  uint64_t GetCollectionFlags(int32_t logic_device_id) const {
     auto &state = State();
-    if (!state.active.load(std::memory_order_acquire)) {
-      return 0;
-    }
     std::lock_guard<std::mutex> lock(state.mutex);
-    auto it = state.device_flags.find(device_id);
+    auto it = state.device_flags.find(logic_device_id);
     return it == state.device_flags.end() ? 0 : it->second;
   }
 
@@ -85,6 +86,7 @@ private:
   struct CollectionState {
     std::atomic<bool> active{false};
     std::mutex mutex;
+    // MsprofCommandHandle::devIdList contains logic device IDs.
     std::unordered_map<int32_t, uint64_t> device_flags;
   };
 
