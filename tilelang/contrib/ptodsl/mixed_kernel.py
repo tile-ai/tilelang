@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Literal
 from collections.abc import Iterator
 
-from ptoas.mlir.ir import InsertionPoint
-from ptodsl._ops import _pto
+from ptodsl import pto
 from ptodsl._tracing import ModuleStyle
 
 
@@ -17,21 +17,18 @@ MixedKernelRole = Literal["cube", "vector"]
 
 @contextmanager
 def mixed_kernel_section(role: MixedKernelRole) -> Iterator[None]:
-    """Emit one PTO section directly in the active kernel entry.
+    """Emit one PTO physical section in the active kernel entry.
 
-    PTODSL's public ``pto.cube()`` and ``pto.simd()`` contexts outline helper
-    functions. PTOAS's ``vpto-split-cv-module`` pass instead requires the
-    section operations to be direct children of the entry function.
+    The public context records the physical core while tracing.  Helpers such
+    as ``pto.init_core()`` use that context to specialize their Cube and Vector
+    implementations, while the emitted section remains a direct child of the
+    entry function for ``vpto-split-cv-module``.
     """
 
-    if role == "cube":
-        section = _pto.SectionCubeOp()
-    elif role == "vector":
-        section = _pto.SectionVectorOp()
-    else:
+    if role not in {"cube", "vector"}:
         raise ValueError(f"Unsupported mixed-kernel role: {role!r}")
 
-    with InsertionPoint(section.body.blocks.append()):
+    with pto.section(role):
         yield
 
 
