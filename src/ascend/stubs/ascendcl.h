@@ -58,6 +58,9 @@ struct TILELANG_ASCENDCL_STUB_API AscendCLAPI {
                                             void *, size_t, void *, size_t);
   // Optional: absent on CANN versions that predate the API.
   const char *(*aclGetRecentErrMsg_)(void);
+  // Optional: absent on CANN versions that predate the API. Used only by
+  // Ascend native profiling (TILELANG_ASCEND_PROFILER).
+  int32_t (*aclrtGetFunctionAttribute_)(void *, int32_t, int64_t *);
 
   /// Throws std::runtime_error when libascendcl.so (or a required symbol
   /// within it) is unavailable.
@@ -93,5 +96,10 @@ TILELANG_ASCENDCL_STUB_API int32_t aclrtLaunchKernelWithHostArgs(
 /// Returns nullptr (instead of throwing) when libascendcl.so or the symbol is
 /// unavailable, so error-reporting paths stay usable.
 TILELANG_ASCENDCL_STUB_API const char *aclGetRecentErrMsg(void);
+
+/// Returns a nonzero ACL error (instead of throwing) when libascendcl.so or
+/// the symbol is unavailable, so best-effort profiling paths can fall back.
+TILELANG_ASCENDCL_STUB_API int32_t
+aclrtGetFunctionAttribute(void *func, int32_t attrType, int64_t *attrValue);
 
 } // extern "C"
