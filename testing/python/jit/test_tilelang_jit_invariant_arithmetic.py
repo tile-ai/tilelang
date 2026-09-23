@@ -15,6 +15,15 @@ def _compile_invariant(func):
     )
 
 
+def test_invariant_arithmetic_stages():
+    prepare = tilelang.transform.LowerInvariantArithmetic()
+    assert prepare.info.name == "tl.LowerInvariantArithmetic.prepare"
+    materialize = tilelang.transform.LowerInvariantArithmetic(stage="materialize")
+    assert [p.info.name for p in materialize.passes] == ["tl.LowerInvariantArithmetic.materialize", "tirx.ConvertSSA"]
+    with pytest.raises(ValueError, match="stage must be 'prepare' or 'materialize'"):
+        tilelang.transform.LowerInvariantArithmetic(stage="invalid")
+
+
 def divmod_kernel(size=4096):
     @T.prim_func
     def main(A: T.Tensor((size,), "int32"), Q: T.Tensor((size,), "int32"), R: T.Tensor((size,), "int32"), d: T.int32):
@@ -1235,6 +1244,55 @@ def test_invariant_swizzle_signed_wrap():
                 kernel(out, base, modulus, d)
                 expected = (u // d + (f < 0)).to(torch.int32)
                 torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
+@pytest.mark.parametrize("form", ["sum", "offset"])
+def test_invariant_symbolic_remainder(dtype, form):
+    @T.prim_func
+    def main(B: T.Tensor((128,), dtype), d: T.dtype(dtype)):
+        with T.Kernel(1, threads=128):
+            T.assume(d > 0)
+            T.assume(d <= 1024)
+            for i in T.Parallel(128):
+                x = T.cast(i, dtype) % d
+                y = (T.cast(i, dtype) * 7) % d if form == "sum" else d - 1
+                B[i] = (x + y) % d
+
+    kernel = _compile_invariant(main)
+    out = torch.empty(128, dtype=getattr(torch, dtype), device="cuda")
+    x = torch.arange(128, dtype=torch.int64, device="cuda")
+    for d in [1, 2, 3, 7, 31, 127, 128, 1024]:
+        kernel(out, d)
+        y = (x * 7) % d if form == "sum" else d - 1
+        torch.testing.assert_close(out.to(torch.int64), (x % d + y) % d)
+
+    for invalid in [0, 1025]:
+        with pytest.raises(RuntimeError, match="Assume"):
+            kernel(out, invalid)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("subtract", [False, True])
+def test_invariant_positive_affine_divisor(subtract):
+    @T.prim_func
+    def main(B: T.Tensor((128,), "int32"), n: T.int32):
+        with T.Kernel(1, threads=128):
+            T.assume(n >= 0)
+            T.assume(n <= 1024)
+            d = 1025 - n if subtract else n + 1
+            for i in T.Parallel(128):
+                B[i] = i // d
+
+    kernel = _compile_invariant(main)
+    calls = [line for line in kernel.get_kernel_source().splitlines() if "tl::fast_div(" in line]
+    assert calls and all(line.rstrip().endswith("(bool)1);") for line in calls)
+    out = torch.empty(128, dtype=torch.int32, device="cuda")
+    x = torch.arange(128, dtype=torch.int32, device="cuda")
+    for n in [0, 1, 6, 127, 1023, 1024]:
+        kernel(out, n)
+        torch.testing.assert_close(out, x // (1025 - n if subtract else n + 1))
 
 
 if __name__ == "__main__":

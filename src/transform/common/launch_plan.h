@@ -6,8 +6,6 @@
 #include <tvm/tirx/stmt.h>
 
 #include <string>
-#include <utility>
-#include <vector>
 
 namespace tvm {
 namespace tl {
@@ -20,13 +18,12 @@ public:
   // Callers must supply pure, host-evaluable expressions with in-scope
   // operands.
   tirx::Var Prepare(const PrimExpr &value, const std::string &name) {
-    for (const auto &entry : values_) {
-      if (ffi::StructuralEqual()(entry.first, value)) {
-        return entry.second;
+    for (const tirx::Bind &binding : bindings_) {
+      if (ffi::StructuralEqual()(binding->value, value)) {
+        return binding->var;
       }
     }
     tirx::Var var(name, value.dtype());
-    values_.emplace_back(value, var);
     bindings_.push_back(tirx::Bind(var, value));
     return var;
   }
@@ -47,14 +44,16 @@ public:
   }
 
   tirx::Stmt Materialize(const tirx::Stmt &launch) const {
-    ffi::Array<tirx::Stmt> statements = bindings_;
+    ffi::Array<tirx::Stmt> statements;
+    for (const tirx::Bind &binding : bindings_) {
+      statements.push_back(binding);
+    }
     statements.push_back(launch);
     return tirx::SeqStmt::Flatten(statements);
   }
 
 private:
-  std::vector<std::pair<PrimExpr, tirx::Var>> values_;
-  ffi::Array<tirx::Stmt> bindings_;
+  ffi::Array<tirx::Bind> bindings_;
 };
 
 } // namespace tl

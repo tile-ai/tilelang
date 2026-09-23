@@ -2,6 +2,14 @@
  * \file lower_invariant_arithmetic.cc
  * \brief Host-prepared integer arithmetic for launch-invariant divisors.
  */
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 #include <tvm/arith/analyzer.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -9,11 +17,9 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <algorithm>
-#include <unordered_set>
-
 #include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "arith/product_normal_form.h"
 #include "common/attr.h"
 #include "common/launch_plan.h"
 
@@ -25,8 +31,6 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.enable_invariant_arithmetic", Bool);
 
 namespace {
 using VarSet = std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
-using ExprSet =
-    std::unordered_set<PrimExpr, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
 bool IsSupportedInteger(DataType dtype) {
   return dtype.is_scalar() && (dtype.is_int() || dtype.is_uint()) &&
@@ -39,6 +43,49 @@ bool IsSupportedInteger(DataType dtype) {
 bool IsValuePreservingWiden(DataType from, DataType to) {
   return IsSupportedInteger(from) && IsSupportedInteger(to) &&
          from.bits() < to.bits() && (from.is_uint() || to.is_int());
+}
+
+bool FitsInType(const arith::ConstIntBound &bound, DataType dtype) {
+  int bits = dtype.bits();
+  int64_t minimum = dtype.is_uint()
+                        ? 0
+                        : (bits == 64 ? std::numeric_limits<int64_t>::min()
+                                      : -(int64_t{1} << (bits - 1)));
+  uint64_t maximum =
+      dtype.is_int() ? (uint64_t{1} << (bits - 1)) - 1
+                     : (std::numeric_limits<uint64_t>::max() >> (64 - bits));
+  return bound->min_value != arith::ConstIntBoundNode::kNegInf &&
+         bound->max_value != arith::ConstIntBoundNode::kPosInf &&
+         bound->min_value >= minimum &&
+         (bound->max_value < 0 || uint64_t(bound->max_value) <= maximum);
+}
+
+// Analyzer and its Z3 prover use mathematical integers. Only ask them for word
+// properties when each intermediate and cast agrees with that interpretation.
+// Bound-preserving casts are legal even when the source type itself is wider.
+bool HasUnprovenWrap(const PrimExpr &expr, arith::Analyzer *analyzer,
+                     const VarSet &opaque_vars = {}) {
+  bool may_wrap = false;
+  PostOrderVisit(expr, [&](const ffi::ObjectRef &node) {
+    if (may_wrap) {
+      return;
+    }
+    if (const auto *var = node.as<VarNode>()) {
+      may_wrap = opaque_vars.count(ffi::GetRef<Var>(var));
+    } else if (const auto *cast = node.as<CastNode>()) {
+      may_wrap =
+          !IsSupportedInteger(cast->value.dtype()) ||
+          !IsSupportedInteger(cast->dtype) ||
+          (cast->dtype != cast->value.dtype() &&
+           !IsValuePreservingWiden(cast->value.dtype(), cast->dtype) &&
+           !FitsInType(analyzer->const_int_bound(cast->value), cast->dtype));
+    } else if (node.as<AddNode>() || node.as<SubNode>() || node.as<MulNode>()) {
+      PrimExpr value = Downcast<PrimExpr>(node);
+      may_wrap = !IsSupportedInteger(value.dtype()) ||
+                 !FitsInType(analyzer->const_int_bound(value), value.dtype());
+    }
+  });
+  return may_wrap;
 }
 
 bool CanProvePositiveDivisor(const PrimExpr &expr, arith::Analyzer *analyzer) {
@@ -57,21 +104,9 @@ bool CanProvePositiveDivisor(const PrimExpr &expr, arith::Analyzer *analyzer) {
     return IsValuePreservingWiden(cast->value.dtype(), cast->dtype) &&
            CanProvePositiveDivisor(cast->value, analyzer);
   }
-  if (const auto *mul = expr.as<MulNode>()) {
-    if (!CanProvePositiveDivisor(mul->a, analyzer) ||
-        !CanProvePositiveDivisor(mul->b, analyzer)) {
-      return false;
-    }
-    auto a = analyzer->const_int_bound(mul->a);
-    auto b = analyzer->const_int_bound(mul->b);
-    uint64_t limit = expr.dtype().is_int()
-                         ? (uint64_t{1} << (expr.dtype().bits() - 1)) - 1
-                         : (~uint64_t{0} >> (64 - expr.dtype().bits()));
-    // Positivity of the factors is insufficient if their product wraps.
-    return a->max_value > 0 && b->max_value > 0 &&
-           a->max_value != arith::ConstIntBoundNode::kPosInf &&
-           b->max_value != arith::ConstIntBoundNode::kPosInf &&
-           uint64_t(a->max_value) <= limit / uint64_t(b->max_value);
+  if (expr.as<AddNode>() || expr.as<SubNode>() || expr.as<MulNode>()) {
+    return !HasUnprovenWrap(expr, analyzer) &&
+           analyzer->const_int_bound(expr)->min_value > 0;
   }
   return false;
 }
@@ -79,9 +114,9 @@ bool CanProvePositiveDivisor(const PrimExpr &expr, arith::Analyzer *analyzer) {
 // Remainder canonicalization and factor matching substantially follow the
 // approach in penguin-wwy's PR #3267. Apply these identities after index
 // widening, before introducing opaque arithmetic intrinsics.
-class InvariantRemainderNormalizer : public arith::IRMutatorWithAnalyzer {
+class LayoutArithmeticSimplifier : public arith::IRMutatorWithAnalyzer {
 public:
-  explicit InvariantRemainderNormalizer(arith::Analyzer *analyzer)
+  explicit LayoutArithmeticSimplifier(arith::Analyzer *analyzer)
       : IRMutatorWithAnalyzer(analyzer) {}
 
   static PrimExpr ReuseRemainder(const PrimExpr &product,
@@ -137,49 +172,84 @@ public:
     return value;
   }
 
-  PrimExpr VisitExpr_(const AddNode *op) override {
+  PrimExpr VisitExpr_(const AddNode *op) final {
     PrimExpr value = StmtExprMutator::VisitExpr_(op);
     const auto *add = value.as<AddNode>();
-    if (!add || !IsSupportedInteger(value.dtype()) ||
-        SideEffect(value) != CallEffectKind::kPure) {
+    if (!add || SideEffect(value) != CallEffectKind::kPure) {
       return value;
     }
-    for (int i = 0; i < 2; ++i) {
-      PrimExpr product = i == 0 ? add->a : add->b;
-      PrimExpr remainder = i == 0 ? add->b : add->a;
-      if (const auto *mod = remainder.as<FloorModNode>()) {
-        auto divisor = MatchProduct_(product, mod->a);
-        if (divisor && ffi::StructuralEqual()(divisor.value(), mod->b)) {
-          // q*d + r = x, including signed floor semantics and wrapping
-          // multiplication. No positive-factor or no-overflow assumption.
-          return mod->a;
+    if (IsSupportedInteger(value.dtype())) {
+      for (int i = 0; i < 2; ++i) {
+        PrimExpr product = i == 0 ? add->a : add->b;
+        PrimExpr remainder = i == 0 ? add->b : add->a;
+        if (const auto *mod = remainder.as<FloorModNode>()) {
+          auto divisor = MatchProduct_(product, mod->a);
+          if (divisor && ffi::StructuralEqual()(divisor.value(), mod->b)) {
+            // q*d + r = x also holds under signed word wrapping.
+            value = mod->a;
+            break;
+          }
         }
       }
+    }
+    const auto *sum = value.as<AddNode>();
+    if (!sum) {
+      return value;
+    }
+    PrimExpr left = analyzer_->Simplify(sum->a);
+    PrimExpr right = analyzer_->Simplify(sum->b);
+    if (auto result = Combine_(left, right)) {
+      return result.value();
+    }
+    if (auto result = Combine_(right, left)) {
+      return result.value();
     }
     return value;
   }
 
 private:
-  // Simplification can interleave a swizzle's offsets with x - (x/d)*d.
-  // Recover the remainder without distributing products or crossing casts.
-  static void CollectTerms_(const PrimExpr &value, bool negative,
-                            std::vector<std::pair<PrimExpr, bool>> *terms) {
-    if (const auto *add = value.as<AddNode>()) {
-      CollectTerms_(add->a, negative, terms);
-      CollectTerms_(add->b, negative, terms);
-    } else if (const auto *sub = value.as<SubNode>()) {
-      CollectTerms_(sub->a, negative, terms);
-      CollectTerms_(sub->b, !negative, terms);
-    } else {
-      terms->emplace_back(value, negative);
+  ffi::Optional<PrimExpr> Combine_(const PrimExpr &product,
+                                   const PrimExpr &remainder) {
+    const auto *mul = product.as<MulNode>();
+    const auto *mod = remainder.as<FloorModNode>();
+    if (!mul || !mod) {
+      return std::nullopt;
     }
+    const auto *inner = mod->a.as<FloorDivNode>();
+    if (!inner || !IsSupportedInteger(inner->dtype) ||
+        !CanProvePositiveDivisor(inner->b, analyzer_) ||
+        !CanProvePositiveDivisor(mod->b, analyzer_)) {
+      return std::nullopt;
+    }
+    for (int i = 0; i < 2; ++i) {
+      PrimExpr quotient = i == 0 ? mul->a : mul->b;
+      PrimExpr radix = i == 0 ? mul->b : mul->a;
+      const auto *outer = quotient.as<FloorDivNode>();
+      if (!outer || !analyzer_->CanProveEqual(radix, mod->b) ||
+          !analyzer_->CanProveEqual(outer->a, inner->a)) {
+        continue;
+      }
+      PrimExpr combined = inner->b * mod->b;
+      if (CanProvePositiveDivisor(combined, analyzer_) &&
+          CanProvePositiveDivisor(outer->b, analyzer_) &&
+          analyzer_->CanProveEqual(outer->b, combined)) {
+        // q = floor(x/a); floor(x/(a*b))*b + q%b = q. Positive
+        // denominators and non-wrapping products justify the factorization.
+        return mod->a;
+      }
+    }
+    return std::nullopt;
   }
 
+  // Simplification can interleave a swizzle's offsets with x - (x/d)*d.
+  // Recover the remainder without distributing products or crossing casts.
   ffi::Optional<PrimExpr>
   RecoverRemainder_(const PrimExpr &value,
                     ffi::Optional<PrimExpr> modulus = std::nullopt) {
     std::vector<std::pair<PrimExpr, bool>> terms;
-    CollectTerms_(value, false, &terms);
+    arith::UnpackSum(value, [&](const PrimExpr &term, int sign) {
+      terms.emplace_back(term, sign < 0);
+    });
     if (terms.size() > 32) {
       return std::nullopt;
     }
@@ -195,7 +265,9 @@ private:
           continue;
         }
         std::vector<std::pair<PrimExpr, bool>> dividend;
-        CollectTerms_(div->a, false, &dividend);
+        arith::UnpackSum(div->a, [&](const PrimExpr &term, int sign) {
+          dividend.emplace_back(term, sign < 0);
+        });
         std::vector<bool> used(terms.size(), false);
         used[i] = true;
         bool matched = true;
@@ -240,7 +312,7 @@ private:
     std::vector<PrimExpr> left, right;
     CollectFactors_(sum, &left);
     CollectFactors_(term, &right);
-    if (SameFactors_(left, std::move(right))) {
+    if (SameFactors_(left, right)) {
       return make_zero(sum.dtype());
     }
     if (const auto *add = sum.as<AddNode>()) {
@@ -267,7 +339,7 @@ private:
       CollectFactors_(quotient->b, &divisor_factors);
       auto remaining = factors;
       remaining.erase(remaining.begin() + i);
-      if (SameFactors_(remaining, std::move(divisor_factors))) {
+      if (SameFactors_(remaining, divisor_factors)) {
         return quotient->b;
       }
     }
@@ -275,45 +347,34 @@ private:
   }
 
   static bool SameFactors_(const std::vector<PrimExpr> &left,
-                           std::vector<PrimExpr> right) {
-    if (left.size() != right.size()) {
-      return false;
-    }
-    for (const PrimExpr &factor : left) {
-      auto it =
-          std::find_if(right.begin(), right.end(), [&](const PrimExpr &other) {
-            return ffi::StructuralEqual()(factor, other);
-          });
-      if (it == right.end()) {
-        return false;
-      }
-      right.erase(it);
-    }
-    return true;
+                           const std::vector<PrimExpr> &right) {
+    return std::is_permutation(left.begin(), left.end(), right.begin(),
+                               right.end(), ffi::StructuralEqual());
   }
 
   static void CollectFactors_(const PrimExpr &value,
                               std::vector<PrimExpr> *factors) {
-    if (const auto *mul = value.as<MulNode>()) {
-      CollectFactors_(mul->a, factors);
-      CollectFactors_(mul->b, factors);
-    } else {
-      factors->push_back(value);
-    }
+    arith::UnpackReduction<MulNode>(
+        value, [&](const PrimExpr &factor) { factors->push_back(factor); });
   }
+};
+
+enum DivisionProperty : unsigned {
+  kNonzeroDivisor = 1 << 0,
+  kPositiveDivisor = 1 << 1,
+  kNonnegativeDividend = 1 << 2,
+  kBoundedRemainder = 1 << 3,
+  kSigned32Dividend = 1 << 4,
+  kUnsigned32Magnitude = 1 << 5,
+  kAllDivisionProperties = (1 << 6) - 1,
 };
 
 struct ArithmeticFacts {
   VarSet inputs;
-  VarSet range_opaque;
   ffi::Map<Var, PrimExpr> aliases;
-  ExprSet seen;
-  ExprSet nonzero_divisor;
-  ExprSet positive_divisor;
-  ExprSet nonnegative;
-  ExprSet bounded_remainder;
-  ExprSet fits_signed32;
-  ExprSet fits_unsigned32;
+  std::unordered_map<PrimExpr, unsigned, ffi::ObjectPtrHash,
+                     ffi::ObjectPtrEqual>
+      properties;
   std::vector<PrimExpr> fast_divisors;
 
   PrimExpr Resolve(const PrimExpr &expr) const {
@@ -360,25 +421,6 @@ struct ArithmeticFacts {
     return false;
   }
 
-  bool HasOpaqueRange(const PrimExpr &expr) const {
-    bool opaque = false;
-    PostOrderVisit(expr, [&](const ffi::ObjectRef &node) {
-      if (const auto *cast = node.as<CastNode>()) {
-        // Analyzer bounds can model a signed-to-unsigned cast as a widening
-        // of the signed interval, missing the wrapped negative values.
-        if (IsSupportedInteger(cast->value.dtype()) &&
-            IsSupportedInteger(cast->dtype) &&
-            cast->dtype != cast->value.dtype() &&
-            !IsValuePreservingWiden(cast->value.dtype(), cast->dtype)) {
-          opaque = true;
-        }
-      } else if (const auto *var = node.as<VarNode>()) {
-        opaque = opaque || range_opaque.count(ffi::GetRef<Var>(var));
-      }
-    });
-    return opaque;
-  }
-
   bool HasFastDivisor(const PrimExpr &d) const {
     for (const PrimExpr &other : fast_divisors) {
       if (ffi::StructuralEqual()(d, other)) {
@@ -386,64 +428,6 @@ struct ArithmeticFacts {
       }
     }
     return false;
-  }
-};
-
-// Undo redundant coordinate decoding before div/rem become opaque intrinsics.
-class LayoutDecodeSimplifier : public InvariantRemainderNormalizer {
-public:
-  explicit LayoutDecodeSimplifier(arith::Analyzer *analyzer)
-      : InvariantRemainderNormalizer(analyzer) {}
-
-  PrimExpr VisitExpr_(const AddNode *op) final {
-    PrimExpr value = InvariantRemainderNormalizer::VisitExpr_(op);
-    const auto *sum = value.as<AddNode>();
-    if (!sum || SideEffect(value) != CallEffectKind::kPure) {
-      return value;
-    }
-    PrimExpr left = analyzer_->Simplify(sum->a);
-    PrimExpr right = analyzer_->Simplify(sum->b);
-    if (auto result = Combine(left, right)) {
-      return result.value();
-    }
-    if (auto result = Combine(right, left)) {
-      return result.value();
-    }
-    return value;
-  }
-
-private:
-  ffi::Optional<PrimExpr> Combine(const PrimExpr &product,
-                                  const PrimExpr &remainder) {
-    const auto *mul = product.as<MulNode>();
-    const auto *mod = remainder.as<FloorModNode>();
-    if (!mul || !mod) {
-      return std::nullopt;
-    }
-    const auto *inner = mod->a.as<FloorDivNode>();
-    if (!inner || !IsSupportedInteger(inner->dtype) ||
-        !CanProvePositiveDivisor(inner->b, analyzer_) ||
-        !CanProvePositiveDivisor(mod->b, analyzer_)) {
-      return std::nullopt;
-    }
-    for (int i = 0; i < 2; ++i) {
-      PrimExpr quotient = i == 0 ? mul->a : mul->b;
-      PrimExpr radix = i == 0 ? mul->b : mul->a;
-      const auto *outer = quotient.as<FloorDivNode>();
-      if (!outer || !analyzer_->CanProveEqual(radix, mod->b) ||
-          !analyzer_->CanProveEqual(outer->a, inner->a)) {
-        continue;
-      }
-      PrimExpr combined = inner->b * mod->b;
-      if (CanProvePositiveDivisor(combined, analyzer_) &&
-          CanProvePositiveDivisor(outer->b, analyzer_) &&
-          analyzer_->CanProveEqual(outer->b, combined)) {
-        // q = floor(x/a); floor(x/(a*b))*b + q%b = q. Positive
-        // denominators and non-wrapping products justify the factorization.
-        return mod->a;
-      }
-    }
-    return std::nullopt;
   }
 };
 
@@ -494,7 +478,7 @@ public:
 
   PrimExpr VisitExpr_(const MulNode *op) final {
     PrimExpr value = IRMutatorWithAnalyzer::VisitExpr_(op);
-    return InvariantRemainderNormalizer::ReuseRemainder(value, remainders_);
+    return LayoutArithmeticSimplifier::ReuseRemainder(value, remainders_);
   }
 
   PrimExpr VisitExpr_(const FloorDivNode *op) final {
@@ -569,9 +553,8 @@ public:
 
   Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = facts_->Resolve(op->value);
-    if (facts_->HasOpaqueRange(op->value) ||
-        HasUnprovenWrap_(value, analyzer_)) {
-      facts_->range_opaque.insert(op->var);
+    if (HasUnprovenWrap(value, analyzer_, range_opaque_)) {
+      range_opaque_.insert(op->var);
     }
     if (facts_->CanPrepare(value)) {
       facts_->aliases.Set(op->var, value);
@@ -580,14 +563,18 @@ public:
     arith::Analyzer type_analyzer;
     arith::Analyzer *range_analyzer =
         SideEffect(value) == CallEffectKind::kPure ? analyzer_ : &type_analyzer;
-    if (!facts_->HasOpaqueRange(value) && FitsSigned32(value, range_analyzer)) {
+    if (!HasUnprovenWrap(value, range_analyzer, range_opaque_) &&
+        FitsSigned32_(value, range_analyzer)) {
       // Bind captures a value even when its RHS reads mutable memory. Retain
       // type-derived bounds on that captured value, not on subsequent reloads.
       auto bound = analyzer_->const_int_bound(op->var);
       analyzer_->const_int_bound.Update(
           op->var,
-          arith::ConstIntBound(std::max(bound->min_value, int64_t{-2147483648}),
-                               std::min(bound->max_value, int64_t{2147483647})),
+          arith::ConstIntBound(
+              std::max<int64_t>(bound->min_value,
+                                std::numeric_limits<int32_t>::min()),
+              std::min<int64_t>(bound->max_value,
+                                std::numeric_limits<int32_t>::max())),
           true);
     }
     return result;
@@ -595,7 +582,7 @@ public:
 
 #define TL_ANALYZE_DIVMOD(Node, is_remainder)                                  \
   PrimExpr VisitExpr_(const Node *op) final {                                  \
-    Record(ffi::GetRef<PrimExpr>(op), op->a, op->b, is_remainder);             \
+    Record_(ffi::GetRef<PrimExpr>(op), op->a, op->b, is_remainder);            \
     return IRMutatorWithAnalyzer::VisitExpr_(op);                              \
   }
   TL_ANALYZE_DIVMOD(FloorDivNode, false)
@@ -605,39 +592,9 @@ public:
 #undef TL_ANALYZE_DIVMOD
 
 private:
-  static bool HasUnprovenWrap_(const PrimExpr &expr,
-                               arith::Analyzer *analyzer) {
-    bool may_wrap = false;
-    PostOrderVisit(expr, [&](const ffi::ObjectRef &node) {
-      if (!node.as<AddNode>() && !node.as<SubNode>() && !node.as<MulNode>()) {
-        return;
-      }
-      PrimExpr value = Downcast<PrimExpr>(node);
-      if (!IsSupportedInteger(value.dtype())) {
-        return;
-      }
-      auto bound = analyzer->const_int_bound(value);
-      int bits = value.dtype().bits();
-      int64_t minimum =
-          value.dtype().is_uint()
-              ? 0
-              : (bits == 64 ? INT64_MIN : -(int64_t{1} << (bits - 1)));
-      uint64_t maximum = value.dtype().is_int()
-                             ? (uint64_t{1} << (bits - 1)) - 1
-                             : (~uint64_t{0} >> (64 - bits));
-      // Analyzer intervals can describe mathematical arithmetic past the
-      // node's word width. Such bounds cannot prove the wrapped result's sign
-      // or the range of a later widening cast.
-      may_wrap |=
-          bound->min_value == arith::ConstIntBoundNode::kNegInf ||
-          bound->max_value == arith::ConstIntBoundNode::kPosInf ||
-          bound->min_value < minimum ||
-          (bound->max_value >= 0 && uint64_t(bound->max_value) > maximum);
-    });
-    return may_wrap;
-  }
+  VarSet range_opaque_;
 
-  bool CanReduceOnce(const PrimExpr &x, const PrimExpr &d) const {
+  bool CanReduceOnce_(const PrimExpr &x, const PrimExpr &d) const {
     if (!CanProvePositiveDivisor(d, analyzer_)) {
       return false;
     }
@@ -653,14 +610,16 @@ private:
     }
     PrimExpr value = analyzer_->Simplify(x);
     const auto *call = value.as<CallNode>();
-    if (!call || !call->op.same_as(builtin::bitwise_xor())) {
+    if (!call || !(call->op.same_as(builtin::bitwise_xor()) ||
+                   call->op.same_as(builtin::bitwise_or()))) {
       return false;
     }
     for (int i = 0; i < 2; ++i) {
       PrimExpr base = call->args[i], mask = call->args[1 - i];
       auto mask_bound = analyzer_->const_int_bound(mask);
-      // For nonnegative operands, base ^ mask <= base + mask. If each
-      // operand is below d, the XOR is below 2*d without forming that product.
+      // For nonnegative operands, XOR and OR are bounded by their sum.
+      // If each operand is below d, the result is below 2*d without
+      // forming that product.
       if (mask_bound->min_value >= 0 &&
           mask_bound->max_value < divisor_bound->min_value &&
           analyzer_->CanProve(base >= 0) && analyzer_->CanProve(base < d)) {
@@ -670,7 +629,7 @@ private:
     return false;
   }
 
-  bool FitsSigned32(const PrimExpr &expr, arith::Analyzer *analyzer) const {
+  bool FitsSigned32_(const PrimExpr &expr, arith::Analyzer *analyzer) const {
     if (!IsSupportedInteger(expr.dtype())) {
       return false;
     }
@@ -678,12 +637,14 @@ private:
         (expr.dtype().is_int() && expr.dtype().bits() == 32)) {
       return true;
     }
-    if (!facts_->HasOpaqueRange(expr) && !HasUnprovenWrap_(expr, analyzer) &&
+    if (!HasUnprovenWrap(expr, analyzer, range_opaque_) &&
         (expr.dtype().is_uint() ||
-         analyzer->CanProve(expr >=
-                            make_const(expr.dtype(), int64_t{-2147483648}))) &&
-        analyzer->CanProve(expr <=
-                           make_const(expr.dtype(), int64_t{2147483647}))) {
+         analyzer->CanProve(
+             expr >=
+             make_const(expr.dtype(), std::numeric_limits<int32_t>::min()))) &&
+        analyzer->CanProve(
+            expr <=
+            make_const(expr.dtype(), std::numeric_limits<int32_t>::max()))) {
       return true;
     }
     // For either floor or truncating remainder, a signed-int32 divisor bounds
@@ -700,8 +661,8 @@ private:
                  call->op.same_as(builtin::bitwise_and()) ||
                  call->op.same_as(builtin::bitwise_or()))) {
       // Bitwise operations preserve sign extension when both operands fit.
-      return FitsSigned32(call->args[0], analyzer) &&
-             FitsSigned32(call->args[1], analyzer);
+      return FitsSigned32_(call->args[0], analyzer) &&
+             FitsSigned32_(call->args[1], analyzer);
     }
     return false;
   }
@@ -709,14 +670,14 @@ private:
   bool CanProveNonnegative_(const PrimExpr &expr,
                             arith::Analyzer *analyzer) const {
     if (expr.dtype().is_uint() ||
-        (!facts_->HasOpaqueRange(expr) && !HasUnprovenWrap_(expr, analyzer) &&
+        (!HasUnprovenWrap(expr, analyzer, range_opaque_) &&
          analyzer->CanProve(expr >= 0))) {
       return true;
     }
     // These operations bound their result independently of overflow in the
     // dividend. An opaque input range need not poison the entire decode chain.
     if (const auto *mod = expr.as<FloorModNode>()) {
-      return !facts_->HasOpaqueRange(mod->b) &&
+      return !HasUnprovenWrap(mod->b, analyzer, range_opaque_) &&
              CanProvePositiveDivisor(mod->b, analyzer);
     }
     if (const auto *call = expr.as<CallNode>()) {
@@ -733,8 +694,8 @@ private:
     return false;
   }
 
-  void Record(const PrimExpr &expr, const PrimExpr &x, const PrimExpr &divisor,
-              bool remainder) {
+  void Record_(const PrimExpr &expr, const PrimExpr &x, const PrimExpr &divisor,
+               bool remainder) {
     PrimExpr d = facts_->ResolveDivisor(divisor);
     if (!facts_->CanPrepare(d) || d.as<IntImmNode>() ||
         !IsSupportedInteger(x.dtype())) {
@@ -745,38 +706,37 @@ private:
     bool stable = SideEffect(x) == CallEffectKind::kPure;
     arith::Analyzer type_analyzer;
     arith::Analyzer *range_analyzer = stable ? analyzer_ : &type_analyzer;
-    bool range_safe =
-        !facts_->HasOpaqueRange(x) && !HasUnprovenWrap_(x, range_analyzer);
-    bool divisor_safe = !facts_->HasOpaqueRange(divisor);
-    bool first = facts_->seen.insert(expr).second;
-    auto record_proof = [&](ExprSet *set, bool proven) {
-      // A shared expression node can occur under different predicates. A
-      // proof must hold at every occurrence, not merely at the first visit.
-      if (first && proven) {
-        set->insert(expr);
-      } else if (!proven) {
-        set->erase(expr);
+    bool range_safe = !HasUnprovenWrap(x, range_analyzer, range_opaque_);
+    bool divisor_safe = !HasUnprovenWrap(divisor, analyzer_, range_opaque_);
+    auto entry =
+        facts_->properties.try_emplace(expr, kAllDivisionProperties).first;
+    unsigned &properties = entry->second;
+    auto retain = [&](DivisionProperty property, bool proven) {
+      // A shared IR node must satisfy the property at every occurrence.
+      if (!proven) {
+        properties &= ~property;
       }
     };
-    record_proof(&facts_->bounded_remainder, remainder && stable &&
-                                                 range_safe && divisor_safe &&
-                                                 CanReduceOnce(x, d));
-    // Type-derived bounds remain valid for mutable loads. Predicate-derived
-    // bounds are used only for stable values.
-    record_proof(&facts_->nonnegative, CanProveNonnegative_(x, range_analyzer));
-    record_proof(&facts_->fits_signed32, FitsSigned32(x, range_analyzer));
-    record_proof(&facts_->fits_unsigned32,
-                 x.dtype().bits() <= 32 || facts_->fits_signed32.count(expr) ||
-                     (range_safe &&
-                      (x.dtype().is_uint() ||
-                       range_analyzer->CanProve(
-                           x >= make_const(x.dtype(), int64_t{-4294967295}))) &&
-                      range_analyzer->CanProve(
-                          x <= make_const(x.dtype(), uint64_t{4294967295}))));
-    record_proof(&facts_->positive_divisor,
-                 divisor_safe && CanProvePositiveDivisor(d, analyzer_));
-    record_proof(&facts_->nonzero_divisor,
-                 divisor_safe && analyzer_->CanProve(divisor != 0));
+    retain(kBoundedRemainder, remainder && stable && range_safe &&
+                                  divisor_safe && CanReduceOnce_(x, d));
+    // Mutable loads may use type bounds, but not predicates on an earlier read.
+    retain(kNonnegativeDividend, CanProveNonnegative_(x, range_analyzer));
+    retain(kSigned32Dividend, FitsSigned32_(x, range_analyzer));
+    retain(
+        kUnsigned32Magnitude,
+        x.dtype().bits() <= 32 || (properties & kSigned32Dividend) ||
+            (range_safe &&
+             (x.dtype().is_uint() ||
+              range_analyzer->CanProve(
+                  x >= make_const(
+                           x.dtype(),
+                           -int64_t{std::numeric_limits<uint32_t>::max()}))) &&
+             range_analyzer->CanProve(
+                 x <=
+                 make_const(x.dtype(), std::numeric_limits<uint32_t>::max()))));
+    retain(kPositiveDivisor,
+           divisor_safe && CanProvePositiveDivisor(d, analyzer_));
+    retain(kNonzeroDivisor, divisor_safe && analyzer_->CanProve(divisor != 0));
     if (!remainder && d.dtype() == DataType::Int(32) &&
         !facts_->HasFastDivisor(d)) {
       facts_->fast_divisors.push_back(d);
@@ -793,8 +753,8 @@ public:
 
 #define TL_REWRITE_DIVMOD(Node, remainder, truncating)                         \
   PrimExpr VisitExpr_(const Node *op) final {                                  \
-    return Rewrite(ffi::GetRef<PrimExpr>(op), VisitExpr(op->a),                \
-                   VisitExpr(op->b), remainder, truncating);                   \
+    return Rewrite_(ffi::GetRef<PrimExpr>(op), VisitExpr(op->a),               \
+                    VisitExpr(op->b), remainder, truncating);                  \
   }
   TL_REWRITE_DIVMOD(FloorDivNode, false, false)
   TL_REWRITE_DIVMOD(FloorModNode, true, false)
@@ -803,33 +763,33 @@ public:
 #undef TL_REWRITE_DIVMOD
 
 private:
-  PrimExpr PreserveWordWrap(const PrimExpr &value) const {
+  PrimExpr PreserveWordWrap_(const PrimExpr &value) const {
     DataType word = DataType::UInt(value.dtype().bits());
 #define TL_UNSIGNED_WORD_ARITH(Node, Operator)                                 \
   if (const auto *op = value.as<Node>()) {                                     \
     return cast(value.dtype(),                                                 \
-                cast(word, PreserveWordWrap(op->a))                            \
-                    Operator cast(word, PreserveWordWrap(op->b)));             \
+                cast(word, PreserveWordWrap_(op->a))                           \
+                    Operator cast(word, PreserveWordWrap_(op->b)));            \
   }
     TL_UNSIGNED_WORD_ARITH(AddNode, +)
     TL_UNSIGNED_WORD_ARITH(SubNode, -)
     TL_UNSIGNED_WORD_ARITH(MulNode, *)
 #undef TL_UNSIGNED_WORD_ARITH
     if (const auto *op = value.as<CastNode>()) {
-      return cast(op->dtype, PreserveWordWrap(op->value));
+      return cast(op->dtype, PreserveWordWrap_(op->value));
     }
     if (const auto *op = value.as<MinNode>()) {
-      return min(PreserveWordWrap(op->a), PreserveWordWrap(op->b));
+      return min(PreserveWordWrap_(op->a), PreserveWordWrap_(op->b));
     }
     if (const auto *op = value.as<MaxNode>()) {
-      return max(PreserveWordWrap(op->a), PreserveWordWrap(op->b));
+      return max(PreserveWordWrap_(op->a), PreserveWordWrap_(op->b));
     }
     return value;
   }
 
-  PrimExpr Magnitude(const PrimExpr &value) const {
+  PrimExpr Magnitude_(const PrimExpr &value) const {
     DataType word = DataType::UInt(value.dtype().bits());
-    PrimExpr bits = cast(word, PreserveWordWrap(value));
+    PrimExpr bits = cast(word, PreserveWordWrap_(value));
     if (value.dtype().is_uint()) {
       return bits;
     }
@@ -840,14 +800,14 @@ private:
     return bitwise_xor(bits, sign) - sign;
   }
 
-  PrimExpr FastDiv(const PrimExpr &x, const PrimExpr &d, bool remainder,
-                   const PrimExpr &valid, bool truncating, bool nonnegative,
-                   bool positive_divisor) {
+  PrimExpr FastDiv_(const PrimExpr &x, const PrimExpr &d, bool remainder,
+                    const PrimExpr &valid, bool truncating, bool nonnegative,
+                    bool positive_divisor) {
     DataType i32 = DataType::Int(32);
     DataType u32 = DataType::UInt(32);
     DataType u64 = DataType::UInt(64);
     Var safe =
-        plan_->Prepare(max(Magnitude(d), make_const(u32, 1)), "fastdiv_d");
+        plan_->Prepare(max(Magnitude_(d), make_const(u32, 1)), "fastdiv_d");
     Var k = plan_->Prepare(
         32 - cast(i32, clz(cast(u32, max(safe, make_const(u32, 2)) - 1))),
         "fastdiv_k");
@@ -864,20 +824,20 @@ private:
   // mu = floor(2^word_bits / abs(d)). For a magnitude in that word's range,
   // the quotient is at most one too small, even if abs(d) is wider than the
   // word.
-  PrimExpr BarrettReduction(const PrimExpr &x, const PrimExpr &d,
-                            bool remainder, const PrimExpr &valid,
-                            bool truncating, int word_bits, bool nonnegative,
-                            bool positive_divisor) {
+  PrimExpr BarrettReduction_(const PrimExpr &x, const PrimExpr &d,
+                             bool remainder, const PrimExpr &valid,
+                             bool truncating, int word_bits, bool nonnegative,
+                             bool positive_divisor) {
     DataType word = DataType::UInt(word_bits);
     DataType u64 = DataType::UInt(64);
-    PrimExpr magnitude = Magnitude(d);
+    PrimExpr magnitude = Magnitude_(d);
     PrimExpr safe = cast(u64, max(magnitude, make_const(magnitude.dtype(), 1)));
     PrimExpr reciprocal_expr;
     if (word.bits() == 64) {
       // floor(2^64 / d), represented modulo 2^64 for d == 1. Compute
       // via UINT64_MAX so neither host int128 nor an overflowing literal is
       // required. The device handles d == 1 separately.
-      PrimExpr top = make_const(u64, uint64_t{0xffffffffffffffff});
+      PrimExpr top = make_const(u64, std::numeric_limits<uint64_t>::max());
       reciprocal_expr =
           floordiv(top, safe) + cast(u64, floormod(top, safe) == safe - 1);
     } else {
@@ -905,16 +865,16 @@ private:
                  Bool(positive_divisor)});
   }
 
-  PrimExpr Rewrite(const PrimExpr &site, const PrimExpr &x,
-                   const PrimExpr &divisor, bool remainder, bool truncating) {
-    PrimExpr d = facts_.ResolveDivisor(divisor);
-    PrimExpr original =
-        truncating ? (remainder ? truncmod(x, divisor) : truncdiv(x, divisor))
-                   : (remainder ? floormod(x, divisor) : floordiv(x, divisor));
-    if (!facts_.CanPrepare(d) || d.as<IntImmNode>() ||
-        !IsSupportedInteger(x.dtype())) {
-      return original;
+  PrimExpr Rewrite_(const PrimExpr &site, const PrimExpr &x,
+                    const PrimExpr &divisor, bool remainder, bool truncating) {
+    auto found = facts_.properties.find(site);
+    if (found == facts_.properties.end()) {
+      return truncating
+                 ? (remainder ? truncmod(x, divisor) : truncdiv(x, divisor))
+                 : (remainder ? floormod(x, divisor) : floordiv(x, divisor));
     }
+    unsigned properties = found->second;
+    PrimExpr d = facts_.ResolveDivisor(divisor);
     // The operation type is independent of the reciprocal's word size.
     // Narrow operations use CUDA's scalar 32-bit arithmetic and cast the
     // result back; wide operations retain their original fallback width.
@@ -924,28 +884,28 @@ private:
             : x.dtype();
     // Preserve evaluated-word semantics when the helper is inlined by C++
     // codegen. Signed overflow in a swizzle recipe must not erase its sign.
-    PrimExpr value = cast(compute_type, PreserveWordWrap(x));
-    if (remainder && facts_.bounded_remainder.count(site)) {
+    PrimExpr value = cast(compute_type, PreserveWordWrap_(x));
+    if (remainder && (properties & kBoundedRemainder)) {
       return cast(x.dtype(), Call(compute_type, tl::bounded_rem(),
                                   {value, cast(compute_type, d)}));
     }
     // Select the algorithm from the dividend range before preparing parameters.
     // A narrow divisor does not imply a narrow quotient or dividend.
     bool fast32 = d.dtype() == DataType::Int(32) && facts_.HasFastDivisor(d) &&
-                  facts_.fits_signed32.count(site);
+                  (properties & kSigned32Dividend);
     // Every nonzero divisor is handled by the selected magnitude algorithm.
     // Keep only the original zero-divisor behavior, not a per-lane sign guard.
-    PrimExpr valid = facts_.nonzero_divisor.count(site) ? const_true() : d != 0;
+    PrimExpr valid = (properties & kNonzeroDivisor) ? const_true() : d != 0;
     PrimExpr result;
     if (fast32) {
-      result = FastDiv(value, d, remainder, valid, truncating,
-                       facts_.nonnegative.count(site),
-                       facts_.positive_divisor.count(site));
+      result = FastDiv_(value, d, remainder, valid, truncating,
+                        (properties & kNonnegativeDividend),
+                        (properties & kPositiveDivisor));
     } else {
-      int word_bits = facts_.fits_unsigned32.count(site) ? 32 : 64;
-      result = BarrettReduction(value, d, remainder, valid, truncating,
-                                word_bits, facts_.nonnegative.count(site),
-                                facts_.positive_divisor.count(site));
+      int word_bits = (properties & kUnsigned32Magnitude) ? 32 : 64;
+      result = BarrettReduction_(value, d, remainder, valid, truncating,
+                                 word_bits, (properties & kNonnegativeDividend),
+                                 (properties & kPositiveDivisor));
     }
     return cast(x.dtype(), result);
   }
@@ -995,7 +955,8 @@ public:
           AttrStmt((*it)->node, (*it)->attr_key, (*it)->value, context_body);
     }
     arith::Analyzer layout_analyzer;
-    Stmt simplified = LayoutDecodeSimplifier(&layout_analyzer)(context_body);
+    Stmt simplified =
+        LayoutArithmeticSimplifier(&layout_analyzer)(context_body);
     arith::Analyzer quotient_analyzer;
     simplified =
         SharedLayoutQuotient(&quotient_analyzer, simplified)(simplified);
@@ -1039,11 +1000,10 @@ bool IsInvariantArithmetic(const PrimExpr &expr) {
 
 class ArithmeticCallBinder : public ExprMutator {
 public:
-  using Values = std::vector<std::pair<PrimExpr, Var>>;
+  explicit ArithmeticCallBinder(ffi::Array<Bind> bindings)
+      : bindings_(std::move(bindings)), inherited_count_(bindings_.size()) {}
 
-  explicit ArithmeticCallBinder(Values values) : values_(std::move(values)) {}
-
-  const Values &GetValues() const { return values_; }
+  const ffi::Array<Bind> &GetBindings() const { return bindings_; }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
     // Do not move expressions out of a lazy arm or cache mutable loads.
@@ -1055,13 +1015,12 @@ public:
     if (!IsInvariantArithmetic(value)) {
       return value;
     }
-    for (const auto &entry : values_) {
-      if (ffi::StructuralEqual()(entry.first, value)) {
-        return entry.second;
+    for (const Bind &binding : bindings_) {
+      if (ffi::StructuralEqual()(binding->value, value)) {
+        return binding->var;
       }
     }
     Var var("invariant_value", value.dtype());
-    values_.emplace_back(value, var);
     bindings_.push_back(Bind(var, value, op->span));
     return var;
   }
@@ -1081,29 +1040,32 @@ public:
     return ffi::GetRef<PrimExpr>(op);
   }
 
-  Stmt Materialize(const Stmt &stmt) {
-    bindings_.push_back(stmt);
-    return SeqStmt::Flatten(bindings_);
+  Stmt Materialize(const Stmt &stmt) const {
+    ffi::Array<Stmt> statements;
+    for (size_t i = inherited_count_; i < bindings_.size(); ++i) {
+      statements.push_back(bindings_[i]);
+    }
+    statements.push_back(stmt);
+    return SeqStmt::Flatten(statements);
   }
 
 private:
-  Values values_;
-  ffi::Array<Stmt> bindings_;
+  ffi::Array<Bind> bindings_;
+  size_t inherited_count_;
 };
 
 class InvariantArithmeticMaterializer : public StmtMutator {
 public:
-  explicit InvariantArithmeticMaterializer(
-      ArithmeticCallBinder::Values values = {})
-      : values_(std::move(values)) {}
+  explicit InvariantArithmeticMaterializer(ffi::Array<Bind> bindings = {})
+      : bindings_(std::move(bindings)) {}
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    return MaterializeCondition(op->condition, op->then_case, op->else_case,
-                                op->span);
+    return MaterializeCondition_(op->condition, op->then_case, op->else_case,
+                                 op->span);
   }
 
   Stmt VisitStmt_(const BindNode *op) final {
-    ArithmeticCallBinder binder(values_);
+    ArithmeticCallBinder binder(bindings_);
     PrimExpr value = binder(op->value);
     return binder.Materialize(Bind(op->var, value, op->span));
   }
@@ -1115,21 +1077,21 @@ public:
     }
     if (const auto *call = op->value.as<CallNode>();
         call && call->op.same_as(builtin::if_then_else()) &&
-        ContainsArithmetic(op->value)) {
+        ContainsArithmetic_(op->value)) {
       Stmt yes = BufferStore(op->buffer, call->args[1], op->indices,
                              op->predicate, op->span);
       Stmt no = BufferStore(op->buffer, call->args[2], op->indices,
                             op->predicate, op->span);
-      return MaterializeCondition(call->args[0], yes, no, op->span, true);
+      return MaterializeCondition_(call->args[0], yes, no, op->span, true);
     }
-    ArithmeticCallBinder binder(values_);
+    ArithmeticCallBinder binder(bindings_);
     PrimExpr value = binder(op->value);
     return binder.Materialize(
         BufferStore(op->buffer, value, op->indices, op->predicate, op->span));
   }
 
 private:
-  static bool ContainsArithmetic(const PrimExpr &expr) {
+  static bool ContainsArithmetic_(const PrimExpr &expr) {
     bool found = false;
     PostOrderVisit(expr, [&](const ffi::ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
@@ -1139,10 +1101,10 @@ private:
     return found;
   }
 
-  Stmt MaterializeCondition(const PrimExpr &condition, const Stmt &yes,
-                            const ffi::Optional<Stmt> &no, const Span &span,
-                            bool split_store_guard = false) {
-    if (!ContainsArithmetic(condition)) {
+  Stmt MaterializeCondition_(const PrimExpr &condition, const Stmt &yes,
+                             const ffi::Optional<Stmt> &no, const Span &span,
+                             bool split_store_guard = false) {
+    if (!ContainsArithmetic_(condition)) {
       return IfThenElse(condition, VisitStmt(yes),
                         no.defined()
                             ? ffi::Optional<Stmt>(VisitStmt(no.value()))
@@ -1155,53 +1117,52 @@ private:
     if (const auto *op = condition.as<AndNode>();
         split_store_guard && op && !op->a.as<AndNode>() &&
         !op->a.as<OrNode>() && !op->b.as<AndNode>() && !op->b.as<OrNode>()) {
-      return MaterializeCondition(op->a, IfThenElse(op->b, yes, no, span), no,
-                                  span);
+      return MaterializeCondition_(op->a, IfThenElse(op->b, yes, no, span), no,
+                                   span);
     }
-    ArithmeticCallBinder binder(values_);
+    ArithmeticCallBinder binder(bindings_);
     PrimExpr value = binder(condition);
     // Reuse only pure values already evaluated by a dominating condition.
     // Branch-local bindings never escape to siblings or later statements.
-    InvariantArithmeticMaterializer nested(binder.GetValues());
+    InvariantArithmeticMaterializer nested(binder.GetBindings());
     return binder.Materialize(IfThenElse(
         value, nested(yes),
         no.defined() ? ffi::Optional<Stmt>(nested(no.value())) : std::nullopt,
         span));
   }
 
-  ArithmeticCallBinder::Values values_;
+  ffi::Array<Bind> bindings_;
 };
 } // namespace
 
 namespace transform {
-tvm::transform::Pass LowerInvariantArithmetic() {
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) {
-    func.CopyOnWrite()->body = InvariantArithmeticPlanner(func)(func->body);
+tvm::transform::Pass LowerInvariantArithmetic(const ffi::String &stage) {
+  if (stage != "prepare" && stage != "materialize") {
+    TVM_FFI_THROW(ValueError)
+        << "LowerInvariantArithmetic stage must be 'prepare' or 'materialize', "
+           "got '"
+        << stage << "'";
+  }
+  bool materialize = stage == "materialize";
+  auto pass_func = [materialize](PrimFunc func, const IRModule &,
+                                 const tvm::transform::PassContext &) {
+    Stmt body = materialize ? InvariantArithmeticMaterializer()(func->body)
+                            : InvariantArithmeticPlanner(func)(func->body);
+    func.CopyOnWrite()->body = std::move(body);
     return func;
   };
-  return tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                             "tl.LowerInvariantArithmetic", {});
-}
-
-tvm::transform::Pass MaterializeInvariantArithmetic() {
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) {
-    func.CopyOnWrite()->body = InvariantArithmeticMaterializer()(func->body);
-    return func;
-  };
+  tvm::transform::Pass pass = tirx::transform::CreatePrimFuncPass(
+      pass_func, 0, "tl.LowerInvariantArithmetic." + stage, {});
+  if (!materialize) {
+    return pass;
+  }
   // Splitting short-circuit conditions can duplicate branch-local bindings.
-  return tvm::transform::Sequential(
-      {tirx::transform::CreatePrimFuncPass(
-           pass_func, 0, "tl.MaterializeInvariantArithmetic", {}),
-       tirx::transform::ConvertSSA()});
+  return tvm::transform::Sequential({pass, tirx::transform::ConvertSSA()});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  ffi::reflection::GlobalDef()
-      .def("tl.transform.LowerInvariantArithmetic", LowerInvariantArithmetic)
-      .def("tl.transform.MaterializeInvariantArithmetic",
-           MaterializeInvariantArithmetic);
+  ffi::reflection::GlobalDef().def("tl.transform.LowerInvariantArithmetic",
+                                   LowerInvariantArithmetic);
 }
 } // namespace transform
 } // namespace tl

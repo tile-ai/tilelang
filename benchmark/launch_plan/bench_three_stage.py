@@ -246,7 +246,7 @@ def main():
     args = parser.parse_args()
     root = args.output
     root.mkdir(parents=True, exist_ok=True)
-    materialize = tilelang.transform.MaterializeInvariantArithmetic
+    lower_invariant = tilelang.transform.LowerInvariantArithmetic
     results = []
     cases = [
         "decode",
@@ -288,7 +288,13 @@ def main():
             variants = []
             hosts = {}
             for mode in ["off", "lower", "late"]:
-                tilelang.transform.MaterializeInvariantArithmetic = materialize if mode == "late" else lambda: lambda mod: mod
+
+                def lower_stage(stage="prepare", mode=mode):
+                    if stage == "materialize" and mode != "late":
+                        return lambda mod: mod
+                    return lower_invariant(stage=stage)
+
+                tilelang.transform.LowerInvariantArithmetic = lower_stage
                 begin = time.perf_counter()
                 try:
                     k = tilelang.compile(
@@ -299,7 +305,7 @@ def main():
                         pass_configs={"tl.enable_invariant_arithmetic": mode != "off"},
                     )
                 finally:
-                    tilelang.transform.MaterializeInvariantArithmetic = materialize
+                    tilelang.transform.LowerInvariantArithmetic = lower_invariant
                 compile_s = time.perf_counter() - begin
                 stem = f"{case}_{size}_{mode}"
                 source = k.get_kernel_source()
