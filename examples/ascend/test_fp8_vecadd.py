@@ -16,6 +16,7 @@ import tilelang.ascend.language as T
 
 
 THREADS = 128
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
 
 # (TileLang dtype, torch dtype)
 FP8_DTYPES = [
@@ -24,36 +25,37 @@ FP8_DTYPES = [
 ]
 
 
-@tilelang.jit(
-    out_idx=[2],
-)
-def fp8_vecadd_kernel(n: int, dtype):
-    @T.prim_func
-    def main(
-        A: T.Tensor((n,), dtype),
-        B: T.Tensor((n,), dtype),
-        C: T.Tensor((n,), dtype),
-    ):
-        with T.Kernel(1):
-            a_ub = T.alloc_shared((n,), dtype)
-            b_ub = T.alloc_shared((n,), dtype)
-            c_ub = T.alloc_shared((n,), dtype)
+def fp8_vecadd_kernel(n: int, dtype, target="ascend"):
+    @tilelang.jit(out_idx=[2], target=target)
+    def kernel_factory(n_val: int, dtype_val):
+        @T.prim_func
+        def main(
+            A: T.Tensor((n_val,), dtype_val),
+            B: T.Tensor((n_val,), dtype_val),
+            C: T.Tensor((n_val,), dtype_val),
+        ):
+            with T.Kernel(1):
+                a_ub = T.alloc_shared((n_val,), dtype_val)
+                b_ub = T.alloc_shared((n_val,), dtype_val)
+                c_ub = T.alloc_shared((n_val,), dtype_val)
 
-            T.copy(A, a_ub)
-            T.copy(B, b_ub)
-            with T.SimtVF(threads=THREADS):
-                a_local = T.alloc_fragment((n,), dtype)
-                b_local = T.alloc_fragment((n,), dtype)
-                c_local = T.alloc_fragment((n,), dtype)
+                T.copy(A, a_ub)
+                T.copy(B, b_ub)
+                with T.SimtVF(threads=THREADS):
+                    a_local = T.alloc_fragment((n_val,), dtype_val)
+                    b_local = T.alloc_fragment((n_val,), dtype_val)
+                    c_local = T.alloc_fragment((n_val,), dtype_val)
 
-                T.copy(a_ub, a_local)
-                T.copy(b_ub, b_local)
-                for i in T.Parallel(n):
-                    c_local[i] = a_local[i] + b_local[i]
-                T.copy(c_local, c_ub)
-            T.copy(c_ub, C)
+                    T.copy(a_ub, a_local)
+                    T.copy(b_ub, b_local)
+                    for i in T.Parallel(n_val):
+                        c_local[i] = a_local[i] + b_local[i]
+                    T.copy(c_local, c_ub)
+                T.copy(c_ub, C)
 
-    return main
+        return main
+
+    return kernel_factory(n, dtype)
 
 
 def _raw_prefix(tensor: torch.Tensor, count: int = 16) -> str:
@@ -63,10 +65,10 @@ def _raw_prefix(tensor: torch.Tensor, count: int = 16) -> str:
         return "<raw view unavailable>"
 
 
-def run_case(num_fp8_per_thread: int, tl_dtype, torch_dtype) -> bool:
+def run_case(num_fp8_per_thread: int, tl_dtype, torch_dtype, target="ascend") -> bool:
     n = THREADS * num_fp8_per_thread
 
-    kernel = fp8_vecadd_kernel(n, tl_dtype)
+    kernel = fp8_vecadd_kernel(n, tl_dtype, target=target)
 
     a_f32 = torch.linspace(-128.0, 128.0, n, device="npu", dtype=torch.float32)
     b_f32 = torch.linspace(64.0, -64.0, n, device="npu", dtype=torch.float32)
@@ -98,9 +100,10 @@ def run_case(num_fp8_per_thread: int, tl_dtype, torch_dtype) -> bool:
 
 @pytest.mark.parametrize("tl_dtype, torch_dtype", FP8_DTYPES)
 @pytest.mark.parametrize("num_fp8_per_thread", [16, 8, 4, 2, 1])
-def test_fp8_vecadd(num_fp8_per_thread, tl_dtype, torch_dtype):
-    assert run_case(num_fp8_per_thread, tl_dtype, torch_dtype), (
-        f"{torch_dtype} vector add mismatch at num_fp8_per_thread={num_fp8_per_thread}"
+@pytest.mark.parametrize("target", TARGETS)
+def test_fp8_vecadd(num_fp8_per_thread, tl_dtype, torch_dtype, target):
+    assert run_case(num_fp8_per_thread, tl_dtype, torch_dtype, target=target), (
+        f"{target} {torch_dtype} vector add mismatch at num_fp8_per_thread={num_fp8_per_thread}"
     )
 
 
