@@ -195,20 +195,6 @@
              msg, BLOCK_IDX, buf_name, index, val);                            \
     }                                                                          \
   };                                                                           \
-  template <> struct PrintTraits<double> {                                     \
-    static ATTR inline void print_var(__gm__ const char *msg, double val) {    \
-      /* cast to float: CANN 9.2+ simt_vf printf rejects double */             \
-      printf("msg='%s' BlockIdx=%d: dtype=float64 value=%f\n", msg,            \
-             BLOCK_IDX, (float)val);                                           \
-    }                                                                          \
-    static ATTR inline void print_buffer(__gm__ const char *msg,               \
-                                         __gm__ const char *buf_name,          \
-                                         int index, double val) {              \
-      printf("msg='%s' BlockIdx=%d: buffer=%s, index=%d, dtype=float64 "       \
-             "value=%f\n",                                                     \
-             msg, BLOCK_IDX, buf_name, index, (float)val);                     \
-    }                                                                          \
-  };                                                                           \
   template <> struct PrintTraits<half> {                                       \
     static ATTR inline void print_var(__gm__ const char *msg, half val) {      \
       printf("msg='%s' BlockIdx=%d: dtype=float16 value=%f\n", msg, BLOCK_IDX, \
