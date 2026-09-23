@@ -11,6 +11,7 @@ from ptoas.mlir.ir import IntegerType
 from .common import (
     as_logical_bool,
     coerce_i1,
+    wrap_const,
 )
 
 
@@ -76,7 +77,7 @@ def write_gm_bypass_dcache(ptr, offset, value, logical_dtype):
     if pto.const_expr(adaptation in ("bitcast", "integer_cast")):
         payload_ptr = pto.castptr(ptr, pto.ptr(payload_dtype, "gm"))
     if pto.const_expr(adaptation == "bitcast"):
-        value = pto.bitcast(value, payload_dtype)
+        value = pto.bitcast(wrap_const(value, logical_dtype), payload_dtype)
     elif pto.const_expr(adaptation == "integer_cast"):
         value = pto.cast(value, payload_dtype)
     elif pto.const_expr(adaptation == "bool"):
