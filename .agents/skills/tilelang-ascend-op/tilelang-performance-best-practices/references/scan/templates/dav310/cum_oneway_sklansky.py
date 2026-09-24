@@ -1,7 +1,13 @@
 from ..scan_tiling_data import ScanStrategy
 
 STATUS = "DESIGN_ONLY"
-STRATEGY = ScanStrategy("oneway_sklansky", "one core owns one resident row", True, "ceil(log2(R))", "static R; each level broadcasts the group anchor to the upper half")
+STRATEGY = ScanStrategy(
+    "oneway_sklansky",
+    "one core owns one resident row",
+    True,
+    "ceil(log2(R))",
+    "static R; each level broadcasts the group anchor to the upper half",
+)
 
 
 def level_pairs(length: int, level: int):

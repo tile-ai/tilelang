@@ -33,6 +33,7 @@ def euclidean_norm(rows: int, cols: int, dtype: str = "float16", num_cores: int 
                                 squares[i] = T.float32(0)
                         T.reduce_sum(squares, total, dim=0)
                         out[row] = T.sqrt(total[0])
+
     return kernel
 
 
@@ -72,6 +73,7 @@ def softmax_full_load(rows: int, cols: int, dtype: str = "float16", num_cores: i
                         for i in T.serial(cols):
                             out_ub[i] = T.cast(exp_ub[i] / total[0], dtype)
                     T.copy(out_ub, out[row, :])
+
     return kernel
 
 

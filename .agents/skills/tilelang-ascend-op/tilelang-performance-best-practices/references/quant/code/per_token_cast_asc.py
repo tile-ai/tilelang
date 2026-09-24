@@ -1,3 +1,7 @@
+# Ruff cannot model the TileLang macros retained after the shape-selection loop.
+# They intentionally use the loop's final converged values.
+# ruff: noqa: B023
+
 import contextlib
 
 import tilelang
@@ -27,37 +31,37 @@ def _stochastic_round_vector(
     min_step_exp,
 ):
     abs_values = S.vmins(S.vabs(values), quant_max)
-    abs_bits = T.reinterpret(abs_values, 'uint32x64')
+    abs_bits = T.reinterpret(abs_values, "uint32x64")
     exponent = T.reinterpret(
         S.vand(
             S.vshrs(abs_bits, 23),
             S.vdup(0xFF, T.uint32),
         ),
-        'int32x64',
+        "int32x64",
     )
     step_exponent = S.vmax(
         S.vadds(exponent, -mantissa_bits),
         S.vdup(min_step_exp + 127, T.int32),
     )
     step = T.reinterpret(
-        S.vshls(T.reinterpret(step_exponent, 'uint32x64'), 23),
-        'float32x64',
+        S.vshls(T.reinterpret(step_exponent, "uint32x64"), 23),
+        "float32x64",
     )
 
     lower_steps = S.vcvt(
         S.vdiv(abs_values, step),
         T.int32,
-        round='ROUND_Z',
+        round="ROUND_Z",
     )
     lower = S.vmul(S.vcvt(lower_steps, T.float32), step)
     upper = S.vmins(S.vadd(lower, step), quant_max)
     gap = S.vsub(upper, lower)
-    has_gap = S.vcmps(gap, 0.0, op='gt')
+    has_gap = S.vcmps(gap, 0.0, op="gt")
     safe_gap = S.vsel(gap, S.vdup(1.0, T.float32), has_gap)
     probability = S.vdiv(S.vsub(abs_values, lower), safe_gap)
 
     random_seed = S.vadd(
-        T.reinterpret(S.vci(T.int32(linear_base), T.int32), 'uint32x64'),
+        T.reinterpret(S.vci(T.int32(linear_base), T.int32), "uint32x64"),
         S.vdup(0x9E3779B9, T.uint32),
     )
     random_bits_1 = _xor_u32(random_seed, S.vshls(random_seed, 13))
@@ -68,21 +72,21 @@ def _stochastic_round_vector(
         S.vdup(0x3F800000, T.uint32),
     )
     random_uniform = S.vadds(
-        T.reinterpret(random_mantissa, 'float32x64'),
+        T.reinterpret(random_mantissa, "float32x64"),
         -1.0,
     )
     rounded_abs = S.vsel(
         upper,
         lower,
-        S.vcmp(random_uniform, probability, op='lt'),
+        S.vcmp(random_uniform, probability, op="lt"),
     )
     sign = S.vand(
-        T.reinterpret(values, 'uint32x64'),
+        T.reinterpret(values, "uint32x64"),
         S.vdup(0x80000000, T.uint32),
     )
     return T.reinterpret(
-        S.vor(T.reinterpret(rounded_abs, 'uint32x64'), sign),
-        'float32x64',
+        S.vor(T.reinterpret(rounded_abs, "uint32x64"), sign),
+        "float32x64",
     )
 
 
@@ -127,12 +131,12 @@ def get_per_token_cast_kernel_asc(
     assert out_config.dtype in (T.float8_e4m3fn, T.float4_e2m1fn)
     assert out_config.sf_block[0] == 1
     assert not out_config.use_packed_ue8m0 or out_config.round_sf
-    assert not (sf_only and cast_only), 'SF-only and cast-only modes are mutually exclusive'
+    assert not (sf_only and cast_only), "SF-only and cast-only modes are mutually exclusive"
     if in_config.with_sf:
         assert in_config.dtype in (T.float8_e4m3fn, T.float4_e2m1fn)
         assert in_config.sf_block[0] in (1, 32, 128)
         assert in_config.sf_block[1] in (32, 128)
-        assert not sf_only and not cast_only, 'pre-quantized input only supports full cast'
+        assert not sf_only and not cast_only, "pre-quantized input only supports full cast"
     else:
         assert in_config.dtype in (T.float32, T.bfloat16)
 
@@ -156,7 +160,7 @@ def get_per_token_cast_kernel_asc(
             small_batch=small_batch,
         )
 
-    assert not in_config.with_sf, 'pre-quantized input requires grouped output scales'
+    assert not in_config.with_sf, "pre-quantized input requires grouped output scales"
     assert group_size == hidden and hidden % 64 == 0
     return _get_full_row_cast_kernel(
         hidden=hidden,
@@ -273,9 +277,16 @@ def _get_grouped_cast_kernel(
             _prequant_rows_stay = not small_batch and (
                 (
                     not out_config.use_tma_aligned_col_major_sf
-                    and (out_config.use_packed_ue8m0 or (group_size >= 64 and prequant_block_k == PREQUANT_TILE_ELEMS // PACKED_PREQUANT_ROWS))
+                    and (
+                        out_config.use_packed_ue8m0
+                        or (group_size >= 64 and prequant_block_k == PREQUANT_TILE_ELEMS // PACKED_PREQUANT_ROWS)
+                    )
                 )
-                or (out_config.use_tma_aligned_col_major_sf and prequant_block_k == 256 and input_block_m > PREQUANT_TILE_ELEMS // prequant_block_k)
+                or (
+                    out_config.use_tma_aligned_col_major_sf
+                    and prequant_block_k == 256
+                    and input_block_m > PREQUANT_TILE_ELEMS // prequant_block_k
+                )
             )
             prequant_tile_elems = 2 * PREQUANT_TILE_ELEMS if use_tall_prequant_tile else PREQUANT_TILE_ELEMS
             if _prequant_rows_stay:
@@ -372,7 +383,7 @@ def _get_grouped_cast_kernel(
             and not sf_only
         )
         num_stages = 3 if (_three_stages_ok and num_stages == 2) else num_stages
-        pipeline_offset_annotations = {'enable_offset': True} if not small_batch else None
+        pipeline_offset_annotations = {"enable_offset": True} if not small_batch else None
         manual_pipeline_stages = pipeline_offset_annotations is not None and num_stages >= 2
         sf_ub_dtype = T.uint8 if is_packed_sf else T.float32
         sf_storage_words = (num_sf_slots * sf_ub_dtype.bytes + 3) // 4
@@ -383,14 +394,13 @@ def _get_grouped_cast_kernel(
         else:
             sf_ub_shape = (block_m, groups_per_tile)
         quant_max = 6.0 if is_fp4 else 448.0
-        num_tokens = T.dynamic('num_tokens')
+        num_tokens = T.dynamic("num_tokens")
         _one = T.ceildiv(num_tokens, T.max(num_tokens, 1))
 
         def _lim(n):
             return T.serial(n * _one) if _rf > 1 else T.unroll(n, explicit=True)
 
-        in_sf_stride = T.dynamic('in_sf_stride')
-        out_sf_stride = T.dynamic('out_sf_stride')
+        out_sf_stride = T.dynamic("out_sf_stride")
         x_sf_shape = get_sf_shape((num_tokens, hidden), in_config) if has_input_sf else (1, 1)
         sf_shape = get_sf_shape((num_tokens, hidden), out_config)
         num_hidden_tiles = T.ceildiv(hidden, block_k)
@@ -415,7 +425,9 @@ def _get_grouped_cast_kernel(
                     (max(128, (input_groups_per_tile + 1) // 2), 2) if in_config.use_packed_ue8m0 else (max(64, input_groups_per_tile), 1)
                 )
             else:
-                input_sf_raw_shape = (1, max(256, input_groups_per_tile)) if in_config.use_packed_ue8m0 else (1, max(64, input_groups_per_tile))
+                input_sf_raw_shape = (
+                    (1, max(256, input_groups_per_tile)) if in_config.use_packed_ue8m0 else (1, max(64, input_groups_per_tile))
+                )
             input_sf_raw_slots = input_sf_raw_shape[0] * input_sf_raw_shape[1]
         _tile_bf16_unfused = (
             not stochastic_cast
@@ -430,7 +442,9 @@ def _get_grouped_cast_kernel(
             and block_m <= BF16_TILE_MAX_ROWS
         )
 
-        _input_group_ratio_pow2 = input_group_size % group_size == 0 and (input_group_size // group_size) & (input_group_size // group_size - 1) == 0
+        _input_group_ratio_pow2 = (
+            input_group_size % group_size == 0 and (input_group_size // group_size) & (input_group_size // group_size - 1) == 0
+        )
         if is_col_major_sf and is_packed_sf:
             _col_batch_in_one_group = (block_m * 2) % 64 == 0
             _batch_input_scale_ok = _input_group_ratio_pow2
@@ -478,7 +492,7 @@ def _get_grouped_cast_kernel(
             index = S.vshrs(groups, shift) if shift else groups
             return S.vgather2(
                 input_sf_values_ub[0],
-                T.reinterpret(index, 'uint32x64'),
+                T.reinterpret(index, "uint32x64"),
             )
 
         @T.macro
@@ -499,14 +513,14 @@ def _get_grouped_cast_kernel(
                 in_group = S.vshrs(out_group, _ratio_shift) if _ratio_shift else out_group
                 return S.vgather2(
                     input_sf_values_ub[0],
-                    T.reinterpret(in_group, 'uint32x64'),
+                    T.reinterpret(in_group, "uint32x64"),
                 )
             if is_packed_sf:
                 out_group = sf_batch * 64 // (block_m * 2) * 2
             else:
                 out_group = sf_batch * 64 // block_m
             in_group = out_group * group_size // input_group_size
-            return S.vld(input_sf_values_ub[in_group], dist='BRC_B32')
+            return S.vld(input_sf_values_ub[in_group], dist="BRC_B32")
 
         @T.macro
         def clear_raw_input(x_ub):
@@ -522,7 +536,7 @@ def _get_grouped_cast_kernel(
         @T.macro
         def clear_quantized_input(x_ub_uint8):
             with T.SimdVF():
-                mask = S.pset(8, 'PAT_VL128' if is_fp4_input else 'PAT_ALL')
+                mask = S.pset(8, "PAT_VL128" if is_fp4_input else "PAT_ALL")
                 vector_bytes = 128 if is_fp4_input else 256
                 physical_block_k = block_k // 2 if is_fp4_input else block_k
                 for row in T.serial(block_m):
@@ -558,19 +572,19 @@ def _get_grouped_cast_kernel(
         @T.macro
         def load_input_scale(input_sf_values_ub, vector):
             if input_group_size == 32:
-                mask_low = S.pset(32, 'PAT_VL32')
+                mask_low = S.pset(32, "PAT_VL32")
                 scale_low = S.vld(
                     input_sf_values_ub[vector * 2],
-                    dist='BRC_B32',
+                    dist="BRC_B32",
                 )
                 scale_high = S.vld(
                     input_sf_values_ub[vector * 2 + 1],
-                    dist='BRC_B32',
+                    dist="BRC_B32",
                 )
                 return S.vsel(scale_low, scale_high, mask_low)
             return S.vld(
                 input_sf_values_ub[vector // 2],
-                dist='BRC_B32',
+                dist="BRC_B32",
             )
 
         bf16_tile = (
@@ -604,7 +618,7 @@ def _get_grouped_cast_kernel(
             _wide_k_settled = True
             break
 
-    assert _wide_k_settled, 'block shape selection did not converge within 8 passes'
+    assert _wide_k_settled, "block shape selection did not converge within 8 passes"
 
     fuse_amax_into_dequant = (
         has_input_sf
@@ -651,23 +665,25 @@ def _get_grouped_cast_kernel(
     @T.macro
     def load_as_fp32(x_ub, row, col):
         if no_dequant_tile:
-            return S.vcvt(S.vld(x_ub[row, col], dist='UNPK4_B8'), T.float32)
+            return S.vcvt(S.vld(x_ub[row, col], dist="UNPK4_B8"), T.float32)
         if has_input_sf:
             if bf16_tile:
                 return S.vcvt(
-                    S.vld(x_ub[row, col], dist='UNPK_B16'),
+                    S.vld(x_ub[row, col], dist="UNPK_B16"),
                     T.float32,
                     part=0,
                 )
             return S.vld(x_ub[row, col])
         if is_bf16_input:
-            return S.vcvt(S.vld(x_ub[row, col], dist='UNPK_B16'), T.float32, part=0)
+            return S.vcvt(S.vld(x_ub[row, col], dist="UNPK_B16"), T.float32, part=0)
         return S.vld(x_ub[row, col])
 
     amax_row_major = (
         fast_reduce
         and (block_m >= 32 or not is_col_major_sf)
-        and not (is_col_major_sf and is_packed_sf and block_k >= 256 and not stochastic_cast and block_m <= 32 and not (is_fp4_input and is_fp4))
+        and not (
+            is_col_major_sf and is_packed_sf and block_k >= 256 and not stochastic_cast and block_m <= 32 and not (is_fp4_input and is_fp4)
+        )
     )
 
     amax_needs_gather = amax_row_major and is_col_major_sf
@@ -681,7 +697,10 @@ def _get_grouped_cast_kernel(
         bf16_inverse
         and group_size == 32
         and (sf_inv_offset_words * 2) % 8 == 0
-        and ((is_col_major_sf and is_packed_sf and groups_per_tile == 8 and block_m % 32 == 0) or (not is_col_major_sf and groups_per_tile % 4 == 0))
+        and (
+            (is_col_major_sf and is_packed_sf and groups_per_tile == 8 and block_m % 32 == 0)
+            or (not is_col_major_sf and groups_per_tile % 4 == 0)
+        )
     )
 
     reorder_inverse_rows = row_major_inverse and is_col_major_sf
@@ -698,20 +717,20 @@ def _get_grouped_cast_kernel(
                     exponents = T.reinterpret(
                         S.vld(
                             input_sf_raw_linear_ub[sf_offset],
-                            dist='UNPK4_B8',
+                            dist="UNPK4_B8",
                         ),
-                        'uint32x64',
+                        "uint32x64",
                     )
                     if input_scale_bf16:
                         words = S.vor(
                             S.vshls(exponents, 7),
                             S.vshls(exponents, 23),
                         )
-                        scales = T.reinterpret(words, 'float32x64')
+                        scales = T.reinterpret(words, "float32x64")
                     else:
                         scales = T.reinterpret(
                             S.vshls(exponents, 23),
-                            'float32x64',
+                            "float32x64",
                         )
                 else:
                     scales = S.vld(input_sf_raw_linear_ub[sf_offset])
@@ -733,7 +752,7 @@ def _get_grouped_cast_kernel(
                 for row in T.serial(block_m):
                     for pair in _lim(block_k // 128):
                         col = pair * 128
-                        x_fp4 = S.vld(x_ub[row, col], dist='UNPK4_B8')
+                        x_fp4 = S.vld(x_ub[row, col], dist="UNPK4_B8")
                         S.vsts(dequantized_ub[row, col], S.vcvt(x_fp4, T.bfloat16))
             elif is_fp4_input and bf16_tile and input_group_size == 128:
                 for pair in _lim(block_k // 128):
@@ -741,51 +760,51 @@ def _get_grouped_cast_kernel(
                     scale = T.reinterpret(
                         S.vld(
                             input_sf_bf16_ub[input_scale_bf16_slot(col // input_group_size)],
-                            dist='BRC_B32',
+                            dist="BRC_B32",
                         ),
-                        'bfloat16x128',
+                        "bfloat16x128",
                     )
                     for row in T.serial(block_m):
-                        x_fp4 = S.vld(x_ub[row, col], dist='UNPK4_B8')
+                        x_fp4 = S.vld(x_ub[row, col], dist="UNPK4_B8")
                         S.vsts(
                             dequantized_ub[row, col],
                             S.vmul(S.vcvt(x_fp4, T.bfloat16), scale),
                         )
             elif is_fp4_input and bf16_tile:
                 lanes = S.vci(0, T.int16)
-                low_quarter = S.vcmps(lanes, 32, op='lt')
-                low_half = S.vcmps(lanes, 64, op='lt')
-                low_three_quarters = S.vcmps(lanes, 96, op='lt')
+                low_quarter = S.vcmps(lanes, 32, op="lt")
+                low_half = S.vcmps(lanes, 64, op="lt")
+                low_three_quarters = S.vcmps(lanes, 96, op="lt")
                 for pair in _lim(block_k // 128):
                     col = pair * 128
                     group = col // input_group_size
                     first = T.reinterpret(
                         S.vld(
                             input_sf_bf16_ub[input_scale_bf16_slot(group)],
-                            dist='BRC_B32',
+                            dist="BRC_B32",
                         ),
-                        'bfloat16x128',
+                        "bfloat16x128",
                     )
                     second = T.reinterpret(
                         S.vld(
                             input_sf_bf16_ub[input_scale_bf16_slot(group + 1)],
-                            dist='BRC_B32',
+                            dist="BRC_B32",
                         ),
-                        'bfloat16x128',
+                        "bfloat16x128",
                     )
                     third = T.reinterpret(
                         S.vld(
                             input_sf_bf16_ub[input_scale_bf16_slot(group + 2)],
-                            dist='BRC_B32',
+                            dist="BRC_B32",
                         ),
-                        'bfloat16x128',
+                        "bfloat16x128",
                     )
                     fourth = T.reinterpret(
                         S.vld(
                             input_sf_bf16_ub[input_scale_bf16_slot(group + 3)],
-                            dist='BRC_B32',
+                            dist="BRC_B32",
                         ),
-                        'bfloat16x128',
+                        "bfloat16x128",
                     )
                     scale = S.vsel(
                         S.vsel(first, second, low_quarter),
@@ -793,7 +812,7 @@ def _get_grouped_cast_kernel(
                         low_half,
                     )
                     for row in T.serial(block_m):
-                        x_fp4 = S.vld(x_ub[row, col], dist='UNPK4_B8')
+                        x_fp4 = S.vld(x_ub[row, col], dist="UNPK4_B8")
                         S.vsts(
                             dequantized_ub[row, col],
                             S.vmul(S.vcvt(x_fp4, T.bfloat16), scale),
@@ -806,11 +825,11 @@ def _get_grouped_cast_kernel(
                         scale_low = load_input_scale(input_sf_values_ub, pair * 2)
                         scale_high = load_input_scale(input_sf_values_ub, pair * 2 + 1)
                         for row in T.serial(block_m):
-                            x_fp4 = S.vld(x_ub[row, col], dist='UNPK4_B8')
+                            x_fp4 = S.vld(x_ub[row, col], dist="UNPK4_B8")
                             x_bf16 = S.vcvt(x_fp4, T.bfloat16)
                             x_uint_low, x_uint_high = S.vintlv(zero_bf16, x_bf16)
-                            x_low = T.reinterpret(x_uint_low, 'float32x64')
-                            x_high = T.reinterpret(x_uint_high, 'float32x64')
+                            x_low = T.reinterpret(x_uint_low, "float32x64")
+                            x_high = T.reinterpret(x_uint_high, "float32x64")
                             S.vsts(dequantized_ub[row, col], S.vmul(x_low, scale_low))
                             S.vsts(dequantized_ub[row, col + 64], S.vmul(x_high, scale_high))
                 else:
@@ -818,11 +837,11 @@ def _get_grouped_cast_kernel(
                         zero_bf16 = S.vdup(0.0, T.bfloat16)
                         for pair in _lim(block_k // 128):
                             col = pair * 128
-                            x_fp4 = S.vld(x_ub[row, col], dist='UNPK4_B8')
+                            x_fp4 = S.vld(x_ub[row, col], dist="UNPK4_B8")
                             x_bf16 = S.vcvt(x_fp4, T.bfloat16)
                             x_uint_low, x_uint_high = S.vintlv(zero_bf16, x_bf16)
-                            x_low = T.reinterpret(x_uint_low, 'float32x64')
-                            x_high = T.reinterpret(x_uint_high, 'float32x64')
+                            x_low = T.reinterpret(x_uint_low, "float32x64")
+                            x_high = T.reinterpret(x_uint_high, "float32x64")
                             S.vsts(
                                 dequantized_ub[row, col],
                                 apply_input_scale(
@@ -846,26 +865,26 @@ def _get_grouped_cast_kernel(
                         scale_low = load_input_scale(input_sf_values_ub, group * 2)
                         scale_high = load_input_scale(input_sf_values_ub, group * 2 + 1)
                         for row in T.serial(block_m):
-                            low = S.vmul(S.vcvt(S.vld(x_ub[row, col], dist='UNPK4_B8'), T.float32), scale_low)
-                            high = S.vmul(S.vcvt(S.vld(x_ub[row, col + 64], dist='UNPK4_B8'), T.float32), scale_high)
+                            low = S.vmul(S.vcvt(S.vld(x_ub[row, col], dist="UNPK4_B8"), T.float32), scale_low)
+                            high = S.vmul(S.vcvt(S.vld(x_ub[row, col + 64], dist="UNPK4_B8"), T.float32), scale_high)
                             S.vsts(dequantized_ub[row, col], low)
                             S.vsts(dequantized_ub[row, col + 64], high)
                             S.vsts(
                                 amax_ub[sf_slot(row, group)],
                                 S.vcmax(S.vmax(S.vabs(low), S.vabs(high))),
-                                dist='ONEPT_B32',
+                                dist="ONEPT_B32",
                             )
                 else:
                     for row in T.serial(block_m):
                         for group in _lim(groups_per_tile):
                             col = group * 128
                             low = apply_input_scale(
-                                S.vcvt(S.vld(x_ub[row, col], dist='UNPK4_B8'), T.float32),
+                                S.vcvt(S.vld(x_ub[row, col], dist="UNPK4_B8"), T.float32),
                                 input_sf_values_ub,
                                 group * 2,
                             )
                             high = apply_input_scale(
-                                S.vcvt(S.vld(x_ub[row, col + 64], dist='UNPK4_B8'), T.float32),
+                                S.vcvt(S.vld(x_ub[row, col + 64], dist="UNPK4_B8"), T.float32),
                                 input_sf_values_ub,
                                 group * 2 + 1,
                             )
@@ -874,7 +893,7 @@ def _get_grouped_cast_kernel(
                             S.vsts(
                                 amax_ub[sf_slot(row, group)],
                                 S.vcmax(S.vmax(S.vabs(low), S.vabs(high))),
-                                dist='ONEPT_B32',
+                                dist="ONEPT_B32",
                             )
             else:
                 if not fuse_input_scale:
@@ -882,13 +901,13 @@ def _get_grouped_cast_kernel(
                         col = vector * 64
                         scale = load_input_scale(input_sf_values_ub, vector)
                         for row in T.serial(block_m):
-                            x_fp8 = S.vld(x_ub[row, col], dist='UNPK4_B8')
+                            x_fp8 = S.vld(x_ub[row, col], dist="UNPK4_B8")
                             widened = S.vmul(S.vcvt(x_fp8, T.float32), scale)
                             if bf16_tile:
                                 S.vsts(
                                     dequantized_ub[row, col],
-                                    S.vshrs(T.reinterpret(widened, 'uint32x64'), 16),
-                                    dist='PK_B32',
+                                    S.vshrs(T.reinterpret(widened, "uint32x64"), 16),
+                                    dist="PK_B32",
                                 )
                             else:
                                 S.vsts(dequantized_ub[row, col], widened)
@@ -896,7 +915,7 @@ def _get_grouped_cast_kernel(
                     for row in T.serial(block_m):
                         for vector in _lim(block_k // 64):
                             col = vector * 64
-                            x_fp8 = S.vld(x_ub[row, col], dist='UNPK4_B8')
+                            x_fp8 = S.vld(x_ub[row, col], dist="UNPK4_B8")
                             widened = apply_input_scale(
                                 S.vcvt(x_fp8, T.float32),
                                 input_sf_values_ub,
@@ -905,8 +924,8 @@ def _get_grouped_cast_kernel(
                             if bf16_tile:
                                 S.vsts(
                                     dequantized_ub[row, col],
-                                    S.vshrs(T.reinterpret(widened, 'uint32x64'), 16),
-                                    dist='PK_B32',
+                                    S.vshrs(T.reinterpret(widened, "uint32x64"), 16),
+                                    dist="PK_B32",
                                 )
                             else:
                                 S.vsts(dequantized_ub[row, col], widened)
@@ -931,7 +950,7 @@ def _get_grouped_cast_kernel(
     def reduce_groups(x_ub, amax_ub):
         with T.SimdVF():
             if group_size == 16 and not is_col_major_sf:
-                amax_store_mask = S.pset(32, 'PAT_VL8')
+                amax_store_mask = S.pset(32, "PAT_VL8")
                 if is_bf16_input:
                     abs_mask_u16 = S.vdup(0x7FFF, T.uint16)
                     zero_bf16 = S.vdup(0.0, T.bfloat16)
@@ -942,19 +961,19 @@ def _get_grouped_cast_kernel(
                         if is_bf16_input:
                             values = S.vld(x_ub[row, col])
                             abs_u16 = S.vand(
-                                T.reinterpret(values, 'uint16x128'),
+                                T.reinterpret(values, "uint16x128"),
                                 abs_mask_u16,
                             )
                             amax_u16 = S.vcgmax(abs_u16)
                             amax_low, _ = S.vintlv(
                                 zero_bf16,
-                                T.reinterpret(amax_u16, 'bfloat16x128'),
+                                T.reinterpret(amax_u16, "bfloat16x128"),
                             )
-                            amax = T.reinterpret(amax_low, 'float32x64')
+                            amax = T.reinterpret(amax_low, "float32x64")
                         else:
                             values_even, values_odd = S.vld2(
                                 x_ub[row, col],
-                                dist='DINTLV_B32',
+                                dist="DINTLV_B32",
                             )
                             pair_amax = S.vmax(
                                 S.vabs(values_even),
@@ -965,16 +984,16 @@ def _get_grouped_cast_kernel(
                             amax_ub[sf_offset],
                             amax,
                             amax_store_mask,
-                            dist='NORM_B32',
+                            dist="NORM_B32",
                             extent=8,
                         )
             elif group_size == 16:
-                mask_0 = S.pset(32, 'PAT_VL16')
-                mask_01 = S.pset(32, 'PAT_VL32')
-                mask_all = S.pset(32, 'PAT_ALL')
+                mask_0 = S.pset(32, "PAT_VL16")
+                mask_01 = S.pset(32, "PAT_VL32")
+                mask_all = S.pset(32, "PAT_ALL")
                 mask_1 = S.pnot(mask_0, mask_01)
                 mask_23 = S.pnot(mask_01, mask_all)
-                mask_012 = S.vcmps(S.vci(0, T.int32), 48, op='lt')
+                mask_012 = S.vcmps(S.vci(0, T.int32), 48, op="lt")
                 mask_2 = S.pand(mask_012, mask_23, mask_all)
                 mask_3 = S.pnot(mask_2, mask_23)
                 for row in T.serial(block_m):
@@ -983,38 +1002,38 @@ def _get_grouped_cast_kernel(
                         S.vsts(
                             amax_ub[sf_slot(row, vector * 4)],
                             S.vcmax(values, mask_0),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
                         S.vsts(
                             amax_ub[sf_slot(row, vector * 4 + 1)],
                             S.vcmax(values, mask_1),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
                         S.vsts(
                             amax_ub[sf_slot(row, vector * 4 + 2)],
                             S.vcmax(values, mask_2),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
                         S.vsts(
                             amax_ub[sf_slot(row, vector * 4 + 3)],
                             S.vcmax(values, mask_3),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
             elif group_size == 32:
-                mask_low = S.pset(32, 'PAT_VL32')
-                mask_high = S.vcmps(S.vci(0, T.int32), 31, op='gt')
+                mask_low = S.pset(32, "PAT_VL32")
+                mask_high = S.vcmps(S.vci(0, T.int32), 31, op="gt")
                 for row in T.serial(block_m):
                     for vector in _lim(block_k // 64):
                         values = S.vabs(load_as_fp32(x_ub, row, vector * 64))
                         S.vsts(
                             amax_ub[sf_slot(row, vector * 2)],
                             S.vcmax(values, mask_low),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
                         S.vsts(
                             amax_ub[sf_slot(row, vector * 2 + 1)],
                             S.vcmax(values, mask_high),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
             elif group_size == 64:
                 for row in T.serial(block_m):
@@ -1023,7 +1042,7 @@ def _get_grouped_cast_kernel(
                         S.vsts(
                             amax_ub[sf_slot(row, vector)],
                             S.vcmax(values),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
             else:
                 for row in T.serial(block_m):
@@ -1034,7 +1053,7 @@ def _get_grouped_cast_kernel(
                         S.vsts(
                             amax_ub[sf_slot(row, group)],
                             S.vcmax(S.vmax(values0, values1)),
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
 
     @T.macro
@@ -1046,7 +1065,7 @@ def _get_grouped_cast_kernel(
                 S.vmuls(S.vshr(lane, one), block_m * 2),
                 S.vand(lane, one),
             )
-            store_mask = S.pset(16, 'PAT_VL16') if bf16_amax else S.pset(32, 'PAT_VL8')
+            store_mask = S.pset(16, "PAT_VL16") if bf16_amax else S.pset(32, "PAT_VL8")
             if reduce_reads_fp8:
                 abs_mask_u16_pair = S.vdup(0x7F7F, T.uint16)
                 low_byte_mask = S.vdup(0x00FF, T.uint16)
@@ -1061,7 +1080,7 @@ def _get_grouped_cast_kernel(
                     col = chunk * 256
                     if reduce_reads_fp8:
                         magnitudes = S.vand(
-                            T.reinterpret(S.vld(x_ub[row, col]), 'uint16x128'),
+                            T.reinterpret(S.vld(x_ub[row, col]), "uint16x128"),
                             abs_mask_u16_pair,
                         )
                         per_lane = S.vmax(
@@ -1071,45 +1090,45 @@ def _get_grouped_cast_kernel(
                         winners = S.vcgmax(per_lane)
                         if bf16_amax:
                             group_max = S.vcvt(
-                                T.reinterpret(winners, f'{input_dtype}x256'),
+                                T.reinterpret(winners, f"{input_dtype}x256"),
                                 T.bfloat16,
                                 part=0,
                             )
                         else:
                             stride4, _high = S.vintlv(winners, S.vdup(0, T.uint16))
                             group_max = S.vcvt(
-                                T.reinterpret(stride4, f'{input_dtype}x256'),
+                                T.reinterpret(stride4, f"{input_dtype}x256"),
                                 T.float32,
                                 part=0,
                             )
                     elif reduce_reads_bf16:
-                        even, odd = S.vld2(x_ub[row, col], dist='DINTLV_B16')
+                        even, odd = S.vld2(x_ub[row, col], dist="DINTLV_B16")
                         pairs = S.vmax(
-                            S.vand(T.reinterpret(even, 'uint16x128'), abs_mask_u16),
-                            S.vand(T.reinterpret(odd, 'uint16x128'), abs_mask_u16),
+                            S.vand(T.reinterpret(even, "uint16x128"), abs_mask_u16),
+                            S.vand(T.reinterpret(odd, "uint16x128"), abs_mask_u16),
                         )
                         if bf16_amax:
                             group_max = T.reinterpret(
                                 S.vcgmax(pairs),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                         else:
                             amax_low, _amax_high = S.vintlv(
                                 zero_bf16,
-                                T.reinterpret(S.vcgmax(pairs), 'bfloat16x128'),
+                                T.reinterpret(S.vcgmax(pairs), "bfloat16x128"),
                             )
-                            group_max = T.reinterpret(amax_low, 'float32x64')
+                            group_max = T.reinterpret(amax_low, "float32x64")
                     else:
-                        even_low, odd_low = S.vld2(x_ub[row, col], dist='DINTLV_B32')
+                        even_low, odd_low = S.vld2(x_ub[row, col], dist="DINTLV_B32")
                         if rows_per_pass == 2:
                             even_high, odd_high = S.vld2(
                                 x_ub[row + 1, 0],
-                                dist='DINTLV_B32',
+                                dist="DINTLV_B32",
                             )
                         else:
                             even_high, odd_high = S.vld2(
                                 x_ub[row, col + 128],
-                                dist='DINTLV_B32',
+                                dist="DINTLV_B32",
                             )
                         pairs_low = S.vmax(S.vabs(even_low), S.vabs(odd_low))
                         pairs_high = S.vmax(S.vabs(even_high), S.vabs(odd_high))
@@ -1120,7 +1139,7 @@ def _get_grouped_cast_kernel(
                             amax_ub[row * amax_row_pitch + chunk * 8],
                             group_max,
                             store_mask,
-                            dist='NORM_B16' if bf16_amax else 'NORM_B32',
+                            dist="NORM_B16" if bf16_amax else "NORM_B32",
                             extent=16 if bf16_amax else 8,
                         )
                     else:
@@ -1132,7 +1151,7 @@ def _get_grouped_cast_kernel(
                                     base_index,
                                     chunk * 4 * block_m * 2 + row * 2,
                                 ),
-                                'uint32x64',
+                                "uint32x64",
                             ),
                             store_mask,
                         )
@@ -1142,7 +1161,7 @@ def _get_grouped_cast_kernel(
         with T.SimdVF():
             if group_size == 16:
                 lane_ids = S.vci(0, T.int32)
-                full_mask = S.pset(32, 'PAT_ALL')
+                full_mask = S.pset(32, "PAT_ALL")
                 for row in T.serial(block_m):
                     for micro in T.serial(packed_row_micro_tiles):
                         for local_vector in T.unroll(
@@ -1153,17 +1172,17 @@ def _get_grouped_cast_kernel(
                             values = S.vabs(load_as_fp32(x_ub, row, vector * 64))
                             for group in T.unroll(4, explicit=True):
                                 lower = group * 16
-                                mask_ge = S.vcmps(lane_ids, lower, op='ge')
-                                mask_lt = S.vcmps(lane_ids, lower + 16, op='lt')
+                                mask_ge = S.vcmps(lane_ids, lower, op="ge")
+                                mask_lt = S.vcmps(lane_ids, lower + 16, op="lt")
                                 mask = S.pand(mask_ge, mask_lt, full_mask)
                                 S.vsts(
                                     amax_ub[sf_slot(row, vector * 4 + group)],
                                     S.vcmax(values, mask),
-                                    dist='ONEPT_B32',
+                                    dist="ONEPT_B32",
                                 )
             elif group_size == 32:
-                mask_low = S.pset(32, 'PAT_VL32')
-                mask_high = S.vcmps(S.vci(0, T.int32), 31, op='gt')
+                mask_low = S.pset(32, "PAT_VL32")
+                mask_high = S.vcmps(S.vci(0, T.int32), 31, op="gt")
                 for row in T.serial(block_m):
                     for micro in T.serial(packed_row_micro_tiles):
                         for local_vector in T.unroll(
@@ -1175,12 +1194,12 @@ def _get_grouped_cast_kernel(
                             S.vsts(
                                 amax_ub[sf_slot(row, vector * 2)],
                                 S.vcmax(values, mask_low),
-                                dist='ONEPT_B32',
+                                dist="ONEPT_B32",
                             )
                             S.vsts(
                                 amax_ub[sf_slot(row, vector * 2 + 1)],
                                 S.vcmax(values, mask_high),
-                                dist='ONEPT_B32',
+                                dist="ONEPT_B32",
                             )
             elif group_size == 64:
                 for row in T.serial(block_m):
@@ -1194,7 +1213,7 @@ def _get_grouped_cast_kernel(
                             S.vsts(
                                 amax_ub[sf_slot(row, vector)],
                                 S.vcmax(values),
-                                dist='ONEPT_B32',
+                                dist="ONEPT_B32",
                             )
             else:
                 groups_per_micro = packed_row_micro_k // group_size
@@ -1208,7 +1227,7 @@ def _get_grouped_cast_kernel(
                             S.vsts(
                                 amax_ub[sf_slot(row, group)],
                                 S.vcmax(S.vmax(values0, values1)),
-                                dist='ONEPT_B32',
+                                dist="ONEPT_B32",
                             )
 
     @T.macro
@@ -1249,14 +1268,14 @@ def _get_grouped_cast_kernel(
                     S.vdup(0.0, T.bfloat16),
                     S.vgather2(
                         amax_ub[0],
-                        T.reinterpret(batch_index, 'uint16x128'),
+                        T.reinterpret(batch_index, "uint16x128"),
                     ),
                 )
-                raw_amax = T.reinterpret(amax_low, 'float32x64')
+                raw_amax = T.reinterpret(amax_low, "float32x64")
             else:
                 raw_amax = S.vgather2(
                     amax_ub[0],
-                    T.reinterpret(batch_index, 'uint32x64'),
+                    T.reinterpret(batch_index, "uint32x64"),
                 )
         else:
             raw_amax = S.vld(amax_ub[sf_offset])
@@ -1274,14 +1293,14 @@ def _get_grouped_cast_kernel(
         )
         if out_config.round_sf:
             scale_raw = S.vmuls(amax, 1.0 / quant_max)
-            scale_bits = T.reinterpret(scale_raw, 'uint32x64')
+            scale_bits = T.reinterpret(scale_raw, "uint32x64")
             scale_exp = S.vadds(
                 S.vshrs(S.vsub(scale_bits, S.vdup(1, T.uint32)), 23),
                 1,
             )
             if not sf_only:
                 inv_exp = S.vsub(S.vdup(254, T.uint32), scale_exp)
-                inv_raw = T.reinterpret(S.vshls(inv_exp, 23), 'float32x64')
+                inv_raw = T.reinterpret(S.vshls(inv_exp, 23), "float32x64")
                 scale_inv = (
                     S.vmul(
                         inv_raw,
@@ -1291,9 +1310,9 @@ def _get_grouped_cast_kernel(
                     else inv_raw
                 )
             if is_packed_sf:
-                S.vsts(sf_linear_ub[sf_offset], scale_exp, dist='PK4_B32')
+                S.vsts(sf_linear_ub[sf_offset], scale_exp, dist="PK4_B32")
             else:
-                scale = T.reinterpret(S.vshls(scale_exp, 23), 'float32x64')
+                scale = T.reinterpret(S.vshls(scale_exp, 23), "float32x64")
                 S.vsts(sf_linear_ub[sf_offset], scale)
         else:
             quant_max_vec = S.vdup(quant_max, T.float32)
@@ -1307,15 +1326,15 @@ def _get_grouped_cast_kernel(
     @T.macro
     def store_inverse_bf16(sf_inv_bf16_ub, slot, scale_inv):
         doubled = S.vor(
-            T.reinterpret(S.vcvt(scale_inv, T.bfloat16), 'uint16x128'),
+            T.reinterpret(S.vcvt(scale_inv, T.bfloat16), "uint16x128"),
             T.reinterpret(
                 S.vcvt(scale_inv, T.bfloat16, part=1),
-                'uint16x128',
+                "uint16x128",
             ),
         )
         S.vsts(
             sf_inv_bf16_ub[sf_inv_bf16_slot(slot)],
-            T.reinterpret(doubled, 'bfloat16x128'),
+            T.reinterpret(doubled, "bfloat16x128"),
         )
 
     @T.macro
@@ -1384,11 +1403,11 @@ def _get_grouped_cast_kernel(
                 sf_offset = sf_batch * 64
                 if is_packed_sf:
                     scale_exp = T.reinterpret(
-                        S.vld(sf_linear_ub[sf_offset], dist='UNPK4_B8'),
-                        'uint32x64',
+                        S.vld(sf_linear_ub[sf_offset], dist="UNPK4_B8"),
+                        "uint32x64",
                     )
                     inv_exp = S.vsub(S.vdup(254, T.uint32), scale_exp)
-                    scale_inv = T.reinterpret(S.vshls(inv_exp, 23), 'float32x64')
+                    scale_inv = T.reinterpret(S.vshls(inv_exp, 23), "float32x64")
                 else:
                     scale = S.vld(sf_linear_ub[sf_offset])
                     scale_inv = S.vdiv(S.vdup(1.0, T.float32), scale)
@@ -1402,32 +1421,32 @@ def _get_grouped_cast_kernel(
             for group in T.unroll(4, explicit=True):
                 inverses[group] = S.vld(
                     sf_inv_ub[sf_inv_slot(sf_slot(row, vector * 4 + group))],
-                    dist='BRC_B32',
+                    dist="BRC_B32",
                 )
             inverse_low = S.vsel(
                 inverses[0],
                 inverses[1],
-                S.vcmps(lane_ids, 16, op='lt'),
+                S.vcmps(lane_ids, 16, op="lt"),
             )
             inverse_high = S.vsel(
                 inverses[2],
                 inverses[3],
-                S.vcmps(lane_ids, 48, op='lt'),
+                S.vcmps(lane_ids, 48, op="lt"),
             )
             return S.vsel(
                 inverse_low,
                 inverse_high,
-                S.vcmps(lane_ids, 32, op='lt'),
+                S.vcmps(lane_ids, 32, op="lt"),
             )
         if group_size == 32:
-            mask_low = S.pset(32, 'PAT_VL32')
+            mask_low = S.pset(32, "PAT_VL32")
             inverse_low = S.vld(
                 sf_inv_ub[sf_inv_slot(sf_slot(row, vector * 2))],
-                dist='BRC_B32',
+                dist="BRC_B32",
             )
             inverse_high = S.vld(
                 sf_inv_ub[sf_inv_slot(sf_slot(row, vector * 2 + 1))],
-                dist='BRC_B32',
+                dist="BRC_B32",
             )
             return S.vsel(
                 inverse_low,
@@ -1437,11 +1456,11 @@ def _get_grouped_cast_kernel(
         if group_size == 64:
             return S.vld(
                 sf_inv_ub[sf_inv_slot(sf_slot(row, vector))],
-                dist='BRC_B32',
+                dist="BRC_B32",
             )
         return S.vld(
             sf_inv_ub[sf_inv_slot(sf_slot(row, vector // 2))],
-            dist='BRC_B32',
+            dist="BRC_B32",
         )
 
     _qn = min(quantize_micro_vectors, block_k // 64)
@@ -1461,7 +1480,7 @@ def _get_grouped_cast_kernel(
             for pair in T.unroll(_qn // 2, explicit=True):
                 expanded = S.vld(
                     sf_inv_ub[sf_inv_slot(row * groups_per_tile + (_m * (_qn // 2) + pair) * 8)],
-                    dist='E2B_B32',
+                    dist="E2B_B32",
                 )
                 inverses[pair * 2], inverses[pair * 2 + 1] = S.vintlv(
                     expanded,
@@ -1471,7 +1490,7 @@ def _get_grouped_cast_kernel(
             for batch in T.unroll(_qn // 4, explicit=True):
                 expanded = S.vld(
                     sf_inv_ub[sf_inv_slot(row * groups_per_tile + (_m * (_qn // 4) + batch) * 8)],
-                    dist='E2B_B32',
+                    dist="E2B_B32",
                 )
                 low, high = S.vintlv(expanded, expanded)
                 inverses[batch * 4], inverses[batch * 4 + 1] = S.vintlv(
@@ -1486,13 +1505,13 @@ def _get_grouped_cast_kernel(
             for vector in T.unroll(_qn, explicit=True):
                 inverses[vector] = S.vld(
                     sf_inv_ub[sf_inv_slot(row * groups_per_tile + _m * _qn + vector)],
-                    dist='BRC_B32',
+                    dist="BRC_B32",
                 )
         else:
             for group in T.unroll(_qn // 2, explicit=True):
                 inverse = S.vld(
                     sf_inv_ub[sf_inv_slot(row * groups_per_tile + _m * (_qn // 2) + group)],
-                    dist='BRC_B32',
+                    dist="BRC_B32",
                 )
                 inverses[group * 2] = inverse
                 inverses[group * 2 + 1] = inverse
@@ -1513,18 +1532,18 @@ def _get_grouped_cast_kernel(
                             -1,
                         )
                 low, high = S.vdintlv(
-                    T.reinterpret(scaled[0], 'uint16x128'),
-                    T.reinterpret(scaled[1], 'uint16x128'),
+                    T.reinterpret(scaled[0], "uint16x128"),
+                    T.reinterpret(scaled[1], "uint16x128"),
                 )
                 scaled_bf16 = T.reinterpret(
                     S.vor(high, S.vmins(low, 1)),
-                    'bfloat16x128',
+                    "bfloat16x128",
                 )
                 quantized = S.vcvt(scaled_bf16, T.float4_e2m1fn)
                 S.vsts(
                     out_ub[row, (_m * (_qn // 2) + pair) * 128],
                     quantized,
-                    dist='PK4_B32',
+                    dist="PK4_B32",
                 )
         else:
             for vector in T.unroll(_qn, explicit=True):
@@ -1548,7 +1567,7 @@ def _get_grouped_cast_kernel(
                 S.vsts(
                     out_ub[row, (_m * _qn + vector) * 64],
                     quantized,
-                    dist='PK4_B32',
+                    dist="PK4_B32",
                 )
 
     @T.macro
@@ -1572,13 +1591,13 @@ def _get_grouped_cast_kernel(
                             chunk = _micro * _mc + _local
                             inverse = S.vld(
                                 sf_inv_bf16_ub[sf_inv_bf16_slot(row * groups_per_tile + chunk * 4)],
-                                dist='E2B_B16',
+                                dist="E2B_B16",
                             )
                             values = S.vld(x_ub[row, chunk * 128])
                             S.vsts(
                                 out_ub[row, chunk * 128],
                                 S.vcvt(S.vmul(values, inverse), T.float4_e2m1fn),
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
             elif group_size >= 128:
                 for row in T.serial(block_m):
@@ -1589,19 +1608,19 @@ def _get_grouped_cast_kernel(
                             inverse = T.reinterpret(
                                 S.vld(
                                     sf_inv_bf16_ub[sf_inv_bf16_slot(sf_slot(row, chunk * 128 // group_size))],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             values = S.vld(x_ub[row, chunk * 128])
                             S.vsts(
                                 out_ub[row, chunk * 128],
                                 S.vcvt(S.vmul(values, inverse), T.float4_e2m1fn),
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
             elif group_size == 64:
                 lanes = S.vci(0, T.int16)
-                low_half = S.vcmps(lanes, 64, op='lt')
+                low_half = S.vcmps(lanes, 64, op="lt")
                 for row in T.serial(block_m):
                     _mc = min(quantize_bf16_micro, block_k // 128)
                     for _micro in T.serial(block_k // 128 // _mc):
@@ -1611,29 +1630,29 @@ def _get_grouped_cast_kernel(
                             first = T.reinterpret(
                                 S.vld(
                                     sf_inv_bf16_ub[sf_inv_bf16_slot(sf_slot(row, group))],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             second = T.reinterpret(
                                 S.vld(
                                     sf_inv_bf16_ub[sf_inv_bf16_slot(sf_slot(row, group + 1))],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             inverse = S.vsel(first, second, low_half)
                             values = S.vld(x_ub[row, chunk * 128])
                             S.vsts(
                                 out_ub[row, chunk * 128],
                                 S.vcvt(S.vmul(values, inverse), T.float4_e2m1fn),
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
             else:
                 lanes = S.vci(0, T.int16)
-                low_quarter = S.vcmps(lanes, 32, op='lt')
-                low_half = S.vcmps(lanes, 64, op='lt')
-                low_three_quarters = S.vcmps(lanes, 96, op='lt')
+                low_quarter = S.vcmps(lanes, 32, op="lt")
+                low_half = S.vcmps(lanes, 64, op="lt")
+                low_three_quarters = S.vcmps(lanes, 96, op="lt")
                 for row in T.serial(block_m):
                     _mc = min(quantize_bf16_micro, block_k // 128)
                     for _micro in T.serial(block_k // 128 // _mc):
@@ -1643,30 +1662,30 @@ def _get_grouped_cast_kernel(
                             first = T.reinterpret(
                                 S.vld(
                                     sf_inv_bf16_ub[sf_inv_bf16_slot(sf_slot(row, group))],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             second = T.reinterpret(
                                 S.vld(
                                     sf_inv_bf16_ub[sf_inv_bf16_slot(sf_slot(row, group + 1))],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             third = T.reinterpret(
                                 S.vld(
                                     sf_inv_bf16_ub[sf_inv_bf16_slot(sf_slot(row, group + 2))],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             fourth = T.reinterpret(
                                 S.vld(
                                     sf_inv_bf16_ub[sf_inv_bf16_slot(sf_slot(row, group + 3))],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             inverse = S.vsel(
                                 S.vsel(first, second, low_quarter),
@@ -1677,7 +1696,7 @@ def _get_grouped_cast_kernel(
                             S.vsts(
                                 out_ub[row, chunk * 128],
                                 S.vcvt(S.vmul(values, inverse), T.float4_e2m1fn),
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
 
     @T.macro
@@ -1698,7 +1717,7 @@ def _get_grouped_cast_kernel(
                         for pair in T.unroll(2, explicit=True):
                             expanded = S.vld(
                                 sf_inv_ub[sf_inv_slot(sf_base + micro * 16 + pair * 8)],
-                                dist='E2B_B32',
+                                dist="E2B_B32",
                             )
                             inverses[pair * 2], inverses[pair * 2 + 1] = S.vintlv(
                                 expanded,
@@ -1707,7 +1726,7 @@ def _get_grouped_cast_kernel(
                     elif group_size == 32:
                         expanded = S.vld(
                             sf_inv_ub[sf_inv_slot(sf_base + micro * 8)],
-                            dist='E2B_B32',
+                            dist="E2B_B32",
                         )
                         low, high = S.vintlv(expanded, expanded)
                         inverses[0], inverses[1] = S.vintlv(low, low)
@@ -1719,13 +1738,13 @@ def _get_grouped_cast_kernel(
                         ):
                             inverses[local_vector] = S.vld(
                                 sf_inv_ub[sf_inv_slot(sf_base + vector_base + local_vector)],
-                                dist='BRC_B32',
+                                dist="BRC_B32",
                             )
                     else:
                         for local_group in T.unroll(2, explicit=True):
                             inverse = S.vld(
                                 sf_inv_ub[sf_inv_slot(sf_base + micro * 2 + local_group)],
-                                dist='BRC_B32',
+                                dist="BRC_B32",
                             )
                             inverses[local_group * 2] = inverse
                             inverses[local_group * 2 + 1] = inverse
@@ -1747,18 +1766,18 @@ def _get_grouped_cast_kernel(
                                         -1,
                                     )
                             low, high = S.vdintlv(
-                                T.reinterpret(scaled[0], 'uint16x128'),
-                                T.reinterpret(scaled[1], 'uint16x128'),
+                                T.reinterpret(scaled[0], "uint16x128"),
+                                T.reinterpret(scaled[1], "uint16x128"),
                             )
                             scaled_bf16 = T.reinterpret(
                                 S.vor(high, S.vmins(low, 1)),
-                                'bfloat16x128',
+                                "bfloat16x128",
                             )
                             quantized = S.vcvt(scaled_bf16, T.float4_e2m1fn)
                             S.vsts(
                                 out_ub[row, micro * packed_row_micro_k + local_pair * 128],
                                 quantized,
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
                     else:
                         for local_vector in T.unroll(
@@ -1786,7 +1805,7 @@ def _get_grouped_cast_kernel(
                             S.vsts(
                                 out_ub[row, vector * 64],
                                 quantized,
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
 
     @T.prim_func
@@ -1879,12 +1898,11 @@ def _get_grouped_cast_kernel(
                 valid_groups = T.ceildiv(valid_cols, group_size)
 
                 with _stage(0, manual_pipeline_stages):
-                    if hidden % block_k != 0:
-                        if hidden_tile == num_hidden_tiles - 1:
-                            if has_input_sf:
-                                clear_quantized_input(x_ub_uint8)
-                            else:
-                                clear_raw_input(x_ub)
+                    if hidden % block_k != 0 and hidden_tile == num_hidden_tiles - 1:
+                        if has_input_sf:
+                            clear_quantized_input(x_ub_uint8)
+                        else:
+                            clear_raw_input(x_ub)
                     T.copy(
                         x[
                             token_base : token_base + valid_rows,
@@ -1924,20 +1942,19 @@ def _get_grouped_cast_kernel(
                                 ],
                                 input_sf_raw_ub[:1, :valid_input_groups],
                             )
-                    if not manual_pipeline_stages:
-                        if has_input_sf:
-                            decode_input_scales(
-                                input_sf_raw_linear_ub,
+                    if not manual_pipeline_stages and has_input_sf:
+                        decode_input_scales(
+                            input_sf_raw_linear_ub,
+                            input_sf_values_ub,
+                        )
+                        if not no_dequant_tile:
+                            dequantize_input(
+                                x_ub,
                                 input_sf_values_ub,
+                                input_sf_bf16_ub if input_scale_bf16 else None,
+                                dequantized_ub,
+                                amax_ub if fuse_amax_into_dequant else None,
                             )
-                            if not no_dequant_tile:
-                                dequantize_input(
-                                    x_ub,
-                                    input_sf_values_ub,
-                                    input_sf_bf16_ub if input_scale_bf16 else None,
-                                    dequantized_ub,
-                                    amax_ub if fuse_amax_into_dequant else None,
-                                )
                     if cast_only:
                         if is_col_major_sf:
                             if is_packed_sf:
@@ -1967,20 +1984,19 @@ def _get_grouped_cast_kernel(
                             )
 
                 with _stage(1, manual_pipeline_stages):
-                    if manual_pipeline_stages:
-                        if has_input_sf:
-                            decode_input_scales(
-                                input_sf_raw_linear_ub,
+                    if manual_pipeline_stages and has_input_sf:
+                        decode_input_scales(
+                            input_sf_raw_linear_ub,
+                            input_sf_values_ub,
+                        )
+                        if not no_dequant_tile:
+                            dequantize_input(
+                                x_ub,
                                 input_sf_values_ub,
+                                input_sf_bf16_ub if input_scale_bf16 else None,
+                                dequantized_ub,
+                                amax_ub if fuse_amax_into_dequant else None,
                             )
-                            if not no_dequant_tile:
-                                dequantize_input(
-                                    x_ub,
-                                    input_sf_values_ub,
-                                    input_sf_bf16_ub if input_scale_bf16 else None,
-                                    dequantized_ub,
-                                    amax_ub if fuse_amax_into_dequant else None,
-                                )
                     if cast_only:
                         compute_inverse_scales(sf_linear_ub, sf_inv_ub)
                     else:
@@ -2004,34 +2020,33 @@ def _get_grouped_cast_kernel(
                             sf_inv_bf16_ub,
                             input_sf_values_ub if has_input_sf else amax_ub,
                         )
-                    if not manual_pipeline_stages:
-                        if not cast_only:
-                            if is_col_major_sf:
-                                if is_packed_sf:
-                                    valid_group_pairs = T.ceildiv(valid_groups, 2)
-                                    T.copy(
-                                        sf_ub[:valid_group_pairs, : valid_rows * 2],
-                                        out_sf[
-                                            sf_base // 2 : sf_base // 2 + valid_group_pairs,
-                                            token_base * 2 : token_base * 2 + valid_rows * 2,
-                                        ],
-                                    )
-                                else:
-                                    T.copy(
-                                        sf_ub[:valid_groups, :valid_rows],
-                                        out_sf[
-                                            sf_base : sf_base + valid_groups,
-                                            token_base : token_base + valid_rows,
-                                        ],
-                                    )
-                            else:
+                    if not manual_pipeline_stages and not cast_only:
+                        if is_col_major_sf:
+                            if is_packed_sf:
+                                valid_group_pairs = T.ceildiv(valid_groups, 2)
                                 T.copy(
-                                    sf_ub[:valid_rows, :valid_groups],
+                                    sf_ub[:valid_group_pairs, : valid_rows * 2],
                                     out_sf[
-                                        token_base : token_base + valid_rows,
-                                        sf_base : sf_base + valid_groups,
+                                        sf_base // 2 : sf_base // 2 + valid_group_pairs,
+                                        token_base * 2 : token_base * 2 + valid_rows * 2,
                                     ],
                                 )
+                            else:
+                                T.copy(
+                                    sf_ub[:valid_groups, :valid_rows],
+                                    out_sf[
+                                        sf_base : sf_base + valid_groups,
+                                        token_base : token_base + valid_rows,
+                                    ],
+                                )
+                        else:
+                            T.copy(
+                                sf_ub[:valid_rows, :valid_groups],
+                                out_sf[
+                                    token_base : token_base + valid_rows,
+                                    sf_base : sf_base + valid_groups,
+                                ],
+                            )
                     if not sf_only:
                         if has_input_sf and not no_dequant_tile:
                             quantize_input_ub = dequantized_ub
@@ -2061,34 +2076,33 @@ def _get_grouped_cast_kernel(
                             )
 
                 with _stage(2, manual_pipeline_stages):
-                    if manual_pipeline_stages:
-                        if not cast_only:
-                            if is_col_major_sf:
-                                if is_packed_sf:
-                                    valid_group_pairs = T.ceildiv(valid_groups, 2)
-                                    T.copy(
-                                        sf_ub[:valid_group_pairs, : valid_rows * 2],
-                                        out_sf[
-                                            sf_base // 2 : sf_base // 2 + valid_group_pairs,
-                                            token_base * 2 : token_base * 2 + valid_rows * 2,
-                                        ],
-                                    )
-                                else:
-                                    T.copy(
-                                        sf_ub[:valid_groups, :valid_rows],
-                                        out_sf[
-                                            sf_base : sf_base + valid_groups,
-                                            token_base : token_base + valid_rows,
-                                        ],
-                                    )
-                            else:
+                    if manual_pipeline_stages and not cast_only:
+                        if is_col_major_sf:
+                            if is_packed_sf:
+                                valid_group_pairs = T.ceildiv(valid_groups, 2)
                                 T.copy(
-                                    sf_ub[:valid_rows, :valid_groups],
+                                    sf_ub[:valid_group_pairs, : valid_rows * 2],
                                     out_sf[
-                                        token_base : token_base + valid_rows,
-                                        sf_base : sf_base + valid_groups,
+                                        sf_base // 2 : sf_base // 2 + valid_group_pairs,
+                                        token_base * 2 : token_base * 2 + valid_rows * 2,
                                     ],
                                 )
+                            else:
+                                T.copy(
+                                    sf_ub[:valid_groups, :valid_rows],
+                                    out_sf[
+                                        sf_base : sf_base + valid_groups,
+                                        token_base : token_base + valid_rows,
+                                    ],
+                                )
+                        else:
+                            T.copy(
+                                sf_ub[:valid_rows, :valid_groups],
+                                out_sf[
+                                    token_base : token_base + valid_rows,
+                                    sf_base : sf_base + valid_groups,
+                                ],
+                            )
                     if not sf_only:
                         T.copy(
                             out_ub[:valid_rows, :valid_cols],
@@ -2128,14 +2142,14 @@ def _get_full_row_cast_kernel(
     sf_ub_shape = (1, block_m * sf_cols) if is_col_major_sf else (block_m, sf_cols)
     sf_storage_slots = max(64, block_m * sf_cols)
     quant_max = 6.0 if is_fp4 else 448.0
-    num_tokens = T.dynamic('num_tokens')
-    out_sf_stride = T.dynamic('out_sf_stride')
+    num_tokens = T.dynamic("num_tokens")
+    out_sf_stride = T.dynamic("out_sf_stride")
     sf_shape = get_sf_shape((num_tokens, hidden), out_config)
 
     @T.macro
     def load_as_fp32(x_ub, row, col):
         if is_bf16_input:
-            return S.vcvt(S.vld(x_ub[row, col], dist='UNPK_B16'), T.float32, part=0)
+            return S.vcvt(S.vld(x_ub[row, col], dist="UNPK_B16"), T.float32, part=0)
         return S.vld(x_ub[row, col])
 
     @T.macro
@@ -2187,25 +2201,25 @@ def _get_full_row_cast_kernel(
                 )
                 if out_config.round_sf:
                     scale_raw = S.vmuls(amax, 1.0 / quant_max)
-                    scale_bits = T.reinterpret(scale_raw, 'uint32x64')
+                    scale_bits = T.reinterpret(scale_raw, "uint32x64")
                     scale_exp = S.vadds(
                         S.vshrs(S.vsub(scale_bits, S.vdup(1, T.uint32)), 23),
                         1,
                     )
                     inv_exp = S.vsub(S.vdup(254, T.uint32), scale_exp)
-                    scale_inv = T.reinterpret(S.vshls(inv_exp, 23), 'float32x64')
+                    scale_inv = T.reinterpret(S.vshls(inv_exp, 23), "float32x64")
                     if is_packed_sf:
                         S.vsts(
                             sf_storage_ub[row * 2],
-                            T.reinterpret(scale_exp, 'uint16x128'),
-                            dist='ONEPT_B16',
+                            T.reinterpret(scale_exp, "uint16x128"),
+                            dist="ONEPT_B16",
                         )
                     else:
-                        scale = T.reinterpret(S.vshls(scale_exp, 23), 'float32x64')
+                        scale = T.reinterpret(S.vshls(scale_exp, 23), "float32x64")
                         S.vsts(
                             sf_storage_ub[row],
                             scale,
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
                 else:
                     quant_max_vec = S.vdup(quant_max, T.float32)
@@ -2214,7 +2228,7 @@ def _get_full_row_cast_kernel(
                     S.vsts(
                         sf_storage_ub[row],
                         scale,
-                        dist='ONEPT_B32',
+                        dist="ONEPT_B32",
                     )
                 S.vsts(
                     sf_inv_ub[row, 0],
@@ -2227,20 +2241,20 @@ def _get_full_row_cast_kernel(
             lane_ids = S.vci(0, T.int32)
             if is_packed_sf:
                 scale_values = T.reinterpret(
-                    S.vld(sf_storage_ub[0], dist='UNPK4_B8'),
-                    'uint32x64',
+                    S.vld(sf_storage_ub[0], dist="UNPK4_B8"),
+                    "uint32x64",
                 )
             else:
                 scale_values = S.vld(sf_storage_ub[0])
             for row in T.serial(block_m):
                 scale_lane = row * 2 if is_packed_sf else row
-                lane_mask = S.vcmps(lane_ids, scale_lane, op='eq')
+                lane_mask = S.vcmps(lane_ids, scale_lane, op="eq")
                 if is_packed_sf:
                     scale_exp = S.vdupv(
                         S.vcmax(scale_values, lane_mask),
                     )
                     inv_exp = S.vsub(S.vdup(254, T.uint32), scale_exp)
-                    inverse = T.reinterpret(S.vshls(inv_exp, 23), 'float32x64')
+                    inverse = T.reinterpret(S.vshls(inv_exp, 23), "float32x64")
                 else:
                     scale = S.vdupv(
                         S.vcmax(scale_values, lane_mask),
@@ -2274,18 +2288,18 @@ def _get_full_row_cast_kernel(
                                     -1,
                                 )
                         low, high = S.vdintlv(
-                            T.reinterpret(scaled[0], 'uint16x128'),
-                            T.reinterpret(scaled[1], 'uint16x128'),
+                            T.reinterpret(scaled[0], "uint16x128"),
+                            T.reinterpret(scaled[1], "uint16x128"),
                         )
                         scaled_bf16 = T.reinterpret(
                             S.vor(high, S.vmins(low, 1)),
-                            'bfloat16x128',
+                            "bfloat16x128",
                         )
                         quantized = S.vcvt(scaled_bf16, T.float4_e2m1fn)
                         S.vsts(
                             out_ub[row, pair * 128],
                             quantized,
-                            dist='PK4_B32',
+                            dist="PK4_B32",
                         )
                 else:
                     for vector in T.unroll(block_k // 64, explicit=True):
@@ -2310,7 +2324,7 @@ def _get_full_row_cast_kernel(
                         S.vsts(
                             out_ub[row, col],
                             quantized,
-                            dist='PK4_B32',
+                            dist="PK4_B32",
                         )
 
     @T.prim_func
@@ -2368,9 +2382,8 @@ def _get_full_row_cast_kernel(
                     for hidden_tile in T.serial(num_hidden_tiles):
                         hidden_base = hidden_tile * block_k
                         valid_cols = T.min(block_k, hidden - hidden_base)
-                        if hidden % block_k != 0:
-                            if hidden_tile == num_hidden_tiles - 1:
-                                clear_input(x_ub)
+                        if hidden % block_k != 0 and hidden_tile == num_hidden_tiles - 1:
+                            clear_input(x_ub)
                         T.copy(
                             x[
                                 token_base : token_base + valid_rows,
@@ -2402,9 +2415,8 @@ def _get_full_row_cast_kernel(
                     for hidden_tile in T.serial(num_hidden_tiles):
                         hidden_base = hidden_tile * block_k
                         valid_cols = T.min(block_k, hidden - hidden_base)
-                        if hidden % block_k != 0:
-                            if hidden_tile == num_hidden_tiles - 1:
-                                clear_input(x_ub)
+                        if hidden % block_k != 0 and hidden_tile == num_hidden_tiles - 1:
+                            clear_input(x_ub)
                         T.copy(
                             x[
                                 token_base : token_base + valid_rows,
@@ -2490,8 +2502,8 @@ def _get_prequant_row_major_cast_kernel(
     g128_stage_row_pitch = chunks_per_row * 8
     workspace_slots = g128_stage_offset + (block_m * g128_stage_row_pitch + pad if group_size == 128 else 0)
 
-    num_tokens = T.dynamic('num_tokens')
-    out_sf_stride = T.dynamic('out_sf_stride')
+    num_tokens = T.dynamic("num_tokens")
+    out_sf_stride = T.dynamic("out_sf_stride")
     x_sf_shape = get_sf_shape((num_tokens, hidden), in_config)
     sf_shape = get_sf_shape((num_tokens, hidden), out_config)
 
@@ -2517,8 +2529,8 @@ def _get_prequant_row_major_cast_kernel(
         with T.SimdVF():
             one = S.vdup(1, T.uint32)
             exp_limit = S.vdup(254, T.uint32)
-            sf_store_mask = S.pset(32, 'PAT_VL8' if groups_per_chunk == 8 else 'PAT_VL2')
-            factor_store_mask = S.pset(32, 'PAT_VL8')
+            sf_store_mask = S.pset(32, "PAT_VL8" if groups_per_chunk == 8 else "PAT_VL2")
+            factor_store_mask = S.pset(32, "PAT_VL8")
             if group_size == 128:
                 zero_f32 = S.vdup(0.0, T.float32)
             if is_fp4_input:
@@ -2533,29 +2545,29 @@ def _get_prequant_row_major_cast_kernel(
                     col = chunk * 256
                     if is_fp4_input:
                         first = T.reinterpret(
-                            S.vcvt(S.vld(x_ub[row, col], dist='UNPK4_B8'), T.bfloat16),
-                            'uint16x128',
+                            S.vcvt(S.vld(x_ub[row, col], dist="UNPK4_B8"), T.bfloat16),
+                            "uint16x128",
                         )
                         second = T.reinterpret(
-                            S.vcvt(S.vld(x_ub[row, col + 128], dist='UNPK4_B8'), T.bfloat16),
-                            'uint16x128',
+                            S.vcvt(S.vld(x_ub[row, col + 128], dist="UNPK4_B8"), T.bfloat16),
+                            "uint16x128",
                         )
                         even, odd = S.vdintlv(first, second)
                         pairs = S.vmax(S.vand(even, abs_mask), S.vand(odd, abs_mask))
                         winners, _winners_high = S.vintlv(
                             zero_bf16,
-                            T.reinterpret(S.vcgmax(pairs), 'bfloat16x128'),
+                            T.reinterpret(S.vcgmax(pairs), "bfloat16x128"),
                         )
-                        code_max = T.reinterpret(winners, 'float32x64')
+                        code_max = T.reinterpret(winners, "float32x64")
                     else:
                         magnitudes = S.vand(
-                            T.reinterpret(S.vld(x_ub[row, col]), 'uint16x128'),
+                            T.reinterpret(S.vld(x_ub[row, col]), "uint16x128"),
                             abs_mask_pair,
                         )
                         per_lane = S.vmax(S.vshrs(magnitudes, 8), S.vand(magnitudes, low_byte))
                         stride4, _stride4_high = S.vintlv(S.vcgmax(per_lane), zero_u16)
                         code_max = S.vcvt(
-                            T.reinterpret(stride4, f'{input_dtype}x256'),
+                            T.reinterpret(stride4, f"{input_dtype}x256"),
                             T.float32,
                             part=0,
                         )
@@ -2566,26 +2578,26 @@ def _get_prequant_row_major_cast_kernel(
                         amax = S.vmaxs(S.vcgmax(spread), out_config.clamp_min_value)
                     else:
                         amax = S.vmaxs(scaled_max, out_config.clamp_min_value)
-                    scale_bits = T.reinterpret(S.vmuls(amax, 1.0 / quant_max), 'uint32x64')
+                    scale_bits = T.reinterpret(S.vmuls(amax, 1.0 / quant_max), "uint32x64")
                     scale_exp = S.vadds(S.vshrs(S.vsub(scale_bits, one), 23), 1)
                     inverse = T.reinterpret(
                         S.vshls(S.vsub(exp_limit, scale_exp), 23),
-                        'float32x64',
+                        "float32x64",
                     )
                     if is_packed_sf:
                         S.vsts(
                             workspace_ub[sf_store_slot(row, chunk)],
-                            T.reinterpret(scale_exp, 'float32x64'),
+                            T.reinterpret(scale_exp, "float32x64"),
                             sf_store_mask,
-                            dist='NORM_B32',
+                            dist="NORM_B32",
                             extent=groups_per_chunk,
                         )
                     else:
                         S.vsts(
                             workspace_ub[sf_store_slot(row, chunk)],
-                            T.reinterpret(S.vshls(scale_exp, 23), 'float32x64'),
+                            T.reinterpret(S.vshls(scale_exp, 23), "float32x64"),
                             sf_store_mask,
-                            dist='NORM_B32',
+                            dist="NORM_B32",
                             extent=groups_per_chunk,
                         )
                     if group_size == 128:
@@ -2598,7 +2610,7 @@ def _get_prequant_row_major_cast_kernel(
                         workspace_ub[factor_offset + row * subs_per_row + chunk * 8],
                         factors,
                         factor_store_mask,
-                        dist='NORM_B32',
+                        dist="NORM_B32",
                         extent=8,
                     )
 
@@ -2612,7 +2624,7 @@ def _get_prequant_row_major_cast_kernel(
                     col = chunk * 256
                     expanded = S.vld(
                         workspace_ub[factor_offset + row * subs_per_row + chunk * 8],
-                        dist='E2B_B32',
+                        dist="E2B_B32",
                     )
                     factor_low, factor_high = S.vintlv(expanded, expanded)
                     factors = S.alloc_local((4,), T.float32)
@@ -2621,67 +2633,67 @@ def _get_prequant_row_major_cast_kernel(
                     if is_fp4_input:
                         for pair in T.unroll(2, explicit=True):
                             x_bf16 = S.vcvt(
-                                S.vld(x_ub[row, col + pair * 128], dist='UNPK4_B8'),
+                                S.vld(x_ub[row, col + pair * 128], dist="UNPK4_B8"),
                                 T.bfloat16,
                             )
                             x_low, x_high = S.vintlv(zero_bf16, x_bf16)
-                            scaled_low = S.vmul(T.reinterpret(x_low, 'float32x64'), factors[pair * 2])
-                            scaled_high = S.vmul(T.reinterpret(x_high, 'float32x64'), factors[pair * 2 + 1])
+                            scaled_low = S.vmul(T.reinterpret(x_low, "float32x64"), factors[pair * 2])
+                            scaled_high = S.vmul(T.reinterpret(x_high, "float32x64"), factors[pair * 2 + 1])
                             if is_fp4:
                                 low, high = S.vdintlv(
-                                    T.reinterpret(scaled_low, 'uint16x128'),
-                                    T.reinterpret(scaled_high, 'uint16x128'),
+                                    T.reinterpret(scaled_low, "uint16x128"),
+                                    T.reinterpret(scaled_high, "uint16x128"),
                                 )
                                 S.vsts(
                                     out_ub[row, col + pair * 128],
                                     S.vcvt(
-                                        T.reinterpret(S.vor(high, S.vmins(low, 1)), 'bfloat16x128'),
+                                        T.reinterpret(S.vor(high, S.vmins(low, 1)), "bfloat16x128"),
                                         T.float4_e2m1fn,
                                     ),
-                                    dist='PK4_B32',
+                                    dist="PK4_B32",
                                 )
                             else:
                                 S.vsts(
                                     out_ub[row, col + pair * 128],
                                     S.vcvt(scaled_low, T.float8_e4m3fn),
-                                    dist='PK4_B32',
+                                    dist="PK4_B32",
                                 )
                                 S.vsts(
                                     out_ub[row, col + pair * 128 + 64],
                                     S.vcvt(scaled_high, T.float8_e4m3fn),
-                                    dist='PK4_B32',
+                                    dist="PK4_B32",
                                 )
                     elif is_fp4:
                         scaled = S.alloc_local((2,), T.float32)
                         for pair in T.unroll(2, explicit=True):
                             for half in T.unroll(2, explicit=True):
                                 values = S.vcvt(
-                                    S.vld(x_ub[row, col + (pair * 2 + half) * 64], dist='UNPK4_B8'),
+                                    S.vld(x_ub[row, col + (pair * 2 + half) * 64], dist="UNPK4_B8"),
                                     T.float32,
                                 )
                                 scaled[half] = S.vmul(values, factors[pair * 2 + half])
                             low, high = S.vdintlv(
-                                T.reinterpret(scaled[0], 'uint16x128'),
-                                T.reinterpret(scaled[1], 'uint16x128'),
+                                T.reinterpret(scaled[0], "uint16x128"),
+                                T.reinterpret(scaled[1], "uint16x128"),
                             )
                             S.vsts(
                                 out_ub[row, col + pair * 128],
                                 S.vcvt(
-                                    T.reinterpret(S.vor(high, S.vmins(low, 1)), 'bfloat16x128'),
+                                    T.reinterpret(S.vor(high, S.vmins(low, 1)), "bfloat16x128"),
                                     T.float4_e2m1fn,
                                 ),
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
                     else:
                         for vector in T.unroll(4, explicit=True):
                             values = S.vcvt(
-                                S.vld(x_ub[row, col + vector * 64], dist='UNPK4_B8'),
+                                S.vld(x_ub[row, col + vector * 64], dist="UNPK4_B8"),
                                 T.float32,
                             )
                             S.vsts(
                                 out_ub[row, col + vector * 64],
                                 S.vcvt(S.vmul(values, factors[vector]), T.float8_e4m3fn),
-                                dist='PK4_B32',
+                                dist="PK4_B32",
                             )
 
     @T.macro
@@ -2695,7 +2707,7 @@ def _get_prequant_row_major_cast_kernel(
                     index = S.vadds(S.vmuls(lane, input_rows), T.min(input_row + row_shift, copied_rows - 1))
                 S.vsts(
                     input_sf_linear_ub[input_row * input_sf_pitch],
-                    S.vgather2(input_sf_cm_linear_ub[0], T.reinterpret(index, 'uint32x64')),
+                    S.vgather2(input_sf_cm_linear_ub[0], T.reinterpret(index, "uint32x64")),
                 )
 
     @T.macro
@@ -2706,7 +2718,7 @@ def _get_prequant_row_major_cast_kernel(
                 index = S.vadds(S.vmuls(lane, groups_per_tile), group)
                 S.vsts(
                     sf_cm_linear_ub[group * block_m],
-                    S.vgather2(workspace_ub[0], T.reinterpret(index, 'uint32x64')),
+                    S.vgather2(workspace_ub[0], T.reinterpret(index, "uint32x64")),
                 )
 
     @T.macro
@@ -2714,12 +2726,12 @@ def _get_prequant_row_major_cast_kernel(
         with T.SimdVF():
             for vector in T.serial(vectors):
                 exponents = T.reinterpret(
-                    S.vld(input_sf_raw_linear_ub[vector * 64], dist='UNPK4_B8'),
-                    'uint32x64',
+                    S.vld(input_sf_raw_linear_ub[vector * 64], dist="UNPK4_B8"),
+                    "uint32x64",
                 )
                 S.vsts(
                     values_linear_ub[vector * 64],
-                    T.reinterpret(S.vshls(exponents, 23), 'float32x64'),
+                    T.reinterpret(S.vshls(exponents, 23), "float32x64"),
                 )
 
     @T.macro
@@ -2737,7 +2749,7 @@ def _get_prequant_row_major_cast_kernel(
                     input_sf_linear_ub[input_row * input_sf_pitch],
                     S.vgather2(
                         input_sf_cm_values_ub[0],
-                        T.reinterpret(S.vadds(base, source_offset), 'uint32x64'),
+                        T.reinterpret(S.vadds(base, source_offset), "uint32x64"),
                     ),
                 )
 
@@ -2748,16 +2760,16 @@ def _get_prequant_row_major_cast_kernel(
             rows_index = S.vmuls(lane, groups_per_tile)
             for pair in T.serial(groups_per_tile // 2):
                 first = T.reinterpret(
-                    S.vgather2(workspace_ub[0], T.reinterpret(S.vadds(rows_index, pair * 2), 'uint32x64')),
-                    'uint32x64',
+                    S.vgather2(workspace_ub[0], T.reinterpret(S.vadds(rows_index, pair * 2), "uint32x64")),
+                    "uint32x64",
                 )
                 second = T.reinterpret(
-                    S.vgather2(workspace_ub[0], T.reinterpret(S.vadds(rows_index, pair * 2 + 1), 'uint32x64')),
-                    'uint32x64',
+                    S.vgather2(workspace_ub[0], T.reinterpret(S.vadds(rows_index, pair * 2 + 1), "uint32x64")),
+                    "uint32x64",
                 )
                 low, high = S.vintlv(first, second)
-                S.vsts(sf_bytes_ub[pair * block_m * 2], low, dist='PK4_B32')
-                S.vsts(sf_bytes_ub[pair * block_m * 2 + block_m], high, dist='PK4_B32')
+                S.vsts(sf_bytes_ub[pair * block_m * 2], low, dist="PK4_B32")
+                S.vsts(sf_bytes_ub[pair * block_m * 2 + block_m], high, dist="PK4_B32")
 
     @T.macro
     def compact_g128_scales(workspace_ub):
@@ -2778,7 +2790,7 @@ def _get_prequant_row_major_cast_kernel(
                     workspace_ub[batch * 64],
                     S.vgather2(
                         workspace_ub[g128_stage_offset],
-                        T.reinterpret(S.vadds(index, batch * (64 // groups_per_tile) * g128_stage_row_pitch), 'uint32x64'),
+                        T.reinterpret(S.vadds(index, batch * (64 // groups_per_tile) * g128_stage_row_pitch), "uint32x64"),
                     ),
                 )
 
@@ -2788,8 +2800,8 @@ def _get_prequant_row_major_cast_kernel(
             for batch in T.serial((sf_slots + 63) // 64):
                 S.vsts(
                     sf_bytes_ub[batch * 64],
-                    T.reinterpret(S.vld(workspace_ub[batch * 64]), 'uint32x64'),
-                    dist='PK4_B32',
+                    T.reinterpret(S.vld(workspace_ub[batch * 64]), "uint32x64"),
+                    dist="PK4_B32",
                 )
 
     @T.prim_func

@@ -28,6 +28,7 @@ import tilelang
 from tilelang import language as T
 from tilelang.language import simd as S
 
+
 @tilelang.jit(out_idx=-1)
 def make_kernel(n: int, num_cores: int):
     # num_cores is supplied from confirmed target hardware resources.
@@ -35,6 +36,7 @@ def make_kernel(n: int, num_cores: int):
     def kernel(x: T.Tensor[(n,), T.float32], y: T.Tensor[(n,), T.float32]):
         with T.Kernel(num_cores) as core_id:
             ...
+
     return kernel
 ```
 
@@ -59,14 +61,17 @@ y_ub = T.alloc_shared((block,), T.float32)
 T.annotate_buffer_versions({x_ub: num_stages, y_ub: num_stages})
 
 for task in T.Persistent(
-    [T.ceildiv(n, block)], num_cores, core_id,
-    group_size=1, num_stages=num_stages,
+    [T.ceildiv(n, block)],
+    num_cores,
+    core_id,
+    group_size=1,
+    num_stages=num_stages,
 ):
     offset = task * block
     valid = T.min(block, n - offset)
-    T.copy(x[offset:offset + valid], x_ub[:valid])  # Schematic: verify this dynamic slice on PTO.
+    T.copy(x[offset : offset + valid], x_ub[:valid])  # Schematic: verify this dynamic slice on PTO.
     ...
-    T.copy(y_ub[:valid], y[offset:offset + valid])
+    T.copy(y_ub[:valid], y[offset : offset + valid])
 ```
 
 UB budget formula: `Σ(buffer_elems × dtype_bytes × versions) + padding + resident + safety_margin`.
@@ -122,7 +127,7 @@ with T.Kernel(num_cube_cores) as block_id:
     T.copy(c_l0, c_gm_slice)
 ```
 
-This is a structural illustration from current Ascend examples, not the only legal `T.gemm` layout for every target. Adapt slicing, padding, and output transfers from similar examples that have run successfully. With nested K subloops, clear only on the first valid subtile, for example, `kt == 0 and sk == 0`. Do not assume arbitrary M/N/K tails are handled correctly automatically.
+This is a structural illustration from current Ascend examples, not the only legal `T.gemm` layout for every target. Adapt slicing, padding, and output transfers from similar examples that have run successfully. With nested K subloops, clear only on the first valid sub-tile, for example, `kt == 0 and sk == 0`. Do not assume arbitrary M/N/K tails are handled correctly automatically.
 
 ## Validation Matrix
 

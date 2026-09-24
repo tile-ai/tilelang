@@ -8,7 +8,7 @@ from tile_kernels.config import get_num_vec_cores
 def get_normalize_weight_kernel_asc(num_topk: int):
     """Normalize top-k routing weights on Ascend NPU."""
     num_cores = get_num_vec_cores()
-    num_tokens = T.dynamic('num_tokens')
+    num_tokens = T.dynamic("num_tokens")
 
     tile = 128
     num_stages = 4

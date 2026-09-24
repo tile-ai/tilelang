@@ -84,7 +84,9 @@ def validate_npu(num_cores: int) -> None:
     for rows, cols in ((65, 65), (2, 129), (2, 257)):
         x = torch.randn((rows, cols), device="npu", dtype=torch.float16)
         expected = torch.sqrt(torch.sum(x.float() * x.float(), dim=1))
-        check(f"euclidean_norm_{rows}x{cols}", euclidean_norm(rows, cols, "float16", num_cores=num_cores)(x), expected, rtol=1e-4, atol=1e-4)
+        check(
+            f"euclidean_norm_{rows}x{cols}", euclidean_norm(rows, cols, "float16", num_cores=num_cores)(x), expected, rtol=1e-4, atol=1e-4
+        )
 
     x = torch.randn((2, 257), device="npu", dtype=torch.float16)
     check("softmax_2x257", softmax_full_load(2, 257, "float16", num_cores=num_cores)(x), torch.softmax(x, dim=-1), rtol=2e-3, atol=2e-3)

@@ -126,7 +126,7 @@ Set the top-level `status` in this priority order:
 
 Retain issues found by completed checks even when the final status is `PARTIAL`.
 
-A nonzero exit code from Ruff caused by lint findings or formatting differences, and exit code 1 from `diff` caused by a difference, are normal "issue found" results and must not be written to `execution_errors`. Treat only failure to start a tool, unparseable output, or abnormal command interruption as an execution error.
+A nonzero exit code from Ruff caused by lint findings or formatting differences, and exit code 1 from `diff` caused by a difference, are normal "issue found" results and must not be written to `execution_errors`. Treat only failure to start a tool, unparsable output, or abnormal command interruption as an execution error.
 
 ### 6. Generate and Submit One Summary YAML
 

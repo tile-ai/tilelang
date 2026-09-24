@@ -27,7 +27,8 @@ import os
 import re
 import shutil
 import statistics
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any
+from collections.abc import Iterable, Sequence
 
 
 KERNEL_NAME_FIELDS = (
@@ -62,17 +63,15 @@ def safe_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
-def read_csv(path: str) -> List[Dict[str, str]]:
+def read_csv(path: str) -> list[dict[str, str]]:
     if not os.path.exists(path):
         return []
-    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as file:
+    with open(path, encoding="utf-8-sig", errors="replace", newline="") as file:
         rows = []
         for row in csv.DictReader(file):
-            rows.append({
-                str(key).strip(): value.strip() if isinstance(value, str) else value
-                for key, value in row.items()
-                if key is not None
-            })
+            rows.append(
+                {str(key).strip(): value.strip() if isinstance(value, str) else value for key, value in row.items() if key is not None}
+            )
         return rows
 
 
@@ -84,9 +83,7 @@ def metric_csv_path(opprof_dir: str, csv_name: str) -> str:
     stem, extension = os.path.splitext(csv_name)
     matches = glob.glob(os.path.join(opprof_dir, f"{stem}_*{extension}"))
     if len(matches) != 1:
-        raise ValueError(
-            f"expected one {csv_name} in {opprof_dir}, got {len(matches)}"
-        )
+        raise ValueError(f"expected one {csv_name} in {opprof_dir}, got {len(matches)}")
     return matches[0]
 
 
@@ -96,19 +93,16 @@ def stat_line(
     fmt: str = ".1f",
     unit: str = "",
     multiply: float = 1.0,
-) -> Optional[str]:
+) -> str | None:
     """Generate a min/avg/max line, omitting an all-zero metric."""
     scaled = [value * multiply for value in values]
     if not scaled or all(abs(value) < 0.001 for value in scaled):
         return None
     suffix = f"    ({unit})" if unit else ""
-    return (
-        f"{'  ' + name:<24s} {min(scaled):>10{fmt}} "
-        f"{statistics.mean(scaled):>10{fmt}} {max(scaled):>10{fmt}}{suffix}"
-    )
+    return f"{'  ' + name:<24s} {min(scaled):>10{fmt}} {statistics.mean(scaled):>10{fmt}} {max(scaled):>10{fmt}}{suffix}"
 
 
-def row_kernel_name(row: Dict[str, str]) -> Optional[str]:
+def row_kernel_name(row: dict[str, str]) -> str | None:
     for field in KERNEL_NAME_FIELDS:
         raw_value = row.get(field)
         value = raw_value.strip() if isinstance(raw_value, str) else ""
@@ -117,7 +111,7 @@ def row_kernel_name(row: Dict[str, str]) -> Optional[str]:
     return None
 
 
-def unique_kernel_names(rows: Iterable[Dict[str, str]]) -> List[str]:
+def unique_kernel_names(rows: Iterable[dict[str, str]]) -> list[str]:
     return sorted({name for row in rows if (name := row_kernel_name(row))})
 
 
@@ -136,22 +130,17 @@ def unique_match(expected: str, names: Sequence[str], source: str) -> str:
     if len(contains) == 1:
         return contains[0]
     if not contains:
-        raise ValueError(
-            f"{source}: kernel '{expected}' not found; available kernels: "
-            f"{', '.join(names) if names else '(none)'}"
-        )
-    raise ValueError(
-        f"{source}: kernel '{expected}' is ambiguous; matches: {', '.join(contains)}"
-    )
+        raise ValueError(f"{source}: kernel '{expected}' not found; available kernels: {', '.join(names) if names else '(none)'}")
+    raise ValueError(f"{source}: kernel '{expected}' is ambiguous; matches: {', '.join(contains)}")
 
 
 def filter_rows_for_kernel(
-    rows: List[Dict[str, str]],
+    rows: list[dict[str, str]],
     expected: str,
     resolved: str,
     source: str,
     raw_kernel_count: int,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """Filter a CSV by kernel name when it exposes a supported name column."""
     if not rows:
         return []
@@ -159,8 +148,7 @@ def filter_rows_for_kernel(
     if not names:
         if raw_kernel_count > 1:
             raise ValueError(
-                f"{source}: no kernel-name column, but OpBasicInfo.csv contains "
-                f"{raw_kernel_count} kernels; refusing to mix their metrics"
+                f"{source}: no kernel-name column, but OpBasicInfo.csv contains {raw_kernel_count} kernels; refusing to mix their metrics"
             )
         return rows
 
@@ -171,46 +159,34 @@ def filter_rows_for_kernel(
     return filtered
 
 
-def load_kernel_tables(
-    opprof_dir: str, expected: str
-) -> Tuple[Dict[str, List[Dict[str, str]]], str]:
+def load_kernel_tables(opprof_dir: str, expected: str) -> tuple[dict[str, list[dict[str, str]]], str]:
     basic_name = "OpBasicInfo.csv"
     basic_rows = read_csv(metric_csv_path(opprof_dir, basic_name))
     if not basic_rows:
         raise ValueError(f"{basic_name} is missing or empty")
     basic_kernels = unique_kernel_names(basic_rows)
     if not basic_kernels:
-        raise ValueError(
-            f"{basic_name} has no supported kernel-name column; expected one of: "
-            f"{', '.join(KERNEL_NAME_FIELDS)}"
-        )
+        raise ValueError(f"{basic_name} has no supported kernel-name column; expected one of: {', '.join(KERNEL_NAME_FIELDS)}")
 
     resolved = unique_match(expected, basic_kernels, basic_name)
     raw_kernel_count = len(basic_kernels)
-    tables: Dict[str, List[Dict[str, str]]] = {}
+    tables: dict[str, list[dict[str, str]]] = {}
     for csv_name in CSV_NAMES:
         rows = read_csv(metric_csv_path(opprof_dir, csv_name))
-        tables[csv_name] = filter_rows_for_kernel(
-            rows, expected, resolved, csv_name, raw_kernel_count
-        )
+        tables[csv_name] = filter_rows_for_kernel(rows, expected, resolved, csv_name, raw_kernel_count)
     return tables, resolved
 
 
-def active_core_prefixes(rows: Sequence[Dict[str, str]]) -> List[str]:
+def active_core_prefixes(rows: Sequence[dict[str, str]]) -> list[str]:
     """Return every active core type instead of collapsing mixed AIC/AIV data."""
     active = []
     for prefix in ("aiv", "aic"):
-        if any(
-            safe_float(value) > 0
-            for row in rows
-            for field, value in row.items()
-            if field.startswith(f"{prefix}_")
-        ):
+        if any(safe_float(value) > 0 for row in rows for field, value in row.items() if field.startswith(f"{prefix}_")):
             active.append(prefix)
     return active
 
 
-def core_rows(rows: Sequence[Dict[str, str]], prefix: str) -> List[Dict[str, str]]:
+def core_rows(rows: Sequence[dict[str, str]], prefix: str) -> list[dict[str, str]]:
     time_field = f"{prefix}_time(us)"
     selected = [row for row in rows if safe_float(row.get(time_field)) > 0]
     return selected or list(rows)
@@ -226,20 +202,16 @@ def find_next_round(perf_dir: str) -> str:
     return os.path.join(perf_dir, f"round_{max(numbers) + 1:03d}")
 
 
-def archive_csvs(opprof_dir: str, round_dir: str) -> List[str]:
+def archive_csvs(opprof_dir: str, round_dir: str) -> list[str]:
     os.makedirs(round_dir, exist_ok=False)
     copied = []
     for csv_name in CSV_NAMES:
-        shutil.copy2(
-            metric_csv_path(opprof_dir, csv_name), os.path.join(round_dir, csv_name)
-        )
+        shutil.copy2(metric_csv_path(opprof_dir, csv_name), os.path.join(round_dir, csv_name))
         copied.append(csv_name)
     return copied
 
 
-def append_ratio_and_bandwidth(
-    lines: List[str], rows: Sequence[Dict[str, str]], prefix: str
-) -> None:
+def append_ratio_and_bandwidth(lines: list[str], rows: Sequence[dict[str, str]], prefix: str) -> None:
     if prefix == "aiv":
         ratio_fields = [
             ("vec_ratio%", "aiv_vec_ratio"),
@@ -284,9 +256,7 @@ def append_ratio_and_bandwidth(
             lines.append(line)
 
 
-def append_scalar_breakdown(
-    lines: List[str], rows: Sequence[Dict[str, str]], prefix: str
-) -> None:
+def append_scalar_breakdown(lines: list[str], rows: Sequence[dict[str, str]], prefix: str) -> None:
     fields = [
         ("single", f"{prefix}_scalar_single_time(us)"),
         ("dual", f"{prefix}_scalar_dual_time(us)"),
@@ -295,15 +265,19 @@ def append_scalar_breakdown(
         ("mte3_stall", f"{prefix}_scalar_mte3_stall_time(us)"),
     ]
     if prefix == "aiv":
-        fields.extend([
-            ("vec_stall", "aiv_scalar_vector_stall_time(us)"),
-            ("ub_stall", "aiv_scalar_stall_by_ub_time(us)"),
-        ])
+        fields.extend(
+            [
+                ("vec_stall", "aiv_scalar_vector_stall_time(us)"),
+                ("ub_stall", "aiv_scalar_stall_by_ub_time(us)"),
+            ]
+        )
     else:
-        fields.extend([
-            ("cube_stall", "aic_scalar_cube_stall_time(us)"),
-            ("mte1_stall", "aic_scalar_mte1_stall_time(us)"),
-        ])
+        fields.extend(
+            [
+                ("cube_stall", "aic_scalar_cube_stall_time(us)"),
+                ("mte1_stall", "aic_scalar_mte1_stall_time(us)"),
+            ]
+        )
     fields.append(("wait_ib", f"{prefix}_scalar_wait_ib_time(us)"))
 
     parts = []
@@ -316,7 +290,7 @@ def append_scalar_breakdown(
 
 
 def generate_summary(
-    tables: Dict[str, List[Dict[str, str]]],
+    tables: dict[str, list[dict[str, str]]],
     round_dir: str,
     expected_kernel: str,
     resolved_kernel: str,
@@ -335,20 +309,16 @@ def generate_summary(
     lines.append(f"Resolved Kernel:  {resolved_kernel} | Type: {op_type}")
     if durations:
         lines.append(
-            f"Task Duration(us): min={min(durations):.2f} | avg={duration:.2f} | "
-            f"max={max(durations):.2f} | samples={len(durations)}"
+            f"Task Duration(us): min={min(durations):.2f} | avg={duration:.2f} | max={max(durations):.2f} | samples={len(durations)}"
         )
     if block_dims:
         lines.append(f"BlockDim: {min(block_dims)}..{max(block_dims)}")
     if current_freqs or rated_freqs:
-        lines.append(
-            f"Freq(avg): {statistics.mean(current_freqs):.0f}/"
-            f"{statistics.mean(rated_freqs):.0f}"
-        )
+        lines.append(f"Freq(avg): {statistics.mean(current_freqs):.0f}/{statistics.mean(rated_freqs):.0f}")
 
     pipe_rows = tables["PipeUtilization.csv"]
     prefixes = active_core_prefixes(pipe_rows)
-    critical_times: List[float] = []
+    critical_times: list[float] = []
     for prefix in prefixes:
         selected_rows = core_rows(pipe_rows, prefix)
         core_times = [safe_float(row.get(f"{prefix}_time(us)")) for row in selected_rows]
@@ -368,13 +338,15 @@ def generate_summary(
         critical_path = max(critical_times)
         overhead = max(0.0, duration - critical_path)
         mode = "max(AIV, AIC)" if len(prefixes) == 2 else prefixes[0].upper()
-        lines.extend([
-            "",
-            "--- Critical Path and Launch Overhead ---",
-            f"  Core-time methodology: {mode}",
-            f"  Task Duration(avg): {duration:.2f}us | Critical path: {critical_path:.2f}us | "
-            f"Launch overhead: {overhead:.2f}us ({overhead / duration * 100:.1f}%)",
-        ])
+        lines.extend(
+            [
+                "",
+                "--- Critical Path and Launch Overhead ---",
+                f"  Core-time methodology: {mode}",
+                f"  Task Duration(avg): {duration:.2f}us | Critical path: {critical_path:.2f}us | "
+                f"Launch overhead: {overhead:.2f}us ({overhead / duration * 100:.1f}%)",
+            ]
+        )
 
     mem_rows = tables["Memory.csv"]
     if mem_rows:
@@ -389,8 +361,7 @@ def generate_summary(
             if sum(data) > 0:
                 usage = [safe_float(row.get(usage_field)) for row in mem_rows]
                 lines.append(
-                    f"  {display}: {sum(data):.1f}KB total "
-                    f"({statistics.mean(data):.1f}KB/core), BW usage: {statistics.mean(usage):.2f}%"
+                    f"  {display}: {sum(data):.1f}KB total ({statistics.mean(data):.1f}KB/core), BW usage: {statistics.mean(usage):.2f}%"
                 )
         for display, field in [
             ("Main-memory read", "read_main_memory_datas(KB)"),
@@ -402,16 +373,11 @@ def generate_summary(
 
         gm_ub_total = sum(safe_float(row.get("GM_to_UB_datas(KB)")) for row in mem_rows)
         mte2_instructions = sum(
-            safe_float(row.get("aiv_mte2_instructions"))
-            + safe_float(row.get("aic_mte2_instructions"))
-            for row in mem_rows
+            safe_float(row.get("aiv_mte2_instructions")) + safe_float(row.get("aic_mte2_instructions")) for row in mem_rows
         )
         if gm_ub_total > 0 and mte2_instructions > 0:
             average_transfer = gm_ub_total / mte2_instructions
-            lines.append(
-                f"  Avg MTE2 transfer: {average_transfer:.2f}KB "
-                f"({int(mte2_instructions)} instructions total)"
-            )
+            lines.append(f"  Avg MTE2 transfer: {average_transfer:.2f}KB ({int(mte2_instructions)} instructions total)")
 
         for display, field in [
             ("GM→UB avg BW", "aiv_gm_to_ub_bw(GB/s)"),
@@ -467,16 +433,11 @@ def generate_summary(
             ]:
                 values = [safe_float(row.get(field)) for row in l2_rows]
                 if any(value > 0 for value in values):
-                    parts.append(
-                        f"{display}: avg={statistics.mean(values):.1f}% "
-                        f"(min={min(values):.1f}%, max={max(values):.1f}%)"
-                    )
+                    parts.append(f"{display}: avg={statistics.mean(values):.1f}% (min={min(values):.1f}%, max={max(values):.1f}%)")
             if parts:
                 lines.append(f"  {prefix.upper()}: " + " | ".join(parts))
             hits = sum(safe_float(row.get(f"{prefix}_write_cache_hit")) for row in l2_rows)
-            misses = sum(
-                safe_float(row.get(f"{prefix}_write_cache_miss_allocate")) for row in l2_rows
-            )
+            misses = sum(safe_float(row.get(f"{prefix}_write_cache_miss_allocate")) for row in l2_rows)
             if hits + misses > 0:
                 lines.append(f"  {prefix.upper()} write cache: hit={int(hits)} miss={int(misses)}")
 
@@ -502,7 +463,12 @@ def generate_summary(
             wait_fields = (
                 [("vec_wait", "aiv_vec_wait_ratio"), ("mte2_wait", "aiv_mte2_wait_ratio"), ("mte3_wait", "aiv_mte3_wait_ratio")]
                 if prefix == "aiv"
-                else [("cube_wait", "aic_cube_wait_ratio"), ("mte1_wait", "aic_mte1_wait_ratio"), ("mte2_wait", "aic_mte2_wait_ratio"), ("mte3_wait", "aic_mte3_wait_ratio")]
+                else [
+                    ("cube_wait", "aic_cube_wait_ratio"),
+                    ("mte1_wait", "aic_mte1_wait_ratio"),
+                    ("mte2_wait", "aic_mte2_wait_ratio"),
+                    ("mte3_wait", "aic_mte3_wait_ratio"),
+                ]
             )
             parts = []
             for display, field in wait_fields:
@@ -546,13 +512,15 @@ def generate_summary(
         if cube_parts:
             lines.append("  AIC: " + " | ".join(cube_parts))
 
-    lines.extend([
-        "",
-        "--- Raw Data Location ---",
-        f"  CSV files: {round_dir}/",
-        "  Archived files preserve the original msprof content; summary.txt reports only the Resolved Kernel.",
-        "  For per-core details, read the corresponding CSV files and continue using the same kernel filter.",
-    ])
+    lines.extend(
+        [
+            "",
+            "--- Raw Data Location ---",
+            f"  CSV files: {round_dir}/",
+            "  Archived files preserve the original msprof content; summary.txt reports only the Resolved Kernel.",
+            "  For per-core details, read the corresponding CSV files and continue using the same kernel filter.",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -562,9 +530,7 @@ def validate_round_name(round_name: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Archive msprof CSVs and summarize exactly one TileLang kernel."
-    )
+    parser = argparse.ArgumentParser(description="Archive msprof CSVs and summarize exactly one TileLang kernel.")
     parser.add_argument("opprof_dir", help="Path to a flat OPPROF or launch directory")
     parser.add_argument("variant_output_dir", help="Current baseline/optimization variant output directory")
     parser.add_argument(
@@ -593,9 +559,7 @@ def main() -> None:
         if os.path.exists(round_dir):
             raise ValueError(f"archive directory already exists: {round_dir}")
 
-        summary = generate_summary(
-            tables, round_dir, args.kernel_name, resolved_kernel
-        )
+        summary = generate_summary(tables, round_dir, args.kernel_name, resolved_kernel)
         copied = archive_csvs(opprof_dir, round_dir)
         summary_path = os.path.join(round_dir, "summary.txt")
         with open(summary_path, "w", encoding="utf-8") as file:

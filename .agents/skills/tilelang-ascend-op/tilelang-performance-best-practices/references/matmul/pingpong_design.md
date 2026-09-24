@@ -6,7 +6,7 @@ Use this pattern when there are at least two K-tile iterations and overlap oppor
 
 ## TileLang/PTO Implementation Flow
 
-Set two stages for the A/B L1 buffers with `T.annotate_buffer_versions`, and use `T.Pipelined` for the K loop. If L0A/L0B subtiles are explicit, use capacity-constrained `T.Pipelined` in the inner loop as well. Let the PTO scheduler manage dependencies; do not write manual events.
+Set two stages for the A/B L1 buffers with `T.annotate_buffer_versions`, and use `T.Pipelined` for the K loop. If L0A/L0B sub-tiles are explicit, use capacity-constrained `T.Pipelined` in the inner loop as well. Let the PTO scheduler manage dependencies; do not write manual events.
 
 Reuse `examples/ascend/example_gemm.py` as the base implementation: B has physical layout `[N,K]`, calls `T.gemm(..., transpose_B=True)`, uses fp32 L0C, and sets `clear_accum=True` only for the first K tile. The number of cores for output tiles must not exceed the independent-task count. M/N/K tails must use a validated padded copy or dedicated fallback.
 

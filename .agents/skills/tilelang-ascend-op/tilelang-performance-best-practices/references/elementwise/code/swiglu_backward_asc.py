@@ -33,7 +33,7 @@ def get_swiglu_backward_kernel_asc(
     is_bf16_grad_in = act_x_grad_dtype == T.bfloat16
     is_bf16_out = out_dtype == T.bfloat16
 
-    num_expanded_tokens = T.dynamic('num_expanded_tokens')
+    num_expanded_tokens = T.dynamic("num_expanded_tokens")
 
     @T.prim_func
     def swiglu_backward_kernel_asc(
@@ -93,7 +93,7 @@ def get_swiglu_backward_kernel_asc(
                     T.copy(act_x_grad[token_id, 0:hidden], act_x_grad_ub[:hidden])
 
                     with T.SimdVF():
-                        one_mask = S.pset(32, 'PAT_VL1')
+                        one_mask = S.pset(32, "PAT_VL1")
 
                         ones = S.vdup(1.0, T.float32)
                         zeros = S.vdup(0.0, T.float32)
@@ -114,8 +114,8 @@ def get_swiglu_backward_kernel_asc(
                         x_grad_local = S.alloc_local((2,), T.float32)
                         y_grad_local = S.alloc_local((2,), T.float32)
                         if use_clamp:
-                            is_clamped_x = T.alloc_local((2,), 'boolx256')
-                            is_clamped_y = T.alloc_local((2,), 'boolx256')
+                            is_clamped_x = T.alloc_local((2,), "boolx256")
+                            is_clamped_y = T.alloc_local((2,), "boolx256")
 
                         for v in T.serial(num_vregs // 2):
                             for i in T.unroll(2, explicit=True):
@@ -123,19 +123,19 @@ def get_swiglu_backward_kernel_asc(
 
                                 # load from global memory
                                 if is_bf16_in:
-                                    x_local[i] = S.vcvt(S.vld(x_ub[col], dist='UNPK_B16'), T.float32, part=0)
-                                    y_local[i] = S.vcvt(S.vld(y_ub[col], dist='UNPK_B16'), T.float32, part=0)
+                                    x_local[i] = S.vcvt(S.vld(x_ub[col], dist="UNPK_B16"), T.float32, part=0)
+                                    y_local[i] = S.vcvt(S.vld(y_ub[col], dist="UNPK_B16"), T.float32, part=0)
                                 else:
                                     x_local[i] = S.vld(x_ub[col])
                                     y_local[i] = S.vld(y_ub[col])
                                 if is_bf16_grad_in:
-                                    act_x_grad_local[i] = S.vcvt(S.vld(act_x_grad_ub[col], dist='UNPK_B16'), T.float32, part=0)
+                                    act_x_grad_local[i] = S.vcvt(S.vld(act_x_grad_ub[col], dist="UNPK_B16"), T.float32, part=0)
                                 else:
                                     act_x_grad_local[i] = S.vld(act_x_grad_ub[col])
 
                                 if use_clamp:
-                                    is_clamped_x[i] = S.vcmps(x_local[i], clamp_value, op='gt')
-                                    is_clamped_y[i] = S.vcmps(S.vabs(y_local[i]), clamp_value, op='gt')
+                                    is_clamped_x[i] = S.vcmps(x_local[i], clamp_value, op="gt")
+                                    is_clamped_y[i] = S.vcmps(S.vabs(y_local[i]), clamp_value, op="gt")
                                     x_local[i] = S.vmins(x_local[i], clamp_value)
                                     y_local[i] = S.vmaxs(y_local[i], -clamp_value)
                                     y_local[i] = S.vmins(y_local[i], clamp_value)
@@ -149,7 +149,7 @@ def get_swiglu_backward_kernel_asc(
                                 if with_weight:
                                     w_grad = S.vmul(act_x_grad_local[i], act_out[i])
                                     lane_id = S.vci(T.int32(col), T.int32)
-                                    valid_mask = S.vcmp(lane_id, hidden_reg, op='lt')
+                                    valid_mask = S.vcmp(lane_id, hidden_reg, op="lt")
                                     w_grad = S.vsel(w_grad, zeros, valid_mask)
                                     w_grad_acc = S.vadd(w_grad_acc, w_grad)
 
@@ -167,8 +167,8 @@ def get_swiglu_backward_kernel_asc(
 
                                 # Store outputs
                                 if is_bf16_out:
-                                    S.vsts(x_grad_ub[col], S.vcvt(x_grad_local[i], T.bfloat16), dist='PK_B32')
-                                    S.vsts(y_grad_ub[col], S.vcvt(y_grad_local[i], T.bfloat16), dist='PK_B32')
+                                    S.vsts(x_grad_ub[col], S.vcvt(x_grad_local[i], T.bfloat16), dist="PK_B32")
+                                    S.vsts(y_grad_ub[col], S.vcvt(y_grad_local[i], T.bfloat16), dist="PK_B32")
                                 else:
                                     S.vsts(x_grad_ub[col], x_grad_local[i])
                                     S.vsts(y_grad_ub[col], y_grad_local[i])
@@ -176,7 +176,7 @@ def get_swiglu_backward_kernel_asc(
                                 if do_recompute:
                                     act_out[i] = S.vmul(act_out[i], w_reg)
                                     if is_bf16_out:
-                                        S.vsts(act_out_ub[col], S.vcvt(act_out[i], T.bfloat16), dist='PK_B32')
+                                        S.vsts(act_out_ub[col], S.vcvt(act_out[i], T.bfloat16), dist="PK_B32")
                                     else:
                                         S.vsts(act_out_ub[col], act_out[i])
 
@@ -185,7 +185,7 @@ def get_swiglu_backward_kernel_asc(
                             wg_sum = S.vcadd(w_grad_acc)
                             if with_routed_scaling:
                                 wg_sum = S.vmuls(wg_sum, routed_scaling_factor)
-                            S.vsts(w_grad_ub[0], wg_sum, one_mask, dist='ONEPT_B32')
+                            S.vsts(w_grad_ub[0], wg_sum, one_mask, dist="ONEPT_B32")
 
                     T.copy(x_grad_ub[:hidden], x_grad[token_id, 0:hidden])
                     T.copy(y_grad_ub[:hidden], x_grad[token_id, hidden : 2 * hidden])

@@ -15,10 +15,10 @@ def get_batched_transpose_kernel_asc(
     assert shape_x_mod_128 in (0, 64) and shape_y_mod_128 in (0, 64)
     assert block_x in (64, 128) and block_y in (32, 64, 128)
 
-    num_batches = T.dynamic('num_batches')
-    shape_x = T.dynamic('shape_x')
-    shape_y = T.dynamic('shape_y')
-    stride_x = T.dynamic('stride_x')
+    num_batches = T.dynamic("num_batches")
+    shape_x = T.dynamic("shape_x")
+    shape_y = T.dynamic("shape_y")
+    stride_x = T.dynamic("stride_x")
 
     n_cores = get_num_vec_cores()
     num_threads = 256
@@ -29,14 +29,10 @@ def get_batched_transpose_kernel_asc(
     # padding at one 32-byte data block so the 2-D GM->UB copy can encode the
     # destination gap without falling back to scalar row copies.
     ub_row_pad = 0 if dtype.bytes == 1 else 32 // dtype.bytes
-    padded_block_y = (
-        block_y
-        if dtype.bytes == 1
-        else ((block_y + vector_elems - 1) // vector_elems) * vector_elems + ub_row_pad
-    )
-    index_dtype = 'int32' if dtype.bytes == 4 else 'int16'
-    unsigned_index_vector_dtype = 'uint32x64' if dtype.bytes == 4 else 'uint16x128'
-    mask_pattern = 'PAT_ALL' if block_x % vector_elems == 0 else f'PAT_VL{block_x % vector_elems}'
+    padded_block_y = block_y if dtype.bytes == 1 else ((block_y + vector_elems - 1) // vector_elems) * vector_elems + ub_row_pad
+    index_dtype = "int32" if dtype.bytes == 4 else "int16"
+    unsigned_index_vector_dtype = "uint32x64" if dtype.bytes == 4 else "uint16x128"
+    mask_pattern = "PAT_ALL" if block_x % vector_elems == 0 else f"PAT_VL{block_x % vector_elems}"
     num_x_tiles = shape_x // block_x
     num_y_tiles = shape_y // block_y
 

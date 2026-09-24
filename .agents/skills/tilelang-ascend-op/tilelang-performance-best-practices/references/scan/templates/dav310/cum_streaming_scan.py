@@ -1,4 +1,3 @@
-from .scan_base import build
 from ..scan_tiling_data import ScanStrategy
 
 STATUS = "EXECUTABLE_BASELINE"

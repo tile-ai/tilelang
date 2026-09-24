@@ -9,11 +9,11 @@ from tile_kernels.quant.common import *
 
 
 def vector_mask(dtype, num_lanes):
-    return S.pset(dtype.bits, 'PAT_VL' + str(num_lanes))
+    return S.pset(dtype.bits, "PAT_VL" + str(num_lanes))
 
 
 def lane_indices(dtype):
-    index_dtype, vector_type = {8: (T.int8, 'uint8x256'), 16: (T.int16, 'uint16x128'), 32: (T.int32, 'uint32x64')}[dtype.bits]
+    index_dtype, vector_type = {8: (T.int8, "uint8x256"), 16: (T.int16, "uint16x128"), 32: (T.int32, "uint32x64")}[dtype.bits]
     return T.reinterpret(S.vci(0, index_dtype), vector_type)
 
 
@@ -33,14 +33,14 @@ def init_fp4_to_fp8_map(fp4_to_fp8_map_ub, invalid_exp_ub):
         fp8_base_u32[0], fp8_base_u32[1] = S.vintlv(S.vdup(T.uint32(0x3C383000), T.uint32), S.vdup(T.uint32(0x4C484440), T.uint32))
         code = S.vand(lanes, S.vdup(T.uint8(0x0F), T.uint8))
         magnitude = S.vand(code, S.vdup(T.uint8(0x07), T.uint8))
-        base = S.vselr(T.reinterpret(fp8_base_u32[0], 'uint8x256'), magnitude)
+        base = S.vselr(T.reinterpret(fp8_base_u32[0], "uint8x256"), magnitude)
         delta = S.vadds(S.vand(S.vshrs(lanes, 1), S.vdup(T.uint8(0x78), T.uint8)), T.uint8(216))
         scaled = S.vadd(base, delta)
-        nonzero_mask = S.vcmps(magnitude, T.uint8(0), op='ne')
+        nonzero_mask = S.vcmps(magnitude, T.uint8(0), op="ne")
         nonzero = S.vsel(scaled, S.vdup(T.uint8(0), T.uint8), nonzero_mask)
-        S.vsts(fp4_to_fp8_map_ub[0], S.vor(nonzero, S.vshls(S.vand(code, S.vdup(T.uint8(0x08), T.uint8)), 4)), dist='NORM_B8')
+        S.vsts(fp4_to_fp8_map_ub[0], S.vor(nonzero, S.vshls(S.vand(code, S.vdup(T.uint8(0x08), T.uint8)), 4)), dist="NORM_B8")
         assert_mask = vector_mask(T.uint16, 16)
-        S.vsts(invalid_exp_ub[0], S.vdup(0, T.uint16), assert_mask, dist='NORM_B16')
+        S.vsts(invalid_exp_ub[0], S.vdup(0, T.uint16), assert_mask, dist="NORM_B16")
 
 
 @tilelang.jit()
@@ -107,15 +107,15 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
     else:
         num_batched_tiles = 1
         out_sf_shape_ub = (num_out_sf_rows, max(num_sf_store_cols, 8 * out_pack_factor) * out_pack_factor)
-    num_tokens = T.dynamic('num_tokens')
+    num_tokens = T.dynamic("num_tokens")
     in_sf_shape = get_sf_shape((num_tokens, hidden), in_config)
     out_sf_shape = get_sf_shape((num_tokens, hidden), out_config)
     if in_config.use_tma_aligned_col_major_sf:
-        in_sf_stride = T.dynamic('in_sf_stride')
+        in_sf_stride = T.dynamic("in_sf_stride")
     else:
         in_sf_stride = in_sf_shape[1]
     if out_config.use_tma_aligned_col_major_sf:
-        out_sf_stride = T.dynamic('out_sf_stride')
+        out_sf_stride = T.dynamic("out_sf_stride")
     else:
         out_sf_stride = out_sf_shape[1]
 
@@ -129,12 +129,12 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
         if in_config.use_tma_aligned_col_major_sf:
             values = S.vgather2(sf_load_ub[0, 0], S.vadds(gather_base, row * in_pack_factor), gather_mask)
         elif sf_dtype == T.uint16:
-            values = S.vld(sf_load_ub[row, 0], dist='UNPK_B8')
+            values = S.vld(sf_load_ub[row, 0], dist="UNPK_B8")
         else:
-            values = S.vld(sf_load_ub[row, 0], dist='NORM')
+            values = S.vld(sf_load_ub[row, 0], dist="NORM")
         if sf_dtype == T.uint16:
-            return T.reinterpret(values, 'uint16x128')
-        return S.vpack(S.vshrs(T.reinterpret(values, 'uint32x64'), 23))
+            return T.reinterpret(values, "uint16x128")
+        return S.vpack(S.vshrs(T.reinterpret(values, "uint32x64"), 23))
 
     @T.macro
     def copy_sf(x_sf, sf_load_ub, row_start, pid_k):
@@ -150,33 +150,33 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
         # Merge every 4 consecutive 32-column slots into a single 128-column
         # out-sf value. block_k is fixed at 128 for out_sf_k == 128, so the merge
         # is a single PAT_ALL group reduce + broadcast (verified semantics).
-        pat_all = S.pset(16, 'PAT_ALL')
+        pat_all = S.pset(16, "PAT_ALL")
         return S.vdupv(S.vcmax(v, pat_all), pat_all)
 
     @T.macro
     def emit_out_sf(sf_exp_ub, out_sf_ub, invalid_exp_ub, out_exp_row, min_exp_row, sf_exp_row, sf_ub_row, store_row, mask, zero, six):
         full_mask = vector_mask(T.uint16, max(num_sf_cols_per_block, 16))
-        S.vsts(sf_exp_ub[sf_exp_row, 0], S.vadds(out_exp_row, -5), full_mask, dist='NORM_B16')
+        S.vsts(sf_exp_ub[sf_exp_row, 0], S.vadds(out_exp_row, -5), full_mask, dist="NORM_B16")
         invalid = S.vsub(out_exp_row, S.vmin(out_exp_row, S.vadds(min_exp_row, 5)))
         max_invalid = S.vcmax(invalid, mask)
-        acc_invalid = S.vmax(max_invalid, S.vld(invalid_exp_ub[0], dist='BRC_B16'))
+        acc_invalid = S.vmax(max_invalid, S.vld(invalid_exp_ub[0], dist="BRC_B16"))
         assert_mask = vector_mask(T.uint16, 16)
-        S.vsts(invalid_exp_ub[0], acc_invalid, assert_mask, dist='NORM_B16')
+        S.vsts(invalid_exp_ub[0], acc_invalid, assert_mask, dist="NORM_B16")
         out_sf_value = S.alloc_var(out_sf_dtype)
         if out_sf_dtype == T.uint16:
-            out_sf_value = T.reinterpret(S.vpack(out_exp_row), 'uint16x128')
+            out_sf_value = T.reinterpret(S.vpack(out_exp_row), "uint16x128")
         else:
             wide_exp, _ = S.vintlv(out_exp_row, zero)
-            out_sf_value = T.reinterpret(S.vshls(T.reinterpret(wide_exp, 'uint32x64'), 23), 'float32x64')
+            out_sf_value = T.reinterpret(S.vshls(T.reinterpret(wide_exp, "uint32x64"), 23), "float32x64")
         out_store_mask = vector_mask(out_sf_dtype, num_sf_store_cols)
         if out_config.use_tma_aligned_col_major_sf:
             store_indices = lane_indices(out_sf_dtype)
             offsets = S.vadds(S.vmuls(store_indices, num_batched_tiles), store_row)
             S.vscatter(out_sf_value, out_sf_ub[0, 0], offsets, out_store_mask)
         elif out_sf_dtype == T.uint16:
-            S.vsts(out_sf_ub[sf_ub_row, 0], out_sf_value, out_store_mask, dist='NORM_B16')
+            S.vsts(out_sf_ub[sf_ub_row, 0], out_sf_value, out_store_mask, dist="NORM_B16")
         else:
-            S.vsts(out_sf_ub[sf_ub_row, 0], out_sf_value, out_store_mask, dist='NORM_B32')
+            S.vsts(out_sf_ub[sf_ub_row, 0], out_sf_value, out_store_mask, dist="NORM_B32")
 
     @T.macro
     def reduce_sf(sf_load_ub, sf_exp_ub, out_sf_ub, invalid_exp_ub, store_row):
@@ -207,10 +207,10 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
             for row in T.serial(0, block_m, 2):
                 in_exp0 = load_sf(sf_load_ub, row, gather_base, gather_mask)
                 in_exp0_clean = S.vsel(in_exp0, zero, mask)
-                S.vsts(sf_exp_ub[row, 0], in_exp0_clean, full_mask, dist='NORM_B16')
+                S.vsts(sf_exp_ub[row, 0], in_exp0_clean, full_mask, dist="NORM_B16")
                 in_exp1 = load_sf(sf_load_ub, row + 1, gather_base, gather_mask)
                 in_exp1_clean = S.vsel(in_exp1, zero, mask)
-                S.vsts(sf_exp_ub[row + 1, 0], in_exp1_clean, full_mask, dist='NORM_B16')
+                S.vsts(sf_exp_ub[row + 1, 0], in_exp1_clean, full_mask, dist="NORM_B16")
                 if out_sf_m == 1:
                     # (1, 128): every data row produces its own out-sf row.
                     # max_exp/min_exp cross-row reduction is only needed for the
@@ -218,8 +218,22 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                     # vector ops per 2 rows (compile-time branch).
                     out_exp0 = col_merge(S.vsub(S.vmax(in_exp0_clean, six), six))
                     out_exp1 = col_merge(S.vsub(S.vmax(in_exp1_clean, six), six))
-                    emit_out_sf(sf_exp_ub, out_sf_ub, invalid_exp_ub, out_exp0, in_exp0_clean, block_m + row, row, store_row, mask, zero, six)
-                    emit_out_sf(sf_exp_ub, out_sf_ub, invalid_exp_ub, out_exp1, in_exp1_clean, block_m + row + 1, row + 1, store_row, mask, zero, six)
+                    emit_out_sf(
+                        sf_exp_ub, out_sf_ub, invalid_exp_ub, out_exp0, in_exp0_clean, block_m + row, row, store_row, mask, zero, six
+                    )
+                    emit_out_sf(
+                        sf_exp_ub,
+                        out_sf_ub,
+                        invalid_exp_ub,
+                        out_exp1,
+                        in_exp1_clean,
+                        block_m + row + 1,
+                        row + 1,
+                        store_row,
+                        mask,
+                        zero,
+                        six,
+                    )
                 else:
                     max_exp0 = S.vmax(max_exp0, in_exp0_clean, mask)
                     min_exp0 = S.vmin(min_exp0, in_exp0_clean, mask)
@@ -236,11 +250,11 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
 
     @T.macro
     def quant_chunk(sf_exp_ub, out_ub, fp4_to_fp8_map, fp4_codes_u8, out_exp, row, chunk):
-        in_exp = S.vld(sf_exp_ub[row, chunk * 8], dist='E2B_B16')
+        in_exp = S.vld(sf_exp_ub[row, chunk * 8], dist="E2B_B16")
         delta = S.vmuls(S.vsub(in_exp, out_exp), T.uint16(0x1010))
-        index = S.vadd(fp4_codes_u8, T.reinterpret(delta, 'uint8x256'))
-        quantized = T.reinterpret(S.vselr(fp4_to_fp8_map, index), 'float8_e4m3fnx256')
-        S.vsts(out_ub[row, chunk * 256], quantized, dist='NORM_B8')
+        index = S.vadd(fp4_codes_u8, T.reinterpret(delta, "uint8x256"))
+        quantized = T.reinterpret(S.vselr(fp4_to_fp8_map, index), "float8_e4m3fnx256")
+        S.vsts(out_ub[row, chunk * 256], quantized, dist="NORM_B8")
 
     @T.macro
     def quant(sf_exp_ub, x_ub, out_ub, fp4_to_fp8_map_ub):
@@ -254,12 +268,12 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                 # truncated on store-back).
                 for row in T.serial(0, block_m, 2):
                     if out_sf_m == 1:
-                        out_exp0 = S.vld(sf_exp_ub[block_m + row, 0], dist='E2B_B16')
-                        out_exp1 = S.vld(sf_exp_ub[block_m + row + 1, 0], dist='E2B_B16')
+                        out_exp0 = S.vld(sf_exp_ub[block_m + row, 0], dist="E2B_B16")
+                        out_exp1 = S.vld(sf_exp_ub[block_m + row + 1, 0], dist="E2B_B16")
                     else:
-                        out_exp0 = S.vld(sf_exp_ub[block_m, 0], dist='E2B_B16')
+                        out_exp0 = S.vld(sf_exp_ub[block_m, 0], dist="E2B_B16")
                         out_exp1 = out_exp0
-                    packed = T.reinterpret(S.vld(x_ub[row, 0]), 'uint8x256')
+                    packed = T.reinterpret(S.vld(x_ub[row, 0]), "uint8x256")
                     fp4_codes_u8_0, fp4_codes_u8_1 = S.vintlv(S.vand(packed, mask), S.vshrs(packed, 4))
                     quant_chunk(sf_exp_ub, out_ub, fp4_to_fp8_map, fp4_codes_u8_0, out_exp0, row, 0)
                     quant_chunk(sf_exp_ub, out_ub, fp4_to_fp8_map, fp4_codes_u8_1, out_exp1, row + 1, 0)
@@ -267,13 +281,13 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                 for chunk in T.serial(0, block_k // 256, 2):
                     for row in T.serial(0, block_m, 2):
                         if out_sf_m == 1:
-                            out_exp0 = S.vld(sf_exp_ub[block_m + row, chunk * 8], dist='E2B_B16')
-                            out_exp1 = S.vld(sf_exp_ub[block_m + row, (chunk + 1) * 8], dist='E2B_B16')
+                            out_exp0 = S.vld(sf_exp_ub[block_m + row, chunk * 8], dist="E2B_B16")
+                            out_exp1 = S.vld(sf_exp_ub[block_m + row, (chunk + 1) * 8], dist="E2B_B16")
                         else:
-                            out_exp0 = S.vld(sf_exp_ub[block_m, chunk * 8], dist='E2B_B16')
-                            out_exp1 = S.vld(sf_exp_ub[block_m, (chunk + 1) * 8], dist='E2B_B16')
-                        packed0 = T.reinterpret(S.vld(x_ub[row, chunk * 256]), 'uint8x256')
-                        packed1 = T.reinterpret(S.vld(x_ub[row + 1, chunk * 256]), 'uint8x256')
+                            out_exp0 = S.vld(sf_exp_ub[block_m, chunk * 8], dist="E2B_B16")
+                            out_exp1 = S.vld(sf_exp_ub[block_m, (chunk + 1) * 8], dist="E2B_B16")
+                        packed0 = T.reinterpret(S.vld(x_ub[row, chunk * 256]), "uint8x256")
+                        packed1 = T.reinterpret(S.vld(x_ub[row + 1, chunk * 256]), "uint8x256")
                         fp4_codes_u8_0_0, fp4_codes_u8_0_1 = S.vintlv(S.vand(packed0, mask), S.vshrs(packed0, 4))
                         fp4_codes_u8_1_0, fp4_codes_u8_1_1 = S.vintlv(S.vand(packed1, mask), S.vshrs(packed1, 4))
                         quant_chunk(sf_exp_ub, out_ub, fp4_to_fp8_map, fp4_codes_u8_0_0, out_exp0, row, chunk)
@@ -296,14 +310,16 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
             sf_load_ub = T.alloc_shared(sf_load_ub_shape, in_config.sf_dtype)
             out_sf_ub = T.alloc_shared(out_sf_shape_ub, out_config.sf_dtype)
             invalid_exp_ub = T.alloc_shared((16,), T.uint16)
-            T.annotate_buffer_versions({
-                x_ub: num_stages,
-                sf_load_ub: num_stages,
-                sf_exp_ub: num_stages,
-                out_ub: num_stages,
-                out_sf_ub: num_stages,
-                invalid_exp_ub: 1,
-            })
+            T.annotate_buffer_versions(
+                {
+                    x_ub: num_stages,
+                    sf_load_ub: num_stages,
+                    sf_exp_ub: num_stages,
+                    out_ub: num_stages,
+                    out_sf_ub: num_stages,
+                    invalid_exp_ub: 1,
+                }
+            )
             init_fp4_to_fp8_map(fp4_to_fp8_map_ub, invalid_exp_ub)
             for pid_m, pid_k in T.Persistent(
                 [num_tokens // (block_m * num_batched_tiles), hidden // block_k],
@@ -322,7 +338,7 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                         with T.SimdVF():
                             zero8 = S.vdup(0, T.uint8)
                             for pad_row in T.serial(0, block_m, 2):
-                                S.vsts(x_ub[pad_row, 0], zero8, dist='NORM_B8')
+                                S.vsts(x_ub[pad_row, 0], zero8, dist="NORM_B8")
                     T.copy(x[row_start, pid_k * block_k], x_ub[:block_m, :block_k])
                     copy_sf(x_sf, sf_load_ub, row_start, pid_k)
                     reduce_sf(sf_load_ub, sf_exp_ub, out_sf_ub, invalid_exp_ub, batch)
@@ -331,12 +347,17 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                 first_tile = T.alloc_var(T.int32, init=pid_m * num_batched_tiles)
                 store_base = T.alloc_var(T.int32, init=pid_k * num_sf_store_cols)
                 if out_config.use_tma_aligned_col_major_sf:
-                    T.copy(out_sf_ub[:num_sf_store_cols, : num_batched_tiles * out_pack_factor], out_sf[store_base, first_tile * out_pack_factor])
+                    T.copy(
+                        out_sf_ub[:num_sf_store_cols, : num_batched_tiles * out_pack_factor],
+                        out_sf[store_base, first_tile * out_pack_factor],
+                    )
                 else:
                     # out_sf_ub stores one sf per 32-column slot; its copy width is in
                     # storage elements (uint8 for packed UE8M0, otherwise sf dtype).
                     store_copy_cols = num_sf_store_cols * out_pack_factor if out_config.use_packed_ue8m0 else num_sf_store_cols
-                    T.copy(out_sf_ub[:num_out_sf_rows, :store_copy_cols], out_sf[first_tile * num_out_sf_rows, store_base * out_pack_factor])
+                    T.copy(
+                        out_sf_ub[:num_out_sf_rows, :store_copy_cols], out_sf[first_tile * num_out_sf_rows, store_base * out_pack_factor]
+                    )
             T.device_assert(invalid_exp_ub[0] == 0)
 
     return kernel

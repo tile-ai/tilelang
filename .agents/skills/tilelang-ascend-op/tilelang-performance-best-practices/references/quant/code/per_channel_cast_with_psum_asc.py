@@ -21,12 +21,12 @@ def get_per_channel_cast_with_psum_kernel_asc(
     assert num_per_tokens in (32, 128)
     if in_config.with_sf:
         num_per_channels = in_config.sf_block[1]
-        assert num_per_channels in (32, 128), 'Ascend rescale supports num_per_channels in (32, 128) only'
+        assert num_per_channels in (32, 128), "Ascend rescale supports num_per_channels in (32, 128) only"
     else:
-        assert in_config.dtype == T.bfloat16, 'per_channel_cast supports bf16 or e4m3 (rescale) input only'
+        assert in_config.dtype == T.bfloat16, "per_channel_cast supports bf16 or e4m3 (rescale) input only"
 
     quant_max = 448.0
-    assert out_config.clamp_min_value >= quant_max * (2 ** (-126)), 'Ascend scale exponent fast path requires clamp to normal number'
+    assert out_config.clamp_min_value >= quant_max * (2 ** (-126)), "Ascend scale exponent fast path requires clamp to normal number"
 
     # num_per_tokens=128 packed 路径用 block_k=256（而非 1024），使 block_m=128，
     # groups_per_tile=1；num_per_tokens=32 保持 block_k=1024 高性能路径不受影响
@@ -45,12 +45,8 @@ def get_per_channel_cast_with_psum_kernel_asc(
     # [P1] 扩展 use_per_expert 条件：原条件仅 unpacked output 时触发，现增加 packed output 分支。
     # packed output 时 pack_row 需配对 2 个 SF 行，当 (alignment // npt) % pack_factor != 0
     # 时 alignment-tiled 路径的 groups_per_tile*nbg 为奇数无法配对，改用 per-expert 路径。
-    use_per_expert = (
-        token_alignment % num_per_tokens != 0
-        or (
-            out_config.use_packed_ue8m0
-            and (token_alignment // num_per_tokens) % pack_factor != 0
-        )
+    use_per_expert = token_alignment % num_per_tokens != 0 or (
+        out_config.use_packed_ue8m0 and (token_alignment // num_per_tokens) % pack_factor != 0
     )
     if use_per_expert:
         if out_config.use_packed_ue8m0:
@@ -67,7 +63,7 @@ def get_per_channel_cast_with_psum_kernel_asc(
     else:
         block_m = min(128, 32768 // block_k)
         assert block_m >= num_per_tokens and block_m % num_per_tokens == 0, (
-            f'Unsupported Ascend psum tile: block_m={block_m}, num_per_tokens={num_per_tokens}'
+            f"Unsupported Ascend psum tile: block_m={block_m}, num_per_tokens={num_per_tokens}"
         )
 
         # Adjust block_m downward so that token_alignment is a multiple of block_m.
@@ -80,8 +76,7 @@ def get_per_channel_cast_with_psum_kernel_asc(
                     block_m = candidate
                     break
             assert token_alignment % block_m == 0, (
-                f'Cannot find block_m dividing token_alignment={token_alignment} '
-                f'with num_per_tokens={num_per_tokens}'
+                f"Cannot find block_m dividing token_alignment={token_alignment} with num_per_tokens={num_per_tokens}"
             )
         groups_per_tile = block_m // num_per_tokens
         # nbg = token_alignment // block_m: each Persistent iter processes one
@@ -98,8 +93,7 @@ def get_per_channel_cast_with_psum_kernel_asc(
         num_packed_per_channels = num_per_channels * pack_factor if in_config.use_packed_ue8m0 else num_per_channels
     if out_config.use_packed_ue8m0:
         assert (groups_per_tile * num_blocks_per_group) % pack_factor == 0, (
-            f'packed ue8m0 requires groups_per_tile*nbg % pack_factor == 0: '
-            f'groups_per_tile={groups_per_tile}, nbg={num_blocks_per_group}'
+            f"packed ue8m0 requires groups_per_tile*nbg % pack_factor == 0: groups_per_tile={groups_per_tile}, nbg={num_blocks_per_group}"
         )
         num_packed_rows = groups_per_tile * num_blocks_per_group // pack_factor
 
@@ -108,15 +102,12 @@ def get_per_channel_cast_with_psum_kernel_asc(
     # [P1+P2] per-expert 路径强制单缓冲：跨迭代标量依赖（expert_id/token_offset）需要
     # 同步 UB 读写，双缓冲会读到未同步的陈旧数据。
     # non-per-expert + non-packed f32 dequant: block_k=128 时双缓冲超出 UB，降为单缓冲
-    num_stages = 1 if (
-        use_per_expert
-        or (in_config.with_sf and num_per_tokens == 128 and not in_config.use_packed_ue8m0)
-    ) else 2
+    num_stages = 1 if (use_per_expert or (in_config.with_sf and num_per_tokens == 128 and not in_config.use_packed_ue8m0)) else 2
     num_cores = get_num_vec_cores()
 
-    num_tokens = T.dynamic('num_tokens')
-    sf_stride = T.dynamic('sf_stride')
-    out_sf_shape_m = T.dynamic('out_sf_shape_m')
+    num_tokens = T.dynamic("num_tokens")
+    sf_stride = T.dynamic("sf_stride")
+    out_sf_shape_m = T.dynamic("out_sf_shape_m")
     sf_shape = (out_sf_shape_m, hidden * (pack_factor if out_config.use_packed_ue8m0 else 1))
     x_sf_shape = get_sf_shape((num_tokens, hidden), in_config)
     packed_col_major_input = in_config.use_tma_aligned_col_major_sf and in_config.use_packed_ue8m0
@@ -135,13 +126,13 @@ def get_per_channel_cast_with_psum_kernel_asc(
             sf_inv = S.vdiv(S.vdup(quant_max, T.float32), clamped)
             return scale, sf_inv
         scale_raw = S.vmul(clamped, S.vdup(1.0 / quant_max, T.float32))
-        scale_bits = T.reinterpret(scale_raw, 'uint32x64')
+        scale_bits = T.reinterpret(scale_raw, "uint32x64")
         scale_exponent = S.vadds(S.vshrs(S.vsub(scale_bits, S.vdup(1, T.uint32)), 23), 1)
         inverse_exponent = S.vsub(S.vdup(254, T.uint32), scale_exponent)
-        inverse = T.reinterpret(S.vshls(inverse_exponent, 23), 'float32x64')
+        inverse = T.reinterpret(S.vshls(inverse_exponent, 23), "float32x64")
         if out_config.use_packed_ue8m0:
             return scale_exponent, inverse
-        scale = T.reinterpret(S.vshls(scale_exponent, 23), 'float32x64')
+        scale = T.reinterpret(S.vshls(scale_exponent, 23), "float32x64")
         return scale, inverse
 
     @T.macro
@@ -151,17 +142,17 @@ def get_per_channel_cast_with_psum_kernel_asc(
         # 守卫 row_base + row < rows 需要全局行号语义，故 rows 必须是 tile 级而非 group 级。
         rows = block_m if num_rows is None else num_rows
         with T.SimdVF():
-            sf_dist = 'PK4_B32' if out_config.use_packed_ue8m0 else 'NORM_B32'
+            sf_dist = "PK4_B32" if out_config.use_packed_ue8m0 else "NORM_B32"
             zero_bf16 = S.vdup(0.0, T.bfloat16)
-            abs_mask = T.reinterpret(S.vdup(0x7FFF, T.uint16), 'bfloat16x128')
+            abs_mask = T.reinterpret(S.vdup(0x7FFF, T.uint16), "bfloat16x128")
             amax_values = S.alloc_local((2,), T.bfloat16)
             inverse = S.alloc_local((2,), T.float32)
             if in_config.with_sf:
-                lane_channel = T.reinterpret(S.vshrs(S.vci(0, T.int16), 5), 'uint16x128')  # 0x32 1x32 2x32 3x32
+                lane_channel = T.reinterpret(S.vshrs(S.vci(0, T.int16), 5), "uint16x128")  # 0x32 1x32 2x32 3x32
                 # 适配 NPU num_per_channels（每个缩放因子覆盖的通道数）=128 的场景：num_per_channels=32 两行 packed SF 用 vsel 按 lane 组对选择；num_per_channels=128 单行 packed，用 chunk*8 选字节
                 if in_config.use_tma_aligned_col_major_sf and num_per_channels != 128:
-                    use_pair1 = S.vcmps(lane_channel, 2, op='ge')  # 0x64 1x64
-                    byte_shift = T.reinterpret(S.vshls(S.vand(lane_channel, S.vdup(1, T.uint16)), 3), 'int16x128')  # 0x32 8x32 0x32 8x32
+                    use_pair1 = S.vcmps(lane_channel, 2, op="ge")  # 0x64 1x64
+                    byte_shift = T.reinterpret(S.vshls(S.vand(lane_channel, S.vdup(1, T.uint16)), 3), "int16x128")  # 0x32 8x32 0x32 8x32
                     byte_mask = S.vdup(0x00FF, T.int16)
                 elif in_config.use_tma_aligned_col_major_sf:
                     byte_mask = S.vdup(0x00FF, T.int16)
@@ -187,26 +178,26 @@ def get_per_channel_cast_with_psum_kernel_asc(
                         # group 1 的 row_base=128，需用全局行号判断有效性而非组内行号。
                         for row in T.serial(num_per_tokens):
                             if row_base + row < rows:
-                                raw0 = S.vcvt(S.vld(x_ub[row_base + row, col], dist='UNPK4_B8'), T.float32)
-                                raw1 = S.vcvt(S.vld(x_ub[row_base + row, col + 64], dist='UNPK4_B8'), T.float32)
-                                _, raw_bf16 = S.vdintlv(T.reinterpret(raw0, 'bfloat16x128'), T.reinterpret(raw1, 'bfloat16x128'))
+                                raw0 = S.vcvt(S.vld(x_ub[row_base + row, col], dist="UNPK4_B8"), T.float32)
+                                raw1 = S.vcvt(S.vld(x_ub[row_base + row, col + 64], dist="UNPK4_B8"), T.float32)
+                                _, raw_bf16 = S.vdintlv(T.reinterpret(raw0, "bfloat16x128"), T.reinterpret(raw1, "bfloat16x128"))
                                 if in_config.use_tma_aligned_col_major_sf:
                                     sf_row = row_base + row
                                     if num_per_channels == 128:
-                                        packed = S.vld(sf_input[0, sf_row], dist='BRC_B16')
+                                        packed = S.vld(sf_input[0, sf_row], dist="BRC_B16")
                                         byte_shift = S.vdup(chunk * 8, T.int16)
                                         exponents = S.vand(S.vshr(packed, byte_shift), byte_mask)
                                     else:
-                                        packed0 = S.vld(sf_input[chunk * 2, sf_row], dist='BRC_B16')
-                                        packed1 = S.vld(sf_input[chunk * 2 + 1, sf_row], dist='BRC_B16')
+                                        packed0 = S.vld(sf_input[chunk * 2, sf_row], dist="BRC_B16")
+                                        packed1 = S.vld(sf_input[chunk * 2 + 1, sf_row], dist="BRC_B16")
                                         packed = S.vsel(packed1, packed0, use_pair1)
                                         exponents = S.vand(S.vshr(packed, byte_shift), byte_mask)
                                     scale_bits = S.vshls(exponents, 7)
                                 else:
-                                    exponents = T.reinterpret(S.vld(sf_input[row_base + row, 0], dist='UNPK_B8'), 'uint16x128')
+                                    exponents = T.reinterpret(S.vld(sf_input[row_base + row, 0], dist="UNPK_B8"), "uint16x128")
                                     scale_bits = S.vshls(S.vselr(exponents, scale_index), 7)
-                                values = S.vmul(raw_bf16, T.reinterpret(scale_bits, 'bfloat16x128'))
-                                S.vsts(dequant_ub[row, 0], values, dist='NORM_B16')
+                                values = S.vmul(raw_bf16, T.reinterpret(scale_bits, "bfloat16x128"))
+                                S.vsts(dequant_ub[row, 0], values, dist="NORM_B16")
                                 amax[0] = S.vmax(amax[0], S.vand(values, abs_mask))
                     else:
                         # [P2] 非 SF 路径：同样用 num_per_tokens + if 守卫
@@ -217,19 +208,19 @@ def get_per_channel_cast_with_psum_kernel_asc(
                     # [P2] 通过 amax[0] 索引访问可变本地内存，确保 interleave 读到累加后的值
                     amax_values[0], amax_values[1] = S.vintlv(zero_bf16, amax[0])
                     for half in T.unroll(2, explicit=True):
-                        scale, inverse[half] = compute_scale(T.reinterpret(amax_values[half], 'float32x64'))
+                        scale, inverse[half] = compute_scale(T.reinterpret(amax_values[half], "float32x64"))
                         S.vsts(sf_dst[dst_base + group, col + half * 64], scale, dist=sf_dist)
                     # [P2] 量化循环同样用 num_per_tokens + if 守卫
                     for half in T.unroll(2, explicit=True):
                         for row in T.serial(num_per_tokens):
                             if row_base + row < rows:
                                 value_ub, value_row, value_col = (dequant_ub, row, 0) if in_config.with_sf else (x_ub, row_base + row, col)
-                                values = S.vcvt(S.vld(value_ub[value_row, value_col + half * 64], dist='UNPK_B16'), T.float32)
+                                values = S.vcvt(S.vld(value_ub[value_row, value_col + half * 64], dist="UNPK_B16"), T.float32)
                                 quantized = S.vmul(values, inverse[half])
-                                S.vsts(o_ub[row_base + row, col + half * 64], S.vcvt(quantized, T.float8_e4m3fn), dist='PK4_B32')
+                                S.vsts(o_ub[row_base + row, col + half * 64], S.vcvt(quantized, T.float8_e4m3fn), dist="PK4_B32")
 
     def dequant_f32_scaled(x_ub, row, col, scale_vec):
-        values = S.vcvt(S.vld(x_ub[row, col], dist='UNPK4_B8'), T.float32)
+        values = S.vcvt(S.vld(x_ub[row, col], dist="UNPK4_B8"), T.float32)
         return S.vmul(values, scale_vec)
 
     @T.macro
@@ -239,15 +230,15 @@ def get_per_channel_cast_with_psum_kernel_asc(
         # 守卫 row_base + row < rows 需要全局行号语义，故 rows 必须是 tile 级而非 group 级。
         rows = block_m if num_rows is None else num_rows
         with T.SimdVF():
-            sf_dist = 'PK4_B32' if out_config.use_packed_ue8m0 else 'NORM_B32'
-            abs_mask = T.reinterpret(S.vdup(0x7FFFFFFF, T.uint32), 'float32x64')
+            sf_dist = "PK4_B32" if out_config.use_packed_ue8m0 else "NORM_B32"
+            abs_mask = T.reinterpret(S.vdup(0x7FFFFFFF, T.uint32), "float32x64")
             num_subvectors = block_k // 64
             amax_values = S.alloc_local((num_subvectors,), T.float32)
             input_scale_values = S.alloc_local((num_subvectors,), T.float32)
             scale_values = S.alloc_local((num_subvectors,), T.uint32 if out_config.use_packed_ue8m0 else T.float32)
             if in_config.use_tma_aligned_col_major_sf:
                 # lane 0-31 属组 2k，lane 32-63 属组 2k+1；vsel 按 lane>=32 选择对应 SF
-                sf_lane_ge32 = S.vcmps(S.vci(0, T.int32), 32, op='ge')
+                sf_lane_ge32 = S.vcmps(S.vci(0, T.int32), 32, op="ge")
             for g in T.serial(groups_per_tile):
                 row_base = g * num_per_tokens
                 for j in T.unroll(num_subvectors, explicit=True):
@@ -261,20 +252,20 @@ def get_per_channel_cast_with_psum_kernel_asc(
                             if num_per_channels == 128:
                                 for subvector in T.unroll(num_subvectors, explicit=True):
                                     sf_group = subvector // 2
-                                    input_scale_values[subvector] = S.vld(sf_ub[sf_group, row_base + r], dist='BRC_B32')
+                                    input_scale_values[subvector] = S.vld(sf_ub[sf_group, row_base + r], dist="BRC_B32")
                             else:
                                 for subvector in T.unroll(num_subvectors, explicit=True):
-                                    lo = S.vld(sf_ub[subvector * 2, row_base + r], dist='BRC_B32')
-                                    hi = S.vld(sf_ub[subvector * 2 + 1, row_base + r], dist='BRC_B32')
+                                    lo = S.vld(sf_ub[subvector * 2, row_base + r], dist="BRC_B32")
+                                    hi = S.vld(sf_ub[subvector * 2 + 1, row_base + r], dist="BRC_B32")
                                     input_scale_values[subvector] = S.vsel(hi, lo, sf_lane_ge32)
                         else:
                             if num_per_channels == 128:
                                 num_groups = block_k // num_per_channels
                                 subvectors_per_group = num_subvectors // num_groups
                                 for sv in T.unroll(num_subvectors, explicit=True):
-                                    input_scale_values[sv] = S.vld(sf_ub[row_base + r, sv // subvectors_per_group], dist='BRC_B32')
+                                    input_scale_values[sv] = S.vld(sf_ub[row_base + r, sv // subvectors_per_group], dist="BRC_B32")
                             else:
-                                expanded = S.vld(sf_ub[row_base + r, 0], dist='E2B_B32')
+                                expanded = S.vld(sf_ub[row_base + r, 0], dist="E2B_B32")
                                 low, high = S.vintlv(expanded, expanded)
                                 input_scale_values[0], input_scale_values[1] = S.vintlv(low, low)
                                 if block_k == 256:
@@ -296,7 +287,7 @@ def get_per_channel_cast_with_psum_kernel_asc(
                                 for half in T.unroll(2, explicit=True):
                                     subvector = pair * 2 + half
                                     quantized = S.vmul(S.vld(dequant_ub[r, subvector * 64]), amax_values[subvector])
-                                    S.vsts(o_ub[row_base + r, subvector * 64], S.vcvt(quantized, T.float8_e4m3fn), dist='PK4_B32')
+                                    S.vsts(o_ub[row_base + r, subvector * 64], S.vcvt(quantized, T.float8_e4m3fn), dist="PK4_B32")
                 else:
                     for subvector in T.unroll(num_subvectors, explicit=True):
                         scale, inverse = compute_scale(amax_values[subvector])
@@ -304,16 +295,16 @@ def get_per_channel_cast_with_psum_kernel_asc(
                         for r in T.serial(num_per_tokens):
                             if row_base + r < rows:
                                 q = S.vmul(S.vld(dequant_ub[r, subvector * 64]), inverse)
-                                S.vsts(o_ub[row_base + r, subvector * 64], S.vcvt(q, T.float8_e4m3fn), dist='PK4_B32')
+                                S.vsts(o_ub[row_base + r, subvector * 64], S.vcvt(q, T.float8_e4m3fn), dist="PK4_B32")
 
     @T.macro
     def pack_row(exp_src, pk_dst, exp_row, dst_row):
         with T.SimdVF():
             for base in T.serial(0, block_k, 256):
                 lo, hi = S.vintlv(S.vld(exp_src[exp_row, base]), S.vld(exp_src[exp_row + 1, base]))
-                S.vsts(pk_dst[dst_row, base * 2], lo, dist='NORM_B8')
+                S.vsts(pk_dst[dst_row, base * 2], lo, dist="NORM_B8")
                 if block_k - base >= 256:
-                    S.vsts(pk_dst[dst_row, base * 2 + 256], hi, dist='NORM_B8')
+                    S.vsts(pk_dst[dst_row, base * 2 + 256], hi, dist="NORM_B8")
 
     @T.prim_func
     def per_channel_cast_with_psum_kernel(
@@ -411,7 +402,7 @@ def get_per_channel_cast_with_psum_kernel_asc(
                         valid_rows = T.min(T.max(expert_end - token_offset, 0), block_m)
 
                         if valid_rows > 0:
-                            T.copy(x[token_offset, col_offset], x_ub, l2_cache_ctrl='NOTALLOC_KEEP')
+                            T.copy(x[token_offset, col_offset], x_ub, l2_cache_ctrl="NOTALLOC_KEEP")
                             if in_config.with_sf:
                                 if in_config.use_tma_aligned_col_major_sf:
                                     T.copy(
@@ -419,7 +410,9 @@ def get_per_channel_cast_with_psum_kernel_asc(
                                         sf_in_ub[: ceil_div(block_k, num_packed_per_channels), :block_m],
                                     )
                                 else:
-                                    T.copy(x_sf_invs[token_offset, col_offset // num_per_channels], sf_in_ub[:, : block_k // num_per_channels])
+                                    T.copy(
+                                        x_sf_invs[token_offset, col_offset // num_per_channels], sf_in_ub[:, : block_k // num_per_channels]
+                                    )
                                 if in_config.use_packed_ue8m0:
                                     quantize_block_bf16(x_ub, out_ub, sf_out_ub, sf_in_ub, dequant_ub, num_rows=valid_rows)
                                 else:
@@ -449,7 +442,10 @@ def get_per_channel_cast_with_psum_kernel_asc(
                     token_offset = iter_id * tile_m
                     # Same monotonic expert cursor used by swiglu_forward_asc: each
                     # core observes nondecreasing token tiles in a Persistent loop.
-                    while expert_id < num_experts and token_offset >= (psum_ub[expert_id] + token_alignment - 1) // token_alignment * token_alignment:
+                    while (
+                        expert_id < num_experts
+                        and token_offset >= (psum_ub[expert_id] + token_alignment - 1) // token_alignment * token_alignment
+                    ):
                         expert_id += 1
 
                     expert_start = T.alloc_var(T.int32, init=0)
@@ -462,15 +458,20 @@ def get_per_channel_cast_with_psum_kernel_asc(
                     for bg in T.serial(num_blocks_per_group):
                         tile_row = iter_id * num_blocks_per_group + bg
                         if num_blocks_per_group == 1 or tile_row * block_m < num_tokens:
-                            T.copy(x[tile_row * block_m, col_offset], x_ub, l2_cache_ctrl='NOTALLOC_KEEP')
+                            T.copy(x[tile_row * block_m, col_offset], x_ub, l2_cache_ctrl="NOTALLOC_KEEP")
                             if in_config.with_sf:
                                 if in_config.use_tma_aligned_col_major_sf:
                                     T.copy(
                                         x_sf_invs[col_offset // num_packed_per_channels, tile_row * block_m],
-                                        sf_in_ub[: ceil_div(block_k, num_packed_per_channels), :block_m],  # ceil_div: 防止 block_k < num_per_channels*pack_factor 时拷贝 0 行
+                                        sf_in_ub[
+                                            : ceil_div(block_k, num_packed_per_channels), :block_m
+                                        ],  # ceil_div: 防止 block_k < num_per_channels*pack_factor 时拷贝 0 行
                                     )
                                 else:
-                                    T.copy(x_sf_invs[tile_row * block_m, col_offset // num_per_channels], sf_in_ub[:, : block_k // num_per_channels])
+                                    T.copy(
+                                        x_sf_invs[tile_row * block_m, col_offset // num_per_channels],
+                                        sf_in_ub[:, : block_k // num_per_channels],
+                                    )
                                 if in_config.use_packed_ue8m0:
                                     quantize_block_bf16(x_ub, out_ub, sf_out_ub, sf_in_ub, dequant_ub, dst_base=bg * groups_per_tile)
                                 else:

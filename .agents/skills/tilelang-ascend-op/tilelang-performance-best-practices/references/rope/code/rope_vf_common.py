@@ -48,13 +48,11 @@ def rope_half_split(
                         for i in T.Parallel(dim):
                             if i < half:
                                 out_ub[i] = T.cast(
-                                    T.cast(x_ub[i], "float32") * cos_ub[i]
-                                    - T.cast(x_ub[i + half], "float32") * sin_ub[i],
+                                    T.cast(x_ub[i], "float32") * cos_ub[i] - T.cast(x_ub[i + half], "float32") * sin_ub[i],
                                     "bfloat16",
                                 )
                                 out_ub[i + half] = T.cast(
-                                    T.cast(x_ub[i + half], "float32") * cos_ub[i]
-                                    + T.cast(x_ub[i], "float32") * sin_ub[i],
+                                    T.cast(x_ub[i + half], "float32") * cos_ub[i] + T.cast(x_ub[i], "float32") * sin_ub[i],
                                     "bfloat16",
                                 )
 

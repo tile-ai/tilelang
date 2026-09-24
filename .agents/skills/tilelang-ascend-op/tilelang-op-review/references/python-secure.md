@@ -96,10 +96,10 @@ Nonzero constant divisors do not require redundant validation.
 
 ```python
 # Incorrect
-subprocess.run(f'pytest {path}', shell=True)
+subprocess.run(f"pytest {path}", shell=True)
 
 # Correct
-subprocess.run(['pytest', str(path)], check=True)
+subprocess.run(["pytest", str(path)], check=True)
 ```
 
 **Decision method**: Assign `FAIL` when external input can reach a shell command string. A completely static `shell=True` command with no input is not evidence of injection, but should still be reported as removable risky usage.

@@ -2,7 +2,6 @@ import tilelang
 from tilelang import language as T
 from tilelang.language import simd as S
 
-from tile_kernels.config import get_num_vec_cores
 from tile_kernels.quant.common import CastOutputConfig, get_sf_shape
 
 
@@ -27,11 +26,11 @@ def get_swiglu_forward_kernel_asc(
 
     num_stages = 3
     vec_size = 64
-    assert hidden % vec_size == 0, f'Ascend swiglu requires hidden % {vec_size} == 0, got {hidden}'
+    assert hidden % vec_size == 0, f"Ascend swiglu requires hidden % {vec_size} == 0, got {hidden}"
     num_vecs = hidden // vec_size
 
-    num_expanded_tokens = T.dynamic('num_expanded_tokens')
-    sf_stride = T.dynamic('sf_stride')
+    num_expanded_tokens = T.dynamic("num_expanded_tokens")
+    sf_stride = T.dynamic("sf_stride")
     sf_shape = (1, 1)  # placeholder, no scaling factors
 
     @T.prim_func
@@ -97,8 +96,8 @@ def get_swiglu_forward_kernel_asc(
                         for c in T.serial(num_vecs):
                             col = c * vec_size
                             if is_bf16_in:
-                                val_l = S.vcvt(S.vld(xl_ub[col], dist='UNPK_B16'), T.float32, part=0)
-                                val_r = S.vcvt(S.vld(xr_ub[col], dist='UNPK_B16'), T.float32, part=0)
+                                val_l = S.vcvt(S.vld(xl_ub[col], dist="UNPK_B16"), T.float32, part=0)
+                                val_r = S.vcvt(S.vld(xr_ub[col], dist="UNPK_B16"), T.float32, part=0)
                             else:
                                 val_l = S.vld(xl_ub[col])
                                 val_r = S.vld(xr_ub[col])
@@ -106,12 +105,12 @@ def get_swiglu_forward_kernel_asc(
                                 if count_clamp:
                                     # Count clamped elements with a single merging add per
                                     # predicate (acc += 1 on lanes where the compare is true).
-                                    clamped_mask_0 = S.vcmps(val_l, clamp_value, op='gt')
-                                    clamped_mask_1 = S.vcmps(val_r, clamp_value, op='gt')
-                                    clamped_mask_2 = S.vcmps(val_r, -clamp_value, op='lt')
-                                    acc[0] = S.vadds(acc[0], 1.0, clamped_mask_0, mode='MODE_MERGING')
-                                    acc[1] = S.vadds(acc[1], 1.0, clamped_mask_1, mode='MODE_MERGING')
-                                    acc[2] = S.vadds(acc[2], 1.0, clamped_mask_2, mode='MODE_MERGING')
+                                    clamped_mask_0 = S.vcmps(val_l, clamp_value, op="gt")
+                                    clamped_mask_1 = S.vcmps(val_r, clamp_value, op="gt")
+                                    clamped_mask_2 = S.vcmps(val_r, -clamp_value, op="lt")
+                                    acc[0] = S.vadds(acc[0], 1.0, clamped_mask_0, mode="MODE_MERGING")
+                                    acc[1] = S.vadds(acc[1], 1.0, clamped_mask_1, mode="MODE_MERGING")
+                                    acc[2] = S.vadds(acc[2], 1.0, clamped_mask_2, mode="MODE_MERGING")
 
                                 val_l = S.vmins(val_l, clamp_value)
                                 val_r = S.vmaxs(S.vmins(val_r, clamp_value), -clamp_value)
@@ -121,7 +120,7 @@ def get_swiglu_forward_kernel_asc(
                             if with_weight:
                                 val = S.vmuls(val, weight)
                             if is_bf16_out:
-                                S.vsts(out_ub[col], S.vcvt(val, T.bfloat16), dist='PK_B32')
+                                S.vsts(out_ub[col], S.vcvt(val, T.bfloat16), dist="PK_B32")
                             else:
                                 S.vsts(out_ub[col], val)
 
@@ -137,7 +136,7 @@ def get_swiglu_forward_kernel_asc(
             if count_clamp:
                 with T.SimdVF():
                     for i in T.unroll(3, explicit=True):
-                        S.vsts(acc_ub[i], S.vcvt(S.vcadd(S.vld(pacc_ub[i, 0])), T.int32), dist='ONEPT_B32')
+                        S.vsts(acc_ub[i], S.vcvt(S.vcadd(S.vld(pacc_ub[i, 0])), T.int32), dist="ONEPT_B32")
 
                 with T.SimtVF(threads=1):
                     # TODO: check if int32 is feasible for faster atomic add
@@ -182,8 +181,8 @@ def get_swiglu_forward_and_per_token_cast_kernel_asc(
     num_vecs = hidden // vec_size
     quant_max = 6.0 if is_fp4 else 448.0
 
-    num_expanded_tokens = T.dynamic('num_expanded_tokens')
-    sf_stride = T.dynamic('sf_stride')
+    num_expanded_tokens = T.dynamic("num_expanded_tokens")
+    sf_stride = T.dynamic("sf_stride")
     sf_shape = get_sf_shape((num_expanded_tokens, hidden), out_config)
 
     @T.prim_func
@@ -266,19 +265,19 @@ def get_swiglu_forward_and_per_token_cast_kernel_asc(
                         for vector in T.serial(num_vecs):
                             col = vector * vec_size
                             if is_bf16_in:
-                                val_l = S.vcvt(S.vld(xl_ub[col], dist='UNPK_B16'), T.float32, part=0)
-                                val_r = S.vcvt(S.vld(xr_ub[col], dist='UNPK_B16'), T.float32, part=0)
+                                val_l = S.vcvt(S.vld(xl_ub[col], dist="UNPK_B16"), T.float32, part=0)
+                                val_r = S.vcvt(S.vld(xr_ub[col], dist="UNPK_B16"), T.float32, part=0)
                             else:
                                 val_l = S.vld(xl_ub[col])
                                 val_r = S.vld(xr_ub[col])
                             if has_clamp:
                                 if count_clamp:
-                                    clamped_mask_0 = S.vcmps(val_l, clamp_value, op='gt')
-                                    clamped_mask_1 = S.vcmps(val_r, clamp_value, op='gt')
-                                    clamped_mask_2 = S.vcmps(val_r, -clamp_value, op='lt')
-                                    acc[0] = S.vadds(acc[0], 1.0, clamped_mask_0, mode='MODE_MERGING')
-                                    acc[1] = S.vadds(acc[1], 1.0, clamped_mask_1, mode='MODE_MERGING')
-                                    acc[2] = S.vadds(acc[2], 1.0, clamped_mask_2, mode='MODE_MERGING')
+                                    clamped_mask_0 = S.vcmps(val_l, clamp_value, op="gt")
+                                    clamped_mask_1 = S.vcmps(val_r, clamp_value, op="gt")
+                                    clamped_mask_2 = S.vcmps(val_r, -clamp_value, op="lt")
+                                    acc[0] = S.vadds(acc[0], 1.0, clamped_mask_0, mode="MODE_MERGING")
+                                    acc[1] = S.vadds(acc[1], 1.0, clamped_mask_1, mode="MODE_MERGING")
+                                    acc[2] = S.vadds(acc[2], 1.0, clamped_mask_2, mode="MODE_MERGING")
                                 val_l = S.vmins(val_l, clamp_value)
                                 val_r = S.vmaxs(S.vmins(val_r, clamp_value), -clamp_value)
                             val = S.vmul(S.vdiv(val_l, S.vadd(S.vexpdif(zeros, val_l), ones)), val_r)
@@ -297,23 +296,23 @@ def get_swiglu_forward_and_per_token_cast_kernel_asc(
 
                     with T.SimdVF():
                         if group_size == 32:
-                            mask_low = S.pset(32, 'PAT_VL32')
-                            mask_high = S.vcmps(S.vci(0, T.int32), 31, op='gt')
+                            mask_low = S.pset(32, "PAT_VL32")
+                            mask_high = S.vcmps(S.vci(0, T.int32), 31, op="gt")
                             for vector in T.serial(num_vecs):
                                 values = S.vabs(S.vld(value_ub[vector * vec_size]))
-                                S.vsts(amax_ub[vector * 2], S.vcmax(values, mask_low), dist='ONEPT_B32')
-                                S.vsts(amax_ub[vector * 2 + 1], S.vcmax(values, mask_high), dist='ONEPT_B32')
+                                S.vsts(amax_ub[vector * 2], S.vcmax(values, mask_low), dist="ONEPT_B32")
+                                S.vsts(amax_ub[vector * 2 + 1], S.vcmax(values, mask_high), dist="ONEPT_B32")
                         else:
                             if hidden >= group_size:
                                 for group in T.serial(hidden // group_size):
                                     col = group * group_size
                                     values0 = S.vabs(S.vld(value_ub[col]))
                                     values1 = S.vabs(S.vld(value_ub[col + vec_size]))
-                                    S.vsts(amax_ub[group], S.vcmax(S.vmax(values0, values1)), dist='ONEPT_B32')
+                                    S.vsts(amax_ub[group], S.vcmax(S.vmax(values0, values1)), dist="ONEPT_B32")
                             if hidden % group_size:
                                 tail_col = (num_groups - 1) * group_size
                                 values = S.vabs(S.vld(value_ub[tail_col]))
-                                S.vsts(amax_ub[num_groups - 1], S.vcmax(values), dist='ONEPT_B32')
+                                S.vsts(amax_ub[num_groups - 1], S.vcmax(values), dist="ONEPT_B32")
 
                     with T.SimdVF():
                         for sf_batch in T.serial(num_sf_batches):
@@ -321,14 +320,14 @@ def get_swiglu_forward_and_per_token_cast_kernel_asc(
                             amax = S.vmaxs(S.vld(amax_ub[sf_offset]), out_config.clamp_min_value)
                             if out_config.round_sf:
                                 scale_raw = S.vmuls(amax, 1.0 / quant_max)
-                                scale_bits = T.reinterpret(scale_raw, 'uint32x64')
+                                scale_bits = T.reinterpret(scale_raw, "uint32x64")
                                 scale_exp = S.vadds(S.vshrs(S.vsub(scale_bits, S.vdup(1, T.uint32)), 23), 1)
                                 inv_exp = S.vsub(S.vdup(254, T.uint32), scale_exp)
-                                scale_inv = T.reinterpret(S.vshls(inv_exp, 23), 'float32x64')
+                                scale_inv = T.reinterpret(S.vshls(inv_exp, 23), "float32x64")
                                 if is_packed_sf:
-                                    S.vsts(sf_linear_ub[sf_offset], scale_exp, dist='PK4_B32')
+                                    S.vsts(sf_linear_ub[sf_offset], scale_exp, dist="PK4_B32")
                                 else:
-                                    scale = T.reinterpret(S.vshls(scale_exp, 23), 'float32x64')
+                                    scale = T.reinterpret(S.vshls(scale_exp, 23), "float32x64")
                                     S.vsts(sf_linear_ub[sf_offset], scale)
                             else:
                                 quant_max_vec = S.vdup(quant_max, T.float32)
@@ -341,47 +340,47 @@ def get_swiglu_forward_and_per_token_cast_kernel_asc(
                         if is_fp4:
                             scaled = S.alloc_local((2,), T.float32)
                             if group_size == 32:
-                                mask_low = S.pset(32, 'PAT_VL32')
+                                mask_low = S.pset(32, "PAT_VL32")
                             for pair in T.serial(num_vecs // 2):
                                 for half in T.unroll(2, explicit=True):
                                     vector = pair * 2 + half
                                     if group_size == 32:
-                                        inverse_low = S.vld(sf_inv_ub[vector * 2], dist='BRC_B32')
-                                        inverse_high = S.vld(sf_inv_ub[vector * 2 + 1], dist='BRC_B32')
+                                        inverse_low = S.vld(sf_inv_ub[vector * 2], dist="BRC_B32")
+                                        inverse_high = S.vld(sf_inv_ub[vector * 2 + 1], dist="BRC_B32")
                                         inverse = S.vsel(inverse_low, inverse_high, mask_low)
                                     else:
-                                        inverse = S.vld(sf_inv_ub[pair], dist='BRC_B32')
+                                        inverse = S.vld(sf_inv_ub[pair], dist="BRC_B32")
                                     scaled[half] = S.vmul(S.vld(value_ub[vector * vec_size]), inverse)
-                                low, high = S.vdintlv(T.reinterpret(scaled[0], 'uint16x128'), T.reinterpret(scaled[1], 'uint16x128'))
-                                scaled_bf16 = T.reinterpret(S.vor(high, S.vmins(low, 1)), 'bfloat16x128')
-                                S.vsts(out_ub[pair * 128], S.vcvt(scaled_bf16, T.float4_e2m1fn), dist='PK4_B32')
+                                low, high = S.vdintlv(T.reinterpret(scaled[0], "uint16x128"), T.reinterpret(scaled[1], "uint16x128"))
+                                scaled_bf16 = T.reinterpret(S.vor(high, S.vmins(low, 1)), "bfloat16x128")
+                                S.vsts(out_ub[pair * 128], S.vcvt(scaled_bf16, T.float4_e2m1fn), dist="PK4_B32")
                             if num_vecs % 2:
                                 tail_vector = num_vecs - 1
                                 if group_size == 32:
-                                    tail_inverse_low = S.vld(sf_inv_ub[tail_vector * 2], dist='BRC_B32')
-                                    tail_inverse_high = S.vld(sf_inv_ub[tail_vector * 2 + 1], dist='BRC_B32')
+                                    tail_inverse_low = S.vld(sf_inv_ub[tail_vector * 2], dist="BRC_B32")
+                                    tail_inverse_high = S.vld(sf_inv_ub[tail_vector * 2 + 1], dist="BRC_B32")
                                     tail_inverse = S.vsel(tail_inverse_low, tail_inverse_high, mask_low)
                                 else:
-                                    tail_inverse = S.vld(sf_inv_ub[tail_vector // 2], dist='BRC_B32')
+                                    tail_inverse = S.vld(sf_inv_ub[tail_vector // 2], dist="BRC_B32")
                                 tail = S.vmul(S.vld(value_ub[tail_vector * vec_size]), tail_inverse)
                                 tail_low, tail_high = S.vdintlv(
-                                    T.reinterpret(tail, 'uint16x128'), T.reinterpret(S.vdup(0.0, T.float32), 'uint16x128')
+                                    T.reinterpret(tail, "uint16x128"), T.reinterpret(S.vdup(0.0, T.float32), "uint16x128")
                                 )
-                                tail_bf16 = T.reinterpret(S.vor(tail_high, S.vmins(tail_low, 1)), 'bfloat16x128')
-                                S.vsts(out_ub[tail_vector * vec_size], S.vcvt(tail_bf16, T.float4_e2m1fn), dist='PK4_B32')
+                                tail_bf16 = T.reinterpret(S.vor(tail_high, S.vmins(tail_low, 1)), "bfloat16x128")
+                                S.vsts(out_ub[tail_vector * vec_size], S.vcvt(tail_bf16, T.float4_e2m1fn), dist="PK4_B32")
                         elif group_size == 32:
-                            mask_low = S.pset(32, 'PAT_VL32')
+                            mask_low = S.pset(32, "PAT_VL32")
                             for vector in T.serial(num_vecs):
-                                inverse_low = S.vld(sf_inv_ub[vector * 2], dist='BRC_B32')
-                                inverse_high = S.vld(sf_inv_ub[vector * 2 + 1], dist='BRC_B32')
+                                inverse_low = S.vld(sf_inv_ub[vector * 2], dist="BRC_B32")
+                                inverse_high = S.vld(sf_inv_ub[vector * 2 + 1], dist="BRC_B32")
                                 inverse = S.vsel(inverse_low, inverse_high, mask_low)
                                 scaled = S.vmul(S.vld(value_ub[vector * vec_size]), inverse)
-                                S.vsts(out_ub[vector * vec_size], S.vcvt(scaled, T.float8_e4m3fn), dist='PK4_B32')
+                                S.vsts(out_ub[vector * vec_size], S.vcvt(scaled, T.float8_e4m3fn), dist="PK4_B32")
                         else:
                             for vector in T.serial(num_vecs):
-                                inverse = S.vld(sf_inv_ub[vector // 2], dist='BRC_B32')
+                                inverse = S.vld(sf_inv_ub[vector // 2], dist="BRC_B32")
                                 scaled = S.vmul(S.vld(value_ub[vector * vec_size]), inverse)
-                                S.vsts(out_ub[vector * vec_size], S.vcvt(scaled, T.float8_e4m3fn), dist='PK4_B32')
+                                S.vsts(out_ub[vector * vec_size], S.vcvt(scaled, T.float8_e4m3fn), dist="PK4_B32")
 
                     # A single token produces a short SF row. Scalar stores avoid
                     # issuing an unaligned, sub-32-byte strided MTE transfer.
@@ -402,7 +401,7 @@ def get_swiglu_forward_and_per_token_cast_kernel_asc(
             if count_clamp:
                 with T.SimdVF():
                     for i in T.unroll(3, explicit=True):
-                        S.vsts(acc_ub[i], S.vcvt(S.vcadd(S.vld(pacc_ub[i, 0])), T.int32), dist='ONEPT_B32')
+                        S.vsts(acc_ub[i], S.vcvt(S.vcadd(S.vld(pacc_ub[i, 0])), T.int32), dist="ONEPT_B32")
                 with T.SimtVF(threads=1):
                     for i in T.serial(4):
                         T.atomic_add(clamped_count[i], T.int64(acc_ub[i]))

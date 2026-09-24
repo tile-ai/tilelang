@@ -21,6 +21,7 @@ class Layout5HDPlan:
 def nd_to_5hd_reference(x, c0: int = 16):
     """Reference mapping [N,C,H,W] -> [N,C1,H,W,C0] with zero channel padding."""
     import torch
+
     n, c, h, w = x.shape
     c1 = (c + c0 - 1) // c0
     padded = torch.zeros((n, c1 * c0, h, w), dtype=x.dtype, device=x.device)

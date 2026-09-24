@@ -1,5 +1,5 @@
 """Ascend (NPU) implementations for MHC norm_fn operations using TileLang."""
-import math
+
 from functools import lru_cache
 
 import torch
@@ -9,7 +9,7 @@ from tilelang import language as T
 from tilelang.language import simd as S
 from tilelang.layout import make_ascend_compact_nz_layout
 
-from tile_kernels.config import get_num_cube_cores, get_num_sms, get_num_vec_cores
+from tile_kernels.config import get_num_cube_cores, get_num_vec_cores
 from tile_kernels.utils import align, ceil_div
 
 # fp32 vector register width on Ascend (2048-bit vreg / 32-bit lane).
@@ -63,13 +63,11 @@ def _choose_fwd_num_cores(m: int, n: int, num_stages: int, max_num_cores: int) -
 
 
 @tilelang.jit
-def get_mhc_fn_normw_merge_fwd_kernel_asc(
-    n: int, num_stages: int = 2, num_cores: int | None = None
-):
+def get_mhc_fn_normw_merge_fwd_kernel_asc(n: int, num_stages: int = 2, num_cores: int | None = None):
     max_num_cores = get_num_vec_cores()
     num_cores = max_num_cores if num_cores is None else num_cores
     assert 0 < num_cores <= max_num_cores
-    m = T.dynamic('m')
+    m = T.dynamic("m")
 
     if n == 1:
         m_blk = 8192  # flat elements per UB tile (VL-aligned)
@@ -90,24 +88,22 @@ def get_mhc_fn_normw_merge_fwd_kernel_asc(
                 # Load the single scalar into lane 0 and broadcast to a vreg.
                 T.copy(normw[0:1], w_ub[0:1])
 
-                for blk in T.Persistent(
-                    [T.ceildiv(m, m_blk)], num_cores, core_id, group_size=1, num_stages=num_stages
-                ):
+                for blk in T.Persistent([T.ceildiv(m, m_blk)], num_cores, core_id, group_size=1, num_stages=num_stages):
                     row0 = blk * m_blk
                     valid = T.min(m_blk, m - row0)
-                    T.copy(fn[row0:row0 + valid, 0], fn_ub[:valid])
+                    T.copy(fn[row0 : row0 + valid, 0], fn_ub[:valid])
                     with T.SimdVF():
-                        w_reg = S.vld(w_ub[0], dist='BRC_B32')  # broadcast normw[0] to all lanes
+                        w_reg = S.vld(w_ub[0], dist="BRC_B32")  # broadcast normw[0] to all lanes
                         for v in range(m_vregs):
                             col = v * _VEC
                             S.vsts(out_ub[col], S.vmul(S.vld(fn_ub[col]), w_reg))
-                    T.copy(out_ub[:valid], out_fn[row0:row0 + valid, 0])
+                    T.copy(out_ub[:valid], out_fn[row0 : row0 + valid, 0])
 
         return _mhc_fn_normw_merge_fwd
 
     block_m, n_blk, normw_resident = _choose_tile(n, num_stages)
     n_col_tiles = ceil_div(n, n_blk)
-    n_vregs = n_blk // _VEC          # literal trip count for the VF inner loop
+    n_vregs = n_blk // _VEC  # literal trip count for the VF inner loop
     n_align_full = align(n, _N_BLK_ALIGN)
 
     if normw_resident:
@@ -186,9 +182,7 @@ def get_mhc_fn_normw_merge_fwd_kernel_asc(
 
 @lru_cache(maxsize=256)
 def _get_fwd_kernel(n: int, num_stages: int, num_cores: int):
-    return get_mhc_fn_normw_merge_fwd_kernel_asc(
-        n, num_stages=num_stages, num_cores=num_cores
-    )
+    return get_mhc_fn_normw_merge_fwd_kernel_asc(n, num_stages=num_stages, num_cores=num_cores)
 
 
 @lru_cache(maxsize=256)
@@ -213,13 +207,11 @@ def _choose_bwd_num_cores(n: int, num_stages: int, max_num_cores: int) -> int:
 
 
 @tilelang.jit
-def get_mhc_fn_normw_merge_bwd_kernel_asc(
-    n: int, num_stages: int = 2, num_cores: int | None = None
-):
+def get_mhc_fn_normw_merge_bwd_kernel_asc(n: int, num_stages: int = 2, num_cores: int | None = None):
     max_num_cores = get_num_vec_cores()
     num_cores = max_num_cores if num_cores is None else num_cores
     assert 0 < num_cores <= max_num_cores
-    m = T.dynamic('m')
+    m = T.dynamic("m")
 
     # Keep the tile shape stable across launch widths; only the core count is
     # reduced when the resulting column-tile count does not need full occupancy.
@@ -240,15 +232,18 @@ def get_mhc_fn_normw_merge_bwd_kernel_asc(
             g_ub = T.alloc_shared((block_m, n_blk), T.float32)
             fng_ub = T.alloc_shared((block_m, n_blk), T.float32)
             normw_ub = T.alloc_shared((n_blk,), T.float32)
-            nwg_ub = T.alloc_shared((n_blk,), T.float32)       # normw_grad accumulator (carry-in/out)
-            T.annotate_buffer_versions({
-                fn_ub: num_stages, g_ub: num_stages, fng_ub: num_stages,
-                normw_ub: 1, nwg_ub: 1,
-            })
+            nwg_ub = T.alloc_shared((n_blk,), T.float32)  # normw_grad accumulator (carry-in/out)
+            T.annotate_buffer_versions(
+                {
+                    fn_ub: num_stages,
+                    g_ub: num_stages,
+                    fng_ub: num_stages,
+                    normw_ub: 1,
+                    nwg_ub: 1,
+                }
+            )
 
-            for col_blk in T.Persistent(
-                [n_col_tiles], num_cores, core_id, group_size=1, num_stages=num_stages
-            ):
+            for col_blk in T.Persistent([n_col_tiles], num_cores, core_id, group_size=1, num_stages=num_stages):
                 col0 = col_blk * n_blk
                 valid_cols = T.min(n_blk, n - col0)
 
@@ -303,9 +298,7 @@ def get_mhc_fn_normw_merge_bwd_kernel_asc(
 
 @lru_cache(maxsize=256)
 def _get_bwd_kernel(n: int, num_stages: int, num_cores: int):
-    return get_mhc_fn_normw_merge_bwd_kernel_asc(
-        n, num_stages=num_stages, num_cores=num_cores
-    )
+    return get_mhc_fn_normw_merge_bwd_kernel_asc(n, num_stages=num_stages, num_cores=num_cores)
 
 
 def mhc_fn_normw_merge_bwd_asc(
@@ -360,10 +353,10 @@ def mhc_reduce_partials_and_rmsnorm_fwd_asc(
     rms_eps: float,
     n_splits: int,
 ):
-    num_tokens = T.dynamic('num_tokens')
-    mhc_mult3 = T.const('mhc_mult3')
-    n_rms_group = T.const('n_rms_group')
-    assert n_rms_group == 1, 'Ascend reduce/rmsnorm fwd currently supports one RMS group'
+    num_tokens = T.dynamic("num_tokens")
+    mhc_mult3 = T.const("mhc_mult3")
+    n_rms_group = T.const("n_rms_group")
+    assert n_rms_group == 1, "Ascend reduce/rmsnorm fwd currently supports one RMS group"
 
     out_mul_splitted: T.Tensor[(n_splits, num_tokens, n_rms_group, mhc_mult3), T.float32]
     sqrsum_splitted: T.Tensor[(n_splits, num_tokens, n_rms_group), T.float32]
@@ -421,7 +414,7 @@ def mhc_reduce_partials_and_rmsnorm_fwd_asc(
             core_id,
             group_size=1,
             num_stages=_RMSNORM_NUM_STAGES,
-            annotations={'enable_offset': True},
+            annotations={"enable_offset": True},
         ):
             token_start = token_block * token_block_size
             stage = (token_block // n_cores) % _RMSNORM_NUM_STAGES
@@ -450,7 +443,7 @@ def mhc_reduce_partials_and_rmsnorm_fwd_asc(
             with T.SimdVF():
                 zero = S.vdup(0.0, T.float32)
                 one = S.vdup(1.0, T.float32)
-                one_lane = S.pset(32, 'PAT_VL1')
+                one_lane = S.pset(32, "PAT_VL1")
 
                 for row in range(token_block_size):
                     out_vec = S.alloc_var(T.float32)
@@ -463,7 +456,7 @@ def mhc_reduce_partials_and_rmsnorm_fwd_asc(
                                 sqrsum_vec,
                                 S.vld(
                                     partial_sqrsum_ub[stage, row, split, k],
-                                    dist='BRC_B32',
+                                    dist="BRC_B32",
                                 ),
                             )
                         rms_vec = S.vdiv(
@@ -479,7 +472,7 @@ def mhc_reduce_partials_and_rmsnorm_fwd_asc(
                             sqrsum_ub[row, k],
                             sqrsum_vec,
                             one_lane,
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
                         out_mul_vec = S.alloc_var(T.float32)
                         out_mul_vec = zero
@@ -497,20 +490,21 @@ def mhc_reduce_partials_and_rmsnorm_fwd_asc(
 
             T.copy(
                 out_ub[0:valid_tokens, 0:mhc_mult3],
-                out[token_start:token_start + valid_tokens, 0:mhc_mult3],
+                out[token_start : token_start + valid_tokens, 0:mhc_mult3],
             )
             T.copy(
                 out_mul_ub[0:valid_tokens, 0:n_rms_group, 0:mhc_mult3],
                 out_mul[
-                    token_start:token_start + valid_tokens,
+                    token_start : token_start + valid_tokens,
                     0:n_rms_group,
                     0:mhc_mult3,
                 ],
             )
             T.copy(
                 sqrsum_ub[0:valid_tokens, 0:n_rms_group],
-                sqrsum[token_start:token_start + valid_tokens, 0:n_rms_group],
+                sqrsum[token_start : token_start + valid_tokens, 0:n_rms_group],
             )
+
 
 @tilelang.jit
 def mhc_reduce_partials_and_rmsnorm_bwd_asc(
@@ -522,9 +516,9 @@ def mhc_reduce_partials_and_rmsnorm_bwd_asc(
     rms_group_size: int,
     rms_eps: float,
 ):
-    num_tokens = T.dynamic('num_tokens')
-    mhc_mult3 = T.const('mhc_mult3')
-    n_rms_group = T.const('n_rms_group')
+    num_tokens = T.dynamic("num_tokens")
+    mhc_mult3 = T.const("mhc_mult3")
+    n_rms_group = T.const("n_rms_group")
 
     out_grad: T.Tensor[(num_tokens, mhc_mult3), T.float32]
     out_mul: T.Tensor[(num_tokens, n_rms_group, mhc_mult3), T.float32]
@@ -571,35 +565,35 @@ def mhc_reduce_partials_and_rmsnorm_bwd_asc(
             core_id,
             group_size=1,
             num_stages=_RMSNORM_NUM_STAGES,
-            annotations={'enable_offset': True},
+            annotations={"enable_offset": True},
         ):
             token_start = token_block * _RMSNORM_TOKEN_BLOCK
             valid_tokens = T.min(_RMSNORM_TOKEN_BLOCK, num_tokens - token_start)
             T.copy(
-                out_grad[token_start:token_start + valid_tokens, 0:mhc_mult3],
+                out_grad[token_start : token_start + valid_tokens, 0:mhc_mult3],
                 out_grad_ub[0:valid_tokens, 0:mhc_mult3],
             )
             T.copy(
                 out_mul[
-                    token_start:token_start + valid_tokens,
+                    token_start : token_start + valid_tokens,
                     0:n_rms_group,
                     0:mhc_mult3,
                 ],
                 out_mul_ub[0:valid_tokens, 0:n_rms_group, 0:mhc_mult3],
             )
             T.copy(
-                sqrsum[token_start:token_start + valid_tokens, 0:n_rms_group],
+                sqrsum[token_start : token_start + valid_tokens, 0:n_rms_group],
                 sqrsum_ub[0:valid_tokens, 0:n_rms_group],
             )
 
             with T.SimdVF():
                 one = S.vdup(1.0, T.float32)
-                one_lane = S.pset(32, 'PAT_VL1')
+                one_lane = S.pset(32, "PAT_VL1")
                 lane_id = S.vci(T.int32(0), T.int32)
                 valid_lanes = S.vcmp(
                     lane_id,
                     S.vdup(mhc_mult3, T.int32),
-                    op='lt',
+                    op="lt",
                 )
                 for row in range(_RMSNORM_TOKEN_BLOCK):
                     out_grad_vec = S.vld(out_grad_ub[row, 0])
@@ -607,7 +601,7 @@ def mhc_reduce_partials_and_rmsnorm_bwd_asc(
                     for k in range(n_rms_group):
                         sqrsum_vec = S.vld(
                             sqrsum_ub[row, k],
-                            dist='BRC_B32',
+                            dist="BRC_B32",
                         )
                         rms_vec = S.vdiv(
                             one,
@@ -645,7 +639,7 @@ def mhc_reduce_partials_and_rmsnorm_bwd_asc(
                             sqrsum_grad_ub[row, k],
                             sqrsum_grad_vec,
                             one_lane,
-                            dist='ONEPT_B32',
+                            dist="ONEPT_B32",
                         )
 
             T.copy(
@@ -655,7 +649,7 @@ def mhc_reduce_partials_and_rmsnorm_bwd_asc(
                     0:mhc_mult3,
                 ],
                 out_mul_grad[
-                    token_start:token_start + valid_tokens,
+                    token_start : token_start + valid_tokens,
                     0:n_rms_group,
                     0:mhc_mult3,
                 ],
@@ -663,7 +657,7 @@ def mhc_reduce_partials_and_rmsnorm_bwd_asc(
             T.copy(
                 sqrsum_grad_ub[0:valid_tokens, 0:n_rms_group],
                 sqrsum_grad[
-                    token_start:token_start + valid_tokens,
+                    token_start : token_start + valid_tokens,
                     0:n_rms_group,
                 ],
             )
@@ -690,11 +684,11 @@ def get_mhc_gemm_with_sqrsum_fwd_kernel_asc(
     num_cores = max_num_cores if num_cores is None else num_cores
     assert 0 < num_cores <= max_num_cores
     VL = _SQRSUM_VL
-    assert hidden_block % VL == 0, f'hidden_block {hidden_block} must be a multiple of {VL}'
+    assert hidden_block % VL == 0, f"hidden_block {hidden_block} must be a multiple of {VL}"
     nchunk = hidden_block // VL
     assert nchunk in (1, 2, 4), (
-        f'hidden_block {hidden_block} -> nchunk {nchunk}; the square-sum tree-reduce '
-        'only handles nchunk in {1,2,4} (hidden_block in {64,128,256})'
+        f"hidden_block {hidden_block} -> nchunk {nchunk}; the square-sum tree-reduce "
+        "only handles nchunk in {1,2,4} (hidden_block in {64,128,256})"
     )
     k_tiles = split_size // hidden_block
     token_tiles = ceil_div(num_tokens, token_block)
@@ -734,13 +728,13 @@ def get_mhc_gemm_with_sqrsum_fwd_kernel_asc(
                 # ---- GEMM (fp32) fused with square-sum: read x once, cast once ----
                 for kt in T.Pipelined(k_tiles, num_stages=num_stages):
                     k_start = k_offset + kt * hidden_block
-                    T.dual_copy(x[token_start:token_start + token_block, k_start:k_start + hidden_block], x_ub_b)
-                    T.copy(fn[0:mhc_mult3, k_start:k_start + hidden_block], fn_l1[0:mhc_mult3, :])
+                    T.dual_copy(x[token_start : token_start + token_block, k_start : k_start + hidden_block], x_ub_b)
+                    T.copy(fn[0:mhc_mult3, k_start : k_start + hidden_block], fn_l1[0:mhc_mult3, :])
                     with T.SimdVF():
                         for i in range(token_block // 2):
                             for jj in range(nchunk):
-                                b = T.simd.vld(x_ub_b[i, jj * VL], dist='UNPK_B16')
-                                f = T.simd.vcvt(b, 'float32', part=0)
+                                b = T.simd.vld(x_ub_b[i, jj * VL], dist="UNPK_B16")
+                                f = T.simd.vcvt(b, "float32", part=0)
                                 T.simd.vsts(x_ub_f[i, jj * VL], f)
                                 sq = T.simd.vmul(f, f)
                                 prev = T.simd.vld(sqacc[i, jj * VL])
@@ -757,14 +751,13 @@ def get_mhc_gemm_with_sqrsum_fwd_kernel_asc(
                 # Consume the final GEMM unit flag while committing the L0C tile.
                 T.copy(
                     acc[:, 0:mhc_mult3],
-                    out[pid_z, token_start:token_start + token_block,
-                        pid_y * mhc_mult3:(pid_y + 1) * mhc_mult3],
+                    out[pid_z, token_start : token_start + token_block, pid_y * mhc_mult3 : (pid_y + 1) * mhc_mult3],
                     unit_flag_ctrl=3,
                 )
                 # fold the nchunk VL-slices and horizontally reduce -> per-row scalar
                 with T.SimdVF():
-                    full = T.simd.pset(32, 'PAT_ALL')
-                    one = T.simd.pset(32, 'PAT_VL1')
+                    full = T.simd.pset(32, "PAT_ALL")
+                    one = T.simd.pset(32, "PAT_VL1")
                     for i in range(token_block // 2):
                         # tree-reduce nchunk (1,2,4) VL-slices with distinct SSA values,
                         # then horizontal reduce -> per-row scalar (single ONEPT store).
@@ -776,7 +769,7 @@ def get_mhc_gemm_with_sqrsum_fwd_kernel_asc(
                             s01 = T.simd.vadd(T.simd.vld(sqacc[i, 0]), T.simd.vld(sqacc[i, VL]))
                             s23 = T.simd.vadd(T.simd.vld(sqacc[i, 2 * VL]), T.simd.vld(sqacc[i, 3 * VL]))
                             red = T.simd.vadd(s01, s23)
-                        T.simd.vsts(sqr_final[i], T.simd.vcadd(red, full), one, 'ONEPT_B32')
+                        T.simd.vsts(sqr_final[i], T.simd.vcadd(red, full), one, "ONEPT_B32")
                 half = token_block // 2
                 T.copy(sqr_final, sqrsum[pid_z, token_start + sid * half : token_start + sid * half + half, pid_y])
 
@@ -879,6 +872,7 @@ def _mhc_gemm_with_sqrsum_fwd_asc_legacy(
     kernel(x, fn, out_3d, sqrsum)
     return out, sqrsum
 
+
 @tilelang.jit
 def mhc_gemm_with_sqrsum_fwd_asc(
     x,
@@ -906,9 +900,9 @@ def mhc_gemm_with_sqrsum_fwd_asc(
     num_l1_x_stages = 3
     num_mad_stages = 2
 
-    num_tokens = T.dynamic('num_tokens')
-    mhc_mult3 = T.const('mhc_mult3')
-    mhc_hidden_size = T.const('mhc_hidden_size')
+    num_tokens = T.dynamic("num_tokens")
+    mhc_mult3 = T.const("mhc_mult3")
+    mhc_hidden_size = T.const("mhc_hidden_size")
 
     x: T.Tensor[(num_tokens, mhc_hidden_size), T.bfloat16]
     fn: T.Tensor[(mhc_mult3, mhc_hidden_size), T.float32]
@@ -954,8 +948,8 @@ def mhc_gemm_with_sqrsum_fwd_asc(
         )
 
         if split_id != 0:
-            T.set_atomic('add', 'float32')
-        T.set_hf32_mode('nearest_even')
+            T.set_atomic("add", "float32")
+        T.set_hf32_mode("nearest_even")
         for chunk_idx in T.Serial(num_token_chunks):
             token_block_base = chunk_idx * num_token_blocks_per_chunk + core_in_split
             num_valid_token_stages = T.min(
@@ -992,7 +986,7 @@ def mhc_gemm_with_sqrsum_fwd_asc(
 
                 for token_stage in T.Serial(
                     num_valid_token_stages,
-                    annotations={'multi_buffer_eligible': [x_l1]},
+                    annotations={"multi_buffer_eligible": [x_l1]},
                 ):
                     token_block = token_block_base + token_stage * cores_per_split
                     token_begin = token_block * block_num_tokens
@@ -1010,7 +1004,7 @@ def mhc_gemm_with_sqrsum_fwd_asc(
                                 hidden_begin : hidden_begin + block_hidden,
                             ],
                             x_ub[0:actual_aiv_num_tokens, :],
-                            l2_cache_ctrl='notalloc_keep',
+                            l2_cache_ctrl="notalloc_keep",
                             pad_value=0,
                         )
 
@@ -1019,32 +1013,32 @@ def mhc_gemm_with_sqrsum_fwd_asc(
                             bf16_mask = T.simd.pset(16)
                             f32_mask = T.simd.pset(32)
                             nz_stride = T.int32((nz_stage_rows << 16) | (8 * nz_stage_rows))
-                            zero_bf16 = T.simd.vdup(T.bfloat16(0), 'bfloat16', bf16_mask)
-                            row_indices = T.simd.vci(T.float32(0), 'float32')
-                            current_row = T.simd.alloc_var('float32')
-                            current_row = T.simd.vdup(T.float32(0), 'float32', f32_mask)
-                            one = T.simd.vdup(T.float32(1), 'float32', f32_mask)
-                            sqr_sums = T.simd.alloc_var('float32')
-                            sqr_sums = T.simd.vdup(T.float32(0), 'float32', f32_mask)
+                            zero_bf16 = T.simd.vdup(T.bfloat16(0), "bfloat16", bf16_mask)
+                            row_indices = T.simd.vci(T.float32(0), "float32")
+                            current_row = T.simd.alloc_var("float32")
+                            current_row = T.simd.vdup(T.float32(0), "float32", f32_mask)
+                            one = T.simd.vdup(T.float32(1), "float32", f32_mask)
+                            sqr_sums = T.simd.alloc_var("float32")
+                            sqr_sums = T.simd.vdup(T.float32(0), "float32", f32_mask)
 
                             for row in T.Serial(half_block_num_tokens):
-                                row_acc = T.simd.alloc_var('float32')
-                                row_acc = T.simd.vdup(T.float32(0), 'float32', f32_mask)
+                                row_acc = T.simd.alloc_var("float32")
+                                row_acc = T.simd.vdup(T.float32(0), "float32", f32_mask)
                                 nz_ptr = T.simd.make_ubuf_ptr(
                                     T.access_ptr(
                                         x_nz_ub[row, 0],
-                                        'w',
+                                        "w",
                                         1,
                                         block_hidden,
                                     ),
-                                    'float32',
+                                    "float32",
                                 )
 
                                 for pass_id in T.Serial(block_hidden // 128):
                                     packed = T.simd.vld(x_ub[row, pass_id * 128])
                                     lo_bits, hi_bits = T.simd.vintlv(zero_bf16, packed)
-                                    lo = T.reinterpret(lo_bits, 'float32x64')
-                                    hi = T.reinterpret(hi_bits, 'float32x64')
+                                    lo = T.reinterpret(lo_bits, "float32x64")
+                                    hi = T.reinterpret(hi_bits, "float32x64")
 
                                     row_acc = T.simd.vadd(
                                         row_acc,
@@ -1071,14 +1065,14 @@ def mhc_gemm_with_sqrsum_fwd_asc(
                                         update=True,
                                     )
 
-                                row_sum = T.simd.alloc_var('float32')
+                                row_sum = T.simd.alloc_var("float32")
                                 row_sum = T.simd.vcadd(row_acc, f32_mask)
                                 row_sum_broadcast = T.simd.vdupv(row_sum, f32_mask)
                                 row_mask = T.simd.vcmp(
                                     row_indices,
                                     current_row,
                                     f32_mask,
-                                    'eq',
+                                    "eq",
                                 )
                                 sqr_sums = T.simd.vsel(row_sum_broadcast, sqr_sums, row_mask)
                                 current_row = T.simd.vadd(current_row, one, f32_mask)
@@ -1143,8 +1137,8 @@ def mhc_gemm_with_sqrsum_fwd_asc(
                         T.min(num_token_chunks - chunk_idx - 1, num_chunk_end_syncs),
                     )
                     for _ in T.Serial(num_store_syncs):
-                        T.ascend_sync_inter_arrive('PIPE_FIX', out_mul_flag)
-                        T.ascend_sync_inter_wait('PIPE_FIX', out_mul_flag)
+                        T.ascend_sync_inter_arrive("PIPE_FIX", out_mul_flag)
+                        T.ascend_sync_inter_wait("PIPE_FIX", out_mul_flag)
 
             with T.PerCoreTask():
                 for store_phase in T.Serial(num_store_phases):
@@ -1167,7 +1161,7 @@ def mhc_gemm_with_sqrsum_fwd_asc(
                                 T.copy(
                                     sqrsum_ub[token_stage, 0:actual_aiv_num_tokens],
                                     sqrsum[token_begin : token_begin + actual_aiv_num_tokens],
-                                    l2_cache_ctrl='normal_fv',
+                                    l2_cache_ctrl="normal_fv",
                                 )
                     num_store_syncs = T.if_then_else(
                         store_phase < num_always_synced_store_phases,
@@ -1175,11 +1169,12 @@ def mhc_gemm_with_sqrsum_fwd_asc(
                         T.min(num_token_chunks - chunk_idx - 1, num_chunk_end_syncs),
                     )
                     for _ in T.Serial(num_store_syncs):
-                        T.ascend_sync_inter_arrive('PIPE_MTE3', sqrsum_flag)
-                        T.ascend_sync_inter_wait('PIPE_MTE3', sqrsum_flag)
+                        T.ascend_sync_inter_arrive("PIPE_MTE3", sqrsum_flag)
+                        T.ascend_sync_inter_wait("PIPE_MTE3", sqrsum_flag)
 
         if split_id != 0:
             T.set_atomic_none()
+
 
 @tilelang.jit
 def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
@@ -1254,9 +1249,7 @@ def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
             x_grad_ub = T.alloc_shared((half_tokens, hidden_block), T.bfloat16)
             sqrsum_grad_ub = T.alloc_shared((half_tokens, n_rms_group), T.float32)
 
-            for block_id in T.Persistent(
-                [total_tasks], num_cores, core_id, group_size=1
-            ):
+            for block_id in T.Persistent([total_tasks], num_cores, core_id, group_size=1):
                 if block_id < x_tasks:
                     # ------------------------- x gradient -----------------
                     x_pid_z = block_id % hidden_tiles
@@ -1269,14 +1262,13 @@ def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
 
                     T.copy(
                         out_mul_grad[
-                            x_token_start:x_token_start + token_block,
-                            x_pid_y * mhc_mult3:
-                            x_pid_y * mhc_mult3 + grad_block,
+                            x_token_start : x_token_start + token_block,
+                            x_pid_y * mhc_mult3 : x_pid_y * mhc_mult3 + grad_block,
                         ],
                         grad_l1,
                     )
                     T.copy(
-                        fn[0:grad_block, x_hidden_start:x_hidden_start + hidden_block],
+                        fn[0:grad_block, x_hidden_start : x_hidden_start + hidden_block],
                         fn_l1,
                     )
                     T.copy(grad_l1, grad_l0)
@@ -1301,20 +1293,20 @@ def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
                     T.dual_copy(x_acc, gemm_ub, unit_flag_ctrl=3)
                     T.dual_copy(
                         x[
-                            x_token_start:x_token_start + token_block,
-                            x_hidden_start:x_hidden_start + hidden_block,
+                            x_token_start : x_token_start + token_block,
+                            x_hidden_start : x_hidden_start + hidden_block,
                         ],
                         x_ub_b,
                     )
                     T.dual_copy(
                         x_grad[
-                            x_token_start:x_token_start + token_block,
-                            x_hidden_start:x_hidden_start + hidden_block,
+                            x_token_start : x_token_start + token_block,
+                            x_hidden_start : x_hidden_start + hidden_block,
                         ],
                         x_grad_ub,
                     )
                     T.dual_copy(
-                        sqrsum_grad[x_token_start:x_token_start + token_block, :],
+                        sqrsum_grad[x_token_start : x_token_start + token_block, :],
                         sqrsum_grad_ub,
                     )
 
@@ -1347,9 +1339,8 @@ def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
                     T.copy(
                         x_grad_ub,
                         x_grad[
-                            x_token_start + sid * half_tokens:
-                            x_token_start + (sid + 1) * half_tokens,
-                            x_hidden_start:x_hidden_start + hidden_block,
+                            x_token_start + sid * half_tokens : x_token_start + (sid + 1) * half_tokens,
+                            x_hidden_start : x_hidden_start + hidden_block,
                         ],
                     )
                 else:
@@ -1363,16 +1354,15 @@ def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
                         fn_token_start = token_tile * token_block
                         T.copy(
                             out_mul_grad[
-                                fn_token_start:fn_token_start + token_block,
-                                fn_pid_y * mhc_mult3:
-                                fn_pid_y * mhc_mult3 + grad_block,
+                                fn_token_start : fn_token_start + token_block,
+                                fn_pid_y * mhc_mult3 : fn_pid_y * mhc_mult3 + grad_block,
                             ],
                             grad_l1,
                         )
                         T.dual_copy(
                             x[
-                                fn_token_start:fn_token_start + token_block,
-                                fn_hidden_start:fn_hidden_start + hidden_block,
+                                fn_token_start : fn_token_start + token_block,
+                                fn_hidden_start : fn_hidden_start + hidden_block,
                             ],
                             x_ub_b,
                         )
@@ -1391,11 +1381,11 @@ def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
                         for sub_tile in T.serial(token_sub_tiles):
                             sub_start = sub_tile * token_sub_block
                             T.copy(
-                                grad_l1[sub_start:sub_start + token_sub_block, :],
+                                grad_l1[sub_start : sub_start + token_sub_block, :],
                                 fn_grad_l0,
                             )
                             T.copy(
-                                x_l1[sub_start:sub_start + token_sub_block, :],
+                                x_l1[sub_start : sub_start + token_sub_block, :],
                                 x_l0,
                             )
                             # This is the L0 TN form (A^T @ B).  The B
@@ -1413,7 +1403,7 @@ def get_mhc_gemm_with_sqrsum_bwd_kernel_asc(
 
                     T.copy(
                         fn_acc[0:mhc_mult3, :],
-                        fn_grad[0:mhc_mult3, fn_hidden_start:fn_hidden_start + hidden_block],
+                        fn_grad[0:mhc_mult3, fn_hidden_start : fn_hidden_start + hidden_block],
                     )
 
     return mhc_gemm_with_sqrsum_bwd_asc_fused
@@ -1482,12 +1472,8 @@ def mhc_gemm_with_sqrsum_bwd_asc(
     assert token_block % 2 == 0
     assert token_block % 64 == 0
     assert hidden_block % _VEC == 0
-    assert num_tokens % token_block == 0, (
-        f"num_tokens {num_tokens} must be divisible by token_block {token_block}"
-    )
-    assert rms_group_size % hidden_block == 0, (
-        f"rms_group_size {rms_group_size} must be divisible by hidden_block {hidden_block}"
-    )
+    assert num_tokens % token_block == 0, f"num_tokens {num_tokens} must be divisible by token_block {token_block}"
+    assert rms_group_size % hidden_block == 0, f"rms_group_size {rms_group_size} must be divisible by hidden_block {hidden_block}"
 
     if num_tokens == 0:
         return x_grad, fn_grad

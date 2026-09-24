@@ -23,7 +23,7 @@ python3 {skill_base}/scripts/workflow.assemble_report.py \
     --output {report_output_path}
 ```
 
-The script reads all available YAML files under `{yaml_dir}` and assembles one aggregate `type: format` result together with ordinary `type: clause` results into a single Markdown report. Every parseable `_dupN` file is included independently in the report and statistics. Unparseable YAML is skipped with a warning. When an ordinary clause's total evidence score disagrees with `confidence_value`, the script recalculates it according to `core/methodology.md` and follows the AscendC behavior of writing the corrected value back in place.
+The script reads all available YAML files under `{yaml_dir}` and assembles one aggregate `type: format` result together with ordinary `type: clause` results into a single Markdown report. Every parseable `_dupN` file is included independently in the report and statistics. Unparsable YAML is skipped with a warning. When an ordinary clause's total evidence score disagrees with `confidence_value`, the script recalculates it according to `core/methodology.md` and follows the AscendC behavior of writing the corrected value back in place.
 
 If the command fails or does not generate a nonempty report, stop this step and return the actual error. Do not fabricate a report.
 

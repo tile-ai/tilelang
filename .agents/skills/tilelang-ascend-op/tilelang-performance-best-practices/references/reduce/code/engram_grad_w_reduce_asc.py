@@ -26,9 +26,7 @@ def _choose_num_batches(num_rows: int, max_rows_per_batch: int) -> int:
 def get_engram_grad_w_reduce_kernel_asc(hidden_size: int, num_persistent_blocks: int, hc_mult: int = 4):
     assert num_persistent_blocks > 0
 
-    if hidden_size <= 3072:
-        blk_d = 256
-    elif hidden_size == 6144 and num_persistent_blocks > 74:
+    if hidden_size <= 3072 or hidden_size == 6144 and num_persistent_blocks > 74:
         blk_d = 256
     else:
         blk_d = 512
@@ -61,13 +59,15 @@ def get_engram_grad_w_reduce_kernel_asc(hidden_size: int, num_persistent_blocks:
             grad_we_ub = T.alloc_shared((blk_d,), T.float)
             grad_w_batch_ub = T.alloc_shared((rows_per_batch, blk_d), T.float)
             grad_w_acc_ub = T.alloc_shared((blk_d,), T.float)
-            T.annotate_buffer_versions({
-                wh_ub: persistent_stages,
-                we_ub: persistent_stages,
-                grad_wh_ub: persistent_stages,
-                grad_we_ub: persistent_stages,
-                grad_w_batch_ub: buffer_versions,
-            })
+            T.annotate_buffer_versions(
+                {
+                    wh_ub: persistent_stages,
+                    we_ub: persistent_stages,
+                    grad_wh_ub: persistent_stages,
+                    grad_we_ub: persistent_stages,
+                    grad_w_batch_ub: buffer_versions,
+                }
+            )
 
             for pid_h, pid_b in T.Persistent([hc_mult, num_tiles], num_cores, core_id, group_size=1, num_stages=persistent_stages):
                 col_start = pid_b * blk_d
@@ -84,7 +84,11 @@ def get_engram_grad_w_reduce_kernel_asc(hidden_size: int, num_persistent_blocks:
 
                 for batch in T.Pipelined(num_row_batches, num_stages=row_pipeline_stages):
                     row_start = batch * rows_per_batch
-                    T.copy(grad_w_partial[row_start : row_start + rows_per_batch, pid_h, col_start:col_end], grad_w_batch_ub, l2_cache_ctrl="NOTALLOC_KEEP")
+                    T.copy(
+                        grad_w_partial[row_start : row_start + rows_per_batch, pid_h, col_start:col_end],
+                        grad_w_batch_ub,
+                        l2_cache_ctrl="NOTALLOC_KEEP",
+                    )
                     with T.SimdVF():
                         acc0 = S.alloc_var(T.float32)
                         acc1 = S.alloc_var(T.float32)

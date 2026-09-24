@@ -52,6 +52,7 @@ class HalChipInfo(ctypes.Structure):
 # CANN home positioning (follow the original logic)
 # ---------------------------------------------------------------------------
 
+
 def _derive_from_opp_path():
     opp = os.environ.get("ASCEND_OPP_PATH", "")
     if opp and opp.endswith("/opp"):
@@ -117,8 +118,7 @@ def get_cann_home():
             if resolved:
                 return resolved
     raise RuntimeError(
-        "Cannot locate CANN toolkit installation. Set one of: "
-        "ASCEND_TOOLKIT_HOME, ASCEND_HOME, ASCEND_HOME_PATH, ASCEND_CANN_HOME"
+        "Cannot locate CANN toolkit installation. Set one of: ASCEND_TOOLKIT_HOME, ASCEND_HOME, ASCEND_HOME_PATH, ASCEND_CANN_HOME"
     )
 
 
@@ -130,23 +130,22 @@ def get_arch_dir():
 # Layer 1: full-soc-version detection
 # ---------------------------------------------------------------------------
 
+
 def _find_asys():
     """Locate the asys executable file: first under ASCEND_HOME_PATH/tools, followed by PATH."""
     if os.environ.get("ASCEND_HOME_PATH"):
-        cand = os.path.join(
-            os.environ["ASCEND_HOME_PATH"], "tools", "ascend_system_advisor", "asys", "asys"
-        )
+        cand = os.path.join(os.environ["ASCEND_HOME_PATH"], "tools", "ascend_system_advisor", "asys", "asys")
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
     for cand in (
-        os.path.join(os.path.expanduser("~"), "Ascend", "tools",
-                     "ascend_system_advisor", "asys", "asys"),
+        os.path.join(os.path.expanduser("~"), "Ascend", "tools", "ascend_system_advisor", "asys", "asys"),
         "/usr/local/Ascend/tools/ascend_system_advisor/asys/asys",
     ):
         if os.path.isfile(cand) and os.access(cand, os.X_OK):
             return cand
     # Search in PATH (only the command name is returned, which will be parsed by subprocess)
     from shutil import which
+
     return which("asys")
 
 
@@ -160,7 +159,9 @@ def _run_asys_hardware(asys_cmd):
     try:
         result = subprocess.run(
             [asys_cmd, "info", "-r=hardware"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         output = result.stdout if result.returncode == 0 else None
     except (OSError, subprocess.TimeoutExpired):
@@ -216,8 +217,7 @@ def probe_full_soc_via_asys():
 
 
 def probe_full_soc_via_dsmi():
-    """Alternative: DSMI dsmi_get_chip_info (TTK dsmi_interface mode, single device query). Returns full_soc or None.
-    """
+    """Alternative: DSMI dsmi_get_chip_info (TTK dsmi_interface mode, single device query). Returns full_soc or None."""
     try:
         dll = ctypes.CDLL("libdrvdsmi_host.so")
         device_count = (ctypes.c_int * 1)()
@@ -246,7 +246,7 @@ def probe_full_soc_via_dsmi():
 
 
 def probe_full_soc():
-    """full-soc-version: asys Chip Info is the first choice, DSMI is the best choice. Return (full_soc, source) or None. """
+    """full-soc-version: asys Chip Info is the first choice, DSMI is the best choice. Return (full_soc, source) or None."""
     result = probe_full_soc_via_asys()
     if result:
         return result, "asys"
@@ -259,6 +259,7 @@ def probe_full_soc():
 # ---------------------------------------------------------------------------
 # Layer 2: NpuArch detection
 # ---------------------------------------------------------------------------
+
 
 def probe_npu_arch_via_asys():
     """Preferred: Arch Info of asys info -r=hardware (some versions do not have this field).
@@ -284,10 +285,11 @@ def probe_npu_arch_via_asys():
 # Layer 3: ini query (NpuArch bottom line + short-soc-version / CCE_AIV_version / variant_dir)
 # ---------------------------------------------------------------------------
 
+
 def _ini_has_soc_version(ini_path, full_soc):
     """Check whether a single ini contains the exact line SoC_version=full_soc (full file match line by line)."""
     try:
-        with open(ini_path, "r", errors="ignore") as f:
+        with open(ini_path, errors="ignore") as f:
             for line in f:
                 if line.strip() == f"SoC_version={full_soc}":
                     return True
@@ -314,7 +316,7 @@ def read_ini_fields(ini_path):
     """Read the [version] section key field."""
     fields = {}
     in_version_section = False
-    with open(ini_path, "r", errors="ignore") as f:
+    with open(ini_path, errors="ignore") as f:
         for line in f:
             line = line.strip()
             if line == "[version]":
@@ -340,6 +342,7 @@ def variant_dir_from_aiv(ccec_aiv_version):
 # Summary
 # ---------------------------------------------------------------------------
 
+
 def _apply_ini_fields(result, ini_path):
     """Write the ini field into result: short-soc-version / CCE_AIV_version / variant_dir; NpuArch knows the truth."""
     fields = read_ini_fields(ini_path)
@@ -352,9 +355,7 @@ def _apply_ini_fields(result, ini_path):
         if ini_arch:
             result["npu_arch"], result["npu_arch_source"] = ini_arch, "ini"
     elif ini_arch and ini_arch != result["npu_arch"]:
-        result["warnings"].append(
-            f"NpuArch is inconsistent: asys={result['npu_arch']}, ini={ini_arch} (asys shall prevail, please check)"
-        )
+        result["warnings"].append(f"NpuArch is inconsistent: asys={result['npu_arch']}, ini={ini_arch} (asys shall prevail, please check)")
 
 
 def _probe_npu_count():
@@ -431,26 +432,33 @@ def probe_all():
 # Output (refer to lookup_arch_variant.sh for printing style: value + end-of-line purpose comment to enhance memory)
 # ---------------------------------------------------------------------------
 
+
 def _format_report(r):
     lines = []
     lines.append(f"full-soc-version={r['full_soc']} (source={r['full_soc_source']})")
     if r["npu_arch"] is not None:
-        lines.append(f"NpuArch={r['npu_arch']} (source={r['npu_arch_source']})   "
-                     "# __NPU_ARCH__ macro branch / --npu-arch compiled value; only this macro branch is used to read the header file")
+        lines.append(
+            f"NpuArch={r['npu_arch']} (source={r['npu_arch_source']})   "
+            "# __NPU_ARCH__ macro branch / --npu-arch compiled value; only this macro branch is used to read the header file"
+        )
     if r["short_soc"]:
-        lines.append(f"short-soc-version={r['short_soc']}   "
-                     "# Operator prototype definition xxx operator_def.cpp The first parameter of AddConfig() (such as "
-                     "this->AICore().AddConfig(\"ascend950\", aicConfig))")
+        lines.append(
+            f"short-soc-version={r['short_soc']}   "
+            "# Operator prototype definition xxx operator_def.cpp The first parameter of AddConfig() (such as "
+            'this->AICore().AddConfig("ascend950", aicConfig))'
+        )
     if r["ccec_aiv_version"]:
         lines.append(f"CCE_AIV_version={r['ccec_aiv_version']}")
     if r["variant_dir"]:
-        lines.append(f"variant_dir={r['variant_dir']}   "
-                     f"# When reading the source code in the CANN installation directory, only look at the files under **/{r['variant_dir']}/")
+        lines.append(
+            f"variant_dir={r['variant_dir']}   "
+            f"# When reading the source code in the CANN installation directory, only look at the files under **/{r['variant_dir']}/"
+        )
     if r["ini_path"]:
         lines.append(f"ini={r['ini_path']}")
     if r["npu_count"] is not None:
         lines.append(f"npu_count={r['npu_count']}")
-    lines.append("dav-%s" % r["npu_arch"] if r["npu_arch"] else "dav-UNKNOWN")
+    lines.append(f"dav-{r['npu_arch']}" if r["npu_arch"] else "dav-UNKNOWN")
     for w in r["warnings"]:
         lines.append(f"WARNING: {w}")
     return "\n".join(lines)

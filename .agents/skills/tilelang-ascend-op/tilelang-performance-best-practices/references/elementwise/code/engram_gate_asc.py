@@ -102,8 +102,14 @@ def get_engram_gate_fwd_kernel_asc(
                 num_stages=num_stages,
                 annotations={
                     "multi_buffer_eligible": [
-                        x_ub, k_ub, v_ub, out_ub,
-                        dot_ub, gate_ub, rstd_x_ub, rstd_k_ub,
+                        x_ub,
+                        k_ub,
+                        v_ub,
+                        out_ub,
+                        dot_ub,
+                        gate_ub,
+                        rstd_x_ub,
+                        rstd_k_ub,
                     ]
                 },
             ):
@@ -163,12 +169,8 @@ def get_engram_gate_fwd_kernel_asc(
                                 one,
                                 S.vsqrt(S.vadds(S.vmuls(sum_k2, 1.0 / hidden_size), eps)),
                             )
-                            normalized_dot = S.vmuls(
-                                S.vmul(S.vmul(raw_dot, rstd_x), rstd_k), scalar
-                            )
-                            sqrt_abs = S.vsqrt(
-                                S.vmaxs(S.vabs(normalized_dot), clamp_value)
-                            )
+                            normalized_dot = S.vmuls(S.vmul(S.vmul(raw_dot, rstd_x), rstd_k), scalar)
+                            sqrt_abs = S.vsqrt(S.vmaxs(S.vabs(normalized_dot), clamp_value))
                             positive_sqrt = S.vsel(
                                 sqrt_abs,
                                 zero,
@@ -254,11 +256,11 @@ def get_engram_gate_bwd_kernel_asc(
     """Fused backward with disjoint main-gradient and grad-v vector-core roles."""
     assert hidden_size % _VEC == 0
     assert num_grad_v_cores > 0
-    assert hc_mult == 4, 'optimized Ascend SIMD backward requires hc_mult == 4'
+    assert hc_mult == 4, "optimized Ascend SIMD backward requires hc_mult == 4"
     heads_per_core = 2
     assert (num_cores - num_grad_v_cores) % (hc_mult // heads_per_core) == 0
 
-    num_tokens = T.dynamic('num_tokens')
+    num_tokens = T.dynamic("num_tokens")
     num_vecs = hidden_size // _VEC
     num_main_cores = num_cores - num_grad_v_cores
     num_head_groups = hc_mult // heads_per_core
@@ -269,9 +271,7 @@ def get_engram_gate_bwd_kernel_asc(
     # Four two-stage BF16 vectors plus two two-head FP32 vectors cost 32 * D;
     # the two versions of the eight-value FP32 stats buffer add 64 bytes.
     simdvf_ub_bytes = 32 * hidden_size + 2 * 8 * 4
-    assert simdvf_ub_bytes <= 248 * 1024, (
-        'Engram gate backward exceeds the 248 KiB SimdVF UB capacity'
-    )
+    assert simdvf_ub_bytes <= 248 * 1024, "Engram gate backward exceeds the 248 KiB SimdVF UB capacity"
 
     @T.prim_func
     def engram_gate_bwd_kernel_asc(
@@ -356,12 +356,12 @@ def get_engram_gate_bwd_kernel_asc(
                             for vec_id in range(num_vecs):
                                 col = vec_id * _VEC
                                 go_reg = S.vcvt(
-                                    S.vld(go_ub[col], dist='UNPK_B16'),
+                                    S.vld(go_ub[col], dist="UNPK_B16"),
                                     T.float32,
                                     part=0,
                                 )
                                 v_reg = S.vcvt(
-                                    S.vld(v_ub[col], dist='UNPK_B16'),
+                                    S.vld(v_ub[col], dist="UNPK_B16"),
                                     T.float32,
                                     part=0,
                                 )
@@ -370,7 +370,7 @@ def get_engram_gate_bwd_kernel_asc(
                             S.vsts(
                                 stats_ub[4],
                                 S.vcadd(dldg),
-                                dist='ONEPT_B32',
+                                dist="ONEPT_B32",
                             )
 
                         with T.SimdVF():
@@ -379,11 +379,11 @@ def get_engram_gate_bwd_kernel_asc(
                             grad_k_acc = S.alloc_var(T.float32)
                             compute_zero = S.vdup(0.0, T.float32)
                             compute_one = S.vdup(1.0, T.float32)
-                            dldg_broadcast = S.vld(stats_ub[4], dist='BRC_B32')
-                            raw_dot = S.vld(stats_ub[0], dist='BRC_B32')
-                            gate = S.vld(stats_ub[1], dist='BRC_B32')
-                            rstd_x_reg = S.vld(stats_ub[2], dist='BRC_B32')
-                            rstd_k_reg = S.vld(stats_ub[3], dist='BRC_B32')
+                            dldg_broadcast = S.vld(stats_ub[4], dist="BRC_B32")
+                            raw_dot = S.vld(stats_ub[0], dist="BRC_B32")
+                            gate = S.vld(stats_ub[1], dist="BRC_B32")
+                            rstd_x_reg = S.vld(stats_ub[2], dist="BRC_B32")
+                            rstd_k_reg = S.vld(stats_ub[3], dist="BRC_B32")
                             abs_raw_dot = S.vabs(raw_dot)
                             normalized_abs = S.vmuls(
                                 S.vmul(
@@ -411,7 +411,7 @@ def get_engram_gate_bwd_kernel_asc(
                                     )
                                 ),
                             )
-                            clamped_mask = S.vcmps(normalized_abs, clamp_value, op='lt')
+                            clamped_mask = S.vcmps(normalized_abs, clamp_value, op="lt")
                             derivative = S.vsel(
                                 compute_zero,
                                 derivative_unclamped,
@@ -432,27 +432,23 @@ def get_engram_gate_bwd_kernel_asc(
                                 1.0 / hidden_size,
                             )
 
-                            negative_derivative_dot_x = S.vmuls(
-                                S.vmul(derivative, dot_x), -1.0
-                            )
-                            negative_derivative_dot_k = S.vmuls(
-                                S.vmul(derivative, dot_k), -1.0
-                            )
+                            negative_derivative_dot_x = S.vmuls(S.vmul(derivative, dot_x), -1.0)
+                            negative_derivative_dot_k = S.vmuls(S.vmul(derivative, dot_k), -1.0)
 
                             for vec_id in range(num_vecs):
                                 col = vec_id * _VEC
                                 go_reg = S.vcvt(
-                                    S.vld(go_ub[col], dist='UNPK_B16'),
+                                    S.vld(go_ub[col], dist="UNPK_B16"),
                                     T.float32,
                                     part=0,
                                 )
                                 x_reg = S.vcvt(
-                                    S.vld(x_ub[col], dist='UNPK_B16'),
+                                    S.vld(x_ub[col], dist="UNPK_B16"),
                                     T.float32,
                                     part=0,
                                 )
                                 k_reg = S.vcvt(
-                                    S.vld(k_ub[col], dist='UNPK_B16'),
+                                    S.vld(k_ub[col], dist="UNPK_B16"),
                                     T.float32,
                                     part=0,
                                 )
@@ -480,12 +476,12 @@ def get_engram_gate_bwd_kernel_asc(
                                 S.vsts(
                                     x_ub[col],
                                     S.vcvt(grad_x_acc, T.bfloat16),
-                                    dist='PK_B32',
+                                    dist="PK_B32",
                                 )
                                 S.vsts(
                                     k_ub[col],
                                     S.vcvt(grad_k_acc, T.bfloat16),
-                                    dist='PK_B32',
+                                    dist="PK_B32",
                                 )
                                 S.vsts(grad_w_ub[local_head_id, col], grad_w_acc)
 
@@ -513,29 +509,29 @@ def get_engram_gate_bwd_kernel_asc(
                     T.copy(gate_in[token_id, :], stats_ub[:hc_mult])
 
                     with T.SimdVF():
-                        gate_0 = S.vld(stats_ub[0], dist='BRC_B32')
-                        gate_1 = S.vld(stats_ub[1], dist='BRC_B32')
-                        gate_2 = S.vld(stats_ub[2], dist='BRC_B32')
-                        gate_3 = S.vld(stats_ub[3], dist='BRC_B32')
+                        gate_0 = S.vld(stats_ub[0], dist="BRC_B32")
+                        gate_1 = S.vld(stats_ub[1], dist="BRC_B32")
+                        gate_2 = S.vld(stats_ub[2], dist="BRC_B32")
+                        gate_3 = S.vld(stats_ub[3], dist="BRC_B32")
                         for vec_id in range(num_vecs):
                             col = vec_id * _VEC
                             go_0 = S.vcvt(
-                                S.vld(go_ub[col], dist='UNPK_B16'),
+                                S.vld(go_ub[col], dist="UNPK_B16"),
                                 T.float32,
                                 part=0,
                             )
                             go_1 = S.vcvt(
-                                S.vld(x_ub[col], dist='UNPK_B16'),
+                                S.vld(x_ub[col], dist="UNPK_B16"),
                                 T.float32,
                                 part=0,
                             )
                             go_2 = S.vcvt(
-                                S.vld(k_ub[col], dist='UNPK_B16'),
+                                S.vld(k_ub[col], dist="UNPK_B16"),
                                 T.float32,
                                 part=0,
                             )
                             go_3 = S.vcvt(
-                                S.vld(v_ub[col], dist='UNPK_B16'),
+                                S.vld(v_ub[col], dist="UNPK_B16"),
                                 T.float32,
                                 part=0,
                             )
@@ -552,7 +548,7 @@ def get_engram_gate_bwd_kernel_asc(
                             S.vsts(
                                 go_ub[col],
                                 S.vcvt(grad_v_reg, T.bfloat16),
-                                dist='PK_B32',
+                                dist="PK_B32",
                             )
 
                     T.copy(go_ub, grad_v[token_id, :])

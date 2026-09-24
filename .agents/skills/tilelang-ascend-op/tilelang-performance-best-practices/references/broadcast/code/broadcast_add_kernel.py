@@ -26,7 +26,7 @@ def build(rows: int, cols: int, dtype: str = "float16", num_cores: int | None = 
                     for tile in T.serial(tiles):
                         begin = tile * cfg.tile_cols
                         valid = T.min(cfg.tile_cols, cols - begin)
-                        T.copy(a[row, begin:begin + valid], a_ub[:valid])
+                        T.copy(a[row, begin : begin + valid], a_ub[:valid])
                         with T.SimtVF(threads=128):
                             a_fp32 = T.alloc_fragment((cfg.tile_cols,), "float32")
                             bias_fp32 = T.alloc_fragment((1,), "float32")
@@ -35,5 +35,6 @@ def build(rows: int, cols: int, dtype: str = "float16", num_cores: int | None = 
                                 if i < valid:
                                     a_fp32[i] = T.cast(a_ub[i], "float32")
                                     out_ub[i] = T.cast(a_fp32[i] + bias_fp32[0], dtype)
-                        T.copy(out_ub[:valid], out[row, begin:begin + valid])
+                        T.copy(out_ub[:valid], out[row, begin : begin + valid])
+
     return kernel

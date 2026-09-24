@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -32,6 +33,8 @@ AGENT_ROOT = SCRIPT_PATH.parents[1]
 SOURCE_REPO_ROOT = AGENT_ROOT.parent
 SOURCE_MANIFEST_PATH = AGENT_ROOT / "manifest.json"
 SOURCE_SKILLS_ROOT = SOURCE_REPO_ROOT / ".agents" / "skills" / "tilelang-ascend-op"
+
+
 class InstallError(RuntimeError):
     pass
 
@@ -86,11 +89,7 @@ def source_manifest() -> dict[str, Any]:
 def target_layout(tool: str, scope: str, requested_path: str | None) -> TargetLayout:
     home = Path.home()
     if scope == "project":
-        install_base = (
-            Path(requested_path).expanduser().resolve()
-            if requested_path
-            else AGENT_ROOT
-        )
+        install_base = Path(requested_path).expanduser().resolve() if requested_path else AGENT_ROOT
         if not install_base.is_dir():
             raise InstallError(f"project path is not a directory: {install_base}")
         config_root = install_base / f".{tool}"
@@ -107,11 +106,7 @@ def target_layout(tool: str, scope: str, requested_path: str | None) -> TargetLa
             config_root = home / ".claude"
 
     if tool in ("codex", "opencode"):
-        shared_skill_root = (
-            install_base / ".agents" / "skills"
-            if scope == "project"
-            else home / ".agents" / "skills"
-        )
+        shared_skill_root = install_base / ".agents" / "skills" if scope == "project" else home / ".agents" / "skills"
         skill_root = shared_skill_root / "tilelang-ascend-op"
     else:
         skill_root = config_root / "skills"
@@ -157,9 +152,7 @@ def render_opencode(agent: dict[str, Any], body: str, schema: str) -> bytes:
     child_permissions = ""
     if children:
         if schema == "classic":
-            child_permissions = "\n".join(
-                f"    {yaml_scalar(child)}: allow" for child in children
-            )
+            child_permissions = "\n".join(f"    {yaml_scalar(child)}: allow" for child in children)
         else:
             child_permissions = "\n".join(
                 "\n".join(
@@ -236,15 +229,11 @@ def build_artifacts(
                 )
             )
         else:
-            artifacts.append(
-                Artifact(layout.agent_root / f"{name}.md", "file", content=render_claude(agent, body))
-            )
+            artifacts.append(Artifact(layout.agent_root / f"{name}.md", "file", content=render_claude(agent, body)))
 
     for workflow_source in manifest["workflows"]:
         source = AGENT_ROOT / str(workflow_source)
-        artifacts.append(
-            Artifact(layout.workflow_root / source.name, "file", content=source.read_bytes())
-        )
+        artifacts.append(Artifact(layout.workflow_root / source.name, "file", content=source.read_bytes()))
 
     source_skill_root = SOURCE_SKILLS_ROOT.resolve()
     target_skill_root = layout.skill_root.resolve(strict=False)
@@ -300,15 +289,10 @@ def validate_install_manifest_target(
         "scope": layout.scope,
     }
     mismatches = [
-        f"{key}={install_manifest.get(key)!r} (expected {value!r})"
-        for key, value in expected.items()
-        if install_manifest.get(key) != value
+        f"{key}={install_manifest.get(key)!r} (expected {value!r})" for key, value in expected.items() if install_manifest.get(key) != value
     ]
     if mismatches:
-        raise InstallError(
-            f"install manifest does not belong to this target: {layout.manifest_path}\n  "
-            + "\n  ".join(mismatches)
-        )
+        raise InstallError(f"install manifest does not belong to this target: {layout.manifest_path}\n  " + "\n  ".join(mismatches))
 
 
 def backup_path(path: Path) -> Path:
@@ -535,9 +519,7 @@ def uninstall(layout: TargetLayout, source: dict[str, Any], dry_run: bool) -> No
         return
     validate_install_manifest_target(manifest, layout, source)
 
-    expected_paths = {
-        str(artifact.path) for artifact in build_artifacts(layout, source)
-    }
+    expected_paths = {str(artifact.path) for artifact in build_artifacts(layout, source)}
     invalid_entries = [
         entry
         for entry in manifest.get("artifacts", [])
@@ -550,10 +532,7 @@ def uninstall(layout: TargetLayout, source: dict[str, Any], dry_run: bool) -> No
     ]
     if invalid_entries:
         details = "\n".join(f"  - {entry!r}" for entry in invalid_entries)
-        raise InstallError(
-            "refusing to uninstall invalid entries or paths not declared by the current source manifest:\n"
-            + details
-        )
+        raise InstallError("refusing to uninstall invalid entries or paths not declared by the current source manifest:\n" + details)
 
     retained: list[dict[str, Any]] = []
     for entry in manifest.get("artifacts", []):
@@ -583,10 +562,8 @@ def uninstall(layout: TargetLayout, source: dict[str, Any], dry_run: bool) -> No
     else:
         layout.manifest_path.unlink(missing_ok=True)
         for directory in (layout.agent_root, layout.workflow_root, layout.skill_root):
-            try:
+            with contextlib.suppress(OSError):
                 directory.rmdir()
-            except OSError:
-                pass
         print(f"  removed manifest {layout.manifest_path}")
 
 
@@ -681,9 +658,7 @@ def validate_source(manifest: dict[str, Any]) -> None:
     bootstrap = load_template("common/AGENTS.md.tpl")
     required_npu_prefix = "env -u ASCEND_RT_VISIBLE_DEVICES"
     if required_npu_prefix not in bootstrap:
-        errors.append(
-            f"AGENTS bootstrap missing Codex NPU command prefix: {required_npu_prefix}"
-        )
+        errors.append(f"AGENTS bootstrap missing Codex NPU command prefix: {required_npu_prefix}")
     if "sandbox_permissions=require_escalated" not in bootstrap:
         errors.append("AGENTS bootstrap missing Codex NPU escalation requirement")
     if len(bootstrap.encode("utf-8")) > 8192:
@@ -813,4 +788,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except InstallError as exc:
         print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None

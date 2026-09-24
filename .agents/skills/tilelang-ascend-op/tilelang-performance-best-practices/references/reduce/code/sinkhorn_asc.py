@@ -9,9 +9,7 @@ _TOKEN_TILE = 64
 
 
 @tilelang.jit(target="pto", pass_configs={"tl.enable_fast_math": True})
-def _mhc_sinkhorn_fwd_asc(
-    x, out, repeat: int, eps: float, tile_num: int, num_cores: int, threads: int
-):
+def _mhc_sinkhorn_fwd_asc(x, out, repeat: int, eps: float, tile_num: int, num_cores: int, threads: int):
     """Unified Sinkhorn forward for any token count (v2: reciprocal-mul).
 
     ``num_cores`` and ``threads`` are compile-time scalars chosen by the host
@@ -20,8 +18,8 @@ def _mhc_sinkhorn_fwd_asc(
       - threads   = min(num_tokens, _TOKEN_TILE) * 16
     so small inputs launch few cores/threads instead of wasting a full grid.
     """
-    num_tokens = T.dynamic('num_tokens')
-    mhc = T.const('mhc')
+    num_tokens = T.dynamic("num_tokens")
+    mhc = T.const("mhc")
     x: T.Tensor[(num_tokens, mhc, mhc), T.float32]
     out: T.Tensor[(num_tokens, mhc, mhc), T.float32]
 
@@ -51,9 +49,7 @@ def _mhc_sinkhorn_fwd_asc(
                 row = load_element // mhc
                 col = load_element % mhc
                 if load_token < valid_tokens:
-                    matrix_ub[row, col, load_token] = x[
-                        token_start + load_token, row, col
-                    ]
+                    matrix_ub[row, col, load_token] = x[token_start + load_token, row, col]
                 else:
                     matrix_ub[row, col, load_token] = 0.0
 
@@ -127,9 +123,7 @@ def _mhc_sinkhorn_fwd_asc(
                 row = store_element // mhc
                 col = store_element % mhc
                 if store_token < valid_tokens:
-                    out[token_start + store_token, row, col] = matrix_ub[
-                        row, col, store_token
-                    ]
+                    out[token_start + store_token, row, col] = matrix_ub[row, col, store_token]
 
 
 @tilelang.jit(target="pto", pass_configs={"tl.enable_fast_math": True})
@@ -144,8 +138,8 @@ def _mhc_sinkhorn_bwd_asc(
     threads: int,
 ):
     """Unified Sinkhorn backward for any token count (v2: reciprocal-mul)."""
-    num_tokens = T.dynamic('num_tokens')
-    mhc = T.const('mhc')
+    num_tokens = T.dynamic("num_tokens")
+    mhc = T.const("mhc")
     num_states = repeat * 2
 
     grad_output: T.Tensor[(num_tokens, mhc, mhc), T.float32]
@@ -155,12 +149,8 @@ def _mhc_sinkhorn_bwd_asc(
     with T.Kernel(num_cores) as core_id:
         matrix_ub = T.alloc_shared((mhc, mhc, _TOKEN_TILE), T.float32)
         grad_ub = T.alloc_shared((mhc, mhc, _TOKEN_TILE), T.float32)
-        states_ub = T.alloc_shared(
-            (num_states, mhc, mhc, _TOKEN_TILE), T.float32
-        )
-        sums_ub = T.alloc_shared(
-            (num_states, mhc, _TOKEN_TILE), T.float32
-        )
+        states_ub = T.alloc_shared((num_states, mhc, mhc, _TOKEN_TILE), T.float32)
+        sums_ub = T.alloc_shared((num_states, mhc, _TOKEN_TILE), T.float32)
 
         for tile_id in T.Persistent(
             [tile_num],
@@ -179,12 +169,8 @@ def _mhc_sinkhorn_bwd_asc(
                 row = load_element // mhc
                 col = load_element % mhc
                 if load_token < valid_tokens:
-                    matrix_ub[row, col, load_token] = x[
-                        token_start + load_token, row, col
-                    ]
-                    grad_ub[row, col, load_token] = grad_output[
-                        token_start + load_token, row, col
-                    ]
+                    matrix_ub[row, col, load_token] = x[token_start + load_token, row, col]
+                    grad_ub[row, col, load_token] = grad_output[token_start + load_token, row, col]
                 else:
                     matrix_ub[row, col, load_token] = 0.0
                     grad_ub[row, col, load_token] = 0.0
@@ -262,16 +248,14 @@ def _mhc_sinkhorn_bwd_asc(
                     recip = S.vdiv(one, reduction)
                     for col in T.unroll(mhc, explicit=True):
                         values[row, col] = S.vmul(values[row, col], recip)
-                        S.vsts(
-                            states_ub[num_states - 1, row, col, 0], values[row, col]
-                        )
+                        S.vsts(states_ub[num_states - 1, row, col, 0], values[row, col])
 
                 for col in T.unroll(mhc, explicit=True):
                     reduction = initial_eps
                     for row in T.unroll(mhc, explicit=True):
                         reduction = S.vadd(reduction, values[row, col])
                     S.vsts(sums_ub[num_states - 1, col, 0], reduction)
-                S.mem_bar('VST_VLD')
+                S.mem_bar("VST_VLD")
 
             with T.SimdVF():
                 reverse_zero = S.vdup(0.0, T.float32)
@@ -296,63 +280,43 @@ def _mhc_sinkhorn_bwd_asc(
                     for col in T.unroll(mhc, explicit=True):
                         dot = reverse_zero
                         for row in T.unroll(mhc, explicit=True):
-                            states[row] = S.vld(
-                                states_ub[col_state, row, col, 0]
-                            )
-                            dot = S.vadd(
-                                dot, S.vmul(grads[row, col], states[row])
-                            )
+                            states[row] = S.vld(states_ub[col_state, row, col, 0])
+                            dot = S.vadd(dot, S.vmul(grads[row, col], states[row]))
                         denom = S.vld(sums_ub[col_state, col, 0])
                         recip = S.vdiv(one_r, denom)
                         correction = S.vmul(dot, recip)
                         for row in T.unroll(mhc, explicit=True):
-                            grads[row, col] = S.vmul(
-                                S.vsub(grads[row, col], correction), recip
-                            )
+                            grads[row, col] = S.vmul(S.vsub(grads[row, col], correction), recip)
 
                     for row in T.unroll(mhc, explicit=True):
                         dot = reverse_zero
                         for col in T.unroll(mhc, explicit=True):
-                            states[col] = S.vld(
-                                states_ub[row_state, row, col, 0]
-                            )
-                            dot = S.vadd(
-                                dot, S.vmul(grads[row, col], states[col])
-                            )
+                            states[col] = S.vld(states_ub[row_state, row, col, 0])
+                            dot = S.vadd(dot, S.vmul(grads[row, col], states[col]))
                         denom = S.vld(sums_ub[row_state, row, 0])
                         recip = S.vdiv(one_r, denom)
                         correction = S.vmul(dot, recip)
                         for col in T.unroll(mhc, explicit=True):
-                            grads[row, col] = S.vmul(
-                                S.vsub(grads[row, col], correction), recip
-                            )
+                            grads[row, col] = S.vmul(S.vsub(grads[row, col], correction), recip)
 
                 for col in T.unroll(mhc, explicit=True):
                     dot = grad_zero
                     for row in T.unroll(mhc, explicit=True):
                         states[row] = S.vld(states_ub[1, row, col, 0])
-                        dot = S.vadd(
-                            dot, S.vmul(grads[row, col], states[row])
-                        )
+                        dot = S.vadd(dot, S.vmul(grads[row, col], states[row]))
                     denom = S.vld(sums_ub[1, col, 0])
                     recip = S.vdiv(one_r, denom)
                     correction = S.vmul(dot, recip)
                     for row in T.unroll(mhc, explicit=True):
-                        grads[row, col] = S.vmul(
-                            S.vsub(grads[row, col], correction), recip
-                        )
+                        grads[row, col] = S.vmul(S.vsub(grads[row, col], correction), recip)
 
                 for row in T.unroll(mhc, explicit=True):
                     dot = grad_zero
                     for col in T.unroll(mhc, explicit=True):
                         states[col] = S.vld(states_ub[0, row, col, 0])
-                        dot = S.vadd(
-                            dot, S.vmul(grads[row, col], states[col])
-                        )
+                        dot = S.vadd(dot, S.vmul(grads[row, col], states[col]))
                     for col in T.unroll(mhc, explicit=True):
-                        grads[row, col] = S.vmul(
-                            S.vsub(grads[row, col], dot), states[col]
-                        )
+                        grads[row, col] = S.vmul(S.vsub(grads[row, col], dot), states[col])
 
                 for row in T.unroll(mhc, explicit=True):
                     for col in T.unroll(mhc, explicit=True):
@@ -365,9 +329,7 @@ def _mhc_sinkhorn_bwd_asc(
                 row = store_element // mhc
                 col = store_element % mhc
                 if store_token < valid_tokens:
-                    grad_input[
-                        token_start + store_token, row, col
-                    ] = grad_ub[row, col, store_token]
+                    grad_input[token_start + store_token, row, col] = grad_ub[row, col, store_token]
 
 
 def _launch_config(num_tokens: int):
@@ -393,6 +355,4 @@ def mhc_sinkhorn_bwd_asc(
     eps: float,
 ):
     tile_num, num_cores, threads = _launch_config(x.shape[0])
-    return _mhc_sinkhorn_bwd_asc(
-        grad_output, x, grad_input, repeat, eps, tile_num, num_cores, threads
-    )
+    return _mhc_sinkhorn_bwd_asc(grad_output, x, grad_input, repeat, eps, tile_num, num_cores, threads)

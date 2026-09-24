@@ -7,16 +7,16 @@ A multiversion pipeline allows the transfer-in for tile `i+1`, computation for t
 Before implementation, map the dependencies for each logical iteration:
 
 ```text
-GM --CopyIn--> input/local buffer --Compute--> output/local buffer --CopyOut--> GM
+GM --copy in--> input/local buffer --compute--> output/local buffer --copy out--> GM
 ```
 
-Version every UB/L1 buffer that will be written in the next iteration while it may still be read by Compute or CopyOut from the preceding iteration. Determine input, output, index, and temporary-intermediate versions from their actual lifetimes; do not assume that "double-buffering only the input" is sufficient. Read-only resident data that remains unchanged across iterations usually stays single-versioned.
+Version every UB/L1 buffer that will be written in the next iteration while it may still be read by compute or copy out from the preceding iteration. Determine input, output, index, and temporary-intermediate versions from their actual lifetimes; do not assume that "double-buffering only the input" is sufficient. Read-only resident data that remains unchanged across iterations usually stays single-versioned.
 
 Also account for the total footprint of all versions, padding, resident data, and the number of effective iterations per core. Fall back to a single stage when the number of effective iterations is less than the stage count. Consider three stages only when a pipeline gap remains after using two stages and capacity permits it.
 
 ## Automatic and Manual Multiversioning
 
-When access relations are simple and affine, and the compiler can uniquely identify producers and consumers, try automatic versioning first. Prefer peeling unconditional, fixed-extent full iterations away from tail handling, and use `T.Pipelined` to expose a canonical CopyIn -> Compute -> CopyOut body:
+When access relations are simple and affine, and the compiler can uniquely identify producers and consumers, try automatic versioning first. Prefer peeling unconditional, fixed-extent full iterations away from tail handling, and use `T.Pipelined` to expose a canonical copy in -> compute -> copy out body:
 
 ```python
 input_ub = T.alloc_shared((tile_elems,), dtype)
@@ -37,7 +37,7 @@ This automatic template has four structural conditions that must all be satisfie
 
 1. Allocate `input_ub/output_ub` for **one logical tile**. Do not first add an explicit `[2, ...]` stage dimension and then call `annotate_buffer_versions(...: 2)`. That requests both manual and automatic version expansion and may cause incorrect extent rewriting.
 2. Version only mutable buffers that genuinely remain live across iterations in the steady-state loop. Keep read-only LUT/index buffers, tail buffers outside the pipeline, and fallback buffers not involved in this body single-versioned.
-3. Each execution of the `T.Pipelined` body must use the same rank, shape, and copy extent for CopyIn/Compute/CopyOut. Place full/tail branches that alter the accessed range, zero-work branches, and dynamic remainder handling outside the body.
+3. Each execution of the `T.Pipelined` body must use the same rank, shape, and copy extent for copy in/compute/copy out. Place full/tail branches that alter the accessed range, zero-work branches, and dynamic remainder handling outside the body.
 4. The first automatic representative should preferably access the original logical shape of the versioned buffer directly. Do not access it through a `view` with a hidden extent, a flattened alias, or an explicit stage subscript. If an intrinsic needs a base pointer, it must still be traceable to the same logical buffer and a fixed range.
 
 `T.Persistent(..., num_stages=2)` is not prohibited, but the presence of `num_stages` alone does not make it the standard form of an automatic pipeline. Treat it as an automatic candidate only when it likewise provides a steady-state task body with an unconditional fixed extent and unique producers/consumers. Otherwise, use the `T.Pipelined(full_tile_count, ...)` representative above to evaluate automatic versioning first. CANN/compiler upgrades do not replace these structural conditions.
@@ -93,12 +93,12 @@ When automatic versioning is already fully effective, the equivalent manual impl
 
 Handwritten `set_flag`/`wait_flag` or event ordering is not the default alternative. Consider it only when the current repository or actually installed source contains a verified example with the same access pattern. A deadlock eliminates only the corresponding event scheme.
 
-The scheduler must be able to see the steady-state pipeline body; do not wrap the entire CopyIn/Compute/CopyOut sequence in a runtime condition. Peel the tail with generic bounds:
+The scheduler must be able to see the steady-state pipeline body; do not wrap the entire copy in/compute/copy out sequence in a runtime condition. Peel the tail with generic bounds:
 
 ```text
 full_waves = work_items // items_per_wave
 pipeline(full_waves):
-    unconditionally execute a complete CopyIn -> Compute -> CopyOut
+    unconditionally execute a complete copy in -> compute -> copy out
 if work_items % items_per_wave != 0:
     process the final tail wave separately
 ```

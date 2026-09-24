@@ -44,7 +44,7 @@
         "eval_mode": "text"
       },
       "prompt": "Use tilelang-performance-best-practices to review a TileLang GEMM design intended for the PTO backend. List constraints for the kernel, layout, buffers, accumulation, and performance validation, and explain whether [N,K] + transpose_B=True is a mandatory T.gemm requirement for every target. Do not execute external tools.",
-      "expected_output": "Explain that an Ascend kernel uses a one-dimensional grid and does not pass threads. [N,K] + transpose_B=True is the currently validated canonical PTO Ascend pattern, not a mandatory API constraint for every target. L0C uses fp32 by default. Set clear_accum only on the first valid K subtile; nested loops must check both outer and inner indices. Use L1/L0, the Cube core count, and the task count. Adapt tail handling from validated examples, then test correctness and latency under identical conditions.",
+      "expected_output": "Explain that an Ascend kernel uses a one-dimensional grid and does not pass threads. [N,K] + transpose_B=True is the currently validated canonical PTO Ascend pattern, not a mandatory API constraint for every target. L0C uses fp32 by default. Set clear_accum only on the first valid K sub-tile; nested loops must check both outer and inner indices. Use L1/L0, the Cube core count, and the task count. Adapt tail handling from validated examples, then test correctness and latency under identical conditions.",
       "files": [],
       "expectations": [
         {
@@ -60,7 +60,7 @@
         {
           "name": "handles_nested_k_clear",
           "description": "Describe the L0C clearing condition correctly",
-          "assertion_text": "Clear only on the first valid K subtile; for nested kt/sk loops, the example condition is kt == 0 and sk == 0"
+          "assertion_text": "Clear only on the first valid K sub-tile; for nested kt/sk loops, the example condition is kt == 0 and sk == 0"
         }
       ]
     },
