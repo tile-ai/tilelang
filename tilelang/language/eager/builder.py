@@ -750,6 +750,13 @@ class Builder(BaseBuilder):
             IRBuilder.name(name, value)
             return value
         elif isinstance(value, (PrimExpr, BufferRegion)):
+            # A value-less (void) expression stringifies to the empty dtype.
+            if isinstance(value, PrimExpr) and not str(value.dtype):
+                raise ValueError(
+                    f"Cannot bind `{name}` to a value-less expression: `{value}` has void "
+                    "type. A side-effecting intrinsic such as `T.rng_init(...)` is a "
+                    "statement; call it without assigning its result."
+                )
             var = tirx.bind(value)
             register_let_value(var, value)
             IRBuilder.name(name, var)

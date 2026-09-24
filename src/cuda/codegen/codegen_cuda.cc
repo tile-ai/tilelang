@@ -5381,6 +5381,21 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), alloc_dtype);
 }
 
+void CodeGenTileLangCUDA::VisitStmt_(const BindNode *op) {
+  // tl.rng_init is a side-effect-only intrinsic: it initialises the kernel's
+  // curand state and produces no value. Binding its result would emit
+  // `void state = ;`, which nvcc rejects as an incomplete type. Diagnose the
+  // misuse here instead of letting malformed CUDA escape the codegen.
+  const CallNode *value = op->value.as<CallNode>();
+  ICHECK(value == nullptr || !value->op.same_as(tl::rng_init()))
+      << "The result of `T.rng_init(...)` cannot be bound to variable \""
+      << op->var->name_hint
+      << "\": the call initialises the kernel's curand state as a side "
+         "effect and has no value. Call it as a statement instead, for "
+         "example `T.rng_init(seed)` without assigning the result.";
+  CodeGenC::VisitStmt_(op);
+}
+
 void CodeGenTileLangCUDA::VisitStmt_(const AssertStmtNode *op) {
   // Every function this codegen emits is a __global__ kernel, so a tirx
   // AssertStmt has to lower to the device-legal helper. The inherited CodeGenC
