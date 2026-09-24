@@ -175,6 +175,8 @@ public:
  */
 class Im2ColOpNode : public TileOperatorNode {
 public:
+  Optional<Stmt> LowerLogical(Target target,
+                              arith::Analyzer *analyzer) const override;
   BufferRegion srcRegion_, dstRegion_;
   Buffer src_,
       dst_;      // Source (input feature map) and destination (im2col matrix)
@@ -228,11 +230,19 @@ struct Im2ColImpl {
   CopyTargetPredicate match_target;
   int priority;
 
+  // Exactly one lowering entry is provided: logical SIMT expansion or
+  // physical device instructions. Scheduling queries the selected protocol.
   Stmt (*lower)(const Im2ColOpNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
+  Stmt (*lower_logical)(const Im2ColOpNode &op,
+                        arith::Analyzer *analyzer) = nullptr;
+  bool is_tma = false;
 };
 
 void RegisterIm2ColImpl(Im2ColImpl impl);
+
+// Query the selected implementation rather than assuming an architecture range.
+bool Im2ColUsesTMA(Target target);
 
 class Im2ColOp : public TileOperator {
 public:

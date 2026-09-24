@@ -38,15 +38,19 @@ def LayoutInference():
     return _ffi_api.LayoutInference()  # type: ignore
 
 
-def LowerTileOp():
-    """LowerTileOp
+def LowerTileOp(logical_only: bool = False):
+    """Lower tile operators.
+
+    With ``logical_only=True``, expand composite implementations into logical
+    TIR before scheduling and layout inference. Otherwise lower the remaining
+    operators and inferred parallel loops to physical device operations.
 
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerTileOp()  # type: ignore
+    return _ffi_api.LowerTileOp(logical_only)  # type: ignore
 
 
 def InjectSoftwarePipeline():

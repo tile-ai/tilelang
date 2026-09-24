@@ -1595,7 +1595,9 @@ private:
     // so the async copy completion drives the mbarrier arrival, allowing
     // TMA and cp.async to overlap.  Other groups use MakeArriveBarrier.
     if (has_simt_producer || has_cp_async_producer) {
-      // Any SIMT producer will become cp.async after LowerTileOp.
+      // The group owns a completion protocol, not an instruction promise.
+      // LowerTileOp may retain synchronous stores for some or all SIMT work;
+      // an empty cp.async group still completes the barrier arrival.
       bool group_has_async_copy = has_simt_producer || has_cp_async_producer;
       for (int g = 0; g < num_producer_groups; ++g) {
         int fwd_base = g * num_stages;

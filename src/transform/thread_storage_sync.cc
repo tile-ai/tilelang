@@ -623,8 +623,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     /*! \brief The buffer variable, if any */
     Array<PrimExpr> buffer_indices;
     ConstrSet cset;
-    /*! \brief The buffer ranges for pointer access */
-    Array<Range> buffer_ranges;
     Var buffer = NullValue<Var>();
     Buffer buffer_name;
     /*! \brief The access data type */
@@ -634,6 +632,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
      * Has one IntSet for each index in the buffer being accessed.
      */
     Array<arith::IntSet> touched;
+    /*! \brief Physical byte footprint, shared by pointer and indexed accesses.
+     * Undefined when the address cannot be represented as one linear range.
+     */
+    arith::IntSet touched_bytes;
     /*! \brief The type of access */
     AccessType type;
     /*! \brief The storage scope */
@@ -700,6 +702,63 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                               IntImm(DataType::Int(32), index_dtype.lanes()));
     }
     return index + elem_offset;
+  }
+  arith::IntSet ByteFootprint(const Var &buffer_var, DataType dtype,
+                              const arith::IntSet &elements) const {
+    PrimExpr min = elements.min();
+    PrimExpr max = elements.max();
+    // Relaxed data-dependent indices can have symbolic infinity bounds.
+    if ((!min.dtype().is_int() && !min.dtype().is_uint()) ||
+        (!max.dtype().is_int() && !max.dtype().is_uint())) {
+      return {};
+    }
+    DataType index_dtype = DataType::Int(64);
+    PrimExpr element_bits =
+        make_const(index_dtype, dtype.bits() * dtype.lanes());
+    PrimExpr byte_offset = make_zero(index_dtype);
+    auto it = shared_memory_alias_byte_offsets_.find(buffer_var.get());
+    if (it != shared_memory_alias_byte_offsets_.end()) {
+      byte_offset = Cast(index_dtype, it->second);
+    }
+    // Round outwards for packed subbyte elements. Keep alias offsets in bytes:
+    // dividing an unaligned alias offset by the element size loses information.
+    PrimExpr first = floordiv(Cast(index_dtype, min) * element_bits, 8);
+    PrimExpr last =
+        floordiv((Cast(index_dtype, max) + 1) * element_bits + 7, 8) - 1;
+    return arith::IntSet::Interval(first + byte_offset, last + byte_offset);
+  }
+  arith::IntSet ByteFootprint(const Buffer &buffer,
+                              const Array<PrimExpr> &indices) const {
+    Array<PrimExpr> offsets = buffer->ElemOffset(indices);
+    if (offsets.size() != 1) {
+      return {};
+    }
+    return ByteFootprint(buffer->data, buffer->dtype,
+                         arith::IntSet::Vector(offsets[0]));
+  }
+  arith::IntSet PointerByteFootprint(const Var &buffer, DataType dtype,
+                                     const PrimExpr &offset,
+                                     const PrimExpr &declared_extent) const {
+    PrimExpr extent = pointer_access_.extent.value_or(declared_extent);
+    if (pointer_access_.extent_in_bytes) {
+      arith::IntSet start =
+          ByteFootprint(buffer, dtype, arith::IntSet::SinglePoint(offset));
+      if (!start.defined()) {
+        return {};
+      }
+      return arith::IntSet::Interval(
+          start.min(), start.min() + Cast(DataType::Int(64), extent) - 1);
+    }
+    return ByteFootprint(
+        buffer, dtype,
+        arith::IntSet::FromRange(Range::FromMinExtent(offset, extent)));
+  }
+  void VisitPointerArgument(const PrimExpr &pointer, const PrimExpr &extent,
+                            bool extent_in_bytes, int rw_mask) {
+    auto saved = pointer_access_;
+    pointer_access_ = {extent, extent_in_bytes, rw_mask};
+    this->VisitExpr(pointer);
+    pointer_access_ = saved;
   }
   void RecordSharedMemoryAlias(const Var &alias_var, const PrimExpr &value) {
     const auto *call = value.as<CallNode>();
@@ -806,7 +865,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
   void VisitExpr_(const BufferLoadNode *op) final {
     Var buf = op->buffer->data;
-    buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), op->buffer);
     StorageScope scope = GetScope(buf);
     if (Enabled(buf.get(), scope)) {
       ICHECK(allow_append_)
@@ -816,6 +874,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.buffer = buf;
       e.buffer_name = op->buffer;
       e.dtype = op->dtype.element_of();
+      e.touched_bytes = ByteFootprint(op->buffer, op->indices);
       for (const auto &index : op->indices) {
         PrimExpr physical_index =
             AddAliasElemOffset(buf, op->buffer->dtype, index);
@@ -835,7 +894,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     curr_stmt_.stmt = op;
 
     Var buf = op->buffer->data;
-    buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), op->buffer);
     StorageScope scope = GetScope(buf);
     if (Enabled(buf.get(), scope)) {
       AccessEntry e{.cset = {constr_stack_}};
@@ -843,6 +901,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       e.buffer = buf;
       e.buffer_name = op->buffer;
       e.dtype = op->value.dtype().element_of();
+      e.touched_bytes = ByteFootprint(op->buffer, op->indices);
       for (const auto &index : op->indices) {
         PrimExpr physical_index =
             AddAliasElemOffset(buf, op->buffer->dtype, index);
@@ -888,14 +947,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     // Record let var properties
     auto let_prop = AnalyzeExprProperty(op->value);
     let_var_properties_[op->var.get()] = let_prop;
-  }
-  void VisitStmt_(const SBlockNode *op) final {
-    auto block = Downcast<SBlock>(op);
-    for (const auto &buffer : block->alloc_buffers) {
-      ICHECK(buffer->IsInstance<BufferNode>());
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-    ConstrVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const AttrStmtNode *op) override {
     if (op->attr_key == tvm::tl::attr::coproc_scope) {
@@ -945,6 +996,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
             new_touched.push_back(arith::EvalSet(touched, relax_map));
           }
           e.touched = std::move(new_touched);
+          if (e.touched_bytes.defined()) {
+            e.touched_bytes = arith::EvalSet(e.touched_bytes, relax_map);
+          }
         }
       }
     }
@@ -1165,10 +1219,32 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     }();
     if (is_cp_async) {
       cp_async_depth_++;
-      for (const auto &a : op->args) {
-        this->VisitExpr(a);
+      // The instruction's count is authoritative, including for explicit IR
+      // whose pointer metadata describes only the base element.
+      bool bytes = op->op.same_as(builtin::ptx_cp_async());
+      VisitPointerArgument(op->args[0], op->args[2], bytes, 2);
+      VisitPointerArgument(op->args[1], op->args[2], bytes, 1);
+      for (size_t i = 2; i < op->args.size(); ++i) {
+        this->VisitExpr(op->args[i]);
       }
       cp_async_depth_--;
+      return;
+    }
+
+    if (op->op.same_as(tl::ptx_ldmatrix()) ||
+        op->op.same_as(tl::ptx_stmatrix())) {
+      // Each participating lane supplies a 16-byte shared row address, not
+      // the per-thread register fragment's size. x1/x2/x4 changes how many
+      // lanes supply rows, not their width. Including inactive address lanes
+      // gives a superset of the collective instruction's footprint.
+      bool load = op->op.same_as(tl::ptx_ldmatrix());
+      for (size_t i = 0; i < op->args.size(); ++i) {
+        if (i == 2) {
+          VisitPointerArgument(op->args[i], Integer(16), true, load ? 1 : 2);
+        } else {
+          this->VisitExpr(op->args[i]);
+        }
+      }
       return;
     }
 
@@ -1192,8 +1268,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     }();
     if (is_atomic_op) {
       if (!op->args.empty()) {
+        int lanes = op->op.same_as(tl::atomic_addx4_elem_op())   ? 4
+                    : op->op.same_as(tl::atomic_addx2_elem_op()) ? 2
+                                                                 : 1;
+        int mask = op->op.same_as(tl::atomic_load_elem_op())    ? 1
+                   : op->op.same_as(tl::atomic_store_elem_op()) ? 2
+                                                                : 3;
         atomic_dst_ptr_depth_++;
-        this->VisitExpr(op->args[0]);
+        VisitPointerArgument(op->args[0], Integer(lanes), false, mask);
         atomic_dst_ptr_depth_--;
         for (size_t i = 1; i < op->args.size(); ++i) {
           this->VisitExpr(op->args[i]);
@@ -1207,19 +1289,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         Buffer buffer = load->buffer;
         DataType dtype = buffer->dtype;
         const VarNode *buffer_var = buffer->data.as<VarNode>();
-        buffer_data_to_buffer_.Set(GetRef<Var>(buffer_var), buffer);
         StorageScope scope = GetScope(GetRef<Var>(buffer_var));
-        Array<Range> buffer_ranges;
-        // from indices to buffer indices
-        ICHECK(buffer->shape.size() == load->indices.size());
-        // Use buffer shape and indices to compute the buffer_ranges for each
-        // dimension.
-        for (size_t i = 0; i < buffer->shape.size(); ++i) {
-          PrimExpr min = AddAliasElemOffset(GetRef<Var>(buffer_var),
-                                            buffer->dtype, load->indices[i]);
-          PrimExpr extent = make_const(buffer->shape[i].dtype(), 1);
-          buffer_ranges.push_back(Range::FromMinExtent(min, extent));
-        }
         if (Enabled(buffer_var, scope)) {
           ICHECK(allow_append_);
           AccessEntry e{.cset = {constr_stack_}};
@@ -1227,7 +1297,14 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           e.dtype = dtype;
           e.buffer = Downcast<Var>(buffer->data);
           e.buffer_name = buffer;
-          e.buffer_ranges = buffer_ranges;
+          // address_of describes an address, not an access extent. Only an
+          // enclosing instruction with a known footprint can supply one.
+          Array<PrimExpr> offsets = buffer->ElemOffset(load->indices);
+          if (pointer_access_.extent.defined() && offsets.size() == 1) {
+            e.touched_bytes =
+                PointerByteFootprint(buffer->data, dtype, offsets[0],
+                                     pointer_access_.extent.value());
+          }
           for (const auto &index : load->indices) {
             PrimExpr physical_index = AddAliasElemOffset(
                 GetRef<Var>(buffer_var), buffer->dtype, index);
@@ -1235,9 +1312,17 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
           e.is_pointer_access = true;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-          e.type = kRead;
           e.scope = scope;
-          curr_stmt_.access.emplace_back(e);
+          int mask = pointer_access_.rw_mask ? pointer_access_.rw_mask : 1;
+          if (mask & 1) {
+            e.type = kRead;
+            curr_stmt_.access.emplace_back(e);
+          }
+          if (mask & 2) {
+            e.type = kWrite;
+            e.is_async_copy = (cp_async_depth_ > 0);
+            curr_stmt_.access.emplace_back(e);
+          }
         }
         ConstrVisitor::VisitExpr_(load);
       } else {
@@ -1255,63 +1340,25 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       // The buffer scope.
       if (Enabled(buffer_var, scope)) {
         ICHECK(allow_append_);
-        Array<Range> buffer_ranges;
-        if (buffer_data_to_buffer_.find(GetRef<Var>(buffer_var)) ==
-            buffer_data_to_buffer_.end()) {
-          // cannot find buffer map, use the default buffer
-          buffer_ranges = {Range::FromMinExtent(offset, extent)};
-        } else {
-          Buffer buffer = buffer_data_to_buffer_.at(GetRef<Var>(buffer_var));
-          auto buffer_shape = buffer->shape;
-          // convert 1d offset to multi-dimensional index
-          auto linear_to_indices = [](PrimExpr offset,
-                                      const Array<PrimExpr> &shape) {
-            Array<PrimExpr> indices;
-            DataType index_dtype = offset.dtype();
-            ICHECK(index_dtype.is_int() || index_dtype.is_uint())
-                << "Expected integer offset dtype in tvm_access_ptr, but got "
-                << index_dtype;
-            PrimExpr remaining = std::move(offset);
-            for (size_t i = 0; i < shape.size(); ++i) {
-              PrimExpr stride = make_const(index_dtype, 1);
-              for (size_t j = i + 1; j < shape.size(); ++j) {
-                PrimExpr dim = shape[j];
-                if (dim.dtype() != index_dtype) {
-                  dim = tirx::Cast(index_dtype, dim);
-                }
-                stride = stride * dim;
-              }
-              PrimExpr idx = FloorDiv(remaining, stride);
-              remaining = FloorMod(remaining, stride);
-              indices.push_back(idx);
-            }
-            return indices;
-          };
-          Array<PrimExpr> start_indices =
-              linear_to_indices(offset, buffer_shape);
-          Array<PrimExpr> end_indices =
-              linear_to_indices(offset + extent, buffer_shape);
-          for (size_t i = 0; i < buffer_shape.size(); ++i) {
-            buffer_ranges.push_back(Range::FromMinExtent(
-                start_indices[i], end_indices[i] - start_indices[i]));
-          }
-        }
         AccessEntry e{.cset = {constr_stack_}};
         e.threads = env_threads();
         e.dtype = dtype;
         e.buffer = GetRef<Var>(buffer_var);
-        e.buffer_ranges = buffer_ranges;
         e.is_pointer_access = true;
         e.is_atomic = (atomic_dst_ptr_depth_ > 0);
         e.touched = {
             arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
+        e.touched_bytes =
+            PointerByteFootprint(e.buffer, dtype, op->args[2], extent);
         e.scope = scope;
-        if (flag->value & 1) {
+        int mask =
+            pointer_access_.rw_mask ? pointer_access_.rw_mask : flag->value;
+        if (mask & 1) {
           e.type = kRead;
           e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
         }
-        if (flag->value & 2) {
+        if (mask & 2) {
           e.type = kWrite;
           e.is_async_copy = (tma_depth_ > 0 || cp_async_depth_ > 0);
           curr_stmt_.access.emplace_back(e);
@@ -1342,10 +1389,6 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     } else {
       ConstrVisitor::VisitExpr_(op);
     }
-  }
-
-  void SetBufferDataToBuffer(const Var &buffer_var, const Buffer &buffer) {
-    buffer_data_to_buffer_.Set(buffer_var, buffer);
   }
 
   std::vector<AccessEntry> Summarize(std::vector<StmtEntry> seq,
@@ -1562,6 +1605,13 @@ private:
   int tma_depth_{0};
   // Nesting depth of cp.async calls (ptx_cp_async)
   int cp_async_depth_{0};
+  // The enclosing instruction owns the actual extent and direction. Pointer
+  // metadata is used only when the caller does not supply that contract.
+  struct PointerAccess {
+    Optional<PrimExpr> extent;
+    bool extent_in_bytes{false};
+    int rw_mask{0};
+  } pointer_access_;
   // Whether we're visiting the pointer argument expression of an atomic call
   // (e.g., atomic_add/atomic_max/atomic_load). When > 0, accesses produced by
   // the pointer metadata ops are tagged as atomic.
@@ -1574,8 +1624,6 @@ private:
   // current lexical scope.
   std::unordered_map<const VarNode *, ConditionThreadProperty>
       let_var_properties_;
-  // The buffer map
-  Map<Var, Buffer> buffer_data_to_buffer_;
   // synchronization scope
   StorageScope sync_scope_;
   // warp size from target
@@ -1586,70 +1634,58 @@ private:
       return;
     syncs_inserted_.insert(obj);
   }
-  bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
-    if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
+  bool ByteAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs,
+                            const Optional<For> &loop) {
+    if (!lhs.touched_bytes.defined() || !rhs.touched_bytes.defined()) {
       return false;
     }
-    ConstrSet prev_cset{lhs.cset};
-    ConstrSet curr_cset{rhs.cset};
-    arith::Analyzer analyzer;
-
-    struct ThreadVarInfo {
-      const char *name_prev;
-      const char *name_curr;
-    } thread_vars[] = {
-        {"tx1", "tx2"},
-        {"ty1", "ty2"},
-        {"tz1", "tz2"},
-    };
-    PrimExpr lhs_min = analyzer.Simplify(lhs.touched[0].min());
-    PrimExpr lhs_max = analyzer.Simplify(lhs.touched[0].max());
-    PrimExpr rhs_min = analyzer.Simplify(rhs.touched[0].min());
-    PrimExpr rhs_max = analyzer.Simplify(rhs.touched[0].max());
-    // A touched interval relaxed to (half-)unbounded carries TVM's symbolic
-    // infinity sentinels, which are handle-typed vars: comparing them against
-    // integer offsets throws a dtype mismatch inside tvm::less. An unbounded
-    // side can never prove disjointness anyway (e.g. an atomic whose index is
-    // a data-dependent load), so answer conservatively.
+    PrimExpr lhs_min = lhs.touched_bytes.min();
+    PrimExpr lhs_max = lhs.touched_bytes.max();
+    PrimExpr rhs_min = rhs.touched_bytes.min();
+    PrimExpr rhs_max = rhs.touched_bytes.max();
     for (const PrimExpr &bound : {lhs_min, lhs_max, rhs_min, rhs_max}) {
       if (!bound.dtype().is_int() && !bound.dtype().is_uint()) {
         return false;
       }
     }
-    Map<Var, PrimExpr> prev_sub, curr_sub;
-    for (unsigned idx = 0; idx != 3; ++idx) {
-      auto &info = thread_vars[idx];
-      Var old_prev_var = lhs.threads[lhs.threads.size() + idx - 3]->var;
-      Var old_curr_var = rhs.threads[rhs.threads.size() + idx - 3]->var;
-      prev_sub.Set(old_prev_var, Var(info.name_prev, old_prev_var.dtype()));
-      curr_sub.Set(old_curr_var, Var(info.name_curr, old_curr_var.dtype()));
-    }
-    // Two threads here as well, so every per-thread bind needs its own copy;
-    // sharing one would force the two thread variables to agree. Ranges stay
-    // shared: an enclosing iteration variable is the same for both sides.
-    prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
-                                     /*rename_ranges=*/false);
-    curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,
-                                     /*rename_ranges=*/false);
-    lhs_min = Substitute(lhs_min, prev_sub);
-    lhs_max = Substitute(lhs_max, prev_sub);
-    rhs_min = Substitute(rhs_min, curr_sub);
-    rhs_max = Substitute(rhs_max, curr_sub);
-    // Lower to predicates before merging so that a variable bound to different
-    // values on the two sides does not trip the analyzer's re-bind check.
-    prev_cset.ToConstraints()
-        .Merge(curr_cset.ToConstraints())
-        .Populate(analyzer);
 
-    if (analyzer.CanProve(lhs_max < rhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
+    // Model both sides independently. A per-thread bind cannot be shared by
+    // two threads, nor can a mutable index be assumed unchanged across them.
+    Map<Var, PrimExpr> lhs_sub, rhs_sub;
+    for (const IterVar &iv : lhs.threads) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank == 1) {
+        lhs_sub.Set(iv->var,
+                    Var(iv->var->name_hint + "<PREV>", iv->var.dtype()));
+      }
     }
-    if (analyzer.CanProve(rhs_max < lhs_min,
-                          arith::ProofStrength::kSymbolicBound)) {
-      return true;
+    for (const IterVar &iv : rhs.threads) {
+      if (runtime::ThreadScope::Create(iv->thread_tag).rank == 1) {
+        rhs_sub.Set(iv->var,
+                    Var(iv->var->name_hint + "<CURR>", iv->var.dtype()));
+      }
     }
-    return false;
+    if (loop.defined()) {
+      const For &next = loop.value();
+      PrimExpr step =
+          next->step.value_or(make_const(next->loop_var.dtype(), 1));
+      rhs_sub.Set(next->loop_var, next->loop_var + step);
+    }
+    ConstrSet lhs_cset = lhs.cset.RenameFrom("<PREV>", lhs_sub, std::nullopt,
+                                             /*rename_ranges=*/false);
+    ConstrSet rhs_cset = rhs.cset.RenameFrom("<CURR>", rhs_sub, std::nullopt,
+                                             /*rename_ranges=*/false);
+    arith::Analyzer analyzer;
+    lhs_cset.ToConstraints().Merge(rhs_cset.ToConstraints()).Populate(analyzer);
+    FreshenMutableReads lhs_fresh(FreshenMutableReads::Mode::kSnapshot);
+    FreshenMutableReads rhs_fresh(FreshenMutableReads::Mode::kSnapshot);
+    lhs_min = lhs_fresh(Substitute(lhs_min, lhs_sub));
+    lhs_max = lhs_fresh(Substitute(lhs_max, lhs_sub));
+    rhs_min = rhs_fresh(Substitute(rhs_min, rhs_sub));
+    rhs_max = rhs_fresh(Substitute(rhs_max, rhs_sub));
+    // Prove the union of both orderings, not a globally fixed ordering: modulo
+    // buffer versions exchange sides on successive iterations.
+    return analyzer.CanProve(Or(lhs_max < rhs_min, rhs_max < lhs_min),
+                             arith::ProofStrength::kSymbolicBound);
   }
   void print_access_tentry(const AccessEntry &access,
                            bool print_constr = false) {
@@ -1709,15 +1745,8 @@ private:
     }
     output << "]\n";
 
-    if (!access.buffer_ranges.empty()) {
-      output << "  Buffer Ranges: [";
-      for (size_t i = 0; i < access.buffer_ranges.size(); ++i) {
-        if (i > 0)
-          output << ", ";
-        output << "[" << access.buffer_ranges[i]->min << ", "
-               << access.buffer_ranges[i]->extent << "]";
-      }
-      output << "]\n";
+    if (access.touched_bytes.defined()) {
+      output << "  Byte footprint: " << access.touched_bytes << "\n";
     }
 
     if (!access.touched.empty()) {
@@ -1778,21 +1807,14 @@ private:
       return false;
     }
 
-    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
-      // They are not the same indices, should be conflict.
-      return true;
-    }
-
     if (prev.is_pointer_access || curr.is_pointer_access) {
-      // For accesses created via tvm_access_ptr we may still be able to prove
-      // disjointness using their byte ranges. If both sides expose a touched
-      // interval and we can show they don't overlap, skip the conflict.
-      if (prev.is_pointer_access && curr.is_pointer_access &&
-          PointerAccessIsDisjoint(prev, curr)) {
-        return false;
-      }
-      // Otherwise fall back to the conservative answer: treat them as
-      // overlapping.
+      // Pointer and indexed operations inhabit the same byte-addressed arena,
+      // even when their ranks, dtypes or shared-allocation aliases differ.
+      Optional<For> carry =
+          loop ? Optional<For>(GetRef<For>(loop)) : std::nullopt;
+      return !ByteAccessIsDisjoint(prev, curr, carry);
+    }
+    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
       return true;
     }
 
@@ -2074,9 +2096,6 @@ PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
                     .IntValue();
   }
   TileLangThreadSyncPlanner planner(sync_scope, warp_size);
-  for (const auto &[_, buffer] : func->buffer_map) {
-    planner.SetBufferDataToBuffer(buffer->data, buffer);
-  }
   planner(stmt);
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));

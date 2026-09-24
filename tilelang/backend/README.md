@@ -58,6 +58,26 @@ pipeline and codegen stages. It also records the selected shared execution
 backend, which consumes the generated outputs. A later stage must not infer or
 resolve either backend again.
 
+### Logical and physical tile-op lowering
+
+Native TIR pipelines run `LowerTileOp(logical_only=True)` before warp
+specialization, software-pipeline planning, and layout inference. A composite
+implementation's `TileOperatorNode::LowerLogical` returns logical TIR, without
+thread partitioning or physical layouts. Implementations requiring device
+instructions return no expansion and remain tile ops until `LowerTileOp()`.
+
+Logical expansion retains one scheduling unit and transfers operation
+annotations (including explicit WS operation ids) to that unit. SIMT im2col
+uses this path: its guarded parallel loads participate in the ordinary global
+layout solve and parallel-loop lowering, rather than running private layout
+inference during physical lowering. Its NHWC source region defines the image
+extent and origin; batch, spatial, and reduction tails are zero-filled. TMA
+im2col retains its specialized lowering and constraints.
+
+Memory-copy semantics alone do not imply an asynchronous completion protocol.
+Pipeline and WS analysis query the selected im2col implementation's TMA
+capability instead of guessing from its opcode or target architecture.
+
 ### Terminology
 
 - A **target backend**, such as CUDA, ROCm, CPU, Metal, or WebGPU, owns the
