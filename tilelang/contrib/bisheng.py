@@ -108,7 +108,7 @@ def get_bisheng_compile_options(
 ) -> list[str]:
     """Return common Bisheng options shared by tvm-ffi and Cython paths."""
     resolved_arch = get_npu_arch(npu_arch)
-    result = ["-O2", "-fPIC", "-std=c++20"]
+    result = ["-O2", "-fPIC", "-std=c++20", "-mllvm", "-cce-aicore-dcpreload-args=false"]
     if resolved_arch:
         result.append(f"--npu-arch={resolved_arch}")
     result.extend(normalize_options(options))

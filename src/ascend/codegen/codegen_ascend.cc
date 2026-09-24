@@ -1437,6 +1437,8 @@ void CodeGenTileLangAscend::EmitL0cToUbufCopy_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 26)
       << "tl.ascend_copy_matrix_cc_to_ub expects exactly 26 arguments";
 
+  PrintIndent();
+  stream << "asc_set_l0c_copy_nz_para(1, 0, 0);\n";
   EmitCApiCall_("asc_copy_l0c2ub",
                 {{op->args[0]},
                  {op->args[1]},

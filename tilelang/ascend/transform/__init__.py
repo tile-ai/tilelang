@@ -207,13 +207,13 @@ def RewriteFp4ToFp4x2():
 
 
 def RewriteFlagToBuf():
-    """Split each hard_event's synchronization between the 8-slot flag namespace
-    and the shared 32-slot get_buf/rls_buf mutex pool to minimize wasted
-    flag_ids. When a hard_event's sync points total more than 8 event_ids, a 0/1
-    knapsack (capacity 8) keeps the subset of sync-point blocks that fills the
-    flag slots best (renumbered into [0,8)); the rest spill to the mutex pool as
-    get_buf/rls_buf pairs. Hard_events fitting within 8 slots are untouched, and
-    a kernel with no overflow is a no-op.
+    """Normalize each hard_event's synchronization into its 8-slot flag namespace.
+    Sparse flag_ids that extend outside [0,8) and occupy at most 8 slots are
+    compacted into [0,8) without spilling. When more than 8 slots are required,
+    a 0/1 knapsack (capacity 8) keeps the subset of sync-point blocks that fills
+    the flag slots best (renumbered into [0,8)); the rest spill to the shared
+    32-slot get_buf/rls_buf mutex pool. Hard_events whose flag_ids are already
+    within [0,8) are untouched.
 
     Must run after InferBufferAliases for manual schedules because alias
     inference uses set_flag/wait_flag as its liveness-graph anchors. The

@@ -2009,11 +2009,13 @@ public:
     for (const auto &[domain, total] : next_intra_core_id) {
       if (total <= kIntraCoreFlagLimit)
         continue;
-      LOG(WARNING) << "Ascend auto-schedule allocated " << total
-                   << " flag ids for " << domain << " after safe reuse, "
+      LOG(WARNING) << "Ascend auto-schedule reached an intra-core flag-id "
+                      "high-water mark of "
+                   << total << " for " << domain << " after safe reuse, "
                    << "exceeding the dav-3510 limit of " << kIntraCoreFlagLimit
-                   << "; the later RewriteFlagToBuf pass will spill the excess "
-                      "intra-core flags to get_buf/rls_buf.";
+                   << "; the later RewriteFlagToBuf pass will compact sparse "
+                      "out-of-range ids or spill excess flag blocks to "
+                      "get_buf/rls_buf when capacity is exceeded.";
     }
 
     for (const FlagAllocation &allocation : allocations_) {

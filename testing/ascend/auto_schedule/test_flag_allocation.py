@@ -10,7 +10,7 @@ import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend import transform as ascend_transform
 from tvm import tirx
-from testing.ascend._ir import calls, schedule
+from testing.ascend._ir import calls, schedule, statements
 
 
 def _make_cross_iter_reuse_program():
@@ -200,6 +200,40 @@ def _make_bound_flag_spill_program():
     return main
 
 
+def _make_sparse_out_of_range_flag_program():
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            for group_iter in T.serial(4):
+                T.ascend_set_flag("V_MTE3", group_iter % 2)
+                T.ascend_wait_flag("V_MTE3", group_iter % 2)
+            for group_iter in T.serial(4):
+                T.ascend_set_flag("V_MTE3", group_iter % 2 + 2)
+                T.ascend_wait_flag("V_MTE3", group_iter % 2 + 2)
+            T.ascend_set_flag("V_MTE3", 4)
+            T.ascend_wait_flag("V_MTE3", 4)
+            T.ascend_set_flag("V_MTE3", 6)
+            T.ascend_wait_flag("V_MTE3", 6)
+            T.ascend_set_flag("V_MTE3", 8)
+            T.ascend_wait_flag("V_MTE3", 8)
+
+    return main
+
+
+def _make_legal_sparse_flag_program():
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            T.ascend_set_flag("V_MTE3", 0)
+            T.ascend_wait_flag("V_MTE3", 0)
+            T.ascend_set_flag("V_MTE3", 2)
+            T.ascend_wait_flag("V_MTE3", 2)
+            T.ascend_set_flag("V_MTE3", 7)
+            T.ascend_wait_flag("V_MTE3", 7)
+
+    return main
+
+
 def _make_cross_core_reuse_program(
     versions: int,
     add_vector_stage: bool = False,
@@ -260,6 +294,24 @@ def _constant_ids(mod, operation, hard_event):
     return {int(expr) for expr in _events(mod, operation, hard_event) if isinstance(expr, tirx.IntImm)}
 
 
+def _event_ranges(mod, operation, hard_event):
+    ranges = []
+    op_name = "tl.ascend_" + operation + "_flag"
+    for stmt, ancestors in statements(mod):
+        if not isinstance(stmt, tirx.Evaluate) or not isinstance(stmt.value, tirx.Call):
+            continue
+        call = stmt.value
+        if not isinstance(call.op, tvm.ir.Op) or call.op.name != op_name or str(call.args[0].value) != hard_event:
+            continue
+        analyzer = tvm.arith.Analyzer()
+        for ancestor in ancestors:
+            if isinstance(ancestor, tirx.For):
+                analyzer.bind(ancestor.loop_var, tvm.ir.Range.from_min_extent(ancestor.min, ancestor.extent))
+        bound = analyzer.const_int_bound(call.args[1])
+        ranges.append((bound.min_value, bound.max_value))
+    return sorted(ranges)
+
+
 @pytest.mark.parametrize("count", [5, 9], ids=["fits", "requires-reuse"])
 def test_serial_protocols_fit_hardware_flag_budget(count):
     mod = _insert_sync(_make_serial_protocols(count))
@@ -300,6 +352,30 @@ def test_flag_spill_preserves_bound_dynamic_ids():
     assert calls(rewritten, "tl.ascend_rls_buf")
     for operation in ("set", "wait"):
         assert _constant_ids(rewritten, operation, "MTE2_V") <= set(range(8))
+
+
+def test_sparse_out_of_range_flags_are_compacted_without_spill():
+    mod = tvm.IRModule({"main": _make_sparse_out_of_range_flag_program()})
+    expected_before = [(0, 1), (2, 3), (4, 4), (6, 6), (8, 8)]
+    for operation in ("set", "wait"):
+        assert _event_ranges(mod, operation, "V_MTE3") == expected_before
+
+    rewritten = ascend_transform.RewriteFlagToBuf()(mod)
+    assert not calls(rewritten, "tl.ascend_get_buf")
+    assert not calls(rewritten, "tl.ascend_rls_buf")
+    expected_after = [(0, 1), (2, 3), (4, 4), (5, 5), (6, 6)]
+    for operation in ("set", "wait"):
+        assert _event_ranges(rewritten, operation, "V_MTE3") == expected_after
+
+
+def test_legal_sparse_flags_remain_unchanged():
+    mod = tvm.IRModule({"main": _make_legal_sparse_flag_program()})
+    rewritten = ascend_transform.RewriteFlagToBuf()(mod)
+    tvm.ir.assert_structural_equal(rewritten, mod)
+    assert not calls(rewritten, "tl.ascend_get_buf")
+    assert not calls(rewritten, "tl.ascend_rls_buf")
+    for operation in ("set", "wait"):
+        assert _constant_ids(rewritten, operation, "V_MTE3") == {0, 2, 7}
 
 
 @pytest.mark.parametrize(

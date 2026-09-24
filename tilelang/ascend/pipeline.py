@@ -173,9 +173,9 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         disable_reuse=disable_reuse,
     )(mod)
 
-    # Split each hard_event between its 8-slot flag namespace and the shared
-    # get_buf/rls_buf mutex pool (knapsack) to minimize wasted flag_ids; a no-op
-    # when no hard_event overflows 8 slots.
+    # Normalize each hard_event into its 8-slot flag namespace: compact sparse
+    # out-of-range flag_ids when they fit, or spill excess blocks to the shared
+    # get_buf/rls_buf mutex pool (knapsack) when capacity is exceeded.
     mod = ascend_transform.RewriteFlagToBuf()(mod)
 
     mod = ascend_transform.AscendThreadSync("shared")(mod)
