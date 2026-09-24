@@ -1,18 +1,20 @@
 /*!
  * \file rewrite_flag_to_buf.cc
- * \brief Split each hard_event's synchronization between the 8-slot flag
- * namespace and the shared asc_lock/asc_unlock mutex pool to minimize wasted
- * flag_ids.
+ * \brief Normalize each hard_event's synchronization into the 8-slot flag
+ * namespace, spilling excess blocks to the shared asc_lock/asc_unlock mutex
+ * pool.
  *
- * A set_flag/wait_flag event-pair (hard_event) owns only 8 event_id slots. When
- * a hard_event's sync points need more than 8 slots in total, some must spill
- * to the shared 32-slot asc_lock/asc_unlock mutex pool. To waste as few flag
- * slots as possible, we treat each sync point as an indivisible block (a
- * contiguous event_id range of size = its version count, since a dynamic
- * event_id = iter%nv + base cannot be split across the 8-boundary at runtime)
- * and run a 0/1 knapsack (capacity 8) per hard_event: the subset of blocks that
- * fills the 8 flag slots best is KEPT as set_flag/wait_flag (renumbered into
- * [0,8)); the rest SPILL to the mutex pool.
+ * A set_flag/wait_flag event-pair (hard_event) owns only 8 event_id slots. A
+ * sparse layout may use at most 8 slots while still containing an out-of-range
+ * id, so every such layout is compacted into [0,8). When a hard_event's sync
+ * points need more than 8 slots in total, some must spill to the shared 32-slot
+ * asc_lock/asc_unlock mutex pool. To waste as few flag slots as possible, we
+ * treat each sync point as an indivisible block (a contiguous event_id range of
+ * size = its version count, since a dynamic event_id = iter%nv + base cannot be
+ * split across the 8-boundary at runtime) and run a 0/1 knapsack (capacity 8)
+ * per hard_event: the subset of blocks that fills the 8 flag slots best is KEPT
+ * as set_flag/wait_flag (renumbered into [0,8)); the rest SPILL to the mutex
+ * pool.
  *
  * Spill lowering (hard_event = "PROD_CONS", split at '_'):
  *   set_flag<PROD_CONS>(id):  asc_lock(PIPE_PROD, buf, ASC_LOCK_NON_BLOCK);
@@ -20,8 +22,9 @@
  *   wait_flag<PROD_CONS>(id): asc_lock(PIPE_CONS, buf, ASC_LOCK_BLOCK);
  *                             asc_unlock(PIPE_CONS, buf, ASC_LOCK_BLOCK);
  *
- * A hard_event whose sync points total <= 8 is left entirely as flags
- * (unchanged); a kernel with no such overflow is a no-op.
+ * A hard_event whose sync points are already within [0,8) is unchanged. A
+ * sparse hard_event with at most 8 live slots but an out-of-range id is
+ * compacted without spilling.
  *
  * Must run after InferBufferAliases for manual schedules, because that pass
  * relies on set_flag/wait_flag as liveness-graph anchors and cannot model
@@ -313,24 +316,37 @@ PrimFunc RewriteFlagToBufFn(PrimFunc f) {
   std::unordered_map<std::string, std::vector<BlockAssign>> assign;
   // Start spilled buf_id allocation past the slots gemm_l1 already reserves.
   int mutex_running = static_cast<int>(collector.reserved_hwm);
+  bool has_spill = false;
   std::ostringstream layout;
   for (const std::string &he : collector.order) {
     std::vector<Block> blocks = CoalesceBlocks(collector.ranges[he]);
     int64_t total = 0;
-    for (const auto &b : blocks)
+    bool already_legal = true;
+    for (const auto &b : blocks) {
       total += b.size();
-    if (total <= kFlagSlotsPerPair)
-      continue; // fits in flags: leave this hard_event unchanged.
+      already_legal &= b.hi < kFlagSlotsPerPair;
+    }
+    if (total <= kFlagSlotsPerPair && already_legal)
+      continue; // Already fits in the physical flag namespace.
 
-    std::vector<bool> kept = KnapsackKeep(blocks);
+    // A sparse out-of-range layout that still fits in 8 slots only needs
+    // compaction. Use knapsack selection only when capacity is truly exceeded.
+    std::vector<bool> kept = total <= kFlagSlotsPerPair
+                                 ? std::vector<bool>(blocks.size(), true)
+                                 : KnapsackKeep(blocks);
     std::vector<BlockAssign> he_assign;
     int flag_running = 0;
     for (size_t i = 0; i < blocks.size(); ++i) {
       const Block &b = blocks[i];
       if (kept[i]) {
+        ICHECK_LE(static_cast<int64_t>(flag_running) + b.size(),
+                  static_cast<int64_t>(kFlagSlotsPerPair))
+            << "RewriteFlagToBuf: compacted flag range exceeds [0,8) for '"
+            << he << "'";
         he_assign.push_back(BlockAssign{b.lo, b.hi, true, flag_running - b.lo});
         flag_running += static_cast<int>(b.size());
       } else {
+        has_spill = true;
         he_assign.push_back(
             BlockAssign{b.lo, b.hi, false, mutex_running - b.lo});
         layout << "\n  " << he << ": event_id[" << b.lo << ".." << b.hi
@@ -343,10 +359,12 @@ PrimFunc RewriteFlagToBufFn(PrimFunc f) {
   }
 
   if (assign.empty())
-    return f; // nothing spilled anywhere.
-  ICHECK_LE(mutex_running, kMaxBufId)
-      << "RewriteFlagToBuf: total spilled mutex slots (" << mutex_running
-      << ") exceed the shared pool of " << kMaxBufId << "." << layout.str();
+    return f; // Nothing needs compaction or spilling.
+  if (has_spill) {
+    ICHECK_LE(mutex_running, kMaxBufId)
+        << "RewriteFlagToBuf: total spilled mutex slots (" << mutex_running
+        << ") exceed the shared pool of " << kMaxBufId << "." << layout.str();
+  }
 
   FlagToBufRewriter rewriter(std::move(assign),
                              std::move(collector.call_ranges));
