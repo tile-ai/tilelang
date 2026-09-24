@@ -121,15 +121,19 @@ def make_fp8_blockscaled_kernel(case: Case):
             sfb_l1 = T.alloc_l1((n_alloc, sf_e8m0), "uint8")
             a_l0 = T.alloc_l0a((m_alloc, k_alloc), "float8_e4m3fn")
             b_l0 = T.alloc_l0b((n_alloc, k_alloc), "float8_e4m3fn")
+            a_l0_sf = T.alloc_l0a_sf(a_l0, sf_dtype="uint8")
+            b_l0_sf = T.alloc_l0b_sf(b_l0, sf_dtype="uint8")
             acc = T.alloc_l0c((m_alloc, n_alloc), "float32")
 
             T.copy(A[0 : a_l1_shape[0], 0 : a_l1_shape[1]], a_l1)
             T.copy(B[0 : b_l1_shape[0], 0 : b_l1_shape[1]], b_l1)
             T.copy(SFA, sfa_l1)
             T.copy(SFB, sfb_l1)
-            T.copy(a_l1, a_l0, scale=sfa_l1, transpose=case.k_on_row)
-            T.copy(b_l1, b_l0, scale=sfb_l1, transpose=case.k_on_row)
-            T.blockscaled_gemm(a_l0, b_l0, acc, transpose_B=True, clear_accum=True)
+            T.copy(a_l1, a_l0, transpose=case.k_on_row)
+            T.copy(sfa_l1, a_l0_sf)
+            T.copy(b_l1, b_l0, transpose=case.k_on_row)
+            T.copy(sfb_l1, b_l0_sf)
+            T.gemm_blockscaled(a_l0, b_l0, acc, a_l0_sf, b_l0_sf, transpose_B=True, clear_accum=True)
             T.copy(acc, C)
 
     return kernel

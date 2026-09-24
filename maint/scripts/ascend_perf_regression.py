@@ -69,6 +69,7 @@ _ENTRIES: list[tuple[str, str, dict]] = [
     ("ascend_blockscaled_gemm", "example_blockscaled_gemm.py", {}),
     ("ascend_mha", "flash_attention/example_mha.py", {}),
     ("ascend_gqa", "flash_attention/example_gqa.py", {}),
+    ("ascend_gqa_bwd", "flash_attention/example_gqa_bwd.py", {}),
     ("ascend_rmsnorm", "example_rmsnorm.py", {}),
     ("ascend_buffer_version_annotation", "example_buffer_version_annotation.py", {}),
     ("ascend_atomic_add", "example_atomic.py", {}),

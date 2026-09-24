@@ -26,14 +26,20 @@ def _kernel(m, n, trans_a, trans_b):
             sb_l1 = T.alloc_l1((n, 2), "uint16")
             a_l0 = T.alloc_l0a(a_shape, "float8_e4m3fn")
             b_l0 = T.alloc_l0b(b_shape, "float8_e4m3fn")
+            # Transposed data tiles need the explicit logical SF shape (rows
+            # always follow M/N, not the tile's leading axis).
+            a_sf = T.alloc_l0a_sf(a_l0, sf_shape=(m, 2))
+            b_sf = T.alloc_l0b_sf(b_l0, sf_shape=(n, 2))
             acc = T.alloc_l0c((m, n), "float32")
             T.copy(a, a_l1)
             T.copy(b, b_l1)
             T.copy(sa, sa_l1, transpose=True)
             T.copy(sb, sb_l1, transpose=True)
-            T.copy(a_l1, a_l0, scale=sa_l1)
-            T.copy(b_l1, b_l0, scale=sb_l1)
-            T.blockscaled_gemm(a_l0, b_l0, acc, transpose_A=trans_a, transpose_B=trans_b, clear_accum=True)
+            T.copy(a_l1, a_l0)
+            T.copy(sa_l1, a_sf)
+            T.copy(b_l1, b_l0)
+            T.copy(sb_l1, b_sf)
+            T.gemm_blockscaled(a_l0, b_l0, acc, a_sf, b_sf, transpose_A=trans_a, transpose_B=trans_b, clear_accum=True)
             T.copy(acc, out)
 
     return gemm

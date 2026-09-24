@@ -246,14 +246,6 @@ TVM_DLL const Op &ascend_fill_l1();
  *
  * ascend_load_cbuf_to_ca(dst, src, mStartPosition, kStartPosition,
  * mStep, kStep, srcStride, dstStride, transpose)
- *
- * Optionally 16 args when an MX scale-factor companion load is attached; the
- * extra args drive a following asc_copy_l12l0a_mx:
- *   [9]  sf_ptr, [10] sf_x_start,
- *   [11] sf_y_start (y is contiguous fractal direction),
- *   [12] sf_x_step,
- *   [13] sf_y_step,
- *   [14] sf_src_stride, [15] sf_dst_stride.
  */
 TVM_DLL const Op &ascend_load_cbuf_to_ca();
 
@@ -262,16 +254,29 @@ TVM_DLL const Op &ascend_load_cbuf_to_ca();
  *
  * ascend_load_cbuf_to_cb(dst, src, mStartPosition, kStartPosition,
  * mStep, kStep, srcStride, dstStride, transpose)
- *
- * Optionally 16 args when an MX scale-factor companion load is attached; the
- * extra args drive a following asc_copy_l12l0b_mx:
- *   [9]  sf_ptr, [10] sf_x_start,
- *   [11] sf_y_start (y is contiguous fractal direction),
- *   [12] sf_x_step,
- *   [13] sf_y_step,
- *   [14] sf_src_stride, [15] sf_dst_stride.
  */
 TVM_DLL const Op &ascend_load_cbuf_to_cb();
+
+/*!
+ * \brief Ascend standalone MX scale-factor load into the L0A slot shadow of a
+ *        data tile.
+ *
+ * ascend_load_ca_sf(dst_data_ptr, sf_ptr, x_start, y_start, x_step, y_step,
+ * src_stride, dst_stride)
+ *
+ * `dst_data_ptr` addresses the L0A DATA tile whose MX scale slots are
+ * written: the hardware keys the slot positions to that address
+ * (asc_copy_l12l0a_mx consumes it in 16-byte units; codegen appends the /16).
+ * x/y are the L1-source fractal coordinates of the scales, exactly as in the
+ * 16-arg companion form of ascend_load_cbuf_to_ca.
+ */
+TVM_DLL const Op &ascend_load_ca_sf();
+
+/*!
+ * \brief Ascend standalone MX scale-factor load into the L0B slot shadow of a
+ *        data tile. Argument protocol mirrors ascend_load_ca_sf.
+ */
+TVM_DLL const Op &ascend_load_cb_sf();
 
 /*!
  * \brief Ascend copy matrix from CC (L0C) to UBuf.

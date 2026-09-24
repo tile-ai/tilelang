@@ -37,11 +37,11 @@ def test_ascend_dialect_owns_its_backend_knobs():
     import tilelang.language.copy_op as common_copy_op
 
     common_copy = inspect.signature(common_copy_op.copy).parameters
-    assert {"transpose", "l2_cache_ctrl", "unit_flag_ctrl", "sub_blockid", "scale", "pad_value", "data_select"}.isdisjoint(common_copy)
+    assert {"transpose", "l2_cache_ctrl", "unit_flag_ctrl", "sub_blockid", "pad_value", "data_select"}.isdisjoint(common_copy)
     assert {"coalesced_width", "annotations", "loop_layout"} <= set(common_copy)
 
     ascend_copy = inspect.signature(T.copy).parameters
-    assert {"transpose", "l2_cache_ctrl", "unit_flag_ctrl", "sub_blockid", "scale", "pad_value", "data_select"} <= set(ascend_copy)
+    assert {"transpose", "l2_cache_ctrl", "unit_flag_ctrl", "sub_blockid", "pad_value", "data_select"} <= set(ascend_copy)
 
 
 def test_ascend_dialect_does_not_leak_into_common():

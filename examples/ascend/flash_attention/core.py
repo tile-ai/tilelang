@@ -41,6 +41,7 @@ def flash_attention_fwd(
     num_blocks=None,
     tiling=None,
     manual_schedule=False,
+    return_lse=False,
 ):
     tiling = tiling or FwdTiling()
 
@@ -322,14 +323,115 @@ def flash_attention_fwd(
                     S.vsts(O_cast_ub[r, c], ob, cast_full, "PK_B32")
         T.dual_copy(O_cast_ub[0:ROWS, 0:D], O[mt * BR : (mt + 1) * BR, 0:D])
 
+    @T.macro
+    def store_lse(mt, LSE, m_ub, l_ub, lse_ub):
+        with T.SimdVF(latency=256):
+            lse_mask = S.pset(32, "PAT_ALL")
+            lse = S.vadd(S.vln(S.vld(l_ub[0], "NORM"), lse_mask), S.vld(m_ub[0], "NORM"), lse_mask)
+            S.vsts(lse_ub[0], lse, lse_mask, "NORM_B32")
+        T.dual_copy(lse_ub[0:ROWS], LSE[mt * BR : (mt + 1) * BR])
+
     kv_step = kv_manual if manual_schedule else kv_auto
 
+    if not return_lse:
+
+        @T.prim_func
+        def main(
+            Q: T.Buffer((q_len, D), dtype),
+            K: T.Buffer((kv_len, D), dtype),
+            V: T.Buffer((kv_len, D), dtype),
+            O: T.Buffer((q_len, D), out_dtype),
+        ):
+            with T.Kernel(NUM_BLOCKS) as bx:
+                Q_shared = T.alloc_l1((BR, D), dtype)
+                K_shared = T.alloc_l1((BC, D), dtype)
+                V_shared = T.alloc_l1((D, BC), dtype)
+                P_shared = T.alloc_l1((BR, BC), dtype)
+
+                qk_a_l0 = T.alloc_l0a((BR, D), dtype)
+                qk_b_l0 = T.alloc_l0b((BC, D), dtype)
+                pv_a_l0 = T.alloc_l0a((BR, BC), dtype)
+                pv_b_l0 = T.alloc_l0b((D, BC), dtype)
+                qk_acc_l0c = T.alloc_l0c((BR, BC), accum_dtype)
+                pv_acc_l0c = T.alloc_l0c((BR, D), accum_dtype)
+
+                S_ub = T.alloc_shared((ROWS, BC), accum_dtype)
+                P_nz_ub = T.alloc_shared((ROWS + 1, BC), dtype)
+                T.annotate_layout({P_nz_ub: make_ascend_compact_nz_layout(P_nz_ub)})
+                O_tmp_ub = T.alloc_shared((ROWS, D), accum_dtype)
+                O_ub = T.alloc_shared((ROWS, D), accum_dtype)
+                m_ub = T.alloc_shared((ROWS,), accum_dtype)
+                l_ub = T.alloc_shared((ROWS,), accum_dtype)
+                alpha_ub = T.alloc_shared((ROWS,), accum_dtype)
+                old_m_ub = T.alloc_shared((ROWS,), accum_dtype)
+                row_sum_ub = T.alloc_shared((ROWS,), accum_dtype)
+                T.annotate_buffer_versions(
+                    {
+                        K_shared: 3,
+                        V_shared: 3,
+                        qk_acc_l0c: 2,
+                        pv_acc_l0c: 2,
+                        S_ub: 3,
+                        P_nz_ub: 2,
+                        alpha_ub: 3,
+                        O_tmp_ub: 2,
+                    }
+                )
+
+                for local_mt in T.serial(M_TILES_PER_BLOCK):
+                    mt = bx * M_TILES_PER_BLOCK + local_mt
+                    T.copy(Q[mt * BR : (mt + 1) * BR, 0:D], Q_shared[0:BR, 0:D])
+
+                    init_m_l(m_ub, l_ub)
+                    clear_O_ub(O_ub)
+
+                    for kv in T.Pipelined(
+                        NUM_KV_BLOCKS,
+                        num_stages=PIPELINE_STAGES,
+                        annotations={"enable_offset": True},
+                    ):
+                        kv_step(
+                            kv,
+                            K,
+                            V,
+                            Q_shared,
+                            K_shared,
+                            V_shared,
+                            P_shared,
+                            qk_a_l0,
+                            qk_b_l0,
+                            pv_a_l0,
+                            pv_b_l0,
+                            qk_acc_l0c,
+                            pv_acc_l0c,
+                            S_ub,
+                            P_nz_ub,
+                            O_tmp_ub,
+                            O_ub,
+                            m_ub,
+                            l_ub,
+                            alpha_ub,
+                            old_m_ub,
+                            row_sum_ub,
+                        )
+
+                    if is_cast_out:
+                        # Byte reinterpretation only: aliases O_ub, consumes no extra
+                        # UB capacity or buffer versions.
+                        O_cast_ub = T.view(O_ub, (ROWS * 2, D), dtype=out_dtype)
+                        finalize_cast(mt, O, O_ub, O_cast_ub, l_ub)
+                    else:
+                        finalize_fp32(mt, O, O_ub, l_ub)
+
+        return main
+
     @T.prim_func
-    def main(
+    def main_with_lse(
         Q: T.Buffer((q_len, D), dtype),
         K: T.Buffer((kv_len, D), dtype),
         V: T.Buffer((kv_len, D), dtype),
         O: T.Buffer((q_len, D), out_dtype),
+        LSE: T.Buffer((q_len,), accum_dtype),
     ):
         with T.Kernel(NUM_BLOCKS) as bx:
             Q_shared = T.alloc_l1((BR, D), dtype)
@@ -404,12 +506,11 @@ def flash_attention_fwd(
                         row_sum_ub,
                     )
 
+                store_lse(mt, LSE, m_ub, l_ub, row_sum_ub)
                 if is_cast_out:
-                    # Byte reinterpretation only: aliases O_ub, consumes no extra
-                    # UB capacity or buffer versions.
                     O_cast_ub = T.view(O_ub, (ROWS * 2, D), dtype=out_dtype)
                     finalize_cast(mt, O, O_ub, O_cast_ub, l_ub)
                 else:
                     finalize_fp32(mt, O, O_ub, l_ub)
 
-    return main
+    return main_with_lse

@@ -19,15 +19,22 @@ def _lower(m, n, k, *, blockscaled=False):
     def region(buffer, rows, cols):
         return tirx.BufferRegion(buffer, [tvm.ir.Range(0, rows), tvm.ir.Range(0, cols)])
 
-    gemm = T.blockscaled_gemm if blockscaled else T.gemm
-    body = tirx.Evaluate(gemm(region(a, m, k), region(b, n, k), region(c, m, n), transpose_B=True, clear_accum=True))
+    alloc_buffers = [a, b, c]
+    if blockscaled:
+        sfa = tirx.decl_buffer((64, 2), "int16", name="sfa", scope="shared.l0a.sf")
+        sfb = tirx.decl_buffer((64, 2), "int16", name="sfb", scope="shared.l0b.sf")
+        alloc_buffers += [sfa, sfb]
+        call = T.gemm_blockscaled(region(a, m, k), region(b, n, k), region(c, m, n), sfa, sfb, transpose_B=True, clear_accum=True)
+    else:
+        call = T.gemm(region(a, m, k), region(b, n, k), region(c, m, n), transpose_B=True, clear_accum=True)
+    body = tirx.Evaluate(call)
     root = tirx.SBlock(
         [],
         [],
         [],
         "root",
         body,
-        alloc_buffers=[a, b, c],
+        alloc_buffers=alloc_buffers,
         annotations={"layout_map": {a: make_ascend_major_k_layout(a), b: make_ascend_major_k_layout(b), c: make_ascend_l0c_layout(c)}},
     )
     target = tvm.target.Target("ascend")

@@ -19,6 +19,8 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128):
     scale = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="scale", scope="shared.l1")
     l0a = tirx.decl_buffer(dst_shape, "float8_e4m3fn", name="l0a", scope="shared.l0a")
     l0b = tirx.decl_buffer((mn, k_alloc), "float8_e4m3fn", name="l0b", scope="shared.l0b")
+    sfa = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="sfa", scope="shared.l0a.sf")
+    sfb = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="sfb", scope="shared.l0b.sf")
     acc = tirx.decl_buffer((mn, mn), "float32", name="acc", scope="shared.l0c")
 
     def region(buffer, transposed):
@@ -30,12 +32,19 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128):
     body = tirx.SeqStmt(
         [
             tirx.Evaluate(T.copy(region(a, src_transposed), region(l1, dst_transposed), transpose=src_transposed != dst_transposed)),
-            tirx.Evaluate(T.copy(l1, l0a, scale=scale)),
-            tirx.Evaluate(T.blockscaled_gemm(l0a, l0b, acc, transpose_A=dst_transposed, transpose_B=True, clear_accum=True)),
+            tirx.Evaluate(T.copy(l1, l0a)),
+            tirx.Evaluate(T.copy(scale, sfa)),
+            tirx.Evaluate(T.gemm_blockscaled(l0a, l0b, acc, sfa, sfb, transpose_A=dst_transposed, transpose_B=True, clear_accum=True)),
         ]
     )
     root = tirx.SBlock(
-        [], [], [], "root", body, alloc_buffers=[l1, scale, l0a, l0b, acc], annotations={"layout_map": {l1: make_ascend_major_k_layout(l1)}}
+        [],
+        [],
+        [],
+        "root",
+        body,
+        alloc_buffers=[l1, scale, l0a, l0b, acc, sfa, sfb],
+        annotations={"layout_map": {l1: make_ascend_major_k_layout(l1)}},
     )
     return tvm.IRModule({"main": tirx.PrimFunc([a.data], tirx.SBlockRealize([], True, root), buffer_map={a.data: a})}), l1
 
@@ -66,7 +75,7 @@ def test_mx_copy_pads_only_the_unwritten_k_tail(layout, actual_k, tail):
     start, extent = tail
     assert [int(index) for index in dst.args[0].indices] == ([start, 0] if k_axis == 0 else [0, start])
     assert [int(size) for size in dst.args[2:]] == ([extent, 32] if k_axis == 0 else [32, extent])
-    # Padding must follow the GM write and precede the scale-bearing L1 read.
+    # Padding must follow the GM write and precede the MX operand's L1 read.
     copies = calls(after, "tl.tileop.ascend_copy")
     operations = nodes(after, tirx.Call)
 

@@ -10,7 +10,7 @@ from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.utils.language import prim_expr_equal, retrieve_shape, to_buffer_region
 from tvm import arith, tirx
 
-__all__ = ["gemm", "blockscaled_gemm"]
+__all__ = ["gemm", "gemm_blockscaled"]
 
 
 def _legalize_argument(arg):
@@ -107,46 +107,58 @@ def _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, a
     )
 
 
-def blockscaled_gemm(
+def gemm_blockscaled(
     A: BufferLikeType,
     B: BufferLikeType,
     C: BufferLikeType,
-    sfa: BufferLikeType | None = None,
-    sfb: BufferLikeType | None = None,
+    SFA: BufferLikeType,
+    SFB: BufferLikeType,
     transpose_A: bool = False,
     transpose_B: bool = False,
     clear_accum: bool = False,
     unit_flag_ctrl: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
-    """Ascend block-scaled MXFP8 GEMM.
+    """Ascend block-scaled MXFP8 GEMM, shadowing the common ``T.gemm_blockscaled``.
 
-    Scale buffers are required for L1 A/B inputs. For L0 A/B inputs the scales
-    are expected to have been loaded by the preceding ``T.copy(..., scale=...)``.
+    ``SFA``/``SFB`` are required. For L1 A/B inputs they are the L1
+    scale-factor buffers, consumed directly by the fused L1 lowering. For L0
+    A/B inputs they are the MX scale-factor handles of the operand tiles
+    (:func:`tilelang.ascend.language.alloc_l0a_sf` /
+    :func:`~tilelang.ascend.language.alloc_l0b_sf`), loaded by a preceding
+    ``T.copy(sf_l1, view)``; the MAD reads the slots implied by its A/B data
+    addresses, so the operands here carry the read-region truth and select
+    the block-scaled lowering.
+
+    Unlike the common surface, ``k_start`` and the ``sf_*_granularity_k``
+    knobs are implicit: the Ascend lowering derives the scale K offset from
+    the SFA region slice, and MX scales cover 32 K elements per factor.
     """
 
-    ann = {"blockscaled": 1}
+    ann: dict = {}
     if unit_flag_ctrl is not None:
         ann["unit_flag_ctrl"] = unit_flag_ctrl
-    call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, GemmWarpPolicy.Square, clear_accum, ann)
-    if sfa is None and sfb is None:
-        return call
-    assert sfa is not None and sfb is not None, "block-scaled GEMM requires both sfa and sfb"
-    # Mirror T.tcgen05_gemm_blockscaled's wire format: the scale-factor
-    # regions ride as trailing tl.tileop.gemm args (SFA, SFB, sf_k_start),
-    # parsed into GemmNode's sfaRegion/sfbRegion. Appending to the common
-    # builder's call keeps the positional contract in one place.
-    sfa_region = to_buffer_region(sfa, access_type="r")
-    sfb_region = to_buffer_region(sfb, access_type="r")
+    assert SFA is not None and SFB is not None, "block-scaled GEMM requires both SFA and SFB"
+    call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, GemmWarpPolicy.Square, clear_accum, ann or None)
+    # Re-emit the dense slots under the dedicated tl.tileop.gemm_blockscaled
+    # op with the SFA/SFB regions and k_start appended (the 16-slot protocol
+    # parsed by GemmBlockScaled). k_start stays 0: the Ascend lowering derives
+    # the scale K offset from the SFA region slice instead. MX scales cover 32
+    # K elements per factor.
+    sfa_region = to_buffer_region(SFA, access_type="r")
+    sfb_region = to_buffer_region(SFB, access_type="r")
     sfa_arg = buffer_region_to_tile_region(sfa_region, "r", list(retrieve_shape(sfa_region)))
     sfb_arg = buffer_region_to_tile_region(sfb_region, "r", list(retrieve_shape(sfb_region)))
+    annotations = dict(call.annotations)
+    annotations["sf_a_granularity_k"] = 32
+    annotations["sf_b_granularity_k"] = 32
     return tirx.call_intrin(
         "handle",
-        call.op,
+        tirx.op.Op.get("tl.tileop.gemm_blockscaled"),
         *call.args,
         sfa_arg,
         sfb_arg,
         tirx.const(0, dtype="int32"),
-        annotations=call.annotations,
+        annotations=annotations,
     )
 
 

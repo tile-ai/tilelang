@@ -1524,8 +1524,8 @@ void CodeGenTileLangAscend::EmitFillL1_(const CallNode *op) {
 void CodeGenTileLangAscend::EmitL1ToL0Copy_(const CallNode *op, bool is_l0a) {
   const char *intrinsic =
       is_l0a ? "tl.ascend_load_cbuf_to_ca" : "tl.ascend_load_cbuf_to_cb";
-  ICHECK(op->args.size() == 9 || op->args.size() == 16)
-      << intrinsic << " expects 9 or 16 arguments, got " << op->args.size();
+  ICHECK_EQ(op->args.size(), 9)
+      << intrinsic << " expects exactly 9 arguments, got " << op->args.size();
 
   const bool is_transpose = GetIntImmArg(op, 8, intrinsic, "transpose") == 1;
   const char *function_name =
@@ -1540,22 +1540,25 @@ void CodeGenTileLangAscend::EmitL1ToL0Copy_(const CallNode *op, bool is_l0a) {
                                 {op->args[5]},
                                 {op->args[6]},
                                 {op->args[7]}});
+}
 
-  if (op->args.size() == 16) {
-    // MX destinations use 16-byte address units, while the scale source must
-    // be viewed in its physical E8M0 representation.
-    const char *mx_function_name =
-        is_l0a ? "asc_copy_l12l0a_mx" : "asc_copy_l12l0b_mx";
-    EmitCApiCall_(mx_function_name,
-                  {{op->args[0], "(uint64_t)(uintptr_t)(", ") / 16"},
-                   {op->args[9], "(__cbuf__ fp8_e8m0_t*)(", ")"},
-                   {op->args[10]},
-                   {op->args[11]},
-                   {op->args[12]},
-                   {op->args[13]},
-                   {op->args[14]},
-                   {op->args[15]}});
-  }
+void CodeGenTileLangAscend::EmitMxSfLoad_(const CallNode *op, bool is_l0a) {
+  const char *intrinsic =
+      is_l0a ? "tl.ascend_load_ca_sf" : "tl.ascend_load_cb_sf";
+  ICHECK_EQ(op->args.size(), 8)
+      << intrinsic << " expects exactly 8 arguments, got " << op->args.size();
+
+  // The MX destination is the DATA tile's address in 16-byte units; the
+  // scale source must be viewed in its physical E8M0 representation.
+  EmitCApiCall_(is_l0a ? "asc_copy_l12l0a_mx" : "asc_copy_l12l0b_mx",
+                {{op->args[0], "(uint64_t)(uintptr_t)(", ") / 16"},
+                 {op->args[1], "(__cbuf__ fp8_e8m0_t*)(", ")"},
+                 {op->args[2]},
+                 {op->args[3]},
+                 {op->args[4]},
+                 {op->args[5]},
+                 {op->args[6]},
+                 {op->args[7]}});
 }
 
 void CodeGenTileLangAscend::EmitUbufToL1Copy_(const CallNode *op) {
@@ -1702,6 +1705,9 @@ bool CodeGenTileLangAscend::EmitAscendMemoryCall_(const CallNode *op) {
   } else if (op->op.same_as(tl::ascend_load_cbuf_to_ca()) ||
              op->op.same_as(tl::ascend_load_cbuf_to_cb())) {
     EmitL1ToL0Copy_(op, op->op.same_as(tl::ascend_load_cbuf_to_ca()));
+  } else if (op->op.same_as(tl::ascend_load_ca_sf()) ||
+             op->op.same_as(tl::ascend_load_cb_sf())) {
+    EmitMxSfLoad_(op, op->op.same_as(tl::ascend_load_ca_sf()));
   } else if (op->op.same_as(tl::ascend_copy_matrix_cc_to_ub())) {
     EmitL0cToUbufCopy_(op);
   } else if (op->op.same_as(tl::ascend_copy_matrix_cc_to_gm())) {
