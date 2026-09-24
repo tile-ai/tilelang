@@ -27,7 +27,7 @@ def _clamp_kernel(dtype="float32", threads=32):
             id="cuda",
         ),
         pytest.param(
-            {"kind": "hip", "arch": "gfx942"},
+            {"kind": "hip", "mcpu": "gfx942"},
             "target.build.tilelang_hip_without_compile",
             marks=tilelang.testing.requires_rocm.marks(),
             id="hip",
