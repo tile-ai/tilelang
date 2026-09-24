@@ -356,6 +356,37 @@ def _cpu_target(with_host: bool = False) -> tvm.target.Target:
     return tvm.target.Target("c", host) if with_host else tvm.target.Target("c")
 
 
+@pytest.mark.parametrize("target_kind", ["cuda", "hip"])
+@pytest.mark.parametrize("rows,cols,threads,thread_start", [(1, 2, 2, 0), (2, 8, 4, 0), (3, 5, 8, 0), (2, 8, 8, 4)])
+def test_lower_tile_op_parallel_let_indices(target_kind, rows, cols, threads, thread_start):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target_kind == "cuda" else {"kind": "hip", "mcpu": "gfx1100"})
+    size = 2 * rows * cols + 8
+
+    @T.prim_func
+    def main(A: T.Tensor((size,), T.int32), B: T.Tensor((size,), T.int32)):
+        with T.Kernel(2, threads=threads) as bx:
+            if T.get_thread_binding() >= thread_start:
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = A[idx] * 3 + idx
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = B[idx] + 5
+
+    config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: False}}
+    with target, tvm.transform.PassContext(config=config):
+        mod = tvm.IRModule.from_expr(main)
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.Simplify()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    _assert_no_unexpected_free_vars(mod["main"])
+
+
 def _cpu_while_kernel_module(with_host: bool = False):
     """The while + fragment kernel from issue #2202, on a CPU `c` target.
 
