@@ -4,6 +4,7 @@
 
 - Target platform: Ascend 950/A5; Hardware evidence: <complete full_soc, npu_arch, detection source and evidence storage location or original text>
 - Target backend: <PTO or AscendC>
+- Kernel contract: each independent computation direction or public computation entry has one target factory, one nested `@T.prim_func`, and one kernel launch per invocation; forward and backward are counted separately
 - Resource specifications: <Actual number of AIC/AIV cores, involved on-chip capacity; record L2, Memory, peak bandwidth and theoretical computing power as needed and their specific SKU sources, unconfirmed items are clearly marked>
 - Source code environment: <Current warehouse root directory, version, local changes affecting the plan>
 - Compilation configuration: <target, codegen, execution backend; unconfirmed items are clearly marked>
@@ -32,13 +33,17 @@ This time only the cases in the table below are implemented, and input outside t
 
 ## 2. Algorithm and implementation architecture
 
-### 2.1 Algorithm, execution mode and kernel division
+### 2.1 Algorithm, execution mode and per-entry single-kernel organization
 
-<Explain the recommended algorithm, number of kernels, fusion strategy, and their applicability to the specified case. When there are clear trade-offs, alternatives and usage conditions are given. >
+<Enumerate every independent computation direction or public computation entry. For each entry, explain how all calculation stages are fused into one logical TileLang kernel and why it covers every specified case for that entry. Forward and backward may use different factories and PrimFuncs, but each entry must have exactly one target factory, one nested @T.prim_func, and one launch per invocation. >
 
-| Calculation phase | Subformulas and dependencies | kernel / execution unit | intermediate results |
+| Public computation entry / direction | Target factory | Nested `@T.prim_func` | Launches per invocation |
 |---|---|---|---|
-| <stage> | <calculation content and preorder dependencies> | <such as SimdVF/SimtVF in AIV, or AIC/Cube> | <buffer name and purpose, or none> |
+| <such as forward or backward> | <factory symbol> | <PrimFunc symbol> | 1 |
+
+| Public computation entry / direction | Calculation phase | Subformulas and dependencies | in-kernel execution unit | intermediate results |
+|---|---|---|---|---|
+| <entry> | <stage> | <calculation content and preorder dependencies> | <such as SimdVF/SimtVF in AIV, or AIC/Cube> | <buffer name and purpose, or none> |
 
 ### 2.2 Numerical precision and initialization
 
@@ -46,9 +51,9 @@ This time only the cases in the table below are implemented, and input outside t
 
 ### 2.3 Calling interface and project integration
 
-<Gives the Python calling interface, kernel builder main parameters, recommended file locations and calling relationships. Clarify workspace size, allocation and initialization responsibilities; omit inapplicable items. >
+<Give each public computation interface, its one target factory's main parameters, recommended file locations and calling relationships. Clarify workspace size, allocation and initialization responsibilities; omit inapplicable items. >
 
-<Multi-kernel solution explains the calling sequence and input-output mapping. When there is data rearrangement, padding or type conversion, clarify the execution location and cost; distinguish between metadata views and actual data copying. >
+<State that each public entry performs one kernel launch per invocation. Forward and backward may launch their own different PrimFuncs when invoked separately. Within one entry, do not introduce candidate PrimFuncs, host shape dispatch among multiple factories or PrimFuncs, or chained launches. When there is data rearrangement, padding or type conversion, clarify the execution location and cost; distinguish between metadata views and actual data copying, and keep the entry's core computation inside its kernel. >
 
 ## 3. Tiling, data flow and resource planning
 
@@ -80,7 +85,7 @@ This time only the cases in the table below are implemented, and input outside t
 |---|---|---|---|
 | <stage> | <specific buffer> | <execution domain and operation> | <before and after dependencies, automatic or manual synchronization method> |
 
-<Describes how the main dependencies are ensured by the selected scheduling method, and lists synchronization points and APIs for manual control. AIC/AIV collaboration needs to clarify the scope of data processed by each; cross-kernel needs to clarify the readable timing of intermediate data. You must not just write "Compiler automatic synchronization". >
+<For each public entry, describe how the main dependencies are ensured inside its one kernel by the selected scheduling method, and list synchronization points and APIs for manual control. AIC/AIV collaboration must clarify the scope of data processed by each and the readable timing of intermediate data. You must not just write "Compiler automatic synchronization". >
 
 ### 3.4 Boundary processing and calculation skeleton
 

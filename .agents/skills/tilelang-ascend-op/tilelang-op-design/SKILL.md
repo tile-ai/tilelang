@@ -1,6 +1,6 @@
 ---
 name: tilelang-op-design
-description: Generate or revise the TileLang design document design.md for Ascend 950 (A5) based on operator requirements. When the necessary input is insufficient, pause and guide the user to supplement. After the information is clear, design the implementation plan and accuracy verification method of the specified case. It is used to create new operators, migrate operators or revise the design based on implementation feedback; it is not responsible for generalized use case expansion and performance tuning.
+description: Generate or revise the TileLang design document design.md for Ascend 950 (A5) based on operator requirements. When the necessary input is insufficient, pause and guide the user to supplement. After the information is clear, design a one-kernel-per-public-entry implementation plan and accuracy verification method for the specified cases. It is used to create new operators, migrate operators or revise the design based on implementation feedback; it is not responsible for generalized use case expansion and performance tuning.
 ---
 
 # TileLang A5 operator solution design
@@ -10,7 +10,7 @@ description: Generate or revise the TileLang design document design.md for Ascen
 Generate `design.md` according to the operator requirements, providing an implementation solution that can directly guide coding for subsequent models. The report should independently describe the following core decisions without relying on historical dialogue:
 
 - **Computation definition and support scope**: input and output, attribute semantics, specified case and accuracy requirements.
-- **Algorithm and execution mode**: kernel partitioning, fusion strategy, AIC/AIV division of labor and SIMD/SIMT selection.
+- **Algorithm and execution mode**: per-entry single-kernel organization and fusion, AIC/AIV division of labor and SIMD/SIMT selection.
 - **API mapping and implementation basis**: key operations, parameters, applicable conditions and source code reference of corresponding versions.
 - **Tiling and data flow**: task division, index mapping, storage layout, data handling and resource budgeting.
 - **Scheduling and synchronization**: loop structure, pipeline series, buffer life cycle and data dependency.
@@ -23,6 +23,16 @@ The report directly states the design decisions, rationales, and implementation 
 This skill only designs user-specified cases and does not automatically expand shape, dtype, exception input or general fallback. The report guides subsequent model implementation operators and verifies the accuracy of specified cases; generalized use case expansion belongs to the subsequent testing stage, and the report does not set test grading or special handover chapters.
 
 Use a single skill, single report, without introducing multi-agent segmentation, document assembly, or additional approvals. The current stage does not generate operator code, test scripts, spec/proto, status files or independent iteration plans.
+
+### Per-entry single-kernel design contract
+
+The counting unit is each independent computation direction or public computation entry, not the whole operator file or delivery. Forward, backward, and any other separately callable computation are distinct entries. This is a hard design constraint rather than an optimization preference:
+
+- Each entry has exactly one target factory and exactly one nested `@T.prim_func`; one invocation of that entry launches its PrimFunc exactly once. A delivery that exposes both forward and backward may therefore contain one forward factory/PrimFunc and one backward factory/PrimFunc.
+- Within the same entry, do not design candidate or shape-specific PrimFuncs, host dispatch among multiple factories or PrimFuncs, chained device-kernel launches, or a workspace whose purpose is to connect multiple kernels.
+- Python factory parameters may select compile-time configurations such as tile sizes and core counts, and `T.macro` may factor reusable code inside an entry's kernel. After macro expansion, that entry must still contain one PrimFunc and perform one device-kernel launch.
+- Different shapes of the same entry may use a small number of JIT parameter combinations from its one kernel definition. General execution paths may branch inside that kernel on interface semantics or provable properties such as dtype, capacity, alignment, task count, full/tail tiles, contiguity, or hardware resource limits.
+- If an entry's required semantics cannot be implemented as one kernel with the current TileLang API and selected-backend lowering, identify the exact API, synchronization, capacity, or lowering blocker and stop. Do not emit a multi-kernel design for that entry, silently reduce the specified cases, or substitute host-side computation.
 
 **Requirements completeness pre-check must be completed before design. When the necessary input is insufficient or there is ambiguity that affects the design, the design is suspended and the user is guided to make supplements; after receiving a valid reply and passing the pre-inspection again, the scheme design can be started again. Default values, placeholders to be added, or partial design reports may not be substituted for requirements clarification. **
 
@@ -127,7 +137,7 @@ Explicit loading, calculation, reduce/accumulate, and store dtypes for each stag
 
 ### 4.5 Reasonable performance design
 
-Prioritize the reuse of applicable existing structures to avoid obvious duplication and unnecessary serialization. The fusion solution needs to take into account the intermediate data capacity and parallelism; the separation solution needs to take into account workspace and additional handling. Actual rearrangement, padding or type conversion on the host side must be factored into the implementation and cost. No performance search is performed during the design phase, and speedup ratios are not promised in the absence of actual measurements.
+Prioritize the reuse of applicable existing structures to avoid obvious duplication and unnecessary serialization. Each public entry's single-kernel fusion must account for intermediate-data capacity, synchronization and parallelism; splitting one entry into multiple launches is not an allowed fallback. Actual rearrangement, padding or type conversion on the host side must be factored into the implementation and cost and must not perform the operator's core computation. No performance search is performed during the design phase, and speedup ratios are not promised in the absence of actual measurements.
 
 ## 5. Workflow
 
@@ -156,11 +166,11 @@ Entry conditions: The requirement completeness pre-check for Phase 1 has passed.
 
 ### Phase 3: Implementation plan design
 
-#### 3.1 Algorithm, execution mode and kernel division
+#### 3.1 Algorithm, execution mode and per-entry single-kernel organization
 
-Break down the formula into its main steps and determine single-kernel, fused, or multi-kernel solutions. Matrix calculations are mainly undertaken by AIC/Cube, and the vector part is undertaken by AIV. Within AIV, `SimdVF`, `SimtVF` or a combination can be selected.
+Enumerate every public computation entry or independent direction, then break down each entry's formula and fuse its stages into the one kernel required by the per-entry contract. Matrix calculations are mainly undertaken by AIC/Cube, and the vector part is undertaken by AIV. Within AIV, `SimdVF`, `SimtVF` or a combination can be selected.
 
-Give a recommended solution, and list alternatives and usage conditions when there are clear trade-offs. When merging, explain the reduced handling and intermediate data capacity; when separating, explain the kernel calling sequence, intermediate result location and workspace size. Block reduction requires clear merging methods, state retention and initialization of partial results, and cannot be described as just "final reduction".
+For each entry, give one recommended single-kernel solution and list only alternatives that preserve its one-factory/one-PrimFunc/one-launch contract. Explain how intermediate results stay within that entry's launch, their storage locations and capacity, and how execution domains synchronize. Block reduction requires a concrete in-kernel merging method, state retention and initialization; it cannot be deferred to another launch or described only as "final reduction".
 
 #### 3.2 Tiling, task mapping and loop structure
 
@@ -181,7 +191,7 @@ Use data flow tables or diagrams to correspond to calculation steps and buffers,
 #### 3.4 Numerical values, synchronization and boundary processing
 
 - **Numerical calculation**: Provide the dtype, reduction initial value, clearing timing, accumulation sequence and output conversion of the main intermediate quantities; explain the corresponding relationship with golden.
-- **Synchronization dependencies**: clarify the conditions for moving in, calculating, moving out and reusing. Distinguish between same-core pipeline, AIC/AIV collaboration and cross-kernel dependencies; list synchronization points and APIs during manual control.
+- **Synchronization dependencies**: clarify the conditions for moving in, calculating, moving out and reusing. For each public entry, distinguish between same-core pipelines and AIC/AIV collaboration within its one kernel; list synchronization points and APIs during manual control.
 - **Write Safe**: Check whether the output of task/core overlaps. When multiple tasks update the same result, clearly merge or atomic operations, initialization responsibilities and numerical impacts.
 - **Tail block processing**: Give priority to the legal blocks that divide the specified case; if there are still tail blocks, clarify the valid range, fill value, calculate mask and output clipping. When the reduction reads padding, the padding value must not change the effective result.
 
@@ -212,7 +222,7 @@ Directly define comparison objects, methods and passing conditions. When boundar
 | Input completeness | Blocking deficiencies have been resolved, user replies are not replaced with default input or "to be supplemented"; design reports are not generated or overwritten when preflight fails |
 | Template consistency | The template has been compared item by item, the title, chapter sequence, table structure and fixed fields are complete, and the prompt has been replaced |
 | Requirement consistency | The calculation semantics are consistent with the input data, the specified cases have implementation paths, and the scope of the commitment is not clear |
-| Solution completeness | The algorithm, kernel partitioning, API mapping, index formula and initial parameters are specific and can directly guide coding |
+| Solution completeness | Every public computation entry/direction is enumerated with exactly one target factory, one nested PrimFunc and one launch per invocation; its algorithm, API mapping, index formula and initial parameters can directly guide coding, with no same-entry multi-kernel or host-compute fallback |
 | Resource feasibility | Relevant level peak occupancy, capacity sources, implicit allocation, multi-version and reuse basis are complete |
 | Data flow correctness | Handling scope, initialization, synchronization dependencies, output partitioning and necessary tail block processing are consistent with each other |
 | Verify executability | All the inputs, golden, comparison rules and thresholds of the specified case can be used to write tests without mixing with the execution progress |
@@ -228,6 +238,7 @@ Both structure and content must meet the requirements, and length is not the bas
 | Missing requirements or semantic conflicts | Return to Section 2.4 to guide the user to supplement and pause the design; re-pre-inspect after a valid reply, and resume after passing |
 | Insufficient API or capacity basis | Explain the conditions, impact and verification method of the plan according to Section 3.3 |
 | Target combination is not supported | Evaluate evidence-based alternatives; list dependencies separately if backend must be extended |
+| Per-entry single-kernel implementation is infeasible | Report the exact API, synchronization, capacity, or lowering blocker and stop; do not split the affected entry into multiple kernels or replace it with host-side computation |
 | Revision of implementation or generalized test feedback requirements | Read old designs, failed cases, implementation and verification results after debugging, distinguish design defects from implementation errors, and only revise the affected content |
 
 When subsequent generalization tests pass directly, there is no need to rewrite the plan. If the repair only makes the code conform to the original design, there is no need to change the correct solution; if debugging changes the algorithm, chunking, data flow, or applicable conditions, update the design based on the revised implementation and verification results. The retest failed case after repair is the same as the original specified case. Passing the test only proves the verified case and does not mean that any input is supported.
