@@ -427,6 +427,17 @@ TL_DEVICE unsigned __pack_nv_bfloat162(const bfloat16_t x, const bfloat16_t y) {
 }
 
 namespace tl {
+// Copy a packed vector without assigning its individual byte fields. Keep
+// both accesses typed: memcpy can scalarize aligned vector loads or stores.
+template <typename Bits, typename T>
+TL_DEVICE void store_packed_vector(T *dst, const T &src) {
+  static_assert(sizeof(Bits) == sizeof(T), "packed store size mismatch");
+  static_assert(alignof(T) >= alignof(Bits), "packed store alignment mismatch");
+  static_assert(__is_trivially_copyable(T),
+                "packed stores require trivially copyable vectors");
+  *reinterpret_cast<Bits *>(dst) = *reinterpret_cast<const Bits *>(&src);
+}
+
 TL_DEVICE float fast_rcp(float x) {
   float ret;
   asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(ret) : "f"(x));
