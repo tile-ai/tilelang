@@ -56,7 +56,7 @@ def ref_backward(Q, K, V, dO, softmax_scale=None):
     return q_ref.grad, k_ref.grad, v_ref.grad
 
 
-def run_correctness(S1=512, G=2, S2=384, D=128):
+def run_correctness(S1=512, G=2, S2=384, D=128, *, target="ascend"):
     import torch
 
     q_len = S1 * G
@@ -69,16 +69,19 @@ def run_correctness(S1=512, G=2, S2=384, D=128):
             D,
             tiling=FwdTiling(num_stages=min(3, S2 // 128)),
         ),
+        target=target,
         out_idx=[3, 4],
         pass_configs=pass_configs,
     )
     delta_kernel = tilelang.compile(
         flash_attention_bwd_preprocess(q_len, D),
+        target=target,
         out_idx=[2],
         pass_configs=pass_configs,
     )
     bwd_kernel = tilelang.compile(
         flash_attention_bwd_fused_dq_atomic_staged(q_len, S2, D),
+        target=target,
         out_idx=[],
         pass_configs=pass_configs,
     )
