@@ -100,8 +100,10 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
       node->nan_propagate = i.value()->value != 0;
     }
   }
-  if (node->nan_propagate &&
-      (node->type->IsMax() || node->type->IsMin() || node->type->IsAbsMax())) {
+  const bool is_minmax =
+      node->type->IsMax() || node->type->IsMin() || node->type->IsAbsMax();
+
+  if (node->nan_propagate && is_minmax) {
     CHECK(node->dst->dtype.is_float16() || node->dst->dtype.is_bfloat16(),
           ValueError)
         << "reduce_" << reduce_type
