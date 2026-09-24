@@ -27,7 +27,8 @@ def _two_kernel_program():
 def test_pto_wrapper_supports_multiple_device_kernels_in_host_call_order():
     program = _two_kernel_program()
     module = tvm.IRModule({"main": program})
-    artifact = lower(program, target="pto")
+    with determine_target("pto", return_object=True):
+        artifact = lower(program, target="pto")
     reversed_device_mod = tvm.IRModule(dict(reversed(list(artifact.device_mod.functions.items()))))
     wrapper = TLPTOSourceWrapper(
         module,

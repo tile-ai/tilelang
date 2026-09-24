@@ -105,7 +105,7 @@ def test_dcache_bypass_codegen_for_scalar_write(target):
     assert (header in source) == (target == "ascend")
     _assert_bypass_calls_only_on_writable(source, target)
     if target == "pto":
-        assert any("ro_buf" in call for call in re.findall(r"scalar\.load\([^;\n]+\)", source))
+        assert any("ro_buf" in call for call in re.findall(r"pto\.load\([^;\n]+\)", source))
     else:
         assert "ro_buf[0]" in source
 

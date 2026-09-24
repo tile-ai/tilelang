@@ -102,12 +102,13 @@ def test_manual_pipeline_rewrites_compact_nz_dual_copy():
             "asc_copy_gm2ub_align",
             "asc_copy_ub2gm_align",
         ),
-        (
+        pytest.param(
             "pto",
-            'with pto.section("cube")',
+            'with tl.mixed_kernel_section("cube")',
             "pto.get_subblock_idx()",
             "pto.mte_gm_ub",
             "pto.mte_ub_gm",
+            marks=pytest.mark.pto,
         ),
     ],
     ids=["ascend", "pto"],
@@ -117,7 +118,7 @@ def test_manual_mixed_pipeline_shares_sub_block_id(target, kernel_marker, sid_ma
         source = tilelang.lower(_manual_mixed_dual_copy(), target=target).kernel_source
     assert kernel_marker in source
     if target == "pto":
-        assert 'with pto.section("vector")' in source
+        assert 'with tl.mixed_kernel_section("vector")' in source
     assert source.count(sid_marker) == 1
     assert source.count(load_marker) == 1
     assert source.count(store_marker) == 1

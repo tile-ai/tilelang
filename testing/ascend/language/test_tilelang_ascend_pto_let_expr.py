@@ -1,5 +1,7 @@
 """PTO codegen must print Let-bearing For extents (post-#382 shape >= 0)."""
 
+import pytest
+
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.engine.lower import lower
@@ -19,6 +21,7 @@ def dynamic_persistent_copy_kernel():
     return main
 
 
+@pytest.mark.pto
 def test_pto_dynamic_persistent_lowers_lets():
     source = lower(dynamic_persistent_copy_kernel(), target="pto").kernel_source
     # Regression for #382: missing Let visitor used to throw

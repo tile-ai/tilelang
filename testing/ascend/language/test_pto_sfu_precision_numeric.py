@@ -16,6 +16,7 @@ float32 (IEEE correctly rounded, compared bitwise).
 import struct
 
 import numpy as np
+import pytest
 import torch
 import tilelang
 import tilelang.ascend.language as T
@@ -157,6 +158,7 @@ def _make_inputs(values, device="npu"):
     return torch.tensor(np.asarray(values, dtype=np.float32), dtype=torch.float32, device=device)
 
 
+@pytest.mark.pto
 def test_pto_vexp_ftz_false_numeric():
     # Normal outputs, subnormal outputs (x in (-104, -87.34)), and underflow
     # to +0 (e^x < 2^-150), where the wrapper's (e^(x/2))^2 path must agree
@@ -172,6 +174,7 @@ def test_pto_vexp_ftz_false_numeric():
     assert_close_ulp(y, torch.from_numpy(ref), max_ulp=1, context="vexp ftz_false")
 
 
+@pytest.mark.pto
 def test_pto_vln_ftz_false_numeric():
     values = (
         # Subnormal inputs: min/largest subnormal, and interior patterns.
@@ -188,6 +191,7 @@ def test_pto_vln_ftz_false_numeric():
     assert_close_ulp(y, torch.from_numpy(ref), max_ulp=1, context="vln ftz_false")
 
 
+@pytest.mark.pto
 def test_pto_vsqrt_ftz_false_numeric():
     values = (
         # Subnormal inputs, including the largest subnormal 0x007fffff that
@@ -206,6 +210,7 @@ def test_pto_vsqrt_ftz_false_numeric():
     assert_close_ulp(y, torch.from_numpy(ref), max_ulp=0, context="vsqrt ftz_false")
 
 
+@pytest.mark.pto
 def test_pto_vdiv_exact_numeric():
     rng = np.random.default_rng(0)
     n = 3 * VEC

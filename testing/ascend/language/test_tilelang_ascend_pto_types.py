@@ -3,14 +3,20 @@
 import pytest
 
 import tilelang.ascend.language as T
+from tilelang.backend.target import determine_target
 from tilelang.engine.lower import lower
+
+
+def _pto_source(func):
+    with determine_target("pto", return_object=True):
+        return lower(func, target="pto").kernel_source
 
 
 def _indent(line):
     return len(line) - len(line.lstrip())
 
 
-@pytest.mark.parametrize("op_name,combine", [("fmax", T.max), ("fmin", T.min)])
+@pytest.mark.parametrize("op_name,combine", [("maximum", T.max), ("minimum", T.min)])
 @pytest.mark.pto
 def test_pto_float32x2_minmax_codegen(op_name, combine):
     @T.prim_func
@@ -30,7 +36,7 @@ def test_pto_float32x2_minmax_codegen(op_name, combine):
                     c_ub[i] = combine(a_ub[i], b_ub[i])
             T.copy(c_ub, C)
 
-    source = lower(func, target="pto").kernel_source
+    source = _pto_source(func)
     assert f"tl.vectorize_binary_f32x2(pto.{op_name}," in source
     compile(source, "<pto-float32x2-minmax>", "exec")
 
@@ -56,7 +62,7 @@ def test_pto_float32x2_unary_math_codegen(scalar_op, unary):
                     b_ub[i] = unary(a_ub[i])
             T.copy(b_ub, B)
 
-    source = lower(func, target="pto").kernel_source
+    source = _pto_source(func)
     assert f"tl.vectorize_unary_f32x2({scalar_op}," in source
     compile(source, "<pto-float32x2-unary-math>", "exec")
 
@@ -80,9 +86,9 @@ def test_pto_float32x2_div_codegen():
                     c_ub[i] = a_ub[i] / b_ub[i]
             T.copy(c_ub, C)
 
-    source = lower(func, target="pto").kernel_source
+    source = _pto_source(func)
     assert "import tilelang.contrib.ptodsl as tl" in source
-    assert "_tl_vectorize_binary_f32x2" not in source
+    assert "def vectorize_binary_f32x2" not in source
     assert "tl.vectorize_binary_f32x2(tl.scalar_div," in source
     compile(source, "<pto-float32x2-div>", "exec")
 
@@ -90,10 +96,10 @@ def test_pto_float32x2_div_codegen():
 @pytest.mark.parametrize(
     "src_dtype,dst_dtype,dst_pto_type",
     [
-        ("float32", "float16", "pto.f16x2"),
-        ("float32", "bfloat16", "pto.bf16x2"),
-        ("float16", "float32", "pto.f32x2"),
-        ("bfloat16", "float32", "pto.f32x2"),
+        ("float32", "float16", "pto.f16"),
+        ("float32", "bfloat16", "pto.bf16"),
+        ("float16", "float32", "pto.f32"),
+        ("bfloat16", "float32", "pto.f32"),
     ],
 )
 @pytest.mark.pto
@@ -110,9 +116,10 @@ def test_pto_packed_float_cast_and_local_fragment_codegen(src_dtype, dst_dtype, 
                 T.copy(local, b_ub)
             T.copy(b_ub, B)
 
-    source = lower(func, target="pto").kernel_source
-    assert f', {dst_pto_type}, rounding="r", saturation="nosat")' in source
-    assert "pto.alloc_buffer((2,)," in source
+    source = _pto_source(func)
+    assert "local = pto.alloc_buffer((2,), " in source
+    assert f"pto.cast(pto.load(local, 0, contiguous=2), {dst_pto_type})" in source
+    assert f"pto.alloc_buffer((2,), {dst_pto_type})" in source
     compile(source, "<pto-packed-float-cast>", "exec")
 
 
@@ -150,14 +157,9 @@ def test_empty_simdvf_pto_codegen_emits_valid_python():
         with T.Kernel(1) as _, T.SimdVF():
             pass
 
-    source = lower(func, target="pto").kernel_source
+    source = _pto_source(func)
     compile(source, "<pto-empty-simdvf>", "exec")
 
-    lines = source.splitlines()
-    vecscope_lines = [(index, line) for index, line in enumerate(lines) if "with pto.vecscope():" in line]
-    assert len(vecscope_lines) == 1
-    vecscope_index, vecscope_line = vecscope_lines[0]
-    body_lines = [line for line in lines[vecscope_index + 1 :] if line.strip()]
-    assert body_lines
-    assert body_lines[0].strip() == "pass"
-    assert _indent(body_lines[0]) > _indent(vecscope_line)
+    assert "with pto.vecscope():" not in source
+    assert "pass" not in source
+    assert "pto.init_core()" in source

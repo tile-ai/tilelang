@@ -140,6 +140,7 @@ def vdup_runtime_scalar_f16(N: int, dtype_str: str):
     return main
 
 
+@pytest.mark.pto
 def test_vdup_runtime_i32():
     N = 256
     kernel = vdup_runtime_scalar_i32(N)
@@ -150,6 +151,7 @@ def test_vdup_runtime_i32():
     assert torch.equal(y, ref), f"i32 vdup mismatch: {y} vs {ref}"
 
 
+@pytest.mark.pto
 @pytest.mark.parametrize("dtype_str,torch_dtype", [("int8", torch.int8), ("uint8", torch.uint8)])
 def test_vdup_runtime_i8(dtype_str, torch_dtype):
     N = 256
@@ -161,6 +163,7 @@ def test_vdup_runtime_i8(dtype_str, torch_dtype):
     assert torch.equal(y, ref), f"{dtype_str} vdup mismatch: {y} vs {ref}"
 
 
+@pytest.mark.pto
 def test_vdup_runtime_f32():
     N = 256
     kernel = vdup_runtime_scalar_f32(N)
@@ -171,6 +174,7 @@ def test_vdup_runtime_f32():
     torch.testing.assert_close(y, ref, rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.pto
 @pytest.mark.parametrize("dtype_str,torch_dtype", [("float16", torch.float16), ("bfloat16", torch.bfloat16)])
 def test_vdup_runtime_f16(dtype_str, torch_dtype):
     N = 256
