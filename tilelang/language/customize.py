@@ -3,8 +3,8 @@
 from __future__ import annotations
 from tilelang._typing import ShapeType, DType, BufferLikeType
 import tilelang.language as T
-from tvm import arith
-from tvm.tirx import PrimExpr, Buffer, op
+from tvm import DataType, DataTypeCode, arith
+from tvm.tirx import PrimExpr, Buffer, Broadcast, convert, op
 from tilelang.utils.language import bits_product, prim_expr_equal, retrieve_buffer_and_offset
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_or, atomic_store  # noqa: F401
 
@@ -41,8 +41,21 @@ def dp4a(A: BufferLikeType, B: BufferLikeType, C: BufferLikeType) -> PrimExpr:
     )
 
 
+_NON_FLOAT_TYPE_CODES = (
+    DataTypeCode.INT,
+    DataTypeCode.UINT,
+    DataTypeCode.BOOL,
+    DataTypeCode.HANDLE,
+)
+
+
 def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     """Clamps the input value dst between [min_val, max_val]
+
+    Floating-point ``NaN`` values in the input or either bound propagate to
+    the result. When ``min_val > max_val``, the result is ``max_val`` (unless
+    an operand is ``NaN``), matching ``torch.clamp``. Each operand is evaluated
+    once, and vector operands are clamped independently in each lane.
 
     Args:
         dst: Input value to be clamped
@@ -52,9 +65,20 @@ def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     Returns:
         Value clamped to the specified range
     """
-    dst = T.max(dst, min_val)  # Ensure value is not less than minimum
-    dst = T.min(dst, max_val)  # Ensure value is not greater than maximum
-    return dst
+    dst, min_val, max_val = (convert(value) for value in (dst, min_val, max_val))
+    clamped = T.min(T.max(dst, min_val), max_val)
+    dtype = DataType(clamped.dtype)
+    if dtype.type_code in _NON_FLOAT_TYPE_CODES:
+        return clamped
+    # Match min/max's type promotion, including scalar bounds on vector inputs.
+    lanes = max(DataType(value.dtype).lanes for value in (dst, min_val, max_val))
+    dtype = dtype.with_lanes(lanes)
+    args = []
+    for value in (dst, min_val, max_val):
+        if DataType(value.dtype).lanes == 1 and lanes != 1:
+            value = Broadcast(value, lanes)
+        args.append(T.cast(value, dtype))
+    return T.call_intrin(dtype, op.Op.get("tl.clamp"), *args)
 
 
 def reshape(src: Buffer, shape: ShapeType) -> Buffer:
