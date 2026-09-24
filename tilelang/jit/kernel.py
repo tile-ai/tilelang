@@ -368,7 +368,7 @@ class JITKernel(Generic[_P, _T]):
                 device_mod=artifact.device_mod,
                 device_kernel_source=artifact.kernel_source,
                 verbose=self.verbose,
-                pass_configs=pass_configs,
+                pass_configs=self.pass_configs,
                 compile_flags=compile_flags,
             )
         elif execution_backend == "nvrtc":

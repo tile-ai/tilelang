@@ -153,13 +153,14 @@ class LibraryGenerator:
             npu_arch = get_target_npu_arch(target)
             configured_options = normalize_options((self.pass_configs or {}).get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
             explicit_options = normalize_options(self.compile_flags)
+            # Keep repeated option/value pairs such as -mllvm intact and ordered.
+            # Merge here to bypass the token deduplication below.
             extra_compile_options = []
-            for option in [*configured_options, *explicit_options]:
-                if option not in extra_compile_options:
-                    extra_compile_options.append(option)
             command = [
                 find_bisheng_path(),
                 *get_bisheng_compile_options(npu_arch),
+                *configured_options,
+                *explicit_options,
                 # Avoid using mmap to write linker output, thus more friendly for distributed FS
                 "-Wl,--no-mmap-output-file",
                 "--shared",
