@@ -46,6 +46,7 @@
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
+#include "transform/common/transfer_analysis.h"
 #include "ws_analysis.h"
 
 namespace tvm {
@@ -1544,8 +1545,20 @@ private:
           simt_stmts_emitted = true;
         }
 
+        bool prefix_writes_shared = false;
         for (const auto &stmt : producer_loop_prefix_stmts[tma_idx]) {
           producer_stmts.push_back(stmt);
+          prefix_writes_shared |= AnalyzeTransfers(stmt, target_).writes_shared;
+        }
+        if (prefix_writes_shared) {
+          // Synchronous copies moved to the producer must finish on every
+          // producer thread before an elected TMA thread can publish them.
+          // Their destinations need not overlap the TMA buffers, so ordinary
+          // shared-memory hazard analysis cannot supply this completion edge.
+          // ThreadPartialSync lowers this to the producer partition's barrier.
+          producer_stmts.push_back(
+              Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
+                            {StringImm("shared")})));
         }
         // Convert copy → tma_copy with barrier, or annotate non-copy
         // TMA tile-ops (e.g. im2col) with barrier reference.
