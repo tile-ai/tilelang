@@ -49,6 +49,7 @@ def test_each_dialect_declares_its_own_op_hints():
         "copy": {"disable_tma", "eviction_policy", "prefer_instruction"},
         "im2col": {"eviction_policy"},
         "gemm": {"mbar"},
+        "gemm_blockscaled": {"mbar", "use_2cta", "sf_layout"},
         "gemm_sp": {"wg_wait"},
         "atomic_add": {"use_tma"},
         "Parallel": {"prefer_async"},

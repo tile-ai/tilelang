@@ -5,7 +5,6 @@ from tilelang.ascend import language as T
 from tilelang.layout import (
     make_ascend_major_k_layout,
     make_ascend_major_mn_layout,
-    make_ascend_sf_layout,
     try_extract_fractal_layout,
 )
 from tilelang.transform.simplify import _Simplify
@@ -93,12 +92,10 @@ _ASCEND_DTYPE_MAP = {
 class GemmMAD(GemmBase):
     @property
     def is_blockscaled(self) -> bool:
-        # An Ascend L0-input block-scaled gemm carries no SF regions on the
-        # node (the scales were pre-loaded into the MX registers by
-        # T.copy(scale=...)); the dialect marks it with the "blockscaled"
-        # annotation instead, so widen the base's structural predicate.
-        ann = getattr(self.gemm_node, "annotations", {})
-        return bool(ann.get("blockscaled", False)) or super().is_blockscaled
+        # Structural, matching the C++ node hierarchy: explicit SFA/SFB
+        # operands build a tl.tileop.gemm_blockscaled op handled by
+        # GemmMADBlockScaled, which overrides this to True.
+        return False
 
     @property
     def unit_flag_ctrl(self) -> tirx.PrimExpr:
@@ -139,20 +136,9 @@ class GemmMAD(GemmBase):
         if self._is_l1_input() or self._is_l0_input() or self.is_blockscaled:
             layouts[self.A] = _a_layout(self.A)
             layouts[self.B] = _b_layout(self.B)
-        if self.SFARegion is not None:
-            layouts[self.SFARegion.buffer] = make_ascend_sf_layout(self.SFARegion.buffer)
-        if self.SFBRegion is not None:
-            layouts[self.SFBRegion.buffer] = make_ascend_sf_layout(self.SFBRegion.buffer)
         return layouts
 
-    def lower(
-        self,
-        layout_map: dict,
-        target: Target,
-        thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
-    ):
+    def _prepare_lower(self, layout_map: dict) -> None:
         self._check_blockscaled_k_alignment()
         self._layout_map = layout_map
 
@@ -162,16 +148,19 @@ class GemmMAD(GemmBase):
                 info = try_extract_fractal_layout(layout, self.C)
                 assert info is not None, f"GEMM C buffer {self.C.name} must carry an Ascend fractal layout"
 
+    def lower(
+        self,
+        layout_map: dict,
+        target: Target,
+        thread_bounds: Range,
+        thread_index: tirx.PrimExpr,
+        mbar_phase_expr: tirx.PrimExpr | None = None,
+    ):
+        self._prepare_lower(layout_map)
+
         if self._is_l1_input():
             assert not self.trans_A and self.trans_B, "Ascend L1 GEMM currently only supports trans_A=False, trans_B=True (NT)."
-            if self.is_blockscaled:
-                assert self.SFARegion is not None and self.SFBRegion is not None, (
-                    "blockscaled_gemm with L1 A/B inputs requires sfa and sfb buffers"
-                )
-                return self._lower_l1_blockscaled()
             return self._lower_l1()
-        if self.is_blockscaled:
-            return self._lower_l0_blockscaled()
         return self._lower_l0()
 
     def _is_l1_input(self):
@@ -258,37 +247,6 @@ class GemmMAD(GemmBase):
 
         return _Simplify(_gemm_mad, inline_let=True)
 
-    def _lower_l0_blockscaled(self):
-        # L0 block-scaled MAD. The per-block scale factors must already have been
-        # loaded into the L0A/L0B MX scale registers (e.g. via
-        # T.copy(l1_data, l0, sf=l1_sf)); asc_mmad_mx then applies them. The call
-        # signature matches tl.ascend_mad — the scaling is implicit in the
-        # hardware MX registers, so no SF pointer is passed here.
-        m, n, k = self._l0_operation_extents()
-        c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
-        a_ptr = _make_access_ptr(self.ARegion.buffer, self.ARegion, 1)
-        b_ptr = _make_access_ptr(self.BRegion.buffer, self.BRegion, 1)
-        call = tirx.call_intrin(
-            "void",
-            tirx.op.Op.get("tl.ascend_mad_mx"),
-            c_ptr,
-            a_ptr,
-            b_ptr,
-            _to_int32(m),
-            _to_int32(k),
-            _to_int32(n),
-            _to_int32(self.unit_flag_ctrl),
-            _to_int32(1),  # gemv_ctrl: 1 disables the specialized GEMV mode
-            _to_int32(0),  # BTbuf_ctrl
-            self.clear_accum,
-        )
-
-        @T.prim_func
-        def _gemm_mad_mx() -> None:
-            T.evaluate(call)
-
-        return _Simplify(_gemm_mad_mx, inline_let=True)
-
     def _lower_l1(self):
         tile_k_sub = self._compute_tile_k_sub()
         c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
@@ -336,99 +294,3 @@ class GemmMAD(GemmBase):
             T.evaluate(call)
 
         return _Simplify(_gemm_mad_l1, inline_let=True)
-
-    def _lower_l1_blockscaled(self):
-        tile_k_sub = self._compute_tile_k_sub()
-        c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
-
-        a_buf = self.ARegion.buffer
-        b_buf = self.BRegion.buffer
-        a_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(a_buf.dtype),
-            a_buf.data,
-            _compute_flat_offset_excluding_last(a_buf, self.ARegion),
-            _compute_extent(self.ARegion),
-            tirx.IntImm("int32", 1),
-        )
-        b_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(b_buf.dtype),
-            b_buf.data,
-            _compute_flat_offset_excluding_last(b_buf, self.BRegion),
-            _compute_extent(self.BRegion),
-            tirx.IntImm("int32", 1),
-        )
-
-        sfa_region = self.SFARegion
-        sfb_region = self.SFBRegion
-        assert sfa_region is not None and sfb_region is not None, "blockscaled_gemm requires sfa and sfb buffers"
-        sfa_buf = sfa_region.buffer
-        sfb_buf = sfb_region.buffer
-        sfa_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(sfa_buf.dtype),
-            sfa_buf.data,
-            _compute_flat_offset_excluding_last(sfa_buf, sfa_region),
-            _compute_extent(sfa_region),
-            tirx.IntImm("int32", 1),
-        )
-        sfb_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(sfb_buf.dtype),
-            sfb_buf.data,
-            _compute_flat_offset_excluding_last(sfb_buf, sfb_region),
-            _compute_extent(sfb_region),
-            tirx.IntImm("int32", 1),
-        )
-
-        input_dtype = self._input_dtype()
-        in_dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)
-        assert in_dtype_str is not None, f"Unsupported dtype for Ascend blockscaled GEMM: {input_dtype}"
-
-        def _sf_dtype_str(dtype) -> str:
-            dtype_str = str(dtype)
-            if "uint8" in dtype_str:
-                return "uint8_t"
-            if "int8" in dtype_str:
-                return "int8_t"
-            if "uint16" in dtype_str:
-                return "uint16_t"
-            if "int16" in dtype_str:
-                return "int16_t"
-            if "float8_e4m3" in dtype_str:
-                return "float8_e4m3_t"
-            return dtype_str
-
-        sf_dtype_str = _sf_dtype_str(sfa_buf.dtype)
-        sfa_layout = _find_layout(getattr(self, "_layout_map", {}), sfa_buf)
-        sfa_info = try_extract_fractal_layout(sfa_layout, sfa_buf) if sfa_layout is not None else None
-        assert sfa_info is not None and sfa_info.kind == 2, f"blockscaled_gemm sfa buffer {sfa_buf.name} must carry an Ascend SF_K layout"
-        assert sfa_info.c0_axis == 1, f"blockscaled_gemm sfa buffer {sfa_buf.name}: SF K axis must be col, got c0_axis={sfa_info.c0_axis}"
-        sf_nz_stride = sfa_info.outer1
-        sf_k_offset = _to_int32(sfa_region.region[-1].min // sfa_info.c0)
-
-        call = tirx.call_intrin(
-            "void",
-            tirx.op.Op.get("tl.ascend_blockscaled_gemm_l1"),
-            c_ptr,
-            a_ptr,
-            b_ptr,
-            sfa_ptr,
-            sfb_ptr,
-            _to_int32(self.M),
-            _to_int32(self.K),
-            _to_int32(self.N),
-            _to_int32(tile_k_sub),
-            _to_int32(1 if self.trans_B else 0),
-            self.clear_accum,
-            tirx.StringImm(in_dtype_str),
-            tirx.StringImm(sf_dtype_str),
-            tirx.StringImm("float"),
-            _to_int32(0),  # buf_offset
-            sf_k_offset,  # sf_k_offset (auto from region slice)
-            _to_int32(sf_nz_stride),
-            _to_int32(self.unit_flag_ctrl),
-        )
-
-        @T.prim_func
-        def _gemm_mad_l1_blockscaled() -> None:
-            T.evaluate(call)
-
-        return _Simplify(_gemm_mad_l1_blockscaled, inline_let=True)

@@ -138,7 +138,8 @@ inline uint16_t GetAscendCopyPipeMask(const Buffer &src, const Buffer &dst) {
   if (IsSharedBuffer(src) && (IsGlobalBuffer(dst) || IsL1Buffer(dst))) {
     return PipeMask(ResourcePipe::kMTE3);
   }
-  if (IsL1Buffer(src) && (IsL0ABuffer(dst) || IsL0BBuffer(dst))) {
+  if (IsL1Buffer(src) &&
+      (IsL0ABuffer(dst) || IsL0BBuffer(dst) || IsL0SFBuffer(dst))) {
     return PipeMask(ResourcePipe::kMTE1);
   }
   if (IsL0CBuffer(src) && (IsSharedBuffer(dst) || IsGlobalBuffer(dst))) {
@@ -208,7 +209,7 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
     return GetAscendFillPipeMask(fill->dst);
   }
 
-  if (name == "tl.tileop.gemm") {
+  if (name == "tl.tileop.gemm" || name == "tl.tileop.gemm_blockscaled") {
     return PipeMask(ResourcePipe::kCube);
   }
   if (name == "tl.tileop.reduce" || name == "tl.tileop.finalize_reducer") {

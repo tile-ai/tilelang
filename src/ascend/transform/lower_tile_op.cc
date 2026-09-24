@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ascend/op/copy.h"
+#include "ascend/op/utils.h"
 #include "cuda/op/builtin.h"
 #include "layout/layout.h"
 #include "layout/utils.h"
@@ -213,6 +215,19 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
+    substituter.mx_sf_bindings_ = CollectMxSfBindings(f->body);
+    tirx::PostOrderVisit(f->body, [&substituter](const ObjectRef &node) {
+      const auto *attr = node.as<AttrStmtNode>();
+      if (attr == nullptr || attr->attr_key != tl::attr::kBufferVersion)
+        return;
+      auto versions = attr->node.try_cast<BufferVersionMap>();
+      ICHECK(versions.has_value())
+          << "'" << tl::attr::kBufferVersion
+          << "' AttrStmt node must be a buffer version map";
+      for (const auto &[data, version] : versions.value()) {
+        substituter.buffer_versions_.Set(data, version);
+      }
+    });
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -384,8 +399,21 @@ private:
 
     auto block = Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
-    for (size_t i = 0; i < block->alloc_buffers.size(); i++) {
-      auto buffer = block->alloc_buffers[i];
+    // MX scale-factor handles (shared.l0a.sf/.l0b.sf) never materialize
+    // storage: the scale-load lowering above resolved every access into a
+    // pointer over the bound data tile, so drop their allocations here
+    // before storage planning sees the scope.
+    {
+      Array<Buffer> kept;
+      for (const Buffer &buffer : block->alloc_buffers) {
+        if (!IsL0SFBuffer(buffer))
+          kept.push_back(buffer);
+      }
+      if (kept.size() != block->alloc_buffers.size())
+        block_ptr->alloc_buffers = std::move(kept);
+    }
+    for (size_t i = 0; i < block_ptr->alloc_buffers.size(); i++) {
+      auto buffer = block_ptr->alloc_buffers[i];
       if (buffer_remap_.count(buffer)) {
         block_ptr->alloc_buffers.Set(i, buffer_remap_[buffer]);
       } else if (IsFragmentBuffer(buffer)) {
@@ -1135,6 +1163,26 @@ private:
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
 
+    // MX scale-factor loads carry no binding of their own: the handle's data
+    // tile is defined structurally by the gemm_blockscaled that consumes it
+    // as SFA/SFB. Resolve it here from the func-wide map so the copy
+    // lowering can address the tile's storage, and record the tile's version
+    // count so a hoisted (single-version) scale load broadcasts into every
+    // version slot.
+    if (const auto *copy = tile_op.as<AscendCopyNode>()) {
+      if (IsL0SFBuffer(copy->dst) && !copy->mx_sf_of.defined()) {
+        if (auto bound = mx_sf_bindings_.Get(copy->dst->data)) {
+          AscendCopy bound_copy = Downcast<AscendCopy>(std::move(tile_op));
+          AscendCopyNode *bound_node = bound_copy.CopyOnWrite();
+          bound_node->mx_sf_of = bound.value();
+          if (auto versions = buffer_versions_.Get(bound.value())) {
+            bound_node->mx_sf_versions = versions.value();
+          }
+          tile_op = std::move(bound_copy);
+        }
+      }
+    }
+
     Range thread_bounds = GetActiveThreadBounds();
 
     // Convert bind_var_to_expr_ to Map<Var, PrimExpr> for LowerArgs
@@ -1475,6 +1523,13 @@ private:
   }
 
   Target target_;
+  // Handle storage -> bound data tile storage, derived once per func from
+  // the gemm_blockscaled consumers (see CollectMxSfBindings).
+  Map<Var, Var> mx_sf_bindings_;
+  // Selected multi-buffer version counts (union of the per-kernel
+  // kBufferVersion attributes), collected once per func so MX scale-factor
+  // loads learn their bound tile's slot count.
+  BufferVersionMap buffer_versions_;
   Map<String, Any> block_annotations_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Var, PrimExpr> safe_value_map_;

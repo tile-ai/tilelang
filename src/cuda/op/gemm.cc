@@ -359,20 +359,6 @@ struct Gemm {
       return kCudaTCGEN05;
     }
 
-    if (op.sfaRegion_.defined() || op.sfbRegion_.defined()) {
-      if (!op.sfaRegion_.defined() || !op.sfbRegion_.defined()) {
-        LOG(FATAL) << "T.mma_gemm_blockscaled() requires both SFA and SFB "
-                      "scale-factor regions.";
-      }
-      if (!TargetIsSM120(target)) {
-        LOG(FATAL) << "T.mma_gemm_blockscaled() requires an SM120 CUDA target, "
-                      "but got target="
-                   << target << "."
-                   << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
-      }
-      return kCudaMMABlockScaled;
-    }
-
     if (AllowTcgen5Mma(op, target)) {
       return kCudaTCGEN05;
     }
@@ -463,16 +449,6 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         uint32_t desc = GetTCGEN5InstrDesc(
             atom_m, atom_n, atom_k, a_dtype, b_dtype, c_dtype, a_is_k_major,
             b_is_k_major, scale_in_a, scale_in_b);
-        return Integer(static_cast<int64_t>(desc));
-      });
-  refl::GlobalDef().def(
-      "tl.get_tcgen5_blockscaled_instr_desc",
-      [](int atom_m, int atom_n, DataType a_dtype, DataType b_dtype,
-         bool a_is_k_major, bool b_is_k_major, int scale_in_a, int scale_in_b,
-         int a_sf_id, int b_sf_id) {
-        uint32_t desc = GetTCGEN5BlockScaledInstrDesc(
-            atom_m, atom_n, a_dtype, b_dtype, a_is_k_major, b_is_k_major,
-            scale_in_a, scale_in_b, a_sf_id, b_sf_id);
         return Integer(static_cast<int64_t>(desc));
       });
 }

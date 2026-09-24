@@ -91,6 +91,21 @@ GEMM and sparse GEMM
 - `T.gemm(A_shared, B_shared, C_fragment)`: computes a tile GEMM using shared
   inputs and a fragment accumulator; lowered to target‑specific tensor cores.
 - `T.gemm_sp(...)`: 2:4 sparse tensor core variant (see examples and README).
+- `T.gemm_blockscaled(A, B, C, SFA, SFB, k_start=..., sf_a_granularity_k=...,
+  sf_b_granularity_k=...)`: common, target-neutral block-scaled GEMM,
+  `C (+)= (A * SFA) @ (B * SFB)`, with scale factors covering blocks along K.
+  Each backend owns its supported dtypes, operand scopes and lowering;
+  a backend without an implementation rejects the op instead of dropping
+  the scale factors. Current CUDA implementations select TCGEN05 on SM100
+  with `C` in tensor memory or `mma.sync` on SM120 with `C` in a fragment.
+  The CUDA dialect adds `mbar`, `use_2cta` and `sf_layout`. Like `T.gemm`,
+  the op is synchronous: the TCGEN05 path requires a completion barrier and
+  TileLang inserts the matching `mbarrier_wait_parity` implicitly after
+  issue. The explicit variants `T.tcgen05_gemm_blockscaled` and
+  `T.mma_gemm_blockscaled` remain CUDA-only; `T.tcgen05_gemm_blockscaled`
+  never waits implicitly, and with `mbar=None` it defers the completion
+  arrival to a later TCGEN05 operation or an explicit `T.tcgen05_mma_arrive`;
+  the caller must wait for that completion before consuming the result.
 
 Reductions and scans
 - `T.reduce_sum`, `T.reduce_max`, `T.reduce_min`, `T.cumsum`, `T.cummax`, plus warp
@@ -169,6 +184,9 @@ Memory allocation and descriptors
 Compute primitives
 - `T.gemm(A_s, B_s, C_f)`: Tile GEMM into fragment accumulator.
 - `T.gemm_sp(...)`: Sparse (2:4) tensor core GEMM.
+- `T.gemm_blockscaled(A_s, B_s, C, SFA, SFB, ...)`: Block‑scaled GEMM with
+  target‑selected instruction; explicit `T.tcgen05_gemm_blockscaled` /
+  `T.mma_gemm_blockscaled`.
 - Reductions: `T.reduce_sum/max/min/abssum/absmax`, bitwise `and/or/xor`.
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.

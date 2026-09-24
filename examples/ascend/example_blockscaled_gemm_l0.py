@@ -75,6 +75,8 @@ def gemm(
         with T.Kernel(NUM_BLOCKS) as bx:
             x_l0 = T.alloc_l0a((TILE_M, TILE_K_SUB), dtype)
             w_l0 = T.alloc_l0b((TILE_N, TILE_K_SUB), dtype)
+            x_l0_sf = T.alloc_l0a_sf(x_l0, sf_dtype=scale_dtype)
+            w_l0_sf = T.alloc_l0b_sf(w_l0, sf_dtype=scale_dtype)
             res = T.alloc_l0c((TILE_M, TILE_N), "float32")
             x_l1 = T.alloc_l1((TILE_M, TILE_K), dtype)
             w_l1 = T.alloc_l1((TILE_N, TILE_K), dtype)
@@ -137,17 +139,19 @@ def gemm(
                         T.copy(
                             x_l1[:, sk * TILE_K_SUB : (sk + 1) * TILE_K_SUB],
                             x_l0,
-                            scale=xsf_l1[:, sf_start : sf_start + SF_SUB_K],
                         )
+                        T.copy(xsf_l1[:, sf_start : sf_start + SF_SUB_K], x_l0_sf)
                         T.copy(
                             w_l1[:, sk * TILE_K_SUB : (sk + 1) * TILE_K_SUB],
                             w_l0,
-                            scale=wsf_l1[:, sf_start : sf_start + SF_SUB_K],
                         )
-                        T.blockscaled_gemm(
+                        T.copy(wsf_l1[:, sf_start : sf_start + SF_SUB_K], w_l0_sf)
+                        T.gemm_blockscaled(
                             x_l0,
                             w_l0,
                             res,
+                            x_l0_sf,
+                            w_l0_sf,
                             transpose_B=True,
                             clear_accum=(kt == 0 and sk == 0),
                             unit_flag_ctrl=T.Select(

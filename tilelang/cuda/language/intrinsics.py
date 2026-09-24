@@ -50,7 +50,7 @@ from tilelang.language.builtin import (
     warpgroup_wait,
 )
 from tilelang.language.experimental.gemm_sp_op import tcgen05_gemm_sp, wgmma_gemm_sp
-from tilelang.language.gemm_op import (
+from .gemm_op import (
     make_blockscaled_gemm_layout,
     mma_gemm_blockscaled,
     tcgen05_gemm,

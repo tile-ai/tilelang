@@ -13,24 +13,19 @@
 
 #include "op/copy.h"
 
+#include <tvm/ir/cow.h>
+
 namespace tvm {
 namespace tl {
 
 /*!
  * \brief Typed Ascend view of a tile copy.
  *
- * Extends the shared CopyNode with the MX scale-factor companion region
- * (structural: it widens the copy's read set) and with typed decodes of the
- * Ascend lowering hints that ride in the Call annotations.
+ * Extends the shared CopyNode with typed decodes of the Ascend lowering
+ * hints that ride in the Call annotations.
  */
 class AscendCopyNode : public CopyNode {
 public:
-  // Ascend MX scale-factor companion source (L1/cbuf) for an L1→L0 data copy.
-  // When set, the L1→L0A/L0B lowering also loads the per-block scale factors
-  // into the L0 MX scale registers (asc_copy_l12l0a_mx / asc_copy_l12l0b_mx).
-  Optional<Buffer> sf;
-  Array<Range> sf_range; // Ranges for each dimension of `sf`.
-
   // Typed views of the Ascend copy hint annotations, decoded once at
   // construction. Deliberately not reflected: the reflected `annotations`
   // map on the base node remains the single durable encoding.
@@ -38,6 +33,17 @@ public:
   int dual_dst_ctl{0}; // "dual_dst_ctl": L0C->UB dual-destination mode
   int transpose{0};    // "transpose": GM->L1 dn2nz / L1->L0 transpose request
   int data_select{0};  // "data_select": GM->UB hardware right-padding
+  // For a standalone MX scale-factor load (dst scope shared.l0a.sf /
+  // shared.l0b.sf), the storage Var of the L0 data tile the handle is bound
+  // to. Not an annotation: AscendLowerTileOp resolves it structurally from
+  // the gemm_blockscaled consuming the handle as SFA/SFB
+  // (CollectMxSfBindings). The hardware keys the slots to that tile's
+  // address.
+  Optional<Var> mx_sf_of;
+  // The bound tile's multi-buffer version count (injected alongside
+  // mx_sf_of). A hoisted scale load (2-D destination, no version index of its
+  // own) broadcasts into every one of these version slots.
+  int mx_sf_versions{1};
   PrimExpr unit_flag_ctl;          // "unit_flag_ctrl", defaults to 0
   PrimExpr sub_blockid;            // "sub_blockid", defaults to 0
   Optional<Integer> l2_cache_ctrl; // "l2_cache_ctrl"; defaults differ per path
@@ -56,12 +62,7 @@ public:
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AscendCopy", AscendCopyNode, CopyNode);
 
-  static void RegisterReflection() {
-    namespace refl = reflection;
-    refl::ObjectDef<AscendCopyNode>()
-        .def_ro("sf", &AscendCopyNode::sf)
-        .def_ro("sf_range", &AscendCopyNode::sf_range);
-  }
+  static void RegisterReflection() { reflection::ObjectDef<AscendCopyNode>(); }
 
   AscendCopyNode() = default;
   /*! \brief Copy the base state verbatim; annotation decoding happens in
@@ -81,11 +82,11 @@ protected:
 class AscendCopy : public Copy {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AscendCopy, Copy, AscendCopyNode);
+  TVM_DEFINE_OBJECT_REF_COW_METHOD(AscendCopyNode);
 
   /*!
    * \brief Constructor from tl.tileop.ascend_copy call arguments.
-   * \param args args[0]/args[1] are the source/destination regions; optional
-   *             args[2] is the MX scale-factor source region.
+   * \param args args[0]/args[1] are the source/destination regions.
    * \param annotations Annotations map from the Call node.
    */
   TVM_DLL
@@ -97,8 +98,7 @@ public:
    *
    * Plain tl.tileop.copy calls synthesized by shared passes (e.g.
    * ReducerPlanAndMaterialize) parse into the base CopyNode; this re-decodes
-   * their annotations so both spellings converge on one implementation. A
-   * base-spelled copy never carries an MX scale-factor region.
+   * their annotations so both spellings converge on one implementation.
    */
   TVM_DLL explicit AscendCopy(const CopyNode &base);
 
@@ -114,6 +114,18 @@ public:
  *        synthesized by shared passes.
  */
 bool IsAscendCopyCall(const tirx::CallNode *call);
+
+/*!
+ * \brief Derive the MX scale-factor handle bindings from the GEMMs that
+ *        consume them.
+ *
+ * A handle (scope shared.l0a.sf/.l0b.sf) is bound to the data tile it is
+ * paired with structurally: the tl.tileop.gemm_blockscaled call that reads
+ * it as SFA (or SFB) names the tile as its A (or B) operand. Returns a map
+ * from handle storage Var to the bound tile's storage Var; a handle
+ * consumed with two different tiles is an error.
+ */
+ffi::Map<tirx::Var, tirx::Var> CollectMxSfBindings(const tirx::Stmt &body);
 
 } // namespace tl
 } // namespace tvm

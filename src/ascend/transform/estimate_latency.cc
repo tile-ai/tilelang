@@ -54,6 +54,7 @@
 #include "ascend/transform/attr.h"
 #include "op/copy.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "transform/common/attr.h"
 #include "transform/common/constr_visitor.h"
 
@@ -124,7 +125,8 @@ private:
       ICHECK(mode && mode->value >= 0 && mode->value <= 2)
           << "HF32 mode must be a constant in {0, 1, 2}";
       state_ = Mode(mode->value == 0 ? kDisabled : kEnabled);
-    } else if (op->op.same_as(Op::Get("tl.tileop.gemm"))) {
+    } else if (op->op.same_as(Op::Get("tl.tileop.gemm")) ||
+               op->op.same_as(Op::Get("tl.tileop.gemm_blockscaled"))) {
       modes_[GetRef<Call>(op)] |= PossibleModes();
     }
     StmtExprVisitor::VisitExpr_(op);
@@ -1578,9 +1580,18 @@ private:
 
   void VisitExpr_(const CallNode *op) final {
     static const auto gemm_op = Op::Get("tl.tileop.gemm");
+    static const auto gemm_blockscaled_op =
+        Op::Get("tl.tileop.gemm_blockscaled");
     if (IsAscendCopyCall(op)) {
       AscendCopy copy_obj(op->args, op->annotations);
       const AscendCopyNode *copy = copy_obj.get();
+      // MX scale loads move a few bytes alongside the data loads; keep the
+      // cost accounting identical to the fused scale-companion era, when
+      // those bytes rode the data copy invisibly.
+      if (IsL0SFBuffer(copy->dst)) {
+        StmtExprVisitor::VisitExpr_(op);
+        return;
+      }
       MteGeometry geometry = InferMteGeometry(copy);
       features_.copy_infos.push_back({copy->src.scope(), copy->dst.scope(),
                                       CalculateCopyBytes(copy),
@@ -1589,11 +1600,15 @@ private:
                                       /*is_nd2nz_post_copy=*/false});
     } else if (op->op.same_as(tl::ascend_nd2nz_post_copy())) {
       RecordNd2NzPostCopy(op);
-    } else if (op->op.same_as(gemm_op)) {
+    } else if (op->op.same_as(gemm_op) || op->op.same_as(gemm_blockscaled_op)) {
       int64_t m = op->args[5].as<IntImmNode>()->value;
       int64_t n = op->args[6].as<IntImmNode>()->value;
       int64_t k = op->args[7].as<IntImmNode>()->value;
-      Gemm gemm(op->args, op->annotations);
+      // Both spellings share the leading 13 dense slots; the block-scaled op
+      // appends SFA/SFB/k_start, which the cube-shape features ignore.
+      Gemm gemm = op->op.same_as(gemm_blockscaled_op)
+                      ? GemmBlockScaled(op->args, op->annotations)
+                      : Gemm(op->args, op->annotations);
       if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
         // The serialized ints are static tile metadata. A dynamic L0 tail
         // may have a tighter region bound than its padded allocation.

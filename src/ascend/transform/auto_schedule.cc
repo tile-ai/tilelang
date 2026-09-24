@@ -61,6 +61,7 @@
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
+#include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
@@ -1305,6 +1306,51 @@ static void WarnOnUnappliedBufferVersionOverrides(
   }
 }
 
+// MX scale-factor handles (shared.l0a.sf/.l0b.sf) are excluded from version
+// selection; each is planned from the data tile its consuming
+// gemm_blockscaled binds it to. A scale load ringing under the same owner
+// loops as its tile copies the tile's version count and fills each stage's
+// slot in lockstep; a hoisted scale load stays single-version and the copy
+// lowering broadcasts it into every version slot of the tile.
+static void PropagateMxSfHandleVersions(
+    const Stmt &kernel_body,
+    const std::vector<std::shared_ptr<IRStructure>> &ir_structure,
+    BufferVersionMap *versions) {
+  MultiBufferOwnerMap owners = CollectMultiBufferOwners(ir_structure);
+  static const std::vector<ControlNode *> kNoOwners;
+  auto owners_of = [&](const Var &storage) -> const auto & {
+    auto it = owners.find(storage);
+    return it == owners.end() ? kNoOwners : it->second;
+  };
+  for (const auto &[handle, data] : CollectMxSfBindings(kernel_body)) {
+    auto data_versions = versions->Get(data);
+    if (!data_versions.has_value())
+      continue;
+    const auto &handle_owners = owners_of(handle);
+    const auto &data_owners = owners_of(data);
+    bool lockstep =
+        !handle_owners.empty() && handle_owners.size() == data_owners.size() &&
+        std::is_permutation(handle_owners.begin(), handle_owners.end(),
+                            data_owners.begin());
+    if (lockstep) {
+      if (auto existing = versions->Get(handle)) {
+        ICHECK_EQ(existing.value(), data_versions.value())
+            << "Conflicting version counts for MX scale-factor handle "
+            << handle->name_hint;
+      } else {
+        versions->Set(handle, data_versions.value());
+      }
+    } else if (auto existing = versions->Get(handle)) {
+      ICHECK_EQ(existing.value(), 1)
+          << "MX scale-factor handle " << handle->name_hint
+          << " is versioned but its scale load does not ring with data tile "
+          << data->name_hint
+          << "; a hoisted scale load broadcasts into every version slot and "
+             "must stay single-version";
+    }
+  }
+}
+
 // Build and schedule one kernel segment, leaving core assignment/resolution
 // and final lowering to the downstream passes.
 static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
@@ -1341,6 +1387,8 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
 
   metadata.unlimit_memory_scopes = {};
   metadata.buffer_versions = unit_builder.GetSelectedBufferVersions();
+  PropagateMxSfHandleVersions(kernel_body, ir_structure,
+                              &metadata.buffer_versions);
 }
 } // namespace
 

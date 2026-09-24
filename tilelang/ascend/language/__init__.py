@@ -7,14 +7,22 @@ from tilelang.language.common import __all__ as _COMMON_ALL
 
 # alloc_shared deliberately shadows the common surface: Ascend UB takes
 # bool buffers in the requested scope, without CUDA's static-scope hack.
-from .allocate import alloc_shared, alloc_l1, alloc_l0a, alloc_l0b, alloc_l0c  # noqa: F401
+from .allocate import (  # noqa: F401
+    alloc_shared,
+    alloc_l1,
+    alloc_l0a,
+    alloc_l0a_sf,
+    alloc_l0b,
+    alloc_l0b_sf,
+    alloc_l0c,
+)
 from .annotations import (  # noqa: F401
     annotate_buffer_versions,
     annotate_manual_multi_buffer,
     annotate_unlimit_memory,
 )
 from .copy_op import copy, dual_copy  # noqa: F401
-from .gemm_op import blockscaled_gemm, gemm  # noqa: F401
+from .gemm_op import gemm, gemm_blockscaled  # noqa: F401
 
 # T.reduce and its thin wrappers shadow the common surface: inside SimdVF a
 # shared-to-shared reduce is emitted directly on the UB regions (no fragment
@@ -92,7 +100,9 @@ _ASCEND_API_ALL = (
     "Vector",
     "VectorFrame",
     "alloc_l0a",
+    "alloc_l0a_sf",
     "alloc_l0b",
+    "alloc_l0b_sf",
     "alloc_l0c",
     "alloc_l1",
     "annotate_buffer_versions",
@@ -100,7 +110,7 @@ _ASCEND_API_ALL = (
     "annotate_unlimit_memory",
     "assume_conflict",
     "assume_no_conflict",
-    "blockscaled_gemm",
+    "gemm_blockscaled",
     "copy",
     "gemm",
     "device_assert",

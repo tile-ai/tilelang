@@ -401,12 +401,17 @@ public:
 
   // Return unique on-chip storage identities touched by this node. Composite
   // nodes include their complete subtree through GetRead/WriteRegions().
+  // MX scale-factor handles count as storage here so the multi-buffer
+  // eligibility planner claims an owner loop for them; their version count
+  // is never chosen independently — AutoSchedule copies it from the bound
+  // data tile after selection.
   std::vector<Var> GetOnChipStorages() const {
     std::vector<Var> storages;
     std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> seen;
     auto collect = [&](const std::vector<BufferRegion> &regions) {
       for (const BufferRegion &region : regions) {
-        if (IsAscendOnChipBuffer(region->buffer) &&
+        if ((IsAscendOnChipBuffer(region->buffer) ||
+             IsL0SFBuffer(region->buffer)) &&
             seen.insert(region->buffer->data).second) {
           storages.push_back(region->buffer->data);
         }

@@ -139,12 +139,12 @@ def gemm(
                             )
 
                     sf_start = (kt % sf_int) * TILE_SF_K
-                    T.blockscaled_gemm(
+                    T.gemm_blockscaled(
                         x_l1,
                         w_l1,
                         res,
-                        sfa=xsf_l1[:, sf_start : sf_start + TILE_SF_K],
-                        sfb=wsf_l1[:, sf_start : sf_start + TILE_SF_K],
+                        SFA=xsf_l1[:, sf_start : sf_start + TILE_SF_K],
+                        SFB=wsf_l1[:, sf_start : sf_start + TILE_SF_K],
                         transpose_B=True,
                         clear_accum=(kt == 0),
                         unit_flag_ctrl=T.Select(kt == K_TILES - 1, 3, 2),

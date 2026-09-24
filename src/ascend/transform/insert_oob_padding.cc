@@ -44,6 +44,7 @@
 #include "layout/layout.h"
 #include "op/copy.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/utils.h"
 
 namespace tvm {
@@ -141,6 +142,21 @@ void SetKAxis(VarAxisMap *axes, const Buffer &buffer, LogicalAxis axis) {
       << "Conflicting MX K-axis uses for buffer " << buffer->name;
 }
 
+// Match a dense or block-scaled GEMM tile op and parse the typed reference.
+std::optional<Gemm> ParseGemmLikeCall(const CallNode *op) {
+  static const Op &gemm_op = Op::Get("tl.tileop.gemm");
+  static const Op &gemm_blockscaled_op = Op::Get("tl.tileop.gemm_blockscaled");
+  if (op->op.same_as(gemm_blockscaled_op))
+    return GemmBlockScaled(op->args, op->annotations);
+  if (op->op.same_as(gemm_op))
+    return Gemm(op->args, op->annotations);
+  return std::nullopt;
+}
+
+bool IsBlockScaledGemm(const Gemm &gemm) {
+  return gemm->IsInstance<GemmBlockScaledNode>();
+}
+
 // First recover the semantic K axis of each blockscaled GEMM operand. This is
 // deliberately independent of the inferred layout tag: a physical [K, MN]
 // buffer can carry the same 2-D map tag as a [MN, K] buffer while the GEMM
@@ -155,15 +171,9 @@ public:
 
 private:
   void VisitExpr_(const CallNode *op) final {
-    static const Op &gemm_op = Op::Get("tl.tileop.gemm");
-    if (op->op.same_as(gemm_op)) {
-      Gemm gemm(op->args, op->annotations);
-      bool is_blockscaled = false;
-      if (auto value = gemm->annotations_.Get("blockscaled")) {
-        if (const auto *imm = value.value().as<IntImmNode>())
-          is_blockscaled = imm->value != 0;
-      }
-      if (is_blockscaled) {
+    if (std::optional<Gemm> gemm_opt = ParseGemmLikeCall(op)) {
+      const Gemm &gemm = *gemm_opt;
+      if (IsBlockScaledGemm(gemm)) {
         SetKAxis(&result_, gemm->a_,
                  gemm->transA_ ? LogicalAxis::kRow : LogicalAxis::kCol);
         SetKAxis(&result_, gemm->b_,
@@ -193,11 +203,13 @@ private:
       : operand_axes_(operand_axes) {}
 
   void VisitExpr_(const CallNode *op) final {
-    static const Op &gemm_op = Op::Get("tl.tileop.gemm");
     if (IsAscendCopyCall(op)) {
       AscendCopy copy(op->args, op->annotations);
       auto it = operand_axes_.find(copy->dst->data);
-      if (copy->sf.defined() && IsL1Buffer(copy->src) &&
+      // Only L1->L0 DATA loads feeding a block-scaled GEMM propagate; the
+      // standalone MX scale loads target the shared.l0a.sf/.l0b.sf handle
+      // scopes, which the L0 data predicates exclude.
+      if (IsL1Buffer(copy->src) &&
           (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst)) &&
           it != operand_axes_.end()) {
         LogicalAxis src_k_axis = it->second;
@@ -207,8 +219,8 @@ private:
         }
         SetKAxis(&result_, copy->src, src_k_axis);
       }
-    } else if (op->op.same_as(gemm_op)) {
-      Gemm gemm(op->args, op->annotations);
+    } else if (std::optional<Gemm> gemm_opt = ParseGemmLikeCall(op)) {
+      const Gemm &gemm = *gemm_opt;
       if (IsL1Buffer(gemm->a_)) {
         auto it = operand_axes_.find(gemm->a_->data);
         if (it != operand_axes_.end())

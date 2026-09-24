@@ -121,14 +121,18 @@ def _make_l0_matrix_sf_transpose_kernel(M, K, N):
             wsf_l1 = T.alloc_l1((N, sf_k), scale_dtype)
             x_l0a = T.alloc_l0a((M, K), dtype)
             w_l0b = T.alloc_l0b((N, K), dtype)
+            x_l0a_sf = T.alloc_l0a_sf(x_l0a)
+            w_l0b_sf = T.alloc_l0b_sf(w_l0b)
 
             T.copy(X, x_l1)
             T.copy(W, w_l1)
             T.copy(SFX, xsf_l1, transpose=True)
             T.copy(SFW, wsf_l1, transpose=True)
-            T.copy(x_l1, x_l0a, scale=xsf_l1)
-            T.copy(w_l1, w_l0b, scale=wsf_l1)
-            T.blockscaled_gemm(x_l0a, w_l0b, res, transpose_B=True, clear_accum=True)
+            T.copy(x_l1, x_l0a)
+            T.copy(xsf_l1, x_l0a_sf)
+            T.copy(w_l1, w_l0b)
+            T.copy(wsf_l1, w_l0b_sf)
+            T.gemm_blockscaled(x_l0a, w_l0b, res, x_l0a_sf, w_l0b_sf, transpose_B=True, clear_accum=True)
             T.copy(res, C)
 
     return gemm_kernel

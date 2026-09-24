@@ -36,6 +36,10 @@ enum class DMAPath {
   kGMToL1,
   kL1ToL0A,
   kL1ToL0B,
+  // MX scale-factor loads into the slot shadow of an L0A/L0B data tile
+  // (destination scope shared.l0a.sf / shared.l0b.sf).
+  kL1ToL0ASF,
+  kL1ToL0BSF,
   kL0CToUB,
   kUBToL1,
   kL0CToGM,

@@ -33,6 +33,23 @@ inline bool IsL0BBuffer(const Buffer &buffer) {
          (buffer.scope() == "shared.l0b" || buffer.scope() == "shared.l0b.dyn");
 }
 
+// MX scale-factor handles (alloc_l0a_sf/alloc_l0b_sf): dedicated scopes for
+// the slot shadow of an L0A/L0B data tile. They never materialize storage —
+// the hardware keys the slots to the bound data tile's address — so every
+// storage-planning pass excludes them by scope, and the scale-load lowering
+// resolves their address through the tile they are bound to.
+inline bool IsL0ASFBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "shared.l0a.sf";
+}
+
+inline bool IsL0BSFBuffer(const Buffer &buffer) {
+  return buffer.defined() && buffer.scope() == "shared.l0b.sf";
+}
+
+inline bool IsL0SFBuffer(const Buffer &buffer) {
+  return IsL0ASFBuffer(buffer) || IsL0BSFBuffer(buffer);
+}
+
 inline bool IsL0CBuffer(const Buffer &buffer) {
   return buffer.defined() &&
          (buffer.scope() == "shared.l0c" || buffer.scope() == "shared.l0c.dyn");

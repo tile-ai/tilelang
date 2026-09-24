@@ -54,6 +54,10 @@ DMAPath GetDMAPath(const Buffer &src, const Buffer &dst) {
     return DMAPath::kL1ToL0A;
   if (IsL1Buffer(src) && IsL0BBuffer(dst))
     return DMAPath::kL1ToL0B;
+  if (IsL1Buffer(src) && IsL0ASFBuffer(dst))
+    return DMAPath::kL1ToL0ASF;
+  if (IsL1Buffer(src) && IsL0BSFBuffer(dst))
+    return DMAPath::kL1ToL0BSF;
   if (IsL0CBuffer(src) && IsSharedBuffer(dst))
     return DMAPath::kL0CToUB;
   if (IsSharedBuffer(src) && IsL1Buffer(dst))
