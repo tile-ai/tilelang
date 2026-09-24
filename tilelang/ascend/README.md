@@ -1,0 +1,143 @@
+# Ascend 950 Backend
+
+This guide shows how to install TileLang and run kernels on **Huawei Ascend
+950 NPUs**.
+
+## Installation
+
+### Prerequisites
+
+To compile and run kernels, use an Ascend 950 environment with:
+
+- A compatible Ascend driver and CANN toolkit, including `bisheng`, the
+  CCE-capable `ld.lld`, and the Ascend runtime libraries.
+- Compatible PyTorch and `torch_npu` installations. Verify that
+  `torch.npu.is_available()` returns `True` after importing `torch_npu`.
+- The Python and native build prerequisites described in the
+  [installation guide](../../docs/get_started/Installation.md).
+
+Make sure the CANN environment is configured according to the instructions
+for your toolkit installation or container image before building or running
+TileLang. No specific setup script or installation path is assumed.
+
+Ensure that `bisheng` is available through `PATH` or `BISHENG_HOME/bin`, and
+that the Ascend runtime libraries are discoverable by the dynamic linker.
+The backend defaults to `dav-3510` for Ascend 950, so setting
+`ASCEND_NPU_ARCH` is optional for this target.
+
+### Build from Source
+
+From the repository root:
+
+```bash
+git submodule update --init --recursive
+USE_ASCEND=ON USE_CUDA=OFF python -m pip install -v .
+```
+
+`USE_ASCEND=ON` enables this backend. `USE_CUDA=OFF` avoids requiring a CUDA
+toolkit for an Ascend-only build.
+
+For an editable development install:
+
+```bash
+python -m pip install -r requirements-dev.txt
+USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
+```
+
+## Quick Start
+
+The following example implements the same GEMM with a fused ReLU epilogue as
+the [main README](../../README.md#quick-start), while using Huawei Ascend 950
+features such as SIMT vector programming and direct Cube-to-Vector data
+transfers. It computes `C = relu(A @ B.T)` with `bfloat16` inputs and `float32`
+accumulation and output.
+
+`B` is stored as `[N, K]`, matching
+`transpose_B=True`. All dimensions are divisible by their tile sizes; this
+snippet does not handle partial tiles. Save the code as `gemm_relu.py` and
+run it with `python gemm_relu.py` after installation.
+
+```python
+import torch
+import torch_npu
+import tilelang
+import tilelang.ascend.language as T
+
+
+@tilelang.jit(target="ascend")
+def matmul_relu(A, B, block_M: int = 256, block_N: int = 224, block_K: int = 128):
+    M, N, K = T.const("M, N, K")
+    A: T.Tensor((M, K), T.bfloat16)
+    B: T.Tensor((N, K), T.bfloat16)
+    C = T.empty((M, N), T.float32)
+    num_blocks = 32
+    n_tiles = N // block_N
+
+    with T.Kernel(num_blocks) as bx:
+        A_l1 = T.alloc_l1((block_M, block_K), T.bfloat16)
+        B_l1 = T.alloc_l1((block_N, block_K), T.bfloat16)
+        C_l0c = T.alloc_l0c((block_M, block_N), T.float32)
+        C_ub = T.alloc_shared((block_M // 2, block_N), T.float32)
+
+        for tile in T.Persistent([M // block_M * n_tiles], num_blocks, bx):
+            m, n = tile // n_tiles * block_M, tile % n_tiles * block_N
+            for k in T.Pipelined(K // block_K, num_stages=2):
+                T.copy(A[m, k * block_K], A_l1)
+                T.copy(B[n, k * block_K], B_l1, l2_cache_ctrl="NOTALLOC_KEEP")
+                T.gemm(A_l1, B_l1, C_l0c, transpose_B=True, clear_accum=(k == 0))
+            T.dual_copy(C_l0c, C_ub)
+            with T.SimtVF(threads=128):
+                for i, j in T.Parallel(block_M // 2, block_N):
+                    C_ub[i, j] = T.max(C_ub[i, j], 0)
+            T.dual_copy(C_ub, C[m : m + block_M, n : n + block_N], l2_cache_ctrl="NOTALLOC_PW")
+
+    return C
+
+
+M, N, K = 256, 7168, 2048
+a = torch.randn((M, K), device="npu", dtype=torch.bfloat16)
+b = torch.randn((N, K), device="npu", dtype=torch.bfloat16)
+c = matmul_relu(a, b)
+torch.testing.assert_close(c, torch.relu(a.float() @ b.float().T), rtol=1e-2, atol=1e-2)
+print("GEMM + ReLU passed.")
+```
+
+- `@tilelang.jit` specializes and compiles the kernel on first use;
+  `matmul_relu(a, b)` directly returns the output tensor.
+- Ascend 950 kernels typically use a persistent execution model, where a fixed
+  grid of blocks iterates over work tiles. Here, `T.Persistent` distributes
+  output tiles across 32 blocks, and `T.Pipelined` uses a two-stage pipeline
+  for the reduction loop.
+- `T.gemm` runs on the Cube cores, while `T.SimtVF` and `T.SimdVF` run on
+  the Vector cores. These operations can be combined in a single
+  `T.Kernel`; the compiler handles core assignment, scheduling, and
+  synchronization by default. Here, `T.SimtVF` uses `T.Parallel` to
+  distribute the in-place ReLU computation across threads.
+- `T.dual_copy` calls move each result tile from L0C to the
+  Vector cores' Unified Buffers (UB) and then to global memory. GEMM and
+  ReLU run in a single kernel, without a separate launch for the epilogue.
+- The L2 cache hints are chosen for the matrix sizes shown here. See the
+  [L2-bypass GEMM example](../../examples/ascend/example_gemm_bypass_l2.py)
+  for shape-dependent cache policies.
+
+## Writing Ascend Kernels
+
+- Use the ascend dialect `tilelang.ascend.language` for Ascend-specific operations.
+- Ascend supports mixing SIMT and SIMD code within a single kernel, so
+  `T.Kernel(num_blocks)` specifies only the number of blocks in a
+  one-dimensional grid. Use `with T.SimtVF(threads=...):` to define a SIMT
+  region with its own thread count, and `T.Parallel` to distribute work
+  across those threads. For SIMD programming, use `with T.SimdVF():`
+  without a thread count.
+- Use `T.alloc_shared` for Unified Buffer storage, `T.alloc_l1` for L1 storage,
+  and `T.alloc_l0a`, `T.alloc_l0b`, or `T.alloc_l0c` for Cube buffers.
+
+## Examples
+
+- **Start here:** [GEMM](../../examples/ascend/example_gemm.py) and [SIMT vector add](../../examples/ascend/example_simtvf_vector_add.py)
+- **GEMM and quantization:** [L2-bypass GEMM](../../examples/ascend/example_gemm_bypass_l2.py), [L0-staged GEMM](../../examples/ascend/example_gemm_l0.py), [split-K GEMM](../../examples/ascend/example_gemm_splitk.py), [block-scaled GEMM](../../examples/ascend/example_blockscaled_gemm.py), and per-token FP8 quantization ([SIMT](../../examples/ascend/example_simtvf_per_token_cast_to_fp8.py), [SIMD](../../examples/ascend/example_simdvf_per_token_cast_to_fp8.py))
+- **Attention, normalization, and routing:** [FlashAttention](../../examples/ascend/flash_attention/README.md), [RMSNorm](../../examples/ascend/example_rmsnorm.py), and [MoE Top-K gating](../../examples/ascend/example_simdvf_topk_gate.py)
+- **Vector programming:** [SIMD vector operations](../../examples/ascend/example_simdvf_vecadd.py) and [SIMD intrinsics](../../examples/ascend/example_simdvf_vecadd_lower.py)
+
+Browse the [complete Ascend examples directory](../../examples/ascend) for
+additional kernels and programming techniques.
