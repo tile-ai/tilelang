@@ -234,6 +234,9 @@ struct Im2ColImpl {
 
 void RegisterIm2ColImpl(Im2ColImpl impl);
 
+// Query the selected implementation rather than assuming an architecture range.
+bool Im2ColUsesSIMT(Target target);
+
 class Im2ColOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Im2ColOp, TileOperator,
