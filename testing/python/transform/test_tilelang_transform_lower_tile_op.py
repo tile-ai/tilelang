@@ -104,6 +104,55 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("enable_let_inline", [False, True])
+@pytest.mark.parametrize(
+    "cols,vector_size,dtype",
+    [(1024, 8, "bfloat16"), (1024, 4, "bfloat16"), (1024, 4, "float32"), (3072, 8, "bfloat16")],
+)
+def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dtype, enable_let_inline):
+    """Simplify inverse-layout indices enough to prove cp.async contiguity."""
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    layout = T.Fragment(
+        (4, cols),
+        forward_fn=lambda i, j: (
+            i * 64 + (j // vector_size) % 64,
+            j % vector_size + (j // (64 * vector_size)) * vector_size,
+        ),
+    )
+
+    @T.prim_func
+    def main(A: T.Tensor((4, cols), dtype), B: T.Tensor((4, cols), dtype)):
+        with T.Kernel(1, threads=256):
+            shared = T.alloc_shared((4, cols), dtype)
+            T.async_copy(A, shared, loop_layout=layout)
+            T.ptx_wait_group(0)
+            T.sync_threads()
+            T.copy(shared, B)
+
+    config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: enable_let_inline}}
+    with target, tvm.transform.PassContext(config=config):
+        mod = tvm.IRModule.from_expr(main)
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.Simplify()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    _assert_no_unexpected_free_vars(func)
+    assert len(_collect_calls(func, "tl.ptx_cp_async")) == 1
+    async_vector_loops = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.VECTORIZED and _collect_calls(node, "tl.ptx_cp_async"):
+            async_vector_loops.append(node)
+
+    post_order_visit(func.body, collect)
+    assert len(async_vector_loops) == 1
+    assert int(async_vector_loops[0].extent) == vector_size
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("num_stages", [2, 3])
 def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(num_stages):
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})

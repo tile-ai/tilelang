@@ -26,6 +26,7 @@
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <utility>
@@ -45,6 +46,16 @@ public:
   BufferIndiceSimplify(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
 
 private:
+  Stmt VisitStmt_(const BindNode *node) final {
+    auto bind = Downcast<Bind>(StmtExprMutator::VisitStmt_(node));
+    if (SideEffect(bind->value) <= CallEffectKind::kPure) {
+      // Refresh let aliases from the substituted IR before simplifying uses.
+      // The analyzer may still bind them to the original loop indices.
+      analyzer_->Bind(bind->var, bind->value, /*allow_override=*/true);
+    }
+    return bind;
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *node) final {
     auto visited = StmtExprMutator::VisitExpr_(node);
     auto n = Downcast<BufferLoad>(visited);
@@ -144,6 +155,8 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
     loop_extents.push_back(loop->extent);
     body = loop->body;
   }
+  // substitute and re-construct the serial loop
+  body = Substitute(body, vmap);
   // Guard executes the recovered loop body only if each inverse-mapped iterator
   // falls back into the original For ranges. We first check every axis from the
   // old loop nest (old_loop_depth) and then the extra index produced by inverse
@@ -203,11 +216,7 @@ For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
     analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
   }
 
-  // The analyzer still binds aliases to logical loop variables. Simplify
-  // before substitution so expanding an alias cannot reintroduce a removed
-  // loop variable into the thread-partitioned body.
   body = BufferIndiceSimplify(analyzer)(body);
-  body = Substitute(body, vmap);
 
   return Downcast<For>(body);
 }
