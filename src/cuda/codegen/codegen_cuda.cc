@@ -2528,21 +2528,6 @@ void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
   }
 
   if (scope != "global" || t.bits() * t.lanes() <= 128) {
-    if (t.is_float8() && t.lanes() > 1) {
-      // FP8 vectors are structs of byte-sized fields. Memberwise assignment
-      // can unpack and repack native x2 conversion results. Use an integer
-      // carrier at every store in the local/shared/global copy chain instead.
-      int bits = t.bits() * t.lanes();
-      DataType carrier = bits <= 32    ? DataType::UInt(bits)
-                         : bits <= 128 ? DataType::UInt(32, bits / 32)
-                                       : DataType::UInt(64, bits / 64);
-      auto buffer_ref = this->GetBufferRef(t, buffer, base);
-      this->PrintIndent();
-      stream << "tl::store_packed_vector<";
-      this->PrintType(carrier, stream);
-      stream << ">(&(" << buffer_ref << "), " << value << ");\n";
-      return;
-    }
     this->CodeGenC::PrintVecStore(buffer, t, base, value);
     return;
   }
@@ -5665,9 +5650,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const BufferStoreNode *op) {
       this->PrintIndent();
       stream << "tl_fp4_packed_store((fp4_e2_2_t*)" << vid << ", " << idx_str
              << ", " << value << ");\n";
-    } else if (value_dtype.is_float8() && value_dtype.lanes() > 1) {
-      std::string value = this->PrintExpr(op->value);
-      this->PrintVecStore(op->buffer.get(), value_dtype, index_expr, value);
     } else {
       std::string value = this->PrintExpr(op->value);
       std::string ref =
