@@ -12,6 +12,9 @@ class PassConfigKey(str, Enum):
 
     # TileLang specific configs: TL_XX
 
+    TL_ENABLE_EARLY_SIMT_IM2COL = "tl.enable_early_simt_im2col"
+    """Expose CUDA SIMT im2col loads before scheduling. Default: False."""
+
     TL_SIMPLIFY = "tl.Simplify"
     """Configuration for TileLang simplification passes.
 
