@@ -10,6 +10,7 @@ or invoke only the tool needed for the current workflow.
 | Emit kernel source without a GPU | [Compile-Only Tool](compile_only.md) | `python -m tilelang.tools.compile_only` |
 | Estimate compute and memory cost from TIR | [Performance Analyzer](analyzer.md) | `tilelang.tools.Analyzer` |
 | Inspect thread and data mappings | [Layout Visualization](layout_visualization.md) | `tilelang.tools.plot_layout` |
+| Print TVMScript with source locations | [Source-Span Visualization](tirx_span_viz.md) | `tilelang.tools.tirx_span_viz` |
 | Reduce a failing program to a smaller reproducer | [AutoDD](autodd.md) | `python -m tilelang.autodd` |
 | Track IR changes across the full lowering pipeline (recommended) | [IR Lower Trace](lower_trace.md) | `TL_LOWER_TRACE` |
 | Compare IR before and after compiler passes (legacy) | [Pass Diff](pass_diff.md) | `TILELANG_PASS_DIFF` |
@@ -24,6 +25,9 @@ or invoke only the tool needed for the current workflow.
   estimate from a `PrimFunc` or `IRModule`.
 - Use **Layout Visualization** to inspect how logical indices map to threads and
   local indices.
+- Use **Source-Span Visualization** to print the official TVMScript of a
+  `PrimFunc` or `IRModule` with each statement's `file:line:column` location
+  appended, for correlating lowered IR back to source.
 - Use **AutoDD** after obtaining a stable failure signature and before filing a
   large reproducer.
 - Use **IR Lower Trace** to observe every pass and the final codegen step of a

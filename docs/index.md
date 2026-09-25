@@ -34,6 +34,7 @@ tools/index
 tools/compile_only
 tools/analyzer
 tools/layout_visualization
+tools/tirx_span_viz
 tools/autodd
 tools/lower_trace
 tools/pass_diff
