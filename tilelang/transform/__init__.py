@@ -1,6 +1,8 @@
 """Wrapping transformations."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
+from typing import Literal
+
 from . import _ffi_api
 from .simplify import Simplify, simplify_prim_func, LetInline  # noqa: F401
 from .pass_config import PassConfigKey  # noqa: F401
@@ -458,3 +460,16 @@ def UnrollLoop():
         The result pass
     """
     return _ffi_api.UnrollLoop()  # type: ignore
+
+
+def LowerInvariantArithmetic(stage: Literal["prepare", "materialize"] = "prepare"):
+    """Lower launch-invariant integer div/rem and Barrett reduction in two stages.
+
+    ``prepare`` runs after AnnotateDeviceRegions, before SplitHostDevice. It
+    prepares host parameters and emits opaque device arithmetic intrinsics.
+    ``materialize`` runs after the final device simplification, before codegen.
+    It shares those intrinsics within statement/branch scopes and restores SSA.
+
+    Both stages are required by the enabled optimization and communicate via IR.
+    """
+    return _ffi_api.LowerInvariantArithmetic(stage)
