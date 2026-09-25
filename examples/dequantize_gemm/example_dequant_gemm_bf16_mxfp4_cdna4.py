@@ -43,7 +43,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
 
 def _get_target():
     """Return TVM hip target for gfx950."""
-    return tvm.target.Target("hip -mcpu=gfx950")
+    return tvm.target.Target({"kind": "hip", "mcpu": "gfx950"})
 
 
 def get_configs():
@@ -59,7 +59,7 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs())
-@tilelang.jit(out_idx=[-1], target="hip -mcpu=gfx950")
+@tilelang.jit(out_idx=[-1], target={"kind": "hip", "mcpu": "gfx950"})
 def matmul(
     M,
     N,
