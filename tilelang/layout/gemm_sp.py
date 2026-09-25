@@ -135,6 +135,12 @@ def make_cutlass_metadata_layout_sm8x(buffer: tvm.tirx.Buffer, mma_dtype: str):
     group = 32 if buffer.dtype.bits == 16 else 16
     interweave = 4 if buffer.dtype.bits == 16 else 2
 
+    # ref: https://github.com/pytorch/pytorch/blob/18acb4f62d1557fb068bfeec4622967885484da6/torch/sparse/_semi_structured_conversions.py#L72-L81
+    if m % group != 0:
+        raise ValueError(f"metadata M={m} must be a multiple of {group}")
+    if k % 2 != 0:
+        raise ValueError(f"metadata K={k} must be even")
+
     def ColumnMajorInterleaved(i: int, j: int) -> int:
         i = i // group * group + (i % 8) * interweave + (i % group) // 8
         topright = (1 - (i % 2)) & (j % 2)
