@@ -604,7 +604,7 @@ class Builder(BaseBuilder):
         with self.with_frame(tirx.While(cond_v_unwrap)):
             yield None
 
-    def bind(self, name, value, annot=BaseBuilder.empty):
+    def bind(self, name, value, annot=BaseBuilder.empty, *, loop_target=False):
         self.check_continue_break()
 
         # in prim func, before T.match_buffer
@@ -645,7 +645,12 @@ class Builder(BaseBuilder):
             else:
                 return orig_value
 
-        orig_value = locals.get(name, self.empty)
+        # Only a live Ref/alloc_var is a store target; loop targets and the
+        # rewriter's `_` temporaries always bind fresh.
+        if loop_target or name == "_" or self.binding_expired(name):
+            orig_value = self.empty
+        else:
+            orig_value = locals.get(name, self.empty)
 
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is not a PrimExpr, such as buffer,
@@ -700,6 +705,11 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             self.name_inside_frame[name] = self.frames[frame]
         return res
+
+    def binding_expired(self, name: str | None) -> bool:
+        """Whether `name` was last bound inside a TIR region that has since closed."""
+        frame = self.name_inside_frame.get(name)
+        return frame is not None and frame not in self.frames
 
     def unwrap_value(self, value):
         """
@@ -889,13 +899,11 @@ class Builder(BaseBuilder):
             raise AssertionError(msg)
 
     def rval(self, name: str | None, value: Any) -> Any:
-        if name in self.name_inside_frame:
-            frame = self.name_inside_frame[name]
-            if frame not in self.frames:
-                raise RuntimeError(
-                    f"Immutable variable `{name}` is used outside its defining region!\n"
-                    f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
-                )
+        if self.binding_expired(name):
+            raise RuntimeError(
+                f"Immutable variable `{name}` is used outside its defining region!\n"
+                f"variable `{name}` is defined in frame: {self.name_inside_frame[name]}, current frames: {self.frames}."
+            )
         return self.unwrap_value(value)
 
     def macro_arg(self, name, value):

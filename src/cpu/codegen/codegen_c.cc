@@ -379,6 +379,10 @@ void CodeGenTileLangC::VisitExpr_(const CallNode *op,
     os << "tl_clz" << dtype.bits() << "((uint" << dtype.bits() << "_t)(";
     PrintExpr(op->args[0], os);
     os << "))";
+  } else if (op->op.same_as(tl::clamp())) {
+    ICHECK_EQ(op->args.size(), 3);
+    os << "tl::clamp(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
   } else if (op->op.same_as(builtin::tvm_stack_alloca())) {
     std::string stack_name = name_supply_->FreshName("stack");
     const std::string &type = op->args[0].as<StringImmNode>()->value;

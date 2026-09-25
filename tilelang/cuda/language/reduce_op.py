@@ -33,7 +33,8 @@ def reduce_max(
     """Perform reduce max, with the CUDA NaN-propagation knob.
 
     Same semantics as the common :func:`tilelang.language.reduce_op.reduce_max`.
-    ``nan_propagate`` is meaningful for float16/bfloat16 only: when True the
+    ``nan_propagate=True`` requires float16 or bfloat16 output. Other output
+    dtypes raise a compilation error. With NaN propagation enabled, the
     reduction lowers to ``__hmax_nan`` so NaNs propagate; when False (default)
     ``__hmax`` returns the non-NaN operand. Targets without these intrinsics
     reject the annotation at compile time.

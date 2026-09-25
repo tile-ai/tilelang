@@ -26,6 +26,7 @@
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <utility>
@@ -45,6 +46,16 @@ public:
   BufferIndiceSimplify(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
 
 private:
+  Stmt VisitStmt_(const BindNode *node) final {
+    auto bind = Downcast<Bind>(StmtExprMutator::VisitStmt_(node));
+    if (SideEffect(bind->value) <= CallEffectKind::kPure) {
+      // Refresh let aliases from the substituted IR before simplifying uses.
+      // The analyzer may still bind them to the original loop indices.
+      analyzer_->Bind(bind->var, bind->value, /*allow_override=*/true);
+    }
+    return bind;
+  }
+
   PrimExpr VisitExpr_(const BufferLoadNode *node) final {
     auto visited = StmtExprMutator::VisitExpr_(node);
     auto n = Downcast<BufferLoad>(visited);

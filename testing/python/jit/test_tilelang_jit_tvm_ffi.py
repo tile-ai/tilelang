@@ -496,5 +496,35 @@ def test_tvm_ffi_pdl():
     print("pdl test passed!")
 
 
+@tilelang.testing.requires_cuda
+def test_tvm_ffi_dynamic_shape_output_before_input():
+    """An output may precede the input that supplies its symbolic dimension.
+
+    The dynamic-symbolic map records parameter indices taken from the PrimFunc
+    signature, and an output's shape is resolved while that output is being
+    allocated. When the output precedes its input, the referenced slot is not an
+    input, so resolving it against the compacted input list reads the wrong tensor
+    or runs off the end of that list.
+    """
+    N = T.dynamic("N")
+
+    @tilelang.jit(out_idx=[0], execution_backend="tvm_ffi")
+    def kernel():
+        @T.prim_func
+        def main(
+            B: T.Tensor((N,), "float32"),
+            A: T.Tensor((N,), "float32"),
+        ):
+            with T.Kernel(1, threads=128):
+                for i in T.Parallel(N):
+                    B[i] = A[i] + T.float32(9)
+
+        return main
+
+    a = torch.arange(128, dtype=torch.float32).cuda()
+    out = kernel()(a)
+    tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
