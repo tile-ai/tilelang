@@ -39,6 +39,9 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # loop bodies are still in source order and tile ops still declare
     # their access regions.
     mod = tilelang.transform.VerifyBufferInit()(mod)
+    # Expose logical accesses before scheduling and global layout inference.
+    mod = tilelang.transform.LowerTileOp(logical_only=True)(mod)
+    mod = tilelang.transform.Simplify()(mod)
 
     mod = tilelang.transform.IfStmtBinding()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)

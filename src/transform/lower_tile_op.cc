@@ -1474,11 +1474,43 @@ namespace transform {
 
 using namespace tirx::transform;
 
-tvm::transform::Pass LowerTileOp() {
+// Logical expansion deliberately has no layout/thread state. Composite ops
+// participate in the same scheduling and layout solve as user-written loops.
+class LogicalTileOpLowerer : public arith::IRMutatorWithAnalyzer {
+public:
+  LogicalTileOpLowerer(Target target, arith::Analyzer *analyzer)
+      : arith::IRMutatorWithAnalyzer(analyzer), target_(std::move(target)) {}
+
+private:
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    auto tile_op = ParseOperator(GetRef<Stmt>(op));
+    if (tile_op.defined()) {
+      if (auto expanded = tile_op->LowerLogical(target_, analyzer_)) {
+        Stmt stmt = expanded.value();
+        StampSubtreeSpans(stmt, op->span);
+        return stmt;
+      }
+    }
+    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Target target_;
+};
+
+tvm::transform::Pass LowerTileOp(bool logical_only) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    if (logical_only) {
+      arith::Analyzer analyzer;
+      LogicalTileOpLowerer lowerer(
+          f->GetAttr<Target>(tvm::attr::kTarget).value(), &analyzer);
+      f.CopyOnWrite()->body = lowerer(f->body);
+      return f;
+    }
     return LowerTileOpPass::Substitute(std::move(f));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});
+  return CreatePrimFuncPass(
+      pass_func, 0, logical_only ? "tl.LowerTileOpLogical" : "tl.LowerTileOp",
+      {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
