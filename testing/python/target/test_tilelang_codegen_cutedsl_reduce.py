@@ -8,9 +8,6 @@ from tilelang.cuda.target import normalize_cutedsl_target
 
 
 def _lower_cutedsl_partial_reduce():
-    if not tvm.runtime.enabled("cuda"):
-        pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
-
     build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
     if build_cutedsl is None:
         pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
@@ -32,13 +29,15 @@ def _lower_cutedsl_partial_reduce():
             for i, j in T.Parallel(1, 512):
                 x_frag[i, j] = A[i, j]
             T.reduce_sum(x_frag, sum_frag, dim=1)
-            for i in T.Parallel(1):
-                B[i] = sum_frag[i]
+            # Only threads [0, 64) own sum_frag; use one owner for the store.
+            if T.get_thread_binding() == 0:
+                B[0] = sum_frag[0]
 
     with target:
         return lower(prog.with_attr("global_symbol", "main"), target=target)
 
 
+@tilelang.testing.requires_cuda
 def test_cutedsl_codegen_partial_reduce_named_barrier():
     """The partial scalar AllReduce uses its exact participant count."""
     artifact = _lower_cutedsl_partial_reduce()

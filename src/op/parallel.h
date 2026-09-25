@@ -62,6 +62,7 @@ public:
 private:
   bool valid_{false};
   tirx::Var thread_var_;
+  Range thread_domain_;
   Map<tirx::Var, PrimExpr> loop_var_map_;
   Map<tirx::Var, PrimExpr> thread_offset_map_;
   bool has_thread_offset_{false};
@@ -181,6 +182,10 @@ public:
   // constant 0.
   Optional<PrimExpr> GetPredicate(PrimExpr thread_index) const;
 
+  // Validate the inferred loop mapping against every currently known fragment
+  // layout. The free-inference driver calls this again after full propagation.
+  void ValidateInferredLayout(const LayoutInferArgs &layout_args) const;
+
   // Clone this operator.
   TileOperator Clone() const override;
 
@@ -241,10 +246,8 @@ private:
   // Add replication guard predicates when needed for cross-thread stores.
   void BuildReplicationGuardsIfNeeded(
       const LayoutInferArgs &layout_args,
-      const std::vector<Buffer> &store_shared_global_buffers,
       const std::vector<Buffer> &store_fragment_buffers,
-      bool has_cross_thread_access,
-      const std::vector<Buffer> &const_index_fragment_buffer) const;
+      bool has_cross_thread_access) const;
   // Add a predicate to the current predicate expression.
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;

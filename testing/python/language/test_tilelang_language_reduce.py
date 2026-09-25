@@ -231,8 +231,10 @@ def _make_partial_warp_reduce_kernel():
                 for i, j in T.Parallel(1, 384):
                     x_frag[i, j] = x[i, j]
                 T.reduce_sum(x_frag, sum_frag, dim=1)
-                for i in T.Parallel(1):
-                    out[i] = sum_frag[i]
+                # Keep the output within the fragment's [0, 48) owner range
+                # so lowering reaches the intended reduction-width check.
+                if T.get_thread_binding() == 0:
+                    out[0] = sum_frag[0]
 
         return partial_warp_reduce
 
@@ -277,8 +279,9 @@ def _make_warp_misaligned_base_reduce_kernel():
                 for i, j in T.Parallel(1, 512):
                     x_frag[i, j] = x[i, j]
                 T.reduce_sum(x_frag, sum_frag, dim=1)
-                for i in T.Parallel(1):
-                    out[i] = sum_frag[i]
+                # Thread 16 owns the result in [16, 80); thread 0 does not.
+                if T.get_thread_binding() == 16:
+                    out[0] = sum_frag[0]
 
         return warp_misaligned_base_reduce
 
@@ -443,16 +446,17 @@ REDUCE_CASES = [
     ("abssum", T.int64, 128, 128, "fragment", "fragment", 32, 1),
     ("absmax", T.float32, 128, 128, "fragment", "fragment", 32, 1),
     ("absmax", T.int64, 128, 128, "fragment", "fragment", 32, 1),
-    # batch > 1: verify run_batch codegen and correctness together
+    # batch > 1: verify run_batch codegen and correctness together. Keep enough
+    # rows per thread for the requested batch even with 256-bit vectorization.
     ("sum", T.float32, 128, 64, "shared", "fragment", 256, 2),
     ("sum", T.float32, 128, 64, "shared", "fragment", 256, 4),
-    ("sum", T.float16, 64, 128, "fragment", "fragment", 256, 4),
+    ("sum", T.float16, 128, 128, "fragment", "fragment", 256, 4),
     ("sum", T.bfloat16, 128, 128, "fragment", "fragment", 32, 1),
-    ("sum", T.bfloat16, 64, 128, "fragment", "fragment", 256, 4),
+    ("sum", T.bfloat16, 128, 128, "fragment", "fragment", 256, 4),
     ("max", T.bfloat16, 128, 64, "shared", "fragment", 256, 2),
     ("max", T.float32, 128, 128, "fragment", "fragment", 256, 4),
     ("min", T.float32, 64, 128, "shared", "fragment", 128, 2),
-    ("min", T.float16, 128, 128, "fragment", "fragment", 256, 8),
+    ("min", T.float16, 256, 128, "fragment", "fragment", 256, 8),
     ("abssum", T.float32, 128, 128, "fragment", "fragment", 256, 4),
     ("absmax", T.float32, 128, 128, "fragment", "fragment", 256, 4),
 ]
