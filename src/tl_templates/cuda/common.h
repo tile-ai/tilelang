@@ -272,6 +272,54 @@ TL_PATCH TL_DEVICE bfloat16_t hnearbyint(const bfloat16_t x) {
   return bfloat16_t(nearbyintf(float(x)));
 }
 
+TL_PATCH TL_DEVICE half_t hasin(const half_t x) {
+  return half_t(asinf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hasin(const bfloat16_t x) {
+  return bfloat16_t(asinf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hacos(const half_t x) {
+  return half_t(acosf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hacos(const bfloat16_t x) {
+  return bfloat16_t(acosf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hasinh(const half_t x) {
+  return half_t(asinhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hasinh(const bfloat16_t x) {
+  return bfloat16_t(asinhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hacosh(const half_t x) {
+  return half_t(acoshf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hacosh(const bfloat16_t x) {
+  return bfloat16_t(acoshf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hatanh(const half_t x) {
+  return half_t(atanhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hatanh(const bfloat16_t x) {
+  return bfloat16_t(atanhf(float(x)));
+}
+
+TL_PATCH TL_DEVICE half_t hlog1p(const half_t x) {
+  return half_t(log1pf(float(x)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hlog1p(const bfloat16_t x) {
+  return bfloat16_t(log1pf(float(x)));
+}
+
 TL_PATCH TL_DEVICE half_t hpow(const half_t x, const half_t y) {
   return half_t(powf(float(x), float(y)));
 }
@@ -286,6 +334,67 @@ TL_PATCH TL_DEVICE half_t hfmod(const half_t x, const half_t y) {
 
 TL_PATCH TL_DEVICE bfloat16_t hfmod(const bfloat16_t x, const bfloat16_t y) {
   return bfloat16_t(fmodf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE half_t hatan2(const half_t x, const half_t y) {
+  return half_t(atan2f(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hatan2(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(atan2f(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE half_t hhypot(const half_t x, const half_t y) {
+  return half_t(hypotf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hhypot(const bfloat16_t x, const bfloat16_t y) {
+  return bfloat16_t(hypotf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE half_t hcopysign(const half_t x, const half_t y) {
+  return half_t(copysignf(float(x), float(y)));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hcopysign(const bfloat16_t x,
+                                        const bfloat16_t y) {
+  return bfloat16_t(copysignf(float(x), float(y)));
+}
+
+// ldexp's second operand is an exponent, not a value of the same type.
+TL_PATCH TL_DEVICE half_t hldexp(const half_t x, const int n) {
+  return half_t(ldexpf(float(x), n));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hldexp(const bfloat16_t x, const int n) {
+  return bfloat16_t(ldexpf(float(x), n));
+}
+
+// Step the 16-bit encoding directly: a float32 step is below one 16-bit ulp
+// and rounds back. Compare as integers too, or fast math flushes bf16
+// subnormals to zero. `inf` is the dtype's +inf encoding.
+TL_DEVICE uint16_t nextafter_bits16(const uint16_t ux, const uint16_t uy,
+                                    const uint16_t inf) {
+  const uint16_t mx = ux & 0x7FFF, my = uy & 0x7FFF;
+  if (mx > inf || my > inf)
+    return 0x7FFF;
+  if (ux == uy || (mx | my) == 0)
+    return uy;
+  if (mx == 0)
+    return (uy & 0x8000) | 0x0001;
+  const int kx = (ux & 0x8000) ? -int(mx) : int(mx);
+  const int ky = (uy & 0x8000) ? -int(my) : int(my);
+  const bool away = (kx < ky) == !(ux & 0x8000);
+  return ux + (away ? 1 : -1);
+}
+
+TL_PATCH TL_DEVICE half_t hnextafter(const half_t x, const half_t y) {
+  return half_t::bitcast(nextafter_bits16(x.raw(), y.raw(), 0x7C00));
+}
+
+TL_PATCH TL_DEVICE bfloat16_t hnextafter(const bfloat16_t x,
+                                         const bfloat16_t y) {
+  return bfloat16_t::bitcast(nextafter_bits16(x.raw(), y.raw(), 0x7F80));
 }
 
 // TVM lowers 16-bit math ops to CUDA's half-style names (hexp, hlog, ...).
