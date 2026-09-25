@@ -59,6 +59,7 @@ class LibraryGenerator:
     def compile_lib(self, timeout: float = None):
         target = self.target
         verbose = self.verbose
+        msvc_cpu = False
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
@@ -141,13 +142,29 @@ class LibraryGenerator:
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
 
+            compiler = get_cplus_compiler()
+            if compiler is None:
+                raise RuntimeError("CPU JIT requires a C++ compiler; set CXX or install a host toolchain.")
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
-            libpath = src.name.replace(".cpp", ".so")
+            libpath = src.name.replace(".cpp", ".dll" if sys.platform == "win32" else ".so")
 
-            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
-            command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
-            ]
+            msvc_cpu = sys.platform == "win32" and os.path.basename(compiler).lower() in ("cl", "cl.exe", "clang-cl", "clang-cl.exe")
+            if msvc_cpu:
+                # clang-cl accepts the MSVC driver flags, not -std/-shared.
+                # half.hpp also needs C++ exceptions enabled. Keep compiler
+                # intermediates beside the unique temporary source, not in cwd.
+                command = [
+                    compiler,
+                    "/nologo",
+                    "/std:c++17",
+                    "/EHsc",
+                    "/MD",
+                    "/LD",
+                    "/Fo" + src.name.replace(".cpp", ".obj"),  # codespell:ignore
+                    src.name,
+                ]
+            else:
+                command = [compiler, "-std=c++17", "-fPIC", "-shared", src.name]
         else:
             raise ValueError(f"Unsupported target: {target}")
 
@@ -158,7 +175,7 @@ class LibraryGenerator:
         if self.compile_flags:
             command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
 
-        command += ["-o", libpath]
+        command += ["/Fe:" + libpath] if msvc_cpu else ["-o", libpath]
 
         src.write(self.lib_code)
         src.flush()
@@ -172,10 +189,17 @@ class LibraryGenerator:
         # Pipe stdio + isolate stdin to make the launch self-contained.
         run_kwargs: dict[str, Any] = {"timeout": timeout}
         if sys.platform == "win32":
-            from tilelang.contrib.nvcc import get_nvcc_subprocess_env
+            if is_cpu_target(target):
+                from tilelang.contrib.msvc import get_msvc_subprocess_env
+
+                compiler_env = get_msvc_subprocess_env()
+            else:
+                from tilelang.contrib.nvcc import get_nvcc_subprocess_env
+
+                compiler_env = get_nvcc_subprocess_env()
 
             run_kwargs.update(
-                env=get_nvcc_subprocess_env(),
+                env=compiler_env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
