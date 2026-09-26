@@ -3,8 +3,8 @@
 
 Each module under ``cases/`` constructs PrimFuncs whose free-mode layout
 search has a known-good answer.  This driver runs LayoutInference under
-both selection policies (``tl.layout_cost_model`` = "register-count" or
-"io-aware"), snapshots the inferred layouts, and compares them against
+the configured selection policies (``tl.layout_cost_model``), snapshots
+the inferred layouts, and compares them against
 the reviewed golden files under ``expected/``.
 
 Usage:

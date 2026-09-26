@@ -713,6 +713,7 @@ public:
   }
 
   void Collect(const PrimFunc &f) {
+    function_ = f;
     for (const auto &[_, buffer] : f->buffer_map) {
       if (buffer_data_to_buffers_.count(buffer->data)) {
         auto buffers = buffer_data_to_buffers_[buffer->data];
@@ -1312,6 +1313,7 @@ private:
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
   Target target_;
+  PrimFunc function_;
   LayoutMap annotated_layout_map_;
 
   std::vector<TileOperator> BackupInferList() {
@@ -1341,7 +1343,8 @@ private:
       int attempt_root, const std::vector<int> &members,
       const LayoutMap &base_layout_map, const LayoutMap &strict_layout_map,
       const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0) {
+      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0,
+      std::vector<Fragment> *seen_root_layouts = nullptr) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
     // A failed attempt can leave pending propagation work. Keep both the
@@ -1360,6 +1363,20 @@ private:
       // solved layout is frozen; propagation and later visits use normal args.
       RunInferStep(attempt_root, InferLevel::kFree, true, tmp_layout_map,
                    strict_layout_map, q, in_queue, candidate_vector_size_limit);
+      if (seen_root_layouts != nullptr) {
+        Fragment root_layout =
+            Downcast<ParallelOp>(infer_list_[attempt_root])->GetLoopLayout();
+        for (const Fragment &seen : *seen_root_layouts) {
+          if (root_layout->IsEqual(seen.get())) {
+            infer_list_ = std::move(back_infer_list);
+            DLOG(INFO) << "[ReducerVectorPlan] duplicate root layout: root="
+                       << attempt_root
+                       << " limit=" << candidate_vector_size_limit;
+            return std::nullopt;
+          }
+        }
+        seen_root_layouts->push_back(root_layout);
+      }
       FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map, q,
                        in_queue);
       for (int other : members) {
@@ -1457,8 +1474,8 @@ private:
 
     // For each component, try each op as root, and determine the least
     // replicated one
-    std::unique_ptr<LayoutCostModel> cost_model =
-        LayoutCostModel::Create(tl_config::LayoutCostModelName(), target_);
+    std::unique_ptr<LayoutCostModel> cost_model = LayoutCostModel::Create(
+        tl_config::LayoutCostModelName(), target_, function_, infer_list_stmt_);
     DLOG(INFO) << "[InferInFreeMode] cost model: " << cost_model->Name();
     for (auto &&[root, members] : components) {
       DLOG(INFO) << "======================= processing component " << root
@@ -1482,29 +1499,59 @@ private:
       // slots; the existing cost model decides whether that is worthwhile.
       for (int attempt_infer_root : members) {
         const auto *loop = infer_list_[attempt_infer_root].as<ParallelOpNode>();
-        bool try_scalar =
-            cost_model->ExploreReducerScalarLayouts() && loop &&
+        ReducerVectorSearch search = cost_model->GetReducerVectorSearch();
+        bool try_alternatives =
+            search != ReducerVectorSearch::kNative && loop &&
             loop->HasReducerUpdates() && !loop->GetLoopLayout().defined() &&
             !loop->annotated_layout_unbound_.defined() &&
             !loop->GetRoot()->annotations.count(attr::kCoalescedWidth);
-        for (int candidate_vector_size_limit : {0, 1}) {
-          if (candidate_vector_size_limit != 0 && !try_scalar) {
-            continue;
+        std::vector<int> limits{0};
+        if (try_alternatives) {
+          if (search == ReducerVectorSearch::kScalar) {
+            limits.push_back(1);
+          } else {
+            LayoutInferArgs args{
+                target_,    thread_bounds_vec_[attempt_infer_root],
+                layout_map, analyzer_vec_[attempt_infer_root].get(),
+                {},         bind_var_to_expr_,
+                false,      strict_layout_map};
+            for (int width = loop->GetPlanVectorSize(args) / 2; width >= 1;
+                 width /= 2) {
+              limits.push_back(width);
+            }
           }
+        }
+        std::vector<Fragment> seen_root_layouts;
+        for (int candidate_vector_size_limit : limits) {
           DLOG(INFO) << "----------------------- try root "
                      << attempt_infer_root << " members " << members.size()
                      << " candidate_vector_size_limit="
                      << candidate_vector_size_limit << '\n';
           auto outcome = RunOneAttempt(
               attempt_infer_root, members, layout_map, strict_layout_map,
-              /*seed_layouts=*/{}, *cost_model, candidate_vector_size_limit);
+              /*seed_layouts=*/{}, *cost_model, candidate_vector_size_limit,
+              try_alternatives && search == ReducerVectorSearch::kAll
+                  ? &seen_root_layouts
+                  : nullptr);
           if (!outcome) {
             continue;
           }
           DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_infer_root
                      << " cost model " << cost_model->Name()
                      << " output: mem=" << outcome->cost.mem
+                     << " total=" << outcome->cost.total_cost.value_or(-1)
+                     << " execution=" << outcome->cost.execution
                      << " regs=" << outcome->cost.regs;
+          if (search == ReducerVectorSearch::kAll &&
+              tl_config::ReducerPlanVerboseEnabled()) {
+            LOG(INFO) << "[ReducerVectorPlan] root=" << attempt_infer_root
+                      << " limit=" << candidate_vector_size_limit
+                      << " known=" << outcome->cost.known
+                      << " total=" << outcome->cost.total_cost.value_or(-1)
+                      << " spill=" << outcome->cost.mem
+                      << " execution=" << outcome->cost.execution
+                      << " regs=" << outcome->cost.regs;
+          }
           // Ties keep the earliest root and its native plan. The scalar
           // alternative must improve the score to replace the same root.
           if (!has_best || outcome->cost.BetterThan(best_cost) ||
@@ -1543,6 +1590,8 @@ private:
       DLOG(INFO) << "[InferInFreeMode] final selection: attempt root "
                  << best_infer_root << " cost model " << cost_model->Name()
                  << " output: mem=" << best_cost.mem
+                 << " total=" << best_cost.total_cost.value_or(-1)
+                 << " execution=" << best_cost.execution
                  << " regs=" << best_cost.regs;
     }
   }
