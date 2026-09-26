@@ -88,7 +88,15 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
                     raise ValueError("SM120 fragment scales currently require sf_layout='rowmajor'")
                 if not is_full_region(region) or len(buffer.shape) != 2 or int(buffer.shape[0]) != int(rows):
                     raise ValueError(f"SM120 fragment SF{matrix} must be a full 2D region with {rows} rows")
-                layouts[buffer] = emitter.make_scale_load_layout(buffer, matrix)
+                scale_layout = emitter.make_scale_load_layout(buffer, matrix)
+                # Preserve both operand requirements when SFA and SFB alias.
+                if buffer in layouts and not layouts[buffer].is_equal(scale_layout):
+                    raise ValueError(
+                        f"SM120 block-scaled GEMM cannot reuse fragment buffer '{buffer.name}' as SF{matrix}: "
+                        "its operands require different fragment layouts. "
+                        "Use separate SFA and SFB fragment buffers, or shared-memory scales."
+                    )
+                layouts[buffer] = scale_layout
         return layouts
 
     def lower(
