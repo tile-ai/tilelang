@@ -101,25 +101,25 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
 
     if nbits == 1 and target_dtype == "int8":
         # special handling for 1b interleave
-        n16_weight = new_qweight & torch.int32(0xF0F00F0F)
-        n16_weight |= ((new_qweight & torch.int32(0x000000F0)) >> 4) << 16
-        n16_weight |= ((new_qweight & torch.int32(0x0000F000)) >> 12) << 24
-        n16_weight |= ((new_qweight & torch.int32(0x000F0000)) >> 16) << 4
-        n16_weight |= ((new_qweight & torch.int32(0x0F000000)) >> 24) << 12
+        n16_weight = new_qweight & 0xF0F00F0F
+        n16_weight |= ((new_qweight & 0x000000F0) >> 4) << 16
+        n16_weight |= ((new_qweight & 0x0000F000) >> 12) << 24
+        n16_weight |= ((new_qweight & 0x000F0000) >> 16) << 4
+        n16_weight |= ((new_qweight & 0x0F000000) >> 24) << 12
         return n16_weight.view(torch.int8)
     elif nbits == 2 and target_dtype == "float16":
-        n8_weight = new_qweight & torch.int32(0xFF0000FF)
-        n8_weight |= ((new_qweight & torch.int32(0x0000FF00)) >> 8) << 16
-        n8_weight |= ((new_qweight & torch.int32(0x00FF0000)) >> 16) << 8
+        n8_weight = new_qweight & 0xFF0000FF
+        n8_weight |= ((new_qweight & 0x0000FF00) >> 8) << 16
+        n8_weight |= ((new_qweight & 0x00FF0000) >> 16) << 8
         return n8_weight.view(torch.int8)
     elif nbits == 1 and target_dtype == "float16":
-        n8_weight = new_qweight & torch.int32(0xF000000F)
-        n8_weight |= ((new_qweight & torch.int32(0x000000F0)) >> 4) << 8
-        n8_weight |= ((new_qweight & torch.int32(0x00000F00)) >> 8) << 16
-        n8_weight |= ((new_qweight & torch.int32(0x0000F000)) >> 12) << 24
-        n8_weight |= ((new_qweight & torch.int32(0x000F0000)) >> 16) << 4
-        n8_weight |= ((new_qweight & torch.int32(0x00F00000)) >> 20) << 12
-        n8_weight |= ((new_qweight & torch.int32(0x0F000000)) >> 24) << 20
+        n8_weight = new_qweight & 0xF000000F
+        n8_weight |= ((new_qweight & 0x000000F0) >> 4) << 8
+        n8_weight |= ((new_qweight & 0x00000F00) >> 8) << 16
+        n8_weight |= ((new_qweight & 0x0000F000) >> 12) << 24
+        n8_weight |= ((new_qweight & 0x000F0000) >> 16) << 4
+        n8_weight |= ((new_qweight & 0x00F00000) >> 20) << 12
+        n8_weight |= ((new_qweight & 0x0F000000) >> 24) << 20
         return n8_weight.view(torch.int8)
 
     return new_qweight.view(torch.int8)
