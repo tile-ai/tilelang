@@ -68,10 +68,11 @@ ffi::String SelectBlockScaledGemmInst(const GemmBlockScaled &op,
   }
 
   bool requires_tcgen05 = op->isTcgen05_ || use_2cta;
-  bool sm120_operands = (IsSharedBuffer(op->a_) || IsFragmentBuffer(op->a_)) &&
-                        IsSharedBuffer(op->b_);
-  if (!requires_tcgen05 && TargetIsSM120(target) && sm120_operands &&
-      IsFragmentBuffer(op->c_)) {
+  bool matches_sm120_mma =
+      TargetIsSM120(target) &&
+      (IsSharedBuffer(op->a_) || IsFragmentBuffer(op->a_)) &&
+      IsSharedBuffer(op->b_) && IsFragmentBuffer(op->c_);
+  if (!requires_tcgen05 && matches_sm120_mma) {
     return kCudaMMABlockScaled;
   }
 
