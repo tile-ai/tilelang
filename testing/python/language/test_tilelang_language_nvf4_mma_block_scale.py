@@ -874,6 +874,53 @@ def test_nvf4_mma_block_scale_compact_fragment_diagnostic(fragment_a, fragment_s
         tilelang.lower(program, target=target, enable_device_compile=False)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("policy", [T.GemmWarpPolicy.FullRow, T.GemmWarpPolicy.FullCol, T.GemmWarpPolicy.Square])
+@pytest.mark.parametrize("fragment_a", [False, True])
+@pytest.mark.parametrize("fragment_scales, alias_scales", [(True, True), (True, False), (False, True)])
+def test_nvf4_mma_block_scale_scale_buffer_aliasing(policy, fragment_a, fragment_scales, alias_scales):
+    @T.prim_func
+    def main(O: T.Tensor((128, 128), T.float32)):
+        with T.Kernel(1, threads=256):
+            A = T.alloc_fragment((128, 128), T.float4_e2m1fn) if fragment_a else T.alloc_shared((128, 128), T.float4_e2m1fn)
+            B = T.alloc_shared((128, 128), T.float4_e2m1fn)
+            SFA = T.alloc_fragment((128, 2), T.uint32) if fragment_scales else T.alloc_shared((128, 2), T.uint32)
+            SFB = SFA if alias_scales else T.alloc_fragment((128, 2), T.uint32)
+            C = T.alloc_fragment((128, 128), T.float32)
+            T.fill(A, 1)
+            T.fill(B, 1)
+            for i, k in T.Parallel(128, 2):
+                SFA[i, k] = T.uint32(0x38383838) + T.cast(i // 16 % 2, T.uint32) * T.uint32(0x08080808)
+            if not alias_scales:
+                for i, k in T.Parallel(128, 2):
+                    SFB[i, k] = T.uint32(0x38383838) + T.cast(i // 16 % 2, T.uint32) * T.uint32(0x08080808)
+            T.gemm_blockscaled(
+                A,
+                B,
+                C,
+                SFA,
+                SFB,
+                transpose_B=True,
+                clear_accum=True,
+                policy=policy,
+                k_start=0,
+                sf_a_granularity_k=16,
+                sf_b_granularity_k=16,
+                sf_layout="rowmajor",
+            )
+            T.copy(C, O)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120a"})
+    if fragment_scales and alias_scales:
+        diagnostic = "cannot reuse fragment buffer '[^']+' as SFB:.*different fragment layouts.*Use separate SFA and SFB fragment buffers"
+        with target, pytest.raises(ValueError, match=diagnostic):
+            tilelang.lower(main, target=target, enable_device_compile=False)
+    else:
+        with target:
+            result = tilelang.lower(main, target=target, enable_device_compile=False)
+        assert "tl::sm120_mma_sync_blockscaled<" in result.kernel_source
+
+
 # ---------------------------------------------------------------------------
 # Example tail-tile behavior (moved from test_tilelang_sm120_nvfp4_example_cli).
 # ---------------------------------------------------------------------------
