@@ -87,6 +87,22 @@ def _make_unary_kernel(op_func, dtype_tl):
     return main
 
 
+def _make_float32_shuffle_kernel():
+    """Build a scalar-to-float2 shuffle store used by FP4 pack paths."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M,), dtype=T.float32),
+        B: T.Tensor((M,), dtype=T.float32),
+        C: T.Tensor((M * 2,), dtype=T.float32),
+    ):
+        with T.Kernel(1, threads=M):
+            tid = T.get_thread_binding()
+            C[T.Ramp(tid * 2, 1, 2)] = T.Shuffle([A[tid], B[tid]], [0, 1])
+
+    return main
+
+
 # ---------------------------------------------------------------------------
 # Helper: lower to CUDA source
 # ---------------------------------------------------------------------------
@@ -323,6 +339,14 @@ def test_codegen_abs2(dtype_name):
     assert "tl::abs2" in src
     if dtype_name in _NATIVE_CAST_TYPE:
         assert _NATIVE_CAST_TYPE[dtype_name] in src, f"Expected {_NATIVE_CAST_TYPE[dtype_name]} cast in CUDA source for {dtype_name}"
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_float32_shuffle_uses_make_float2():
+    """CUDA float2 is an aggregate and must use its make_float2 helper."""
+    src = _lower_to_cuda_source(_make_float32_shuffle_kernel(), target=SM80_TARGET)
+    assert "make_float2(" in src
+    assert "= float2(" not in src
 
 
 # ---------------------------------------------------------------------------

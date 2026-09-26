@@ -1818,6 +1818,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](const Buffer &buffer, int continuity, bool k_inner) {
              return MakeTcgen05MmaSwizzledLayout(buffer, continuity, k_inner);
            })
+      .def("tl.make_sm120_fp4_smem_layout",
+           [](const Buffer &buffer) { return MakeSm120Fp4SmemLayout(buffer); })
       .def("tl.make_full_bank_swizzled_layout",
            [](const Buffer &buffer) {
              return MakeFullBankSwizzleLayout(buffer);

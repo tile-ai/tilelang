@@ -130,6 +130,44 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
 
 
 @tilelang.testing.requires_cuda
+def test_manual_warp_specialized_tma_handoff_has_no_cta_sync():
+    """Manual warp roles synchronize a TMA-store handoff with mbarriers.
+
+    A CTA-wide barrier between the producer and consumer role branches can
+    never be reached by both sets of warps at once and therefore deadlocks.
+    """
+
+    @T.prim_func(private=True)
+    def func(out: T.Buffer((128,), "float32")):
+        shared = T.alloc_buffer((128,), "float32", scope="shared.dyn")
+        tx = T.launch_thread("threadIdx.x", 384)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if 256 <= tx:
+            T.attr(0, "warp_specialize", 1)
+            if tx == 256:
+                T.evaluate(
+                    T.call_intrin(
+                        "handle",
+                        tvm.tirx.op.Op.get("tl.tma_store"),
+                        T.tvm_access_ptr(T.type_annotation("float32"), out.data, 0, 128, 2),
+                        T.tvm_access_ptr(T.type_annotation("float32"), shared.data, 0, 128, 1),
+                        512,
+                        0,
+                        0,
+                    )
+                )
+        if tx < 256:
+            T.attr(0, "warp_specialize", 1)
+            shared[tx % 128] = T.Cast("float32", tx)
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    s = str(mod.script())
+    assert 'T.tvm_storage_sync("shared.dyn")' not in s, f"Unexpected CTA sync across manual warp roles:\n{s}"
+
+
+@tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
     @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:

@@ -652,6 +652,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
      * return values).
      */
     bool is_atomic = false;
+    // Explicit T.ws roles own their mbarrier/named-barrier synchronization.
+    bool is_warp_specialized = false;
   };
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
@@ -812,6 +814,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       ICHECK(allow_append_)
           << GetRef<BufferLoad>(op) << " " << scope.to_string();
       AccessEntry e{.cset = {constr_stack_}};
+      e.is_warp_specialized = warp_specialize_depth_ > 0;
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_name = op->buffer;
@@ -839,6 +842,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     StorageScope scope = GetScope(buf);
     if (Enabled(buf.get(), scope)) {
       AccessEntry e{.cset = {constr_stack_}};
+      e.is_warp_specialized = warp_specialize_depth_ > 0;
       e.threads = env_threads();
       e.buffer = buf;
       e.buffer_name = op->buffer;
@@ -920,6 +924,10 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         ConstrVisitor::VisitStmt_(op);
       }
       env_threads_.pop_back();
+    } else if (op->attr_key == "warp_specialize") {
+      ++warp_specialize_depth_;
+      ConstrVisitor::VisitStmt_(op);
+      --warp_specialize_depth_;
     } else {
       ConstrVisitor::VisitStmt_(op);
     }
@@ -1223,6 +1231,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         if (Enabled(buffer_var, scope)) {
           ICHECK(allow_append_);
           AccessEntry e{.cset = {constr_stack_}};
+          e.is_warp_specialized = warp_specialize_depth_ > 0;
           e.threads = env_threads();
           e.dtype = dtype;
           e.buffer = Downcast<Var>(buffer->data);
@@ -1297,6 +1306,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
         }
         AccessEntry e{.cset = {constr_stack_}};
+        e.is_warp_specialized = warp_specialize_depth_ > 0;
         e.threads = env_threads();
         e.dtype = dtype;
         e.buffer = GetRef<Var>(buffer_var);
@@ -1324,6 +1334,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       if (s != "warp" && s != "cluster") {
         StorageScope scope = StorageScope::Create(s);
         AccessEntry e{.cset = {constr_stack_}};
+        e.is_warp_specialized = warp_specialize_depth_ > 0;
         e.threads = env_threads();
         e.type = kSync;
         e.scope = StorageScope::Create(s);
@@ -1335,6 +1346,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       // scope planned here.
       ICHECK(allow_append_);
       AccessEntry e{.cset = {constr_stack_}};
+      e.is_warp_specialized = warp_specialize_depth_ > 0;
       e.threads = env_threads();
       e.type = kSync;
       e.scope = sync_scope_;
@@ -1580,6 +1592,7 @@ private:
   StorageScope sync_scope_;
   // warp size from target
   int warp_size_;
+  int warp_specialize_depth_ = 0;
 
   void insert_syncs(const Object *obj) {
     if (syncs_inserted_.count(obj))
@@ -1758,6 +1771,12 @@ private:
    */
   bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                     const ForNode *loop) {
+    // Manual warp roles synchronize explicitly. A CTA barrier between
+    // divergent roles deadlocks; auto-WS retains the normal sync analysis.
+    if (prev.is_warp_specialized && curr.is_warp_specialized) {
+      return false;
+    }
+
     // Special case: ignore conflicts between async-copy writes (e.g., TMA
     // loads into shared memory). Multiple async writes do not require
     // interspersed barriers among themselves. We still respect conflicts with

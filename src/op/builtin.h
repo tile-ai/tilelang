@@ -30,6 +30,10 @@ static constexpr const char *kPipelineMbarPhaseExpr =
     "tl.pipeline_mbar_phase_expr";
 
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
+// Keep a manual warp-role allocation at the exact statement where it was
+// emitted, so StorageRewrite cannot hoist it across setmaxnreg or a role
+// branch.
+static constexpr const char *kRoleScopedAlloc = "tl.role_scoped_alloc";
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 
