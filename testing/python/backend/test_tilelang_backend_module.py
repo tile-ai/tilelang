@@ -10,7 +10,7 @@ from tilelang.backend import BackendContext, create_backend_context, get_backend
 
 def test_builtin_backend_modules_are_explicit():
     expected = {
-        "cuda": (("cuda",), ["tvm_ffi", "nvrtc", "cython"]),
+        "cuda": (("cuda",), ["tvm_ffi", "nvrtc", "cython", "tileir"]),
         "cutedsl": (("cuda",), ["cutedsl"]),
         "rocm": (("hip",), ["tvm_ffi", "cython"]),
         "cpu": (("c", "llvm"), ["cython", "tvm_ffi"]),

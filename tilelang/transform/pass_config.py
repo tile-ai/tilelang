@@ -87,6 +87,11 @@ class PassConfigKey(str, Enum):
     """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
 
+    TL_TILEIR_OPT_LEVEL = "tl.tileir.opt_level"
+    """CUDA Tile IR (TileIR backend) optimization level in [0, 3]. Forwarded to
+    the CUDA Tile IR optimizer and the ``tileiras`` assembler (``--opt-level``).
+    Default: 3."""
+
     TL_DEVICE_COMPILE_FLAGS = "tl.device_compile_flags"
     """Additional device compiler flags passed to nvcc/NVRTC.
 

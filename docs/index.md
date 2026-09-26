@@ -51,6 +51,7 @@ programming_guides/control_flow
 programming_guides/software_pipeline
 programming_guides/python_compatibility
 programming_guides/autotuning
+programming_guides/tileir_backend
 programming_guides/type_system
 :::
 
@@ -73,6 +74,7 @@ compiler_internals/letstmt_inline
 compiler_internals/inject_fence_proxy
 compiler_internals/tensor_checks
 compiler_internals/metal_tilelang_development
+compiler_internals/tileir_backend
 :::
 
 :::{toctree}
