@@ -52,8 +52,8 @@ def test_cross_core_mte3_write_visible_to_mte2_read(target):
         assert mte3_store < arrive
         assert wait < mte2_loads[1]
     else:
-        assert "pto.set_cross_block" in source
-        assert "pto.wait_cross_block" in source
+        assert "tl.ascend_cross_core_set_flag" in source
+        assert "tl.ascend_cross_core_wait_flag" in source
 
     values = torch.arange(
         NUM_VECTOR_CORES * TILE_ELEMS,
