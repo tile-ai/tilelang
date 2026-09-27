@@ -299,17 +299,19 @@ private:
     auto bound_ty = analyzer_->const_int_bound(ty_);
     auto bound_tz = analyzer_->const_int_bound(tz_);
 
-    // Check if all threads are participating (full extent)
-    if (IsFullThreadExtent(tx_, bound_tx) &&
-        IsFullThreadExtent(ty_, bound_ty) &&
-        IsFullThreadExtent(tz_, bound_tz)) {
-      return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
-    }
-
     // Calculate thread extents
     auto extent_tx = CalculateThreadExtent(tx_, bound_tx);
     auto extent_ty = CalculateThreadExtent(ty_, bound_ty);
     auto extent_tz = CalculateThreadExtent(tz_, bound_tz);
+
+    // Check if all threads are participating (full extent)
+    auto full_extent_tx = *as_const_int(tx_->dom->extent);
+    auto full_extent_ty = *as_const_int(ty_->dom->extent);
+    auto full_extent_tz = *as_const_int(tz_->dom->extent);
+    if (extent_tx == full_extent_tx && extent_ty == full_extent_ty &&
+        extent_tz == full_extent_tz) {
+      return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
+    }
 
     // Create or get barrier info
     ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
@@ -318,6 +320,7 @@ private:
 
     auto [barrier_id, thread_count] =
         GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
+
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -400,26 +403,6 @@ private:
       }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
-  }
-
-  bool IsFullThreadExtent(const IterVar &iv,
-                          const arith::ConstIntBound &bound) {
-    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
-      return true;
-    }
-
-    if (!iv->dom.defined()) {
-      return true;
-    }
-
-    const auto *min_node = iv->dom->min.as<IntImmNode>();
-    const auto *extent_node = iv->dom->extent.as<IntImmNode>();
-
-    int64_t min = min_node->value;
-    int64_t extent = extent_node->value;
-    int64_t max = min + extent - 1;
-
-    return min == bound->min_value && max == bound->max_value;
   }
 
   // Member variables

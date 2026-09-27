@@ -1,6 +1,7 @@
 # ruff: noqa
 
 from tilelang import tvm as tvm
+import tilelang.language as TL
 import tilelang.testing
 from tvm.script import tirx as T
 
@@ -825,6 +826,53 @@ def test_partial_sync_warp_multiple_still_lowered():
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
     assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a partial barrier with thread_count=32:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_equivalent_partial_thread_guards_lower_to_the_same_barriers():
+    """Equivalent TileLang guards must produce the same CUDA barriers."""
+    import re
+
+    threads = 128
+    active = 64
+    rounds = 2
+
+    @TL.prim_func
+    def less_than(
+        A: TL.Tensor((rounds, active), "float16"),
+        PartialOut: TL.Tensor((rounds, active), "float16"),
+        AllOut: TL.Tensor((threads,), "float16"),
+    ):
+        with TL.Kernel(1, threads=threads):
+            tx = TL.get_thread_binding()
+            S = TL.alloc_shared((active,), "float16")
+
+            if tx < active:
+                for k in TL.serial(rounds):
+                    S[tx] = A[k, tx]
+                    PartialOut[k, tx] = S[(tx + 1) % active]
+            AllOut[tx] = S[tx % active]
+
+    @TL.prim_func
+    def floor_div(
+        A: TL.Tensor((rounds, active), "float16"),
+        PartialOut: TL.Tensor((rounds, active), "float16"),
+        AllOut: TL.Tensor((threads,), "float16"),
+    ):
+        with TL.Kernel(1, threads=threads):
+            tx = TL.get_thread_binding()
+            S = TL.alloc_shared((active,), "float16")
+
+            if tx // active == 0:
+                for k in TL.serial(rounds):
+                    S[tx] = A[k, tx]
+                    PartialOut[k, tx] = S[(tx + 1) % active]
+            AllOut[tx] = S[tx % active]
+
+    partial_pattern = r"tl::__sync_thread_partial\(\d+,\s*64\)"
+    for func in (less_than, floor_div):
+        source = tilelang.compile(func, out_idx=[1, 2]).get_kernel_source()
+        assert len(re.findall(partial_pattern, source)) == 2, source
 
 
 # =============================================================================
