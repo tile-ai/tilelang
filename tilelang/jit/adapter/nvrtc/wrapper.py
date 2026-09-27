@@ -376,8 +376,19 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     return (f"{name}.data_ptr()", arg_type)
                 return (name, arg_type)
 
+            def transform_host_expr(expr):
+                if not hasattr(expr, "dtype"):
+                    raise ValueError(f"Unsupported host-computed kernel argument: {expr}")
+                return (self._pythonic_expr(expr), self._lookup_type(expr.dtype))
+
             call_args = parse_function_call_args(
-                declaration, function_args, function_params, desc_name_map, desc_name_var_map, transform_nvrtc_arg
+                declaration,
+                function_args,
+                function_params,
+                desc_name_map,
+                desc_name_var_map,
+                transform_nvrtc_arg,
+                transform_host_expr,
             )
 
             for arg_name, arg_type in call_args:

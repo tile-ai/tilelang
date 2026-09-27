@@ -122,6 +122,10 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options.append(f"-D__CUDACC_VER_MAJOR__={version[0]}")
         if version[0] < 13:
             options += [f"-I{path}/cuda/std" for path in include_paths if not path.endswith(osp.join("include", "cccl"))]
+        if cfg.get(PassConfigKey.TL_EMIT_LINE_DIRECTIVES, False) and not any(
+            flag in {"-lineinfo", "--lineinfo"} for flag in options
+        ):
+            options.append("-lineinfo")
 
     cache_key = CUDABinaryCache.make_key(
         code=code,

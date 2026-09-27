@@ -10,11 +10,30 @@ from tilelang import tvm
 from tilelang.backend import create_backend_context
 from tilelang.engine.lower import device_codegen, extrac_params, get_device_call, get_host_call, host_codegen
 from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
+from tilelang.jit.adapter.utils import parse_function_call_args
+
+
+def test_parse_function_call_args_uses_host_expression_for_scalars():
+    host_expression = object()
+    call_args = parse_function_call_args(
+        "extern \"C\" __global__ void kernel(int n)",
+        [{"name": "n", "type": "ctypes.c_int32"}],
+        [host_expression],
+        transform_arg=lambda name, arg_type: (name, arg_type),
+        fallback_arg=lambda expression: (expression, "ctypes.c_int32"),
+    )
+    assert call_args == [(host_expression, "ctypes.c_int32")]
 
 
 @pytest.fixture
 def nvrtc_ffi(monkeypatch, tmp_path):
-    pytest.importorskip("cuda.bindings.nvrtc")
+    nvrtc = pytest.importorskip("cuda.bindings.nvrtc")
+    from cuda.pathfinder import DynamicLibNotFoundError
+
+    try:
+        nvrtc.nvrtcVersion()
+    except DynamicLibNotFoundError:
+        pytest.skip("NVRTC library is unavailable")
     from tilelang.contrib import nvcc
     from tilelang.env import env
 

@@ -278,6 +278,7 @@ def parse_function_call_args(
     desc_name_map: dict[str, str] | None = None,
     desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
     transform_arg: Callable[[str, str], Any] | None = None,
+    fallback_arg: Callable[[Any], Any] | None = None,
 ) -> list[Any]:
     """
     Parse function call arguments from a kernel declaration.
@@ -289,21 +290,36 @@ def parse_function_call_args(
         desc_name_map: Optional mapping for descriptor names.
         desc_name_var_map: Optional mapping from descriptor names to TVM variables.
         transform_arg: Optional function to transform each argument (name, type) -> result.
+        fallback_arg: Optional function to render a host-computed device argument.
 
     Returns:
         List of parsed call arguments.
     """
-    pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
-    matches = re.findall(pattern, declaration)
+    signature = declaration[declaration.find("(") + 1 : declaration.rfind(")")]
+    matches = []
+    for parameter in signature.split(","):
+        match = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^]]*\])?$", parameter.strip())
+        if match:
+            matches.append(match.group(1))
     call_args = []
 
     for i, match in enumerate(matches):
+        matched = False
         for arg in function_args:
             if arg["name"] == match:
-                if transform_arg is not None:
+                if (
+                    fallback_arg is not None
+                    and function_params is not None
+                    and i < len(function_params)
+                    and arg["type"] != "ctypes.c_void_p"
+                ):
+                    call_args.append(fallback_arg(function_params[i]))
+                elif transform_arg is not None:
                     call_args.append(transform_arg(match, arg["type"]))
                 else:
                     call_args.append(match)
+                matched = True
+                break
             elif maybe_desc_name(arg["name"], matches, i, desc_name_map):
                 if transform_arg is not None:
                     call_args.append(transform_arg(match, "None"))
@@ -312,6 +328,15 @@ def parse_function_call_args(
                 if desc_name_var_map is not None and function_params is not None:
                     assert len(call_args) <= len(function_params), f"Too many arguments: {len(call_args)} > {len(function_params)}"
                     desc_name_var_map[match] = function_params[len(call_args) - 1]
+                matched = True
+                break
+        if (
+            not matched
+            and fallback_arg is not None
+            and function_params is not None
+            and len(call_args) < len(function_params)
+        ):
+            call_args.append(fallback_arg(function_params[len(call_args)]))
 
     return call_args
 
