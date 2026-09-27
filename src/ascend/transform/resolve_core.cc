@@ -523,12 +523,13 @@ private:
 
 void ResolveCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
                       const BufferVersionMap &buffer_versions,
-                      const ffi::Optional<Var> &outer_sid) {
+                      const ffi::Optional<Var> &outer_sid,
+                      const L0StorageGroups &groups) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
   // PrepareMultiBuffer persists the chosen counters and active guards on owner
   // loops; reconstruct exactly that plan instead of recomputing it here.
-  MultiBufferPlan plan = ReadMultiBufferPlan(root, buffer_versions);
+  MultiBufferPlan plan = ReadMultiBufferPlan(root, buffer_versions, groups);
   CoreMaskResolver::Resolve(root, all_tasks, plan, outer_sid);
 }
 
@@ -545,7 +546,8 @@ tvm::transform::Pass ResolveCore() {
               DecodeScheduledTIR(context.root, context.outer_ctx);
           ResolveCoreMasks(scheduled_tir.tree,
                            scheduled_tir.metadata.buffer_versions,
-                           context.outer_sid);
+                           context.outer_sid,
+                           L0StorageGroups(CollectL0SFBindings(context.root)));
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });
   };

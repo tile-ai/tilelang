@@ -132,6 +132,21 @@ print("GEMM + ReLU passed.")
 - Use `T.alloc_shared` for Unified Buffer storage, `T.alloc_l1` for L1 storage,
   and `T.alloc_l0a`, `T.alloc_l0b`, or `T.alloc_l0c` for Cube buffers.
 
+Compared with writing Ascend C directly, the default automatically scheduled
+TileLang path divides the work as follows:
+
+| Area | You write with TileLang | Ascend C code you can skip | What the compiler does |
+| --- | --- | --- | --- |
+| Buffering and data movement | `T.alloc_*`, `T.copy`, `T.dual_copy` | `TPipe` / `TQue` setup and DMA calls | Plans storage; lowers copies and supported layout conversions |
+| Tiling and tiled operators | Shapes/dtypes, tile sizes, block count, and ops such as `T.gemm` | Low-level operator implementations | Lowers tiled ops to hardware instructions |
+| SIMT computation | Scalar code and `T.Parallel` in `T.SimtVF(threads=...)` | Thread mapping and barrier placement | Maps iterations to threads; inserts barriers for detected cross-thread hazards |
+| SIMD computation | Explicit `T.simd.*` operations and masks in `T.SimdVF()` | Device-function boilerplate | Lowers SIMD ops into device functions |
+| Scheduling and pipelining | `T.Pipelined(..., num_stages=...)` as needed | Manual schedules and buffer-slot rotation | Assigns tasks to AIC/AIV; schedules overlap and multibuffering |
+| Synchronization | None (Just write operations in order!) | Set/wait flags and flag ID management | Infers pipeline and Cube/Vector dependencies; inserts paired flags |
+
+Automatic scheduling handles task order and dependencies; it does not imply
+automatic tensorization of arbitrary `T.Parallel` code into SIMD instructions.
+
 ## Examples
 
 - **Start here:** [GEMM](../../examples/ascend/example_gemm.py) and [SIMT vector add](../../examples/ascend/example_simtvf_vector_add.py)

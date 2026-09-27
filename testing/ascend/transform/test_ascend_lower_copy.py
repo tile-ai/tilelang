@@ -3,9 +3,15 @@
 import pytest
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
-from tilelang.layout import make_ascend_nz_layout, make_ascend_l0c_layout, make_ascend_major_k_layout, make_ascend_major_mn_layout
+from tilelang.layout import (
+    make_ascend_nz_layout,
+    make_ascend_l0c_layout,
+    make_ascend_major_k_layout,
+    make_ascend_major_mn_layout,
+    make_ascend_sf_layout,
+)
 from tvm import tirx
-from testing.ascend._ir import calls, nodes
+from testing.ascend._ir import allocated_buffer, calls, nodes
 
 
 def _region(buffer, extents=None, mins=None):
@@ -18,7 +24,7 @@ def _region(buffer, extents=None, mins=None):
     )
 
 
-def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, wrap=None, **kwargs):
+def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings=None, wrap=None, **kwargs):
     copy = T.copy(src_region if src_region is not None else src, dst_region if dst_region is not None else dst, **kwargs)
     buffers = [src, dst]
     for buffer in layouts or {}:
@@ -33,7 +39,7 @@ def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, wrap=Non
         "root",
         wrap(body) if wrap else body,
         alloc_buffers=[b for b in buffers if b.scope() != "global"],
-        annotations={"layout_map": layouts or {}},
+        annotations={"layout_map": layouts or {}, "tl.l0_sf_bindings": bindings or {}},
     )
     target = tvm.target.Target("ascend")
     body = tirx.SBlockRealize([], True, root)
@@ -245,3 +251,103 @@ def test_simt_copy_is_lowered_per_thread_and_does_not_change_later_dma():
     assert any(load.buffer.data.same_as(src.data) for load in nodes(vf, tirx.BufferLoad))
     assert any(store.buffer.data.same_as(dst.data) for store in nodes(vf, tirx.BufferStore))
     assert len(calls(after, "tl.ascend_copy_gm_to_ubuf")) == 1
+
+
+@pytest.mark.parametrize(
+    "leading,index,scope,transposed,dtype,pack",
+    [
+        pytest.param((), (), "shared.l0a", False, "uint16", 1, id="compact-a"),
+        pytest.param((3,), (1,), "shared.l0b", False, "uint16", 1, id="leading-b"),
+        pytest.param((2, 3), (1, 2), "shared.l0a", False, "uint8", 2, id="two-leading-byte-scales"),
+        pytest.param((2, 3), (1, 2), "shared.l0b", True, "uint16", 1, id="two-leading-transposed-b"),
+        pytest.param((), (), "shared.l0a", True, "uint8", 2, id="transposed-a-byte-scales"),
+    ],
+)
+def test_sf_copy_uses_bound_data_address_and_compact_pitch(leading, index, scope, transposed, dtype, pack):
+    # No GEMM and no multi-buffer metadata: every leading dimension is ordinary.
+    data = tirx.decl_buffer((*leading, *((128, 64) if transposed else (64, 128))), "float8_e4m3fn", name="data", scope=scope)
+    sf = tirx.decl_buffer((*leading, 64, 2 * pack), dtype, name="sf", scope=scope + ".sf")
+    src = tirx.decl_buffer((64, 4 * pack), dtype, name="source", scope="shared.l1")
+    after = _lower(
+        src,
+        sf,
+        _region(src, [32, pack], [16, pack]),
+        _region(sf, [*([1] * len(leading)), 32, pack], [*index, 0, 0]),
+        layouts={src: make_ascend_sf_layout(src), data: (make_ascend_major_mn_layout if transposed else make_ascend_major_k_layout)(data)},
+        bindings={sf.data: data.data},
+    )
+    (load,) = calls(after, "tl.ascend_load_ca_sf" if scope.endswith("a") else "tl.ascend_load_cb_sf")
+    tile = 0
+    for size, position in zip(leading, index):
+        tile = tile * size + position
+    assert load.args[0].args[1].same_as(allocated_buffer(after, "data").data)
+    _equal([load.args[0].args[2]], [tile * 64 * 128])
+    _equal(load.args[2:], [1, 1, 2, 1, 4, 1])
+
+
+@pytest.mark.parametrize(
+    "case,diagnostic",
+    [
+        ("row-origin", "source origin"),
+        ("pair-origin", "source origin"),
+        ("dst-origin", "zero-origin"),
+        ("capacity", "bound data allocation"),
+        ("compact-region", "compact destination region"),
+        ("short-source", "compact destination region"),
+    ],
+)
+def test_sf_copy_rejects_unrepresentable_physical_regions(case, diagnostic):
+    src = tirx.decl_buffer((32, 8), "uint8", name="src", scope="shared.l1")
+    data = tirx.decl_buffer((32, 128), "float8_e4m3fn", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((32, 8), "uint8", name="sf", scope="shared.l0a.sf")
+    src_extents = [16, 8 if case == "capacity" else 2 if case == "short-source" else 4]
+    dst_extents = [16, 8 if case == "capacity" else 2 if case == "compact-region" else 4]
+    with pytest.raises(tvm.error.InternalError, match=diagnostic):
+        _lower(
+            src,
+            sf,
+            _region(src, src_extents, [1 if case == "row-origin" else 0, 1 if case == "pair-origin" else 0]),
+            _region(sf, dst_extents, [1 if case == "dst-origin" else 0, 0]),
+            layouts={src: make_ascend_sf_layout(src), data: make_ascend_major_k_layout(data)},
+            bindings={sf.data: data.data},
+        )
+
+
+@pytest.mark.parametrize(
+    "axis,lower_bound,upper_bound,valid",
+    [
+        pytest.param("mn", 0, 32, True, id="bounded-mn"),
+        pytest.param("mn", 0, 64, False, id="unknown-mn"),
+        pytest.param("mn", 33, 64, False, id="overflow-mn"),
+        pytest.param("mn", 33, 32, True, id="unreachable-mn"),
+        pytest.param("k", 0, 2, True, id="bounded-k"),
+        pytest.param("k", 0, 8, False, id="unknown-k"),
+        pytest.param("k", 3, 8, False, id="overflow-k"),
+        pytest.param("k", 3, 2, True, id="unreachable-k"),
+    ],
+)
+def test_dynamic_sf_copy_requires_proven_data_capacity(axis, lower_bound, upper_bound, valid):
+    n = tirx.Var("n", "int32")
+    src = tirx.decl_buffer((64, 8), "uint16", name="src", scope="shared.l1")
+    sf = tirx.decl_buffer((64, 8), "uint16", name="sf", scope="shared.l0a.sf")
+    data = tirx.decl_buffer((32, 128), "float8_e4m3fn", name="data", scope="shared.l0a")
+    extents = [n, 1] if axis == "mn" else [16, n]
+
+    def lower():
+        return _lower(
+            src,
+            sf,
+            _region(src, extents),
+            _region(sf, extents),
+            layouts={src: make_ascend_sf_layout(src), data: make_ascend_major_k_layout(data)},
+            bindings={sf.data: data.data},
+            wrap=lambda body: tirx.IfThenElse(tirx.And(n >= lower_bound, n <= upper_bound), body, None),
+        )
+
+    if not valid:
+        with pytest.raises(tvm.error.InternalError, match="must fit its bound data allocation"):
+            lower()
+        return
+    (load,) = calls(lower(), "tl.ascend_load_ca_sf")
+    if lower_bound <= upper_bound:
+        _equal(load.args[4:6], [tirx.floordiv(n + 15, 16), 1] if axis == "mn" else [1, n])

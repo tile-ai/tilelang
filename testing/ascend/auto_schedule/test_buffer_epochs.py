@@ -60,3 +60,59 @@ def test_storage_clock(mode, guarded, owners, uses_counter, versions):
 def test_iteration_clock_requires_single_owner():
     with pytest.raises(tvm.error.InternalError, match="requires exactly one owner"):
         transform.PrepareMultiBuffer()(copy_ring(mode="iteration", owners=2))
+
+
+@pytest.mark.parametrize(
+    "owners,last_members",
+    [(1, "both"), (2, "both"), (2, "data"), (2, "sf"), (1, "data")],
+    ids=["single-owner", "sibling-owners", "data-only-sibling", "sf-only-sibling", "unused-sf"],
+)
+def test_bound_sf_and_data_share_counter_and_union_epoch_guard(owners, last_members):
+    from testing.ascend._ir import kernel, seq
+    from testing.ascend.auto_schedule._scheduled_ir import unit
+
+    data = tirx.decl_buffer((1,), "int32", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((1,), "int32", name="sf", scope="shared.l0a.sf")
+    out = tirx.decl_buffer((4,), "int32", name="out")
+    loops = []
+    for owner in range(owners):
+        i = tirx.Var(f"i{owner}", "int32")
+        members = last_members if owner == owners - 1 else "both"
+        tasks = []
+        for buffer, guard in [(data, None), (sf, i % 2 == 0)]:
+            if members != "both" and buffer.name != members:
+                continue
+            tasks += [
+                unit(tirx.BufferStore(buffer, i, [0]), core=2, guard=guard),
+                unit(tirx.BufferStore(out, buffer[0], [i]), core=2, guard=guard),
+            ]
+        loops.append(
+            unit(
+                tirx.For(i, 0, 4, tirx.ForKind.SERIAL, seq(*tasks), annotations={"multi_buffer_eligible": [data.data, sf.data]}), core=None
+            )
+        )
+    before = kernel(
+        seq(*loops),
+        buffers=[data, sf],
+        params=[out],
+        annotations={
+            "tl.l0_sf_bindings": {sf.data: data.data},
+            "tl.buffer_versions_map": {data.data: 2, sf.data: 2},
+            "tl.buffer_version_mode": {data.data: "counter", sf.data: "counter"},
+        },
+    )
+    after = transform.PrepareMultiBuffer()(before)
+    counters = []
+    loops = nodes(after, tirx.For)
+    assert len(loops) == owners
+    for index, loop in enumerate(loops):
+        mapping = loop.annotations["tl.multi_buffer_counter_map"]
+        assert mapping[data.data].same_as(mapping[sf.data])
+        counters.append(mapping[data.data])
+        guards = loop.annotations["tl.storage_epoch_guard_map"]
+        expected = loop.loop_var % 2 == 0 if index == owners - 1 and last_members == "sf" else tirx.const(True, "bool")
+        assert tvm.arith.Analyzer().can_prove_equal(guards[data.data], expected)
+        assert tvm.arith.Analyzer().can_prove_equal(guards[data.data], guards[sf.data])
+    assert all(counter.same_as(counters[0]) for counter in counters)
+    updates = [store for store in nodes(after, tirx.BufferStore) if store.buffer.same_as(counters[0])]
+    assert len(updates) == owners + 1  # One reset, one increment per owner.

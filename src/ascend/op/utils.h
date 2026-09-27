@@ -18,6 +18,15 @@
 namespace tvm {
 namespace tl {
 
+constexpr const char *kL0SFBindings = "tl.l0_sf_bindings";
+using L0SFBindings = ffi::Map<tirx::Var, tirx::Var>;
+
+// The annotation is emitted by alloc_l0*_sf, never inferred from consumers.
+L0SFBindings CollectL0SFBindings(const tirx::Stmt &body);
+class GemmBlockScaled;
+void ValidateL0SFGemm(const GemmBlockScaled &gemm, const L0SFBindings &bindings,
+                      arith::Analyzer *analyzer);
+
 inline bool IsL1Buffer(const Buffer &buffer) {
   return buffer.defined() &&
          (buffer.scope() == "shared.l1" || buffer.scope() == "shared.l1.dyn");
@@ -36,8 +45,8 @@ inline bool IsL0BBuffer(const Buffer &buffer) {
 // MX scale-factor handles (alloc_l0a_sf/alloc_l0b_sf): dedicated scopes for
 // the slot shadow of an L0A/L0B data tile. They never materialize storage —
 // the hardware keys the slots to the bound data tile's address — so every
-// storage-planning pass excludes them by scope, and the scale-load lowering
-// resolves their address through the tile they are bound to.
+// allocation accounting excludes them by scope. Versioning and address reuse
+// group them with their data tile; logical access analysis keeps them separate.
 inline bool IsL0ASFBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "shared.l0a.sf";
 }

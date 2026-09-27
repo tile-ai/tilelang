@@ -44,6 +44,7 @@
 #include "./ir_structure.h"
 #include "./memory_detector.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/buffer_version.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include "transform/common/constr_visitor.h"
@@ -308,8 +309,9 @@ namespace buffer_alias_analysis_detail {
 
 class BufferAliasAnalyzerImpl {
 public:
-  explicit BufferAliasAnalyzerImpl(const BufferAliasAnalysisContext &context)
-      : context_(&context) {}
+  explicit BufferAliasAnalyzerImpl(const BufferAliasAnalysisContext &context,
+                                   L0StorageGroups groups)
+      : context_(&context), groups_(std::move(groups)) {}
 
   void Collect(const std::vector<std::shared_ptr<IRStructure>> &root) {
     storage_access_info_.clear();
@@ -335,7 +337,8 @@ public:
       std::vector<Var> task_storage_order;
       auto get_task_access =
           [&](const BufferRegion &region) -> TaskAccessRegions * {
-        if (!IsAscendOnChipBuffer(region->buffer))
+        if (!IsAscendOnChipBuffer(region->buffer) &&
+            !IsL0SFBuffer(region->buffer))
           return nullptr;
         const Var &storage = region->buffer->data;
         auto [it, inserted] = task_accesses.try_emplace(storage);
@@ -364,7 +367,8 @@ public:
           info = storage_access_info_.emplace(storage, std::move(storage_info))
                      .first;
           storage_order_.push_back(storage);
-          AddBufferAliasStorage(&buffer_aliases_, storage);
+          AddBufferAliasStorage(&buffer_aliases_,
+                                groups_.Representative(storage));
         }
         info->second.accesses.push_back(
             {task, mask.reads, mask.writes, mask.must_writes});
@@ -446,13 +450,36 @@ private:
         lifetimes.push_back(std::move(lifetime.value()));
     }
 
-    for (size_t i = 0; i < lifetimes.size(); ++i) {
-      for (size_t j = i + 1; j < lifetimes.size(); ++j) {
-        if (CanAliasStorageLifetimes(lifetimes[i], lifetimes[j], loop,
-                                     current_happens_before)) {
-          AddBufferAlias(&buffer_aliases_, lifetimes[i].storage,
-                         lifetimes[j].storage);
+    std::unordered_map<Var, const LifetimeSummary *, ObjectPtrHash,
+                       ObjectPtrEqual>
+        by_storage;
+    for (const LifetimeSummary &lifetime : lifetimes)
+      by_storage.emplace(lifetime.storage, &lifetime);
+    auto can_alias_groups = [&](const Var &lhs, const Var &rhs) {
+      for (const Var &a : groups_.Members(lhs)) {
+        for (const Var &b : groups_.Members(rhs)) {
+          auto a_lifetime = by_storage.find(a);
+          auto b_lifetime = by_storage.find(b);
+          // A partial group summary cannot authorize reusing its address.
+          if (a_lifetime == by_storage.end() ||
+              b_lifetime == by_storage.end() ||
+              !CanAliasStorageLifetimes(*a_lifetime->second,
+                                        *b_lifetime->second, loop,
+                                        current_happens_before))
+            return false;
         }
+      }
+      return true;
+    };
+    for (size_t i = 0; i < lifetimes.size(); ++i) {
+      const Var &lhs = lifetimes[i].storage;
+      if (!groups_.Representative(lhs).same_as(lhs))
+        continue;
+      for (size_t j = i + 1; j < lifetimes.size(); ++j) {
+        const Var &rhs = lifetimes[j].storage;
+        if (groups_.Representative(rhs).same_as(rhs) &&
+            can_alias_groups(lhs, rhs))
+          AddBufferAlias(&buffer_aliases_, lhs, rhs);
       }
     }
 
@@ -1449,6 +1476,7 @@ private:
   }
 
   const BufferAliasAnalysisContext *context_;
+  L0StorageGroups groups_;
   StorageAccessInfoMap storage_access_info_;
   std::vector<Var> storage_order_;
   std::map<ControlNode *, LifetimeSummaryMap> lifetime_summaries_;
@@ -1459,8 +1487,9 @@ private:
 
 class BufferAliasAnalyzer {
 public:
-  explicit BufferAliasAnalyzer(const BufferAliasAnalysisContext &context)
-      : impl_(context) {}
+  explicit BufferAliasAnalyzer(const BufferAliasAnalysisContext &context,
+                               L0StorageGroups groups = L0StorageGroups())
+      : impl_(context, std::move(groups)) {}
 
   BufferAliasAnalyzer(const BufferAliasAnalyzer &) = delete;
   BufferAliasAnalyzer &operator=(const BufferAliasAnalyzer &) = delete;

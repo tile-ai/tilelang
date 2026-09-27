@@ -33,17 +33,9 @@ public:
   int dual_dst_ctl{0}; // "dual_dst_ctl": L0C->UB dual-destination mode
   int transpose{0};    // "transpose": GM->L1 dn2nz / L1->L0 transpose request
   int data_select{0};  // "data_select": GM->UB hardware right-padding
-  // For a standalone MX scale-factor load (dst scope shared.l0a.sf /
-  // shared.l0b.sf), the storage Var of the L0 data tile the handle is bound
-  // to. Not an annotation: AscendLowerTileOp resolves it structurally from
-  // the gemm_blockscaled consuming the handle as SFA/SFB
-  // (CollectMxSfBindings). The hardware keys the slots to that tile's
-  // address.
-  Optional<Var> mx_sf_of;
-  // The bound tile's multi-buffer version count (injected alongside
-  // mx_sf_of). A hoisted scale load (2-D destination, no version index of its
-  // own) broadcasts into every one of these version slots.
-  int mx_sf_versions{1};
+  // Canonical allocation buffer selected from alloc_l0*_sf's IR binding.
+  // Leading indices already include any materialized physical versions.
+  Optional<Buffer> mx_sf_data;
   PrimExpr unit_flag_ctl;          // "unit_flag_ctrl", defaults to 0
   PrimExpr sub_blockid;            // "sub_blockid", defaults to 0
   Optional<Integer> l2_cache_ctrl; // "l2_cache_ctrl"; defaults differ per path
@@ -114,18 +106,6 @@ public:
  *        synthesized by shared passes.
  */
 bool IsAscendCopyCall(const tirx::CallNode *call);
-
-/*!
- * \brief Derive the MX scale-factor handle bindings from the GEMMs that
- *        consume them.
- *
- * A handle (scope shared.l0a.sf/.l0b.sf) is bound to the data tile it is
- * paired with structurally: the tl.tileop.gemm_blockscaled call that reads
- * it as SFA (or SFB) names the tile as its A (or B) operand. Returns a map
- * from handle storage Var to the bound tile's storage Var; a handle
- * consumed with two different tiles is an error.
- */
-ffi::Map<tirx::Var, tirx::Var> CollectMxSfBindings(const tirx::Stmt &body);
 
 } // namespace tl
 } // namespace tvm

@@ -220,3 +220,27 @@ def test_single_version_counter_elision_rejects_live_uses(use):
     )
     with pytest.raises(tvm.error.InternalError, match="Cannot elide single-version counter epoch"):
         transform.MaterializeMultiBuffer()(before)
+
+
+def test_bound_data_and_sf_preserve_user_leading_dimensions_under_one_ring():
+    data = tirx.decl_buffer((2, 3, 32, 128), "float8_e4m3fn", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((2, 3, 32, 2), "uint16", name="sf", scope="shared.l0a.sf")
+    i = tirx.Var("i", "int32")
+    body = seq(*[unit(tirx.BufferStore(buf, tirx.const(1, buf.dtype), [1, 2, 0, 0]), core=2) for buf in (data, sf)])
+    owner = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [data.data, sf.data]})
+    before = kernel(
+        unit(owner, core=None),
+        buffers=[data, sf],
+        annotations={
+            "tl.l0_sf_bindings": {sf.data: data.data},
+            "tl.buffer_versions_map": {data.data: 2, sf.data: 2},
+        },
+    )
+    after = transform.MaterializeMultiBuffer()(before)
+    for name, tail in [("data", (32, 128)), ("sf", (32, 2))]:
+        assert tuple(int(x) for x in allocated_buffer(after, name).shape) == (2, 2, 3, *tail)
+    stores = nodes(after, tirx.BufferStore)
+    assert len(stores) == 2
+    for store in stores:
+        assert tvm.arith.Analyzer().can_prove_equal(store.indices[0], i % 2)
+        assert [int(x) for x in store.indices[1:]] == [1, 2, 0, 0]

@@ -779,8 +779,10 @@ public:
   explicit SyncAnalyzer(const MultiBufferPlan &multi_buffer_plan,
                         const EpochDomainRegistry &domains,
                         BufferVersionMap manual = {},
-                        ConflictHintList root_conflicts = {})
-      : multi_buffer_plan_(multi_buffer_plan), domains_(domains),
+                        ConflictHintList root_conflicts = {},
+                        L0StorageGroups storage_groups = L0StorageGroups())
+      : storage_groups_(std::move(storage_groups)),
+        multi_buffer_plan_(multi_buffer_plan), domains_(domains),
         manual_(std::move(manual)), root_conflicts_(std::move(root_conflicts)),
         site_registry_(domains) {
     for (const MultiBufferInfo &info : multi_buffer_plan_.Infos()) {
@@ -821,7 +823,7 @@ public:
       return;
     }
 
-    BufferAliasAnalyzer buffer_alias_analyzer(*this);
+    BufferAliasAnalyzer buffer_alias_analyzer(*this, storage_groups_);
     buffer_alias_analyzer.Collect(root);
     buffer_alias_analyzer.Analyze(root);
     buffer_alias_analyzer.Validate();
@@ -1729,6 +1731,7 @@ private:
     }
   }
 
+  L0StorageGroups storage_groups_;
   const MultiBufferPlan &multi_buffer_plan_;
   const EpochDomainRegistry &domains_;
   BufferVersionMap manual_;
@@ -2482,8 +2485,10 @@ private:
 SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
   std::vector<std::shared_ptr<IRStructure>> &root = scheduled_tir.tree;
   int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.value_or(2);
+  L0StorageGroups groups(
+      CollectL0SFBindings(scheduled_tir.metadata.kernel_root));
   MultiBufferPlan multi_buffer_plan =
-      ReadMultiBufferPlan(root, scheduled_tir.metadata.buffer_versions);
+      ReadMultiBufferPlan(root, scheduled_tir.metadata.buffer_versions, groups);
   std::vector<TaskNode *> tasks;
   CollectAllTaskNodes(root, tasks);
   for (TaskNode *task : tasks) {
@@ -2491,9 +2496,9 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
         << "InsertSync requires ResolveCore to assign every T.Task";
   }
   EpochDomainRegistry domains(root, multi_buffer_plan);
-  SyncAnalyzer analyzer(multi_buffer_plan, domains,
-                        scheduled_tir.metadata.manual_buffer_versions,
-                        std::move(scheduled_tir.metadata.root_conflict_hints));
+  SyncAnalyzer analyzer(
+      multi_buffer_plan, domains, scheduled_tir.metadata.manual_buffer_versions,
+      std::move(scheduled_tir.metadata.root_conflict_hints), groups);
   scheduled_tir.metadata.root_conflict_hints = {};
   analyzer.Analyze(root);
   scheduled_tir.metadata.buffer_aliases = analyzer.BufferAliases();

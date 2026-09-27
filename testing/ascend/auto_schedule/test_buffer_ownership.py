@@ -180,3 +180,47 @@ def test_version_policy_controls_storage_and_alias_eligibility(versions, mode, e
     assert len(loops) == 2
     expected = versions != 1 or mode is not None
     assert all((ub.data in loop.annotations.get("multi_buffer_eligible", [])) == expected for loop in loops)
+
+
+@pytest.mark.parametrize("placement,expected", [("inner", "inner"), ("outer", "outer"), ("hoisted", None)])
+def test_l0_sf_group_selects_one_complete_owner(placement, expected):
+    data = tirx.decl_buffer((1,), "int32", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((1,), "int32", name="sf", scope="shared.l0a.sf")
+    out = tirx.decl_buffer((4,), "int32", name="out")
+    outer, inner = tirx.Var("outer", "int32"), tirx.Var("inner", "int32")
+    sf_write = unit(tirx.BufferStore(sf, 2, [0]), core=2)
+    inner_body = seq(unit(tirx.BufferStore(data, inner, [0]), core=2), unit(tirx.BufferStore(out, data[0] + sf[0], [inner]), core=2))
+    if placement == "inner":
+        inner_body = seq(sf_write, inner_body)
+    outer_body = unit(tirx.For(inner, 0, 4, tirx.ForKind.SERIAL, inner_body), core=None)
+    if placement == "outer":
+        outer_body = seq(sf_write, outer_body)
+    body = unit(tirx.For(outer, 0, 4, tirx.ForKind.SERIAL, outer_body), core=None)
+    if placement == "hoisted":
+        body = seq(sf_write, body)
+    before = kernel(body, buffers=[data, sf], params=[out], annotations={"tl.l0_sf_bindings": {sf.data: data.data}})
+    after = transform.AnnotateMultiBufferEligible()(before)
+    for storage in (data.data, sf.data):
+        owners = [loop.loop_var.name for loop in nodes(after, tirx.For) if storage in loop.annotations.get("multi_buffer_eligible", [])]
+        assert owners == ([expected] if expected else [])
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_sf_version_override_applies_to_the_allocation_group(conflict):
+    from tilelang import tvm
+
+    data = tirx.decl_buffer((1,), "int32", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((1,), "int32", name="sf", scope="shared.l0a.sf")
+    versions = {sf.data: 2, **({data.data: 3} if conflict else {})}
+    before = kernel(
+        unit(tirx.Evaluate(0)),
+        buffers=[data, sf],
+        annotations={"tl.l0_sf_bindings": {sf.data: data.data}, "tl.buffer_versions_map": versions},
+    )
+    if conflict:
+        with pytest.raises(tvm.error.InternalError, match="Conflicting.*bound L0 data/SF group"):
+            transform.AnnotateMultiBufferEligible()(before)
+    else:
+        after = transform.AnnotateMultiBufferEligible()(before)
+        root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+        assert int(root.annotations["tl.buffer_versions_map"][data.data]) == 2

@@ -25,26 +25,27 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
 
     from tilelang.cache.ascend_binary_cache import AscendBinaryCache
 
+    compile_format = AscendBinaryCache.binary_format
     cache_key = AscendBinaryCache.make_key(
         code=code,
         target_kind=target.kind.name,
         target_arch=target_arch,
-        compile_format=AscendBinaryCache.binary_format,
+        compile_format=compile_format,
         options=compile_options,
         linker_options=linker_options,
     )
-    cached_binary = AscendBinaryCache.load(cache_key)
+    cached_binary = AscendBinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
         return bytearray(cached_binary)
 
     aibin = bisheng.compile_ascend(
         code,
-        target_format="aibin",
+        target_format=compile_format,
         npu_arch=target_arch,
         options=options,
         verbose=env.get_default_verbose(),
     )
-    AscendBinaryCache.save(cache_key, aibin)
+    AscendBinaryCache.save(cache_key, compile_format, aibin)
     return aibin
 
 

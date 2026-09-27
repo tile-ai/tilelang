@@ -516,7 +516,8 @@ void ElideUnitVersionCounterGroups(ScheduledTIR *scheduled_tir,
 
 SBlock MaterializeKernel(ScheduledTIR scheduled_tir) {
   MultiBufferPlan plan = ReadMultiBufferPlan(
-      scheduled_tir.tree, scheduled_tir.metadata.buffer_versions);
+      scheduled_tir.tree, scheduled_tir.metadata.buffer_versions,
+      L0StorageGroups(CollectL0SFBindings(scheduled_tir.metadata.kernel_root)));
   ElideUnitVersionCounterGroups(&scheduled_tir, plan);
   VersionedBufferRegistry buffers(plan, scheduled_tir.metadata.kernel_root);
   RewriteScheduledTree(&scheduled_tir.tree, plan, &buffers);

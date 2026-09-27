@@ -312,3 +312,66 @@ def test_mmad_direction_reaches_only_cube_and_precedes_its_gemm():
     assert aic.index("asc_set_mmad_direction_n();") < aic.index("asc_mmad(")
     assert aic.index("asc_mmad(") < aic.index("asc_set_mmad_direction_m();") < aic.rindex("asc_mmad(")
     assert "asc_set_mmad_direction" not in aiv
+
+
+@pytest.mark.parametrize("versions", [1, 2], ids=["single-version", "ring"])
+def test_sf_group_owners_survive_a_plain_gemm_sibling(versions):
+    @T.prim_func
+    def main(
+        A: T.Tensor((16, 128), "float8_e4m3fn"),
+        B: T.Tensor((16, 128), "float8_e4m3fn"),
+        S: T.Tensor((2, 16), "uint16"),
+        C: T.Tensor((2, 3, 16, 16), "float32"),
+    ):
+        with T.Kernel(1):
+            a1 = T.alloc_l1((16, 128), "float8_e4m3fn")
+            b1 = T.alloc_l1((16, 128), "float8_e4m3fn")
+            s1 = T.alloc_l1((16, 2), "uint16")
+            a0 = T.alloc_l0a((16, 128), "float8_e4m3fn")
+            b0 = T.alloc_l0b((16, 128), "float8_e4m3fn")
+            sa = T.alloc_l0a_sf(a0)
+            sb = T.alloc_l0b_sf(b0)
+            acc = T.alloc_l0c((16, 16), "float32")
+            T.annotate_buffer_versions({a0: (versions, "auto"), b0: (versions, "auto")})
+            T.copy(A, a1)
+            T.copy(B, b1)
+            T.copy(S, s1, transpose=True)
+            for owner in T.Unroll(2, explicit=True):
+                for i in T.Pipelined(3, num_stages=2):
+                    T.copy(a1, a0)
+                    T.copy(b1, b0)
+                    if owner == 0:
+                        T.copy(s1, sa)
+                        T.copy(s1, sb)
+                        T.gemm_blockscaled(a0, b0, acc, sa, sb, transpose_B=True, clear_accum=True)
+                    else:
+                        T.gemm(a0, b0, acc, transpose_B=True, clear_accum=True)
+                    T.copy(acc, C[owner, i, :, :])
+
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.InsertSync", "tl.MaterializeMultiBuffer"):
+                snapshots[info.name] = mod
+
+    # Owner and counter metadata must survive Prepare -> ResolveCore -> Sync
+    # and reconstruct the same physical ring in MaterializeMultiBuffer.
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(main, target="ascend")
+    prepared = snapshots["tl.InsertSync"]
+    for data_name, sf_name in [("a0", "sa"), ("b0", "sb")]:
+        data, sf = allocated_buffer(prepared, data_name), allocated_buffer(prepared, sf_name)
+        owners = [loop for loop in nodes(prepared, tirx.For) if data.data in loop.annotations.get("multi_buffer_eligible", [])]
+        assert len(owners) == 2
+        counters = [loop.annotations["tl.multi_buffer_counter_map"] for loop in owners]
+        assert all(
+            mapping[data.data].same_as(counters[0][data.data]) and mapping[sf.data].same_as(mapping[data.data]) for mapping in counters
+        )
+        for name in (data_name, sf_name):
+            shape = allocated_buffer(snapshots["tl.MaterializeMultiBuffer"], name).shape
+            assert len(shape) == (3 if versions > 1 else 2)
+            if versions > 1:
+                assert int(shape[0]) == versions
+    assert artifact.kernel_source and artifact.device_mod

@@ -149,3 +149,40 @@ def test_single_version_sibling_owners_preserve_dependency_kind(eligible, second
     assert (ub.data in versions) == eligible
     if eligible:
         assert int(versions[ub.data]) == 1
+
+
+def test_sf_hazard_uses_the_data_ring_variable_in_the_solver():
+    # The consumer is two stages later. A one-version SF recurrence cannot
+    # satisfy this manual schedule; it must use the group's requested ring.
+    data = tirx.decl_buffer((32, 128), "float8_e4m3fn", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((32, 2), "uint16", name="sf", scope="shared.l0a.sf")
+    source = tirx.decl_buffer((32, 128), data.dtype, name="source", scope="shared.l1")
+    scale_source = tirx.decl_buffer((32, 2), sf.dtype, name="scale_source", scope="shared.l1")
+    out = tirx.decl_buffer((4,), "uint16", name="out")
+    i = tirx.Var("i", "int32")
+    tasks = seq(
+        unit(copy(source, data), core=2, cost=(1, 1)),
+        unit(copy(scale_source, sf), core=2, cost=(1, 1)),
+        unit(tirx.BufferStore(out, sf[0, 0], [i]), core=2, stage=2, cost=(1, 1)),
+    )
+    loop = tirx.For(
+        i,
+        0,
+        4,
+        tirx.ForKind.SERIAL,
+        tasks,
+        annotations={"num_stages": 3, "enable_offset": True, "multi_buffer_eligible": [data.data, sf.data]},
+    )
+    before = kernel(
+        unit(loop, core=None),
+        buffers=[data, sf, source, scale_source],
+        params=[out],
+        annotations={
+            "tl.l0_sf_bindings": {sf.data: data.data},
+            "tl.buffer_versions_map": {sf.data: 3},
+        },
+    )
+    after = ascend_transform.AutoSchedule()(before)
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    versions = root.annotations["tl.buffer_versions_map"]
+    assert int(versions[data.data]) == int(versions[sf.data]) == 3
