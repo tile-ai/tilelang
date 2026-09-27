@@ -821,6 +821,10 @@ def test_nvf4_mma_block_scale_varying_scale_correctness():
         (128, True, True, True, False, T.GemmWarpPolicy.FullRow),
         (64, False, False, False, True, T.GemmWarpPolicy.FullRow),
         (256, False, False, False, True, T.GemmWarpPolicy.FullCol),
+        (256, True, False, False, False, T.GemmWarpPolicy.FullRow),
+        (192, True, False, False, False, T.GemmWarpPolicy.Square),
+        (256, True, False, True, False, T.GemmWarpPolicy.FullCol),
+        (192, False, False, False, False, T.GemmWarpPolicy.FullRow),
     ],
 )
 def test_nvf4_mma_block_scale_fragments_and_odd_warps(K, fragment_a, fragment_scales, transpose_a, compact, policy):
@@ -855,6 +859,36 @@ def test_nvf4_mma_block_scale_fragments_and_odd_warps(K, fragment_a, fragment_sc
         out_idx=[4],
     )
     torch.testing.assert_close(kernel(A, B, SFA, SFB), ref, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(12, 0)
+@pytest.mark.parametrize("policy", [T.GemmWarpPolicy.FullRow, T.GemmWarpPolicy.Square])
+def test_nvf4_mma_block_scale_fragment_a_unrolls_k_atoms_and_packs_scales(policy):
+    kernel = tilelang.compile(
+        _make_nvf4_matmul_codegen_kernel(
+            128,
+            128,
+            256,
+            num_stages=0,
+            block_col_warps=4,
+            warp_row_tiles=64,
+            fragment_a=True,
+            sf_layout="rowmajor",
+            policy=policy,
+        ),
+        target={"kind": "cuda", "arch": "sm_120a"},
+        out_idx=[4],
+    )
+    src = kernel.get_kernel_source()
+    # K atoms are unrolled in TIR, so the A fragment is only indexed with constants.
+    assert "for (int ki" not in src
+    mma_lines = [line for line in src.splitlines() if "sm120_mma_sync_blockscaled<" in line]
+    assert mma_lines
+    # Shared scales are loaded once per K atom into per-lane packages; the MMAs read registers.
+    assert "SFA_package" in src
+    assert "SFB_package" in src
+    assert not any("SFA_shared" in line or "SFB_shared" in line for line in mma_lines)
 
 
 @tilelang.testing.requires_cuda
