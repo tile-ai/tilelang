@@ -33,6 +33,13 @@ _SPEC.loader.exec_module(_MODULE)
     ],
 )
 def test_topk_candidate_overflow(distribution, seq_len, topk, partial):
+    """Regression matrix for the radix-select candidate overflow (#1351).
+
+    In a plain run the low-mantissa cases catch the overflow on the unfixed kernel (illegal memory
+    access, or duplicate indices from the uniqueness assert). The all-equal cases cover the 4096
+    boundary for the fixed kernel; right past it (seq_len 4097) the stray write can go unobserved
+    and the case only fails on the unfixed kernel under ``compute-sanitizer --tool memcheck``.
+    """
     torch.manual_seed(42)
     batch = 2
     if distribution in ("low_bits", "negative_low_bits"):
