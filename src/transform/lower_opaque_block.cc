@@ -238,6 +238,20 @@ private:
     }
   }
 
+  /*! \brief Ensure imported C source ends with a newline character. */
+  static PrimExpr EnsureTrailingNewline(const String &key, PrimExpr value) {
+    if (key != tirx::attr::pragma_import_c) {
+      return value;
+    }
+    if (const auto *str = value.as<StringImmNode>()) {
+      std::string text = str->value;
+      if (!text.empty() && text.back() != '\n') {
+        return StringImm(text + "\n");
+      }
+    }
+    return value;
+  }
+
   /*!
    * \brief Helper to handle annotation dict.
    * (1) if the attr key is prefixed by `pragma_`, move to ordered kv list. They
@@ -257,7 +271,8 @@ private:
     for (const auto &kv : annotations) {
       const String &key = kv.first;
       if (tirx::attr::IsPragmaKey(key) || tl::attr::IsCodeBlockKey(key)) {
-        pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
+        pragma_attrs->emplace_back(
+            key, EnsureTrailingNewline(key, ConvertAttrValue(key, kv.second)));
       } else if (key == tl::attr::kLocalVarInit) {
         if (auto local_init_map = kv.second.try_cast<Map<Var, PrimExpr>>()) {
           for (const auto &pair : local_init_map.value()) {
