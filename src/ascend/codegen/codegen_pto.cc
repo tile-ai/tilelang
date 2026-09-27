@@ -612,6 +612,8 @@ void ValidateKernelCapabilities(const PrimFunc &func) {
                  call->op.same_as(tl::ascend_fill_l1()) ||
                  call->op.same_as(tl::ascend_load_cbuf_to_ca()) ||
                  call->op.same_as(tl::ascend_load_cbuf_to_cb()) ||
+                 call->op.same_as(tl::ascend_load_ca_sf()) ||
+                 call->op.same_as(tl::ascend_load_cb_sf()) ||
                  call->op.same_as(tl::ascend_copy_ubuf_to_cbuf())) {
         has_supported_cube_mte = true;
       } else if (call->op.same_as(tl::ascend_mad()) ||
@@ -2028,6 +2030,8 @@ bool CodeGenTileLangPTO::IsAscendCubeKernel(const PrimFunc &func) const {
               call->op.same_as(tl::ascend_fill_l1()) ||
               call->op.same_as(tl::ascend_load_cbuf_to_ca()) ||
               call->op.same_as(tl::ascend_load_cbuf_to_cb()) ||
+              call->op.same_as(tl::ascend_load_ca_sf()) ||
+              call->op.same_as(tl::ascend_load_cb_sf()) ||
               call->op.same_as(tl::ascend_copy_ubuf_to_cbuf()) ||
               call->op.same_as(tl::ascend_copy_matrix_cc_to_ub()) ||
               call->op.same_as(tl::ascend_copy_matrix_cc_to_gm());
@@ -3798,6 +3802,78 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallNode *op,
   stream << ")\n";
 }
 
+void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallNode *op, bool is_ca) {
+  const char *name = is_ca ? "tl.ascend_load_ca_sf" : "tl.ascend_load_cb_sf";
+  ICHECK_EQ(op->args.size(), 8U)
+      << name << " expects exactly 8 arguments, got " << op->args.size();
+
+  auto control_expr = [&](size_t index, const char *arg_name) {
+    int64_t value = 0;
+    if (TryGetConstInt(op->args[index], &value)) {
+      if (index < 4U) {
+        ICHECK_GE(value, 0)
+            << "PTO " << (is_ca ? "L1->L0A" : "L1->L0B") << " MX " << arg_name
+            << " must be non-negative, got " << value;
+      } else {
+        ICHECK_GT(value, 0)
+            << "PTO " << (is_ca ? "L1->L0A" : "L1->L0B") << " MX " << arg_name
+            << " must be positive, got " << value;
+      }
+    }
+    return RemoveOutermostParentheses(PrintExpr_(op->args[index]));
+  };
+
+  const VarNode *dst_var = nullptr;
+  const VarNode *sf_var = nullptr;
+  PrimExpr dst_index;
+  PrimExpr sf_index;
+  DataType dst_dtype;
+  DataType sf_dtype;
+  std::string dst_scope;
+  std::string sf_scope;
+  GetCopyEndpoint_(op->args[0], "PTO MX L0 destination", &dst_var, &dst_index,
+                   &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[1], "PTO MX scale-factor source", &sf_var,
+                   &sf_index, &sf_dtype, &sf_scope);
+
+  const char *expected_scope = is_ca ? "shared.l0a" : "shared.l0b";
+  ICHECK(IsBufferInScope(dst_scope, expected_scope))
+      << name << " destination must use " << expected_scope
+      << " storage, got scope " << dst_scope;
+  ICHECK(sf_scope == "shared.l1" || sf_scope == "shared.l1.dyn")
+      << name << " scale-factor source must use shared.l1 storage, got scope "
+      << sf_scope;
+  ICHECK(sf_dtype.is_scalar() && sf_dtype.is_uint() &&
+         (sf_dtype.bits() == 8 || sf_dtype.bits() == 16))
+      << name
+      << " scale-factor source supports uint8 or pair-packed uint16 "
+         "storage, got "
+      << sf_dtype;
+  ICHECK(IsSupportedCubeMteDtype(dst_dtype))
+      << name
+      << " destination supports int8, float16, bfloat16, float32, "
+         "float8_e4m3fn/float8_e5m2, and float4_e2m1fn, got "
+      << dst_dtype;
+
+  ValidateFractalAddressAlignment_(dst_index, dst_dtype,
+                                   "PTO MX L0 destination");
+  ValidateFractalAddressAlignment_(sf_index, sf_dtype,
+                                   "PTO MX scale-factor source");
+
+  std::string sf_src = GetE8M0ScalePtrExpr(op->args[1]);
+  std::string dst =
+      GetLocalPtrExpr(op->args[0], is_ca ? "left" : "right", dst_dtype);
+  const char *arg_names[] = {"x_start", "y_start",    "x_step",
+                             "y_step",  "src_stride", "dst_stride"};
+  PrintIndent();
+  stream << (is_ca ? "pto.mte_l1_l0a_mx(" : "pto.mte_l1_l0b_mx(") << sf_src
+         << ", " << dst;
+  for (size_t i = 0; i < 6U; ++i) {
+    stream << ", " << arg_names[i] << "=" << control_expr(i + 2U, arg_names[i]);
+  }
+  stream << ")\n";
+}
+
 void CodeGenTileLangPTO::EmitAscendCrossCoreFlag(const CallNode *op,
                                                  bool is_set) {
   ICHECK_EQ(op->args.size(), 3U)
@@ -4572,6 +4648,16 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
 
   if (op->op.same_as(tl::ascend_load_cbuf_to_cb())) {
     EmitAscendLoadCbufToL0(op, false);
+    return;
+  }
+
+  if (op->op.same_as(tl::ascend_load_ca_sf())) {
+    EmitAscendLoadMxSf(op, true);
+    return;
+  }
+
+  if (op->op.same_as(tl::ascend_load_cb_sf())) {
+    EmitAscendLoadMxSf(op, false);
     return;
   }
 

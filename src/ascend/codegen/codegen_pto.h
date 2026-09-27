@@ -162,6 +162,7 @@ private:
   void EmitAscendCopyGmToCbuf(const CallNode *op);
   void EmitAscendFillL1(const CallNode *op);
   void EmitAscendLoadCbufToL0(const CallNode *op, bool is_ca);
+  void EmitAscendLoadMxSf(const CallNode *op, bool is_ca);
   void EmitAscendCrossCoreFlag(const CallNode *op, bool is_set);
   void EmitAscendMad(const CallNode *op);
   void EmitAscendGemmL1(const CallNode *op);
