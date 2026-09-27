@@ -351,9 +351,7 @@ def parse_function_call_args(
                     call_args.append(match)
                 matched = True
                 break
-            elif maybe_desc_name(
-                arg["name"], matches, i, desc_name_map, descriptor_matches
-            ):
+            elif maybe_desc_name(arg["name"], matches, i, desc_name_map, descriptor_matches):
                 if transform_arg is not None:
                     call_args.append(transform_arg(match, "None"))
                 else:
