@@ -330,12 +330,7 @@ def parse_function_call_args(
                     desc_name_var_map[match] = function_params[len(call_args) - 1]
                 matched = True
                 break
-        if (
-            not matched
-            and fallback_arg is not None
-            and function_params is not None
-            and len(call_args) < len(function_params)
-        ):
+        if not matched and fallback_arg is not None and function_params is not None and len(call_args) < len(function_params):
             call_args.append(fallback_arg(function_params[len(call_args)]))
 
     return call_args
