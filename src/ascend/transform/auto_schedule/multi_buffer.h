@@ -341,8 +341,9 @@ inline void ClearMultiBufferBroadcastFills(TaskNode *task) {
                semantic_task->value, semantic_task->body, semantic_task->span);
 }
 
-inline MultiBufferOwnerMap CollectMultiBufferOwners(
-    const std::vector<std::shared_ptr<IRStructure>> &root) {
+inline MultiBufferOwnerMap
+CollectMultiBufferOwners(const std::vector<std::shared_ptr<IRStructure>> &root,
+                         const L0StorageGroups &groups) {
   MultiBufferOwnerMap owners;
   std::function<void(IRStructure *)> visit = [&](IRStructure *node) {
     if (!node || !node->IsControl())
@@ -351,7 +352,10 @@ inline MultiBufferOwnerMap CollectMultiBufferOwners(
     auto annotation = control->control->annotations.Get(kMultiBufferEligible);
     if (annotation.has_value()) {
       for (const Var &storage : annotation.value().cast<Array<Var>>()) {
-        if (control->BodyTouchesStorage(storage))
+        Array<Var> members = groups.Members(storage);
+        if (std::any_of(members.begin(), members.end(), [&](const Var &member) {
+              return control->BodyTouchesStorage(member);
+            }))
           owners[storage].push_back(control);
       }
     }
@@ -367,9 +371,11 @@ inline MultiBufferOwnerMap CollectMultiBufferOwners(
 // the annotated owners but does not recompute mode or active guards.
 inline MultiBufferPlan
 ReadMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
-                    const BufferVersionMap &selected_versions) {
+                    const BufferVersionMap &selected_versions,
+                    const L0StorageGroups &groups) {
   MultiBufferPlan plan;
-  MultiBufferOwnerMap owners_by_storage = CollectMultiBufferOwners(root);
+  MultiBufferOwnerMap owners_by_storage =
+      CollectMultiBufferOwners(root, groups);
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> counter_groups;
   int next_counter_group_id = 1;
   for (const auto &[storage, num_versions] : selected_versions) {

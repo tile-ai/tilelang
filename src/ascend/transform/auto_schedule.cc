@@ -63,6 +63,7 @@
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/buffer_version.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
 #include "runtime/thread_storage_scope.h"
@@ -183,6 +184,10 @@ public:
   void Z3SchedulePythonLoop(ControlNode *ctrl, bool manual_schedule);
 
   // Set memory limit for a given buffer scope (e.g. "shared", "shared.l1")
+  void SetStorageGroups(L0StorageGroups groups) {
+    storage_groups_ = std::move(groups);
+  }
+
   void SetMemoryLimit(const std::string &scope, int64_t bytes) {
     memory_limits_[scope] = bytes;
   }
@@ -251,9 +256,11 @@ private:
       // such a kernel may only be rejected by downstream/runtime validation.
       num_versions = std::max((*existing).second, num_versions);
     }
-    selected_buffer_versions_.Set(storage, num_versions);
+    for (const Var &member : storage_groups_.Members(storage))
+      selected_buffer_versions_.Set(member, num_versions);
   }
 
+  L0StorageGroups storage_groups_;
   std::map<std::string, int64_t> memory_limits_;
   BufferVersionMap buffer_version_overrides_;
   BufferVersionMap manual_buffer_versions_;
@@ -396,7 +403,7 @@ schedule candidates.
 */
 void ScheduleBuilder::ScheduleList(
     std::vector<std::shared_ptr<IRStructure>> &children) {
-  multi_buffer_owners_ = CollectMultiBufferOwners(children);
+  multi_buffer_owners_ = CollectMultiBufferOwners(children, storage_groups_);
   dependency_cache_.clear();
   std::vector<std::shared_ptr<IRStructure>> origin_children = children;
   bool manual_schedule = HasRequestedStage_(origin_children);
@@ -949,7 +956,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     } else {
       int64_t distance = 1;
       if (dep.storage.has_value()) {
-        Var storage = dep.storage.value();
+        Var storage = storage_groups_.Representative(dep.storage.value());
         auto it = storage_version_id.find(storage);
         if (it != storage_version_id.end()) {
           // Encode the storage-version id in the negative distance for the Z3
@@ -1306,51 +1313,6 @@ static void WarnOnUnappliedBufferVersionOverrides(
   }
 }
 
-// MX scale-factor handles (shared.l0a.sf/.l0b.sf) are excluded from version
-// selection; each is planned from the data tile its consuming
-// gemm_blockscaled binds it to. A scale load ringing under the same owner
-// loops as its tile copies the tile's version count and fills each stage's
-// slot in lockstep; a hoisted scale load stays single-version and the copy
-// lowering broadcasts it into every version slot of the tile.
-static void PropagateMxSfHandleVersions(
-    const Stmt &kernel_body,
-    const std::vector<std::shared_ptr<IRStructure>> &ir_structure,
-    BufferVersionMap *versions) {
-  MultiBufferOwnerMap owners = CollectMultiBufferOwners(ir_structure);
-  static const std::vector<ControlNode *> kNoOwners;
-  auto owners_of = [&](const Var &storage) -> const auto & {
-    auto it = owners.find(storage);
-    return it == owners.end() ? kNoOwners : it->second;
-  };
-  for (const auto &[handle, data] : CollectMxSfBindings(kernel_body)) {
-    auto data_versions = versions->Get(data);
-    if (!data_versions.has_value())
-      continue;
-    const auto &handle_owners = owners_of(handle);
-    const auto &data_owners = owners_of(data);
-    bool lockstep =
-        !handle_owners.empty() && handle_owners.size() == data_owners.size() &&
-        std::is_permutation(handle_owners.begin(), handle_owners.end(),
-                            data_owners.begin());
-    if (lockstep) {
-      if (auto existing = versions->Get(handle)) {
-        ICHECK_EQ(existing.value(), data_versions.value())
-            << "Conflicting version counts for MX scale-factor handle "
-            << handle->name_hint;
-      } else {
-        versions->Set(handle, data_versions.value());
-      }
-    } else if (auto existing = versions->Get(handle)) {
-      ICHECK_EQ(existing.value(), 1)
-          << "MX scale-factor handle " << handle->name_hint
-          << " is versioned but its scale load does not ring with data tile "
-          << data->name_hint
-          << "; a hoisted scale load broadcasts into every version slot and "
-             "must stay single-version";
-    }
-  }
-}
-
 // Build and schedule one kernel segment, leaving core assignment/resolution
 // and final lowering to the downstream passes.
 static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
@@ -1370,6 +1332,12 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
 
   // Schedule IRStructure in place with the Z3 scheduler.
   ScheduleBuilder unit_builder;
+  L0StorageGroups groups(CollectL0SFBindings(metadata.kernel_root));
+  metadata.buffer_versions = ExpandL0StorageGroupValues(
+      metadata.buffer_versions, groups, "version counts");
+  metadata.manual_buffer_versions = ExpandL0StorageGroupValues(
+      metadata.manual_buffer_versions, groups, "manual version counts");
+  unit_builder.SetStorageGroups(groups);
   int64_t shared_mem_limit = GetSharedMemoryLimit(kernel_body);
   unit_builder.SetMemoryLimit("shared", shared_mem_limit);
   unit_builder.SetMemoryLimit("shared.l1", GetL1MemoryLimit(target));
@@ -1385,10 +1353,16 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   unit_builder.SetRootConflictHints(metadata.root_conflict_hints);
   unit_builder.ScheduleList(ir_structure);
 
+  for (const auto &[sf, data] : groups.Bindings()) {
+    auto requested = metadata.buffer_versions.Get(data);
+    ICHECK(!requested.has_value() || requested.value() <= 1 ||
+           unit_builder.GetSelectedBufferVersions().count(data))
+        << "Bound L0 data/SF group " << data->name_hint
+        << " has no common multi-buffer owner. Load scales and data under a "
+           "common owner, or request one version for the group.";
+  }
   metadata.unlimit_memory_scopes = {};
   metadata.buffer_versions = unit_builder.GetSelectedBufferVersions();
-  PropagateMxSfHandleVersions(kernel_body, ir_structure,
-                              &metadata.buffer_versions);
 }
 } // namespace
 

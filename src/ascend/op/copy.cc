@@ -6,7 +6,6 @@
 #include "op/copy.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
-#include "op/gemm_blockscaled.h"
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
@@ -739,33 +738,8 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
   return copy_stmt;
 }
 
-// The scale-factor handle names the slot shadow of its bound L0 data tile;
-// the binding Var is resolved by AscendLowerTileOp from the consuming
-// gemm_blockscaled (CollectMxSfBindings). The tile's buffer is the
-// layout-map key for that Var.
-Optional<Buffer> FindDataBufferForVar(const LayoutMap &layout_map,
-                                      const Var &data_var) {
-  for (const auto &kv : layout_map) {
-    if (kv.first->data.same_as(data_var)) {
-      return kv.first;
-    }
-  }
-  return std::nullopt;
-}
-
-// Lower a standalone MX scale-factor load: T.copy(sf_l1, sf_handle) where
-// sf_handle is the shared.l0a.sf / shared.l0b.sf slot shadow of an L0 data
-// tile (alloc_l0a_sf/alloc_l0b_sf). The hardware keys the written MX slots
-// to the DATA tile's address (asc_copy_l12l0a_mx consumes it in 16-byte
-// units), so the destination pointer is emitted over the bound tile's Var
-// in DATA elements: the access-ptr rewriting in AscendLowerTileOp resolves
-// that Var to the allocation buffer and remaps the offset through the
-// tile's fractal layout exactly as it does for the data copy's own dst
-// pointer. Only the version slot index feeds that pointer: a lockstep
-// handle rings with its tile and its leading region index is the tile's
-// ping-pong stage, while a hoisted handle broadcasts into every slot of the
-// tile's ring. The x/y slot coordinates ride the SOURCE region, exactly as
-// in the fused scale-companion form this replaces.
+// SF has separate storage but derives its address from the bound L0 tile.
+// All leading axes are ordinary tile selectors, including materialized rings.
 Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
                    arith::Analyzer *analyzer, bool is_l0a) {
   auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
@@ -778,46 +752,50 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
     return Evaluate(0);
   }
 
-  size_t ndim = op.dst_range.size();
+  Array<Range> src_range = NormalizeEmptyUnitAxesForMTE(op.src_range, analyzer);
+  Array<Range> dst_range = NormalizeEmptyUnitAxesForMTE(op.dst_range, analyzer);
+  ICHECK_EQ(sf_buf->dtype.bits(), handle->dtype.bits())
+      << "L0 SF copy requires matching source and destination scale widths";
+  ICHECK_EQ(sf_buf->dtype.lanes(), 1);
+  ICHECK_EQ(handle->dtype.lanes(), 1);
+  ICHECK_EQ(op.transpose, 0) << "L0 SF copy does not support transpose";
+  size_t ndim = dst_range.size();
   ICHECK_GE(ndim, 2) << "Ascend MX scale-factor copy destination " << handle
                      << " must keep a trailing 2-D SF handle shape.";
-  ICHECK_LE(ndim, 3)
-      << "Ascend MX scale-factor handle " << handle->name
-      << " carries more than one leading (multi-buffer version) dimension; "
-         "the slot shadow rings as one ping-pong with its data tile, so "
-         "nested version dimensions are not supported.";
-  for (size_t i = ndim - 2; i < ndim; ++i) {
-    ICHECK(analyzer->CanProveEqual(op.dst_range[i]->min,
-                                   make_zero(op.dst_range[i]->min.dtype())))
-        << "Ascend MX scale-factor copy must target the whole SF handle "
-        << handle->name
-        << " (the slot positions are derived from the source region); "
-           "slicing the destination is not supported.";
+  CheckCompactL0Region(handle, dst_range, analyzer,
+                       "Ascend MX scale-factor copy");
+
+  ICHECK(op.mx_sf_data.defined())
+      << "L0 SF copy destination " << handle->name
+      << " has no allocation binding; use alloc_l0a_sf/alloc_l0b_sf";
+  const Buffer &data_buf = op.mx_sf_data.value();
+  ICHECK_EQ(data_buf->shape.size(), ndim)
+      << "L0 SF and bound data allocation must preserve the same leading axes";
+  AscendFractalLayoutInfo data_info;
+  Optional<Layout> data_layout = FindLayoutForBuffer(T.layout_map, data_buf);
+  ICHECK(
+      data_layout.defined() &&
+      TryExtractAscendFractalLayout(data_layout.value(), data_buf, &data_info))
+      << "L0 SF's bound data buffer requires a fractal layout";
+  Array<Range> data_ranges;
+  for (size_t i = 0; i + 2 < ndim; ++i) {
+    ICHECK(analyzer->CanProve(dst_range[i]->extent <= 1))
+        << "L0 SF copy must select one tile on each leading axis";
+    data_ranges.push_back(dst_range[i]);
   }
+  PrimExpr mn = dst_range[ndim - 2]->extent;
+  PrimExpr k = dst_range[ndim - 1]->extent * I(4 * handle->dtype.bits());
+  data_ranges.push_back(Range::FromMinExtent(
+      I(0), data_info.c0_axis == LogicalAxis::kCol ? mn : k));
+  data_ranges.push_back(Range::FromMinExtent(
+      I(0), data_info.c0_axis == LogicalAxis::kCol ? k : mn));
+  PrimExpr dst_ptr =
+      MakeAscendLeadingDimAccessPtr(BufferRegion(data_buf, data_ranges), 2);
 
-  ICHECK(op.mx_sf_of.defined())
-      << "Ascend MX scale-factor copy destination " << handle->name
-      << " is not consumed as SFA/SFB by any T.gemm_blockscaled in this "
-         "kernel, so its data tile binding cannot be derived.";
-  Var data_var = op.mx_sf_of.value();
-  Optional<Buffer> data_buf_opt = FindDataBufferForVar(T.layout_map, data_var);
-  ICHECK(data_buf_opt.defined())
-      << "Ascend MX scale-factor handle " << handle->name
-      << " is bound to L0 storage " << data_var->name_hint
-      << " that carries no fractal layout; the data tile must feed a GEMM "
-         "in this kernel.";
-  const Buffer &data_buf = data_buf_opt.value();
-
-  // Stage pitch in data elements: the tile's (padded) allocation footprint.
-  PrimExpr data_pitch = I(1);
-  for (const PrimExpr &dim : data_buf->shape) {
-    data_pitch = data_pitch * dim;
-  }
-
-  NormalizeTrailingMTE2DLayout(sf_buf, op.src_range, analyzer,
+  NormalizeTrailingMTE2DLayout(sf_buf, src_range, analyzer,
                                "Ascend MX scale-factor source");
   PrimExpr sf_ptr =
-      MakeAscendLeadingDimAccessPtr(BufferRegion(sf_buf, op.src_range), 1);
+      MakeAscendLeadingDimAccessPtr(BufferRegion(sf_buf, src_range), 1);
 
   AscendFractalLayoutInfo sf_info;
   Optional<Layout> sf_layout = FindLayoutForBuffer(T.layout_map, sf_buf);
@@ -826,73 +804,43 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
       TryExtractAscendFractalLayout(sf_layout.value(), sf_buf, &sf_info) &&
       sf_info.kind == AscendFractalKind::kSF;
 
-  PrimExpr sf_m_start, sf_m_step, sf_k_start, sf_k_step, sf_src_stride,
-      sf_dst_stride;
-
-  if (have_sf_layout) {
-    AscendFractalRegionInfo sf_region;
-    ICHECK(TryExtractAscendFractalRegion(sf_layout.value(), op.src_range,
-                                         &sf_region))
-        << "Failed to map MX scale-factor source region through layout for "
-           "buffer "
-        << sf_buf->name;
-    // SF_K layout maps trailing [M, K-pairs] to physical
-    // [M/16, K-pairs/pack, M%16, K-pairs%pack].  The MX load intrinsic
-    // expects x=M/16 and y=K-pair/pack positions.
-    sf_m_start = sf_region.outer0->min;
-    sf_k_start = sf_region.outer1->min;
-    sf_m_step = sf_region.outer0->extent;
-    sf_k_step = sf_region.outer1->extent;
-    sf_src_stride = sf_info.outer1;
-    sf_dst_stride = sf_region.outer1->extent;
-  } else {
-    const int sf_range_ndim = static_cast<int>(op.src_range.size());
-    const int sf_shape_ndim = static_cast<int>(sf_buf->shape.size());
-    // SF buffer layout is (..., K-pairs, M): K-pairs is the second-to-last
-    // dim, M is the last. All positions are derived from the SF region
-    // itself (independent of the data copy), and the M/K start positions
-    // flow through the intrinsic parameters rather than the pointer.
-    const int sf_k_dim = sf_range_ndim >= 2 ? sf_range_ndim - 2 : -1;
-    const int sf_m_dim = sf_range_ndim - 1;
-
-    sf_m_start = op.src_range[sf_m_dim]->min / I(16);
-    sf_m_step = op.src_range[sf_m_dim]->extent / I(16);
-    sf_k_start = sf_k_dim >= 0 ? op.src_range[sf_k_dim]->min : I(0);
-    sf_k_step = sf_k_dim >= 0 ? op.src_range[sf_k_dim]->extent : I(1);
-    sf_src_stride =
-        sf_shape_ndim >= 2 ? sf_buf->shape[sf_shape_ndim - 2] : I(1);
-    sf_dst_stride = sf_k_dim >= 0 ? op.src_range[sf_k_dim]->extent : I(1);
-  }
-
-  auto make_load = [&](const PrimExpr &slot) {
-    PrimExpr dst_offset =
-        analyzer->Simplify(cast(DataType::Int(32), slot) * data_pitch);
-    PrimExpr dst_ptr = Call(DataType::Handle(), builtin::tvm_access_ptr(),
-                            {TypeAnnotation(data_buf->dtype), data_var,
-                             dst_offset, analyzer->Simplify(data_pitch), I(2)});
-    return Evaluate(Call(DataType::Void(),
-                         is_l0a ? ascend_load_ca_sf() : ascend_load_cb_sf(),
-                         {dst_ptr, sf_ptr, sf_m_start, sf_k_start, sf_m_step,
-                          sf_k_step, sf_src_stride, sf_dst_stride}));
-  };
-  // MaterializeMultiBuffer prepends a version index only when the handle
-  // rings in lockstep with its tile, so a 3-D destination names its slot:
-  // the tile's current stage. A 2-D handle is single-version and fills every
-  // slot of the tile's ring (see PropagateMxSfHandleVersions).
-  const bool handle_rings_with_tile = ndim == 3;
-  Array<PrimExpr> slots;
-  if (handle_rings_with_tile) {
-    slots.push_back(op.dst_range[0]->min);
-  } else {
-    for (int version = 0; version < op.mx_sf_versions; ++version) {
-      slots.push_back(I(version));
+  ICHECK(have_sf_layout)
+      << "L0 SF copy requires the canonical SF_K layout on its L1 source";
+  AscendFractalRegionInfo sf_region;
+  ICHECK(
+      TryExtractAscendFractalRegion(sf_layout.value(), src_range, &sf_region))
+      << "Failed to map MX scale-factor source region for " << sf_buf->name;
+  // Source pitch belongs to the L1 allocation; destination pitch belongs to
+  // this compact tile. SF_K packs pairs of E8M0 bytes on its C0 axis.
+  PrimExpr sf_m_start = sf_region.outer0->min;
+  PrimExpr sf_k_start = sf_region.outer1->min;
+  PrimExpr sf_m_step = sf_region.outer0->extent;
+  PrimExpr sf_k_step = sf_region.outer1->extent;
+  PrimExpr sf_src_stride = sf_info.outer1;
+  PrimExpr sf_dst_stride =
+      FloorDiv(dst_range[ndim - 1]->extent + sf_info.c0 - 1, sf_info.c0);
+  {
+    With<arith::ConstraintContext> nonempty_copy(analyzer, has_data);
+    size_t src_ndim = src_range.size();
+    ICHECK(analyzer->CanProveEqual(
+               FloorMod(src_range[src_ndim - 2]->min, I(16)), 0) &&
+           analyzer->CanProveEqual(
+               FloorMod(src_range[src_ndim - 1]->min, sf_info.c0), 0))
+        << "L0 SF source origin must align to 16 MN rows and a scale pair";
+    ICHECK(analyzer->CanProveEqual(sf_m_step, FloorDiv(mn + 15, 16)) &&
+           analyzer->CanProveEqual(sf_k_step, sf_dst_stride))
+        << "L0 SF source and compact destination region must cover the same "
+           "physical scale groups";
+    for (size_t i = ndim - 2; i < ndim; ++i) {
+      ICHECK(analyzer->CanProve(data_ranges[i]->extent <= data_buf->shape[i]))
+          << "L0 SF copy must fit its bound data allocation " << data_buf->name;
     }
   }
-  Array<Stmt> loads;
-  for (const PrimExpr &slot : slots) {
-    loads.push_back(make_load(slot));
-  }
-  Stmt stmt = SeqStmt::Flatten(loads);
+
+  Stmt stmt = Evaluate(Call(DataType::Void(),
+                            is_l0a ? ascend_load_ca_sf() : ascend_load_cb_sf(),
+                            {dst_ptr, sf_ptr, sf_m_start, sf_k_start, sf_m_step,
+                             sf_k_step, sf_src_stride, sf_dst_stride}));
   if (!is_one(has_data) && !analyzer->CanProve(has_data)) {
     stmt = IfThenElse(has_data, stmt);
   }
@@ -1001,6 +949,8 @@ struct AscendCopyImpl {
 
   static Stmt Lower(const AscendCopyNode &op, const LowerArgs &T,
                     arith::Analyzer *analyzer) {
+    ICHECK(!IsL0SFBuffer(op.src))
+        << "L0 SF handles can only be read by gemm_blockscaled";
     if (IsL0SFBuffer(op.dst)) {
       DMAPath dma_path = GetDMAPath(op.src, op.dst);
       ICHECK(dma_path == DMAPath::kL1ToL0ASF || dma_path == DMAPath::kL1ToL0BSF)
@@ -1042,8 +992,7 @@ void DecodeAscendCopyAnnotations(AscendCopyNode *node) {
   node->dual_dst_ctl = int_or("dual_dst_ctl", 0);
   node->transpose = int_or("transpose", 0);
   node->data_select = int_or("data_select", 0);
-  node->mx_sf_of = std::nullopt;
-  node->mx_sf_versions = 1;
+  node->mx_sf_data = std::nullopt;
   node->l2_cache_ctrl = std::nullopt;
   if (auto val = node->annotations.Get("l2_cache_ctrl")) {
     if (const auto *int_val = val->as<IntImmNode>()) {
@@ -1165,7 +1114,7 @@ AscendCopy::AscendCopy(Array<PrimExpr> args,
 // state (regions, access regions, block-annotation results) transfers as-is.
 // MX scale-factor loads also arrive base-spelled (the dialect needs no
 // special emission for them); their dedicated destination scope classifies
-// them, and AscendLowerTileOp resolves the tile binding before lowering.
+// them, and AscendLowerTileOp resolves the allocation binding before lowering.
 AscendCopy::AscendCopy(const CopyNode &base) {
   ObjectPtr<AscendCopyNode> node = make_object<AscendCopyNode>(base);
   DecodeAscendCopyAnnotations(node.get());
@@ -1191,38 +1140,39 @@ Stmt AscendCopyNode::Lower(const LowerArgs &lower_args,
   return ascend::AscendCopyImpl::Lower(*this, lower_args, analyzer);
 }
 
+L0SFBindings CollectL0SFBindings(const Stmt &body) {
+  L0SFBindings bindings, data_to_sf;
+  PostOrderVisit(body, [&](const ObjectRef &obj) {
+    const auto *block = obj.as<SBlockNode>();
+    if (!block)
+      return;
+    if (auto annotation = block->annotations.Get(kL0SFBindings)) {
+      for (const auto &[sf, data] : annotation.value().cast<L0SFBindings>()) {
+        if (auto existing = bindings.Get(sf)) {
+          ICHECK(existing.value().same_as(data))
+              << "Conflicting allocation bindings for L0 SF " << sf->name_hint;
+        }
+        ICHECK(!sf.same_as(data))
+            << "L0 SF and data must have distinct storage";
+        if (auto existing = data_to_sf.Get(data)) {
+          ICHECK(existing.value().same_as(sf))
+              << "L0 data " << data->name_hint
+              << " has multiple SF handles; reuse the handle returned by "
+                 "alloc_l0a_sf/alloc_l0b_sf";
+        }
+        bindings.Set(sf, data);
+        data_to_sf.Set(data, sf);
+      }
+    }
+  });
+  return bindings;
+}
+
 bool IsAscendCopyCall(const CallNode *call) {
   if (call == nullptr) {
     return false;
   }
   return call->op.same_as(AscendCopy::Get()) || call->op.same_as(Copy::Get());
-}
-
-ffi::Map<Var, Var> CollectMxSfBindings(const Stmt &body) {
-  ffi::Map<Var, Var> bindings;
-  static const Op &gemm_blockscaled_op = Op::Get("tl.tileop.gemm_blockscaled");
-  tirx::PostOrderVisit(body, [&](const ObjectRef &obj) {
-    const auto *call = obj.as<CallNode>();
-    if (call == nullptr || !call->op.same_as(gemm_blockscaled_op))
-      return;
-    GemmBlockScaled gemm(call->args, call->annotations);
-    auto bind = [&](const Buffer &sf, const Buffer &data) {
-      if (!IsL0SFBuffer(sf))
-        return;
-      if (auto existing = bindings.Get(sf->data)) {
-        ICHECK(existing.value().same_as(data->data))
-            << "MX scale-factor handle " << sf->name
-            << " is consumed with two different data tiles ("
-            << existing.value()->name_hint << " and " << data->data->name_hint
-            << "); allocate one handle per tile.";
-      } else {
-        bindings.Set(sf->data, data->data);
-      }
-    };
-    bind(gemm->sfaRegion_->buffer, gemm->a_);
-    bind(gemm->sfbRegion_->buffer, gemm->b_);
-  });
-  return bindings;
 }
 
 // Register the Ascend dialect copy operation. Same contract as

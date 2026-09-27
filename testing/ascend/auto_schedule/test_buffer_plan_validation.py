@@ -85,3 +85,34 @@ def test_external_fill_is_marked_for_broadcast(tail, partial, versions):
         node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_task" and "tl.multi_buffer_broadcast_fill" in node.node
     ]
     assert len(broadcast) == 1 and ub.data in broadcast[0].node["tl.multi_buffer_broadcast_fill"]
+
+
+def test_bound_data_and_sf_cannot_have_different_owners():
+    data = tirx.decl_buffer((1,), "int32", name="data", scope="shared.l0a")
+    sf = tirx.decl_buffer((1,), "int32", name="sf", scope="shared.l0a.sf")
+    loops = []
+    for buf in (data, sf):
+        i = tirx.Var("i", "int32")
+        loops.append(
+            unit(
+                tirx.For(
+                    i,
+                    0,
+                    4,
+                    tirx.ForKind.SERIAL,
+                    unit(tirx.BufferStore(buf, i, [0]), core=2),
+                    annotations={"multi_buffer_eligible": [buf.data]},
+                ),
+                core=None,
+            )
+        )
+    before = kernel(
+        seq(*loops),
+        buffers=[data, sf],
+        annotations={
+            "tl.l0_sf_bindings": {sf.data: data.data},
+            "tl.buffer_versions_map": {data.data: 2, sf.data: 2},
+        },
+    )
+    with pytest.raises(tvm.error.InternalError, match="same owner loops"):
+        transform.PrepareMultiBuffer()(before)

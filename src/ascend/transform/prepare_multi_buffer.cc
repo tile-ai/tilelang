@@ -46,6 +46,7 @@
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/transform/attr.h"
+#include "ascend/transform/buffer_version.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -282,8 +283,9 @@ struct StorageEpochAnalysis {
   bool has_write{false};
 };
 
-StorageEpochAnalysis AnalyzeStorageEpoch(const Var &storage,
-                                         ControlNode *loop) {
+StorageEpochAnalysis
+AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
+                    const L0StorageGroups &groups = L0StorageGroups()) {
   std::vector<PrimExpr> guard_terms;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> guard_definitions;
   arith::Analyzer analyzer;
@@ -297,7 +299,10 @@ StorageEpochAnalysis AnalyzeStorageEpoch(const Var &storage,
     int child_index = child->GetIndex();
     for (const Var &var : child->GetWriteVars())
       guard_definitions[var] = child_index;
-    if (!child->TouchesStorage(storage))
+    bool touches = false;
+    for (const Var &member : groups.Members(storage))
+      touches |= child->TouchesStorage(member);
+    if (!touches)
       continue;
     if (!access_stage.has_value()) {
       access_stage = child->GetStage();
@@ -306,7 +311,8 @@ StorageEpochAnalysis AnalyzeStorageEpoch(const Var &storage,
     }
     if (first_access < 0)
       first_access = child_index;
-    has_write |= child->WritesStorage(storage);
+    for (const Var &member : groups.Members(storage))
+      has_write |= child->WritesStorage(member);
     guard_terms.push_back(child->GetConditionGuard());
   }
   ICHECK_GE(first_access, 0) << "Storage epoch analysis for "
@@ -426,9 +432,10 @@ public:
   MultiBufferPlanBuilder(const std::vector<std::shared_ptr<IRStructure>> &root,
                          const BufferVersionMap &selected_versions,
                          const BufferVersionModeTable &requested_modes,
-                         const ffi::Optional<Var> &outer_sid)
+                         const ffi::Optional<Var> &outer_sid,
+                         L0StorageGroups groups)
       : root_(root), selected_versions_(selected_versions),
-        requested_modes_(requested_modes) {
+        requested_modes_(requested_modes), groups_(std::move(groups)) {
     if (outer_sid.has_value())
       availability_.SetExternalVarCoreMask(outer_sid.value(), kCoreVector);
   }
@@ -442,11 +449,24 @@ public:
       if (Optional<Bind> bind = GetFlatTaskBind(task->stmt); bind.defined())
         bind_definitions_.emplace(bind.value()->var, task);
     }
-    MultiBufferOwnerMap owners_by_storage = CollectMultiBufferOwners(root_);
+    MultiBufferOwnerMap owners_by_storage =
+        CollectMultiBufferOwners(root_, groups_);
     for (StorageState &state : storages_) {
       auto owners_it = owners_by_storage.find(state.storage);
       if (owners_it != owners_by_storage.end())
         state.owners = owners_it->second;
+      for (const Var &member : groups_.Members(state.storage)) {
+        if (member.same_as(state.storage))
+          continue;
+        auto member_owners = owners_by_storage.find(member);
+        ICHECK(member_owners != owners_by_storage.end() &&
+               member_owners->second.size() == state.owners.size() &&
+               std::is_permutation(member_owners->second.begin(),
+                                   member_owners->second.end(),
+                                   state.owners.begin()))
+            << "Bound L0 data/SF group " << state.storage->name_hint
+            << " must have the same owner loops for every member";
+      }
     }
 
     std::vector<PreparedStorage> prepared;
@@ -455,7 +475,11 @@ public:
           << "Automatic multi-buffer storage " << state.storage->name_hint
           << " has no annotated owner loop";
       ValidateOwnersDisjoint(state);
-      ValidateCoverage(state);
+      for (const Var &member : groups_.Members(state.storage)) {
+        StorageState member_state = state;
+        member_state.storage = member;
+        ValidateCoverage(member_state);
+      }
 
       PreparedStorage storage;
       storage.info.storage = state.storage;
@@ -518,8 +542,13 @@ public:
       prepared.push_back(std::move(storage));
     }
     AssignCounterGroups(&prepared);
-    for (PreparedStorage &storage : prepared)
-      plan_.AddInfo(std::move(storage.info));
+    for (const PreparedStorage &storage : prepared) {
+      for (const Var &member : groups_.Members(storage.info.storage)) {
+        MultiBufferInfo info = storage.info;
+        info.storage = member;
+        plan_.AddInfo(std::move(info));
+      }
+    }
     return std::move(plan_);
   }
 
@@ -527,6 +556,8 @@ private:
   void InitializeStorages() {
     storages_.reserve(selected_versions_.size());
     for (const auto &[storage, num_versions] : selected_versions_) {
+      if (!groups_.Representative(storage).same_as(storage))
+        continue;
       StorageState state;
       state.storage = storage;
       state.num_versions = num_versions;
@@ -580,11 +611,14 @@ private:
     return false;
   }
 
-  static std::optional<int> CounterStorageStage(const Var &storage,
-                                                ControlNode *owner) {
+  std::optional<int> CounterStorageStage(const Var &storage,
+                                         ControlNode *owner) const {
     int storage_stage = -1;
     for (const auto &child : owner->children) {
-      if (!child->TouchesStorage(storage))
+      bool touches = false;
+      for (const Var &member : groups_.Members(storage))
+        touches |= child->TouchesStorage(member);
+      if (!touches)
         continue;
       if (storage_stage < 0) {
         storage_stage = child->GetStage();
@@ -605,8 +639,9 @@ private:
     // one physical counter protocol; ResolveCore chooses the final subset.
     CoreMask result = kCoreUnassigned;
     for (const MultiBufferOwnerInfo &owner : owners)
-      result |= GetStorageAccessCoreMask(storage, owner.loop,
-                                         /*skip_broadcast_fills=*/true);
+      for (const Var &member : groups_.Members(storage))
+        result |= GetStorageAccessCoreMask(member, owner.loop,
+                                           /*skip_broadcast_fills=*/true);
     ICHECK_NE(result, kCoreUnassigned)
         << "Counter multi-buffer storage " << storage->name_hint
         << " has no core-assigned owner access";
@@ -614,11 +649,8 @@ private:
   }
 
   PreparedOwner AnalyzeOwner(const Var &storage, ControlNode *owner) {
-    StorageEpochAnalysis analysis = AnalyzeStorageEpoch(storage, owner);
-    ICHECK(analysis.has_write)
-        << "Multi-buffer owner for " << storage->name_hint
-        << " never writes the storage";
-
+    StorageEpochAnalysis analysis =
+        AnalyzeStorageEpoch(storage, owner, groups_);
     bool has_non_affine_loop_path = HasNonAffineLoopPath(owner);
     bool needs_counter =
         !is_one(analysis.active_guard) || has_non_affine_loop_path;
@@ -816,6 +848,7 @@ private:
   const std::vector<std::shared_ptr<IRStructure>> &root_;
   const BufferVersionMap &selected_versions_;
   const BufferVersionModeTable &requested_modes_;
+  L0StorageGroups groups_;
   std::vector<StorageState> storages_;
   std::unordered_map<Var, const TaskNode *, ObjectPtrHash, ObjectPtrEqual>
       bind_definitions_;
@@ -827,9 +860,10 @@ MultiBufferPlan
 BuildMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
                      const BufferVersionMap &selected_versions,
                      const BufferVersionModeTable &requested_modes,
-                     const ffi::Optional<Var> &outer_sid) {
+                     const ffi::Optional<Var> &outer_sid,
+                     const L0StorageGroups &groups) {
   return MultiBufferPlanBuilder(root, selected_versions, requested_modes,
-                                outer_sid)
+                                outer_sid, groups)
       .Build();
 }
 
@@ -871,7 +905,7 @@ std::shared_ptr<TaskNode> MakeCounterTask(const Stmt &body, int stage) {
 void AnnotateStorageEpochs(
     const std::vector<std::shared_ptr<IRStructure>> &root,
     const MultiBufferPlan &plan, const BufferVersionMap &manual_buffer_versions,
-    const ffi::Optional<Var> &outer_sid) {
+    const ffi::Optional<Var> &outer_sid, const L0StorageGroups &groups) {
   std::vector<TaskNode *> tasks;
   CollectAllTaskNodes(root, tasks);
   CoreMaskAvailability availability(tasks);
@@ -883,8 +917,9 @@ void AnnotateStorageEpochs(
     if (info.UsesCounter()) {
       CoreMask storage_core_mask = kCoreUnassigned;
       for (const MultiBufferOwnerInfo &owner : info.owners) {
-        storage_core_mask |= GetStorageAccessCoreMask(
-            info.storage, owner.loop, /*skip_broadcast_fills=*/true);
+        for (const Var &member : groups.Members(info.storage))
+          storage_core_mask |= GetStorageAccessCoreMask(
+              member, owner.loop, /*skip_broadcast_fills=*/true);
       }
       ICHECK_NE(storage_core_mask, kCoreUnassigned);
       counter_group_core_masks[info.counter_group_id] |= storage_core_mask;
@@ -915,9 +950,21 @@ void AnnotateStorageEpochs(
     std::vector<StorageEpoch> counter_epochs;
     std::vector<StorageEpoch> lexical_epochs;
 
-    for (const Var &storage : CollectLoopStorages(loop)) {
-      StorageEpochAnalysis analysis = AnalyzeStorageEpoch(storage, loop);
-      if (const MultiBufferInfo *info = plan.Find(storage)) {
+    std::vector<Var> storages;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> seen;
+    for (const Var &touched : CollectLoopStorages(loop)) {
+      Array<Var> members =
+          plan.Find(touched) ? groups.Members(touched) : Array<Var>{touched};
+      for (const Var &member : members)
+        if (seen.insert(member).second)
+          storages.push_back(member);
+    }
+    for (const Var &storage : storages) {
+      const MultiBufferInfo *info = plan.Find(storage);
+      StorageEpochAnalysis analysis =
+          info ? AnalyzeStorageEpoch(storage, loop, groups)
+               : AnalyzeStorageEpoch(storage, loop);
+      if (info) {
         // Iteration-mode rings retain the unconditional lexical clock.
         if (!info->UsesCounter())
           continue;
@@ -1175,15 +1222,21 @@ tvm::transform::Pass PrepareMultiBuffer() {
             ICHECK_NE(task->GetCoreMask(), kCoreUnassigned)
                 << "PrepareMultiBuffer requires AssignCore to run first";
           }
-          BufferVersionModeTable modes = ParseBufferVersionModes(
-              scheduled_tir.metadata.buffer_version_modes);
+          L0StorageGroups groups(CollectL0SFBindings(context.root));
+          auto &metadata = scheduled_tir.metadata;
+          metadata.buffer_versions = ExpandL0StorageGroupValues(
+              metadata.buffer_versions, groups, "version counts");
+          metadata.buffer_version_modes = ExpandL0StorageGroupValues(
+              metadata.buffer_version_modes, groups, "version modes");
+          BufferVersionModeTable modes =
+              ParseBufferVersionModes(metadata.buffer_version_modes);
           MultiBufferPlan plan = BuildMultiBufferPlan(
               scheduled_tir.tree, scheduled_tir.metadata.buffer_versions, modes,
-              context.outer_sid);
+              context.outer_sid, groups);
           scheduled_tir.metadata.buffer_version_modes = {};
           AnnotateStorageEpochs(scheduled_tir.tree, plan,
                                 scheduled_tir.metadata.manual_buffer_versions,
-                                context.outer_sid);
+                                context.outer_sid, groups);
           MaterializeCounterProtocol(&scheduled_tir, plan);
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });

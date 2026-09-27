@@ -23,6 +23,7 @@
 #include "layout/layout.h"
 #include "layout/utils.h"
 #include "op/gemm.h"
+#include "op/gemm_blockscaled.h"
 #include "op/gemm_sp.h"
 #include "op/operator.h"
 #include "op/utils.h"
@@ -215,19 +216,7 @@ public:
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined()) << "LowerTileOpPass: Require the target attribute";
     substituter.target_ = target.value();
-    substituter.mx_sf_bindings_ = CollectMxSfBindings(f->body);
-    tirx::PostOrderVisit(f->body, [&substituter](const ObjectRef &node) {
-      const auto *attr = node.as<AttrStmtNode>();
-      if (attr == nullptr || attr->attr_key != tl::attr::kBufferVersion)
-        return;
-      auto versions = attr->node.try_cast<BufferVersionMap>();
-      ICHECK(versions.has_value())
-          << "'" << tl::attr::kBufferVersion
-          << "' AttrStmt node must be a buffer version map";
-      for (const auto &[data, version] : versions.value()) {
-        substituter.buffer_versions_.Set(data, version);
-      }
-    });
+    substituter.mx_sf_bindings_ = CollectL0SFBindings(f->body);
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
@@ -399,6 +388,7 @@ private:
 
     auto block = Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
+    block_ptr->annotations.erase(kL0SFBindings);
     // MX scale-factor handles (shared.l0a.sf/.l0b.sf) never materialize
     // storage: the scale-load lowering above resolved every access into a
     // pointer over the bound data tile, so drop their allocations here
@@ -1163,24 +1153,22 @@ private:
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
 
-    // MX scale-factor loads carry no binding of their own: the handle's data
-    // tile is defined structurally by the gemm_blockscaled that consumes it
-    // as SFA/SFB. Resolve it here from the func-wide map so the copy
-    // lowering can address the tile's storage, and record the tile's version
-    // count so a hoisted (single-version) scale load broadcasts into every
-    // version slot.
-    if (const auto *copy = tile_op.as<AscendCopyNode>()) {
-      if (IsL0SFBuffer(copy->dst) && !copy->mx_sf_of.defined()) {
-        if (auto bound = mx_sf_bindings_.Get(copy->dst->data)) {
-          AscendCopy bound_copy = Downcast<AscendCopy>(std::move(tile_op));
-          AscendCopyNode *bound_node = bound_copy.CopyOnWrite();
-          bound_node->mx_sf_of = bound.value();
-          if (auto versions = buffer_versions_.Get(bound.value())) {
-            bound_node->mx_sf_versions = versions.value();
-          }
-          tile_op = std::move(bound_copy);
-        }
-      }
+    if (tile_op.as<GemmBlockScaledNode>()) {
+      ValidateL0SFGemm(Downcast<GemmBlockScaled>(tile_op), mx_sf_bindings_,
+                       analyzer_);
+    }
+    if (const auto *copy = tile_op.as<CopyNode>();
+        copy && IsL0SFBuffer(copy->dst)) {
+      auto bound = mx_sf_bindings_.Get(copy->dst->data);
+      ICHECK(bound.has_value()) << "L0 SF copy has no allocation binding";
+      auto data = buffer_data_to_buffer_.Get(bound.value());
+      ICHECK(data.has_value())
+          << "L0 SF binding refers to an unavailable data allocation";
+      AscendCopy bound_copy = tile_op.as<AscendCopyNode>()
+                                  ? Downcast<AscendCopy>(tile_op)
+                                  : AscendCopy(*copy);
+      bound_copy.CopyOnWrite()->mx_sf_data = data.value();
+      tile_op = std::move(bound_copy);
     }
 
     Range thread_bounds = GetActiveThreadBounds();
@@ -1523,14 +1511,10 @@ private:
   }
 
   Target target_;
-  // Handle storage -> bound data tile storage, derived once per func from
-  // the gemm_blockscaled consumers (see CollectMxSfBindings).
-  Map<Var, Var> mx_sf_bindings_;
-  // Selected multi-buffer version counts (union of the per-kernel
-  // kBufferVersion attributes), collected once per func so MX scale-factor
-  // loads learn their bound tile's slot count.
-  BufferVersionMap buffer_versions_;
   Map<String, Any> block_annotations_;
+  // Allocation binding; SF handles and data remain separate logical storages.
+  L0SFBindings mx_sf_bindings_;
+
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Var, PrimExpr> safe_value_map_;
   Map<Buffer, Layout> layout_map_;

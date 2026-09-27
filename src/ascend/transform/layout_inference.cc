@@ -25,6 +25,7 @@
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "ascend/op/utils.h"
 #include "ascend/transform/vf_regions.h"
 #include "backend/common/target_utils.h"
 #include "config.h"
@@ -32,6 +33,7 @@
 #include "layout/utils.h"
 #include "op/builtin.h"
 #include "op/copy.h"
+#include "op/gemm_blockscaled.h"
 #include "op/parallel.h"
 #include "op/reducer.h"
 #include "op/utils.h"
@@ -716,6 +718,7 @@ public:
   }
 
   void Collect(const PrimFunc &f) {
+    l0_sf_bindings_ = CollectL0SFBindings(f->body);
     for (const auto &[_, buffer] : f->buffer_map) {
       if (buffer_data_to_buffers_.count(buffer->data)) {
         auto buffers = buffer_data_to_buffers_[buffer->data];
@@ -801,6 +804,9 @@ private:
                  << GetRef<Call>(op);
     }
     if (p.defined()) {
+      if (p.as<GemmBlockScaledNode>())
+        ValidateL0SFGemm(Downcast<GemmBlockScaled>(p), l0_sf_bindings_,
+                         &analyzer_);
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
           addToUseList(buffer.value());
@@ -1372,6 +1378,7 @@ private:
   std::vector<PrimExpr> thread_index_vec_;
   std::vector<Range> thread_bounds_vec_;
   std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
+  L0SFBindings l0_sf_bindings_;
   Target target_;
   LayoutMap annotated_layout_map_;
 

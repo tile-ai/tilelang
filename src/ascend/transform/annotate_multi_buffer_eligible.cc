@@ -569,18 +569,22 @@ class MultiBufferOwnerPlanner {
 public:
   static ControlStorageClaims
   Plan(const std::vector<std::shared_ptr<IRStructure>> &root,
-       const StorageSet &excluded_storages) {
+       const StorageSet &excluded_storages, const L0StorageGroups &groups) {
     MultiBufferOwnerPlanner planner;
     StorageSet seen;
     for (const auto &node : root) {
       for (const Var &storage : node->GetOnChipStorages()) {
-        if (!seen.insert(storage).second || excluded_storages.count(storage))
+        Var representative = groups.Representative(storage);
+        if (!seen.insert(representative).second ||
+            excluded_storages.count(representative))
           continue;
-        CoveragePlan plan = planner.PlanList(root, storage);
+        Array<Var> members = groups.Members(storage);
+        CoveragePlan plan = planner.PlanList(root, members);
         if (!plan.IsComplete())
           continue;
         for (ControlNode *owner : plan.owners)
-          planner.claims_[owner].push_back(storage);
+          for (const Var &member : members)
+            planner.claims_[owner].push_back(member);
       }
     }
     return std::move(planner.claims_);
@@ -620,48 +624,55 @@ private:
 
   ControlStorageClaims claims_;
 
-  static CoveragePlan PlanLeaf(const TaskNode *task, const Var &storage) {
-    if (!task->TouchesStorage(storage))
-      return {};
+  static CoveragePlan PlanLeaf(const TaskNode *task,
+                               const Array<Var> &members) {
     CoveragePlan result;
-    bool broadcast_fill = !task->GuardsTouchStorage(storage) &&
-                          CanBroadcastFillToStorage(task->stmt, storage);
-    result.coverage =
-        broadcast_fill ? Coverage::kCovered : Coverage::kNeedsOwner;
+    for (const Var &storage : members) {
+      if (!task->TouchesStorage(storage))
+        continue;
+      bool broadcast_fill = members.size() == 1 &&
+                            !task->GuardsTouchStorage(storage) &&
+                            CanBroadcastFillToStorage(task->stmt, storage);
+      if (!broadcast_fill)
+        result.AddUncoveredAccess();
+      else if (result.coverage == Coverage::kUntouched)
+        result.coverage = Coverage::kCovered;
+    }
     return result;
   }
 
   CoveragePlan PlanList(const std::vector<std::shared_ptr<IRStructure>> &nodes,
-                        const Var &storage) {
+                        const Array<Var> &members) {
     CoveragePlan result;
     for (const auto &node : nodes)
-      result.Merge(PlanNode(node.get(), storage));
+      result.Merge(PlanNode(node.get(), members));
     return result;
   }
 
-  CoveragePlan PlanNode(IRStructure *node, const Var &storage) {
-    if (node->IsTask()) {
-      return PlanLeaf(static_cast<const TaskNode *>(node), storage);
-    }
+  CoveragePlan PlanNode(IRStructure *node, const Array<Var> &members) {
+    if (node->IsTask())
+      return PlanLeaf(static_cast<const TaskNode *>(node), members);
 
     auto *control = static_cast<ControlNode *>(node);
-    CoveragePlan result = PlanList(control->children, storage);
+    CoveragePlan result = PlanList(control->children, members);
     if (result.CanClaimHere()) {
-      AccessOrder order = IRWriteFirstClassifier::Classify(
-          control->children, storage, control->GetLoopBodyContext());
-      if (order == AccessOrder::kWriteFirst ||
-          order == AccessOrder::kMaybeWriteFirst) {
+      // Each plane must be write-first independently. In particular, a data
+      // reload does not initialize or kill sticky SF contents.
+      bool write_first = true;
+      for (const Var &storage : members) {
+        AccessOrder order = IRWriteFirstClassifier::Classify(
+            control->children, storage, control->GetLoopBodyContext());
+        write_first &= order != AccessOrder::kReadFirst;
+      }
+      if (write_first) {
         result.coverage = Coverage::kCovered;
         result.owners = {control};
       }
     }
-
-    // A ControlNode's task describes accesses that execute before entering
-    // the loop body, including guards and loop-header expressions. They cannot
-    // be covered by this loop's version epoch, but remain ordinary accesses
-    // that an enclosing loop may cover.
-    if (control->task->TouchesStorage(storage))
-      result.AddUncoveredAccess();
+    for (const Var &storage : members) {
+      if (control->task->TouchesStorage(storage))
+        result.AddUncoveredAccess();
+    }
     return result;
   }
 };
@@ -670,7 +681,8 @@ private:
 // the decoded ControlNodes. Encoding preserves schedule-unit stages and guards.
 class MultiBufferAnnotator {
 public:
-  static void Rewrite(ScheduledTIR *scheduled_tir, StorageSet manual_buffers) {
+  static void Rewrite(ScheduledTIR *scheduled_tir, StorageSet manual_buffers,
+                      const L0StorageGroups &groups) {
     ICHECK(scheduled_tir != nullptr);
     // This pass precedes AutoSchedule: these counts are frontend overrides,
     // not solver-selected versions. Only a bare frontend 1 means opt-out.
@@ -685,20 +697,28 @@ public:
       }
     }
     CollectExplicitStorages(scheduled_tir->tree, &excluded_storages);
-    ControlStorageClaims claims =
-        MultiBufferOwnerPlanner::Plan(scheduled_tir->tree, excluded_storages);
+    StorageSet expanded;
+    for (const Var &storage : excluded_storages)
+      for (const Var &member : groups.Members(storage))
+        expanded.insert(member);
+    excluded_storages = std::move(expanded);
+    ControlStorageClaims claims = MultiBufferOwnerPlanner::Plan(
+        scheduled_tir->tree, excluded_storages, groups);
     MultiBufferAnnotator annotator(std::move(claims), std::move(manual_buffers),
-                                   std::move(single_version_buffers));
+                                   std::move(single_version_buffers), groups);
     annotator.RewriteNodes(scheduled_tir->tree);
   }
 
 private:
   MultiBufferAnnotator(ControlStorageClaims claims, StorageSet manual_buffers,
-                       StorageSet single_version_buffers)
-      : claims_(std::move(claims)), manual_buffers_(std::move(manual_buffers)),
+                       StorageSet single_version_buffers,
+                       L0StorageGroups groups)
+      : claims_(std::move(claims)), groups_(std::move(groups)),
+        manual_buffers_(std::move(manual_buffers)),
         single_version_buffers_(std::move(single_version_buffers)) {}
 
   ControlStorageClaims claims_;
+  L0StorageGroups groups_;
   StorageSet manual_buffers_;
   StorageSet single_version_buffers_;
   StorageSet warned_excluded_storages_;
@@ -757,16 +777,18 @@ private:
           }
           continue;
         }
-        if (already.insert(storage).second)
-          eligible.push_back(storage);
+        for (const Var &member : groups_.Members(storage))
+          if (already.insert(member).second)
+            eligible.push_back(member);
       }
     }
 
     auto planned = claims_.find(control);
     if (planned != claims_.end()) {
       for (const Var &storage : planned->second) {
-        if (already.insert(storage).second)
-          eligible.push_back(storage);
+        for (const Var &member : groups_.Members(storage))
+          if (already.insert(member).second)
+            eligible.push_back(member);
       }
     }
 
@@ -786,13 +808,21 @@ tvm::transform::Pass AnnotateMultiBufferEligible() {
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir =
               DecodeScheduledTIR(context.root, context.outer_ctx);
+          L0StorageGroups groups(CollectL0SFBindings(context.root));
+          auto &metadata = scheduled_tir.metadata;
+          metadata.buffer_versions = ExpandL0StorageGroupValues(
+              metadata.buffer_versions, groups, "version counts");
+          metadata.manual_buffer_versions = ExpandL0StorageGroupValues(
+              metadata.manual_buffer_versions, groups, "manual version counts");
+          metadata.buffer_version_modes = ExpandL0StorageGroupValues(
+              metadata.buffer_version_modes, groups, "version modes");
           StorageSet manual_buffers;
           for (const auto &[storage, _] :
                scheduled_tir.metadata.manual_buffer_versions) {
             manual_buffers.insert(storage);
           }
           MultiBufferAnnotator::Rewrite(&scheduled_tir,
-                                        std::move(manual_buffers));
+                                        std::move(manual_buffers), groups);
           return EncodeScheduledTIR(std::move(scheduled_tir));
         },
         /*require_kernel=*/false);

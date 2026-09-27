@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tvm import arith
+
 from tilelang._typing import DType, ShapeType
 from tilelang.language.allocate import _with_span
 from tvm import DataType
@@ -74,21 +76,28 @@ _MX_SF_K_PER_SCALE_BYTE = 32
 
 
 def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: ShapeType | None) -> Buffer:
-    assert buf.scope() == expected_scope, f"expected a {expected_scope} data tile, got scope {buf.scope()} for {buf.name}"
+    if buf.scope() != expected_scope:
+        raise ValueError(f"expected a {expected_scope} data tile, got scope {buf.scope()} for {buf.name}")
+    if len(buf.shape) < 2:
+        raise ValueError(f"L0 SF requires trailing matrix dimensions, got {buf.shape}")
+    dtype = DataType(sf_dtype)
+    if dtype.bits not in (8, 16) or dtype.lanes != 1:
+        raise ValueError(f"L0 SF storage must contain 8-bit scales or 16-bit scale pairs, got {sf_dtype}")
     if sf_shape is None:
-        assert len(buf.shape) == 2, (
-            f"MX SF handle default shape needs a plain 2-D data tile, got shape {buf.shape} for {buf.name}; "
-            "a manually multi-buffered tile carries leading version dims — pass sf_shape explicitly with the same leading dims"
-        )
-        k_per_sf = _MX_SF_K_PER_SCALE_BYTE * (DataType(sf_dtype).bits // 8)
+        k_per_sf = _MX_SF_K_PER_SCALE_BYTE * (dtype.bits // 8)
         rows, k = buf.shape[-2], buf.shape[-1]
-        if isinstance(k, (int,)) or hasattr(k, "value"):
-            k_value = int(k)
-            assert k_value % k_per_sf == 0, (
-                f"data tile K extent {k_value} of {buf.name} is not divisible by {k_per_sf} (K elements per {sf_dtype} scale element); pass sf_shape explicitly"
+        if (isinstance(k, int) or hasattr(k, "value")) and int(k) % k_per_sf != 0:
+            raise ValueError(
+                f"data tile K extent {k} of {buf.name} is not divisible by {k_per_sf} "
+                f"(K elements per {sf_dtype} scale element); pass sf_shape explicitly for a transposed tile"
             )
-        sf_shape = (rows, k // k_per_sf)
-    return _with_span(T.sblock_alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))
+        sf_shape = (*buf.shape[:-2], rows, k // k_per_sf)
+    analyzer = arith.Analyzer()
+    if len(sf_shape) != len(buf.shape) or any(not analyzer.can_prove_equal(a, b) for a, b in zip(sf_shape[:-2], buf.shape[:-2])):
+        raise ValueError(f"L0 SF shape {sf_shape} must preserve the data buffer's leading dimensions {buf.shape[:-2]}")
+    sf = _with_span(T.sblock_alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))
+    sblock_attr({"tl.l0_sf_bindings": {sf.data: buf.data}})
+    return sf
 
 
 def alloc_l0a_sf(buf: Buffer, sf_dtype: DType = "uint16", sf_shape: ShapeType | None = None) -> Buffer:
@@ -97,15 +106,16 @@ def alloc_l0a_sf(buf: Buffer, sf_dtype: DType = "uint16", sf_shape: ShapeType | 
     The handle (scope ``shared.l0a.sf``) materializes no storage: the
     hardware keys a tile's scale slots to the tile's own address. Load
     scales with ``T.copy(sf_l1, handle)`` and pass the handle to
-    ``T.gemm_blockscaled`` as ``SFA``; that gemm binds the handle to its A
-    tile — ``buf`` only supplies the default shape and a scope check. Scale
+    ``T.gemm_blockscaled`` as ``SFA``. Allocation permanently binds this
+    handle to ``buf``; GEMM verifies the binding and leading indices. Scale
     slots are sticky, so one scale load may serve several data loads (see
     testing/ascend/language/test_tilelang_ascend_mx_sf_slots.py).
 
-    The default shape assumes an untransposed ``(rows, K)`` data tile with
+    The default shape preserves all leading dimensions and assumes trailing
+    untransposed ``(rows, K)`` matrix dimensions with
     one scale per 32 K elements packed into ``sf_dtype`` (``uint16`` = one
     pair per 64 K elements); pass ``sf_shape`` explicitly for transposed
-    tiles or other packings.
+    tiles. Allocate one SF handle per data buffer and reuse that handle.
     """
     return _alloc_l0_sf(buf, "shared.l0a", sf_dtype, sf_shape)
 

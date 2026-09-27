@@ -125,7 +125,10 @@ def gemm_blockscaled(
     A/B inputs they are the MX scale-factor handles of the operand tiles
     (:func:`tilelang.ascend.language.alloc_l0a_sf` /
     :func:`~tilelang.ascend.language.alloc_l0b_sf`), loaded by a preceding
-    ``T.copy(sf_l1, view)``; the MAD reads the slots implied by its A/B data
+    ``T.copy(sf_l1, handle)``. Each handle must be allocated for the
+    corresponding data buffer, select the same leading indices, and describe
+    its compact trailing tile (zero origin and matching K). The MAD reads
+    the slots implied by its A/B data
     addresses, so the operands here carry the read-region truth and select
     the block-scaled lowering.
 

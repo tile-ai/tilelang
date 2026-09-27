@@ -231,7 +231,8 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
     return PipeMask(ResourcePipe::kMTE2);
   }
   if (op.same_as(ascend_load_cbuf_to_ca()) ||
-      op.same_as(ascend_load_cbuf_to_cb())) {
+      op.same_as(ascend_load_cbuf_to_cb()) || op.same_as(ascend_load_ca_sf()) ||
+      op.same_as(ascend_load_cb_sf())) {
     return PipeMask(ResourcePipe::kMTE1);
   }
   if (op.same_as(ascend_copy_matrix_cc_to_ub()) ||
