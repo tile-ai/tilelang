@@ -245,7 +245,13 @@ def pythonic_expr(
     return next(iter(node_to_result_map[expr]), "")
 
 
-def maybe_desc_name(name: str, matches: list[str], i: int, desc_name_map: dict[str, str] | None = None) -> bool:
+def maybe_desc_name(
+    name: str,
+    matches: list[str],
+    i: int,
+    desc_name_map: dict[str, str] | None = None,
+    descriptor_matches: list[bool] | None = None,
+) -> bool:
     """
     Check if a parameter name corresponds to a TMA descriptor.
 
@@ -261,9 +267,15 @@ def maybe_desc_name(name: str, matches: list[str], i: int, desc_name_map: dict[s
     match = matches[i]
     if not (match == name + "_desc" or match.startswith(name + "_desc_")):
         return False
-    desc_decls = []
+    if descriptor_matches is not None:
+        if not descriptor_matches[i]:
+            return False
+        if desc_name_map is not None:
+            desc_name_map[match] = name
+        return True
     if desc_name_map is not None:
         desc_name_map[match] = name
+    desc_decls = []
     if i > 0:
         desc_decls.append(matches[i - 1])
     if i < len(matches) - 1:
@@ -314,10 +326,12 @@ def parse_function_call_args(
         return []
     signature = declaration[signature_start : signature_end - 1]
     matches = []
+    descriptor_matches = []
     for parameter in signature.split(","):
         match = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^]]*\])?$", parameter.strip())
         if match:
             matches.append(match.group(1))
+            descriptor_matches.append("CUtensorMap" in parameter)
     call_args = []
 
     for i, match in enumerate(matches):
@@ -337,7 +351,9 @@ def parse_function_call_args(
                     call_args.append(match)
                 matched = True
                 break
-            elif maybe_desc_name(arg["name"], matches, i, desc_name_map):
+            elif maybe_desc_name(
+                arg["name"], matches, i, desc_name_map, descriptor_matches
+            ):
                 if transform_arg is not None:
                     call_args.append(transform_arg(match, "None"))
                 else:

@@ -25,6 +25,31 @@ def test_parse_function_call_args_uses_host_expression_for_scalars():
     assert call_args == [(host_expression, "ctypes.c_int32")]
 
 
+def test_parse_function_call_args_maps_tma_descriptors():
+    desc_name_map = {}
+    declaration = (
+        "__global__ void kernel(__grid_constant__ const CUtensorMap A_desc, "
+        "__grid_constant__ const CUtensorMap B_desc, half_t* __restrict__ C)"
+    )
+    call_args = parse_function_call_args(
+        declaration,
+        [
+            {"name": "A", "type": "half_t* __restrict__"},
+            {"name": "B", "type": "half_t* __restrict__"},
+            {"name": "C", "type": "half_t* __restrict__"},
+        ],
+        [object(), object(), object()],
+        desc_name_map=desc_name_map,
+        transform_arg=lambda name, arg_type: (name, arg_type),
+    )
+    assert call_args == [
+        ("A_desc", "None"),
+        ("B_desc", "None"),
+        ("C", "half_t* __restrict__"),
+    ]
+    assert desc_name_map == {"A_desc": "A", "B_desc": "B"}
+
+
 @pytest.fixture
 def nvrtc_ffi(monkeypatch, tmp_path):
     nvrtc = pytest.importorskip("cuda.bindings.nvrtc")
