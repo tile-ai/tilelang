@@ -216,15 +216,15 @@ jobs:
           echo "::group::torch.utils.collect_env"
           python -m torch.utils.collect_env
           # Self-contained PTO toolchain from the official hw-native-sys/PTOAS
-          # vmi-v0.1.6 release (ptodsl + MLIR dialects + ptoas CLI).
+          # v0.66 release (ptodsl + MLIR dialects + ptoas CLI).
           case "${RUNNER_ARCH}" in
             ARM64)
               PTOAS_ARCH=aarch64
-              PTOAS_SHA256=4fa6ccd152b126fbf9d2453b86d424a5212606ac4776f4dc9a50d5fb75566fd6
+              PTOAS_SHA256=d121b5b5db9a23a98eb3c0acc74d0abaef8aaa90e4df0385e79feb67636ef997
               ;;
             X64)
               PTOAS_ARCH=x86_64
-              PTOAS_SHA256=e215fb0d4076566d4d9e41aa42ee85e93910b06d21701048129edc943903c219
+              PTOAS_SHA256=539e20bd7ab02958d5ccb2355772fbe58e244062d620a71a8da3b17ca43df8cc
               ;;
             *)
               echo "Unsupported runner architecture: ${RUNNER_ARCH}" >&2
@@ -232,7 +232,7 @@ jobs:
               ;;
           esac
           PTOAS_CACHE_DIR="${XDG_CACHE_HOME}/ptoas"
-          PTOAS_FILENAME="ptoas_vmi-0.1.6-cp312-cp312-manylinux_2_34_${PTOAS_ARCH}.whl"
+          PTOAS_FILENAME="ptoas-0.66-cp312-cp312-manylinux_2_34_${PTOAS_ARCH}.whl"
           PTOAS_WHEEL="${PTOAS_CACHE_DIR}/${PTOAS_FILENAME}"
           mkdir -p "${PTOAS_CACHE_DIR}"
           if ! [[ -f "${PTOAS_WHEEL}" ]] || \
@@ -241,7 +241,7 @@ jobs:
             trap 'rm -f "${PTOAS_DOWNLOAD}"' EXIT
             curl --fail --location --retry 3 \
               --output "${PTOAS_DOWNLOAD}" \
-              "https://github.com/hw-native-sys/PTOAS/releases/download/vmi-v0.1.6/${PTOAS_FILENAME}"
+              "https://github.com/hw-native-sys/PTOAS/releases/download/v0.66/${PTOAS_FILENAME}"
             printf '%s  %s\n' "${PTOAS_SHA256}" "${PTOAS_DOWNLOAD}" | sha256sum --check -
             mv "${PTOAS_DOWNLOAD}" "${PTOAS_WHEEL}"
             trap - EXIT
