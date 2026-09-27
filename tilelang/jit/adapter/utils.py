@@ -307,13 +307,16 @@ def parse_function_call_args(
     Returns:
         List of parsed call arguments.
     """
-    kernel = re.search(
-        r"__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?(?:\w+\s+)*([A-Za-z_]\w*)\s*\(",
-        declaration,
+    global_start = declaration.find("__global__")
+    if global_start < 0:
+        return []
+    kernel = next(
+        (match for match in re.finditer(r"([A-Za-z_]\w*)\s*\(", declaration[global_start:]) if match.group(1) != "__launch_bounds__"),
+        None,
     )
     if kernel is None:
         return []
-    signature_start = declaration.find("(", kernel.start(1)) + 1
+    signature_start = global_start + kernel.end()
     depth = 1
     signature_end = signature_start
     while signature_end < len(declaration) and depth:
