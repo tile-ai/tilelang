@@ -295,7 +295,24 @@ def parse_function_call_args(
     Returns:
         List of parsed call arguments.
     """
-    signature = declaration[declaration.find("(") + 1 : declaration.rfind(")")]
+    kernel = re.search(
+        r"__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?(?:\w+\s+)*([A-Za-z_]\w*)\s*\(",
+        declaration,
+    )
+    if kernel is None:
+        return []
+    signature_start = declaration.find("(", kernel.start(1)) + 1
+    depth = 1
+    signature_end = signature_start
+    while signature_end < len(declaration) and depth:
+        if declaration[signature_end] == "(":
+            depth += 1
+        elif declaration[signature_end] == ")":
+            depth -= 1
+        signature_end += 1
+    if depth:
+        return []
+    signature = declaration[signature_start : signature_end - 1]
     matches = []
     for parameter in signature.split(","):
         match = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^]]*\])?$", parameter.strip())

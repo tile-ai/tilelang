@@ -16,7 +16,7 @@ from tilelang.jit.adapter.utils import parse_function_call_args
 def test_parse_function_call_args_uses_host_expression_for_scalars():
     host_expression = object()
     call_args = parse_function_call_args(
-        'extern "C" __global__ void kernel(int n)',
+        'extern "C" __global__ void kernel(int n) { helper(n); }',
         [{"name": "n", "type": "ctypes.c_int32"}],
         [host_expression],
         transform_arg=lambda name, arg_type: (name, arg_type),
