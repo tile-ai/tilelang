@@ -107,6 +107,10 @@ def main() -> None:
     parser.add_argument("--verify", action="store_true")
     parser.add_argument("--dump-source")
     args = parser.parse_args()
+    if args.block_k % 64 or args.k % 64:
+        parser.error("--block-k and --k must be multiples of 64 (the SM120 block-scaled MMA K atom)")
+    if args.k % args.block_k:
+        parser.error("--k must be a multiple of --block-k")
 
     m, n, k = args.m, args.n, args.k
     kernel = fragment_a_blockscaled_gemm(

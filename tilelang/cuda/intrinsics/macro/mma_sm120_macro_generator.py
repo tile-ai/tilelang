@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tilelang.utils.language import is_fragment
+from tilelang.utils.language import is_fragment, is_shared
 from tvm.runtime import convert
 from tvm.tirx import Buffer, BufferRegion, PrimExpr, Var
 
@@ -616,7 +616,8 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
-        if not is_fragment(SFA_data) and not is_fragment(SFB_data):
+        # Compact selector packages are read from shared memory; other scale scopes keep the per-MMA path below.
+        if is_shared(SFA_data) and is_shared(SFB_data):
             return self._mma_with_compact_scale_packages(
                 A_local_buf,
                 B_local_buf,
