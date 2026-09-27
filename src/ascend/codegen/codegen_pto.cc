@@ -5200,18 +5200,21 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     return;
   }
 
-  // Cumulative histogram updates a mutable vector destination.
-  if (op->op.same_as(tl::simd_chistv2())) {
+  // Histogram updates a mutable vector destination.
+  if (op->op.same_as(tl::simd_chistv2()) ||
+      op->op.same_as(tl::simd_dhistv2())) {
     ICHECK_EQ(op->args.size(), 4U)
-        << "tl.simd.chistv2 expects 4 arguments (dst, src, mask, bin)";
+        << "tl.simd histogram expects 4 arguments (dst, src, mask, bin)";
+    const bool is_dhistv2 = op->op.same_as(tl::simd_dhistv2());
+    const char *name = is_dhistv2 ? "dhistv2" : "chistv2";
     int64_t bin = 0;
     ICHECK(TryGetConstInt(op->args[3], &bin))
-        << "tl.simd.chistv2 bin must be a constant integer";
+        << "tl.simd." << name << " bin must be a constant integer";
     ICHECK(bin == 0 || bin == 1)
-        << "tl.simd.chistv2 only supports bin 0 or 1, got " << bin;
-    std::string dst_ref = GetMutableVectorRef(op->args[0], "chistv2");
+        << "tl.simd." << name << " only supports bin 0 or 1, got " << bin;
+    std::string dst_ref = GetMutableVectorRef(op->args[0], name);
     PrintIndent();
-    stream << dst_ref << " = pto.chistv2(" << dst_ref << ", "
+    stream << dst_ref << " = pto." << name << "(" << dst_ref << ", "
            << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2])
            << ", pto.const(" << bin << ", dtype=pto.int32))\n";
     return;
@@ -5271,6 +5274,24 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         ", pto.mask_type(\"b" + std::to_string(input_bits) + "\"))";
     os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ", " << mask
        << ")";
+    return;
+  }
+
+  // Unsqueeze mask bits into an integer prefix-count vector. PTOAS keeps a
+  // vector carrier operand for this operation, while TileLang only exposes the
+  // predicate; use a zero-initialized carrier of the result type.
+  if (op->op.same_as(tl::simd_vusqz())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.simd.vusqz expects 1 argument (mask)";
+    DataType elem = op->dtype.element_of();
+    ICHECK((elem.is_int() || elem.is_uint()) &&
+           (elem.bits() == 8 || elem.bits() == 16 || elem.bits() == 32))
+        << "tl.simd.vusqz result must be an 8-, 16-, or 32-bit integer vector, "
+           "got "
+        << op->dtype;
+    std::string mask = PrintExpr_(op->args[0]);
+    std::string carrier = "pto.vdup(pto.const(0, dtype=" + DataTypeName(elem) +
+                          "), " + mask + ")";
+    os << "pto.vusqz(" << carrier << ", " << mask << ")";
     return;
   }
 
@@ -5420,6 +5441,27 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         << "tl.simd.vpack expects 2 arguments (src, part)";
     std::string part = Downcast<StringImm>(op->args[1])->value;
     os << "pto.vpack(" << PrintExpr_(op->args[0]) << ", \"" << part << "\")";
+    return;
+  }
+
+  if (op->op.same_as(tl::simd_vunpack())) {
+    ICHECK_EQ(op->args.size(), 2U)
+        << "tl.simd.vunpack expects 2 arguments (src, part)";
+    int64_t part = -1;
+    if (const auto *part_imm = op->args[1].as<IntImmNode>()) {
+      part = part_imm->value;
+    } else if (const auto *part_str = op->args[1].as<StringImmNode>()) {
+      if (part_str->value == "LOWER") {
+        part = 0;
+      } else if (part_str->value == "HIGHER") {
+        part = 1;
+      }
+    }
+    ICHECK(part == 0 || part == 1)
+        << "tl.simd.vunpack part must be LOWER/HIGHER or 0/1, got "
+        << op->args[1];
+    // PTOAS selects signed versus zero extension from the source vector type.
+    os << "pto.vunpack(" << PrintExpr_(op->args[0]) << ", " << part << ")";
     return;
   }
 
