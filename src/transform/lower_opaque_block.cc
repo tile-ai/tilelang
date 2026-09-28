@@ -241,10 +241,9 @@ private:
   /*! \brief Ensure imported C source ends with a newline character. */
   static PrimExpr EnsureTrailingNewline(PrimExpr value) {
     if (const auto *str = value.as<StringImmNode>()) {
-      std::string text = str->value;
-      if (!text.empty() && text.back() != '\n') {
-        return StringImm(text + "\n");
-      }
+      // Keep an extra blank line in case the final newline is
+      // backslash-escaped.
+      return StringImm(str->value + "\n\n");
     }
     return value;
   }

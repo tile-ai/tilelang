@@ -69,13 +69,8 @@ public:
     }
     const auto *value = op->value.as<StringImmNode>();
     TVM_FFI_ICHECK(value != nullptr);
-    const std::string &text = value->value;
-    import_c_stream_ << text;
-    // The import is spliced verbatim; keep its last line from fusing with
-    // whatever is emitted next.
-    if (!text.empty() && text.back() != '\n') {
-      import_c_stream_ << '\n';
-    }
+    // Keep an extra blank line in case the final newline is backslash-escaped.
+    import_c_stream_ << value->value << "\n\n";
     PrintStmt(op->body);
   }
 
