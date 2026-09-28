@@ -851,6 +851,7 @@ def test_equivalent_partial_thread_guards_lower_to_the_same_barriers():
                 for k in TL.serial(rounds):
                     S[tx] = A[k, tx]
                     PartialOut[k, tx] = S[(tx + 1) % active]
+            TL.sync_threads()
             AllOut[tx] = S[tx % active]
 
     @TL.prim_func
@@ -867,6 +868,7 @@ def test_equivalent_partial_thread_guards_lower_to_the_same_barriers():
                 for k in TL.serial(rounds):
                     S[tx] = A[k, tx]
                     PartialOut[k, tx] = S[(tx + 1) % active]
+            TL.sync_threads()
             AllOut[tx] = S[tx % active]
 
     partial_pattern = r"tl::__sync_thread_partial\(\d+,\s*64\)"
