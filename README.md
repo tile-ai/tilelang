@@ -200,6 +200,14 @@ print("GEMM + ReLU passed.")
 
 `@tilelang.jit` specializes the kernel for the input shape and compile-time arguments on first use. `T.Pipelined` stages global-to-shared transfers, `T.gemm` maps the tile operation to the target backend, and `T.Parallel` expresses the elementwise ReLU epilogue. Continue with the [language basics](https://tilelang.com/programming_guides/language_basics.html), then explore the [GEMM examples](https://github.com/tile-ai/tilelang/tree/main/examples/gemm) for layouts, autotuning, and architecture-specific optimizations.
 
+To separate compilation from execution, set
+`TILELANG_REQUIRE_EXPLICIT_COMPILE=1` and call
+`matmul_relu.compile(a, b)` before `matmul_relu(a, b)`. A new specialization
+then raises an error instead of compiling during execution. The first kernel
+launch also seals compilation for the process, so compile every kernel first;
+see the
+[explicit compilation guide](https://tilelang.com/programming_guides/language_basics.html#separating-compilation-from-execution).
+
 ## Examples
 
 - **Start here:** [quickstart](https://github.com/tile-ai/tilelang/blob/main/examples/quickstart.py) and [elementwise kernels](https://github.com/tile-ai/tilelang/tree/main/examples/elementwise)

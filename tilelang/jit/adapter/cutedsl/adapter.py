@@ -339,6 +339,22 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
 
         return result
 
+    def prepare_for_execution(self) -> None:
+        """Reject a fresh runtime-specialized CuTeDSL artifact.
+
+        CuTeDSL's final ``cute.compile`` needs runtime tensor metadata and is
+        intentionally performed by the generated module on its first call.
+        Silently accepting this adapter in explicit-compile mode would violate
+        that mode's compile-before-execution guarantee.
+        """
+        if getattr(self.pymodule, "_cubin_needs_generation", False):
+            raise RuntimeError(
+                "TILELANG_REQUIRE_EXPLICIT_COMPILE=1 cannot prepare a fresh "
+                "CuTeDSL cubin without runtime tensor metadata. Use the tvm_ffi, "
+                "cython, or nvrtc execution backend, or a CuTeDSL cache entry "
+                "whose cubin was generated previously."
+            )
+
     def _save_cubin_to_cache_if_needed(self):
         """Save cubin to cache directory after first execution.
 

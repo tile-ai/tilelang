@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from tilelang.engine.param import KernelParam
+from tilelang.jit.compile_phase import guard_kernel_launch
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,14 @@ class BaseKernelAdapter(ABC):
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         return self.func(*args, **kwds)
 
+    def prepare_for_execution(self) -> None:
+        """Finish backend work that would otherwise occur on first invocation.
+
+        Most adapters compile and load their executable during construction.
+        Backends with an additional lazy preparation step override this method.
+        """
+        return None
+
     def get_kernel_source(self, kernel_only: bool = True) -> str:
         if kernel_only:
             return self.mod.imports[0].inspect_source()
@@ -106,7 +115,7 @@ class BaseKernelAdapter(ABC):
             return self.mod.inspect_source() + "\n\n" + self.mod.imports[0].inspect_source()
 
     def _post_init(self):
-        self.func = self._convert_torch_func()
+        self.func = guard_kernel_launch(self._convert_torch_func())
 
     @staticmethod
     def _normalize_cached_text_source(source: CachedTextSourceLike) -> CachedTextSource:

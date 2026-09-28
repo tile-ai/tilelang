@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Literal
 from tvm.target import Target as TVMTarget
 from tvm.tirx import PrimFunc
 from tilelang.jit import JITKernel
+from tilelang.jit.compile_phase import compilation_guard
 from tilelang import env
 from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache
 from tilelang.jit.adapter.cython.kernel_cache import CythonKernelCache
@@ -64,6 +65,7 @@ def _resolve_cache_dispatch(
     return _dispatch_map[resolved_backend], context, verbose
 
 
+@compilation_guard
 def cached(
     func: PrimFunc = None,
     out_idx: list[int] = None,
