@@ -272,6 +272,7 @@ class LibraryGenerator:
             import importlib.util
             import json
             import pathlib
+            import re
             import sys
             import traceback
 
@@ -309,6 +310,32 @@ class LibraryGenerator:
                             "from ptoas-vmi 0.1.4 or newer"
                         )
                     pto_text = str(merge_jit_modules(*kernels))
+
+                    # TODO: Remove this temporary workaround once the duplicate helper
+                    # symbol issue is fixed in PTOAS. PTOAS may emit identical global
+                    # symbols for helpers (notably ``pto.init_core``) in each nested kernel
+                    # module. Give duplicate module-local helpers distinct symbols so the
+                    # fatobj linker can combine the entries without changing semantics.
+                    modules = re.split(r"(?m)(?=^  module attributes \\{pto\\.backend = )", pto_text)
+                    seen_helpers = set()
+                    rewritten = [modules[0]]
+                    for module_index, module_text in enumerate(modules[1:], 1):
+                        helper_names = re.findall(
+                            r"func\\.func @([A-Za-z_][A-Za-z0-9_]*)\\([^\\n]*\\)"
+                            r' attributes \\{pto\\.ptodsl\\.callable_kind = "func"',
+                            module_text,
+                        )
+                        for helper_name in helper_names:
+                            if helper_name in seen_helpers:
+                                unique_name = f"{helper_name}__module_{module_index}"
+                                module_text = re.sub(
+                                    rf"(?<![A-Za-z0-9_]){re.escape(helper_name)}(?![A-Za-z0-9_])",
+                                    unique_name,
+                                    module_text,
+                                )
+                            seen_helpers.add(helper_name)
+                        rewritten.append(module_text)
+                    pto_text = "".join(rewritten)
                 out_path.write_text(pto_text, encoding="utf-8")
             except Exception:
                 traceback.print_exc()
