@@ -146,6 +146,13 @@ static constexpr const char *kPassProfileThresholdMs =
  */
 TVM_DLL const Op &tvm_ffi_call_with_result();
 
+/*! \brief Elementwise clamp with NaN propagation and single-evaluation
+ * operands. */
+TVM_DLL const Op &clamp();
+
+/*! \brief Shared clamp expansion for backends without a device helper. */
+TVM_DLL PrimExpr LowerClamp(PrimExpr expr);
+
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
  *

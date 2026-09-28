@@ -58,6 +58,37 @@ def test_parallel_static_extent():
     torch.testing.assert_close(result, data + 1.0, atol=1e-5, rtol=1e-5)
 
 
+@pytest.mark.parametrize("enable_let_inline", [False, True])
+@pytest.mark.parametrize("rows,cols,threads,thread_start", [(1, 2, 2, 0), (2, 8, 4, 0), (3, 5, 8, 0), (2, 8, 8, 4)])
+def test_parallel_let_indices(rows, cols, threads, thread_start, enable_let_inline):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA or ROCm runtime unavailable")
+    size = 2 * rows * cols + 8
+
+    @T.prim_func
+    def main(A: T.Tensor((size,), T.int32), B: T.Tensor((size,), T.int32)):
+        with T.Kernel(2, threads=threads) as bx:
+            if T.get_thread_binding() >= thread_start:
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = A[idx] * 3 + idx
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = B[idx] + 5
+
+    config = {tilelang.PassConfigKey.TL_SIMPLIFY: {tilelang.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: enable_let_inline}}
+    target = "hip" if torch.version.hip else "cuda"
+    kernel = tilelang.compile(main, target=target, execution_backend="tvm_ffi", pass_configs=config)
+    data = torch.arange(size, dtype=torch.int32, device="cuda")
+    output = torch.full_like(data, -7)
+    kernel(data, output)
+    expected = torch.full_like(data, -7)
+    expected[4:-4] = data[4:-4] * 4 + 5
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "valid_len",
     PARALLEL_DYNAMIC_VALID_LENGTHS,

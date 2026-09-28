@@ -202,6 +202,16 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
       << "(threads / scale) to be a positive power of two, got "
       << logical_width << " (threads=" << reducing_threads
       << ", scale=" << scale << ")";
+  // The butterfly pairs thread t with t ^ (scale * k).  That only moves the
+  // reduce coordinate when the non-reduced part of the thread index occupies
+  // the bits below `scale`, i.e. when `scale` is itself a power of two.
+  // Otherwise the pairs straddle reduce groups (and replicas) and the result
+  // is silently wrong or reads outside the workspace.
+  ICHECK(tirx::is_const_power_of_two_integer(Integer(scale), &shift))
+      << op_name << ": XOR-butterfly AllReduce requires scale (the thread "
+      << "stride between consecutive reduce participants) to be a power of "
+      << "two, got " << scale << " (threads=" << reducing_threads
+      << "). Pad the non-reduced fragment extent to a power of two.";
 }
 
 inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {

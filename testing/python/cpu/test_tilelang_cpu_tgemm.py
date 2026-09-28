@@ -52,16 +52,6 @@ def ref_matmul(A, B, trans_A, trans_B):
     return torch.matmul(A.float(), B.float()).to(A.dtype)
 
 
-def run_gemm_codegen(M, N, K, block_M, block_N, block_K, trans_A=False, trans_B=False):
-    func = matmul(M, N, K, block_M, block_N, block_K, trans_A, trans_B)
-    with tvm.target.Target("c"):
-        artifact = tilelang.lower(func, target="c", target_host="c")
-    code = artifact.kernel_source
-    assert code is not None, "Code generation failed"
-    assert "matmul" in code or "main" in code, "Generated code missing kernel function"
-    return code
-
-
 def run_gemm_compile(M, N, K, block_M, block_N, block_K, trans_A=False, trans_B=False, dtype=T.float32):
     func = matmul(M, N, K, block_M, block_N, block_K, trans_A, trans_B, dtype=dtype)
     with tvm.target.Target("c"):
@@ -77,25 +67,6 @@ def run_gemm_compile(M, N, K, block_M, block_N, block_K, trans_A=False, trans_B=
     C_ref = ref_matmul(A, B, trans_A, trans_B)
 
     tilelang.testing.torch_assert_close(C, C_ref, atol=1e-2, rtol=1e-2)
-
-
-# --- Codegen tests ---
-
-
-def test_codegen_basic():
-    run_gemm_codegen(128, 128, 128, 64, 64, 64)
-
-
-def test_codegen_rectangular():
-    run_gemm_codegen(256, 512, 128, 64, 64, 64)
-
-
-def test_codegen_trans_A():
-    run_gemm_codegen(128, 128, 128, 64, 64, 64, trans_A=True)
-
-
-def test_codegen_trans_B():
-    run_gemm_codegen(128, 128, 128, 64, 64, 64, trans_B=True)
 
 
 # --- Compile + correctness tests ---

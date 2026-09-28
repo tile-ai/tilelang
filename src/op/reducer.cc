@@ -264,6 +264,11 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
     if (!is_power_of_two(step.extent)) {
       return reject("collective width is not a power of two");
     }
+    // The XOR butterfly can only address the reduce coordinate when the
+    // thread stride between consecutive participants is a power of two.
+    if (!is_power_of_two(step.scale)) {
+      return reject("collective thread stride is not a power of two");
+    }
     int reducing_threads = step.ReducingThreads();
     if (reducing_threads > thread_extent) {
       return reject("collective width exceeds the participant extent");
