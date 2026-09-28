@@ -4,6 +4,7 @@
 #ifndef TVM_TL_THREAD_BOUND_KEY_H_
 #define TVM_TL_THREAD_BOUND_KEY_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 
@@ -12,10 +13,12 @@ namespace tl {
 
 struct ThreadBoundKey {
   int64_t tx_min, tx_max, ty_min, ty_max, tz_min, tz_max;
+  size_t thread_count;
   bool operator==(const ThreadBoundKey &other) const {
     return tx_min == other.tx_min && tx_max == other.tx_max &&
            ty_min == other.ty_min && ty_max == other.ty_max &&
-           tz_min == other.tz_min && tz_max == other.tz_max;
+           tz_min == other.tz_min && tz_max == other.tz_max &&
+           thread_count == other.thread_count;
   }
 };
 
@@ -43,6 +46,7 @@ template <> struct hash<tvm::tl::ThreadBoundKey> {
     h = h * 31 + std::hash<int64_t>()(k.ty_max);
     h = h * 31 + std::hash<int64_t>()(k.tz_min);
     h = h * 31 + std::hash<int64_t>()(k.tz_max);
+    h = h * 31 + std::hash<int64_t>()(k.thread_count);
     return h;
   }
 };

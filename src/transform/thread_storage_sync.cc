@@ -313,13 +313,14 @@ private:
       return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
 
-    // Create or get barrier info
+    size_t thread_count = extent_tx * extent_ty * extent_tz;
     ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
                        bound_ty->min_value, bound_ty->max_value,
-                       bound_tz->min_value, bound_tz->max_value};
+                       bound_tz->min_value, bound_tz->max_value,
+                       thread_count};
 
-    auto [barrier_id, thread_count] =
-        GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
+    // Create or get barrier info
+    auto barrier_id = GetOrCreateBarrier(key);
 
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
@@ -341,23 +342,18 @@ private:
     return Evaluate(Call(op->dtype, op->op, new_args));
   }
 
-  std::pair<size_t, size_t> GetOrCreateBarrier(const ThreadBoundKey &key,
-                                               size_t extent_tx,
-                                               size_t extent_ty,
-                                               size_t extent_tz) {
+  size_t GetOrCreateBarrier(const ThreadBoundKey &key) {
     if (barrier_id_map_.count(key)) {
-      return {barrier_id_map_[key], thread_count_map_[key]};
+      return barrier_id_map_[key];
     }
 
     size_t barrier_id =
         barrier_id_map_.size() +
         static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
-    size_t thread_count = extent_tx * extent_ty * extent_tz;
 
     barrier_id_map_[key] = barrier_id;
-    thread_count_map_[key] = thread_count;
 
-    return {barrier_id, thread_count};
+    return barrier_id;
   }
 
   /*!
@@ -413,7 +409,6 @@ private:
   IterVar tz_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
-  std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
   int warp_size_;
 };
 
