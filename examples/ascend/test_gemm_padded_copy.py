@@ -67,17 +67,12 @@ def _run_gemm_padded_copy(target):
     assert max_diff < 1e-2, f"max_diff={max_diff:.2e}"
 
 
-def test_gemm_padded_copy():
-    _run_gemm_padded_copy("ascend")
-
-
-@pytest.mark.pto
-def test_gemm_padded_copy_pto():
-    _run_gemm_padded_copy("pto")
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+def test_gemm_padded_copy(target):
+    _run_gemm_padded_copy(target)
 
 
 if __name__ == "__main__":
-    test_gemm_padded_copy()
-    print("PASS: test_gemm_padded_copy")
-    test_gemm_padded_copy_pto()
-    print("PASS: test_gemm_padded_copy_pto")
+    for target in ("ascend", "pto"):
+        test_gemm_padded_copy(target)
+        print(f"PASS: test_gemm_padded_copy[{target}]")

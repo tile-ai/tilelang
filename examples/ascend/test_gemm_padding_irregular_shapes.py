@@ -202,26 +202,19 @@ def _test_fp8_blockscaled_irregular_padding_gemm(case: Case, target: str):
     )
 
 
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
+
+
+@pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("case", BF16_CASES, ids=case_id)
-def test_bf16_irregular_padding_gemm(case: Case):
-    _test_bf16_irregular_padding_gemm(case, target="ascend")
+def test_bf16_irregular_padding_gemm(case: Case, target: str):
+    _test_bf16_irregular_padding_gemm(case, target=target)
 
 
-@pytest.mark.pto
-@pytest.mark.parametrize("case", BF16_CASES, ids=case_id)
-def test_bf16_irregular_padding_gemm_pto(case: Case):
-    _test_bf16_irregular_padding_gemm(case, target="pto")
-
-
+@pytest.mark.parametrize("target", TARGETS)
 @pytest.mark.parametrize("case", FP8_CASES, ids=case_id)
-def test_fp8_blockscaled_irregular_padding_gemm(case: Case):
-    _test_fp8_blockscaled_irregular_padding_gemm(case, target="ascend")
-
-
-@pytest.mark.pto
-@pytest.mark.parametrize("case", FP8_CASES, ids=case_id)
-def test_fp8_blockscaled_irregular_padding_gemm_pto(case: Case):
-    _test_fp8_blockscaled_irregular_padding_gemm(case, target="pto")
+def test_fp8_blockscaled_irregular_padding_gemm(case: Case, target: str):
+    _test_fp8_blockscaled_irregular_padding_gemm(case, target=target)
 
 
 if __name__ == "__main__":

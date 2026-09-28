@@ -27,22 +27,14 @@ def _run_rmsnorm(d, target):
     assert max_diff < 1e-3, f"max_diff={max_diff:.2e}"
 
 
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
 @pytest.mark.parametrize("d", DS)
-def test_rmsnorm_auto(d):
-    _run_rmsnorm(d, "ascend")
-
-
-@pytest.mark.pto
-@pytest.mark.parametrize("d", DS)
-def test_rmsnorm_pto(d):
-    _run_rmsnorm(d, "pto")
+def test_rmsnorm(d, target):
+    _run_rmsnorm(d, target)
 
 
 if __name__ == "__main__":
-    for d in DS:
-        test_rmsnorm_auto(d)
-        print(f"PASS: test_rmsnorm_auto d={d}")
-
-    for d in DS:
-        test_rmsnorm_pto(d)
-        print(f"PASS: test_rmsnorm_pto d={d}")
+    for target in ("ascend", "pto"):
+        for d in DS:
+            test_rmsnorm(d, target)
+            print(f"PASS: test_rmsnorm d={d} target={target}")

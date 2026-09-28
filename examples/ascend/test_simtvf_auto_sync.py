@@ -8,21 +8,25 @@ import tilelang
 from example_simtvf_auto_sync import sync_kernel
 
 
-def test_asc_syncthreads_emitted():
-    kernel = tilelang.compile(sync_kernel(1024))
+def _test_syncthreads_emitted(target, expected):
+    kernel = tilelang.compile(sync_kernel(1024), target=target)
     source = kernel.get_kernel_source()
-    assert "asc_syncthreads" in source
+    assert expected in source
 
 
-@pytest.mark.pto
-def test_pto_syncthreads_emitted():
-    kernel = tilelang.compile(sync_kernel(1024), target="pto")
-    source = kernel.get_kernel_source()
-    assert "pto.syncthreads" in source
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        ("ascend", "asc_syncthreads"),
+        pytest.param("pto", "pto.syncthreads", marks=pytest.mark.pto),
+    ],
+)
+def test_syncthreads_emitted(target, expected):
+    _test_syncthreads_emitted(target, expected)
 
 
 if __name__ == "__main__":
-    test_asc_syncthreads_emitted()
-    print("PASS: test_asc_syncthreads_emitted")
-    test_pto_syncthreads_emitted()
-    print("PASS: test_pto_syncthreads_emitted")
+    _test_syncthreads_emitted("ascend", "asc_syncthreads")
+    print("PASS: test_syncthreads_emitted[ascend]")
+    _test_syncthreads_emitted("pto", "pto.syncthreads")
+    print("PASS: test_syncthreads_emitted[pto]")

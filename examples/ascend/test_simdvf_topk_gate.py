@@ -15,6 +15,8 @@ from example_simdvf_topk_gate import ref_program, topk_gate
         ("asc", 128, 6),
         ("asc", 161, 8),
         pytest.param("pto", 256, 8, marks=pytest.mark.pto),
+        pytest.param("pto", 128, 6, marks=pytest.mark.pto),
+        pytest.param("pto", 161, 8, marks=pytest.mark.pto),
     ],
 )
 def test_topk_gate(backend, num_experts, num_topk, num_tokens=4096):

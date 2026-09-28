@@ -25,17 +25,12 @@ def _run_gemm_ub_merge(target="ascend"):
     assert max_diff < 1e-2, f"max_diff={max_diff:.2e}"
 
 
-def test_gemm_ub_merge():
-    _run_gemm_ub_merge(target="ascend")
-
-
-@pytest.mark.pto
-def test_gemm_ub_merge_pto():
-    _run_gemm_ub_merge(target="pto")
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+def test_gemm_ub_merge(target):
+    _run_gemm_ub_merge(target=target)
 
 
 if __name__ == "__main__":
-    test_gemm_ub_merge()
-    print("PASS: test_gemm_ub_merge")
-    test_gemm_ub_merge_pto()
-    print("PASS: test_gemm_ub_merge_pto")
+    for target in ("ascend", "pto"):
+        test_gemm_ub_merge(target)
+        print(f"PASS: test_gemm_ub_merge[{target}]")
