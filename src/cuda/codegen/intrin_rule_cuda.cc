@@ -152,7 +152,7 @@ template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
 
 TVM_REGISTER_OP("tirx.popcount")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
-                              DispatchPureExtern<CUDAPopcount>, 11);
+                               DispatchPureExtern<CUDAPopcount>, 11);
 
 TVM_REGISTER_OP("tirx.rsqrt")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
