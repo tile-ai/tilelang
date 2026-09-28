@@ -5,6 +5,7 @@
  */
 
 #include "support/check.h"
+#include <tvm/ffi/reflection/accessor.h>
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/utils.h>
 #include <tvm/tirx/analysis.h>
@@ -14,10 +15,12 @@
 #include <tvm/tirx/transform.h>
 
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 #include "arith/const_fold.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "common/attr.h"
 #include "tir/analysis/control_flow_graph.h"
 #include "tir/analysis/var_use_def_analysis.h"
 
@@ -215,6 +218,99 @@ CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
   return visitor.used_in_buffer_def_;
 }
 
+class UnusedBindRemover : public StmtMutator {
+public:
+  static PrimFunc Apply(PrimFunc func) {
+    bool removed;
+    // Recompute after removing consumers to handle chains and shared nodes.
+    do {
+      UnusedBindRemover remover;
+      remover.CollectUsedVars(func);
+      func.CopyOnWrite()->body = remover(func->body);
+      removed = remover.removed_;
+    } while (removed);
+    return func;
+  }
+
+private:
+  void CollectUsedVars(const Any &value) {
+    auto obj = value.as<ObjectRef>();
+    if (!obj || !obj->defined() || !visited_.insert(obj->get()).second) {
+      return;
+    }
+    if (auto var = obj->as<VarNode>()) {
+      used_vars_.insert(var);
+    }
+    if (auto bind = obj->as<BindNode>()) {
+      // The definition is not a use. Do not mark its Var visited either:
+      // the same object may be referenced later, including through metadata.
+      CollectUsedVars(bind->value);
+      CollectUsedVars(bind->var->type_annotation);
+      return;
+    }
+    if (auto alloc = obj->as<AllocBufferNode>()) {
+      if (alloc->annotations.count(tirx::attr::kVolatile)) {
+        volatile_buffers_.insert(alloc->buffer->data.get());
+      }
+    }
+    if (auto attr = obj->as<AttrStmtNode>()) {
+      if (attr->attr_key == tl::attr::volatile_scope) {
+        if (auto var = attr->node.as<VarNode>()) {
+          volatile_buffers_.insert(var);
+        } else if (auto buffer = attr->node.as<BufferNode>()) {
+          volatile_buffers_.insert(buffer->data.get());
+        }
+      }
+    }
+    // Ordinary TIR visitors omit some buffer fields and annotations. Walk
+    // reflected fields and containers so metadata-only references stay live.
+    if (auto array = obj->as<ArrayObj>()) {
+      for (const Any &item : *array) {
+        CollectUsedVars(item);
+      }
+    } else if (auto map = obj->as<MapObj>()) {
+      for (const auto &item : *map) {
+        CollectUsedVars(item.first);
+        CollectUsedVars(item.second);
+      }
+    } else {
+      auto visit_field = [&](const TVMFFIFieldInfo *field) {
+        CollectUsedVars(reflection::FieldGetter(field)(*obj));
+      };
+      reflection::ForEachFieldInfo(TVMFFIGetTypeInfo((*obj)->type_index()),
+                                   visit_field);
+    }
+  }
+
+  bool CanDiscard(const PrimExpr &value) const {
+    bool discard = SideEffect(value) <= CallEffectKind::kReadState &&
+                   !UsesVar(value, [&](const VarNode *var) {
+                     return volatile_buffers_.count(var);
+                   });
+    // SideEffect and UsesVar do not visit BufferLoad predicates.
+    PostOrderVisit(value, [&](const ObjectRef &node) {
+      if (const auto *load = node.as<BufferLoadNode>();
+          load && load->predicate) {
+        discard &= CanDiscard(load->predicate.value());
+      }
+    });
+    return discard;
+  }
+
+  Stmt VisitStmt_(const BindNode *op) final {
+    if (!used_vars_.count(op->var.get()) && CanDiscard(op->value)) {
+      removed_ = true;
+      return Evaluate(Integer(0));
+    }
+    return GetRef<Stmt>(op);
+  }
+
+  std::unordered_set<const Object *> visited_;
+  std::unordered_set<const VarNode *> used_vars_;
+  std::unordered_set<const VarNode *> volatile_buffers_;
+  bool removed_{false};
+};
+
 class SimplifyConfig : public Attrs {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, Attrs,
@@ -246,6 +342,7 @@ public:
                               std::move(used_in_buffer_def));
     simplifier.MarkBufferMapShapes(func);
     func.CopyOnWrite()->body = simplifier(func->body);
+    func = UnusedBindRemover::Apply(std::move(func));
 
     // Optionally remove unused buffer parameters
     if (simplify_arguments) {

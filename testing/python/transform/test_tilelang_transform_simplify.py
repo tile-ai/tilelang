@@ -5,7 +5,8 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 
-from tvm import te
+from tvm import te, tirx
+import pytest
 
 
 def bind_then(var, value, body):
@@ -666,6 +667,109 @@ def test_tilelang_enable_simplify_let_inline_false():
     mod_before = tvm.IRModule({"main": before})
     # When disabled, let statements should be preserved (before == after)
     simplify_and_compare(mod_before, mod_before, {PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE.value: False})
+
+
+@pytest.mark.parametrize("depth, used", [(0, False), (1, False), (1, True)])
+def test_simplify_unused_macro_bind(depth, used, capfd):
+    @T.macro
+    def macro(value):
+        for _ in [None] * depth:
+            value = value + 1.0
+        return value if used else 7.0
+
+    @T.prim_func
+    def before(B: T.Tensor((1,), "float32")):
+        with T.Kernel(1, threads=1):
+            x = T.alloc_var("float32")
+            B[0] = macro(x)
+
+    mod = tvm.IRModule.from_expr(before)
+    tl.transform.VerifyBufferInit()(mod)
+    assert "Buffer read before initialization" in capfd.readouterr().err
+    after = tl.transform.Simplify()(mod)
+    tl.transform.VerifyBufferInit()(after)
+    assert ("Buffer read before initialization" in capfd.readouterr().err) == used
+    bindings = []
+    tirx.stmt_functor.post_order_visit(
+        after["before"].body, lambda node: bindings.append(node) if isinstance(node, tirx.Bind) and node.var.dtype == "float32" else None
+    )
+    assert bool(bindings) == used
+
+
+def test_simplify_bind_read_before_write():
+    A, C = buffer_pair()
+    value = tirx.Var("value", "float32")
+    body = bind_then(value, A[0], tirx.SeqStmt([tirx.BufferStore(A, 2.0, [0]), tirx.BufferStore(C, value, [0])]))
+    mod = tvm.IRModule.from_expr(tirx.PrimFunc([A, C], body))
+    simplify_and_compare(mod, mod)
+
+
+def test_simplify_bind_side_effects():
+    A, _ = buffer_pair()
+    values = [
+        tirx.call_extern("float32", "update_state", A.data),
+        T.atomic_add(A[0], 1.0, return_prev=True),
+        T.tvm_storage_sync("shared"),
+        tirx.BufferLoad(A, [0], predicate=tirx.call_extern("bool", "predicate_effect")),
+    ]
+    bindings = [tirx.Bind(tirx.Var("value", value.dtype), value) for value in values]
+    dead = [tirx.Bind(tirx.Var("dead", bind.var.dtype), bind.var + 1) for bind in bindings]
+    before = tvm.IRModule.from_expr(tirx.PrimFunc([A], tirx.SeqStmt(bindings + dead)))
+    expected = tvm.IRModule.from_expr(tirx.PrimFunc([A], tirx.SeqStmt(bindings)))
+    simplify_and_compare(before, expected)
+
+
+@pytest.mark.parametrize("allocation", [False, True])
+def test_simplify_bind_volatile(allocation):
+    A = tirx.decl_buffer((1,), "float32", scope="local")
+    alias = tirx.decl_buffer((1,), "float32", data=A.data, scope="local")
+    value = tirx.Var("value", "float32")
+
+    def wrap(body):
+        body = (
+            tirx.SeqStmt([tirx.AllocBuffer(A, annotations={"tirx.volatile": True}), body])
+            if allocation
+            else tirx.AttrStmt(A.data, "volatile_scope", 1, body)
+        )
+        return tvm.IRModule.from_expr(tirx.PrimFunc([], body))
+
+    bind = tirx.Bind(value, alias[0])
+    simplify_and_compare(wrap(tirx.SeqStmt([bind, tirx.Bind(tirx.Var("dead", "float32"), value + 1.0)])), wrap(bind))
+
+
+def test_simplify_bind_metadata():
+    source = tirx.decl_buffer((4,), "int32")
+    size, stride, offset, tag = [tirx.Var(name, "int32") for name in ("size", "stride", "offset", "tag")]
+    data = tirx.Var("data", tvm.ir.PointerType(tvm.ir.PrimType("float32")))
+    view = tirx.decl_buffer((size,), "float32", data=data, strides=[stride], elem_offset=offset)
+    bindings = [tirx.Bind(var, source[i]) for i, var in enumerate((size, stride, offset, tag))]
+    bindings.append(tirx.Bind(data, tirx.call_pure_extern("handle", "get_pointer")))
+    loop = tirx.For(
+        tirx.Var("i", "int32"),
+        0,
+        2,
+        tirx.ForKind.SERIAL,
+        tirx.BufferStore(view, 1.0, [0]),
+        annotations={"test.metadata": {"nested": [tag]}},
+    )
+    mod = tvm.IRModule.from_expr(tirx.PrimFunc([source], tirx.SeqStmt(bindings + [loop])))
+    simplify_and_compare(mod, mod)
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_simplify_bind_shared_nodes(live):
+    A, C = buffer_pair()
+    cond, value = tirx.Var("cond", "bool"), tirx.Var("value", "float32")
+    shared = value + 1.0
+    dead = tirx.Bind(tirx.Var("dead", "float32"), shared)
+    store = tirx.BufferStore(C, shared if live else 0.0, [0])
+    before = bind_then(value, A[0], tirx.SeqStmt([tirx.IfThenElse(cond, dead, dead), store]))
+    expected = tirx.SeqStmt([tirx.IfThenElse(cond, tirx.Evaluate(0), tirx.Evaluate(0)), store])
+    if live:
+        expected = bind_then(value, A[0], expected)
+    simplify_and_compare(
+        tvm.IRModule.from_expr(tirx.PrimFunc([A, C, cond], before)), tvm.IRModule.from_expr(tirx.PrimFunc([A, C, cond], expected))
+    )
 
 
 if __name__ == "__main__":
