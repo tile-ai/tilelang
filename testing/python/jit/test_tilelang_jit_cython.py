@@ -57,5 +57,34 @@ def test_cython_pdl():
     print("pdl test passed!")
 
 
+@tilelang.testing.requires_cuda
+def test_cython_dynamic_shape_output_before_input():
+    """An output may precede the input that supplies its symbolic dimension.
+
+    The symbolic-dimension map used to be built over every parameter in signature
+    order, outputs included, and the caller assembled its tensor list in a single
+    pass. When the output came first it was therefore recorded as the owner of its
+    own dimension and then read its own not-yet-filled slot.
+    """
+    N = T.dynamic("N")
+
+    @tilelang.jit(out_idx=[0], execution_backend="cython")
+    def kernel():
+        @T.prim_func
+        def main(
+            B: T.Tensor((N,), "float32"),
+            A: T.Tensor((N,), "float32"),
+        ):
+            with T.Kernel(1, threads=128):
+                for i in T.Parallel(N):
+                    B[i] = A[i] + T.float32(9)
+
+        return main
+
+    a = torch.arange(128, dtype=torch.float32).cuda()
+    out = kernel()(a)
+    tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

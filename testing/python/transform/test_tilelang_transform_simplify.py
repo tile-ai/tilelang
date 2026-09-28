@@ -64,6 +64,24 @@ def test_thread_extent_simplify():
     assert isinstance(body.body.body.body, tvm.tirx.BufferStore)
 
 
+def test_dynamic_reduction_tail_guard():
+    batch = tvm.tirx.Var("batch", "int32")
+    i = tvm.tirx.Var("i", "int32")
+    tx = te.thread_axis("threadIdx.x")
+    source = tvm.tirx.decl_buffer((batch, 192), "float32", name="A")
+    output = tvm.tirx.decl_buffer((128,), "float32", name="C")
+    offset = i * 128 + tx.var
+    store = tvm.tirx.BufferStore(output, tvm.tirx.BufferLoad(source, [offset // 192, offset % 192]), [tx.var])
+    guard = tvm.tirx.IfThenElse(offset < batch * 192, store, None)
+    loop = tvm.tirx.For(i, 0, (batch * 192 - 1) // 128 + 1, tvm.tirx.ForKind.SERIAL, guard)
+    body = tvm.tirx.AttrStmt(tx, "thread_extent", 128, loop)
+    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([source, output], body))
+
+    # For batch=1, i=1 and tx=64, the offset is 192 and the guard is false.
+    # Incorrect modular bounds used to prove it true without a batch > 0 assume.
+    simplify_and_compare(mod, mod)
+
+
 def test_context_singleton_floordiv_index():
     A, C = buffer_pair((128,))
     tx = te.thread_axis("threadIdx.x")

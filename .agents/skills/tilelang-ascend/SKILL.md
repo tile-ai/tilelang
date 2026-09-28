@@ -4,7 +4,7 @@ description: >
   Write, port, tune, and debug TileLang kernels for Huawei Ascend NPUs. Covers the
   Ascend dialect, AIC/AIV work partitioning, SIMD/SIMT operations, memory and
   data movement, T.Stage scheduling, synchronization, performance measurement,
-  profiling, and VF latency estimates and annotations.
+  profiling, operation cycle measurements, and VF latency annotations.
   Explains how Ascend kernel programming differs from CUDA/GPU programming.
 ---
 
@@ -28,7 +28,7 @@ documentation and [tilelang-build](../tilelang-build/SKILL.md).
   execution, conflict hints, and fully manual protocols.
 
 - [Profiling recipes](references/profiling.md): device timing, regression tools,
-  generated-source experiments, and isolated VF simulation.
+  generated-source experiments, and operation cycle measurements with npusim.
 
 For a suspected compiler defect, preserve the smallest failing kernel together
 with its generated source or lowering trace.
@@ -607,7 +607,7 @@ has several measured expansions, use their largest cost for its shared
 annotation. Recompile and validate correctness after changing `latency=`.
 Inaccurate estimates can produce poor schedules, but correctness still requires
 sound dependencies and synchronization. Use
-[VF latency estimation](#124-estimate-vf-latency) for isolated cycle estimates
+[operation cycle measurements](#124-measure-operation-cycles) for isolated cycle estimates
 and [performance measurement](#12-performance-measurement-and-tuning) for
 whole-kernel device timing; these measure different quantities.
 
@@ -818,23 +818,30 @@ set. Report missing, skipped, or failed cases explicitly. Keep correctness and
 performance status separate; do not optimize an incorrect kernel into a new
 baseline.
 
-### 12.4 Estimate VF latency
+### 12.4 Measure operation cycles
 
-For a `T.SimtVF` or `T.SimdVF` cycle estimate, isolate the generated function
-and its actual call site, preserving thread dimensions, arguments, memory
-aliasing, masks, and loop trip counts. Match macro expansions to the source
-scope rather than assuming generated declaration order. Use a working TileLang
-Ascend build; see [tilelang-build](../tilelang-build/SKILL.md) when a rebuild
-is needed.
+Use npusim to investigate the cycles spent in a VF, data transfer, Cube
+operation, synchronization handoff, or a sequence of these in your kernel.
+Choose the measured region and preserve its shapes, dtypes, layouts, buffer
+lifetimes, and dependencies. For `T.SimtVF` and `T.SimdVF`, also preserve the
+actual call site, thread dimensions, masks, and loop trip counts. Match macro
+expansions to the source scope rather than generated declaration order.
 
-Follow the [VF simulation recipe](references/profiling.md#vf-simulation-and-latency-estimates)
-to compile a minimal launcher, record its execution, and decode the VF's
-instruction interval. Measure each relevant input-dependent path. Report the
-source scope, generated VF name, cycles, input conditions, target/toolchain,
-and paths to the source, build command, launcher, and trace.
+Follow the [cycle measurement recipe](references/profiling.md#operation-cycle-measurements)
+to isolate the operation, compile a minimal launcher, record its execution,
+and identify the relevant instruction interval. Measure each relevant
+input-dependent path and retain the source, binary, build command, launcher,
+input conditions, and trace with the result.
 
-When asked to apply the estimate, follow the
-[latency annotation guidance](#83-vf-latency-annotation).
+Verify the captured kernel and instruction count, check outputs against a
+reference, and identify dispatch versus completion events before quoting
+cycles. For repeated work, distinguish dependent latency from independent
+throughput; see [repeated operations](references/profiling.md#repeated-operations-and-throughput).
+
+To apply measured task costs, use
+[`T.Task(latency=..., ii=...)`](references/profiling.md#override-automatic-task-estimates).
+For VF-specific annotations, follow the
+[VF latency annotation guidance](#83-vf-latency-annotation).
 Keep simulated cycles, modeled II, compiler solve time, and measured device
 latency separate. Whole-kernel overlap, transfers, and memory effects require
 benchmarking the actual kernel after rescheduling.

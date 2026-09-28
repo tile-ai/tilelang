@@ -4,7 +4,7 @@ Contents: [components](#measurement-and-tuning-components),
 [benchmark API](#do_bench-units-and-return-types),
 [regression drivers](#existing-regression-entry-points),
 [source experiments](#generated-source-experiments),
-[VF simulation](#vf-simulation-and-latency-estimates).
+[cycle measurements](#operation-cycle-measurements).
 
 ## Measurement and tuning components
 
@@ -98,20 +98,44 @@ frontend or dependency model already supports that change. Confirm a fresh
 compile actually applies the callback; cached artifacts can bypass the
 experiment. Validate results before interpreting faster timing.
 
-## VF simulation and latency estimates
+## Operation cycle measurements
 
-### Isolate and compile the VF
+### Choose the measured region
+
+Start from the operation whose cost or overlap you want to understand in your
+kernel. State whether the result covers one operation, a dependent chain,
+independent repeated work, or the complete kernel. These boundaries answer
+different questions.
+
+| Region | Keep in the experiment |
+|---|---|
+| SIMD/SIMT VF | Actual function and call, thread dimensions, masks, loop counts, loads/stores, and synchronization |
+| Data transfer | Source/destination memory spaces, physical bytes, layout conversion, strides, alignment, and buffer reuse |
+| Cube operation | Operand dtype and tile geometry, initialized inputs, accumulator clear/accumulate mode, and dependencies |
+| Synchronization handoff | Producer, signal/wait, and consumer; an idle signal alone does not measure readiness under load |
+| Combined pipeline | Operation order, buffer versions, overlap, first-iteration fill, and final drain |
+
+### Isolate and compile the operation
 
 Save the kernel's generated `.asc` with its intended pass settings. Copy the
-selected VF definition, includes, and helper dependencies into a small `.asc`
-file, with a `__global__ __vector__` entry that invokes it once. Preserve the
-original SIMD call or SIMT `asc_vf_call<vf>(cce::dim3(x, y, z), ...)`, including
-all thread dimensions and captured arguments.
+selected operation, includes, and helper dependencies into a small `.asc`
+file. Match its execution model with a Cube, Vector, or mixed entry. For a VF,
+use a `__global__ __vector__` entry and preserve the original SIMD call or SIMT
+`asc_vf_call<vf>(cce::dim3(x, y, z), ...)`, including captured arguments.
 
-Provide aligned GM/UB storage covering every accessed offset and preserving
-alias relationships. Initialize representative inputs, masks, and scalar
-parameters; finish input preparation and synchronization before the VF runs.
+Provide aligned storage in the original memory spaces, covering every accessed
+offset and preserving alias relationships. Initialize representative inputs,
+masks, and scalar parameters; finish preparation and synchronization before
+the measured region. For a copy-only or compute-only experiment, make its
+inputs ready beforehand. Add the producer back when measuring the dependency
+chain or overlap, and report that as a separate boundary.
 Keep measurement programs and traces in a temporary directory for the task.
+
+Check the output against a reference before interpreting timing. Use inputs
+that distinguish the relevant paths and buffer versions. If intermediate state
+cannot be read back, consume it in a checked result after the measured interval.
+Inspect the generated code and captured instruction count to confirm the
+intended work remains after optimization.
 
 Reuse the kernel's CANN installation, target, optimization flags, TileLang
 template include path, and launch ABI. Compile the isolated program with
@@ -123,15 +147,33 @@ and simulator versions; load that installation's `set_env.sh` if needed.
 
 Use `npusim` and inspect `npusim record --help`.
 Select the model matching the compiler target and a fresh output directory.
-For example, an Ascend950 run uses:
+For example, an Ascend950 run with a Python launcher uses:
 
 ```bash
-npusim record -s Ascend950 -o <output-dir> <executable-launcher>
+npusim record -s Ascend950 -o ./cycle-profile -g -n 0 \
+  'python /absolute/path/to/kernel_launcher.py'
 ```
 
+In the current CLI, `-n 0` enables core 0 logs; it does not select a kernel or
+change the launch grid. Select the kernel's core count in the launcher. Use
+`-n all` or the required core range when the measurement spans several cores;
+one core's completion does not establish whole-kernel completion.
+
+For a Python launcher, prepare inputs and reference results on the CPU, then
+transfer the inputs to the device. Avoid NPU random generation, quantization,
+or warmup kernels before the intended capture. Confirm the captured kernel
+identity and launch count instead of assuming the recorder selected the intended
+wrapper. Use separate processes for independent captures; several cases may
+share one wrapper if each has a distinct trace interval and completed setup.
+
 Keep the selected CANN runtime and simulator libraries in the launch
-environment. Wait for kernel completion and recording flush, then check the
-log. Missing or truncated vector instructions invalidate the cycle estimate.
+environment, including the child process started by the recorder. If imports
+or device initialization fail, inspect that child's interpreter, library paths,
+and simulator-visible device IDs. Preserve simulator library precedence when
+adding a missing CANN runtime path; host device visibility may not match the
+simulator's devices. Wait for kernel completion and recording flush, then
+check the log. Missing or truncated target instructions invalidate the cycle
+estimate even if the launcher exits successfully.
 
 ### Read the cycle interval
 
@@ -140,9 +182,92 @@ directory. Decode it with the same CANN installation's
 `cannsim.core.public.instr_decoder`, or use its instruction timeline report.
 Check timestamp units and issue/completion semantics before calculating cycles.
 
-For the selected VF on one chip/core/subcore, measure from the first vector
-instruction's start to the last one's completion. Select its RVEC/VECTOR events,
-excluding buffer preparation and scalar launch work. For duration events,
+Pair events using the installed reader's semantics and the launch, chip, core,
+subcore, instruction ID, and PC. A PC alone is insufficient for repeated loop
+iterations. Do not infer timing semantics from the name `is_popped`: in the
+verified CANN 9.2 reader, `1` marks dispatch and `0` marks completion. Recheck
+this mapping for another tool version, and compare extracted intervals with
+the generated timeline and a known producer/consumer dependency.
+
+For the selected region, measure from its first instruction's start to its
+last instruction's completion. A VF uses its RVEC/VECTOR events; a copy, Cube,
+or combined region uses the corresponding pipe events and required handoffs.
+Exclude preparation outside the chosen boundary. For duration events,
 the interval is `max(start + duration) - min(start)`; express it in cycles
-using the report's units. Keep the trace showing those boundaries. A dispatch
-interval or host wall time measures a different quantity.
+using the report's units. State whether the start event is dispatch or actual
+execution: dispatch-to-completion includes queue and dependency waits, so it
+does not by itself isolate instruction service time. Include loads, stores,
+and synchronization inside the original region when they are part of its cost.
+Keep the trace showing the selected boundaries; summing overlapping instruction
+durations does not give elapsed time. For a complete kernel, include the launch
+and all participating cores through final completion, rather than reporting
+only the busiest operation's interval.
+
+Keep raw cycles alongside any time conversion. Verify the report's clock
+domain and frequency before converting to nanoseconds; simulator host wall
+time is not device latency. Record whether input data is already resident and
+whether cache state is controlled. A fresh process alone does not prove a cold
+cache in the model.
+
+### Repeated operations and throughput
+
+When measuring repeated work, distinguish an isolated operation's latency
+from the initiation interval (II) of a stream of operations. A dependent chain
+measures a different limit from independent operations. For the latter, keep
+physical buffers or registers distinct and live until their results are
+consumed; different source-level names need not imply independent storage.
+Reusing a destination can introduce write-after-write or consumer dependencies.
+
+Sweep a few repetition counts and relevant work sizes, masks, strides, and
+thread dimensions. Keep preparation outside the interval and place required
+drain synchronization after the stream; a barrier after every operation
+serializes the experiment. Compare steady issue and completion spacings with
+the burst-duration slope. A relation such as
+`T(P) = L + (P - 1) * II` is useful only when the trace shows a stable pipeline;
+startup, queue limits, scalar issue cost, and buffer reuse may change the slope.
+An empty wrapper can expose fixed overhead, but subtracting overlapping
+pipeline intervals mechanically can produce a misleading estimate.
+
+Check a conclusion on a different work size or repetition count before using
+it to change the kernel. Preserve the source, binary, build flags, target,
+tool versions, input conditions, correctness result, and raw trace with each
+measurement. Report simulation coverage separately from real-device testing,
+and validate the actual kernel after applying an annotation or rescheduling.
+
+### Override automatic task estimates
+
+Use `T.Task(latency=..., ii=...)` to supply measured cycle costs to AutoSchedule
+for a specific operation or group of operations in your kernel. Both arguments
+are optional compile-time Python integers. Each supplied value replaces that
+cost for the **complete task body**; an omitted value is still estimated.
+The final pair must satisfy `latency >= ii > 0`, including when one value comes
+from automatic estimation.
+
+```python
+# measured_latency and measured_ii are Python integers from an experiment
+# matching this copy's shape, dtype, layout, and memory spaces.
+with T.Task(latency=measured_latency, ii=measured_ii):
+    T.copy(src, dst)
+```
+
+- `latency` is the number of cycles from task issue until its outputs are ready.
+  Use a measurement with inputs ready and unrelated queues drained; a copy
+  waiting behind other work does not establish its intrinsic task cost.
+- `ii` is the minimum interval before the same hardware pipe can issue another
+  instance. Estimate it from a sustained stream of independent work, checking
+  issue/completion spacings and the burst-duration slope. It is not the solved
+  II of the enclosing loop.
+- With several operations inside one `T.Task`, measure and annotate the whole
+  group. Do not reuse a single instruction's latency or II as the group's cost,
+  or divide total burst cycles by the count and use that as both values.
+
+All statements in one `T.Task` must use the same hardware pipe and AIC/AIV core
+affinity. They issue in source order without internal synchronization. Split
+cross-pipe sequences, such as a data load followed by Cube computation, into
+separate tasks; see [task boundaries](../SKILL.md#24-task-boundaries).
+
+The overrides change the scheduler's cost assumptions. They do not insert
+waits inside the task or make an otherwise invalid dependency sequence legal.
+Keep the matching measurement conditions with the values, recompile to apply
+them, then check correctness and benchmark the complete kernel. Remeasure when
+the task body, shape, layout, target, or toolchain changes.
