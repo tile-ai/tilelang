@@ -28,6 +28,7 @@ def _round_kernel(dtype, lanes):
     return main
 
 
+@tilelang.testing.requires_rocm
 @pytest.mark.parametrize("dtype,intrinsic", [("float32", "nearbyintf"), ("float64", "nearbyint")])
 @pytest.mark.parametrize("lanes", [1, 2])
 def test_round_ties_to_even_codegen(dtype, intrinsic, lanes):
