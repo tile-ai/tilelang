@@ -5927,6 +5927,58 @@ void CodeGenTileLangPTO::VisitExpr_(const LetNode *op,
   os << "(lambda " << vid << ": " << body << ")(" << value << ")";
 }
 
+void CodeGenTileLangPTO::VisitExpr_(const ShuffleNode *op,
+                                    std::ostream &os) { // NOLINT(*)
+  // Shuffle picks lanes by constant index from its concatenated inputs;
+  // tl.shuffle_vec gathers them into a scalar or packed vector.
+  int64_t total_lanes = 0;
+  for (const PrimExpr &vector : op->vectors) {
+    DataType dtype = vector.dtype();
+    if (dtype.lanes() > 1) {
+      ICHECK(!tl::IsAscendVectorizableFP8(dtype))
+          << "PTO cannot split FP8 builtin vectors lane-by-lane, got " << dtype;
+    }
+    total_lanes += dtype.lanes();
+  }
+  ICHECK_GE(total_lanes, 1) << "PTO Shuffle expects at least one input lane";
+  for (const PrimExpr &index : op->indices) {
+    const auto *constant_index = index.as<IntImmNode>();
+    ICHECK(constant_index != nullptr)
+        << "ShuffleNode indices must be constants at PTO codegen time, got "
+        << index;
+    ICHECK_GE(constant_index->value, 0)
+        << "ShuffleNode index must be non-negative, got "
+        << constant_index->value;
+    ICHECK_LT(constant_index->value, total_lanes)
+        << "ShuffleNode index " << constant_index->value
+        << " is outside the concatenated input with " << total_lanes
+        << " lanes";
+  }
+
+  os << "tl.shuffle_vec(" << DataTypeName(op->dtype.element_of()) << ", (";
+  for (size_t i = 0; i < op->vectors.size(); ++i) {
+    if (i != 0) {
+      os << ", ";
+    }
+    PrintExpr_(op->vectors[i], os);
+  }
+  // A single-element Python tuple requires a trailing comma: (value,).
+  if (op->vectors.size() == 1) {
+    os << ",";
+  }
+  os << "), (";
+  for (size_t i = 0; i < op->indices.size(); ++i) {
+    if (i != 0) {
+      os << ", ";
+    }
+    os << Downcast<IntImm>(op->indices[i])->value;
+  }
+  if (op->indices.size() == 1) {
+    os << ",";
+  }
+  os << "))";
+}
+
 void CodeGenTileLangPTO::VisitExpr_(const MinNode *op,
                                     std::ostream &os) { // NOLINT(*)
   if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(op->dtype)) {
