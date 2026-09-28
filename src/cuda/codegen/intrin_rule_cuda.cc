@@ -91,7 +91,7 @@ struct CUDAFastMathTan : public CUDAMath {
 
 struct CUDAPopcount {
   std::string operator()(DataType t, std::string name) const {
-    if (t.is_uint()) {
+    if (t.is_int() || t.is_uint()) {
       switch (t.bits()) {
       case 32:
         return "__popc";
@@ -149,6 +149,10 @@ template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
   return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), cuda_args,
               call->annotations);
 }
+
+TVM_REGISTER_OP("tirx.popcount")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                              DispatchPureExtern<CUDAPopcount>, 11);
 
 TVM_REGISTER_OP("tirx.rsqrt")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
