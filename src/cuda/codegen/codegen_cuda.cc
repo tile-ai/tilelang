@@ -751,7 +751,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#endif\n";
   decl_stream << "\n";
 
-  return CodeGenC::Finish();
+  return CodeGenCWithLineDirectives::Finish();
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
@@ -5268,7 +5268,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     unroll_factor[op->node.as<VarNode>()] = Downcast<IntImm>(factor);
   }
 
-  CodeGenC::VisitStmt_(op);
+  CodeGenCWithLineDirectives::VisitStmt_(op);
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const AllocBufferNode *op) {
