@@ -58,6 +58,9 @@ inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
     "tl.debug_merge_shared_memory_allocations";
 static constexpr const char *kSmemAlignmentMap = "tl.smem_alignment_map";
+// Required base alignment of the dynamic shared-memory arena after merging.
+static constexpr const char *kDynamicSmemAlignment =
+    "tl.dynamic_smem_alignment";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
