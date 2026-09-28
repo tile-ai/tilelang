@@ -175,9 +175,7 @@ CollectUsedBuffers(const PrimFunc &func) {
   return visitor.used_in_buffer_def_;
 }
 
-/* \brief Utility function to collect vars that should be retained. Used in
- * Letstmt Only
- */
+/* \brief Collect variables referenced by buffer definitions. */
 std::unordered_set<const VarNode *>
 CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
   struct Visitor : StmtExprVisitor {
@@ -535,11 +533,9 @@ private:
       non_inlined_bindings_.Set(op->var, value);
     }
 
-    bool used_in_buffer_def = used_in_buffer_def_.count(op->var.get());
-
-    if (can_inline && !used_in_buffer_def) {
-      return Evaluate(Integer(0));
-    } else if (value.same_as(op->value)) {
+    // Defer deletion to UnusedBindRemover: annotations and other metadata may
+    // still reference the variable after its ordinary uses have been inlined.
+    if (value.same_as(op->value)) {
       return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
