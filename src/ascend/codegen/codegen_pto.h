@@ -62,6 +62,8 @@ protected:
                   std::ostream &os) override;                    // NOLINT(*)
   void VisitExpr_(const ModNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const DivNode *op, std::ostream &os) override; // NOLINT(*)
+  void VisitExpr_(const ShuffleNode *op,
+                  std::ostream &os) override; // NOLINT(*)
 
 private:
   struct PTOGemmEmitContext {

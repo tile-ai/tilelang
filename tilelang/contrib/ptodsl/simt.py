@@ -17,6 +17,24 @@ def _vector_lane(value, index):
     return wrap_surface_value(llvm.ExtractElementOp(unwrap_surface_value(value), raw_index).res)
 
 
+def shuffle_vec(dtype: _DType, values: list | tuple, indices: list[int] | tuple[int, ...]):
+    """Pick lanes by constant index from concatenated scalar/vector inputs."""
+    entries = [(value, value.size) if isinstance(value, VecValue) else (value, 1) for value in values]
+    picked = []
+    for index in indices:
+        lane = index
+        for value, size in entries:
+            if lane < size:
+                picked.append(_vector_lane(value, lane) if size > 1 else value)
+                break
+            lane -= size
+        else:
+            raise IndexError(f"shuffle_vec index {index} is outside the concatenated inputs")
+    if len(picked) == 1:
+        return picked[0]
+    return vector_from_list(dtype, picked)
+
+
 def vector_from_list(dtype: _DType, values: list | tuple) -> VecValue:
     """Build a PTODSL builtin vector from scalar values in a Python sequence."""
     values = tuple(values)
