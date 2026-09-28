@@ -80,6 +80,15 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = ascend_transform.UnrollLoopSkipVF()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
+    # Materialize every L1-input GEMM as an L1->L0A/L0B staged sub-K pipeline.
+    # Gated on AutoSchedule because the staged copies rely on the synchronization
+    # InsertSync inserts, but kept above layout inference -- which assigns the new
+    # L0 tiles their fractal layouts. Moving it into the AutoSchedule block below
+    # leaves the tiles without a layout, and the L1->L0 lowering then fails with
+    # "requires canonical fractal layouts on both buffers".
+    if auto_schedule_enabled:
+        mod = ascend_transform.NormalizeGemm()(mod)
+
     mod = ascend_transform.AscendLayoutInference()(mod)
     mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     LayoutVisual(mod)
