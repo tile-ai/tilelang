@@ -414,6 +414,9 @@ private:
     // Create or get barrier info
     auto barrier_id = GetOrCreateBarrier(key);
 
+    // https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar
+    ICHECK_LT(barrier_id, 16U) << "[ThreadSync] barrier_id shouldn't exceed 16";
+
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
