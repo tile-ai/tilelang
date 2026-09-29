@@ -1023,6 +1023,28 @@ def test_atomic_load_store():
     run_atomic_load_store(64, 64, 16, 16)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float16", "bfloat16"])
+@pytest.mark.parametrize("memory_order", ["relaxed", "release", "seq_cst"])
+def test_atomic_store_dtype(dtype, memory_order):
+    @T.prim_func
+    def main(A: T.Tensor((32,), dtype), B: T.Tensor((32,), dtype)):
+        with T.Kernel(1, threads=32):
+            i = T.get_thread_binding()
+            T.atomic_store(B[i], A[i], memory_order=memory_order)
+
+    kernel = tilelang.compile(main, target="cuda")
+    values = [-7, 0, 3, 9]
+    if dtype == "int64":
+        values = [-(1 << 40), -7, 3, 1 << 40]
+    elif dtype.startswith("float") or dtype == "bfloat16":
+        values += [-0.0, float("inf"), -float("inf"), float("nan")]
+    a = torch.tensor(values * (32 // len(values)), dtype=getattr(torch, dtype), device="cuda")
+    b = torch.full_like(a, 42)
+    kernel(a, b)
+    assert torch.equal(b.view(torch.uint8), a.view(torch.uint8))
+
+
 # ======================= Tile-level atomic max/min =======================
 
 

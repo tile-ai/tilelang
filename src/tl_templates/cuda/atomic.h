@@ -959,10 +959,9 @@ template <typename T> TL_DEVICE T AtomicLoad(T *ref, int memory_order) {
 
 template <typename T1, typename T2>
 TL_DEVICE void AtomicStore(T1 *ref, T2 value, int memory_order) {
-  using NT1 = typename normalize_atomic_type<T1>::type;
 #if CUDART_VERSION >= 11080
-  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*ref);
-  aref.store(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+  cuda::atomic_ref<T1, cuda::thread_scope_device> aref(*ref);
+  aref.store(cuda_cast<T1>(value), cuda::memory_order(memory_order));
 #else
   TL_NOT_IMPLEMENTED();
 #endif
