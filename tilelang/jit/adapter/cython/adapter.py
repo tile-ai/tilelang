@@ -100,6 +100,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     lib: ctypes.CDLL | None = None  # Compiled library handle
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
+    # Maps scalar params to their TIR vars, None elsewhere
+    scalar_param_vars: list[tirx.Var | None] | None = None
     # Maps symbolic variable names to ALL buffers that carry them, for cascaded None resolution
     dynamic_symbolic_sources: dict[str, list[tuple[int, int, int]]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
@@ -159,6 +161,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.dynamic_symbolic_sources = self._process_dynamic_symbolic_sources()
+        self.scalar_param_vars = self._process_scalar_param_vars()
         self.buffer_dtype_map = self._process_buffer_dtype()
         self.param_storage_metadata = self._process_param_storage_metadata()
         self.ptr_map = self._process_ptr_map()
@@ -203,6 +206,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_static_shape_map(self.static_shape_map)
         self.cython_wrapper.set_static_strides_map(self.static_strides_map)
         self.cython_wrapper.set_dynamic_strides_map(self.dynamic_strides_map)
+        self.cython_wrapper.set_scalar_param_vars(self.scalar_param_vars)
         self.cython_wrapper.set_static_contiguous_list(self.static_contiguous_list)
         self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
         self.cython_wrapper.set_ptr_map(self.ptr_map)
@@ -240,6 +244,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
         adapter.dynamic_symbolic_sources = adapter._process_dynamic_symbolic_sources()
+        adapter.scalar_param_vars = adapter._process_scalar_param_vars()
         adapter.buffer_dtype_map = adapter._process_buffer_dtype()
         adapter.param_storage_metadata = adapter._process_param_storage_metadata()
         adapter.ptr_map = adapter._process_ptr_map()
@@ -271,6 +276,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
         adapter.cython_wrapper.set_static_strides_map(adapter.static_strides_map)
         adapter.cython_wrapper.set_dynamic_strides_map(adapter.dynamic_strides_map)
+        adapter.cython_wrapper.set_scalar_param_vars(adapter.scalar_param_vars)
         adapter.cython_wrapper.set_static_contiguous_list(adapter.static_contiguous_list)
         adapter.cython_wrapper.set_buffer_device_map(adapter.buffer_device_map)
         adapter.cython_wrapper.set_ptr_map(adapter.ptr_map)
@@ -349,6 +355,23 @@ class CythonKernelAdapter(BaseKernelAdapter):
                             sources[key] = []
                         sources[key].append((i, j, stride_scale))
         return sources
+
+    def _process_scalar_param_vars(self) -> list[tirx.Var | None]:
+        """Map scalar params to their TIR vars, None elsewhere.
+
+        Stride expressions may reference explicit scalar params, which are
+        excluded from dynamic_symbolic_map since the caller passes their
+        values directly at launch.
+        """
+        func = self.prim_func
+        buffer_map = func.buffer_map
+        scalar_param_vars: list[tirx.Var | None] = []
+        for param in func.params:
+            if param not in buffer_map and param.dtype != "handle":
+                scalar_param_vars.append(param)
+            else:
+                scalar_param_vars.append(None)
+        return scalar_param_vars
 
     def _process_buffer_dtype(self) -> dict[tirx.Var, tuple[int, torch.dtype | tuple[torch.dtype, ...]]]:
         """Extract information about buffer dtypes from the TIR function.
