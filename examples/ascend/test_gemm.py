@@ -1,102 +1,48 @@
-"""pytest test for example_gemm.py — bf16 + fp32 auto GEMM."""
+"""Persistent GEMM, epilogue and precision modes."""
 
+import pytest
 import torch
 import tilelang
-import pytest
-from example_gemm import gemm, ref_program
-
-TARGETS = ["ascend"]
+import tilelang.testing
+from example_gemm import gemm
 
 
-def _test(dtype, thresh, out_dtype="float32", target="ascend", mixed=None, hf32=None):
-    M, K, N = 8192, 8192, 8192
-    kernel = tilelang.compile(
-        gemm(M, K, N, dtype=dtype, out_dtype=out_dtype, MIXED=mixed, hf32=hf32),
-        target=target,
-        out_idx=-1,
-    )
-    device = torch.device("npu")
-    x = torch.randn(M, K, device=device).to(dtype=getattr(torch, dtype))
-    w = torch.randn(N, K, device=device).to(dtype=getattr(torch, dtype))
-    c = kernel(x, w)
-    torch.npu.synchronize()
-    expected = ref_program(x, w, out_dtype=out_dtype)
-    max_diff = (c - expected).abs().max().item()
-    assert max_diff < thresh, f"{dtype} target={target} max_diff={max_diff:.2e}"
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "dtype,out_dtype,mixed,hf32,unit_flag",
+    [
+        ("float8_e4m3fn", "float32", False, None, True),
+        ("float8_e4m3fn", "float32", True, None, True),
+        ("bfloat16", "float32", False, None, False),
+        ("bfloat16", "bfloat16", False, None, True),
+        ("bfloat16", "float32", None, None, True),
+        ("float32", "float32", None, None, True),
+        ("float32", "float32", None, "nearest_zero", True),
+        ("float32", "float32", None, "nearest_even", True),
+    ],
+    ids=["fp8-cube", "fp8-mixed", "bf16-no-unit-flag", "bf16-output", "bf16-persistent", "fp32", "hf32-truncate", "hf32-round"],
+)
+def test_gemm(dtype, out_dtype, mixed, hf32, unit_flag):
+    # More tiles than cores exercise persistent traversal and alternating swizzle windows.
+    m, n = (2048, 1280) if dtype == "bfloat16" and mixed is None else (256, 256)
+    k = 512
+    generator = torch.Generator().manual_seed(0)
+    a = torch.randn(m, k, generator=generator).to(getattr(torch, dtype))
+    b = torch.randn(n, k, generator=generator).to(getattr(torch, dtype))
+    kernel = tilelang.compile(gemm(m, k, n, dtype, out_dtype, mixed, hf32, unit_flag), target="ascend", out_idx=-1)
+    tolerance = 0.1 if hf32 else 1e-2 if out_dtype == "bfloat16" else 1e-3
+    expected = (a.float() @ b.float().T).to(getattr(torch, out_dtype))
+    torch.testing.assert_close(kernel(a.npu(), b.npu()).cpu(), expected, rtol=tolerance, atol=tolerance)
 
 
-@pytest.mark.parametrize("target", TARGETS)
-def test_gemm_auto_fp8(target):
-    _test("float8_e4m3fn", 1e-1, target=target, mixed=False)
-
-
-@pytest.mark.parametrize("target", TARGETS)
-def test_gemm_auto_fp8_mixed(target):
-    _test("float8_e4m3fn", 1e-1, target=target, mixed=True)
-
-
-@pytest.mark.parametrize("target", TARGETS)
-def test_gemm_auto_bf16(target):
-    _test("bfloat16", 1e-2, target=target, mixed=False)
-    _test("bfloat16", 1e-2, "bfloat16", target=target, mixed=False)
-
-
-@pytest.mark.parametrize("target", TARGETS)
-def test_gemm_auto_bf16_mixed(target):
-    _test("bfloat16", 1e-2, target=target, mixed=True)
-
-
-@pytest.mark.parametrize("target", TARGETS)
-def test_gemm_auto_fp32(target):
-    _test("float32", 5e-3, target=target, mixed=False)
-
-
-@pytest.mark.parametrize("target", TARGETS)
-@pytest.mark.parametrize("hf32", ["nearest_zero", "nearest_even"])
-def test_gemm_auto_fp32_hf32(target, hf32):
-    _test("float32", 2e-1, target=target, mixed=False, hf32=hf32)
-
-
-def _test_acc(out_dtype, thresh, target="ascend"):
-    """C += A @ B^T via store-mode atomic; C is an in/out buffer."""
-    M, K, N = 8192, 8192, 8192
-    device = torch.device("npu")
-    kernel = tilelang.compile(
-        gemm(M, K, N, dtype="bfloat16", out_dtype=out_dtype, acc=True),
-        target=target,
-    )
-    x = torch.randn(M, K, device=device, dtype=torch.bfloat16)
-    w = torch.randn(N, K, device=device, dtype=torch.bfloat16)
-    c0 = torch.randn(M, N, device=device, dtype=getattr(torch, out_dtype))
-    expected = ref_program(x, w, out_dtype=out_dtype, c=c0)
-    c = c0.clone()
-    kernel(x, w, c)
-    torch.npu.synchronize()
-    # Relative error: bf16 output rounds each element, so a max-abs bound is
-    # dominated by rounding of large K=8192 accumulations.
-    rel = (c.float() - expected.float()).abs().mean().item() / expected.float().abs().mean().clamp_min(1e-6).item()
-    assert rel < thresh, f"acc target={target} out={out_dtype} rel={rel:.2e}"
-
-
-@pytest.mark.parametrize("target", TARGETS)
-def test_gemm_auto_acc(target):
-    _test_acc("float32", 1e-2, target=target)
-    _test_acc("bfloat16", 1e-2, target=target)
-
-
-if __name__ == "__main__":
-    test_gemm_auto_fp8("ascend")
-    print("PASS: test_gemm_auto_fp8")
-    test_gemm_auto_fp8_mixed("ascend")
-    print("PASS: test_gemm_auto_fp8_mixed")
-    test_gemm_auto_bf16("ascend")
-    print("PASS: test_gemm_auto_bf16")
-    test_gemm_auto_bf16_mixed("ascend")
-    print("PASS: test_gemm_auto_bf16_mixed")
-    test_gemm_auto_fp32("ascend")
-    print("PASS: test_gemm_auto_fp32")
-    for hf32 in ["nearest_zero", "nearest_even"]:
-        test_gemm_auto_fp32_hf32("ascend", hf32)
-    print("PASS: test_gemm_auto_fp32_hf32")
-    test_gemm_auto_acc("ascend")
-    print("PASS: test_gemm_auto_acc")
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("out_dtype", ["float32", "bfloat16"])
+def test_gemm_accumulate(out_dtype):
+    a = (torch.randint(-4, 5, (256, 512)).float() / 8).to(torch.bfloat16)
+    b = (torch.randint(-4, 5, (256, 512)).float() / 8).to(torch.bfloat16)
+    initial = torch.ones(256, 256, dtype=getattr(torch, out_dtype))
+    output = initial.npu()
+    kernel = tilelang.compile(gemm(256, 512, 256, out_dtype=out_dtype, acc=True), target="ascend")
+    kernel(a.npu(), b.npu(), output)
+    expected = (a.float() @ b.float().T).to(initial.dtype) + initial
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)

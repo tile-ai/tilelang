@@ -5,8 +5,8 @@ import re
 import pytest
 
 import tilelang
-import tilelang.ascend.language as T
 import tilelang.testing
+import tilelang.ascend.language as T
 
 
 def _source(func, *, target, pass_configs=None):
@@ -198,3 +198,27 @@ def test_broadcast_is_materialized_per_lane(dtype, carrier):
     source = _source(_broadcast_kernel(dtype), target="ascend", pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True})
     assert f"(({carrier}*)(&(" in source
     assert ".x =" in source and ".y =" in source
+
+
+@tilelang.testing.requires_ascend
+def test_int64_strided_vector_load():
+    import torch
+
+    stride = T.dynamic("stride", dtype="int64")
+
+    @T.prim_func
+    def kernel(A: T.StridedTensor((2, 128), (stride, 1), "float32"), O: T.Tensor((2, 128), "float32")):
+        T.assume(stride % 256 == 0)
+        with T.Kernel(1), T.SimtVF(threads=64):
+            values = T.alloc_fragment((128,), "float32")
+            for j in T.Parallel(128):
+                values[j] = A[1, j]
+            for j in T.Parallel(128):
+                O[0, j] = values[j]
+
+    storage = torch.arange(512, dtype=torch.float32).reshape(2, 256).npu()
+    out = torch.full((2, 128), -1.0, device="npu")
+    tilelang.compile(kernel, target="ascend")(storage[:, :128], out)
+    expected = torch.full((2, 128), -1.0)
+    expected[0] = torch.arange(256, 384, dtype=torch.float32)
+    torch.testing.assert_close(out.cpu(), expected, rtol=0, atol=0)

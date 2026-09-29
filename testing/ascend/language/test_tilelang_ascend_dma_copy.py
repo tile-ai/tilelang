@@ -3,6 +3,7 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 from tilelang.ascend import language as T
 
 
@@ -119,3 +120,24 @@ def test_gm2ub2gm_fp4_copy():
     assert out.dtype == torch.float4_e2m1fn_x2
     out_bytes = out.view(torch.uint8)
     torch.testing.assert_close(out_bytes.cpu(), src_bytes.cpu())
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("reuse_pad_register", [False, True], ids=["pad-value", "data-select"])
+def test_gm_to_ub_pad_value(reuse_pad_register):
+    @T.prim_func
+    def copy(A: T.Tensor((2, 30), "float32"), O: T.Tensor((2, 32), "float32")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((2, 32), "float32")
+            if reuse_pad_register:
+                T.ascend_set_copy_pad_value(-1.0, dtype="float32")
+                T.copy(A, ub[:, :30], data_select=True)
+            else:
+                T.copy(A, ub[:, :30], pad_value=-1.0)
+            T.copy(ub, O)
+
+    a = torch.arange(60, dtype=torch.float32).reshape(2, 30)
+    result = tilelang.compile(copy, target="ascend", out_idx=-1)(a.npu())
+    expected = torch.full((2, 32), -1.0)
+    expected[:, :30] = a
+    torch.testing.assert_close(result.cpu(), expected, rtol=0, atol=0)

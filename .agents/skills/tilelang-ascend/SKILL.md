@@ -87,8 +87,12 @@ with T.SimtVF(threads=128):
 ```
 
 Auto-sync: The compiler inserts `asc_syncthreads()` when it detects
-cross-thread data hazards (see `example_simtvf_auto_sync.py`). Thread
-binding is accessed via `T.get_thread_binding()`.
+cross-thread data hazards; regression coverage is in
+`testing/ascend/transform/test_ascend_thread_sync.py`. Thread binding is
+accessed via `T.get_thread_binding()`. For random values inside a VF, use
+`T.rng_init(seed, seq=..., off=...)` with `T.rng_rand()` or
+`T.rng_rand_float()` (uniform) / `T.rng_rand_float(dist="normal")`. Choose
+explicit sequences when reproducibility must be independent of launch geometry.
 
 ### 2.3 SIMD VF: Register-Level Vector (No Threads)
 
@@ -215,17 +219,18 @@ with T.MixedKernel(NUM_BLOCKS, sids=2) as (bx, sid):
     ...  # Partition each AIV's accesses according to sid and buffer ownership.
 ```
 
-See `examples/ascend/example_gemm_mixedkernel.py`. Follow its actual buffer
-extents when partitioning output; a local half-sized buffer is not a full-sized
-buffer to split again.
+See the mixed-core epilogues in `examples/ascend/deepgemm/kernels/epilogue.py`.
+Follow the actual buffer extents when partitioning output; a local half-sized
+buffer is not a full-sized buffer to split again.
 
 ### 3.3 Fully Manual Mixed Kernels
 
 Explicit `T.Cube()` and `T.Vector()` scopes with manually managed buffer slots
 and intra-/cross-core flags belong to the fully manual path. Disable the
-scheduling path with `PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False` and follow
-`examples/ascend/example_gemm_mix_manual.py` for a complete protocol. Read the
-[synchronization reference](references/synchronization.md) before modifying it.
+scheduling path with `PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False`. Read the
+[synchronization reference](references/synchronization.md) for the complete
+initialization, reuse and final-drain protocol. Small manual mixed-core
+regressions are in `testing/ascend/language/test_tilelang_ascend_nd2nz_scatter.py`.
 
 ---
 
@@ -311,6 +316,12 @@ when changing manual kernels. For capacity or launch failures, record the
 generated allocation sizes, buffer versions, VF mode, and compiler options.
 Check SDK reservations as well as user buffers before changing tile sizes.
 
+`T.annotate_unlimit_memory("shared", "shared.l1")` inside a kernel removes the
+scheduler's capacity constraint for those pools. Other supported scopes are
+`shared.l0a`, `shared.l0b`, and `shared.l0c`. This is useful for investigating a
+capacity-constrained schedule; it does not enlarge hardware memory or make an
+over-capacity allocation executable. Verify physical allocations before launch.
+
 ---
 
 ## 5. GEMM Constraints
@@ -339,6 +350,12 @@ W: T.Buffer((N_DIM, K_DIM), dtype)
 ```
 
 ### 5.3 Clear Accumulator
+
+SIMT supports `T.atomic_add`, `T.atomic_max` and `T.atomic_min` on GM values;
+`return_prev=True` returns the value before the update. For a DMA/FixPipe store,
+`T.set_atomic("add", dtype)` selects an accumulating store until
+`T.set_atomic_none()` restores ordinary stores. Initialize the destination before
+any accumulating write; the split-K example shows cross-core initialization.
 
 For split-K and backward reductions, define which task owns each partial
 output and where it is initialized and combined. Atomic and staged reductions
@@ -430,7 +447,8 @@ T.copy(A[:, :], a_ub[:, :30], data_select=True)
 - Passing both `pad_value` and `data_select` raises `ValueError`.
 - Ascend GM→UB only; supported dtypes are 8/16/32-bit (int8/uint8/int16/
   uint16/float16/bfloat16/int32/uint32/float32). Ignored on other paths/backends.
-- Example: `examples/ascend/example_copy_pad_value.py` (+ `test_copy_pad_value.py`).
+- Numerical coverage: `test_gm_to_ub_pad_value` in
+  `testing/ascend/language/test_tilelang_ascend_dma_copy.py`.
 
 ### 6.2 T.dual_copy (Ascend-Only)
 
@@ -581,12 +599,11 @@ the examples above are not an exhaustive API list.
 ### 8.2 Explicit Intrinsics and High-Level SIMD
 
 Use explicit `T.simd.*` calls when the task needs a specific instruction, mask,
-rounding mode, or evaluation order. See
-`examples/ascend/example_simdvf_vecadd_lower.py`. High-level `T.Parallel` inside
-`T.SimdVF()` is lowered by `AscendSimdVFLowerParallel`; see
-`examples/ascend/example_simdvf_vecadd.py`. Check the current supported pattern
-and emitted code before replacing one form with the other. If high-level
-lowering rejects the required pattern, express it with explicit `T.simd.*`
+rounding mode, or evaluation order, as in the SIMD implementation of
+`examples/ascend/example_per_token_cast_to_fp8.py`. High-level `T.Parallel`
+inside `T.SimdVF()` is lowered by `AscendSimdVFLowerParallel`. Check the
+current supported pattern and emitted code before replacing one form with the
+other. If high-level lowering rejects the required pattern, express it with explicit `T.simd.*`
 operations and validate the result.
 
 ### 8.3 VF Latency Annotation
@@ -615,28 +632,26 @@ whole-kernel device timing; these measure different quantities.
 
 ## 9. Programming Patterns
 
-Use the Ascend dialect when adapting these files under `examples/ascend/`:
+The top-level `examples/ascend/` directory contains complete applications,
+with one matching test per example. Use DeepGEMM for advanced matrix kernels:
 
-| Task | Example |
+| Task | Example under `examples/ascend/` |
 |---|---|
-| Automatic persistent GEMM / MixedKernel | `example_gemm.py` / `example_gemm_mixedkernel.py` |
-| Fully manual Cube+Vector synchronization | `example_gemm_mix_manual.py` |
-| Nested L0 staging | `example_gemm_l0.py` |
-| L2 bypass / shape-dependent GEMM configuration | `example_gemm_bypass_l2.py` / `example_gemm_various_shapes.py` |
-| Block-scaled MXFP8 GEMM | `example_blockscaled_gemm.py` |
-| Explicit SIMD / high-level SIMD | `example_simdvf_vecadd_lower.py` / `example_simdvf_vecadd.py` |
-| SIMD interleave / TopK gate | `example_simdvf_vintlv.py` / `example_simdvf_topk_gate.py` |
-| SIMD / SIMT per-token FP8 cast | `example_simdvf_per_token_cast_to_fp8.py` / `example_simtvf_per_token_cast_to_fp8.py` |
-| Automatic / minimal SIMT vector add | `example_simtvf_vecadd.py` / `example_simtvf_vector_add.py` |
-| SIMT automatic thread synchronization | `example_simtvf_auto_sync.py` |
-| SIMT mutex / multi-buffer UB protocols | `example_simtvf_vecadd_mutex.py` / `example_simtvf_ubuf_multi.py` |
-| Reduction and normalization | `example_rmsnorm.py` |
+| Persistent GEMM with swizzling, precision modes and mixed epilogues | `example_gemm.py` |
+| Split-K with atomic or ordered reduction | `example_gemm_splitk.py` |
+| Persistent traversal, L0 staging, mixed epilogues and quantized GEMM | `deepgemm/` |
+| SIMT and explicit SIMD vector addition with pipelined copies | `example_vecadd.py` |
+| SIMT reduction and normalization | `example_rmsnorm.py` |
+| SIMT and SIMD group-wise FP8 quantization | `example_per_token_cast_to_fp8.py` |
 | MHA / GQA | `flash_attention/example_mha.py` / `flash_attention/example_gqa.py` |
-| Manual stages: vector add / GQA | `example_manual_schedule.py` / `flash_attention/example_gqa_manual_schedule.py` |
-| Padded GM-to-UB copy | `example_copy_pad_value.py` |
-| Buffer versions / nested ownership | `example_buffer_version_annotation.py` / `example_crosslevel_multibuffer.py` |
-| While loops containing pipelined work | `example_while_pipelined.py` |
-| Generated-source postprocessing | `example_ascend_postproc_callback.py` |
+| Explicit pipeline stages in attention | `flash_attention/example_gqa_manual_schedule.py` |
+
+Feature regressions live in `testing/ascend/`; do not import application kernels
+into that suite. Use small `T.Tensor` fixtures at the owning compiler boundary;
+see its `README.md` for test design and placement.
+Copy padding is described in [Data movement](#61-tcopy). Version annotations,
+cross-level ownership, explicit stages, manual buffer rings and while-loop
+scheduling are described in the [synchronization reference](references/synchronization.md).
 
 The RMSNorm example demonstrates `T.alloc_fragment` for vectorized loads and
 register reuse. For reductions, follow the example in
@@ -744,7 +759,7 @@ For source-only compilation and pass traces, use the
 [lowering trace](../../../docs/tools/lower_trace.md); keep device work out of
 import-time code. To modify generated source before compilation,
 see `tilelang.ascend.callback.register_ascend_postproc_callback` and
-`examples/ascend/example_ascend_postproc_callback.py`. Follow the
+`testing/ascend/target/test_ascend_postproc.py`. Follow the
 [controlled experiment guidance](#125-attribute-the-difference) before drawing
 performance conclusions.
 

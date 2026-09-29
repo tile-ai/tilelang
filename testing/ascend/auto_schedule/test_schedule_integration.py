@@ -6,6 +6,7 @@ Only these tests deliberately exercise multiple compiler stages.
 
 import pytest
 import tilelang
+import tilelang.testing
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
@@ -375,3 +376,24 @@ def test_sf_group_owners_survive_a_plain_gemm_sibling(versions):
             if versions > 1:
                 assert int(shape[0]) == versions
     assert artifact.kernel_source and artifact.device_mod
+
+
+@tilelang.testing.requires_ascend
+def test_scalar_snapshot_precedes_pipeline_update():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((16,), "float32"), O: T.Tensor((16,), "float32")):
+        with T.Kernel(1):
+            accum = T.alloc_var("float32", init=0)
+            out = T.alloc_shared((16,), "float32")
+            for i in T.Pipelined(16, num_stages=2):
+                previous = accum
+                for _ in T.serial(2):
+                    accum += A[i]
+                out[i] = previous
+            T.copy(out, O)
+
+    a = torch.arange(16, dtype=torch.float32)
+    result = tilelang.compile(main, target="ascend", out_idx=-1)(a.npu())
+    torch.testing.assert_close(result.cpu(), 2 * (a.cumsum(0) - a), rtol=0, atol=0)

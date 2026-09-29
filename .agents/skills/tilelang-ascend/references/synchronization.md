@@ -16,8 +16,11 @@ Contents: [scheduling modes](#choose-the-scheduling-mode),
 | Constrained scheduling | `T.Stage` around complete tasks | Preserve manual stage and per-PIPE order constraints while retaining dependency analysis, sync, and multibuffering |
 | Fully manual | Explicit core scopes, buffer slots, and flags with `TL_ENABLE_AUTO_SCHEDULE=False` | Skip the scheduling path; the program supplies the required storage and synchronization protocol |
 
-Use the current examples `examples/ascend/example_gemm.py`,
-`example_manual_schedule.py`, and `example_gemm_mix_manual.py` respectively.
+Start with `examples/ascend/example_gemm.py` for automatic scheduling and
+`examples/ascend/flash_attention/example_gqa_manual_schedule.py` for explicit
+stages. Stage constraints and buffer rings are covered by
+`testing/ascend/auto_schedule/test_schedule_units.py` and `test_sync_dependencies.py`.
+Fully manual mixed protocols are covered in `testing/ascend/language/test_tilelang_ascend_nd2nz_scatter.py`.
 The presence of low-level flags does not automatically select fully manual mode.
 
 For fully manual kernels, use these APIs as part of a complete protocol:
@@ -28,8 +31,9 @@ For fully manual kernels, use these APIs as part of a complete protocol:
 | Signal/wait between cores | `T.ascend_cross_core_set_flag` / `T.ascend_cross_core_wait_flag` |
 | Barrier for a selected pipe | `T.ascend_pipe_barrier` |
 
-Use `example_gemm_mix_manual.py` for matching flag IDs, initialization, reuse,
-and final waits.
+Match flag IDs and include initialization, reuse and final waits. Legacy
+`T.ascend_get_buf(pipe, id)` / `T.ascend_rls_buf(pipe, id)` are also available for
+explicit buffer handoffs; use them only with a complete manual protocol.
 
 ### Constrained scheduling details
 
@@ -75,9 +79,8 @@ dependencies, synchronization, and buffer versions.
 3. **Express a small set of candidates.** Reorder independent same-PIPE tasks
    in source, or place producers and consumers in different `T.Stage` scopes
    with `enable_offset=True`. Account for every task in the affected child
-   list, including siblings that default to stage 0. The vector-add example
-   uses stage 0 for loads, stage 1 for the VF, and stage 2 for the store; use
-   this as an experiment to compare with fewer stages, not a universal layout.
+   list, including siblings that default to stage 0. A load/VF/store pipeline
+   can use stages 0/1/2; compare it with fewer stages for the actual workload.
    Wrap complete tasks, for example `with T.Stage(1), T.SimtVF(...):`.
 4. **Check the materialized schedule and storage.** Inspect generated order,
    cross-iteration overlap, prologue/epilogue guards, waits, and buffer versions.
@@ -121,7 +124,7 @@ with `num_stages` as the search upper bound. For an automatic loop without that
 annotation the bound is one. A manual `T.Stage` child list without an explicit
 `num_stages` uses `max_stage + 1`; an explicit bound does not limit stage numbers.
 Fixed counts still require valid ownership and sufficient capacity. See
-`examples/ascend/example_buffer_version_annotation.py`.
+`testing/ascend/auto_schedule/test_buffer_version_annotations.py` for API coverage.
 
 Automatic buffers do not need a manually added leading stage dimension. An
 explicit leading dimension can instead be part of the application's layout;
@@ -142,9 +145,11 @@ Cross-PIPE overlap exists in both modes. Manual nonzero `T.Stage` values require
 An owner is a loop whose iteration contains a complete buffer epoch: its writes
 and the reads consuming that value. Automatic inference finds the deepest
 mutually non-nested loops covering all ordinary accesses, with writes before
-reads. Separate sibling loops can own the same storage. If an inner loop writes
-rows and an outer task consumes the whole buffer, the owner must include both;
-see `examples/ascend/example_crosslevel_multibuffer.py`.
+reads. Separate sibling loops can own the same storage. If an outer loop loads
+a tile consumed by an inner loop, that outer loop owns its versions: inner-loop synchronization must use the owner's iteration, not the
+consumer's local iteration. If an inner loop writes rows and an outer task
+consumes the whole buffer, the owner must likewise include both. See
+`testing/ascend/auto_schedule/test_buffer_ownership.py` for ownership cases.
 
 The current write-first heuristic is storage-granular: a write to one region
 does not prove that every later-read region was overwritten. When untouched
@@ -222,8 +227,9 @@ The user writes every slot index; the annotation does not reshape or reallocate
 storage, or validate an arbitrary manual buffering protocol. AutoSchedule can
 remain enabled to analyze dependencies and insert synchronization. This differs
 from disabling the entire scheduling path for a fully manual flag kernel.
-See `examples/ascend/example_manual_multibuffer.py` only as a simple example,
-not evidence of support for arbitrary manual protocols.
+Guarded manual-ring synchronization is checked in
+`testing/ascend/auto_schedule/test_sync_dependencies.py`; this does not establish
+support for arbitrary manual protocols.
 
 ## Control flow and stage shifting
 
@@ -241,7 +247,9 @@ it is not automatically multibuffered and can constrain stage offsets.
 The current pipeline accepts nested while/for control flow by normalizing while
 loops for scheduling and restoring them afterward. An inner `T.Pipelined` loop
 can overlap work; the synthetic while loop itself is not an arbitrary pipeline
-offset boundary. See `examples/ascend/example_while_pipelined.py`. Preserve
+offset boundary. `testing/ascend/transform/test_ascend_restore_while_loops.py`
+checks restored control flow, and `testing/ascend/auto_schedule/test_schedule_integration.py`
+checks nested-loop exits across core splitting. Preserve
 `T.loop_break` ordering and examine zero-trip loops and early exits when changing
 buffer clocks. A one-trip loop can still be an owner or synchronization boundary;
 do not remove it solely because its extent is one.
