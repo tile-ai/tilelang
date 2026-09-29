@@ -180,7 +180,7 @@ We evaluate TileLang against Torch NPU on Ascend 950 using BF16 GEMM, FP8 castin
 
 ## Acknowledgements
 
-The initial version of the TileLang Ascend 950 backend was developed by
+The initial version of the TileLang Ascend 950 backend was mainly developed by
 [silentCoder-dev](https://github.com/silentCoder-dev),
 [Elevator14B](https://github.com/Elevator14B),
 [Denverjin](https://github.com/Denverjin),
@@ -190,7 +190,6 @@ The initial version of the TileLang Ascend 950 backend was developed by
 [liguanglin](https://github.com/liguanglin),
 [Achazwl](https://github.com/Achazwl), and
 [bucket-xv](https://github.com/bucket-xv)
-from [DeepSeek AI](https://github.com/deepseek-ai/).
-
-We also thank [LeiWang1999](https://github.com/LeiWang1999) and the broader TileLang
-community for their support in integrating the backend. This work was carried out in close collaboration with Huawei, whose valuable support we gratefully acknowledge.
+from [DeepSeek AI](https://github.com/deepseek-ai/). We thank [LeiWang1999](https://github.com/LeiWang1999) and the broader TileLang
+community for their support in integrating the backend. We also thank the Huawei
+team for their close collaboration and valuable support.
