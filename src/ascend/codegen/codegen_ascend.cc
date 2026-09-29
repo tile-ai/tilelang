@@ -2320,9 +2320,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "simd_inst::" << it->second << "(" << src
                  << ", (__ubuf__ uint32_t*)" << addr << ", 0);\n";
   }
-  // --- SimdVF load: (addr, dist) ---
+  // --- SimdVF load: (addr, dist [, post-update increment]) ---
   else if (op->op.same_as(tl::simd_vld())) {
-    ICHECK_EQ(op->args.size(), 2);
+    ICHECK(op->args.size() == 2 || op->args.size() == 3);
+    bool post_update = op->args.size() == 3;
     DataType elem = op->dtype.element_of();
     std::string dist = Downcast<StringImm>(op->args[1])->value;
     // Each load distribution maps to a dedicated single-purpose entry point;
@@ -2351,11 +2352,17 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto it = kVldFn.find(dist);
     ICHECK(it != kVldFn.end())
         << "Unsupported SimdVF load distribution: " << dist;
-    // Zero scalar offset keeps parity with the previous vlds(addr, 0, dist).
-    os << "simd_inst::" << it->second << "<" << CCEUBufType(elem) << ">(("
-       << "__ubuf__" << " " << CCEUBufType(elem) << "*)";
-    PrintExpr(op->args[0], os); // addr
-    os << ", 0)";
+    os << "simd_inst::" << it->second << (post_update ? "_postupdate" : "")
+       << "<" << CCEUBufType(elem) << ">((__ubuf__ " << CCEUBufType(elem)
+       << "*)";
+    PrintExpr(op->args[0], os);
+    os << ", ";
+    if (post_update) {
+      PrintExpr(op->args[2], os);
+    } else {
+      os << "0";
+    }
+    os << ")";
   }
   // --- SimdVF dual-dest load: (addr, dist [, offset]) -> vec_pair ---
   else if (op->op.same_as(tl::simd_vld2())) {
