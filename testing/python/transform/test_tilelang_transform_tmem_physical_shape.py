@@ -6,6 +6,7 @@ from tilelang import tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import collect_calls
 from tilelang.cuda.intrinsics.layout.mma_sm100_layout import (
     TCGEN05Meta,
     make_tmem_frg_c,
@@ -24,17 +25,6 @@ def _lower(func):
     # shape + physical access coordinates) before allocation sizing.
     mod = tl.transform.LowerTileOp()(mod)
     return tl.cuda.transform.LowerSharedTmem()(mod)
-
-
-def _collect_calls(stmt, op_name):
-    calls = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", None) == op_name:
-            calls.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return calls
 
 
 @tilelang.testing.requires_cuda
@@ -60,8 +50,8 @@ def test_tmem_outer_m_tiles_allocate_physical_columns(dtype, expected_num_b32_co
             T.evaluate(tmem[0, 0])
 
     body = _lower(func)["main"].body
-    alloc = _collect_calls(body, "tl.ptx_init_tensor_memory")
-    dealloc = _collect_calls(body, "tl.ptx_deallocate_tensor_memory")
+    alloc = collect_calls(body, op="tl.ptx_init_tensor_memory")
+    dealloc = collect_calls(body, op="tl.ptx_deallocate_tensor_memory")
     assert len(alloc) == len(dealloc) == 1
     assert alloc[0].args[1].value == expected_num_b32_cols
     assert dealloc[0].args[1].value == expected_num_b32_cols
@@ -81,8 +71,8 @@ def test_tmem_frg_type_c_allocates_int32_storage_columns(dtype):
             T.evaluate(c_tmem[0, 0])
 
     body = _lower(func)["main"].body
-    alloc = _collect_calls(body, "tl.ptx_init_tensor_memory")
-    dealloc = _collect_calls(body, "tl.ptx_deallocate_tensor_memory")
+    alloc = collect_calls(body, op="tl.ptx_init_tensor_memory")
+    dealloc = collect_calls(body, op="tl.ptx_deallocate_tensor_memory")
     assert len(alloc) == len(dealloc) == 1
     assert alloc[0].args[1].value == 64
     assert dealloc[0].args[1].value == 64
