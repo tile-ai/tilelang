@@ -250,10 +250,16 @@ class JITKernel(Generic[_P, _T]):
 
             compile_flags = self.compile_flags
             if compile_flags is not None:
+                # Normalize the existing config: it may be absent, a single
+                # string, or an arbitrary sequence.
                 compile_flags_cfg = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS)
-                pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = (
-                    compile_flags_cfg + compile_flags if compile_flags_cfg is not None else compile_flags
-                )
+                if compile_flags_cfg is None:
+                    compile_flags_cfg = []
+                elif isinstance(compile_flags_cfg, str):
+                    compile_flags_cfg = [compile_flags_cfg]
+                else:
+                    compile_flags_cfg = list(compile_flags_cfg)
+                pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = [*compile_flags_cfg, *compile_flags]
 
             capture_hip_resource_usage = is_hip_target(target)
             if capture_hip_resource_usage:
@@ -362,7 +368,7 @@ class JITKernel(Generic[_P, _T]):
                 device_mod=artifact.device_mod,
                 device_kernel_source=artifact.kernel_source,
                 verbose=self.verbose,
-                pass_configs=pass_configs,
+                pass_configs=self.pass_configs,
                 compile_flags=compile_flags,
             )
         elif execution_backend == "nvrtc":

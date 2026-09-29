@@ -138,7 +138,7 @@ class KernelCache:
 
     @staticmethod
     def _get_base_key() -> dict:
-        base = {"version": __version__}
+        base = {"version": __version__, "platform": platform.machine()}
         if env.should_use_kernel_cache_lib_stamp():
             lib_stamp = KernelCache._get_tilelang_lib_stamp()
             if lib_stamp:

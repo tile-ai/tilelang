@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from tilelang import tvm as tvm
 from tilelang.language.eager import PrimFunc, prim_func, JITFunc
 from tvm.target import Target
+from contextlib import nullcontext
 
 from tilelang.jit.kernel import JITKernel
 from tilelang.cache import cached
@@ -32,6 +33,7 @@ from tilelang.jit.param import Kernel
 import concurrent.futures
 
 from tqdm.auto import tqdm
+from tilelang.backend.target import determine_target
 
 logger = getLogger(__name__)
 
@@ -363,17 +365,29 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         self._call_form_cache: _CallFormCache = _CallFormCache()
         self._tuner_cache: dict[tuple, Kernel] = {}
 
+    def _get_frontend_target_context(self):
+        if self.target is None:
+            return nullcontext()
+        try:
+            target = determine_target(self.target, return_object=True)
+        except Exception:
+            return nullcontext()
+        if isinstance(target, Target):
+            return target
+        return nullcontext()
+
     def get_tir(self, *args: _P.args, **kwargs: _P.kwargs) -> PrimFunc[_KP, _T]:
         """
         Retrieve a TIR (Tensor Intermediate Representation) PrimFunc from the stored callable or object.
         """
         self.initialize_jit_mode(*args, **kwargs)
-        if isinstance(self.func, PrimFunc):
-            tir = self.func
-        elif callable(self.func):
-            tir = self.func(*args, **kwargs)
-        else:
-            raise ValueError(f"Invalid function type: {type(self.func)}")
+        with self._get_frontend_target_context():
+            if isinstance(self.func, PrimFunc):
+                tir = self.func
+            elif callable(self.func):
+                tir = self.func(*args, **kwargs)
+            else:
+                raise ValueError(f"Invalid function type: {type(self.func)}")
         assert isinstance(tir, PrimFunc), f"target function must be a PrimFunc but got {type(tir)}"
         return tir
 

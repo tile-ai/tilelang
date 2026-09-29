@@ -13,6 +13,7 @@ from tilelang.jit.adapter.cython.kernel_cache import CythonKernelCache
 from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
 from tilelang.jit.adapter.torch.kernel_cache import TorchKernelCache
 from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
+from tilelang.ascend.kernel_cache import AscendCythonKernelCache, AscendTVMFFIKernelCache
 
 if TYPE_CHECKING:
     from .kernel_cache import KernelCache
@@ -26,6 +27,11 @@ _dispatch_map: dict[str, KernelCache] = {
     "nvrtc": NVRTCKernelCache(),
     "cutedsl": CuTeDSLKernelCache(),
     "torch": TorchKernelCache(),
+}
+
+_ascend_dispatch_map: dict[str, KernelCache] = {
+    "tvm_ffi": AscendTVMFFIKernelCache(),
+    "cython": AscendCythonKernelCache(),
 }
 
 
@@ -59,9 +65,11 @@ def _resolve_cache_dispatch(
                 context.target.kind.name,
                 ", ".join(sorted(allowed_now)),
             )
-    if resolved_backend not in _dispatch_map:
+    # Dispatch on the resolved backend module rather than on the target kind.
+    dispatch_map = _ascend_dispatch_map if context.module.name == "ascend" else _dispatch_map
+    if resolved_backend not in dispatch_map:
         raise ValueError(f'Cannot find support for execution backend "{resolved_backend}"')
-    return _dispatch_map[resolved_backend], context, verbose
+    return dispatch_map[resolved_backend], context, verbose
 
 
 def cached(

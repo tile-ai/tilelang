@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import tilelang
 from tilelang import tvm
-import tilelang.cache.cuda_binary_cache as cuda_binary_cache_mod
+import tilelang.cache.binary_cache as binary_cache_mod
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.backend import create_backend_context
 from tilelang.cache.cuda_binary_cache import CUDABinaryCache
@@ -237,7 +237,7 @@ def test_cuda_binary_cache_empty_read_is_miss(monkeypatch, tmp_path, missing_met
             raise FileNotFoundError(errno.ENOENT, "metadata disappeared")
         return builtins.open(file, *args, **kwargs)
 
-    monkeypatch.setattr(cuda_binary_cache_mod, "open", empty_read, raising=False)
+    monkeypatch.setattr(binary_cache_mod, "open", empty_read, raising=False)
 
     assert CUDABinaryCache.load(key, "fatbin") is None
     assert path.read_bytes() == b"valid-fatbin"
