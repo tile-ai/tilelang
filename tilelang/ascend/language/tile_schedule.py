@@ -3,12 +3,25 @@
 Built on the shared ``BaseTileScheduler`` skeleton in
 ``tilelang.language.tile_schedule``; see that module's docstring for how
 ``@meta_class`` inlining and the ``T.alloc_var`` state protocol work.
+
+Next to the raw state accessors, a scheduler hands out the tile scalars a kernel
+slices with: ``tile()``, plus ``batch()`` / ``group()`` on the variants.  Each
+call binds its values, assumes their range contract, and returns the bound
+variables::
+
+    scheduler.init(block_idx)
+    while scheduler.valid():
+        m_idx, n_idx, actual_m, actual_n = scheduler.tile()
+        ...
+
+Those assumptions are what lets the pre-schedule passes prove per-tile GM
+regions and L1/L0 extents in bounds.
 """
 
 from __future__ import annotations
 
 import tilelang.ascend.language as T
-from tilelang.language.meta import meta_class
+from tilelang.language.meta import inline, meta_class
 from tilelang.language.tile_schedule import BaseTileScheduler
 
 
@@ -116,14 +129,38 @@ class AscendBaseTileScheduler(BaseTileScheduler):
         """Advance one persistent block: set ``m_idx`` / ``n_idx`` / ``valid_flag``."""
         raise NotImplementedError
 
+    # ---- state contract ----------------------------------------------------
+
+    @inline
+    def tile(self):
+        """Bind the current tile's M/N offsets and extents, and assume their ranges.
+
+        Returns ``(m_idx, n_idx, actual_m, actual_n)``: the tile's element offsets
+        along M/N and the in-bounds extents of its M/N tail.  ``actual_m`` /
+        ``actual_n`` follow ``get_actual_m`` / ``get_actual_n``, and every tile
+        ``_step`` hands out is a grid tile with a non-empty remainder, so the
+        emitted facts hold for every iteration of the ``while sched.valid()``
+        loop they dominate.  Call it once at the top of that loop body and slice
+        with the returned values.
+        """
+        m_tile = self._m_idx[0]
+        n_tile = self._n_idx[0]
+        m_idx = m_tile * self._block_m
+        n_idx = n_tile * self._block_n
+        actual_m = self.get_actual_m(m_tile)
+        actual_n = self.get_actual_n(n_tile)
+        T.assume(m_idx >= 0 and actual_m > 0 and actual_m <= self._block_m and m_idx + actual_m <= self._shape_m)
+        T.assume(n_idx >= 0 and actual_n > 0 and actual_n <= self._block_n and n_idx + actual_n <= self._shape_n)
+        return m_idx, n_idx, actual_m, actual_n
+
     # ---- stateless swizzle -------------------------------------------------
 
     def _swizzle(self, block_idx, local_num_m_blocks):
         """Map a (group-local) ``block_idx`` to ``(m_block, n_block)`` (store-free).
 
-        Faithful port of DeepGEMM ``get_swizzled_block``: small-M row-major fast
-        path, tail row-major fallback for the last ``< group_m`` M-rows, and the
-        GROUP_M superrow swizzle (+ optional xor_n / snake) on the aligned region.
+        Use row-major order for small M and the last ``< group_m`` M-rows.
+        Apply the GROUP_M superrow swizzle, with optional xor_n / snake ordering,
+        to the aligned region.
         ``local_num_m_blocks`` is compile-time for Normal/Batched (the whole grid)
         and a runtime PrimExpr for the grouped variants (the current group).
         Runtime conditions use ``T.if_then_else``; compile-time toggles use ``if``.
@@ -291,6 +328,17 @@ class AscendBatchedTileScheduler(AscendBaseTileScheduler):
     def get_batch_idx(self):
         return self.batch_idx[0]
 
+    @inline
+    def batch(self):
+        """Bind the current batch index and assume its range.
+
+        Returns the same bound variable the fact is stated over; use it (instead
+        of the raw ``get_batch_idx()`` read) to slice per-batch GM regions.
+        """
+        batch_idx = self.batch_idx[0]
+        T.assume(batch_idx >= 0 and batch_idx < self._num_groups)
+        return batch_idx
+
 
 @meta_class
 class AscendMGroupedTileScheduler(AscendBaseTileScheduler):
@@ -298,6 +346,7 @@ class AscendMGroupedTileScheduler(AscendBaseTileScheduler):
     array (length ``num_groups``); group ``g``'s valid rows are
     ``[align(psum[g-1], alignment), psum[g])`` in the global M space (group 0 starts at
     0). ``get_group_idx()`` exposes the current group for per-group B/SF offsets.
+    A/D must allocate all aligned rows, and physical M must be a multiple of alignment.
 
     Extra parameters beyond the base: ``grouped_layout`` (GM ``int32`` prefix-sum
     buffer), ``num_groups``, ``alignment`` (group-start row alignment, default 256).
@@ -379,6 +428,18 @@ class AscendMGroupedTileScheduler(AscendBaseTileScheduler):
     def get_actual_m(self, m_block_idx):
         return self._block_m
 
+    @inline
+    def group(self):
+        """Bind the current group index and assume its range.
+
+        ``valid`` gates the loop body on ``group_idx < num_groups``; the m cursor
+        is ``last_psum_m // block_m + <group-local tile>``, so it stays
+        non-negative and every full tile fits the padded row space.
+        """
+        group_idx = self.group_idx[0]
+        T.assume(group_idx >= 0 and group_idx < self._num_groups)
+        return group_idx
+
 
 @meta_class
 class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
@@ -388,7 +449,9 @@ class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
     offsets; ``get_shape_k()`` is the current group's K length.
 
     Extra parameters beyond the base: ``grouped_layout`` (GM ``int32`` prefix-sum
-    buffer), ``num_groups``, ``alignment`` (group-start K alignment, default 256).
+    buffer), ``num_groups``, ``shape_k`` (physical K allocation, including trailing padding; only the
+    K-range contract uses it),
+    ``alignment`` (group-start K alignment, default 256).
     """
 
     # One scale-factor pair covers this many K elements (MX FP hardware constant).
@@ -402,6 +465,7 @@ class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
         num_cores,
         shape_m,
         shape_n,
+        shape_k,
         grouped_layout,
         num_groups: int,
         alignment: int = 256,
@@ -413,7 +477,13 @@ class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
     ):
         self._grouped_layout = grouped_layout
         self._num_groups = num_groups
+        self._shape_k = shape_k
         self._alignment = alignment
+        # A group's K window starts on an ``alignment`` boundary; the SF range
+        # contract below needs that boundary to be scale-pair aligned too.
+        assert alignment % self._MX_SF_DIVISOR == 0, (
+            f"k-grouped alignment must be a multiple of the MX SF divisor ({self._MX_SF_DIVISOR}), got {alignment}"
+        )
         super().__init__(
             block_m=block_m,
             block_n=block_n,
@@ -476,3 +546,24 @@ class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
 
     def get_shape_k(self):
         return self.cur_shape_k[0]
+
+    @inline
+    def group(self):
+        """Bind the current group's K window and assume its ranges.
+
+        Returns ``(group_idx, k_base, group_k, sf_base)``: the group index, the
+        group's K origin, its K length, and the origin of its packed scale-factor
+        rows.  A valid tile belongs to a non-empty group, so the K span
+        ``[k_base, k_base + group_k)`` stays inside the total K and its SF rows
+        stay inside the packed SF buffer: a group starts on an ``alignment``
+        boundary, which is a multiple of the SF divisor.
+        """
+        group_idx = self.group_idx[0]
+        k_base = self.last_psum_k[0]
+        group_k = self.cur_shape_k[0]
+        sf_base = self.sf_k_cumsum[0]
+        sf_divisor = self._MX_SF_DIVISOR
+        T.assume(group_idx >= 0 and group_idx < self._num_groups)
+        T.assume(k_base >= 0 and group_k > 0 and k_base + group_k <= self._shape_k)
+        T.assume(sf_base >= 0 and sf_base + T.ceildiv(group_k, sf_divisor) <= T.ceildiv(self._shape_k, sf_divisor))
+        return group_idx, k_base, group_k, sf_base

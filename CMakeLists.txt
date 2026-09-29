@@ -696,6 +696,35 @@ if(WIN32)
 endif()
 target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
 
+# CPU-only heuristic for the Ascend DeepGEMM examples; no CANN dependency.
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c"
+  COMMAND Python::Interpreter -m cython
+          "${CMAKE_CURRENT_SOURCE_DIR}/examples/ascend/deepgemm/_heuristics.pyx"
+          --module-name tilelang_deepgemm_heuristics
+          --output-file "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/ascend/deepgemm/_heuristics.pyx"
+  VERBATIM)
+python_add_library(tilelang_deepgemm_heuristics MODULE
+                   "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c" ${USE_SABI} WITH_SOABI)
+target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+if(WIN32)
+  target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_deepgemm_heuristics PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
+set_target_properties(tilelang_deepgemm_heuristics PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+install(TARGETS tilelang_deepgemm_heuristics
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
+
 # Ensure dev builds drop the extension into build/lib alongside other shared libs
 set_target_properties(tilelang_cython_wrapper PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
