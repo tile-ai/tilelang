@@ -69,6 +69,60 @@ def test_pto_float32x2_unary_math_codegen(scalar_op, unary):
 
 
 @pytest.mark.pto
+def test_pto_float32_rsqrt_codegen():
+    @T.prim_func
+    def func(A: T.Tensor((2,), "float32"), B: T.Tensor((2,), "float32")):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((2,), "float32")
+            b_ub = T.alloc_shared((2,), "float32")
+            T.copy(A, a_ub)
+            with T.SimtVF(threads=1):
+                for i in T.vectorized(2):
+                    b_ub[i] = T.rsqrt(a_ub[i])
+            T.copy(b_ub, B)
+
+    source = _pto_source(func)
+    # tirx.rsqrt carries no TVectorizable op attribute, so the loop is
+    # legalized as serial and rsqrtf maps to the scalar reciprocal form
+    # instead of a vectorize_unary_f32x2 pair.
+    assert "1.0 / pto.sqrt(" in source
+    assert "rsqrtf(" not in source
+    compile(source, "<pto-float32-rsqrt>", "exec")
+
+
+@pytest.mark.parametrize(
+    "expected,unary",
+    [
+        ("pto.exp(", T.exp),
+        ("pto.absf(", T.abs),
+        ("pto.log(", T.log),
+        ("pto.sqrt(", T.sqrt),
+        ("1.0 / pto.sqrt(", T.rsqrt),
+    ],
+)
+@pytest.mark.pto
+def test_pto_float16_unary_math_codegen(expected, unary):
+    @T.prim_func
+    def func(A: T.Tensor((2,), "float16"), B: T.Tensor((2,), "float16")):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((2,), "float16")
+            b_ub = T.alloc_shared((2,), "float16")
+            T.copy(A, a_ub)
+            with T.SimtVF(threads=1):
+                for i in T.vectorized(2):
+                    b_ub[i] = unary(a_ub[i])
+            T.copy(b_ub, B)
+
+    source = _pto_source(func)
+    # AscendMath renames f16 tirx.* to h* extern names (hexp/...); these must
+    # be mapped back to pto.* instead of reaching the PTODSL source verbatim.
+    assert expected in source
+    for lowered in ("hexp(", "hfabs(", "hlog(", "hsqrt(", "hrsqrt("):
+        assert lowered not in source
+    compile(source, "<pto-float16-unary-math>", "exec")
+
+
+@pytest.mark.pto
 def test_pto_float32x2_div_codegen():
     @T.prim_func
     def func(
