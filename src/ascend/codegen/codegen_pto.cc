@@ -6084,11 +6084,24 @@ bool CodeGenTileLangPTO::TryEmitUnaryMath_(const std::string &name,
     bool reciprocal; // emit (1.0 / fn(x)) instead of fn(x)
   };
   static const std::unordered_map<std::string, UnaryMathForm> kForms = {
-      {"expf", {"pto.exp(", false}},       {"tirx.exp", {"pto.exp(", false}},
-      {"logf", {"pto.log(", false}},       {"tirx.log", {"pto.log(", false}},
-      {"sqrt", {"pto.sqrt(", false}},      {"sqrtf", {"pto.sqrt(", false}},
-      {"tirx.sqrt", {"pto.sqrt(", false}}, {"rsqrt", {"pto.sqrt(", true}},
-      {"rsqrtf", {"pto.sqrt(", true}},     {"tirx.rsqrt", {"pto.sqrt(", true}},
+      {"expf", {"pto.exp(", false}},
+      {"tirx.exp", {"pto.exp(", false}},
+      {"logf", {"pto.log(", false}},
+      {"tirx.log", {"pto.log(", false}},
+      {"sqrt", {"pto.sqrt(", false}},
+      {"sqrtf", {"pto.sqrt(", false}},
+      {"tirx.sqrt", {"pto.sqrt(", false}},
+      {"rsqrt", {"pto.sqrt(", true}},
+      {"rsqrtf", {"pto.sqrt(", true}},
+      {"tirx.rsqrt", {"pto.sqrt(", true}},
+      {"fabsf", {"pto.absf(", false}},
+      {"tirx.fabs", {"pto.absf(", false}},
+      // f16 extern names produced by AscendMath (intrin_rule_ascend.cc).
+      {"hexp", {"pto.exp(", false}},
+      {"hfabs", {"pto.absf(", false}},
+      {"hlog", {"pto.log(", false}},
+      {"hsqrt", {"pto.sqrt(", false}},
+      {"hrsqrt", {"pto.sqrt(", true}},
   };
   auto it = kForms.find(name);
   if (it == kForms.end()) {
