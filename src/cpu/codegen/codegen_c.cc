@@ -2,6 +2,7 @@
  * \file cpu/codegen/codegen_c.cc
  */
 #include "codegen_c.h"
+#include "backend/common/codegen/c_bit_intrinsics.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
@@ -35,6 +36,7 @@ void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
+  emitted_bit_intrinsics_ = false;
   decl_stream << "// tilelang target: " << target_str << "\n";
   decl_stream << "#include <tl_templates/cpp/common.h>\n";
   decl_stream << "\n";
@@ -366,7 +368,18 @@ CodeGenTileLangC::GetFunctionInfo(const CallNode *op,
 
 void CodeGenTileLangC::VisitExpr_(const CallNode *op,
                                   std::ostream &os) { // NOLINT(*)
-  if (op->op.same_as(tl::clamp())) {
+  if (op->op.same_as(Op::Get("tirx.clz"))) {
+    DataType dtype = op->args[0].dtype();
+    ICHECK(dtype.is_scalar() && (dtype.is_int() || dtype.is_uint()) &&
+           (dtype.bits() == 32 || dtype.bits() == 64));
+    if (!emitted_bit_intrinsics_) {
+      emitted_bit_intrinsics_ = true;
+      decl_stream << kCBitIntrinsics;
+    }
+    os << "tl_clz" << dtype.bits() << "((uint" << dtype.bits() << "_t)(";
+    PrintExpr(op->args[0], os);
+    os << "))";
+  } else if (op->op.same_as(tl::clamp())) {
     ICHECK_EQ(op->args.size(), 3);
     os << "tl::clamp(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";

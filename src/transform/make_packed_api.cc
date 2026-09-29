@@ -265,8 +265,22 @@ private:
       // tl.assume, matching SplitHostDevice's conservative lifting policy.
       return VisitStmt(op->body);
     }
+    if (UsesVar(condition, [&](const VarNode *var) {
+          return local_vars_.count(GetRef<Var>(var));
+        })) {
+      // Launch preparation can introduce local scalar bindings. Keep their
+      // checks after the definitions instead of hoisting or expanding them.
+      return SeqStmt::Flatten(AssertStmt(condition, StringImm("RuntimeError"),
+                                         message_parts, op->span),
+                              VisitStmt(op->body));
+    }
     runtime_checks_->push_back({condition, std::move(message_parts), op->span});
     return VisitStmt(op->body);
+  }
+
+  Stmt VisitStmt_(const BindNode *op) final {
+    local_vars_.insert(op->var);
+    return GetRef<Stmt>(op);
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
@@ -291,6 +305,7 @@ private:
   }
 
   std::vector<AssumeRuntimeCheck> *runtime_checks_;
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> local_vars_;
   int conditional_scope_depth_{0};
 };
 
