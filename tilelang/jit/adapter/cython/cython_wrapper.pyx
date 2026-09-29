@@ -20,6 +20,7 @@ cdef class CythonKernelWrapper:
         object static_shape_map        # Maps buffer variables to their corresponding static shapes
         object static_strides_map      # Maps buffer variables to their corresponding static strides
         object dynamic_strides_map    # Maps buffers to runtime stride validation metadata
+        object scalar_param_vars      # Maps scalar params to their TIR vars, None elsewhere
         object static_contiguous_list  # A list contains contiguous buffers
         object ptr_map                 # Maps pointer arguments to their corresponding buffer indices
         list result_idx                # Indices of output tensors in the params list
@@ -41,6 +42,7 @@ cdef class CythonKernelWrapper:
         self.param_dtypes = [param.torch_dtype() for param in params]
         self.param_storage_metadata = [(-1, 1) for _ in params]
         self.dynamic_strides_map = {}
+        self.scalar_param_vars = None
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
         self.get_current_device = get_current_device if get_current_device is not None else torch.cuda.current_device
@@ -82,6 +84,10 @@ cdef class CythonKernelWrapper:
 
     def set_dynamic_strides_map(self, dynamic_strides_map):
         self.dynamic_strides_map = dynamic_strides_map
+        return self
+
+    def set_scalar_param_vars(self, scalar_param_vars):
+        self.scalar_param_vars = scalar_param_vars
         return self
 
     def set_static_contiguous_list(self, static_contiguous_list):
@@ -157,7 +163,7 @@ cdef class CythonKernelWrapper:
                     )
 
     cpdef dict _resolve_dynamic_values(self, list tensor_list):
-        """Resolve dynamic shape/stride symbols once for validation and launch."""
+        """Resolve dynamic symbols and scalar params once for validation and launch."""
         values = {}
         for var, (ref_id, buffer_idx, shape_idx, storage_scale) in self.dynamic_symbolic_map.items():
             # Cascaded resolution across all carrier buffers to handle None
@@ -173,6 +179,17 @@ cdef class CythonKernelWrapper:
                         value = int(tensor.stride(src_dim_idx)) * src_storage_scale
                     break
             values[var] = value
+        # Scalar params take their values from the caller instead of carrier
+        # tensors; merge them so stride validation can substitute them like
+        # implicit symbols.
+        if self.scalar_param_vars:
+            for i, var in enumerate(self.scalar_param_vars):
+                if var is None or i >= len(tensor_list):
+                    continue
+                value = tensor_list[i]
+                # tirx.IntImm only accepts int/uint/bool dtypes (codes 0, 1, 6).
+                if isinstance(value, int) and var.dtype.type_code in (0, 1, 6):
+                    values[var] = int(value)
         return values
 
     cpdef void _check_dynamic_strides(self, list tensor_list, dict dynamic_values):
@@ -189,6 +206,11 @@ cdef class CythonKernelWrapper:
         for buffer_name, (buffer_idx, strides) in self.dynamic_strides_map.items():
             tensor = tensor_list[buffer_idx]
             if not isinstance(tensor, torch.Tensor):
+                continue
+            # Empty tensors have no addressable elements, so their strides do
+            # not constrain any legal kernel access.  PyTorch may choose a
+            # different valid stride tuple than TIR for zero-sized dimensions.
+            if tensor.numel() == 0:
                 continue
 
             for stride_idx, stride_expr, packing_factor in strides:
