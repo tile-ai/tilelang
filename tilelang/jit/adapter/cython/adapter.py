@@ -75,10 +75,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
     device_kernel_source: str | None = None
     kernel_global_source: str | None = None  # Alias for device_kernel_source for compatibility
     lib: ctypes.CDLL | None = None  # Compiled library handle
-    # Maps symbolic variables to their corresponding buffer and shape indices
-    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int]] | None = None
+    # Maps symbolic variables to (kind, buffer_index, dimension, stride_scale)
+    dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
     # Maps symbolic variable names to ALL buffers that carry them, for cascaded None resolution
-    dynamic_symbolic_sources: dict[str, list[tuple[int, int, int]]] | None = None
+    dynamic_symbolic_sources: dict[str, list[tuple[int, int, int, int]]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
     ptr_map: dict[int, str] | None = None
     # Maps buffer variables to their corresponding dtypes
@@ -278,16 +278,17 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
-    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int]]]:
+    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int, int]]]:
         """Build a multi-source map for cascaded None resolution.
 
-        For each dynamic symbol, maps to ALL buffers that carry it as (buffer_idx, dim_idx, stride_scale).
+        For each dynamic symbol, maps to ALL buffers that carry it as (kind, buffer_idx, dim_idx, stride_scale).
+        Each source retains its own kind: 0 for shape, 1 for stride.
         This allows the Cython wrapper to find a non-None carrier when some buffers are None.
         """
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
-        sources: dict[str, list[tuple[int, int, int]]] = {}
+        sources: dict[str, list[tuple[int, int, int, int]]] = {}
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
@@ -298,13 +299,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         key = str(dim)
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((i, j, stride_scale))
+                        sources[key].append((0, i, j, 1))
                 for j, stride in enumerate(buffer.strides):
                     if isinstance(stride, tirx.Var) and stride not in params:
                         key = str(stride)
                         if key not in sources:
                             sources[key] = []
-                        sources[key].append((i, j, stride_scale))
+                        sources[key].append((1, i, j, stride_scale))
         return sources
 
     def _process_buffer_dtype(self) -> dict[tirx.Var, tuple[int, torch.dtype]]:

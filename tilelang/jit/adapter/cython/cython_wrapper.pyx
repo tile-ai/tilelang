@@ -286,12 +286,12 @@ cdef class CythonKernelWrapper:
         for var, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():
             # Cascaded resolution across all carrier buffers to handle None
             var_key = str(var)
-            sources = self.dynamic_symbolic_sources.get(var_key, [(buffer_idx, shape_idx, stride_scale)])
+            sources = self.dynamic_symbolic_sources.get(var_key, [(ref_id, buffer_idx, shape_idx, stride_scale)])
             value = 0
-            for src_buf_idx, src_dim_idx, src_stride_scale in sources:
+            for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in sources:
                 tensor = tensor_list[src_buf_idx]
                 if tensor is not None:
-                    if ref_id == 0:
+                    if src_ref_id == 0:
                         value = tensor.shape[src_dim_idx]
                     else:
                         value = tensor.stride(src_dim_idx) * src_stride_scale
