@@ -172,6 +172,7 @@ public:
   // input dims of GetLoopLayout().
   const Array<IterVar> &GetLoopVars() const { return loop_vars_; }
   bool HasReducerUpdates() const { return !reducer_updates_.empty(); }
+  int GetPlanVectorSize(const LayoutInferArgs &layout_args) const;
   // Get the mapping from buffer to access indices + access type.
   const BufferIndiceMap &GetIndiceMap() const { return indice_map_; }
   // Get buffers in the order they first appear in the loop body.

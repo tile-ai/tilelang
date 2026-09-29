@@ -23,7 +23,7 @@ from tilelang.backend.target import determine_target
 from tilelang.layout import Fragment
 from tvm.tirx.stmt_functor import post_order_visit
 
-# The two selection policies behind `tl.layout_cost_model`, by name.
+# The existing policies; register-count snapshots exercise the default path.
 COST_MODELS = ("register-count", "io-aware")
 
 
@@ -35,7 +35,8 @@ def _run_passes(prim_func, cost_model: str, target=None):
     with tvm.target.Target(target):
         mod = tvm.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
-        with tvm.transform.PassContext(config={"tl.layout_cost_model": cost_model}):
+        configs = {} if cost_model == "register-count" else {"tl.layout_cost_model": cost_model}
+        with tvm.transform.PassContext(config=configs):
             mod = tl.transform.LayoutInference()(mod)
     return mod["main"]
 
