@@ -6075,6 +6075,7 @@ bool CodeGenTileLangPTO::TryEmitUnaryMath_(const std::string &name,
       {"sqrt", {"pto.sqrt(", false}},      {"sqrtf", {"pto.sqrt(", false}},
       {"tirx.sqrt", {"pto.sqrt(", false}}, {"rsqrt", {"pto.sqrt(", true}},
       {"rsqrtf", {"pto.sqrt(", true}},     {"tirx.rsqrt", {"pto.sqrt(", true}},
+      {"fabsf", {"pto.absf(", false}},     {"tirx.fabs", {"pto.absf(", false}},
   };
   auto it = kForms.find(name);
   if (it == kForms.end()) {
