@@ -5846,6 +5846,22 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
        << "), pto.const(0.0, dtype=" << DataTypeName(to) << "))";
     return;
   }
+  if (scalar_value && from_integer && to.is_bool()) {
+    // The bool result must be normalized to 0/1, not the raw integer.
+    os << "tl.as_logical_bool(" << PrintExpr_(op->value) << ")";
+    return;
+  }
+  if (scalar_value && from.is_bool() && (to.is_int() || to.is_uint())) {
+    // Materialize the boolean as a normalized 0/1 integer.
+    if (const auto *imm = op->value.as<IntImmNode>()) {
+      os << "pto.const(" << imm->value << ", dtype=" << DataTypeName(to) << ")";
+      return;
+    }
+    os << "pto.select(" << PrintCondition(op->value)
+       << ", pto.const(1, dtype=" << DataTypeName(to)
+       << "), pto.const(0, dtype=" << DataTypeName(to) << "))";
+    return;
+  }
   if (!immediate_value && scalar_value &&
       ((from_float && to_integer) || (from_integer && to_float))) {
     os << ScalarCastExpr(PrintExpr_(op->value), to, "PTO scalar cast");
@@ -5869,13 +5885,11 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
     os << ScalarCastExpr(PrintExpr_(op->value), to, "PTO integer cast");
     return;
   }
-  if (from_integer && to_integer &&
-      (from.bits() <= to.bits() || from.bits() == 1 || to.bits() == 1 ||
-       from.is_bool() || to.is_bool())) {
-    // Address-index widening and boolean representation casts should not become
-    // Python int(...)/bool(...), because that coerces PTODSL runtime values and
-    // breaks tracing. Same-width int/uint casts are handled above to preserve
-    // signedness for downstream scalar lowering.
+  if (from_integer && to_integer && from.bits() <= to.bits()) {
+    // Address-index widening should not become Python int(...), because that
+    // coerces PTODSL runtime values and breaks tracing. Same-width int/uint
+    // casts are handled above to preserve signedness for downstream scalar
+    // lowering.
     PrintExpr_(op->value, os);
     return;
   }
@@ -5883,8 +5897,8 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
   if (to.is_bool()) {
     ICHECK(from.is_scalar() && (from_integer || from_float))
         << "PTO bool cast expects a scalar numeric source, got " << from;
-    // Integer sources already use the representation-preserving path above;
-    // runtime floating-point sources already use ScalarCastExpr.
+    // Integer sources already normalize above; runtime floating-point
+    // sources already use ScalarCastExpr.
     const auto *imm = op->value.as<FloatImmNode>();
     ICHECK(imm) << "PTO bool cast expected a floating-point immediate";
     os << (imm->value != 0.0 ? "True" : "False");
