@@ -47,7 +47,8 @@ _DEFAULT_ENTRY_TIMEOUT = 900.0
 _WORKER_SHUTDOWN_TIMEOUT = 60.0
 _WORKER_TERMINATE_TIMEOUT = 10.0
 
-# (entry name, example path relative to this file, run_regression_perf kwargs).
+# (entry name, example path[:function], function kwargs).
+# The default function is run_regression_perf; paths are relative to _EXAMPLES_DIR.
 # One row == one worker command and one independently reported result. The path may live
 # in a subfolder (e.g. flash_attention/); the worker puts its directory on sys.path so
 # intra-folder imports (``from core import …``) resolve without dotted-module gymnastics.
@@ -65,7 +66,43 @@ _ENTRIES: list[tuple[str, str, dict]] = [
     ("ascend_gemm_mix_manual", "example_gemm_mix_manual.py", {}),
     ("ascend_gemm_mixedkernel", "example_gemm_mixedkernel.py", {}),
     ("ascend_gemm_bypass_l2", "example_gemm_bypass_l2.py", {}),
-    ("ascend_gemm_various_shapes", "example_gemm_various_shapes.py", {}),
+    # Four dense shapes cover both dtypes and traversal orders without a sweep.
+    (
+        "ascend_deepgemm_bf16_mnk_4096x4096x4096",
+        "deepgemm/bench_deepgemm.py",
+        {"m": 4096, "n": 4096, "k": 4096, "dtype": "bfloat16", "loop_order": "mnk"},
+    ),
+    (
+        "ascend_deepgemm_bf16_kmn_128x4096x7168",
+        "deepgemm/bench_deepgemm.py",
+        {"m": 128, "n": 4096, "k": 7168, "dtype": "bfloat16", "loop_order": "kmn"},
+    ),
+    (
+        "ascend_deepgemm_fp8_mnk_1024x4096x7168",
+        "deepgemm/bench_deepgemm.py",
+        {"m": 1024, "n": 4096, "k": 7168, "dtype": "float8_e4m3fn", "loop_order": "mnk"},
+    ),
+    (
+        "ascend_deepgemm_fp8_kmn_1025x4096x7168",
+        "deepgemm/bench_deepgemm.py",
+        {"m": 1025, "n": 4096, "k": 7168, "dtype": "float8_e4m3fn", "loop_order": "kmn"},
+    ),
+    # Scale packing, transpose and broadcast share the DeepGEMM benchmark module.
+    (
+        "ascend_deepgemm_sf_fp32_k_32768x7168",
+        "deepgemm/bench_deepgemm.py:run_transform_sf_perf",
+        {"mn": 32768, "k": 7168},
+    ),
+    (
+        "ascend_deepgemm_sf_int16_k_32768x7168",
+        "deepgemm/bench_deepgemm.py:run_transform_sf_perf",
+        {"mn": 32768, "k": 7168, "dtype": "int16"},
+    ),
+    (
+        "ascend_deepgemm_sf_int16_mn_gran128_32768x7168",
+        "deepgemm/bench_deepgemm.py:run_transform_sf_perf",
+        {"mn": 32768, "k": 7168, "dtype": "int16", "major": "mn", "gran_mn": 128},
+    ),
     ("ascend_blockscaled_gemm", "example_blockscaled_gemm.py", {}),
     ("ascend_mha", "flash_attention/example_mha.py", {}),
     ("ascend_gqa", "flash_attention/example_gqa.py", {}),
@@ -123,7 +160,8 @@ def _run_child(entry_name: str) -> int:
         print(_MARKER + json.dumps([]), flush=True)
         return 1
 
-    _, rel_path, kwargs = spec
+    _, entry_path, kwargs = spec
+    rel_path, _, function_name = entry_path.partition(":")
     results: list[dict] = []
     try:
         module = _load_example(rel_path)
@@ -132,7 +170,8 @@ def _run_child(entry_name: str) -> int:
         from tilelang.testing import perf_regression as pr
 
         pr._reset_results()
-        tilelang_testing.process_func(module.run_regression_perf, entry_name, **kwargs)
+        benchmark = getattr(module, function_name or "run_regression_perf")
+        tilelang_testing.process_func(benchmark, entry_name, **kwargs)
         results = [{"name": r.name, "latency": r.latency} for r in pr._RESULTS]
     except Exception as e:  # noqa: BLE001 - catchable failures still skip cleanly
         print(f"  ⚠️  {entry_name} failed, skipping: {type(e).__name__}: {e}", flush=True)

@@ -274,51 +274,7 @@ else()
 endif()
 
 # Configs
-set(TILELANG_BACKENDS CUDA ROCM METAL LLVM ASCEND)
-
-set(TILELANG_BACKEND_DOC_CUDA "Enable CUDA backend (ON/OFF/or CUDA SDK path)")
-set(TILELANG_BACKEND_DOC_ROCM "Enable ROCm backend (ON/OFF/or ROCm SDK path)")
-set(TILELANG_BACKEND_DOC_METAL "Enable Metal backend")
-set(TILELANG_BACKEND_DOC_LLVM "Enable LLVM backend")
-set(TILELANG_BACKEND_DOC_ASCEND "Enable Ascend backend")
-
-# TVM's config.cmake redefines USE_* options later, so we cache the user's choice
-# (including explicit -DUSE_XXX arguments) before we include TVM and restore it
-# afterwards.
-
-macro(tilelang_define_backend_option BACKEND)
-  set(_backend_var "USE_${BACKEND}")
-  set(_doc "${TILELANG_BACKEND_DOC_${BACKEND}}")
-  set(_user_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
-
-  set(_user_override OFF)
-  if(DEFINED ${_user_override_var})
-    set(_user_override "${${_user_override_var}}")
-  endif()
-
-  if(DEFINED CACHE{${_backend_var}})
-    get_property(_cache_type CACHE ${_backend_var} PROPERTY TYPE)
-    if(_cache_type STREQUAL "UNINITIALIZED")
-      set(_user_override ON)
-    endif()
-  endif()
-
-  set(_default OFF)
-  if(DEFINED ${_backend_var})
-    set(_default "${${_backend_var}}")
-  endif()
-
-  option(${_backend_var} "${_doc}" "${_default}")
-  # Remember if the user explicitly set this option so that later logic
-  # won't auto-toggle backends they configured on the command line.
-  set(${_user_override_var} ${_user_override} CACHE INTERNAL
-    "User explicitly set ${_backend_var} during configuration" FORCE)
-  set(TILELANG_OPTION_${_backend_var} "${${_backend_var}}")
-endmacro()
-
-foreach(BACKEND IN LISTS TILELANG_BACKENDS)
-  tilelang_define_backend_option(${BACKEND})
-endforeach()
+include(cmake/BackendOptions.cmake)
 
 set(PREBUILD_CYTHON ON)
 
@@ -421,87 +377,6 @@ file(GLOB TILE_LANG_SRCS
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
 )
-# Track if the user explicitly selected a backend via cache options.
-set(TILELANG_BACKEND_USER_SELECTED OFF)
-foreach(BACKEND IN LISTS TILELANG_BACKENDS)
-  set(_backend_var "USE_${BACKEND}")
-  set(_override_var "TILELANG_USER_OVERRIDE_${_backend_var}")
-  if(${_backend_var} OR ${_override_var})
-    set(TILELANG_BACKEND_USER_SELECTED ON)
-  endif()
-endforeach()
-
-# Only auto-select a backend when the user didn't specify one explicitly.
-if(NOT TILELANG_BACKEND_USER_SELECTED)
-  set(_tilelang_backend_env_selected OFF)
-
-  if(DEFINED ENV{USE_CUDA})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_CUDA})
-      set(USE_CUDA ON)
-    else()
-      set(USE_CUDA OFF)
-    endif()
-  endif()
-
-  if(DEFINED ENV{USE_ROCM})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_ROCM})
-      set(USE_ROCM ON)
-    else()
-      set(USE_ROCM OFF)
-    endif()
-  endif()
-
-  if(DEFINED ENV{USE_METAL})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_METAL})
-      set(USE_METAL ON)
-    else()
-      set(USE_METAL OFF)
-    endif()
-  endif()
-
-
-  if(DEFINED ENV{USE_LLVM})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_LLVM})
-      set(USE_LLVM ON)
-    else()
-      set(USE_LLVM OFF)
-    endif()
-  endif()
-
-  if(DEFINED ENV{USE_ASCEND})
-    set(_tilelang_backend_env_selected ON)
-    if($ENV{USE_ASCEND})
-      set(USE_ASCEND ON)
-    else()
-      set(USE_ASCEND OFF)
-    endif()
-  endif()
-
-  if(NOT _tilelang_backend_env_selected)
-    if(APPLE)
-      message(STATUS "Enable Metal support by default.")
-      set(USE_METAL ON)
-    elseif(IS_DIRECTORY "$ENV{ASCEND_HOME_PATH}" OR
-           IS_DIRECTORY "/usr/local/Ascend/ascend-toolkit/latest")
-      # A physical CANN install is a stronger signal than a (possibly
-      # pip-provided) CUDA toolkit, so probe it first.
-      message(STATUS "CANN toolkit found; enable Ascend support by default.")
-      set(USE_ASCEND ON)
-    elseif(TILELANG_CUDA_TOOLKIT_AVAILABLE)
-      message(STATUS "Enable CUDA support by default.")
-      set(USE_CUDA ON)
-    else()
-      message(STATUS "CUDA toolkit not found; building without CUDA support by default.")
-      set(USE_CUDA OFF)
-    endif()
-  endif()
-  unset(_tilelang_backend_env_selected)
-endif()
-
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/cpu/CMakeLists.txt")
@@ -696,6 +571,35 @@ if(WIN32)
   endif()
 endif()
 target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+
+# CPU-only heuristic for the Ascend DeepGEMM examples; no CANN dependency.
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c"
+  COMMAND Python::Interpreter -m cython
+          "${CMAKE_CURRENT_SOURCE_DIR}/examples/ascend/deepgemm/_heuristics.pyx"
+          --module-name tilelang_deepgemm_heuristics
+          --output-file "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/ascend/deepgemm/_heuristics.pyx"
+  VERBATIM)
+python_add_library(tilelang_deepgemm_heuristics MODULE
+                   "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c" ${USE_SABI} WITH_SOABI)
+target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
+if(WIN32)
+  target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE Py_NO_LINK_LIB=1)
+  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+    target_link_options(tilelang_deepgemm_heuristics PRIVATE
+      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+  endif()
+endif()
+set_target_properties(tilelang_deepgemm_heuristics PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
+install(TARGETS tilelang_deepgemm_heuristics
+        LIBRARY DESTINATION tilelang/lib
+        RUNTIME DESTINATION tilelang/lib
+        ARCHIVE DESTINATION tilelang/lib)
 
 # Ensure dev builds drop the extension into build/lib alongside other shared libs
 set_target_properties(tilelang_cython_wrapper PROPERTIES

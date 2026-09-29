@@ -34,8 +34,10 @@ git submodule update --init --recursive
 USE_ASCEND=ON USE_CUDA=OFF python -m pip install -v .
 ```
 
-`USE_ASCEND=ON` enables this backend. `USE_CUDA=OFF` avoids requiring a CUDA
-toolkit for an Ascend-only build.
+Ascend is enabled by default on Linux. These settings enable Ascend and
+disable CUDA, so a CUDA toolkit is not required. For an existing build
+directory, pass the corresponding `-DUSE_*=...` options through `CMAKE_ARGS`
+to override its cached settings.
 
 For an editable development install:
 
