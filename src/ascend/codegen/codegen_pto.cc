@@ -1751,15 +1751,16 @@ bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallNode *op,
   return true;
 }
 
-void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
-                                     const PrimFunc &func) {
-  RegisterFunction_(gvar, func);
-  current_function_name_ = GetFunctionName_(gvar);
-  InitFuncState_(func);
-  name_supply_->ReserveName("pto");
-  name_supply_->ReserveName("scalar");
-  name_supply_->ReserveName("tl");
-  ValidateKernelCapabilities(func);
+void CodeGenTileLangPTO::ResetRngState_() {
+  pto_rng_state_var_.clear();
+  pto_rng_counter_var_.clear();
+  pto_rng_normal_cache_var_.clear();
+  pto_rng_has_normal_var_.clear();
+  pto_rng_initialized_ = false;
+  pto_rng_result_counter_ = 0;
+}
+
+void CodeGenTileLangPTO::ResetFunctionState_() {
   local_var_buffers_.clear();
   current_unroll_factor_loop_var_ = Optional<Var>();
   current_unroll_factor_ = 0;
@@ -1771,12 +1772,30 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   gemm_emit_context_by_call_.clear();
   gemm_zero_addr_emitted_ = false;
   inside_simtvf_body_ = false;
-  persistent_buffer_vars_ = SimtPersistentBufferCollector().Collect(func->body);
-  hf32_mode_by_gemm_ = PTOHf32ModeAnalyzer::Analyze(func);
+  in_mixed_vector_section_ = false;
+  inside_mixed_section_ = false;
   copy_pad_value_counter_ = 0;
   current_copy_pad_value_id_ = -1;
   current_copy_pad_value_dtype_ = DataType::Void();
   uniform_const_copy_pad_value_ = PrimExpr();
+  native_loop_depth_ = 0;
+  simdvf_nesting_depth_ = 0;
+  pto_if_result_counter_ = 0;
+  ResetRngState_();
+}
+
+void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
+                                     const PrimFunc &func) {
+  RegisterFunction_(gvar, func);
+  current_function_name_ = GetFunctionName_(gvar);
+  InitFuncState_(func);
+  ResetFunctionState_();
+  name_supply_->ReserveName("pto");
+  name_supply_->ReserveName("scalar");
+  name_supply_->ReserveName("tl");
+  ValidateKernelCapabilities(func);
+  persistent_buffer_vars_ = SimtPersistentBufferCollector().Collect(func->body);
+  hf32_mode_by_gemm_ = PTOHf32ModeAnalyzer::Analyze(func);
   bool saw_copy_pad_value = false;
   bool has_uniform_const_copy_pad_value = true;
   tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
@@ -1806,8 +1825,6 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
       func_has_gemm_l1 || func_has_blockscaled_gemm_l1 || HasAscendMad(func);
   current_function_is_cube_ = IsAscendCubeKernel(func);
   current_function_is_mixed_ = IsAscendMixedKernel(func);
-  in_mixed_vector_section_ = false;
-  inside_mixed_section_ = false;
   if (current_function_is_mixed_) {
     MixedSectionVariableInfo mixed_info =
         MixedSectionLocalVarAnalyzer::Analyze(func->body);

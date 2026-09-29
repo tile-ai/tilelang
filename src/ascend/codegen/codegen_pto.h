@@ -254,6 +254,9 @@ private:
   bool pto_rng_initialized_{false};
   int pto_rng_result_counter_{0};
   int pto_if_result_counter_{0};
+  void ResetRngState_();
+  // Clears all function-scoped emission state; see AddFunction.
+  void ResetFunctionState_();
   void EmitRngInit(const CallNode *op);
   std::string EmitRngRand(const CallNode *op);
   std::string EmitRngRandFloat(const CallNode *op);
