@@ -55,12 +55,13 @@ def reduce(
     """
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
-    out_buffer = to_buffer_region(out).buffer
+    out_region = to_buffer_region(out)
+    out_buffer = out_region.buffer
     if reduce_type in ("bitand", "bitor", "bitxor") and not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
         raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     buf_shape = retrieve_shape(buffer)
-    out_shape = retrieve_shape(out)
+    out_shape = retrieve_shape(out_region)
     expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
     if list(out_shape) not in expected_shapes:
         expected_shapes_str = " or ".join(map(str, expected_shapes))
