@@ -47,6 +47,7 @@ def test_pto_float32x2_minmax_codegen(op_name, combine):
         ("pto.exp", T.exp),
         ("pto.log", T.log),
         ("pto.sqrt", T.sqrt),
+        ("pto.absf", T.abs),
     ],
 )
 @pytest.mark.pto
