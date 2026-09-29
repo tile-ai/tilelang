@@ -133,6 +133,14 @@ template <typename SrcVec> using widen_vec_t = typename widen_vec<SrcVec>::type;
     vec_t<T> dst;                                                              \
     CApi(dst, src, offset);                                                    \
     return dst;                                                                \
+  }                                                                            \
+  template <typename T>                                                        \
+  __simd_callee__ inline vec_pair<vec_t<T>, __ubuf__ T *> Op##_postupdate(     \
+      __ubuf__ T *src, int32_t offset) {                                       \
+    vec_pair<vec_t<T>, __ubuf__ T *> dst;                                      \
+    CApi##_postupdate(dst.v0, src, offset);                                    \
+    dst.v1 = src;                                                              \
+    return dst;                                                                \
   }
 
 SIMD_INST_DEFINE_LOAD(vlds_norm, asc_loadalign)

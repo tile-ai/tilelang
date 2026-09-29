@@ -8,6 +8,7 @@ import tilelang.testing
 from tilelang.ascend.language import simd as ascend_simd
 from tilelang.engine.lower import lower
 from tvm import tirx
+from tvm.script.ir_builder import IRBuilder
 from tvm.tirx import Call
 from testing.ascend._ir import calls
 
@@ -357,6 +358,37 @@ def test_vld2_loads_once_and_exposes_both_vectors(dtype, bits):
     assert source.count("simd_inst::vld_x2<") == 1
     assert distribution in source
     assert ".v0" in source and ".v1" in source
+
+
+def test_vld_postupdate_rejects_invalid_pointer_and_increment():
+    buf = tirx.decl_buffer((128,), "uint16", scope="shared")
+    with pytest.raises(ValueError, match="mutable pointer"):
+        ascend_simd.vld(buf[0], post_inc=128)
+    untyped = tirx.decl_buffer((1,), "handle", scope="local.var")[0]
+    with pytest.raises(ValueError, match="declared with make_ubuf_ptr"):
+        ascend_simd.vld(untyped, post_inc=128)
+    with IRBuilder(), T.sblock("root"):
+        ptr = ascend_simd.make_ubuf_ptr(buf[0], "uint16")[0]
+        with pytest.raises(ValueError, match="must match dtype"):
+            ascend_simd.vld(ptr, "BRC_B8", post_inc=1)
+        with pytest.raises(TypeError, match="int32 element increment"):
+            ascend_simd.vld(ptr, post_inc=True)
+        with pytest.raises(ValueError, match="fit int32"):
+            ascend_simd.vld(ptr, post_inc=1 << 32)
+        wide_ptr = ascend_simd.make_ubuf_ptr(buf[0], "uint64")[0]
+        with pytest.raises(ValueError, match="8/16/32-bit pointer"):
+            ascend_simd.vld(wide_ptr, post_inc=1)
+        with pytest.raises(ValueError, match="source element dtype must match"):
+            ascend_simd.vsstb(tirx.Var("src", "float32x64"), ptr, 1, tirx.Var("mask", "boolx256"), update=True)
+
+
+@pytest.mark.parametrize("dist", ["US_B32", "DS_B32", "E2B", "E2B_B8", "UNPK4_B16", "UNKNOWN_B16", None])
+def test_vld_postupdate_rejects_unknown_distribution(dist):
+    with IRBuilder(), T.sblock("root"):
+        buf = T.alloc_shared((128,), "uint16")
+        ptr = ascend_simd.make_ubuf_ptr(buf[0], "uint16")[0]
+        with pytest.raises(ValueError, match="Unsupported vld post-update distribution"):
+            ascend_simd.vld(ptr, dist, post_inc=1)
 
 
 def test_vld2_rejects_a_single_vector_distribution():

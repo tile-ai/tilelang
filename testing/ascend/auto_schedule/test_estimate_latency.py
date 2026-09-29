@@ -14,7 +14,7 @@ from testing.ascend.auto_schedule._task_utils import (
 )
 
 
-def _make_gemm_cost_program(m, n, k, dtype="float32", hf32=True, dynamic_k=False, l0=True):
+def _make_gemm_cost_program(m, n, k, dtype="float32", hf32=True, dynamic_k=False, l0=True, blockscaled=False):
     @T.prim_func
     def main(tail_k: T.int32):
         with T.Kernel(1):
@@ -24,7 +24,12 @@ def _make_gemm_cost_program(m, n, k, dtype="float32", hf32=True, dynamic_k=False
             if dtype == "float32":
                 T.set_hf32_mode("nearest_even" if hf32 else None)
             effective_k = T.max(T.min(tail_k, k), 0) if dynamic_k else k
-            T.gemm(a[:m, :effective_k], b[:n, :effective_k], c[:m, :n], transpose_B=True, clear_accum=True)
+            if blockscaled:
+                sfa = T.alloc_l0a_sf(a)
+                sfb = T.alloc_l0b_sf(b)
+                T.gemm_blockscaled(a[:m, :effective_k], b[:n, :effective_k], c[:m, :n], sfa, sfb, transpose_B=True, clear_accum=True)
+            else:
+                T.gemm(a[:m, :effective_k], b[:n, :effective_k], c[:m, :n], transpose_B=True, clear_accum=True)
 
     return main
 
@@ -60,6 +65,25 @@ def test_l0_gemm_cost_respects_fp32_mode():
 
 def test_l1_gemm_cost_uses_compute_groups():
     assert _estimate_gemm_cost(24, 24, 32, dtype="bfloat16", l0=False) == _estimate_gemm_cost(32, 32, 32, dtype="bfloat16", l0=False)
+
+
+@pytest.mark.parametrize(
+    "mn,dtype,measured",
+    [
+        (16, "float8_e4m3fn", (31, 6)),
+        (64, "float8_e4m3fn", (57, 32)),
+        (16, "float4_e2m1fn", (28, 3)),
+        (64, "float4_e2m1fn", (41, 16)),
+    ],
+)
+def test_blockscaled_gemm_measured_compute_cost(mn, dtype, measured):
+    # CANN 9.2 / npusim Ascend950: steady latency/II with resident data/SF
+    # and independent L0C outputs, covering small-tile and peak-throughput costs.
+    assert _estimate_gemm_cost(mn, mn, 64, dtype=dtype, blockscaled=True) == measured
+
+
+def test_dense_fp8_gemm_keeps_its_cost_model():
+    assert _estimate_gemm_cost(16, 16, 64, dtype="float8_e4m3fn") == (10, 2)
 
 
 def _make_dual_copy_program(split_n: bool):
@@ -438,6 +462,35 @@ def test_updated_non_aiv_copy_costs_match_full_path_remeasurement():
     assert _estimate_copy_metadata(_make_two_small_gm_to_l1_copies_program()) == [(260, 128)]
     assert _estimate_copy_metadata(_make_l0c_copy_program("ub", "float32")) == [(570, 514)]
     assert _estimate_copy_metadata(_make_l0c_copy_program("gm", "float32")) == [(712, 514)]
+
+
+@pytest.mark.parametrize(
+    "rows,k,sf_dtype,dynamic_rows,measured",
+    [
+        (16, 64, "uint16", False, (29, 2)),
+        (128, 128, "int16", False, (44, 17)),
+        (256, 128, "uint8", False, (60, 33)),
+        (128, 128, "int16", True, (44, 17)),
+    ],
+)
+def test_mx_sf_copy_cost_uses_region_payload(rows, k, sf_dtype, dynamic_rows, measured):
+    # CANN 9.2 / npusim: 32, 512 and 1024 B SF loads on either L0 side.
+    # Slice a larger allocation so the cost must use the region and SF dtype.
+    sf_columns = k // (32 * (tvm.DataType(sf_dtype).bits // 8))
+
+    @T.prim_func
+    def main(tail_rows: T.int32):
+        with T.Kernel(1):
+            src = T.alloc_l1((256, sf_columns * 2), sf_dtype)
+            a = T.alloc_l0a((256, k), "float8_e4m3fn")
+            b = T.alloc_l0b((256, k), "float8_e4m3fn")
+            sfa = T.alloc_l0a_sf(a, sf_dtype=sf_dtype)
+            sfb = T.alloc_l0b_sf(b, sf_dtype=sf_dtype)
+            copy_rows = T.max(T.min(tail_rows, rows), 0) if dynamic_rows else rows
+            T.copy(src[:copy_rows, sf_columns : sf_columns * 2], sfa[:copy_rows, :])
+            T.copy(src[:copy_rows, sf_columns : sf_columns * 2], sfb[:copy_rows, :])
+
+    assert _estimate_copy_metadata(main)[-2:] == [measured, measured]
 
 
 def test_fixpipe_quant_cost_uses_destination_payload_bytes():

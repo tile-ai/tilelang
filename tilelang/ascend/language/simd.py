@@ -12,7 +12,7 @@ division and the ``ftz_false`` variants of ``vexp``, ``vln``, and ``vsqrt``.
 
 from tvm import tirx
 from tvm.tirx import BufferLoad
-from tvm.tirx.script.builder.ir import bind as _bind
+from tvm.tirx.script.builder.ir import bind as _bind, sblock_attr
 from tvm.script.ir_builder import IRBuilder
 from tilelang import tvm
 from tilelang._typing import DType, ShapeType
@@ -26,7 +26,7 @@ class SimdPair:
     """Wraps a two-result SIMD intrinsic and preserves each result dtype.
 
     ``a, b = ...`` emits two ``pair_get`` calls against the pair. The pair-
-    producing op (``vintlv`` / ``vdintlv`` / ``vld2`` / ``vaddc``) is bound once
+    producing op (e.g. ``vintlv``, ``vld2``, or post-update ``vld``) is bound once
     at its call site by the frontend, so both ``pair_get`` calls reference a
     single bound variable rather than inlining the pair expression twice.
 
@@ -299,11 +299,47 @@ def pst(addr, src, dist="NORM"):
     return tirx.call_intrin("void", _Op("tl.simd.pst"), addr, src, dist)
 
 
-def vld(addr, dist="NORM"):
+_VLD_POSTUPDATE_DISTS = (
+    "NORM",
+    "NORM_B8",
+    "NORM_B16",
+    "NORM_B32",
+    "BRC_B8",
+    "BRC_B16",
+    "BRC_B32",
+    "US_B8",
+    "US_B16",
+    "DS_B8",
+    "DS_B16",
+    "UNPK_B8",
+    "UNPK_B16",
+    "UNPK_B32",
+    "UNPK4_B8",
+    "BLK",
+    "E2B_B16",
+    "E2B_B32",
+)
+
+
+def vld(addr, dist="NORM", *, post_inc=None):
     """Vector load. Returns a typed vector register.
 
     addr can be a BufferLoad auto-wrapped as tl.access_ptr. Express address
     offsets in ``addr``.
+
+    With ``post_inc=step``, load through a mutable :func:`make_ubuf_ptr` handle
+    and return ``(vector, advanced_pointer)``. Assign the second result back to
+    the handle. ``step`` is a signed int32 increment in elements of the dtype
+    declared by :func:`make_ubuf_ptr`; the load uses the old address. The dtype
+    must be 8/16/32-bit and match the distribution. ``None`` selects an ordinary
+    load; zero still returns the pair without advancing the pointer::
+
+        src_ptr = T.simd.make_ubuf_ptr(T.access_ptr(src_ub[0], "r", extent=256), "uint16")
+        first, src_ptr = T.simd.vld(src_ptr, post_inc=128)
+        second, src_ptr = T.simd.vld(src_ptr, post_inc=128)
+
+    Keep the pointer within one SIMD VF and declare its complete accessed span
+    in the initializer's ``access_ptr``, as in the example.
 
     A ``BRC_B8/B16/B32`` broadcast replicates one element of the width named by
     the suffix, widening the result past the source buffer's element type when
@@ -312,6 +348,28 @@ def vld(addr, dist="NORM"):
     the source buffer; their ``_B*`` suffixes describe the data being loaded and
     must agree with it.
     """
+    if post_inc is not None:
+        if not (isinstance(addr, BufferLoad) and addr.buffer.scope() == "local.var" and str(addr.dtype) == "handle"):
+            raise ValueError("vld post_inc requires a mutable pointer from make_ubuf_ptr")
+        elem_dtype = _ubuf_ptr_dtype(addr)
+        bits = _ELEM_BITS.get(elem_dtype)
+        if bits not in (8, 16, 32):
+            raise ValueError("vld post_inc requires an 8/16/32-bit pointer element dtype")
+        if not isinstance(dist, str) or dist not in _VLD_POSTUPDATE_DISTS:
+            raise ValueError(f"Unsupported vld post-update distribution: {dist!r}")
+        if "_B" in dist and not dist.endswith(f"_B{bits}"):
+            raise ValueError(f"vld post_inc distribution {dist!r} must match dtype {elem_dtype!r}")
+        if isinstance(post_inc, bool):
+            raise TypeError("vld post_inc must be a signed int32 element increment, not a boolean")
+        if isinstance(post_inc, int):
+            if not -(1 << 31) <= post_inc < (1 << 31):
+                raise ValueError("vld post_inc element increment must fit int32")
+            post_inc = tirx.const(post_inc, "int32")
+        if not isinstance(post_inc, tirx.PrimExpr) or str(post_inc.dtype) != "int32":
+            raise TypeError("vld post_inc must be a signed int32 element increment")
+        vec_dtype = _vec_dtype(elem_dtype)
+        pair = tirx.call_intrin(vec_dtype, _Op("tl.simd.vld"), addr, dist, post_inc)
+        return SimdPair(_bind(pair), (vec_dtype, "handle"))
     if isinstance(addr, BufferLoad):
         elem_dtype = str(addr.buffer.dtype)
         elem_bits = _ELEM_BITS.get(elem_dtype)
@@ -435,8 +493,11 @@ def vsstb(src, base, stride, mask=None, update=False):
     if mask is None:
         mask = _default_mask(src.dtype)
     mutable_pointer = isinstance(base, BufferLoad) and base.buffer.scope() == "local.var" and str(base.dtype) == "handle"
-    if update and not mutable_pointer:
-        raise ValueError("vsstb update=True base must be a pointer from make_ubuf_ptr")
+    if update:
+        if not mutable_pointer:
+            raise ValueError("vsstb update=True base must be a pointer from make_ubuf_ptr")
+        if _ubuf_ptr_dtype(base) != str(src.dtype).split("x")[0]:
+            raise ValueError("vsstb source element dtype must match the pointer dtype")
     if isinstance(base, BufferLoad) and not mutable_pointer:
         base = access_ptr(base, "w", extent=_vreg_lanes(base.buffer.dtype))
     args = [src, base, stride, mask]
@@ -449,12 +510,27 @@ def vsstb(src, base, stride, mask=None, update=False):
     )
 
 
+def _ubuf_ptr_dtype(addr):
+    if IRBuilder.is_in_scope():
+        for frame in reversed(IRBuilder.current().frames):
+            annotations = getattr(frame, "annotations", None)
+            if annotations is not None:
+                dtype = annotations.get("tl.simd_pointer_dtypes", {}).get(addr.buffer.data)
+                if dtype is not None:
+                    return str(dtype)
+    raise ValueError("SIMD pointer must be declared with make_ubuf_ptr in the current IRBuilder")
+
+
 def make_ubuf_ptr(buf_access, dtype):
-    """Allocate a mutable UB pointer for POST_UPDATE :func:`vsstb` calls.
+    """Allocate a mutable UB pointer for post-update :func:`vld` / :func:`vsstb` calls.
+
+    ``dtype`` declares the pointee element type used by :func:`vld` and checked
+    against the source vector by :func:`vsstb`. It is stored in the enclosing
+    block's IR annotations; the mutable carrier remains a ``handle`` buffer.
 
     The pointer is carried by a ``local.var`` handle buffer. Assigning the
-    handle returned by :func:`vsstb` writes it back into the same mutable
-    carrier::
+    advanced handle returned by :func:`vld` or :func:`vsstb` writes it back
+    into the same mutable carrier::
 
         dst_ptr = T.simd.make_ubuf_ptr(dst_ub[0], "bfloat16")
         dst_ptr = T.simd.vsstb(src, dst_ptr, stride, mask, update=True)
@@ -464,7 +540,11 @@ def make_ubuf_ptr(buf_access, dtype):
     elif str(buf_access.dtype) != "handle":
         raise ValueError("make_ubuf_ptr expects a buffer access or handle expression")
 
+    dtype = tvm.DataType(dtype)
+    if dtype.lanes != 1 or str(dtype) not in _ELEM_BITS:
+        raise ValueError("make_ubuf_ptr requires a scalar numeric element dtype")
     pointer = _alloc_var("handle", buf_access, scope="local.var")
+    sblock_attr({"tl.simd_pointer_dtypes": {pointer.data: str(dtype)}})
     return pointer
 
 

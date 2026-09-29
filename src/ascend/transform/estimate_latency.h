@@ -28,9 +28,7 @@ struct AscendLatencyParams {
   // Convention: latency is in cycles, bandwidth in bytes/cycle, and compute
   // throughput in operations/cycle (two operations per multiply-add).
 
-  // Cube (MMAD). The physical FP16/BF16 granularity and throughput come from
-  // the A5 architecture guide p.7: 16x16x16x2 = 8192 operations/cycle. The
-  // dispatch overhead is measured; one MMAD can be issued each cycle.
+  // Cube completion overhead beyond the throughput cost.
   int64_t cube_base_latency{8};
   int64_t cube_fallback_throughput{8192};
   int64_t cube_min_ii{1};
@@ -40,21 +38,23 @@ struct AscendLatencyParams {
   int64_t cube_unit_n{16};
   int64_t cube_throughput_fp16{8192};
   int64_t cube_throughput_bf16{8192};
-  // Ascend 950 MMAD parallelism: FP32=16x16x1, HF32=16x16x8.
-  // The HF32 register mode is resolved separately for each FP32 GEMM.
+  // FP32/HF32 throughput, selected by each GEMM's HF32 register mode.
   int64_t cube_throughput_fp32{512};
   int64_t cube_throughput_hf32{4096};
-  // CANN 9.2 MMAD pop-to-completion cost beyond the compute interval for
-  // aligned FP32/HF32 tiles. Keep this out of the throughput II.
+  // FP32/HF32 completion overhead beyond the throughput cost.
   int64_t cube_fp32_base_latency{67};
-  // HiF8/FP8 uses 16x32x16x2 operations/cycle.
+  // HiF8/FP8 throughput.
   int64_t cube_throughput_fp8{16384};
+  // MX MAD completion overhead beyond the independent-issue cost.
+  int64_t cube_mx_base_latency{25};
+  // Minimum larger M/N extent in the MX compute cost after alignment.
+  int64_t cube_mx_min_mn{48};
+  // MX FP4 throughput.
+  int64_t cube_throughput_mxfp4{32768};
   // INT8 MMAD is not supported on A5; zero selects the fallback.
   int64_t cube_throughput_int8{0};
 
-  // VALU throughput measured with cannsim RVEC instruction timing. Common
-  // fp32 operations sustain about 51 ops/cycle; division, modulo, and special
-  // functions use iterative implementations and are slower.
+  // VALU throughput by operation type.
   int64_t add_throughput{51};
   int64_t sub_throughput{51};
   int64_t mul_throughput{51};
@@ -66,83 +66,72 @@ struct AscendLatencyParams {
   int64_t special_func_throughput{8};
   // Unknown operations use the OperationCounter one-cycle fallback.
   int64_t default_operation_throughput{0};
-  // A5 architecture guide p.8: VRF <-> UB is 256 bytes/cycle per AIV.
+  // VRF <-> UB bandwidth per AIV.
   int64_t valu_bandwidth{256};
 
-  // Warm CANN 9.2 service-cost fits for the templates in nd2nz_copy.h. Each
-  // pass consumes one 256-byte source vector per row. The row rate includes
-  // conversion/interleave/pack and scatter stores, not just UB reads.
+  // ND->NZ scatter cost, including conversion, interleaving and packing.
   struct Nd2NzLatencyParams {
+    // Minimum completion latency.
     int64_t min_cycles;
+    // Fixed overhead per invocation.
     int64_t setup_cycles;
+    // Overhead per 256-byte source-vector pass across all rows.
     int64_t pass_cycles;
+    // Cost per row per pass, scaled by four.
     int64_t row_cycles_x4;
   };
   Nd2NzLatencyParams nd2nz_same_dtype{62, 10, 10, 8};
   Nd2NzLatencyParams nd2nz_bf16_to_f32{98, 40, 4, 13};
   Nd2NzLatencyParams nd2nz_f32_to_bf16{73, 16, 4, 8};
 
-  // MTE1 retains its existing completion base pending a scheduler-stability
-  // follow-up. The FixPipe bases below use Ascend950DT SYS_CNT P-sweeps.
+  // MTE1 completion overhead.
   int64_t mte1_base_latency{5};
-  // Independent-buffer streams sustain 3 + bytes/256 cycles per L0 load.
-  // This is paid by each descriptor, independently of completion latency.
+  // Issue overhead per L0 load descriptor.
   int64_t mte1_issue_overhead{3};
+  // MX scale-factor load completion and issue overheads.
+  int64_t mte1_sf_base_latency{28};
+  int64_t mte1_sf_issue_overhead{1};
+  // Default FixPipe completion overhead.
   int64_t fixpipe_base_latency{58};
-  // FixPipe's endpoint takes 2 + bytes/bandwidth cycles per descriptor.
-  // For dual destinations, narrow-row throughput is an independent bound.
+  // Issue overhead per descriptor at the shared FixPipe endpoint.
   int64_t fixpipe_issue_overhead{2};
-  // Real-device L0C->GM latency fit.
+  // L0C->GM completion overhead.
   int64_t fixpipe_l0c_to_gm_base_latency{200};
-  // Descriptor overhead is already absorbed into measured base latency.
+  // Additional completion cycles per memory descriptor.
   int64_t mte_descriptor_cycles{0};
 
-  // Physical path bandwidths. L1->L0A/L0B and UB->L1 reach 256 B/cycle;
-  // GM->L1 reaches 100 B/cycle; a single-destination FixPipe path sustains
-  // 128 B/cycle. AIV MTE uses measured effective bandwidths below.
+  // Physical path bandwidths; FixPipe uses a single destination here.
   int64_t l1_to_l0a_bandwidth{256};
   int64_t l1_to_l0b_bandwidth{256};
+  int64_t l1_to_l0_sf_bandwidth{32};
   int64_t l1_to_bt_bandwidth{32};
   int64_t l1_to_fp_buf_bandwidth{32};
   int64_t aic_mte2_to_l1_bandwidth{100};
   int64_t fixpipe_bandwidth{128};
-  // GM->L1 completion and saturated issue rate use the same bytes/cycle fit;
-  // small descriptors retain the measured II floor below.
+  // GM->L1 completion overhead and minimum issue interval per descriptor.
   int64_t mte2_gm_to_l1_base_latency{190};
   int64_t mte2_gm_to_l1_min_ii{64};
 
-  // Real-device AIV MTE model shared by pure-Vector and Mixed kernels. The
-  // calibration unit is aggregate payload across the two normally active
-  // AIVs. A rewritten copy contains one AIV's region, so the estimator
-  // normalizes it to this common unit without inspecting cthread guards. The
-  // bandwidths use Ascend950DT SYS_CNT P-sweeps (20 warmups, 2000 iterations,
-  // an 8-slot UB ring through P=64): GM->UB reaches 100 B/cycle, while UB->GM
-  // reaches 115 B/cycle for M-like and >=512B N-like rows, with a 110 B/cycle
-  // dip at 256B N-like rows.
+  // AIV MTE completion overheads and bandwidths for pure-Vector and Mixed
+  // kernels. All AIV MTE bandwidths use the aggregate payload of two AIVs.
   int64_t mte2_gm_to_ub_base_latency{90};
   int64_t mte2_gm_to_ub_bandwidth{100};
   int64_t mte3_ub_to_gm_base_latency{180};
   int64_t mte3_ub_to_gm_bandwidth{115};
   int64_t mte3_ub_to_l1_base_latency{43};
   int64_t mte3_ub_to_l1_bandwidth{256};
-  // Independent 16/32/64-buffer batches of 256-1024 aggregate bytes are
-  // descriptor-limited. Round the measured issue bounds up to whole cycles;
-  // do not approximate tiny-copy II by halving the aggregate byte count.
+  // Minimum issue intervals per GM->UB and UB->GM descriptor.
   int64_t mte2_gm_to_ub_min_ii{13};
   int64_t mte3_ub_to_gm_min_ii{10};
 
-  // Strided MTE geometry parameters. Effective bandwidth is limited by the
-  // shared endpoint and by the physically contiguous row width.
-  //
-  // Strided N-split rows travel in 128-byte MTE transactions: the row rate
-  // peaks when the per-AIV width is a whole multiple of 128 B and dips
-  // between multiples. A row narrower than one transaction pays a measured
-  // half-rate plateau; from two transactions (256 B) up the row streams at
-  // the wide steady rate. Values use the aggregate two-AIV calibration unit
-  // described above.
+  // Dual-destination FixPipe bandwidth cap, per-AIV row-width multiplier,
+  // and fallback bandwidth when the row width is unknown.
   int64_t fixpipe_dual_bandwidth{256};
   int64_t fixpipe_dual_width_scale{2};
   int64_t fixpipe_dual_unknown_width_bandwidth{128};
+  // N-strided MTE transaction sizes are per-AIV contiguous row widths.
+  // Bandwidths cover full transactions, sub-transaction plateaus, wide rows,
+  // and unknown row widths, respectively.
   int64_t mte2_gm_to_ub_n_transaction_bytes{128};
   int64_t mte2_gm_to_ub_n_peak_bandwidth{102};
   int64_t mte2_gm_to_ub_n_plateau_bandwidth{50};
@@ -161,9 +150,8 @@ struct AscendLatencyParams {
   int64_t mte3_ub_to_l1_raw_n_width_denominator{4};
   int64_t mte3_ub_to_l1_raw_n_unknown_bandwidth{48};
 
-  // Geometry-specific completion bases. UB->GM has a separate narrow-N value
-  // because 64-byte strided rows incur a large first-descriptor penalty even
-  // though steady-state II is represented by the bandwidth above.
+  // Completion overheads for N-strided GM->UB, narrow N-strided UB->GM,
+  // and dual-destination L0C->UB copies.
   int64_t mte2_gm_to_ub_n_base_latency{75};
   int64_t mte3_ub_to_gm_narrow_base_latency{440};
   int64_t fixpipe_dual_base_latency{55};
