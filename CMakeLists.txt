@@ -231,6 +231,18 @@ if(CCACHE_PROGRAM)
   # text, the resulting result-key is stable across .tmpXXX rotations.
   if(WIN32)
     set(CCACHE_PROGRAM "${CCACHE_PROGRAM};ignore_options=-external:I*")
+
+    # CMake emits concatenated -imsvc<path> for clang-cl. ccache 4.9 hashes
+    # that form even in preprocessor mode, so PEP 517's random dependency
+    # paths defeat hits despite the preprocessor wrapper below. A trailing
+    # space makes CMake emit -imsvc <path>: ccache then omits the include
+    # option from the preprocessor hash while retaining it in direct mode.
+    foreach(_lang IN ITEMS C CXX)
+      if(CMAKE_${_lang}_COMPILER_ID STREQUAL "Clang" AND
+         CMAKE_${_lang}_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        set(CMAKE_INCLUDE_SYSTEM_FLAG_${_lang} "-imsvc ")
+      endif()
+    endforeach()
   endif()
 
   # Plug a wrapper around cl.exe -P so .tmpXXX path components in the
@@ -459,6 +471,16 @@ if(MSVC)
   # Keep the wider project on its current baseline, but let TileLang's C++
   # sources use C++20 so designated initializers compile under MSVC.
   target_compile_features(tilelang_objs PRIVATE cxx_std_20)
+endif()
+
+# A direct single-config CMake build with no selected build type otherwise
+# compiles TileLang without optimization. Layout validation includes bounded
+# exhaustive expression evaluation, which is prohibitively slow at -O0.
+# Explicit Debug/Release configurations and multi-config generators keep their
+# normal toolchain flags.
+if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE STREQUAL "" AND
+   CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+  target_compile_options(tilelang_objs PRIVATE -O2)
 endif()
 
 # Set debug mode compile definitions
