@@ -439,6 +439,73 @@ jobs:
             ls -alh $(git status --ignored --porcelain | grep -vE '/$' | grep -oE '\S+$')
           fi
 
+  ascend:
+    name: Ascend tests
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    needs: [lint]
+    runs-on: [self-hosted, ascend]
+    timeout-minutes: 120
+    env:
+      PIP_USER: "0"
+      USE_CUDA: "OFF"
+      USE_ASCEND: "ON"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          activate-environment: false
+          enable-cache: false
+
+      - name: Build and test Ascend
+        run: |
+          # Keep the runner's preinstalled Torch/Torch-NPU stack.
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          for CANN_SET_ENV in \
+            "${ASCEND_HOME_PATH:-}/set_env.sh" \
+            "${ASCEND_TOOLKIT_HOME:-}/set_env.sh" \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/cann-*/set_env.sh; do
+            if [[ -f "${CANN_SET_ENV}" ]]; then
+              source "${CANN_SET_ENV}"
+              break
+            fi
+          done
+          export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+
+          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
+          source .venv/bin/activate
+          export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+          import torch
+          import torch_npu
+
+          assert torch.npu.is_available(), "Ascend CI requires an available NPU"
+          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+              for package in ("torch", "torch_npu"):
+                  requirement = f"{package}=={version(package)}"
+                  constraints.write(f"{requirement}\n")
+                  print(requirement)
+          PY
+
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -v -r requirements-test.txt pybind11==2.12.0
+          python -m pip install -v .
+
+          cd testing
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
+
   cutedsl:
     name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
     if: |
