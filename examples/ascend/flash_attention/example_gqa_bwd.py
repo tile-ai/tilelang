@@ -349,7 +349,8 @@ def run_performance_comparison(
     torch_over_tilelang = torch_ms / tilelang_ms
 
     print("\nFFTS kernel duration (cold L2 between iterations):")
-    print(f"  TileLang Delta:  {delta_prof.dur_us:10.2f} us")
+    delta_bytes = o.numel() * o.element_size() + do.numel() * do.element_size() + delta.numel() * delta.element_size()
+    print(f"  TileLang Delta:  {delta_prof.dur_us:10.2f} us | {delta_prof.gbps(delta_bytes):.2f} GB/s")
     print(f"  TileLang fused:  {fused_prof.dur_us:10.2f} us | {fused_prof.tflops(effective_bwd_flops):.1f} TFLOPS")
     print(f"  Torch SDPA bwd: {torch_prof.dur_us:10.2f} us | {torch_prof.tflops(effective_bwd_flops):.1f} TFLOPS")
     if torch_over_tilelang >= 1:
@@ -377,7 +378,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--perf", action="store_true", help="run the full GQA backward performance comparison")
+    parser.add_argument("--perf", action=argparse.BooleanOptionalAction, default=True, help="run the GQA backward performance comparison")
     parser.add_argument("--s1", type=int)
     parser.add_argument("--g", type=int)
     parser.add_argument("--s2", type=int)

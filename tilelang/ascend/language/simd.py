@@ -1232,8 +1232,8 @@ def vcvt(
         IEEE-754 rounding mode. Valid values:
         - ``"ROUND_R"`` (default): Round to nearest, ties to even (banker's rounding).
         - ``"ROUND_A"``: Round away from zero.
-        - ``"ROUND_F"``: Round toward +inf (ceiling).
-        - ``"ROUND_C"``: Round toward -inf (floor).
+        - ``"ROUND_F"``: Round toward -inf (floor).
+        - ``"ROUND_C"``: Round toward +inf (ceiling).
         - ``"ROUND_Z"``: Round toward zero (truncation).
         - ``"ROUND_O"``: Round to odd (only for f32->f16).
         - ``"ROUND_H"``: Round half away from zero (only for hif8 conversions).

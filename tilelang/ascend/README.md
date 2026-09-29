@@ -119,8 +119,8 @@ print("GEMM + ReLU passed.")
   Vector cores' Unified Buffers (UB) and then to global memory. GEMM and
   ReLU run in a single kernel, without a separate launch for the epilogue.
 - The L2 cache hints are chosen for the matrix sizes shown here. See the
-  [L2-bypass GEMM example](../../examples/ascend/example_gemm_bypass_l2.py)
-  for shape-dependent cache policies.
+  [DeepGEMM copy kernels](../../examples/ascend/deepgemm/kernels/copy.py)
+  for cache policies in optimized matrix kernels.
 
 ## Writing Ascend Kernels
 
@@ -151,10 +151,19 @@ automatic tensorization of arbitrary `T.Parallel` code into SIMD instructions.
 
 ## Examples
 
-- **Start here:** [GEMM](../../examples/ascend/example_gemm.py) and [SIMT vector add](../../examples/ascend/example_simtvf_vector_add.py)
-- **GEMM and quantization:** [L2-bypass GEMM](../../examples/ascend/example_gemm_bypass_l2.py), [L0-staged GEMM](../../examples/ascend/example_gemm_l0.py), [split-K GEMM](../../examples/ascend/example_gemm_splitk.py), [block-scaled GEMM](../../examples/ascend/example_blockscaled_gemm.py), and per-token FP8 quantization ([SIMT](../../examples/ascend/example_simtvf_per_token_cast_to_fp8.py), [SIMD](../../examples/ascend/example_simdvf_per_token_cast_to_fp8.py))
-- **Attention, normalization, and routing:** [FlashAttention](../../examples/ascend/flash_attention/README.md), [RMSNorm](../../examples/ascend/example_rmsnorm.py), and [MoE Top-K gating](../../examples/ascend/example_simdvf_topk_gate.py)
-- **Vector programming:** [SIMD vector operations](../../examples/ascend/example_simdvf_vecadd.py) and [SIMD intrinsics](../../examples/ascend/example_simdvf_vecadd_lower.py)
+Start with the [persistent GEMM](../../examples/ascend/example_gemm.py), which
+demonstrates swizzling, pipelining, precision modes and mixed-core epilogues.
+For advanced GEMM tiling, L0 staging, quantization and epilogues, use
+[DeepGEMM](../../examples/ascend/deepgemm). The separate
+[split-K example](../../examples/ascend/example_gemm_splitk.py) demonstrates
+atomic and deterministic reduction across cores.
 
-Browse the [complete Ascend examples directory](../../examples/ascend) for
-additional kernels and programming techniques.
+The vector examples cover [SIMT and SIMD addition](../../examples/ascend/example_vecadd.py),
+[SIMT RMSNorm](../../examples/ascend/example_rmsnorm.py),
+and [SIMT and SIMD FP8 quantization](../../examples/ascend/example_per_token_cast_to_fp8.py).
+[FlashAttention](../../examples/ascend/flash_attention/README.md) contains the
+attention implementations.
+
+See the [example guide](../../examples/ascend/README.md) for running and benchmarking.
+Each top-level example has one matching correctness test. Small language and
+compiler regressions belong in [testing/ascend](../../testing/ascend/README.md).

@@ -82,7 +82,7 @@ def run_regression_perf(S1=8192, G=32, S2=8192, D_val=128):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--benchmark", action=argparse.BooleanOptionalAction, default=True, help="benchmark after correctness checks")
     args = parser.parse_args()
     check_correctness()
     if args.benchmark:

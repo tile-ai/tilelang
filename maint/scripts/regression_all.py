@@ -187,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--examples-root",
         default=None,
-        help="Directory to scan for regression_*.py (default: repo's examples/). Use examples/ascend to run only the Ascend suite.",
+        help="Directory to scan for regression_*.py (default: repo's examples/). For Ascend, use maint/scripts/run_perf_regression_ascend.sh.",
     )
     args = parser.parse_args()
     regression_all(args.examples_root)

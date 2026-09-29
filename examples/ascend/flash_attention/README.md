@@ -1,21 +1,22 @@
 # FlashAttention (Ascend NPU)
 
-Online-softmax FlashAttention 前向与 GQA backward kernel。MHA 与 GQA 前向共享
-`core.py` 中的 `flash_attention_fwd` builder；MHA 是
-`q_len == kv_len`、单 query tile per core 的特例，GQA 把 query group 展平成
-`q_len = S1 * G` 并按 `num_blocks` 切分到多核。
+Online-softmax FlashAttention forward and GQA backward kernels. MHA and GQA
+forward share the `flash_attention_fwd` builder in `core.py`. MHA is a special
+case with `q_len == kv_len` and one query tile per core. GQA flattens query groups
+into `q_len = S1 * G` and distributes the work across cores using `num_blocks`.
 
-GQA backward 使用 forward 可选输出的 LSE，只保留当前最快的 `T.Stage` +
-AutoSchedule 路径：先用
-`flash_attention_bwd_preprocess` 计算所有 query row 共享的
-`Delta = sum(O * dO, axis=-1)`，再执行 frontend-staged KV-centric mixed kernel。后者在
-一个 kernel 内完成五次 GEMM，私有累加 dK/dV，并把 dQ 以 bfloat16 atomic add
-归约到 GM。若把 Delta 放进按 KV tile 切分的 fused kernel，完整 shape 会把
-`O * dO` reduction 重复 64 次，因此这两个 launch 都是保留路径的一部分。
+GQA backward consumes the optional LSE output from forward and retains the
+fastest current path, using `T.Stage` with AutoSchedule. First,
+`flash_attention_bwd_preprocess` computes `Delta = sum(O * dO, axis=-1)` for all
+query rows. A frontend-staged, KV-centric mixed kernel then performs five GEMMs
+in one launch, accumulates dK/dV privately, and reduces dQ into GM using bfloat16
+atomic adds. Fusing Delta into the kernel partitioned by KV tile would repeat
+the `O * dO` reduction 64 times for the full shape, so both launches remain part
+of this implementation.
 
 ```
-core.py          # 通用 flash_attention_fwd builder + FwdTiling
-core_bwd.py      # Delta 与 T.Stage AutoSchedule fused builders
+core.py          # Shared flash_attention_fwd builder + FwdTiling
+core_bwd.py      # Delta and T.Stage AutoSchedule fused builders
 example_mha.py   # MHA wrapper + reference + benchmark
 example_gqa.py   # GQA wrapper + reference + benchmark
 example_gqa_bwd.py
@@ -23,92 +24,118 @@ example_gqa_manual_schedule.py  # GQA with a validated fixed-stage schedule
 test_mha.py / test_gqa.py / test_gqa_bwd.py
 ```
 
-## 局限性
+## Limitations
 
-MHA/GQA 前向实例共享同一条 SIMD softmax-packing 实现；backward packing 目前也
-沿用相同的 128x128 固定 tile 约束：
+MHA/GQA forward share the same SIMD softmax-packing implementation. Backward
+packing also uses a fixed 128x128 tile:
 
-- **`head_dim` 固定为 128。** softmax 直接把概率写成 NZ 布局（128 列 `vsstb` stride、
-  `uint16x128` 合并），这条路径硬编码了 D=128，builder 里以 `assert head_dim == 128`
-  显式限制，未泛化前不接受其它 D。
-- **tile 形状固定。** `block_q` 必须偶数，`block_kv == 2 * VL == 128`（fp32 SIMD lane
-  数 64）。`q_len % block_q == 0`、`kv_len % block_kv == 0` 必须整除。
-- **输入 dtype 固定为 bfloat16**，累加为 float32。输出 dtype 可选：MHA 用 float32
-  直出（无 cast），GQA 用 bfloat16（额外一趟 `vcvt` cast，写入 `O_ub` 的 byte-alias，
-  不额外占 UB）。
-- **无 causal mask。** 不支持 dropout、attention bias、变长 / padding mask。
-- **backward 当前仅覆盖 GQA 的 flattened 布局。** 输入、`dO` 与输出梯度均为
-  bfloat16，其中 dQ 跨 KV tile 做 BF16 atomic add。tile 固定为 128x128。MHA
-  backward 尚未封装，但其数学路径等价于 `G=1`。
-- **staged backward 至少需要三个 query tile。** 要求 `q_len / 128 >= 3`；
-  四层 Q/dO 缓冲不提高最短输入要求。
-- **GQA `num_blocks` 必须整除 `q_len / block_q`**（M tile 数），否则各核负载不均。
+- **`head_dim` is fixed at 128.** Softmax writes probabilities directly in NZ
+  layout, using a 128-column `vsstb` stride and `uint16x128` merging. This path
+  hardcodes D=128, enforced by `assert head_dim == 128` in the builder. Other
+  values of D are unsupported until the implementation is generalized.
+- **Tile shapes are constrained.** `block_q` must be even, and
+  `block_kv == 2 * VL == 128` (64 fp32 SIMD lanes). Both
+  `q_len % block_q == 0` and `kv_len % block_kv == 0` must hold.
+- **Inputs must use bfloat16**, with float32 accumulation. The output dtype is
+  configurable: MHA writes float32 directly without a cast; GQA writes bfloat16
+  through an additional `vcvt` cast into a byte alias of `O_ub`, requiring no
+  extra UB storage.
+- **No causal mask.** Dropout, attention bias, variable lengths, and padding
+  masks are unsupported.
+- **Backward currently supports only the flattened GQA layout.** Inputs, `dO`,
+  and output gradients use bfloat16. dQ uses BF16 atomic adds across KV tiles.
+  Tiles are fixed at 128x128. There is no MHA backward wrapper yet, although its
+  mathematical formulation is equivalent to `G=1`.
+- **Staged backward requires at least three query tiles:** `q_len / 128 >= 3`.
+  Four Q/dO buffer versions do not increase the minimum input size.
+- **GQA `num_blocks` must divide `q_len / block_q`**, the number of M tiles,
+  to avoid an uneven workload across cores.
 
-## 性能（当前 shape，Ascend 950 / dav-3510，bf16）
+## Performance (current shapes, Ascend 950 / dav-3510, bf16)
 
-| kernel | shape | TileLang | Torch SDPA | 对比 |
+| Kernel | Shape | TileLang | Torch SDPA | Comparison |
 |---|---|---|---|---|
-| MHA | `SEQ_LEN=4096, D=128` | 26.8 us · 320.1 TFLOPS | 28.94 us · 296.8 TFLOPS | **TileLang 快 1.08x** |
-| GQA | `S1=8192, G=32, S2=8192, D=128` | 3030 us · 362.8 TFLOPS | 2864 us · 383.9 TFLOPS | Torch 快 1.06x |
-| GQA backward（T.Stage fused） | `S1=8192, G=32, S2=8192, D=128` | **6.418 ms · 428.3 effective TFLOPS** | — | 见下方同环境优化前后对照 |
-| GQA（manual） | 同上 | 3125 us · 351.8 TFLOPS | — | 同轮达到 auto 的 92.9% |
+| MHA | `SEQ_LEN=4096, D=128` | 26.8 us · 320.1 TFLOPS | 28.94 us · 296.8 TFLOPS | **1.08x speedup with TileLang** |
+| GQA | `S1=8192, G=32, S2=8192, D=128` | 3030 us · 362.8 TFLOPS | 2864 us · 383.9 TFLOPS | 1.06x speedup with Torch |
+| GQA backward (T.Stage fused) | `S1=8192, G=32, S2=8192, D=128` | **6.418 ms · 428.3 effective TFLOPS** | — | See the comparison below, measured in the same environment |
+| GQA (manual) | Same as above | 3125 us · 351.8 TFLOPS | — | 92.9% of automatic scheduling throughput in the same measurement round |
 
-前向正确性相对误差 < 0.5%。完整 backward shape 上，T.Stage fused BF16 输出相对
-Torch BF16 梯度的 dQ/dK/dV 相对 L2 误差约为 1.024% / 0.316% / 0.037%。dQ 的较大
-误差来自跨 64 个 KV tile 的 BF16 atomic 逐次舍入。
+Forward relative error is below 0.5%. For the full backward shape, the T.Stage
+fused BF16 outputs have relative L2 errors of approximately
+1.024% / 0.316% / 0.037% for dQ/dK/dV against Torch BF16 gradients. The larger dQ
+error comes from repeated BF16 rounding during atomic accumulation across
+64 KV tiles.
 
-Backward 数据于 2026-09-24 在 Ascend950DT、CANN/Bisheng 9.2.0 上测得，使用
-TileLang `8121f415` 的本地构建，开启 fast-math。优化前后使用同一组输入和预分配
-输出，五轮按 A/B、B/A 交替测量。每轮为 cold-L2 `msprof_detail` FFTS kernel
-duration，warmup 5 次、repeat 20 次；下面报告五轮均值的中位数和范围。
-计时包含 **dQ 清零 + fused backward**，不含 forward、Delta 或 cache flush。
-FLOPs 按五个 GEMM 的 `10 * Q * K * D` 计算。
+Backward measurements were collected on 2026-09-24 using Ascend950DT,
+CANN/Bisheng 9.2.0, and a local build of TileLang `8121f415` with fast-math
+enabled. The baseline and optimized versions used identical inputs and
+preallocated outputs over five rounds, alternating A/B and B/A order. Each
+round measured cold-L2 `msprof_detail` FFTS kernel durations with 5 warmups and
+20 repetitions. The table reports the median and range of the five round means.
+Timing includes **dQ zeroing + fused backward**, but excludes forward, Delta,
+and cache flush. FLOPs are calculated as `10 * Q * K * D` for the five GEMMs.
 
-| backward 实现 | 中位数 | 五轮范围 | effective TFLOPS |
+| Backward implementation | Median | Range over five rounds | Effective TFLOPS |
 |---|---:|---:|---:|
-| 优化前（`4347e52e`） | 6834.581 us | 6830.059–6837.689 us | 402.19 |
-| UnitFlag + FixPipe dQ + 缓冲重分配 | 6418.273 us | 6417.254–6418.779 us | 428.27 |
+| Baseline (`4347e52e`) | 6834.581 us | 6830.059–6837.689 us | 402.19 |
+| UnitFlag + FixPipe dQ + buffer reallocation | 6418.273 us | 6417.254–6418.779 us | 428.27 |
 
-延迟下降 6.09%，吞吐提高 6.49%。十份原始 profile 均核实有 20 次 fused AIC、
-20 次 fused AIV、20 次清零和 20 次 cache flush，mixed kernel 的时间只累计一次。
-清零约 15.4 us；fused 本身由约 6819.2 us 降至 6402.9 us。当前环境未复现早期
-430.6 TFLOPS 的历史数字，表中对照均来自同一工具链，不将差异归因于某个编译器提交。
+Latency decreased by 6.09%, and throughput increased by 6.49%. All ten raw
+profiles were verified to contain 20 fused AIC executions, 20 fused AIV
+executions, 20 zeroing operations, and 20 cache flushes. Mixed-kernel duration
+was counted only once. Zeroing took approximately 15.4 us; the fused kernel
+itself decreased from approximately 6819.2 us to 6402.9 us. The earlier
+430.6 TFLOPS result was not reproduced in this environment. All comparisons in
+the table use the same toolchain; the difference is not attributed to any
+particular compiler commit.
 
-优化同时调整 L0C 交接、dQ 数据路径和缓冲分配。仅添加 UnitFlag 约为 6.753 ms；
-在原三层缓冲上改用 FixPipe dQ 约为 6.755 ms；结合四层 Q/dO、两层中间缓冲才
-达到 6.418 ms。AIC MAD active 从约 96.86% 提高到 99.80%。UnitFlag 下 FixPipe
-active 包含等待就绪时间，接近 100% 不代表带宽耗尽。
+The optimization changes L0C handoffs, the dQ data path, and buffer allocation
+together. Adding only UnitFlag took approximately 6.753 ms. Using FixPipe for
+dQ with the original three buffer versions took approximately 6.755 ms. Reaching
+6.418 ms required four Q/dO buffer versions and two intermediate buffer versions
+as well. AIC MAD active increased from approximately 96.86% to 99.80%. With
+UnitFlag, FixPipe active includes time spent waiting for data readiness, so a
+value near 100% does not indicate exhausted bandwidth.
 
-保持此前 cannsim RVEC 估算的 `SimdVF` latency：Delta 1053 cycles、P/dS pack
-706 cycles。优化版已移除 dQ Vector cast。
+The earlier cannsim RVEC estimates for `SimdVF` latency are retained:
+1053 cycles for Delta and 706 cycles for P/dS packing. The optimized version
+removes the dQ Vector cast.
 
-### T.Stage AutoSchedule fused backward 实现快照
+### T.Stage AutoSchedule fused backward implementation snapshot
 
-入口是 `core_bwd.py::flash_attention_bwd_fused_dq_atomic_staged`。grid 按 KV tile
-切分，每个 AIC 独占一个 128x128 K/V tile，并在 2048 个 query tile 上执行：
+The entry point is `core_bwd.py::flash_attention_bwd_fused_dq_atomic_staged`.
+The grid is partitioned by KV tile. Each AIC exclusively owns a 128x128 K/V tile
+and performs the following operations across 2048 query tiles:
 
-| 顺序 | GEMM | 结果与所有权 |
+| Order | GEMM | Result and ownership |
 |---:|---|---|
-| 1 | `K @ Q.T` | score，经 FixPipe 分给两个 AIV |
-| 2 | `V @ dO.T` | dP，经 FixPipe 分给两个 AIV |
-| 3 | `P @ dO` | dV，在该 KV core 的 L0C 中 FP32 累加 |
-| 4 | `dS @ Q` | dK，在该 KV core 的 L0C 中 FP32 累加 |
-| 5 | `dS.T @ K` | dQ contribution，转 BF16 后 atomic add 到 GM |
+| 1 | `K @ Q.T` | Scores, split between two AIVs through FixPipe |
+| 2 | `V @ dO.T` | dP, split between two AIVs through FixPipe |
+| 3 | `P @ dO` | dV, accumulated in FP32 in the KV core's L0C |
+| 4 | `dS @ Q` | dK, accumulated in FP32 in the KV core's L0C |
+| 5 | `dS.T @ K` | dQ contribution, converted to BF16 and atomically added to GM |
 
-`T.Stage(0)` 产生 score/dP 并打包 P/dS，`T.Stage(1)` 消费上一 query tile 的
-P/dS。Q/dO L1 使用四层缓冲，P/dS L1、score/dP UB 和 LSE/Delta UB 使用两层；
-L0A/L0B 保持两个槽、逐 GEMM 交替，P/dS packing scratch 保持单槽。L1 总占用
-仍为 448 KiB，UB 从 243.5 KiB 降到 162.5 KiB。
+`T.Stage(0)` produces scores/dP and packs P/dS. `T.Stage(1)` consumes P/dS from
+the previous query tile. Q/dO in L1 uses four buffer versions; P/dS in L1,
+scores/dP in UB, and LSE/Delta in UB use two. L0A/L0B retain two slots, alternating
+between GEMMs, while P/dS packing scratch retains one slot. Total L1 usage
+remains 448 KiB, and UB usage decreases from 243.5 KiB to 162.5 KiB.
 
-score、dP、dQ 的 GEMM 和输出 copy 成对指定 `unit_flag_ctrl=3`，保护临时 L0C
-的就绪与复用。dQ 仍借用已排空的 `dp_l0c`，由 FixPipe 直接转换为 BF16 并原子
-写回 GM，省去 L0C→UB、Vector cast 和 UB→GM。每个部分梯度先转 BF16 再累加，
-调用方仍须清零 dQ，原子归约仍不保证逐位确定性。
+The score, dP, and dQ GEMMs and their output copies each specify
+`unit_flag_ctrl=3` as a pair to protect temporary L0C readiness and reuse. dQ
+still borrows the drained `dp_l0c`. FixPipe converts it directly to BF16 and
+atomically writes it back to GM, eliminating L0C-to-UB transfer, the Vector cast,
+and UB-to-GM transfer. Each partial gradient is converted to BF16 before
+accumulation. The caller must still zero dQ, and atomic reduction does not
+guarantee bitwise determinism.
 
-版本数由 kernel 指定；版本索引、流水线展开及其余本地/跨核同步由 AutoSchedule
-生成。去掉 `T.Stage` 的对照虽通过正确性验证，但约为 6.897 ms，因此保留阶段约束。
+The kernel specifies buffer version counts. AutoSchedule generates version
+indices, pipeline expansion, and the remaining local and cross-core
+synchronization. A variant without `T.Stage` passed correctness checks but took
+approximately 6.897 ms, so the stage constraints are retained.
 
-该 PrimFunc 保持 AutoSchedule 与 shared-memory reuse 默认开启，只需沿用 fast-math：
+This PrimFunc keeps AutoSchedule and shared-memory reuse enabled by default.
+Only fast-math needs to be specified:
 
 ```python
 {
@@ -116,17 +143,22 @@ score、dP、dQ 的 GEMM 和输出 copy 成对指定 `unit_flag_ctrl=3`，保护
 }
 ```
 
-## 运行
+## Running the examples
+
+Running a forward or backward example directly checks correctness and reports
+latency and TFLOPS. Backward Delta preprocessing reports its latency and
+effective bandwidth separately, calculated as logical input and output bytes
+divided by elapsed time. Use `--no-perf` for GQA backward or `--no-benchmark`
+for manually scheduled GQA to run correctness checks only.
 
 ```bash
-source haienv tilelang
 ASCEND_NPU_ARCH=dav-3510 TILELANG_DISABLE_CACHE=1 python example_mha.py
 ASCEND_NPU_ARCH=dav-3510 TILELANG_DISABLE_CACHE=1 python example_gqa.py
 ASCEND_NPU_ARCH=dav-3510 TILELANG_DISABLE_CACHE=1 python example_gqa_bwd.py
-# GQA backward 与 Torch SDPA backward 的完整 shape 性能对比
-ASCEND_NPU_ARCH=dav-3510 python example_gqa_bwd.py --perf
-# 固定 13 个 task 的 stage；加 --benchmark 运行完整性能 shape
+# Check GQA backward correctness on small inputs only
+ASCEND_NPU_ARCH=dav-3510 python example_gqa_bwd.py --no-perf
+# Fixed stages for 13 tasks; runs the full benchmark shape by default
 ASCEND_NPU_ARCH=dav-3510 TILELANG_DISABLE_CACHE=1 python example_gqa_manual_schedule.py
-# 或跑正确性测试
+# Or run the correctness tests
 ASCEND_NPU_ARCH=dav-3510 TILELANG_DISABLE_CACHE=1 python -m pytest test_mha.py test_gqa.py test_gqa_bwd.py -v
 ```

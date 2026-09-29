@@ -52,6 +52,7 @@ _WORKER_TERMINATE_TIMEOUT = 10.0
 # One row == one worker command and one independently reported result. The path may live
 # in a subfolder (e.g. flash_attention/); the worker puts its directory on sys.path so
 # intra-folder imports (``from core import …``) resolve without dotted-module gymnastics.
+# Benchmark complete examples; language-feature regressions live in testing/ascend.
 _ENTRIES: list[tuple[str, str, dict]] = [
     ("ascend_gemm_bf16", "example_gemm.py", {"dtype": "bfloat16"}),
     ("ascend_gemm_fp32", "example_gemm.py", {"dtype": "float32"}),
@@ -62,10 +63,6 @@ _ENTRIES: list[tuple[str, str, dict]] = [
         "example_gemm_splitk.py",
         {"deterministic": True},
     ),
-    ("ascend_gemm_l0", "example_gemm_l0.py", {}),
-    ("ascend_gemm_mix_manual", "example_gemm_mix_manual.py", {}),
-    ("ascend_gemm_mixedkernel", "example_gemm_mixedkernel.py", {}),
-    ("ascend_gemm_bypass_l2", "example_gemm_bypass_l2.py", {}),
     # Four dense shapes cover both dtypes and traversal orders without a sweep.
     (
         "ascend_deepgemm_bf16_mnk_4096x4096x4096",
@@ -103,22 +100,14 @@ _ENTRIES: list[tuple[str, str, dict]] = [
         "deepgemm/bench_deepgemm.py:run_transform_sf_perf",
         {"mn": 32768, "k": 7168, "dtype": "int16", "major": "mn", "gran_mn": 128},
     ),
-    ("ascend_blockscaled_gemm", "example_blockscaled_gemm.py", {}),
     ("ascend_mha", "flash_attention/example_mha.py", {}),
     ("ascend_gqa", "flash_attention/example_gqa.py", {}),
     ("ascend_gqa_bwd", "flash_attention/example_gqa_bwd.py", {}),
     ("ascend_rmsnorm", "example_rmsnorm.py", {}),
-    ("ascend_buffer_version_annotation", "example_buffer_version_annotation.py", {}),
-    ("ascend_atomic_add", "example_atomic.py", {}),
-    ("ascend_simdvf_topk_gate", "example_simdvf_topk_gate.py", {}),
-    ("ascend_simdvf_vecadd", "example_simdvf_vecadd.py", {}),
-    ("ascend_simdvf_vecadd_lower", "example_simdvf_vecadd_lower.py", {}),
-    ("ascend_simtvf_vecadd", "example_simtvf_vecadd.py", {}),
-    ("ascend_simtvf_vecadd_mutex", "example_simtvf_vecadd_mutex.py", {}),
-    ("ascend_simdvf_per_token_cast_to_fp8", "example_simdvf_per_token_cast_to_fp8.py", {}),
-    ("ascend_simtvf_per_token_cast_to_fp8", "example_simtvf_per_token_cast_to_fp8.py", {}),
-    ("ascend_crosslevel_multibuffer", "example_crosslevel_multibuffer.py", {}),
-    ("ascend_compress", "example_compress.py", {}),
+    ("ascend_simtvf_vecadd", "example_vecadd.py", {"mode": "simt"}),
+    ("ascend_simdvf_vecadd_lower", "example_vecadd.py", {"mode": "simd"}),
+    ("ascend_simdvf_per_token_cast_to_fp8", "example_per_token_cast_to_fp8.py", {"mode": "simd"}),
+    ("ascend_simtvf_per_token_cast_to_fp8", "example_per_token_cast_to_fp8.py", {"mode": "simt"}),
 ]
 
 _EXAMPLE_MODULES: dict[str, object] = {}

@@ -13,6 +13,14 @@ regressions only for necessary coverage of this fork's changes to shared code.
 | `runtime`, `target` | Ascend launch ABI, current stream and target/compiler selection | Numerical runtime checks or isolated configuration tests |
 | `language` | Ascend frontend, emitted device code and numerical behavior | Use lowering for codegen contracts; compile and execute for numerical contracts |
 
+Application examples and their one-to-one correctness tests are listed in
+[examples/ascend](../../examples/ascend/README.md). Feature checks are kept here:
+SIMT atomics and packed arithmetic under `language/simtvf`, SIMD permutations
+and arithmetic under `language/simdvf`, and pad-register DMA in
+`language/test_tilelang_ascend_dma_copy.py`. Existing scheduling tests cover
+buffer ownership, clocks, rings and stages at their owning pass boundaries;
+source postprocessing is checked without device execution under `target`.
+
 ## Pass and device boundaries
 
 - `test_ascend_normalize_fractal_storage` protects padded storage, aliases and

@@ -3,6 +3,7 @@
 import pytest
 import torch
 import tilelang
+import tilelang.testing
 from tilelang.ascend import language as T
 from tilelang.ascend.language import simd as S
 from tilelang.engine.lower import lower
@@ -225,3 +226,33 @@ def test_fused_multiply_add(op, dtype, atol):
     expected = out * a + b if op == "vmadd" else out + a * b
     run(a, b, out)
     torch.testing.assert_close(out, expected, rtol=0, atol=atol)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("special", [False, True], ids=["finite", "ieee-special"])
+def test_precise_division(special):
+    @T.prim_func
+    def kernel(A: T.Tensor((64,), "float32"), B: T.Tensor((64,), "float32"), O: T.Tensor((64,), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_shared((64,), "float32")
+            b = T.alloc_shared((64,), "float32")
+            out = T.alloc_shared((64,), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            with T.SimdVF():
+                x = T.simd.vld(a[0])
+                y = T.simd.vld(b[0])
+                T.simd.vsts(out[0], T.simd.vdiv(x, y))
+            T.copy(out, O)
+
+    a = torch.linspace(-128, 128, 64)
+    b = torch.linspace(0.1, 3, 64)
+    if special:
+        a[:8] = torch.tensor([1, -1, 0, 1, float("inf"), float("nan"), 1, -0.0])
+        b[:8] = torch.tensor([0, 0, 0, -0.0, float("inf"), 1, float("inf"), 1])
+    a, b = a.npu(), b.npu()
+    compiled = tilelang.compile(kernel, target="ascend", out_idx=-1, pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False})
+    actual, expected = compiled(a, b).cpu(), (a / b).cpu()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0, equal_nan=True)
+    finite = ~torch.isnan(expected)
+    torch.testing.assert_close(actual.view(torch.int32)[finite], expected.view(torch.int32)[finite], rtol=0, atol=0)
