@@ -7,7 +7,7 @@ import tilelang.testing
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", [f"{sign}{bits}" for sign in ("int", "uint") for bits in (32, 64)])
+@pytest.mark.parametrize("dtype", [f"{sign}{bits}" for sign in ("int", "uint") for bits in (8, 16, 32, 64)])
 @pytest.mark.parametrize("elements_per_thread", [1, 4])
 def test_popcount(dtype, elements_per_thread):
     n = 32 * elements_per_thread
