@@ -859,6 +859,51 @@ def test_simplify_inlines_constant_but_keeps_annotation_binding():
     simplify_and_compare(mod_before, mod_expected)
 
 
+@pytest.mark.parametrize("site", ["function", "block", "allocation", "call", "cast"])
+def test_simplify_keeps_bind_used_in_metadata_objects(site):
+    """References outside ordinary expression children must keep bindings live."""
+    source = tirx.decl_buffer((2,), "int32")
+    output = tirx.decl_buffer((1,), "float32")
+    tag = tirx.Var("tag", "int32")
+    metadata = {"test.metadata": {"nested": [tag]}}
+    body = tirx.BufferStore(output, 1.0, [0])
+
+    if site == "block":
+        block = tirx.SBlock([], [], [], "metadata", body, annotations=metadata)
+        body = tirx.SBlockRealize([], True, block)
+    elif site == "allocation":
+        scratch = tirx.decl_buffer((1,), "float32", scope="local")
+        body = tirx.SeqStmt([tirx.AllocBuffer(scratch, annotations=metadata), body])
+    elif site == "call":
+        call = tirx.call_extern("float32", "observe")
+        call = tirx.Call(call.dtype, call.op, call.args, annotations=metadata)
+        body = tirx.BufferStore(output, call, [0])
+    elif site == "cast":
+        value = tirx.Cast("float32", source[1], annotations=metadata)
+        body = tirx.BufferStore(output, value, [0])
+
+    func = tirx.PrimFunc([source, output], bind_then(tag, source[0], body))
+    if site == "function":
+        func = func.with_attr("test.metadata", metadata["test.metadata"])
+    mod_before = tvm.IRModule.from_expr(func)
+    simplify_and_compare(mod_before, mod_before)
+
+
+@pytest.mark.parametrize("access", ["load", "store"])
+def test_simplify_keeps_bind_used_only_in_buffer_predicate(access):
+    """Both load and store predicates are uses even when the index is constant."""
+    source = tirx.decl_buffer((1,), "int32")
+    A, C = buffer_pair()
+    predicate = tirx.Var("predicate", "bool")
+    if access == "load":
+        body = tirx.BufferStore(C, tirx.BufferLoad(A, [0], predicate=predicate), [0])
+    else:
+        body = tirx.BufferStore(C, 1.0, [0], predicate=predicate)
+    body = bind_then(predicate, tirx.LT(0, source[0]), body)
+    mod_before = tvm.IRModule.from_expr(tirx.PrimFunc([source, A, C], body))
+    simplify_and_compare(mod_before, mod_before)
+
+
 @pytest.mark.parametrize(
     "store_uses_shared_value",
     [pytest.param(False, id="all_uses_dead"), pytest.param(True, id="live_store")],

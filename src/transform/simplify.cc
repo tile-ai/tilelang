@@ -216,6 +216,162 @@ CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
   return visitor.used_in_buffer_def_;
 }
 
+namespace {
+
+struct BindUseInfo {
+  using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+  VarSet used_vars;
+  VarSet volatile_buffers;
+};
+
+class BindUseCollector : public StmtExprVisitor {
+public:
+  static BindUseInfo Collect(const PrimFunc &func) {
+    BindUseCollector collector;
+    collector.VisitObject_(func);
+    return std::move(collector.info_);
+  }
+
+private:
+  // IR children and metadata share the same deduplication entry point.
+  void VisitStmt(const Stmt &stmt) final { VisitObject_(stmt); }
+  void VisitExpr(const PrimExpr &expr) final { VisitObject_(expr); }
+
+  void VisitExpr_(const VarNode *op) final {
+    info_.used_vars.insert(GetRef<Var>(op));
+    VisitObject_(op->type_annotation);
+  }
+
+  void VisitStmt_(const BindNode *op) final {
+    // Skip the definition without marking its Var visited: metadata may use it
+    // later.
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->var->type_annotation);
+  }
+
+  void VisitStmt_(const AllocBufferNode *op) final {
+    if (op->annotations.count(tirx::attr::kVolatile)) {
+      info_.volatile_buffers.insert(op->buffer->data);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tl::attr::volatile_scope) {
+      if (auto var = op->node.as<Var>()) {
+        info_.volatile_buffers.insert(var.value());
+      } else if (auto buffer = op->node.as<Buffer>()) {
+        info_.volatile_buffers.insert(buffer.value()->data);
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->node);
+  }
+
+  void VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
+    VisitObject_(buffer);
+  }
+
+  void VisitBufferUse(const Buffer &buffer) final {
+    // Liveness must retain references in buffer descriptors even when there is
+    // no explicit DeclBuffer in the body. It does not enforce lexical scope.
+    VisitObject_(buffer);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->predicate);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->predicate);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->loop_var);
+    VisitObject_(op->thread_binding);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitStmt_(const SBlockNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->iter_vars);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->op);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitExpr_(const CastNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitExpr_(const LetNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->var);
+  }
+
+  void VisitExpr_(const ReduceNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->combiner);
+    VisitObject_(op->axis);
+  }
+
+  void VisitExpr_(const ProducerLoadNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->producer);
+  }
+
+  void VisitExpr_(const RampNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitExpr(op->lanes);
+  }
+
+  void VisitExpr_(const BroadcastNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitExpr(op->lanes);
+  }
+
+  // Use ordinary IR visitors for statements and expressions. Reflection is
+  // only needed for containers and metadata objects such as Buffer and Layout.
+  void VisitObject_(const Any &value) {
+    auto obj = value.as<ObjectRef>();
+    if (!obj || !obj->defined() || !visited_.insert(*obj).second) {
+      return;
+    }
+    if (auto expr = obj->as<PrimExpr>()) {
+      StmtExprVisitor::VisitExpr(expr.value());
+    } else if (auto stmt = obj->as<Stmt>()) {
+      StmtExprVisitor::VisitStmt(stmt.value());
+    } else if (auto array = obj->as<ArrayObj>()) {
+      for (const Any &item : *array) {
+        VisitObject_(item);
+      }
+    } else if (auto map = obj->as<MapObj>()) {
+      for (const auto &item : *map) {
+        VisitObject_(item.first);
+        VisitObject_(item.second);
+      }
+    } else {
+      auto visit_field = [&](const TVMFFIFieldInfo *field) {
+        VisitObject_(reflection::FieldGetter(field)(*obj));
+      };
+      reflection::ForEachFieldInfo(TVMFFIGetTypeInfo((*obj)->type_index()),
+                                   visit_field);
+    }
+  }
+
+  BindUseInfo info_;
+  std::unordered_set<ObjectRef, ObjectPtrHash, ObjectPtrEqual> visited_;
+};
+
 class UnusedBindRemover : public StmtMutator {
 public:
   static PrimFunc Apply(PrimFunc func) {
@@ -223,7 +379,7 @@ public:
     // Recompute after removing consumers to handle chains and shared nodes.
     do {
       UnusedBindRemover remover;
-      remover.CollectUsedVars(func);
+      remover.uses_ = BindUseCollector::Collect(func);
       func.CopyOnWrite()->body = remover(func->body);
       removed = remover.removed_;
     } while (removed);
@@ -231,83 +387,34 @@ public:
   }
 
 private:
-  void CollectUsedVars(const Any &value) {
-    auto obj = value.as<ObjectRef>();
-    if (!obj || !obj->defined() || !visited_.insert(obj->get()).second) {
-      return;
-    }
-    if (auto var = obj->as<VarNode>()) {
-      used_vars_.insert(var);
-    }
-    if (auto bind = obj->as<BindNode>()) {
-      // The definition is not a use. Do not mark its Var visited either:
-      // the same object may be referenced later, including through metadata.
-      CollectUsedVars(bind->value);
-      CollectUsedVars(bind->var->type_annotation);
-      return;
-    }
-    if (auto alloc = obj->as<AllocBufferNode>()) {
-      if (alloc->annotations.count(tirx::attr::kVolatile)) {
-        volatile_buffers_.insert(alloc->buffer->data.get());
-      }
-    }
-    if (auto attr = obj->as<AttrStmtNode>()) {
-      if (attr->attr_key == tl::attr::volatile_scope) {
-        if (auto var = attr->node.as<VarNode>()) {
-          volatile_buffers_.insert(var);
-        } else if (auto buffer = attr->node.as<BufferNode>()) {
-          volatile_buffers_.insert(buffer->data.get());
-        }
-      }
-    }
-    // Ordinary TIR visitors omit some buffer fields and annotations. Walk
-    // reflected fields and containers so metadata-only references stay live.
-    if (auto array = obj->as<ArrayObj>()) {
-      for (const Any &item : *array) {
-        CollectUsedVars(item);
-      }
-    } else if (auto map = obj->as<MapObj>()) {
-      for (const auto &item : *map) {
-        CollectUsedVars(item.first);
-        CollectUsedVars(item.second);
-      }
-    } else {
-      auto visit_field = [&](const TVMFFIFieldInfo *field) {
-        CollectUsedVars(reflection::FieldGetter(field)(*obj));
-      };
-      reflection::ForEachFieldInfo(TVMFFIGetTypeInfo((*obj)->type_index()),
-                                   visit_field);
-    }
-  }
-
-  bool CanDiscard(const PrimExpr &value) const {
+  bool CanDiscard_(const PrimExpr &value) const {
     bool discard = SideEffect(value) <= CallEffectKind::kReadState &&
                    !UsesVar(value, [&](const VarNode *var) {
-                     return volatile_buffers_.count(var);
+                     return uses_.volatile_buffers.count(GetRef<Var>(var));
                    });
     // SideEffect and UsesVar do not visit BufferLoad predicates.
     PostOrderVisit(value, [&](const ObjectRef &node) {
       if (const auto *load = node.as<BufferLoadNode>();
           load && load->predicate) {
-        discard &= CanDiscard(load->predicate.value());
+        discard &= CanDiscard_(load->predicate.value());
       }
     });
     return discard;
   }
 
   Stmt VisitStmt_(const BindNode *op) final {
-    if (!used_vars_.count(op->var.get()) && CanDiscard(op->value)) {
+    if (!uses_.used_vars.count(op->var) && CanDiscard_(op->value)) {
       removed_ = true;
       return Evaluate(Integer(0));
     }
     return GetRef<Stmt>(op);
   }
 
-  std::unordered_set<const Object *> visited_;
-  std::unordered_set<const VarNode *> used_vars_;
-  std::unordered_set<const VarNode *> volatile_buffers_;
+  BindUseInfo uses_;
   bool removed_{false};
 };
+
+} // namespace
 
 class SimplifyConfig : public Attrs {
 public:
