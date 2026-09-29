@@ -175,9 +175,11 @@ jobs:
           create-symlink: ${{ runner.os != 'Windows' }}
           evict-old-files: "7d"
           append-timestamp: false
-          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc') }}
+          # Build configuration changes must also create a new cache entry:
+          # existing GitHub cache entries cannot be updated in place.
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc', 'CMakeLists.txt', 'cmake/**', 'pyproject.toml') }}
           restore-keys: |
-            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc') }}
+            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc', 'CMakeLists.txt', 'cmake/**', 'pyproject.toml') }}
             wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}
             wheel-${{ runner.os }}-${{ runner.arch }}
 
