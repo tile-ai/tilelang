@@ -5,6 +5,7 @@ import pytest
 from tilelang import tvm as tvm
 import tilelang.language as TL
 import tilelang.testing
+import pytest
 from tvm.script import tirx as T
 
 
@@ -908,6 +909,108 @@ def test_partial_sync_warp_multiple_still_lowered():
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
     assert re.search(r'tvm_storage_sync\("shared",\s*\d+,\s*32\)', s), f"Expected a partial barrier with thread_count=32:\n{s}"
+
+
+@tilelang.testing.requires_cuda
+def test_disjoint_partial_sync_scopes_use_distinct_ids():
+    """Diverse thread counts and bounds should lead to different sync ids"""
+
+    @T.prim_func(private=True)
+    def func():
+        tx = T.launch_thread("threadIdx.x", 128)
+        if tx // 64 == 0:
+            for i in range(2):
+                T.evaluate(T.tvm_storage_sync("shared"))
+                T.evaluate(T.tvm_storage_sync("shared"))
+        else:
+            for j in range(2):
+                T.evaluate(T.tvm_storage_sync("shared"))
+                T.evaluate(T.tvm_storage_sync("shared"))
+
+    mod = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))
+    barriers = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tirx.tvm_storage_sync"):
+            barriers.append(tuple(int(arg) for arg in node.args[1:]))
+
+    tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, collect)
+    assert len(barriers) == 4
+    assert all(count == 64 for _, count in barriers)
+    assert barriers[0] == barriers[1]
+    assert barriers[2] == barriers[3]
+    assert barriers[0][0] != barriers[2][0]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("scope_kind", ["attr", "block", "if", "for"])
+def test_partial_sync_assert_predicate_lifetime(scope_kind):
+    """An assertion affects later siblings, but not out of its scope."""
+    from textwrap import dedent
+
+    tir = tvm.tirx
+    scope_header = {
+        "attr": 'with T.attr(tx, "pragma_test_scope", 1):',
+        "block": 'with T.sblock("test_scope"):',
+        "if": "if tx < 64:",
+        "for": "for i in T.serial(2):",
+    }[scope_kind]
+
+    source = dedent(f"""
+        @T.prim_func(private=True)
+        def func():
+            tx = T.launch_thread("threadIdx.x", 128)
+            if tx < 64:
+                T.evaluate(T.tvm_storage_sync("shared"))      # sync_0: group 0
+                {scope_header}
+                    T.evaluate(T.tvm_storage_sync("shared"))  # sync_1: might be group 1 or group 0
+                    assert tx % 2 == 0, "thread index"
+                    T.evaluate(T.tvm_storage_sync("shared"))  # sync_2: group 2
+                    T.evaluate(T.tvm_storage_sync("shared"))  # sync_3: group 2
+                T.evaluate(T.tvm_storage_sync("shared"))      # sync_4: group 0
+    """)
+    func = tvm.script.from_source(source, extra_vars={"T": T})
+    mod = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))
+    barriers = []
+
+    def collect(node):
+        if isinstance(node, tir.Call) and node.op == tvm.ir.Op.get("tirx.tvm_storage_sync"):
+            barriers.append(tuple(int(arg) for arg in node.args[1:]))
+
+    tir.stmt_functor.post_order_visit(mod["main"].body, collect)
+    assert len(barriers) == 5
+    assert barriers[0] == barriers[4]
+    assert barriers[2] == barriers[3]
+    assert barriers[1][0] != barriers[2][0]
+
+
+@tilelang.testing.requires_cuda
+def test_partial_sync_assume_scopes_use_distinct_ids():
+    """Assume predicates works like IfThenElse statement"""
+    tir = tvm.tirx
+
+    @T.prim_func(private=True)
+    def func():
+        tx = T.launch_thread("threadIdx.x", 128)
+        with T.attr(tx // 64 == 0, "tl.assume", 1):
+            T.evaluate(T.tvm_storage_sync("shared"))  # sync_0: group 0
+        with T.attr(tx // 64 == 1, "tl.assume", 1):
+            T.evaluate(T.tvm_storage_sync("shared"))  # sync_1: group 1
+        with T.attr(tx // 64 == 0, "tl.assume", 1):
+            T.evaluate(T.tvm_storage_sync("shared"))  # sync_2: group 0 again
+
+    mod = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))
+    barriers = []
+
+    def collect(node):
+        if isinstance(node, tir.Call) and node.op == tvm.ir.Op.get("tirx.tvm_storage_sync"):
+            barriers.append(tuple(int(arg) for arg in node.args[1:]))
+
+    tir.stmt_functor.post_order_visit(mod["main"].body, collect)
+    assert len(barriers) == 3
+    assert all(count == 64 for _, count in barriers)
+    assert barriers[0] == barriers[2]
+    assert barriers[0][0] != barriers[1][0]
 
 
 @tilelang.testing.requires_cuda
