@@ -142,7 +142,9 @@ def test_each_dialect_declares_its_own_launch_annotations():
         "tilelang.rocm.language": {"threads", "prelude"},
         "tilelang.metal.language": {"threads", "prelude"},
         "tilelang.webgpu.language": {"threads"},
-        "tilelang.cpu.language": {"prelude"},
+        # cpu_num_threads is a CPU-only launch annotation; the default facade
+        # (the CUDA dialect) rejects it at trace time.
+        "tilelang.cpu.language": {"prelude", "cpu_num_threads"},
     }
     for module, keys in expected.items():
         dialect = importlib.import_module(module)

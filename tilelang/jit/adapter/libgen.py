@@ -26,6 +26,20 @@ from .utils import is_cpu_target, is_cuda_target, is_hip_target
 logger = logging.getLogger(__name__)
 
 
+def cpu_openmp_flags(pass_configs: dict[str, Any] | None) -> list[str]:
+    """OpenMP compile flags for the CPU library build.
+
+    Empty unless the ``tl.cpu_parallel`` pass config is enabled — the
+    default-off contract keeps the compile command bit-identical to the
+    serial baseline.
+    """
+    if pass_configs and pass_configs.get(PassConfigKey.TL_CPU_PARALLEL, False):
+        from tilelang.contrib.openmp import get_openmp_compile_flags
+
+        return get_openmp_compile_flags()
+    return []
+
+
 class LibraryGenerator:
     srcpath: str | None = None
     libpath: str | None = None
@@ -148,6 +162,7 @@ class LibraryGenerator:
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
+            command += cpu_openmp_flags(self.pass_configs)
         else:
             raise ValueError(f"Unsupported target: {target}")
 

@@ -395,6 +395,7 @@ def launch_kernel(
     threads: int | list[int] | tuple[int, ...] | None = None,
     prelude: str | None = None,
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+    cpu_num_threads: int | None = None,
     **annotations: Any,
 ) -> KernelLaunchFrame:
     """Shared implementation behind every dialect's ``T.Kernel``.
@@ -423,6 +424,11 @@ def launch_kernel(
     for key, value in annotations.items():
         if value is not None:
             attrs[key] = value
+
+    if cpu_num_threads is not None:
+        if isinstance(cpu_num_threads, bool) or not isinstance(cpu_num_threads, int) or cpu_num_threads <= 0:
+            raise ValueError(f"cpu_num_threads must be a positive integer, got {cpu_num_threads}")
+        attrs["tl.cpu_num_threads"] = cpu_num_threads
 
     return _ffi_api.KernelLaunch(blocks, _normalize_threads(threads), attrs)
 
