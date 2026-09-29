@@ -240,6 +240,7 @@ struct TaskCostFeatures {
     int64_t k;
     DataType input_dtype;
     bool hf32;
+    bool blockscaled;
   };
 
   struct CopyInfo {
@@ -255,7 +256,7 @@ struct TaskCostFeatures {
     // that a dynamic tail could be narrower at runtime.
     int64_t contiguous_bytes_lower_bound;
     // ND2NZ post-copy traverses physical NZ D-groups rather than logical ND
-    // rows, so it does not use raw N-strided row-width fits.
+    // rows, so it does not use raw N-strided row-width bandwidths.
     bool is_nd2nz_post_copy;
   };
 
@@ -387,6 +388,7 @@ private:
     kUbToL1,    // MTE3 (cross-core)
     kL1ToL0a,   // MTE1
     kL1ToL0b,   // MTE1
+    kL1ToL0Sf,  // MTE1, shared by A/B scale-factor loads
     kL1ToBt,    // MTE1
     kL1ToFpBuf, // MTE1
     kL0cToUb,   // Fixpipe
@@ -410,6 +412,8 @@ private:
       return params_.l1_to_l0a_bandwidth;
     case AscendPath::kL1ToL0b:
       return params_.l1_to_l0b_bandwidth;
+    case AscendPath::kL1ToL0Sf:
+      return params_.l1_to_l0_sf_bandwidth;
     case AscendPath::kL1ToBt:
       return params_.l1_to_bt_bandwidth;
     case AscendPath::kL1ToFpBuf:
@@ -442,7 +446,7 @@ private:
   }
 
   // A strided N-split row of `width` bytes travels in whole
-  // `transaction_bytes`-sized MTE transactions. The measured row rate peaks
+  // `transaction_bytes`-sized MTE transactions. The row rate peaks
   // at whole transaction multiples and scales with the occupied fraction
   // between them:
   //   rate = peak * width / (transaction_bytes * ceil(width / transaction)).
@@ -574,6 +578,8 @@ private:
     case AscendPath::kL1ToBt:
     case AscendPath::kL1ToFpBuf:
       return params_.mte1_base_latency;
+    case AscendPath::kL1ToL0Sf:
+      return params_.mte1_sf_base_latency;
     case AscendPath::kL0cToUb:
       return params_.fixpipe_base_latency;
     case AscendPath::kL0cToGm:
@@ -632,6 +638,8 @@ private:
         return AscendPath::kL1ToL0a;
       if (s == "shared.l0b")
         return AscendPath::kL1ToL0b;
+      if (s == "shared.l0a.sf" || s == "shared.l0b.sf")
+        return AscendPath::kL1ToL0Sf;
       if (s == "shared.bt")
         return AscendPath::kL1ToBt;
     }
@@ -664,6 +672,9 @@ private:
       return AscendPath::kL1ToL0a;
     if (src == "shared.l1" && dst == "shared.l0b")
       return AscendPath::kL1ToL0b;
+    if ((src == "shared.l1" || src == "shared.l1.dyn") &&
+        (dst == "shared.l0a.sf" || dst == "shared.l0b.sf"))
+      return AscendPath::kL1ToL0Sf;
     if (src == "shared.l1" && dst == "shared.bt")
       return AscendPath::kL1ToBt;
     if (src == "shared.l1" && dst == "shared.fp")
@@ -685,12 +696,21 @@ private:
     auto align = [](int64_t extent, int64_t group) {
       return ((extent + group - 1) / group) * group;
     };
-    return 2 * align(shape.m, 16) * align(shape.n, 16) *
-           align(shape.k, k_group);
+    int64_t m = align(shape.m, 16);
+    int64_t n = align(shape.n, 16);
+    if (shape.blockscaled) {
+      // MX MAD's independent-issue cost has a minimum larger M/N extent.
+      return 2 * std::min(m, n) * std::max({m, n, params_.cube_mx_min_mn}) *
+             align(shape.k, k_group);
+    }
+    return 2 * m * n * align(shape.k, k_group);
   }
 
   // Throughput in operations/cycle, matching the rounded operation count.
-  int64_t CubeThroughputFor(DataType dtype, bool hf32 = false) const {
+  int64_t CubeThroughputFor(DataType dtype, bool hf32 = false,
+                            bool blockscaled = false) const {
+    if (blockscaled && dtype.is_float4_e2m1fn())
+      return params_.cube_throughput_mxfp4;
     if (dtype.is_float16())
       return params_.cube_throughput_fp16 ? params_.cube_throughput_fp16
                                           : params_.cube_fallback_throughput;
@@ -761,6 +781,9 @@ private:
                   path == AscendPath::kL1ToL0b) &&
                  ii_bytes > 0) {
         cost.override_cycles += params_.mte1_issue_overhead +
+                                safe_div_ceil(ii_bytes, BandwidthForPath(path));
+      } else if (path == AscendPath::kL1ToL0Sf && ii_bytes > 0) {
+        cost.override_cycles += params_.mte1_sf_issue_overhead +
                                 safe_div_ceil(ii_bytes, BandwidthForPath(path));
       } else if ((path == AscendPath::kL0cToUb ||
                   path == AscendPath::kL0cToGm) &&
@@ -885,8 +908,12 @@ private:
         for (const TaskCostFeatures::CubeShape &shape :
              cost_features.cube_shapes) {
           int64_t ops = CubeOperations(shape);
-          int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32);
-          if (shape.input_dtype.is_float() && shape.input_dtype.bits() == 32) {
+          int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32,
+                                                 shape.blockscaled);
+          if (shape.blockscaled) {
+            base_latency = std::max(base_latency, params_.cube_mx_base_latency);
+          } else if (shape.input_dtype.is_float() &&
+                     shape.input_dtype.bits() == 32) {
             base_latency =
                 std::max(base_latency, params_.cube_fp32_base_latency);
           }
@@ -932,7 +959,8 @@ private:
         for (const TaskCostFeatures::CubeShape &shape :
              cost_features.cube_shapes) {
           int64_t ops = CubeOperations(shape);
-          int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32);
+          int64_t throughput = CubeThroughputFor(shape.input_dtype, shape.hf32,
+                                                 shape.blockscaled);
           cube_ii = std::max(cube_ii, safe_div_ceil(ops, throughput));
         }
       }
@@ -1167,7 +1195,6 @@ private:
 
     int64_t EstimateNd2NzScatterLatency(const CallNode *op) const {
       // InsertNd2Nz validates this template contract before EstimateLatency.
-      // Unknown shapes or conversions need a new fit, not a minimum-cost fit.
       ICHECK_EQ(op->args.size(), 6U);
       const int64_t *rows = as_const_int(op->args[2]);
       const int64_t *cols = as_const_int(op->args[3]);
@@ -1585,13 +1612,6 @@ private:
     if (IsAscendCopyCall(op)) {
       AscendCopy copy_obj(op->args, op->annotations);
       const AscendCopyNode *copy = copy_obj.get();
-      // MX scale loads move a few bytes alongside the data loads; keep the
-      // cost accounting identical to the fused scale-companion era, when
-      // those bytes rode the data copy invisibly.
-      if (IsL0SFBuffer(copy->dst)) {
-        StmtExprVisitor::VisitExpr_(op);
-        return;
-      }
       MteGeometry geometry = InferMteGeometry(copy);
       features_.copy_infos.push_back({copy->src.scope(), copy->dst.scope(),
                                       CalculateCopyBytes(copy),
@@ -1604,11 +1624,11 @@ private:
       int64_t m = op->args[5].as<IntImmNode>()->value;
       int64_t n = op->args[6].as<IntImmNode>()->value;
       int64_t k = op->args[7].as<IntImmNode>()->value;
-      // Both spellings share the leading 13 dense slots; the block-scaled op
-      // appends SFA/SFB/k_start, which the cube-shape features ignore.
-      Gemm gemm = op->op.same_as(gemm_blockscaled_op)
-                      ? GemmBlockScaled(op->args, op->annotations)
-                      : Gemm(op->args, op->annotations);
+      // Both spellings share the leading 13 dense slots. Keep the MX identity
+      // so its compute cost does not fall back to the dense GEMM model.
+      bool blockscaled = op->op.same_as(gemm_blockscaled_op);
+      Gemm gemm = blockscaled ? GemmBlockScaled(op->args, op->annotations)
+                              : Gemm(op->args, op->annotations);
       if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
         // The serialized ints are static tile metadata. A dynamic L0 tail
         // may have a tighter region bound than its padded allocation.
@@ -1623,7 +1643,8 @@ private:
       bool hf32 = mode != hf32_modes_.end() &&
                   mode->second == Hf32ModeAnalyzer::kEnabled;
       if (m > 0 && n > 0 && k > 0)
-        features_.cube_shapes.push_back({m, n, k, gemm->a_->dtype, hf32});
+        features_.cube_shapes.push_back(
+            {m, n, k, gemm->a_->dtype, hf32, blockscaled});
     }
     StmtExprVisitor::VisitExpr_(op);
   }
