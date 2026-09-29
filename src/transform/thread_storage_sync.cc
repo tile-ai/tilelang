@@ -28,12 +28,17 @@
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/ffi/cast.h"
+#include "tvm/ffi/object.h"
+#include "tvm/ir/expr.h"
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/cast.h>
+#include <tvm/ir/scope_stack.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -260,11 +265,96 @@ PrimExpr MakeLinearThreadId(const Array<IterVar> &thread_vars) {
 
 } // namespace
 
+// Mock the way of IRMutatorWithAnalyzer to collect the constraints of each
+// statement
+class ThreadPredicateCollector : public StmtExprVisitor {
+public:
+  std::optional<PrimExpr> SyncScope(const Evaluate &evaluate) const {
+    auto it = sync_scope_map_.find(evaluate);
+    ICHECK(it != sync_scope_map_.end())
+        << "Sync statement was not recorded by ThreadPredicateCollector";
+    return it->second;
+  }
+
+private:
+  void VisitStmt_(const IfThenElseNode *op) override {
+    WithNewScope_([&] {
+      AddPredicate_(op->condition);
+      VisitStmt(op->then_case);
+    });
+    if (op->else_case) {
+      WithNewScope_([&] {
+        AddPredicate_(Not(op->condition));
+        VisitStmt(op->else_case.value());
+      });
+    }
+  }
+  void VisitStmt_(const ForNode *op) override {
+    WithNewScope_([&] {
+      AddPredicate_(op->extent > 0);
+      StmtExprVisitor::VisitStmt_(op);
+    });
+  }
+  void VisitStmt_(const AttrStmtNode *op) override {
+    WithNewScope_([&] {
+      if (op->attr_key == tirx::attr::tilelang_assume) {
+        AddPredicate_(Downcast<PrimExpr>(op->node));
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    });
+  }
+
+  void VisitStmt_(const SBlockNode *op) override {
+    WithNewScope_([&] { StmtExprVisitor::VisitStmt_(op); });
+  }
+
+  void VisitStmt_(const AssertStmtNode *op) override {
+    StmtExprVisitor::VisitStmt_(op);
+    // Flat assertions constrain later siblings until this scope exits.
+    AddPredicate_(op->condition);
+  }
+
+  void VisitStmt_(const EvaluateNode *op) override {
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(builtin::tvm_storage_sync())) {
+        sync_scope_map_.emplace(GetRef<Evaluate>(op),
+                                scope_predicates_.Current());
+      }
+    }
+    return StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void AddPredicate_(const PrimExpr &predicate) {
+    auto &current = scope_predicates_.Current();
+    if (current) {
+      current = *current && predicate;
+    } else {
+      current = predicate;
+    }
+  }
+
+  template <typename F> void WithNewScope_(F &&body) {
+    // ScopeStack default-constructs new levels; inherit the parent scope
+    // constraint explicitly.
+    auto parent = scope_predicates_.Current();
+    scope_predicates_.WithNewScope([&] {
+      scope_predicates_.Current() = parent;
+      body();
+    });
+  }
+
+  ScopeStack<std::optional<PrimExpr>> scope_predicates_;
+  std::unordered_map<Evaluate, std::optional<PrimExpr>, ObjectPtrHash,
+                     ObjectPtrEqual>
+      sync_scope_map_;
+};
+
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
 public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
     arith::Analyzer analyzer;
     ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
+    rewriter.predicate_collector_(stmt);
     return rewriter(std::move(stmt));
   }
 
@@ -287,13 +377,15 @@ private:
           return IRMutatorWithAnalyzer::VisitStmt_(op);
         }
 
-        return ProcessSharedSync(call, scope);
+        return ProcessSharedSync(
+            call, scope, predicate_collector_.SyncScope(GetRef<Evaluate>(op)));
       }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  Stmt ProcessSharedSync(const CallNode *op, const std::string &scope) {
+  Stmt ProcessSharedSync(const CallNode *op, const std::string &scope,
+                         std::optional<PrimExpr> scope_predicate) {
     // Get thread bounds
     auto bound_tx = analyzer_->const_int_bound(tx_);
     auto bound_ty = analyzer_->const_int_bound(ty_);
@@ -317,7 +409,7 @@ private:
     ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
                        bound_ty->min_value, bound_ty->max_value,
                        bound_tz->min_value, bound_tz->max_value,
-                       thread_count};
+                       thread_count,        std::move(scope_predicate)};
 
     // Create or get barrier info
     auto barrier_id = GetOrCreateBarrier(key);
@@ -409,6 +501,7 @@ private:
   IterVar tz_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
+  ThreadPredicateCollector predicate_collector_;
   int warp_size_;
 };
 
