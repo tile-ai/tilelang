@@ -231,6 +231,18 @@ if(CCACHE_PROGRAM)
   # text, the resulting result-key is stable across .tmpXXX rotations.
   if(WIN32)
     set(CCACHE_PROGRAM "${CCACHE_PROGRAM};ignore_options=-external:I*")
+
+    # CMake emits concatenated -imsvc<path> for clang-cl. ccache 4.9 hashes
+    # that form even in preprocessor mode, so PEP 517's random dependency
+    # paths defeat hits despite the preprocessor wrapper below. A trailing
+    # space makes CMake emit -imsvc <path>: ccache then omits the include
+    # option from the preprocessor hash while retaining it in direct mode.
+    foreach(_lang IN ITEMS C CXX)
+      if(CMAKE_${_lang}_COMPILER_ID STREQUAL "Clang" AND
+         CMAKE_${_lang}_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        set(CMAKE_INCLUDE_SYSTEM_FLAG_${_lang} "-imsvc ")
+      endif()
+    endforeach()
   endif()
 
   # Plug a wrapper around cl.exe -P so .tmpXXX path components in the
