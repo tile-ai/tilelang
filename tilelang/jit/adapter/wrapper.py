@@ -1075,8 +1075,6 @@ class TLWrapper(BaseWrapper):
     A wrapper class for the TileLang backend.
     """
 
-    source_wrapper_class: type | None = None
-    source_wrapper: object | None = None
     device_mod: IRModule | None = None
     host_mod: IRModule | None = None
     pass_configs: dict[str, Any] | None = None
@@ -1105,9 +1103,7 @@ class TLWrapper(BaseWrapper):
     # Get Scheduled Rt Module and return source to be compiled
     def wrap(self, c_source: str):
         assert self.scheduled_ir_module is not None, "Please assign optimized module first."
-        if self.source_wrapper_class is not None:
-            wrapper_class = self.source_wrapper_class
-        elif is_cuda_target(self.target):
+        if is_cuda_target(self.target):
             wrapper_class = TLCUDASourceWrapper
         elif is_hip_target(self.target):
             wrapper_class = TLHIPSourceWrapper
@@ -1127,7 +1123,6 @@ class TLWrapper(BaseWrapper):
             host_mod=self.host_mod,
             pass_configs=self.pass_configs,
         )
-        self.source_wrapper = wrapper
         return wrapper.lib_code
 
 

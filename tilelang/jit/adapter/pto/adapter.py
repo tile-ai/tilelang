@@ -1,4 +1,4 @@
-"""Compile and execute PTODSL kernels using the Cython launch wrapper."""
+"""Compile and execute PTODSL kernels using the PTO launch wrapper."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from tvm import arith, tirx
 from tvm.target import Target
-from tilelang_cython_wrapper import CythonKernelWrapper
+from tilelang_pto_wrapper import PTOKernelWrapper
 
 from tilelang import tvm
 from tilelang.backend.target import determine_target
@@ -167,18 +167,18 @@ class PTOKernelAdapter(BaseKernelAdapter):
                 error_msg += f"\n{self.lib_code}"
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
-        self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
-        self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
-        self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
-        self.cython_wrapper.set_param_storage_metadata(self.param_storage_metadata)
-        self.cython_wrapper.set_static_shape_map(self.static_shape_map)
-        self.cython_wrapper.set_static_strides_map(self.static_strides_map)
-        self.cython_wrapper.set_dynamic_strides_map(self.dynamic_strides_map)
-        self.cython_wrapper.set_scalar_param_vars(self.scalar_param_vars)
-        self.cython_wrapper.set_static_contiguous_list(self.static_contiguous_list)
-        self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
-        self.cython_wrapper.set_ptr_map(self.ptr_map)
+        self.runtime_wrapper = PTOKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
+        self.runtime_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
+        self.runtime_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
+        self.runtime_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
+        self.runtime_wrapper.set_param_storage_metadata(self.param_storage_metadata)
+        self.runtime_wrapper.set_static_shape_map(self.static_shape_map)
+        self.runtime_wrapper.set_static_strides_map(self.static_strides_map)
+        self.runtime_wrapper.set_dynamic_strides_map(self.dynamic_strides_map)
+        self.runtime_wrapper.set_scalar_param_vars(self.scalar_param_vars)
+        self.runtime_wrapper.set_static_contiguous_list(self.static_contiguous_list)
+        self.runtime_wrapper.set_buffer_device_map(self.buffer_device_map)
+        self.runtime_wrapper.set_ptr_map(self.ptr_map)
         self._post_init()
 
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
@@ -412,7 +412,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
                 skip_tensor_validation: Whether to skip tensor attributes validation which
                 includes shape, dtype, device, etc.
             """
-            return self.cython_wrapper.forward([*args], stream=stream, skip_tensor_validation=skip_tensor_validation)
+            return self.runtime_wrapper.forward([*args], stream=stream, skip_tensor_validation=skip_tensor_validation)
 
         return lambda_forward
 

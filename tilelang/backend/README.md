@@ -79,9 +79,9 @@ not select a different target architecture or pass pipeline.
 
 For `target="pto"`, `execution_backend="auto"` selects the dedicated `pto`
 execution backend, just as CuTeDSL selects `cutedsl`. PTO compiles PTODSL through
-`ptoas` and Bisheng. Its adapter directly extends `BaseKernelAdapter` and uses
-the compiled Cython launch wrapper; it does not support
-`execution_backend="cython"` or `"tvm_ffi"`.
+`ptoas` and Bisheng. Its adapter directly extends `BaseKernelAdapter`; its
+source wrapper and compiled launch runtime live under `jit/adapter/pto/`.
+PTO does not support `execution_backend="cython"` or `"tvm_ffi"`.
 
 ## Source Layout
 

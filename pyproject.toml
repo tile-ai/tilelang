@@ -123,6 +123,7 @@ include = [
     "version_provider.py",
     "requirements*.txt",
     "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "tilelang/jit/adapter/pto/cython_wrapper.pyx",
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
