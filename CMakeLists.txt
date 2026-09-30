@@ -263,8 +263,10 @@ if(CCACHE_PROGRAM)
       endif()
     endforeach()
     if(_tilelang_pep517_python)
+      # The wrapper only needs the stdlib. Skip site startup and the build
+      # frontend's Python environment, which may target another interpreter.
       set(_tilelang_pep517_wrapper
-          "${_tilelang_pep517_python} ${CMAKE_SOURCE_DIR}/cmake/ccache_strip_pep517.py")
+          "${_tilelang_pep517_python} -I -S ${CMAKE_SOURCE_DIR}/cmake/ccache_strip_pep517.py")
       set(CCACHE_PROGRAM
           "${CCACHE_PROGRAM};prefix_command_cpp=${_tilelang_pep517_wrapper}")
       message(STATUS "  ccache: stripping PEP 517 .tmpXXX paths via ${_tilelang_pep517_wrapper}")
