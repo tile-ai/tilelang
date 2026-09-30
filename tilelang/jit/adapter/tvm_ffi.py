@@ -1,6 +1,8 @@
 """Utilities to adapt TVM-FFI kernels to Torch tensors.
 
 TVM-FFI obtains the active work stream through Torch's DLPack Exchange API.
+The Ascend adapter installs TileLang's Torch NPU callback before the first
+tensor reaches an executable.
 """
 
 from __future__ import annotations
@@ -35,11 +37,21 @@ elif sys.platform == "win32":
     COMPILE_ARGS["fcompile"] = _msvc_create_shared
 
 
+def _install_torch_stream_exchange() -> None:
+    from tilelang.ascend.torch_exchange import (
+        install_torch_npu_stream_exchange,
+    )
+
+    install_torch_npu_stream_exchange()
+
+
 class TVMFFIKernelAdapter(BaseKernelAdapter):
     """Adapter that runs a TVM runtime.Executable with Torch tensors.
 
     Notes
     - Torch tensors use TVM-FFI's zero-copy DLPack Exchange API conversion.
+    - Ascend execution installs a Cython callback that reads Torch's current
+      NPU stream for every invocation.
     """
 
     # Class attributes to store compiled kernel information
@@ -61,8 +73,12 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
 
+    _torch_npu_stream_exchange_installed: bool = False
+
     def _prepare_torch_device(self, device: torch.device) -> None:
-        """Allow backend adapters to prepare device-specific Torch interop."""
+        if device.type == "npu" and not self._torch_npu_stream_exchange_installed:
+            _install_torch_stream_exchange()
+            self._torch_npu_stream_exchange_installed = True
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
