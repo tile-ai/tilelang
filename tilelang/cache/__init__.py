@@ -26,6 +26,7 @@ _dispatch_map: dict[str, KernelCache] = {
     "cython": CythonKernelCache(),
     "nvrtc": NVRTCKernelCache(),
     "cutedsl": CuTeDSLKernelCache(),
+    "pto": CythonKernelCache(),
     "torch": TorchKernelCache(),
 }
 
@@ -38,7 +39,7 @@ _ascend_dispatch_map: dict[str, KernelCache] = {
 def _resolve_cache_dispatch(
     target: TargetLike | None,
     target_host: TargetLike | None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None,
     verbose: bool | None,
 ):
     if target is None:
@@ -78,7 +79,7 @@ def cached(
     *args,
     target: TargetLike | None = None,
     target_host: TargetLike | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,
     compile_flags: list[str] | str | None = None,

@@ -94,7 +94,7 @@ class _CallFormCache:
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None = None,
     target: TargetLike | None = None,
     target_host: TargetLike | None = None,
     verbose: bool | None = None,
@@ -110,7 +110,7 @@ def compile(
         The TileLang TIR function to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
-    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
+    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     target : str, dict, or tvm.target.Target, optional
@@ -176,7 +176,7 @@ def compile(
 def par_compile(
     funcs: Iterable[PrimFunc[_KP, _T]],
     out_idx: list[int] | int | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None = None,
     target: TargetLike | None = None,
     target_host: TargetLike | None = None,
     verbose: bool | None = None,
@@ -194,7 +194,7 @@ def par_compile(
         The TileLang TIR functions to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
-    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"], optional
+    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
     target : str, dict, or tvm.target.Target, optional
@@ -341,7 +341,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     """
 
     out_idx: list[int] | int | None
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None
     target: TargetLike | None
     target_host: TargetLike | None
     verbose: bool | None
@@ -564,7 +564,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             return kernel
 
 
-ExecutionBackend = Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"]
+ExecutionBackend = Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"]
 
 
 @overload
