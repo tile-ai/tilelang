@@ -338,25 +338,35 @@ WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
   }
   std::sort(warp_groups.begin(), warp_groups.end());
 
-  // Merge consecutive groups
-  std::vector<std::pair<int, int>> merged;
-  for (int group : warp_groups) {
-    if (merged.empty() || group != merged.back().second) {
-      merged.emplace_back(group, group + 1);
-    } else {
-      merged.back().second = group + 1;
+  if (std::find(warp_groups.begin(), warp_groups.end(), -1) !=
+      warp_groups.end()) {
+    // `-1` skips the threadIdx.x binding, so the region runs on every thread
+    // and no range constraint is emitted. Treated as a group index instead, it
+    // would build the empty range [-warp_group_size, 0) and the region would
+    // run on no thread at all, dropping every store inside it.
+    condition = IntImm(DataType::Bool(), 1);
+  } else {
+    // Merge consecutive groups
+    std::vector<std::pair<int, int>> merged;
+    for (int group : warp_groups) {
+      if (merged.empty() || group != merged.back().second) {
+        merged.emplace_back(group, group + 1);
+      } else {
+        merged.back().second = group + 1;
+      }
     }
-  }
 
-  for (const auto &[start, end] : merged) {
-    PrimExpr min_bound = IntImm(thread_idx.dtype(), start) * warp_group_size;
-    PrimExpr max_bound = IntImm(thread_idx.dtype(), end) * warp_group_size;
-    PrimExpr range_cond = (thread_idx >= min_bound) && (thread_idx < max_bound);
+    for (const auto &[start, end] : merged) {
+      PrimExpr min_bound = IntImm(thread_idx.dtype(), start) * warp_group_size;
+      PrimExpr max_bound = IntImm(thread_idx.dtype(), end) * warp_group_size;
+      PrimExpr range_cond =
+          (thread_idx >= min_bound) && (thread_idx < max_bound);
 
-    if (condition.defined()) {
-      condition = tirx::Or(condition, range_cond);
-    } else {
-      condition = range_cond;
+      if (condition.defined()) {
+        condition = tirx::Or(condition, range_cond);
+      } else {
+        condition = range_cond;
+      }
     }
   }
   IfFrame if_frame = If(condition);
