@@ -212,7 +212,16 @@ private:
     Array<PrimExpr> new_indices = indices;
     for (size_t i = 0; i < indices.size(); ++i) {
       if (state_vec[i] == IndexSignState::kNegative) {
-        new_indices.Set(i, analyzer_->Simplify(buffer_shape[i] + indices[i]));
+        PrimExpr wrapped = analyzer_->Simplify(buffer_shape[i] + indices[i]);
+        // One wrap only legalizes an index that is in range. An index more
+        // negative than the extent lands before the start of the buffer, and
+        // emitting it would read or write outside the allocation; NumPy and
+        // PyTorch reject the same index instead.
+        ICHECK(!analyzer_->CanProve(wrapped < 0))
+            << "LegalizeNegativeIndex: negative index " << indices[i]
+            << " is out of range for extent " << buffer_shape[i]
+            << " (a single wrap gives " << wrapped << ")";
+        new_indices.Set(i, wrapped);
       } else if (state_vec[i] == IndexSignState::kUnknown) {
         PrimExpr rewritten = TryRewriteMixedRamp(indices[i], buffer_shape[i]);
         if (rewritten.defined())

@@ -1,4 +1,5 @@
 from tilelang import tvm as tvm
+import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -491,6 +492,43 @@ def test_buffer_store_nested_in_condition():
             A[1023] = 42.0
         else:
             A[1022] = 24.0
+
+    _check(before, after)
+
+
+def test_out_of_range_constant_negative_index_is_rejected():
+    """A single wrap only legalizes an index that is in range.
+
+    `A[-10]` on a length-8 buffer used to become `A[-2]`, which reads before the
+    start of the allocation. NumPy and PyTorch reject the same index, so this
+    rejects it too instead of emitting the out-of-bounds load.
+    """
+
+    @T.prim_func
+    def before(A: T.Tensor((8,), T.float32)):
+        value = A[-10]
+        B = T.alloc_buffer((1,), T.float32)
+        B[0] = value
+
+    with pytest.raises(Exception, match="out of range"):
+        mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+        tl.transform.LegalizeNegativeIndex()(mod)
+
+
+def test_largest_in_range_constant_negative_index_is_still_legalized():
+    """Control: the most negative index that is still in range wraps as before."""
+
+    @T.prim_func
+    def before(A: T.Tensor((8,), T.float32)):
+        value = A[-8]
+        B = T.alloc_buffer((1,), T.float32)
+        B[0] = value
+
+    @T.prim_func
+    def after(A: T.Tensor((8,), T.float32)):
+        value = A[0]  # A[-8] becomes A[0]
+        B = T.alloc_buffer((1,), T.float32)
+        B[0] = value
 
     _check(before, after)
 
