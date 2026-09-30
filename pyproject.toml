@@ -123,6 +123,7 @@ include = [
     "version_provider.py",
     "requirements*.txt",
     "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "tilelang/jit/adapter/pto/cython_wrapper.pyx",
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
@@ -245,6 +246,7 @@ markers = [
     # decorators (see 3rdparty/tvm/python/tvm/testing/utils.py). TVM registers
     # these via its own conftest, but tilelang only imports the decorators, so
     # they must be registered here to avoid PytestUnknownMarkWarning.
+    "pto: tests for the PTO backend",
     "cpu: Mark a test as running on CPU",
     "gpu: Mark a test as using a GPU",
     "multi_gpu: Mark a test as using multiple GPUs",
