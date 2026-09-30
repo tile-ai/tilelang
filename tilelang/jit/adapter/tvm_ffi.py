@@ -143,18 +143,24 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         while the device code still runs cluster-scope barriers. The cython adapter
         writes its own host wrapper and does emit the cluster launch, so this is a
         property of the backend rather than of the kernel.
+
+        Both modules are inspected: `from_database` rebuilds an adapter for a cached
+        kernel through `__new__`, so it has no `device_mod` and reaches this guard by
+        way of `ir_module` instead. Without that a kernel cached before this check
+        existed would still launch without its cluster.
         """
-        if self.device_mod is None:
-            return
-        for g_var, func in self.device_mod.functions.items():
-            if "cluster_dims" not in func.attrs:
+        for mod in (self.device_mod, self.ir_module):
+            if mod is None:
                 continue
-            raise NotImplementedError(
-                f"execution_backend='tvm_ffi' does not emit a cluster launch, so kernel "
-                f"'{g_var.name_hint}' with cluster_dims={list(func.attrs['cluster_dims'])} "
-                f"would launch as an ordinary grid while its device code still runs "
-                f"cluster-scope barriers. Use execution_backend='cython' for a cluster kernel."
-            )
+            for g_var, func in mod.functions.items():
+                if "cluster_dims" not in func.attrs:
+                    continue
+                raise NotImplementedError(
+                    f"execution_backend='tvm_ffi' does not emit a cluster launch, so kernel "
+                    f"'{g_var.name_hint}' with cluster_dims={list(func.attrs['cluster_dims'])} "
+                    f"would launch as an ordinary grid while its device code still runs "
+                    f"cluster-scope barriers. Use execution_backend='cython' for a cluster kernel."
+                )
 
     def _make_executable(self) -> tvm.runtime.Executable:
         if self.rt_mod is None:
@@ -438,6 +444,11 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             adapter.ir_module = func_or_mod
+
+        # This path builds the adapter without `__init__`, so the up-front checks in
+        # there do not run. A kernel cached before a check existed would otherwise
+        # skip it entirely.
+        adapter._reject_cluster_launch()
 
         target = determine_target(target, return_object=True)
         adapter.target = Target(determine_target(target))
