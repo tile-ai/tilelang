@@ -684,9 +684,11 @@ class Builder(BaseBuilder):
 
         # 2. Quick return for trivil types
         if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
+            self.reject_conditional_constant_rebind(name)
             self.name_inside_frame.pop(name, None)
             return value
         if isinstance(value, tirx.IntImm) and value.dtype == "int32":
+            self.reject_conditional_constant_rebind(name)
             return value.value
         if isinstance(value, (Var, Buffer)):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
@@ -712,6 +714,33 @@ class Builder(BaseBuilder):
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
             self.name_inside_frame[name] = self.frames[frame]
         return res
+
+    def reject_conditional_constant_rebind(self, name: str | None) -> None:
+        """Reject a constant assigned to a name bound in an enclosing region.
+
+        The constant fast paths in `bind` take an `int`/`float`/`str`/`IntImm` and
+        return it directly. Assigning one to a name that already has a live
+        binding in an enclosing region was accepted silently: the constant
+        replaced the value at trace time, the enclosing `if` was dropped, and
+        every later read saw the constant unconditionally. The expression form of
+        the same rebind is already rejected, so a clamp written in the natural way
+        returned a wrong tensor with no diagnostic.
+
+        A name whose binding is in a region that has already closed is left alone,
+        so a constant stays reusable once the region that introduced it is gone.
+        """
+        if name is None or name == "_":
+            return
+        bound_in = self.name_inside_frame.get(name)
+        if bound_in is None or bound_in not in self.frames:
+            return
+        innermost = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
+        if innermost is None or self.frames[innermost] is bound_in:
+            return
+        raise RuntimeError(
+            f"Immutable variable `{name}` is used outside its defining region!\n"
+            f"variable `{name}` is defined in frame: {self.name_inside_frame[name]}, current frames: {self.frames}."
+        )
 
     def binding_expired(self, name: str | None) -> bool:
         """Whether `name` was last bound inside a TIR region that has since closed."""
