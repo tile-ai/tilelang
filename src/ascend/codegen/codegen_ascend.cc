@@ -541,6 +541,8 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
   has_gemm_l0_ = false;
   has_gemm_l1_ = false;
+  has_philox_rng_ = false;
+  ascend_rng_state_var_.clear();
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
   name_supply_->ReserveName("block_idx");
