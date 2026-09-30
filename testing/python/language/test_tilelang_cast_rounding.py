@@ -522,5 +522,83 @@ def test_cast_rs_rbits_invariance(rbits_mode, dtype):
     assert expected in code, f"Expected '{expected}' for rbits_mode={rbits_mode}, dtype={dtype}.\nGenerated code:\n{code}"
 
 
+# ===========================================================================
+# `round` is validated as a (source, destination, mode) combination
+# ===========================================================================
+
+_RS_TARGET = {"kind": "cuda", "arch": "sm_90a"}
+_UNSUPPORTED_COMBINATION = "is not supported for a cast from"
+
+
+def _vectorized_cast_kernel(src_dtype, dst_dtype, *, round_mode):
+    @T.prim_func
+    def main(A: T.Tensor((8,), src_dtype), B: T.Tensor((8,), dst_dtype)):
+        with T.Kernel(1, threads=1):
+            for i in T.vectorized(8):
+                if round_mode is None:
+                    B[i] = cast(A[i], dst_dtype)
+                else:
+                    B[i] = cast(A[i], dst_dtype, round=round_mode, rbits=T.uint32(0x12345678))
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_cast_rs_rejected_for_non_f32_source_in_a_vectorized_loop():
+    """The vectorized branches must not drop `round` that they cannot honour.
+
+    `round` and its `rbits` operand have a PTX lowering only for an f32 source. Every
+    other source dtype reaches a vectorized branch that emits the plain conversion
+    helper and returns, before the rejection at the end of the cast lowering is
+    reached -- so the request was dropped silently: the output was bit-identical to a
+    plain round-to-nearest cast for every seed, while the same cast written in a
+    scalar loop was rejected.
+    """
+    with pytest.raises(Exception, match=_UNSUPPORTED_COMBINATION), tvm.target.Target(_RS_TARGET):
+        tilelang.lower(_vectorized_cast_kernel("float16", "float8_e4m3fn", round_mode="rs"), target=_RS_TARGET)
+
+
+@tilelang.testing.requires_cuda
+def test_cast_rs_rejected_for_f32_to_e8m0():
+    """f32 -> E8M0 is an f32 source, but its helper takes no rounding argument.
+
+    The E8M0 conversions round towards +infinity unconditionally, so `round` has to
+    be refused for that pair as well rather than dropped by the branch.
+    """
+    with pytest.raises(Exception, match=_UNSUPPORTED_COMBINATION), tvm.target.Target(_RS_TARGET):
+        tilelang.lower(_vectorized_cast_kernel("float32", "float8_e8m0fnu", round_mode="rs"), target=_RS_TARGET)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("round_mode", ["rn", "rz", "rp", "rm"])
+def test_cast_rejected_for_a_mode_without_a_lowering(round_mode):
+    """Only 'rs' has a lowering today; the other accepted modes are refused.
+
+    The frontend accepts rn/rz/rp/rm, so the backend has to say which combinations it
+    can actually lower -- adding one later means listing it in the table together
+    with its lowering.
+    """
+    with pytest.raises(Exception, match=_UNSUPPORTED_COMBINATION), tvm.target.Target(_RS_TARGET):
+        tilelang.lower(_vectorized_cast_kernel("float32", "float8_e4m3fn", round_mode=round_mode), target=_RS_TARGET)
+
+
+@tilelang.testing.requires_cuda
+def test_supported_rs_combination_still_lowers():
+    """Control: the f32 -> fp8 stochastic combination keeps its packed lowering."""
+    with tvm.target.Target(_RS_TARGET):
+        artifact = tilelang.lower(_vectorized_cast_kernel("float32", "float8_e4m3fn", round_mode="rs"), target=_RS_TARGET)
+
+    assert "_rs_sat" in artifact.kernel_source, artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda
+def test_vectorized_cast_without_round_still_lowers():
+    """Control: the same vectorized cast with no rounding mode is unaffected."""
+    with tvm.target.Target(_RS_TARGET):
+        artifact = tilelang.lower(_vectorized_cast_kernel("float16", "float8_e4m3fn", round_mode=None), target=_RS_TARGET)
+
+    assert "__tl_cvt_half2_to_fp8x2" in artifact.kernel_source, artifact.kernel_source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
