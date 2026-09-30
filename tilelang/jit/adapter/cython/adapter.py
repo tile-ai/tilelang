@@ -17,6 +17,7 @@ from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target, is_metal_target
+from tilelang.ascend.target import target_is_pto
 from tilelang.backend.target import determine_target
 from tilelang.utils.language import prim_expr_equal, retrieve_func_from_module
 
@@ -58,11 +59,29 @@ def is_symbolic_expr(expr) -> bool:
 
 
 def _storage_pack_factor(dtype: tvm.DataType, target: Target) -> int:
-    """Return the target-specific host-storage packing factor for ``dtype``."""
-    # Keep the Cython adapter on the same ABI definition as KernelParam.  In
-    # particular, bool is one byte in Torch even though its TIR dtype has one
-    # logical bit, while packed int4/FP4 storage is only enabled for PTO.
-    return KernelParam(dtype, []).storage_packing_factor(target=target)
+    """Return the number of logical values stored in one Torch element.
+
+    Packed host ABI conversion is defined by the Ascend PTO backend.
+    """
+    # Torch stores bool values as individual bytes even though their TIR
+    # logical dtype is one bit.  Only the sub-byte dtypes with an explicit
+    # packed Torch ABI may shrink their storage shape.
+    dtype_name = str(dtype).removeprefix("torch.")
+    if not target_is_pto(target):
+        return 1
+    if not (dtype_name.startswith("float4") or dtype_name in {"int4", "uint4"}):
+        return 1
+    logical_bits = dtype.bits * dtype.lanes
+    if logical_bits >= 8:
+        return 1
+    # The supported packed ABI stores these logical sub-byte types in an
+    # 8-bit Torch element: FP4 uses float4_e2m1fn_x2 and int4/uint4 use
+    # int8.  Keep this mapping static rather than allocating a tensor just
+    # to query element_size().
+    storage_bits = 8
+    if storage_bits % logical_bits:
+        raise ValueError(f"Cannot represent {dtype} in an {storage_bits}-bit Torch storage element")
+    return storage_bits // logical_bits
 
 
 def _accepted_storage_dtypes(dtype: tvm.DataType, target: Target) -> torch.dtype | tuple[torch.dtype, ...]:
@@ -396,7 +415,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         """
         metadata = []
         for param in self.params:
-            pack_factor = param.storage_packing_factor(target=self.target)
+            pack_factor = _storage_pack_factor(param.dtype, self.target)
             if pack_factor > 1 and len(param.shape) > 0:
                 metadata.append((len(param.shape) - 1, pack_factor))
             else:
@@ -441,7 +460,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 static_shape, static_strides, dynamic_strides = [], [], []
-                packing_factor = KernelParam.from_buffer(buffer).storage_packing_factor(target=self.target)
+                packing_factor = _storage_pack_factor(buffer.dtype, self.target)
                 innermost_dim = len(buffer.shape) - 1
                 for j, s in enumerate(buffer.shape):
                     if isinstance(s, tirx.IntImm):
