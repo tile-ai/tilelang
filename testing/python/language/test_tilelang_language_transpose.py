@@ -1,5 +1,6 @@
 """Tests for T.transpose shared memory transpose primitive."""
 
+import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
@@ -166,6 +167,51 @@ def test_tilelang_transpose_square():
     run_tilelang_transpose_square(M=128, block_M=128)
     run_tilelang_transpose_square(M=256, block_M=128)
     run_tilelang_transpose_square(M=512, block_M=128)
+
+
+# ---------------------------------------------------------------------------
+# Frontend legality: dst's shape is fixed by the transpose contract
+# ---------------------------------------------------------------------------
+
+
+def _make_transpose_shape_kernel(src_shape, dst_shape, dtype="int32", threads=128):
+    @T.prim_func
+    def main(A: T.Tensor(src_shape, dtype), B: T.Tensor(dst_shape, dtype)):
+        with T.Kernel(1, threads=threads):
+            tile = T.alloc_shared(src_shape, dtype)
+            tile_T = T.alloc_shared(dst_shape, dtype)
+            T.copy(A, tile)
+            T.transpose(tile, tile_T)
+            T.copy(tile_T, B)
+
+    return main
+
+
+def _compile_transpose_shape_kernel(program):
+    tilelang.disable_cache()
+    try:
+        return tilelang.compile(program, out_idx=[1], target="cuda")
+    finally:
+        tilelang.enable_cache()
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_transpose_rejects_non_swapped_dst_shape():
+    """A dst whose last two extents are not the swap of src's must be rejected.
+
+    The docstring contract (dst[j, i] = src[i, j]) fixes dst's shape relative to
+    src's. Without the check a mismatched dst compiled and silently truncated.
+    """
+    with pytest.raises(ValueError) as exc_info:
+        _compile_transpose_shape_kernel(_make_transpose_shape_kernel((3, 4), (3, 4)))
+
+    assert "Transpose requires" in str(exc_info.value)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_transpose_accepts_swapped_dst_shape():
+    """Control: the documented (M, N) -> (N, M) contract still compiles."""
+    _compile_transpose_shape_kernel(_make_transpose_shape_kernel((3, 4), (4, 3)))
 
 
 if __name__ == "__main__":
