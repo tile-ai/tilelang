@@ -315,10 +315,11 @@ def create_backend_context(
     """Resolve user inputs into the immutable context for one compilation."""
 
     from tilelang import tvm
-    from tilelang.backend.target import determine_target
+    from tilelang.backend.target import determine_target, normalize_target_for_execution
 
     normalized_target = determine_target(target, return_object=True)
     assert isinstance(normalized_target, Target)
+    normalized_target = normalize_target_for_execution(normalized_target, execution_backend)
 
     if target_host is None:
         target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
