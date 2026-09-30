@@ -385,6 +385,17 @@ class DSLMutator(ast.NodeTransformer):
                 "the `else` body would be silently dropped. Move it after the loop instead."
             )
 
+    def visit_Match(self, node: ast.Match):
+        # Only the other control-flow constructs are lowered into builder calls.
+        # A `match` left in place runs at trace time, where the scrutinee is a
+        # symbolic expression and no literal pattern can compare equal, so every
+        # input takes the wildcard arm and that body is baked in unconditionally.
+        raise NotImplementedError(
+            f"`match` is not supported in TileLang kernels (line {node.lineno}); "
+            "no case arm would be selected at trace time, so every input would take the "
+            "wildcard arm. Use an `if`/`elif` chain instead."
+        )
+
     def visit_For(self, node: ast.For):
         self._reject_loop_else(node)
         exits = LoopControlFinder()
