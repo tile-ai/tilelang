@@ -215,6 +215,10 @@ private:
   std::unordered_set<const VarNode *> local_var_buffers_;
   std::unordered_map<Call, int64_t, ObjectPtrHash, ObjectPtrEqual>
       hf32_mode_by_gemm_;
+  std::unordered_map<Call, bool, ObjectPtrHash, ObjectPtrEqual>
+      n_direction_by_mad_;
+  std::unordered_map<Var, std::string, ObjectPtrHash, ObjectPtrEqual>
+      loop_condition_snapshot_ids_;
   // pragma_unroll_factor is lowered to an AttrStmt around its loop. Retain the
   // annotated variable so nested unrolled loops do not inherit the factor.
   Optional<Var> current_unroll_factor_loop_var_;
