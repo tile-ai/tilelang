@@ -140,65 +140,6 @@ class KernelParam:
         """
         return T.dtype(self.dtype).as_torch()
 
-    @staticmethod
-    def _is_pto_target(target) -> bool:
-        if target is None:
-            return False
-        kind = getattr(getattr(target, "kind", None), "name", None)
-        keys = getattr(target, "keys", ())
-        return kind == "ascend" and "pto" in keys
-
-    def storage_packing_factor(self, *, target=None) -> int:
-        """Return the number of logical values stored in one Torch element.
-
-        Packed host ABI conversion is defined by the Ascend PTO backend.
-        """
-        # Torch stores bool values as individual bytes even though their TIR
-        # logical dtype is one bit.  Only the sub-byte dtypes with an explicit
-        # packed Torch ABI may shrink their storage shape.
-        dtype_name = str(self.dtype).removeprefix("torch.")
-        if not self._is_pto_target(target):
-            return 1
-        if not (self.is_float4() or dtype_name in {"int4", "uint4"}):
-            return 1
-        logical_bits = self.dtype.bits * self.dtype.lanes
-        if logical_bits >= 8:
-            return 1
-        # The supported packed ABI stores these logical sub-byte types in an
-        # 8-bit Torch element: FP4 uses float4_e2m1fn_x2 and int4/uint4 use
-        # int8.  Keep this mapping static rather than allocating a tensor just
-        # to query element_size().
-        storage_bits = 8
-        if storage_bits % logical_bits:
-            raise ValueError(f"Cannot represent {self.dtype} in an {storage_bits}-bit Torch storage element")
-        return storage_bits // logical_bits
-
-    def storage_shape(self, *, target=None) -> list[int | IntImm | Var]:
-        """Return the shape expected by the Torch storage dtype.
-
-        TIR expresses scalar sub-byte types such as ``float4_e2m1fn`` in
-        logical elements.  PyTorch exposes them through a packed storage dtype
-        (``float4_e2m1fn_x2``), so the innermost storage dimension is smaller.
-        """
-        shape = list(self.shape)
-        packing_factor = self.storage_packing_factor(target=target)
-        if packing_factor == 1 or not shape:
-            return shape
-
-        innermost = shape[-1]
-        if isinstance(innermost, IntImm):
-            innermost = int(innermost.value)
-        if not isinstance(innermost, int):
-            raise ValueError(
-                f"The innermost dimension of packed {self.dtype} must be a compile-time integer; dynamic packed storage is not supported"
-            )
-        if innermost % packing_factor:
-            raise ValueError(
-                f"The innermost dimension of {self.dtype} must be divisible by its packing factor ({packing_factor}), got {innermost}"
-            )
-        shape[-1] = innermost // packing_factor
-        return shape
-
     def tilelang_dtype(self) -> T.dtype:
         """
         Converts the TVM DataType to TileLang dtype.
