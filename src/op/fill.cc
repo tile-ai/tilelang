@@ -122,6 +122,16 @@ Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
         ICHECK_LE(extent_imm->value, shape_imm->value)
             << "region[" << i << "] = " << extent_imm->value << " > "
             << node->dst->shape[i];
+        // `extent <= shape` only bounds a region anchored at the start of the
+        // buffer. A sliced region may start further in, so its end is what has
+        // to fit: `As[6:12]` into a shape-8 buffer has a legal extent and still
+        // writes four elements past the end.
+        if (const auto *min_imm = node->region[i]->min.as<IntImmNode>()) {
+          ICHECK_LE(min_imm->value + extent_imm->value, shape_imm->value)
+              << "region[" << i << "] = [" << min_imm->value << ", "
+              << min_imm->value + extent_imm->value << ") exceeds "
+              << node->dst->shape[i];
+        }
       }
     }
   }
