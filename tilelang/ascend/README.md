@@ -128,6 +128,23 @@ print("GEMM + ReLU passed.")
 
 ## Writing Ascend Kernels
 
+### Selecting PTO code generation
+
+Pass `target="pto"` to `@tilelang.jit` or `tilelang.compile` to generate
+PTODSL instead of Ascend C. The same Ascend lowering pipeline runs for both
+targets; the PTO target selects a different device code generator and the PTO
+execution adapter. For example, change the Quick Start decorator to
+`@tilelang.jit(target="pto")` to select PTO for that kernel. Leave
+`execution_backend` at its default `"auto"`: the PTO target selects the PTO
+execution backend automatically. Setting only `execution_backend="pto"` on an
+`"ascend"` target does not select PTO code generation and is rejected.
+
+For source-only inspection, call `tilelang.lower(kernel, target="pto")` and
+read its `kernel_source`. PTO JIT compilation additionally requires PTODSL,
+`ptoas`, and `bisheng`; running the result requires the Ascend runtime and NPU.
+Automatic target detection selects the regular Ascend target, so specify
+`target="pto"` explicitly when PTO is required.
+
 - Use the ascend dialect `tilelang.ascend.language` for Ascend-specific operations.
 - Ascend supports mixing SIMT and SIMD code within a single kernel, so
   `T.Kernel(num_blocks)` specifies only the number of blocks in a
