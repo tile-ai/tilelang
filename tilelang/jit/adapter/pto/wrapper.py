@@ -579,4 +579,14 @@ class TLPTOSourceWrapper:
 
 
 class TLPTOWrapper(TLWrapper):
-    source_wrapper_class = TLPTOSourceWrapper
+    def wrap(self, source: str):
+        assert self.scheduled_ir_module is not None, "Please assign optimized module first."
+        self.source_wrapper = TLPTOSourceWrapper(
+            scheduled_ir_module=self.scheduled_ir_module,
+            source=source,
+            target=self.target,
+            device_mod=self.device_mod,
+            host_mod=self.host_mod,
+            pass_configs=self.pass_configs,
+        )
+        return self.source_wrapper.lib_code
