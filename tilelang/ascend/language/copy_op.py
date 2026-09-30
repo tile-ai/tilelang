@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from math import prod
 from typing import Any
 
 from tilelang._typing import BufferLikeType
@@ -11,7 +10,7 @@ from tilelang.language.copy_op import (
 )
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region
-from tvm import arith, tirx
+from tvm import tirx
 
 __all__ = ["copy", "dual_copy"]
 
@@ -243,17 +242,12 @@ def copy(  # noqa: A001
 ) -> tirx.PrimExpr | tirx.Stmt:
     """Copy data between memory regions, with Ascend DMA lowering hints.
 
-    Uses the common region handling with Ascend-specific whole-buffer checks.
-    Whole buffers must have equal element counts, but their shapes may differ
-    for Ascend format conversion and transpose paths (for example, copying
-    ``[K, M]`` into ``[M, K]``). The extra keywords steer how the Ascend backend
-    lowers the copy (GM↔L1 L2 cache control, ND/NZ transpose, MTE pad handling,
-    Cube unit-flag control for the following MAD, sub-block routing).
-
-    A UB-to-UB copy from a dense source into a destination annotated with
-    ``make_ascend_compact_nz_layout`` lowers to the ND-to-NZ scatter. The
-    destination allocation must reserve one padding row, and the copied region
-    must exclude that row (for example, ``T.copy(src, dst[:rows, :])``).
+    Same semantics as the common :func:`tilelang.language.copy_op.copy`; the
+    extra keywords steer how the Ascend backend lowers the copy (GM↔L1 L2
+    cache control, ND/NZ transpose, MTE pad handling, Cube unit-flag control
+    for the following MAD, sub-block routing). They are performance hints
+    recorded on the tile op: compiling the same kernel for a target that has
+    no use for them leaves the result unchanged.
 
     A copy whose destination is an MX scale-factor handle
     (:func:`tilelang.ascend.language.alloc_l0a_sf` /
@@ -293,20 +287,6 @@ def copy(  # noqa: A001
     Returns:
         tirx.PrimExpr | tirx.Stmt: A handle to the copy operation.
     """
-    if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
-        src_elems = prod(src.shape)
-        dst_elems = prod(dst.shape)
-        if not arith.Analyzer().can_prove_equal(src_elems, dst_elems):
-            raise ValueError(
-                f"Ascend T.copy src/dst element count mismatch: "
-                f"{src.name} shape={src.shape} ({src_elems}) vs {dst.name} shape={dst.shape} ({dst_elems}). "
-                "Use explicit regions for a partial copy."
-            )
-        # Ascend validates its whole-buffer contract here. Pass explicit regions
-        # to reuse common normalization without imposing common shape equality.
-        src = to_buffer_region(src, access_type="r")
-        dst = to_buffer_region(dst, access_type="w")
-
     ann = _normalize_annotations(annotations)
 
     # Ascend GM→L1: use dn2nz (transpose N/D mapping) instead of nd2nz

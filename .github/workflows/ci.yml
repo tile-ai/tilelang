@@ -19,10 +19,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  CLANG_TIDY_CMAKE_OPTIONS: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # to be updated
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   PYTHONPATH: "" # explicit cleanup
-  PIP_USER: "" # explicit cleanup
+  PIP_USER: "0" # install into the job venv
+  PIP_TIMEOUT: "600"
   COLUMNS: "100"
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
@@ -36,7 +38,7 @@ env:
 jobs:
   lint:
     name: Quick Lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ascend]
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -45,11 +47,11 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Setup Python 3.10
+      - name: Setup Python 3.12
         id: setup-pylowest
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.12"
           update-environment: true
           cache: pip
           cache-dependency-path: |
@@ -57,7 +59,7 @@ jobs:
             requirements*.txt
             .pre-commit-config.yaml
 
-      - name: Check AST with Python 3.10
+      - name: Check AST with Python 3.12
         run: |
           "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
 
@@ -77,27 +79,16 @@ jobs:
   tests:
     name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} (on ${{ matrix.runner.name }})
     if: |
-      github.repository_owner == 'tile-ai' &&
+      github.repository_owner == 'deepseek-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
     runs-on: ${{ matrix.runner.tags }}
     strategy:
       matrix:
         runner:
-          - tags: [self-hosted, nvidia]
-            name: self-hosted-nvidia
-            # Format: CUDA-auto or [Nightly-]CUDA-<major>.<minor>[.<patch>].
-            # E.g., "CUDA-auto", "CUDA-13.0", or "Nightly-CUDA-13.0".
-            # Use "Nightly-" prefix to use torch nightly builds.
-            toolkit: CUDA-auto
-          - tags: [self-hosted, amd, gfx942]
-            name: self-hosted-amd-gfx942
-            # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
-            # Use "Nightly-" prefix to use torch nightly builds.
-            toolkit: ROCm-7.2
-          - tags: [macos-latest]
-            name: macos-latest
-            toolkit: Metal # or Nightly-Metal
+          - tags: [self-hosted, ascend]
+            name: self-hosted-ascend
+            toolkit: Ascend
         python-version:
           - "3.12"
       fail-fast: false
@@ -122,6 +113,15 @@ jobs:
             done
           fi
 
+          # Preserve the runner interpreter before setup-uv changes PATH.
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          CI_PYTHON_VERSION="$("${CI_BASE_PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          if [[ "${CI_PYTHON_VERSION}" != "${{ matrix.python-version }}" ]]; then
+            echo "::error::Runner Python ${CI_PYTHON_VERSION} does not match requested ${{ matrix.python-version }}"
+            exit 1
+          fi
+          echo "CI_BASE_PYTHON=${CI_BASE_PYTHON}" >> "${GITHUB_ENV}"
+
           # Use runner tool_cache as cache root for self-hosted runners to avoid internet connection
           # issues and to share cache between jobs.
           export XDG_CACHE_HOME="${{ runner.tool_cache }}/.ci-cache-${{ github.workflow }}"
@@ -130,156 +130,39 @@ jobs:
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
-      # Use the ccache action only on GitHub-hosted runners, where it manages
-      # remote cache restore/save. Self-hosted runners use a local cache below.
-      - name: Setup ccache (GitHub-hosted runners)
-        id: setup-ccache
-        if: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
-        uses: hendrikmuhs/ccache-action@v1
-        with:
-          create-symlink: true
-          evict-old-files: "7d"
-          append-timestamp: false
-          key: ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/*.cc') }}
-            ${{ runner.os }}-${{ runner.arch }}-${{ matrix.runner.toolkit }}
-            ${{ runner.os }}-${{ runner.arch }}
+          # PTO toolchain is provided by the self-contained `ptoas` wheel installed
+          # in the "Setup venv" step (auditwheel-repaired: bundles the LLVM/MLIR
+          # shared libs with $ORIGIN RPATH, ptodsl, mlir dialects, and the ptoas CLI
+          # console script). No PYTHONPATH / PATH / LD_LIBRARY_PATH wiring to a build
+          # tree is needed anymore.
 
-      - name: Setup ccache (self-hosted runners)
-        if: startsWith(matrix.runner.name, 'self-hosted')
-        run: |
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "::warning::ccache is not installed on this self-hosted runner; CMake will build without ccache."
-            exit 0
+          # CANN runtime env for torch_npu autoload (libascendcl.so, liburma.so.0, ...).
+          # The runner daemon does not inherit the container-injected CANN environment,
+          # so torch_npu fails to load at `import torch` without this.
+          CANN_SET_ENV="$(ls -d /usr/local/Ascend/cann-*/set_env.sh 2>/dev/null | sort | tail -1)"
+          if [[ -n "${CANN_SET_ENV}" ]]; then
+            # shellcheck disable=SC1090
+            source "${CANN_SET_ENV}"
           fi
+          # driver / urma library paths injected by the container but absent from set_env.sh
+          export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH}"
 
-          export CCACHE_DIR="${XDG_CACHE_HOME}/ccache/${{ matrix.runner.name }}/${{ matrix.runner.toolkit }}"
-          mkdir -p "${CCACHE_DIR}"
+          # Propagate the assembled CANN environment to subsequent steps.
+          # (PTO/LLVM libs are self-contained inside the installed `ptoas` wheel.)
+          {
+            echo "ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME}"
+            echo "ASCEND_HOME_PATH=${ASCEND_HOME_PATH}"
+            echo "ASCEND_OPP_PATH=${ASCEND_OPP_PATH}"
+            echo "ASCEND_AICPU_PATH=${ASCEND_AICPU_PATH}"
+            echo "TOOLCHAIN_HOME=${TOOLCHAIN_HOME}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+          } | tee -a "${GITHUB_ENV}"
 
-          echo "CCACHE_DIR=${CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
-          echo "CCACHE_BASEDIR=${{ github.workspace }}" | tee -a "${GITHUB_ENV}"
-          echo "CCACHE_NOHASHDIR=true" | tee -a "${GITHUB_ENV}"
-          echo "CCACHE_COMPILERCHECK=content" | tee -a "${GITHUB_ENV}"
-
-          ccache -M 20G
-          ccache -z
-          ccache -s
-
-      - name: Set environment (CUDA)
-        if: contains(matrix.runner.toolkit, 'CUDA')
-        run: |
-          RAW_TOOLKIT="${{ matrix.runner.toolkit }}"
-          TOOLKIT="${RAW_TOOLKIT#Nightly-}"
-          USE_TORCH_NIGHTLY=0
-          if [[ "${RAW_TOOLKIT}" == "Nightly-"* ]]; then
-            USE_TORCH_NIGHTLY=1
-          fi
-
-          if [[ ! -x "$(command -v nvcc)" ]]; then
-            export PATH="/usr/local/cuda/bin:${PATH}"
-            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
-            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
-          fi
-
-          NVCC_VERSION=""
-          if [[ -x "$(command -v nvcc)" ]]; then
-            echo "\$ $(command -v nvcc) --version" && nvcc --version
-            NVCC_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)"
-          fi
-
-          if [[ "${TOOLKIT}" == "CUDA-auto" ]]; then
-            if [[ -z "${NVCC_VERSION}" ]]; then
-              echo "::error::CUDA-auto requires nvcc in PATH, but nvcc was not found or its version could not be parsed."
-              exit 1
-            fi
-            case "${NVCC_VERSION%%.*}" in
-              13) CUDA_VERSION="13.0" ;;
-              *)
-                echo "::error::CUDA-auto requires a CUDA 13 runner, but nvcc reported ${NVCC_VERSION}."
-                exit 1
-                ;;
-            esac
-          else
-            CUDA_VERSION="${TOOLKIT##*-}"
-            if [[ -n "${NVCC_VERSION}" && "${NVCC_VERSION%%.*}" != "${CUDA_VERSION%%.*}" ]]; then
-              echo "::error::nvcc CUDA ${NVCC_VERSION} does not match requested ${TOOLKIT}."
-              exit 1
-            fi
-          fi
-
-          CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
-          CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
-          if [[ "${USE_TORCH_NIGHTLY}" == "1" ]]; then
-            # Use torch nightly builds
-            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
-          else
-            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
-          fi
-          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
-
-          echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_NVCC_VERSION=${NVCC_VERSION:-unknown}" | tee -a "${GITHUB_ENV}"
-          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
-          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-
-      - name: Set environment (ROCm)
-        if: contains(matrix.runner.toolkit, 'ROCm')
-        run: |
-          TOOLKIT="${{ matrix.runner.toolkit }}"
-          ROCM_VERSION="${TOOLKIT##*-}"
-          ROCM_VERSION_MAJMIN="$(echo ${ROCM_VERSION} | cut -d '.' -f-2)"
-          ROCM_VERSION_MAJMIN_NODOT="${ROCM_VERSION_MAJMIN//./}"
-          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
-            # Use torch nightly builds
-            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/rocm${ROCM_VERSION_MAJMIN}"
-          else
-            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
-          fi
-          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
-
-          echo "USE_ROCM=ON" | tee -a "${GITHUB_ENV}"
-          echo "ROCM_VERSION=${ROCM_VERSION}" | tee -a "${GITHUB_ENV}"
-          echo "ROCM_VERSION_MAJMIN=${ROCM_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
-          echo "ROCM_VERSION_MAJMIN_NODOT=${ROCM_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
-          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-
-          if [[ ! -x "$(command -v hipcc)" ]]; then
-            export PATH="/opt/rocm/bin:${PATH}"
-            export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
-            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
-          fi
-          if [[ -x "$(command -v hipcc)" ]]; then
-            echo "\$ $(command -v hipcc) --version" && hipcc --version
-          else
-            echo "::warning::hipcc not found in PATH!"
-          fi
-
-      - name: Set environment (Metal)
-        if: contains(matrix.runner.toolkit, 'Metal')
-        run: |
-          if [[ "${{ matrix.runner.toolkit }}" == "Nightly-"* ]]; then
-            # Use torch nightly builds
-            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cpu"
-            export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
-            echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
-            echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-          fi
-
-          echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
-
-      - name: Setup Python and uv with caching
+      - name: Setup uv with caching
         id: setup-uv
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: ${{ matrix.python-version }}
-          activate-environment: true
+          activate-environment: false
           # Do not use cache for self-hosted runners, as it will download/upload caches which is slow.
           enable-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
           prune-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
@@ -298,25 +181,72 @@ jobs:
         run: |
           set -o pipefail
 
-          uv pip install --upgrade pip setuptools wheel
-          if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
-            uv pip install --prerelease=allow -v torch
-          fi
-          uv pip install -v -r requirements-test.txt
-          echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
-          if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
-            uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
-            echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
-          elif [[ "${{ matrix.runner.toolkit }}" == *"ROCm"* ]]; then
-            uv pip install -v -r requirements-test-rocm.txt
-          elif [[ "${{ matrix.runner.toolkit }}" == *"Metal"* ]]; then
-            uv pip install -v -r requirements-test-metal.txt
-          else
-            echo "::error::Unknown toolkit: ${{ matrix.runner.toolkit }}"
-            exit 1
-          fi
+          export PYTHONPATH=""
+          export PIP_USER=0
+
+          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
+          source .venv/bin/activate
+          export UV_PYTHON="${VIRTUAL_ENV}/bin/python"
+          export PIP_CONSTRAINT="${RUNNER_TEMP}/inherited-torch-constraints.txt"
+          {
+            echo "VIRTUAL_ENV=${VIRTUAL_ENV}"
+            echo "UV_PYTHON=${UV_PYTHON}"
+            echo "PIP_CONSTRAINT=${PIP_CONSTRAINT}"
+          } >> "${GITHUB_ENV}"
+          echo "${VIRTUAL_ENV}/bin" >> "${GITHUB_PATH}"
+
+          # Fail early if the runner's Torch stack cannot load, and preserve its versions.
+          python - <<'PY'
+          import importlib
+          import os
+          from importlib.metadata import version
+
+          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+              for package in ("torch", "torch_npu"):
+                  module = importlib.import_module(package)
+                  requirement = f"{package}=={version(package)}"
+                  constraints.write(f"{requirement}\n")
+                  print(f"{requirement} ({module.__file__})")
+          PY
+
+          # pip recognizes inherited packages; uv pip would install another Torch copy.
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -v -r requirements-test.txt
+          python -m pip install pybind11==2.12.0
           echo "::group::torch.utils.collect_env"
-          uv run --no-project -m -- torch.utils.collect_env
+          python -m torch.utils.collect_env
+          # Self-contained PTO toolchain from the official hw-native-sys/PTOAS
+          # v0.66 release (ptodsl + MLIR dialects + ptoas CLI).
+          case "${RUNNER_ARCH}" in
+            ARM64)
+              PTOAS_ARCH=aarch64
+              PTOAS_SHA256=d121b5b5db9a23a98eb3c0acc74d0abaef8aaa90e4df0385e79feb67636ef997
+              ;;
+            X64)
+              PTOAS_ARCH=x86_64
+              PTOAS_SHA256=539e20bd7ab02958d5ccb2355772fbe58e244062d620a71a8da3b17ca43df8cc
+              ;;
+            *)
+              echo "Unsupported runner architecture: ${RUNNER_ARCH}" >&2
+              exit 1
+              ;;
+          esac
+          PTOAS_CACHE_DIR="${XDG_CACHE_HOME}/ptoas"
+          PTOAS_FILENAME="ptoas-0.66-cp312-cp312-manylinux_2_34_${PTOAS_ARCH}.whl"
+          PTOAS_WHEEL="${PTOAS_CACHE_DIR}/${PTOAS_FILENAME}"
+          mkdir -p "${PTOAS_CACHE_DIR}"
+          if ! [[ -f "${PTOAS_WHEEL}" ]] || \
+             ! printf '%s  %s\n' "${PTOAS_SHA256}" "${PTOAS_WHEEL}" | sha256sum --check --status -; then
+            PTOAS_DOWNLOAD="$(mktemp "${PTOAS_WHEEL}.tmp.XXXXXX")"
+            trap 'rm -f "${PTOAS_DOWNLOAD}"' EXIT
+            curl --fail --location --retry 3 \
+              --output "${PTOAS_DOWNLOAD}" \
+              "https://github.com/hw-native-sys/PTOAS/releases/download/v0.66/${PTOAS_FILENAME}"
+            printf '%s  %s\n' "${PTOAS_SHA256}" "${PTOAS_DOWNLOAD}" | sha256sum --check -
+            mv "${PTOAS_DOWNLOAD}" "${PTOAS_WHEEL}"
+            trap - EXIT
+          fi
+          python -m pip install "${PTOAS_WHEEL}"
           echo "::endgroup::"
 
       - name: Clear uv cache for self-hosted runners (if setup failed)
@@ -330,343 +260,59 @@ jobs:
           echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
           uv cache clean
 
-      - name: Enable core dump generation (Linux / GitHub-hosted runners)
-        if: ${{ runner.os == 'Linux' && !startsWith(matrix.runner.name, 'self-hosted') }}
-        run: |
-          sudo sysctl -w kernel.core_pattern="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
-          sudo sysctl -w kernel.core_uses_pid=0
-          sudo sysctl -w fs.suid_dumpable=1
-          sysctl kernel.core_pattern kernel.core_uses_pid fs.suid_dumpable
-
-      - name: Enable core dump generation (macOS / GitHub-hosted runners)
-        if: ${{ runner.os == 'macOS' && !startsWith(matrix.runner.name, 'self-hosted') }}
-        run: |
-          sudo sysctl -w kern.corefile="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
-          sudo sysctl -w kern.coredump=1
-          sudo sysctl -w kern.sugid_coredump=1
-          sysctl kern.corefile kern.coredump kern.sugid_coredump
-
       - name: Install project (wheel form)
+        env:
+          USE_CUDA: "OFF"
+          USE_ASCEND: "ON"
         run: |
-          uv pip install -v .
-
-      - name: Show ccache stats
-        if: always()
-        run: |
-          if command -v ccache >/dev/null 2>&1; then
-            ccache -s || true
-          fi
-
-      - name: Clean up stale /tmp files (self-hosted runners)
-        if: startsWith(matrix.runner.name, 'self-hosted')
-        run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
-
-      - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
-        if: contains(matrix.runner.toolkit, 'CUDA')
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
-          )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
-            --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
-            --ignore=../examples/ascend \
-            ../examples
-
-      # NVIDIA CUDA tests
-      - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
-        id: cuda-tests
-        if: contains(matrix.runner.toolkit, 'CUDA')
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
-          )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
-            ./python
-
-      # AMD ROCm tests
-      - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
-        id: rocm-tests
-        if: contains(matrix.runner.toolkit, 'ROCm')
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
-          )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
-            ./python
-
-      - name: Run portable examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
-        if: contains(matrix.runner.toolkit, 'ROCm')
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
-          )
-          "${PYTEST[@]}" --maxfail=1 \
-            ../examples/seer_attention/test_block_sparse_attn_tilelang.py::test_block_sparse_attn_tilelang_rocm \
-            ../examples/topk/test_topk_tilelang.py::test_topk_tilelang_rocm \
-            ../examples/deepseek_v32/test_tilelang_example_deepseek_v32.py::test_example_sparse_mla_fwd_rocm \
-            ../examples/grouped_gemm/test_example_grouped_gemm.py::test_example_grouped_gemm_rocm
-
-      # Apple Metal tests
-      - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
-        id: metal-tests
-        if: contains(matrix.runner.toolkit, 'Metal')
-        run: |
-          cd testing
-          PYTEST=(
-            uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
-          )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
-            -k metal \
-            ./python
-
-      - name: List generated files
-        if: ${{ !cancelled() }}
-        run: |
-          find . -type f -name '*.py[co]' -delete
-          find . -depth -type d -name "__pycache__" -exec rm -r "{}" +
-          if git status --ignored --porcelain | grep -qvE '/$'; then
-            ls -alh $(git status --ignored --porcelain | grep -vE '/$' | grep -oE '\S+$')
-          fi
-
-  ascend:
-    name: Ascend tests
-    if: |
-      github.repository_owner == 'tile-ai' &&
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    needs: [lint]
-    runs-on: [self-hosted, ascend]
-    timeout-minutes: 120
-    env:
-      PIP_USER: "0"
-      USE_CUDA: "OFF"
-      USE_ASCEND: "ON"
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          activate-environment: false
-          enable-cache: false
-
-      - name: Build and test Ascend
-        run: |
-          # Keep the runner's preinstalled Torch/Torch-NPU stack.
-          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
-          for CANN_SET_ENV in \
-            "${ASCEND_HOME_PATH:-}/set_env.sh" \
-            "${ASCEND_TOOLKIT_HOME:-}/set_env.sh" \
-            /usr/local/Ascend/ascend-toolkit/set_env.sh \
-            /usr/local/Ascend/cann-*/set_env.sh; do
-            if [[ -f "${CANN_SET_ENV}" ]]; then
-              source "${CANN_SET_ENV}"
-              break
-            fi
-          done
-          export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
-
-          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
-          source .venv/bin/activate
-          export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
-          python - <<'PY'
-          import os
-          from importlib.metadata import version
-          import torch
-          import torch_npu
-
-          assert torch.npu.is_available(), "Ascend CI requires an available NPU"
-          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
-              for package in ("torch", "torch_npu"):
-                  requirement = f"{package}=={version(package)}"
-                  constraints.write(f"{requirement}\n")
-                  print(requirement)
-          PY
-
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
-          cd testing
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
-
-  cutedsl:
-    name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
-    if: |
-      github.repository_owner == 'tile-ai' &&
-      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    needs: [tests]
-    runs-on: [self-hosted, nvidia]
-    timeout-minutes: 120
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Set environment (self-hosted runners)
-        run: |
-          # Hide sensitive data in logs for self-hosted runners
-          if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
-            echo "::add-mask::${{ secrets.SECRET_PATH_PREFIXES }}"
-            # Colon separated list of secrets to mask
-            for secret in $(echo "${{ secrets.SECRET_PATH_PREFIXES }}" | tr ':' '\n'); do
-              echo "::add-mask::${secret}"
-            done
-          fi
-
-          # Use runner tool_cache as cache root for self-hosted runners to avoid internet connection
-          # issues and to share cache between jobs.
-          export XDG_CACHE_HOME="${{ runner.tool_cache }}/.ci-cache-${{ github.workflow }}"
-          echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" | tee -a "${GITHUB_ENV}"
-          echo "PIP_CACHE_DIR=${XDG_CACHE_HOME}/pip" | tee -a "${GITHUB_ENV}"
-          echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
-          echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
-
-      - name: Setup ccache (self-hosted runners)
-        run: |
-          if ! command -v ccache >/dev/null 2>&1; then
-            echo "::warning::ccache is not installed on this self-hosted runner; CMake will build without ccache."
-            exit 0
-          fi
-
-          export CCACHE_DIR="${XDG_CACHE_HOME}/ccache/self-hosted-nvidia/CUDA-auto"
-          mkdir -p "${CCACHE_DIR}"
-
-          echo "CCACHE_DIR=${CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
-          echo "CCACHE_BASEDIR=${{ github.workspace }}" | tee -a "${GITHUB_ENV}"
-          echo "CCACHE_NOHASHDIR=true" | tee -a "${GITHUB_ENV}"
-          echo "CCACHE_COMPILERCHECK=content" | tee -a "${GITHUB_ENV}"
-
-          ccache -M 20G
-          ccache -z
-          ccache -s
-
-      - name: Set environment (CUDA)
-        run: |
-          TOOLKIT="CUDA-auto"
-
-          if [[ ! -x "$(command -v nvcc)" ]]; then
-            export PATH="/usr/local/cuda/bin:${PATH}"
-            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
-            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
-          fi
-
-          if [[ ! -x "$(command -v nvcc)" ]]; then
-            echo "::error::CUDA-auto requires nvcc in PATH."
-            exit 1
-          fi
-          echo "\$ $(command -v nvcc) --version" && nvcc --version
-          NVCC_VERSION="$(nvcc --version | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n1)"
-
-          case "${NVCC_VERSION%%.*}" in
-            13) CUDA_VERSION="13.0" ;;
-            *)
-              echo "::error::CUDA-auto requires a CUDA 13 runner, but nvcc reported ${NVCC_VERSION}."
-              exit 1
-              ;;
-          esac
-
-          CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
-          CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
-          export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
-          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
-
-          echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-          echo "CUDA_NVCC_VERSION=${NVCC_VERSION}" | tee -a "${GITHUB_ENV}"
-          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
-          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-
-      - name: Setup Python and uv with caching
-        id: setup-uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          python-version: "3.12"
-          activate-environment: true
-          enable-cache: false
-          prune-cache: false
-          cache-local-path: ${{ env.UV_CACHE_DIR }}
-          ignore-nothing-to-cache: true
-          cache-suffix: uv-${{ runner.os }}-${{ runner.arch }}-3.12-self-hosted-nvidia-CUDA-auto
-          cache-dependency-glob: |
-            pyproject.toml
-            requirements*.txt
-            .pre-commit-config.yaml
-
-      - name: Setup venv
-        id: setup-venv
-        run: |
-          set -o pipefail
-
-          uv pip install --upgrade pip setuptools wheel
-          uv pip install -v -r requirements-test.txt
-          echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
-          uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
-          echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
-          echo "::group::torch.utils.collect_env"
-          uv run --no-project -m -- torch.utils.collect_env
-          echo "::endgroup::"
-
-      - name: Clear uv cache for self-hosted runners (if setup failed)
-        if: >-
-          ${{
-            failure() &&
-            (steps.setup-uv.conclusion == 'failure' || steps.setup-venv.conclusion == 'failure')
-          }}
-        run: |
-          echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
-          uv cache clean
-
-      - name: Install project (wheel form)
-        run: |
-          uv pip install -v .
-
-      - name: Show ccache stats
-        if: always()
-        run: |
-          if command -v ccache >/dev/null 2>&1; then
-            ccache -s || true
-          fi
-
-      - name: Clean up stale /tmp files (self-hosted runners)
-        run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
-
-      - name: Run CuTeDSL examples with Python 3.12 (CUDA-auto)
-        env:
-          TILELANG_TARGET: cutedsl
+      - name: Run Ascend example tests with Python ${{ matrix.python-version }}
         run: |
           cd testing
           PYTEST=(
             uv run --no-project -m --
-            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 4
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
-            --ignore=../examples/ascend \
-            ../examples
+          "${PYTEST[@]}" --maxfail=3 -m "not pto" \
+            ../examples/ascend
+
+      - name: Run Ascend unit tests with Python ${{ matrix.python-version }}
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 32
+          )
+          "${PYTEST[@]}" --maxfail=3 -m "not pto" \
+            ascend
+
+      - name: Run PTO example tests with Python ${{ matrix.python-version }}
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 4
+          )
+          "${PYTEST[@]}" --maxfail=3 -m "pto" \
+            ../examples/ascend
+
+      - name: Run PTO unit tests with Python ${{ matrix.python-version }}
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear -n 32
+          )
+          "${PYTEST[@]}" --maxfail=3 -m "pto" \
+            ascend
+
+      # Disabled on the asc branch while Ascend CI is split out from upstream multi-backend CI:
+      # - CUDA examples: ../examples
+      # - CUDA tests: testing/python
+      # - ROCm tests: testing/python
+      # - Metal tests: testing/python -k metal
+      # - CuTeDSL examples job
 
       - name: List generated files
         if: ${{ !cancelled() }}

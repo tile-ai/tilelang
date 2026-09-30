@@ -20,9 +20,23 @@ def _normalize_copy_regions(
     tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
     tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
 ]:
-    # If both side are buffers, we should make sure their shapes are equal
+    # If both side are buffers, check total element counts match.  Shape
+    # equality is NOT required: Ascend fractal copies between differently-
+    # major'd buffers (e.g. [K,M] -> [M,K]) have transposed shapes but equal
+    # element counts.
     if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
-        ir.assert_structural_equal(src.shape, dst.shape)
+        from tvm import arith
+
+        src_elems = 1
+        for s in src.shape:
+            src_elems = src_elems * s
+        dst_elems = 1
+        for s in dst.shape:
+            dst_elems = dst_elems * s
+        analyzer = arith.Analyzer()
+        assert analyzer.can_prove_equal(src_elems, dst_elems), (
+            f"T.copy src/dst element count mismatch: src={src.shape} ({src_elems}) vs dst={dst.shape} ({dst_elems})"
+        )
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
@@ -103,6 +117,10 @@ def copy(
     - The finalized extents are encoded with `tl.region` via `to_buffer_region`
       and passed through to the backend; low-level loop construction and any
       scope-specific decisions happen during lowering.
+    - On Ascend, a UB-to-UB copy from a dense source into a destination annotated
+      with ``make_ascend_compact_nz_layout`` lowers to the ND-to-NZ scatter. The
+      destination allocation must reserve one padding row, and the copied region
+      must exclude that row (for example, ``T.copy(src, dst[:rows, :])``).
     """
     src, dst = _normalize_copy_regions(src, dst)
 

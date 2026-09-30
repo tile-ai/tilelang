@@ -1,6 +1,8 @@
 """Dual-copy rewriting splits software regions and preserves hardware copies."""
 
 import pytest
+import tilelang
+import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
 from tvm import tirx
@@ -28,6 +30,25 @@ def _cthread(body, extent=2):
     sid = tirx.Var("sid", "int32")
     thread = tirx.IterVar(tvm.ir.Range(0, extent), sid, tirx.IterVar.ThreadIndex, "cthread")
     return tirx.AttrStmt(thread, "thread_extent", extent, body)
+
+
+def _unsupported_gm_to_l1_dual_copy():
+    @T.prim_func
+    def main(
+        A: T.Tensor((128, 128), "bfloat16"),
+        B: T.Tensor((128, 128), "bfloat16"),
+        C: T.Tensor((64, 128), "float32"),
+    ):
+        with T.Kernel(1):
+            a_l1 = T.alloc_l1((64, 128), "bfloat16")
+            b_l1 = T.alloc_l1((128, 128), "bfloat16")
+            accum = T.alloc_l0c((64, 128), "float32")
+            T.dual_copy(A, a_l1)
+            T.copy(B, b_l1)
+            T.gemm(a_l1, b_l1, accum, transpose_B=True, clear_accum=True)
+            T.copy(accum, C)
+
+    return main
 
 
 @pytest.mark.parametrize(
@@ -90,6 +111,12 @@ def test_invalid_copy_regions(src_scope, dst_scope, src_shape, dst_shape, split,
     before = _module(_cthread(_copy(src_scope, dst_scope, src_shape, dst_shape, split=split)))
     with pytest.raises(ValueError, match=message):
         transform.RewriteDualCopy()(before)
+
+
+@pytest.mark.pto
+def test_pto_rejects_unsupported_memory_path():
+    with pytest.raises(ValueError, match="RewriteDualCopy supports only L0C->UB"):
+        tilelang.lower(_unsupported_gm_to_l1_dual_copy(), target="pto")
 
 
 @pytest.mark.parametrize("mixed", [False, True], ids=["unscoped", "mixed-kernel"])

@@ -14,79 +14,83 @@ from tilelang.utils.tensor import torch_assert_close
 from tilelang.transform import PassConfigKey
 
 
-@tilelang.jit(out_idx=[1, 2], target="ascend", pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
-def per_token_cast_simt(M, N):
-    if M <= 0 or N <= 0 or M % 32 or N % 128:
-        raise ValueError("SIMT quantization expects M % 32 == 0 and N % 128 == 0")
-    dtype = T.float32
-    group_size = 128
-    fp8_max = 448.0
-    num_groups = M * (N // group_size)
-    # Keep enough tiles to occupy all cores.
-    if num_groups >= 64 * 128 and num_groups % 128 == 0:
-        block_groups = 128
-    elif num_groups >= 64 * 64 and num_groups % 64 == 0:
-        block_groups = 64
-    else:
-        block_groups = 32
-    num_tiles = num_groups // block_groups
-    N_CORES = min(64, num_tiles)
-    NUM_STAGES = 2
+def per_token_cast_simt(M, N, target="ascend"):
 
-    @T.prim_func
-    def per_token_cast(
-        X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), T.float8_e4m3fn), X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)
-    ):
-        # Adjacent groups, including across tokens, use contiguous DMA transfers.
-        x_groups = T.Tensor((num_groups, group_size), dtype, X.data)
-        q_groups = T.Tensor((num_groups, group_size), T.float8_e4m3fn, X_fp8.data)
-        scales = T.Tensor((num_groups,), dtype, X_amax.data)
-        with T.Kernel(N_CORES) as core_id:
-            for tile in T.Persistent([num_tiles], N_CORES, core_id, num_stages=NUM_STAGES):
-                y_ub = T.alloc_shared((block_groups, group_size), dtype)
-                y_q_ub_fp8 = T.alloc_shared((block_groups, group_size), T.float8_e4m3fn)
-                y_s_ub = T.alloc_shared((block_groups,), dtype)
-                T.annotate_buffer_versions({y_ub: NUM_STAGES, y_q_ub_fp8: NUM_STAGES, y_s_ub: NUM_STAGES})
-                T.copy(x_groups[tile * block_groups : (tile + 1) * block_groups, :], y_ub)
-                with T.SimtVF(threads=1024):
-                    y_local = T.alloc_fragment((block_groups, group_size), dtype)
-                    y_abs_local = T.alloc_fragment((block_groups, group_size), dtype)
-                    y_amax_local = T.alloc_fragment((block_groups,), dtype)
-                    y_s_local = T.alloc_fragment((block_groups,), dtype)
-                    y_q_local = T.alloc_fragment((block_groups, group_size), dtype)
-                    y_q_local_fp8 = T.alloc_fragment((block_groups, group_size), T.float8_e4m3fn)
-                    # A warp loads two 64-value strips per group. Each lane owns
-                    # a float2 in each strip, giving contiguous accesses in UB.
-                    T.annotate_layout(
-                        {
-                            y_local: T.Fragment(
-                                (block_groups, group_size),
-                                forward_thread_fn=lambda i, j: (i % 32) * 32 + (j // 2) % 32,
-                                forward_index_fn=lambda i, j: (i // 32) * 4 + (j // 64) * 2 + j % 2,
-                            )
-                        }
-                    )
-                    T.copy(y_ub, y_local)
-                    # Explicit abs lowers to fabsf in the SIMT VF.
-                    for i, j in T.Parallel(block_groups, group_size):
-                        y_abs_local[i, j] = T.abs(y_local[i, j])
-                    T.reduce_max(y_abs_local, y_amax_local, dim=1)
-                    for i in T.Parallel(block_groups):
-                        y_amax_local[i] = T.max(y_amax_local[i], 0.0001)
-                        y_s_local[i] = y_amax_local[i] / fp8_max
-                    for i, j in T.Parallel(block_groups, group_size):
-                        y_q_local[i, j] = y_local[i, j] / y_s_local[i]
-                    # The FP8 conversion saturates values at the finite limits.
-                    T.copy(y_q_local, y_q_local_fp8)
-                    T.copy(y_s_local, y_s_ub)
-                    T.copy(y_q_local_fp8, y_q_ub_fp8)
-                T.copy(y_s_ub, scales[tile * block_groups : (tile + 1) * block_groups])
-                T.copy(y_q_ub_fp8, q_groups[tile * block_groups : (tile + 1) * block_groups, :])
+    @tilelang.jit(out_idx=[1, 2], target=target, pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
+    def _build():
+        if M <= 0 or N <= 0 or M % 32 or N % 128:
+            raise ValueError("SIMT quantization expects M % 32 == 0 and N % 128 == 0")
+        dtype = T.float32
+        group_size = 128
+        fp8_max = 448.0
+        num_groups = M * (N // group_size)
+        # Keep enough tiles to occupy all cores.
+        if num_groups >= 64 * 128 and num_groups % 128 == 0:
+            block_groups = 128
+        elif num_groups >= 64 * 64 and num_groups % 64 == 0:
+            block_groups = 64
+        else:
+            block_groups = 32
+        num_tiles = num_groups // block_groups
+        N_CORES = min(64, num_tiles)
+        NUM_STAGES = 2
 
-    return per_token_cast
+        @T.prim_func
+        def per_token_cast(
+            X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), T.float8_e4m3fn), X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)
+        ):
+            # Adjacent groups, including across tokens, use contiguous DMA transfers.
+            x_groups = T.Tensor((num_groups, group_size), dtype, X.data)
+            q_groups = T.Tensor((num_groups, group_size), T.float8_e4m3fn, X_fp8.data)
+            scales = T.Tensor((num_groups,), dtype, X_amax.data)
+            with T.Kernel(N_CORES) as core_id:
+                for tile in T.Persistent([num_tiles], N_CORES, core_id, num_stages=NUM_STAGES):
+                    y_ub = T.alloc_shared((block_groups, group_size), dtype)
+                    y_q_ub_fp8 = T.alloc_shared((block_groups, group_size), T.float8_e4m3fn)
+                    y_s_ub = T.alloc_shared((block_groups,), dtype)
+                    T.annotate_buffer_versions({y_ub: NUM_STAGES, y_q_ub_fp8: NUM_STAGES, y_s_ub: NUM_STAGES})
+                    T.copy(x_groups[tile * block_groups : (tile + 1) * block_groups, :], y_ub)
+                    with T.SimtVF(threads=1024):
+                        y_local = T.alloc_fragment((block_groups, group_size), dtype)
+                        y_abs_local = T.alloc_fragment((block_groups, group_size), dtype)
+                        y_amax_local = T.alloc_fragment((block_groups,), dtype)
+                        y_s_local = T.alloc_fragment((block_groups,), dtype)
+                        y_q_local = T.alloc_fragment((block_groups, group_size), dtype)
+                        y_q_local_fp8 = T.alloc_fragment((block_groups, group_size), T.float8_e4m3fn)
+                        # A warp loads two 64-value strips per group. Each lane owns
+                        # a float2 in each strip, giving contiguous accesses in UB.
+                        T.annotate_layout(
+                            {
+                                y_local: T.Fragment(
+                                    (block_groups, group_size),
+                                    forward_thread_fn=lambda i, j: (i % 32) * 32 + (j // 2) % 32,
+                                    forward_index_fn=lambda i, j: (i // 32) * 4 + (j // 64) * 2 + j % 2,
+                                )
+                            }
+                        )
+                        T.copy(y_ub, y_local)
+                        # Explicit abs lowers to fabsf in the SIMT VF.
+                        for i, j in T.Parallel(block_groups, group_size):
+                            y_abs_local[i, j] = T.abs(y_local[i, j])
+                        T.reduce_max(y_abs_local, y_amax_local, dim=1)
+                        for i in T.Parallel(block_groups):
+                            y_amax_local[i] = T.max(y_amax_local[i], 0.0001)
+                            y_s_local[i] = y_amax_local[i] / fp8_max
+                        for i, j in T.Parallel(block_groups, group_size):
+                            y_q_local[i, j] = y_local[i, j] / y_s_local[i]
+                        # The FP8 conversion saturates values at the finite limits.
+                        T.copy(y_q_local, y_q_local_fp8)
+                        T.copy(y_s_local, y_s_ub)
+                        T.copy(y_q_local_fp8, y_q_ub_fp8)
+                    T.copy(y_s_ub, scales[tile * block_groups : (tile + 1) * block_groups])
+                    T.copy(y_q_ub_fp8, q_groups[tile * block_groups : (tile + 1) * block_groups, :])
+
+        return per_token_cast
+
+    return _build()
 
 
-def per_token_cast_simd(M, N):
+def per_token_cast_simd(M, N, target="ascend"):
     dtype = T.float32
     group_size = 128
     fp8_max = 448.0
@@ -108,7 +112,7 @@ def per_token_cast_simd(M, N):
     if M % blk_m != 0 or N % group_size != 0:
         raise ValueError(f"optimized Ascend SimdVF path expects M % {blk_m} == 0 and N % {group_size} == 0, got M={M}, N={N}")
 
-    @tilelang.jit(out_idx=[1, 2], target="ascend", pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
+    @tilelang.jit(out_idx=[1, 2], target=target, pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
     def _build():
         @T.prim_func
         def per_token_cast(
@@ -171,16 +175,16 @@ def ref_program(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return (x_fp8, (x_amax / 448.0).view(m, -1))
 
 
-def per_token_cast_to_fp8(M, N, mode="simd"):
+def per_token_cast_to_fp8(M, N, mode="simd", target="ascend"):
     if mode == "simd":
-        return per_token_cast_simd(M, N)
+        return per_token_cast_simd(M, N, target=target)
     if mode == "simt":
-        return per_token_cast_simt(M, N)
+        return per_token_cast_simt(M, N, target=target)
     raise ValueError(f"Unknown VF mode: {mode}")
 
 
-def run_regression_perf(M=8192, N=8192, mode="simd"):
-    kernel = per_token_cast_to_fp8(M, N, mode)
+def run_regression_perf(M=8192, N=8192, mode="simd", target="ascend"):
+    kernel = per_token_cast_to_fp8(M, N, mode, target=target)
     x = torch.randn(M, N, dtype=torch.float32, device="npu")
     latency = do_bench(lambda: kernel(x), backend="msprof", _n_warmup=30, _n_repeat=50)
     # Read FP32 input; write FP8 values and one FP32 scale per group of 128.
@@ -193,6 +197,7 @@ def run_regression_perf(M=8192, N=8192, mode="simd"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["all", "simt", "simd"], default="all")
+    parser.add_argument("--target", choices=["ascend", "pto"], default="ascend")
     parser.add_argument("--bench", action=argparse.BooleanOptionalAction, default=True, help="benchmark after correctness checks")
     args = parser.parse_args()
     x = torch.randn(128, 1024, dtype=torch.float32, device="npu")
@@ -204,4 +209,4 @@ if __name__ == "__main__":
         torch.testing.assert_close(scale, expected_scale, rtol=1e-5, atol=1e-7)
         print(f"fp8_quantization ({mode}): correctness passed")
         if args.bench:
-            run_regression_perf(mode=mode)
+            run_regression_perf(mode=mode, target=args.target)

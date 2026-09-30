@@ -61,7 +61,7 @@ def reduce(
         raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     buf_shape = retrieve_shape(buffer)
-    out_shape = retrieve_shape(out_region)
+    out_shape = retrieve_shape(out)
     expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
     if list(out_shape) not in expected_shapes:
         expected_shapes_str = " or ".join(map(str, expected_shapes))

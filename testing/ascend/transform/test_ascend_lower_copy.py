@@ -57,31 +57,6 @@ def _equal(actual, expected):
         assert analyzer.can_prove_equal(a, b), (a, b)
 
 
-@pytest.mark.parametrize("scope", ["shared.l0a", "shared.l0b"])
-def test_whole_buffer_transpose_preserves_ascend_copy_geometry(scope):
-    src = tirx.decl_buffer((32, 16), "bfloat16", name="src", scope="shared.l1")
-    dst = tirx.decl_buffer((16, 32), "bfloat16", name="dst", scope=scope)
-    after = _lower(src, dst, layouts={src: make_ascend_nz_layout(src), dst: make_ascend_major_k_layout(dst)}, transpose=True)
-    (load,) = calls(after, "tl.ascend_load_cbuf_to_ca" if scope.endswith("a") else "tl.ascend_load_cbuf_to_cb")
-    assert int(load.args[8]) == 1
-
-
-def test_whole_buffer_copy_accepts_symbolic_transposed_shapes():
-    rows = tirx.Var("rows", "int32")
-    src = tirx.decl_buffer((2 * rows, 16), "bfloat16", name="src", scope="shared.l1")
-    dst = tirx.decl_buffer((16, rows * 2), "bfloat16", name="dst", scope="shared.l0a")
-    copy = T.copy(src, dst, transpose=True)
-    assert copy.op.name == "tl.tileop.ascend_copy"
-    assert int(copy.annotations["transpose"]) == 1
-
-
-def test_whole_buffer_copy_rejects_unequal_element_counts():
-    src = tirx.decl_buffer((32, 16), "bfloat16", name="src", scope="shared.l1")
-    dst = tirx.decl_buffer((16, 64), "bfloat16", name="dst", scope="shared.l0a")
-    with pytest.raises(ValueError, match="Ascend T.copy src/dst element count mismatch"):
-        T.copy(src, dst, transpose=True)
-
-
 @pytest.mark.parametrize(
     "src_shape,dst_shape,src_extent,dst_extent,expected",
     [

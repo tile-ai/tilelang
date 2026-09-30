@@ -1,17 +1,23 @@
 """pytest test for example_mha.py — MHA Mix kernel (SimdVF softmax)."""
 
+import pytest
 import torch
 import tilelang
 
 from example_mha import mha, ref_program
 
 
-def test_mha():
+TARGETS = ["ascend", pytest.param("pto", marks=pytest.mark.pto)]
+
+
+@pytest.mark.parametrize("target", TARGETS)
+def test_mha(target):
     D = 128
     SEQ_LEN = 4096
 
     kernel = tilelang.compile(
         mha(D, SEQ_LEN),
+        target=target,
         out_idx=-1,
         pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True},
     )
@@ -32,5 +38,5 @@ def test_mha():
 
 
 if __name__ == "__main__":
-    test_mha()
+    test_mha("ascend")
     print("PASS: test_mha")

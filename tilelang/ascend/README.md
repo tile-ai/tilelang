@@ -1,11 +1,7 @@
-# TileLang Ascend 950 Backend
+# Ascend 950 Backend
 
 This guide shows how to install TileLang and run kernels on **Huawei Ascend
-950 NPUs**. The Ascend dialect reuses TileLang's shared frontend, with Ascend-specific
-lowering, scheduling, synchronization, and code generation for Cube and Vector
-execution.
-
-![Ascend 950 backend architecture](../../images/ascend-950-backend-architecture.png)
+950 NPUs**.
 
 ## Installation
 
@@ -147,7 +143,7 @@ TileLang path divides the work as follows:
 | Tiling and tiled operators | Shapes/dtypes, tile sizes, block count, and ops such as `T.gemm` | Low-level operator implementations | Lowers tiled ops to hardware instructions |
 | SIMT computation | Scalar code and `T.Parallel` in `T.SimtVF(threads=...)` | Thread mapping and barrier placement | Maps iterations to threads; inserts barriers for detected cross-thread hazards |
 | SIMD computation | Explicit `T.simd.*` operations and masks in `T.SimdVF()` | Device-function boilerplate | Lowers SIMD ops into device functions |
-| Scheduling and pipelining | `T.Pipelined(...)` as needed | Manual schedules and buffer-slot rotation | Assigns tasks to AIC/AIV; schedules overlap and multibuffering |
+| Scheduling and pipelining | `T.Pipelined(..., num_stages=...)` as needed | Manual schedules and buffer-slot rotation | Assigns tasks to AIC/AIV; schedules overlap and multibuffering |
 | Synchronization | None (Just write operations in order!) | Set/wait flags and flag ID management | Infers pipeline and Cube/Vector dependencies; inserts paired flags |
 
 Automatic scheduling handles task order and dependencies; it does not imply
@@ -171,25 +167,3 @@ attention implementations.
 See the [example guide](../../examples/ascend/README.md) for running and benchmarking.
 Each top-level example has one matching correctness test. Small language and
 compiler regressions belong in [testing/ascend](../../testing/ascend/README.md).
-
-## Benchmark
-
-We evaluate TileLang against Torch NPU on Ascend 950 using BF16 GEMM, FP8 casting, and GQA backward, with four shapes per operator. GEMM and GQA (compute-bound) are reported in TFLOP/s, and FP8 casting (memory bound) in effective GB/s.
-
-![Ascend 950 throughput: TileLang versus Torch NPU](../../images/ascend-950-throughput.png)
-
-## Acknowledgements
-
-The initial version of the TileLang Ascend 950 backend was mainly developed by
-[silentCoder-dev](https://github.com/silentCoder-dev),
-[Elevator14B](https://github.com/Elevator14B),
-[Denverjin](https://github.com/Denverjin),
-[AutumnKite](https://github.com/AutumnKite),
-[SiriusNEO](https://github.com/SiriusNEO),
-[timetraveler314](https://github.com/timetraveler314),
-[liguanglin](https://github.com/liguanglin),
-[Achazwl](https://github.com/Achazwl), and
-[bucket-xv](https://github.com/bucket-xv)
-from [DeepSeek AI](https://github.com/deepseek-ai/). We thank [LeiWang1999](https://github.com/LeiWang1999) and the broader TileLang
-community for their support in integrating the backend. We also thank the Huawei
-team for their close collaboration and valuable support.

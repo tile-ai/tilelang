@@ -116,6 +116,16 @@ def test_manual_sync_intrinsic_codegen():
         assert instruction in source
 
 
+def test_ascend_simd_mem_bar_pto_codegen():
+    @T.prim_func
+    def func():
+        with T.Kernel(1) as _, T.SimdVF():
+            T.simd.mem_bar("VST_VLD")
+
+    source = lower(func, target="pto").kernel_source
+    assert 'pto.mem_bar("VST_VLD")' in source
+
+
 @pytest.mark.parametrize("dtype", ["int32", "uint32"])
 def test_ascend_simd_vaddc_codegen(dtype):
     @T.prim_func
@@ -189,6 +199,16 @@ def test_ascend_simd_vdiv_precision_override():
     assert fast_default_source.count("simd_inst::vdiv_0ulp_ftz_true(") == 1
     assert fast_default_source.count("simd_inst::vdiv(") == 2
 
+    with tilelang.transform.PassContext(config={config_key: False}):
+        pto_precise_default_source = lower(func, target="pto").kernel_source
+    with tilelang.transform.PassContext(config={config_key: True}):
+        pto_fast_default_source = lower(func, target="pto").kernel_source
+
+    assert pto_precise_default_source.count("tl.vdiv_precise_f32(") == 2
+    assert pto_precise_default_source.count("pto.vdiv(") == 1
+    assert pto_fast_default_source.count("tl.vdiv_precise_f32(") == 1
+    assert pto_fast_default_source.count("pto.vdiv(") == 2
+
 
 def test_ascend_simd_sfu_precision_merging():
     """ftz_false in MODE_MERGING selects the precision wrappers."""
@@ -221,6 +241,44 @@ def test_ascend_simd_sfu_precision_merging():
     assert "::vexp(" not in source
     assert "::vln(" not in source
     assert "::vsqrt(" not in source
+
+    # PTO lowers merging to a zeroing SFU call wrapped in pto.vsel; the
+    # ftz_false precision tier selects the subnormal-preserving helpers.
+    pto_source = lower(func, target="pto").kernel_source
+    assert "pto.vsel(" in pto_source
+    for wrapper in ("tl.vexp_1ulp_ftz_false", "tl.vln_1ulp_ftz_false", "tl.vsqrt_0ulp_ftz_false"):
+        assert f"{wrapper}(" in pto_source
+    assert "MODE_MERGING" not in pto_source
+
+
+def test_pto_simd_sfu_precision_source():
+    @T.prim_func
+    def func(
+        A: T.Buffer((64,), "float32"),
+        C: T.Buffer((320,), "float32"),
+    ):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((64,), "float32")
+            c_ub = T.alloc_shared((320,), "float32")
+            T.copy(A, a_ub)
+            with T.SimdVF():
+                full = T.simd.pset(32)
+                src = T.simd.vld(a_ub[0])
+                T.simd.vsts(c_ub[0], ascend_simd.vexp(src, full, precision="ftz_false"), full)
+                T.simd.vsts(c_ub[64], ascend_simd.vexp(src, full, precision="ftz_true"), full)
+                T.simd.vsts(c_ub[128], ascend_simd.vexp(src, full), full)
+                T.simd.vsts(c_ub[192], ascend_simd.vln(src, full, precision="ftz_false"), full)
+                T.simd.vsts(c_ub[256], ascend_simd.vsqrt(src, full, precision="ftz_false"), full)
+            T.copy(c_ub, C)
+
+    config_key = tilelang.PassConfigKey.TL_ENABLE_FAST_MATH.value
+    for fast_math in (False, True):
+        with tilelang.transform.PassContext(config={config_key: fast_math}):
+            source = lower(func, target="pto").kernel_source
+        assert source.count("tl.vexp_1ulp_ftz_false(") == 1
+        assert source.count("pto.vexp(") == 2
+        assert source.count("tl.vln_1ulp_ftz_false(") == 1
+        assert source.count("tl.vsqrt_0ulp_ftz_false(") == 1
 
 
 def test_ascend_simd_vsstb_threads_pointer_state():
@@ -265,6 +323,16 @@ def test_ascend_simd_vsstb_threads_pointer_state():
     source = lower(func, target="ascend").kernel_source
     assert source.count("simd_inst::vsstb(") == 2
     assert source.count("POST_UPDATE") == 2
+
+    pto_source = lower(func, target="pto").kernel_source
+    assert "dst_ptr = None" in pto_source
+    assert pto_source.count("pto.vsstb(") == 2
+    assert "dst_ptr, 3, 1, " in pto_source
+    assert 'dist="1PT_B32"' in pto_source
+    assert "ONEPT_B32" not in pto_source
+    assert "_tl_coerce_i64(pto.addptr(" not in pto_source
+    assert "_tl_coerce_i64(pto.vsstb(" not in pto_source
+    assert 'pto.mem_bar("VST_VLD")' in pto_source
 
 
 @pytest.mark.parametrize("dtype,bits", [("bfloat16", 16), ("float32", 32), ("uint8", 8), ("float8_e4m3", 8)])

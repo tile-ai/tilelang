@@ -6,6 +6,7 @@ import tilelang
 import tilelang.testing
 from tilelang.ascend import language as T
 from tilelang.ascend.language import simd as S
+from tilelang.engine.lower import lower
 
 
 def bitwise_kernel(n):
@@ -83,7 +84,7 @@ NUM_ITERS = 4
 LANES = 64
 
 
-def serial_vreg_accum_kernel():
+def serial_vreg_accum_kernel(backend="ascend"):
     @T.prim_func
     def main(
         A: T.Tensor((NUM_ITERS * LANES,), T.float32),
@@ -110,8 +111,21 @@ def serial_vreg_accum_kernel():
     return main
 
 
-def test_serial_vreg_accum():
-    kernel = tilelang.compile(serial_vreg_accum_kernel(), target="ascend", out_idx=[2])
+@pytest.mark.pto
+def test_serial_vreg_accum_pto_codegen_carries_local_var():
+    source = lower(serial_vreg_accum_kernel("pto"), target="pto").kernel_source
+    assert "pto.vmula" in source
+    assert "T.unroll" not in source
+    assert "pto.static_range" not in source
+    has_python_range = " in range(" in source
+    has_explicit_carry = ".carry(" in source
+    assert has_python_range or has_explicit_carry, source
+    assert "with pto.for_(" not in source or has_explicit_carry, source
+
+
+@pytest.mark.parametrize("backend", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+def test_serial_vreg_accum(backend):
+    kernel = tilelang.compile(serial_vreg_accum_kernel(backend), target=backend, out_idx=[2])
     device = torch.device("npu")
     torch.manual_seed(0)
     a = torch.randn(NUM_ITERS * LANES, dtype=torch.float32, device=device)

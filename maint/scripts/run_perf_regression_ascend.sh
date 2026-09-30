@@ -1,13 +1,13 @@
 #!/bin/bash
-# Ascend performance regression test: compare current checkout vs tile-ai/tilelang main
+# Ascend performance regression test: compare current checkout vs asc-on-upstream-main
 #
 # Usage:
 #   ./maint/scripts/run_perf_regression_ascend.sh
 #
 # Environment variables:
 #   BASELINE_URL    - remote URL to fetch the baseline from
-#                     (default: https://github.com/tile-ai/tilelang.git)
-#   BASELINE_BRANCH - branch on BASELINE_URL to compare against (default: main)
+#                     (default: https://github.com/deepseek-ai/tilelang.git)
+#   BASELINE_BRANCH - branch on BASELINE_URL to compare against (default: asc-on-upstream-main)
 #   BASELINE_SHA    - Already-fetched baseline commit; skips fetching the branch when set
 #   CURRENT_LABEL   - Current ref label in the report (default: current branch or SHA)
 #   WORK_DIR        - Directory outside the checkout for snapshots and results
@@ -20,8 +20,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 
-BASELINE_URL="${BASELINE_URL:-https://github.com/tile-ai/tilelang.git}"
-BASELINE_BRANCH="${BASELINE_BRANCH:-main}"
+BASELINE_URL="${BASELINE_URL:-https://github.com/deepseek-ai/tilelang.git}"
+BASELINE_BRANCH="${BASELINE_BRANCH:-asc-on-upstream-main}"
 NINJA_JOBS="${NINJA_JOBS:-64}"
 
 cd "${REPO_ROOT}"
