@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any, Generic, Literal, ParamSpec, TypeVar
 from collections.abc import Callable
 
-from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
+from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target, is_pto_target
 from tvm.tirx import PrimFunc
 
 from tilelang import tvm
@@ -13,7 +13,7 @@ from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
     BaseKernelAdapter,
     CachedTextSource,
-    get_cython_adapter_class,
+    CythonKernelAdapter,
     CuTeDSLKernelAdapter,
     TVMFFIKernelAdapter,
     MetalKernelAdapter,
@@ -358,8 +358,13 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "cython":
+            adapter_cls = CythonKernelAdapter
+            if is_pto_target(target):
+                from tilelang.jit.adapter.pto.adapter import PTOCythonKernelAdapter
+
+                adapter_cls = PTOCythonKernelAdapter
             adapter = create_adapter(
-                get_cython_adapter_class(target),
+                adapter_cls,
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -452,7 +457,12 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "cython":
-            adapter = get_cython_adapter_class(target).from_database(
+            adapter_cls = CythonKernelAdapter
+            if is_pto_target(target):
+                from tilelang.jit.adapter.pto.adapter import PTOCythonKernelAdapter
+
+                adapter_cls = PTOCythonKernelAdapter
+            adapter = adapter_cls.from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,
