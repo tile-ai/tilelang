@@ -41,6 +41,21 @@ def test_match_statement_rejection_names_the_line():
                         B[0] = 0
 
 
+def test_match_inside_macro_is_rejected():
+    # `@T.macro` bodies go through the same mutator, so the rejection has to
+    # cover them too; this mirrors the loop-`else` precedent in
+    # test_tilelang_issue_2946.py.
+    with pytest.raises(NotImplementedError, match=r"`match` is not supported"):
+
+        @T.macro
+        def body(A, B):
+            match A[0]:
+                case 0:
+                    B[0] = 100
+                case _:
+                    B[0] = 999
+
+
 def test_if_chain_equivalent_still_traces():
     # The `if`/`elif` spelling of the same selector is unaffected: only the
     # unhandled `match` construct is rejected.
