@@ -59,14 +59,23 @@ def test_cast_to_e5m2_reaches_infinity():
     torch.testing.assert_close(out.view(torch.uint8), values.to(torch.float8_e5m2).view(torch.uint8), rtol=0, atol=0)
 
 
+_E4M3FN_MAX = 448.0
+
+
 @tilelang.testing.requires_cuda
 def test_cast_to_e4m3fn_still_saturates():
-    """Control: e4m3fn has no infinity encoding, so over-range still clamps."""
+    """Control: e4m3fn has no infinity encoding, so over-range still clamps.
+
+    The reference is clamped to the format's finite range first, because how
+    `torch` converts an infinity or an over-range value to a finite-only format
+    is not something this test should depend on.
+    """
 
     values = torch.tensor(_OVER_RANGE, dtype=torch.float32, device="cuda")
     out = cast_to_fp8_kernel("float8_e4m3fn")(values)
+    expected = values.clamp(-_E4M3FN_MAX, _E4M3FN_MAX).to(torch.float8_e4m3fn)
 
-    torch.testing.assert_close(out.view(torch.uint8), values.to(torch.float8_e4m3fn).view(torch.uint8), rtol=0, atol=0)
+    torch.testing.assert_close(out.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0)
 
 
 if __name__ == "__main__":
