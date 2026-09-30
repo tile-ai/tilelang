@@ -143,7 +143,7 @@ def _make_two_group_reduce_kernel(block_threads: int = 128, group_stride: int = 
     return make_kernel()
 
 
-def _make_offset_thread_reduce_kernel():
+def _make_offset_thread_reduce_kernel(batch=1):
     """Reduction whose participating threads occupy a non-zero thread range,
     i.e. tx in [32, 96) of a 128-thread block."""
 
@@ -188,7 +188,7 @@ def _make_offset_thread_reduce_kernel():
                 )
                 for i, j in T.Parallel(rows, width):
                     x_frag[i, j] = x[i, j]
-                T.reduce_sum(x_frag, sum_frag, dim=1)
+                T.reduce_sum(x_frag, sum_frag, dim=1, batch=batch)
                 for i, j in T.Parallel(rows, width):
                     out[i, j] = x_frag[i, j] / sum_frag[i]
 
@@ -1226,46 +1226,7 @@ def test_reduce_packed_max_nan_batch_runtime():
 # Batched all-reduce over an offset partial thread range
 # ---------------------------------------------------------------------------
 
-_OFFSET_RANGE_ROWS, _OFFSET_RANGE_WIDTH, _OFFSET_RANGE_VEC = 4, 512, 8
-_OFFSET_RANGE_START, _OFFSET_RANGE_THREADS = 32, 64
-
-
-def _make_offset_range_reduce_kernel(batch):
-    """A reduction whose fragment is owned by threads [32, 96) of a 128-thread block.
-
-    The participating range neither starts at thread 0 nor spans the block, so the
-    lowering has to resolve it before emitting the all-reduce.
-    """
-    rows, width, vec = _OFFSET_RANGE_ROWS, _OFFSET_RANGE_WIDTH, _OFFSET_RANGE_VEC
-
-    @T.prim_func
-    def main(
-        x: T.Tensor((rows, width), "float32"),
-        out: T.Tensor((rows, width), "float32"),
-    ) -> None:
-        with T.Kernel(1, threads=128):
-            x_frag = T.alloc_fragment((rows, width), "float32")
-            s_frag = T.alloc_fragment((rows,), "float32")
-            T.annotate_layout(
-                {
-                    x_frag: T.Fragment(
-                        x_frag.shape,
-                        forward_fn=lambda i, j: (_OFFSET_RANGE_START + j // vec, i * vec + j % vec),
-                    ),
-                    s_frag: T.Fragment(
-                        s_frag.shape,
-                        forward_fn=lambda i, rep: (_OFFSET_RANGE_START + rep, i),
-                        replicate=_OFFSET_RANGE_THREADS,
-                    ),
-                }
-            )
-            for i, j in T.Parallel(rows, width):
-                x_frag[i, j] = x[i, j]
-            T.reduce_sum(x_frag, s_frag, dim=1, batch=batch)
-            for i, j in T.Parallel(rows, width):
-                out[i, j] = x_frag[i, j] + s_frag[i]
-
-    return main
+_OFFSET_RANGE_THREADS = 64
 
 
 def _allreduce_call(kernel):
@@ -1273,22 +1234,23 @@ def _allreduce_call(kernel):
     return match.group(0) if match else ""
 
 
-@tilelang.testing.requires_cuda
-def test_reduce_batch_matches_scalar_on_offset_partial_thread_range():
-    """`batch > 1` is documented as the same reduction with fewer barriers.
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_batch_matches_scalar_on_offset_thread_range():
+    """`batch > 1` is documented as the same reduction using fewer barriers.
 
-    The batched arm used to take the offset and the barrier width from the block's
-    bounds instead of the resolved range, so with participants `[32, 96)` it indexed
-    from thread 0 and waited on 128 threads. Non-participants' untouched registers
-    were folded into the sum and every output element came out wrong.
+    `_make_offset_thread_reduce_kernel` covers an offset participating range, but
+    it calls `reduce_sum` without a batch, so it only ever exercised the scalar
+    arm -- the one that resolves the range. The batched arm took the offset and
+    the barrier width from the block's bounds instead, so on the same kernel it
+    indexed from thread 0 and waited on 128 threads, folding non-participants'
+    untouched registers into the sum. Every output element came out wrong.
     """
-    rows, width = _OFFSET_RANGE_ROWS, _OFFSET_RANGE_WIDTH
-    torch.manual_seed(0)
-    x = torch.randint(1, 8, (rows, width)).float().cuda()
-    reference = x + x.sum(dim=1, keepdim=True)
+    torch.manual_seed(3)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    reference = x / x.sum(dim=1, keepdim=True)
 
-    scalar = tilelang.compile(_make_offset_range_reduce_kernel(1), out_idx=[1], target="cuda")
-    batched = tilelang.compile(_make_offset_range_reduce_kernel(2), out_idx=[1], target="cuda")
+    scalar = _make_offset_thread_reduce_kernel(1)
+    batched = _make_offset_thread_reduce_kernel(2)
 
     scalar_out = scalar(x)
     batched_out = batched(x)
@@ -1297,8 +1259,8 @@ def test_reduce_batch_matches_scalar_on_offset_partial_thread_range():
     # The batched path has to resolve the participants, not the whole block.
     assert f"NamedBarrier<{_OFFSET_RANGE_THREADS}>" in _allreduce_call(batched), _allreduce_call(batched)
 
-    torch.testing.assert_close(scalar_out, reference, rtol=0, atol=0)
-    torch.testing.assert_close(batched_out, reference, rtol=0, atol=0)
+    torch.testing.assert_close(scalar_out, reference, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(batched_out, reference, rtol=1e-5, atol=1e-6)
 
 
 if __name__ == "__main__":
