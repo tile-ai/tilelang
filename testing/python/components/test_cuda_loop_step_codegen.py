@@ -25,8 +25,8 @@ STEP = 2
 
 @T.prim_func
 def stepped_serial(B: T.Buffer((N,), "int32")):
-    for bx in T.thread_binding(1, thread="blockIdx.x"):
-        for tx in T.thread_binding(1, thread="threadIdx.x"):
+    for _bx in T.thread_binding(1, thread="blockIdx.x"):
+        for _tx in T.thread_binding(1, thread="threadIdx.x"):
             for i in T.serial(0, N, step=STEP):
                 B[i] = 1
 
@@ -58,8 +58,8 @@ def test_unit_step_loops_still_emit_a_plain_increment():
 
     @T.prim_func
     def plain(B: T.Buffer((N,), "int32")):
-        for bx in T.thread_binding(1, thread="blockIdx.x"):
-            for tx in T.thread_binding(1, thread="threadIdx.x"):
+        for _bx in T.thread_binding(1, thread="blockIdx.x"):
+            for _tx in T.thread_binding(1, thread="threadIdx.x"):
                 for i in T.serial(0, N):
                     B[i] = 1
 
