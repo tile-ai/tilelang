@@ -216,8 +216,10 @@ private:
         // One wrap only legalizes an index that is in range. An index more
         // negative than the extent lands before the start of the buffer, and
         // emitting it would read or write outside the allocation; NumPy and
-        // PyTorch reject the same index instead.
-        ICHECK(!analyzer_->CanProve(wrapped < 0))
+        // PyTorch reject the same index instead. The index comes from the
+        // TileLang program under compilation, so this is a frontend validation
+        // failure rather than an internal invariant.
+        CHECK(!analyzer_->CanProve(wrapped < 0), ValueError)
             << "LegalizeNegativeIndex: negative index " << indices[i]
             << " is out of range for extent " << buffer_shape[i]
             << " (a single wrap gives " << wrapped << ")";
