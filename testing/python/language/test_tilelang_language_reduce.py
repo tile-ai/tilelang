@@ -1222,5 +1222,65 @@ def test_reduce_packed_max_nan_batch_runtime():
         assert math.isnan(B[2].float().item()), f"{tl_dtype}: NaN row must produce NaN"
 
 
+# ---------------------------------------------------------------------------
+# Frontend legality: the bitwise reduce dtype gate covers both faces
+# ---------------------------------------------------------------------------
+
+
+def _make_bitwise_reduce_kernel(op, src_dtype, dst_dtype, M=4, N=4):
+    @T.prim_func
+    def main(A: T.Tensor((M, N), src_dtype), Out: T.Tensor((M,), dst_dtype)):
+        with T.Kernel(1, threads=128):
+            A_fr = T.alloc_fragment((M, N), src_dtype)
+            B_fr = T.alloc_fragment((M,), dst_dtype)
+            T.copy(A, A_fr)
+            op(A_fr, B_fr, dim=1)
+            T.copy(B_fr, Out)
+
+    return main
+
+
+def _compile_bitwise_reduce(program):
+    tilelang.disable_cache()
+    try:
+        return tilelang.compile(program, out_idx=-1, target="cuda")
+    finally:
+        tilelang.enable_cache()
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op_name", ["reduce_bitand", "reduce_bitor", "reduce_bitxor"])
+def test_bitwise_reduce_rejects_float_source(op_name):
+    """A float source must be rejected rather than silently value-cast to int.
+
+    The gate inspected only the destination, so a float source was truncated
+    before the bitwise reduction ran.
+    """
+    op = getattr(T, op_name)
+    with pytest.raises(ValueError) as exc_info:
+        _compile_bitwise_reduce(_make_bitwise_reduce_kernel(op, "float32", "int32"))
+
+    message = str(exc_info.value)
+    assert op_name in message
+    assert "float32" in message
+
+
+@tilelang.testing.requires_cuda
+def test_bitwise_reduce_rejects_float_destination():
+    """The destination face of the gate keeps firing."""
+    with pytest.raises(ValueError) as exc_info:
+        _compile_bitwise_reduce(_make_bitwise_reduce_kernel(T.reduce_bitor, "int32", "float32"))
+
+    message = str(exc_info.value)
+    assert "reduce_bitor" in message
+    assert "float32" in message
+
+
+@tilelang.testing.requires_cuda
+def test_bitwise_reduce_accepts_integer_faces():
+    """Control: an integer source and destination still lower."""
+    _compile_bitwise_reduce(_make_bitwise_reduce_kernel(T.reduce_bitor, "int32", "int32"))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
