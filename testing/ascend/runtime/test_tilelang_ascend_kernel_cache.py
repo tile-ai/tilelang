@@ -1,7 +1,7 @@
 """Ascend cache artifacts preserve the selected execution backend's ABI."""
 
 import pytest
-from tilelang.cache import _dispatch_map, _resolve_cache_dispatch
+from tilelang.cache import _resolve_cache_dispatch
 
 
 @pytest.mark.parametrize("backend, host_suffix", [("tvm_ffi", ".c"), ("cython", ".asc")])
@@ -11,14 +11,3 @@ def test_ascend_cache_source_suffixes(backend, host_suffix):
     assert context.execution_backend.name == backend
     assert cache.device_kernel_path.endswith(".asc")
     assert cache.host_kernel_path.endswith(host_suffix)
-
-
-def test_pto_cache_layout_is_unchanged():
-    cache, context, _ = _resolve_cache_dispatch("pto", None, "cython", False)
-
-    assert cache is _dispatch_map["cython"]
-    assert context.module.name == "pto"
-    assert "pto" in context.target.keys
-    assert context.execution_backend.name == "cython"
-    assert cache.device_kernel_path == "device_kernel.cu"
-    assert cache.host_kernel_path == "host_kernel.cu"

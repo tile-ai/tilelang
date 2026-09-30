@@ -15,7 +15,7 @@ Three kinds of tests:
 
 import tilelang
 from tilelang import tvm as tvm
-import tilelang.cuda.language as T
+import tilelang.language as T
 import tilelang.testing
 import pytest
 import torch

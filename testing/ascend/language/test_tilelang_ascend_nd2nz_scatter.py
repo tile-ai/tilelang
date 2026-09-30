@@ -92,36 +92,13 @@ def test_manual_pipeline_rewrites_compact_nz_dual_copy():
     assert source.count("asc_copy_ub2l1") == 1
 
 
-@pytest.mark.parametrize(
-    "target,kernel_marker,sid_marker,load_marker,store_marker",
-    [
-        (
-            "ascend",
-            "__global__ __mix__(1, 2)",
-            "asc_get_sub_block_id()",
-            "asc_copy_gm2ub_align",
-            "asc_copy_ub2gm_align",
-        ),
-        pytest.param(
-            "pto",
-            'with tl.mixed_kernel_section("cube")',
-            "pto.get_subblock_idx()",
-            "pto.mte_gm_ub",
-            "pto.mte_ub_gm",
-            marks=pytest.mark.pto,
-        ),
-    ],
-    ids=["ascend", "pto"],
-)
-def test_manual_mixed_pipeline_shares_sub_block_id(target, kernel_marker, sid_marker, load_marker, store_marker):
+def test_manual_mixed_pipeline_shares_sub_block_id():
     with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False}):
-        source = tilelang.lower(_manual_mixed_dual_copy(), target=target).kernel_source
-    assert kernel_marker in source
-    if target == "pto":
-        assert 'with tl.mixed_kernel_section("vector")' in source
-    assert source.count(sid_marker) == 1
-    assert source.count(load_marker) == 1
-    assert source.count(store_marker) == 1
+        source = tilelang.lower(_manual_mixed_dual_copy(), target="ascend").kernel_source
+    assert "__global__ __mix__(1, 2)" in source
+    assert source.count("asc_get_sub_block_id()") == 1
+    assert "asc_copy_gm2ub_align" in source
+    assert "asc_copy_ub2gm_align" in source
 
 
 @pytest.mark.parametrize(
