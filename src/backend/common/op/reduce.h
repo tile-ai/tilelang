@@ -1025,6 +1025,19 @@ template <typename Impl> struct ReduceLowerer {
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
+          // The batched all-reduce has to carry the same resolved thread range as the
+          // scalar arm below. When the reducing threads are a partial range that does
+          // not start at thread 0, using the block's bounds here both mis-indexes the
+          // offset and sizes the named barrier for threads that do not participate, so
+          // their untouched registers get folded into the reduction.
+          PrimExpr all_threads = lower_args.thread_bounds->extent;
+          if (reducing_threads > 32 &&
+              TargetSupportsNamedBarrier(lower_args.target)) {
+            Range thread_range = reduce::ResolveAllReduceThreadRange(
+                red_layout, lower_args.thread_bounds, lower_args.target);
+            thread_offset = thread_range->min;
+            all_threads = thread_range->extent;
+          }
 
           int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
           bool can_batch_pack =
@@ -1036,8 +1049,7 @@ template <typename Impl> struct ReduceLowerer {
                   .value();
           std::string allreduce = Impl::MakeBatchAllReduce(
               reducer, reducing_threads, thread_step.scale, thread_offset,
-              lower_args.thread_bounds->extent, eff_batch, block_threads,
-              lower_args.target);
+              all_threads, eff_batch, block_threads, lower_args.target);
 
           DataType ws_dtype = can_batch_pack
                                   ? clear_buffer->dtype.with_lanes(vsize)
