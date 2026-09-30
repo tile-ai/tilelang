@@ -61,6 +61,16 @@ nvcc = [
     # cuRAND is required when kernels use tilelang.cuda.language.random
     "nvidia-curand>=10.4; platform_system == 'Windows'",
 ]
+# TileIR backend. The CUDA wheels provide the `tileiras` assembler stack.
+# `cuda-tile` supplies the cuTile 1.5 native dispatcher used to launch generated
+# cubins; compiler-side MLIR bindings come from a matching NVIDIA/cuda-tile
+# v13.4.0 source build.
+tileir = [
+    "cuda-tile>=1.5,<1.6",
+    "cuda-toolkit[nvcc,tileiras]>=13.4.1,<13.5",
+    # The toolkit allows newer nvJitLink minors; keep the validated TileIR stack aligned.
+    "nvidia-nvjitlink>=13.4,<13.5",
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

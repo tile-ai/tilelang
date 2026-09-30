@@ -880,7 +880,7 @@ def test_read_before_nested_cycle_declines():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version(9)
 def test_post_loop_read_numerical():
     kernel = tilelang.compile(
         _post_loop_read_kernel(),

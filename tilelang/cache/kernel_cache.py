@@ -47,7 +47,7 @@ class KernelCache:
     _memory_cache = {}  # In-memory cache dictionary
     _staging_cleanup_lock = threading.Lock()
     _last_cleaned_staging_root: str | None = None
-    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi"
+    execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "tileir"] = "tvm_ffi"
     device_kernel_path = "device_kernel.cu"
     host_kernel_path = "host_kernel.cu"
     kernel_lib_path = "kernel_lib.so"
@@ -244,7 +244,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: list[int],
-        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "tileir"] = "tvm_ffi",
         args=None,
         target: str | Target = "auto",
         target_host: str | Target = None,
@@ -290,7 +290,7 @@ class KernelCache:
         *args,
         target: str | Target | None = None,
         target_host: str | Target | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl"] | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "tileir"] | None = None,
         verbose: bool,
         pass_configs: dict | None = None,
         compile_flags: list[str] | str | None = None,

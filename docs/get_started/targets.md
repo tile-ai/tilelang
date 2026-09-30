@@ -15,6 +15,7 @@ dictionary when you need options such as GPU architecture or CPU model. The most
 | `auto` | Detects CUDA → HIP → Metal in that order. Useful when running the same script across machines. |
 | `cuda` | NVIDIA GPUs. Use a config dict for options such as `{"kind": "cuda", "arch": "sm_80"}`. |
 | `cutedsl` | NVIDIA CUTLASS/CuTe DSL backend. Requires `nvidia-cutlass-dsl`. |
+| `tileir` | NVIDIA CUDA Tile IR backend. Requires an explicit SM architecture and the TileIR toolchain. See [Using and Tuning the TileIR Backend](../programming_guides/tileir_backend.md). |
 | `hip` | AMD GPUs via ROCm. Use a config dict for options such as `{"kind": "hip", "mcpu": "gfx90a"}`. |
 | `metal` | Apple Silicon GPUs (arm64 Macs). |
 | `llvm` | CPU execution. Use a config dict for options such as `{"kind": "llvm", "mtriple": "x86_64-linux-gnu"}`. |
