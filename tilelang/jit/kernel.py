@@ -15,7 +15,7 @@ from tilelang.jit.adapter import (
     CachedTextSource,
     get_cython_adapter_class,
     CuTeDSLKernelAdapter,
-    get_tvm_ffi_adapter_class,
+    TVMFFIKernelAdapter,
     MetalKernelAdapter,
 )
 from tilelang.profiler import Profiler, TensorSupplyType
@@ -344,7 +344,7 @@ class JITKernel(Generic[_P, _T]):
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
             adapter = create_adapter(
-                get_tvm_ffi_adapter_class(target),
+                TVMFFIKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -440,7 +440,7 @@ class JITKernel(Generic[_P, _T]):
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
-            adapter = get_tvm_ffi_adapter_class(target).from_database(
+            adapter = TVMFFIKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,
