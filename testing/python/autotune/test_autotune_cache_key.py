@@ -51,10 +51,14 @@ def test_cache_key_is_disabled_for_profile_callbacks():
 
 
 def _decorated(warmup, rep, timeout):
-    """Build an autotuned kernel whose profiler settings differ per call."""
+    """Build an autotuned kernel whose profiler settings differ per call.
+
+    The target is pinned to a host target so the test does not depend on a
+    device being present to auto-detect one; nothing here is lowered.
+    """
 
     @tilelang.autotune(configs=[{"block_size": 128}], warmup=warmup, rep=rep, timeout=timeout)
-    @tilelang.jit
+    @tilelang.jit(target="c")
     def kernel(N: int = 256, block_size: int = 128):
         @T.prim_func
         def main(A: T.Tensor((N,), "float32")):
