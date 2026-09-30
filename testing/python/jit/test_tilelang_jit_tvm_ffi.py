@@ -526,5 +526,49 @@ def test_tvm_ffi_dynamic_shape_output_before_input():
     tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
 
 
+_CLUSTER_TARGET = {"kind": "cuda", "arch": "sm_90a"}
+
+
+def _cluster_kernel():
+    @T.prim_func
+    def cluster_kernel(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32")):
+        with T.Kernel(2, threads=128, cluster_dims=2):
+            T.cluster_sync()
+            for i in T.Parallel(256):
+                B[i] = A[i]
+
+    return cluster_kernel
+
+
+def test_tvm_ffi_backend_rejects_a_cluster_kernel():
+    """The tvm_ffi host wrapper never consults `cluster_dims`.
+
+    It comes from TVM's C host codegen, which has no `cudaLaunchKernelEx` carrying a
+    `cudaLaunchAttributeClusterDimension`, so the grid would launch as ordinary CTAs
+    while the device code still runs `barrier.cluster.*`. That has to fail loudly
+    rather than launch a cluster kernel without its cluster.
+    """
+    with pytest.raises(NotImplementedError, match="does not emit a cluster launch"):
+        tilelang.compile(
+            _cluster_kernel(),
+            target=_CLUSTER_TARGET,
+            execution_backend="tvm_ffi",
+        )
+
+
+def test_cython_backend_still_compiles_a_cluster_kernel():
+    """Control: the cython adapter writes its own host wrapper and does emit the
+    cluster launch, so the same kernel compiles there."""
+    kernel = tilelang.compile(
+        _cluster_kernel(),
+        target=_CLUSTER_TARGET,
+        execution_backend="cython",
+    )
+    host_source = kernel.get_host_source()
+
+    assert "cudaLaunchKernelEx" in host_source, host_source
+    assert "cudaLaunchAttributeClusterDimension" in host_source, host_source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

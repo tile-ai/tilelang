@@ -123,6 +123,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.verbose = verbose
         self.pass_configs = pass_configs
         self.compile_flags = compile_flags
+        self._reject_cluster_launch()
         self._ffi_callee_allocated_output_abi = self._uses_ffi_callee_allocated_output_abi()
         self.dynamic_symbolic_map = None if self._ffi_callee_allocated_output_abi else self._process_dynamic_symbolic()
         self.kernel_global_source = self.device_kernel_source
@@ -130,6 +131,30 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self._executable_lock = threading.Lock()
 
         self._post_init()
+
+    def _reject_cluster_launch(self) -> None:
+        """Refuse a cluster kernel instead of launching it without its cluster.
+
+        A kernel with `cluster_dims=N` has to be launched through `cudaLaunchKernelEx`
+        with a `cudaLaunchAttributeClusterDimension` so its N CTAs are co-scheduled into
+        one cluster; only then does the `barrier.cluster.*` handshake in the device code
+        mean anything. The host wrapper for this backend comes from TVM's C host codegen
+        and never consults `cluster_dims`, so the grid would launch as ordinary CTAs
+        while the device code still runs cluster-scope barriers. The cython adapter
+        writes its own host wrapper and does emit the cluster launch, so this is a
+        property of the backend rather than of the kernel.
+        """
+        if self.device_mod is None:
+            return
+        for g_var, func in self.device_mod.functions.items():
+            if "cluster_dims" not in func.attrs:
+                continue
+            raise NotImplementedError(
+                f"execution_backend='tvm_ffi' does not emit a cluster launch, so kernel "
+                f"'{g_var.name_hint}' with cluster_dims={list(func.attrs['cluster_dims'])} "
+                f"would launch as an ordinary grid while its device code still runs "
+                f"cluster-scope barriers. Use execution_backend='cython' for a cluster kernel."
+            )
 
     def _make_executable(self) -> tvm.runtime.Executable:
         if self.rt_mod is None:
