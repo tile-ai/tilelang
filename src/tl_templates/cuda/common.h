@@ -1049,11 +1049,21 @@ struct float_e5m2_t : public cute::float_e5m2_t {
   CUTLASS_HOST_DEVICE
   float_e5m2_t() = default;
 
+  // e5m2 has an infinity and a NaN encoding, so a value outside the finite
+  // range converts to infinity, the way `torch.float8_e5m2` and the hardware
+  // `cvt.*.e5m2.f32` do. `__NV_SATFINITE` would clamp it to the largest finite
+  // value 57344 instead: an infinity that needs no rounding at all would come
+  // back finite. e4m3fn is finite-only and keeps saturating.
+  CUTLASS_HOST_DEVICE
+  explicit float_e5m2_t(float x)
+      : cute::float_e5m2_t(cute::float_e5m2_t::bitcast(
+            __nv_cvt_float_to_fp8(x, __NV_NOSAT, __NV_E5M2))) {}
+
   CUTLASS_HOST_DEVICE
   explicit float_e5m2_t(__nv_bfloat16 x)
       : cute::float_e5m2_t(
             cute::float_e5m2_t::bitcast(__nv_cvt_bfloat16raw_to_fp8(
-                *reinterpret_cast<__nv_bfloat16_raw *>(&x), __NV_SATFINITE,
+                *reinterpret_cast<__nv_bfloat16_raw *>(&x), __NV_NOSAT,
                 __NV_E5M2))) {}
 
   CUTLASS_HOST_DEVICE
