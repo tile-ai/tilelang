@@ -1,8 +1,6 @@
 """Utilities to adapt TVM-FFI kernels to Torch tensors.
 
 TVM-FFI obtains the active work stream through Torch's DLPack Exchange API.
-The Ascend adapter installs TileLang's Torch NPU callback before the first
-tensor reaches an executable.
 """
 
 from __future__ import annotations
@@ -23,7 +21,6 @@ from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
-from tilelang.jit.adapter.utils import is_pto_target
 
 
 COMPILE_ARGS = {}
@@ -38,21 +35,11 @@ elif sys.platform == "win32":
     COMPILE_ARGS["fcompile"] = _msvc_create_shared
 
 
-def _install_torch_stream_exchange() -> None:
-    from tilelang.ascend.torch_exchange import (
-        install_torch_npu_stream_exchange,
-    )
-
-    install_torch_npu_stream_exchange()
-
-
 class TVMFFIKernelAdapter(BaseKernelAdapter):
     """Adapter that runs a TVM runtime.Executable with Torch tensors.
 
     Notes
     - Torch tensors use TVM-FFI's zero-copy DLPack Exchange API conversion.
-    - Ascend execution installs a Cython callback that reads Torch's current
-      NPU stream for every invocation.
     """
 
     # Class attributes to store compiled kernel information
@@ -74,12 +61,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
 
-    _torch_npu_stream_exchange_installed: bool = False
-
     def _prepare_torch_device(self, device: torch.device) -> None:
-        if device.type == "npu" and not self._torch_npu_stream_exchange_installed:
-            _install_torch_stream_exchange()
-            self._torch_npu_stream_exchange_installed = True
+        """Allow backend adapters to prepare device-specific Torch interop."""
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
@@ -210,6 +193,26 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
+    def _get_param_shapes(self):
+        """Convert logical parameter shapes to Torch storage shapes."""
+        param_shapes = []
+        for param in self.params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tirx.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tirx.Var):
+                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
+                else:
+                    native_shape.append(dim)
+            tl_dtype = param.dtype
+            if tl_dtype.bits < 8:
+                storage_dtype: dtype = dtype(param.torch_dtype())
+                native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
+            param_shapes.append(native_shape)
+
+        return param_shapes
+
     def _convert_torch_func(self) -> Callable[..., Any]:
         if getattr(self, "_ffi_callee_allocated_output_abi", False):
             return self._convert_ffi_callee_allocated_output_func()
@@ -219,26 +222,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         param_dtypes = [param.torch_dtype() for param in self.params]
-        # Convert TVM shape arrays to native Python lists
-        param_shapes = []
-
-        if is_pto_target(self.target):
-            param_shapes = [param.storage_shape(target=self.target) for param in self.params]
-        else:
-            for param in self.params:
-                native_shape = []
-                for dim in param.shape:
-                    if isinstance(dim, tirx.IntImm):
-                        native_shape.append(int(dim))
-                    elif isinstance(dim, tirx.Var):
-                        native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
-                    else:
-                        native_shape.append(dim)
-                tl_dtype = param.dtype
-                if tl_dtype.bits < 8:
-                    storage_dtype: dtype = dtype(param.torch_dtype())
-                    native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
-                param_shapes.append(native_shape)
+        param_shapes = self._get_param_shapes()
 
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None
