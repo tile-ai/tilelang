@@ -26,6 +26,7 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <set>
 #include <sstream>
 
 namespace tvm {
@@ -81,7 +82,29 @@ void ValidateSharedScope(const std::string &scope) {
 }
 
 bool RequiresStatementControlFlow(const PrimExpr &expr) {
-  return SideEffect(expr) > CallEffectKind::kPure;
+  if (const auto *call = expr.as<CallNode>()) {
+    if (call->op.same_as(builtin::if_then_else()) ||
+        call->op.same_as(tirx::builtin::if_then_else())) {
+      ICHECK_EQ(call->args.size(), 3U);
+      return RequiresStatementControlFlow(call->args[0]) ||
+             RequiresStatementControlFlow(call->args[1]) ||
+             RequiresStatementControlFlow(call->args[2]);
+    }
+  }
+  // Read-only expressions can remain inside a lazy PTODSL branch. Only an
+  // expression that mutates state can require emitted Python statements.
+  return SideEffect(expr) > CallEffectKind::kReadState;
+}
+
+std::string NormalizeVldDistribution(const std::string &dist) {
+  if (dist == "NORM_B8" || dist == "NORM_B16" || dist == "NORM_B32") {
+    return "NORM";
+  }
+  if (dist == "BLK") {
+    return "BRC_BLK";
+  }
+  // AscendC-style UNPK4_B* aliases use the UNPK4 token in PTODSL.
+  return dist.rfind("UNPK4_B", 0) == 0 ? "UNPK4" : dist;
 }
 
 std::string FP8TypeName(DataType t) {
@@ -975,6 +998,148 @@ private:
   arith::Analyzer analyzer_;
 };
 
+// Each mask is a set of reaching directions: 0 is unreachable, 1 is M, 2 is N,
+// and 3 means both directions can reach this path.
+struct MmadDirectionFlowState {
+  uint8_t fallthrough;
+  uint8_t breaks;
+};
+
+// PTODSL encodes the stateful AscendC MAD direction on each MAD operation.
+class PTOMmadDirectionAnalyzer
+    : public StmtFunctor<MmadDirectionFlowState(const Stmt &, uint8_t)> {
+public:
+  using DirectionMap =
+      std::unordered_map<Call, bool, ObjectPtrHash, ObjectPtrEqual>;
+
+  static DirectionMap Analyze(const PrimFunc &func) {
+    PTOMmadDirectionAnalyzer analyzer;
+    analyzer.VisitStmt(func->body, kM);
+    DirectionMap result;
+    for (const auto &[call, directions] : analyzer.mad_directions_) {
+      ICHECK(directions == 0 || directions == kM || directions == kN)
+          << "PTO MAD direction depends on control flow for " << call;
+      // Codegen can still emit unreachable MADs. Their direction is arbitrary.
+      result.emplace(call, directions == kN);
+    }
+    return result;
+  }
+
+private:
+  using FlowState = MmadDirectionFlowState;
+  static constexpr uint8_t kM = 1;
+  static constexpr uint8_t kN = 2;
+
+  FlowState AnalyzeLoop(const Stmt &body, uint8_t incoming, bool must_execute,
+                        bool can_exit_normally = true) {
+    uint8_t header = incoming;
+    for (int i = 0; i < 4; ++i) {
+      FlowState body_out = VisitStmt(body, header);
+      uint8_t next = incoming | body_out.fallthrough;
+      if (next == header) {
+        // Breaks exit this loop rather than flowing back to its header. A
+        // nested loop consumes its own breaks before returning to this body.
+        uint8_t exits = body_out.breaks;
+        if (can_exit_normally) {
+          exits |= body_out.fallthrough;
+          if (!must_execute) {
+            exits |= incoming;
+          }
+        }
+        return {exits, 0};
+      }
+      header = next;
+    }
+    LOG(FATAL) << "PTO MAD direction loop analysis failed to converge";
+    return {incoming, 0};
+  }
+
+  FlowState VisitStmt_(const BindNode *, uint8_t state) final {
+    return {state, 0};
+  }
+  FlowState VisitStmt_(const AttrStmtNode *op, uint8_t state) final {
+    return VisitStmt(op->body, state);
+  }
+  FlowState VisitStmt_(const IfThenElseNode *op, uint8_t state) final {
+    FlowState then_out = VisitStmt(op->then_case, state);
+    FlowState else_out = op->else_case ? VisitStmt(op->else_case.value(), state)
+                                       : FlowState{state, 0};
+    return {static_cast<uint8_t>(then_out.fallthrough | else_out.fallthrough),
+            static_cast<uint8_t>(then_out.breaks | else_out.breaks)};
+  }
+  FlowState VisitStmt_(const ForNode *op, uint8_t state) final {
+    return AnalyzeLoop(op->body, state, analyzer_.CanProve(op->extent > 0));
+  }
+  FlowState VisitStmt_(const WhileNode *op, uint8_t state) final {
+    const bool always_true = is_one(analyzer_.Simplify(op->condition));
+    // A constant-true while only exits through break. Its normal body exit is
+    // a backedge, and the incoming state cannot bypass the body.
+    return AnalyzeLoop(op->body, state, always_true, !always_true);
+  }
+  FlowState VisitStmt_(const AllocBufferNode *, uint8_t state) final {
+    return {state, 0};
+  }
+  FlowState VisitStmt_(const DeclBufferNode *, uint8_t state) final {
+    return {state, 0};
+  }
+  FlowState VisitStmt_(const BufferStoreNode *, uint8_t state) final {
+    return {state, 0};
+  }
+  FlowState VisitStmt_(const AssertStmtNode *, uint8_t state) final {
+    return {state, 0};
+  }
+  FlowState VisitStmt_(const SeqStmtNode *op, uint8_t state) final {
+    FlowState result{state, 0};
+    for (const Stmt &stmt : op->seq) {
+      FlowState next = VisitStmt(stmt, result.fallthrough);
+      result.fallthrough = next.fallthrough;
+      result.breaks |= next.breaks;
+    }
+    return result;
+  }
+  FlowState VisitStmt_(const EvaluateNode *op, uint8_t state) final {
+    const auto *call = op->value.as<CallNode>();
+    if (call == nullptr)
+      return {state, 0};
+    if (call->op.same_as(tl::loop_break())) {
+      return {0, state};
+    }
+    if (call->op.same_as(tl::ascend_set_mmad_direction())) {
+      ICHECK_EQ(call->args.size(), 1U);
+      const auto *direction = call->args[0].as<StringImmNode>();
+      ICHECK(direction && (direction->value == "m" || direction->value == "n"))
+          << "PTO MAD direction expects 'm' or 'n'";
+      // An unreachable setter must not revive the path after a break.
+      if (state == 0) {
+        return {0, 0};
+      }
+      return {direction->value == "n" ? kN : kM, 0};
+    }
+    if (call->op.same_as(tl::ascend_mad()) ||
+        call->op.same_as(tl::ascend_mad_mx()))
+      mad_directions_[GetRef<Call>(call)] |= state;
+    return {state, 0};
+  }
+  FlowState VisitStmt_(const SBlockNode *op, uint8_t state) final {
+    FlowState init =
+        op->init ? VisitStmt(op->init.value(), state) : FlowState{state, 0};
+    FlowState body = VisitStmt(op->body, init.fallthrough);
+    body.breaks |= init.breaks;
+    return body;
+  }
+  FlowState VisitStmt_(const SBlockRealizeNode *op, uint8_t state) final {
+    FlowState block_out = VisitStmt(op->block, state);
+    if (!is_one(op->predicate)) {
+      block_out.fallthrough |= state;
+    }
+    return block_out;
+  }
+
+  std::unordered_map<Call, uint8_t, ObjectPtrHash, ObjectPtrEqual>
+      mad_directions_;
+  arith::Analyzer analyzer_;
+};
+
 // Detects whether a statement (loop body) contains a tl.loop_break() call,
 // without recursing into nested for loops (their breaks are their own).
 class LoopBreakDetector : public tirx::StmtExprVisitor {
@@ -1767,6 +1932,7 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
   mixed_captured_local_vars_.clear();
   mixed_external_vars_by_section_.clear();
   mixed_entry_snapshot_ids_.clear();
+  loop_condition_snapshot_ids_.clear();
   simd_pair_vars_.clear();
   gemm_emit_contexts_.clear();
   gemm_emit_context_by_call_.clear();
@@ -1796,6 +1962,7 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   ValidateKernelCapabilities(func);
   persistent_buffer_vars_ = SimtPersistentBufferCollector().Collect(func->body);
   hf32_mode_by_gemm_ = PTOHf32ModeAnalyzer::Analyze(func);
+  n_direction_by_mad_ = PTOMmadDirectionAnalyzer::Analyze(func);
   bool saw_copy_pad_value = false;
   bool has_uniform_const_copy_pad_value = true;
   tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
@@ -1985,7 +2152,12 @@ std::string CodeGenTileLangPTO::ScalarPointerBase_(const VarNode *buffer_var,
   std::string base = GetVarID(buffer_var);
   if (scope == "shared" || scope == "shared.dyn" || scope == "global" ||
       scope.empty()) {
-    if (NeedsCastptr_(buffer_var, elem_dtype)) {
+    // Mixed AIC/AIV kernels represent their shared UB arena as an integer
+    // address, even when the TIR handle annotation already has this dtype.
+    // addptr and SIMD memory operations still need a PTODSL pointer.
+    if (NeedsCastptr_(buffer_var, elem_dtype) ||
+        (current_function_has_gemm_ &&
+         (scope == "shared" || scope == "shared.dyn"))) {
       std::string pto_space =
           (scope == "shared" || scope == "shared.dyn") ? "ub" : "gm";
       base = "pto.castptr(" + base + ", " +
@@ -2216,7 +2388,9 @@ std::string CodeGenTileLangPTO::GetPointerExpr(const VarNode *buffer_var,
   // mirroring AscendC's (__gm__/__ubuf__ T*) casts.
   if (scope == "shared" || scope == "shared.dyn" || scope == "global" ||
       scope.empty()) {
-    if (NeedsCastptr_(buffer_var, elem_dtype)) {
+    if (NeedsCastptr_(buffer_var, elem_dtype) ||
+        (current_function_has_gemm_ &&
+         (scope == "shared" || scope == "shared.dyn"))) {
       std::string pto_space =
           (scope == "global" || scope.empty()) ? "gm" : "ub";
       base = "pto.castptr(" + base + ", " +
@@ -2963,18 +3137,30 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallNode *op) {
 
   int64_t sid = require_const(2, "sid");
   ICHECK_EQ(sid, 0) << "PTO L0C->UB MTE requires sid == 0, got " << sid;
-  int64_t n_size = require_const(3, "n_size");
-  int64_t m_size = require_const(4, "m_size");
-  int64_t dst_stride = require_const(5, "loop_dst_stride");
-  int64_t src_stride = require_const(6, "loop_src_stride");
-  ICHECK_GT(m_size, 0) << "PTO L0C->UB MTE requires m_size > 0";
-  ICHECK_GT(n_size, 0) << "PTO L0C->UB MTE requires n_size > 0";
-  ICHECK_GE(dst_stride, n_size)
-      << "PTO L0C->UB MTE destination stride must be at least n_size, got "
-      << dst_stride << " < " << n_size;
-  ICHECK_GE(src_stride, n_size)
-      << "PTO L0C->UB MTE source stride must be at least n_size, got "
-      << src_stride << " < " << n_size;
+  int64_t n_size_const = 0;
+  int64_t m_size_const = 0;
+  const bool has_const_n_size = TryGetConstInt(op->args[3], &n_size_const);
+  const bool has_const_m_size = TryGetConstInt(op->args[4], &m_size_const);
+  std::string n_size = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
+  std::string m_size = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
+  int64_t dst_stride_const = 0;
+  int64_t src_stride_const = 0;
+  const bool has_const_dst_stride =
+      TryGetConstInt(op->args[5], &dst_stride_const);
+  const bool has_const_src_stride =
+      TryGetConstInt(op->args[6], &src_stride_const);
+  std::string dst_stride = RemoveOutermostParentheses(PrintExpr_(op->args[5]));
+  std::string src_stride = RemoveOutermostParentheses(PrintExpr_(op->args[6]));
+  ICHECK(!has_const_m_size || m_size_const > 0)
+      << "PTO L0C->UB MTE requires m_size > 0";
+  ICHECK(!has_const_n_size || n_size_const > 0)
+      << "PTO L0C->UB MTE requires n_size > 0";
+  ICHECK(!has_const_n_size || !has_const_dst_stride ||
+         dst_stride_const >= n_size_const)
+      << "PTO L0C->UB MTE destination stride must be at least n_size";
+  ICHECK(!has_const_n_size || !has_const_src_stride ||
+         src_stride_const >= n_size_const)
+      << "PTO L0C->UB MTE source stride must be at least n_size";
 
   int64_t dual_dst_ctl = require_const(7, "dual_dst_ctl");
   ICHECK(dual_dst_ctl == 0 || dual_dst_ctl == 1 || dual_dst_ctl == 2)
@@ -3164,9 +3350,10 @@ std::string CodeGenTileLangPTO::GetE8M0ScalePtrExpr(const PrimExpr &expr) {
   // view. Compute the byte address from that physical storage type, then expose
   // the address to the MX instruction as an E8M0 matrix pointer.
   DataType storage_dtype = GetAnnotatedPointerDtype(expr, DataType::UInt(8));
-  ICHECK(storage_dtype.is_uint() &&
-         (storage_dtype.bits() == 8 || storage_dtype.bits() == 16))
-      << "PTO E8M0 scale storage must be uint8 or pair-packed uint16, got "
+  ICHECK(storage_dtype == DataType::UInt(8) ||
+         storage_dtype == DataType::UInt(16) ||
+         storage_dtype == DataType::Int(16))
+      << "PTO E8M0 scale storage must be uint8 or pair-packed 16-bit, got "
       << storage_dtype;
 
   std::string scope;
@@ -3597,11 +3784,13 @@ void CodeGenTileLangPTO::EmitAscendCopyGmToCbuf(const CallNode *op) {
         << "PTO GM->L1 MTE does not support dtype conversion: source is "
         << src_dtype << ", destination is " << dst_dtype;
     bool is_uint16_scale_storage =
-        dst_dtype == DataType::UInt(16) && src_dtype == DataType::UInt(16);
+        dst_dtype.bits() == 16 && src_dtype.bits() == 16 &&
+        (dst_dtype.is_int() || dst_dtype.is_uint()) &&
+        (src_dtype.is_int() || src_dtype.is_uint());
     ICHECK(IsSupportedCubeMteDtype(dst_dtype) || is_uint16_scale_storage)
         << "PTO GM->L1 MTE supports int8, float16, bfloat16, float32, and "
-           "float8_e4m3fn/float8_e5m2 matrix data, plus uint16 scale-factor "
-           "storage; got "
+           "float8_e4m3fn/float8_e5m2 matrix data, plus signed or unsigned "
+           "16-bit scale-factor storage; got "
         << dst_dtype;
     transfer_dtype = dst_dtype;
   }
@@ -3785,9 +3974,9 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallNode *op,
   ICHECK(sf_scope == "shared.l1" || sf_scope == "shared.l1.dyn")
       << "PTO MX scale-factor source must use shared.l1 storage, got `"
       << sf_scope << "`";
-  ICHECK(sf_dtype.is_scalar() && sf_dtype.is_uint() &&
-         (sf_dtype.bits() == 8 || sf_dtype.bits() == 16))
-      << "PTO MX scale-factor source supports uint8 or pair-packed uint16 "
+  ICHECK(sf_dtype == DataType::UInt(8) || sf_dtype == DataType::UInt(16) ||
+         sf_dtype == DataType::Int(16))
+      << "PTO MX scale-factor source supports uint8 or pair-packed 16-bit "
          "storage, got "
       << sf_dtype;
   ValidateFractalAddressAlignment_(sf_index, sf_dtype,
@@ -3860,10 +4049,10 @@ void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallNode *op, bool is_ca) {
   ICHECK(sf_scope == "shared.l1" || sf_scope == "shared.l1.dyn")
       << name << " scale-factor source must use shared.l1 storage, got scope "
       << sf_scope;
-  ICHECK(sf_dtype.is_scalar() && sf_dtype.is_uint() &&
-         (sf_dtype.bits() == 8 || sf_dtype.bits() == 16))
+  ICHECK(sf_dtype == DataType::UInt(8) || sf_dtype == DataType::UInt(16) ||
+         sf_dtype == DataType::Int(16))
       << name
-      << " scale-factor source supports uint8 or pair-packed uint16 "
+      << " scale-factor source supports uint8 or pair-packed 16-bit "
          "storage, got "
       << sf_dtype;
   ICHECK(IsSupportedCubeMteDtype(dst_dtype))
@@ -4038,6 +4227,10 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallNode *op) {
   std::string acc = GetAccPtrExpr(op->args[0], acc_dtype);
   std::string lhs = GetLocalPtrExpr(op->args[1], "left", lhs_dtype);
   std::string rhs = GetLocalPtrExpr(op->args[2], "right", rhs_dtype);
+  auto direction_it = n_direction_by_mad_.find(GetRef<Call>(op));
+  ICHECK(direction_it != n_direction_by_mad_.end())
+      << "PTO codegen did not analyze MAD direction";
+  const bool n_direction = direction_it->second;
 
   int64_t hf32_mode = 0;
   if (IsFloat32(lhs_dtype)) {
@@ -4078,6 +4271,9 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallNode *op) {
            << ", " << n << ", " << k;
     if (gemv_ctrl == 1) {
       stream << ", disable_gemv=True";
+    }
+    if (n_direction) {
+      stream << ", n_dir=True";
     }
     if (IsFloat32(lhs_dtype) && hf32_mode != 0) {
       // Encode the reaching HF32 state as a per-MAD tf32_mode attribute.
@@ -4768,6 +4964,11 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     return;
   }
 
+  if (op->op.same_as(tl::ascend_set_mmad_direction())) {
+    // The reaching direction is encoded as the per-MAD n_dir attribute.
+    return;
+  }
+
   if (op->op.same_as(tl::ascend_copy_matrix_cc_to_ub())) {
     EmitAscendCopyMatrixCcToUb(op);
     return;
@@ -4977,11 +5178,8 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     DataType elem_dtype = op->dtype.element_of();
     ICHECK_GT(op->dtype.lanes(), 1)
         << "tl.simd.vld should return a vector type, got " << op->dtype;
-    std::string dist = Downcast<StringImm>(op->args[1])->value;
-    // AscendC-style UNPK4_B* aliases → PTODSL UNPK4 token.
-    if (dist.rfind("UNPK4_B", 0) == 0) {
-      dist = "UNPK4";
-    }
+    std::string dist =
+        NormalizeVldDistribution(Downcast<StringImm>(op->args[1])->value);
     std::string offset =
         op->args.size() == 3U
             ? RemoveOutermostParentheses(PrintExpr_(op->args[2]))
@@ -5747,7 +5945,8 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         << "tl.simd.pair_get expects a bound pair variable as arg0";
     auto it = simd_pair_vars_.find(var);
     ICHECK(it != simd_pair_vars_.end())
-        << "tl.simd.pair_get references an unknown pair variable";
+        << "tl.simd.pair_get references an unknown pair variable "
+        << var->name_hint << " in " << GetRef<Call>(op);
     int64_t index = Downcast<IntImm>(op->args[1])->value;
     os << (index == 0 ? it->second.first : it->second.second);
     return;
@@ -6386,6 +6585,28 @@ void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
       simd_pair_vars_[op->var.get()] = {low, high};
       return;
     }
+    if (call->op.same_as(tl::simd_vld()) && call->args.size() == 3U) {
+      std::string ptr = PrintExpr_(call->args[0]);
+      std::string dist =
+          NormalizeVldDistribution(Downcast<StringImm>(call->args[1])->value);
+      std::string step = RemoveOutermostParentheses(PrintExpr_(call->args[2]));
+      DataType elem_dtype = call->dtype.element_of();
+      std::string pair_name = AllocVarID(op->var.get());
+      std::string value = pair_name + "_value";
+      std::string next_ptr = pair_name + "_next_ptr";
+      PrintIndent();
+      stream << value << " = pto.vlds(" << ptr
+             << ", pto.const(0), pto.vreg_type(" << call->dtype.lanes() << ", "
+             << ScalarType(elem_dtype) << ")";
+      if (!dist.empty() && dist != "NORM") {
+        stream << ", dist=\"" << dist << "\"";
+      }
+      stream << ")\n";
+      PrintIndent();
+      stream << next_ptr << " = pto.addptr(" << ptr << ", " << step << ")\n";
+      simd_pair_vars_[op->var.get()] = {value, next_ptr};
+      return;
+    }
   }
 
   // T.make_tensor binds a handle-typed Var to `reinterpret(handle, int_addr)`
@@ -6422,10 +6643,22 @@ void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
   std::string vid;
   std::string name_hint = op->var->name_hint;
   if (name_hint.rfind("__cond_", 0) == 0) {
+    if (SideEffect(op->value) == CallEffectKind::kPure) {
+      // Scheduling can reuse this predicate across tasks that mutate its input.
+      // Only pure predicates can be rematerialized; state reads need a
+      // snapshot.
+      var_idmap_[op->var.get()] = PrintExpr_(op->value);
+      return;
+    }
     // PTODSL's rewritten branch object uses attribute access for live-out
     // values. Python reserves double-underscore attribute names, so normalize
     // AutoSchedule's condition temporaries before they reach the DSL.
-    vid = "tl_cond_" + name_hint.substr(7);
+    auto snapshot_it = loop_condition_snapshot_ids_.find(op->var);
+    if (snapshot_it == loop_condition_snapshot_ids_.end()) {
+      vid = name_supply_->FreshName("tl_cond_" + name_hint.substr(7), false);
+    } else {
+      vid = snapshot_it->second;
+    }
     var_idmap_[op->var.get()] = vid;
   } else if (IsInlineableInvariantSimdBind(op->value)) {
     // Map the Var to the printed RHS so each use rematerializes the broadcast /
@@ -6754,10 +6987,56 @@ void CodeGenTileLangPTO::VisitStmt_(const WhileNode *op) {
   PrintIndent();
   stream << "while " << PrintCondition(op->condition) << ":\n";
   int while_scope = BeginScope();
+  // PTODSL can infer a nested loop's condition snapshots as outer loop inputs
+  // when an earlier break skips their definitions. Bind placeholders before
+  // any break; the authored Bind still takes the actual snapshot at its use.
+  // Nested while loops reuse these names instead of resetting them again.
+  std::vector<Var> initialized_conditions;
+  tirx::PostOrderVisit(op->body, [&](const ObjectRef &node) {
+    const auto *bind = node.as<BindNode>();
+    if (bind == nullptr) {
+      return;
+    }
+    std::string name_hint = bind->var->name_hint;
+    if (name_hint.rfind("__cond_", 0) != 0 ||
+        SideEffect(bind->value) == CallEffectKind::kPure ||
+        loop_condition_snapshot_ids_.count(bind->var)) {
+      return;
+    }
+    std::string name =
+        name_supply_->FreshName("tl_cond_" + name_hint.substr(7), false);
+    loop_condition_snapshot_ids_.emplace(bind->var, name);
+    initialized_conditions.push_back(bind->var);
+    PrintIndent();
+    stream << name
+           << " = pto.const(0, dtype=" << DataTypeName(bind->var.dtype())
+           << ")\n";
+  });
+  // PTODSL's native-while rewrite needs a value to be carried when it is
+  // assigned on some iterations and read after the loop. Materialize a
+  // read/write on every iteration for local.var values already in scope.
+  std::set<std::string> carried_locals;
+  tirx::PostOrderVisit(op->body, [&](const ObjectRef &node) {
+    const auto *store = node.as<BufferStoreNode>();
+    if (store == nullptr)
+      return;
+    const VarNode *var = store->buffer->data.get();
+    if (local_var_buffers_.count(var) && var_idmap_.count(var) &&
+        !store->buffer->dtype.is_vector()) {
+      carried_locals.insert(GetVarID(var));
+    }
+  });
+  for (const std::string &name : carried_locals) {
+    PrintIndent();
+    stream << name << " = " << name << "\n";
+  }
   ++native_loop_depth_;
   PrintStmt_(op->body);
   --native_loop_depth_;
   EndScope(while_scope);
+  for (const Var &var : initialized_conditions) {
+    loop_condition_snapshot_ids_.erase(var);
+  }
 
   // A runtime loop may execute zero times, so no copy-pad state established
   // only in its body is available after the loop.
