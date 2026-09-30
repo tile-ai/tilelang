@@ -510,7 +510,9 @@ def test_out_of_range_constant_negative_index_is_rejected():
         B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
-    with pytest.raises(Exception, match="out of range"):
+    # The index comes from the program under compilation, so the failure is reported
+    # as a user-facing ValueError rather than an internal invariant.
+    with pytest.raises(ValueError, match="out of range"):
         mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
         tl.transform.LegalizeNegativeIndex()(mod)
 
