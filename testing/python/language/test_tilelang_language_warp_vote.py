@@ -539,18 +539,14 @@ def test_predicate_intrinsics_preserve_truth_value(dtype, nonzero_values):
                 for lane in range(128)
             ]
             predicates = [bool(value) for value in values]
-            expected = [[0] * 128 for _ in range(7)]
+            block_results = [sum(predicates), int(all(predicates)), int(any(predicates))]
+            expected = [[] for _ in range(7)]
             for start in range(0, 128, warp_size):
                 warp = predicates[start : start + warp_size]
                 ballot = sum(int(predicate) << lane for lane, predicate in enumerate(warp))
-                for lane in range(start, start + warp_size):
-                    expected[0][lane] = int(any(warp))
-                    expected[1][lane] = int(all(warp))
-                    expected[2][lane] = ballot
-                    expected[3][lane] = ballot
-                    expected[4][lane] = sum(predicates)
-                    expected[5][lane] = int(all(predicates))
-                    expected[6][lane] = int(any(predicates))
+                warp_results = [int(any(warp)), int(all(warp)), ballot, ballot, *block_results]
+                for output, expected_value in zip(expected, warp_results):
+                    output.extend([expected_value] * len(warp))
             inputs = torch.tensor(values, dtype=getattr(torch, dtype), device="cuda")
             actual = kernel(inputs).cpu().tolist()
             if actual != expected:
