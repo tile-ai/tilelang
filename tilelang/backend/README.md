@@ -77,12 +77,6 @@ Target backends and execution backends are deliberately separate. For example,
 CUDA can execute through `tvm_ffi`, `nvrtc`, or `cython`; selecting `nvrtc` does
 not select a different target architecture or pass pipeline.
 
-For `target="pto"`, `execution_backend="auto"` selects the dedicated `pto`
-execution backend, just as CuTeDSL selects `cutedsl`. PTO compiles PTODSL through
-`ptoas` and Bisheng. Its adapter directly extends `BaseKernelAdapter`; its
-source wrapper and compiled launch runtime live under `jit/adapter/pto/`.
-PTO does not support `execution_backend="cython"` or `"tvm_ffi"`.
-
 ## Source Layout
 
 The Python implementation is split into common infrastructure and
