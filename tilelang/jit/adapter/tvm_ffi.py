@@ -209,9 +209,18 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
         return dynamic_symbolic_map
 
-    def _get_param_shapes(self):
-        """Convert logical parameter shapes to Torch storage shapes."""
+    def _convert_torch_func(self) -> Callable[..., Any]:
+        if getattr(self, "_ffi_callee_allocated_output_abi", False):
+            return self._convert_ffi_callee_allocated_output_func()
+
+        current_device_functor = None
+
+        # Convert TVM types to native Python types during initialization
+        # Convert tvm.DataType to torch.dtype for tensor creation
+        param_dtypes = [param.torch_dtype() for param in self.params]
+        # Convert TVM shape arrays to native Python lists
         param_shapes = []
+
         for param in self.params:
             native_shape = []
             for dim in param.shape:
@@ -226,19 +235,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 storage_dtype: dtype = dtype(param.torch_dtype())
                 native_shape[-1] = native_shape[-1] * tl_dtype.bits * tl_dtype.lanes // (storage_dtype.bits * storage_dtype.lanes)
             param_shapes.append(native_shape)
-
-        return param_shapes
-
-    def _convert_torch_func(self) -> Callable[..., Any]:
-        if getattr(self, "_ffi_callee_allocated_output_abi", False):
-            return self._convert_ffi_callee_allocated_output_func()
-
-        current_device_functor = None
-
-        # Convert TVM types to native Python types during initialization
-        # Convert tvm.DataType to torch.dtype for tensor creation
-        param_dtypes = [param.torch_dtype() for param in self.params]
-        param_shapes = self._get_param_shapes()
 
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None
