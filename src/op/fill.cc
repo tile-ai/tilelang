@@ -109,17 +109,19 @@ Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
       << "region size = " << node->region.size()
       << " != " << node->dst->shape.size();
   for (int i = 0; i < node->region.size(); i++) {
-    // bound check if region is static
+    // bound check if region is static. The region comes from the TileLang
+    // program under compilation, so a region that does not fit is a frontend
+    // validation failure rather than an internal invariant.
     if (const auto *min_imm = node->region[i]->min.as<IntImmNode>()) {
       int64_t min = min_imm->value;
-      ICHECK_GE(min, 0) << "region[" << i << "] = " << min << " < 0";
+      CHECK(min >= 0, ValueError) << "region[" << i << "] = " << min << " < 0";
     }
     if (const auto *extent_imm = node->region[i]->extent.as<IntImmNode>()) {
       // Only perform the upper-bound check when the destination shape
       // extent is also statically known. If the shape is symbolic (e.g., Var),
       // skip this static check to avoid invalid downcasts.
       if (const auto *shape_imm = node->dst->shape[i].as<IntImmNode>()) {
-        ICHECK_LE(extent_imm->value, shape_imm->value)
+        CHECK(extent_imm->value <= shape_imm->value, ValueError)
             << "region[" << i << "] = " << extent_imm->value << " > "
             << node->dst->shape[i];
         // `extent <= shape` only bounds a region anchored at the start of the
@@ -127,7 +129,8 @@ Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
         // to fit: `As[6:12]` into a shape-8 buffer has a legal extent and still
         // writes four elements past the end.
         if (const auto *min_imm = node->region[i]->min.as<IntImmNode>()) {
-          ICHECK_LE(min_imm->value + extent_imm->value, shape_imm->value)
+          CHECK(min_imm->value + extent_imm->value <= shape_imm->value,
+                ValueError)
               << "region[" << i << "] = [" << min_imm->value << ", "
               << min_imm->value + extent_imm->value << ") exceeds "
               << node->dst->shape[i];
