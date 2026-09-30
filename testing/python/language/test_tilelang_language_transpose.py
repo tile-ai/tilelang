@@ -214,5 +214,24 @@ def test_tilelang_transpose_accepts_swapped_dst_shape():
     _compile_transpose_shape_kernel(_make_transpose_shape_kernel((3, 4), (4, 3)))
 
 
+@tilelang.testing.requires_cuda
+def test_tilelang_transpose_accepts_higher_rank_swapped_trailing_extents():
+    """Control: only the trailing two extents are constrained.
+
+    The documented shape is (..., M, N) -> (..., N, M), so leading extents that
+    agree must still compile.
+    """
+    _compile_transpose_shape_kernel(_make_transpose_shape_kernel((2, 3, 4), (2, 4, 3)))
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_transpose_rejects_higher_rank_non_swapped_trailing_extents():
+    """The same rejection applies when the operands have leading extents."""
+    with pytest.raises(ValueError) as exc_info:
+        _compile_transpose_shape_kernel(_make_transpose_shape_kernel((2, 3, 4), (2, 3, 4)))
+
+    assert "Transpose requires" in str(exc_info.value)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
