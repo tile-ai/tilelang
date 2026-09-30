@@ -525,11 +525,7 @@ def test_predicate_intrinsics_preserve_truth_value(dtype, nonzero_values):
             B[6, lane] = T.cast(T.syncthreads_or(predicate), "uint64")
 
     kernel = tilelang.compile(main, out_idx=[1])
-    warp_size = (
-        torch.cuda.get_device_properties(0).warp_size
-        if hasattr(torch.cuda.get_device_properties(0), "warp_size")
-        else (64 if torch.version.hip else 32)
-    )
+    warp_size = getattr(torch.cuda.get_device_properties(0), "warp_size", 32)
     for value in nonzero_values:
         for pattern in ["zero", "all", "alternating", "one_per_warp"]:
             values = [
