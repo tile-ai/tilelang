@@ -64,5 +64,53 @@ def test_reduce_abs_reduce_signed_source_into_unsigned_destination(op: str, expe
     torch.testing.assert_close(out[0], torch.tensor(expected, dtype=torch.uint32, device="cuda"), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("src_dtype", ["int8", "int16"])
+@pytest.mark.parametrize("op", ["absmax", "abssum"])
+def test_reduce_abs_of_a_narrow_signed_source(src_dtype, op):
+    """A narrow source needs the negation done in the unsigned accumulator.
+
+    Negating the minimum of a narrow signed type overflows back onto itself, so
+    taking the absolute value in the source dtype leaves it negative and the cast
+    to the unsigned accumulator wraps it into a huge number:
+
+        int8 [-128, -128, -1, -1] -> 4294967038 instead of 258
+    """
+    info = torch.iinfo(getattr(torch, src_dtype))
+    values = [info.min, info.min, -1, -1]
+    expected = (abs(info.min) * 2 + 2) if op == "abssum" else abs(info.min)
+
+    @T.prim_func
+    def main(A: T.Tensor((N,), src_dtype), B: T.Tensor((1,), "uint32")):
+        with T.Kernel(1, threads=N):
+            As = T.alloc_fragment((N,), src_dtype)
+            Bs = T.alloc_fragment((1,), "uint32")
+            T.copy(A, As)
+            getattr(T, "reduce_" + op)(As, Bs, dim=0)
+            T.copy(Bs, B)
+
+    A = torch.tensor(values, dtype=getattr(torch, src_dtype), device="cuda")
+    out = tilelang.compile(main, out_idx=[1])(A)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out[0], torch.tensor(expected, dtype=torch.uint32, device="cuda"), rtol=0, atol=0)
+
+
+def test_reduce_abs_of_the_widest_value_of_the_same_width():
+    """The magnitude of the minimum only fits in the unsigned accumulator."""
+
+    @T.prim_func
+    def main(A: T.Tensor((N,), "int32"), B: T.Tensor((1,), "uint32")):
+        with T.Kernel(1, threads=N):
+            As = T.alloc_fragment((N,), "int32")
+            Bs = T.alloc_fragment((1,), "uint32")
+            T.copy(A, As)
+            T.reduce_abssum(As, Bs, dim=0)
+            T.copy(Bs, B)
+
+    A = torch.tensor([-(2**31), 0, 0, 0], dtype=torch.int32, device="cuda")
+    out = tilelang.compile(main, out_idx=[1])(A)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out[0], torch.tensor(2**31, dtype=torch.uint32, device="cuda"), rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
