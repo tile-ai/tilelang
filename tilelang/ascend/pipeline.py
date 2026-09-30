@@ -75,6 +75,11 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.VerifyReducerEpoch()(mod)
     mod = tilelang.transform.VerifyBufferInit()(mod)
 
+    # Wrap eligible Parallel compute regions into SIMT_VF blocks before
+    # unrolling, so the generated VF boundaries are in place for the
+    # downstream unroll/layout/VFChecker stages.
+    mod = ascend_transform.AutoSimtVF()(mod)
+
     # Materialize only user-requested explicit unrolls outside VF blocks so
     # LayoutInference and AutoSchedule can consume the expanded operations.
     mod = ascend_transform.UnrollLoopSkipVF()(mod)
@@ -173,9 +178,9 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         disable_reuse=disable_reuse,
     )(mod)
 
-    # Normalize each hard_event into its 8-slot flag namespace: compact sparse
-    # out-of-range flag_ids when they fit, or spill excess blocks to the shared
-    # get_buf/rls_buf mutex pool (knapsack) when capacity is exceeded.
+    # Split each hard_event between its 8-slot flag namespace and the shared
+    # get_buf/rls_buf mutex pool (knapsack) to minimize wasted flag_ids; a no-op
+    # when no hard_event overflows 8 slots.
     mod = ascend_transform.RewriteFlagToBuf()(mod)
 
     mod = ascend_transform.AscendThreadSync("shared")(mod)
