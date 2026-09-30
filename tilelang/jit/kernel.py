@@ -418,10 +418,10 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "pto":
-            from tilelang.jit.adapter.pto.adapter import PTOCythonKernelAdapter
+            from tilelang.jit.adapter.pto import PTOKernelAdapter
 
             adapter = create_adapter(
-                PTOCythonKernelAdapter,
+                PTOKernelAdapter,
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -505,9 +505,9 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "pto":
-            from tilelang.jit.adapter.pto.adapter import PTOCythonKernelAdapter
+            from tilelang.jit.adapter.pto import PTOKernelAdapter
 
-            adapter = PTOCythonKernelAdapter.from_database(
+            adapter = PTOKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,
