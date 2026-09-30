@@ -118,13 +118,17 @@ def _tir_u32_to_int_to_float(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, 
 
 
 def _tir_packed_uint_to_uint_to_float(storage_nbit: int):
+    """Decode an nbit-wide field of an unsigned word as its plain unsigned value.
+
+    No zero-point is subtracted: the field is unsigned, so masking and shifting it
+    out is the whole decode. The signed sibling sign-extends instead of biasing.
+    """
     storage_dtype = "uint" + str(storage_nbit)
 
     def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
         assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
-        max_int_value = (1 << (nbit - 1)) - 1
         return ((val >> (pos.astype(T.uint32) * tirx.const(nbit, T.uint32))) & tirx.const(
-            (1 << nbit) - 1, "uint32")).astype(dtype) - tirx.const(max_int_value, dtype)
+            (1 << nbit) - 1, "uint32")).astype(dtype)
 
     return f_convert
 
