@@ -69,7 +69,9 @@ def atomic_max(
         >>> # Use in parallel reduction to find global maximum
         >>> @T.prim_func
         >>> def find_max(data: T.Buffer, result: T.Buffer):
-        >>>     result[0] = T.min_value("float32")  # seed with a lower bound for the domain
+        >>>     # `result[0]` must already hold a lower bound for the domain when the
+        >>>     # kernel is launched: an initialization written here would run in every
+        >>>     # thread and could overwrite an update another thread already made.
         >>>     for i in T.thread_binding(128, "threadIdx.x"):
         >>>         atomic_max(result[0], data[i])  # a whole-buffer destination applies once
 
@@ -148,7 +150,7 @@ def atomic_min(
         >>> # Find minimum across threads
         >>> @T.prim_func
         >>> def find_min(data: T.Buffer, result: T.Buffer):
-        >>>     result[0] = T.max_value("float32")  # seed with an upper bound for the domain
+        >>>     # As above, but `result[0]` has to hold an upper bound for the domain.
         >>>     for i in T.thread_binding(256, "threadIdx.x"):
         >>>         atomic_min(result[0], data[i])  # a whole-buffer destination applies once
 
@@ -242,7 +244,7 @@ def atomic_add(
         >>> # Parallel sum reduction
         >>> @T.prim_func
         >>> def parallel_sum(data: T.Buffer, result: T.Buffer):
-        >>>     result[0] = 0  # seed the identity for a sum
+        >>>     # As above: the identity for a sum is zero.
         >>>     for i in T.thread_binding(1024, "threadIdx.x"):
         >>>         atomic_add(result[0], data[i])  # a whole-buffer destination applies once
 
