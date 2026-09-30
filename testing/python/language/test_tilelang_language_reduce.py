@@ -1246,17 +1246,19 @@ def _make_offset_range_reduce_kernel(batch):
         with T.Kernel(1, threads=128):
             x_frag = T.alloc_fragment((rows, width), "float32")
             s_frag = T.alloc_fragment((rows,), "float32")
-            T.annotate_layout({
-                x_frag: T.Fragment(
-                    x_frag.shape,
-                    forward_fn=lambda i, j: (_OFFSET_RANGE_START + j // vec, i * vec + j % vec),
-                ),
-                s_frag: T.Fragment(
-                    s_frag.shape,
-                    forward_fn=lambda i, rep: (_OFFSET_RANGE_START + rep, i),
-                    replicate=_OFFSET_RANGE_THREADS,
-                ),
-            })
+            T.annotate_layout(
+                {
+                    x_frag: T.Fragment(
+                        x_frag.shape,
+                        forward_fn=lambda i, j: (_OFFSET_RANGE_START + j // vec, i * vec + j % vec),
+                    ),
+                    s_frag: T.Fragment(
+                        s_frag.shape,
+                        forward_fn=lambda i, rep: (_OFFSET_RANGE_START + rep, i),
+                        replicate=_OFFSET_RANGE_THREADS,
+                    ),
+                }
+            )
             for i, j in T.Parallel(rows, width):
                 x_frag[i, j] = x[i, j]
             T.reduce_sum(x_frag, s_frag, dim=1, batch=batch)

@@ -1025,11 +1025,12 @@ template <typename Impl> struct ReduceLowerer {
           int block_threads =
               static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
           auto thread_offset = lower_args.thread_bounds->min;
-          // The batched all-reduce has to carry the same resolved thread range as the
-          // scalar arm below. When the reducing threads are a partial range that does
-          // not start at thread 0, using the block's bounds here both mis-indexes the
-          // offset and sizes the named barrier for threads that do not participate, so
-          // their untouched registers get folded into the reduction.
+          // The batched all-reduce has to carry the same resolved thread range
+          // as the scalar arm below. When the reducing threads are a partial
+          // range that does not start at thread 0, using the block's bounds
+          // here both mis-indexes the offset and sizes the named barrier for
+          // threads that do not participate, so their untouched registers get
+          // folded into the reduction.
           PrimExpr all_threads = lower_args.thread_bounds->extent;
           if (reducing_threads > 32 &&
               TargetSupportsNamedBarrier(lower_args.target)) {
