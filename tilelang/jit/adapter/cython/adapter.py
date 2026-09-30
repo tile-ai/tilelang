@@ -125,6 +125,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
 
+    wrapper_class = TLWrapper
+    library_generator_class = LibraryGenerator
+
     def __init__(
         self,
         params: list[KernelParam],
@@ -174,8 +177,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.dynamic_strides_map = static_buffer_infos[3]
 
         self.verbose = verbose
-        self.wrapper = TLWrapper(self.target)
-        self.lib_generator = LibraryGenerator(self.target, verbose=verbose)
+        self.wrapper = self.wrapper_class(self.target)
+        self.lib_generator = self.library_generator_class(self.target, verbose=verbose)
         self.lib_generator.assign_pass_configs(pass_configs)
         self.lib_generator.assign_compile_flags(compile_flags)
 
@@ -185,10 +188,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_device_module(device_mod)
         self.host_kernel_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
-        self.lib_generator.update_lib_code(self.host_kernel_source)
-        if self.wrapper.pto_kernel_source is not None:
-            self.lib_generator.update_pto_kernels(self.wrapper.pto_kernel_source, self.wrapper.pto_kernel_names)
-        self.lib_generator.compile_lib()
+        self._compile_library()
         self.lib = self.lib_generator.load_lib()
 
         self.lib.get_last_error.restype = ctypes.c_char_p
@@ -211,6 +211,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
         self.cython_wrapper.set_ptr_map(self.ptr_map)
         self._post_init()
+
+    def _compile_library(self):
+        """Compile the host wrapper, allowing backends to supply device artifacts."""
+        self.lib_generator.update_lib_code(self.host_kernel_source)
+        self.lib_generator.compile_lib()
 
     @classmethod
     def from_database(
@@ -257,7 +262,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.dynamic_strides_map = static_buffer_infos[3]
 
         adapter.verbose = verbose
-        adapter.lib_generator = LibraryGenerator(adapter.target, verbose=verbose)
+        adapter.lib_generator = cls.library_generator_class(adapter.target, verbose=verbose)
         adapter.lib_generator.assign_pass_configs(pass_configs)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)

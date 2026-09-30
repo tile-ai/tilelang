@@ -13,9 +13,9 @@ from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
     BaseKernelAdapter,
     CachedTextSource,
-    CythonKernelAdapter,
+    get_cython_adapter_class,
     CuTeDSLKernelAdapter,
-    TVMFFIKernelAdapter,
+    get_tvm_ffi_adapter_class,
     MetalKernelAdapter,
 )
 from tilelang.profiler import Profiler, TensorSupplyType
@@ -344,7 +344,7 @@ class JITKernel(Generic[_P, _T]):
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert artifact.rt_mod is not None, "tvm_ffi backend requires a runtime module."
             adapter = create_adapter(
-                TVMFFIKernelAdapter,
+                get_tvm_ffi_adapter_class(target),
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -359,7 +359,7 @@ class JITKernel(Generic[_P, _T]):
             )
         elif execution_backend == "cython":
             adapter = create_adapter(
-                CythonKernelAdapter,
+                get_cython_adapter_class(target),
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -440,7 +440,7 @@ class JITKernel(Generic[_P, _T]):
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "tvm_ffi":
-            adapter = TVMFFIKernelAdapter.from_database(
+            adapter = get_tvm_ffi_adapter_class(target).from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,
@@ -452,7 +452,7 @@ class JITKernel(Generic[_P, _T]):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "cython":
-            adapter = CythonKernelAdapter.from_database(
+            adapter = get_cython_adapter_class(target).from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,
