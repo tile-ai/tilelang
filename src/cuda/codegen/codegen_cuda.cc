@@ -769,10 +769,20 @@ void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
   PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
   std::string start = PrintExpr(op->min);
+  // tirx::ForNode carries a step and the base CodeGenC already emits it, so a
+  // hard-coded `++vid` here silently visits every index of a stepped loop
+  // instead of every step-th one.
+  std::string step = op->step.has_value() ? PrintExpr(*op->step) : "";
   stream << "for (";
   PrintType(op->loop_var.dtype(), stream);
   stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
-         << "; ++" << vid << ") {\n";
+         << "; ";
+  if (step.empty()) {
+    stream << "++" << vid;
+  } else {
+    stream << vid << " += " << step;
+  }
+  stream << ") {\n";
   int for_scope = BeginScope();
   // A lexical_alloc_scope spanning the entire loop body is redundant with
   // the loop's own braces; unwrap it to avoid emitting `{ {`.
