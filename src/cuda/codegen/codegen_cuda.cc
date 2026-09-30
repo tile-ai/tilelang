@@ -1811,6 +1811,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // 2. Add a new if statement like the one below.
   // 3. In src/cuda/target_utils.cc, allow this vectorizable cast.
 
+  // `round` and its `rbits` operand have a PTX lowering only for an f32 source,
+  // in the four groups below that consult `cast_round` themselves. Every other
+  // source dtype reaches a vectorized branch that emits the plain conversion
+  // helper and returns, so it never reaches the rejection at the end of this
+  // function and the argument is dropped silently -- while the same cast
+  // written in a scalar loop is rejected. Refuse it for those sources here.
+  if (!cast_round.empty() && !(from_ty.is_float() && from_ty.bits() == 32)) {
+    LOG(FATAL) << "round '" << cast_round << "' is not supported for cast from "
+               << from_ty << " to " << target_ty
+               << " (only supported f32 packed stochastic conversions are "
+                  "available)";
+  }
+
   // Handle conversion from float16 to float32
   if (from_ty.is_float16() && target_ty.is_float() && target_ty.bits() == 32) {
     // Use __half22float2 for vectorized conversion (half2 -> float2)
