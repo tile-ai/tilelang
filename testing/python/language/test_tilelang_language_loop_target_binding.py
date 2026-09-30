@@ -200,6 +200,27 @@ def test_constant_rebind_at_the_same_level_is_still_accepted():
     tilelang.compile(kernel, target="cuda")
 
 
+@pytest.mark.parametrize("spelling", ["int", "IntImm"])
+def test_both_constant_spellings_expire_alike(spelling):
+    """`7` and `T.int32(7)` are the same constant and must leave the same record.
+
+    Only the `int` path cleared the name's record, so a record left by an earlier
+    expression binding of the same name survived an `IntImm` reassignment and the
+    later read reported the name as outside its defining region.
+    """
+
+    @T.prim_func
+    def kernel(A: T.Tensor((2,), "int32"), Out: T.Tensor((2,), "int32")):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(1):
+                val = A[i]
+                val = 7 if spelling == "int" else T.int32(7)
+            for j in T.serial(1, 2):
+                Out[j] = val
+
+    tilelang.compile(kernel, target="cuda")
+
+
 def test_constant_stays_reusable_once_its_region_closed():
     """Control: a constant is not a TIR binding, so it does not expire with its region."""
 

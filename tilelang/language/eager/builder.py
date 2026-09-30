@@ -689,6 +689,12 @@ class Builder(BaseBuilder):
             return value
         if isinstance(value, tirx.IntImm) and value.dtype == "int32":
             self.reject_conditional_constant_rebind(name)
+            # Clear the record here too. A constant is not a TIR binding, so a
+            # record left by an earlier expression binding of the same name must
+            # not outlive the region it was made in. Without this, reading the
+            # same constant as `T.int32(7)` rather than `7` reported the name as
+            # outside its defining region once that region had closed.
+            self.name_inside_frame.pop(name, None)
             return value.value
         if isinstance(value, (Var, Buffer)):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
