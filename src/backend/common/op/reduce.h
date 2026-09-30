@@ -270,6 +270,14 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
 
   PrimExpr rhs = b;
   if (acc->dtype != rhs->dtype) {
+    // An abs-reduce has to take the absolute value in the source dtype. Casting
+    // a signed element into an unsigned accumulator first turns -3 into
+    // 4294967293, and the `is_uint()` short-circuit further down then reads the
+    // already-cast value as "unsigned, so it is its own absolute value".
+    if ((op.type->IsAbsSum() || op.type->IsAbsMax()) && rhs.dtype().is_int() &&
+        acc->dtype.is_uint()) {
+      rhs = Max(rhs, -rhs);
+    }
     rhs = Cast(acc->dtype, rhs);
   }
 

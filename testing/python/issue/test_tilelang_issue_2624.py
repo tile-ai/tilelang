@@ -36,5 +36,33 @@ def test_reduce_absmax_abssum_with_positive_input(op: str, dtype: str):
     torch.testing.assert_close(raw_op, abs_op, rtol=0, atol=0)
 
 
+def make_signed_to_unsigned_kernel(op):
+    @T.prim_func
+    def main(A: T.Tensor((N,), "int32"), B: T.Tensor((1,), "uint32")):
+        with T.Kernel(1, threads=N):
+            As = T.alloc_fragment((N,), "int32")
+            Bs = T.alloc_fragment((1,), "uint32")
+            T.copy(A, As)
+            getattr(T, "reduce_" + op)(As, Bs, dim=0)
+            T.copy(Bs, B)
+
+    return main
+
+
+@pytest.mark.parametrize(("op", "expected"), [("absmax", 3), ("abssum", 6)])
+def test_reduce_abs_reduce_signed_source_into_unsigned_destination(op: str, expected: int):
+    """The absolute value has to be taken before the accumulator cast.
+
+    A signed source cast into an unsigned accumulator first turns -3 into
+    4294967293, and the `is_uint()` short-circuit in `MakeReduce` then reads the
+    already-cast value as its own absolute value, so the negatives survive as
+    huge unsigned numbers.
+    """
+    A = torch.tensor([-3, -2, -1, 0], dtype=torch.int32, device="cuda")
+    out = tilelang.compile(make_signed_to_unsigned_kernel(op), out_idx=[1])(A)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out[0], torch.tensor(expected, dtype=torch.uint32, device="cuda"), rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
