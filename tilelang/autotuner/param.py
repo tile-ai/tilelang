@@ -58,7 +58,7 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] = "auto"
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"] = "auto"
     target: TargetLike = "auto"
     target_host: TargetLike | None = None
     verbose: bool = False

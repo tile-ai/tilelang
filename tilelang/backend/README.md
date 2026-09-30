@@ -62,9 +62,9 @@ resolve either backend again.
 
 - A **target backend**, such as CUDA, ROCm, CPU, Metal, or WebGPU, owns the
   dialect, lowering, codegen, and target-specific toolchain primitives.
-- An **execution backend**, such as `tvm_ffi`, `nvrtc`, `cython`, `torch`, or
-  `cutedsl`, is a reusable Build/JIT/Runtime implementation that may serve one
-  or more compatible target backends.
+- An **execution backend**, such as `tvm_ffi`, `nvrtc`, `cython`, `torch`,
+  `cutedsl`, or `pto`, is a reusable Build/JIT/Runtime implementation that may
+  serve one or more compatible target backends.
 - A target backend **declares execution compatibility** and satisfies the
   selected implementation's source, artifact, and launch-metadata contract; it
   does not normally implement another JIT adapter or runtime.
@@ -76,6 +76,11 @@ resolve either backend again.
 Target backends and execution backends are deliberately separate. For example,
 CUDA can execute through `tvm_ffi`, `nvrtc`, or `cython`; selecting `nvrtc` does
 not select a different target architecture or pass pipeline.
+
+For `target="pto"`, `execution_backend="auto"` selects the dedicated `pto`
+execution backend, just as CuTeDSL selects `cutedsl`. PTO compiles PTODSL through
+`ptoas` and Bisheng and reuses the Cython runtime adapter; it does not support
+`execution_backend="cython"` or `"tvm_ffi"`.
 
 ## Source Layout
 
