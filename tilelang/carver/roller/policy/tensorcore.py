@@ -320,16 +320,7 @@ class TensorCorePolicy(DefaultPolicy):
         intrin_info = node.get_tag("intrin_info")
         if intrin_info:
             codegen_dict.intrin_info = IntrinInfo(**intrin_info)
-            if intrin_info["out_dtype"] in ["float32"]:
-                codegen_dict.shared_scope = "shared.dyn"
-        # smem capacity
-        # TODO: This is a dummy mul which avoid reusing some shared memory.
-        # Should be removed in the future.
-        if td.smem_cost > (self.arch.smem_cap):
-            # Tile Dict: {td.output_tile} Shared memory exceeds the static capacity
-            # use dynamic shared memory.
-            codegen_dict.shared_scope = "shared.dyn"
-
+        # Preserve the existing dynamic shared-memory scope for tensor-core hints.
         codegen_dict.shared_scope = "shared.dyn"
 
         codegen_dict.complete_config(node)
