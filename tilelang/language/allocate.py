@@ -30,6 +30,8 @@ from .dtypes import dtype as tl_dtype
 from .eager.builder import OutTensor
 from .proxy import Tensor, ptr as _ptr_sentinel
 
+_MAX_MBAR_ARRIVE_COUNT = (1 << 20) - 1
+
 
 def _with_span(buffer: Buffer) -> Buffer:
     """Stamp the buffer with the current user source location.
@@ -196,8 +198,7 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
 
     Args:
         arrive_count (int | list[int]): The number of threads that need to arrive at each barrier.
-            Every count must be at least 1: an mbarrier arrive count of 0 has no defined meaning,
-            and a negative count would be reinterpreted as a garbage unsigned value at init.
+            Every count must be in [1, 2**20 - 1], the range supported by `mbarrier.init`.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a barrier
@@ -210,6 +211,8 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     counts = [arrive_count] if isinstance(arrive_count, int) else list(arrive_count)
     if any(count <= 0 for count in counts):
         raise ValueError(f"alloc_barrier: arrive_count must be at least 1, got {counts}")
+    if any(count > _MAX_MBAR_ARRIVE_COUNT for count in counts):
+        raise ValueError(f"alloc_barrier: arrive_count must be at most {_MAX_MBAR_ARRIVE_COUNT}, got {counts}")
     # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]
@@ -229,7 +232,7 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
 
     Args:
         arrive_count (int | list[int]): The number of threads that need to arrive at each barrier.
-            Every count must be at least 1, as for `alloc_barrier`.
+            Every count must be in [1, 2**20 - 1], as for `alloc_barrier`.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a cluster barrier
@@ -237,6 +240,8 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
     counts = [arrive_count] if isinstance(arrive_count, int) else list(arrive_count)
     if any(count <= 0 for count in counts):
         raise ValueError(f"alloc_cluster_barrier: arrive_count must be at least 1, got {counts}")
+    if any(count > _MAX_MBAR_ARRIVE_COUNT for count in counts):
+        raise ValueError(f"alloc_cluster_barrier: arrive_count must be at most {_MAX_MBAR_ARRIVE_COUNT}, got {counts}")
     # Normalize to list
     if isinstance(arrive_count, int):
         arrive_count = [arrive_count]

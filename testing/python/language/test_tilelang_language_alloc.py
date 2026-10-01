@@ -232,12 +232,12 @@ def test_alloc_global():
     run_alloc_global_eagerjit(1024, 128, T.float16)
 
 
-def alloc_barrier_kernel(arrive_count):
+def alloc_barrier_kernel(arrive_count, allocator=T.alloc_barrier):
 
     @T.prim_func
     def main(A: T.Tensor((128,), T.float16)):
         with T.Kernel(1, threads=128):
-            bar = T.alloc_barrier(arrive_count)  # noqa: F841
+            bar = allocator(arrive_count)  # noqa: F841
 
     return main
 
@@ -249,6 +249,17 @@ def test_alloc_barrier_rejects_non_positive_arrive_count():
         with pytest.raises(ValueError, match="arrive_count must be at least 1"):
             alloc_barrier_kernel(bad)
     alloc_barrier_kernel(128)  # valid count still traces
+
+
+def test_alloc_barrier_rejects_arrive_count_above_20bit_range():
+    import pytest
+
+    for allocator in (T.alloc_barrier, T.alloc_cluster_barrier):
+        with pytest.raises(ValueError, match="arrive_count must be at most 1048575"):
+            alloc_barrier_kernel(1 << 20, allocator)
+        alloc_barrier_kernel((1 << 20) - 1, allocator)
+        with pytest.raises(ValueError, match="arrive_count must be at most 1048575"):
+            alloc_barrier_kernel([128, 1 << 20], allocator)
 
 
 if __name__ == "__main__":
