@@ -486,7 +486,9 @@ def visit_if(self: Parser, node: doc.If) -> None:
     with self.var_table.with_frame():
         predicate = self.eval_expr(node.test)
         if isinstance(predicate, (PrimExpr, tvm.tirx.expr.ExprOp)):
-            with T.If(self.eval_expr(node.test)):
+            if not predicate.dtype.is_bool():
+                self.report_error(node.test, f"If condition must be a boolean expression, but got {predicate.dtype}")
+            with T.If(predicate):
                 with T.Then():
                     with self.var_table.with_frame():
                         self.visit_body(node.body)
@@ -519,6 +521,8 @@ def visit_assert(self: Parser, node: doc.Assert) -> None:
     """
     cond = self.eval_expr(node.test)
     msg = self.eval_expr(node.msg)
+    if isinstance(cond, (PrimExpr, tvm.tirx.expr.ExprOp)) and not cond.dtype.is_bool():
+        self.report_error(node.test, f"Assert condition must be a boolean expression, but got {cond.dtype}")
     frame = T.Assert(cond, msg)
     frame.add_callback(partial(frame.__exit__, None, None, None))
     frame.__enter__()
