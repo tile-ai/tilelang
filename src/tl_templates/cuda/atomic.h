@@ -320,6 +320,12 @@ TL_DEVICE void AtomicAddx4Scalar(T *ref, T x, T y, T z, T w) {
   atomicAdd(ref + 3, w);
 }
 
+template <typename T> TL_DEVICE void CheckAtomicAddDestinationType() {
+  static_assert(!std::is_same_v<T, short> &&
+                    !std::is_same_v<T, unsigned short>,
+                "CUDA atomic_add does not support int16 or uint16 destinations");
+}
+
 TL_DEVICE float2 AtomicAddx2ScalarRet(float *ref, float2 add_val) {
   float2 ret;
   ret.x = atomicAdd(ref + 0, add_val.x);
@@ -472,8 +478,11 @@ template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  if constexpr (std::is_same_v<NT1, half> ||
-                std::is_same_v<NT1, __nv_bfloat16>) {
+  if constexpr (std::is_same_v<NT1, short> ||
+                std::is_same_v<NT1, unsigned short>) {
+    tl_atomic_detail::CheckAtomicAddDestinationType<NT1>();
+  } else if constexpr (std::is_same_v<NT1, half> ||
+                       std::is_same_v<NT1, __nv_bfloat16>) {
     if (tl_atomic_detail::IsRelaxedMemoryOrder(memory_order)) {
       atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
     } else {
@@ -508,8 +517,13 @@ template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  (void)memory_order;
-  atomicAdd(reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val));
+  if constexpr (std::is_same_v<NT1, short> ||
+                std::is_same_v<NT1, unsigned short>) {
+    tl_atomic_detail::CheckAtomicAddDestinationType<NT1>();
+  } else {
+    (void)memory_order;
+    atomicAdd(reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val));
+  }
 }
 #endif
 
@@ -517,7 +531,10 @@ template <typename T1, typename T2>
 TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
                           int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  if constexpr (std::is_same_v<NT1, bfloat16_t>) {
+  if constexpr (std::is_same_v<NT1, short> ||
+                std::is_same_v<NT1, unsigned short>) {
+    tl_atomic_detail::CheckAtomicAddDestinationType<NT1>();
+  } else if constexpr (std::is_same_v<NT1, bfloat16_t>) {
     // Pre-SM80 only: cuda::atomic_ref has no fetch_add for bfloat16_t, so use
     // the atomicAdd overload above. Memory order is dropped, as in AtomicAdd.
     (void)memory_order;
