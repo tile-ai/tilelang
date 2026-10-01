@@ -208,6 +208,16 @@ def run_atomic_addx4(M, N, block_M, block_N):
     torch.testing.assert_close(B, ref_B, atol=1e-3, rtol=1e-3)
 
 
+@pytest.mark.parametrize("dtype", [T.int32, T.int64])
+def test_atomic_addx4_rejects_integer_destination(dtype):
+    with pytest.raises(TypeError, match="atomic_addx4 supports only float16, bfloat16, and float32"):
+
+        @T.prim_func
+        def atomic_addx4_integer(A: T.Tensor((4,), dtype), B: T.Tensor((4,), dtype)):
+            with T.Kernel(1, threads=1):
+                T.atomic_addx4(B[0:4], A[0:4])
+
+
 @tilelang.jit
 def atomic_addx4_sliced_dst_program(N, M, dtype=T.float32):
     @T.prim_func

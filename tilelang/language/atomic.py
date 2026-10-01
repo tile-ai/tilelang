@@ -23,11 +23,15 @@ _ATOMIC_LOAD_MEMORY_ORDERS = frozenset({"relaxed", "consume", "acquire", "seq_cs
 _ATOMIC_STORE_MEMORY_ORDERS = frozenset({"relaxed", "release", "seq_cst"})
 
 
-def _vector_atomic_return_dtype(dst: BufferLikeType | Var, lanes: int) -> DataType:
+def _buffer_dtype(dst: BufferLikeType | Var) -> DataType:
     if isinstance(dst, Var) and T.has_let_value(dst):
         dst = T.get_let_value(dst)
     buffer = dst if isinstance(dst, Buffer) else dst.buffer
-    return buffer.dtype.with_lanes(lanes)
+    return buffer.dtype
+
+
+def _vector_atomic_return_dtype(dst: BufferLikeType | Var, lanes: int) -> DataType:
+    return _buffer_dtype(dst).with_lanes(lanes)
 
 
 def _get_memory_order_id(operation: str, memory_order: str, valid_orders: frozenset[str]) -> int:
@@ -382,6 +386,10 @@ def atomic_addx4(dst: BufferLikeType, value: BufferLikeType, return_prev: bool =
         >>> rgba_add = T.Tensor([4], "float32", name="rgba_add")
         >>> atomic_addx4(rgba_dst, rgba_add)  # Atomic blend of all 4 channels
     """
+    dst_dtype = str(_buffer_dtype(dst))
+    if dst_dtype not in {"float16", "bfloat16", "float32"}:
+        raise TypeError(f"atomic_addx4 supports only float16, bfloat16, and float32 destinations; got {dst_dtype}")
+
     atomic_addx4_op = op.Op.get("tl.atomic_addx4_ret_elem_op") if return_prev else op.Op.get("tl.atomic_addx4_elem_op")
     return_type = _vector_atomic_return_dtype(dst, 4) if return_prev else "handle"
     return T.call_intrin(return_type, atomic_addx4_op, T.access_ptr(dst, "rw"), T.access_ptr(value, "r"))
