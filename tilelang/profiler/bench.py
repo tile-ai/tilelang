@@ -176,6 +176,8 @@ def _normalize_cuda_device(benchmark_device: int | torch.device | None) -> int |
 
 def _cache_device(device_idx: int | torch.device | None) -> str | torch.device:
     if device_idx is None:
+        if IS_CUDA:
+            return torch.device("cuda", torch.cuda.current_device())
         return device
     if isinstance(device_idx, torch.device):
         return device_idx
