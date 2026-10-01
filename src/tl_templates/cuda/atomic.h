@@ -321,9 +321,9 @@ TL_DEVICE void AtomicAddx4Scalar(T *ref, T x, T y, T z, T w) {
 }
 
 template <typename T> TL_DEVICE void CheckAtomicAddDestinationType() {
-  static_assert(!std::is_same_v<T, short> &&
-                    !std::is_same_v<T, unsigned short>,
-                "CUDA atomic_add does not support int16 or uint16 destinations");
+  static_assert(
+      !std::is_same_v<T, short> && !std::is_same_v<T, unsigned short>,
+      "CUDA atomic_add does not support int16 or uint16 destinations");
 }
 
 TL_DEVICE float2 AtomicAddx2ScalarRet(float *ref, float2 add_val) {
