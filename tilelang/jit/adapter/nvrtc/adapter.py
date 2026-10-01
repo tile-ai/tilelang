@@ -311,7 +311,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
-            if str(self.target).startswith("cuda") and torch.cuda.is_available():
+            if self.target.kind.name == "cuda" and torch.cuda.is_available():
                 stream = torch.cuda.current_stream().cuda_stream
             else:
                 stream = 0
