@@ -86,6 +86,11 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
+    if tilelang.transform.get_pass_context().config.get("tl.enable_early_simt_im2col", False) and tilelang.cuda.transform.UsesSIMTIm2Col(
+        target
+    ):
+        mod = tilelang.cuda.transform.ExpandSIMTIm2Col()(mod)
+        mod = tilelang.transform.Simplify()(mod)
     # Verify reducer v2 epoch lifecycle and access rules (early, so
     # diagnostics point at user-written code)
     mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
