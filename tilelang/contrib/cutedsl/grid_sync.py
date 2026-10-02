@@ -140,6 +140,8 @@ def _grid_sync_barrier(*, loc=None, ip=None) -> None:
         """
 {
     .reg .s32 %r_tid;
+    .reg .s32 %r_tid_y;
+    .reg .s32 %r_tid_z;
     .reg .s32 %r_nctaid_x;
     .reg .s32 %r_nctaid_y;
     .reg .s32 %r_nctaid_z;
@@ -151,8 +153,12 @@ def _grid_sync_barrier(*, loc=None, ip=None) -> None:
     .reg .pred %p_is_last;
     .reg .pred %p_done;
 
-    // Check if this is thread 0
+    // Elect exactly one thread per block, including multidimensional blocks.
     mov.u32 %r_tid, %tid.x;
+    mov.u32 %r_tid_y, %tid.y;
+    mov.u32 %r_tid_z, %tid.z;
+    or.b32 %r_tid, %r_tid, %r_tid_y;
+    or.b32 %r_tid, %r_tid, %r_tid_z;
     // Order prior global writes from every thread before thread 0 publishes
     // this block's arrival.
     membar.gl;
