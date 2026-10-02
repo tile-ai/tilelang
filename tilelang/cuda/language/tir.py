@@ -154,7 +154,12 @@ def ptx_mma_block_scale(
     scale_b_byte_id=0,
     scale_b_thread_id=0,
 ):
-    """TVM intrinsic for SM120a warp-level NVF4 block-scaled MMA."""
+    """TVM intrinsic for SM120-family warp-level block-scaled MMA.
+
+    Supports ``m16n8k64 kind::mxf4nvf4 scale_vec::4X`` (E2M1, UE4M3) and
+    ``m16n8k32 kind::mxf8f6f4 scale_vec::1X`` (E4M3/E5M2/E2M1 operands, UE8M0).
+    The byte selectors pick the scale byte for ``scale_vec::1X``.
+    """
 
     def _selector_value(value):
         return IntImm("int32", value) if isinstance(value, int) else value
@@ -552,7 +557,7 @@ def mma_fill(dtype, local_size, local_ptr, offset):
 
 
 @_dtype_forward
-def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
+def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr, variant=None):
     """TileLang intrinsic for ptx load matrix from shared memory
 
     Uses `tl.ptx_ldmatrix` which expects access pointers created via
@@ -574,18 +579,23 @@ def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
     dst_access_ptr : PrimExpr
         A `tl.access_ptr` pointing to the destination (local/register) buffer.
 
+    variant : str, optional
+        ``"b4x16_p64"`` loads padded 4-bit E2M1 rows (``float4_e2m1_unpacked``
+        storage) into 8-bit ``kind::f8f6f4`` MMA containers
+        (``ldmatrix.m8n16.b8x16.b4x16_p64``; SM100/SM120 family).
+
     Returns
     -------
     call : PrimExpr
         The call expression (handle-typed).
     """
+    args = [trans, num, src_access_ptr, dst_access_ptr]
+    if variant is not None:
+        args.append(tvm.tirx.StringImm(variant))
     return tvm.tirx.call_intrin(
         "handle",
         tvm.tirx.op.Op.get("tl.ptx_ldmatrix"),
-        trans,
-        num,
-        src_access_ptr,
-        dst_access_ptr,
+        *args,
     )
 
 
