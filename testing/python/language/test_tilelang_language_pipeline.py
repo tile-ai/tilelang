@@ -203,5 +203,39 @@ def test_blocksparse_matmul():
     run_blocksparse_matmul(num_stages=3)
 
 
+@tilelang.jit(out_idx=[-1])
+def lower_block_triangular_matmul(blocks, blk, num_stages, dtype=T.float16, accum_dtype=T.float32):
+    L = blocks * blk
+
+    @T.prim_func
+    def main(A: T.Tensor((L, L), dtype), B: T.Tensor((L, blk), dtype), C: T.Tensor((L, blk), accum_dtype)):
+        with T.Kernel(blocks, threads=128) as bx:
+            A_shared = T.alloc_shared((blk, blk), dtype)
+            B_shared = T.alloc_shared((blk, blk), dtype)
+            C_local = T.alloc_fragment((blk, blk), accum_dtype)
+            T.clear(C_local)
+            for k in T.Pipelined(bx + 1, num_stages=num_stages):
+                T.copy(A[bx * blk, k * blk], A_shared, disable_tma=True)
+                T.copy(B[k * blk, 0], B_shared, disable_tma=True)
+                T.gemm(A_shared, B_shared, C_local)
+            T.copy(C_local, C[bx * blk, 0])
+
+    return main
+
+
+def test_pipeline_runtime_trip_count():
+    import torch
+
+    # Block bx runs bx + 1 iterations, so the epilogue starts at a runtime index.
+    # Three stages leave it two iterations, whose waits must still lower to
+    # constant counts.
+    blocks, blk = 4, 64
+    a = torch.randn(blocks * blk, blocks * blk).cuda().half()
+    b = torch.randn(blocks * blk, blk).cuda().half()
+    c = lower_block_triangular_matmul(blocks, blk, num_stages=3)(a, b)
+    mask = torch.ones(blocks, blocks).tril().repeat_interleave(blk, 0).repeat_interleave(blk, 1).cuda()
+    torch.testing.assert_close(c, (a.float() * mask) @ b.float(), rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
