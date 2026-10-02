@@ -678,6 +678,18 @@ def test_atomic_add_rejects_16bit_integer_destination(dtype):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.int16, T.uint16])
+def test_atomic_add_return_prev_rejects_16bit_integer_destination(dtype):
+    @T.prim_func
+    def atomic_add_16bit_integer(src: T.Tensor((1,), dtype), dst: T.Tensor((1,), dtype), prev: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=1):
+            prev[0] = T.atomic_add(dst[0], src[0], return_prev=True)
+
+    with pytest.raises(RuntimeError, match="CUDA atomic_add does not support int16 or uint16 destinations"):
+        tilelang.compile(atomic_add_16bit_integer, target="cuda")
+
+
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_atomic_add_auto_vectorized():
     run_atomic_add_auto_vectorized(8, 128, 128, 32, 32, dtype=T.float32)
