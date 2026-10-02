@@ -1137,6 +1137,8 @@ class ParTaskManager:
     allow_larger: bool = False
 
     def __post_init__(self):
+        if self.num_workers < 1:
+            raise ValueError(f"num_workers must be >= 1, got {self.num_workers}; no worker would start and run_async() would wait forever")
         self.worker_tasks: list[asyncio.Task] = []
         self.stopped = False
         self.task_manager: TaskManager | None = None
@@ -1388,7 +1390,13 @@ async def main(args: Args):
 
 
 def cli_main(argv: "Sequence[str] | None" = None) -> None:
-    from argparse import ArgumentParser
+    from argparse import ArgumentParser, ArgumentTypeError
+
+    def positive_jobs(value: str) -> int:
+        jobs = int(value)
+        if jobs < 1:
+            raise ArgumentTypeError(f"--jobs must be >= 1, got {jobs}")
+        return jobs
 
     parser = ArgumentParser(
         usage="python -m tilelang.autodd source --err-msg MSG -o OUTPUT [--backend {runner,subproc}] [--timeout SEC] [-j N]",
@@ -1402,7 +1410,7 @@ def cli_main(argv: "Sequence[str] | None" = None) -> None:
         "--backend", default="runner", choices=["runner", "subproc"], help="Backend for running code: runner is faster, subproc is stable"
     )
     parser.add_argument("--timeout", type=int, default=60, help="Timeout for each task in seconds (default: 60)")
-    parser.add_argument("-j", "--jobs", type=int, default=1, help="Number of parallel jobs (default: 1)")
+    parser.add_argument("-j", "--jobs", type=positive_jobs, default=1, help="Number of parallel jobs (default: 1)")
     ns = parser.parse_args(argv)
 
     args = Args(
