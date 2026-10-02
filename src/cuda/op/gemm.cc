@@ -96,6 +96,15 @@ bool AllowWgmma(const GemmNode &op, int block_size, Target target) {
          CheckWgmma(op);
 }
 
+bool HasWgmmaOperandLayoutConstraint(const GemmNode &op) {
+  return (op.a_->dtype.is_float8() && op.b_->dtype.is_float8()) ||
+         (op.a_->dtype.is_tfloat32() && op.b_->dtype.is_tfloat32()) ||
+         ((op.a_->dtype == DataType::Int(8) ||
+           op.a_->dtype == DataType::UInt(8)) &&
+          (op.b_->dtype == DataType::Int(8) ||
+           op.b_->dtype == DataType::UInt(8)));
+}
+
 bool AllowVoltaMma(const GemmNode &op) {
   bool scope_ok = (IsSharedBuffer(op.a_) || IsFragmentBuffer(op.a_)) &&
                   IsSharedBuffer(op.b_);
@@ -364,6 +373,18 @@ struct Gemm {
     }
     if (AllowWgmma(op, block_size, target)) {
       return kCudaWGMMA;
+    }
+    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+    bool wgmma_disabled =
+        ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false);
+    if (!wgmma_disabled && TargetIsHopper(target) && IsSharedBuffer(op.b_) &&
+        HasWgmmaOperandLayoutConstraint(op) &&
+        (op.transA_ || !op.transB_)) {
+      LOG(WARNING) << "WGMMA disabled for this gemm: FP8, INT8, and TF32 "
+                      "operands require !trans_A && trans_B on Hopper (got "
+                   << "trans_A=" << op.transA_ << ", trans_B=" << op.transB_
+                   << "); falling back to mma.sync. Store B as K-major to "
+                      "enable WGMMA.";
     }
     if (TargetIsVolta(target) && !AllowVoltaMma(op)) {
       return kCudaFMA;
