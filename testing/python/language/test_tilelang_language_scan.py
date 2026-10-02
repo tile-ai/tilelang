@@ -505,6 +505,72 @@ def test_cummax_fragment_1d():
     run_cummax_1d(512, 64, reverse=True, scope="fragment")
 
 
+def scan_mixed_scope_test(
+    M, N, block_M, block_N, op="cumsum", dim=0, reverse=False, src_scope="smem", dst_scope="fragment", dtype=T.float32
+):
+    def alloc(scope):
+        if scope == "smem":
+            return T.alloc_shared((block_M, block_N), dtype)
+        return T.alloc_fragment((block_M, block_N), dtype)
+
+    @T.prim_func
+    def scan_mixed_scope(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
+            A_src = alloc(src_scope)
+            B_dst = alloc(dst_scope)
+
+            T.copy(A[by * block_M, bx * block_N], A_src)
+            scan = T.cumsum if op == "cumsum" else T.cummax
+            scan(src=A_src, dst=B_dst, dim=dim, reverse=reverse)
+            T.copy(B_dst, B[by * block_M, bx * block_N])
+
+    return scan_mixed_scope
+
+
+def run_scan_mixed_scope(
+    M, N, block_M, block_N, op="cumsum", dim=0, reverse=False, src_scope="smem", dst_scope="fragment", dtype=T.float32
+):
+    program = scan_mixed_scope_test(M, N, block_M, block_N, op, dim, reverse, src_scope, dst_scope, dtype)
+    jit_kernel = tl.compile(program, out_idx=-1)
+    A = torch.randn(M, N, dtype=getattr(torch, dtype)).cuda()
+
+    def ref_program(A):
+        ref_b = torch.empty_like(A)
+        for i in range(M // block_M):
+            for j in range(N // block_N):
+                chunk = A[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N]
+                if op == "cumsum":
+                    if reverse:
+                        chunk = chunk.flip(dims=[dim]).cumsum(dim=dim).flip(dims=[dim])
+                    else:
+                        chunk = chunk.cumsum(dim=dim)
+                else:
+                    chunk = _torch_cummax(chunk, dim, reverse)
+                ref_b[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N] = chunk
+        return ref_b
+
+    tilelang_res = jit_kernel(A)
+    ref_res = ref_program(A)
+    torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
+
+
+def test_scan_smem_to_fragment():
+    """Regression for #3011: shared src with a fragment dst."""
+    for op in ("cumsum", "cummax"):
+        run_scan_mixed_scope(128, 128, 64, 64, op=op)
+        run_scan_mixed_scope(128, 128, 64, 64, op=op, dim=1)
+        run_scan_mixed_scope(128, 128, 64, 64, op=op, dim=1, reverse=True)
+        run_scan_mixed_scope(128, 128, 64, 64, op=op, dim=0, reverse=True)
+
+
+def test_scan_fragment_to_smem():
+    for op in ("cumsum", "cummax"):
+        run_scan_mixed_scope(128, 128, 64, 64, op=op, dim=1, src_scope="fragment", dst_scope="smem")
+
+
 def cumsum_strided_region_test(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
 
     @T.prim_func
