@@ -37,7 +37,7 @@ constexpr const char *kCudaFMA = "cuda.fma";
 constexpr const char *kCudaWGMMA = "cuda.wgmma";
 constexpr const char *kCudaTCGEN05 = "cuda.tcgen05";
 
-bool CheckWgmma(const GemmNode &op) {
+bool CheckWgmma(const GemmNode &op, bool ignore_operand_layout = false) {
   if (op.b_.scope() != "shared.dyn" && op.b_.scope() != "shared") {
     return false;
   }
@@ -47,7 +47,8 @@ bool CheckWgmma(const GemmNode &op) {
         op.b_->dtype == DataType::Float(16))
       return op.k_ % 16 == 0;
     if (op.a_->dtype.is_float8() && op.b_->dtype.is_float8())
-      return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
+      return (ignore_operand_layout || ((!op.transA_) && op.transB_)) &&
+             op.k_ % 32 == 0;
     return false;
   }
   if (op.c_->dtype == DataType::Float(32)) {
@@ -58,20 +59,26 @@ bool CheckWgmma(const GemmNode &op) {
         op.b_->dtype == DataType::BFloat(16))
       return op.k_ % 16 == 0;
     if (op.a_->dtype.is_tfloat32() && op.b_->dtype.is_tfloat32())
-      return (!op.transA_) && op.transB_ && op.k_ % 8 == 0;
+      return (ignore_operand_layout || ((!op.transA_) && op.transB_)) &&
+             op.k_ % 8 == 0;
     if (op.a_->dtype.is_float8() && op.b_->dtype.is_float8())
-      return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
+      return (ignore_operand_layout || ((!op.transA_) && op.transB_)) &&
+             op.k_ % 32 == 0;
     return false;
   }
   if (op.c_->dtype == DataType::Int(32)) {
     if (op.a_->dtype == DataType::Int(8) && op.b_->dtype == DataType::Int(8))
-      return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
+      return (ignore_operand_layout || ((!op.transA_) && op.transB_)) &&
+             op.k_ % 32 == 0;
     if (op.a_->dtype == DataType::Int(8) && op.b_->dtype == DataType::UInt(8))
-      return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
+      return (ignore_operand_layout || ((!op.transA_) && op.transB_)) &&
+             op.k_ % 32 == 0;
     if (op.a_->dtype == DataType::UInt(8) && op.b_->dtype == DataType::Int(8))
-      return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
+      return (ignore_operand_layout || ((!op.transA_) && op.transB_)) &&
+             op.k_ % 32 == 0;
     if (op.a_->dtype == DataType::UInt(8) && op.b_->dtype == DataType::UInt(8))
-      return (!op.transA_) && op.transB_ && op.k_ % 32 == 0;
+      return (ignore_operand_layout || ((!op.transA_) && op.transB_)) &&
+             op.k_ % 32 == 0;
     return false;
   }
   return false;
@@ -377,7 +384,9 @@ struct Gemm {
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     bool wgmma_disabled =
         ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false);
-    if (!wgmma_disabled && TargetIsHopper(target) && IsSharedBuffer(op.b_) &&
+    int num_warps = block_size / TargetCudaGetWarpSize(target);
+    if (!wgmma_disabled && TargetIsHopper(target) && op.m_ >= 64 &&
+        num_warps % 4 == 0 && CheckWgmma(op, true) &&
         HasWgmmaOperandLayoutConstraint(op) && (op.transA_ || !op.transB_)) {
       LOG(WARNING) << "WGMMA disabled for this gemm: FP8, INT8, and TF32 "
                       "operands require !trans_A && trans_B on Hopper (got "
