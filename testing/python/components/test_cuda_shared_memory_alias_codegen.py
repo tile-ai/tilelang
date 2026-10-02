@@ -11,6 +11,27 @@ def _get_dynamic_shared_memory_bytes(artifact):
 
 
 @tilelang.testing.requires_cuda
+def test_dynamic_shared_memory_alignment_without_lowering_metadata():
+    @T.prim_func
+    def kernel(A: T.Tensor((32,), T.float32), B: T.Tensor((32,), T.float32)):
+        with T.Kernel(1, threads=32):
+            shared = T.alloc_shared((32,), T.float32)
+            T.copy(A, shared, prefer_instruction="tma")
+            T.copy(shared, B, prefer_instruction="sync")
+
+    with tilelang.tvm.target.Target({"kind": "cuda", "arch": "sm_90"}) as target:
+        artifact = tilelang.lower(kernel, target=target)
+    assert "tl::tma_load(" in artifact.kernel_source
+    name, func = next(iter(artifact.device_mod.functions.items()))
+    assert int(func.attrs["tl.dynamic_smem_alignment"]) == 16
+    # Raw TMA intrinsics without lowering metadata retain the conservative
+    # alignment, even for a single allocation (no arena merging needed).
+    func = func.without_attr("tl.smem_alignment_map").without_attr("tl.dynamic_smem_alignment")
+    mod = tilelang.transform.MergeSharedMemoryAllocations()(tilelang.tvm.IRModule({name: func}))
+    assert int(mod[name].attrs["tl.dynamic_smem_alignment"]) == 1024
+
+
+@tilelang.testing.requires_cuda
 def test_dynamic_shared_memory_merge_emits_named_aliases():
     @T.prim_func
     def kernel(
@@ -26,10 +47,10 @@ def test_dynamic_shared_memory_merge_emits_named_aliases():
             T.tvm_storage_sync("shared")
             C[0] = A_shared[0] + B_shared[0]
 
-    artifact = tilelang.lower(kernel, target="cuda")
+    artifact = tilelang.lower(kernel, target={"kind": "cuda", "arch": "sm_80"})
     source = artifact.kernel_source
 
-    assert "extern __shared__ __align__(1024) uchar buf_dyn_shmem[];" in source
+    assert "extern __shared__ __align__(16) uchar buf_dyn_shmem[];" in source
     assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in source
     assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 64));" in source
     assert "A_shared" in source
@@ -64,7 +85,7 @@ def test_single_dynamic_fp4_allocation_uses_packed_size():
 
     artifact = tilelang.lower(kernel, target="cuda")
 
-    assert "extern __shared__ __align__(1024) fp4_e2_t A_shared[];" in artifact.kernel_source
+    assert "extern __shared__ __align__(16) fp4_e2_t A_shared[];" in artifact.kernel_source
     assert _get_dynamic_shared_memory_bytes(artifact) == 64
 
 
@@ -83,7 +104,7 @@ def test_merged_dynamic_fp4_allocations_use_packed_sizes_and_offsets():
     artifact = tilelang.lower(kernel, target="cuda")
     source = artifact.kernel_source
 
-    assert "extern __shared__ __align__(1024) uchar buf_dyn_shmem[];" in source
+    assert "extern __shared__ __align__(16) uchar buf_dyn_shmem[];" in source
     assert "void* A_shared = ((void*)((char*)buf_dyn_shmem + 0));" in source
     assert "void* B_shared = ((void*)((char*)buf_dyn_shmem + 64));" in source
     assert _get_dynamic_shared_memory_bytes(artifact) == 128

@@ -22,6 +22,89 @@ import tilelang.language as T
 import tilelang
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("eviction_policy", [None, "evict_first", "evict_last"])
+@pytest.mark.parametrize("is_load", [True, False])
+@pytest.mark.parametrize("merged", [False, True])
+def test_bulk_tma_cache_hint_and_alignment(eviction_policy, is_load, merged):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((1024,), T.float32), B: T.Tensor((1024,), T.float32)):
+        with T.Kernel(1, threads=128):
+            if merged:
+                a_pad = T.alloc_shared((1,), T.float32)
+                if T.get_thread_binding() == 0:
+                    a_pad[0] = 7.0
+            b_shared = T.alloc_shared((1024,), T.float32)
+            T.copy(A, b_shared, prefer_instruction="tma" if is_load else "sync", eviction_policy=eviction_policy)
+            if merged:
+                for i in T.Parallel(1024):
+                    b_shared[i] += a_pad[0]
+            T.copy(b_shared, B, prefer_instruction="sync" if is_load else "tma", eviction_policy=eviction_policy)
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "CUtensorMap" not in source
+    assert "extern __shared__ __align__(16)" in source
+    instruction = "tma_load" if is_load else "tma_store"
+    hint = f"<tl::CacheHintSm90::{eviction_policy.upper()}>" if eviction_policy else ""
+    assert f"tl::{instruction}{hint}(" in source
+    if merged:
+        assert "void* b_shared = ((void*)((char*)buf_dyn_shmem + 16));" in source
+    a = torch.randn(1024, device="cuda")
+    torch.testing.assert_close(kernel(a), a + (7 if merged else 0), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("swizzle_bytes,alignment", [(0, 128), (32, 256), (64, 512), (128, 1024)])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_descriptor_tma_preserves_stricter_alignment(swizzle_bytes, alignment, mixed):
+    import torch
+
+    layouts = {
+        32: tilelang.layout.make_quarter_bank_swizzled_layout,
+        64: tilelang.layout.make_half_bank_swizzled_layout,
+        128: tilelang.layout.make_full_bank_swizzled_layout,
+    }
+
+    @T.prim_func
+    def main(A: T.StridedTensor((8, 64), (80, 1), T.float16), B: T.Tensor((8, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            if mixed:
+                a_bulk = T.alloc_shared((64,), T.float16)
+                T.copy(A[0, 0:64], a_bulk, prefer_instruction="tma")
+            b_shared = T.alloc_shared((8, 64), T.float16)
+            if swizzle_bytes:
+                T.annotate_layout({b_shared: layouts[swizzle_bytes](b_shared)})
+            T.copy(A, b_shared, prefer_instruction="tma")
+            if mixed:
+                for i, j in T.Parallel(8, 64):
+                    b_shared[i, j] += a_bulk[j]
+            T.copy(b_shared, B, prefer_instruction="sync")
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        target="cuda",
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_SHARED_MEMORY_REUSE: True},
+    )
+    source = kernel.get_kernel_source()
+    assert "CUtensorMap" in source
+    assert f"extern __shared__ __align__({alignment})" in source
+    if mixed:
+        assert f"void* b_shared = ((void*)((char*)buf_dyn_shmem + {alignment}));" in source
+    a = torch.randn(8, 80, dtype=torch.float16, device="cuda")[:, :64]
+    torch.testing.assert_close(kernel(a), a + a[0] if mixed else a, rtol=0, atol=0)
+
+
 def matmul_tma_copy(
     M,
     N,

@@ -185,6 +185,8 @@ private:
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
+  // Conservative fallback for device IR that bypasses shared-memory planning.
+  int64_t dynamic_smem_alignment_ = 1024;
 
   std::unordered_map<const VarNode *, std::string> fragment_shapes;
   std::unordered_map<const VarNode *, std::string> fragment_layouts;
