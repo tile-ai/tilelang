@@ -3463,19 +3463,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         row_col_f32 && shape == "m16n8k64" && kind == "mxf4nvf4" &&
         scale_vec_size == 4 && A_dtype == "e2m1" && B_dtype == "e2m1" &&
         scale_type == "ue4m3";
+    bool supported_mxf4nvf4_2x_ue8m0 =
+        row_col_f32 && shape == "m16n8k64" && kind == "mxf4nvf4" &&
+        scale_vec_size == 2 && A_dtype == "e2m1" && B_dtype == "e2m1" &&
+        scale_type == "ue8m0";
     bool supported_mxf8f6f4_1x_ue8m0 =
         row_col_f32 && shape == "m16n8k32" && kind == "mxf8f6f4" &&
         scale_vec_size == 1 && scale_type == "ue8m0" &&
         mxf8f6f4_operand_enums.count(A_dtype) &&
         mxf8f6f4_operand_enums.count(B_dtype);
-    ICHECK(supported_mxf4nvf4_4x_ue4m3 || supported_mxf8f6f4_1x_ue8m0)
+    ICHECK(supported_mxf4nvf4_4x_ue4m3 || supported_mxf4nvf4_2x_ue8m0 ||
+           supported_mxf8f6f4_1x_ue8m0)
         << "Unsupported ptx_mma_block_scale configuration: accum_dtype="
         << accum_dtype << ", shape=" << shape << ", A_layout=" << A_layout
         << ", B_layout=" << B_layout << ", kind=" << kind
         << ", scale_vec_size=" << scale_vec_size << ", A_dtype=" << A_dtype
         << ", B_dtype=" << B_dtype << ", scale_type=" << scale_type
         << ". Currently supported: f32 m16n8k64 row.col kind::mxf4nvf4 "
-           "scale_vec::4X e2m1.e2m1 f32 ue4m3, and f32 m16n8k32 row.col "
+           "scale_vec::4X e2m1.e2m1 f32 ue4m3 or scale_vec::2X e2m1.e2m1 f32 "
+           "ue8m0, and f32 m16n8k32 row.col "
            "kind::mxf8f6f4 scale_vec::1X {e2m1,e3m2,e2m3,e4m3,e5m2} f32 ue8m0.";
 
     auto resolve_fp4_packed_buffer =
@@ -3496,6 +3502,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf4nvf4";
     std::string scale_type_enum = "tl::SM120MmaScaleType::kUE4M3";
     std::string operand_type_enums;
+    if (supported_mxf4nvf4_2x_ue8m0) {
+      scale_type_enum = "tl::SM120MmaScaleType::kUE8M0";
+    }
     if (supported_mxf8f6f4_1x_ue8m0) {
       mma_kind_enum = "tl::SM120MmaBlockScaledKind::kMxf8f6f4";
       scale_type_enum = "tl::SM120MmaScaleType::kUE8M0";

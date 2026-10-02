@@ -52,6 +52,12 @@ struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf4nvf4, 4,
 };
 
 template <>
+struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf4nvf4, 2,
+                                 SM120MmaScaleType::kUE8M0> {
+  static constexpr bool kSupported = true;
+};
+
+template <>
 struct SM120MmaBlockScaledConfig<SM120MmaBlockScaledKind::kMxf8f6f4, 1,
                                  SM120MmaScaleType::kUE8M0> {
   static constexpr bool kSupported = true;
@@ -97,6 +103,38 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
   sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
       d, a[0], a[1], a[2], a[3], b[0], b[1], c, scale_a, scale_b,
       scale_a_byte_id, scale_a_thread_id, scale_b_byte_id, scale_b_thread_id);
+}
+
+// SM120a MXFP4 block-scaled warp MMA, one UE8M0 scale per 32 K elements:
+// mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::2X
+// The two scales of a K64 atom sit in one half of the scale word; the byte
+// selector (0 or 2) picks the half.
+TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_2x_ue8m0(
+    float *d, const uint32_t *a, const uint32_t *b, const float *c,
+    uint32_t scale_a, uint32_t scale_b, uint16_t scale_a_byte_id,
+    uint16_t scale_a_thread_id, uint16_t scale_b_byte_id,
+    uint16_t scale_b_thread_id) {
+#if defined(CUTE_ARCH_MXF4NVF4_2X_UE8M0_MMA_ENABLED) &&                        \
+    defined(TL_SM120_BLOCK_SCALED_MMA_ENABLED)
+  asm volatile(
+      "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
+      "2X.f32.e2m1.e2m1.f32.ue8m0 "
+      "{%0, %1, %2, %3}, "
+      "{%4, %5, %6, %7}, "
+      "{%8, %9}, "
+      "{%10, %11, %12, %13}, "
+      "{%14}, {%15, %16}, "
+      "{%17}, {%18, %19};\n"
+      : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+        "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]), "r"(scale_a),
+        "h"(scale_a_byte_id), "h"(scale_a_thread_id), "r"(scale_b),
+        "h"(scale_b_byte_id), "h"(scale_b_thread_id));
+#else
+  CUTE_INVALID_CONTROL_PATH(
+      "tl::sm120_mma_sync_blockscaled kind::mxf4nvf4 scale_vec::2X requires "
+      "sm_120a/f or sm_121a/f and CUDA 12.8 or later");
+#endif
 }
 
 // SM120a MX block-scaled warp MMA, one UE8M0 scale per 32 K elements:
@@ -212,15 +250,21 @@ TL_DEVICE void sm120_mma_sync_blockscaled(float *d, const uint32_t *a,
   static_assert(
       SM120MmaBlockScaledConfig<Kind, ScaleVecSize, SType>::kSupported,
       "Unsupported sm120 mma.block_scale configuration: kind::mxf4nvf4 needs "
-      "scale_vec::4X with ue4m3 scales, kind::mxf8f6f4 needs scale_vec::1X "
-      "with ue8m0 scales");
+      "scale_vec::4X with ue4m3 or scale_vec::2X with ue8m0 scales, "
+      "kind::mxf8f6f4 needs scale_vec::1X with ue8m0 scales");
   if constexpr (Kind == SM120MmaBlockScaledKind::kMxf4nvf4) {
     static_assert(AType == SM120MmaOperandType::kE2M1 &&
                       BType == SM120MmaOperandType::kE2M1,
                   "kind::mxf4nvf4 only supports e2m1 operands");
-    detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
-        d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
-        scale_b_byte_id, scale_b_thread_id);
+    if constexpr (ScaleVecSize == 4) {
+      detail::sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3(
+          d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
+          scale_b_byte_id, scale_b_thread_id);
+    } else {
+      detail::sm120_mma_m16n8k64_mxf4nvf4_2x_ue8m0(
+          d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,
+          scale_b_byte_id, scale_b_thread_id);
+    }
   } else {
     detail::sm120_mma_m16n8k32_mxf8f6f4_1x_ue8m0<AType, BType>(
         d, a, b, c, scale_a, scale_b, scale_a_byte_id, scale_a_thread_id,

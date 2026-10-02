@@ -117,8 +117,9 @@ def gemm_blockscaled(
       ``(1,2,1)``.
     - SM120 family (SM120, SM121), ``C`` in a fragment: synchronous warp
       MMA with FP32 accumulation. Packed E2M1 operands use
-      ``mma.sync.m16n8k64.kind::mxf4nvf4.block_scale`` with UE4M3 scales
-      (granularity 16). E4M3/E5M2 operands, or E2M1 in
+      ``mma.sync.m16n8k64.kind::mxf4nvf4.block_scale``, with UE4M3 scales
+      for granularity 16 (NVFP4) or UE8M0 scales for granularity 32 (MXFP4).
+      E4M3/E5M2 operands, or E2M1 in
       ``float4_e2m1_unpacked`` shared memory, use
       ``mma.sync.m16n8k32.kind::mxf8f6f4.block_scale`` with UE8M0 scales
       (granularity 32); A and B may differ. Scale words pack four
@@ -427,7 +428,9 @@ def mma_gemm_blockscaled(
     The operand dtypes select the instruction:
 
     - packed E2M1 A and B: ``m16n8k64.kind::mxf4nvf4.block_scale.scale_vec::4X``
-      with UE4M3 scales, ``sf_*_granularity_k=16``;
+      with UE4M3 scales and ``sf_*_granularity_k=16`` (NVFP4), or
+      ``scale_vec::2X`` with UE8M0 scales and ``sf_*_granularity_k=32``
+      (MXFP4, ``sf_layout="rowmajor"``);
     - E4M3/E5M2, or E2M1 stored as ``float4_e2m1_unpacked`` shared memory:
       ``m16n8k32.kind::mxf8f6f4.block_scale.scale_vec::1X`` with UE8M0 scales,
       ``sf_*_granularity_k=32`` and ``sf_layout="rowmajor"``.

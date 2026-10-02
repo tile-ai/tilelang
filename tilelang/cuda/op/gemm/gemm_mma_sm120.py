@@ -33,8 +33,9 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
     """SM120 warp-level block-scaled MMA lowering.
 
     The operand dtypes select the instruction: packed E2M1 operands issue
-    ``kind::mxf4nvf4`` (UE4M3 scales per 16 K), and E4M3/E5M2 operands issue
-    ``kind::mxf8f6f4`` (UE8M0 scales per 32 K). Both read uint32 words that
+    ``kind::mxf4nvf4``, as NVFP4 (UE4M3 scales per 16 K) or MXFP4 (UE8M0
+    scales per 32 K), and E4M3/E5M2 operands issue ``kind::mxf8f6f4`` (UE8M0
+    scales per 32 K). Both read uint32 words that
     pack the scales of four consecutive scale blocks.
 
     A may be shared or a full fragment; B remains shared. Fragment A and
@@ -59,12 +60,15 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
 
     @property
     def block_scale_kind(self) -> tuple[str, int, str]:
-        return block_scale_mma_kind_for_dtypes(self.a_dtype, self.b_dtype)
+        return block_scale_mma_kind_for_dtypes(self.a_dtype, self.b_dtype, self.sf_a_granularity_k)
 
     def _validate_operands(self) -> None:
         if not (self.is_gemm_ss() or self.is_gemm_rs()):
             raise ValueError("T.mma_gemm_blockscaled requires shared or fragment A and shared B")
-        if self.block_scale_kind[0] == "mxf8f6f4":
+        kind, scale_vec_size, _ = self.block_scale_kind
+        if kind == "mxf4nvf4" and scale_vec_size == 2 and self.sf_layout != "rowmajor":
+            raise ValueError("SM120 MXFP4 block-scaled GEMM currently requires sf_layout='rowmajor'")
+        if kind == "mxf8f6f4":
             if self.sf_layout != "rowmajor":
                 raise ValueError("SM120 kind::mxf8f6f4 block-scaled GEMM currently requires sf_layout='rowmajor'")
             if self.is_gemm_rs():

@@ -274,6 +274,17 @@ _SUPPORTED_BLOCK_SCALE_MMA_CONFIGS = {
         scale_type="ue4m3",
         operand_dtype_abbrvs=("e2m1",),
     ),
+    # MXFP4: packed E2M1 with one UE8M0 scale per 32 K elements. A scale word
+    # covers two K64 atoms; the byte selector (0 or 2) picks the atom's half.
+    ("mxf4nvf4", 2, "ue8m0"): BlockScaleMmaConfig(
+        kind="mxf4nvf4",
+        mma_prefix="m16n8k64",
+        atom_k=64,
+        scale_vec_size=2,
+        sf_vec_size=32,
+        scale_type="ue8m0",
+        operand_dtype_abbrvs=("e2m1",),
+    ),
     # MX block scaling: one UE8M0 scale per 32 K elements. A packed scale word
     # holds the scales of four consecutive K32 atoms; the byte selector picks one.
     # Every operand occupies one byte per element in the MMA registers: FP8
@@ -301,14 +312,16 @@ def block_scale_register_dtype(dtype) -> str:
     return "uint8" if "float4_e2m1_unpacked" in str(dtype) else str(dtype)
 
 
-def block_scale_mma_kind_for_dtypes(a_dtype: str, b_dtype: str) -> tuple[str, int, str]:
+def block_scale_mma_kind_for_dtypes(a_dtype: str, b_dtype: str, sf_granularity_k: int = 16) -> tuple[str, int, str]:
     """Return the SM120 ``(kind, scale_vec_size, scale_type)`` for operand dtypes.
 
-    Packed E2M1 on both sides selects NVF4; any byte-per-element operand
-    (FP8, or E2M1 in unpacked shared storage) selects MX ``kind::mxf8f6f4``.
+    Packed E2M1 on both sides selects ``kind::mxf4nvf4``: NVFP4 (UE4M3 per 16)
+    or, with a granularity of 32, MXFP4 (UE8M0 per 32). Any byte-per-element
+    operand (FP8, or E2M1 in unpacked shared storage) selects MX
+    ``kind::mxf8f6f4``.
     """
     if _is_packed_fp4(a_dtype) and _is_packed_fp4(b_dtype):
-        return "mxf4nvf4", 4, "ue4m3"
+        return ("mxf4nvf4", 2, "ue8m0") if int(sf_granularity_k) == 32 else ("mxf4nvf4", 4, "ue4m3")
     return "mxf8f6f4", 1, "ue8m0"
 
 
@@ -405,9 +418,14 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             super()._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
 
     @property
-    def is_nvf4(self) -> bool:
-        """Whether this emitter issues the packed-E2M1 ``kind::mxf4nvf4`` MMA."""
+    def uses_packed_fp4(self) -> bool:
+        """Whether operands are packed E2M1 (``kind::mxf4nvf4``, NVFP4 or MXFP4)."""
         return self.is_blockscaled and self.kind == "mxf4nvf4"
+
+    @property
+    def is_nvf4(self) -> bool:
+        """Whether this emitter issues NVFP4 (``kind::mxf4nvf4.scale_vec::4X``)."""
+        return self.uses_packed_fp4 and self.scale_vec_size == 4
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
         if self.is_blockscaled:
@@ -416,7 +434,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
             super()._initialize_mma_prefix(k_dim)
 
     def make_mma_load_layout(self, local_buf, matrix="A"):
-        if not self.is_nvf4 or matrix != "A":
+        if not self.uses_packed_fp4 or matrix != "A":
             return super().make_mma_load_layout(local_buf, matrix)
 
         # SM120 A registers are ordered (K8, M8, K32), matching ldmatrix.x4.
@@ -457,7 +475,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         )
 
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
-        if not self.is_nvf4:
+        if not self.uses_packed_fp4:
             return super().ldmatrix_a(A_local_buf, A_shared_buf, ki, rk)
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
@@ -507,7 +525,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         return _warp_ld_a_e2m1(A_local_buf, A_region, ki, thread_binding, rk)
 
     def ldmatrix_b(self, B_local_buf: Buffer, B_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
-        if not self.is_nvf4:
+        if not self.uses_packed_fp4:
             return super().ldmatrix_b(B_local_buf, B_shared_buf, ki, rk)
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
@@ -600,10 +618,11 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         """Byte of the packed scale word that holds this K atom's scale.
 
         ``scale_vec::4X`` consumes all four bytes, so its selector is 0. With
-        ``scale_vec::1X`` each K32 atom reads one byte. The selector folds to a
+        ``scale_vec::2X`` a K64 atom reads one half (selector 0 or 2), and with
+        ``scale_vec::1X`` a K32 atom reads one byte. The selector folds to a
         constant when the K tile is a multiple of four scale blocks.
         """
-        if self.scale_vec_size != 1:
+        if self.scale_vec_size == 4:
             return 0
         _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
         return (_k_start + self.micro_size_k * ki) // int(sf_granularity_k) % 4
