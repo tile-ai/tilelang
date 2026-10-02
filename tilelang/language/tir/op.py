@@ -4,6 +4,7 @@ from numbers import Integral
 from typing import Any
 
 import tvm
+from tvm import DataType, DataTypeCode
 from tvm.ir import PrimExpr
 from tvm.ir.base import Span
 from tvm.runtime import const
@@ -115,7 +116,6 @@ isfinite = _tvm_op.isfinite
 isinf = _tvm_op.isinf
 popcount = _tvm_op.popcount
 q_multiply_shift = _tvm_op.q_multiply_shift
-q_multiply_shift_per_axis = _tvm_op.q_multiply_shift_per_axis
 shift_left = _tvm_op.shift_left
 shift_right = _tvm_op.shift_right
 fmod = _tvm_op.fmod
@@ -132,6 +132,23 @@ anylist_resetitem = _tvm_op.anylist_resetitem
 anylist_setitem_call_packed = _tvm_op.anylist_setitem_call_packed
 anylist_setitem_call_cpacked = _tvm_op.anylist_setitem_call_cpacked
 vscale = _tvm_op.vscale
+
+
+def q_multiply_shift_per_axis(x, y, ls, rs, q, is_lshift_required, is_rshift_required):
+    """Multiply fixed-point values with per-axis left and right shifts.
+
+    ``is_lshift_required`` and ``is_rshift_required`` accept integer or boolean
+    flags. Integer flags are interpreted as nonzero, matching the documented
+    integer flag interface while providing boolean conditions to legalization.
+    """
+
+    def as_boolean_flag(flag):
+        flag = tvm.tirx.convert(flag)
+        if DataType(flag.dtype).type_code in (DataTypeCode.INT, DataTypeCode.UINT):
+            flag = flag != const(0, flag.dtype)
+        return flag
+
+    return _tvm_op.q_multiply_shift_per_axis(x, y, ls, rs, q, as_boolean_flag(is_lshift_required), as_boolean_flag(is_rshift_required))
 
 
 def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None) -> PrimExpr:
