@@ -130,6 +130,42 @@ best_config = artifact.config
 best_kernel(A, B, C)
 ```
 
+### Observe trial outcomes (experimental)
+
+The programmatic `AutoTuner.run` method accepts an optional synchronous
+`on_trial` callback. For example, after configuring `tuner` as above:
+
+```python
+trial_records = []
+artifact = tuner.run(on_trial=trial_records.append)
+for record in trial_records:
+    print(record["index"], record["status"], record["latency_ms"])
+```
+
+Each record is a dictionary with `status`, `index`, `config`, `latency_ms`,
+`validation`, and `error`. The config is a detached, JSON-compatible copy;
+`error` is a string truncated to 2048 characters or `None`. Successful trials
+use `status="ok"` and report latency in milliseconds. Compilation failures use
+`compile_error`; benchmark failures use `benchmark_error`; timed-out benchmarks
+use `timeout`. Failed trials have no latency. `validation` is `passed` only
+when reference validation ran successfully, `not_run` when it was skipped or
+not configured, and `unknown` for benchmark failures and timeouts.
+
+For a healthy, uncached tuning run with JSON-compatible configs, the callback
+receives one terminal outcome per configuration. Records arrive in aggregation
+order, which may differ from configuration index order. A cache hit emits only
+one `cache_hit` marker; a direct JIT path emits only one `direct_jit` marker.
+Both markers have `index`, `config`, and `latency_ms` set to `None` and do not
+reconstruct trial history. The callback is not part of the cache identity.
+
+Callbacks run synchronously on the aggregation thread. Keep them fast; do not
+mutate or re-enter the tuner from a callback. An ordinary `Exception` raised
+by the callback or while serializing a record disables reporting for the rest
+of that run while tuning continues. `on_trial` with `early_stop=True` is
+currently unsupported and raises `ValueError`. This option is available on
+`AutoTuner.run` only, not the `@tilelang.autotune` decorator, and it does not
+create a persistent trial history in the cache.
+
 ### Example Gallery (in repo)
 - examples/gdn/example_chunk_delta_h.py:101 — uses `@autotune` to sweep configs
 - examples/deepseek_nsa/benchmark/benchmark_nsa_fwd.py:451 — uses `@tilelang.autotune`
