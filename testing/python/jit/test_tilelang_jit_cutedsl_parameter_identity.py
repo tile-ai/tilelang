@@ -151,6 +151,7 @@ def test_cutedsl_host_preserves_tma_argument_identity():
     compile(wrapper.host_func, "cutedsl_tma_host.py", "exec")
     args, _ = wrapper._collect_function_args()
     assert {info["globalAddress"] for info in wrapper.tma_desc_info.values()} == {arg["name"] for arg in args}
+    assert [info["globalAddress"] for info in wrapper.tma_desc_info.values()] == [args[0]["name"], args[1]["name"]]
     assert "cuTensorMapEncodeTiled" in wrapper.get_launcher_cpp_code()
 
 
