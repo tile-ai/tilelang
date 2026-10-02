@@ -378,8 +378,7 @@ struct Gemm {
     bool wgmma_disabled =
         ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false);
     if (!wgmma_disabled && TargetIsHopper(target) && IsSharedBuffer(op.b_) &&
-        HasWgmmaOperandLayoutConstraint(op) &&
-        (op.transA_ || !op.transB_)) {
+        HasWgmmaOperandLayoutConstraint(op) && (op.transA_ || !op.transB_)) {
       LOG(WARNING) << "WGMMA disabled for this gemm: FP8, INT8, and TF32 "
                       "operands require !trans_A && trans_B on Hopper (got "
                    << "trans_A=" << op.transA_ << ", trans_B=" << op.transB_
