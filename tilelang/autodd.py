@@ -1138,10 +1138,7 @@ class ParTaskManager:
 
     def __post_init__(self):
         if self.num_workers < 1:
-            raise ValueError(
-                f"num_workers must be >= 1, got {self.num_workers}; "
-                "no worker would start and run_async() would wait forever"
-            )
+            raise ValueError(f"num_workers must be >= 1, got {self.num_workers}; no worker would start and run_async() would wait forever")
         self.worker_tasks: list[asyncio.Task] = []
         self.stopped = False
         self.task_manager: TaskManager | None = None
