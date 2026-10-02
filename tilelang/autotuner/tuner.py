@@ -32,6 +32,7 @@ import traceback
 from pathlib import Path
 
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
+from tilelang.autotuner.report import TrialReporter
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.utils.device import get_available_cpu_count
@@ -818,6 +819,7 @@ class AutoTuner:
         benchmark_multi_gpu: bool = False,
         early_stop: bool = False,
         early_stop_factor: float = 2.0,
+        on_trial: Callable[[dict], None] | None = None,
     ):
         """Run the auto-tuning process.
 
@@ -832,6 +834,10 @@ class AutoTuner:
             benchmark_multi_gpu: Whether to benchmark configurations across multiple CUDA GPUs.
             early_stop: Whether to skip full benchmark when estimate exceeds best * early_stop_factor.
             early_stop_factor: Multiplier for best latency to compute early stop threshold.
+            on_trial: Experimental, synchronous observer of detached outcome records.
+                Not part of the cache identity. Cache hits have no trial history.
+                Ordinary sink errors disable reporting without failing tuning.
+                Not supported with early_stop until estimated latency is distinguishable.
 
         Returns:
             AutotuneResult: Results of the auto-tuning process.
@@ -840,6 +846,9 @@ class AutoTuner:
 
         if early_stop and early_stop_factor < 1.0:
             raise ValueError(f"early_stop_factor must be >= 1.0, got {early_stop_factor}")
+        if on_trial is not None and early_stop:
+            raise ValueError("Trial reporting with early_stop is not supported in this prototype")
+        reporter = TrialReporter(on_trial, logger)
 
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
@@ -870,6 +879,7 @@ class AutoTuner:
 
         key = self.generate_cache_key(parameters, extra_parameters)
 
+        cached_result = None
         with self._lock:
             if key is not None and env.is_cache_enabled() and not env.is_autotune_cache_disabled():
                 # First check in-memory cache
@@ -882,14 +892,16 @@ class AutoTuner:
                         "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.",
                         kernel_name,
                     )
-                    return cached_result
+                else:
+                    # Then check disk cache
+                    cached_result = self._load_result_from_disk(key)
+                    if cached_result is not None:
+                        self._memory_cache[key] = cached_result
 
-                # Then check disk cache
-                result = self._load_result_from_disk(key)
-                if result is not None:
-                    # Populate memory cache with disk result
-                    self._memory_cache[key] = result
-                    return result
+        if cached_result is not None:
+            # Never invoke user code while holding the shared cache lock.
+            reporter.emit("cache_hit")
+            return cached_result
 
         best_latency: float = float("inf")
         best_config: dict[str, Any] | None = None
@@ -953,6 +965,7 @@ class AutoTuner:
                 autotuner_result = AutotuneResult(libcode=jit_kernel.get_kernel_source(), func=jit_kernel.prim_func, kernel=jit_kernel)
                 if key is not None:
                     self._memory_cache[key] = autotuner_result
+                reporter.emit("direct_jit")
                 return autotuner_result
 
         # After confirming tuning will actually run, validate that scalar
@@ -1028,9 +1041,11 @@ class AutoTuner:
             progress_bar.update(1)
 
             if status == "timeout":
+                reporter.emit("timeout", idx, self.configs[idx], validation="unknown")
                 logger.warning(f"A timeout occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
                 return
             if status == "error":
+                reporter.emit("benchmark_error", idx, self.configs[idx], validation="unknown", error=error_text)
                 logger.warning(f"An error occurred while testing config {self.configs[idx]}, checkout autotuner.log for more details")
                 if error_text:
                     logger.debug(f"Error: {error_text}")
@@ -1040,6 +1055,8 @@ class AutoTuner:
                 ref_latency = worker_ref_latency
             assert latency is not None
             _record_benchmark_result(latency=latency, config=config, jit_kernel=jit_kernel, idx=idx, progress_bar=progress_bar)
+            validation = "passed" if not self.profile_args.skip_check and self.profile_args.ref_prog is not None else "not_run"
+            reporter.emit("ok", idx, self.configs[idx], latency=latency, validation=validation)
 
         def _drain_benchmark_results(progress_bar, block: bool):
             while benchmark_processed_results < benchmark_expected_results:
@@ -1096,11 +1113,14 @@ class AutoTuner:
                         compile_progress.update(len(unit_items))
                         unit_indexes = [idx for idx, _ in unit_items]
                         logger.debug("Compilation unit failed for indexes %s with error: %s", unit_indexes, e)
+                        for idx, _ in unit_items:
+                            reporter.emit("compile_error", idx, self.configs[idx], error=e)
                         continue
 
                     compile_progress.update(len(unit_results))
                     for idx, config, jit_kernel, error in unit_results:
                         if error is not None:
+                            reporter.emit("compile_error", idx, self.configs[idx], error=error)
                             logger.debug(f"Compilation failed for config {self.configs[idx]} at index {idx} with error: {error}")
                             continue
                         assert jit_kernel is not None
