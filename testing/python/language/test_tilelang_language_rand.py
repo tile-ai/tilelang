@@ -1,3 +1,5 @@
+import re
+
 import tilelang
 import tilelang.language as T
 import torch
@@ -122,6 +124,150 @@ def test_rand_init_in_split_guard(generator):
     assert torch.equal(A[:n], A_ref[:n]), "guarded rng output differs from unguarded baseline"
     assert (A[n:] == sentinel).all(), "rows outside the guard must stay untouched"
 
+
+
+# --- RNG hardening regressions (#3034) ---
+
+_NO_INIT_MATCH = re.escape("requires a preceding `T.rng_init(...)`")
+
+
+def _no_init_rng_rand():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "uint32")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            Out[tx] = T.rng_rand()
+
+    return rand_kernel
+
+
+def _init_rng_rand():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "uint32")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            T.rng_init(1234)
+            Out[tx] = T.rng_rand()
+
+    return rand_kernel
+
+
+def _no_init_rng_rand_float():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            Out[tx] = T.rng_rand_float()
+
+    return rand_kernel
+
+
+def _init_rng_rand_float():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            T.rng_init(1234)
+            Out[tx] = T.rng_rand_float()
+
+    return rand_kernel
+
+
+def _no_init_rng_rand_float_bit64():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float64")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            Out[tx] = T.rng_rand_float(bit=64)
+
+    return rand_kernel
+
+
+def _init_rng_rand_float_bit64():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float64")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            T.rng_init(1234)
+            Out[tx] = T.rng_rand_float(bit=64)
+
+    return rand_kernel
+
+
+def _no_init_rng_rand_float_normal():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            Out[tx] = T.rng_rand_float(dist="normal")
+
+    return rand_kernel
+
+
+def _init_rng_rand_float_normal():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float32")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            T.rng_init(1234)
+            Out[tx] = T.rng_rand_float(dist="normal")
+
+    return rand_kernel
+
+
+def _no_init_rng_rand_float_bit64_normal():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float64")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            Out[tx] = T.rng_rand_float(bit=64, dist="normal")
+
+    return rand_kernel
+
+
+def _init_rng_rand_float_bit64_normal():
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((8,), "float64")):
+        with T.Kernel(1, threads=8):
+            tx = T.get_thread_binding()
+            T.rng_init(1234)
+            Out[tx] = T.rng_rand_float(bit=64, dist="normal")
+
+    return rand_kernel
+
+
+_PRODUCERS = [
+    ("rng_rand", _no_init_rng_rand, _init_rng_rand, "uint32"),
+    ("rng_rand_float", _no_init_rng_rand_float, _init_rng_rand_float, "float32"),
+    ("rng_rand_float_bit64", _no_init_rng_rand_float_bit64, _init_rng_rand_float_bit64, "float64"),
+    ("rng_rand_float_normal", _no_init_rng_rand_float_normal, _init_rng_rand_float_normal, "float32"),
+    (
+        "rng_rand_float_bit64_normal",
+        _no_init_rng_rand_float_bit64_normal,
+        _init_rng_rand_float_bit64_normal,
+        "float64",
+    ),
+]
+_IDS = [p[0] for p in _PRODUCERS]
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("name,no_init,initialized,dtype", _PRODUCERS, ids=_IDS)
+def test_rand_producer_without_init_is_rejected(name, no_init, initialized, dtype):
+    """#3034: every producer form diagnoses a missing rng_init before nvcc."""
+    with pytest.raises(Exception, match=_NO_INIT_MATCH):
+        tilelang.compile(no_init())
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("name,no_init,initialized,dtype", _PRODUCERS, ids=_IDS)
+def test_rand_producer_after_init_compiles(name, no_init, initialized, dtype):
+    """Positive control: every producer form works once rng_init has run."""
+    kernel = tilelang.compile(initialized())
+    out = torch.zeros(8, dtype=getattr(torch, dtype), device="cuda")
+    kernel(out)
+    if out.is_floating_point():
+        assert torch.isfinite(out).all()
 
 if __name__ == "__main__":
     tilelang.testing.main()
