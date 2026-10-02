@@ -123,5 +123,130 @@ def test_rand_init_in_split_guard(generator):
     assert (A[n:] == sentinel).all(), "rows outside the guard must stay untouched"
 
 
+
+# --- RNG hardening regressions (#2625) ---
+
+
+def _curand_init_line(source: str) -> str:
+    """The generated `curand_init(...)` call, which carries the effective seq."""
+    for line in source.splitlines():
+        if "curand_init(" in line:
+            return line
+    raise AssertionError(f"no curand_init in generated source:\n{source}")
+
+
+def _default_seq_2d_threads(seed=1234):
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((2, 2), "int32")):
+        with T.Kernel(1, threads=(2, 2)):
+            tx = T.get_thread_binding(0)
+            ty = T.get_thread_binding(1)
+            T.rng_init(seed)
+            Out[tx, ty] = T.reinterpret(T.rng_rand(), dtype="int32")
+
+    return rand_kernel
+
+
+def _default_seq_2d_grid(seed=1234):
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((2, 2), "int32")):
+        with T.Kernel(2, 2, threads=1):
+            bx = T.get_block_binding(0)
+            by = T.get_block_binding(1)
+            T.rng_init(seed)
+            Out[bx, by] = T.reinterpret(T.rng_rand(), dtype="int32")
+
+    return rand_kernel
+
+
+def _default_seq_1d(M=64, threads=32, seed=1234):
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((M,), "int32")):
+        with T.Kernel(T.ceildiv(M, threads), threads=threads) as bx:
+            tx = T.get_thread_binding()
+            T.rng_init(seed)
+            idx = bx * threads + tx
+            if idx < M:
+                Out[idx] = T.reinterpret(T.rng_rand(), dtype="int32")
+
+    return rand_kernel
+
+
+def _explicit_seq_1d(M=64, threads=32, seed=1234):
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((M,), "int32")):
+        with T.Kernel(T.ceildiv(M, threads), threads=threads) as bx:
+            tx = T.get_thread_binding()
+            T.rng_init(seed, seq=tx + bx * threads)
+            idx = bx * threads + tx
+            if idx < M:
+                Out[idx] = T.reinterpret(T.rng_rand(), dtype="int32")
+
+    return rand_kernel
+
+
+def _explicit_seq_2d_threads(seed=1234):
+    @T.prim_func
+    def rand_kernel(Out: T.Tensor((2, 2), "int32")):
+        with T.Kernel(1, threads=(2, 2)):
+            tx = T.get_thread_binding(0)
+            ty = T.get_thread_binding(1)
+            T.rng_init(seed, seq=tx * 2 + ty)
+            Out[tx, ty] = T.reinterpret(T.rng_rand(), dtype="int32")
+
+    return rand_kernel
+
+
+@tilelang.testing.requires_cuda
+def test_rand_default_seq_covers_thread_y():
+    """#2625: the default seq must fold in threadIdx.y, not only threadIdx.x."""
+    kernel = tilelang.compile(_default_seq_2d_threads())
+    assert "threadIdx.y" in _curand_init_line(kernel.get_kernel_source())
+
+    out = torch.zeros((2, 2), dtype=torch.int32, device="cuda")
+    kernel(out)
+    values = out.cpu().flatten().tolist()
+    assert len(set(values)) == 4, f"threadIdx.y shares one curand stream: {values}"
+
+
+@tilelang.testing.requires_cuda
+def test_rand_default_seq_covers_block_y():
+    """#2625: the default seq must fold in blockIdx.y, not only blockIdx.x."""
+    kernel = tilelang.compile(_default_seq_2d_grid())
+    assert "blockIdx.y" in _curand_init_line(kernel.get_kernel_source())
+
+    out = torch.zeros((2, 2), dtype=torch.int32, device="cuda")
+    kernel(out)
+    values = out.cpu().flatten().tolist()
+    assert len(set(values)) == 4, f"blockIdx.y shares one curand stream: {values}"
+
+
+@tilelang.testing.requires_cuda
+def test_rand_default_seq_keeps_1d_layout():
+    """A 1-D launch keeps the historical `threadIdx.x + blockIdx.x * blockDim.x`."""
+    default = tilelang.compile(_default_seq_1d())
+    explicit = tilelang.compile(_explicit_seq_1d())
+
+    a = torch.zeros(64, dtype=torch.int32, device="cuda")
+    b = torch.zeros(64, dtype=torch.int32, device="cuda")
+    default(a)
+    explicit(b)
+    assert torch.equal(a, b), "the default seq changed the 1-D stream layout"
+
+    line = _curand_init_line(default.get_kernel_source())
+    assert "threadIdx.y" not in line and "blockIdx.y" not in line
+
+
+@tilelang.testing.requires_cuda
+def test_rand_explicit_seq_is_used_verbatim():
+    """An explicit seq is forwarded unchanged, with no implicit flattening."""
+    kernel = tilelang.compile(_explicit_seq_2d_threads())
+    line = _curand_init_line(kernel.get_kernel_source())
+    assert "threadIdx.y" in line and "blockIdx" not in line
+
+    out = torch.zeros((2, 2), dtype=torch.int32, device="cuda")
+    kernel(out)
+    assert len(set(out.cpu().flatten().tolist())) == 4
+
 if __name__ == "__main__":
     tilelang.testing.main()
