@@ -134,7 +134,8 @@ def test_cutedsl_launch_preserves_distinct_same_named_shape_vars():
         assert b[0].item() == first
 
 
-def test_cutedsl_host_preserves_tma_argument_identity():
+@pytest.mark.parametrize("reverse_descriptor_order", [False, True])
+def test_cutedsl_host_preserves_tma_argument_identity(reverse_descriptor_order):
     @T.prim_func
     def main(A: T.Tensor((64, 128), T.float16), B: T.Tensor((64, 128), T.float16)):
         with T.Kernel(1, threads=128):
@@ -150,8 +151,12 @@ def test_cutedsl_host_preserves_tma_argument_identity():
     assert wrapper.tma_descriptor_args
     compile(wrapper.host_func, "cutedsl_tma_host.py", "exec")
     args, _ = wrapper._collect_function_args()
-    assert {info["globalAddress"] for info in wrapper.tma_desc_info.values()} == {arg["name"] for arg in args}
-    assert [info["globalAddress"] for info in wrapper.tma_desc_info.values()] == [args[0]["name"], args[1]["name"]]
+    argument_names = {arg["var"]: arg["name"] for arg in args}
+    expected_addresses = {descriptor: argument_names[values[4]] for descriptor, values in wrapper.tma_descriptor_args.items()}
+    if reverse_descriptor_order:
+        wrapper.tma_desc_info = dict(reversed(list(wrapper.tma_desc_info.items())))
+    actual_addresses = {info["desc_var"]: info["globalAddress"] for info in wrapper.tma_desc_info.values()}
+    assert actual_addresses == expected_addresses
     assert "cuTensorMapEncodeTiled" in wrapper.get_launcher_cpp_code()
 
 
