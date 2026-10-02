@@ -1264,7 +1264,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """Filter out descriptor arguments."""
         filtered = []
         for arg_name, arg_type in call_args:
-            if "desc" in arg_name and arg_name in desc_names:
+            if arg_name in desc_names:
                 continue
             if arg_name in tma_tensors:
                 continue
@@ -1401,7 +1401,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         # Build kernel args
         kernel_args = []
         for arg_name, arg_type in call_args:
-            if "desc" in arg_name and arg_name in desc_names:
+            if arg_name in desc_names:
                 # For __grid_constant__ CUtensorMap: pass host pointer directly
                 # cuLaunchKernel will copy 128-byte CUtensorMap to param space
                 desc_idx = all_desc_names.index(arg_name)

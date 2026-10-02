@@ -154,6 +154,21 @@ def test_cutedsl_host_preserves_tma_argument_identity():
     assert "cuTensorMapEncodeTiled" in wrapper.get_launcher_cpp_code()
 
 
+@pytest.mark.parametrize("descriptor_name", ["tensor_map", "tma_desc"])
+def test_cutedsl_descriptor_consumers_do_not_depend_on_name_hint(descriptor_name):
+    _, wrapper = _lower(_scalar_program("m"))
+    call_args = [(descriptor_name, "None"), ("other_desc_scalar", "int32")]
+    assert wrapper._filter_non_descriptor_args(call_args, [descriptor_name], []) == [("other_desc_scalar", "int32")]
+    metadata = {
+        "function_name": wrapper.function_names[0],
+        "call_args": call_args,
+        "desc_names": [descriptor_name],
+        "function_info": {"grid_info": [1, 1, 1], "block_info": [32, 1, 1], "dynamic_smem_buf": 0},
+    }
+    launcher = wrapper._generate_kernel_launch(metadata, 0, [descriptor_name])
+    assert "&tma_descs[0], &other_desc_scalar" in launcher
+
+
 def _host_adapter(program):
     from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
 
