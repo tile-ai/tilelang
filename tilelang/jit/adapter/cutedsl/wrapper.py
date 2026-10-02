@@ -1023,7 +1023,13 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
     def _pythonic_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         """Convert TVM expression to Python string, ignoring casts."""
-        return pythonic_expr(expr, self._TYPE_MAP, ignore_cast=True, floor_div_op="//")
+        return pythonic_expr(
+            expr,
+            self._TYPE_MAP,
+            ignore_cast=True,
+            floor_div_op="//",
+            var_name_map=getattr(self, "_argument_names", None),
+        )
 
     def _generate_cubin_cluster_arg(self, cluster_dims: list[Any] | None) -> str:
         """Render the optional CuTeDSL launch cluster argument."""
@@ -1039,7 +1045,12 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
     def _cxx_expr(self, expr: tvm.tirx.PrimExpr) -> str:
         """Convert TVM expression to C++ string for generated launcher code."""
-        return pythonic_expr(expr, self._CXX_TYPE_MAP, func_name_map={"min": "std::min", "max": "std::max"})
+        return pythonic_expr(
+            expr,
+            self._CXX_TYPE_MAP,
+            func_name_map={"min": "std::min", "max": "std::max"},
+            var_name_map=getattr(self, "_argument_names", None),
+        )
 
     @staticmethod
     def _cxx_cast(ctype: str, expr_str: str) -> str:
@@ -1112,35 +1123,54 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         """
         function_args = []
         buffer_args = []
+        self._argument_names = {}
+        source_names = set(re.findall(r"\b\w+\b", getattr(self, "lib_code", "")))
+        next_index = 0
+
+        def append(var, arg_type, dtype=None):
+            nonlocal next_index
+            if var in self._argument_names:
+                return
+            while True:
+                name = f"_tl_arg_{next_index}"
+                next_index += 1
+                # The embedded device source defines functions in the same
+                # Python scope as the cubin builder's input arguments.
+                related = {name, name + "_", name + "_ptr", f"__fake_{name}__"}
+                if not related & source_names:
+                    break
+            self._argument_names[var] = name
+            arg = {"name": name, "type": arg_type, "var": var}
+            if dtype is not None:
+                arg["dtype"] = dtype
+            function_args.append(arg)
+            if arg_type == "buffer":
+                buffer_args.append(name)
 
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": "buffer",
-                        "dtype": self._TYPE_MAP.get(buffer.dtype) or self._TYPE_MAP.get(str(buffer.dtype)),
-                    }
+                append(
+                    buffer.data,
+                    "buffer",
+                    self._TYPE_MAP.get(buffer.dtype) or self._TYPE_MAP.get(str(buffer.dtype)),
                 )
-                buffer_args.append(buffer.data.name)
             elif isinstance(param, tvm.tirx.Var):
-                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+                append(param, self._TYPE_MAP[param.dtype])
             else:
                 raise ValueError(f"Parameter {param} not in buffer map")
 
-        existing_names = {arg["name"] for arg in function_args}
-        for dyn_sym in self.get_dynamic_symbolic_set(self.prim_func):
-            dyn_sym_name, dyn_sym_dtype = dyn_sym if isinstance(dyn_sym, tuple) else (dyn_sym, "int32")
-            if dyn_sym_name in existing_names:
-                continue
-            existing_names.add(dyn_sym_name)
-            function_args.append({"name": dyn_sym_name, "type": self._TYPE_MAP.get(dyn_sym_dtype, "int")})
+        for field in ("shape", "strides"):
+            for param in self.prim_func.params:
+                if param in self.prim_func.buffer_map:
+                    for value in getattr(self.prim_func.buffer_map[param], field):
+                        if isinstance(value, tvm.tirx.Var):
+                            append(value, self._TYPE_MAP.get(str(value.dtype), "int"))
 
         return function_args, buffer_args
 
-    @staticmethod
     def _extract_func_call_args(
+        self,
         declaration: str,
         function_args: list[dict],
         function_params: list,
@@ -1148,16 +1178,6 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
         desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
     ) -> list[tuple[str, str]]:
         """Extract function call arguments from Python function declaration."""
-
-        def maybe_desc(name: str | tuple[str, str], param_names: list[str], i: int):
-            """Record descriptor aliases while matching declaration parameters."""
-            name_str = name if isinstance(name, str) else name[0]
-            param = param_names[i]
-            if not (param == name_str + "_desc" or param.startswith(name_str + "_desc_")):
-                return False
-            if desc_name_map is not None:
-                desc_name_map[param] = name_str
-            return True
 
         def extract_param_names_ast(decl: str) -> list[str] | None:
             """Extract parameter names using AST parsing."""
@@ -1224,15 +1244,17 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
             param_names = extract_param_names_split(declaration)
 
         call_args = []
-        for i, param_name in enumerate(param_names):
-            for arg in function_args:
-                if arg["name"] == param_name:
-                    call_args.append((param_name, arg["type"]))
-                elif maybe_desc(arg["name"], param_names, i):
-                    call_args.append((param_name, "None"))
-                    if desc_name_var_map is not None and function_params is not None:
-                        assert len(call_args) <= len(function_params)
-                        desc_name_var_map[param_name] = function_params[len(call_args) - 1]
+        by_var = {arg["var"]: arg for arg in function_args}
+        for param_name, param in zip(param_names, function_params, strict=True):
+            if param in by_var:
+                arg = by_var[param]
+                call_args.append((arg["name"], arg["type"]))
+            elif self.tma_descriptor_args is not None and param in self.tma_descriptor_args:
+                call_args.append((param_name, "None"))
+                desc_name_map[param_name] = self._pythonic_expr(self.tma_descriptor_args[param][4])
+                desc_name_var_map[param_name] = param
+            else:
+                raise ValueError(f"Cannot resolve CuTeDSL kernel argument by identity: {param}")
         return call_args
 
     @staticmethod
@@ -1890,6 +1912,17 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
 
         for function_info in function_information_list:
             function_name = function_info["function_name"]
+            # Launch metadata uses device Vars. Resolve it at this call site,
+            # including repeated calls of the same kernel with different inputs.
+            parameter_map = dict(zip(self.device_mod[function_name].params, function_info["function_params"], strict=True))
+            function_info = dict(function_info)
+            for field in ("grid_info", "block_info", "cluster_dims"):
+                values = function_info.get(field)
+                if values is not None:
+                    function_info[field] = [
+                        tvm.tirx.stmt_functor.substitute(value, parameter_map) if isinstance(value, tvm.tirx.PrimExpr) else value
+                        for value in values
+                    ]
             declaration = extract_python_func_declaration(code, function_name)
             desc_name_map: dict[str, str] = {}
             desc_name_var_map: dict[str, tvm.tirx.Var] = {}
