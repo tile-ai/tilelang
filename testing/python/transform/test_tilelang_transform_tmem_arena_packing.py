@@ -7,6 +7,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import collect_calls
 
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
@@ -19,20 +20,9 @@ def _apply(func):
     return tl.cuda.transform.LowerSharedTmem()(mod)
 
 
-def _collect_calls(stmt, op_name):
-    calls = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", None) == op_name:
-            calls.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return calls
-
-
 def _num_cols_allocated(body):
     """Columns passed to each tcgen05.alloc, in the order they are issued."""
-    return [int(call.args[1]) for call in _collect_calls(body, "tl.ptx_init_tensor_memory")]
+    return [int(call.args[1]) for call in collect_calls(body, op="tl.ptx_init_tensor_memory")]
 
 
 def _tmem_addresses(body):
@@ -88,7 +78,7 @@ def test_narrow_buffers_join_a_wide_allocation():
 
     body = _apply(func)["main"].body
     assert _num_cols_allocated(body) == [512]
-    assert [int(call.args[1]) for call in _collect_calls(body, "tl.ptx_deallocate_tensor_memory")] == [512]
+    assert [int(call.args[1]) for call in collect_calls(body, op="tl.ptx_deallocate_tensor_memory")] == [512]
     assert _tmem_addresses(body) == [
         ("C_tmem", 0),
         ("C_tmem", 384),
@@ -226,7 +216,7 @@ def test_dynamic_coordinate_keeps_the_arena_offset():
 
     body = _apply(func)["main"].body
     assert _num_cols_allocated(body) == [512]
-    addresses = _collect_calls(body, "tl.ptx_init_tensor_memory")
+    addresses = collect_calls(body, op="tl.ptx_init_tensor_memory")
     assert len(addresses) == 1
 
     dynamic_address = []

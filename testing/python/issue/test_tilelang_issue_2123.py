@@ -1,9 +1,8 @@
 import tilelang
 import tilelang.testing
+from tilelang.testing.ir import assert_call_count, collect_calls
 import tilelang.language as T
 from tilelang import tvm
-from tvm import tirx
-from tvm.tirx import op
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.transform import LowerAccessPtr
 
@@ -33,22 +32,9 @@ def issue_2123_atomic_load_repro(num_tiles, threads=32):
     return kernel
 
 
-def _has_op_call(func, op_name):
-    found = False
-    target_op = op.Op.get(op_name)
-
-    def _visit(node):
-        nonlocal found
-        if isinstance(node, tirx.Call) and node.op.same_as(target_op):
-            found = True
-
-    tirx.stmt_functor.post_order_visit(func.body, _visit)
-    return found
-
-
 def _assert_access_ptr_lowered(mod):
-    assert _has_op_call(mod["main"], "tirx.tvm_access_ptr")
-    assert not _has_op_call(mod["main"], "tl.access_ptr")
+    assert collect_calls(mod["main"], op="tirx.tvm_access_ptr")
+    assert_call_count(mod["main"], op="tl.access_ptr", count=0)
 
 
 def test_issue_2123_atomic_load_lower_access_ptr_direct():
