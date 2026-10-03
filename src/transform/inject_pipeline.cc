@@ -2573,125 +2573,123 @@ private:
         continue;
       }
 
-      int producer_stage_idx = -1;
-      for (const BufferRegion &read_region : new_stmts[i].reads) {
-        for (const auto &kv : async_states_) {
-          if (kv.first <= new_stmts[i].stage &&
-              kv.second.writes(read_region->buffer)) {
-            ICHECK(producer_stage_idx == -1 || producer_stage_idx == kv.first)
-                << "A dependency on multiple async stages is not supported";
-            producer_stage_idx = kv.first;
-          }
+      // A consumer depends on completion of every producer, independently of
+      // the stage chosen for each transfer. Queue-local wait counts count only
+      // that producer stage's commits: on a shared hardware queue they remain
+      // conservative (other stages can only add newer commits).
+      for (const auto &[producer_stage_idx, producer_state] : async_states_) {
+        if (producer_stage_idx > new_stmts[i].stage ||
+            std::none_of(new_stmts[i].reads.begin(), new_stmts[i].reads.end(),
+                         [&](const BufferRegion &read) {
+                           return producer_state.writes(read->buffer);
+                         })) {
+          continue;
         }
-      }
 
-      if (producer_stage_idx == -1) {
-        continue;
-      }
+        auto &dep_local_state = (*async_states_local)[producer_stage_idx];
+        int num_commit_group = dep_local_state.commit_groups.size();
 
-      auto &dep_local_state = (*async_states_local)[producer_stage_idx];
-      int num_commit_group = dep_local_state.commit_groups.size();
-
-      if (num_commit_group == 0) {
-        ICHECK(!dep_local_state.producer_head);
-        const auto &global_state = async_states_[producer_stage_idx];
-        PrimExpr tail_start =
-            analyzer_.Simplify(pipeline_loop_->min + pipeline_loop_->extent -
-                               PrimExpr(max_stage_));
-        bool is_tail_consumer =
-            ana_normalized->CanProve(new_stmts[i].access_index >= tail_start);
-        if (is_tail_consumer && global_state.commit_group_count > 0) {
-          int latest_group_id = global_state.commit_group_count - 1;
-          PrimExpr latest_producer_head = analyzer_.Simplify(
-              pipeline_loop_->min + pipeline_loop_->extent - PrimExpr(1));
-          std::vector<bool> need_wait_count(global_state.commit_group_count,
-                                            true);
-          bool handled = false;
-          for (const BufferRegion &read_region : new_stmts[i].reads) {
-            if (!global_state.writes(read_region->buffer)) {
+        if (num_commit_group == 0) {
+          ICHECK(!dep_local_state.producer_head);
+          const auto &global_state = async_states_[producer_stage_idx];
+          PrimExpr tail_start =
+              analyzer_.Simplify(pipeline_loop_->min + pipeline_loop_->extent -
+                                 PrimExpr(max_stage_));
+          bool is_tail_consumer =
+              ana_normalized->CanProve(new_stmts[i].access_index >= tail_start);
+          if (is_tail_consumer && global_state.commit_group_count > 0) {
+            int latest_group_id = global_state.commit_group_count - 1;
+            PrimExpr latest_producer_head = analyzer_.Simplify(
+                pipeline_loop_->min + pipeline_loop_->extent - PrimExpr(1));
+            std::vector<bool> need_wait_count(global_state.commit_group_count,
+                                              true);
+            bool handled = false;
+            for (const BufferRegion &read_region : new_stmts[i].reads) {
+              if (!global_state.writes(read_region->buffer)) {
+                continue;
+              }
+              auto it =
+                  global_state.buffer_to_commit_group.find(read_region->buffer);
+              if (it == global_state.buffer_to_commit_group.end()) {
+                handled = false;
+                break;
+              }
+              int commit_group_id = it->second;
+              ICHECK_GE(commit_group_id, 0);
+              ICHECK_LT(commit_group_id, global_state.commit_group_count);
+              if (!need_wait_count[commit_group_id]) {
+                continue;
+              }
+              PrimExpr wait_count = analyzer_.Simplify(
+                  (latest_producer_head - new_stmts[i].access_index) *
+                      global_state.commit_group_count +
+                  (latest_group_id - commit_group_id));
+              if (!ana_normalized->CanProve(wait_count >= 0)) {
+                wait_count = PrimExpr(0);
+              }
+              record_pending_wait(&dep_local_state, commit_group_id,
+                                  static_cast<int>(i), wait_count);
+              need_wait_count[commit_group_id] = false;
+              handled = true;
+            }
+            if (handled) {
               continue;
             }
-            auto it =
-                global_state.buffer_to_commit_group.find(read_region->buffer);
-            if (it == global_state.buffer_to_commit_group.end()) {
-              handled = false;
-              break;
-            }
-            int commit_group_id = it->second;
-            ICHECK_GE(commit_group_id, 0);
-            ICHECK_LT(commit_group_id, global_state.commit_group_count);
-            if (!need_wait_count[commit_group_id]) {
-              continue;
-            }
-            PrimExpr wait_count = analyzer_.Simplify(
-                (latest_producer_head - new_stmts[i].access_index) *
-                    global_state.commit_group_count +
+          }
+
+          PrimExpr wait_count = PrimExpr(0);
+          Optional<PrimExpr> producer_head =
+              async_states_[producer_stage_idx].producer_head;
+          if (producer_head &&
+              ana_normalized->CanProve(producer_head.value() >= 0)) {
+            wait_count = analyzer_.Simplify(producer_head.value() -
+                                            new_stmts[i].access_index);
+          }
+          record_pending_wait(&dep_local_state, -1, static_cast<int>(i),
+                              wait_count);
+          continue;
+        }
+
+        ICHECK(dep_local_state.producer_head);
+        int latest_group_id = -1;
+        Optional<PrimExpr> latest_producer_head;
+        if (auto it = last_committed_group.find(producer_stage_idx);
+            it != last_committed_group.end()) {
+          latest_group_id = it->second;
+          latest_producer_head = dep_local_state.producer_head.value();
+        } else {
+          latest_group_id = num_commit_group - 1;
+          latest_producer_head = dep_local_state.producer_head.value() - 1;
+        }
+
+        std::vector<bool> need_wait_count(num_commit_group, true);
+        for (const BufferRegion &read_region : new_stmts[i].reads) {
+          if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
+            continue;
+          }
+          auto commit_group_id = buffer_to_commit_group.at(read_region->buffer);
+          ICHECK_GE(commit_group_id, 0);
+          ICHECK_LT(commit_group_id, num_commit_group);
+          if (!need_wait_count[commit_group_id]) {
+            continue;
+          }
+
+          PrimExpr wait_count = PrimExpr(0);
+          if (latest_producer_head &&
+              ana_normalized->CanProve(latest_producer_head.value() >= 0)) {
+            wait_count = analyzer_.Simplify(
+                (latest_producer_head.value() - new_stmts[i].access_index) *
+                    num_commit_group +
                 (latest_group_id - commit_group_id));
             if (!ana_normalized->CanProve(wait_count >= 0)) {
               wait_count = PrimExpr(0);
             }
-            record_pending_wait(&dep_local_state, commit_group_id,
-                                static_cast<int>(i), wait_count);
-            need_wait_count[commit_group_id] = false;
-            handled = true;
           }
-          if (handled) {
-            continue;
-          }
-        }
 
-        PrimExpr wait_count = PrimExpr(0);
-        Optional<PrimExpr> producer_head =
-            async_states_[producer_stage_idx].producer_head;
-        if (producer_head &&
-            ana_normalized->CanProve(producer_head.value() >= 0)) {
-          wait_count = analyzer_.Simplify(producer_head.value() -
-                                          new_stmts[i].access_index);
+          record_pending_wait(&dep_local_state, commit_group_id,
+                              static_cast<int>(i), wait_count);
+          need_wait_count[commit_group_id] = false;
         }
-        record_pending_wait(&dep_local_state, -1, static_cast<int>(i),
-                            wait_count);
-        continue;
-      }
-
-      ICHECK(dep_local_state.producer_head);
-      int latest_group_id = -1;
-      Optional<PrimExpr> latest_producer_head;
-      if (auto it = last_committed_group.find(producer_stage_idx);
-          it != last_committed_group.end()) {
-        latest_group_id = it->second;
-        latest_producer_head = dep_local_state.producer_head.value();
-      } else {
-        latest_group_id = num_commit_group - 1;
-        latest_producer_head = dep_local_state.producer_head.value() - 1;
-      }
-
-      std::vector<bool> need_wait_count(num_commit_group, true);
-      for (const BufferRegion &read_region : new_stmts[i].reads) {
-        if (!async_states_[producer_stage_idx].writes(read_region->buffer)) {
-          continue;
-        }
-        auto commit_group_id = buffer_to_commit_group.at(read_region->buffer);
-        ICHECK_GE(commit_group_id, 0);
-        ICHECK_LT(commit_group_id, num_commit_group);
-        if (!need_wait_count[commit_group_id]) {
-          continue;
-        }
-
-        PrimExpr wait_count = PrimExpr(0);
-        if (latest_producer_head &&
-            ana_normalized->CanProve(latest_producer_head.value() >= 0)) {
-          wait_count = analyzer_.Simplify(
-              (latest_producer_head.value() - new_stmts[i].access_index) *
-                  num_commit_group +
-              (latest_group_id - commit_group_id));
-          if (!ana_normalized->CanProve(wait_count >= 0)) {
-            wait_count = PrimExpr(0);
-          }
-        }
-
-        record_pending_wait(&dep_local_state, commit_group_id,
-                            static_cast<int>(i), wait_count);
-        need_wait_count[commit_group_id] = false;
       }
     }
   }

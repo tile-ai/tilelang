@@ -182,6 +182,16 @@ class TileOperator;
 
 class TileOperatorNode : public ffi::Object {
 public:
+  /*! \brief Expand a composite op into logical TIR before scheduling/layout.
+   * Return nullopt for implementations that require physical lowering.
+   * The result must retain one schedulable statement and must not assign
+   * threads, physical layouts, or asynchronous completion protocols.
+   */
+  virtual ffi::Optional<tirx::Stmt>
+  LowerLogical(Target target, arith::Analyzer *analyzer) const {
+    return std::nullopt;
+  }
+
   virtual tirx::Stmt Lower(const LowerArgs &lower_args,
                            arith::Analyzer *analyzer) const = 0;
 
