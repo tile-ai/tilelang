@@ -4,6 +4,8 @@ import inspect
 import threading
 from dataclasses import replace
 
+import tilelang
+import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.autotuner.param import CompileArgs, ProfileArgs
 
@@ -46,3 +48,40 @@ def test_cache_key_is_disabled_for_profile_callbacks():
 
     for callback_field in ("ref_prog", "supply_prog", "manual_check_prog"):
         assert _cache_key(profile_args=ProfileArgs(**{callback_field: callback})) is None
+
+
+def _decorated(warmup, rep, timeout):
+    """Build an autotuned kernel whose profiler settings differ per call.
+
+    The target is pinned to a host target so the test does not depend on a
+    device being present to auto-detect one; nothing here is lowered.
+    """
+
+    @tilelang.autotune(configs=[{"block_size": 128}], warmup=warmup, rep=rep, timeout=timeout)
+    @tilelang.jit(target="c")
+    def kernel(N: int = 256, block_size: int = 128):
+        @T.prim_func
+        def main(A: T.Tensor((N,), "float32")):
+            with T.Kernel(T.ceildiv(N, block_size), threads=block_size):
+                T.evaluate(0)
+
+        return main
+
+    return kernel
+
+
+def test_decorator_profile_settings_reach_the_cache_identity():
+    """warmup/rep/timeout set on the decorator must reach the tuning cache identity.
+
+    The cache key is built from ``hash(profile_args)``, which already covers these
+    three fields. When the decorator did not forward them, the tuner kept the
+    dataclass defaults, so two kernels configured with different measurement
+    settings produced the same key and the second silently reused the first's
+    tuning result.
+    """
+    short = _decorated(warmup=10, rep=20, timeout=5).get_tunner()
+    long = _decorated(warmup=500, rep=1000, timeout=60).get_tunner()
+
+    assert (short.profile_args.warmup, short.profile_args.rep, short.profile_args.timeout) == (10, 20, 5)
+    assert (long.profile_args.warmup, long.profile_args.rep, long.profile_args.timeout) == (500, 1000, 60)
+    assert hash(short.profile_args) != hash(long.profile_args)
