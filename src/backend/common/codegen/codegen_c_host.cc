@@ -288,16 +288,21 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
   std::string metal_result;
   if (is_in_metal_context) {
     metal_result = name_supply_->FreshName("metal_ret");
+    std::string serial_queue = name_supply_->FreshName("serial_queue");
+    std::string command_buffer = name_supply_->FreshName("command_buffer");
+    std::string set_stream = name_supply_->FreshName("set_stream");
     this->PrintLine("__block int ", metal_result, " = 0;");
-    this->PrintLine("auto serialQueue = torch::mps::get_dispatch_queue();");
-    this->PrintLine("dispatch_sync(serialQueue, ^() {");
+    this->PrintLine("auto ", serial_queue,
+                    " = torch::mps::get_dispatch_queue();");
+    this->PrintLine("dispatch_sync(", serial_queue, ", ^() {");
     metal_scope = this->BeginScope();
 
-    this->PrintLine("const id<MTLCommandBuffer> commandBuffer = "
-                    "torch::mps::get_command_buffer();");
-    this->PrintLine(
-        "const auto f = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
-    this->PrintLine("(*f)(static_cast<TVMStreamHandle>(commandBuffer));");
+    this->PrintLine("const id<MTLCommandBuffer> ", command_buffer,
+                    " = torch::mps::get_command_buffer();");
+    this->PrintLine("const auto ", set_stream,
+                    " = tvm::ffi::Function::GetGlobal(\"metal.SetStream\");");
+    this->PrintLine("(*", set_stream, ")(static_cast<TVMStreamHandle>(",
+                    command_buffer, "));");
   }
 
   this->PrintIndent();
