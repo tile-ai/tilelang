@@ -50,7 +50,8 @@ def glm53_kpool_compress_kernel(
 
     One 128-thread program processes one pool. Each thread owns one head
     dimension during the softmax and pooling phases. The Hadamard transform
-    and absmax reduction exchange those values through shared memory.
+    uses warp shuffles within each 32-lane group and shared memory across
+    groups. The absmax reduction reuses that shared memory.
     """
     if pool_size <= 0:
         raise ValueError(f"pool_size must be positive, got {pool_size}")
@@ -100,13 +101,20 @@ def glm53_kpool_compress_kernel(
                 # Match the production path's BF16 boundary before Hadamard.
                 pooled = T.cast(T.cast(pooled / denom, T.bfloat16), T.float32)
 
+                # Width 32 also keeps each butterfly inside one logical warp
+                # on wave64 targets. Preserve the Sylvester stage order.
+                for stage in T.serial(5):
+                    stride = 1 << stage
+                    peer = T.shfl_xor(pooled, stride, width=32)
+                    pooled = T.if_then_else((dim & stride) == 0, pooled + peer, peer - pooled)
+
                 exchange[dim] = pooled
                 T.sync_threads()
 
-                # Normalized Sylvester Hadamard-128. A barrier between the
-                # loads and stores prevents an in-place read/write race.
-                for stage in T.serial(7):
-                    stride = 1 << stage
+                # Cross-warp stages need a barrier between loads and stores
+                # to prevent an in-place read/write race.
+                for stage in T.serial(2):
+                    stride = 32 << stage
                     own = T.alloc_var(T.float32, init=exchange[dim])
                     peer = T.alloc_var(T.float32, init=exchange[dim ^ stride])
                     T.sync_threads()
