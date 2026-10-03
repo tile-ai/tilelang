@@ -36,5 +36,36 @@ def test_uint64_scalar(execution_backend):
         assert b.item() == value
 
 
+def _narrow_unsigned_scalar_kernel(dtype):
+    """One builder per dtype: an annotation cannot be a parametrized name."""
+
+    @T.prim_func
+    def main(B: T.Tensor((1,), "int32"), value: dtype):
+        with T.Kernel(1, threads=1):
+            B[0] = T.cast(value, "int32")
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32"])
+@pytest.mark.parametrize("execution_backend", ["cython", "nvrtc"])
+def test_narrow_unsigned_scalar_parameter(dtype, execution_backend):
+    """The cython host marshalling table carried only `torch.uint64`.
+
+    Every narrower unsigned scalar was rejected at call time with
+    `ValueError: Unsupported tensor dtype: torch.uint32`, even though the kernel
+    compiled and its device signature was generated correctly.
+    """
+    kernel = tilelang.compile(
+        _narrow_unsigned_scalar_kernel(getattr(T, dtype)),
+        target="cuda",
+        execution_backend=execution_backend,
+    )
+    b = torch.empty((1,), dtype=torch.int32, device="cuda")
+    kernel(b, 5)
+    assert b.item() == 5
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
