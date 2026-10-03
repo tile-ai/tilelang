@@ -6170,6 +6170,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   os << ')';
 }
 
+namespace {
+// Max finite magnitude for fp8/fp4 dtypes with no (or no non-finite)
+// infinity encoding, e.g. the e4m3 family, e8m0fnu and float4_e2m1fn.
+double MaxFiniteFp8Fp4(const DataType &dtype) {
+  if (dtype.is_float8_e4m3fnuz()) {
+    return 240.0;
+  }
+  if (dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn()) {
+    return 448.0;
+  }
+  if (dtype.is_float8_e8m0fnu()) {
+    return std::ldexp(1.0, 127);
+  }
+  ICHECK(dtype.is_float4()) << "No max-finite value for " << dtype;
+  return 6.0;
+}
+} // namespace
+
 inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangCUDA *p) { // NOLINT(*)
   // Type code is kBFloat/kFloat16
@@ -6232,9 +6250,21 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       os << "::bitcast(0x7e)";
       return;
     }
+    // No literal spelling for non-finite values here (e.g. -inff/nanf are
+    // invalid identifiers); clamp to the format's max-finite magnitude.
+    double value = op->value;
+    if (std::isnan(value)) {
+      value = MaxFiniteFp8Fp4(op->dtype);
+    } else if (std::isinf(value) && value < 0 &&
+               op->dtype.is_float8_e8m0fnu()) {
+      // e8m0fnu is unsigned: its smallest value, 2^-127, is the lower bound.
+      value = std::ldexp(1.0, -127);
+    } else if (std::isinf(value)) {
+      value = std::copysign(MaxFiniteFp8Fp4(op->dtype), value);
+    }
     p->PrintType(op->dtype, os);
-    os << '(' << FlexibleHexFormat(op->value) << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
+    os << '(' << FlexibleHexFormat(value) << 'f';
+    os << "/*" << std::scientific << value << "*/";
     os << ')';
     return;
   }
