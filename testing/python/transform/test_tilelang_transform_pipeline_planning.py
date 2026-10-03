@@ -754,6 +754,146 @@ def test_pipeline_planning_stages_bind_with_dependent_copy():
     assert replayable_binds == [1, 0, 0]
 
 
+def test_pipeline_planning_orders_buffer_loaded_copy_guard_after_late_consumers():
+    issue_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+
+    def make_before(num_stages):
+        @T.prim_func
+        def before(
+            q: T.Tensor((32, 16), T.bfloat16),
+            starts: T.Tensor((2,), T.int32),
+            out: T.Tensor((2, 2), T.float32),
+        ):
+            with T.Kernel(2, threads=128) as kv_tile:
+                q_shared = T.alloc_shared((16, 16), T.bfloat16)
+                scores = T.alloc_fragment((16, 16), T.float32)
+                start = T.alloc_var(T.int32)
+
+                for q_tile in T.Pipelined(2, num_stages=num_stages):
+                    start = starts[q_tile]
+                    if start <= kv_tile:
+                        T.copy(q[q_tile * 16 : (q_tile + 1) * 16, :], q_shared)
+                        T.clear(scores)
+                        T.gemm(q_shared, q_shared, scores, transpose_B=True)
+                        out[kv_tile, q_tile] = scores[0, 0]
+
+        return before
+
+    def collect_local_var_shapes(func):
+        shapes = []
+
+        def _visit(node):
+            if not isinstance(node, tvm.tirx.SBlock):
+                return
+            for buffer in node.alloc_buffers:
+                if buffer.scope() == "local.var":
+                    shapes.append(tuple(int(dim) for dim in buffer.shape))
+
+        post_order_visit(func.body, _visit)
+        return shapes
+
+    for num_stages in (1, 2):
+        mod = _run_pipeline_planning(make_before(num_stages), issue_target)
+        annos = _collect_pipeline_loop_annotations(mod["main"])
+        assert len(annos) == 1
+        stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+        orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+        assert stages == [0, 0, 1, 1, 1]
+        assert orders == [3, 4, 0, 1, 2]
+        assert int(annos[0]["tl_pipelined_num_stages"]) == 1
+
+        mod = tl.transform.InjectSoftwarePipeline()(mod)
+        assert collect_local_var_shapes(mod["main"]) == [(1,)]
+
+
+def test_pipeline_planning_groups_dependent_copy_guard_scalars():
+    """Two scalars fanning in to one guarded copy form one first-stage group.
+
+    Anchoring the members one by one used to place a scalar load after the copy
+    that reads it, so assert the read-after-write order directly instead of a
+    hard-coded schedule.
+    """
+    issue_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+
+    @T.prim_func
+    def before(
+        q: T.Tensor((32, 16), T.bfloat16),
+        starts: T.Tensor((2,), T.int32),
+        ends: T.Tensor((2,), T.int32),
+        out: T.Tensor((2, 2), T.float32),
+    ):
+        with T.Kernel(2, threads=128) as kv_tile:
+            q_shared = T.alloc_shared((16, 16), T.bfloat16)
+            scores = T.alloc_fragment((16, 16), T.float32)
+            q_start = T.alloc_var(T.int32)
+            q_end = T.alloc_var(T.int32)
+
+            for q_tile in T.Pipelined(2, num_stages=2):
+                q_start = starts[q_tile]
+                q_end = ends[q_tile]
+
+                if (q_start <= kv_tile) & (kv_tile < q_end):
+                    T.copy(q[q_tile * 16 : (q_tile + 1) * 16, :], q_shared)
+                    T.clear(scores)
+                    T.gemm(q_shared, q_shared, scores, transpose_B=True)
+                    out[kv_tile, q_tile] = scores[0, 0]
+
+    mod = _run_pipeline_planning(before, issue_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert len(annos) == 1
+    stages = [int(v) for v in annos[0]["software_pipeline_stage"]]
+    orders = [int(v) for v in annos[0]["software_pipeline_order"]]
+
+    # Statements keep source order: the two scalar loads, the copy, then the
+    # three consumers.
+    assert len(stages) == 6
+    start_order, end_order, copy_order = orders[0], orders[1], orders[2]
+
+    assert stages[0] == stages[1] == stages[2] == 0
+    assert start_order < copy_order
+    assert end_order < copy_order
+    assert int(annos[0]["tl_pipelined_num_stages"]) == 1
+
+    # The first-stage group is emitted as one contiguous run after every
+    # consumer of the current iteration, so the single physical scalar is
+    # overwritten only once all of its readers have run.
+    first_stage_orders = sorted(o for s, o in zip(stages, orders, strict=True) if s == 0)
+    consumer_orders = sorted(o for s, o in zip(stages, orders, strict=True) if s != 0)
+    assert consumer_orders == list(range(len(consumer_orders)))
+    assert first_stage_orders == list(range(len(consumer_orders), len(stages)))
+
+    tl.transform.InjectSoftwarePipeline()(mod)
+
+
+def test_pipeline_planning_keeps_depth_for_first_stage_only_local_var():
+    """A local.var confined to stage 0 must not trigger the depth fallback.
+
+    ``idx`` is written by a first-stage producer, but the only statement reading
+    it is the copy it feeds, which is scheduled into stage 0 as well. There is
+    no stage gap to protect, so the requested depth has to survive.
+    """
+
+    @T.prim_func
+    def before(
+        KV: T.Tensor((4, 4), T.float16),
+        ids: T.Tensor((4,), T.int32),
+        C: T.Tensor((4,), T.float16),
+    ):
+        with T.Kernel(1, threads=1):
+            A = T.alloc_shared((4,), T.float16)
+            idx = T.alloc_var(T.int32)
+            for i in T.Pipelined(4, num_stages=2):
+                idx = ids[i]
+                T.copy(KV[idx, :], A)
+                T.copy(A, C)
+
+    mod = _run_pipeline_planning(before, sm80_target)
+    annos = _collect_pipeline_loop_annotations(mod["main"])
+    assert annos, "Expected at least one loop annotated by PipelinePlanning"
+    assert int(annos[0]["tl_pipelined_num_stages"]) == 2
+
+
 def test_pipeline_planning_accepts_explicit_bind_free_annotations():
     @T.prim_func
     def before(
