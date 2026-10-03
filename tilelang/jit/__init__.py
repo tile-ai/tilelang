@@ -364,6 +364,12 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         self._kernel_cache: dict[tuple, Kernel] = {}
         self._call_form_cache: _CallFormCache = _CallFormCache()
         self._tuner_cache: dict[tuple, Kernel] = {}
+        self._has_unhashable_defaults = False
+        # Unhashable defaults need rebinding on every lookup.
+        try:
+            hash(tuple(param.default for param in self.signature.parameters.values()))
+        except TypeError:
+            self._has_unhashable_defaults = True
 
     def _get_frontend_target_context(self):
         if self.target is None:
@@ -514,7 +520,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
     def _can_use_call_form_cache(self, has_tune_params: bool) -> bool:
         # This cache returns a kernel object directly, so it is only valid for
         # JIT functions that have no runtime tensor arguments to extract.
-        return not has_tune_params and isinstance(self.func, JITFunc) and not self.func.tensor_args
+        return not has_tune_params and not self._has_unhashable_defaults and isinstance(self.func, JITFunc) and not self.func.tensor_args
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         # Separate out the tuning parameters from the user's kwargs
