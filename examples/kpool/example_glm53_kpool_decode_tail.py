@@ -181,6 +181,12 @@ def glm53_kpool_decode_tail_kernel(
                             pooled = pooled + pool_k * probability
 
                         pooled = T.cast(T.cast(pooled / denom, T.bfloat16), T.float32)
+                        # Keep 32-lane butterflies independent on wave64 too.
+                        for stage in T.serial(5):
+                            stride = 1 << stage
+                            peer = T.shfl_xor(pooled, stride, width=32)
+                            pooled = T.if_then_else((dim & stride) == 0, pooled + peer, peer - pooled)
+
                         # A prior pool-closing iteration may still have threads
                         # reading exchange[0] for its absmax. Synchronize before
                         # any lane reuses shared memory for the next closure.
@@ -188,8 +194,8 @@ def glm53_kpool_decode_tail_kernel(
                         exchange[dim] = pooled
                         T.sync_threads()
 
-                        for stage in T.serial(7):
-                            stride = 1 << stage
+                        for stage in T.serial(2):
+                            stride = 32 << stage
                             own = T.alloc_var(T.float32, init=exchange[dim])
                             peer = T.alloc_var(T.float32, init=exchange[dim ^ stride])
                             T.sync_threads()
