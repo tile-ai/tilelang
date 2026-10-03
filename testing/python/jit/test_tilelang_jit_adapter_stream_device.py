@@ -3,14 +3,19 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
-from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter
+import tilelang.testing
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.device_count() < 2, reason="requires two CUDA devices")
-@pytest.mark.parametrize("adapter_type", [CuTeDSLKernelAdapter, NVRTCKernelAdapter])
+@tilelang.testing.requires_cuda
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+@pytest.mark.parametrize("backend", ["cutedsl", "nvrtc"])
 @pytest.mark.parametrize("tensor_device", [0, 1])
-def test_implicit_stream_belongs_to_tensor_device(adapter_type, tensor_device):
+def test_implicit_stream_belongs_to_tensor_device(backend, tensor_device):
+    if backend == "cutedsl":
+        from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter as adapter_type
+    else:
+        from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter as adapter_type
+
     # Run the real wrapper with native Torch streams; intercept only the final backend call.
     calls = []
     adapter = object.__new__(adapter_type)
@@ -28,7 +33,7 @@ def test_implicit_stream_belongs_to_tensor_device(adapter_type, tensor_device):
         with torch.cuda.stream(current_stream), torch.cuda.stream(tensor_stream), torch.cuda.device(0):
             adapter._wrap_forward_from_prebuild_lib(tensor)
             assert calls[-1]["stream"] == tensor_stream.cuda_stream
-            if adapter_type is CuTeDSLKernelAdapter:
+            if backend == "cutedsl":
                 assert calls[-1]["device_id"] == tensor_device
             adapter._wrap_forward_from_prebuild_lib(tensor, stream=tensor_stream.cuda_stream)
             assert calls[-1]["stream"] == tensor_stream.cuda_stream
