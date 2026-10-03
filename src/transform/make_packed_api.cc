@@ -690,7 +690,7 @@ MakePackedAPI(PrimFunc func,
           Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       arg_value = f_load_arg_value(param.dtype(), packed_arg_index);
     } else {
-      ICHECK(dtype.is_float());
+      ICHECK(dtype.is_float() || dtype.is_bfloat16());
       std::ostringstream msg;
       msg << "kernel " << name_hint << " scalar " << param->name_hint
           << " expected float";

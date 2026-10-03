@@ -129,10 +129,11 @@ def test_cython_dynamic_shape_output_before_input():
 
 
 @tilelang.testing.requires_cuda
-def test_cython_bfloat16_scalar_parameter():
+@pytest.mark.parametrize("scalar", [1.5, -3.5, 1.1, 2, True])
+def test_cython_bfloat16_scalar_parameter(scalar):
     """A bfloat16 scalar parameter is marshalled through the Cython backend."""
 
-    @tilelang.jit(execution_backend="cython")
+    @tilelang.jit(out_idx=[-1], execution_backend="cython")
     def kernel():
         @T.prim_func
         def main(A: T.Tensor((128,), T.bfloat16), scalar: T.bfloat16, B: T.Tensor((128,), T.bfloat16)):
@@ -142,9 +143,10 @@ def test_cython_bfloat16_scalar_parameter():
 
         return main
 
-    a = torch.arange(128, dtype=torch.float32).to(torch.bfloat16).cuda()
-    out = kernel()(a, 1.5)
-    tilelang.testing.torch_assert_close(out, a + 1.5, atol=0, rtol=0)
+    a = torch.zeros(128, dtype=torch.bfloat16, device="cuda")
+    out = kernel()(a, scalar)
+    expected = torch.full_like(a, scalar)
+    tilelang.testing.torch_assert_close(out, expected, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

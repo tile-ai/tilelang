@@ -246,6 +246,7 @@ cdef class CythonKernelWrapper:
 
         # Convert tensor pointers to C void pointers for kernel call
         cdef dict dtype_to_ctype = {
+            torch.bfloat16: ctypes.c_uint16,
             torch.float16: ctypes.c_float,
             torch.float32: ctypes.c_float,
             torch.float64: ctypes.c_double,
@@ -268,6 +269,10 @@ cdef class CythonKernelWrapper:
                     dtype = self.param_dtypes[i]
                     if dtype not in dtype_to_ctype:
                         raise ValueError(f"Unsupported tensor dtype: {dtype}")
+                    if dtype == torch.bfloat16:
+                        # The host wrapper takes bfloat16_t by value, so pass
+                        # its rounded 16-bit representation rather than float32.
+                        tensor = torch.tensor(tensor, dtype=torch.bfloat16, device="cpu").view(torch.uint16).item()
                     call_args.append(dtype_to_ctype[dtype](tensor))
             elif tensor is None:
                 call_args.append(ctypes.c_void_p(0))
