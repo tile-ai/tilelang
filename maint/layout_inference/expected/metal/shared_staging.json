@@ -1,0 +1,106 @@
+{
+  "fp16_64x64_t128": {
+    "io-aware": {
+      "buffers": {
+        "frag": {
+          "forward_index": [
+            "_i // 16 * 8 + _j % 8"
+          ],
+          "forward_thread": "_i % 16 * 8 + _j // 8",
+          "input_shape": [
+            64,
+            64
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            32
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      },
+      "loops": {}
+    },
+    "register-count": {
+      "buffers": {
+        "frag": {
+          "forward_index": [
+            "_i // 16 * 8 + _j % 8"
+          ],
+          "forward_thread": "_i % 16 * 8 + _j // 8",
+          "input_shape": [
+            64,
+            64
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            32
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      },
+      "loops": {}
+    }
+  },
+  "fp32_128x128_t128": {
+    "io-aware": {
+      "buffers": {
+        "frag": {
+          "forward_index": [
+            "_i // 4 * 4 + _j % 4"
+          ],
+          "forward_thread": "_i % 4 * 32 + _j // 4",
+          "input_shape": [
+            128,
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            128
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      },
+      "loops": {}
+    },
+    "register-count": {
+      "buffers": {
+        "frag": {
+          "forward_index": [
+            "_i // 4 * 4 + _j % 4"
+          ],
+          "forward_thread": "_i % 4 * 32 + _j // 4",
+          "input_shape": [
+            128,
+            128
+          ],
+          "kind": "Fragment",
+          "output_shape": [
+            128
+          ],
+          "replicate": 1,
+          "thread_range": [
+            0,
+            128
+          ],
+          "threads": 128
+        }
+      },
+      "loops": {}
+    }
+  }
+}
