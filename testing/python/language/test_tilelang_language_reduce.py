@@ -1166,6 +1166,59 @@ def test_reduce_fp8_e4m3_dst_runtime(reduce_fn, torch_op):
     assert torch.allclose(out.float(), ref, atol=1e-1)
 
 
+def _make_fp4_reduce_kernel(reduce_fn, M, N):
+    # fp16 I/O holding exact fp4 values avoids packed-fp4 tensors on the host.
+    @T.prim_func
+    def kernel(A: T.Tensor((M, N), T.float16), B: T.Tensor((M,), T.float16)):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_fragment((M, N), T.float4_e2m1fn)
+            dst = T.alloc_fragment((M,), T.float4_e2m1fn)
+            T.copy(A, src)
+            reduce_fn(src, dst, dim=1)
+            T.copy(dst, B)
+
+    return kernel
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.parametrize(("reduce_fn", "torch_op"), [(T.reduce_max, "max"), (T.reduce_min, "min")], ids=["max", "min"])
+def test_reduce_fp4_dst_runtime(reduce_fn, torch_op):
+    """reduce_max/reduce_min into a float4_e2m1fn dst failed to compile
+    (ambiguous shuffle and comparison) and a bare max/min compared raw
+    encodings (GH-2998)."""
+    M, N = 32, 64
+    k = _compile(_make_fp4_reduce_kernel(reduce_fn, M, N))
+
+    vals = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=torch.float16)
+    vals = torch.cat([vals, -vals])
+    a = vals[torch.randint(0, len(vals), (M, N))].cuda()
+    out = k(a)
+    ref = getattr(a, torch_op)(dim=1).values
+    torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_fp8_e8m0_non_finite_const_codegen():
+    """e8m0fnu has no inf and no sign; non-finite constants must clamp to its
+    own range, not the fp4 limit of 6.0."""
+    pos_inf = tvm.tirx.const(float("inf"), "float8_e8m0fnu")
+    neg_inf = tvm.tirx.const(float("-inf"), "float8_e8m0fnu")
+
+    @T.prim_func
+    def kernel(B: T.Tensor((2,), T.float8_e8m0fnu)):
+        with T.Kernel(1, threads=32):
+            B[0] = pos_inf
+            B[1] = neg_inf
+
+    target = {"kind": "cuda", "arch": "sm_100a"}
+    with tvm.target.Target(target):
+        src = tilelang.lower(kernel, target=target).kernel_source
+    assert "fp8_e8_t(0x1p+127f" in src
+    assert "fp8_e8_t(0x1p-127f" in src
+    assert "6.000000e+00" not in src
+
+
 @tilelang.testing.requires_cuda
 def test_reduce_packed_max_nan_propagate_uses_nan_intrinsics():
     k = _compile(_make_nan_reduce_kernel(T.reduce_max, 128, 128, T.float16, threads=256, nan_propagate=True))

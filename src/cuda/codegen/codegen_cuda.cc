@@ -6055,7 +6055,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
 
 namespace {
 // Max finite magnitude for fp8/fp4 dtypes with no (or no non-finite)
-// infinity encoding, e.g. the e4m3 family and float4_e2m1fn.
+// infinity encoding, e.g. the e4m3 family, e8m0fnu and float4_e2m1fn.
 double MaxFiniteFp8Fp4(const DataType &dtype) {
   if (dtype.is_float8_e4m3fnuz()) {
     return 240.0;
@@ -6063,7 +6063,10 @@ double MaxFiniteFp8Fp4(const DataType &dtype) {
   if (dtype.is_float8_e4m3() || dtype.is_float8_e4m3fn()) {
     return 448.0;
   }
-  // float4_e2m1fn / float4_e2m1_unpacked
+  if (dtype.is_float8_e8m0fnu()) {
+    return std::ldexp(1.0, 127);
+  }
+  ICHECK(dtype.is_float4()) << "No max-finite value for " << dtype;
   return 6.0;
 }
 } // namespace
@@ -6135,6 +6138,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     double value = op->value;
     if (std::isnan(value)) {
       value = MaxFiniteFp8Fp4(op->dtype);
+    } else if (std::isinf(value) && value < 0 &&
+               op->dtype.is_float8_e8m0fnu()) {
+      // e8m0fnu is unsigned: its smallest value, 2^-127, is the lower bound.
+      value = std::ldexp(1.0, -127);
     } else if (std::isinf(value)) {
       value = std::copysign(MaxFiniteFp8Fp4(op->dtype), value);
     }
