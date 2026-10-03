@@ -454,8 +454,13 @@ MakePackedAPI(PrimFunc func,
     Array<PrimExpr> call_args{
         v_packed_args, IntImm(DataType::Int(32), i),
         IntImm(DataType::Int(32), builtin::kTVMFFIAnyUnionValue)};
-    // load 64 bit version
-    DataType api_type = APIType(arg_type);
+    // load 64 bit version.
+    //
+    // `APIType` sends a float scalar through the 64-bit slot, but it does not
+    // recognise bfloat16 as a float and asserts instead. bfloat16 belongs on the
+    // same path: the cast below narrows it back to the parameter's own dtype.
+    DataType api_type =
+        arg_type.is_bfloat16() ? DataType::Float(64) : APIType(arg_type);
     PrimExpr res = Call(api_type, builtin::tvm_struct_get(), call_args);
     // cast to the target version.
     if (api_type != arg_type) {
@@ -690,7 +695,7 @@ MakePackedAPI(PrimFunc func,
           Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       arg_value = f_load_arg_value(param.dtype(), packed_arg_index);
     } else {
-      ICHECK(dtype.is_float());
+      ICHECK(dtype.is_float() || dtype.is_bfloat16());
       std::ostringstream msg;
       msg << "kernel " << name_hint << " scalar " << param->name_hint
           << " expected float";
