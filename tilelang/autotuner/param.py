@@ -44,6 +44,20 @@ PARAMS_PATH = "params.json"
 TargetLike = str | dict[str, object] | Target
 
 
+def _normalize_compile_flags(compile_flags: list[str] | str | None) -> tuple[str, ...] | None:
+    """Return a hashable form of the device-compiler flags, preserving their order.
+
+    The order is kept rather than sorted: the compiler may care about flag
+    precedence, and a spurious cache miss costs less than reusing a binary that
+    was built with different flags.
+    """
+    if compile_flags is None:
+        return None
+    if isinstance(compile_flags, str):
+        return (compile_flags,)
+    return tuple(compile_flags)
+
+
 @dataclass(frozen=True)
 class CompileArgs:
     """Compile arguments for the auto-tuner. Detailed description can be found in `tilelang.jit.compile`.
@@ -55,6 +69,8 @@ class CompileArgs:
         verbose: Whether to enable verbose output (default: False).
         pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.PassConfigKey` for supported options.
+        compile_flags: Extra flags forwarded to the device compiler. Different flags
+            build a different binary, so they take part in the cache identity.
     """
 
     out_idx: list[int] | int | None = None
@@ -63,6 +79,7 @@ class CompileArgs:
     target_host: TargetLike | None = None
     verbose: bool = False
     pass_configs: dict[str, Any] | None = None
+    compile_flags: list[str] | str | None = None
 
     def compile_program(self, program: PrimFunc):
         """Compile one candidate program using this compile configuration."""
@@ -74,6 +91,7 @@ class CompileArgs:
             target_host=self.target_host,
             verbose=self.verbose,
             pass_configs=self.pass_configs,
+            compile_flags=self.compile_flags,
         )
 
     def __hash__(self):
@@ -90,6 +108,7 @@ class CompileArgs:
             "target_host": str(self.target_host) if self.target_host else None,
             "verbose": self.verbose,
             "pass_configs": json.dumps(pass_configs, sort_keys=True) if pass_configs else None,
+            "compile_flags": _normalize_compile_flags(self.compile_flags),
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
@@ -543,7 +562,7 @@ class AutotuneResult:
             backend_context,
             out_idx_override if out_idx_override is not None else compile_args.out_idx,
             compile_args.pass_configs,
-            None,  # compile_flags not tracked here
+            compile_args.compile_flags,
             func,
         )
         if kernel is None:
