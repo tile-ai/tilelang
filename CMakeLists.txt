@@ -388,6 +388,7 @@ file(GLOB TILE_LANG_SRCS
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
+  src/runtime/bound_function.cc
 )
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
