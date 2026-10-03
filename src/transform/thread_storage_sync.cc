@@ -28,12 +28,17 @@
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/ffi/cast.h"
+#include "tvm/ffi/object.h"
+#include "tvm/ir/expr.h"
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
 #include <tvm/ir/attrs.h>
 #include <tvm/ir/cast.h>
+#include <tvm/ir/scope_stack.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -260,11 +265,96 @@ PrimExpr MakeLinearThreadId(const Array<IterVar> &thread_vars) {
 
 } // namespace
 
+// Mock the way of IRMutatorWithAnalyzer to collect the constraints of each
+// statement
+class ThreadPredicateCollector : public StmtExprVisitor {
+public:
+  std::optional<PrimExpr> SyncScope(const Evaluate &evaluate) const {
+    auto it = sync_scope_map_.find(evaluate);
+    ICHECK(it != sync_scope_map_.end())
+        << "Sync statement was not recorded by ThreadPredicateCollector";
+    return it->second;
+  }
+
+private:
+  void VisitStmt_(const IfThenElseNode *op) override {
+    WithNewScope_([&] {
+      AddPredicate_(op->condition);
+      VisitStmt(op->then_case);
+    });
+    if (op->else_case) {
+      WithNewScope_([&] {
+        AddPredicate_(Not(op->condition));
+        VisitStmt(op->else_case.value());
+      });
+    }
+  }
+  void VisitStmt_(const ForNode *op) override {
+    WithNewScope_([&] {
+      AddPredicate_(op->extent > 0);
+      StmtExprVisitor::VisitStmt_(op);
+    });
+  }
+  void VisitStmt_(const AttrStmtNode *op) override {
+    WithNewScope_([&] {
+      if (op->attr_key == tirx::attr::tilelang_assume) {
+        AddPredicate_(Downcast<PrimExpr>(op->node));
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    });
+  }
+
+  void VisitStmt_(const SBlockNode *op) override {
+    WithNewScope_([&] { StmtExprVisitor::VisitStmt_(op); });
+  }
+
+  void VisitStmt_(const AssertStmtNode *op) override {
+    StmtExprVisitor::VisitStmt_(op);
+    // Flat assertions constrain later siblings until this scope exits.
+    AddPredicate_(op->condition);
+  }
+
+  void VisitStmt_(const EvaluateNode *op) override {
+    if (const auto *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(builtin::tvm_storage_sync())) {
+        sync_scope_map_.emplace(GetRef<Evaluate>(op),
+                                scope_predicates_.Current());
+      }
+    }
+    return StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void AddPredicate_(const PrimExpr &predicate) {
+    auto &current = scope_predicates_.Current();
+    if (current) {
+      current = *current && predicate;
+    } else {
+      current = predicate;
+    }
+  }
+
+  template <typename F> void WithNewScope_(F &&body) {
+    // ScopeStack default-constructs new levels; inherit the parent scope
+    // constraint explicitly.
+    auto parent = scope_predicates_.Current();
+    scope_predicates_.WithNewScope([&] {
+      scope_predicates_.Current() = parent;
+      body();
+    });
+  }
+
+  ScopeStack<std::optional<PrimExpr>> scope_predicates_;
+  std::unordered_map<Evaluate, std::optional<PrimExpr>, ObjectPtrHash,
+                     ObjectPtrEqual>
+      sync_scope_map_;
+};
+
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
 public:
   static Stmt Rewrite(Stmt stmt, int warp_size = 32) {
     arith::Analyzer analyzer;
     ThreadPartialSyncRewriter rewriter(&analyzer, warp_size);
+    rewriter.predicate_collector_(stmt);
     return rewriter(std::move(stmt));
   }
 
@@ -287,37 +377,46 @@ private:
           return IRMutatorWithAnalyzer::VisitStmt_(op);
         }
 
-        return ProcessSharedSync(call, scope);
+        return ProcessSharedSync(
+            call, scope, predicate_collector_.SyncScope(GetRef<Evaluate>(op)));
       }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  Stmt ProcessSharedSync(const CallNode *op, const std::string &scope) {
+  Stmt ProcessSharedSync(const CallNode *op, const std::string &scope,
+                         std::optional<PrimExpr> scope_predicate) {
     // Get thread bounds
     auto bound_tx = analyzer_->const_int_bound(tx_);
     auto bound_ty = analyzer_->const_int_bound(ty_);
     auto bound_tz = analyzer_->const_int_bound(tz_);
-
-    // Check if all threads are participating (full extent)
-    if (IsFullThreadExtent(tx_, bound_tx) &&
-        IsFullThreadExtent(ty_, bound_ty) &&
-        IsFullThreadExtent(tz_, bound_tz)) {
-      return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
-    }
 
     // Calculate thread extents
     auto extent_tx = CalculateThreadExtent(tx_, bound_tx);
     auto extent_ty = CalculateThreadExtent(ty_, bound_ty);
     auto extent_tz = CalculateThreadExtent(tz_, bound_tz);
 
-    // Create or get barrier info
+    // Check if all threads are participating (full extent)
+    auto full_extent_tx = *as_const_int(tx_->dom->extent);
+    auto full_extent_ty = *as_const_int(ty_->dom->extent);
+    auto full_extent_tz = *as_const_int(tz_->dom->extent);
+    if (extent_tx == full_extent_tx && extent_ty == full_extent_ty &&
+        extent_tz == full_extent_tz) {
+      return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
+    }
+
+    size_t thread_count = extent_tx * extent_ty * extent_tz;
     ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
                        bound_ty->min_value, bound_ty->max_value,
-                       bound_tz->min_value, bound_tz->max_value};
+                       bound_tz->min_value, bound_tz->max_value,
+                       thread_count,        std::move(scope_predicate)};
 
-    auto [barrier_id, thread_count] =
-        GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
+    // Create or get barrier info
+    auto barrier_id = GetOrCreateBarrier(key);
+
+    // https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-bar
+    ICHECK_LE(barrier_id, 16U) << "[ThreadSync] barrier_id shouldn't exceed 16";
+
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -338,23 +437,18 @@ private:
     return Evaluate(Call(op->dtype, op->op, new_args));
   }
 
-  std::pair<size_t, size_t> GetOrCreateBarrier(const ThreadBoundKey &key,
-                                               size_t extent_tx,
-                                               size_t extent_ty,
-                                               size_t extent_tz) {
+  size_t GetOrCreateBarrier(const ThreadBoundKey &key) {
     if (barrier_id_map_.count(key)) {
-      return {barrier_id_map_[key], thread_count_map_[key]};
+      return barrier_id_map_[key];
     }
 
     size_t barrier_id =
         barrier_id_map_.size() +
         static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
-    size_t thread_count = extent_tx * extent_ty * extent_tz;
 
     barrier_id_map_[key] = barrier_id;
-    thread_count_map_[key] = thread_count;
 
-    return {barrier_id, thread_count};
+    return barrier_id;
   }
 
   /*!
@@ -402,26 +496,6 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  bool IsFullThreadExtent(const IterVar &iv,
-                          const arith::ConstIntBound &bound) {
-    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
-      return true;
-    }
-
-    if (!iv->dom.defined()) {
-      return true;
-    }
-
-    const auto *min_node = iv->dom->min.as<IntImmNode>();
-    const auto *extent_node = iv->dom->extent.as<IntImmNode>();
-
-    int64_t min = min_node->value;
-    int64_t extent = extent_node->value;
-    int64_t max = min + extent - 1;
-
-    return min == bound->min_value && max == bound->max_value;
-  }
-
   // Member variables
   IterVar tx_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
@@ -430,7 +504,7 @@ private:
   IterVar tz_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
-  std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  ThreadPredicateCollector predicate_collector_;
   int warp_size_;
 };
 
