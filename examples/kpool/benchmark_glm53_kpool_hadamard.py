@@ -26,13 +26,19 @@ from tilelang.profiler import do_bench
 
 def load_baseline(root: Path):
     modules = []
-    for name in ("compress", "decode_tail"):
-        path = root / "examples" / "kpool" / f"example_glm53_kpool_{name}.py"
-        spec = importlib.util.spec_from_file_location(f"kpool_baseline_{name}", path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        modules.append(module)
+    previous_compress = sys.modules[compress.__name__]
+    try:
+        for name in ("compress", "decode_tail"):
+            path = root / "examples" / "kpool" / f"example_glm53_kpool_{name}.py"
+            spec = importlib.util.spec_from_file_location(f"kpool_baseline_{name}", path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            modules.append(module)
+            if name == "compress":
+                sys.modules[compress.__name__] = module
+    finally:
+        sys.modules[compress.__name__] = previous_compress
     return tuple(modules)
 
 
