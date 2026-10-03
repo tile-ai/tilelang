@@ -216,8 +216,9 @@ inline void CheckAllReduceWidth(int reducing_threads, int scale,
 
 inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
   auto dst_dtype = op.dst->dtype;
-  auto is_int = dst_dtype.is_int();
+  bool is_int = dst_dtype.is_int();
   bool is_uint = dst_dtype.is_uint();
+  bool is_bool = dst_dtype.is_bool();
   auto bits = dst_dtype.bits();
 
   PrimExpr scalar;
@@ -228,6 +229,8 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
       scalar = make_const(op.dst->dtype, SignedMin(bits));
     } else if (is_uint) {
       scalar = make_const(op.dst->dtype, 0);
+    } else if (is_bool) {
+      scalar = make_const(op.dst->dtype, 0);
     } else {
       scalar = make_const(op.dst->dtype, -INFINITY);
     }
@@ -236,6 +239,8 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
       scalar = make_const(op.dst->dtype, SignedMax(bits));
     } else if (is_uint) {
       scalar = make_const(op.dst->dtype, UnsignedMax(bits));
+    } else if (is_bool) {
+      scalar = make_const(op.dst->dtype, 1);
     } else {
       scalar = make_const(op.dst->dtype, INFINITY);
     }
@@ -246,6 +251,8 @@ inline PrimExpr MakeInitValue(const ReduceOpNode &op, int vsize = 1) {
       scalar = make_const(op.dst->dtype, -1);
     } else if (is_uint) {
       scalar = make_const(op.dst->dtype, UnsignedMax(bits));
+    } else if (is_bool) {
+      scalar = make_const(op.dst->dtype, 1);
     } else {
       scalar = make_const(op.dst->dtype, -INFINITY);
     }
