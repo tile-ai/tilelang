@@ -245,13 +245,7 @@ def pythonic_expr(
     return next(iter(node_to_result_map[expr]), "")
 
 
-def maybe_desc_name(
-    name: str,
-    matches: list[str],
-    i: int,
-    desc_name_map: dict[str, str] | None = None,
-    descriptor_matches: list[bool] | None = None,
-) -> bool:
+def maybe_desc_name(name: str, matches: list[str], i: int, desc_name_map: dict[str, str] | None = None) -> bool:
     """
     Check if a parameter name corresponds to a TMA descriptor.
 
@@ -267,15 +261,9 @@ def maybe_desc_name(
     match = matches[i]
     if not (match == name + "_desc" or match.startswith(name + "_desc_")):
         return False
-    if descriptor_matches is not None:
-        if not descriptor_matches[i]:
-            return False
-        if desc_name_map is not None:
-            desc_name_map[match] = name
-        return True
+    desc_decls = []
     if desc_name_map is not None:
         desc_name_map[match] = name
-    desc_decls = []
     if i > 0:
         desc_decls.append(matches[i - 1])
     if i < len(matches) - 1:
@@ -290,7 +278,6 @@ def parse_function_call_args(
     desc_name_map: dict[str, str] | None = None,
     desc_name_var_map: dict[str, tvm.tirx.Var] | None = None,
     transform_arg: Callable[[str, str], Any] | None = None,
-    fallback_arg: Callable[[Any], Any] | None = None,
 ) -> list[Any]:
     """
     Parse function call arguments from a kernel declaration.
@@ -302,59 +289,22 @@ def parse_function_call_args(
         desc_name_map: Optional mapping for descriptor names.
         desc_name_var_map: Optional mapping from descriptor names to TVM variables.
         transform_arg: Optional function to transform each argument (name, type) -> result.
-        fallback_arg: Optional function to render a host-computed device argument.
 
     Returns:
         List of parsed call arguments.
     """
-    global_start = declaration.find("__global__")
-    if global_start < 0:
-        return []
-    kernel = next(
-        (match for match in re.finditer(r"([A-Za-z_]\w*)\s*\(", declaration[global_start:]) if match.group(1) != "__launch_bounds__"),
-        None,
-    )
-    if kernel is None:
-        return []
-    signature_start = global_start + kernel.end()
-    depth = 1
-    signature_end = signature_start
-    while signature_end < len(declaration) and depth:
-        if declaration[signature_end] == "(":
-            depth += 1
-        elif declaration[signature_end] == ")":
-            depth -= 1
-        signature_end += 1
-    if depth:
-        return []
-    signature = declaration[signature_start : signature_end - 1]
-    matches = []
-    descriptor_matches = []
-    for parameter in signature.split(","):
-        match = re.search(r"([A-Za-z_]\w*)\s*(?:\[[^]]*\])?$", parameter.strip())
-        if match:
-            matches.append(match.group(1))
-            descriptor_matches.append("CUtensorMap" in parameter)
+    pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
+    matches = re.findall(pattern, declaration)
     call_args = []
 
     for i, match in enumerate(matches):
-        matched = False
         for arg in function_args:
             if arg["name"] == match:
-                if (
-                    fallback_arg is not None
-                    and function_params is not None
-                    and i < len(function_params)
-                    and arg["type"] != "ctypes.c_void_p"
-                ):
-                    call_args.append(fallback_arg(function_params[i]))
-                elif transform_arg is not None:
+                if transform_arg is not None:
                     call_args.append(transform_arg(match, arg["type"]))
                 else:
                     call_args.append(match)
-                matched = True
-                break
-            elif maybe_desc_name(arg["name"], matches, i, desc_name_map, descriptor_matches):
+            elif maybe_desc_name(arg["name"], matches, i, desc_name_map):
                 if transform_arg is not None:
                     call_args.append(transform_arg(match, "None"))
                 else:
@@ -362,10 +312,6 @@ def parse_function_call_args(
                 if desc_name_var_map is not None and function_params is not None:
                     assert len(call_args) <= len(function_params), f"Too many arguments: {len(call_args)} > {len(function_params)}"
                     desc_name_var_map[match] = function_params[len(call_args) - 1]
-                matched = True
-                break
-        if not matched and fallback_arg is not None and function_params is not None and len(call_args) < len(function_params):
-            call_args.append(fallback_arg(function_params[len(call_args)]))
 
     return call_args
 
