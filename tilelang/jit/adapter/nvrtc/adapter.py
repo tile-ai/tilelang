@@ -180,7 +180,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         def unique_push_back(v: tirx.Var, entry: tuple[int, int, int, int]):
             self._dynamic_symbolic_candidates_map.setdefault(v, []).append(entry)
             self._dynamic_symbolic_name_candidates_map.setdefault(v.name, []).append(entry)
-            if v in dynamic_symbolic_map or v.name in self._dynamic_symbolic_name_map:
+            if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
             self._dynamic_symbolic_name_map[v.name] = entry
@@ -217,6 +217,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         if v in self._dynamic_symbolic_candidates_map:
             return self._dynamic_symbolic_candidates_map[v]
         if v.name in self._dynamic_symbolic_name_candidates_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
             return self._dynamic_symbolic_name_candidates_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
