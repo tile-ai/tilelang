@@ -3,6 +3,7 @@ import tilelang.testing
 import tilelang.language as T
 import pytest
 import torch
+from tilelang import tvm
 from tilelang.contrib import nvcc
 
 
@@ -101,6 +102,47 @@ def test_fill_int8_negative():
         torch.cuda.synchronize()
         ref = torch.full((M, N), value, dtype=torch.int8, device="cuda")
         torch.testing.assert_close(out, ref)
+
+
+@pytest.mark.parametrize("op", ["fill", "clear"])
+@pytest.mark.parametrize(
+    ("lo", "hi", "fits"),
+    [
+        (6, 12, False),  # min + extent = 12 > 8
+        (2, 8, True),  # in bounds
+    ],
+)
+def test_sliced_region_past_the_end_of_the_buffer_is_rejected(op, lo, hi, fits):
+    """`extent <= shape` only bounds a region anchored at the start of the buffer.
+
+    A sliced region may start further in, so its end is what has to fit: `As[6:12]`
+    into a shape-8 buffer has a legal extent and still wrote four elements past the
+    end. `T.clear` shares the same node, so both spellings are covered.
+    """
+    NBUF = 8
+
+    def program():
+        @T.prim_func
+        def main(out: T.Tensor((NBUF,), "int32")):
+            with T.Kernel(1, threads=32):
+                As = T.alloc_shared((NBUF,), "int32")
+                if op == "fill":
+                    T.fill(As[lo:hi], 7)
+                else:
+                    T.clear(As[lo:hi])
+                T.copy(As, out)
+
+        return main
+
+    # Lowering is where the Fill node validates the region, and it needs no device,
+    # so these cases run with or without a GPU.
+    target = {"kind": "cuda"}
+    if fits:
+        with tvm.target.Target(target):
+            tilelang.lower(program(), target=target)
+    else:
+        with pytest.raises(Exception, match="exceeds"), tvm.target.Target(target):
+            tilelang.lower(program(), target=target)
 
 
 if __name__ == "__main__":
