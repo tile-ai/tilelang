@@ -5,6 +5,32 @@ import pytest
 
 os.environ["PYTHONHASHSEED"] = "0"
 
+
+def _configure_xdist_gpu_affinity():
+    """Give each ROCm xdist worker one GPU when CI requests GPU affinity."""
+    count_text = os.environ.get("TILELANG_XDIST_GPU_COUNT", "")
+    device_ids = os.environ.get("TILELANG_XDIST_GPU_IDS", "")
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    if not count_text or worker == "main":
+        return
+
+    try:
+        count = int(count_text)
+        worker_index = int(worker.removeprefix("gw"))
+    except ValueError as error:
+        raise RuntimeError(f"invalid xdist GPU affinity: count={count_text!r}, worker={worker!r}") from error
+    if count < 1 or not worker.startswith("gw"):
+        raise RuntimeError(f"invalid xdist GPU affinity: count={count_text!r}, worker={worker!r}")
+
+    devices = device_ids.split(",") if device_ids else []
+    if len(devices) != count or any(not device.startswith("GPU-") for device in devices):
+        raise RuntimeError(f"invalid ROCm GPU UUID list: expected {count}, got {device_ids!r}")
+    device = devices[worker_index % count]
+    os.environ["ROCR_VISIBLE_DEVICES"] = device
+
+
+_configure_xdist_gpu_affinity()
+
 # Ensure we import the in-tree `tilelang/` instead of any globally installed
 # versions that may appear earlier on PYTHONPATH.
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
