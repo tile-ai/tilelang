@@ -4,6 +4,7 @@ Run from the repository root with ``python -m examples.kpool.benchmark_glm53_kpo
 Optionally pass ``--baseline-root /path/to/checkout`` to compare example sources
 using the same installed TileLang compiler. Kernel timing uses graph replay;
 wrapper timing includes metadata validation, launch, and device completion.
+Peak temporary bytes exclude allocations already live before the wrapper call.
 """
 
 from __future__ import annotations
@@ -155,6 +156,53 @@ def prepare_decode(modules, batch, next_n, round_scale, *, reference=False):
     return arms
 
 
+def check_decode_rejections(modules, round_scale):
+    arms = prepare_decode(modules, 2, 4, round_scale)
+    for name, (_, wrapper, _) in arms.items():
+        values = wrapper.args
+        tail_slots = values[0].shape[0] * 4
+        cache_slots = values[7].shape[0] * values[7].shape[1]
+        cases = (
+            (((6, (0, 0), -1),), "positions and tail_slot_mapping must use matching negative padding"),
+            (
+                ((6, (1, slice(None)), -1), (1, (1, slice(None)), -1)),
+                "padded tokens must use a negative cache_loc",
+            ),
+            (
+                ((6, (0, 0), -1), (1, (0, 0), -1)),
+                "valid decode tokens must form a prefix in each request row",
+            ),
+            (((6, (0, 1), 8),), "valid positions must be consecutive within each request"),
+            (((1, (0, 0), tail_slots),), f"active tail slots must be in [0, {tail_slots})"),
+            (((1, (0, 0), values[1][0, 0] + 1),), "tail slot phase must equal position modulo pool_size"),
+            (((1, (0, 0), values[1][1, 0]),), "all tokens for one request must use the same tail block"),
+            (((1, (1, slice(None)), values[1][0]),), "active requests must use distinct tail blocks"),
+            (((5, (0, 3), -1),), "cache_loc must be nonnegative exactly when a valid token closes a pool"),
+            (((5, (0, 3), cache_slots),), f"active cache locations must be in [0, {cache_slots})"),
+            (((5, (1, 3), values[5][0, 3]),), "active cache locations must be unique to avoid concurrent writes"),
+        )
+        before_tail = values[0].clone()
+        before_cache = tuple(value.clone() for value in values[7:])
+        for edits, expected_error in cases:
+            changed = list(values)
+            for index in (1, 5, 6):
+                changed[index] = values[index].clone()
+            for index, coordinate, replacement in edits:
+                changed[index][coordinate] = replacement
+            try:
+                wrapper.func(*changed, round_scale=round_scale)
+            except ValueError as error:
+                if str(error) != expected_error:
+                    raise RuntimeError(f"{name}: {error!s} != {expected_error}") from error
+            else:
+                raise RuntimeError(f"{name}: accepted invalid decode metadata: {expected_error}")
+            if not torch.equal(values[0], before_tail):
+                raise RuntimeError(f"{name}: rejected metadata changed the tail cache")
+            check_cache(values[7:], before_cache, exact=True)
+        wrapper()
+    compare_arms(arms)
+
+
 def compare_arms(arms):
     values = list(arms.values())
     for arm in values[1:]:
@@ -169,8 +217,23 @@ def measure(arms, case, rounds, rep):
             launch, wrapper, _ = arms[name]
             kernel_ms = do_bench(launch, backend="cudagraph", rep=rep, return_mode="median")
             wrapper_ms = do_bench(wrapper, backend="wall", device="cuda", warmup=5, rep=rep, return_mode="median")
+            torch.cuda.synchronize()
+            allocated_before = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            wrapper()
+            torch.cuda.synchronize()
+            peak_temporary_bytes = torch.cuda.max_memory_allocated() - allocated_before
             print(
-                json.dumps({**case, "arm": name, "round": index, "kernel_us": kernel_ms * 1000, "wrapper_us": wrapper_ms * 1000}),
+                json.dumps(
+                    {
+                        **case,
+                        "arm": name,
+                        "round": index,
+                        "kernel_us": kernel_ms * 1000,
+                        "wrapper_us": wrapper_ms * 1000,
+                        "peak_temporary_bytes": peak_temporary_bytes,
+                    }
+                ),
                 flush=True,
             )
 
@@ -179,6 +242,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-root", type=Path)
     parser.add_argument("--batches", type=int, nargs="+", default=[1, 32, 256, 2048])
+    parser.add_argument("--operations", choices=("compress", "decode"), nargs="+", default=["compress", "decode"])
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--rep", type=float, default=50, help="milliseconds per timing sample")
     parser.add_argument("--check-only", action="store_true")
@@ -195,6 +259,7 @@ def main():
         )
     )
     for round_scale in (False, True):
+        check_decode_rejections(modules, round_scale)
         compare_arms(prepare_compress(modules, 7, round_scale))
         compare_arms(prepare_compress(modules, 128, round_scale, basis=True))
         for next_n in (1, 4, 8):
@@ -204,11 +269,13 @@ def main():
         return
     for round_scale in (False, True):
         for batch in args.batches:
-            case = {"operation": "compress", "batch": batch, "round_scale": round_scale}
-            measure(prepare_compress(modules, batch, round_scale), case, args.rounds, args.rep)
-            for next_n in (1, 8):
-                case = {"operation": "decode", "batch": batch, "next_n": next_n, "round_scale": round_scale}
-                measure(prepare_decode(modules, batch, next_n, round_scale), case, args.rounds, args.rep)
+            if "compress" in args.operations:
+                case = {"operation": "compress", "batch": batch, "round_scale": round_scale}
+                measure(prepare_compress(modules, batch, round_scale), case, args.rounds, args.rep)
+            if "decode" in args.operations:
+                for next_n in (1, 8):
+                    case = {"operation": "decode", "batch": batch, "next_n": next_n, "round_scale": round_scale}
+                    measure(prepare_decode(modules, batch, next_n, round_scale), case, args.rounds, args.rep)
 
 
 if __name__ == "__main__":

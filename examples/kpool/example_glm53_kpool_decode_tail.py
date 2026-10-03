@@ -438,44 +438,50 @@ def _validate_decode_inputs(
         raise TypeError(f"k_cache must use the platform FP8 dtype {expected_fp8_dtype}, got {k_cache.dtype}")
 
     valid = positions >= 0
-    if torch.any(valid != (tail_slot_mapping >= 0)).item():
-        raise ValueError("positions and tail_slot_mapping must use matching negative padding")
-    if torch.any((~valid) & (cache_loc >= 0)).item():
-        raise ValueError("padded tokens must use a negative cache_loc")
-    if key.shape[1] > 1:
-        if torch.any(valid[:, 1:] & ~valid[:, :-1]).item():
-            raise ValueError("valid decode tokens must form a prefix in each request row")
-        consecutive = positions[:, 1:] == positions[:, :-1] + 1
-        if torch.any(valid[:, 1:] & ~consecutive).item():
-            raise ValueError("valid positions must be consecutive within each request")
-
-    active_tail_slots = tail_slot_mapping[valid]
-    if active_tail_slots.numel() != 0:
-        tail_slots = tail_cache.shape[0] * pool_size
-        if int(active_tail_slots.max().item()) >= tail_slots:
-            raise ValueError(f"active tail slots must be in [0, {tail_slots})")
-        if torch.any(active_tail_slots % pool_size != positions[valid] % pool_size).item():
-            raise ValueError("tail slot phase must equal position modulo pool_size")
-
-        tail_blocks = torch.where(valid, tail_slot_mapping // pool_size, -1)
-        active_rows = valid[:, 0]
-        row_blocks = tail_blocks[:, 0]
-        if torch.any(valid & (tail_blocks != row_blocks[:, None])).item():
-            raise ValueError("all tokens for one request must use the same tail block")
-        active_row_blocks = row_blocks[active_rows]
-        if torch.unique(active_row_blocks).numel() != active_row_blocks.numel():
-            raise ValueError("active requests must use distinct tail blocks")
+    tail_slots = tail_cache.shape[0] * pool_size
+    cache_slots = k_cache.shape[0] * k_cache.shape[1]
+    # Evaluate fixed-shape predicates before one host synchronization, preserving error order.
+    checks = [
+        (torch.any(valid != (tail_slot_mapping >= 0)), "positions and tail_slot_mapping must use matching negative padding"),
+        (torch.any((~valid) & (cache_loc >= 0)), "padded tokens must use a negative cache_loc"),
+        (torch.any(valid[:, 1:] & ~valid[:, :-1]), "valid decode tokens must form a prefix in each request row"),
+        (
+            torch.any(valid[:, 1:] & (positions[:, 1:] != positions[:, :-1] + 1)),
+            "valid positions must be consecutive within each request",
+        ),
+        (torch.any(valid & (tail_slot_mapping >= tail_slots)), f"active tail slots must be in [0, {tail_slots})"),
+        (
+            torch.any(valid & (tail_slot_mapping % pool_size != positions % pool_size)),
+            "tail slot phase must equal position modulo pool_size",
+        ),
+    ]
+    tail_blocks = tail_slot_mapping // pool_size
+    checks.append((torch.any(valid & (tail_blocks != tail_blocks[:, :1])), "all tokens for one request must use the same tail block"))
+    sorted_blocks = tail_blocks[:, :1].flatten().sort().values
+    checks.append(
+        (torch.any((sorted_blocks[1:] == sorted_blocks[:-1]) & (sorted_blocks[1:] >= 0)), "active requests must use distinct tail blocks")
+    )
+    del tail_blocks, sorted_blocks
 
     completion = valid & (positions % pool_size == pool_size - 1)
-    if torch.any(completion != (cache_loc >= 0)).item():
-        raise ValueError("cache_loc must be nonnegative exactly when a valid token closes a pool")
-    active_cache_locs = cache_loc[completion]
-    if active_cache_locs.numel() != 0:
-        cache_slots = k_cache.shape[0] * k_cache.shape[1]
-        if int(active_cache_locs.max().item()) >= cache_slots:
-            raise ValueError(f"active cache locations must be in [0, {cache_slots})")
-        if torch.unique(active_cache_locs).numel() != active_cache_locs.numel():
-            raise ValueError("active cache locations must be unique to avoid concurrent writes")
+    checks.extend(
+        (
+            (torch.any(completion != (cache_loc >= 0)), "cache_loc must be nonnegative exactly when a valid token closes a pool"),
+            (torch.any(completion & (cache_loc >= cache_slots)), f"active cache locations must be in [0, {cache_slots})"),
+        )
+    )
+    del valid, completion
+    sorted_locs = cache_loc.flatten().sort().values
+    checks.append(
+        (
+            torch.any((sorted_locs[1:] == sorted_locs[:-1]) & (sorted_locs[1:] >= 0)),
+            "active cache locations must be unique to avoid concurrent writes",
+        )
+    )
+    errors = torch.stack([invalid for invalid, _ in checks]).cpu().tolist()
+    for invalid, (_, message) in zip(errors, checks):
+        if invalid:
+            raise ValueError(message)
 
     return fp8_dtype_name, float(torch.finfo(expected_fp8_dtype).max)
 
