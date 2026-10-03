@@ -143,7 +143,7 @@ def _make_two_group_reduce_kernel(block_threads: int = 128, group_stride: int = 
     return make_kernel()
 
 
-def _make_offset_thread_reduce_kernel():
+def _make_offset_thread_reduce_kernel(batch=1):
     """Reduction whose participating threads occupy a non-zero thread range,
     i.e. tx in [32, 96) of a 128-thread block."""
 
@@ -188,7 +188,7 @@ def _make_offset_thread_reduce_kernel():
                 )
                 for i, j in T.Parallel(rows, width):
                     x_frag[i, j] = x[i, j]
-                T.reduce_sum(x_frag, sum_frag, dim=1)
+                T.reduce_sum(x_frag, sum_frag, dim=1, batch=batch)
                 for i, j in T.Parallel(rows, width):
                     out[i, j] = x_frag[i, j] / sum_frag[i]
 
@@ -1220,6 +1220,47 @@ def test_reduce_packed_max_nan_batch_runtime():
         B = _compile(_make_nan_reduce_kernel(T.reduce_max, M, N, tl_dtype, threads=256, nan_propagate=True))(A)
         assert not math.isnan(B[0].float().item()), f"{tl_dtype}: non-NaN rows should not produce NaN"
         assert math.isnan(B[2].float().item()), f"{tl_dtype}: NaN row must produce NaN"
+
+
+# ---------------------------------------------------------------------------
+# Batched all-reduce over an offset partial thread range
+# ---------------------------------------------------------------------------
+
+_OFFSET_RANGE_THREADS = 64
+
+
+def _allreduce_call(kernel):
+    match = re.search(r"tl::AllReduce<[^;(]*::run(?:_batch)?\(", kernel.get_kernel_source())
+    return match.group(0) if match else ""
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_batch_matches_scalar_on_offset_thread_range():
+    """`batch > 1` is documented as the same reduction using fewer barriers.
+
+    `_make_offset_thread_reduce_kernel` covers an offset participating range, but
+    it calls `reduce_sum` without a batch, so it only ever exercised the scalar
+    arm -- the one that resolves the range. The batched arm took the offset and
+    the barrier width from the block's bounds instead, so on the same kernel it
+    indexed from thread 0 and waited on 128 threads, folding non-participants'
+    untouched registers into the sum. Every output element came out wrong.
+    """
+    torch.manual_seed(3)
+    x = torch.rand((2, 512), dtype=torch.float32, device="cuda")
+    reference = x / x.sum(dim=1, keepdim=True)
+
+    scalar = _make_offset_thread_reduce_kernel(1)
+    batched = _make_offset_thread_reduce_kernel(2)
+
+    scalar_out = scalar(x)
+    batched_out = batched(x)
+    torch.cuda.synchronize()
+
+    # The batched path has to resolve the participants, not the whole block.
+    assert f"NamedBarrier<{_OFFSET_RANGE_THREADS}>" in _allreduce_call(batched), _allreduce_call(batched)
+
+    torch.testing.assert_close(scalar_out, reference, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(batched_out, reference, rtol=1e-5, atol=1e-6)
 
 
 if __name__ == "__main__":
