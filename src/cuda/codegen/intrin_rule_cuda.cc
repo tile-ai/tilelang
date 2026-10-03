@@ -154,6 +154,50 @@ TVM_REGISTER_OP("tirx.rsqrt")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
                                DispatchPureExtern<CUDAMath>);
 
+TVM_REGISTER_OP("tirx.asin")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.acos")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.asinh")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.acosh")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.atanh")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.log1p")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.atan2")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.hypot")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.copysign")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.ldexp")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
+TVM_REGISTER_OP("tirx.nextafter")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                               DispatchPureExtern<CUDAMath>);
+
 TVM_REGISTER_OP("tirx.isfinite")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAIsFinite);
 
