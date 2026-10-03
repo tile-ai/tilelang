@@ -1828,7 +1828,12 @@ def stg128(dst: BufferLikeType, value: PrimExpr, pred: PrimExpr = None) -> None:
 
 
 def sts32(dst: BufferLikeType, value: PrimExpr) -> None:
-    """Store a uint32 value to shared memory as 32 bits (4 bytes)."""
+    """Store a uint32 value to shared memory as 32 bits (4 bytes).
+
+    The destination address must be 4-byte aligned for every active lane. This
+    low-level intrinsic does not check alignment; callers using narrow-element
+    buffers must ensure their indices keep the byte address aligned.
+    """
     if not isinstance(dst, BufferLikeTypeTuple):
         raise TypeError(f"T.sts32 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
     ptr = retrieve_ptr(dst, access_type="w")
@@ -1836,7 +1841,12 @@ def sts32(dst: BufferLikeType, value: PrimExpr) -> None:
 
 
 def sts64(dst: BufferLikeType, value: PrimExpr) -> None:
-    """Store a uint32x2 value to shared memory as 64 bits (8 bytes)."""
+    """Store a uint32x2 value to shared memory as 64 bits (8 bytes).
+
+    The destination address must be 8-byte aligned for every active lane. This
+    low-level intrinsic does not check alignment; callers using narrow-element
+    buffers must ensure their indices keep the byte address aligned.
+    """
     if not isinstance(dst, BufferLikeTypeTuple):
         raise TypeError(f"T.sts64 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
     ptr = retrieve_ptr(dst, access_type="w")
@@ -1844,7 +1854,12 @@ def sts64(dst: BufferLikeType, value: PrimExpr) -> None:
 
 
 def sts128(dst: BufferLikeType, value: PrimExpr) -> None:
-    """Store a uint32x4 value to shared memory as 128 bits (16 bytes)."""
+    """Store a uint32x4 value to shared memory as 128 bits (16 bytes).
+
+    The destination address must be 16-byte aligned for every active lane. This
+    low-level intrinsic does not check alignment; callers using narrow-element
+    buffers must ensure their indices keep the byte address aligned.
+    """
     if not isinstance(dst, BufferLikeTypeTuple):
         raise TypeError(f"T.sts128 expects Buffer, BufferRegion, or BufferLoad. Got {type(dst)}: {dst}")
     ptr = retrieve_ptr(dst, access_type="w")
