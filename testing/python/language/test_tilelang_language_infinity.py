@@ -30,5 +30,53 @@ def test_infinity():
     _test_infinity(T.float8_e5m2)
 
 
+@tilelang.jit(out_idx=[1])
+def cast_to_fp8_kernel(dtype: str):
+    @T.prim_func
+    def main(A: T.Tensor((8,), "float32"), C: T.Tensor((8,), dtype)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(8):
+                C[i] = T.cast(A[i], dtype)
+
+    return main
+
+
+# Over-range fp32, the +/-inf endpoints, and the largest finite e5m2 value.
+_OVER_RANGE = [65504.0, 1e5, 1e6, 120000.0, float("inf"), -1e5, float("-inf"), 57344.0]
+
+
+@tilelang.testing.requires_cuda
+def test_cast_to_e5m2_reaches_infinity():
+    """A type that can hold an infinity has to produce one from an over-range value.
+
+    `T.infinity("float8_e5m2")` stores an infinity and `torch.float8_e5m2` converts
+    an over-range fp32 to one, but the cast between them clamped to the largest
+    finite value 57344 -- including for `inf` itself, which needs no rounding.
+    """
+    values = torch.tensor(_OVER_RANGE, dtype=torch.float32, device="cuda")
+    out = cast_to_fp8_kernel("float8_e5m2")(values)
+
+    torch.testing.assert_close(out.view(torch.uint8), values.to(torch.float8_e5m2).view(torch.uint8), rtol=0, atol=0)
+
+
+_E4M3FN_MAX = 448.0
+
+
+@tilelang.testing.requires_cuda
+def test_cast_to_e4m3fn_still_saturates():
+    """Control: e4m3fn has no infinity encoding, so over-range still clamps.
+
+    The reference is clamped to the format's finite range first, because how
+    `torch` converts an infinity or an over-range value to a finite-only format
+    is not something this test should depend on.
+    """
+
+    values = torch.tensor(_OVER_RANGE, dtype=torch.float32, device="cuda")
+    out = cast_to_fp8_kernel("float8_e4m3fn")(values)
+    expected = values.clamp(-_E4M3FN_MAX, _E4M3FN_MAX).to(torch.float8_e4m3fn)
+
+    torch.testing.assert_close(out.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
