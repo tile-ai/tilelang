@@ -102,6 +102,13 @@ inline bool IsGlobalBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "global";
 }
 
+// Minimum transfer width of a single cp.async transaction, and its value in
+// bits. PTX cp.async supports 4/8/16-byte transactions; the SIMT partition
+// coalescing in op/parallel.cc references this instead of a bare 32 so the
+// two cannot silently drift apart.
+inline constexpr int kCPAsyncMinTransferBytes = 4;
+inline constexpr int kCPAsyncMinTransferBits = kCPAsyncMinTransferBytes * 8;
+
 inline bool IsValidCPAsyncTransferBytes(int bytes) {
   return bytes == 4 || bytes == 8 || bytes == 16;
 }

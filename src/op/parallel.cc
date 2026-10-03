@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
+#include <limits>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <unordered_set>
@@ -120,7 +121,85 @@ int SelectMinPaddingVectorSize(int max_vector_size, PrimExpr loop_total_size,
   return best_vector_size;
 }
 
+/**
+ * @brief Whether the statement contains a call with non-pure effects.
+ *
+ * Atomics and stateful intrinsics rule out treating the loop as a pure copy.
+ * Pure calls (e.g. shift/logical builtins inside index arithmetic) do not
+ * block copy coalescing.
+ */
+bool ContainsImpureCall(const Stmt &stmt) {
+  bool impure = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (impure) {
+      return;
+    }
+    if (const auto *call = node.as<CallNode>()) {
+      impure = SideEffect(GetRef<PrimExpr>(call)) > CallEffectKind::kPure;
+    }
+  });
+  return impure;
+}
+
+/**
+ * @brief Whether every buffer store is a raw global->shared copy.
+ *
+ * A raw copy is a shared-memory store whose value is a load from a global
+ * buffer with a matching dtype — the only shape that the cp.async injector
+ * can rewrite. cp.async only applies to global->shared transfers, so loops
+ * with other side effects (global stores, mixed compute) must keep their
+ * original partition: re-coalescing them changes their codegen (or even
+ * their semantics, e.g. vectorized atomics) without enabling cp.async.
+ */
+bool IsPureGlobalToSharedCopyLoop(const Stmt &stmt) {
+  bool pure = true;
+  bool saw_store = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    const auto *store = node.as<BufferStoreNode>();
+    if (store == nullptr || !pure) {
+      return;
+    }
+    saw_store = true;
+    const auto *load = store->value.as<BufferLoadNode>();
+    if (load == nullptr || !IsGlobalBuffer(load->buffer) ||
+        !IsSharedBuffer(store->buffer) ||
+        load->buffer->dtype != store->buffer->dtype) {
+      pure = false;
+    }
+  });
+  return saw_store && pure;
+}
+
+/**
+ * @brief Smallest element bit-width among the loop's global->shared copies.
+ *
+ * Measures the full element width (dtype bits times lanes) so vector-typed
+ * buffers are not underreported and over-widened. Callers must only use this
+ * after IsPureGlobalToSharedCopyLoop() accepted the loop.
+ */
+int MinGlobalToSharedCopyElementBits(const Stmt &stmt) {
+  int min_bits = std::numeric_limits<int>::max();
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (const auto *store = node.as<BufferStoreNode>()) {
+      if (const auto *load = store->value.as<BufferLoadNode>()) {
+        int bits = load->buffer->dtype.bits() * load->buffer->dtype.lanes();
+        min_bits = std::min(min_bits, bits);
+      }
+    }
+  });
+  return min_bits;
+}
+
 } // anonymous namespace
+
+std::optional<int>
+ParallelOpNode::GlobalToSharedCopyMinElementBits(const For &root) const {
+  if (ContainsImpureCall(root->body) ||
+      !IsPureGlobalToSharedCopyLoop(root->body)) {
+    return std::nullopt;
+  }
+  return MinGlobalToSharedCopyElementBits(root->body);
+}
 
 /**
  * @brief Handle a parallel For node during traversal, collecting loop metadata.
@@ -996,6 +1075,16 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
   return result;
 }
 
+/**
+ * @brief Compute the plan-based loop layout candidate.
+ *
+ * Determines a vectorized loop layout candidate from the maximum legal
+ * vectorize size, then adjusts it to the smallest-padding width for
+ * non-fragment loops. Pure global->shared copies with sub-32-bit dtypes are
+ * additionally coalesced to keep each active thread's chunk at or above
+ * 4 bytes, so the copy stays compatible with the cp.async minimum transfer
+ * width instead of silently falling back to a synchronous load.
+ */
 Fragment
 ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
   // Vectorize Size must be aware of the buffer_remap
@@ -1024,9 +1113,27 @@ ParallelOpNode::ComputePlanCandidate(const LayoutInferArgs &layout_args) const {
       vector_size /= 2;
     }
   } else if (!root_->annotations.count(attr::kCoalescedWidth)) {
+    int max_vector_size = vector_size;
     vector_size = SelectMinPaddingVectorSize(vector_size, loop_total_size,
                                              layout_args.thread_bounds->extent,
                                              &analyzer_);
+    // Coalesce sub-width elements before distributing them to threads: for
+    // global->shared copies, keep each active thread's chunk at or above the
+    // cp.async minimum transfer width. Smaller per-thread chunks are
+    // memory-inefficient and fall below that width (4/8/16 bytes), which
+    // would silently force the synchronous copy fallback. Threads left idle
+    // by the wider chunk are covered by the partition predicate (and by
+    // predicated cp.async after the rewrite pass).
+    if (auto min_bits =
+            GlobalToSharedCopyMinElementBits(maybe_remapped_root_)) {
+      if (*min_bits < kCPAsyncMinTransferBits &&
+          kCPAsyncMinTransferBits % *min_bits == 0) {
+        int min_lanes = kCPAsyncMinTransferBits / *min_bits;
+        if (vector_size < min_lanes && max_vector_size >= min_lanes) {
+          vector_size = min_lanes;
+        }
+      }
+    }
   }
   DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
              << vector_size << '\n';
