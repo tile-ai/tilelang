@@ -304,6 +304,35 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->dst = dst_access.region->buffer;
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
+
+  auto check_region_bounds = [](const Buffer &buffer,
+                                const Array<Range> &region,
+                                const char *region_name) {
+    CHECK(region.size() == buffer->shape.size(), ValueError)
+        << "[TileLang Semantic Check] T.copy " << region_name
+        << " region rank does not match buffer " << buffer->name;
+
+    for (size_t i = 0; i < region.size(); ++i) {
+      const auto *min = region[i]->min.as<IntImmNode>();
+      const auto *extent = region[i]->extent.as<IntImmNode>();
+      const auto *shape = buffer->shape[i].as<IntImmNode>();
+      if (min != nullptr && extent != nullptr && shape != nullptr &&
+          min->value >= 0 && extent->value >= 0 && shape->value >= 0) {
+        // Compare without forming min + extent so signed integer overflow
+        // cannot turn a statically out-of-bounds end into an in-bounds value.
+        CHECK(extent->value <= shape->value &&
+                  min->value <= shape->value - extent->value,
+              ValueError)
+            << "[TileLang Semantic Check] T.copy " << region_name << " region["
+            << i << "] min " << region[i]->min << " plus extent "
+            << region[i]->extent << " exceeds buffer shape extent "
+            << buffer->shape[i] << " for " << buffer->name;
+      }
+    }
+  };
+
+  check_region_bounds(node->src, node->src_range, "source");
+  check_region_bounds(node->dst, node->dst_range, "destination");
   node->SetAccessRegions({src_access, dst_access});
   // Copy annotations from the Call node
   node->annotations = annotations;
