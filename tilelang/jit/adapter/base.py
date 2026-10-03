@@ -30,21 +30,22 @@ class BaseKernelAdapter(ABC):
         self.result_idx = self._legalize_result_idx(result_idx)
         self._post_init()
 
-    def _legalize_result_idx(self, result_idx: list[int] | None) -> list[int]:
+    def _legalize_result_idx(self, result_idx: list[int] | int | None) -> list[int]:
         params = self.params
         # result_idx is a list of indices of the output tensors
         if result_idx is None:
             result_idx = []
         elif isinstance(result_idx, int):
-            if result_idx > len(params) or result_idx < -len(params):
-                raise ValueError(f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}")
+            if result_idx >= len(params) or result_idx < -len(params):
+                raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
             if result_idx < 0:
                 result_idx = len(params) + result_idx
             result_idx = [result_idx]
         elif isinstance(result_idx, list):
+            result_idx = result_idx.copy()
             for i, idx in enumerate(result_idx):
                 if idx >= len(params) or idx < -len(params):
-                    raise ValueError(f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}")
+                    raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
                 if idx < 0:
                     result_idx[i] = len(params) + idx
         else:
