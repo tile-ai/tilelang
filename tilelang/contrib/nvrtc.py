@@ -14,7 +14,7 @@ def get_nvrtc_version() -> tuple[int, int]:
 def compile_cuda(
     code: str,
     target_format: Literal["ptx", "cubin"] = "ptx",
-    arch: int | None = None,
+    arch: int | str | None = None,
     options: str | list[str] | None = None,
     verbose: bool = False,
 ) -> bytearray:
@@ -28,8 +28,10 @@ def compile_cuda(
     target_format : Literal["ptx", "cubin"]
         The target format of nvrtc compiler.
 
-    arch : Optional[int]
-        The cuda architecture code.
+    arch : Optional[Union[int, str]]
+        The CUDA architecture code. String tokens preserve the exact suffix,
+        such as "90", "90a", or "100f". Integer values use the legacy
+        architecture-specific suffix for SM90 and newer.
 
     options : Optional[Union[str, List[str]]]
         The additional options.
@@ -48,7 +50,7 @@ def compile_cuda(
         major, minor = parse_compute_version(get_target_compute_version(Target.current(allow_none=True)))
         arch = major * 10 + minor
     prefix = "compute" if target_format == "ptx" else "sm"
-    suffix = "a" if arch >= 90 else ""
+    suffix = "a" if isinstance(arch, int) and arch >= 90 else ""
     arch_option = f"--gpu-architecture={prefix}_{arch}{suffix}"
 
     file_name = "tvm_kernels"
@@ -78,37 +80,38 @@ def compile_cuda(
     result, program = nvrtc.nvrtcCreateProgram(code_bytes, bytes(file_name, "utf-8"), 0, [], [])
     assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to create program: {result}"
 
-    options_bytes = [bytes(flag, "utf-8") for flag in final_options]
-    compile_result = nvrtc.nvrtcCompileProgram(program, len(options_bytes), options_bytes)[0]
+    try:
+        options_bytes = [bytes(flag, "utf-8") for flag in final_options]
+        compile_result = nvrtc.nvrtcCompileProgram(program, len(options_bytes), options_bytes)[0]
 
-    if compile_result != nvrtc.nvrtcResult.NVRTC_SUCCESS:
-        msg = f"{code}\nCompilation error:\n"
-        if verbose:
-            result, log_size = nvrtc.nvrtcGetProgramLogSize(program)
-            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log size: {result}"
-            log_bytes = bytes(log_size)
-            result = nvrtc.nvrtcGetProgramLog(program, log_bytes)[0]
-            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log: {result}"
-            msg += f"{log_bytes.decode('utf-8')}\n"
+        if compile_result != nvrtc.nvrtcResult.NVRTC_SUCCESS:
+            msg = f"{code}\nCompilation error:\n"
+            if verbose:
+                result, log_size = nvrtc.nvrtcGetProgramLogSize(program)
+                assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log size: {result}"
+                log_bytes = bytes(log_size)
+                result = nvrtc.nvrtcGetProgramLog(program, log_bytes)[0]
+                assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log: {result}"
+                msg += f"{log_bytes.decode('utf-8')}\n"
+            else:
+                msg += "Turn on verbose to see the full compilation log."
+            msg += f"Options: {' '.join(final_options)}\n"
+            raise RuntimeError(msg)
+
+        if target_format == "cubin":
+            result, cubin_size = nvrtc.nvrtcGetCUBINSize(program)
+            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get CUBIN size: {result}"
+            result_bytes = bytes(cubin_size)
+            result = nvrtc.nvrtcGetCUBIN(program, result_bytes)[0]
+            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get CUBIN: {result}"
         else:
-            msg += "Turn on verbose to see the full compilation log."
-        msg += f"Options: {' '.join(final_options)}\n"
-        raise RuntimeError(msg)
-
-    if target_format == "cubin":
-        result, cubin_size = nvrtc.nvrtcGetCUBINSize(program)
-        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get CUBIN size: {result}"
-        result_bytes = bytes(cubin_size)
-        result = nvrtc.nvrtcGetCUBIN(program, result_bytes)[0]
-        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get CUBIN: {result}"
-    else:
-        result, ptx_size = nvrtc.nvrtcGetPTXSize(program)
-        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX size: {result}"
-        result_bytes = bytes(ptx_size)
-        result = nvrtc.nvrtcGetPTX(program, result_bytes)[0]
-        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX: {result}"
-
-    # Destroy handler
-    assert nvrtc.nvrtcDestroyProgram(program)[0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
+            result, ptx_size = nvrtc.nvrtcGetPTXSize(program)
+            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX size: {result}"
+            result_bytes = bytes(ptx_size)
+            result = nvrtc.nvrtcGetPTX(program, result_bytes)[0]
+            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX: {result}"
+    finally:
+        result = nvrtc.nvrtcDestroyProgram(program)[0]
+        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
 
     return result_bytes

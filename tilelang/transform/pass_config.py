@@ -90,6 +90,14 @@ class PassConfigKey(str, Enum):
     """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
 
+    TL_CUDA_COMPILER = "tl.cuda_compiler"
+    """CUDA device compiler for the TVM-FFI execution backend: "nvcc" or "nvrtc".
+
+    Default: "nvcc". NVRTC requires cuda-python, CUDA headers, and the NVRTC
+    library. Host IR uses the selected host codegen; target_host="c" requires
+    a host C/C++ compiler, including on Windows.
+    """
+
     TL_DEVICE_COMPILE_FLAGS = "tl.device_compile_flags"
     """Additional device compiler flags passed to nvcc/NVRTC.
 

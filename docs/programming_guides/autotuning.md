@@ -239,6 +239,27 @@ Backend notes
 - Torch backend may not save artifacts to disk; in this case, only
   in‑memory caching applies and a warning is logged.
 
+### NVRTC device compilation with TVM-FFI
+
+Select NVRTC as the device compiler through the TVM-FFI execution backend:
+
+```python
+kernel = tilelang.compile(
+    program,
+    execution_backend="tvm_ffi",
+    pass_configs={tilelang.PassConfigKey.TL_CUDA_COMPILER: "nvrtc"},
+)
+```
+
+Host preparation, scalar conversions, conditions, loops, streams, and exported
+libraries use the shared TVM-FFI host path. The device binary cache includes the
+compiler name, NVRTC version, target, and compiler options. NVRTC accepts one
+code target matching the target architecture.
+
+This configuration requires `cuda-python`, the NVRTC library, and CUDA headers.
+The default C host codegen also requires a host C/C++ compiler, including on
+Windows. `tl.cuda_compiler` defaults to `"nvcc"`.
+
 ## Alternative: Manual Sweeps with par_compile
 
 If you prefer manual control, use `JITImpl.par_compile` to compile a batch of
