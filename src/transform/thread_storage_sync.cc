@@ -1235,7 +1235,13 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
           }
           e.is_pointer_access = true;
           e.is_atomic = (atomic_dst_ptr_depth_ > 0);
-          e.type = kRead;
+          // address_of hands the pointer to whatever consumes it and says
+          // nothing about how that consumer uses it, so the access has to be
+          // treated as a write: a shared buffer written through an opaque call
+          // would otherwise never conflict with the block-wide reads that
+          // follow, and no barrier would be planned between them.
+          // loop_unswitching.cc takes the same conservative view of address_of.
+          e.type = kWrite;
           e.scope = scope;
           curr_stmt_.access.emplace_back(e);
         }
