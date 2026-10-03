@@ -6,7 +6,10 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from examples.dequantize_gemm.quantize.quantization import _tir_u32_to_int_to_float
+from examples.dequantize_gemm.quantize.quantization import (
+    _tir_packed_uint_to_uint_to_float,
+    _tir_u32_to_int_to_float,
+)
 
 
 def _pack_signed_values(values: list[int], nbit: int) -> torch.Tensor:
@@ -42,6 +45,42 @@ def test_u32_to_int_to_float_sign_extends_subword_values(nbit, values):
         with T.Kernel(1, threads=1) as _:
             for i in T.serial(num_values):
                 decoded_values[i] = _tir_u32_to_int_to_float(nbit, packed_values[i // lanes_per_word], i % lanes_per_word, "float32")
+
+    kernel = tilelang.compile(main, target="cuda")
+    packed = _pack_signed_values(values, nbit)
+    out = torch.empty(num_values, dtype=torch.float32, device="cuda")
+    kernel(packed, out)
+    torch.testing.assert_close(out.cpu(), torch.tensor(values, dtype=torch.float32), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "nbit,values",
+    [
+        (2, [0, 1, 2, 3]),
+        (4, list(range(8))),
+        (8, [0, 1, 42, 127, 128, 255]),
+    ],
+)
+@tilelang.testing.requires_cuda
+def test_packed_uint_to_uint_to_float_decodes_unsigned_values(nbit, values):
+    """Unsigned sub-word decode should return the field value itself.
+
+    It used to subtract `2^(nbit-1) - 1`, the zero-point of an asymmetric signed
+    decode, so every value came back shifted by a constant (7 for nbit=4) even
+    though the storage and the destination are both unsigned.
+    """
+
+    lanes_per_word = 32 // nbit
+    num_words = math.ceil(len(values) / lanes_per_word)
+    num_values = len(values)
+
+    decode = _tir_packed_uint_to_uint_to_float(32)
+
+    @T.prim_func
+    def main(packed_values: T.Tensor((num_words,), "uint32"), decoded_values: T.Tensor((num_values,), "float32")):
+        with T.Kernel(1, threads=1) as _:
+            for i in T.serial(num_values):
+                decoded_values[i] = decode(nbit, packed_values[i // lanes_per_word], i % lanes_per_word, "float32")
 
     kernel = tilelang.compile(main, target="cuda")
     packed = _pack_signed_values(values, nbit)
