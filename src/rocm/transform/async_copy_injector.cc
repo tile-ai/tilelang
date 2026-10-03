@@ -12,6 +12,7 @@
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -300,7 +301,10 @@ private:
       return IsZeroValue(broadcast->value);
     }
     if (const auto *float_imm = expr.as<FloatImmNode>()) {
-      return float_imm->value == 0.0f;
+      // -0.0 compares equal to 0.0, but its sign bit is part of the value. The
+      // zero fill this matcher selects writes +0.0, so accepting -0.0 here
+      // silently changes the element the kernel asked for.
+      return float_imm->value == 0.0f && !std::signbit(float_imm->value);
     }
     if (const auto *int_imm = expr.as<IntImmNode>()) {
       return int_imm->value == 0;
