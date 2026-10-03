@@ -270,6 +270,21 @@ inline PrimExpr MakeReduce(const ReduceOpNode &op, int vsize,
 
   PrimExpr rhs = b;
   if (acc->dtype != rhs->dtype) {
+    // An abs-reduce has to take the absolute value in the source dtype. Casting
+    // a signed element into an unsigned accumulator first turns -3 into
+    // 4294967293, and the `is_uint()` short-circuit further down then reads the
+    // already-cast value as "unsigned, so it is its own absolute value".
+    if ((op.type->IsAbsSum() || op.type->IsAbsMax()) && rhs.dtype().is_int() &&
+        acc->dtype.is_uint()) {
+      // Negate in the unsigned accumulator instead of the source dtype. The
+      // source may be narrower than the accumulator, in which case negating its
+      // minimum overflows back onto itself (`-(-128)` in int8 is -128 again)
+      // and the value stays negative through the cast. Negating the widened bit
+      // pattern is exact for every input, including the minimum of a source as
+      // wide as the accumulator, whose magnitude only the unsigned type holds.
+      PrimExpr as_unsigned = Cast(acc->dtype, rhs);
+      rhs = Select(rhs < 0, -as_unsigned, as_unsigned);
+    }
     rhs = Cast(acc->dtype, rhs);
   }
 
