@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Ascend/PTO Performance Practices"
+  short_description: "Review and validate TileLang Ascend/PTO operator implementations, templates, and performance evidence"
+  default_prompt: "Use $tilelang-performance-best-practices to review, implement, and validate a TileLang Ascend/PTO kernel against the installed TileLang source and current repository contracts."
