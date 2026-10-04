@@ -20,6 +20,7 @@ from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
 from tilelang.jit.abi import CALLEE_ALLOCATED_OUTPUTS_ATTR
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.utils import is_ascend_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
 from tilelang.language.dtypes import dtype
@@ -74,6 +75,16 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     dynamic_symbolic_map: dict[tirx.Var, tuple[int, int, int, int]] | None = None
 
     _torch_npu_stream_exchange_installed: bool = False
+
+    def _post_init(self) -> None:
+        super()._post_init()
+        if not isinstance(self.target, Target) or not is_ascend_target(self.target):
+            return
+
+        # Load optional host profiling support only for Ascend.
+        from tilelang.jit.host_profile import maybe_wrap_host_profile
+
+        self.func = maybe_wrap_host_profile(self.func, self)
 
     def _prepare_torch_device(self, device: torch.device) -> None:
         if device.type == "npu" and not self._torch_npu_stream_exchange_installed:

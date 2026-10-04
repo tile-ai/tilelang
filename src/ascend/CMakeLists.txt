@@ -25,6 +25,75 @@ endif()
 
 message(STATUS "Ascend Backend is enabled")
 
+# Native profiling is available when the CANN profiling headers are installed.
+# Detect them on each configure without adding a user-facing profiling build
+# option; builds without CANN simply skip the reporting path.
+set(_tilelang_msprof_suffixes
+  include/experiment/msprof
+  include/profiling
+  include/experiment/profiling
+  pkg_inc/profiling
+  include/experiment
+  include
+)
+
+set(_tilelang_msprof_arch_suffixes)
+
+foreach(_suffix IN LISTS _tilelang_msprof_suffixes)
+  list(APPEND _tilelang_msprof_arch_suffixes
+    "${CMAKE_SYSTEM_PROCESSOR}-linux/${_suffix}"
+  )
+endforeach()
+
+find_path(
+  _tilelang_msprof_include_dir
+  aprof_pub.h
+  HINTS
+    "${ASCEND_HOME_PATH}"
+    "${ASCEND_TOOLKIT_HOME}"
+    "${ASCEND_HOME}"
+    "$ENV{ASCEND_HOME_PATH}"
+    "$ENV{ASCEND_TOOLKIT_HOME}"
+    "$ENV{ASCEND_HOME}"
+    /usr/local/Ascend/ascend-toolkit/latest
+  PATH_SUFFIXES
+    ${_tilelang_msprof_suffixes}
+    ${_tilelang_msprof_arch_suffixes}
+  NO_CACHE
+)
+
+set(_tilelang_ascend_profiler 0)
+
+if(_tilelang_msprof_include_dir)
+  set(_tilelang_ascend_profiler 1)
+
+  set_property(
+    SOURCE src/ascend/runtime/ascend_module.cc
+    APPEND PROPERTY
+    INCLUDE_DIRECTORIES "${_tilelang_msprof_include_dir}"
+  )
+
+  message(STATUS "Ascend CANN profiling enabled")
+else()
+  message(STATUS
+    "CANN aprof_pub.h was not found; building Ascend without native "
+    "profiling. Set ASCEND_HOME_PATH to the CANN SDK root and reconfigure "
+    "to enable CANN Node reporting."
+  )
+endif()
+
+set_property(
+  SOURCE src/ascend/runtime/ascend_module.cc
+  APPEND PROPERTY
+  COMPILE_DEFINITIONS TILELANG_ASCEND_PROFILER=${_tilelang_ascend_profiler}
+)
+
+unset(_tilelang_ascend_profiler)
+unset(_tilelang_msprof_include_dir)
+unset(_tilelang_msprof_suffixes)
+unset(_tilelang_msprof_arch_suffixes)
+unset(_suffix)
+
 # The codegen emits AscendC source text and carries no CANN build-time
 # dependency; the runtime module links against the ascendcl stub below (or the
 # real libascendcl when stubs are disabled), so USE_ASCEND=ON is safe on any
