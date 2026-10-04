@@ -92,10 +92,7 @@ def _find_clang_cl(compiler_env: dict[str, str] | None) -> str | None:
 
 @functools.cache
 def _resolve_windows_compiler(prefer_clang_cl: bool) -> tuple[str | None, str | None]:
-    """Return (compiler_path, kind) where kind is 'clang-cl' or 'msvc'.
-
-    Cached so repeated JIT compiles don't re-spawn vswhere or rescan PATH.
-    """
+    """Return (compiler_path, kind), preferring clang-cl when requested."""
     compiler_env = get_msvc_subprocess_env()
     if prefer_clang_cl:
         clang_cl = _find_clang_cl(compiler_env)
@@ -214,14 +211,7 @@ def _import_vsdevcmd_environment(vsdevcmd: str) -> dict[str, str] | None:
 
 @functools.cache
 def get_msvc_subprocess_env() -> dict[str, str] | None:
-    """Return the resolved MSVC subprocess environment.
-
-    Memoized via :func:`functools.cache` (matching ``contrib/cc.py`` and
-    ``cache/kernel_cache.py``). Concurrent first callers may each spawn
-    ``vswhere.exe`` / ``VsDevCmd.bat`` once; ``functools.cache`` keeps only
-    the winning result. Subsequent calls hit the cache directly with no
-    locking.
-    """
+    """Return MSVC's SDK environment without modifying the current process."""
     if os.name != "nt":
         return None
 
@@ -277,8 +267,16 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--environment", type=Path, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--environment", type=Path)
+    mode.add_argument("--run", type=Path)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.run:
+        selected = json.loads(args.run.read_text(encoding="utf-8"))
+        environment = {key: value for key, value in os.environ.items() if key.upper() not in selected}
+        environment.update(selected)
+        return subprocess.call(args.command, env=environment)
     compiler_env = get_msvc_subprocess_env() or os.environ.copy()
     compiler, _ = get_windows_compiler()
     if compiler is None or not compiler_env.get("INCLUDE") or not compiler_env.get("LIB"):

@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import venv
 
 import pytest
 
@@ -70,6 +71,28 @@ def test_disabled_cuda_does_not_probe_sdk(tmp_path, environment_override):
     )
     env = {**os.environ, "USE_CUDA": "OFF", "WITH_PIP_CUDA_TOOLCHAIN": str(tmp_path / "missing-sdk")}
     subprocess.run([_cmake(), "-P", str(source)], env=env, check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("missing_sdk_exit", [0, 1])
+def test_sdk_probe_falls_back_to_virtualenv(tmp_path, missing_sdk_exit):
+    fallback = tmp_path / "fallback env"
+    venv.EnvBuilder(with_pip=False).create(fallback)
+    helper = tmp_path / "probe.py"
+    helper.write_text(
+        "import pathlib, sys\n"
+        + f"if pathlib.Path(sys.prefix) != pathlib.Path({str(fallback)!r}): sys.exit({missing_sdk_exit})\n"
+        + "print(sys.argv[1])\n"
+    )
+    sdk = (tmp_path / "SDK with spaces").as_posix()
+    source = tmp_path / "probe.cmake"
+    source.write_text(
+        f'include("{(ROOT / "cmake/PythonToolchain.cmake").as_posix()}")\n'
+        + f'set(Python_EXECUTABLE "{Path(sys.executable).as_posix()}")\n'
+        + f'tilelang_probe_python_sdk("{helper.as_posix()}" sdk python "{sdk}")\n'
+        + f'if(NOT sdk STREQUAL "{sdk}")\nmessage(FATAL_ERROR "SDK fallback failed: ${{sdk}}")\nendif()\n'
+        + 'if(NOT python MATCHES "fallback env")\nmessage(FATAL_ERROR "Wrong SDK interpreter: ${python}")\nendif()\n'
+    )
+    subprocess.run([_cmake(), "-P", str(source)], env={**os.environ, "VIRTUAL_ENV": str(fallback)}, check=True, capture_output=True)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="MSVC environment persistence is Windows-specific")

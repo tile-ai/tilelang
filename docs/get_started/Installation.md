@@ -104,13 +104,11 @@ apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-e
 ```
 
 On Windows, install Python 3 and Visual Studio Build Tools with the MSVC C++
-toolchain, a Windows SDK, and the **C++ Clang compiler for Windows** component.
-TileLang's native sources currently require clang-cl; cl.exe supports JIT host
-compilation but cannot build all native compiler sources. Ninja builds discover the installed toolchain
-automatically, including from ordinary PowerShell. `VSDEVCMD_BAT` can select a
-custom installation. Explicit CMake compilers, `CC`/`CXX`, toolchain files, and
-developer-shell environments take precedence. CMake and Ninja are supplied by
-the Python build dependencies when needed.
+toolchain, a Windows SDK, and **C++ Clang compiler for Windows**. Native sources
+require clang-cl; host JIT also supports cl.exe. Ninja builds discover the
+toolchain from ordinary PowerShell; `VSDEVCMD_BAT` selects a custom installation.
+Python build dependencies supply CMake and Ninja. See [Windows build details](../developer_guide/windows_build.md)
+for compiler overrides and environment handling.
 
 GPU SDKs are optional: select CUDA with the `nvcc` extra or AMD HIP with the
 `rocm` extra. CPU builds need neither SDK. To force a CPU build on a machine
@@ -190,8 +188,7 @@ pip install "nvidia-cuda-nvcc>=13" "nvidia-cuda-cccl>=13" "nvidia-cuda-nvrtc>=13
 pip install . -v --no-build-isolation
 ```
 
-For an isolated CUDA build, request SDK build requirements explicitly using
-scikit-build-core's `build.requires` setting (available since 0.11):
+For an isolated CUDA build, add the SDK to the build requirements:
 
 ```bash
 pip install . -v -Ccmake.define.USE_CUDA=ON \
@@ -200,8 +197,8 @@ pip install . -v -Ccmake.define.USE_CUDA=ON \
   '-Cbuild.requires=nvidia-cuda-nvrtc>=13'
 ```
 
-These packages are also available through `tilelang[nvcc]` for JIT use. Installing
-an extra does not itself add SDK packages to PEP 517's isolated build environment.
+The `tilelang[nvcc]` extra installs JIT dependencies, which do not enter an
+isolated build environment.
 
 **Option B** — pip toolchain in another virtualenv or path:
 

@@ -1,17 +1,7 @@
 # Host compiler setup is independent of the selected device SDK. Visual Studio
 # generators manage their environment; Ninja needs it during configure and build.
 include_guard(GLOBAL)
-
-function(tilelang_get_python_interpreter OUTPUT_VAR)
-  foreach(_var IN ITEMS Python_EXECUTABLE Python3_EXECUTABLE PYTHON_EXECUTABLE)
-    if(DEFINED ${_var} AND EXISTS "${${_var}}")
-      set(${OUTPUT_VAR} "${${_var}}" PARENT_SCOPE)
-      return()
-    endif()
-  endforeach()
-  find_package(Python3 REQUIRED COMPONENTS Interpreter)
-  set(${OUTPUT_VAR} "${Python3_EXECUTABLE}" PARENT_SCOPE)
-endfunction()
+include("${CMAKE_CURRENT_LIST_DIR}/PythonToolchain.cmake")
 
 if(NOT WIN32 OR NOT CMAKE_GENERATOR MATCHES "Ninja")
   return()
@@ -72,12 +62,9 @@ endforeach()
 function(tilelang_enable_host_launchers)
   foreach(_lang IN ITEMS C CXX)
     foreach(_step IN ITEMS COMPILER LINKER)
-      set(_launcher "${_tilelang_host_python};${CMAKE_CURRENT_FUNCTION_LIST_DIR}/host_toolchain_launcher.py;${_tilelang_host_environment}")
-      if(CMAKE_${_lang}_${_step}_LAUNCHER)
-        list(APPEND _launcher ${CMAKE_${_lang}_${_step}_LAUNCHER})
-      endif()
       set(CMAKE_${_lang}_${_step}_LAUNCHER
-          "${_launcher}"
+          "${_tilelang_host_python}" "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tilelang/_host_toolchain.py"
+          --run "${_tilelang_host_environment}" ${CMAKE_${_lang}_${_step}_LAUNCHER}
           PARENT_SCOPE)
     endforeach()
   endforeach()

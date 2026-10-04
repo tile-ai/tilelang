@@ -3,11 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
 import subprocess
 import tempfile
-
-from tvm.base import py_str
 
 from tilelang.env import TL_LIBS
 from tilelang._host_toolchain import (
@@ -104,6 +101,8 @@ def _find_import_libs() -> tuple[list[str], list[str]]:
 
 
 def _compile(output: str, objects, options=None, cc=None, cwd=None, ccache_env=None, timeout=None, compile_shared=True):
+    from .cc import _run_compiler
+
     if os.name != "nt":
         raise ValueError("Windows shared-library compiler is only available on Windows")
 
@@ -165,35 +164,11 @@ def _compile(output: str, objects, options=None, cc=None, cwd=None, ccache_env=N
             cmd.append("/LD")
         if kind == "clang-cl":
             cmd.append("-Wno-unused-command-line-argument")
-        if ccache_env is not None:
-            if not shutil.which("ccache"):
-                raise ValueError("ccache not found")
-            cmd.insert(0, "ccache")
-            compiler_env = dict(compiler_env or os.environ)
-            compiler_env.update(ccache_env)
         cmd += compile_options
         cmd += patched_objects
         cmd += ["/link"] + link_options
 
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=cwd,
-            env=compiler_env,
-        )
-        try:
-            out, _ = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            raise
-        if proc.returncode != 0:
-            msg = "Compilation error:\n"
-            msg += py_str(out)
-            msg += "\nCommand line: " + " ".join(cmd)
-            raise RuntimeError(msg)
+        _run_compiler(cmd, cwd, compiler_env, ccache_env, timeout, stdin=subprocess.DEVNULL)
 
 
 def create_shared(output: str, objects, options=None, cc=None, cwd=None, ccache_env=None, timeout=None):

@@ -19,13 +19,9 @@ set(CMAKE_HIP_STANDARD 17)
 # Use the same SDK discovery as Python, including AMD's optional pip SDK.
 # Preserve an explicit -DUSE_ROCM=<sdk> path over all detected candidates.
 if(NOT IS_DIRECTORY "${USE_ROCM}")
-  tilelang_get_python_interpreter(_TL_ROCM_PYTHON)
-  execute_process(
-    COMMAND "${_TL_ROCM_PYTHON}" "${CMAKE_SOURCE_DIR}/tilelang/_rocm_sdk.py"
-    RESULT_VARIABLE _TL_ROCM_RESULT
-    OUTPUT_VARIABLE _TL_ROCM_SDK
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if(_TL_ROCM_RESULT EQUAL 0 AND IS_DIRECTORY "${_TL_ROCM_SDK}")
+  tilelang_probe_python_sdk("${CMAKE_SOURCE_DIR}/tilelang/_rocm_sdk.py"
+                           _TL_ROCM_SDK _TL_ROCM_PYTHON)
+  if(IS_DIRECTORY "${_TL_ROCM_SDK}")
     set(USE_ROCM "${_TL_ROCM_SDK}")
   endif()
 endif()

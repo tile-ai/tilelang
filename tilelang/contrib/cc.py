@@ -126,12 +126,7 @@ def create_shared(output, objects, options=None, cc=None, cwd=None, ccache_env=N
     """
     cc = cc or get_cc()
 
-    if _is_linux_like():
-        _linux_compile(output, objects, options, cc, cwd, ccache_env, compile_shared=True, timeout=timeout)
-    elif _is_windows_like():
-        _windows_compile(output, objects, options, cc, cwd, ccache_env, compile_shared=True, timeout=timeout)
-    else:
-        raise ValueError("Unsupported platform")
+    _compile(output, objects, options, cc, cwd, ccache_env, compile_shared=True, timeout=timeout)
 
 
 def _linux_ar(output, inputs, ar):
@@ -207,12 +202,7 @@ def create_executable(output, objects, options=None, cc=None, cwd=None, ccache_e
     """
     cc = cc or get_cc()
 
-    if _is_linux_like():
-        _linux_compile(output, objects, options, cc, cwd, ccache_env)
-    elif _is_windows_like():
-        _windows_compile(output, objects, options, cc, cwd, ccache_env)
-    else:
-        raise ValueError("Unsupported platform")
+    _compile(output, objects, options, cc, cwd, ccache_env)
 
 
 def get_global_symbol_section_map(path, *, nm=None) -> dict[str, str]:
@@ -368,34 +358,48 @@ def cross_compiler(compile_func, options=None, output_format=None, get_target_tr
     return _fcompile
 
 
-def _linux_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=None, compile_shared=False, timeout=None):
+def _compile(output, objects, options, compile_cmd, cwd=None, ccache_env=None, compile_shared=False, timeout=None):
+    windows = _is_windows_like()
+    if not windows and not _is_linux_like():
+        raise ValueError("Unsupported platform")
+    env = None
+    if windows:
+        from . import msvc
+
+        if compile_cmd is None or os.path.basename(compile_cmd).lower() in ("cl", "cl.exe", "clang-cl", "clang-cl.exe"):
+            return msvc._compile(output, objects, options, compile_cmd, cwd, ccache_env, timeout, compile_shared)
+        env = msvc.get_msvc_subprocess_env()
+
     cmd = [compile_cmd]
-    if compile_cmd != "nvcc":
-        if compile_shared or output.endswith(".so") or output.endswith(".dylib"):
-            cmd += ["-shared", "-fPIC"]
+    if windows:
+        cmd.append("-O2")
+    if compile_shared or output.endswith((".so", ".dll") if windows else (".so", ".dylib")):
+        cmd.append("-shared")
+        if not windows and compile_cmd != "nvcc":
+            cmd.append("-fPIC")
             if sys.platform == "darwin":
                 cmd += ["-undefined", "dynamic_lookup"]
-        elif output.endswith(".obj"):
-            cmd += ["-c"]
-    else:
-        if compile_shared or output.endswith(".so") or output.endswith(".dylib"):
-            cmd += ["-shared"]
+    elif output.endswith(".obj") and (windows or compile_cmd != "nvcc"):
+        cmd.append("-c")
     cmd += ["-o", output]
-    if isinstance(objects, str):
-        cmd += [objects]
-    else:
-        cmd += objects
-    if options:
-        cmd += options
-    env = None
+    cmd += [objects] if isinstance(objects, str) else objects
+    cmd += options or []
+    try:
+        _run_compiler(cmd, cwd, env, ccache_env, timeout)
+    except FileNotFoundError:
+        if not windows:
+            raise
+        raise RuntimeError(f"Could not find Windows compiler {compile_cmd}. Check the compiler path or PATH.") from None
+
+
+def _run_compiler(cmd, cwd=None, env=None, ccache_env=None, timeout=None, stdin=None):
     if ccache_env is not None:
-        if shutil.which("ccache"):
-            cmd.insert(0, "ccache")
-            env = os.environ.copy()
-            env.update(ccache_env)
-        else:
+        if not shutil.which("ccache"):
             raise ValueError("ccache not found")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd, env=env)
+        cmd = ["ccache", *cmd]
+        env = dict(os.environ if env is None else env)
+        env.update(ccache_env)
+    proc = subprocess.Popen(cmd, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd, env=env)
     try:
         (out, _) = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -403,60 +407,4 @@ def _linux_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=N
         proc.communicate()
         raise
     if proc.returncode != 0:
-        msg = "Compilation error:\n"
-        msg += py_str(out)
-        msg += "\nCommand line: " + " ".join(cmd)
-        raise RuntimeError(msg)
-
-
-def _windows_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=None, compile_shared=False, timeout=None):
-    from . import msvc
-
-    if compile_cmd is None or os.path.basename(compile_cmd).lower() in ("cl", "cl.exe", "clang-cl", "clang-cl.exe"):
-        if compile_shared:
-            return msvc.create_shared(output, objects, options, compile_cmd, cwd, ccache_env, timeout=timeout)
-        return msvc.create_executable(output, objects, options, compile_cmd, cwd, ccache_env)
-    cmd = [compile_cmd]
-    cmd += ["-O2"]
-
-    if compile_shared or output.endswith(".so") or output.endswith(".dll"):
-        cmd += ["-shared"]
-    elif output.endswith(".obj"):
-        cmd += ["-c"]
-
-    if isinstance(objects, str):
-        objects = [objects]
-    cmd += ["-o", output]
-    cmd += objects
-    if options:
-        cmd += options
-    env = msvc.get_msvc_subprocess_env()
-    if ccache_env is not None:
-        if shutil.which("ccache"):
-            cmd.insert(0, "ccache")
-            env = dict(env or os.environ)
-            env.update(ccache_env)
-        else:
-            raise ValueError("ccache not found")
-
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd, env=env)
-        try:
-            (out, _) = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            raise
-    except FileNotFoundError:
-        raise RuntimeError(
-            "Can not find the LLVM clang for Windows clang.exe)."
-            "Make sure it's installed"
-            " and the installation directory is in the %PATH% environment "
-            "variable. Prebuilt binaries can be found at: https://llvm.org/"
-        ) from None
-    if proc.returncode != 0:
-        msg = "Compilation error:\n"
-        msg += " ".join(cmd) + "\n"
-        msg += py_str(out)
-
-        raise RuntimeError(msg)
+        raise RuntimeError("Compilation error:\n" + py_str(out) + "\nCommand line: " + " ".join(cmd))
