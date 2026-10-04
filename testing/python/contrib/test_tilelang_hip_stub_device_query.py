@@ -25,6 +25,7 @@ def hip_stub_probe(request, tmp_path_factory):
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 
 // Each subprocess starts with a fresh lazy-loader singleton. Linker wrappers
 // isolate the test from ROCm libraries installed or loaded on the host.
@@ -40,7 +41,11 @@ extern "C" void *__wrap_dlopen(const char *, int) {
   return mode == 0 ? nullptr : mock_handle;
 }
 extern "C" void *__wrap_dlsym(void *handle, const char *name) {
-  if (handle != mock_handle || mode == 1) return nullptr;
+  const bool loaded_global = mode == 4 && handle == RTLD_DEFAULT;
+  const bool loaded_next = mode == 5 && handle == RTLD_NEXT;
+  if ((handle != mock_handle && !loaded_global && !loaded_next) || mode == 1) {
+    return nullptr;
+  }
   if (std::strcmp(name, "hipGetDeviceCount") == 0) {
     return reinterpret_cast<void *>(&device_count);
   }
@@ -55,7 +60,7 @@ int main(int argc, char **argv) {
   for (int i = 0; i < 2; ++i) {
     int count = -1;
     hipError_t status = hipGetDeviceCount(&count);
-    if (mode == 3) {
+    if (mode >= 3) {
       assert(status == hipSuccess && count == 2);
     } else {
       assert(status != hipSuccess && count == 0);
@@ -84,6 +89,8 @@ int main(int argc, char **argv) {
     return executable
 
 
-@pytest.mark.parametrize("mode", [0, 1, 2, 3], ids=["missing-runtime", "missing-symbols", "init-error", "success"])
+@pytest.mark.parametrize(
+    "mode", [0, 1, 2, 3, 4, 5], ids=["missing-runtime", "missing-symbols", "init-error", "success", "loaded-global", "loaded-next"]
+)
 def test_hip_stub_device_count(hip_stub_probe, mode):
     subprocess.run([str(hip_stub_probe), str(mode)], check=True)

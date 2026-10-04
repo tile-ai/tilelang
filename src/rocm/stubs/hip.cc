@@ -51,16 +51,23 @@ template <typename T> T GetSymbol(void *handle, const char *name) {
   return reinterpret_cast<T>(sym);
 }
 
-void *TryLoadLibAmdHip64() {
+struct HIPLibrary {
+  void *handle;
+  // RTLD_DEFAULT can be nullptr, so a handle alone cannot indicate
+  // availability.
+  bool available;
+};
+
+HIPLibrary TryLoadLibAmdHip64() {
   // Prefer already-loaded symbols (e.g. if PyTorch ROCm is imported first).
   // We use a representative symbol and ensure we don't just find ourselves.
   void *sym = dlsym(RTLD_DEFAULT, "hipGetErrorString");
   if (sym != nullptr && sym != reinterpret_cast<void *>(&hipGetErrorString)) {
-    return RTLD_DEFAULT;
+    return {RTLD_DEFAULT, true};
   }
   sym = dlsym(RTLD_NEXT, "hipGetErrorString");
   if (sym != nullptr && sym != reinterpret_cast<void *>(&hipGetErrorString)) {
-    return RTLD_NEXT;
+    return {RTLD_NEXT, true};
   }
 
   // Otherwise, attempt to dlopen the library directly.
@@ -71,13 +78,18 @@ void *TryLoadLibAmdHip64() {
       break;
     }
   }
-  return handle;
+  return {handle, handle != nullptr};
+}
+
+const HIPLibrary &GetHIPLibrary() {
+  static const HIPLibrary library = TryLoadLibAmdHip64();
+  return library;
 }
 
 HIPDriverAPI CreateHIPDriverAPI() {
   HIPDriverAPI api{};
   void *handle = HIPDriverAPI::get_handle();
-  if (handle == nullptr) {
+  if (!HIPDriverAPI::is_available()) {
     return api;
   }
 
@@ -131,12 +143,9 @@ HIPDriverAPI CreateHIPDriverAPI() {
 
 } // namespace
 
-void *HIPDriverAPI::get_handle() {
-  static void *handle = TryLoadLibAmdHip64();
-  return handle;
-}
+void *HIPDriverAPI::get_handle() { return GetHIPLibrary().handle; }
 
-bool HIPDriverAPI::is_available() { return get_handle() != nullptr; }
+bool HIPDriverAPI::is_available() { return GetHIPLibrary().available; }
 
 HIPDriverAPI *HIPDriverAPI::get() {
   static HIPDriverAPI singleton = CreateHIPDriverAPI();
