@@ -126,6 +126,35 @@ print("GEMM + ReLU passed.")
   [DeepGEMM copy kernels](../../examples/ascend/deepgemm/kernels/copy.py)
   for cache policies in optimized matrix kernels.
 
+## Choosing a Backend
+
+There are **two backends for the Ascend 950**, and both are selected through the
+same `ascend` target kind. Pick one with the `target` argument:
+
+| `target` | Backend | Generates |
+| --- | --- | --- |
+| `"ascend"` | plain AscendC | Ascend C kernels |
+| `"pto"` | PTO | PTO DSL |
+
+```python
+@tilelang.jit(target="ascend")   # plain AscendC
+@tilelang.jit(target="pto")      # PTO
+```
+
+They are registered separately in `tilelang/ascend/backend.py` with mutually
+exclusive `supports_target` predicates — `target_is_plain_ascend` and
+`target_is_pto` in `tilelang/ascend/target.py` — so one target kind resolves to
+exactly one of them. `target="pto"` is normalized to the `ascend` kind with the
+`pto` feature key added.
+
+The only difference between the two is whether Ascend C or PTO DSL is generated.
+The Ascend C backend is the more stable of the two at the moment, so start
+there; see [#3317](https://github.com/tile-ai/tilelang/issues/3317) for the
+maintainer's answer.
+
+The examples under [`examples/ascend/`](../../examples/ascend) use
+`target="ascend"`.
+
 ## Writing Ascend Kernels
 
 - Use the ascend dialect `tilelang.ascend.language` for Ascend-specific operations.
