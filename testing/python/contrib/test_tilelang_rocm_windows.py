@@ -10,7 +10,7 @@ from tilelang import _rocm_sdk
 
 
 def _make_sdk(tmp_path):
-    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin").mkdir(parents=True)
     (tmp_path / "include/hip").mkdir(parents=True)
     (tmp_path / "include/hip/hip_runtime.h").touch()
     (tmp_path / "bin/hipcc.exe").touch()
@@ -20,6 +20,7 @@ def _make_sdk(tmp_path):
 @pytest.mark.parametrize("variable", ["ROCM_PATH", "ROCM_HOME", "HIP_PATH"])
 def test_windows_hipcc_explicit_sdk(tmp_path, monkeypatch, variable):
     sdk = _make_sdk(tmp_path)
+    monkeypatch.delenv("USE_ROCM", raising=False)
     for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(rocm.sys, "platform", "win32")
@@ -28,8 +29,45 @@ def test_windows_hipcc_explicit_sdk(tmp_path, monkeypatch, variable):
     assert rocm.find_rocm_path() == str(sdk)
 
 
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_use_rocm_directory_overrides_other_sdk_selectors(tmp_path, monkeypatch, platform):
+    sdk = _make_sdk(tmp_path / "selected sdk")
+    other = _make_sdk(tmp_path / "other sdk")
+    (sdk / "bin/hipcc").touch()
+    monkeypatch.setenv("USE_ROCM", str(sdk))
+    for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+        monkeypatch.setenv(name, str(other))
+    monkeypatch.setenv("PATH", str(other / "bin"))
+    monkeypatch.setattr(rocm.sys, "platform", platform)
+    assert _rocm_sdk.find_rocm_home() == str(sdk)
+    assert rocm.find_rocm_path() == str(sdk)
+    compiler = "hipcc.exe" if platform == "win32" else "hipcc"
+    assert rocm.find_hipcc() == str(sdk / "bin" / compiler)
+    if platform == "win32":
+        monkeypatch.setattr(msvc, "get_msvc_subprocess_env", lambda: dict(os.environ))
+    compiler_env = rocm.get_hipcc_subprocess_env()
+    for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+        assert compiler_env[name] == str(sdk)
+        assert os.environ[name] == str(other)
+
+
+@pytest.mark.parametrize("setting", [None, "ON", "OFF", "missing sdk"])
+def test_use_rocm_non_directory_preserves_sdk_discovery(tmp_path, monkeypatch, setting):
+    sdk = _make_sdk(tmp_path)
+    if setting is None:
+        monkeypatch.delenv("USE_ROCM", raising=False)
+    else:
+        monkeypatch.setenv("USE_ROCM", setting)
+    monkeypatch.setenv("ROCM_PATH", str(sdk))
+    assert _rocm_sdk.find_rocm_home() == str(sdk)
+    assert rocm.find_rocm_path() == str(sdk)
+    monkeypatch.setattr(rocm.sys, "platform", "linux")
+    assert rocm.get_hipcc_subprocess_env() is None
+
+
 def test_pip_sdk_discovery_without_environment_or_sdk_import(tmp_path, monkeypatch):
     sdk = _make_sdk(tmp_path)
+    monkeypatch.delenv("USE_ROCM", raising=False)
     for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PATH", "")
