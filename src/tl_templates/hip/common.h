@@ -3,9 +3,9 @@
 #include "atomic.h"
 #include <hip/amd_detail/amd_warp_functions.h>
 #include <hip/hip_bf16.h>
+#include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
-#include <rocwmma/rocwmma.hpp>
 
 #define HIPRT_INF_F __int_as_float(0x7f800000)
 #define HIPRT_NEGINF_F __int_as_float(0xff800000)

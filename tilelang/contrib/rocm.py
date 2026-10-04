@@ -22,6 +22,7 @@ import re
 import shutil
 import subprocess
 import os
+import sys
 from os.path import join, exists
 
 import tvm_ffi
@@ -232,7 +233,7 @@ def have_matrixcore(compute_version=None):
 
 
 @tvm_ffi.register_global_func("tvm_callback_rocm_get_arch", override=True)
-def get_rocm_arch(rocm_path="/opt/rocm"):
+def get_rocm_arch(rocm_path=None):
     """Utility function to get the AMD GPU architecture
 
     Parameters
@@ -245,13 +246,30 @@ def get_rocm_arch(rocm_path="/opt/rocm"):
     gpu_arch : str
         The AMD GPU architecture
     """
+    if rocm_path is None:
+        try:
+            rocm_path = find_rocm_path()
+        except RuntimeError:
+            rocm_path = DEFAULT_ROCM_PATH
     gpu_arch = "gfx900"
     # check if rocm is installed
     if not os.path.exists(rocm_path):
+        if sys.platform == "win32":
+            raise RuntimeError("ROCm SDK not found. Install tilelang[rocm] from the AMD index or set ROCM_PATH.")
         print("ROCm not detected, using default gfx900")
         return gpu_arch
     try:
         # Execute rocminfo command
+        if sys.platform == "win32":
+            # amdgpu-arch queries HIP on Windows, where rocminfo/HSA is absent.
+            tool = join(rocm_path, "lib", "llvm", "bin", "amdgpu-arch.exe")
+            if not exists(tool):
+                tool = join(rocm_path, "bin", "amdgpu-arch.exe")
+            output = subprocess.check_output([tool], stderr=subprocess.STDOUT).decode("utf-8")
+            match = re.search(r"\bgfx[0-9a-f]+\b", output)
+            if not match:
+                raise RuntimeError(f"No AMD GPU architecture reported by {tool}: {output}")
+            return match.group(0)
         rocminfo_output = subprocess.check_output([f"{rocm_path}/bin/rocminfo"]).decode("utf-8")
 
         # Use regex to match the "Name" field
@@ -259,7 +277,11 @@ def get_rocm_arch(rocm_path="/opt/rocm"):
         if match:
             gpu_arch = match.group(1)
         return gpu_arch
-    except subprocess.CalledProcessError:
+    except (OSError, subprocess.CalledProcessError) as exc:
+        if sys.platform == "win32":
+            raise RuntimeError(
+                "Cannot query the AMD GPU architecture. Check the HIP SDK/driver or specify target={'kind': 'hip', 'mcpu': 'gfx...'}."
+            ) from exc
         print(
             f"Unable to execute rocminfo command, \
                 please ensure ROCm is installed and you have an AMD GPU on your system.\
@@ -298,6 +320,11 @@ def _which_all(cmd):
 _warned_incomplete_hipcc = set()
 
 
+def _hipcc_candidates(prefix):
+    names = ("hipcc.exe", "hipcc.bat", "hipcc") if sys.platform == "win32" else ("hipcc",)
+    return [join(prefix, "bin", name) for name in names]
+
+
 def find_hipcc():
     """Resolve the hipcc executable to invoke for JIT compilation.
 
@@ -319,13 +346,15 @@ def find_hipcc():
     path : str
         Path to the hipcc executable.
     """
-    rocm_path = os.environ.get("ROCM_PATH")
-    if rocm_path:
-        explicit = join(rocm_path, "bin", "hipcc")
-        if exists(explicit):
-            return explicit
+    from tilelang.env import _find_rocm_home
 
-    candidates = _which_all("hipcc") + [join(DEFAULT_ROCM_PATH, "bin", "hipcc")]
+    rocm_path = _find_rocm_home()
+    if rocm_path:
+        for explicit in _hipcc_candidates(rocm_path):
+            if exists(explicit):
+                return explicit
+
+    candidates = _which_all("hipcc") + _hipcc_candidates(DEFAULT_ROCM_PATH)
     candidates = [c for c in dict.fromkeys(candidates) if exists(c)]
     for candidate in candidates:
         prefix = _hipcc_toolchain_prefix(candidate)
@@ -351,14 +380,38 @@ def find_rocm_path():
     path : str
         Path to ROCm root.
     """
-    if "ROCM_PATH" in os.environ:
-        return os.environ["ROCM_PATH"]
+    for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+        if os.environ.get(name):
+            return os.environ[name]
     try:
         hipcc = find_hipcc()
     except RuntimeError:
         hipcc = None
     if hipcc is not None:
         return _hipcc_toolchain_prefix(hipcc)
-    if os.path.exists(os.path.join(DEFAULT_ROCM_PATH, "bin/hipcc")):
+    if any(exists(candidate) for candidate in _hipcc_candidates(DEFAULT_ROCM_PATH)):
         return DEFAULT_ROCM_PATH
     raise RuntimeError("Cannot find ROCm path")
+
+
+def get_hipcc_subprocess_env():
+    """Prepare a Windows HIP compiler environment without changing the process."""
+    if sys.platform != "win32":
+        return None
+    from .msvc import get_msvc_subprocess_env
+
+    compiler_env = dict(get_msvc_subprocess_env() or os.environ)
+    prefix = find_rocm_path()
+    path = next((value for key, value in compiler_env.items() if key.upper() == "PATH"), "")
+    for key in list(compiler_env):
+        if key.upper() == "PATH":
+            del compiler_env[key]
+    compiler_env["PATH"] = join(prefix, "bin") + os.pathsep + path
+    compiler_env["HIP_PATH"] = prefix
+    compiler_env.setdefault("HIP_LIB_PATH", join(prefix, "lib"))
+    # TheRock puts device bitcode below lib/llvm; older HIP SDKs use amdgcn.
+    for directory in (join(prefix, "lib", "llvm", "amdgcn", "bitcode"), join(prefix, "amdgcn", "bitcode")):
+        if exists(join(directory, "ocml.bc")):
+            compiler_env.setdefault("HIP_DEVICE_LIB_PATH", directory)
+            break
+    return compiler_env

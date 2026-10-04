@@ -17,7 +17,7 @@ from tilelang.contrib.nvcc import (
     get_nvcc_compiler,
     get_target_arch_and_code,
 )
-from tilelang.contrib.rocm import find_hipcc, find_rocm_path, get_rocm_arch
+from tilelang.contrib.rocm import find_hipcc, find_rocm_path, get_rocm_arch, get_hipcc_subprocess_env
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.contrib.hip_resource_info import filter_and_record
 
@@ -125,18 +125,19 @@ class LibraryGenerator:
             from tilelang.env import TILELANG_HIP_SAVE_TEMP_FILES
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
-            libpath = src.name.replace(".cpp", ".so")
+            libpath = src.name.replace(".cpp", ".dll" if sys.platform == "win32" else ".so")
             rocm_path = find_rocm_path()
             arch = target_get_mcpu(target) or get_rocm_arch(rocm_path)
             command = [
                 find_hipcc(),
                 "-std=c++17",
-                "-fPIC",
                 f"--offload-arch={arch}",
                 "--shared",
                 src.name,
                 "-Rpass-analysis=kernel-resource-usage",
             ]
+            if sys.platform != "win32":
+                command += ["-fPIC"]
             if TILELANG_HIP_SAVE_TEMP_FILES != "0":
                 command += ["--save-temps", "-g"]
         elif is_ascend_target(target):
@@ -199,10 +200,19 @@ class LibraryGenerator:
         # Pipe stdio + isolate stdin to make the launch self-contained.
         run_kwargs: dict[str, Any] = {"timeout": timeout}
         if sys.platform == "win32":
-            from tilelang.contrib.nvcc import get_nvcc_subprocess_env
+            if is_cuda_target(target):
+                from tilelang.contrib.nvcc import get_nvcc_subprocess_env
+
+                compiler_env = get_nvcc_subprocess_env()
+            elif is_hip_target(target):
+                compiler_env = get_hipcc_subprocess_env()
+            else:
+                from tilelang.contrib.msvc import get_msvc_subprocess_env
+
+                compiler_env = get_msvc_subprocess_env()
 
             run_kwargs.update(
-                env=get_nvcc_subprocess_env(),
+                env=compiler_env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
