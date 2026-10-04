@@ -28,6 +28,7 @@
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/ir/expr.h"
 #include <algorithm>
 #include <string>
 #include <tvm/arith/analyzer.h>
@@ -1751,7 +1752,8 @@ private:
    * A[i] and A[i-1] (loop-carry dependency with distance 1).
    *
    * \param prev The access entry from the previous/current iteration
-   * \param curr The access entry to check against
+   * \param curr The access entry to check against, when loop is not nullptr, it
+   * means the next iteration
    * \param loop The loop node for loop-carry analysis, nullptr for
    * same-iteration
    * \return true if the accesses conflict and need synchronization
@@ -1803,7 +1805,9 @@ private:
     Map<Var, PrimExpr> loop_shift_sub;
     if (loop != nullptr) {
       // Get loop step, default to 1 if not specified
-      PrimExpr step = make_const(loop->loop_var.dtype(), 1);
+      PrimExpr step = loop->step.has_value()
+                          ? loop->step.value()
+                          : make_const(loop->loop_var.dtype(), 1);
       // Substitute loop_var -> loop_var + step for the "next iteration"
       loop_shift_sub.Set(loop->loop_var, loop->loop_var + step);
     }
@@ -1848,8 +1852,10 @@ private:
         // For loop-carry analysis, we compare iteration i with iteration i+1.
         // Since i+1 must be a valid iteration, i can only range from min to
         // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr adjusted_extent =
-            loop->extent - make_const(loop->extent.dtype(), 1);
+        PrimExpr step = loop->step.has_value()
+                            ? loop->step.value()
+                            : make_const(loop->loop_var.dtype(), 1);
+        PrimExpr adjusted_extent = loop->extent - step;
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
@@ -1900,8 +1906,10 @@ private:
         // For loop-carry analysis, we compare iteration i with iteration i+1.
         // Since i+1 must be a valid iteration, i can only range from min to
         // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr adjusted_extent =
-            loop->extent - make_const(loop->extent.dtype(), 1);
+        PrimExpr step = loop->step.has_value()
+                            ? loop->step.value()
+                            : make_const(loop->loop_var.dtype(), 1);
+        PrimExpr adjusted_extent = loop->extent - step;
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
