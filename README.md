@@ -122,7 +122,7 @@ TileLang uses `Target` objects to represent compilation targets. The default `au
 | --- | --- | --- | --- | --- |
 | NVIDIA CUDA | `cuda` | Linux x86-64/AArch64, Windows x86-64; code paths from SM70 through SM120 | Primary | Release wheels and CI coverage; TMA, WGMMA, and TMEM features require the corresponding GPU architecture. |
 | AMD ROCm/HIP | `hip` | Linux; CDNA and RDNA GPUs, including gfx942/gfx950 paths | Supported | Included in Linux wheels; a ROCm runtime is required. CI runs on a self-hosted gfx942 (MI300X) runner; gfx950 is not yet covered. |
-| Huawei Ascend 950 | `ascend` | Linux; Ascend 950 NPUs | Supported | Build from source with `USE_ASCEND=ON`; requires CANN and `torch_npu`. See the [Ascend guide](./tilelang/ascend/README.md). |
+| Huawei Ascend 950 | `ascend` / `pto` | Linux; Ascend 950 NPUs | Supported | Build from source with `USE_ASCEND=ON`; requires CANN and `torch_npu`. See the [Ascend guide](./tilelang/ascend/README.md). |
 | Apple Metal | `metal` | macOS on Apple silicon | Supported | Release wheels and CI coverage; Metal 4 cooperative tensors are available on supported M5 systems. |
 | LLVM CPU | `llvm` | Host CPUs | Experimental | Build from source with `USE_LLVM=ON`; LLVM 15 or newer is required. |
 | NVIDIA CuTe DSL | `cutedsl` | NVIDIA GPUs | Experimental | Requires `nvidia-cutlass-dsl`. |
