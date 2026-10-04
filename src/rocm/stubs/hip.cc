@@ -11,9 +11,6 @@
  * - Prefer RTLD_DEFAULT/RTLD_NEXT when HIP is already loaded by another
  *   framework (e.g. PyTorch ROCm).
  *
- * Additionally, this stub provides wrappers for the minimal HSA APIs used by
- * TVM's ROCm device existence check (hsa_init / hsa_shut_down) so that a ROCm
- * enabled build can still be imported on machines without ROCm installed.
  */
 
 #include "hip.h"
@@ -33,21 +30,6 @@
 #include <stdexcept>
 #include <string>
 
-// HSA is only used for two entrypoints, and we want to keep this stub
-// buildable in environments without ROCm headers installed.
-#if __has_include(<hsa/hsa.h>)
-#include <hsa/hsa.h>
-#define TILELANG_HAS_HSA_HEADERS 1
-#else
-#define TILELANG_HAS_HSA_HEADERS 0
-typedef int hsa_status_t;
-#ifndef HSA_STATUS_SUCCESS
-#define HSA_STATUS_SUCCESS 0
-#endif
-extern "C" hsa_status_t hsa_init(void);
-extern "C" hsa_status_t hsa_shut_down(void);
-#endif
-
 namespace tvm::tl::hip {
 
 namespace {
@@ -57,11 +39,6 @@ constexpr const char *kLibHipPaths[] = {
     // Some distros ship a versioned SONAME as well; try a few common ones.
     "libamdhip64.so.6",
     "libamdhip64.so.5",
-};
-
-constexpr const char *kLibHsaPaths[] = {
-    "libhsa-runtime64.so.1",
-    "libhsa-runtime64.so",
 };
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
@@ -152,66 +129,6 @@ HIPDriverAPI CreateHIPDriverAPI() {
   return api;
 }
 
-// -----------------------------------------------------------------------------
-// Minimal HSA stub (needed by TVM's ROCm runtime).
-// -----------------------------------------------------------------------------
-struct HSAAPI {
-  decltype(&::hsa_init) hsa_init_{nullptr};
-  decltype(&::hsa_shut_down) hsa_shut_down_{nullptr};
-};
-
-void *TryLoadLibHsaRuntime() {
-  void *sym = dlsym(RTLD_DEFAULT, "hsa_init");
-  if (sym != nullptr && sym != reinterpret_cast<void *>(&hsa_init)) {
-    return RTLD_DEFAULT;
-  }
-  sym = dlsym(RTLD_NEXT, "hsa_init");
-  if (sym != nullptr && sym != reinterpret_cast<void *>(&hsa_init)) {
-    return RTLD_NEXT;
-  }
-
-  void *handle = nullptr;
-  for (const char *path : kLibHsaPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    if (handle != nullptr) {
-      break;
-    }
-  }
-  return handle;
-}
-
-void *GetLibHsaHandle() {
-  static void *handle = TryLoadLibHsaRuntime();
-  return handle;
-}
-
-HSAAPI CreateHSAAPI() {
-  HSAAPI api{};
-  void *handle = GetLibHsaHandle();
-  if (handle == nullptr) {
-    return api;
-  }
-  api.hsa_init_ = GetSymbol<decltype(api.hsa_init_)>(handle, "hsa_init");
-  api.hsa_shut_down_ =
-      GetSymbol<decltype(api.hsa_shut_down_)>(handle, "hsa_shut_down");
-  // It's fine if these are nullptr; wrappers will return an error code.
-  return api;
-}
-
-HSAAPI *GetHSAAPI() {
-  static HSAAPI singleton = CreateHSAAPI();
-  return &singleton;
-}
-
-#if TILELANG_HAS_HSA_HEADERS
-static hsa_status_t MissingHsaError() {
-  // Any non-success value makes TVM treat ROCm as not existing.
-  return static_cast<hsa_status_t>(1);
-}
-#else
-static hsa_status_t MissingHsaError() { return 1; }
-#endif
-
 } // namespace
 
 void *HIPDriverAPI::get_handle() {
@@ -271,8 +188,19 @@ hipError_t hipGetDevice(int *deviceId) {
 }
 
 hipError_t hipGetDeviceCount(int *count) {
-  // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-  return HIPDriverAPI::get()->hipGetDeviceCount_(count);
+  if (count == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  *count = 0;
+  // Device existence queries must work without a HIP runtime installed.
+  if (!HIPDriverAPI::is_available()) {
+    return hipErrorSharedObjectInitFailed;
+  }
+  auto *api = HIPDriverAPI::get();
+  if (api->hipGetDeviceCount_ == nullptr) {
+    return hipErrorSharedObjectSymbolNotFound;
+  }
+  return api->hipGetDeviceCount_(count);
 }
 
 hipError_t hipDeviceGetAttribute(int *pi, hipDeviceAttribute_t attr,
@@ -414,25 +342,6 @@ hipError_t hipModuleLaunchCooperativeKernel(
   return HIPDriverAPI::get()->hipModuleLaunchCooperativeKernel_(
       f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
       sharedMemBytes, stream, kernelParams);
-}
-
-// --- Minimal HSA wrappers
-// -------------------------------------------------------
-
-TILELANG_HIP_STUB_API hsa_status_t hsa_init(void) {
-  auto *api = tvm::tl::hip::GetHSAAPI();
-  if (api->hsa_init_ == nullptr) {
-    return tvm::tl::hip::MissingHsaError();
-  }
-  return api->hsa_init_();
-}
-
-TILELANG_HIP_STUB_API hsa_status_t hsa_shut_down(void) {
-  auto *api = tvm::tl::hip::GetHSAAPI();
-  if (api->hsa_shut_down_ == nullptr) {
-    return tvm::tl::hip::MissingHsaError();
-  }
-  return api->hsa_shut_down_();
 }
 
 } // extern "C"

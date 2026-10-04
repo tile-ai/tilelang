@@ -46,9 +46,10 @@ Ascend stubs in `src/ascend/stubs/` implement a lazy-loading mechanism:
 - **Lazy Loading**: Libraries are loaded via `dlopen` only upon the first API call.
 - **Global Symbol Reuse**: For `cudart` and `nvrtc`, the stubs first check the global namespace (`RTLD_DEFAULT`) to use any already loaded symbols (e.g., from PyTorch).
 - **ROCm Notes**: `hip_stub` checks `RTLD_DEFAULT` / `RTLD_NEXT` first and then
-  falls back to `dlopen("libamdhip64.so")`. It additionally provides wrappers
-  for `hsa_init` / `hsa_shut_down` so that ROCm-enabled wheels do not record a
-  hard dependency on `libhsa-runtime64` at import time.
+  falls back to `dlopen("libamdhip64.so")`. Device count queries return a HIP
+  error code when the runtime or required symbols are missing, allowing
+  `tvm.rocm(0).exist` to return `False` without throwing. The ROCm device
+  query uses HIP initialization and has no direct HSA dependency.
 - **Ascend Notes**: `ascendcl_stub` checks `RTLD_DEFAULT` / `RTLD_NEXT` first
   (reusing the `libascendcl` copy loaded by torch_npu), then
   `dlopen("libascendcl.so")` (which honors the `LD_LIBRARY_PATH` set by CANN's
