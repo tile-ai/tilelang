@@ -168,15 +168,15 @@ class LibraryGenerator:
                 src.name,
             ]
         elif is_cpu_target(target):
-            from tilelang.contrib.cc import get_cplus_compiler
+            from tilelang.contrib.cc import create_shared, get_cplus_compiler
 
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
-            libpath = src.name.replace(".cpp", ".so")
-
-            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
-            command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
-            ]
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".cpp", delete=False) as src:
+                src.write(self.lib_code)
+            libpath = os.path.splitext(src.name)[0] + "." + create_shared.output_format
+            options = ["-std=c++17", "-I" + TILELANG_TEMPLATE_PATH, *extra_compile_options]
+            create_shared(libpath, [src.name], options=options, cc=get_cplus_compiler(), timeout=timeout)
+            self.srcpath, self.libpath = src.name, libpath
+            return
         else:
             raise ValueError(f"Unsupported target: {target}")
 

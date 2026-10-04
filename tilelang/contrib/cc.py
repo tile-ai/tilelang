@@ -101,7 +101,7 @@ def is_darwin():
     return platform.system() == "Darwin"
 
 
-def create_shared(output, objects, options=None, cc=None, cwd=None, ccache_env=None):
+def create_shared(output, objects, options=None, cc=None, cwd=None, ccache_env=None, timeout=None):
     """Create shared library.
 
     Parameters
@@ -127,9 +127,9 @@ def create_shared(output, objects, options=None, cc=None, cwd=None, ccache_env=N
     cc = cc or get_cc()
 
     if _is_linux_like():
-        _linux_compile(output, objects, options, cc, cwd, ccache_env, compile_shared=True)
+        _linux_compile(output, objects, options, cc, cwd, ccache_env, compile_shared=True, timeout=timeout)
     elif _is_windows_like():
-        _windows_compile(output, objects, options, cwd, ccache_env)
+        _windows_compile(output, objects, options, cc, cwd, ccache_env, compile_shared=True, timeout=timeout)
     else:
         raise ValueError("Unsupported platform")
 
@@ -210,7 +210,7 @@ def create_executable(output, objects, options=None, cc=None, cwd=None, ccache_e
     if _is_linux_like():
         _linux_compile(output, objects, options, cc, cwd, ccache_env)
     elif _is_windows_like():
-        _windows_compile(output, objects, options, cwd, ccache_env)
+        _windows_compile(output, objects, options, cc, cwd, ccache_env)
     else:
         raise ValueError("Unsupported platform")
 
@@ -368,7 +368,7 @@ def cross_compiler(compile_func, options=None, output_format=None, get_target_tr
     return _fcompile
 
 
-def _linux_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=None, compile_shared=False):
+def _linux_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=None, compile_shared=False, timeout=None):
     cmd = [compile_cmd]
     if compile_cmd != "nvcc":
         if compile_shared or output.endswith(".so") or output.endswith(".dylib"):
@@ -396,7 +396,12 @@ def _linux_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=N
         else:
             raise ValueError("ccache not found")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd, env=env)
-    (out, _) = proc.communicate()
+    try:
+        (out, _) = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
     if proc.returncode != 0:
         msg = "Compilation error:\n"
         msg += py_str(out)
@@ -404,11 +409,17 @@ def _linux_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=N
         raise RuntimeError(msg)
 
 
-def _windows_compile(output, objects, options, cwd=None, ccache_env=None):
-    cmd = ["clang"]
+def _windows_compile(output, objects, options, compile_cmd, cwd=None, ccache_env=None, compile_shared=False, timeout=None):
+    from . import msvc
+
+    if compile_cmd is None or os.path.basename(compile_cmd).lower() in ("cl", "cl.exe", "clang-cl", "clang-cl.exe"):
+        if compile_shared:
+            return msvc.create_shared(output, objects, options, compile_cmd, cwd, ccache_env, timeout=timeout)
+        return msvc.create_executable(output, objects, options, compile_cmd, cwd, ccache_env)
+    cmd = [compile_cmd]
     cmd += ["-O2"]
 
-    if output.endswith(".so") or output.endswith(".dll"):
+    if compile_shared or output.endswith(".so") or output.endswith(".dll"):
         cmd += ["-shared"]
     elif output.endswith(".obj"):
         cmd += ["-c"]
@@ -419,18 +430,23 @@ def _windows_compile(output, objects, options, cwd=None, ccache_env=None):
     cmd += objects
     if options:
         cmd += options
-    env = None
+    env = msvc.get_msvc_subprocess_env()
     if ccache_env is not None:
         if shutil.which("ccache"):
             cmd.insert(0, "ccache")
-            env = os.environ.copy()
+            env = dict(env or os.environ)
             env.update(ccache_env)
         else:
             raise ValueError("ccache not found")
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=cwd, env=env)
-        (out, _) = proc.communicate()
+        try:
+            (out, _) = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise
     except FileNotFoundError:
         raise RuntimeError(
             "Can not find the LLVM clang for Windows clang.exe)."

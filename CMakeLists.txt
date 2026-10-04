@@ -3,13 +3,8 @@
 
 cmake_minimum_required(VERSION 3.26)
 
-# Activate the build toolchain before project(): the MSVC environment has to be in
-# place when the compilers are probed, and the generator resolves CMAKE_MAKE_PROGRAM
-# there. CUDA detection lives in the same module but must run after project() instead
-# -- see the second include below.
-set(TILELANG_PRE_PROJECT_ONLY ON)
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
-unset(TILELANG_PRE_PROJECT_ONLY)
+# Resolve the host compiler before project(), independently of device SDKs.
+include(cmake/HostToolchain.cmake)
 
 # Capture this CMakeLists.txt's directory once so `function()` bodies below
 # can reference files shipped with the project. CMake 4.x resolves
@@ -19,6 +14,13 @@ unset(TILELANG_PRE_PROJECT_ONLY)
 set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 project(TILE_LANG C CXX)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+  message(FATAL_ERROR
+    "TileLang native Windows sources currently require clang-cl (GCC/Clang builtins). "
+    "Install Visual Studio's C++ Clang compiler and use Ninja with clang-cl, "
+    "or select the ClangCL Visual Studio toolset. cl.exe remains supported for JIT host compilation.")
+endif()
 
 # Detect CUDA toolkit: tries host installation first, then falls back to
 # pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect). This has to
@@ -100,21 +102,6 @@ if(MSVC)
   endif()
 endif()
 
-function(tilelang_get_python_interpreter OUTPUT_VAR)
-  if(DEFINED Python_EXECUTABLE AND NOT "${Python_EXECUTABLE}" STREQUAL "" AND EXISTS "${Python_EXECUTABLE}")
-    set(${OUTPUT_VAR} "${Python_EXECUTABLE}" PARENT_SCOPE)
-    return()
-  endif()
-
-  if(DEFINED Python3_EXECUTABLE AND NOT "${Python3_EXECUTABLE}" STREQUAL "" AND EXISTS "${Python3_EXECUTABLE}")
-    set(${OUTPUT_VAR} "${Python3_EXECUTABLE}" PARENT_SCOPE)
-    return()
-  endif()
-
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
-  set(${OUTPUT_VAR} "${Python3_EXECUTABLE}" PARENT_SCOPE)
-endfunction()
-
 function(tilelang_generate_windows_import_library DLL_PATH OUTPUT_VAR STEM)
   if(NOT WIN32)
     set(${OUTPUT_VAR} "${DLL_PATH}" PARENT_SCOPE)
@@ -129,7 +116,13 @@ function(tilelang_generate_windows_import_library DLL_PATH OUTPUT_VAR STEM)
   set(_tilelang_import_dir "${CMAKE_BINARY_DIR}/windows-import-libs/${STEM}/${_tilelang_dll_name}")
   file(MAKE_DIRECTORY "${_tilelang_import_dir}")
   set(_tilelang_import_lib "${_tilelang_import_dir}/${STEM}.lib")
-  if(NOT EXISTS "${_tilelang_import_lib}")
+  file(SHA256 "${DLL_PATH}" _tilelang_dll_hash)
+  set(_tilelang_import_stamp "${_tilelang_import_dir}/source.sha256")
+  set(_tilelang_previous_hash "")
+  if(EXISTS "${_tilelang_import_stamp}")
+    file(READ "${_tilelang_import_stamp}" _tilelang_previous_hash)
+  endif()
+  if(NOT EXISTS "${_tilelang_import_lib}" OR NOT _tilelang_previous_hash STREQUAL _tilelang_dll_hash)
     tilelang_get_python_interpreter(_tilelang_python)
     find_program(_tilelang_dumpbin NAMES dumpbin dumpbin.exe)
     find_program(_tilelang_libexe NAMES lib lib.exe)
@@ -162,6 +155,7 @@ function(tilelang_generate_windows_import_library DLL_PATH OUTPUT_VAR STEM)
     if(NOT _tilelang_lib_result EQUAL 0 OR NOT EXISTS "${_tilelang_import_lib}")
       message(FATAL_ERROR "Failed to generate import library ${_tilelang_import_lib} from ${DLL_PATH}")
     endif()
+    file(WRITE "${_tilelang_import_stamp}" "${_tilelang_dll_hash}")
   endif()
 
   set(${OUTPUT_VAR} "${_tilelang_import_lib}" PARENT_SCOPE)
@@ -283,6 +277,10 @@ else()
     set(CMAKE_CXX_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}" CACHE STRING "CXX compiler launcher")
     set(CMAKE_CUDA_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}" CACHE STRING "CUDA compiler launcher")
   endif()
+endif()
+
+if(COMMAND tilelang_enable_host_launchers)
+  tilelang_enable_host_launchers()
 endif()
 
 # Configs
@@ -516,12 +514,6 @@ else()
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
   target_link_libraries(tilelang PUBLIC tvm_compiler)
 
-  # Place dev build outputs under build/lib for consistency
-  set_target_properties(tilelang PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  )
   list(PREPEND TILELANG_OUTPUT_TARGETS tilelang)
 endif()
 
@@ -552,16 +544,7 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-if(WIN32)
-  # Python headers on Windows auto-link pythonXY_d.lib in Debug builds, but
-  # some managed CPython distributions only ship the stable import library we
-  # already link below.
-  target_compile_definitions(tilelang_cython_wrapper PRIVATE Py_NO_LINK_LIB=1)
-  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
-    target_link_options(tilelang_cython_wrapper PRIVATE
-      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
-  endif()
-endif()
+
 
 # Disable Cython's PEP-489 multi-phase init for the wrapper. The generated
 # C++ depends on CPython's private `_xxsubinterpreters` module at import
@@ -583,13 +566,7 @@ add_custom_command(
   VERBATIM)
 
 python_add_library(tilelang_pto_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_pto_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-if(WIN32)
-  target_compile_definitions(tilelang_pto_wrapper PRIVATE Py_NO_LINK_LIB=1)
-  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
-    target_link_options(tilelang_pto_wrapper PRIVATE
-      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
-  endif()
-endif()
+
 target_compile_definitions(tilelang_pto_wrapper PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
 
 # Ascend Torch-NPU stream exchange extension. Pure CPython/DLPack (no CANN
@@ -607,13 +584,7 @@ add_custom_command(
   VERBATIM)
 
 python_add_library(tilelang_ascend_npu_exchange MODULE "${CMAKE_BINARY_DIR}/tilelang_ascend_npu_exchange.cpp" ${USE_SABI} WITH_SOABI)
-if(WIN32)
-  target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE Py_NO_LINK_LIB=1)
-  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
-    target_link_options(tilelang_ascend_npu_exchange PRIVATE
-      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
-  endif()
-endif()
+
 target_compile_definitions(tilelang_ascend_npu_exchange PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
 
 # CPU-only heuristic for the Ascend DeepGEMM examples; no CANN dependency.
@@ -628,50 +599,28 @@ add_custom_command(
 python_add_library(tilelang_deepgemm_heuristics MODULE
                    "${CMAKE_BINARY_DIR}/tilelang_deepgemm_heuristics.c" ${USE_SABI} WITH_SOABI)
 target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE CYTHON_PEP489_MULTI_PHASE_INIT=0)
-if(WIN32)
-  target_compile_definitions(tilelang_deepgemm_heuristics PRIVATE Py_NO_LINK_LIB=1)
-  if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
-    target_link_options(tilelang_deepgemm_heuristics PRIVATE
-      "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+
+# Common output/install rules apply to native Python extensions on every host.
+set(TILELANG_PYTHON_EXTENSIONS
+    tilelang_cython_wrapper tilelang_pto_wrapper tilelang_ascend_npu_exchange
+    tilelang_deepgemm_heuristics)
+foreach(target IN LISTS TILELANG_PYTHON_EXTENSIONS)
+  # A generator expression keeps multi-config generators in the same flat dev
+  # library directory used by single-config generators and the Python loader.
+  set_target_properties(${target} PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<0:>"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<0:>"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<0:>")
+  if(WIN32)
+    # Some managed CPython distributions ship only the stable import library.
+    target_compile_definitions(${target} PRIVATE Py_NO_LINK_LIB=1)
+    if(DEFINED Python_VERSION_MAJOR AND DEFINED Python_VERSION_MINOR)
+      target_link_options(${target} PRIVATE
+        "/NODEFAULTLIB:python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}_d.lib")
+    endif()
   endif()
-endif()
-set_target_properties(tilelang_deepgemm_heuristics PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
-install(TARGETS tilelang_deepgemm_heuristics
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
-
-# Ensure dev builds drop the extension into build/lib alongside other shared libs
-set_target_properties(tilelang_cython_wrapper PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
-set_target_properties(tilelang_pto_wrapper PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
-set_target_properties(tilelang_ascend_npu_exchange PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-)
-
-# Install the extension into tilelang/lib inside the wheel
-install(TARGETS tilelang_cython_wrapper
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
-install(TARGETS tilelang_pto_wrapper
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
-install(TARGETS tilelang_ascend_npu_exchange
+endforeach()
+install(TARGETS ${TILELANG_PYTHON_EXTENSIONS}
         LIBRARY DESTINATION tilelang/lib
         RUNTIME DESTINATION tilelang/lib
         ARCHIVE DESTINATION tilelang/lib)
@@ -732,9 +681,9 @@ foreach(target IN LISTS TILELANG_OUTPUT_TARGETS)
   set_target_properties(${target} PROPERTIES BUILD_RPATH "${TILELANG_BUILD_RPATH}")
   set_target_properties(${target} PROPERTIES INSTALL_RPATH "${TILELANG_INSTALL_RPATH}")
   set_target_properties(${target} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<0:>"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<0:>"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<0:>"
   )
 endforeach()
 

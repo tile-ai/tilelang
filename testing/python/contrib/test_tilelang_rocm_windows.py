@@ -84,6 +84,8 @@ def test_vsdevcmd_environment_has_one_path_key(monkeypatch):
     monkeypatch.setattr(
         msvc.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="PATH=vc-tools\nINCLUDE=vc-headers\n")
     )
-    compiler_env = msvc._import_vsdevcmd_environment("VsDevCmd.bat")
+    from tilelang import _host_toolchain
+
+    compiler_env = _host_toolchain._import_vsdevcmd_environment("VsDevCmd.bat")
     assert compiler_env == {"PATH": "vc-tools", "INCLUDE": "vc-headers"}
     assert original == {"Path": "parent-tools"}

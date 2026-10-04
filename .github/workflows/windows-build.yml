@@ -1,0 +1,57 @@
+name: Windows CPU build
+
+on:
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "cmake/**"
+      - "pyproject.toml"
+      - "tilelang/**"
+      - "src/**"
+      - "testing/python/contrib/**"
+      - "maint/scripts/smoke_cpu_jit.py"
+      - ".github/workflows/windows-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-wheel:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      USE_CUDA: "OFF"
+      USE_ROCM: "OFF"
+      USE_ASCEND: "OFF"
+      USE_METAL: "OFF"
+      USE_LLVM: "OFF"
+      CMAKE_BUILD_PARALLEL_LEVEL: "4"
+      CMAKE_GENERATOR: "Ninja"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          activate-environment: true
+      - name: Build isolated wheel without a GPU SDK
+        run: uv build --wheel
+      - name: Install wheel and test host setup
+        run: |
+          uv pip install --torch-backend cpu (Get-ChildItem dist/*.whl).FullName pytest cmake ninja
+          python -m pytest testing/python/contrib/test_tilelang_host_toolchain.py -q
+      - name: Execute installed wheel and reload cache in a fresh process
+        run: |
+          $env:TILELANG_CACHE_DIR = Join-Path $env:RUNNER_TEMP "tilelang-cpu-cache"
+          $script = Join-Path $env:GITHUB_WORKSPACE "maint/scripts/smoke_cpu_jit.py"
+          Push-Location $env:RUNNER_TEMP
+          try {
+            python $script
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            python $script --cache-reload
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Pop-Location
+          }

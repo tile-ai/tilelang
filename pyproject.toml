@@ -93,26 +93,18 @@ torch = [
 [build-system]
 requires = [
     "cython>=3.1.0",
-    "scikit-build-core",
+    "scikit-build-core>=0.11",
     "z3-solver>=4.13.0,<4.15.5",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.
     "patchelf>=0.17.2; platform_system == 'Linux'",
-    # Under PEP 517 build isolation on Windows, provide nvcc and CUDA headers so
-    # CMake's find_package(CUDAToolkit) succeeds without a host CUDA install.
-    "nvidia-cuda-nvcc>=13; platform_system == 'Windows'",
-    "nvidia-cuda-cccl>=13; platform_system == 'Windows'",
-    "nvidia-cuda-nvrtc>=13; platform_system == 'Windows'",
-    # CMake's MSVC helpers in FindPipCUDAToolkit.cmake only activate under the
-    # Ninja generator; require ninja on Windows so scikit-build-core can pick
-    # it up (paired with the override below that passes -G Ninja).
-    "ninja>=1.11; platform_system == 'Windows'",
 ]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
 wheel.py-api = "cp39"
 cmake.version = ">=3.26.1"
+ninja.version = ">=1.11"
 build-dir = "build"
 
 # Include backend and git info in version
@@ -120,11 +112,11 @@ metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
 
-# On Windows, force the Ninja generator so the project's MSVC environment
-# activation path runs (it is guarded on `CMAKE_GENERATOR MATCHES "Ninja"`).
-# Linux and macOS keep the scikit-build-core default (Makefiles).
+# Native Windows sources currently require clang-cl. Prefer the validated Ninja
+# toolchain while preserving an explicitly selected generator (e.g. ClangCL VS).
 [[tool.scikit-build.overrides]]
 if.platform-system = "win32"
+if.env.CMAKE_GENERATOR = false
 cmake.args = ["-G", "Ninja"]
 
 # editable.rebuild = true
