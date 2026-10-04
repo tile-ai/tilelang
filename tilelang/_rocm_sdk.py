@@ -11,6 +11,9 @@ import shutil
 
 
 def find_rocm_home() -> str:
+    configured_sdk = os.environ.get("USE_ROCM", "")
+    if configured_sdk and Path(configured_sdk).is_dir():
+        return configured_sdk
     for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
         if os.environ.get(name):
             return os.environ[name]

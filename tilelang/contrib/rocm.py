@@ -329,7 +329,8 @@ def find_hipcc():
     """Resolve the hipcc executable to invoke for JIT compilation.
 
     Resolution order:
-        1. ``$ROCM_PATH/bin/hipcc`` -- an explicit ROCM_PATH is honored as-is.
+        1. The SDK selected by ``USE_ROCM=<directory>``, ``ROCM_PATH``,
+           ``ROCM_HOME``, or ``HIP_PATH``, then automatically discovered SDKs.
         2. every ``hipcc`` on PATH, in PATH order.
         3. ``/opt/rocm/bin/hipcc``.
 
@@ -380,9 +381,11 @@ def find_rocm_path():
     path : str
         Path to ROCm root.
     """
-    for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
-        if os.environ.get(name):
-            return os.environ[name]
+    from tilelang.env import _find_rocm_home
+
+    rocm_path = _find_rocm_home()
+    if rocm_path:
+        return rocm_path
     try:
         hipcc = find_hipcc()
     except RuntimeError:
@@ -395,19 +398,23 @@ def find_rocm_path():
 
 
 def get_hipcc_subprocess_env():
-    """Prepare a Windows HIP compiler environment without changing the process."""
-    if sys.platform != "win32":
-        return None
-    from .msvc import get_msvc_subprocess_env
+    """Pass the selected SDK and Windows host tools to HIP without changing the process."""
+    if sys.platform == "win32":
+        from .msvc import get_msvc_subprocess_env
 
-    compiler_env = dict(get_msvc_subprocess_env() or os.environ)
+        compiler_env = dict(get_msvc_subprocess_env() or os.environ)
+    else:
+        if not os.path.isdir(os.environ.get("USE_ROCM", "")):
+            return None
+        compiler_env = os.environ.copy()
     prefix = find_rocm_path()
     path = next((value for key, value in compiler_env.items() if key.upper() == "PATH"), "")
     for key in list(compiler_env):
         if key.upper() == "PATH":
             del compiler_env[key]
     compiler_env["PATH"] = join(prefix, "bin") + os.pathsep + path
-    compiler_env["HIP_PATH"] = prefix
+    for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+        compiler_env[name] = prefix
     compiler_env.setdefault("HIP_LIB_PATH", join(prefix, "lib"))
     # TheRock puts device bitcode below lib/llvm; older HIP SDKs use amdgcn.
     for directory in (join(prefix, "lib", "llvm", "amdgcn", "bitcode"), join(prefix, "amdgcn", "bitcode")):
