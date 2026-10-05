@@ -30,10 +30,11 @@ def test_implicit_stream_belongs_to_tensor_device(backend, tensor_device):
         tensor = torch.empty((1,), device=f"cuda:{tensor_device}")
         current_stream = torch.cuda.Stream(device=0)
         tensor_stream = torch.cuda.Stream(device=tensor_device)
+        explicit_stream = torch.cuda.Stream(device=tensor_device)
         with torch.cuda.stream(current_stream), torch.cuda.stream(tensor_stream), torch.cuda.device(0):
             adapter._wrap_forward_from_prebuild_lib(tensor)
             assert calls[-1]["stream"] == tensor_stream.cuda_stream
             if backend == "cutedsl":
                 assert calls[-1]["device_id"] == tensor_device
-            adapter._wrap_forward_from_prebuild_lib(tensor, stream=tensor_stream.cuda_stream)
-            assert calls[-1]["stream"] == tensor_stream.cuda_stream
+            adapter._wrap_forward_from_prebuild_lib(tensor, stream=explicit_stream.cuda_stream)
+            assert calls[-1]["stream"] == explicit_stream.cuda_stream

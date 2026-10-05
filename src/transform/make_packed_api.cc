@@ -455,16 +455,7 @@ MakePackedAPI(PrimFunc func,
         v_packed_args, IntImm(DataType::Int(32), i),
         IntImm(DataType::Int(32), builtin::kTVMFFIAnyUnionValue)};
     // load 64 bit version
-    // Packed floating values use the FFI union's double field. The pinned
-    // TVM APIType helper only recognizes IEEE floats, not bfloat16.
-    DataType api_type;
-    if (arg_type.is_bfloat16()) {
-      ICHECK_EQ(arg_type.lanes(), 1)
-          << "Cannot pass vector type through packed API.";
-      api_type = DataType::Float(64);
-    } else {
-      api_type = APIType(arg_type);
-    }
+    DataType api_type = APIType(arg_type);
     PrimExpr res = Call(api_type, builtin::tvm_struct_get(), call_args);
     // cast to the target version.
     if (api_type != arg_type) {
@@ -699,7 +690,7 @@ MakePackedAPI(PrimFunc func,
           Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(msg.str())})));
       arg_value = f_load_arg_value(param.dtype(), packed_arg_index);
     } else {
-      ICHECK(dtype.is_float() || dtype.is_bfloat16());
+      ICHECK(dtype.is_float());
       std::ostringstream msg;
       msg << "kernel " << name_hint << " scalar " << param->name_hint
           << " expected float";
