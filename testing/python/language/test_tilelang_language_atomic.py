@@ -209,13 +209,15 @@ def run_atomic_addx4(M, N, block_M, block_N):
 
 
 @pytest.mark.parametrize("dtype", [T.int32, T.int64])
+@tilelang.testing.requires_cuda
 def test_atomic_addx4_rejects_integer_destination(dtype):
-    with pytest.raises(TypeError, match="atomic_addx4 supports only float16, bfloat16, and float32"):
+    @T.prim_func
+    def atomic_addx4_integer(A: T.Tensor((4,), dtype), B: T.Tensor((4,), dtype)):
+        with T.Kernel(1, threads=1):
+            T.atomic_addx4(B[0:4], A[0:4])
 
-        @T.prim_func
-        def atomic_addx4_integer(A: T.Tensor((4,), dtype), B: T.Tensor((4,), dtype)):
-            with T.Kernel(1, threads=1):
-                T.atomic_addx4(B[0:4], A[0:4])
+    with pytest.raises(RuntimeError, match="AtomicAddx4"):
+        tilelang.compile(atomic_addx4_integer, target="cuda")
 
 
 @tilelang.jit
