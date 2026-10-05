@@ -113,6 +113,19 @@ std::string CodeGenTileLangMetal::Finish() {
   code << "#define TILELANG_PRAGMA_UNROLL _Pragma(\"clang loop "
           "unroll(full)\")\n";
   code << "using namespace metal;\n\n";
+  // Narrow or widen a simdgroup matrix on the way to memory. fp16 and fp32 8x8
+  // simdgroup matrices share the same per-lane layout, so the two lane elements
+  // convert in place; a whole-vector cast of the 64-element storage type
+  // crashes the Apple shader compiler. MLX's steel epilogue and the ggml-metal
+  // kernels narrow the fp32 accumulator the same way.
+  code << "template <typename DstT, typename SrcT>\n"
+          "METAL_FUNC simdgroup_matrix<DstT, 8, 8> tl_simdgroup_cast(\n"
+          "    simdgroup_matrix<SrcT, 8, 8> m) {\n"
+          "  simdgroup_matrix<DstT, 8, 8> r;\n"
+          "  r.thread_elements()[0] = (DstT)m.thread_elements()[0];\n"
+          "  r.thread_elements()[1] = (DstT)m.thread_elements()[1];\n"
+          "  return r;\n"
+          "}\n";
   code << decl_stream.str();
   code << fwd_decl_stream.str();
   code << stream.str();
@@ -752,9 +765,8 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
 
     std::ostringstream dtype_os;
     PrintType(dtype, dtype_os);
-    std::string dtype_str = dtype_os.str();
-    simdgroup_dtype_[op->buffer->data] = dtype_str;
-    stream << "simdgroup_" << dtype_str << "8x8 " << vid << '['
+    simdgroup_dtype_[op->buffer->data] = dtype;
+    stream << "simdgroup_" << dtype_os.str() << "8x8 " << vid << '['
            << constant_size / 64 << "];\n";
   } else {
     // Apply 16-byte alignment padding to shared/threadgroup memory
@@ -939,45 +951,53 @@ CodeGenTileLangMetal::GetAddrSpaceOf(const PrimExpr &ptr_expr) const {
   return MetalAddressSpaceForStorageScope(storage_scope);
 }
 
-std::string
-CodeGenTileLangMetal::GetPointeeTypeOf(const PrimExpr &ptr_expr,
-                                       const std::string &fallback) {
+std::optional<DataType>
+CodeGenTileLangMetal::GetPointeeDataType(const PrimExpr &ptr_expr) const {
   if (auto *var = ptr_expr.as<VarNode>()) {
     auto it = handle_data_type_.find(var);
     if (it != handle_data_type_.end()) {
-      std::ostringstream os;
-      PrintType(it->second, os);
-      return os.str();
+      return it->second;
     }
     if (const auto *pointer_type = var->type_annotation.as<PointerTypeNode>()) {
       if (const auto *element_type =
               pointer_type->element_type.as<PrimTypeNode>()) {
-        std::ostringstream os;
-        PrintType(element_type->dtype, os);
-        return os.str();
+        return element_type->dtype;
       }
     }
+    return std::nullopt;
   }
   if (auto *call = ptr_expr.as<CallNode>()) {
     if (call->op.same_as(builtin::address_of())) {
       TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
       if (auto *load = call->args[0].as<BufferLoadNode>()) {
-        std::ostringstream os;
-        PrintType(load->buffer->dtype, os);
-        return os.str();
+        return load->buffer->dtype;
       }
     } else if (call->op.same_as(builtin::handle_add_byte_offset())) {
       TVM_FFI_ICHECK_EQ(call->args.size(), 2U);
-      return GetPointeeTypeOf(call->args[0], fallback);
+      return GetPointeeDataType(call->args[0]);
     } else if (call->op.same_as(builtin::tvm_access_ptr())) {
       TVM_FFI_ICHECK_GE(call->args.size(), 2U);
-      return GetPointeeTypeOf(call->args[1], fallback);
+      return GetPointeeDataType(call->args[1]);
     } else if (call->op.same_as(builtin::reinterpret())) {
+      // The pointee dtype is the reinterpret target, which the pointer type
+      // does not carry; callers that know it must supply their own.
       TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
-      return fallback;
+      return std::nullopt;
     }
   }
-  return fallback;
+  return std::nullopt;
+}
+
+std::string
+CodeGenTileLangMetal::GetPointeeTypeOf(const PrimExpr &ptr_expr,
+                                       const std::string &fallback) {
+  std::optional<DataType> dtype = GetPointeeDataType(ptr_expr);
+  if (!dtype.has_value()) {
+    return fallback;
+  }
+  std::ostringstream os;
+  PrintType(dtype.value(), os);
+  return os.str();
 }
 
 bool CodeGenTileLangMetal::IsThreadIdxXExpr(const PrimExpr &expr) const {
@@ -1343,10 +1363,11 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     auto it = simdgroup_dtype_.find(var);
     TVM_FFI_ICHECK(it != simdgroup_dtype_.end())
         << "Cannot find variable allocation for simdgroup: " << var;
-    const std::string &dtype_str = it->second;
     f_check_simdgroup_shape(op->args[3], op->args[4]);
+    std::ostringstream dtype_os;
+    PrintType(it->second, dtype_os);
     os << PrintExpr(var) << "[" << PrintExpr(op->args[1])
-       << "] = make_filled_simdgroup_matrix<" << dtype_str << ", "
+       << "] = make_filled_simdgroup_matrix<" << dtype_os.str() << ", "
        << PrintExpr(op->args[3]) << ", " << PrintExpr(op->args[4]) << ">("
        << PrintExpr(op->args[2]) << ")";
   } else if (op->op.same_as(builtin::simdgroup_load())) {
@@ -1358,9 +1379,30 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
   } else if (op->op.same_as(builtin::simdgroup_store())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 7);
     f_check_simdgroup_shape(op->args[4], op->args[5]);
-    os << "simdgroup_store(" << PrintExpr(op->args[0]) << "["
-       << PrintExpr(op->args[1]) << "], " << PrintExpr(op->args[2]) << ", "
-       << PrintExpr(op->args[3]) << ", 0, " << PrintExpr(op->args[6]) << ")";
+    // The accumulator can be wider than the destination (an fp32 C_local stored
+    // to an fp16 C). simdgroup_store has no mixed-type overload, so narrow the
+    // matrix first; this is the fp32 -> fp16 cast that T.copy expresses.
+    Var var = Downcast<Var>(op->args[0]);
+    auto it = simdgroup_dtype_.find(var);
+    TVM_FFI_ICHECK(it != simdgroup_dtype_.end())
+        << "Cannot find variable allocation for simdgroup: " << var;
+    DataType mat_dtype = it->second;
+    std::optional<DataType> dst_dtype = GetPointeeDataType(op->args[2]);
+    TVM_FFI_ICHECK(dst_dtype.has_value())
+        << "Cannot determine the dtype of the simdgroup_store destination "
+        << op->args[2];
+    if (dst_dtype.value() != mat_dtype) {
+      std::ostringstream dst_dtype_os;
+      PrintType(dst_dtype.value(), dst_dtype_os);
+      os << "simdgroup_store(tl_simdgroup_cast<" << dst_dtype_os.str() << ">("
+         << PrintExpr(op->args[0]) << "[" << PrintExpr(op->args[1]) << "]), "
+         << PrintExpr(op->args[2]) << ", " << PrintExpr(op->args[3]) << ", 0, "
+         << PrintExpr(op->args[6]) << ")";
+    } else {
+      os << "simdgroup_store(" << PrintExpr(op->args[0]) << "["
+         << PrintExpr(op->args[1]) << "], " << PrintExpr(op->args[2]) << ", "
+         << PrintExpr(op->args[3]) << ", 0, " << PrintExpr(op->args[6]) << ")";
+    }
   } else if (op->op.same_as(builtin::simdgroup_multiply_accumulate())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 8);
     os << "simdgroup_multiply_accumulate("                                 //
