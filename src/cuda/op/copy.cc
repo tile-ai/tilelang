@@ -1265,6 +1265,15 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
     shared_coords = inv->Forward({local_index, thread_index});
   }
   shared_coords.pop_back();
+  if (is_ldmatrix) {
+    if (shared_coords.size() != src_range.size())
+      return LowerNormal(op, lower_args, analyzer);
+    // The fragment inverse is relative to the copy region, not the shared
+    // buffer. Translate before the shared layout remaps these coordinates.
+    for (size_t i = 0; i < shared_coords.size(); i++)
+      shared_coords.Set(
+          i, analyzer->Simplify(shared_coords[i] + src_range[i]->min));
+  }
   PrimExpr shared_addr = Call(
       DataType::Handle(), tl::access_ptr(),
       {BufferLoad(shared_tensor, shared_coords), PrimExpr(elems_per_reg * num),
