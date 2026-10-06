@@ -1156,7 +1156,8 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   Array<Range> local_region = is_ldmatrix ? src_range : dst_range;
   bool is_full_range = true;
   for (size_t i = 0; i < local_region.size(); i++) {
-    if (!analyzer->CanProveEqual(local_region[i]->extent,
+    if (!is_zero(local_region[i]->min) ||
+        !analyzer->CanProveEqual(local_region[i]->extent,
                                  local_tensor->shape[i])) {
       is_full_range = false;
       break;
