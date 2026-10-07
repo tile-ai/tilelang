@@ -279,6 +279,32 @@ def explicit_cp_async_wait_position(iters=4, block=16, cp_elems=8, dtype="float1
     return main
 
 
+def simt_copy_release_position(iters=4, block=16, dtype="float16", threads=128):
+    """A mixed TMA + SIMT copy pipeline with the SIMT destination read last."""
+
+    @T.prim_func
+    def main(
+        A: T.Buffer((iters, block), dtype),
+        B: T.Buffer((iters, block), dtype),
+        A_out: T.Buffer((iters, block), dtype),
+        B_out: T.Buffer((iters, block), dtype),
+    ):
+        with T.Kernel(1, threads=threads) as _:
+            A_shared = T.alloc_shared((block,), dtype)
+            B_shared = T.alloc_shared((block,), dtype)
+
+            for ko in T.Pipelined(iters, num_stages=2):
+                T.copy(A[ko, 0], A_shared)
+                for i in T.Parallel(block):
+                    B_shared[i] = B[ko, T.min(i, block - 2)]
+                for i in T.Parallel(block):
+                    A_out[ko, i] = A_shared[i]
+                for i in T.Parallel(block):
+                    B_out[ko, i] = B_shared[i]
+
+    return main
+
+
 def grouped_gemm_padded_pipelined(
     batch_sizes,
     K,
@@ -771,6 +797,29 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     tma_read = _find_after(script, "A_out[ko, i] = A_shared", consumer_branch)
 
     assert wait < cp_async_read < tma_read
+
+
+@tilelang.testing.requires_cuda
+def test_tiled_ws_simt_copy_release_follows_last_consumer_read():
+    """SIMT copy destinations must keep the stage until their last consumer read."""
+
+    func = simt_copy_release_position().with_attr("global_symbol", "main")
+    mod = tvm.IRModule.from_expr(func)
+    target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    assert "tl_tiled_ws_applied" in script
+    assert "T.tma_copy" in script
+
+    consumer_branch = _find_after(script, "else:")
+    tma_read = _find_after(script, "A_out[ko, i] = A_shared", consumer_branch)
+    simt_read = _find_after(script, "B_out[ko, i] = B_shared", consumer_branch)
+    release = _find_after(script, "T.ptx_arrive_barrier", consumer_branch)
+
+    assert tma_read < simt_read < release
 
 
 @tilelang.testing.requires_cuda
