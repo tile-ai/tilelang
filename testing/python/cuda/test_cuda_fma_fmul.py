@@ -74,6 +74,7 @@ def _lower_cutedsl_source(program) -> str:
     return artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_fma_fmul_build_registered_intrinsics():
     x = tvm.tirx.Var("x", "float32")
     y = tvm.tirx.Var("y", "float32")
@@ -135,6 +136,7 @@ def test_fma_fmul_vectorized_cuda_codegen_sm100():
     assert source.count("tl::fma2(") >= WIDTH // 2
 
 
+@tilelang.testing.requires_cuda
 def test_fma_fmul_vectorized_cutedsl_codegen():
     source = _lower_cutedsl_source(_make_vectorized_program())
 

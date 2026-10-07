@@ -85,7 +85,6 @@ _SOURCE_ONLY_CODEGEN_FFIS: frozenset[str] = frozenset(
         "target.build.tilelang_cpp",
         "target.build.tilelang_webgpu",
         "target.build.tilelang_ascend",
-        "target.build.tilelang_ascend_pto",
     }
 )
 

@@ -22,6 +22,14 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 namespace {
+
+// Whether the target launches only a grid: thread domains stay local to
+// device-side regions and must not become runtime launch dimensions.
+bool LaunchGridOnly(const Target &target) {
+  return target.defined() &&
+         target->GetAttr<Bool>("launch_grid_only", Bool(false)).value();
+}
+
 struct KernelInfo {
   // The device on which the PrimFunc runs
   Target target;
@@ -136,8 +144,15 @@ private:
       // use the first appearance as def.
       if (!defined_thread.count(iv.get())) {
         defined_thread.insert(iv.get());
-        info_.launch_params.push_back(iv->thread_tag);
         thread_extent.Set(iv->thread_tag, op->value);
+        // Grid-only launch targets keep thread domains local to device-side
+        // regions; only the blockIdx.* grid axes are runtime launch
+        // dimensions.
+        std::string thread_tag = iv->thread_tag;
+        if (!LaunchGridOnly(info_.target) ||
+            thread_tag.rfind("blockIdx.", 0) == 0) {
+          info_.launch_params.push_back(iv->thread_tag);
+        }
       }
     }
 
@@ -269,8 +284,23 @@ public:
     }
 
     const auto &info = device_info_map_.at(gvar.get());
-    const auto &thread_extent = info.thread_extent;
-    func = WithAttr(std::move(func), "thread_extent", thread_extent);
+    if (LaunchGridOnly(
+            func->GetAttr<Target>(tvm::attr::kTarget).value_or(info.target))) {
+      // Grid-only launch: keep blockIdx extents (grid shape) but drop
+      // threadIdx extents, which are managed inside device-side regions.
+      Map<String, PrimExpr> grid_extent;
+      for (const auto &kv : info.thread_extent) {
+        if (std::string(kv.first).find("blockIdx") != std::string::npos) {
+          grid_extent.Set(kv.first, kv.second);
+        }
+      }
+      if (!grid_extent.empty()) {
+        func = WithAttr(std::move(func), "thread_extent", grid_extent);
+      }
+    } else {
+      const auto &thread_extent = info.thread_extent;
+      func = WithAttr(std::move(func), "thread_extent", thread_extent);
+    }
     if (info.dyn_shmem_size.defined()) {
       func = WithAttr(std::move(func), "dyn_shared_memory_buf",
                       info.dyn_shmem_size.value());
@@ -309,6 +339,9 @@ private:
 
     bool same_device_type = caller_target->GetTargetDeviceType() ==
                             callee_target->GetTargetDeviceType();
+    // Kernels of packed-launch-only targets are separately compiled
+    // artifacts the host cannot reach through call_extern, even when the
+    // caller reports the same device type; force the kernel-launch path.
     if (same_device_type) {
       // Calls to another target using the same device (e.g. LLVM
       // calling a custom TIRToRuntime target) do not require a kernel

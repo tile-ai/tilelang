@@ -3,6 +3,48 @@ import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
+import pytest
+
+
+@pytest.mark.parametrize("present", [(True, True), (True, False), (False, True), (False, False)])
+def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
+    """Each non-null carrier must retain whether it supplies a shape or stride."""
+    from tilelang.engine.param import KernelParam
+    from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter, CythonKernelWrapper
+
+    size = tvm.tirx.Var("size", "int64")
+    a_buffer = tvm.tirx.decl_buffer((2, 3), "float32", name="A", strides=(size, 1))
+    b_buffer = tvm.tirx.decl_buffer((size,), "float32", name="B")
+    func = tvm.tirx.PrimFunc(
+        [a_buffer.data, b_buffer.data], tvm.tirx.Evaluate(0), buffer_map={a_buffer.data: a_buffer, b_buffer.data: b_buffer}
+    )
+    adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
+    adapter.ir_module = tvm.IRModule({"main": func})
+    adapter.result_idx = []
+    adapter.target = tvm.target.Target("c")
+
+    class CaptureLibrary:
+        def call(self, *args):
+            self.symbol = args[2].value
+            return 0
+
+    lib = CaptureLibrary()
+    params = [KernelParam.from_buffer(buffer) for buffer in (a_buffer, b_buffer)]
+    wrapper = CythonKernelWrapper([], params, lib)
+    wrapper.set_dynamic_symbolic_map(adapter._process_dynamic_symbolic())
+    wrapper.set_dynamic_symbolic_sources(adapter._process_dynamic_symbolic_sources())
+    wrapper.set_ptr_map(adapter._process_ptr_map())
+    wrapper.set_buffer_dtype_map(adapter._process_buffer_dtype())
+    wrapper.set_buffer_device_map(adapter._process_buffer_device())
+    shapes, strides, contiguous = adapter._process_static_buffer_infos()
+    wrapper.set_static_shape_map(shapes)
+    wrapper.set_static_strides_map(strides)
+    wrapper.set_static_contiguous_list(contiguous)
+
+    a = torch.empty_strided((2, 3), (4, 1)) if present[0] else None
+    b = torch.empty((4,)) if present[1] else None
+    wrapper.forward([a, b], stream=0)
+    assert lib.symbol == (4 if any(present) else 0)
 
 
 @tilelang.testing.requires_cuda
@@ -84,6 +126,25 @@ def test_cython_dynamic_shape_output_before_input():
     a = torch.arange(128, dtype=torch.float32).cuda()
     out = kernel()(a)
     tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_cython_bfloat16_scalar_parameter():
+    """A bfloat16 scalar parameter is marshalled through the Cython backend."""
+
+    @tilelang.jit(execution_backend="cython")
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((128,), T.bfloat16), scalar: T.bfloat16, B: T.Tensor((128,), T.bfloat16)):
+            with T.Kernel(1, threads=128):
+                for i in T.Parallel(128):
+                    B[i] = A[i] + scalar
+
+        return main
+
+    a = torch.arange(128, dtype=torch.float32).to(torch.bfloat16).cuda()
+    out = kernel()(a, 1.5)
+    tilelang.testing.torch_assert_close(out, a + 1.5, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

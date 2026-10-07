@@ -222,6 +222,13 @@ TIR_VAR_SCOPE_FRAME = (
 )
 
 
+def register_var_scope_frame(frame_type: type) -> None:
+    """Register a backend-specific frame as a variable scope."""
+    global TIR_VAR_SCOPE_FRAME
+    if frame_type not in TIR_VAR_SCOPE_FRAME:
+        TIR_VAR_SCOPE_FRAME += (frame_type,)
+
+
 def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 

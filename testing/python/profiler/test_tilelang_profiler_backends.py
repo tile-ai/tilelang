@@ -1,5 +1,7 @@
 from functools import partial
 from inspect import Parameter, signature
+import runpy
+import sys
 
 import pytest
 import torch
@@ -27,6 +29,23 @@ def test_legacy_benchmark_helpers(original_name, implementation_name):
 def test_timing_modules_do_not_duplicate_entry_point(module):
     assert not hasattr(module, "do_bench")
     assert not hasattr(module, "_do_bench_impl")
+
+
+def test_msprof_module_only_contains_timing_implementation():
+    from tilelang.profiler import msprof
+
+    assert callable(msprof.bench_with_msprof)
+    assert not hasattr(msprof, "do_bench")
+    assert not hasattr(msprof, "_do_bench_impl")
+
+
+def test_common_entry_does_not_import_msprof(monkeypatch):
+    monkeypatch.delattr(profiler, "msprof", raising=False)
+    monkeypatch.setitem(sys.modules, "tilelang.profiler.msprof", None)
+    namespace = runpy.run_path(bench.__file__, run_name="tilelang.profiler._entry_import_probe")
+
+    assert callable(namespace["do_bench"])
+    assert namespace["_bench_with_cuda_events"] is torch_bench.bench_with_cuda_events
 
 
 def test_public_benchmark_api():

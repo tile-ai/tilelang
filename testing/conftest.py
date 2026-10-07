@@ -75,6 +75,15 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             f"Skipped {config._perf_items_filtered} perf test(s). Re-run with --run-perf to include them.",
         )
         return
+    if executed_count == 0 and getattr(config, "_ascend_suite_gated", False):
+        # testing/ascend/conftest.py ignored its whole directory because this
+        # build has no Ascend backend; that is a legitimate outcome, not a
+        # mis-configured run.
+        terminalreporter.write_sep(
+            "-",
+            "Skipped the Ascend test suite: the Ascend backend is not built into this library.",
+        )
+        return
     if executed_count == 0:
         terminalreporter.write_sep(
             "!",

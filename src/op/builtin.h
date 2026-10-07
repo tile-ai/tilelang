@@ -313,6 +313,19 @@ TVM_DLL const Op &sync_grid();
  */
 TVM_DLL const Op &sync_warp();
 
+// RNG ops. #2855 registers these under the CUDA dialect, but this fork also
+// consumes them from backend-neutral code (loop_vectorize) and the Ascend
+// codegen/SIMT RNG path, so declare them here too (registration stays in
+// cuda/op/builtin.cc; a redeclaration is harmless).
+TVM_DLL const Op &rng_init();
+TVM_DLL const Op &rng_rand();
+TVM_DLL const Op &rng_rand_float();
+
+// device_assert lowers through the Ascend codegen (toolkit assert()) as well as
+// CUDA; #2855 files it under the CUDA dialect, so redeclare for asc codegen.
+TVM_DLL const Op &device_assert();
+TVM_DLL const Op &device_assert_with_msg();
+
 /*!
  * \brief Warp-vote: non-zero if ANY active lane in the mask has a non-zero
  * predicate. Lowers to `__any_sync(mask, predicate)` on CUDA and
