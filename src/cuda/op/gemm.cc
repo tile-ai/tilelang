@@ -13,7 +13,6 @@
 #include "op/utils.h"
 #include "span_utils.h"
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
@@ -142,56 +141,6 @@ bool AllowTuringMma(const GemmNode &op) {
     return op.c_->dtype == DataType::Int(32);
   }
   return false;
-}
-
-// ldmatrix row addresses and the WGMMA descriptor start address (stored as
-// addr >> 4) both need a 16-byte aligned operand origin. A misaligned region
-// origin faults on the ldmatrix path and is silently truncated on the WGMMA
-// path, so reject it when the misalignment is provable.
-void CheckOperandOriginAligned(const BufferRegion &region, const char *name) {
-  const Buffer &buf = region->buffer;
-  DataType i64 = DataType::Int(64);
-  PrimExpr offset = make_const(i64, 0);
-  for (size_t i = 0; i < region->region.size(); ++i) {
-    offset =
-        offset * cast(i64, buf->shape[i]) + cast(i64, region->region[i]->min);
-  }
-  arith::Analyzer analyzer;
-  PrimExpr misalign = analyzer.Simplify(
-      floormod(offset * buf->dtype.bits(), make_const(i64, 128)));
-  const auto *imm = misalign.as<IntImmNode>();
-  if (imm && imm->value != 0) {
-    LOG(FATAL) << "T.gemm() operand " << name << " region " << region
-               << " starts " << imm->value / 8
-               << " bytes past a 16-byte boundary; ldmatrix and the WGMMA "
-                  "descriptor require a 16-byte aligned operand origin."
-               << SpanHintSuffix(buf->span);
-  }
-}
-
-void CheckWgmmaOperandsAligned(const GemmNode &op) {
-  if (IsSharedBuffer(op.a_)) {
-    CheckOperandOriginAligned(op.aRegion_, "A");
-  }
-  CheckOperandOriginAligned(op.bRegion_, "B");
-}
-
-// Mirrors `ldmatrix_available` in the MMA macro generator: 16-bit operands
-// always use ldmatrix, other widths only when K-major; fp64 never does.
-void CheckMmaOperandsAligned(const GemmNode &op, Target target) {
-  if (!TargetHasLdmatrix(target)) {
-    return;
-  }
-  auto uses_ldmatrix = [](const Buffer &buf, bool k_major) {
-    int bits = buf->dtype.bits();
-    return IsSharedBuffer(buf) && bits != 64 && (bits == 16 || k_major);
-  };
-  if (uses_ldmatrix(op.a_, !op.transA_)) {
-    CheckOperandOriginAligned(op.aRegion_, "A");
-  }
-  if (uses_ldmatrix(op.b_, op.transB_)) {
-    CheckOperandOriginAligned(op.bRegion_, "B");
-  }
 }
 
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
@@ -389,7 +338,6 @@ struct Gemm {
       if (!AllowWgmma(op, block_size, target)) {
         FatalWgmmaUnavailable(op, target);
       }
-      CheckWgmmaOperandsAligned(op);
       return kCudaWGMMA;
     }
     if (op.isTcgen05_) {
@@ -415,7 +363,6 @@ struct Gemm {
       return kCudaTCGEN05;
     }
     if (AllowWgmma(op, block_size, target)) {
-      CheckWgmmaOperandsAligned(op);
       return kCudaWGMMA;
     }
     if (TargetIsVolta(target) && !AllowVoltaMma(op)) {
@@ -424,7 +371,6 @@ struct Gemm {
     if (TargetIsTuring(target) && !AllowTuringMma(op)) {
       return kCudaFMA;
     }
-    CheckMmaOperandsAligned(op, target);
     return kCudaMMA;
   }
 
