@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tvm import IRModule, s_tir, tirx
+from tvm import transform as tvm_transform
 from tvm.target import Target
 
 import tilelang
@@ -13,6 +14,31 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_force_let_inline,
 )
 from tilelang.metal.transform import MetalFragmentToSimdgroup
+
+# Default loop unrolling for Metal. Apple's shader compiler does not unroll the
+# short constant loops TileLang emits around simdgroup matrix operations on its
+# own; a rolled loop keeps simdgroup fragments indexed by a runtime variable,
+# which forces them out of registers, and the affected kernels measured several
+# times slower. Mark short constant loops as unrolled so the Metal codegen emits
+# an unroll pragma for them, the same division of labor as CUDA's pipeline and
+# nvcc. An explicit ``tl.UnrollLoop`` pass configuration from the caller takes
+# precedence.
+METAL_UNROLL_LOOP = {"auto_max_step": 64, "auto_max_extent": 4, "explicit_unroll": False}
+
+
+def _unroll_loops(mod: IRModule, pass_ctx: tvm_transform.PassContext) -> IRModule:
+    if "tl.UnrollLoop" in pass_ctx.config:
+        return tilelang.transform.UnrollLoop()(mod)
+    config = dict(pass_ctx.config)
+    config["tl.UnrollLoop"] = METAL_UNROLL_LOOP
+    with tvm_transform.PassContext(
+        opt_level=pass_ctx.opt_level,
+        required_pass=list(pass_ctx.required_pass),
+        disabled_pass=list(pass_ctx.disabled_pass),
+        instruments=list(pass_ctx.instruments),
+        config=config,
+    ):
+        return tilelang.transform.UnrollLoop()(mod)
 
 
 def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
@@ -74,7 +100,7 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
-    mod = tilelang.transform.UnrollLoop()(mod)
+    mod = _unroll_loops(mod, pass_ctx)
     mod = s_tir.transform.RenormalizeSplitPattern()(mod)
     mod = tirx.transform.Simplify()(mod)
     mod = tirx.transform.RemoveNoOp()(mod)
