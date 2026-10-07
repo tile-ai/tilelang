@@ -1153,17 +1153,21 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
 
   Buffer shared_tensor = is_ldmatrix ? src : dst;
   Buffer local_tensor = is_ldmatrix ? dst : src;
-  Array<Range> local_region = is_ldmatrix ? src_range : dst_range;
-  bool is_full_range = true;
-  for (size_t i = 0; i < local_region.size(); i++) {
-    if (!analyzer->CanProveEqual(local_region[i]->extent,
-                                 local_tensor->shape[i])) {
-      is_full_range = false;
-      break;
-    }
-  }
-  if (!is_full_range) {
+  const Array<Range> &shared_range = is_ldmatrix ? src_range : dst_range;
+  const Array<Range> &fragment_range = is_ldmatrix ? dst_range : src_range;
+  if (shared_range.size() != fragment_range.size()) {
     return LowerNormal(op, lower_args, analyzer);
+  }
+  // The inverse layout below covers the complete fragment. The shared side
+  // may be a subregion, but its extents must match the fragment.
+  for (size_t i = 0; i < fragment_range.size(); i++) {
+    if (!is_zero(fragment_range[i]->min) ||
+        !analyzer->CanProveEqual(fragment_range[i]->extent,
+                                 local_tensor->shape[i]) ||
+        !analyzer->CanProveEqual(shared_range[i]->extent,
+                                 fragment_range[i]->extent)) {
+      return LowerNormal(op, lower_args, analyzer);
+    }
   }
 
   Array<PrimExpr> local_indices =
@@ -1216,14 +1220,27 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr flattened_indice = shared_tensor.OffsetOf(shared_indices).back();
   if (!IndicesCanVectorize(flattened_indice, loop_vars.back()->var,
                            loop_vars.back()->dom->extent,
-                           use_m16n8_stmatrix ? 4 : 8, analyzer)) {
+                           use_m16n8_stmatrix ? 16 : 8, analyzer)) {
     return LowerNormal(op, lower_args, analyzer);
   }
 
-  for (size_t i = 0; i < dst_range.size(); i++) {
-    if (!is_zero(dst_range[i]->min) ||
-        !analyzer->CanProveEqual(dst_range[i]->extent, dst->shape[i]))
+  if (use_m16n8_stmatrix) {
+    // Each register packs two adjacent rows at column c, followed by the same
+    // two rows at c + 8. These four elements must be consecutive in the
+    // fragment.
+    Var packed_var("packed", row_var->var.dtype());
+    PrimExpr packed_index =
+        Substitute(local_indices_flattened,
+                   {{row_var->var,
+                     FloorDiv(row_var->var, 2) * 2 + FloorMod(packed_var, 2)},
+                    {col_var->var, FloorDiv(col_var->var, 16) * 16 +
+                                       FloorMod(col_var->var, 8) +
+                                       FloorDiv(packed_var, 2) * 8}});
+    if (!IndicesCanVectorize(packed_index, packed_var,
+                             make_const(packed_var.dtype(), 4), 4, analyzer,
+                             /*allow_broadcast=*/false)) {
       return LowerNormal(op, lower_args, analyzer);
+    }
   }
 
   PrimExpr extent = local_tensor->shape[0];
@@ -1259,21 +1276,17 @@ Stmt Copy::LowerLDSM(const CopyNode &op, const LowerArgs &lower_args,
     auto local_index = analyzer->Simplify(
         local_iter * elems_per_reg * num +
         elems_per_reg * FloorMod(FloorDiv(norm_thread_index, 8), num) +
-        FloorMod(norm_thread_index, elems_per_reg));
-    auto thread_index = analyzer->Simplify(
-        warp + FloorDiv(FloorMod(norm_thread_index, 8), elems_per_reg));
+        FloorMod(norm_thread_index, 2));
+    auto thread_index =
+        analyzer->Simplify(warp + FloorDiv(FloorMod(norm_thread_index, 8), 2));
     shared_coords = inv->Forward({local_index, thread_index});
   }
   shared_coords.pop_back();
-  if (is_ldmatrix) {
-    if (shared_coords.size() != src_range.size())
-      return LowerNormal(op, lower_args, analyzer);
-    // The fragment inverse is relative to the copy region, not the shared
-    // buffer. Translate before the shared layout remaps these coordinates.
-    for (size_t i = 0; i < shared_coords.size(); i++)
-      shared_coords.Set(
-          i, analyzer->Simplify(shared_coords[i] + src_range[i]->min));
-  }
+  // The fragment inverse is relative to the copy region, not the shared
+  // buffer. Translate before the shared layout remaps these coordinates.
+  for (size_t i = 0; i < shared_coords.size(); i++)
+    shared_coords.Set(
+        i, analyzer->Simplify(shared_coords[i] + shared_range[i]->min));
   PrimExpr shared_addr = Call(
       DataType::Handle(), tl::access_ptr(),
       {BufferLoad(shared_tensor, shared_coords), PrimExpr(elems_per_reg * num),

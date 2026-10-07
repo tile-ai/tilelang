@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include <cute/arch/config.hpp>
 
 namespace tl {
 
@@ -121,8 +122,7 @@ TL_DEVICE void ptx_stmatrix_m8n8_x4_trans(void const *const smem_ptr,
                "r"(value0), "r"(value1), "r"(value2), "r"(value3));
 }
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
-    (defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM100_F))
+#if defined(CUTE_ARCH_STSM_SM100A_ENABLED)
 
 TL_DEVICE void ptx_stmatrix_m16n8_x1_trans(void const *const smem_ptr,
                                            const int32_t &value0) {
