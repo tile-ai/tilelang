@@ -199,20 +199,21 @@ class LibraryGenerator:
         #    deadlock when their output interleaves with tqdm progress bars.
         # Pipe stdio + isolate stdin to make the launch self-contained.
         run_kwargs: dict[str, Any] = {"timeout": timeout}
-        if sys.platform == "win32":
+        if is_hip_target(target):
+            run_kwargs["env"] = get_hipcc_subprocess_env()
+        elif sys.platform == "win32":
             if is_cuda_target(target):
                 from tilelang.contrib.nvcc import get_nvcc_subprocess_env
 
                 compiler_env = get_nvcc_subprocess_env()
-            elif is_hip_target(target):
-                compiler_env = get_hipcc_subprocess_env()
             else:
                 from tilelang.contrib.msvc import get_msvc_subprocess_env
 
                 compiler_env = get_msvc_subprocess_env()
+            run_kwargs["env"] = compiler_env
 
+        if sys.platform == "win32":
             run_kwargs.update(
-                env=compiler_env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

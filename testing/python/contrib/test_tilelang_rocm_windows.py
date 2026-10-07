@@ -7,6 +7,8 @@ import pytest
 
 from tilelang.contrib import msvc, rocm
 from tilelang import _rocm_sdk
+from tilelang.jit.adapter import libgen
+from tvm.target import Target
 
 
 def _make_sdk(tmp_path):
@@ -49,6 +51,18 @@ def test_use_rocm_directory_overrides_other_sdk_selectors(tmp_path, monkeypatch,
     for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
         assert compiler_env[name] == str(sdk)
         assert os.environ[name] == str(other)
+
+    def compile_hip(command, **kwargs):
+        assert command[0] == str(sdk / "bin" / compiler)
+        for name in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH"):
+            assert kwargs["env"][name] == str(sdk)
+        return SimpleNamespace(returncode=0, stdout=b"")
+
+    monkeypatch.setattr(libgen.subprocess, "run", compile_hip)
+    monkeypatch.setattr(libgen.tempfile, "tempdir", str(tmp_path))
+    generator = libgen.LibraryGenerator(Target({"kind": "hip", "mcpu": "gfx942"}))
+    generator.update_lib_code("int probe;")
+    generator.compile_lib()
 
 
 @pytest.mark.parametrize("setting", [None, "ON", "OFF", "missing sdk"])
