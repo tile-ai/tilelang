@@ -293,6 +293,68 @@ void RegisterIm2ColImpl(Im2ColImpl impl) {
   Im2ColImplRegistry().push_back(impl);
 }
 
+// The copy loop iterates over the region in the lowest-level memory scope
+// (global < shared/shared.dyn/shared.tmem < local.fragment), preferring src on
+// a tie.
+static bool CopyLoopsOverSrc(const Buffer &src, const Buffer &dst) {
+  auto scope_level = [](const Buffer &b) -> int {
+    String s = b.scope();
+    if (s == "local.fragment" || s == "local")
+      return 2;
+    if (s == "shared" || s == "shared.dyn" || s == "shared.tmem")
+      return 1;
+    // default to global level for unknown scopes
+    return 0;
+  };
+  return scope_level(src) >= scope_level(dst);
+}
+
+// The copy loop takes its extents from one region and indexes the other at
+// the same offsets. When the loop region is provably larger than the other one
+// in a paired non-unit dimension, the copy reads or writes outside that
+// region. A smaller loop region only copies part of the other one, which the
+// copy semantics tolerate (#1883), so it is not rejected here.
+static void CheckCopyStaysInRegions(const BufferRegion &src,
+                                    const BufferRegion &dst) {
+  auto non_unit = [](const BufferRegion &region) {
+    std::vector<PrimExpr> extents;
+    for (const Range &r : region->region) {
+      if (!is_one(r->extent)) {
+        extents.push_back(r->extent);
+      }
+    }
+    return extents;
+  };
+  std::vector<PrimExpr> src_ext = non_unit(src);
+  std::vector<PrimExpr> dst_ext = non_unit(dst);
+  if (src_ext.size() != dst_ext.size()) {
+    return;
+  }
+  bool loop_on_src = CopyLoopsOverSrc(src->buffer, dst->buffer);
+  const BufferRegion &loop = loop_on_src ? src : dst;
+  const BufferRegion &other = loop_on_src ? dst : src;
+  const std::vector<PrimExpr> &loop_ext = loop_on_src ? src_ext : dst_ext;
+  const std::vector<PrimExpr> &other_ext = loop_on_src ? dst_ext : src_ext;
+  arith::Analyzer analyzer;
+  DataType i64 = DataType::Int(64);
+  for (size_t i = 0; i < loop_ext.size(); ++i) {
+    if (!analyzer.CanProve(cast(i64, loop_ext[i]) > cast(i64, other_ext[i]))) {
+      continue;
+    }
+    TVM_FFI_THROW(ValueError)
+        << "[TileLang Semantic Check] T.copy would "
+        << (loop_on_src ? "write outside the dst region "
+                        : "read outside the src region ")
+        << other << ": the copy iterates over the "
+        << (loop_on_src ? "src" : "dst") << " region " << loop
+        << ", whose non-unit dimension " << i << " has extent " << loop_ext[i]
+        << ", but the " << (loop_on_src ? "dst" : "src")
+        << " region has extent " << other_ext[i]
+        << ". Slice both sides to the same shape."
+        << SpanHintSuffix({dst->buffer->span, src->buffer->span});
+  }
+}
+
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
 // annotations: Map containing common SIMT hints and backend-specific metadata.
@@ -305,6 +367,7 @@ Copy::Copy(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->src_range = src_access.region->region;
   node->dst_range = dst_access.region->region;
   node->SetAccessRegions({src_access, dst_access});
+  CheckCopyStaysInRegions(src_access.region, dst_access.region);
   // Copy annotations from the Call node
   node->annotations = annotations;
   if (auto dst_block = node->annotations.Get("dst_block")) {
@@ -331,21 +394,8 @@ TileOperator CopyNode::Clone() const {
 // Creates iterator variables for dimensions with extent > 1.
 Array<IterVar> CopyNode::MakeIterVars() const {
   // Choose the range set from the lowest-level memory scope between src and
-  // dst. Scope levels: global < shared/shared.dyn/shared.tmem < local.fragment
-  // (fragment)
-  auto scope_level = [](const Buffer &b) -> int {
-    String s = b.scope();
-    if (s == "local.fragment" || s == "local")
-      return 2;
-    if (s == "shared" || s == "shared.dyn" || s == "shared.tmem")
-      return 1;
-    // default to global level for unknown scopes
-    return 0;
-  };
-
-  int src_level = scope_level(src);
-  int dst_level = scope_level(dst);
-  bool base_is_src = (src_level >= dst_level);
+  // dst.
+  bool base_is_src = CopyLoopsOverSrc(src, dst);
   const Array<Range> &base_ranges = base_is_src ? src_range : dst_range;
 
   // Sanity check: when switching away from the original (src_range),
