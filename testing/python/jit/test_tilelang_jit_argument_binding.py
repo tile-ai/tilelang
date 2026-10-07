@@ -112,6 +112,42 @@ def test_lazy_jit_var_keyword_kwargs_are_flattened_and_hashable():
     assert "kwargs" not in compile_kwargs
 
 
+def test_lazy_jit_varargs_are_forwarded_to_factory():
+    @tilelang.jit
+    def make_kernel(*values, scale=1):
+        value = sum(values) * scale
+
+        @T.prim_func
+        def kernel():
+            T.evaluate(value)
+
+        return kernel
+
+    first = make_kernel.get_tir(1, 2)
+    assert first.body.value.value == 3
+    assert make_kernel.get_tir(1, 2, scale=1) is first
+    assert make_kernel.get_tir(1, 2, scale=3).body.value.value == 9
+    assert make_kernel.get_tir().body.value.value == 0
+
+
+def test_lazy_jit_varargs_and_kwargs_preserve_specializations():
+    @tilelang.jit
+    def make_kernel(first, *values, scale=1, **metadata):
+        value = (first + sum(values) + metadata.get("offset", 0)) * scale
+
+        @T.prim_func
+        def kernel():
+            T.evaluate(value)
+
+        return kernel
+
+    first = make_kernel.get_tir(1, 2, scale=3, offset=4)
+    assert first.body.value.value == 21
+    second = make_kernel.get_tir(1, 2, 3, scale=2, offset=4)
+    assert second.body.value.value == 20
+    assert make_kernel.get_tir(1, 2, scale=3, offset=4) is first
+
+
 _UNHASHABLE_DEFAULT_OPTS = [1, 2]
 _UNHASHABLE_DEFAULT_CONFIG = {"axis": [0]}
 
