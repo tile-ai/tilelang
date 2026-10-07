@@ -266,6 +266,11 @@ cdef class CythonKernelWrapper:
                     call_args.append(ctypes.c_void_p(tensor))
                 else:
                     dtype = self.param_dtypes[i]
+                    if dtype == torch.bfloat16:
+                        # The by-value bfloat16_t argument carries BF16 bits.
+                        bits = torch.tensor(tensor, dtype=dtype, device="cpu").view(torch.uint16).item()
+                        call_args.append(ctypes.c_uint16(bits))
+                        continue
                     if dtype not in dtype_to_ctype:
                         raise ValueError(f"Unsupported tensor dtype: {dtype}")
                     call_args.append(dtype_to_ctype[dtype](tensor))

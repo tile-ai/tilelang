@@ -305,6 +305,10 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         # dynamic symbolics
         args = list(param_values)
+        for i, value in enumerate(param_values):
+            if self.param_dtypes[i] == torch.bfloat16 and isinstance(value, (int, float, bool)):
+                # CUDA's argument buffer stores the BF16 bit pattern.
+                args[i] = torch.tensor(value, dtype=torch.bfloat16, device="cpu").view(torch.uint16).item()
         for symbol, (ref_id, _, _, _) in self.dynamic_symbolic_map.items():
             if ref_id != 2:
                 args.append(self._resolve_dynamic_symbolic_value(symbol, param_values))

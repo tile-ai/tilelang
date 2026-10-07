@@ -5,6 +5,7 @@ import torch
 
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 
 
 @tilelang.jit
@@ -200,3 +201,26 @@ def test_eager_jit_var_keyword_compile_kwargs_are_flattened():
     assert tensor_args == {"A": a, "B": b}
     assert compile_kwargs == {"block": 64, "opts": {"axis": [1, 2]}}
     assert "metadata" not in compile_kwargs
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("execution_backend", ["cython", "tvm_ffi", "nvrtc"])
+def test_bfloat16_scalar_parameter(execution_backend):
+    """Scalar inputs are rounded to BF16 before device arithmetic."""
+
+    @tilelang.jit(out_idx=[2], execution_backend=execution_backend)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((128,), T.bfloat16), scalar: T.bfloat16, B: T.Tensor((128,), T.bfloat16)):
+            with T.Kernel(1, threads=128):
+                for i in T.Parallel(128):
+                    B[i] = A[i] + scalar
+
+        return main
+
+    a = torch.arange(128, dtype=torch.float32).to(torch.bfloat16).cuda()
+    compiled = kernel()
+    for scalar in (1.5, -1.1, 2, True):
+        out = compiled(a, scalar)
+        rounded = torch.tensor(scalar, dtype=torch.bfloat16).item()
+        tilelang.testing.torch_assert_close(out, a + rounded, atol=0, rtol=0)
