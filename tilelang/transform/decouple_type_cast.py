@@ -397,14 +397,20 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         if _contains_seq_stmt(normalized_body):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
+        # Stage by iteration ordinal, so extent-sized cast buffers remain
+        # zero-based even before LegalizeVectorizedLoop runs.
+        normalized_loop = self._normalize_loop_domain(self._make_for(op, normalized_body))
+
         # Collect all shared/global stores and loads
-        collector = MemoryAccessCollector(op.loop_var)
-        collector.visit_stmt(normalized_body)
+        collector = MemoryAccessCollector(normalized_loop.loop_var)
+        collector.visit_stmt(normalized_loop.body)
 
         if not collector.stores and not collector.loads:
             # Cast exists but no memory access → nothing to decouple
             return self._make_for(op, new_body) if new_body is not op.body else op
 
+        op = normalized_loop
+        normalized_body = op.body
         extent = op.extent.value
 
         # Extract condition (from normalized body for correctness)
@@ -461,6 +467,23 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         return result
 
     # ----- helpers -----
+
+    def _normalize_loop_domain(self, loop: For) -> For:
+        """Use zero-based ordinals while preserving logical indices and guards.
+
+        Both copy and compute stages must index the extent-sized cast buffers
+        by ordinal, including when legalization chooses a scalar copy loop.
+        """
+        if (
+            isinstance(loop.min, IntImm)
+            and loop.min.value == 0
+            and (loop.step is None or isinstance(loop.step, IntImm) and loop.step.value == 1)
+        ):
+            return loop
+        loop_var = Var(loop.loop_var.name, loop.loop_var.dtype)
+        step = loop.step if loop.step is not None else 1
+        body = substitute(loop.body, {loop.loop_var: loop.min + loop_var * step})
+        return For(loop_var, 0, loop.extent, loop.kind, body, loop.thread_binding, loop.annotations)
 
     def _create_cast_entries(self, accesses: list[BufferStore | BufferLoad], extent: int) -> list[CastEntry]:
         """Create local cast buffers for memory accesses.

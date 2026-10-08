@@ -1,3 +1,5 @@
+import pytest
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -63,6 +65,116 @@ def test_memory_to_local():
                 b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
+
+
+def test_local_to_memory_nonzero_min():
+    """Staging stores and copy loads use offsets within the loop extent."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        for i in T.vectorized(2, 6):
+            b[i] = b_frag[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((4,), T.float16, scope="local")
+            for i in T.vectorized(4):
+                b_local_cast[i] = T.cast(b_frag[2 + i], T.float16)
+            for i_copy in T.vectorized(4):
+                b[2 + i_copy] = b_local_cast[i_copy]
+
+    _check(before, after)
+
+
+def test_memory_to_local_nonzero_min():
+    """Staging copy stores and compute loads use offsets within the extent."""
+
+    @T.prim_func
+    def before(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        for i in T.vectorized(2, 6):
+            b_frag[i] = b[i]
+
+    @T.prim_func
+    def after(b: T.Tensor[(8,), T.float16]):
+        b_frag = T.alloc_local((8,), T.float32)
+        with T.sblock("decoupled_cast"):
+            T.sblock_attr({"lexical_alloc_scope": 1})
+            T.reads()
+            T.writes()
+            b_local_cast = T.decl_buffer((4,), T.float16, scope="local")
+            for i_copy in T.vectorized(4):
+                b_local_cast[i_copy] = b[2 + i_copy]
+            for i in T.vectorized(4):
+                b_frag[2 + i] = T.cast(b_local_cast[i], T.float32)
+
+    _check(before, after)
+
+
+@pytest.mark.parametrize("target", ["c", "cuda", "hip", "webgpu", "metal"])
+@pytest.mark.parametrize("loop_min, step", [(2, None), (0, 2), (2, 2), (8, -2), ("symbolic", 2)])
+def test_decouple_then_legalize_loop_domain(target, loop_min, step):
+    """RMW staging stays zero-based after legalization on every backend."""
+    tir = tvm.tirx
+    if loop_min == "symbolic":
+        loop_min = tir.Var("start", "int32")
+        scalar_params = [loop_min]
+    else:
+        scalar_params = []
+    a = tir.decl_buffer((16,), "float16", name="a")
+    i = tir.Var("i", "int32")
+    value = tir.Cast("float16", tir.Cast("float32", a[i]) + tir.const(1, "float32"))
+    before = tir.PrimFunc(
+        [a.data, *scalar_params],
+        tir.For(i, loop_min, 4, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [i]), step=step),
+        buffer_map={a.data: a},
+    ).with_attr("global_symbol", "main")
+
+    # Build the reference with ordinal loops and explicit logical memory indices.
+    # The RMW load and store must share the same four-element staging buffer.
+    cast_buf = tir.decl_buffer((4,), "float16", name="a_local_cast", scope="local")
+    copy_from_var = tir.Var("copy_from", "int32")
+    copy_to_var = tir.Var("copy_to", "int32")
+    loop_step = step if step is not None else 1
+    copy_from = tir.For(
+        copy_from_var,
+        0,
+        4,
+        tir.ForKind.VECTORIZED,
+        tir.BufferStore(cast_buf, a[loop_min + copy_from_var * loop_step], [copy_from_var]),
+    )
+    compute_value = tir.Cast("float16", tir.Cast("float32", cast_buf[i]) + tir.const(1, "float32"))
+    compute = tir.For(i, 0, 4, tir.ForKind.VECTORIZED, tir.BufferStore(cast_buf, compute_value, [i]))
+    copy_to = tir.For(
+        copy_to_var,
+        0,
+        4,
+        tir.ForKind.VECTORIZED,
+        tir.BufferStore(a, cast_buf[copy_to_var], [loop_min + copy_to_var * loop_step]),
+    )
+    block = tir.SBlock(
+        [],
+        [],
+        [],
+        "decoupled_cast",
+        tir.SeqStmt([tir.AllocBuffer(cast_buf), copy_from, compute, copy_to]),
+        annotations={"lexical_alloc_scope": 1},
+    )
+    expected = before.with_body(tir.SBlockRealize([], True, block))
+
+    with tvm.target.Target(target):
+        actual_mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+        actual_mod = tilelang.transform.LegalizeVectorizedLoop()(actual_mod)
+        expected_mod = tilelang.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(expected))
+        actual_mod = tilelang.transform.Simplify()(actual_mod)
+        expected_mod = tilelang.transform.Simplify()(expected_mod)
+    tvm.ir.assert_structural_equal(actual_mod["main"], expected_mod["main"], True)
 
 
 def test_no_transform_same_dtype():
