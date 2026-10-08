@@ -69,6 +69,31 @@ StripGridAnnotation(const Map<ffi::String, ffi::Any> &annotations) {
  * loads/stores, owning annotated nest(s), and outside/opaque/store flags. */
 class GridAccessAnalysis : public StmtExprVisitor {
 public:
+  explicit GridAccessAnalysis(const PrimFunc &func)
+      // SplitHostDevice defaults the kernel ABI to noalias. Respect an
+      // explicit opt-out before that later pass materializes the ABI.
+      : no_alias_(func->GetAttr<Integer>(tirx::attr::kNoAlias)
+                      .value_or(Integer(1))
+                      ->value != 0) {
+    for (const Var &param : func->params) {
+      if (param.dtype().is_handle()) {
+        parameter_data_.insert(param);
+      }
+    }
+    for (const auto &[param, buffer] : func->buffer_map) {
+      parameter_data_.insert(buffer->data);
+    }
+    if (auto non_restrict =
+            func->GetAttr<Array<Var>>(attr::kNonRestrictParams)) {
+      for (const Var &data : non_restrict.value()) {
+        non_restrict_data_.insert(data);
+        if (auto buffer = func->buffer_map.Get(data)) {
+          non_restrict_data_.insert(buffer.value()->data);
+        }
+      }
+    }
+  }
+
   struct AccessInfo {
     int min_depth = 0;
     bool inside = false;        // plain load/store inside a nest
@@ -96,6 +121,14 @@ public:
   //! global buffers have no declaration).
   bool HasAllocation(const Var &data) const {
     return alloc_depths_.count(data) > 0;
+  }
+
+  //! Distinct data vars need the parameter noalias guarantee.
+  //! Unrecognized external buffers may be views of an existing parameter.
+  bool MayAlias(const Var &lhs, const Var &rhs) const {
+    return !no_alias_ || !parameter_data_.count(lhs) ||
+           !parameter_data_.count(rhs) ||
+           (non_restrict_data_.count(lhs) && non_restrict_data_.count(rhs));
   }
 
 private:
@@ -174,6 +207,9 @@ private:
 
   std::unordered_map<Var, AccessInfo, ObjectPtrHash, ObjectPtrEqual> info_;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> alloc_depths_;
+  bool no_alias_;
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> parameter_data_;
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> non_restrict_data_;
   std::unordered_set<const VarNode *> known_alloc_vars_;
   const ForNode *current_nest_ = nullptr;
   int grid_depth_ = 0;
@@ -460,7 +496,9 @@ Optional<Call> FindUnsafeCall(const Stmt &body) {
  * addresses must agree and be injective over the parallel scope and the
  * per-iteration serial scopes (concurrent writes to one address race even
  * when the values agree); loads of a written buffer must use that same
- * address. Read-only buffers are always fine. */
+ * address and storage element width. Distinct buffers also need the function's
+ * parameter noalias guarantee, including its non-restrict exceptions.
+ * Read-only buffers are always fine. */
 class OverlapStoreChecker : public StmtExprVisitor {
 public:
   OverlapStoreChecker(const GridAccessAnalysis &analysis,
@@ -471,17 +509,31 @@ public:
 
   bool found() const { return found_; }
   const std::string &buffer_name() const { return buffer_name_; }
-  const char *reason() const { return reason_; }
+  const std::string &reason() const { return reason_; }
 
   //! Evaluate the collected accesses; call after the traversal.
   void Finish() {
     arith::Analyzer analyzer;
     for (const auto &[data, acc] : access_) {
-      bool fail = acc.opaque_unanalyzable;
-      if (fail) {
-        reason_ = "opaque pointer use (call_extern / address_of / "
-                  "access_ptr)";
+      if (acc.opaque_unanalyzable) {
+        Reject_(acc,
+                "opaque pointer use (call_extern / address_of / access_ptr)");
+        return;
       }
+      if (!acc.stores.empty()) {
+        if (acc.mixed_element_bits) {
+          Reject_(acc, "buffer views use different element widths");
+          return;
+        }
+        for (const auto &[other_data, other_acc] : access_) {
+          if (!data.same_as(other_data) &&
+              analysis_.MayAlias(data, other_data)) {
+            Reject_(acc, "may alias buffer `" + other_acc.name + "`");
+            return;
+          }
+        }
+      }
+      bool fail = false;
       PrimExpr uniform;
       for (const StoreRec &rec : acc.stores) {
         PrimExpr simplified =
@@ -518,8 +570,7 @@ public:
         }
       }
       if (fail) {
-        found_ = true;
-        buffer_name_ = acc.name;
+        Reject_(acc, reason_);
         return;
       }
     }
@@ -534,8 +585,27 @@ private:
     std::string name;
     std::vector<StoreRec> stores; // plain BufferStore addresses
     std::vector<PrimExpr> load_indices;
+    int element_bits = 0;
+    bool mixed_element_bits = false;
     bool opaque_unanalyzable = false;
   };
+
+  void Reject_(const BufAccess &acc, std::string reason) {
+    found_ = true;
+    buffer_name_ = acc.name;
+    reason_ = std::move(reason);
+  }
+
+  BufAccess &RecordAccess_(const Buffer &buffer) {
+    BufAccess &acc = access_[buffer->data];
+    acc.name = buffer->name;
+    int element_bits = buffer->dtype.bits() * buffer->dtype.lanes();
+    if (acc.element_bits != 0 && acc.element_bits != element_bits) {
+      acc.mixed_element_bits = true;
+    }
+    acc.element_bits = element_bits;
+    return acc;
+  }
 
   ffi::Map<Var, Range> CurrentRanges() const {
     ffi::Map<Var, Range> ranges;
@@ -556,8 +626,7 @@ private:
   }
   void VisitStmt_(const BufferStoreNode *op) override {
     if (!analysis_.HasAllocation(op->buffer->data)) {
-      BufAccess &acc = access_[op->buffer->data];
-      acc.name = op->buffer->name;
+      BufAccess &acc = RecordAccess_(op->buffer);
       acc.stores.push_back(
           {op->indices.size() == 1 ? op->indices[0] : PrimExpr(),
            CurrentRanges()});
@@ -566,8 +635,7 @@ private:
   }
   void VisitExpr_(const BufferLoadNode *op) override {
     if (!analysis_.HasAllocation(op->buffer->data)) {
-      BufAccess &acc = access_[op->buffer->data];
-      acc.name = op->buffer->name;
+      BufAccess &acc = RecordAccess_(op->buffer);
       acc.load_indices.push_back(op->indices.size() == 1 ? op->indices[0]
                                                          : PrimExpr());
     }
@@ -611,7 +679,7 @@ private:
   int in_call_ = 0;
   bool found_ = false;
   std::string buffer_name_;
-  const char *reason_ = "";
+  std::string reason_;
 };
 
 struct GridRewriter : public StmtMutator {
@@ -1003,7 +1071,7 @@ tvm::transform::Pass MaterializeCPUParallelGrid() {
       return func;
     }
 
-    GridAccessAnalysis analysis;
+    GridAccessAnalysis analysis(func);
     analysis(func->body);
 
     int64_t min_trip = ctx->GetConfig<IntImm>(kCPUParallelMinTrip,

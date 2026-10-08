@@ -13,16 +13,28 @@ from tilelang import tvm
 from tvm import tirx
 
 
-def _compile_serial(func):
+def _compile_serial(func, out_idx=-1):
     kernel = tilelang.compile(
         func,
         target="c",
         execution_backend="cython",
-        out_idx=-1,
+        out_idx=out_idx,
         pass_configs={"tl.cpu_parallel": True},
     )
     assert "#pragma omp" not in kernel.get_kernel_source()
     return kernel
+
+
+def _parallel_loop_count(func, target):
+    with tvm.target.Target(target), tvm.transform.PassContext(config={"tl.cpu_parallel": True}):
+        lowered = tilelang.lower(func, target=target)
+    loops = []
+    for mod in (lowered.host_mod, lowered.device_mod):
+        for f in mod.functions.values():
+            tirx.stmt_functor.post_order_visit(
+                f.body, lambda node: loops.append(node) if isinstance(node, tirx.For) and node.kind == tirx.ForKind.PARALLEL else None
+            )
+    return len(loops)
 
 
 def _apply(func, target="c"):
@@ -174,3 +186,89 @@ def test_casts_preserve_iterator_identity(mixed_casts):
     grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, tirx.BufferStore(B, bx, [index]), annotations={"tl.cpu_grid_dim": 0})
     func = tirx.PrimFunc([B.data], grid, buffer_map={B.data: B})
     assert _apply(func) == tirx.ForKind.SERIAL
+
+
+@pytest.mark.parametrize("alias_contract", ["non_restrict", "no_noalias"])
+def test_overlapping_parameter_slices_stay_serial(alias_contract, capfd):
+    n = 256
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), "int32"), B: T.Tensor((n,), "int32")):
+        with T.Kernel(n, cpu_num_threads=4) as bx:
+            if alias_contract == "non_restrict":
+                T.annotate_restrict_buffers(A, B)
+            B[bx] = A[bx] + 1
+
+    if alias_contract == "no_noalias":
+        main = main.with_attr("tirx.noalias", False)
+    kernel = _compile_serial(main, out_idx=None)
+    storage = torch.zeros(n + 1, dtype=torch.int32)
+    kernel(storage[:-1], storage[1:])
+    torch.testing.assert_close(storage, torch.arange(n + 1, dtype=torch.int32))
+    assert "may alias" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["c", "llvm"])
+@pytest.mark.parametrize("alias_contract", ["noalias", "missing", "disabled", "both_non_restrict", "one_non_restrict", "read_only"])
+def test_parameter_alias_contract(target, alias_contract):
+    bx = tirx.Var("bx", "int32")
+    A = tirx.decl_buffer((16,), "int32", name="A")
+    B = tirx.decl_buffer((16,), "int32", name="B")
+    body = tirx.BufferStore(B, A[bx] + 1, [bx])
+    if alias_contract == "read_only":
+        body = tirx.Evaluate(A[bx] + B[bx])
+    grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, body, annotations={"tl.cpu_grid_dim": 0})
+    func = tirx.PrimFunc([A.data, B.data], grid, buffer_map={A.data: A, B.data: B})
+    if alias_contract not in ("missing", "read_only"):
+        func = func.with_attr("tirx.noalias", alias_contract != "disabled")
+    if alias_contract == "both_non_restrict":
+        func = func.with_attr("tl.non_restrict_params", [A.data, B.data])
+    elif alias_contract == "one_non_restrict":
+        func = func.with_attr("tl.non_restrict_params", [A.data])
+    parallel = alias_contract in ("noalias", "missing", "one_non_restrict", "read_only")
+    assert _apply(func, target) == (tirx.ForKind.PARALLEL if parallel else tirx.ForKind.SERIAL)
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["c", pytest.param("llvm", marks=pytest.mark.skipif(not tvm.runtime.enabled("llvm"), reason="LLVM support is not built"))],
+)
+@pytest.mark.parametrize("view_dtype", ["uint8", "uint32"])
+def test_parameter_view_access_width(target, view_dtype, capfd):
+    n = 256
+    width = 4 if view_dtype == "uint8" else 1
+
+    @T.prim_func
+    def main(B: T.Tensor((n,), "int32")):
+        with T.Kernel(n, cpu_num_threads=4) as bx:
+            B[bx] = bx + 100
+            T.view(B, (n * width,), dtype=view_dtype)[bx] = T.Cast(view_dtype, 255)
+
+    kernel = tilelang.compile(
+        main, target=target, execution_backend="cython" if target == "c" else "tvm_ffi", pass_configs={"tl.cpu_parallel": True}
+    )
+    parallel = view_dtype == "uint32"
+    if target == "c":
+        assert ("#pragma omp" in kernel.get_kernel_source()) == parallel
+    else:
+        assert (_parallel_loop_count(main, target) > 0) == parallel
+    output = torch.zeros(n, dtype=torch.int32)
+    kernel(output)
+    expected = torch.full_like(output, 255) if parallel else torch.arange(n, dtype=torch.int32) + 100
+    if not parallel:
+        expected[: n // 4] = -1
+    torch.testing.assert_close(output, expected)
+    if not parallel:
+        assert "different element widths" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize("write", [False, True])
+def test_mixed_width_parameter_reads(write):
+    bx = tirx.Var("bx", "int32")
+    B = tirx.decl_buffer((16,), "int32", name="B")
+    view = tirx.decl_buffer((64,), "uint8", data=B.data)
+    value = tirx.Cast("int32", view[bx]) + B[bx]
+    body = tirx.BufferStore(B, value, [bx]) if write else tirx.Evaluate(value)
+    grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, body, annotations={"tl.cpu_grid_dim": 0})
+    func = tirx.PrimFunc([B.data], grid, buffer_map={B.data: B})
+    assert _apply(func) == (tirx.ForKind.SERIAL if write else tirx.ForKind.PARALLEL)
