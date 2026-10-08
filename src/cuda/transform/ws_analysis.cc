@@ -16,6 +16,7 @@
 #include "op/gemm_sp.h"
 #include "op/operator.h"
 #include "op/utils.h"
+#include "transform/common/transfer_analysis.h"
 
 namespace tvm {
 namespace tl {
@@ -23,43 +24,6 @@ namespace tl {
 using namespace ffi;
 
 namespace {
-
-/// Detect if a statement is a SIMT global-to-shared memory copy.
-/// Matches any statement that writes to shared memory and reads from global
-/// memory, without reading shared or local buffers (which would indicate
-/// consumer-side compute).  This is intentionally broader than "pure direct
-/// copy" so that T.Parallel with complex indexing / if_then_else (later
-/// lowered to cp.async) is also captured.
-class SimtProducerDetector : public StmtExprVisitor {
-public:
-  static bool Detect(const Stmt &stmt) {
-    SimtProducerDetector d;
-    d(stmt);
-    return d.writes_shared_ && d.reads_global_ && !d.reads_shared_local_;
-  }
-
-private:
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsSharedBuffer(op->buffer)) {
-      writes_shared_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsGlobalBuffer(op->buffer)) {
-      reads_global_ = true;
-    }
-    if (IsSharedBuffer(op->buffer) || IsLocalBuffer(op->buffer, true)) {
-      reads_shared_local_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  bool writes_shared_{false};
-  bool reads_global_{false};
-  bool reads_shared_local_{false};
-};
 
 class EvaluateCallInSimpleWrapperExtractor
     : public StmtFunctor<Optional<Call>(const Stmt &)> {
@@ -271,10 +235,9 @@ TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
         if (auto *copy = tile_op.as<CopyNode>()) {
           return ClassifyCopy(copy, target);
         }
-        // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
-        // producer so it goes to the producer warp group.
+        // The selected implementation owns the completion protocol.
         if (tile_op.as<Im2ColOpNode>()) {
-          if (TargetIsHopper(target)) {
+          if (Im2ColUsesTMA(target)) {
             return TileStmtKind::kTmaProducer;
           }
         }
@@ -292,8 +255,9 @@ TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
       IsPtxWaitGroup(stmt)) {
     return TileStmtKind::kCpAsyncRaw;
   }
-  // Non-tile-op: check for SIMT global-to-shared copy.
-  if (SimtProducerDetector::Detect(stmt)) {
+  // Producer placement is an effect property, not an async capability.
+  // Arithmetic/casts can execute on producer warps using synchronous stores.
+  if (AnalyzeTransfers(stmt, target).IsSimtProducer()) {
     return TileStmtKind::kSimtProducer;
   }
   return TileStmtKind::kConsumer;

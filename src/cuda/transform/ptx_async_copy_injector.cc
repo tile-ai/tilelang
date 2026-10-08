@@ -21,6 +21,7 @@
 #include "cuda/transform/ptx_async_copy_injector.h"
 #include "op/utils.h"
 #include "tir/ir/buffer_common.h"
+#include "transform/common/transfer_analysis.h"
 
 namespace tvm {
 namespace tl {
@@ -249,12 +250,11 @@ public:
       return StmtMutator::VisitStmt_(store);
     }
 
-    Optional<PrimExpr> predicate = std::nullopt;
-    const BufferLoadNode *load =
-        MatchZeroFillBufferLoad(store->value, &predicate);
-    if (load) {
+    auto transfer = AnalyzeTransferValue(store->value);
+    if (transfer && !transfer->converts_value) {
+      const auto &predicate = transfer->zero_fill_predicate;
       Optional<Stmt> injected =
-          TryInjectPTX(load, store, predicate.defined(),
+          TryInjectPTX(transfer->source.get(), store, predicate.defined(),
                        predicate.defined() ? predicate.value() : PrimExpr());
       if (injected.defined()) {
         injected_ptx_async_copy_ = true;
@@ -294,45 +294,6 @@ private:
   };
 
   // ---- Copy candidate analysis helpers ----
-  static bool IsZeroValue(const PrimExpr &expr) {
-    if (const auto *broadcast = expr.as<BroadcastNode>()) {
-      return IsZeroValue(broadcast->value);
-    }
-    if (const auto *float_imm = expr.as<FloatImmNode>()) {
-      return float_imm->value == 0.0f;
-    }
-    if (const auto *int_imm = expr.as<IntImmNode>()) {
-      return int_imm->value == 0;
-    }
-    return false;
-  }
-
-  static const BufferLoadNode *
-  MatchZeroFillBufferLoad(const PrimExpr &value,
-                          Optional<PrimExpr> *predicate) {
-    if (const auto *load = value.as<BufferLoadNode>()) {
-      return load;
-    }
-
-    const auto *call = value.as<CallNode>();
-    if (!call || !call->op.same_as(builtin::if_then_else()) ||
-        !IsZeroValue(call->args[2])) {
-      return nullptr;
-    }
-
-    const BufferLoadNode *load =
-        MatchZeroFillBufferLoad(call->args[1], predicate);
-    if (load == nullptr) {
-      return nullptr;
-    }
-
-    *predicate =
-        predicate->defined()
-            ? Optional<PrimExpr>(And(call->args[0], predicate->value()))
-            : Optional<PrimExpr>(call->args[0]);
-    return load;
-  }
-
   static Optional<PrimExpr>
   FlattenToLinearOffset(const Buffer &buf, const Array<PrimExpr> &indices) {
     // Convert N-D indices (potentially with axis_separators) into a single

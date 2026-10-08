@@ -25,6 +25,7 @@
 #include "backend/common/target_utils.h"
 #include "common/bind_utils.h"
 #include "common/pipeline_utils.h"
+#include "common/transfer_analysis.h"
 #include "tvm/ir/expr.h"
 
 namespace tvm {
@@ -35,32 +36,20 @@ using namespace ffi;
 
 class BufferRegionCollector : public StmtExprVisitor {
 public:
-  BufferRegionCollector(Map<Var, Buffer> buffer_data_to_buffer, Target target);
+  explicit BufferRegionCollector(Map<Var, Buffer> buffer_data_to_buffer);
 
   Array<BufferRegion> GetReads() const;
   Array<BufferRegion> GetWrites() const;
-  bool GetGlobalCopyPattern() const;
-  bool GetTmaCopyPattern() const;
-  bool HasNonCopyTileOp() const;
 
 private:
-  static bool IsGlobalLikeBuffer(const Buffer &buffer);
-
   void HandleTileOp(const TileOperator &tile_op);
   void VisitStmt_(const BufferStoreNode *op) final;
   void VisitExpr_(const BufferLoadNode *op) final;
   void VisitExpr_(const CallNode *op) final;
-  void VisitStmt_(const IfThenElseNode *op) final;
 
   Map<Var, Buffer> buffer_data_to_buffer_;
-  Target target_;
   Array<BufferRegion> reads_;
   Array<BufferRegion> writes_;
-  bool is_global_read_ = false;
-  bool is_global_copy_pattern_ = false;
-  bool is_tma_copy_ = false;
-  bool has_non_copy_tile_op_ = false;
-  bool within_condition_expr_ = false;
 };
 
 /*!
@@ -84,62 +73,26 @@ bool MayConflict(const Region &region1, const Region &region2) {
 }
 
 BufferRegionCollector::BufferRegionCollector(
-    Map<Var, Buffer> buffer_data_to_buffer, Target target)
-    : buffer_data_to_buffer_(buffer_data_to_buffer), target_(target) {}
+    Map<Var, Buffer> buffer_data_to_buffer)
+    : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
 
 Array<BufferRegion> BufferRegionCollector::GetReads() const { return reads_; }
 
 Array<BufferRegion> BufferRegionCollector::GetWrites() const { return writes_; }
 
-bool BufferRegionCollector::GetGlobalCopyPattern() const {
-  return is_global_copy_pattern_;
-}
-
-bool BufferRegionCollector::GetTmaCopyPattern() const { return is_tma_copy_; }
-
-bool BufferRegionCollector::HasNonCopyTileOp() const {
-  return has_non_copy_tile_op_;
-}
-
-bool BufferRegionCollector::IsGlobalLikeBuffer(const Buffer &buffer) {
-  return IsGlobalBuffer(buffer) || (buffer.defined() && buffer.scope().empty());
-}
-
 void BufferRegionCollector::HandleTileOp(const TileOperator &tile_op) {
   if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
-    BufferRegionCollector nested(buffer_data_to_buffer_, target_);
+    BufferRegionCollector nested(buffer_data_to_buffer_);
     nested(parallel->GetRoot());
     reads_.insert(reads_.end(), nested.GetReads().begin(),
                   nested.GetReads().end());
     writes_.insert(writes_.end(), nested.GetWrites().begin(),
                    nested.GetWrites().end());
-    is_global_copy_pattern_ =
-        is_global_copy_pattern_ || nested.GetGlobalCopyPattern();
-    is_tma_copy_ = is_tma_copy_ || nested.GetTmaCopyPattern();
-    has_non_copy_tile_op_ = has_non_copy_tile_op_ || nested.HasNonCopyTileOp();
     return;
   }
   AccessRegions access = tile_op->GetAccessRegions();
   reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
   writes_.insert(writes_.end(), access.writes.begin(), access.writes.end());
-  if (const auto *copy = tile_op.as<CopyNode>()) {
-    if (IsGlobalLikeBuffer(copy->src) && IsSharedBuffer(copy->dst)) {
-      is_global_copy_pattern_ = true;
-    }
-  }
-  // Im2Col always uses TMA on Hopper.
-  if (const auto *im2col = tile_op.as<Im2ColOpNode>()) {
-    if (IsGlobalLikeBuffer(im2col->src_) && IsSharedBuffer(im2col->dst_)) {
-      is_global_copy_pattern_ = true;
-      if (TargetIsHopper(target_)) {
-        is_tma_copy_ = true;
-      }
-    }
-    return;
-  }
-  if (!tile_op.as<CopyNode>()) {
-    has_non_copy_tile_op_ = true;
-  }
 }
 
 void BufferRegionCollector::VisitStmt_(const BufferStoreNode *op) {
@@ -153,12 +106,7 @@ void BufferRegionCollector::VisitStmt_(const BufferStoreNode *op) {
   auto store_region = BufferRegion(store_buffer, region);
   writes_.push_back(store_region);
 
-  is_global_read_ = false;
-  this->VisitExpr(op->value);
-  if (is_global_read_ && IsSharedBuffer(store_buffer)) {
-    is_global_copy_pattern_ = true;
-  }
-  is_global_read_ = false;
+  StmtExprVisitor::VisitStmt_(op);
 }
 
 void BufferRegionCollector::VisitExpr_(const BufferLoadNode *op) {
@@ -172,13 +120,7 @@ void BufferRegionCollector::VisitExpr_(const BufferLoadNode *op) {
   auto load_region = BufferRegion(load_buffer, region);
   reads_.push_back(load_region);
 
-  if (IsGlobalLikeBuffer(op->buffer) && !within_condition_expr_) {
-    // skip condition expr of if_then_else node
-    // shared[i] = T.if_then_else(global[i] < n, register_a[i], register_b[i])
-    // is not a global read shared[i] = T.if_then_else(global[i] < n,
-    // global_a[i], global_b[i]) is a global read
-    is_global_read_ = true;
-  }
+  StmtExprVisitor::VisitExpr_(op);
 }
 
 void BufferRegionCollector::VisitExpr_(const CallNode *op) {
@@ -244,42 +186,21 @@ void BufferRegionCollector::VisitExpr_(const CallNode *op) {
     for (size_t i = 2; i < op->args.size(); ++i) {
       this->VisitExpr(op->args[i]);
     }
-  } else if (op->op.same_as(builtin::if_then_else())) {
-    within_condition_expr_ = true;
-    this->VisitExpr(op->args[0]);
-    within_condition_expr_ = false;
-    for (auto i = 1; i < op->args.size(); i++) {
-      this->VisitExpr(op->args[i]);
-    }
   } else {
     StmtExprVisitor::VisitExpr_(op);
   }
 }
 
-void BufferRegionCollector::VisitStmt_(const IfThenElseNode *op) {
-  within_condition_expr_ = true;
-  this->VisitExpr(op->condition);
-  within_condition_expr_ = false;
-  this->VisitStmt(op->then_case);
-  if (op->else_case.defined()) {
-    within_condition_expr_ = true;
-    this->VisitStmt(op->else_case.value());
-    within_condition_expr_ = false;
-  }
-}
-
 class PipelinePlanningBodyAnalyzer {
 public:
-  PipelinePlanningBodyAnalyzer(Map<Var, Buffer> buffer_data_to_buffer,
-                               Target target)
-      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
-        target_(std::move(target)) {}
+  explicit PipelinePlanningBodyAnalyzer(Map<Var, Buffer> buffer_data_to_buffer)
+      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
 
   std::pair<Array<BufferRegion>, Array<BufferRegion>>
   CollectStmtAccessRegions(const Stmt &stmt) const {
     SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                  /*name_hint=*/"", /*body*/ stmt);
-    auto collector = BufferRegionCollector(buffer_data_to_buffer_, target_);
+    auto collector = BufferRegionCollector(buffer_data_to_buffer_);
     collector(block);
     return {collector.GetReads(), collector.GetWrites()};
   }
@@ -400,7 +321,6 @@ public:
 
 private:
   Map<Var, Buffer> buffer_data_to_buffer_;
-  Target target_;
 };
 
 /*! \brief Information about a pipeline stage
@@ -411,7 +331,7 @@ private:
  * before reordering \param order Current position of this stage in the
  * pipeline after reordering (-1 if not yet assigned) \param stage Pipeline
  * stage number this operation belongs to (-1 if not yet assigned) \param
- * copy_stage Whether this stage is a memory copy operation \param
+ * prefetch_stage Whether policy places this stage early \param
  * last_use_stmt_index Index of the last statement (in original order) that
  * uses the results of this stage (-1 if not yet determined). This field is
  * crucial for pipeline optimization:
@@ -429,16 +349,18 @@ struct PipelineStageInfo {
   std::unordered_set<const VarNode *> scalar_uses;
   int original_stmt_index{};
   int order = -1, stage = -1;
-  bool copy_stage = false;
+  // Scheduling preference, independent of async instruction capability.
+  bool prefetch_stage = false;
+  bool async_candidate = false;
   bool tma_copy = false; // true if this copy stage uses TMA (not cp.async)
-  bool conditional_execution = false;
   bool producer_for_copy = false;
+  bool register_materialization = false;
   int last_use_stmt_index =
       -1; // Initialized to -1, indicating no consumers found yet
 
 public:
-  bool IsFirstStage() const { return copy_stage || producer_for_copy; }
-  bool IsCopyStage() const { return copy_stage; }
+  bool IsFirstStage() const { return prefetch_stage || producer_for_copy; }
+  bool IsPrefetchStage() const { return prefetch_stage; }
   bool IsTmaCopy() const { return tma_copy; }
   bool IsProducerForCopy() const { return producer_for_copy; }
   bool IsLastUseStmtIndexValid() const { return last_use_stmt_index != -1; }
@@ -450,6 +372,41 @@ public:
                         bool use_async_copy)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         target_(std::move(target)), use_async_copy_(use_async_copy) {}
+
+  void SelectPrefetchStages(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    for (auto &producer : *pipeline_stage_infos) {
+      if (!producer.IsPrefetchStage() || producer.async_candidate ||
+          producer.tma_copy) {
+        continue;
+      }
+      // Prefer to materialize a synchronous shared-to-fragment relay at use,
+      // rather than spend shared buffer versions and register live ranges on
+      // advancing its entire load/convert/store operation. True async transfers
+      // and shared operands consumed by computation retain their prefetch
+      // schedule. This is a cost policy, not an async capability check.
+      bool has_consumer = false;
+      bool only_register_materializations = true;
+      for (const auto &consumer : *pipeline_stage_infos) {
+        if (consumer.original_stmt_index == producer.original_stmt_index) {
+          continue;
+        }
+        for (const BufferRegion &read : consumer.reads) {
+          for (const BufferRegion &write : producer.writes) {
+            if (read->buffer.same_as(write->buffer) &&
+                MayConflict(read->region, write->region)) {
+              has_consumer = true;
+              only_register_materializations &=
+                  consumer.register_materialization;
+            }
+          }
+        }
+      }
+      if (has_consumer && only_register_materializations) {
+        producer.prefetch_stage = false;
+      }
+    }
+  }
 
   class ScalarUseDefCollector : public StmtExprVisitor {
   public:
@@ -474,167 +431,10 @@ public:
     std::unordered_set<const VarNode *> scalar_uses_;
   };
 
-  bool MayBeConditionallyExecuted(const Stmt &stmt) const {
-    bool conditional = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (conditional) {
-        return;
-      }
-      if (const auto *if_then_else = node.as<IfThenElseNode>()) {
-        conditional = true;
-        return;
-      }
-      if (const auto *realize = node.as<SBlockRealizeNode>()) {
-        if (!is_one(realize->predicate)) {
-          conditional = true;
-        }
-      }
-    });
-    return conditional;
-  }
-
-  bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
-    if (pinfo.conditional_execution) {
-      return false;
-    }
-    if (pinfo.IsTmaCopy()) {
-      return false;
-    }
-    return pinfo.IsCopyStage();
-  }
-
-  bool IsPureCopyStmt(const Stmt &stmt) const {
-    auto is_global_like_buffer = [](const Buffer &buffer) {
-      return IsGlobalBuffer(buffer) ||
-             (buffer.defined() && buffer.scope().empty());
-    };
-    auto is_pure_raw_copy_value = [&](const PrimExpr &expr,
-                                      const auto &self) -> bool {
-      if (const auto *load = expr.as<BufferLoadNode>()) {
-        return is_global_like_buffer(load->buffer);
-      }
-      if (const auto *cast = expr.as<CastNode>()) {
-        return self(cast->value, self);
-      }
-      return false;
-    };
-
-    bool saw_copy = false;
-    bool saw_non_copy_tile_op = false;
-    bool saw_non_copy_buffer_store = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (saw_non_copy_tile_op || saw_non_copy_buffer_store) {
-        return;
-      }
-      if (const auto *store = node.as<BufferStoreNode>()) {
-        saw_copy = true;
-        if ((!IsSharedBuffer(store->buffer) &&
-             !IsLocalBuffer(store->buffer, /*allow_var=*/true)) ||
-            !is_pure_raw_copy_value(store->value, is_pure_raw_copy_value)) {
-          saw_non_copy_buffer_store = true;
-        }
-        return;
-      }
-      const auto *call = node.as<CallNode>();
-      if (call == nullptr) {
-        return;
-      }
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (!tile_op.defined()) {
-        return;
-      }
-      if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
-        if (IsPureCopyStmt(parallel->GetRoot())) {
-          saw_copy = true;
-        } else {
-          saw_non_copy_tile_op = true;
-        }
-        return;
-      }
-      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
-        saw_copy = true;
-      } else {
-        saw_non_copy_tile_op = true;
-      }
-    });
-    return saw_copy && !saw_non_copy_tile_op && !saw_non_copy_buffer_store;
-  }
-
-  Optional<TileOperator> GetSinglePureCopyTileOp(const Stmt &stmt) const {
-    Optional<TileOperator> copy_tile_op;
-    bool saw_non_copy_tile_op = false;
-    bool saw_multiple_copy_ops = false;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
-        return;
-      }
-      const auto *call = node.as<CallNode>();
-      if (call == nullptr) {
-        return;
-      }
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (!tile_op.defined()) {
-        return;
-      }
-      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
-        if (copy_tile_op.defined()) {
-          saw_multiple_copy_ops = true;
-          copy_tile_op = Optional<TileOperator>();
-        } else {
-          copy_tile_op = tile_op;
-        }
-      } else {
-        saw_non_copy_tile_op = true;
-        copy_tile_op = Optional<TileOperator>();
-      }
-    });
-    if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
-      return Optional<TileOperator>();
-    }
-    return copy_tile_op;
-  }
-
-  static bool IsGlobalLikeBuffer(const Buffer &buffer) {
-    return IsGlobalBuffer(buffer) ||
-           (buffer.defined() && buffer.scope().empty());
-  }
-
-  void ClassifyCopyLikeStage(const Stmt &stmt, PipelineStageInfo *pinfo) const {
-    ICHECK(pinfo != nullptr);
-    if (pinfo->conditional_execution) {
-      return;
-    }
-
-    if (pinfo->copy_stage) {
-      return;
-    }
-
-    auto copy_tile_op = GetSinglePureCopyTileOp(stmt);
-    if (!copy_tile_op.defined()) {
-      return;
-    }
-
-    if (const auto *copy = copy_tile_op.value().as<CopyNode>()) {
-      if (!IsGlobalLikeBuffer(copy->src) || !IsSharedBuffer(copy->dst)) {
-        return;
-      }
-      pinfo->copy_stage = true;
-      return;
-    }
-
-    if (const auto *im2col = copy_tile_op.value().as<Im2ColOpNode>()) {
-      if (!IsGlobalLikeBuffer(im2col->src_) || !IsSharedBuffer(im2col->dst_)) {
-        return;
-      }
-      pinfo->copy_stage = true;
-      pinfo->tma_copy = TargetIsHopper(target_);
-    }
-  }
-
   void AnalyzeCopyLastUse(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     for (auto &pinfo : *pipeline_stage_infos) {
-      if (!pinfo.IsFirstStage()) {
+      if (!pinfo.IsFirstStage() && !pinfo.async_candidate) {
         continue;
       }
 
@@ -650,7 +450,7 @@ public:
           }
         }
 
-        if (!pinfo.IsCopyStage()) {
+        if (!pinfo.IsPrefetchStage()) {
           continue;
         }
 
@@ -702,7 +502,7 @@ public:
     CopyStageDependencyReadsManager copy_stage_dependency_reads_mgr;
 
     for (const auto &pinfo : *pipeline_stage_infos) {
-      if (pinfo.IsCopyStage()) {
+      if (pinfo.IsPrefetchStage()) {
         for (const BufferRegion &read : pinfo.reads) {
           copy_stage_dependency_reads_mgr.AddUnique(read);
         }
@@ -713,7 +513,7 @@ public:
     size_t iter_count = 0;
 
     for (auto &pinfo : *pipeline_stage_infos) {
-      if (!pinfo.IsCopyStage()) {
+      if (!pinfo.IsPrefetchStage()) {
         continue;
       }
       auto original_copy_stmt_index = pinfo.original_stmt_index;
@@ -721,7 +521,7 @@ public:
       while (updated) {
         updated = false;
         for (auto &pinfo_inner : *pipeline_stage_infos) {
-          if (pinfo_inner.IsCopyStage()) {
+          if (pinfo_inner.IsPrefetchStage()) {
             continue;
           }
           if (pinfo_inner.original_stmt_index >= original_copy_stmt_index) {
@@ -811,7 +611,7 @@ public:
             continue;
           }
           auto &producer = (*pipeline_stage_infos)[it->second];
-          if (producer.IsCopyStage()) {
+          if (producer.IsPrefetchStage()) {
             continue;
           }
           updated |= update_producer(&producer, consumer.last_use_stmt_index);
@@ -878,7 +678,7 @@ public:
     std::map<std::pair<int, int>, int> implicit_group_ids;
     for (int stmt_idx : stmt_indices_by_order) {
       const auto &pinfo = pipeline_stage_infos[stmt_idx];
-      if (!IsAsyncProducerCandidate(pinfo)) {
+      if (!pinfo.async_candidate) {
         continue;
       }
       auto key = std::make_pair(pinfo.stage, pinfo.last_use_stmt_index);
@@ -925,10 +725,10 @@ public:
     return true;
   }
 
-  void MaybeAnnotateLegacyAsyncPipelineLoop(const Array<Stmt> &pipeline_stmts,
-                                            const Array<Integer> &order_array,
-                                            const Array<Integer> &stage_array,
-                                            Map<String, Any> *annotations) {
+  void AnnotateExplicitAsyncPipeline(const Array<Stmt> &pipeline_stmts,
+                                     const Array<Integer> &order_array,
+                                     const Array<Integer> &stage_array,
+                                     Map<String, Any> *annotations) {
     if (!TargetHasAsyncCopy(target_) || !use_async_copy_) {
       return;
     }
@@ -939,29 +739,11 @@ public:
     pipeline_stage_infos.reserve(pipeline_stmts.size());
     for (size_t i = 0; i < pipeline_stmts.size(); ++i) {
       auto pinfo = MakePipelineStageInfo(pipeline_stmts[i], i);
-      ClassifyCopyLikeStage(pipeline_stmts[i], &pinfo);
       pinfo.order = static_cast<int>(order_array[i]->value);
       pinfo.stage = static_cast<int>(stage_array[i]->value);
-      if (!pinfo.IsCopyStage() && !pinfo.conditional_execution &&
-          pinfo.stage == 0) {
-        bool reads_global = false;
-        bool writes_shared = false;
-        for (const BufferRegion &read : pinfo.reads) {
-          if (IsGlobalLikeBuffer(read->buffer)) {
-            reads_global = true;
-            break;
-          }
-        }
-        for (const BufferRegion &write : pinfo.writes) {
-          if (IsSharedBuffer(write->buffer)) {
-            writes_shared = true;
-            break;
-          }
-        }
-        if (reads_global && writes_shared) {
-          pinfo.copy_stage = true;
-        }
-      }
+      // An explicit stage assignment does not change instruction capability.
+      // Reuse the same classification as automatic planning; global reads and
+      // shared writes alone also describe arbitrary synchronous computation.
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
@@ -973,7 +755,7 @@ public:
     SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                  /*name_hint=*/"",
                  /*body*/ std::move(stmt));
-    auto collector = BufferRegionCollector(buffer_data_to_buffer_, target_);
+    auto collector = BufferRegionCollector(buffer_data_to_buffer_);
     collector(block);
     PipelineStageInfo pinfo;
     pinfo.reads = std::move(collector.GetReads());
@@ -983,13 +765,21 @@ public:
     pinfo.scalar_defs = std::move(scalar_defs);
     pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
-    pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
-    bool pure_copy_stage =
-        collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
-    pinfo.copy_stage = pure_copy_stage;
-    pinfo.tma_copy = pure_copy_stage && !pinfo.conditional_execution &&
-                     collector.GetTmaCopyPattern();
-    ClassifyCopyLikeStage(block->body, &pinfo);
+    TransferSummary transfers = AnalyzeTransfers(block->body, target_);
+    // Prefetch transfers, including conversion and zero-fill. This is a
+    // scheduling policy, not an instruction promise: converting loads can
+    // benefit from early placement even though they execute synchronously.
+    pinfo.prefetch_stage = transfers.has_global_to_shared &&
+                           transfers.only_transfers && !transfers.opaque_effect;
+    pinfo.tma_copy =
+        pinfo.prefetch_stage && !transfers.execution_guard && transfers.tma;
+    pinfo.async_candidate = transfers.IsAsyncCandidate();
+    if (auto tile_op = ParseOperator(block->body); tile_op.defined()) {
+      if (const auto *copy = tile_op.as<CopyNode>()) {
+        pinfo.register_materialization =
+            IsSharedBuffer(copy->src) && IsFragmentBuffer(copy->dst);
+      }
+    }
     return pinfo;
   }
 
@@ -1042,11 +832,11 @@ private:
     MakeStageAnalyzer().ValidateScalarDependencies(pipeline_stage_infos);
   }
 
-  void MaybeAnnotateLegacyAsyncPipelineLoop(const Array<Stmt> &pipeline_stmts,
-                                            const Array<Integer> &order_array,
-                                            const Array<Integer> &stage_array,
-                                            Map<String, Any> *annotations) {
-    MakeStageAnalyzer().MaybeAnnotateLegacyAsyncPipelineLoop(
+  void AnnotateExplicitAsyncPipeline(const Array<Stmt> &pipeline_stmts,
+                                     const Array<Integer> &order_array,
+                                     const Array<Integer> &stage_array,
+                                     Map<String, Any> *annotations) {
+    MakeStageAnalyzer().AnnotateExplicitAsyncPipeline(
         pipeline_stmts, order_array, stage_array, annotations);
   }
 
@@ -1066,7 +856,7 @@ private:
   using SeqStmtFlattener = PipelinePlanningBodyAnalyzer::SeqStmtFlattener;
 
   PipelinePlanningBodyAnalyzer MakeBodyAnalyzer() const {
-    return PipelinePlanningBodyAnalyzer(buffer_data_to_buffer_, target_);
+    return PipelinePlanningBodyAnalyzer(buffer_data_to_buffer_);
   }
 
   ScheduledStmtAnalysis AnalyzeScheduledStmts(const Array<Stmt> &stmts) const {
@@ -1093,13 +883,6 @@ private:
         if (key != "tl_pipeline_order" && key != "tl_pipeline_stage") {
           annotations.Set(key, value);
         }
-      }
-      if (TargetHasAsyncCopy(target_) && use_async_copy_) {
-        // Legacy explicit stage/order annotations do not carry per-statement
-        // async producer metadata yet, so keep the previous stage-level
-        // behavior as a fallback for these loops.
-        annotations.Set(s_tir::attr::software_pipeline_async_stages,
-                        Array<Integer>{0});
       }
       Array<Stmt> pipeline_body_stmts = NormalizePipelineBody(loop->body);
       Array<Stmt> pipeline_stmts =
@@ -1133,9 +916,9 @@ private:
                           analysis.replayable_bind_mask);
         }
       }
-      MaybeAnnotateLegacyAsyncPipelineLoop(analysis.scheduled_stmts,
-                                           filtered_order_array,
-                                           filtered_stage_array, &annotations);
+      AnnotateExplicitAsyncPipeline(analysis.scheduled_stmts,
+                                    filtered_order_array, filtered_stage_array,
+                                    &annotations);
       auto for_node = GetRef<For>(loop);
       auto *n = for_node.CopyOnWrite();
       n->annotations = annotations;
@@ -1187,6 +970,8 @@ private:
       auto pinfo = MakePipelineStageInfo(analysis.scheduled_stmts[i], i);
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
+
+    MakeStageAnalyzer().SelectPrefetchStages(&pipeline_stage_infos);
 
     // Some statements before a copy are not copy operations themselves, but
     // they prepare buffers that the copy must read.  A common example is
@@ -1271,7 +1056,7 @@ private:
       for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
         pinfo.order =
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
-        if (!pinfo.IsCopyStage() && !pinfo.IsProducerForCopy())
+        if (!pinfo.IsPrefetchStage() && !pinfo.IsProducerForCopy())
           pinfo.stage--;
       }
     }

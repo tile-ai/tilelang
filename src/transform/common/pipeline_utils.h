@@ -29,7 +29,12 @@ using namespace tirx;
 /*! Per-statement TMA copy flag (1 = TMA eligible, 0 = not). */
 static constexpr const char *kPipelineTmaCopies =
     "software_pipeline_tma_copies";
-/*! Per-statement async producer flag (1 = async copy producer, 0 = not). */
+/*! Per-statement async completion-region candidate.
+ * Planning establishes transfer semantics; physical lowering still selects the
+ * instruction and may retain synchronous stores. Commit-group numbering is
+ * preserved even for empty groups, and shared-memory visibility is handled by
+ * the ordinary synchronization passes. This flag does not assign a stage.
+ */
 static constexpr const char *kPipelineAsyncProducers =
     "software_pipeline_async_producers";
 /*! Per-statement async producer group id (-1 = not an async producer). */

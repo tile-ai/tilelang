@@ -6,7 +6,7 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _make_im2col_kernel(use_deprecated_alias=False, channels=32, block_K=32, block_M=16, hw=8):
+def _make_im2col_kernel(use_deprecated_alias=False, channels=32, block_K=32, block_M=16, hw=8, num_stages=3):
     N, C, H, W, F, K = 1, channels, hw, hw, 32, 3
     S, D, P = 1, 1, 1
     block_N = 32
@@ -30,7 +30,7 @@ def _make_im2col_kernel(use_deprecated_alias=False, channels=32, block_K=32, blo
             out_flat = T.Tensor((N * OH * OW, F), T.float16, out.data)
 
             T.clear(out_local)
-            for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=3):
+            for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
                 if use_deprecated_alias:
                     T.c2d_im2col(data, data_shared, by, k_iter, KH, S, D, P)
                 else:
