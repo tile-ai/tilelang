@@ -880,8 +880,8 @@ AtomicAddx2Ret(float *ref, ValType val,
   }
 }
 
-template <typename dst_dtype, typename ValType>
-TL_DEVICE void AtomicAddx4(dst_dtype *ref, ValType val,
+template <typename ValType>
+TL_DEVICE void AtomicAddx4(float *ref, ValType val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   float4 add_val = ToFloat4(val);
   if (tl_atomic_detail::IsRelaxedMemoryOrder(memory_order)) {
@@ -898,9 +898,9 @@ TL_DEVICE void AtomicAddx4(dst_dtype *ref, ValType val,
   }
 }
 
-template <typename dst_dtype, typename ValType>
+template <typename ValType>
 TL_DEVICE float4
-AtomicAddx4Ret(dst_dtype *ref, ValType val,
+AtomicAddx4Ret(float *ref, ValType val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   float4 add_val = ToFloat4(val);
   if (tl_atomic_detail::IsRelaxedMemoryOrder(memory_order)) {
@@ -932,8 +932,8 @@ AtomicAddx2Ret(float *ref, ValType val,
   return tl_atomic_detail::AtomicAddx2ScalarRet(ref, add_val);
 }
 
-template <typename dst_dtype, typename ValType>
-TL_DEVICE void AtomicAddx4(dst_dtype *ref, ValType val,
+template <typename ValType>
+TL_DEVICE void AtomicAddx4(float *ref, ValType val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
   (void)memory_order;
   float4 add_val = ToFloat4(val);
@@ -941,9 +941,9 @@ TL_DEVICE void AtomicAddx4(dst_dtype *ref, ValType val,
                                       add_val.w);
 }
 
-template <typename dst_dtype, typename ValType>
+template <typename ValType>
 TL_DEVICE float4
-AtomicAddx4Ret(dst_dtype *ref, ValType val,
+AtomicAddx4Ret(float *ref, ValType val,
                int memory_order = int(cuda::memory_order_relaxed)) {
   (void)memory_order;
   float4 add_val = ToFloat4(val);
