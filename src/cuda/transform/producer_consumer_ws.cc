@@ -1971,6 +1971,11 @@ private:
       }
     }
 
+    // Warp specialization does not support pipeline loops inside a while
+    // loop. Keep discovery aligned with the replacement helpers below, which
+    // also stop at While nodes, so these loops use the non-WS pipeline path.
+    void VisitStmt_(const WhileNode *) final {}
+
     Optional<For> pipeline_loop_;
     bool under_outer_for_ = false;
   };
