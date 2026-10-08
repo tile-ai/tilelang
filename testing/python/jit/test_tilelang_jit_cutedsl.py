@@ -305,11 +305,21 @@ def run_cutedsl_kernel_multi_stream(
         tensor_b = tensor_b.T
     tensor_c = torch.randn(M, N, dtype=out_dtype).cuda()
 
+    adapter = matmul_kernel.adapter
+    forward = adapter._forward_from_prebuild_lib
+    passed_streams = []
+
+    def record_stream(*args, **kwargs):
+        passed_streams.append(kwargs["stream"])
+        return forward(*args, **kwargs)
+
+    adapter._forward_from_prebuild_lib = record_stream
     num_streams = 4
     for _ in range(num_streams):
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             matmul_kernel(tensor_a, tensor_b, tensor_c)
+        assert passed_streams[-1] == stream.cuda_stream
 
 
 @tilelang.testing.requires_cuda
