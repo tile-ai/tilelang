@@ -447,7 +447,7 @@ jobs:
     needs: [lint]
     runs-on: linux-amd64-a5-4
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.0-beta.2-950-ubuntu22.04-py3.12
+      image: quay.io/celenewyear/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
     timeout-minutes: 180
     env:
       PIP_USER: "0"
@@ -495,11 +495,6 @@ jobs:
             fi
           done
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
-
-          # Install the torch stack into the image Python first; the venv below
-          # is created with --system-site-packages, so it inherits these.
-          python -m pip install --timeout 120 --retries 10 "torch==2.10.0+cpu" --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install --timeout 120 --retries 10 "torch_npu==2.10.0"
 
           uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
           source .venv/bin/activate
