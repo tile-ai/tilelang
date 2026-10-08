@@ -1442,7 +1442,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
       // Loop-carried dependency analysis using symbolic iteration shift.
       // We compare accesses at iteration i (end of loop, stored in
-      // reads/writes) with accesses at iteration i+1 (beginning of next
+      // reads/writes) with accesses at iteration i+step (beginning of next
       // iteration). By substituting loop_var -> loop_var + step in the "next
       // iteration" indices, we can precisely determine if there's a true
       // dependency.
@@ -1747,13 +1747,11 @@ private:
    * loop_var + step in the "next iteration" access indices and check if they
    * overlap with the "current iteration" access indices.
    *
-   * This approach can prove that accesses like A[i] and A[i+1] are disjoint
-   * (no loop-carry dependency), while correctly detecting dependencies like
-   * A[i] and A[i-1] (loop-carry dependency with distance 1).
+   * For unit-step loops, this proves that A[i] and A[i+1] are disjoint and
+   * detects the distance-one dependency between A[i] and A[i-1].
    *
    * \param prev The access entry from the previous/current iteration
-   * \param curr The access entry to check against, when loop is not nullptr, it
-   * means the next iteration
+   * \param curr The access entry to check against
    * \param loop The loop node for loop-carry analysis, nullptr for
    * same-iteration
    * \return true if the accesses conflict and need synchronization
@@ -1803,13 +1801,13 @@ private:
     // prev represents access at iteration i (end of loop body)
     // curr represents access at iteration i+step (beginning of next iteration)
     Map<Var, PrimExpr> loop_shift_sub;
+    PrimExpr adjusted_extent;
     if (loop != nullptr) {
-      // Get loop step, default to 1 if not specified
-      PrimExpr step = loop->step.has_value()
-                          ? loop->step.value()
-                          : make_const(loop->loop_var.dtype(), 1);
-      // Substitute loop_var -> loop_var + step for the "next iteration"
+      PrimExpr step =
+          loop->step.value_or(make_const(loop->loop_var.dtype(), 1));
       loop_shift_sub.Set(loop->loop_var, loop->loop_var + step);
+      // Only iterations with i + step < min + extent have a successor.
+      adjusted_extent = loop->extent - step;
     }
 
     // Check if indices are the same (considering loop shift)
@@ -1849,13 +1847,6 @@ private:
       }
       // Add loop variable constraint for loop-carry analysis
       if (loop != nullptr) {
-        // For loop-carry analysis, we compare iteration i with iteration i+1.
-        // Since i+1 must be a valid iteration, i can only range from min to
-        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr step = loop->step.has_value()
-                            ? loop->step.value()
-                            : make_const(loop->loop_var.dtype(), 1);
-        PrimExpr adjusted_extent = loop->extent - step;
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
@@ -1903,13 +1894,6 @@ private:
 
       // Add loop variable constraint for loop-carry analysis
       if (loop != nullptr) {
-        // For loop-carry analysis, we compare iteration i with iteration i+1.
-        // Since i+1 must be a valid iteration, i can only range from min to
-        // min+extent-2 (i.e., extent-1 valid pairs instead of extent).
-        PrimExpr step = loop->step.has_value()
-                            ? loop->step.value()
-                            : make_const(loop->loop_var.dtype(), 1);
-        PrimExpr adjusted_extent = loop->extent - step;
         analyzer.Bind(loop->loop_var,
                       Range::FromMinExtent(loop->min, adjusted_extent));
       }
