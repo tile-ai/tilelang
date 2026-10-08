@@ -227,6 +227,9 @@ jobs:
             "CUDA_VERSION=$cudaVersion" | Tee-Object -FilePath $env:GITHUB_ENV -Append
             "UV_TORCH_BACKEND=cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
             "PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+            # GPU SDKs are optional project dependencies. Request the CUDA SDK
+            # explicitly in this release job's isolated build environment.
+            "SKBUILD_BUILD_REQUIRES=nvidia-cuda-nvcc>=13;nvidia-cuda-cccl>=13;nvidia-cuda-nvrtc>=13" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
           if ("${{ env.IS_RELEASE }}" -eq "true") {

@@ -7,7 +7,7 @@
 - **glibc**: 2.28 (Ubuntu 20.04 or later)
 - **Python Version**: >= 3.10
 - **NVIDIA GPUs — CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
-- **AMD GPUs — ROCm**: a host ROCm installation providing `hipcc` (see [Installing on AMD GPUs (ROCm)](#installing-on-amd-gpus-rocm))
+- **AMD GPUs — ROCm**: a host or pip ROCm SDK providing `hipcc` (see [Installing on AMD GPUs (ROCm)](#installing-on-amd-gpus-rocm))
 
 The easiest way to install tilelang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
 
@@ -37,7 +37,7 @@ python -c "import tilelang; print(tilelang.__version__)"
 
 The Linux x86_64 wheels on PyPI are fat CUDA+ROCm builds: the same `pip install tilelang` works on AMD GPUs, and no source build or separate package index is required. Two things differ from the CUDA flow:
 
-1. **A host ROCm installation is required at runtime.** Kernels are JIT-compiled with the host `hipcc` (there is no pip-provided ROCm toolchain, unlike the CUDA `nvcc` extra).
+1. **A ROCm SDK is required at runtime.** Kernels are JIT-compiled with `hipcc`. Use a host SDK, or the optional `tilelang[rocm]` dependency which installs AMD's pip SDK and development tools.
 2. **Install a ROCm build of PyTorch first.** A plain `pip install tilelang` resolves the default (CUDA) `torch` from PyPI, which cannot detect AMD GPUs. Install torch from the ROCm channel matching your ROCm version before (or when) installing tilelang:
 
 ```bash
@@ -67,13 +67,32 @@ Notes:
 - The `tilelang[nvcc]` extra is CUDA-only; do not install it on ROCm hosts.
 - Windows and macOS wheels do not include the ROCm backend (Linux only).
 
+The ROCm SDK packages are published on AMD's index. From a source checkout,
+`uv` uses the index mappings in `pyproject.toml`:
+
+```bash
+uv sync --extra rocm --no-install-project
+```
+
+For pip, install the SDK from AMD's index first (pip does not read uv's source
+mappings), then install TileLang:
+
+```bash
+pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[devel]==10.0.0"
+pip install "tilelang[rocm]"
+```
+
+This extra provides the SDK, not a ROCm build of PyTorch or the Windows native
+TileLang backend. Install a compatible ROCm PyTorch wheel separately for Torch
+tensor inputs. Windows HIP requires a source build as described below.
+
 ## Building from Source
 
 **Prerequisites for building from source:**
 
 - **Operating System**: Linux or Windows
 - **Python Version**: >= 3.10
-- **CUDA Version**: >= 10.0 (host installation), or pip-provided CUDA toolchain (>= 13.0)
+- **GPU SDK**: CUDA for NVIDIA targets, ROCm for AMD targets; see the corresponding source-build section below.
 
 If you prefer Docker, please skip to the [Install Using Docker](#install-using-docker) section. The commands below use Ubuntu/Debian as the Linux example; Windows-specific notes are called out where they differ.
 
@@ -84,11 +103,68 @@ apt-get update
 apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-essential cmake libedit-dev
 ```
 
-On Windows, install Python 3, CMake, and Visual Studio Build Tools with the MSVC C++ toolchain. Run the `pip install` commands below from a Visual Studio Developer Command Prompt (or `call VsDevCmd.bat` first) so that `cl.exe` is on `PATH` and CMake can detect the compiler.
+On Windows, install Python 3 and Visual Studio Build Tools with the MSVC C++
+toolchain, a Windows SDK, and **C++ Clang compiler for Windows**. Native sources
+require clang-cl; host JIT also supports cl.exe. Ninja builds discover the
+toolchain from ordinary PowerShell; `VSDEVCMD_BAT` selects a custom installation.
+Python build dependencies supply CMake and Ninja. See [Windows build details](../developer_guide/windows_build.md)
+for compiler overrides and environment handling.
+
+GPU SDKs are optional: select CUDA with the `nvcc` extra or AMD HIP with the
+`rocm` extra. CPU builds need neither SDK. To force a CPU build on a machine
+with GPU SDKs installed:
+
+```powershell
+$env:USE_CUDA = "OFF"
+$env:USE_ROCM = "OFF"
+$env:USE_ASCEND = "OFF"
+$env:USE_LLVM = "OFF"
+pip install . -v
+```
 
 Then, clone the tilelang repository and install it using pip. The `-v` flag enables verbose output during the build process.
 
 > **Note**: Use the `--recursive` flag to include necessary submodules. Tilelang currently depends on a customized version of TVM, which is included as a submodule. If you prefer [Building with Existing TVM Installation](#using-existing-tvm), you can skip cloning the TVM submodule (but still need other dependencies).
+
+### Windows ROCm/HIP
+
+Use a Visual Studio 2022 developer shell (MSVC 14.44), Python 3.10 or newer,
+and AMD's ROCm SDK. ROCm 10.0's Clang headers conflict with MSVC 14.51's
+`cmath`; see the [upstream LLVM fix](https://github.com/llvm/llvm-project/pull/201563).
+TileLang discovers the installed pip SDK for both its native build and JIT.
+An explicit `ROCM_PATH`, `ROCM_HOME`, `HIP_PATH`, or `USE_ROCM=<sdk>` selects a
+custom SDK.
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[devel]==10.0.0"
+$env:USE_CUDA = "OFF"
+$env:USE_ROCM = "ON"
+pip install -e ".[rocm]" --no-build-isolation -v
+```
+
+For Torch tensor inputs, install AMD's matching PyTorch distribution and select
+your device extra. For example, Radeon 780M (`gfx1103`) was validated with:
+
+```powershell
+pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-gfx1103]==2.13.0+rocm10.0.0"
+```
+
+Build without isolation to use the SDK packages installed in the active Python
+environment. Isolated builds require an externally discoverable SDK path;
+TileLang's build requirements install no GPU SDK automatically.
+Windows HIP stubs are not implemented; leave `TILELANG_USE_HIP_STUBS=OFF`
+(the Windows default). The resulting native libraries require the HIP runtime
+DLLs, whose directories TileLang discovers from the SDK.
+
+Check compiler registration and actual device availability separately:
+
+```powershell
+python -c "import tilelang; from tilelang import tvm; print(tvm.runtime.enabled('rocm'), tvm.rocm(0).exist)"
+python -c "from tilelang.backend.target import determine_target; print(determine_target('auto', return_object=True))"
+```
 
 ### With host CUDA toolchain
 
@@ -111,6 +187,18 @@ pip install -r requirements-dev.txt
 pip install "nvidia-cuda-nvcc>=13" "nvidia-cuda-cccl>=13" "nvidia-cuda-nvrtc>=13"
 pip install . -v --no-build-isolation
 ```
+
+For an isolated CUDA build, add the SDK to the build requirements:
+
+```bash
+pip install . -v -Ccmake.define.USE_CUDA=ON \
+  '-Cbuild.requires=nvidia-cuda-nvcc>=13' \
+  '-Cbuild.requires=nvidia-cuda-cccl>=13' \
+  '-Cbuild.requires=nvidia-cuda-nvrtc>=13'
+```
+
+The `tilelang[nvcc]` extra installs JIT dependencies, which do not enter an
+isolated build environment.
 
 **Option B** — pip toolchain in another virtualenv or path:
 

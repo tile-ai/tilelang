@@ -761,7 +761,7 @@ class TLCPUSourceWrapper:
         #ifdef __cplusplus
         extern "C"
         #endif
-        int32_t call({}) {{
+        TL_EXPORT int32_t call({}) {{
           return {};
         }}
     """)
