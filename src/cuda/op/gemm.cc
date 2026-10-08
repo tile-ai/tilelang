@@ -143,6 +143,24 @@ bool AllowTuringMma(const GemmNode &op) {
   return false;
 }
 
+// fp8 (.e4m3/.e5m2) mma.sync atoms first exist on SM89; the SM80/SM86 MMA
+// path has none. CUTLASS compiles the missing atom into
+// CUTE_INVALID_CONTROL_PATH, so without this gate nvcc succeeds and the
+// device traps at launch with a bare `device-side assert triggered`.
+bool NeedsSm89Fp8Mma(const GemmNode &op) {
+  return op.a_->dtype.is_float8() || op.b_->dtype.is_float8();
+}
+
+void FatalFp8MmaUnavailable(const GemmNode &op, Target target) {
+  LOG(FATAL) << "T.gemm() with fp8 operands requires a CUDA target with fp8 "
+                "mma.sync atoms (SM89+), but got target="
+             << target << " with A(dtype=" << op.a_->dtype
+             << "), B(dtype=" << op.b_->dtype
+             << "). SM80/SM86 have no .e4m3/.e5m2 mma instruction; the kernel "
+                "would compile and then trap at launch."
+             << SpanHintSuffix({op.a_->span, op.b_->span, op.c_->span});
+}
+
 void FatalWgmmaUnavailable(const GemmNode &op, Target target) {
   LOG(FATAL) << "T.wgmma_gemm() requires Hopper WGMMA lowering, but "
                 "constraints were not satisfied. Got target="
@@ -370,6 +388,11 @@ struct Gemm {
     }
     if (TargetIsTuring(target) && !AllowTuringMma(op)) {
       return kCudaFMA;
+    }
+    // Reached only by the mma.sync path: WGMMA/TCGEN05 returned above, and
+    // Volta/Turing demote fp8 to kCudaFMA.
+    if (NeedsSm89Fp8Mma(op) && !TargetHasSMVersionGE(target, 89)) {
+      FatalFp8MmaUnavailable(op, target);
     }
     return kCudaMMA;
   }

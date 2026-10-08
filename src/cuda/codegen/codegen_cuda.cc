@@ -1355,6 +1355,52 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
     std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
     std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
 
+    // Comparisons return bool vectors, not the input floating-point dtype.
+    // Keep their packed path separate from CanEmitPackedX2Math(result_type).
+    // CUDA bool carriers currently support at most four lanes.
+    std::string comparison;
+    if (op == "==")
+      comparison = "eq";
+    else if (op == "!=")
+      comparison = "neu"; // C++/TIR != is true for unordered (NaN) operands.
+    else if (op == "<")
+      comparison = "lt";
+    else if (op == "<=")
+      comparison = "le";
+    else if (op == ">")
+      comparison = "gt";
+    else if (op == ">=")
+      comparison = "ge";
+    DataType operand_type = lhs.dtype();
+    bool packed_comparison =
+        !comparison.empty() && t.is_vector_bool() &&
+        (lanes == 2 || lanes == 4) && operand_type == rhs.dtype() &&
+        operand_type.lanes() == lanes &&
+        (operand_type.is_float16() || operand_type.is_bfloat16());
+    if (packed_comparison) {
+      // The mask intrinsics arrived in CUDA 12. BF16 packed set requires SM90;
+      // retain the scalar path for older toolkits/architectures without PTX.
+      stream << "#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= "
+             << (operand_type.is_bfloat16() ? 900 : 530)
+             << ") && defined(CUDART_VERSION) && (CUDART_VERSION >= 12000)\n";
+      std::string native_type =
+          operand_type.is_bfloat16() ? "__nv_bfloat162" : "__half2";
+      for (int pair = 0; pair < lanes / 2; ++pair) {
+        std::string field = pair == 0 ? ".x" : ".y";
+        std::string mask = name_supply_->FreshName("cmp_mask");
+        PrintIndent();
+        stream << "uint " << mask << " = __h" << comparison << "2_mask("
+               << "tl::from_uint1<" << native_type << ">(make_uint1(" << vlhs
+               << field << ")), tl::from_uint1<" << native_type
+               << ">(make_uint1(" << vrhs << field << ")));\n";
+        // Each true mask lane is 0xffff. Normalize to 0/1 so casts and boolean
+        // arithmetic retain the same semantics as the scalar comparison path.
+        PrintVecElemStore(sret, t, pair * 2, "(" + mask + " & 1u)");
+        PrintVecElemStore(sret, t, pair * 2 + 1, "((" + mask + " >> 16) & 1u)");
+      }
+      stream << "#else\n";
+    }
+
     for (int i = 0, lanes = t.lanes(); i < lanes; ++i) {
       std::ostringstream value_temp;
       if (isalpha(op[0])) {
@@ -1371,6 +1417,9 @@ void CodeGenTileLangCUDA::PrintVecBinaryOp(const std::string &op, DataType t,
         value_temp << ")";
       }
       PrintVecElemStore(sret, t, i, value_temp.str());
+    }
+    if (packed_comparison) {
+      stream << "#endif\n";
     }
   }
   EndScope(ssa_scope);
@@ -3004,7 +3053,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(tl::pack_b8x4())) {
-    print_extern_call_expr(os, "tl::pack_b8x4");
+    print_extern_call_expr(os, "pack_b8x4");
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
