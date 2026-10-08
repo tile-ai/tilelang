@@ -445,10 +445,15 @@ jobs:
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
-    runs-on: [self-hosted, ascend]
-    timeout-minutes: 120
+    runs-on: linux-amd64-a5-4
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:9.2.0-beta.2-950-ubuntu22.04-py3.12
+    timeout-minutes: 180
     env:
       PIP_USER: "0"
+      # The container cannot reach pypi.org reliably (read timeouts); use a
+      # reachable mirror for every pip install in this job.
+      PIP_INDEX_URL: "https://mirrors.huaweicloud.com/repository/pypi/simple"
       USE_CUDA: "OFF"
       USE_ASCEND: "ON"
 
@@ -459,6 +464,14 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      - name: Trust the mounted workspace for git
+        shell: bash
+        run: |
+          # The container runs as root while the runner mounts the workspace
+          # from the host, so git refuses to read it as "dubious ownership".
+          # The CMake submodule check below needs git to work in the checkout.
+          git config --global --add safe.directory '*'
+
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -466,8 +479,10 @@ jobs:
           enable-cache: false
 
       - name: Build and test Ascend
+        shell: bash
         run: |
-          # Keep the runner's preinstalled Torch/Torch-NPU stack.
+          # The CANN image ships no PyTorch stack; install the CPU torch and the
+          # matching torch_npu build before anything imports them.
           CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
           for CANN_SET_ENV in \
             "${ASCEND_HOME_PATH:-}/set_env.sh" \
@@ -480,6 +495,11 @@ jobs:
             fi
           done
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+
+          # Install the torch stack into the image Python first; the venv below
+          # is created with --system-site-packages, so it inherits these.
+          python -m pip install --timeout 120 --retries 10 "torch==2.10.0+cpu" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install --timeout 120 --retries 10 "torch_npu==2.10.0"
 
           uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
           source .venv/bin/activate
