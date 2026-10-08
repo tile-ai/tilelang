@@ -558,18 +558,10 @@ public:
     }
   }
   void VisitStmt_(const tirx::ForNode *op) override {
-    if (op->kind == tirx::ForKind::kParallel ||
-        op->kind == tirx::ForKind::kVectorized) {
-      auto guard_1 =
-          MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-      auto guard_2 = MakeGuard(op->extent > 0);
-      Base::VisitStmt_(op);
-    } else {
-      auto guard_1 =
-          MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-      auto guard_2 = MakeGuard(op->extent > 0);
-      Base::VisitStmt_(op);
-    }
+    auto guard_1 =
+        MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+    auto guard_2 = MakeGuard(op->extent > 0);
+    Base::VisitStmt_(op);
   }
   void VisitStmt_(const tirx::WhileNode *op) override {
     {
