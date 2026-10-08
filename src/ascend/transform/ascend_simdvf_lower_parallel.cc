@@ -7,6 +7,8 @@
  *        return-value vector instructions.
  */
 
+#include <tvm/arith/analyzer.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
@@ -54,6 +56,142 @@ private:
 
   static int64_t ComputeVRegSize(DataType dtype) {
     return 8 * 32 / (dtype.bits() / 8);
+  }
+
+  static PrimExpr MatchIndexDType(const PrimExpr &value, DataType dtype) {
+    return value.dtype() == dtype ? value : Cast(dtype, value);
+  }
+
+  static Array<PrimExpr> InferCompactStrides(const Array<PrimExpr> &shape) {
+    int ndim = static_cast<int>(shape.size());
+    std::vector<PrimExpr> strides(ndim);
+    PrimExpr stride = IntImm(shape.back().dtype(), 1);
+    for (int i = ndim - 1; i >= 0; --i) {
+      strides[i] = stride;
+      stride = stride * shape[i];
+    }
+    return Array<PrimExpr>(strides.begin(), strides.end());
+  }
+
+  // True when a row-major walk of the region is a contiguous element sequence,
+  // so a VReg-sized vsts from each linearized chunk address is legal. Leading
+  // unit-extent dims (the in-loop multi-buffer version slot) are skipped.
+  static bool IsContiguousRegion(const Buffer &buf,
+                                 const std::vector<int64_t> &extents) {
+    int ndim = static_cast<int>(extents.size());
+    ICHECK_EQ(static_cast<int>(buf->shape.size()), ndim);
+    Array<PrimExpr> strides =
+        buf->strides.empty() ? InferCompactStrides(buf->shape) : buf->strides;
+    ICHECK_EQ(static_cast<int>(strides.size()), ndim);
+    int64_t expected = 1;
+    for (int i = ndim - 1; i >= 0; --i) {
+      if (extents[i] == 1) {
+        continue;
+      }
+      const auto *stride = strides[i].as<IntImmNode>();
+      if (!stride || stride->value != expected) {
+        return false;
+      }
+      expected *= extents[i];
+    }
+    return true;
+  }
+
+  static bool TryGetConstExtents(const Array<Range> &ranges,
+                                 std::vector<int64_t> *extents,
+                                 int64_t *total) {
+    extents->clear();
+    *total = 1;
+    for (const Range &range : ranges) {
+      const auto *ext = range->extent.as<IntImmNode>();
+      if (!ext) {
+        return false;
+      }
+      extents->push_back(ext->value);
+      *total *= ext->value;
+    }
+    return true;
+  }
+
+  // Delinearize a flattened region offset. Mins may be symbolic (the physical
+  // version index after MaterializeMultiBuffer).
+  static Array<PrimExpr> MakeRegionIndices(const Array<Range> &ranges,
+                                           const std::vector<int64_t> &extents,
+                                           PrimExpr flat_idx) {
+    int ndim = static_cast<int>(ranges.size());
+    ICHECK_EQ(static_cast<int>(extents.size()), ndim);
+    DataType dtype = flat_idx.dtype();
+    if (ndim == 1) {
+      return {ranges[0]->min +
+              MatchIndexDType(flat_idx, ranges[0]->min.dtype())};
+    }
+    Array<PrimExpr> idxs;
+    PrimExpr remaining = flat_idx;
+    for (int i = ndim - 1; i >= 1; --i) {
+      PrimExpr ext = IntImm(dtype, extents[i]);
+      PrimExpr coord = FloorMod(remaining, ext);
+      idxs.insert(idxs.begin(),
+                  ranges[i]->min +
+                      MatchIndexDType(coord, ranges[i]->min.dtype()));
+      remaining = FloorDiv(remaining, ext);
+    }
+    idxs.insert(idxs.begin(),
+                ranges[0]->min +
+                    MatchIndexDType(remaining, ranges[0]->min.dtype()));
+    return idxs;
+  }
+
+  // vsts_norm lowers to asc_storealign and requires a 32-byte-aligned base.
+  // Prove the linearized region byte offset is a multiple of 32 (mirrors
+  // insert_nd2nz.cc:HasAlignedScatterBase); symbolic version indices remain
+  // provable when the per-version stride is 32-byte aligned.
+  static void ValidateFillBaseAlignment(const Buffer &buf,
+                                        const Array<Range> &ranges) {
+    arith::Analyzer analyzer;
+    DataType index_dtype = DataType::Int(64);
+    PrimExpr offset = cast(index_dtype, buf->elem_offset);
+    PrimExpr compact_stride = make_const(index_dtype, 1);
+    for (size_t axis = buf->shape.size(); axis-- > 0;) {
+      PrimExpr stride = buf->strides.empty()
+                            ? compact_stride
+                            : cast(index_dtype, buf->strides[axis]);
+      offset = offset + cast(index_dtype, ranges[axis]->min) * stride;
+      compact_stride = compact_stride * cast(index_dtype, buf->shape[axis]);
+    }
+    PrimExpr element_bytes =
+        make_const(index_dtype, (buf->dtype.bits() + 7) / 8);
+    PrimExpr alignment = make_const(index_dtype, 32);
+    if (!analyzer.CanProveEqual(FloorMod(offset * element_bytes, alignment),
+                                make_const(index_dtype, 0))) {
+      TVM_FFI_THROW(ValueError)
+          << "T.fill inside SimdVF requires a 32-byte-aligned region base "
+             "address, got region ["
+          << ranges << "] of buffer " << buf->name
+          << " with linearized byte offset " << offset * element_bytes
+          << " (element size " << (buf->dtype.bits() + 7) / 8
+          << " bytes). Use a region whose base is 32-byte aligned.";
+    }
+  }
+
+  static bool CanLowerFillRegion(const Buffer &buf, const Array<Range> &ranges,
+                                 int64_t vreg_size, int64_t *total,
+                                 std::vector<int64_t> *extents) {
+    if (ranges.empty() || static_cast<int>(ranges.size()) !=
+                              static_cast<int>(buf->shape.size())) {
+      return false;
+    }
+    if (!TryGetConstExtents(ranges, extents, total)) {
+      return false;
+    }
+    if (*total <= 0 || *total % vreg_size != 0) {
+      return false;
+    }
+    if (!IsContiguousRegion(buf, *extents)) {
+      return false;
+    }
+    // Structural checks passed; report a misaligned base with a clear error.
+    ValidateFillBaseAlignment(buf, ranges);
+    return true;
   }
 
   Var MakeReg(DataType dtype) {
@@ -457,28 +595,21 @@ private:
       value = Cast(dtype, value);
     }
 
-    int ndim = ranges.size();
     vreg_size_ = ComputeVRegSize(dtype);
     elem_bits_ = dtype.bits();
 
-    bool is_full = true;
-    int64_t total = 1;
-    for (int i = 0; i < ndim; i++) {
-      const auto *min_imm = ranges[i]->min.as<IntImmNode>();
-      const auto *ext_imm = ranges[i]->extent.as<IntImmNode>();
-      const auto *shape_imm = buf->shape[i].as<IntImmNode>();
-      if (!min_imm || !ext_imm || !shape_imm || min_imm->value != 0 ||
-          ext_imm->value != shape_imm->value) {
-        is_full = false;
-        break;
-      }
-      total *= ext_imm->value;
-    }
-
-    ICHECK(is_full) << "T.fill inside SimdVF requires full-buffer regions";
-    ICHECK_EQ(total % vreg_size_, 0)
-        << "T.fill inside SimdVF requires extent divisible by VReg size ("
-        << vreg_size_ << "), got " << total;
+    // Fill the *region*, not the physical allocation. After
+    // MaterializeMultiBuffer, an in-loop T.fill of a logical UB becomes a
+    // leading unit-extent version slice (e.g. [v:v+1, 0:64] on shape [2, 64]).
+    // That is a contiguous fill whose element count is divisible by the VReg
+    // size and whose base address is 32-byte aligned (the per-version stride
+    // is a multiple of the VReg byte width).
+    int64_t total = 0;
+    std::vector<int64_t> extents;
+    ICHECK(CanLowerFillRegion(buf, ranges, vreg_size_, &total, &extents))
+        << "T.fill inside SimdVF requires a contiguous region whose element "
+           "count is divisible by VReg size ("
+        << vreg_size_ << "), got region " << buf_region << " of buffer " << buf;
 
     int64_t nchunks = total / vreg_size_;
     Var frag = MakeReg(dtype);
@@ -489,18 +620,7 @@ private:
         Call(DataType::Bool(256), simd_pset(),
              {IntImm(DataType::Int(32), elem_bits_), StringImm("PAT_ALL")});
     PrimExpr flat_idx = chunk * IntImm(DataType::Int(32), vreg_size_);
-
-    Array<PrimExpr> idxs;
-    if (ndim == 1) {
-      idxs.push_back(flat_idx);
-    } else {
-      PrimExpr remaining = flat_idx;
-      for (int i = ndim - 1; i >= 1; i--) {
-        idxs.insert(idxs.begin(), FloorMod(remaining, buf->shape[i]));
-        remaining = FloorDiv(remaining, buf->shape[i]);
-      }
-      idxs.insert(idxs.begin(), remaining);
-    }
+    Array<PrimExpr> idxs = MakeRegionIndices(ranges, extents, flat_idx);
 
     PrimExpr addr = MakeAccessPtr(buf, idxs, /*rw_mask=*/2);
     Stmt store = Evaluate(Call(DataType::Void(), simd_vsts(),
