@@ -15,7 +15,30 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
+from tilelang.utils.device import device_synchronize
 from tvm import tirx
+
+
+def _synchronize_tensor_devices(*values: Any) -> None:
+    """Synchronize each accelerator device referenced by nested tensor values."""
+    devices: list[torch.device] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, torch.Tensor):
+            device = value.device
+            if device.type in ("cuda", "mps", "npu") and device not in devices:
+                devices.append(device)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+
+    for value in values:
+        collect(value)
+    for device in devices:
+        device_synchronize(device)
 
 
 @dataclass
@@ -120,9 +143,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, ref_outs)
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, lib_outs)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -178,9 +201,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, ref_outs)
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, lib_outs)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
