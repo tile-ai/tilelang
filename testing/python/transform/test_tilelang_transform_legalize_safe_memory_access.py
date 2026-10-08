@@ -1,3 +1,7 @@
+import math
+
+import pytest
+
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -603,6 +607,40 @@ def test_cp_async_access_ptr_oob():
 
 def test_cp_async_access_ptr_nonzero_safe_value_oob():
     assert_cp_async_access_ptr_nonzero_safe_value_legalize()
+
+
+@pytest.mark.parametrize("safe_value", [-0.0, 0.0], ids=["negative_zero", "positive_zero"])
+def test_cp_async_signed_zero_safe_value_oob(safe_value):
+    @T.prim_func
+    def main(A: T.Tensor((16,), T.float32)):
+        with T.sblock("root"):
+            T.sblock_attr({"safe_value_map": {A.data: T.float32(safe_value)}})
+            shared = T.sblock_alloc_buffer((2,), T.float32, scope="shared")
+            for i in T.serial(2):
+                T.ptx_cp_async(
+                    T.access_ptr(shared[i], "w", 1),
+                    T.access_ptr(A[i + 15], "r", 1),
+                    1,
+                )
+            T.ptx_commit_group()
+            T.ptx_wait_group(0)
+
+    mod = tl.transform.LegalizeSafeMemoryAccess()(tvm.IRModule.from_expr(main))
+    body = mod["main"].body
+    calls = _collect_call_nodes(body, "tl.ptx_cp_async")
+    assert len(calls) == 1
+    if math.copysign(1.0, safe_value) > 0:
+        assert len(calls[0].args) == 4
+        assert _count_if_then_else(body) == 0
+    else:
+        assert len(calls[0].args) == 3
+        assert _count_if_then_else(body) == 1
+        stores = []
+        post_order_visit(body, lambda node: stores.append(node) if isinstance(node, tvm.tirx.BufferStore) else None)
+        assert len(stores) == 1
+        fill = stores[0].value
+        assert isinstance(fill, tvm.tirx.FloatImm)
+        assert fill.value == 0.0 and math.copysign(1.0, fill.value) < 0
 
 
 def test_atomic_load_access_ptr_oob():
