@@ -5,13 +5,14 @@
 #include <initializer_list>
 #include <string>
 
+#include "backend/common/codegen/codegen_c_line_directives.h"
 #include "target/source/codegen_c.h"
 #include <tvm/arith/analyzer.h>
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangAscend final : public CodeGenC {
+class CodeGenTileLangAscend final : public CodeGenCWithLineDirectives {
 public:
   using CodeGenC::PrintType;
 
