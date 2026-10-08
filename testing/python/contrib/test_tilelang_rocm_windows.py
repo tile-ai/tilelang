@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tilelang.contrib import msvc, rocm
-from tilelang import _rocm_sdk
+from tilelang.toolchain import rocm as rocm_sdk
 from tilelang.jit.adapter import libgen
 from tvm.target import Target
 
@@ -41,7 +41,7 @@ def test_use_rocm_directory_overrides_other_sdk_selectors(tmp_path, monkeypatch,
         monkeypatch.setenv(name, str(other))
     monkeypatch.setenv("PATH", str(other / "bin"))
     monkeypatch.setattr(rocm.sys, "platform", platform)
-    assert _rocm_sdk.find_rocm_home() == str(sdk)
+    assert rocm_sdk.find_rocm_home() == str(sdk)
     assert rocm.find_rocm_path() == str(sdk)
     compiler = "hipcc.exe" if platform == "win32" else "hipcc"
     assert rocm.find_hipcc() == str(sdk / "bin" / compiler)
@@ -73,7 +73,7 @@ def test_use_rocm_non_directory_preserves_sdk_discovery(tmp_path, monkeypatch, s
     else:
         monkeypatch.setenv("USE_ROCM", setting)
     monkeypatch.setenv("ROCM_PATH", str(sdk))
-    assert _rocm_sdk.find_rocm_home() == str(sdk)
+    assert rocm_sdk.find_rocm_home() == str(sdk)
     assert rocm.find_rocm_path() == str(sdk)
     monkeypatch.setattr(rocm.sys, "platform", "linux")
     assert rocm.get_hipcc_subprocess_env() is None
@@ -86,8 +86,8 @@ def test_pip_sdk_discovery_without_environment_or_sdk_import(tmp_path, monkeypat
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PATH", "")
     compiler = SimpleNamespace(name="hipcc.exe", locate=lambda: sdk / "bin/hipcc.exe")
-    monkeypatch.setattr(_rocm_sdk.importlib.metadata, "files", lambda package: [compiler] if package == "rocm-sdk-core" else [])
-    assert _rocm_sdk.find_rocm_home() == str(sdk)
+    monkeypatch.setattr(rocm_sdk.importlib.metadata, "files", lambda package: [compiler] if package == "rocm-sdk-core" else [])
+    assert rocm_sdk.find_rocm_home() == str(sdk)
 
 
 def test_windows_hip_arch_uses_amdgpu_arch(tmp_path, monkeypatch):

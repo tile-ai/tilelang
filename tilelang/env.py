@@ -200,7 +200,7 @@ def _find_cuda_home() -> str:
 
 def _find_rocm_home() -> str:
     """Find the ROCM install path."""
-    from ._rocm_sdk import find_rocm_home
+    from .toolchain.rocm import find_rocm_home
 
     return find_rocm_home()
 

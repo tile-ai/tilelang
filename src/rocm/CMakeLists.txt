@@ -21,7 +21,7 @@ set(CMAKE_HIP_STANDARD 17)
 if(NOT IS_DIRECTORY "${USE_ROCM}")
   tilelang_get_python_interpreter(_TL_ROCM_PYTHON)
   execute_process(
-    COMMAND "${_TL_ROCM_PYTHON}" "${CMAKE_SOURCE_DIR}/tilelang/_rocm_sdk.py"
+    COMMAND "${_TL_ROCM_PYTHON}" "${CMAKE_SOURCE_DIR}/tilelang/toolchain/rocm.py"
     RESULT_VARIABLE _TL_ROCM_RESULT
     OUTPUT_VARIABLE _TL_ROCM_SDK
     OUTPUT_STRIP_TRAILING_WHITESPACE)
