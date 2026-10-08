@@ -10,6 +10,7 @@ copy take the async path. `-0.0` compares equal to `0.0`, so it used to match,
 and the fill then wrote `+0.0` -- a different value, silently.
 """
 
+import pytest
 import torch
 
 import tilelang
@@ -39,7 +40,7 @@ def _make_masked_staging_kernel(prefer_async):
 
 
 def _masked_row_bits(prefer_async):
-    kernel = tilelang.compile(_make_masked_staging_kernel(prefer_async), out_idx=[1])
+    kernel = tilelang.compile(_make_masked_staging_kernel(prefer_async), out_idx=[1], target="cuda")
     A = torch.randn(M, N, dtype=torch.float32, device="cuda") + 1.0
     out = kernel(A, K_LEN)
     torch.cuda.synchronize()
@@ -74,9 +75,35 @@ def test_masked_staging_preserves_positive_zero_fill():
                 Out[i, d] = S[i, d]
 
     A = torch.randn(M, N, dtype=torch.float32, device="cuda") + 1.0
-    bits = int(tilelang.compile(main, out_idx=[1])(A, K_LEN).view(torch.int32)[K_LEN, 0].item()) & 0xFFFFFFFF
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    assert "cp_async_gs_conditional<" in kernel.get_kernel_source()
+    bits = int(kernel(A, K_LEN).view(torch.int32)[K_LEN, 0].item()) & 0xFFFFFFFF
     torch.cuda.synchronize()
     assert bits == 0
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32", "float64"])
+def test_async_copy_preserves_negative_zero_safe_value(dtype):
+    """Out-of-bounds async copies must preserve every negative-zero fill byte."""
+
+    @T.prim_func
+    def main(A: T.Tensor((K_LEN, N), dtype), Out: T.Tensor((M, N), dtype)):
+        with T.Kernel(1, threads=128):
+            T.annotate_safe_value({A: T.cast(-0.0, dtype)})
+            S = T.alloc_shared((M, N), dtype)
+            for i, d in T.Parallel(M, N, prefer_async=True):
+                S[i, d] = A[i, d]
+            for i, d in T.Parallel(M, N):
+                Out[i, d] = S[i, d]
+
+    torch_dtype = getattr(torch, dtype)
+    a = torch.randn(K_LEN, N, dtype=torch_dtype, device="cuda")
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    out = kernel(a)
+    expected = torch.full((M, N), -0.0, dtype=torch_dtype, device="cuda")
+    expected[:K_LEN] = a
+    assert torch.equal(out.view(torch.uint8), expected.view(torch.uint8))
 
 
 if __name__ == "__main__":

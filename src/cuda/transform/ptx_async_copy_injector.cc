@@ -12,7 +12,6 @@
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -295,22 +294,6 @@ private:
   };
 
   // ---- Copy candidate analysis helpers ----
-  static bool IsZeroValue(const PrimExpr &expr) {
-    if (const auto *broadcast = expr.as<BroadcastNode>()) {
-      return IsZeroValue(broadcast->value);
-    }
-    if (const auto *float_imm = expr.as<FloatImmNode>()) {
-      // -0.0 compares equal to 0.0, but its sign bit is part of the value. The
-      // zero fill this matcher selects writes +0.0, so accepting -0.0 here
-      // silently changes the element the kernel asked for.
-      return float_imm->value == 0.0f && !std::signbit(float_imm->value);
-    }
-    if (const auto *int_imm = expr.as<IntImmNode>()) {
-      return int_imm->value == 0;
-    }
-    return false;
-  }
-
   static const BufferLoadNode *
   MatchZeroFillBufferLoad(const PrimExpr &value,
                           Optional<PrimExpr> *predicate) {
@@ -320,7 +303,7 @@ private:
 
     const auto *call = value.as<CallNode>();
     if (!call || !call->op.same_as(builtin::if_then_else()) ||
-        !IsZeroValue(call->args[2])) {
+        !IsZeroBitPattern(call->args[2])) {
       return nullptr;
     }
 
