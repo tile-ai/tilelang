@@ -108,7 +108,9 @@ class PassConfigKey(str, Enum):
     """Emit ``#line`` directives in generated C-family source from TIR spans,
     mapping generated statements back to their Python source lines. Combined
     with the always-on ``-lineinfo`` for nvcc, PTX ``.loc`` entries then point
-    at the Python source. Default: False
+    at the Python source. On the Ascend target the directives are emitted into
+    the generated AscendC source, where Bisheng debug info (``compile_flags``
+    with ``-g``) maps back to the Python lines. Default: False
     """
 
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
