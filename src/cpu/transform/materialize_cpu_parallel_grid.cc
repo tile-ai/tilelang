@@ -35,6 +35,7 @@
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -95,6 +96,7 @@ public:
   }
 
   struct AccessInfo {
+    Optional<Buffer> allocation;
     int min_depth = 0;
     bool inside = false;        // plain load/store inside a nest
     bool outside = false;       // plain load/store outside every nest
@@ -152,6 +154,7 @@ private:
     // A declaration is not a use.
     known_alloc_vars_.insert(op->buffer->data.get());
     alloc_depths_[op->buffer->data] = grid_depth_;
+    info_[op->buffer->data].allocation = op->buffer;
     StmtExprVisitor::VisitStmt_(op);
   }
   void VisitStmt_(const BufferStoreNode *op) override {
@@ -328,28 +331,59 @@ bool StoreReadsSameBuffer(const BufferStore &op) {
   return reads;
 }
 
-/*! \brief Find the scope at whose completion a store covers the whole buffer.
- * A loop suffix must have constant extents, unit steps,
- * trip×lanes == numel, and an injective flat index. Partial writes, dynamic
- * or zero-trip loops, and non-affine indices do not count as a reset.
+/*! \brief Find the scope at whose completion a store covers its allocation.
+ * A loop suffix must have constant extents, unit steps, and an injective
+ * in-bounds physical index. trip×lanes×element_bits must equal the allocation's
+ * capacity, so fully overwriting a smaller view does not reset its backing
+ * storage. Partial writes, dynamic or zero-trip loops, and non-affine indices
+ * do not count as a reset.
  * Returning enclosing.size() means the store itself covers the buffer. */
 std::optional<size_t> FullRewriteScope(const BufferStore &op,
+                                       const Buffer &allocation,
                                        const std::vector<For> &enclosing) {
   if (op->predicate.defined() && !is_one(op->predicate.value())) {
     return std::nullopt;
   }
-  int64_t numel = 1;
-  for (const PrimExpr &dim : op->buffer->shape) {
+  // AllocBuffer is dense after FlattenBuffer / StorageRewrite. Refuse other
+  // allocation layouts rather than guessing their physical capacity.
+  if (!allocation->strides.empty() || !allocation->axis_separators.empty() ||
+      !is_zero(allocation->elem_offset) ||
+      allocation->dtype.is_scalable_vector() ||
+      op->buffer->dtype.is_scalable_vector()) {
+    return std::nullopt;
+  }
+  int64_t allocation_bits =
+      allocation->dtype.bits() * allocation->dtype.lanes();
+  int64_t element_bits = op->buffer->dtype.bits() * op->buffer->dtype.lanes();
+  // Sub-byte storage may be packed, and non-power-of-two elements may have
+  // ABI padding. Their logical bit counts do not prove physical capacity.
+  if (allocation->dtype.bits() < 8 || op->buffer->dtype.bits() < 8 ||
+      allocation->dtype.is_handle() || op->buffer->dtype.is_handle() ||
+      allocation_bits <= 0 || element_bits <= 0 ||
+      (allocation_bits & (allocation_bits - 1)) != 0 ||
+      (element_bits & (element_bits - 1)) != 0) {
+    return std::nullopt;
+  }
+  for (const PrimExpr &dim : allocation->shape) {
     const auto *imm = dim.as<IntImmNode>();
-    if (!imm || imm->value <= 0) {
+    if (!imm || imm->value <= 0 ||
+        allocation_bits > std::numeric_limits<int64_t>::max() / imm->value) {
       return std::nullopt;
     }
-    numel *= imm->value;
+    allocation_bits *= imm->value;
   }
+  if (allocation_bits % element_bits != 0) {
+    return std::nullopt;
+  }
+  int64_t numel = allocation_bits / element_bits;
   if (op->indices.size() != 1) {
     return std::nullopt;
   }
-  PrimExpr index = op->indices[0];
+  Array<PrimExpr> offsets = op->buffer.OffsetOf(op->indices);
+  if (offsets.size() != 1) {
+    return std::nullopt;
+  }
+  PrimExpr index = offsets[0];
   int64_t lanes = 1;
   if (const auto *ramp = index.as<RampNode>()) {
     const int64_t *l = as_const_int(ramp->lanes);
@@ -385,7 +419,17 @@ std::optional<size_t> FullRewriteScope(const BufferStore &op,
     if (!ok || numel % lanes != 0 || trip != numel / lanes) {
       continue;
     }
-    if (ProveInjectiveIndex(ScalarizedIndex(index, &ranges), ranges)) {
+    PrimExpr scalar_index = ScalarizedIndex(index, &ranges);
+    if (!scalar_index.dtype().is_scalar()) {
+      continue;
+    }
+    arith::Analyzer analyzer;
+    for (const auto &[var, range] : ranges) {
+      analyzer.Bind(var, range);
+    }
+    arith::ConstIntBound bound = analyzer.const_int_bound(scalar_index);
+    if (bound->min_value >= 0 && bound->max_value < numel &&
+        ProveInjectiveIndex(scalar_index, ranges)) {
       return start;
     }
   }
@@ -398,6 +442,9 @@ std::optional<size_t> FullRewriteScope(const BufferStore &op,
  * loop or conditional region. */
 class IterationPrivacyChecker : public StmtExprVisitor {
 public:
+  explicit IterationPrivacyChecker(const GridAccessAnalysis &analysis)
+      : analysis_(analysis) {}
+
   bool ReadsPrevious(const Var &data) const {
     return reads_previous_.count(data) > 0;
   }
@@ -444,7 +491,11 @@ private:
     if (StoreReadsSameBuffer(store) || conditional_depth_ > 0) {
       return;
     }
-    if (auto scope = FullRewriteScope(store, loop_stack_)) {
+    Optional<Buffer> allocation = analysis_.Lookup(op->buffer->data).allocation;
+    if (!allocation.defined()) {
+      return;
+    }
+    if (auto scope = FullRewriteScope(store, allocation.value(), loop_stack_)) {
       if (*scope == loop_stack_.size()) {
         initialized_.insert(op->buffer->data);
       } else {
@@ -460,6 +511,7 @@ private:
   }
   VarSet initialized_;
   VarSet reads_previous_;
+  const GridAccessAnalysis &analysis_;
   std::vector<For> loop_stack_;
   std::vector<VarSet> loop_resets_;
   int conditional_depth_ = 0;
@@ -829,7 +881,8 @@ struct GridRewriter : public StmtMutator {
   IterationPrivacyChecker &Privacy(const ForNode *head) {
     auto it = privacy_cache_.find(head);
     if (it == privacy_cache_.end()) {
-      it = privacy_cache_.emplace(head, IterationPrivacyChecker{}).first;
+      it = privacy_cache_.emplace(head, IterationPrivacyChecker{analysis_})
+               .first;
       std::vector<const ForNode *> loops = CollectChain(head);
       it->second(loops[SinkIndex(loops, collapse_all_dims_)]->body);
     }

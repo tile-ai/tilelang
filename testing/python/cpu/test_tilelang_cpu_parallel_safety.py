@@ -272,3 +272,103 @@ def test_mixed_width_parameter_reads(write):
     grid = tirx.For(bx, 0, 16, tirx.ForKind.SERIAL, body, annotations={"tl.cpu_grid_dim": 0})
     func = tirx.PrimFunc([B.data], grid, buffer_map={B.data: B})
     assert _apply(func) == (tirx.ForKind.SERIAL if write else tirx.ForKind.PARALLEL)
+
+
+@pytest.mark.parametrize("target", ["c", "llvm"])
+@pytest.mark.parametrize(
+    "reset_kind", ["subview", "offset_subview", "strided_view", "byte_subview", "padded_vector_view", "full_view", "byte_full_view"]
+)
+def test_local_view_reset_covers_allocation(target, reset_kind):
+    bx = tirx.Var("bx", "int32")
+    j = tirx.Var("j", "int32")
+    output = tirx.decl_buffer((16,), "int32", name="output")
+    padded_vector = reset_kind == "padded_vector_view"
+    state = tirx.decl_buffer((2,), "int32x3" if padded_vector else "int32", name="state", scope="local")
+    byte_view = reset_kind.startswith("byte_") or padded_vector
+    complete = reset_kind in ("full_view", "byte_full_view")
+    extent = (8 if complete else 4) if byte_view else (2 if complete or reset_kind == "strided_view" else 1)
+    if padded_vector:
+        # A three-lane storage element may be padded by the target ABI;
+        # its logical bit count cannot prove the allocation's capacity.
+        extent = 24
+    view_dtype = "uint8" if byte_view else "int32"
+    offset = 1 if reset_kind == "offset_subview" else 0
+    carried_index = 0 if offset else 1
+    view = tirx.decl_buffer(
+        (extent,),
+        view_dtype,
+        data=state.data,
+        elem_offset=offset,
+        strides=[0] if reset_kind == "strided_view" else None,
+        scope="local",
+        name="view",
+    )
+    reset = tirx.For(j, 0, extent, tirx.ForKind.SERIAL, tirx.BufferStore(view, tirx.IntImm(view_dtype, 0), [j]))
+    initial = tirx.Broadcast(tirx.IntImm("int32", 0), 3) if padded_vector else tirx.IntImm("int32", 0)
+    carried = tirx.Shuffle([state[carried_index]], [2]) if padded_vector else state[carried_index]
+    update = tirx.Broadcast(bx + 1, 3) if padded_vector else bx + 1
+    grid = tirx.For(
+        bx,
+        0,
+        16,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.IfThenElse(bx == 0, tirx.BufferStore(state, initial, [carried_index]), None),
+                reset,
+                tirx.BufferStore(output, carried, [bx]),
+                tirx.BufferStore(state, update, [carried_index]),
+            ]
+        ),
+        annotations={"tl.cpu_grid_dim": 0},
+    )
+    func = tirx.PrimFunc([output.data], tirx.SeqStmt([tirx.AllocBuffer(state), grid]), buffer_map={output.data: output})
+    mod = tvm.IRModule.from_expr(func.with_attr({"target": tvm.target.Target(target), "global_symbol": "main"}))
+    result = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)["main"]
+    grids = []
+    tirx.stmt_functor.post_order_visit(
+        result.body, lambda node: grids.append(node) if isinstance(node, tirx.For) and node.loop_var.same_as(bx) else None
+    )
+    assert len(grids) == 1
+    assert grids[0].kind == (tirx.ForKind.PARALLEL if complete else tirx.ForKind.SERIAL)
+    private_allocations = []
+    tirx.stmt_functor.post_order_visit(
+        grids[0].body,
+        lambda node: (
+            private_allocations.append(node) if isinstance(node, tirx.AllocBuffer) and node.buffer.data.same_as(state.data) else None
+        ),
+    )
+    assert bool(private_allocations) == complete
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["c", pytest.param("llvm", marks=pytest.mark.skipif(not tvm.runtime.enabled("llvm"), reason="LLVM support is not built"))],
+)
+@pytest.mark.parametrize("complete_reset", [False, True])
+def test_local_view_preserves_iteration_state(target, complete_reset):
+    n = 32
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), "int32"), B: T.Tensor((n,), "int32")):
+        state = T.alloc_buffer((2,), "int32", scope="local")
+        with T.Kernel(n, cpu_num_threads=4) as bx:
+            if complete_reset:
+                for j in T.serial(8):
+                    T.view(state, (8,), dtype="uint8")[j] = T.Cast("uint8", 0)
+            else:
+                if bx == 0:
+                    state[1] = 0
+                T.Tensor((1,), "int32", state.data)[0] = bx
+            state[1] = state[1] + A[bx]
+            B[bx] = state[1]
+
+    kernel = tilelang.compile(
+        main, target=target, execution_backend="cython" if target == "c" else "tvm_ffi", out_idx=-1, pass_configs={"tl.cpu_parallel": True}
+    )
+    if target == "c":
+        assert ("#pragma omp" in kernel.get_kernel_source()) == complete_reset
+    else:
+        assert (_parallel_loop_count(main, target) > 0) == complete_reset
+    expected = torch.ones(n, dtype=torch.int32) if complete_reset else torch.arange(1, n + 1, dtype=torch.int32)
+    torch.testing.assert_close(kernel(torch.ones(n, dtype=torch.int32)), expected)
