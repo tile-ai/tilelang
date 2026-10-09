@@ -2,6 +2,8 @@
 
 Auto-scheduled SimtVF example: the plain `T.Parallel` loop is promoted into a
 SIMT vector region by the AutoSimtVF pass, with no explicit `T.SimtVF` wrapper.
+
+CUDA reference: TileKernels ``tile_kernels/mhc/head_compute_mix_cuda.py``.
 """
 
 import torch

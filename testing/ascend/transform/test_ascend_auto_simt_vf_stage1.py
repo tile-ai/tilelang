@@ -410,6 +410,25 @@ def test_m3_single_region_loop_carried_fragment_uses_shared_state():
     assert len(_copy_calls(_vfs(result)[0])) == 2
 
 
+def test_m3_parallel_private_scalar_moves_into_vf():
+    @T.prim_func
+    def main(A: T.Tensor((8,), "float32"), B: T.Tensor((8,), "float32")):
+        with T.Kernel(1):
+            for i in T.Parallel(8):
+                scalar = T.alloc_var("float32")
+                scalar = A[i]
+                scalar += 1
+                B[i] = scalar
+
+    result = _apply(main)
+    root = next(block for block in _collect(result, tirx.SBlock) if block.name_hint == "tilelang_root")
+    assert all(buffer.scope() != "local.var" for buffer in root.alloc_buffers)
+    assert any(buffer.scope() == "local.var" for buffer in _vfs(result)[0].alloc_buffers)
+    target = tvm.target.Target("ascend")
+    with target:
+        assert AscendPassPipelineBody(tvm.IRModule.from_expr(main), target)["main"] is not None
+
+
 def test_m3_read_only_reduce_source_reloads_vf_local_fragment():
     @T.prim_func
     def main(B: T.Tensor((2,), "float32"), A: T.Tensor((2, 8), "float32")):

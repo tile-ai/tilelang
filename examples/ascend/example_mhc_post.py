@@ -2,6 +2,8 @@
 
 x = c * d + a^T @ b, tiled over the hidden dimension with a pipelined
 double-buffered copy. The AutoSimtVF pass promotes the `T.Parallel` loop.
+
+CUDA reference: TileKernels ``tile_kernels/mhc/post_cuda.py``.
 """
 
 import math
@@ -25,32 +27,29 @@ def mhc_post_fwd(mhc, hidden, h_blk=1024):
         x: T.Tensor[(n, mhc, h), T.bfloat16],
     ) -> None:
         with T.Kernel(n) as pid_n:
-            x_shared = T.alloc_shared((mhc, h_blk), T.bfloat16)
+            x_frag = T.alloc_fragment((mhc, h_blk), T.bfloat16)
             b_shared = T.alloc_shared((mhc, h_blk), T.bfloat16)
             d_shared = T.alloc_shared(h_blk, T.bfloat16)
 
-            x_local = T.alloc_fragment((mhc, h_blk), T.float32)
-            b_local = T.alloc_fragment((mhc, h_blk), T.float32)
-            d_local = T.alloc_fragment(h_blk, T.float32)
-
-            a_local = T.alloc_fragment((mhc, mhc), T.float32)
-            c_local = T.alloc_fragment(mhc, T.float32)
-            T.copy(a[pid_n, 0, 0], a_local)
-            T.copy(c[pid_n, 0], c_local)
+            a_frag = T.alloc_fragment((mhc, mhc), T.float32)
+            c_frag = T.alloc_fragment(mhc, T.float32)
+            T.copy(a[pid_n, 0, 0], a_frag)
+            T.copy(c[pid_n, 0], c_frag)
 
             for i0_h in T.Pipelined(T.ceildiv(h, h_blk), num_stages=2):
                 T.copy(b[pid_n, 0, i0_h * h_blk], b_shared)
                 T.copy(d[pid_n, i0_h * h_blk], d_shared)
 
-                T.copy(b_shared, b_local)
-                T.copy(d_shared, d_local)
+                # AutoSimtVF cannot mutate a scalar allocated outside its VF.
+                # Index the per-element CUDA accumulator as a fragment instead.
+                x_local = T.alloc_fragment((mhc, h_blk), T.float32)
                 for i_mhco, i1_h in T.Parallel(mhc, h_blk):
-                    x_local[i_mhco, i1_h] = c_local[i_mhco] * d_local[i1_h]
-                    for i_mhci in T.serial(mhc):
-                        x_local[i_mhco, i1_h] += a_local[i_mhci, i_mhco] * b_local[i_mhci, i1_h]
-                T.copy(x_local, x_shared)
+                    x_local[i_mhco, i1_h] = c_frag[i_mhco] * d_shared[i1_h]
+                    for i_mhci in T.unroll(mhc):
+                        x_local[i_mhco, i1_h] += a_frag[i_mhci, i_mhco] * b_shared[i_mhci, i1_h]
+                    x_frag[i_mhco, i1_h] = x_local[i_mhco, i1_h]
 
-                T.copy(x_shared, x[pid_n, 0, i0_h * h_blk])
+                T.copy(x_frag, x[pid_n, 0, i0_h * h_blk])
 
     return main
 
@@ -70,6 +69,7 @@ if __name__ == "__main__":
     d = torch.randn((num_tokens, hidden), device=device, dtype=torch.bfloat16)
 
     kernel = tilelang.compile(mhc_post_fwd(mhc, hidden), target="ascend", out_idx=-1)
+
     actual = kernel(a, b, c, d)
     torch.npu.synchronize()
     torch.testing.assert_close(actual, ref_program(a, b, c, d), rtol=1e-2, atol=1e-2)

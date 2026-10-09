@@ -93,6 +93,13 @@ struct UnitSemantics {
 struct UnitAccess {
   std::vector<Buffer> reads;
   std::vector<Buffer> writes;
+  bool Accesses(const Buffer &buffer) const {
+    auto same = [&](const Buffer &item) {
+      return item->data.same_as(buffer->data);
+    };
+    return std::any_of(reads.begin(), reads.end(), same) ||
+           std::any_of(writes.begin(), writes.end(), same);
+  }
   // Flow analysis matches data aliases; substitutions match exact Buffers.
   bool Writes(const Buffer &buffer) const {
     return std::any_of(writes.begin(), writes.end(), [&](const Buffer &item) {
@@ -145,7 +152,7 @@ struct Substitution {
 };
 struct RegionAction {
   std::vector<int> relocated_copies; // Emitted before direct region members.
-  std::vector<Buffer> allocations;   // Fragment allocations owned by this VF.
+  std::vector<Buffer> allocations;   // Allocations owned by this VF.
   std::vector<Stmt> prologue;        // Shared-state reloads.
   std::vector<Stmt> epilogue;        // Shared-state writebacks.
 };
@@ -414,6 +421,28 @@ private:
   const BufferLoadNode *region_carrier_{nullptr};
 };
 
+bool IsParallelPrivateScalar(Stmt stmt, const Buffer &buffer) {
+  while (const auto *loop = stmt.as<ForNode>()) {
+    if (loop->kind != ForKind::kParallel)
+      return false;
+    stmt = loop->body;
+  }
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    if (seq->seq.empty())
+      return false;
+    stmt = seq->seq.front();
+  }
+  const auto *def = stmt.as<BufferStoreNode>();
+  if (def == nullptr || !def->buffer.same_as(buffer) ||
+      def->predicate.defined())
+    return false;
+  BufferReadWriteCollector inputs;
+  inputs(def->value);
+  for (const PrimExpr &index : def->indices)
+    inputs(index);
+  return !inputs.summary.Accesses(buffer);
+}
+
 bool HeaderReadsFragment(const Stmt &stmt) {
   BufferReadWriteCollector reads;
   if (const auto *branch = stmt.as<IfThenElseNode>()) {
@@ -536,6 +565,7 @@ public:
     if (!PlanRegions())
       return std::nullopt;
     PlanStorage();
+    PlanPrivateScalars();
     if (!VerifyPlan())
       return std::nullopt;
     auto result = Rewrite();
@@ -1143,6 +1173,34 @@ private:
     }
   }
 
+  void PlanPrivateScalars() {
+    for (const Buffer &buffer : state_.root_block->alloc_buffers) {
+      if (!IsLocalVarBuffer(buffer))
+        continue;
+      int user = -1;
+      for (const Unit &unit : state_.units) {
+        if (!unit.child_scopes.empty())
+          continue; // Control units duplicate their child access summaries.
+        if (!unit.access.Accesses(buffer))
+          continue;
+        if (user >= 0) {
+          user = -2;
+          break;
+        }
+        user = unit.id;
+      }
+      if (user < 0 || plan.owners[user] < 0)
+        continue;
+      const auto *loop = U(user).stmt.as<ForNode>();
+      if (loop == nullptr || loop->kind != ForKind::kParallel)
+        continue;
+      if (!IsParallelPrivateScalar(U(user).stmt, buffer))
+        continue;
+      plan.remove_allocations.push_back(buffer);
+      plan.region_actions[plan.owners[user]].allocations.push_back(buffer);
+    }
+  }
+
   // ---- M4: Plan verification, IR rewrite, and result verification ----
   // Verify the complete plan before rebuilding, then check Parallel coverage,
   // VF nesting/counts, and source-index uniqueness on the emitted PrimFunc.
@@ -1160,9 +1218,9 @@ private:
     for (const Region &region : plan.regions) {
       const RegionAction &action = plan.region_actions[region.id];
       for (const Buffer &buffer : action.allocations) {
-        if (!IsFragmentBuffer(buffer)) {
+        if (!IsFragmentBuffer(buffer) && !IsLocalVarBuffer(buffer)) {
           return Fail(ErrorCode::kPlanInvariant,
-                      "VF-owned allocation is not a fragment");
+                      "VF-owned allocation is not a fragment or local.var");
         }
       }
     }

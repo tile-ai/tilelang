@@ -1,7 +1,9 @@
 """MHC pre-apply-mix forward on Ascend NPU.
 
-o = sum_mhc(mix * x) over a pipelined, double-buffered hidden tiling. Written
+o = sum_mhc(mix * x), with one CTA per token and hidden tile. Written
 in plain TileLang; the AutoSimtVF pass promotes the `T.Parallel` loop.
+
+CUDA reference: TileKernels ``tile_kernels/mhc/pre_apply_mix_cuda.py``.
 """
 
 import math
@@ -16,6 +18,7 @@ def mhc_pre_apply_mix_fwd(mhc_mult, hidden, h_blk=1024):
     h = hidden
     mhc = mhc_mult
     h_blk = math.gcd(h_blk, hidden)
+    h_ctas = h // h_blk
 
     @T.prim_func
     def main(
@@ -23,26 +26,27 @@ def mhc_pre_apply_mix_fwd(mhc_mult, hidden, h_blk=1024):
         mix: T.Tensor[(n, mhc), T.float32],
         o: T.Tensor[(n, h), T.bfloat16],
     ) -> None:
-        with T.Kernel(n) as pid_n:
+        with T.Kernel(n * h_ctas) as pid:
+            pid_n = pid // h_ctas
+            pid_h = pid % h_ctas
             mixl = T.alloc_fragment(mhc, T.float32)
             T.copy(mix[pid_n, 0], mixl)
 
-            for i0_h in T.Pipelined(h // h_blk, num_stages=2):
-                xs = T.alloc_shared((mhc, h_blk), T.bfloat16)
-                xl = T.alloc_fragment((mhc, h_blk), T.float32)
-                T.copy(x[pid_n, 0, i0_h * h_blk], xs)
-                T.copy(xs, xl)
+            xs = T.alloc_shared((mhc, h_blk), T.bfloat16)
+            xl = T.alloc_fragment((mhc, h_blk), T.float32)
+            T.copy(x[pid_n, 0, pid_h * h_blk], xs)
+            T.copy(xs, xl)
 
-                os = T.alloc_shared(h_blk, T.bfloat16)
-                ol = T.alloc_fragment(h_blk, T.float32)
-                T.clear(ol)
+            os = T.alloc_shared(h_blk, T.bfloat16)
+            ol = T.alloc_fragment(h_blk, T.float32)
+            T.clear(ol)
 
-                for i_mhc in T.serial(mhc):
-                    for i1_h in T.Parallel(h_blk):
-                        ol[i1_h] += mixl[i_mhc] * xl[i_mhc, i1_h]
+            for i_mhc in T.serial(mhc):
+                for i1_h in T.Parallel(h_blk):
+                    ol[i1_h] += mixl[i_mhc] * xl[i_mhc, i1_h]
 
-                T.copy(ol, os)
-                T.copy(os, o[pid_n, i0_h * h_blk])
+            T.copy(ol, os)
+            T.copy(os, o[pid_n, pid_h * h_blk])
 
     return main
 
@@ -59,13 +63,10 @@ if __name__ == "__main__":
     x = torch.randn((num_tokens, mhc_mult, hidden), device=device, dtype=torch.bfloat16)
     mix = torch.randn((num_tokens, mhc_mult), device=device, dtype=torch.float32)
 
-    # `tl.disable_shared_memory_reuse` avoids the auto-schedule buffer-alias
-    # inference aliasing the two multi-versioned buffers `xs` and `os`.
     kernel = tilelang.compile(
         mhc_pre_apply_mix_fwd(mhc_mult, hidden),
         target="ascend",
         out_idx=-1,
-        pass_configs={"tl.disable_shared_memory_reuse": True},
     )
     actual = kernel(x, mix)
     torch.npu.synchronize()

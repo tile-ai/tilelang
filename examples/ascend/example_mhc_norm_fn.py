@@ -1,9 +1,11 @@
 """MHC norm-fn kernels on Ascend NPU.
 
 Groups the norm-weight merge forward/backward and the pre-norm normalization
-forward, mirroring `norm_fn_kernel.py` in the TileKernels mHC module. All
+forward, mirroring `norm_fn_cuda.py` in the TileKernels mHC module. All
 kernels are written in plain TileLang; the AutoSimtVF pass promotes the
 `T.Parallel` loops into SIMT vector regions automatically.
+
+CUDA reference: TileKernels ``tile_kernels/mhc/norm_fn_cuda.py``.
 """
 
 import torch
@@ -11,15 +13,15 @@ import tilelang
 import tilelang.ascend.language as T
 
 
-def mhc_fn_normw_merge_fwd(m, n, dtype=T.float32):
-    n_blk = 256
+def mhc_fn_normw_merge_fwd(m, n):
+    n_blk = 1024 if m * n >= 262144 else 256
     num_n_blocks = (n + n_blk - 1) // n_blk
 
     @T.prim_func
     def main(
-        fn: T.Tensor[(m, n), dtype],
-        normw: T.Tensor[(n,), dtype],
-        out_fn: T.Tensor[(m, n), dtype],
+        fn: T.Tensor[(m, n), T.float32],
+        normw: T.Tensor[(n,), T.float32],
+        out_fn: T.Tensor[(m, n), T.float32],
     ) -> None:
         with T.Kernel(m * num_n_blocks) as pid:
             pid_m = pid // num_n_blocks
@@ -32,33 +34,33 @@ def mhc_fn_normw_merge_fwd(m, n, dtype=T.float32):
     return main
 
 
-def mhc_fn_normw_merge_bwd(m, n, dtype=T.float32):
+def mhc_fn_normw_merge_bwd(m, n):
     n_blk = 256
 
     @T.prim_func
     def main(
-        fn: T.Tensor[(m, n), dtype],
-        normw: T.Tensor[(n,), dtype],
-        out_fn_grad: T.Tensor[(m, n), dtype],
-        fn_grad: T.Tensor[(m, n), dtype],
-        normw_grad: T.Tensor[(n,), dtype],
+        fn: T.Tensor[(m, n), T.float32],
+        normw: T.Tensor[(n,), T.float32],
+        out_fn_grad: T.Tensor[(m, n), T.float32],
+        fn_grad: T.Tensor[(m, n), T.float32],
+        normw_grad: T.Tensor[(n,), T.float32],
     ) -> None:
         with T.Kernel(T.ceildiv(n, n_blk)) as pid_n:
-            normw_frag = T.alloc_fragment(n_blk, dtype)
+            normw_frag = T.alloc_fragment(n_blk, T.float32)
             T.copy(normw[pid_n * n_blk], normw_frag)
 
-            normw_grad_frag = T.alloc_fragment(n_blk, dtype)
+            normw_grad_frag = T.alloc_fragment(n_blk, T.float32)
             T.clear(normw_grad_frag)
 
             for i_m in T.serial(m):
                 for i1_n in T.Parallel(n_blk):
                     i_n = pid_n * n_blk + i1_n
                     if i_n < n:
-                        fn_grad[i_m, i_n] = out_fn_grad[i_m, i_n] * normw_frag[i1_n]
+                        fn_grad[i_m, i_n] += out_fn_grad[i_m, i_n] * normw_frag[i1_n]
                         normw_grad_frag[i1_n] += out_fn_grad[i_m, i_n] * fn[i_m, i_n]
 
             for i1_n in T.Parallel(n_blk):
-                normw_grad[pid_n * n_blk + i1_n] = normw_grad_frag[i1_n]
+                normw_grad[pid_n * n_blk + i1_n] += normw_grad_frag[i1_n]
 
     return main
 
@@ -75,6 +77,7 @@ def mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_
         out: T.Tensor[(num_tokens, mhc_mult3), T.float32],
     ) -> None:
         with T.Kernel(num_tokens) as pid:
+            # Ascend uses a scalar instead of CUDA's one-element RMS fragment.
             rms = T.alloc_var(T.float32)
             out_l = T.alloc_fragment(mhc_mult3, T.float32)
             out_l0 = T.alloc_fragment(mhc_mult3, T.float32)
@@ -84,7 +87,7 @@ def mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_
                 for i_split in T.serial(n_splits):
                     rms += sqrsum_splitted[i_split, pid, k]
                 sqrsum[pid, k] = rms
-                rms = rms / rms_group_size + rms_eps
+                rms = T.rsqrt(rms / rms_group_size + rms_eps)
                 for j in T.Parallel(mhc_mult3):
                     out_l0[j] = 0
                     for i_split in T.serial(n_splits):
@@ -107,7 +110,7 @@ def ref_program_fn_normw_merge_bwd(fn, normw, out_fn_grad):
 def ref_program_pre_norm_fn_fwd_norm(out_mul_splitted, sqrsum_splitted, rms_group_size, rms_eps):
     out_mul = out_mul_splitted.sum(dim=0)
     sqrsum = sqrsum_splitted.sum(dim=0)
-    rms = sqrsum / rms_group_size + rms_eps
+    rms = torch.rsqrt(sqrsum / rms_group_size + rms_eps)
     out = (out_mul * rms.unsqueeze(-1)).sum(dim=1)
     return out_mul, sqrsum, out
 
@@ -131,8 +134,10 @@ if __name__ == "__main__":
     normw = torch.randn((n,), device=device, dtype=torch.float32)
     out_fn_grad = torch.randn((m, n), device=device, dtype=torch.float32)
 
-    kernel = tilelang.compile(mhc_fn_normw_merge_bwd(m, n), target="ascend", out_idx=[-2, -1])
-    fn_grad, normw_grad = kernel(fn, normw, out_fn_grad)
+    kernel = tilelang.compile(mhc_fn_normw_merge_bwd(m, n), target="ascend", out_idx=[])
+    fn_grad = torch.zeros_like(fn)
+    normw_grad = torch.zeros_like(normw)
+    kernel(fn, normw, out_fn_grad, fn_grad, normw_grad)
     torch.npu.synchronize()
     expected_fn_grad, expected_normw_grad = ref_program_fn_normw_merge_bwd(fn, normw, out_fn_grad)
     torch.testing.assert_close(fn_grad, expected_fn_grad, rtol=1e-5, atol=2e-5)
