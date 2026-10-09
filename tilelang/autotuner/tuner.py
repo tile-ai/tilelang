@@ -603,6 +603,8 @@ class AutoTuner:
                     benchmark_call_thread.start()
                     benchmark_call_thread.join(timeout=timeout)
                     if benchmark_call_thread.is_alive():
+                        # The timed-out call may still mutate its cached inputs.
+                        worker_state.jit_input_tensors = None
                         result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
                         continue
 
