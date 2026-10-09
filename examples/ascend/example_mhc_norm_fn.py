@@ -84,7 +84,7 @@ def mhc_pre_norm_fn_fwd_norm(mhc_mult3, n_rms_group, rms_group_size, rms_eps, n_
                 for i_split in T.serial(n_splits):
                     rms += sqrsum_splitted[i_split, pid, k]
                 sqrsum[pid, k] = rms
-                rms = rms / rms_group_size + rms_eps
+                rms = T.rsqrt(rms / rms_group_size + rms_eps)
                 for j in T.Parallel(mhc_mult3):
                     out_l0[j] = 0
                     for i_split in T.serial(n_splits):
@@ -107,7 +107,7 @@ def ref_program_fn_normw_merge_bwd(fn, normw, out_fn_grad):
 def ref_program_pre_norm_fn_fwd_norm(out_mul_splitted, sqrsum_splitted, rms_group_size, rms_eps):
     out_mul = out_mul_splitted.sum(dim=0)
     sqrsum = sqrsum_splitted.sum(dim=0)
-    rms = sqrsum / rms_group_size + rms_eps
+    rms = torch.rsqrt(sqrsum / rms_group_size + rms_eps)
     out = (out_mul * rms.unsqueeze(-1)).sum(dim=1)
     return out_mul, sqrsum, out
 
