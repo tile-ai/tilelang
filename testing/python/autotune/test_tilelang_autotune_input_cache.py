@@ -154,5 +154,84 @@ def test_autotune_refreshes_changed_scalar_dtype(scalar_dtypes):
     assert len(supplied) == 3
 
 
+def _add_one(threads):
+    @T.prim_func
+    def main(A: T.Tensor((256,), T.float32), B: T.Tensor((256,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            for i in T.Parallel(256):
+                B[i] = A[i] + 1
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("change_supplier", [False, True])
+def test_autotune_refreshes_inputs_between_runs(change_supplier):
+    supplied = []
+    expected_value = 1
+
+    def make_supply(value):
+        def supply(params):
+            inputs = [torch.full(tuple(p.shape), value, dtype=p.torch_dtype(), device="cuda") for p in params]
+            supplied.append(inputs)
+            return inputs
+
+        return supply
+
+    def reference(x):
+        torch.testing.assert_close(x, torch.full_like(x, expected_value))
+        return x + 1
+
+    tuner = (
+        AutoTuner(_add_one, configs=[{"threads": 64}, {"threads": 128}])
+        .set_compile_args(out_idx=[1], target="cuda")
+        .set_profile_args(supply_prog=make_supply(1), ref_prog=reference, cache_input_tensors=True)
+    )
+    tuner.run(warmup=1, rep=1)
+    assert len(supplied) == 2
+
+    if change_supplier:
+        expected_value = 7
+        tuner.set_profile_args(supply_prog=make_supply(7), ref_prog=reference, cache_input_tensors=True)
+
+    result = tuner.run(warmup=1, rep=1)
+    # Each run supplies inputs once for both trials and once for reference timing.
+    assert len(supplied) == 4
+    x = supplied[-1][0]
+    torch.testing.assert_close(result.kernel(x), x + 1)
+
+
+@tilelang.testing.requires_cuda
+def test_autotune_refreshes_inputs_when_device_changes():
+    if torch.cuda.device_count() < 2:
+        pytest.skip("Requires at least two CUDA devices")
+
+    supplied = []
+
+    def supply(params):
+        inputs = [torch.ones(tuple(p.shape), dtype=p.torch_dtype(), device="cuda") for p in params]
+        supplied.append(inputs)
+        return inputs
+
+    def reference(x):
+        assert x.device == torch.device("cuda", torch.cuda.current_device())
+        return x + 1
+
+    tuner = (
+        AutoTuner(_add_one, configs=[{"threads": 64}, {"threads": 128}])
+        .set_compile_args(out_idx=[1], target="cuda")
+        .set_profile_args(supply_prog=supply, ref_prog=reference, cache_input_tensors=True)
+    )
+    first_device = torch.cuda.current_device()
+    next_device = (first_device + 1) % torch.cuda.device_count()
+    for run_index, device in enumerate((first_device, next_device), start=1):
+        with torch.cuda.device(device):
+            result = tuner.run(warmup=1, rep=1)
+            assert len(supplied) == run_index * 2
+            assert all(inputs[0].device == torch.device("cuda", device) for inputs in supplied[-2:])
+            x = supplied[-1][0]
+            torch.testing.assert_close(result.kernel(x), x + 1)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -153,10 +153,6 @@ class AutoTuner:
     def __init__(self, fn: Callable, configs):
         self.fn = fn
         self.configs = configs
-        self.ref_latency_cache = None
-        self.jit_input_tensors = None
-        self.jit_input_params = None
-        self.ref_input_tensors = None
         self.jit_compile = None
         self.jit_elaborate = None
 
@@ -265,7 +261,7 @@ class AutoTuner:
             max_mismatched_ratio: Maximum allowed mismatch ratio.
             skip_check: Whether to skip validation.
             manual_check_prog: Manual check program for validation.
-            cache_input_tensors: Whether to cache input tensors.
+            cache_input_tensors: Whether to reuse compatible input tensors across trials within each run.
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
@@ -993,13 +989,9 @@ class AutoTuner:
         )
 
         ref_latency = None
-        main_thread_benchmark_state = _BenchmarkWorkerState(
-            jit_input_tensors=self.jit_input_tensors,
-            jit_input_params=self.jit_input_params,
-            ref_input_tensors=self.ref_input_tensors,
-            ref_latency_cache=self.ref_latency_cache,
-            shared_best_latency=shared_best_latency_ref,
-        )
+        # Keep inputs and reference timings local to this run. A later run may
+        # use another device or input supplier even with the same signature.
+        main_thread_benchmark_state = _BenchmarkWorkerState(shared_best_latency=shared_best_latency_ref)
 
         def _record_benchmark_result(latency: float, config: dict[str, Any], jit_kernel: tilelang.JITKernel, idx: int, progress_bar):
             nonlocal best_latency, best_config, best_kernel
@@ -1150,11 +1142,6 @@ class AutoTuner:
             compile_progress.close()
             progress_bar.close()
             pool.shutdown()
-
-        self.jit_input_tensors = main_thread_benchmark_state.jit_input_tensors
-        self.jit_input_params = main_thread_benchmark_state.jit_input_params
-        self.ref_input_tensors = main_thread_benchmark_state.ref_input_tensors
-        self.ref_latency_cache = main_thread_benchmark_state.ref_latency_cache
 
         if best_kernel is None:
             error_msg = "Auto-tuning failed: No configuration successfully compiled and passed benchmarking/validation."
