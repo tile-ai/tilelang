@@ -13,8 +13,14 @@ execution.
 
 To compile and run kernels, use an Ascend 950 environment with:
 
-- A compatible Ascend driver and CANN toolkit, including `bisheng`, the
-  CCE-capable `ld.lld`, and the Ascend runtime libraries.
+- An Ascend driver and **CANN toolkit 9.2.0 weekly 20260909 or newer**, including
+  `bisheng`, the CCE-capable `ld.lld`, and the Ascend runtime libraries. The backend
+  emits AscendC entry points that older toolkits do not declare: `asc_loadalign` has
+  no `vector_bool` overload before 9.1.0, and the `asc_quant_mode` / `asc_relu_pre_mode`
+  enumerations used by the L0C copy first appear in the 9.2.0 branch. Builds from that
+  branch up to `9.2.0-beta.2` still miss `asc_set_l0c_copy_nz_para`, the 8-argument
+  bf16 `asc_copy_gm2l1_nd2nz`, and the fixpipe/quant enumerations, so use the 20260909
+  weekly build or newer rather than the branch head.
 - Compatible PyTorch and `torch_npu` installations. Verify that
   `torch.npu.is_available()` returns `True` after importing `torch_npu`.
 - The Python and native build prerequisites described in the
