@@ -7,13 +7,14 @@ import tilelang.language as T
 
 
 @tilelang.jit
-def get_kernel(reduce_op: str, dtype: str):
+def get_kernel(reduce_op: str, dtype: str, threads=(32, 1, 1)):
     assert reduce_op in ["sum", "max", "min", "bitand", "bitor"]
+    N = threads[0] * threads[1] * threads[2]
 
     @T.prim_func
-    def main(x: T.Tensor((32), dtype)):
-        with T.Kernel(1, threads=32):
-            tx = T.get_thread_binding(0)
+    def main(x: T.Tensor((N,), dtype)):
+        with T.Kernel(1, threads=threads):
+            tx = T.get_thread_binding(0) + threads[0] * (T.get_thread_binding(1) + threads[1] * T.get_thread_binding(2))
             local_val = T.alloc_local([1], dtype)
             local_val[0] = x[tx]
             reduced_val = T.alloc_local([1], dtype)
@@ -123,6 +124,60 @@ def test_warp_reduce_64(op, dtype, N):
     kernel(a)
 
     torch.testing.assert_close(a, ref)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "threads",
+    [(1, 1, 1), (3, 1, 1), (7, 1, 1), (24, 1, 1), (33, 1, 1), (48, 1, 1), (100, 1, 1), (7, 7, 1), (3, 3, 5)],
+)
+@pytest.mark.parametrize(
+    "op,dtype",
+    [(op, dtype) for op in ("sum", "min", "max") for dtype in ("float32", "float16", "bfloat16", "int32", "int64")]
+    + [(op, dtype) for op in ("bitand", "bitor") for dtype in ("int32", "int64")],
+)
+def test_warp_reduce_partial(op, dtype, threads):
+    N = threads[0] * threads[1] * threads[2]
+    indices = torch.arange(N, dtype=torch.int64, device="cuda")
+    a = (indices // 32 + indices % 2 + 1).to(getattr(torch, dtype))
+    if dtype == "int64":
+        a += 1 << 40
+    if op == "max":
+        a = -a
+
+    ref = torch.empty_like(a)
+    for start in range(0, N, 32):
+        warp = a[start : start + 32]
+        if op == "sum":
+            value = warp.sum()
+        elif op == "min":
+            value = warp.min()
+        elif op == "max":
+            value = warp.max()
+        else:
+            value = warp[0]
+            for element in warp[1:]:
+                value = value & element if op == "bitand" else value | element
+        ref[start : start + 32] = value
+
+    kernel = get_kernel(op, dtype, threads)
+    kernel(a)
+    torch.testing.assert_close(a, ref, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("op", ["min", "max"])
+@pytest.mark.parametrize("all_nan", [False, True])
+def test_warp_reduce_partial_nan(op, all_nan):
+    a = torch.full((7,), float("nan"), dtype=torch.float32, device="cuda")
+    expected = float("nan")
+    if not all_nan:
+        a[1], a[5] = 2, -3
+        expected = -3 if op == "min" else 2
+    ref = torch.full_like(a, expected)
+    kernel = get_kernel(op, "float32", (7, 1, 1))
+    kernel(a)
+    torch.testing.assert_close(a, ref, rtol=0, atol=0, equal_nan=True)
 
 
 if __name__ == "__main__":
