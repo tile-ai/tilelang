@@ -6,6 +6,7 @@
 #ifndef TILELANG_BACKEND_COMMON_CODEGEN_CODEGEN_C_LINE_DIRECTIVES_H_
 #define TILELANG_BACKEND_COMMON_CODEGEN_CODEGEN_C_LINE_DIRECTIVES_H_
 
+#include <sstream>
 #include <string>
 
 #include "target/source/codegen_c.h"
@@ -30,9 +31,16 @@ namespace codegen {
  *
  * Enabled via the `tl.emit_line_directives` pass config (default off), read by
  * the backend builders before codegen.
+ *
+ * It also buffers imported C source (`pragma_import_c`) and emits it after the
+ * headers a backend writes in `Finish`, so imports can use the templates those
+ * headers declare. Leaf codegens must forward unhandled `AttrStmt`s and end
+ * `Finish` through this class rather than `CodeGenC`.
  */
 class CodeGenCWithLineDirectives : public CodeGenC {
 public:
+  using CodeGenC::VisitStmt_;
+
   void SetEmitLineDirectives(bool enable) { emit_line_directives_ = enable; }
 
   // Intercept every statement visit. final: leaf codegen classes must not
@@ -52,6 +60,23 @@ public:
     if (emit_line_directives_ && f.defined() && f->span.defined()) {
       EmitSpanDirective_(f->span);
     }
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) override {
+    if (op->attr_key != tirx::attr::pragma_import_c) {
+      CodeGenC::VisitStmt_(op);
+      return;
+    }
+    const auto *value = op->value.as<StringImmNode>();
+    TVM_FFI_ICHECK(value != nullptr);
+    // Keep an extra blank line in case the final newline is backslash-escaped.
+    import_c_stream_ << value->value << "\n\n";
+    PrintStmt(op->body);
+  }
+
+  std::string Finish() override {
+    decl_stream << import_c_stream_.str();
+    return CodeGenC::Finish();
   }
 
 private:
@@ -89,6 +114,8 @@ private:
   std::string last_file_;
   /*! \brief Stream position right after the last emitted directive. */
   std::streampos last_directive_pos_{};
+  /*! \brief Imported C source, emitted by Finish after the backend headers. */
+  std::ostringstream import_c_stream_;
 };
 
 } // namespace codegen

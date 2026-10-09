@@ -431,7 +431,7 @@ std::string CodeGenTileLangHIP::Finish() {
   decl_stream << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/hip/debug.h>\n";
   decl_stream << "\n";
-  return CodeGenC::Finish();
+  return CodeGenCWithLineDirectives::Finish();
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const tirx::ForNode *op) {
@@ -2113,7 +2113,7 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     this->VisitStmt(op->body);
     return;
   }
-  CodeGenC::VisitStmt_(op);
+  CodeGenCWithLineDirectives::VisitStmt_(op);
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {

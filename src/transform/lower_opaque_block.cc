@@ -276,6 +276,16 @@ private:
     }
   }
 
+  /*! \brief Ensure imported C source ends with a newline character. */
+  static PrimExpr EnsureTrailingNewline(PrimExpr value) {
+    if (const auto *str = value.as<StringImmNode>()) {
+      // Keep an extra blank line in case the final newline is
+      // backslash-escaped.
+      return StringImm(str->value + "\n\n");
+    }
+    return value;
+  }
+
   /*!
    * \brief Helper to handle annotation dict.
    * (1) if the attr key is prefixed by `pragma_`, move to ordered kv list. They
@@ -295,7 +305,13 @@ private:
     for (const auto &kv : annotations) {
       const String &key = kv.first;
       if (tirx::attr::IsPragmaKey(key) || tl::attr::IsCodeBlockKey(key)) {
-        pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
+        PrimExpr value = ConvertAttrValue(key, kv.second);
+        // Codegen splices imported source verbatim; without a trailing newline
+        // its last line fuses with the next emitted line.
+        if (key == tirx::attr::pragma_import_c) {
+          value = EnsureTrailingNewline(std::move(value));
+        }
+        pragma_attrs->emplace_back(key, std::move(value));
       } else if (key == tl::attr::kLocalVarInit) {
         if (auto local_init_map = kv.second.try_cast<Map<Var, PrimExpr>>()) {
           for (const auto &pair : local_init_map.value()) {
