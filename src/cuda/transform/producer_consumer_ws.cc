@@ -1444,13 +1444,11 @@ private:
     }
 
     // --- Compute arrive_counts (after producer_extent is finalized) ---
-    // Forward arrive_count:
-    //   - Pure TMA (possibly merged): 1 (leader thread only)
-    //   - Mixed TMA with SIMT/cp.async: producer_extent (all producer threads)
-    PrimExpr fwd_arrive_count = (can_merge_tma_barriers ||
-                                 (!has_simt_producer && !has_cp_async_producer))
-                                    ? IntImm(DataType::Int(32), 1)
-                                    : producer_extent;
+    // Forward arrive_count: producer_extent. All producer threads arrive, also
+    // for pure TMA where only the leader issues: otherwise the other producer
+    // warps only wait on the back-pressure barriers, nothing bounds how far
+    // they lag, and one two phases behind waits on a reused parity forever.
+    PrimExpr fwd_arrive_count = producer_extent;
     Array<PrimExpr> arrive_counts;
     for (int i = 0; i < num_fwd; ++i) {
       arrive_counts.push_back(fwd_arrive_count);
@@ -1554,10 +1552,9 @@ private:
         Call tile_call = Downcast<Call>(eval->value);
         auto tile_op = ParseOperator(tile_call);
         PrimExpr tma_call;
-        // For pure TMA, tell LowerTileOp to emit arrive inside the same
-        // tl_shuffle_elect block (via emit_arrive annotation), producing
-        // arrive_and_expect_tx instead of separate expect_tx + arrive.
-        // When merged barriers, only the last TMA copy should arrive.
+        // For pure TMA, all producer threads arrive right after the copy; the
+        // leader's expect_tx precedes its own arrive. When merged barriers,
+        // only the last TMA copy arrives.
         bool emit_arrive_on_this =
             !has_simt_producer && !has_cp_async_producer &&
             (!can_merge_tma_barriers || tma_idx == last_tma_idx);
@@ -1569,13 +1566,10 @@ private:
           // barrier so Lower() uses the WS barrier instead of its own.
           tma_call = AnnotateTileOpBarrier(tile_call, barrier_buf, fwd_id);
         }
-        if (emit_arrive_on_this) {
-          auto call = Downcast<Call>(tma_call);
-          auto annos = call->annotations;
-          annos.Set("emit_arrive", IntImm(DataType::Int(32), 1));
-          tma_call = Call(call->dtype, call->op, call->args, annos, call->span);
-        }
         producer_stmts.push_back(Evaluate(tma_call));
+        if (emit_arrive_on_this) {
+          producer_stmts.push_back(MakeArriveBarrier(barrier_buf, fwd_id));
+        }
         ++tma_idx;
       }
       // SIMT/cp.async producers are handled above (after first bp_wait).

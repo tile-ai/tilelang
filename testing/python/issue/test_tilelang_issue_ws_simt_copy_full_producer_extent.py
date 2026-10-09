@@ -1,5 +1,7 @@
 import re
 
+import torch
+
 import tilelang
 import tilelang.testing
 from tilelang import language as T
@@ -55,6 +57,44 @@ def test_ws_keeps_full_producer_extent_for_lowered_simt_copy():
     assert "if (((int)threadIdx.x) < 256) {" in flat_src
     assert "tl::tl_shuffle_elect<256>()" in src or "if (((int)threadIdx.x) == 0) {" in src
     assert re.search(r"tl::__sync_thread_partial\(\d+, 256\);", src), src
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
+def test_ws_tma_only_producer_threads_all_arrive():
+    M, N, K = 256, 256, 512
+    block_M, block_N, block_K = 128, 128, 64
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((K, N), T.float16),
+        C: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), T.float16)
+            B_shared = T.alloc_shared((block_K, block_N), T.float16)
+            C_frag = T.alloc_fragment((block_M, block_N), T.float32)
+            T.clear(C_frag)
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[k * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_frag)
+            T.copy(C_frag, C[by * block_M, bx * block_N])
+
+    kernel = _compile_tvm_ffi(main)
+    src = kernel.get_kernel_source()
+    # Only the elected thread issues the TMA loads, but every producer thread must arrive on the forward
+    # barriers. Otherwise warps 1-3 only wait on the back-pressure barriers, can fall two phases behind, and hang.
+    assert "tl::tma_load" in src
+    inits = re.findall(r"mbarrier\[\d+\]\.init\((\d+)\);", src)
+    assert inits and all(n == "128" for n in inits), src
+
+    a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    c = torch.empty(M, N, device="cuda", dtype=torch.float32)
+    kernel(a, b, c)
+    torch.testing.assert_close(c, a.float() @ b.float(), rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
