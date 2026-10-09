@@ -183,24 +183,32 @@ def test_nvcc_compile_cuda_honors_target_code(monkeypatch):
     assert captured["cmd"][gencode_index + 1] == "arch=compute_100f,code=[sm_100a,sm_103a]"
 
 
-def test_cuda_compile_callback_uses_fatbin_for_multiple_target_code(monkeypatch):
+def test_cuda_compile_callback_uses_fatbin_for_multiple_target_code(monkeypatch, tmp_path):
     from tilelang.backend.target import determine_target
     from tilelang.cuda import backend as cuda_backend
+    from tilelang.env import CacheState, env
 
-    captured = {}
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
+    monkeypatch.setattr(CacheState, "_enabled", True)
+    compile_calls = []
 
     def fake_compile_cuda(code, target_format, arch, options=None, verbose=False):
-        captured["target_format"] = target_format
-        captured["arch"] = arch
+        compile_calls.append((target_format, arch))
         return bytearray(b"fake-cuda-binary")
 
     monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_compile_cuda)
 
     target = determine_target({"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}, return_object=True)
-    cuda_backend.tilelang_callback_cuda_compile("__global__ void kernel() {}", target)
+    source = "__global__ void kernel() {}"
+    first = cuda_backend.tilelang_callback_cuda_compile(source, target)
 
-    assert captured["target_format"] == "fatbin"
-    assert captured["arch"] == ["-gencode", "arch=compute_100f,code=[sm_100a,sm_103a]"]
+    assert compile_calls == [("fatbin", ["-gencode", "arch=compute_100f,code=[sm_100a,sm_103a]"])]
+    assert bytes(first) == b"fake-cuda-binary"
+
+    second = cuda_backend.tilelang_callback_cuda_compile(source, target)
+    assert second == first
+    assert len(compile_calls) == 1
 
 
 @tilelang.testing.requires_cuda
