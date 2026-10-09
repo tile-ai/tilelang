@@ -472,12 +472,6 @@ jobs:
           # The CMake submodule check below needs git to work in the checkout.
           git config --global --add safe.directory '*'
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          activate-environment: false
-          enable-cache: false
-
       - name: Build and test Ascend
         shell: bash
         run: |
