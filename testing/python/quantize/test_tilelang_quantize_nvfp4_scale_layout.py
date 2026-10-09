@@ -895,6 +895,36 @@ def test_encode_ue4m3_scale_bytes_known_values():
     assert torch.isnan(decode_ue4m3_scale_bytes(torch.tensor([0x7F], dtype=torch.uint8))).all()
 
 
+@tilelang_testing.requires_cuda
+def test_decode_ue4m3_scale_byte_device_helper_matches_host_reference():
+    """The device decoder must agree with the host reference for every code.
+
+    The host reference maps the reserved UE4M3 code 0x7F to NaN. The device
+    helper used to fall through to the plain bit-pattern path for that code and
+    return a finite 480.0, which exceeds _UE4M3_MAX (448.0) and is not a
+    representable UE4M3 value.
+    """
+    import tilelang
+    import tilelang.language as T
+
+    @T.prim_func
+    def decode_kernel(codes: T.Tensor((256,), "int32"), out: T.Tensor((256,), "float32")):
+        with T.Kernel(1, threads=256):
+            tx = T.get_thread_binding()
+            out[tx] = nvfp4_utils._tl_decode_ue4m3_scale_byte(codes[tx])
+
+    kernel = tilelang.compile(decode_kernel)
+    codes = torch.arange(256, dtype=torch.int32, device="cuda")
+    decoded = torch.empty(256, dtype=torch.float32, device="cuda")
+    kernel(codes, decoded)
+    decoded = decoded.cpu()
+
+    reference = decode_ue4m3_scale_bytes(torch.arange(256, dtype=torch.uint8))
+    assert torch.equal(torch.isnan(decoded), torch.isnan(reference))
+    finite = ~torch.isnan(reference)
+    assert torch.equal(decoded[finite], reference[finite])
+
+
 def test_quantize_nvfp4_blockscaled_bf16_activation_contract():
     rows = 128
     cols = 256
