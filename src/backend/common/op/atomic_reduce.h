@@ -31,6 +31,16 @@ using namespace ffi;
 
 namespace atomic_reduce {
 
+inline size_t CountNonUnitExtents(const Array<Range> &ranges) {
+  size_t count = 0;
+  for (const auto &range : ranges) {
+    if (!is_one(range->extent)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
 inline Array<IterVar> MakeIterVars(const AtomicOpBaseNode &op) {
   Array<IterVar> loop_vars;
   size_t idx = 0;
@@ -92,6 +102,14 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
   PrimExpr src_value_arg;
 
   if (!op.src_value.defined()) {
+    const size_t src_non_unit_dims = CountNonUnitExtents(op.src_range);
+    const size_t dst_non_unit_dims = CountNonUnitExtents(op.dst_range);
+    ICHECK_EQ(src_non_unit_dims, dst_non_unit_dims)
+        << "Atomic reduction requires matching non-unit region dimensions, but "
+           "src "
+        << op.src->name << " has " << src_non_unit_dims << " and dst "
+        << op.dst->name << " has " << dst_non_unit_dims
+        << "; src_range=" << op.src_range << ", dst_range=" << op.dst_range;
     ICHECK(loop_vars.size() <= op.src_range.size())
         << "loop_vars.size() = " << loop_vars.size()
         << ", src_range.size() = " << op.src_range.size()

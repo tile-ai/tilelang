@@ -343,6 +343,54 @@ def lower_tma_atomic_add(dtype, arch="sm_90", shape=(16, 16), explicit_layout=Fa
         )
 
 
+def region_atomic_program(operation, source_shape=(4, 8, 16), destination_shape=(8, 16)):
+    @T.prim_func
+    def main(
+        A: T.Tensor(source_shape, "float32"),
+        B: T.Tensor(destination_shape, "float32"),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(source_shape, "float32")
+            B_shared = T.alloc_shared(destination_shape, "float32")
+            T.clear(A_shared)
+            T.clear(B_shared)
+            source_region = tuple(slice(None) for _ in source_shape)
+            destination_region = tuple(slice(None) for _ in destination_shape)
+            if operation == "add":
+                T.atomic_add(B_shared[destination_region], A_shared[source_region])
+            elif operation == "max":
+                T.atomic_max(B_shared[destination_region], A_shared[source_region])
+            else:
+                T.atomic_min(B_shared[destination_region], A_shared[source_region])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+def test_region_atomic_rank_mismatch_has_diagnostic(operation):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
+    with target, pytest.raises(tvm.error.InternalError, match="matching non-unit region dimensions"):
+        tilelang.lower(
+            region_atomic_program(operation),
+            target=target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+
+
+@tilelang.testing.requires_cuda
+def test_region_atomic_matching_rank_is_accepted():
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
+    with target:
+        tilelang.lower(
+            region_atomic_program("add", source_shape=(8, 16), destination_shape=(8, 16)),
+            target=target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+
+
 def get_tma_atomic_add_descriptor_args(artifact):
     for func in artifact.host_mod.functions.values():
         if func.attrs is None or "tma_descriptor_args" not in func.attrs:
