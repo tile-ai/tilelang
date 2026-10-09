@@ -20,9 +20,26 @@ struct fp8_e8_t {
 #define TL_HAS_FP8_E8M0 0
 #endif
 
+// Keep FP8 vectors packed across assignment and copy construction, including
+// temporaries and helper return values. Memberwise copies can make NVCC unpack
+// and repack each byte of an already packed conversion result.
+#define TL_FP8_VECTOR_COPY(Type, Storage)                                      \
+  TL_DEVICE Type() = default;                                                  \
+  TL_DEVICE Type(const Type &other) { *this = other; }                         \
+  TL_DEVICE Type &operator=(const Type &other) {                               \
+    static_assert(sizeof(Type) == sizeof(Storage), "FP8 copy size mismatch");  \
+    static_assert(alignof(Type) >= alignof(Storage),                           \
+                  "FP8 copy alignment mismatch");                              \
+    *reinterpret_cast<Storage *>(this) =                                       \
+        *reinterpret_cast<const Storage *>(&other);                            \
+    return *this;                                                              \
+  }
+
 struct __CUDA_ALIGN__(2) fp8_e4_2_t {
   fp8_e4_t x;
   fp8_e4_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e4_2_t, uint16_t)
 };
 
 struct __CUDA_ALIGN__(4) fp8_e4_4_t {
@@ -30,26 +47,36 @@ struct __CUDA_ALIGN__(4) fp8_e4_4_t {
   fp8_e4_t y;
   fp8_e4_t z;
   fp8_e4_t w;
+
+  TL_FP8_VECTOR_COPY(fp8_e4_4_t, uint32_t)
 };
 
 struct __CUDA_ALIGN__(8) fp8_e4_8_t {
   fp8_e4_4_t x;
   fp8_e4_4_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e4_8_t, uint2)
 };
 
 struct __CUDA_ALIGN__(16) fp8_e4_16_t {
   fp8_e4_8_t x;
   fp8_e4_8_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e4_16_t, uint4)
 };
 
 struct __CUDA_ALIGN__(32) fp8_e4_32_t {
   fp8_e4_16_t x;
   fp8_e4_16_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e4_32_t, ulonglong4)
 };
 
 struct __CUDA_ALIGN__(2) fp8_e5_2_t {
   fp8_e5_t x;
   fp8_e5_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e5_2_t, uint16_t)
 };
 
 struct __CUDA_ALIGN__(4) fp8_e5_4_t {
@@ -57,26 +84,36 @@ struct __CUDA_ALIGN__(4) fp8_e5_4_t {
   fp8_e5_t y;
   fp8_e5_t z;
   fp8_e5_t w;
+
+  TL_FP8_VECTOR_COPY(fp8_e5_4_t, uint32_t)
 };
 
 struct __CUDA_ALIGN__(8) fp8_e5_8_t {
   fp8_e5_4_t x;
   fp8_e5_4_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e5_8_t, uint2)
 };
 
 struct __CUDA_ALIGN__(16) fp8_e5_16_t {
   fp8_e5_8_t x;
   fp8_e5_8_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e5_16_t, uint4)
 };
 
 struct __CUDA_ALIGN__(32) fp8_e5_32_t {
   fp8_e5_16_t x;
   fp8_e5_16_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e5_32_t, ulonglong4)
 };
 
 struct __CUDA_ALIGN__(2) fp8_e8_2_t {
   fp8_e8_t x;
   fp8_e8_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e8_2_t, uint16_t)
 };
 
 struct __CUDA_ALIGN__(4) fp8_e8_4_t {
@@ -84,22 +121,32 @@ struct __CUDA_ALIGN__(4) fp8_e8_4_t {
   fp8_e8_t y;
   fp8_e8_t z;
   fp8_e8_t w;
+
+  TL_FP8_VECTOR_COPY(fp8_e8_4_t, uint32_t)
 };
 
 struct __CUDA_ALIGN__(8) fp8_e8_8_t {
   fp8_e8_4_t x;
   fp8_e8_4_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e8_8_t, uint2)
 };
 
 struct __CUDA_ALIGN__(16) fp8_e8_16_t {
   fp8_e8_8_t x;
   fp8_e8_8_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e8_16_t, uint4)
 };
 
 struct __CUDA_ALIGN__(32) fp8_e8_32_t {
   fp8_e8_16_t x;
   fp8_e8_16_t y;
+
+  TL_FP8_VECTOR_COPY(fp8_e8_32_t, ulonglong4)
 };
+
+#undef TL_FP8_VECTOR_COPY
 
 // e4m3x2 -> float2
 TL_DEVICE float2

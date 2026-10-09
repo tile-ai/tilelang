@@ -12,7 +12,7 @@ import pytest
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang import tvm
 from tvm import tirx
@@ -32,7 +32,7 @@ def _tile_copy(size):
 
     @T.prim_func
     def main(A: T.Tensor((size,), "bfloat16"), B: T.Tensor((size,), "float32")):
-        with T.Kernel(1, threads=1):
+        with T.Kernel(1):
             T.copy(A, B)
 
     return main

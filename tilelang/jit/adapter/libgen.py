@@ -21,7 +21,7 @@ from tilelang.contrib.rocm import find_hipcc, find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.contrib.hip_resource_info import filter_and_record
 
-from .utils import is_cpu_target, is_cuda_target, is_hip_target
+from .utils import is_ascend_target, is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ class LibraryGenerator:
     def compile_lib(self, timeout: float = None):
         target = self.target
         verbose = self.verbose
+        extra_compile_options = [item for flag in (self.compile_flags or []) for item in flag.split()]
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
 
@@ -138,6 +139,33 @@ class LibraryGenerator:
             ]
             if TILELANG_HIP_SAVE_TEMP_FILES != "0":
                 command += ["--save-temps", "-g"]
+        elif is_ascend_target(target):
+            from tilelang.contrib.bisheng import (
+                find_bisheng_path,
+                get_bisheng_compile_options,
+                get_target_npu_arch,
+                normalize_options,
+            )
+
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".asc", delete=False)  # noqa: SIM115
+            libpath = src.name.replace(".asc", ".so")
+
+            npu_arch = get_target_npu_arch(target)
+            configured_options = normalize_options((self.pass_configs or {}).get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
+            explicit_options = normalize_options(self.compile_flags)
+            # Keep repeated option/value pairs such as -mllvm intact and ordered.
+            # Merge here to bypass the token deduplication below.
+            extra_compile_options = []
+            command = [
+                find_bisheng_path(),
+                *get_bisheng_compile_options(npu_arch),
+                *configured_options,
+                *explicit_options,
+                # Avoid using mmap to write linker output, thus more friendly for distributed FS
+                "-Wl,--no-mmap-output-file",
+                "--shared",
+                src.name,
+            ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
 
@@ -155,8 +183,7 @@ class LibraryGenerator:
             "-I" + TILELANG_TEMPLATE_PATH,
         ]
 
-        if self.compile_flags:
-            command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
+        command += [item for item in extra_compile_options if item not in command]
 
         command += ["-o", libpath]
 

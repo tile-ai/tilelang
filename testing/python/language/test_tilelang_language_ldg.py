@@ -123,6 +123,29 @@ def test_ldg256_codegen():
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_lt(10, 0)
+def test_ldg256_stg256_fallback_on_pre_sm100():
+    """Test that explicit 256-bit load/store falls back on pre-SM100."""
+
+    @tilelang.jit
+    def ldg256_stg256_fallback_kernel(X, Y):
+        N = T.const("N")
+        X: T.Tensor[[N], T.float32]
+        Y: T.Tensor[[N], T.float32]
+
+        with T.Kernel(N // 8, threads=32) as pid:
+            value = T.ldg256(X[pid * 8 : pid * 8 + 8])
+            T.stg256(Y[pid * 8 : pid * 8 + 8], value)
+
+    X = torch.randn(256, dtype=torch.float32, device="cuda")
+    Y = torch.empty(256, dtype=torch.float32, device="cuda")
+
+    ldg256_stg256_fallback_kernel(X, Y)
+
+    torch.testing.assert_close(Y, X, atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
 def test_ldg32_predicated_codegen():
     """Test that ldg32 with predicate generates tl::load_global_32_conditional(ptr, pred) in CUDA source."""
 

@@ -66,21 +66,35 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
   if (IsSharedBuffer(buffer)) {
-    int replicate_extent = 1;
-    Array<PrimExpr> buffer_shape = buffer->shape;
+    // A shared tile only carries a layout with compile-time extents: the
+    // replication factor below, swizzles, TMA boxes and the shared-memory
+    // budget all need constant sizes. Symbolic extents reach here both from
+    // T.annotate_layout and from ops that infer shared layouts (scan), so the
+    // check lives at the remap site rather than on the annotation path.
     int buffer_extent = 1;
+    for (const PrimExpr &shape : buffer->shape) {
+      const auto *extent = shape.as<IntImmNode>();
+      if (extent == nullptr) {
+        TVM_FFI_THROW(ValueError)
+            << "Shared buffer `" << buffer->name << "` has symbolic extent "
+            << shape << ", but a layout on a shared buffer requires "
+            << "compile-time constant tile extents. Allocate the tile with "
+            << "static extents, or drop the layout on it.";
+      }
+      buffer_extent *= extent->value;
+    }
     int layout_extent = 1;
-    for (size_t i = 0; i < buffer_shape.size(); i++) {
-      auto shape = buffer_shape[i].as<IntImmNode>();
-      buffer_extent *= shape->value;
+    for (const PrimExpr &shape : layout_shape) {
+      const auto *extent = shape.as<IntImmNode>();
+      if (extent == nullptr) {
+        TVM_FFI_THROW(ValueError)
+            << "Layout for shared buffer `" << buffer->name
+            << "` has symbolic output extent " << shape
+            << ", but shared layouts require compile-time constant extents.";
+      }
+      layout_extent *= extent->value;
     }
-    for (size_t i = 0; i < layout_shape.size(); i++) {
-      auto shape = layout_shape[i].as<IntImmNode>();
-      ICHECK(shape) << "Layout output shape must be constant integer, but got: "
-                    << layout_shape[i];
-      layout_extent *= shape->value;
-    }
-    replicate_extent = buffer_extent / layout_extent;
+    int replicate_extent = buffer_extent / layout_extent;
     if (replicate_extent > 1) {
       output_shape.insert(output_shape.begin(), replicate_extent);
     }

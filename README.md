@@ -13,15 +13,17 @@
 [Installation](https://tilelang.com/get_started/Installation.html) ·
 [Examples](https://github.com/tile-ai/tilelang/tree/main/examples) ·
 [Releases](https://github.com/tile-ai/tilelang/releases) ·
-[Contributing](https://github.com/tile-ai/tilelang/blob/main/CONTRIBUTING.md)
+[Contributing](https://github.com/tile-ai/tilelang/blob/main/CONTRIBUTING.md) ·
+[TileLang (Ascend 950)](./tilelang/ascend/README.md)
 </div>
 
-Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
+Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU/NPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
 
 <img src="./images/MatmulExample.png" alt="TileLang tiled matrix multiplication example" />
 
 ## Latest News
 
+- **2026-09-30 — [Ascend 950 backend](./tilelang/ascend/README.md):** TileLang now officially supports Huawei Ascend 950 NPUs with native code generation, automatic scheduling and synchronization, SIMD/SIMT vector programming, etc. Explore the Ascend examples for GEMM, FlashAttention, and more.
 - **2026-08-04 — [TileLang LSP open sourced](https://github.com/tile-ai/tilelang-lsp):** published a Language Server Protocol implementation for TileLang with inlay hints for buffer shapes, dtypes, scopes, and inferred layouts, plus hover details and precise diagnostics.
 - **2026-08-03 — [TileLang v0.1.13](https://github.com/tile-ai/tilelang/releases/tag/v0.1.13):** shipped the multi-backend language dialect, source locations in compiler diagnostics, new CUDA and Metal hardware paths, and a broad set of correctness fixes. This release removes several legacy APIs; read the compatibility notes before upgrading.
 - **2026-07-30 — [SM120 NVF4 block-scaled MMA](https://github.com/tile-ai/tilelang/pull/2364):** added an optimized Blackwell path for `T.mma_gemm_blockscaled` and a corresponding SM120 example.
@@ -114,17 +116,18 @@ TileLang is evolving into a multi-backend compiler (**TileLang-X**) built around
 
 The currently supported backends are listed below. `Primary` identifies TileLang's core backend, while `Supported` and `Experimental` backends are implemented in the main repository. `Ecosystem` adapters live in separate repositories, are not included in TileLang release wheels, and may follow independent compatibility schedules. Prebuilt wheels are available for Linux x86-64/AArch64, Windows x86-64, and macOS arm64.
 
-TileLang uses `Target` objects to represent compilation targets. The default `auto` target detects CUDA, HIP, and Metal devices; select an explicit target when compiling for another backend or architecture. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
+TileLang uses `Target` objects to represent compilation targets. The default `auto` target detects CUDA, HIP, Metal, and Ascend devices; select an explicit target when compiling for another backend or architecture. See the [target guide](https://tilelang.com/get_started/targets.html) for target syntax, architecture options, and backend-specific notes, or the corresponding adapter repository for installation and tested-device details.
 
 | Backend | Target | Platforms and hardware | Support level | Notes |
 | --- | --- | --- | --- | --- |
 | NVIDIA CUDA | `cuda` | Linux x86-64/AArch64, Windows x86-64; code paths from SM70 through SM120 | Primary | Release wheels and CI coverage; TMA, WGMMA, and TMEM features require the corresponding GPU architecture. |
 | AMD ROCm/HIP | `hip` | Linux; CDNA and RDNA GPUs, including gfx942/gfx950 paths | Supported | Included in Linux wheels; a ROCm runtime is required. CI runs on a self-hosted gfx942 (MI300X) runner; gfx950 is not yet covered. |
+| Huawei Ascend 950 | `ascend` | Linux; Ascend 950 NPUs | Supported | Build from source with `USE_ASCEND=ON`; requires CANN and `torch_npu`. See the [Ascend guide](./tilelang/ascend/README.md). |
 | Apple Metal | `metal` | macOS on Apple silicon | Supported | Release wheels and CI coverage; Metal 4 cooperative tensors are available on supported M5 systems. |
 | LLVM CPU | `llvm` | Host CPUs | Experimental | Build from source with `USE_LLVM=ON`; LLVM 15 or newer is required. |
 | NVIDIA CuTe DSL | `cutedsl` | NVIDIA GPUs | Experimental | Requires `nvidia-cutlass-dsl`. |
 | WebGPU | `webgpu` | WebGPU runtimes | Experimental | Code generation and runtime integration are still evolving. |
-| Huawei Ascend | Ascend C / NPU IR | Ascend A2 and A3 | Ecosystem | Developed in [tilelang-ascend](https://github.com/tile-ai/tilelang-ascend) and the MLIR-based [tilelang-mlir-ascend](https://github.com/tile-ai/tilelang-mlir-ascend). |
+| Huawei Ascend A2/A3 | `ascendc` / `pto` / `npuir` | Ascend A2 and A3 | Ecosystem | Developed in [tilelang-ascend](https://github.com/tile-ai/tilelang-ascend) and the MLIR-based [tilelang-mlir-ascend](https://github.com/tile-ai/tilelang-mlir-ascend). |
 | MetaX MACA | `maca` | MetaX C500 and C600 | Ecosystem | Developed in [tilelang-metax](https://github.com/tile-ai/tilelang-metax); requires the MACA software stack. |
 | Moore Threads MUSA | `musa` | S5000, S4000, and M1000 | Ecosystem | Developed in [tilelang-musa](https://github.com/tile-ai/tilelang-musa) and released independently. |
 | HYGON | `hcu` | Linux; BW1000, BW1100, BW150 and K100_AI | Ecosystem | Developed in [tilelang-hygon](https://github.com/tile-ai/tilelang-hygon); requires the DTK software stack. |

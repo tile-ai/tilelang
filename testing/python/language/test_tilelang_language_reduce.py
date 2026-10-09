@@ -1039,13 +1039,16 @@ def _make_allreduce_width_kernel(reduce_fn, M, width, threads):
     return kernel
 
 
-def _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale):
+def _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale, threads=None):
+    if threads is None:
+        threads = logical_width * scale
+
     @T.prim_func
     def kernel(
         A: T.Tensor((logical_width, scale), T.float32),
         B: T.Tensor((scale,), T.float32),
     ):
-        with T.Kernel(1, threads=logical_width * scale):
+        with T.Kernel(1, threads=threads):
             src = T.alloc_fragment((logical_width, scale), T.float32)
             dst = T.alloc_fragment((scale,), T.float32)
             T.copy(A, src)
@@ -1089,6 +1092,28 @@ def test_allreduce_scale_greater_than_one_valid_runtime(logical_width, scale):
 def test_allreduce_scale_greater_than_one_rejects_non_power_of_two(reduce_fn):
     with pytest.raises(Exception, match=r"logical_width.*positive power of two"):
         _compile(_make_allreduce_dim0_scale_kernel(reduce_fn, 48, 2))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
+@pytest.mark.parametrize(
+    ("logical_width", "scale", "threads"),
+    [
+        # Exactly one replica: t ^ 48 reads past the 96-entry workspace.
+        (32, 3, 96),
+        # Two replicas over 192 of 256 threads: the layout inferred for a
+        # (32, 3) fragment, silently mixes columns and replicas.
+        (32, 3, 256),
+        # Shuffle-only width: shfl_xor(12/6/3) still straddles columns.
+        (8, 3, 128),
+    ],
+)
+def test_allreduce_rejects_non_power_of_two_scale(reduce_fn, logical_width, scale, threads):
+    # The XOR butterfly only addresses the reduce coordinate when the thread
+    # stride between consecutive participants is a power of two; a stride-3
+    # reduce must fail loudly instead of returning a wrong result.
+    with pytest.raises(Exception, match=r"scale .*power of two"):
+        _compile(_make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale, threads))
 
 
 def _make_nan_reduce_kernel(reduce_fn, M, N, dtype, threads, *, nan_propagate):

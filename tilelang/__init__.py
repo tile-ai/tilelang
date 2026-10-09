@@ -162,19 +162,27 @@ if not env.is_light_import():
             enable_cache,
             disable_cache,
             is_cache_enabled,
-            get_windows_runtime_dll_dirs,
+            get_runtime_library_dirs,
             prepend_dll_search_path,
         )
         from . import libinfo
 
+        runtime_library_dirs = get_runtime_library_dirs()
         if sys.platform.startswith("win32"):
             # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
             # then register all native dependency dirs with the secure DLL
             # loader used by Python 3.8+ for absolute-path DLL loads.
-            runtime_dll_dirs = get_windows_runtime_dll_dirs()
-            prepend_dll_search_path(runtime_dll_dirs)
-            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_dll_dirs])
+            prepend_dll_search_path(runtime_library_dirs)
+            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_library_dirs])
             _dll_handles = [os.add_dll_directory(p) for p in dll_dirs]
+        else:
+            # Symlink installs break sibling-relative RPATHs. TVM-FFI loads its
+            # own library during discovery above; load Z3 from its package path.
+            _z3_handles = [
+                ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
+                for directory in runtime_library_dirs
+                if (path := Path(directory) / ("libz3.dylib" if sys.platform == "darwin" else "libz3.so")).is_file()
+            ]
 
         import tvm
         import tvm.base  # noqa: F401
@@ -215,6 +223,7 @@ if not env.is_light_import():
     from . import ir  # noqa: F401
     from . import tileop  # noqa: F401
     from . import cpu as cpu  # noqa: F401
+    from . import ascend as ascend  # noqa: F401
     from . import cuda as cuda  # noqa: F401
     from . import rocm as rocm  # noqa: F401
     from . import metal as metal  # noqa: F401

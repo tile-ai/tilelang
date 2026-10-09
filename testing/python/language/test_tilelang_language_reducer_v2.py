@@ -340,6 +340,33 @@ def test_narrow_plan_row_reduction_projected_width():
     torch.testing.assert_close(B, A.sum(dim=1), atol=1e-3, rtol=1e-3)
 
 
+def test_narrow_plan_rejects_non_power_of_two_thread_stride():
+    """Parallel(R, C) -> acc[C] with C=3: the row-major loop layout puts the
+    reduced rows at thread stride 3, which the XOR butterfly cannot address.
+    The planner must fall back to the wide plan instead of emitting
+    AllReduce<..., 96, 3>."""
+    R, C, threads = 32, 3, 128
+
+    @T.prim_func
+    def kernel(A: T.Tensor((R, C), T.int32), B: T.Tensor((C,), T.int32)):
+        with T.Kernel(1, threads=threads):
+            acc = T.alloc_reducer((C,), T.int32, op="max")
+            T.reducer_init(acc)
+            for i, j in T.Parallel(R, C):
+                T.reducer_update(acc[j], A[i, j])
+            result = T.alloc_fragment((C,), T.int32)
+            T.finalize_reducer(acc, result)
+            T.copy(result, B)
+
+    source = tl.compile(kernel, out_idx=-1).get_kernel_source()
+    assert f"MaxOp, {threads}, 1" in source, source  # wide plan
+    assert f"MaxOp, {R * C}, {C}" not in source, source
+
+    A = torch.arange(R * C, dtype=torch.int32, device="cuda").reshape(R, C)
+    B = tl.compile(kernel, out_idx=-1)(A)
+    torch.testing.assert_close(B, A.amax(dim=0), atol=0, rtol=0)
+
+
 def test_seed_with_narrow_plan():
     """Seeds work with narrow plans: combined exactly once per logical
     output after the projected collective, not once per replica group."""
