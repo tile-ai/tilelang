@@ -11,13 +11,10 @@ from example_mhc_pre_apply_mix import mhc_pre_apply_mix_fwd, ref_program
 def test_mhc_pre_apply_mix_fwd(target):
     num_tokens, mhc_mult, hidden = 128, 4, 1280
 
-    # `tl.disable_shared_memory_reuse` avoids the auto-schedule buffer-alias
-    # inference aliasing the two multi-versioned buffers `xs` and `os`.
     kernel = tilelang.compile(
         mhc_pre_apply_mix_fwd(mhc_mult, hidden),
         target=target,
         out_idx=-1,
-        pass_configs={"tl.disable_shared_memory_reuse": True},
     )
 
     device = torch.device("npu")

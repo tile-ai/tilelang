@@ -2,6 +2,8 @@
 
 Broadcasts `x[n, h]` to `o[n, mhc, h]` and reduces the gradient back. Written
 in plain TileLang; the AutoSimtVF pass promotes the `T.Parallel` loops.
+
+CUDA reference: TileKernels ``tile_kernels/mhc/expand_cuda.py``.
 """
 
 import torch
@@ -25,15 +27,14 @@ def mhc_expand_fwd(hidden, mhc_mult):
         with T.Kernel(T.ceildiv(n, blk_n) * num_hidden_blocks) as pid:
             pid_i = pid // num_hidden_blocks
             pid_j = pid % num_hidden_blocks
-            if n > 0:
-                xl = T.alloc_fragment((blk_n, blk_h), T.bfloat16)
-                T.copy(x[pid_i * blk_n, pid_j * blk_h], xl)
-                for m in T.serial(mhc):
-                    for ti, tj in T.Parallel(blk_n, blk_h):
-                        i = pid_i * blk_n + ti
-                        j = pid_j * blk_h + tj
-                        if i < n and j < h:
-                            o[i, m, j] = xl[ti, tj]
+            xl = T.alloc_fragment((blk_n, blk_h), T.bfloat16)
+            T.copy(x[pid_i * blk_n, pid_j * blk_h], xl)
+            for m in T.serial(mhc):
+                for ti, tj in T.Parallel(blk_n, blk_h):
+                    i = pid_i * blk_n + ti
+                    j = pid_j * blk_h + tj
+                    if i < n and j < h:
+                        o[i, m, j] = xl[ti, tj]
 
     return main
 
@@ -54,16 +55,15 @@ def mhc_expand_bwd(hidden, mhc_mult):
         with T.Kernel(T.ceildiv(n, blk_n) * num_hidden_blocks) as pid:
             pid_i = pid // num_hidden_blocks
             pid_j = pid % num_hidden_blocks
-            if n > 0:
-                xgl = T.alloc_fragment((blk_n, blk_h), T.float32)
-                T.fill(xgl, 0)
-                for m in T.serial(mhc):
-                    for ti, tj in T.Parallel(blk_n, blk_h):
-                        i = pid_i * blk_n + ti
-                        j = pid_j * blk_h + tj
-                        if i < n and j < h:
-                            xgl[ti, tj] += o_grad[i, m, j]
-                T.copy(xgl, x_grad[pid_i * blk_n, pid_j * blk_h])
+            xgl = T.alloc_fragment((blk_n, blk_h), T.float32)
+            T.fill(xgl, 0)
+            for m in T.serial(mhc):
+                for ti, tj in T.Parallel(blk_n, blk_h):
+                    i = pid_i * blk_n + ti
+                    j = pid_j * blk_h + tj
+                    if i < n and j < h:
+                        xgl[ti, tj] += o_grad[i, m, j]
+            T.copy(xgl, x_grad[pid_i * blk_n, pid_j * blk_h])
 
     return main
 

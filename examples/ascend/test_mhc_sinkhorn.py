@@ -15,7 +15,7 @@ from example_mhc_sinkhorn import (
 @pytest.mark.parametrize("target", ["ascend"])
 def test_mhc_sinkhorn_fwd(target):
     num_tokens, hidden_size = 64, 4
-    token_block_size, repeat, eps = 1, 10, 1e-6
+    token_block_size, repeat, eps = 8, 10, 1e-6
     kernel = tilelang.compile(mhc_sinkhorn_fwd(hidden_size, token_block_size, repeat, eps), target=target, out_idx=-1)
 
     device = torch.device("npu")
@@ -30,7 +30,7 @@ def test_mhc_sinkhorn_fwd(target):
 @pytest.mark.parametrize("target", ["ascend"])
 def test_mhc_sinkhorn_bwd(target):
     num_tokens, hidden_size = 128, 4
-    token_block_size, repeat, eps = 32, 2, 1e-6
+    token_block_size, repeat, eps = 8, 10, 1e-6
     kernel = tilelang.compile(mhc_sinkhorn_bwd(hidden_size, token_block_size, repeat, eps), target=target, out_idx=-1)
 
     device = torch.device("npu")

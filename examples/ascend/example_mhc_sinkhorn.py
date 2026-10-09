@@ -2,6 +2,8 @@
 
 Row/column normalization of the combination matrix over a serial repeat loop.
 Written in plain TileLang; the AutoSimtVF pass promotes the `T.Parallel` loops.
+
+CUDA reference: TileKernels ``tile_kernels/mhc/sinkhorn_cuda.py``.
 """
 
 import torch
@@ -92,7 +94,7 @@ def mhc_sinkhorn_bwd(hidden_size, token_block_size, repeat, eps):
             for i, j, k in T.Parallel(token_block_size, hidden_size, hidden_size):
                 x_frag[i, j, k] = x_frag[i, j, k] / (col_sum[i, k] + eps)
 
-            for step in T.serial(repeat - 1):
+            for step in T.unroll(repeat - 1):
                 T.reduce_sum(x_frag, row_sum, dim=2)
                 T.copy(row_sum, sums[step * 2 + 2, 0, 0])
                 T.copy(x_frag, xs[step * 2 + 2, 0, 0, 0])
@@ -106,7 +108,7 @@ def mhc_sinkhorn_bwd(hidden_size, token_block_size, repeat, eps):
                     x_frag[i, j, k] = x_frag[i, j, k] / (col_sum[i, k] + eps)
 
             x_inter = T.alloc_fragment((token_block_size, hidden_size, hidden_size), T.float32)
-            for inv_step in T.serial(2 * repeat - 1):
+            for inv_step in T.unroll(2 * repeat - 1):
                 T.copy(xs[2 * repeat - 1 - inv_step, 0, 0, 0], x_inter)
                 if inv_step % 2 == 0:
                     T.copy(sums[2 * repeat - 1 - inv_step, 0, 0], col_sum)
@@ -163,7 +165,7 @@ if __name__ == "__main__":
     device = torch.device("npu")
 
     num_tokens, hidden_size = 64, 4
-    token_block_size, repeat, eps = 1, 10, 1e-6
+    token_block_size, repeat, eps = 8, 10, 1e-6
     comb_res_mix = torch.randn((num_tokens, hidden_size, hidden_size), device=device, dtype=torch.float32)
     kernel = tilelang.compile(mhc_sinkhorn_fwd(hidden_size, token_block_size, repeat, eps), target="ascend", out_idx=-1)
     actual = kernel(comb_res_mix)
@@ -173,7 +175,7 @@ if __name__ == "__main__":
     print("PASS: mhc_sinkhorn_fwd")
 
     num_tokens, hidden_size = 128, 4
-    token_block_size, repeat, eps = 32, 2, 1e-6
+    token_block_size, repeat, eps = 8, 10, 1e-6
     grad_output = torch.randn((num_tokens, hidden_size, hidden_size), device=device, dtype=torch.float32)
     x = torch.randn((num_tokens, hidden_size, hidden_size), device=device, dtype=torch.float32)
     kernel = tilelang.compile(mhc_sinkhorn_bwd(hidden_size, token_block_size, repeat, eps), target="ascend", out_idx=-1)

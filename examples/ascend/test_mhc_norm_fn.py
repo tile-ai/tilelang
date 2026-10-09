@@ -16,33 +16,38 @@ from example_mhc_norm_fn import (
 
 @pytest.mark.parametrize("target", ["ascend"])
 def test_mhc_fn_normw_merge_fwd(target):
-    m, n = 24, 7168
-    kernel = tilelang.compile(mhc_fn_normw_merge_fwd(m, n), target=target, out_idx=-1)
-
     device = torch.device("npu")
-    fn = torch.randn((m, n), device=device, dtype=torch.float32)
-    normw = torch.randn((n,), device=device, dtype=torch.float32)
+    # Exercise both CUDA tile-size branches, including a partial final tile.
+    for m, n in [(24, 7168), (256, 1024), (256, 1031)]:
+        kernel = tilelang.compile(mhc_fn_normw_merge_fwd(m, n), target=target, out_idx=-1)
+        fn = torch.randn((m, n), device=device, dtype=torch.float32)
+        normw = torch.randn((n,), device=device, dtype=torch.float32)
 
-    actual = kernel(fn, normw)
-    torch.npu.synchronize()
-    torch.testing.assert_close(actual, ref_program_fn_normw_merge_fwd(fn, normw), rtol=1e-5, atol=1e-6)
+        actual = kernel(fn, normw)
+        torch.npu.synchronize()
+        torch.testing.assert_close(actual, ref_program_fn_normw_merge_fwd(fn, normw), rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize("target", ["ascend"])
 def test_mhc_fn_normw_merge_bwd(target):
     m, n = 128, 512
-    kernel = tilelang.compile(mhc_fn_normw_merge_bwd(m, n), target=target, out_idx=[-2, -1])
+    kernel = tilelang.compile(mhc_fn_normw_merge_bwd(m, n), target=target, out_idx=[])
 
     device = torch.device("npu")
     fn = torch.randn((m, n), device=device, dtype=torch.float32)
     normw = torch.randn((n,), device=device, dtype=torch.float32)
     out_fn_grad = torch.randn((m, n), device=device, dtype=torch.float32)
 
-    fn_grad, normw_grad = kernel(fn, normw, out_fn_grad)
-    torch.npu.synchronize()
     expected_fn_grad, expected_normw_grad = ref_program_fn_normw_merge_bwd(fn, normw, out_fn_grad)
-    torch.testing.assert_close(fn_grad, expected_fn_grad, rtol=1e-5, atol=2e-5)
-    torch.testing.assert_close(normw_grad, expected_normw_grad, rtol=1e-5, atol=2e-5)
+    # CUDA accumulates into caller-owned gradients, including on repeated calls.
+    for fn_initial, normw_initial in [(0.0, 0.0), (0.75, 0.5)]:
+        fn_grad = torch.full_like(fn, fn_initial)
+        normw_grad = torch.full_like(normw, normw_initial)
+        for count in (1, 2):
+            kernel(fn, normw, out_fn_grad, fn_grad, normw_grad)
+            torch.npu.synchronize()
+            torch.testing.assert_close(fn_grad, fn_initial + count * expected_fn_grad, rtol=1e-5, atol=2e-5)
+            torch.testing.assert_close(normw_grad, normw_initial + count * expected_normw_grad, rtol=1e-5, atol=2e-5)
 
 
 @pytest.mark.parametrize("target", ["ascend"])
