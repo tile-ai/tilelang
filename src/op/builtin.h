@@ -33,6 +33,12 @@ static constexpr const char *kLocalVarInit = "tl.local_var_init";
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 
+// Annotation on the tilelang_root block recording the SIMT thread-block
+// extents requested by T.Kernel(threads=...). It is a launch hint: SIMT
+// backends materialize it as threadIdx.* thread_extent scopes, other
+// backends ignore it.
+static constexpr const char *kLaunchThreads = "tl.launch_threads";
+
 } // namespace attr
 
 inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
@@ -140,6 +146,13 @@ static constexpr const char *kPassProfileThresholdMs =
  */
 TVM_DLL const Op &tvm_ffi_call_with_result();
 
+/*! \brief Elementwise clamp with NaN propagation and single-evaluation
+ * operands. */
+TVM_DLL const Op &clamp();
+
+/*! \brief Shared clamp expansion for backends without a device helper. */
+TVM_DLL PrimExpr LowerClamp(PrimExpr expr);
+
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
  *
@@ -184,6 +197,19 @@ TVM_DLL const Op &access_ptr();
  * - args[2 + i]: extent of axis i (may be a dynamic PrimExpr).
  */
 TVM_DLL const Op &region();
+
+/*!
+ * \brief Placeholder for the thread index along one launch axis.
+ *
+ * T.Kernel binds each thread variable as `LetStmt(tx, launch_thread_idx(axis))`
+ * so the kernel body can reference a thread index before the target is known.
+ * tl.MaterializeKernelLaunch replaces the binding with a real threadIdx.*
+ * thread_extent scope on SIMT backends and rejects any use on backends
+ * without SIMT. It must never reach codegen.
+ *
+ * int32 launch_thread_idx(axis)
+ */
+TVM_DLL const Op &launch_thread_idx();
 
 // Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
 TVM_DLL const Op &add2();
@@ -285,6 +311,19 @@ TVM_DLL const Op &sync_grid();
  *
  */
 TVM_DLL const Op &sync_warp();
+
+// RNG ops. #2855 registers these under the CUDA dialect, but this fork also
+// consumes them from backend-neutral code (loop_vectorize) and the Ascend
+// codegen/SIMT RNG path, so declare them here too (registration stays in
+// cuda/op/builtin.cc; a redeclaration is harmless).
+TVM_DLL const Op &rng_init();
+TVM_DLL const Op &rng_rand();
+TVM_DLL const Op &rng_rand_float();
+
+// device_assert lowers through the Ascend codegen (toolkit assert()) as well as
+// CUDA; #2855 files it under the CUDA dialect, so redeclare for asc codegen.
+TVM_DLL const Op &device_assert();
+TVM_DLL const Op &device_assert_with_msg();
 
 /*!
  * \brief Warp-vote: non-zero if ANY active lane in the mask has a non-zero

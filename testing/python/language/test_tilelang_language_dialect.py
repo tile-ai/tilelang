@@ -19,8 +19,10 @@ from tilelang.language.tir.exports import (
 CUDA_ONLY_NAMES = {
     "ClusterKernel",
     "CUDASourceCodeKernel",
+    "mma_gemm_blockscaled",
     "pdl_trigger",
     "rng_init",
+    "tcgen05_gemm_blockscaled",
     "tcgen05_mma",
     "tma_copy",
     "wgmma_mma",
@@ -56,8 +58,16 @@ def test_default_language_is_static_cuda_facade():
 
 def test_common_language_preserves_special_dsl_exports():
     assert T_comm.__tilelang_dialect__ == "common"
-    assert "__log" in T_comm.__all__
-    assert hasattr(T_comm, "__log")
+    assert "gemm_blockscaled" in T_comm.__all__
+    # Packed-x2 math is target-neutral and stays on the common surface; the
+    # CUDA-only fast-math family (dunder names like __log) moved to the CUDA
+    # dialect, whose export machinery must keep supporting them.
+    assert "add2" in T_comm.__all__
+    assert "__log" not in T_comm.__all__
+    from tilelang.cuda import language as cuda_language
+
+    assert "__log" in cuda_language.__all__
+    assert hasattr(cuda_language, "__log")
     assert CUDA_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
     assert METAL_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
     assert ROCM_ONLY_TIR_EXPORTS.isdisjoint(T_comm.__all__)
@@ -72,7 +82,11 @@ def test_cuda_language_composes_common_and_cuda_symbols():
     from tilelang.cuda import language as T
     from tilelang.cuda import debug as cuda_debug
 
-    assert T.copy is T_comm.copy
+    # The CUDA dialect shadows T.copy with a version exposing CUDA hints
+    # (disable_tma, eviction_policy, prefer_instruction); see
+    # test_tilelang_language_dialect_op_hints.py for the full contract.
+    assert T.copy is not T_comm.copy
+    assert T.async_copy is T_comm.async_copy
     assert T.tcgen05_mma is T.tcgen05_gemm
     assert T.tcgen05_mma_blockscaled is T.tcgen05_gemm_blockscaled
     assert T.wgmma_mma is T.wgmma_gemm
@@ -173,6 +187,8 @@ def test_non_cuda_dialects_do_not_export_cuda_symbols(module_name):
     module = importlib.import_module(module_name)
     assert CUDA_ONLY_NAMES.isdisjoint(module.__all__)
     assert CUDA_ONLY_TIR_EXPORTS.isdisjoint(module.__all__)
+    assert "gemm_blockscaled" in module.__all__
+    assert module.gemm_blockscaled is T_comm.gemm_blockscaled
 
 
 @pytest.mark.parametrize(

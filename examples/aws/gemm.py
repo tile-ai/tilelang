@@ -7,7 +7,7 @@ from tilelang.carver.arch import driver
 from tilelang.profiler import do_bench
 
 
-@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: "role_based"})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_WARP_SPECIALIZATION: "role_based"})
 def gemm(
     A,
     B,

@@ -1,4 +1,4 @@
-"""Tests for AutoSchedule's "role_based" scheduler.
+"""Tests for AutoWarpSpecialization's "role_based" scheduler.
 
 The pass consumes plain (schedule-free) kernels, assigns fixed roles from
 lowering eligibility (Load / MMA / Store / Worker), pulls warp-private
@@ -28,15 +28,15 @@ def _prepare(func):
     return mod
 
 
-def _auto_schedule(mod, scheduler="role_based"):
-    """Apply AutoSchedule with the scheduler opted in via pass config."""
-    with tvm.transform.PassContext(config={"tl.enable_auto_schedule": scheduler}):
-        return tilelang.cuda.transform.AutoSchedule()(mod)
+def _auto_warp_specialization(mod, scheduler="role_based"):
+    """Apply AutoWarpSpecialization with the scheduler opted in via pass config."""
+    with tvm.transform.PassContext(config={"tl.enable_auto_warp_specialization": scheduler}):
+        return tilelang.cuda.transform.AutoWarpSpecialization()(mod)
 
 
 def _schedule(func):
     """Run the pass; returns (scheduled module, root WSSchedule or None)."""
-    scheduled = _auto_schedule(_prepare(func))
+    scheduled = _auto_warp_specialization(_prepare(func))
     return scheduled, _root_schedule(scheduled["main"])
 
 
@@ -622,7 +622,7 @@ def test_guarded_write_into_versioned_pipeline_declines():
     than silently re-versioned; guarded writes to single-buffered
     pipelines (FA's rescale) keep source semantics and stay schedulable."""
     prepared = _prepare(_guarded_producer_kernel())
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -746,7 +746,7 @@ def test_rmw_accumulator_numerical():
         _rmw_accumulator_kernel(),
         target="cuda",
         out_idx=[3],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((4, 128, 64), device="cuda", dtype=torch.float16)
     b = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
@@ -875,7 +875,7 @@ def test_read_before_nested_cycle_declines():
                     T.copy(F, B[w, k, 0, 0])
 
     prepared = _prepare(kernel)
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -886,7 +886,7 @@ def test_post_loop_read_numerical():
         _post_loop_read_kernel(),
         target="cuda",
         out_idx=[1, 2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((2, 4, 64, 64), device="cuda", dtype=torch.float16)
     b, c = kernel(a)
@@ -900,7 +900,7 @@ def test_pipeline_opt_in_runs_automatic_ws():
     mod = tvm.IRModule.from_expr(func)
     with (
         _TARGET,
-        tvm.transform.PassContext(config={"tl.enable_auto_schedule": "role_based"}),
+        tvm.transform.PassContext(config={"tl.enable_auto_warp_specialization": "role_based"}),
     ):
         out = tilelang.cuda.pipeline.CUDAPassPipelineBodyPrologue(mod, _TARGET)["main"]
 
@@ -920,7 +920,7 @@ def test_no_shared_handoff_is_left_unchanged():
             T.copy(F, B)
 
     prepared = _prepare(kernel)
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -993,7 +993,7 @@ def test_while_scope_numerical():
         _persistent_while_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((2, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1005,7 +1005,7 @@ def test_pipelined_load_numerical():
         _pipelined_load_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1017,7 +1017,7 @@ def test_two_cycles_numerical():
         _two_cycle_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((2, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1029,7 +1029,7 @@ def test_gather_bind_numerical():
         _gather_kernel(worker_uses_index=True),
         target="cuda",
         out_idx=[2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     indices = torch.tensor([5, 2, 7, 0], device="cuda", dtype=torch.int32)
     a = torch.randn((8, 64, 64), device="cuda", dtype=torch.float16)
@@ -1045,7 +1045,7 @@ def test_local_chain_numerical():
         _local_chain_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     expected = torch.stack([a[k * 2 % 4] for k in range(4)])
@@ -1058,7 +1058,7 @@ def test_worker_gemm_numerical():
         _local_accumulator_gemm(),
         target="cuda",
         out_idx=[2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((64, 128), device="cuda", dtype=torch.float16)
     b = torch.randn((128, 64), device="cuda", dtype=torch.float16)
@@ -1097,7 +1097,7 @@ def test_storage_cycling_in_sibling_loops_declines():
     nothing chains — the second loop's pre-armed acquire could overwrite
     data the first loop's consumer still reads. The kernel declines."""
     prepared = _prepare(_two_loop_kernel())
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -1169,7 +1169,7 @@ def test_non_tma_layout_numerical():
         _non_tma_layout_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a + a)
@@ -1229,7 +1229,7 @@ def test_cp_async_load_numerical():
         _cp_async_load_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((4, 64, 64), device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
@@ -1261,7 +1261,7 @@ def test_async_wgmma_wait_kernel_is_left_unchanged():
             T.copy(C_local, C[0, 0])
 
     prepared = _prepare(kernel)
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -1288,7 +1288,7 @@ def test_raw_cp_async_kernel_is_left_unchanged():
                 T.copy(F, A[k, 0, 0])
 
     prepared = _prepare(kernel)
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -1322,7 +1322,7 @@ def test_pointer_table_bind_follows_freshened_buffer():
         _pointer_table_kernel(),
         target="cuda",
         out_idx=[1],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     src = torch.randn((64, 64), device="cuda", dtype=torch.float16)
     ptrs = torch.tensor([src.data_ptr()], device="cuda", dtype=torch.int64)
@@ -1331,8 +1331,8 @@ def test_pointer_table_bind_follows_freshened_buffer():
 
 @tilelang.testing.requires_cuda
 def test_unknown_scheduler_rejected():
-    with pytest.raises(Exception, match="unknown auto-schedule scheduler"):
-        _auto_schedule(_prepare(_pipelined_load_kernel()), scheduler="nonexistent")
+    with pytest.raises(Exception, match="unknown auto-warp-specialization scheduler"):
+        _auto_warp_specialization(_prepare(_pipelined_load_kernel()), scheduler="nonexistent")
 
 
 @tilelang.testing.requires_cuda
@@ -1371,7 +1371,7 @@ def test_unschedulable_constructs_decline():
 
     for kernel in (atomic_kernel, hosted_async_kernel, sync_threads_kernel):
         prepared = _prepare(kernel)
-        scheduled = _auto_schedule(prepared)
+        scheduled = _auto_warp_specialization(prepared)
         assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -1382,7 +1382,7 @@ def test_tmem_gemm_numerical():
         _tmem_gemm(),
         target="cuda",
         out_idx=[2],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((2, 128, 64), device="cuda", dtype=torch.float16)
     b = torch.randn((2, 128, 64), device="cuda", dtype=torch.float16)
@@ -1408,7 +1408,7 @@ def test_thread_budget_exceeded_declines():
                 T.copy(F, B[k, 0, 0])
 
     prepared = _prepare(kernel)
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -1501,7 +1501,7 @@ def test_annotated_ws_pipeline_depth_on_inner_binding_declines():
     rescale): versioning it would expose a stale slot, so the annotated
     depth declines."""
     prepared = _prepare(_waved_rmw_accumulator_kernel(inner_depth=2))
-    scheduled = _auto_schedule(prepared)
+    scheduled = _auto_warp_specialization(prepared)
     assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
 
 
@@ -1512,7 +1512,7 @@ def test_annotated_ws_pipeline_depth_ring_numerical():
         _waved_rmw_accumulator_kernel(depth=2),
         target="cuda",
         out_idx=[3],
-        pass_configs={"tl.enable_auto_schedule": "role_based"},
+        pass_configs={"tl.enable_auto_warp_specialization": "role_based"},
     )
     a = torch.randn((2, 4, 128, 64), device="cuda", dtype=torch.float16)
     b = torch.randn((2, 4, 64, 64), device="cuda", dtype=torch.float16)

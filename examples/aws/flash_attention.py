@@ -16,7 +16,7 @@ PASS_CFG = {
 @tilelang.jit(
     pass_configs={
         **PASS_CFG,
-        tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: "role_based",
+        tilelang.PassConfigKey.TL_ENABLE_AUTO_WARP_SPECIALIZATION: "role_based",
     }
 )
 def flash_attention(

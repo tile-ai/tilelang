@@ -85,3 +85,28 @@ TL_DEFINE_VEC(uint32_t)
 TL_DEFINE_VEC(uint64_t)
 
 #undef TL_DEFINE_VEC
+
+namespace tl {
+
+template <typename T> inline T clamp(T x, T lo, T hi) {
+  if (x != x)
+    return x;
+  if (lo != lo)
+    return lo;
+  if (hi != hi)
+    return hi;
+  T lower = x < lo ? lo : x;
+  return lower > hi ? hi : lower;
+}
+
+template <typename T, int N>
+inline vec_type<T, N> clamp(vec_type<T, N> x, vec_type<T, N> lo,
+                            vec_type<T, N> hi) {
+  vec_type<T, N> result;
+  for (int i = 0; i < N; ++i) {
+    result.data[i] = clamp(x.data[i], lo.data[i], hi.data[i]);
+  }
+  return result;
+}
+
+} // namespace tl

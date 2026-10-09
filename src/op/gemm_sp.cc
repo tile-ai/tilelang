@@ -76,15 +76,14 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
  *
  * Deserializes operator parameters from `args` and resolves buffer references,
  * populating an internal GemmSPNode with buffers, transpose flags, M/N/K,
- * warp policy, clear_accum, strides, offsets, and optional kPack/wg_wait.
+ * warp policy and clear_accum.
  *
  * @param args Positional serialized arguments produced by the TL frontend:
  *   expected layout is:
  *     [Aptr, Eptr, Bptr, Cptr, trans_A (Bool), trans_E (Bool),
  *      trans_B (Bool), M (Int), N (Int), K (Int), policy (Int),
- *      clear_accum (Bool), stride_A (Int), stride_B (Int),
- *      offset_A (Int), offset_B (Int),
- *      (optional) kPack (Int), (optional) wg_wait (Int)]
+ *      clear_accum (Bool)]
+ *   Backend lowering knobs (wg_wait) ride in the annotations map.
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
@@ -112,18 +111,12 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->K = args[9].as<IntImm>().value()->value;
   node->policy = GemmSPWarpPolicy(args[10].as<IntImm>().value()->value);
   node->clear_accum = args[11].as<PrimExpr>().value();
-  node->stride_A = args[12].as<IntImm>().value()->value;
-  node->stride_B = args[13].as<IntImm>().value()->value;
-  node->offset_A = args[14].as<IntImm>().value()->value;
-  node->offset_B = args[15].as<IntImm>().value()->value;
-  if (args.size() > 16) {
-    node->kPack = args[16].as<IntImm>().value()->value;
-    if (node->kPack != 1 && node->kPack != 2) {
-      ICHECK(false) << "kPack must be 1 or 2";
-    }
-  }
-  if (args.size() > 17) {
-    node->wg_wait = args[17].as<IntImm>().value()->value;
+  // wg_wait is a Hopper warpgroup knob set by the CUDA dialect; it rides in
+  // the annotations rather than the positional call protocol.
+  if (auto val = annotations.Get("wg_wait")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "wg_wait annotation must be IntImmNode";
+    node->wg_wait = int_val->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
     const auto *int_val = val->as<IntImmNode>();

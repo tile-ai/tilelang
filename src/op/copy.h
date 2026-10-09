@@ -44,7 +44,9 @@ public:
 
   mutable ParallelOp par_op_; // Optional associated parallelization operator
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Copy", CopyNode, TileOperatorNode);
+  // Non-final so dialects can extend the copy with typed backend state
+  // (e.g. AscendCopyNode in src/ascend/op/copy.h).
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.Copy", CopyNode, TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = reflection;
@@ -182,7 +184,7 @@ public:
   int padding_;  // Padding amount
   int dilation_; // Dilation factor
   int kernel_;   // Kernel size
-  int eviction_policy_;                // Cache eviction policy
+  int eviction_policy_ = 0;            // Cache eviction policy (annotation)
   PrimExpr nhw_step_;                  // Step size in NHW dimensions
   PrimExpr c_step_;                    // Step size in channel dimension
   Map<String, ObjectRef> annotations_; // Annotations from Call node

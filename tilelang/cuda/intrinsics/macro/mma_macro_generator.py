@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import IntEnum
-import tilelang.language as T
+import tilelang.cuda.language as T
 from typing import Literal
 from collections.abc import Callable
 from tvm import DataType

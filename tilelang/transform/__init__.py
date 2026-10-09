@@ -198,26 +198,77 @@ def MakePackedAPI():
     return _ffi_api.MakePackedAPI()  # type: ignore
 
 
-def MaterializeKernelLaunch(lower_thread_binding: bool = True):
-    """Materialize the target-neutral kernel launch nest (thread_binding
-    For loops emitted by T.Kernel) into a backend-specific form. Each
-    backend pipeline decides the mode for itself:
+DEFAULT_SIMT_THREADS = 128
+
+
+def MaterializeKernelLaunch(
+    lower_thread_binding: bool = True,
+    default_threads: int | list[int] | tuple | None = DEFAULT_SIMT_THREADS,
+    unsupported_annotations: list[str] | tuple[str, ...] | None = None,
+    *,
+    lower_grid_binding: bool | None = None,
+    launch_dim_tags: list[str] | tuple[str, ...] | None = None,
+):
+    """Materialize the target-neutral kernel launch nest emitted by T.Kernel
+    into a backend-specific form. Each backend pipeline decides the mode for
+    itself; this is where the target-dependent parts of a launch (whether a
+    program-index space exists, whether threads exist and how many run by
+    default) are decided.
 
     Parameters
     ----------
     lower_thread_binding : bool
-        If True (SIMT backends, e.g. CUDA/ROCm/Metal), lower the
-        blockIdx.*/threadIdx.* loops into thread_extent AttrStmts.
-        If False (backends without SIMT, e.g. CPU), lower blockIdx.*
-        loops into plain serial For loops and ignore threadIdx.* loops
-        (their extents are dropped; the loop vars are pinned to 0).
+        If True (SIMT backends, e.g. CUDA/ROCm/Metal), bind the thread
+        placeholders as threadIdx.* thread_extent scopes.
+        If False (backends without SIMT, e.g. CPU and Ascend), drop the thread
+        placeholders. A body that references a thread index is rejected on such
+        targets. Ascend pairs this with ``lower_grid_binding=True``: its NPU
+        launch is a real 1-D core grid, while thread domains only exist inside
+        ``T.SimtVF``, which emits its own thread scopes below the launch nest.
+    default_threads : int | list[int] | tuple | None
+        Thread-block extents used by SIMT backends when T.Kernel was called
+        without ``threads=``. Ignored when ``lower_thread_binding`` is False.
+        None means the backend has no default and ``threads=`` is required.
+    unsupported_annotations : list[str] | None
+        Launch annotations (keys on the ``tilelang_root`` block, e.g.
+        ``cluster_dims``) that have no meaning on this backend. A launch
+        carrying one is rejected here instead of being silently ignored by
+        later passes.
+    lower_grid_binding : bool | None
+        Keyword-only. If True (targets with a real block/core-level launch,
+        e.g. CUDA, Ascend), lower the launch loops (blockIdx.* grid axes and
+        any tag in ``launch_dim_tags``) into thread_extent AttrStmts carrying
+        each loop's own thread tag.
+        If False (targets with no program-index space, e.g. CPU), lower those
+        loops into plain serial For loops.
+        If None (the default), follow ``lower_thread_binding``: a backend with
+        SIMT threads has a program-index space too, and a backend without them
+        has none. Pass this explicitly to decouple the two, as Ascend does.
+    launch_dim_tags : list[str] | None
+        Keyword-only. Extra thread_binding tags that belong to the launch
+        nest rather than to the thread domain, so a backend can extend the
+        launch vocabulary without this pass knowing about it. Ascend passes
+        ``["cthread"]`` for ``T.MixedKernel``'s sub-block-id dimension.
 
     Returns
     -------
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MaterializeKernelLaunch(lower_thread_binding)  # type: ignore
+    if lower_grid_binding is None:
+        lower_grid_binding = lower_thread_binding
+    if default_threads is not None:
+        if isinstance(default_threads, int):
+            default_threads = [default_threads, 1, 1]
+        else:
+            default_threads = list(default_threads) + [1] * (3 - len(default_threads))
+    if unsupported_annotations is not None:
+        unsupported_annotations = list(unsupported_annotations)
+    if launch_dim_tags is not None:
+        launch_dim_tags = list(launch_dim_tags)
+    return _ffi_api.MaterializeKernelLaunch(  # type: ignore
+        lower_grid_binding, lower_thread_binding, default_threads, unsupported_annotations, launch_dim_tags
+    )
 
 
 def AnnotateDeviceRegions():

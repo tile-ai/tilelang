@@ -636,7 +636,24 @@ public:
           }
           return Buffer();
         };
-        if (call->op.same_as(Copy::Get()) && call->args.size() >= 2) {
+        // Recognize tile copies through the op builder so dialect copy ops
+        // (e.g. tl.tileop.ascend_copy) are censused like plain tl.tileop.copy.
+        // Only strict CopyNode refinements qualify: other spellings that build
+        // a plain CopyNode (async_copy, tma_copy) keep their historical
+        // exclusion from the census.
+        auto is_tile_copy = [](const CallNode *call) {
+          if (call->op.same_as(Copy::Get())) {
+            return true;
+          }
+          if (!call->op.as<OpNode>()) {
+            return false;
+          }
+          TileOperator tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
+          const CopyNode *copy = tile_op.as<CopyNode>();
+          return copy != nullptr &&
+                 copy->type_index() != CopyNode::RuntimeTypeIndex();
+        };
+        if (is_tile_copy(call) && call->args.size() >= 2) {
           Buffer src = region_buffer(call->args[0]);
           Buffer dst = region_buffer(call->args[1]);
           if (src.defined() && dst.defined()) {

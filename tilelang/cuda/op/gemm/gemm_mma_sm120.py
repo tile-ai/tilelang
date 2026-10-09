@@ -5,8 +5,9 @@ from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
     TensorCoreIntrinEmitterSM120 as TensorCoreIntrinEmitterBlockScaled,
 )
 from tilelang.cuda.target import target_is_cuda, target_is_sm120
+from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
-from tilelang.utils.language import is_full_region
+from tilelang.utils.language import is_fragment, is_full_region
 from tvm import tirx
 from tvm.ir import Range
 from tvm.target import Target
@@ -26,8 +27,15 @@ def _is_explicit_non_sm120_cuda(target: Target) -> bool:
     return not target_is_sm120(target)
 
 
-class GemmMMASm120BlockScaled(GemmMMA):
-    """SM120 warp-level block-scaled MMA lowering."""
+class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
+    """SM120 warp-level block-scaled MMA lowering.
+
+    A may be shared or a full fragment; B remains shared. Fragment A and
+    fragment scales use row-major packed uint32 scales. Compact K-major
+    scales retain the shared/shared ping-pong path, including odd atom grids.
+    """
+
+    supported_sf_layouts = ("rowmajor", "blockscaled_chunk_kmajor")
 
     intrin_emitter_cls = TensorCoreIntrinEmitterBlockScaled
 
@@ -37,8 +45,13 @@ class GemmMMASm120BlockScaled(GemmMMA):
             raise ValueError("T.mma_gemm_blockscaled requires SM120 CUDA target")
 
     def _validate_operands(self) -> None:
-        if not self.is_gemm_ss():
-            raise ValueError("T.mma_gemm_blockscaled supports shared-memory A/B operands only")
+        if not (self.is_gemm_ss() or self.is_gemm_rs()):
+            raise ValueError("T.mma_gemm_blockscaled requires shared or fragment A and shared B")
+        if self.is_gemm_rs():
+            if not is_full_region(self.ARegion):
+                raise ValueError("SM120 block-scaled fragment input A must be a full region")
+            if self.sf_layout != "rowmajor":
+                raise ValueError("SM120 block-scaled fragment A currently requires sf_layout='rowmajor'")
 
     def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(
@@ -66,7 +79,25 @@ class GemmMMASm120BlockScaled(GemmMMA):
     def infer_layout(self, target: Target, thread_nums: int):
         self._validate_target(target)
         self._validate_operands()
-        return super().infer_layout(target, thread_nums)
+        layouts = super().infer_layout(target, thread_nums)
+        emitter = self._make_mma_emitter(target, thread_nums)
+        for matrix, region, rows in (("A", self.SFARegion, self.M), ("B", self.SFBRegion, self.N)):
+            buffer = region.buffer
+            if is_fragment(buffer):
+                if self.sf_layout != "rowmajor":
+                    raise ValueError("SM120 fragment scales currently require sf_layout='rowmajor'")
+                if not is_full_region(region) or len(buffer.shape) != 2 or int(buffer.shape[0]) != int(rows):
+                    raise ValueError(f"SM120 fragment SF{matrix} must be a full 2D region with {rows} rows")
+                scale_layout = emitter.make_scale_load_layout(buffer, matrix)
+                # Preserve both operand requirements when SFA and SFB alias.
+                if buffer in layouts and not layouts[buffer].is_equal(scale_layout):
+                    raise ValueError(
+                        f"SM120 block-scaled GEMM cannot reuse fragment buffer '{buffer.name}' as SF{matrix}: "
+                        "its operands require different fragment layouts. "
+                        "Use separate SFA and SFB fragment buffers, or shared-memory scales."
+                    )
+                layouts[buffer] = scale_layout
+        return layouts
 
     def lower(
         self,
@@ -101,14 +132,35 @@ class GemmMMASm120BlockScaled(GemmMMA):
         assert block_K % micro_size_k == 0, f"block_K ({block_K}) must be a multiple of micro_size_k ({micro_size_k})"
         assert is_full_region(C_region), "Fragment output C must be a full region"
 
-        annotations = getattr(self.gemm_node, "annotations", {})
-        sf_a_granularity_k = annotations.get("sf_a_granularity_k")
-        sf_b_granularity_k = annotations.get("sf_b_granularity_k")
-        sf_layout = annotations.get("sf_layout", "rowmajor")
-        if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
+        sf_layout = self.sf_layout
+        if sf_layout not in self.supported_sf_layouts:
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
-        if sf_a_granularity_k is None or sf_b_granularity_k is None:
-            raise ValueError("Block-scaled MMA GEMM requires sf_a_granularity_k and sf_b_granularity_k")
+        sf_a_granularity_k = self.sf_a_granularity_k
+        sf_b_granularity_k = self.sf_b_granularity_k
+
+        if self.is_gemm_rs():
+            A_buf = A_region.buffer
+
+            @T.prim_func
+            def _gemm_rs_blockscaled() -> None:
+                B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
+                if clear_accum:
+                    T.clear(C_buf)
+                for ki in T.serial(block_K // micro_size_k):
+                    mma_emitter.ldmatrix_b(B_local, B_region, ki)
+                    mma_emitter.mma(
+                        A_buf,
+                        B_local,
+                        C_buf,
+                        ki,
+                        SFA_buf=self.SFARegion,
+                        SFB_buf=self.SFBRegion,
+                        k_start=self.sf_k_start,
+                        sf_a_granularity_k=sf_a_granularity_k,
+                        sf_b_granularity_k=sf_b_granularity_k,
+                    )
+
+            return _Simplify(_gemm_rs_blockscaled, inline_let=True)
 
         if sf_layout == "blockscaled_chunk_kmajor":
 
@@ -154,8 +206,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
                     self.SFBRegion,
                     ki=0,
                     k_start=self.sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
+                    sf_a_granularity_k=sf_a_granularity_k,
+                    sf_b_granularity_k=sf_b_granularity_k,
                     sf_layout=sf_layout,
                 )
                 mma_emitter.ldmatrix_a(A_local_1, A_region, 1)
@@ -168,8 +220,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
                     self.SFBRegion,
                     ki=1,
                     k_start=self.sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
+                    sf_a_granularity_k=sf_a_granularity_k,
+                    sf_b_granularity_k=sf_b_granularity_k,
                     sf_layout=sf_layout,
                 )
                 for i in T.unroll(warp_rows):
@@ -195,8 +247,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
                     self.SFBRegion,
                     ki=2,
                     k_start=self.sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
+                    sf_a_granularity_k=sf_a_granularity_k,
+                    sf_b_granularity_k=sf_b_granularity_k,
                     sf_layout=sf_layout,
                 )
                 for i in T.unroll(warp_rows):
@@ -222,8 +274,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
                     self.SFBRegion,
                     ki=3,
                     k_start=self.sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
+                    sf_a_granularity_k=sf_a_granularity_k,
+                    sf_b_granularity_k=sf_b_granularity_k,
                     sf_layout=sf_layout,
                 )
                 for i in T.unroll(warp_rows):
@@ -270,8 +322,8 @@ class GemmMMASm120BlockScaled(GemmMMA):
                     SFA_buf=self.SFARegion,
                     SFB_buf=self.SFBRegion,
                     k_start=self.sf_k_start,
-                    sf_a_granularity_k=int(sf_a_granularity_k),
-                    sf_b_granularity_k=int(sf_b_granularity_k),
+                    sf_a_granularity_k=sf_a_granularity_k,
+                    sf_b_granularity_k=sf_b_granularity_k,
                 )
 
         return _Simplify(_gemm_ss_blockscaled, inline_let=True)

@@ -212,6 +212,31 @@ def test_stg256_codegen():
 
 
 @tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_lt(10, 0)
+def test_implicit_256_bit_vector_store_fallback_on_pre_sm100():
+    """Test that an explicit 256-bit vector value falls back on pre-SM100."""
+
+    @tilelang.jit
+    def implicit_stg256_fallback_kernel(X, Y):
+        N = T.const("N")
+        X: T.Tensor[[1], T.float32]
+        Y: T.Tensor[[N], T.float32]
+
+        with T.Kernel(1, threads=1):
+            # Keep this as a regular vector BufferStore rather than T.stg256:
+            # the codegen path must also lower frontend-created 256-bit values.
+            value = T.Broadcast(X[0], N)
+            Y[0:N] = value
+
+    X = torch.tensor([3.5], dtype=torch.float32, device="cuda")
+    Y = torch.zeros(8, dtype=torch.float32, device="cuda")
+
+    implicit_stg256_fallback_kernel(X, Y)
+
+    torch.testing.assert_close(Y, torch.full_like(Y, 3.5), atol=1e-5, rtol=1e-5)
+
+
+@tilelang.testing.requires_cuda
 def test_stg32_predicated_codegen():
     """Test that stg32 with predicate generates tl::store_global_32_conditional(ptr, val, pred) in CUDA source."""
 

@@ -450,15 +450,11 @@ def test_codegen_auto_vec_reduce_f32_no_sm80(op_name, reduce_func, packed_ops):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize(
-    "reduce_func,packed_op",
-    [(T.reduce_max, "max2"), (T.reduce_min, "min2"), (T.reduce_absmax, "max2")],
-)
-def test_codegen_auto_vec_reduce_f32_ignores_half_nan_mode(reduce_func, packed_op):
+@pytest.mark.parametrize("reduce_func", [T.reduce_max, T.reduce_min, T.reduce_absmax])
+def test_codegen_auto_vec_reduce_f32_rejects_nan_mode(reduce_func):
     func = _make_auto_vec_reduce_kernel(reduce_func, nan_propagate=True)
-    src = _lower_to_cuda_source(func, target=SM100_TARGET)
-    assert f"tl::{packed_op}" in src
-    assert f"tl::{packed_op}_nan" not in src
+    with pytest.raises(ValueError, match="nan_propagate=True requires float16 or bfloat16 output, got float32"):
+        _lower_to_cuda_source(func, target=SM100_TARGET)
 
 
 @tilelang.testing.requires_cuda

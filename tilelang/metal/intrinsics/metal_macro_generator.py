@@ -119,19 +119,19 @@ class MPSIntrinEmitter:
         use_cooperative_tensor = self.use_cooperative_tensor
 
         warp_m, _ = self._get_warp_indices()
-        buffer, extra, offset_m, offset_k, stride = self._parse_buffer_nd(A_shared_buf)
+        buffer, extra, offset_row, offset_col, stride = self._parse_buffer_nd(A_shared_buf)
         if self.a_stride_override is not None:
             stride = self.a_stride_override
 
         @T.macro
-        def _warp_ldmatrix_a(A_local_buf, buffer, offset_m, offset_k, stride, warp_m, ki):
+        def _warp_ldmatrix_a(A_local_buf, buffer, offset_row, offset_col, stride, warp_m, ki):
             for i in T.serial(warp_rows):
                 if a_transposed:
-                    row_idx = offset_k + ki * micro_size_k
-                    col_idx = offset_m + warp_m * warp_row_tiles + i * micro_size_x
+                    row_idx = offset_row + ki * micro_size_k
+                    col_idx = offset_col + warp_m * warp_row_tiles + i * micro_size_x
                 else:
-                    row_idx = offset_m + warp_m * warp_row_tiles + i * micro_size_x
-                    col_idx = offset_k + ki * micro_size_k
+                    row_idx = offset_row + warp_m * warp_row_tiles + i * micro_size_x
+                    col_idx = offset_col + ki * micro_size_k
                 ptr = T.access_ptr(buffer[extra + (row_idx, col_idx)], "r")
                 if use_cooperative_tensor:
                     T.cooperative_tensor_load(
@@ -158,7 +158,7 @@ class MPSIntrinEmitter:
                         T.bool(a_transposed),
                     )
 
-        return _warp_ldmatrix_a(A_local_buf, buffer, offset_m, offset_k, stride, warp_m, ki)
+        return _warp_ldmatrix_a(A_local_buf, buffer, offset_row, offset_col, stride, warp_m, ki)
 
     def ldmatrix_b(self, B_local_buf, B_shared_buf: Buffer | BufferRegion, ki, k_inner: int = 0):
         """Load matrix B tiles from memory into simdgroup/cooperative tensor buffers."""
@@ -171,19 +171,19 @@ class MPSIntrinEmitter:
         use_cooperative_tensor = self.use_cooperative_tensor
 
         _, warp_n = self._get_warp_indices()
-        buffer, extra, offset_k, offset_n, stride = self._parse_buffer_nd(B_shared_buf)
+        buffer, extra, offset_row, offset_col, stride = self._parse_buffer_nd(B_shared_buf)
         if self.b_stride_override is not None:
             stride = self.b_stride_override
 
         @T.macro
-        def _warp_ldmatrix_b(B_local_buf, buffer, offset_k, offset_n, stride, warp_n, ki):
+        def _warp_ldmatrix_b(B_local_buf, buffer, offset_row, offset_col, stride, warp_n, ki):
             for j in T.serial(warp_cols):
                 if b_transposed:
-                    row_idx = offset_n + warp_n * warp_col_tiles + j * micro_size_y
-                    col_idx = offset_k + ki * micro_size_k
+                    row_idx = offset_row + warp_n * warp_col_tiles + j * micro_size_y
+                    col_idx = offset_col + ki * micro_size_k
                 else:
-                    row_idx = offset_k + ki * micro_size_k
-                    col_idx = offset_n + warp_n * warp_col_tiles + j * micro_size_y
+                    row_idx = offset_row + ki * micro_size_k
+                    col_idx = offset_col + warp_n * warp_col_tiles + j * micro_size_y
                 ptr = T.access_ptr(buffer[extra + (row_idx, col_idx)], "r")
                 if use_cooperative_tensor:
                     T.cooperative_tensor_load(
@@ -210,7 +210,7 @@ class MPSIntrinEmitter:
                         T.bool(b_transposed),
                     )
 
-        return _warp_ldmatrix_b(B_local_buf, buffer, offset_k, offset_n, stride, warp_n, ki)
+        return _warp_ldmatrix_b(B_local_buf, buffer, offset_row, offset_col, stride, warp_n, ki)
 
     def mma(self, A_local_buf, B_local_buf, C_local_buf, k_inner: int = 0):
         """Perform matrix multiply-accumulate: C += A * B."""

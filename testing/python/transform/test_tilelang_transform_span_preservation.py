@@ -58,9 +58,9 @@ def _marker_line(marker: str) -> int:
 def _make_vector_add():
     @T.prim_func
     def main(A: T.Tensor((1024,), "float32"), B: T.Tensor((1024,), "float32")):
-        with T.Kernel(1024):
-            tid = T.get_thread_binding()
-            B[tid] = A[tid] + 1.0  # span_marker_vadd_store
+        with T.Kernel(8) as bx:
+            for i in T.Parallel(128):
+                B[bx * 128 + i] = A[bx * 128 + i] + 1.0  # span_marker_vadd_store
 
     return main
 
@@ -96,8 +96,9 @@ def _lower_with_recorder(func, target: str) -> _SpanCoverageRecorder:
     return recorder
 
 
-# Passes whose span propagation was fixed; they must never drop a span
-# (statement *deletion* is fine — it also reduces the total).
+# Passes whose span propagation was fixed; they must never strip a span from
+# a statement or introduce a new statement without one (statement *deletion*
+# is fine — it reduces the spanned and total counts alike).
 _SPAN_SAFE_PASSES = {
     "tl.MaterializeKernelLaunch",
     "tl.AddWrapperForSingleBufStore",
@@ -112,11 +113,13 @@ _SPAN_SAFE_PASSES = {
 
 
 def _assert_no_span_loss(recorder: _SpanCoverageRecorder):
-    prev_w = None
-    for name, w, _t in recorder.rows:
-        if prev_w is not None and name in _SPAN_SAFE_PASSES:
-            assert w >= prev_w, f"pass {name} dropped spans: {prev_w} -> {w}"
-        prev_w = w
+    prev = None
+    for name, w, t in recorder.rows:
+        if prev is not None and name in _SPAN_SAFE_PASSES:
+            prev_w, prev_t = prev
+            unspanned, prev_unspanned = t - w, prev_t - prev_w
+            assert unspanned <= prev_unspanned, f"pass {name} dropped spans: {prev_w}/{prev_t} spanned -> {w}/{t} spanned"
+        prev = (w, t)
 
 
 def test_span_survives_lowering_cpu():

@@ -33,7 +33,7 @@ def gemm_lower(
 class Gemm(Node, Scriptable):
     # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
     # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
-    # strideA, strideB, offsetA, offsetB, clearAccum, kPack, wgWait, policy
+    # clearAccum, kPack, wgWait, policy
     #
     # Backward-compat alias properties are provided below to support old names.
 
@@ -83,22 +83,6 @@ class Gemm(Node, Scriptable):
         return self.transB
 
     @property
-    def stride_A(self):
-        return self.strideA
-
-    @property
-    def stride_B(self):
-        return self.strideB
-
-    @property
-    def offset_A(self):
-        return self.offsetA
-
-    @property
-    def offset_B(self):
-        return self.offsetB
-
-    @property
     def clear_accum(self):
         return self.clearAccum
 
@@ -113,10 +97,6 @@ class Gemm(Node, Scriptable):
     @property
     def is_tcgen05(self):
         return getattr(self, "isTcgen05", False)
-
-    @property
-    def sf_k_start(self):
-        return self.sfKStart
 
     def infer_layout(self, target: Target, thread_nums: int):
         """Infer the layout for the GEMM operation based on target architecture."""

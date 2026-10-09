@@ -21,6 +21,15 @@ OLD_PYTHON = os.environ.get("OLD_PYTHON", "./old/bin/python")
 NEW_PYTHON = os.environ.get("NEW_PYTHON", "./new/bin/python")
 OUT_MD = os.environ.get("PERF_REGRESSION_MD", "regression_result.md")
 OUT_PNG = os.environ.get("PERF_REGRESSION_PNG", "regression_result.png")
+# Fail the run only when at least MIN_COUNT benchmarks drop below THRESHOLD.
+# Calibrated on the 33 bot reports posted to PRs up to #3176 (1901 samples):
+# 20 reports are clean, 6 (all on PR #2464) show a real regression with 14-23
+# benchmarks collapsing at once, and 7 carry exactly one outlier as low as 0.044
+# while every other benchmark sits at 1.000. Requiring two simultaneous drops
+# separates those cases exactly -- 6/6 real regressions caught, 0 false alarms --
+# for any threshold in 0.80..0.95.
+THRESHOLD = float(os.environ.get("PERF_REGRESSION_THRESHOLD", "0.90"))
+MIN_COUNT = int(os.environ.get("PERF_REGRESSION_MIN_COUNT", "2"))
 _RESULTS_JSON_PREFIX = "__TILELANG_PERF_RESULTS_JSON__="
 
 
@@ -226,11 +235,35 @@ if not table:
 table.sort(key=lambda x: x[-1])
 
 headers = ["File", "Original Latency", "Current Latency", "Speedup"]
-
-with open(OUT_MD, "w") as f:
-    f.write(tabulate(table, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
-    f.write("\n")
-
 df = pd.DataFrame(table, columns=headers)
 df = df.sort_values("Speedup", ascending=False).reset_index(drop=True)
 draw(df)
+
+# Speedup is old/new latency, so anything below the threshold is a slowdown.
+slow = [row for row in table if row[-1] < THRESHOLD]
+regressed = slow if len(slow) >= MIN_COUNT else []
+
+if regressed:
+    summary = f"**Regression: {len(regressed)}/{len(table)} benchmarks below {THRESHOLD:g}x**\n\n"
+    summary += "".join(f"- `{row[0]}`: {row[-1]:.3f}x\n" for row in regressed)
+elif slow:
+    summary = (
+        f"No regression. {len(slow)}/{len(table)} benchmarks landed below {THRESHOLD:g}x, "
+        f"under the {MIN_COUNT}-benchmark bar that separates a real regression from a single noisy run: "
+        + ", ".join(f"`{row[0]}` {row[-1]:.3f}x" for row in slow)
+        + "\n"
+    )
+else:
+    summary = f"No regression: all {len(table)} benchmarks kept speedup >= {THRESHOLD:g}.\n"
+
+marked = [[f"{row[0]} :warning:" if row[-1] < THRESHOLD else row[0], *row[1:]] for row in table]
+with open(OUT_MD, "w") as f:
+    f.write(summary)
+    f.write("\n")
+    f.write(tabulate(marked, headers=headers, tablefmt="github", stralign="left", numalign="decimal"))
+    f.write("\n")
+
+print(summary)
+if regressed:
+    # Exit last so the markdown table and the plot are still produced for the report.
+    exit(1)

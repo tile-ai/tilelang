@@ -25,7 +25,9 @@
 #include "../op/utils.h"
 #include "arith/scalable_expression.h"
 #include "backend/common/target_utils.h"
+#include "loop_vectorize.h"
 #include "tir/analysis/check_contains.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -100,41 +102,6 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
 }
 
 /*!
- * \brief Extract BufferLoad from an expression that may be wrapped in
- * address_of.
- */
-inline Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr) {
-  if (const auto *load = expr.as<BufferLoadNode>()) {
-    return GetRef<BufferLoad>(load);
-  }
-  if (const auto *call = expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::address_of()) && !call->args.empty()) {
-      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-        return GetRef<BufferLoad>(load);
-      }
-    }
-    if (call->op.same_as(tl::access_ptr()) && !call->args.empty()) {
-      if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-        return GetRef<BufferLoad>(load);
-      }
-    }
-    // Handle tvm_access_ptr: args are (dtype_annotation, data, offset, extent,
-    // access_mask)
-    if (call->op.same_as(builtin::tvm_access_ptr()) && call->args.size() >= 3) {
-      DataType dtype = call->args[0].dtype();
-      Var data_var = Downcast<Var>(call->args[1]);
-      PrimExpr offset = call->args[2];
-      // Create a dummy buffer with the correct dtype and a BufferLoad from data
-      // + offset
-      Buffer dummy_buf(data_var, dtype, {Integer(1)}, {}, Integer(0),
-                       data_var->name_hint, 0, 0, kDefault);
-      return BufferLoad(dummy_buf, {offset});
-    }
-  }
-  return Optional<BufferLoad>();
-}
-
-/*!
  * \brief Get the vectorized atomic add op based on vector size.
  */
 inline Op GetVectorizedAtomicOp(int vector_size) {
@@ -146,22 +113,6 @@ inline Op GetVectorizedAtomicOp(int vector_size) {
   default:
     return atomic_add_elem_op();
   }
-}
-
-/*!
- * \brief Get the max vector size supported by the destination for atomic ops.
- */
-inline int GetMaxAtomicVectorSize(const Buffer &destination, Target target) {
-  DataType dtype = destination->dtype;
-  if (dtype.is_float16() || dtype.is_bfloat16()) {
-    return 2;
-  }
-  if (dtype.is_float() && dtype.bits() == 32 &&
-      TargetHasSMVersionGE(target, 90) && IsGlobalBuffer(destination)) {
-    // CUDA's float2/float4 atomicAdd overloads support global memory only.
-    return 4;
-  }
-  return 1;
 }
 
 // Rewrite vectorized allocation access
@@ -612,10 +563,8 @@ public:
   PrimExpr MutateAtomicAddExpr_(const CallNode *op) {
     ICHECK(op->op.same_as(atomic_add_elem_op()));
 
-    // Must have at least 2 args (dst_ptr and src)
-    if (op->args.size() < 2) {
-      return GetRef<PrimExpr>(op);
-    }
+    ICHECK_GE(op->args.size(), 2U)
+        << "atomic_add_elem_op requires at least 2 args (dst and src)";
 
     // Get the vector size from var_lanes_
     auto lanes_ptr = as_const_int(var_lanes_);
@@ -633,11 +582,23 @@ public:
       src = BroadcastTo(src, vector_size, src.dtype().is_scalable_vector());
     }
 
-    // Check if dtype supports this vector size
-    auto dst_buffer_load = ExtractBufferLoadForAtomic(dst);
+    // The emitter only needs the destination dtype and address space.
     Target target = Target::Current(false);
-    int max_vec_size =
-        GetMaxAtomicVectorSize(dst_buffer_load.value()->buffer, target);
+    int max_vec_size;
+    if (auto load = ExtractBufferLoadForAtomic(dst); load.defined()) {
+      const Buffer &buffer = load.value()->buffer;
+      max_vec_size =
+          GetMaxAtomicVectorSize(buffer->dtype, buffer.scope(), target);
+    } else {
+      Call ptr = Downcast<Call>(dst);
+      ICHECK(ptr->op.same_as(builtin::tvm_access_ptr()))
+          << "Unsupported atomic destination: " << dst;
+      ICHECK_EQ(ptr->args.size(), 5U)
+          << "tvm_access_ptr expects (dtype, data, offset, extent, rw_mask)";
+      max_vec_size = GetMaxAtomicVectorSize(
+          ptr->args[0].dtype(), GetPtrStorageScope(Downcast<Var>(ptr->args[1])),
+          target);
+    }
     if (vector_size > max_vec_size) {
       // Keep the loop binder when this atomic requires scalar lanes.
       need_scalarize_ = true;
@@ -1220,7 +1181,9 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.VectorizeLoop", VectorizeLoop);
+  refl::GlobalDef().def(
+      "tl.transform.VectorizeLoop",
+      [](bool enable_vectorize) { return VectorizeLoop(enable_vectorize); });
 }
 
 } // namespace tl

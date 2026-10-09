@@ -5,6 +5,7 @@
  */
 
 #include "support/check.h"
+#include <tvm/ffi/reflection/accessor.h>
 #include <tvm/ir/cast.h>
 #include <tvm/s_tir/utils.h>
 #include <tvm/tirx/analysis.h>
@@ -14,10 +15,12 @@
 #include <tvm/tirx/transform.h>
 
 #include <optional>
+#include <unordered_set>
 #include <utility>
 
 #include "arith/const_fold.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "common/attr.h"
 #include "tir/analysis/control_flow_graph.h"
 #include "tir/analysis/var_use_def_analysis.h"
 
@@ -172,9 +175,7 @@ CollectUsedBuffers(const PrimFunc &func) {
   return visitor.used_in_buffer_def_;
 }
 
-/* \brief Utility function to collect vars that should be retained. Used in
- * Letstmt Only
- */
+/* \brief Collect variables referenced by buffer definitions. */
 std::unordered_set<const VarNode *>
 CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
   struct Visitor : StmtExprVisitor {
@@ -215,6 +216,206 @@ CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
   return visitor.used_in_buffer_def_;
 }
 
+namespace {
+
+struct BindUseInfo {
+  using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+  VarSet used_vars;
+  VarSet volatile_buffers;
+};
+
+class BindUseCollector : public StmtExprVisitor {
+public:
+  static BindUseInfo Collect(const PrimFunc &func) {
+    BindUseCollector collector;
+    collector.VisitObject_(func);
+    return std::move(collector.info_);
+  }
+
+private:
+  // IR children and metadata share the same deduplication entry point.
+  void VisitStmt(const Stmt &stmt) final { VisitObject_(stmt); }
+  void VisitExpr(const PrimExpr &expr) final { VisitObject_(expr); }
+
+  void VisitExpr_(const VarNode *op) final {
+    info_.used_vars.insert(GetRef<Var>(op));
+    VisitObject_(op->type_annotation);
+  }
+
+  void VisitStmt_(const BindNode *op) final {
+    // Skip the definition without marking its Var visited: metadata may use it
+    // later.
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->var->type_annotation);
+  }
+
+  void VisitStmt_(const AllocBufferNode *op) final {
+    if (op->annotations.count(tirx::attr::kVolatile)) {
+      info_.volatile_buffers.insert(op->buffer->data);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tl::attr::volatile_scope) {
+      if (auto var = op->node.as<Var>()) {
+        info_.volatile_buffers.insert(var.value());
+      } else if (auto buffer = op->node.as<Buffer>()) {
+        info_.volatile_buffers.insert(buffer.value()->data);
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->node);
+  }
+
+  void VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
+    VisitObject_(buffer);
+  }
+
+  void VisitBufferUse(const Buffer &buffer) final {
+    // Liveness must retain references in buffer descriptors even when there is
+    // no explicit DeclBuffer in the body. It does not enforce lexical scope.
+    VisitObject_(buffer);
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->predicate);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->predicate);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->loop_var);
+    VisitObject_(op->thread_binding);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitStmt_(const SBlockNode *op) final {
+    StmtExprVisitor::VisitStmt_(op);
+    VisitObject_(op->iter_vars);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->op);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitExpr_(const CastNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->annotations);
+  }
+
+  void VisitExpr_(const LetNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->var);
+  }
+
+  void VisitExpr_(const ReduceNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->combiner);
+    VisitObject_(op->axis);
+  }
+
+  void VisitExpr_(const ProducerLoadNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitObject_(op->producer);
+  }
+
+  void VisitExpr_(const RampNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitExpr(op->lanes);
+  }
+
+  void VisitExpr_(const BroadcastNode *op) final {
+    StmtExprVisitor::VisitExpr_(op);
+    VisitExpr(op->lanes);
+  }
+
+  // Use ordinary IR visitors for statements and expressions. Reflection is
+  // only needed for containers and metadata objects such as Buffer and Layout.
+  void VisitObject_(const Any &value) {
+    auto obj = value.as<ObjectRef>();
+    if (!obj || !obj->defined() || !visited_.insert(*obj).second) {
+      return;
+    }
+    if (auto expr = obj->as<PrimExpr>()) {
+      StmtExprVisitor::VisitExpr(expr.value());
+    } else if (auto stmt = obj->as<Stmt>()) {
+      StmtExprVisitor::VisitStmt(stmt.value());
+    } else if (auto array = obj->as<ArrayObj>()) {
+      for (const Any &item : *array) {
+        VisitObject_(item);
+      }
+    } else if (auto map = obj->as<MapObj>()) {
+      for (const auto &item : *map) {
+        VisitObject_(item.first);
+        VisitObject_(item.second);
+      }
+    } else {
+      auto visit_field = [&](const TVMFFIFieldInfo *field) {
+        VisitObject_(reflection::FieldGetter(field)(*obj));
+      };
+      reflection::ForEachFieldInfo(TVMFFIGetTypeInfo((*obj)->type_index()),
+                                   visit_field);
+    }
+  }
+
+  BindUseInfo info_;
+  std::unordered_set<ObjectRef, ObjectPtrHash, ObjectPtrEqual> visited_;
+};
+
+class UnusedBindRemover : public StmtMutator {
+public:
+  static PrimFunc Apply(PrimFunc func) {
+    bool removed;
+    // Recompute after removing consumers to handle chains and shared nodes.
+    do {
+      UnusedBindRemover remover;
+      remover.uses_ = BindUseCollector::Collect(func);
+      func.CopyOnWrite()->body = remover(func->body);
+      removed = remover.removed_;
+    } while (removed);
+    return func;
+  }
+
+private:
+  bool CanDiscard_(const PrimExpr &value) const {
+    bool discard = SideEffect(value) <= CallEffectKind::kReadState &&
+                   !UsesVar(value, [&](const VarNode *var) {
+                     return uses_.volatile_buffers.count(GetRef<Var>(var));
+                   });
+    // SideEffect and UsesVar do not visit BufferLoad predicates.
+    PostOrderVisit(value, [&](const ObjectRef &node) {
+      if (const auto *load = node.as<BufferLoadNode>();
+          load && load->predicate) {
+        discard &= CanDiscard_(load->predicate.value());
+      }
+    });
+    return discard;
+  }
+
+  Stmt VisitStmt_(const BindNode *op) final {
+    if (!uses_.used_vars.count(op->var) && CanDiscard_(op->value)) {
+      removed_ = true;
+      return Evaluate(Integer(0));
+    }
+    return GetRef<Stmt>(op);
+  }
+
+  BindUseInfo uses_;
+  bool removed_{false};
+};
+
+} // namespace
+
 class SimplifyConfig : public Attrs {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, Attrs,
@@ -246,6 +447,7 @@ public:
                               std::move(used_in_buffer_def));
     simplifier.MarkBufferMapShapes(func);
     func.CopyOnWrite()->body = simplifier(func->body);
+    func = UnusedBindRemover::Apply(std::move(func));
 
     // Optionally remove unused buffer parameters
     if (simplify_arguments) {
@@ -438,11 +640,9 @@ private:
       non_inlined_bindings_.Set(op->var, value);
     }
 
-    bool used_in_buffer_def = used_in_buffer_def_.count(op->var.get());
-
-    if (can_inline && !used_in_buffer_def) {
-      return Evaluate(Integer(0));
-    } else if (value.same_as(op->value)) {
+    // Defer deletion to UnusedBindRemover: annotations and other metadata may
+    // still reference the variable after its ordinary uses have been inlined.
+    if (value.same_as(op->value)) {
       return GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);

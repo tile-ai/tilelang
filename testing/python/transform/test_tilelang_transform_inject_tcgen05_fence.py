@@ -134,6 +134,37 @@ def test_lower_tmem_copy_uses_tcgen05_ld_intrin():
 
 
 @tilelang.testing.requires_cuda
+def test_blockscaled_issue_without_arrive_gets_handoff_fences():
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            barrier = T.decl_buffer((1,), T.uint64, scope="shared.barrier")
+            desc = T.decl_buffer((1,), T.uint64, scope="local")
+            c = T.decl_buffer((128, 128), T.float32, scope="shared.tmem")
+            sfa = T.decl_buffer((128, 4), T.uint32, scope="shared.tmem")
+            sfb = T.decl_buffer((128, 4), T.uint32, scope="shared.tmem")
+            T.mbarrier_wait_parity(barrier[0], 0)
+            T.ptx_tcgen05_mma_blockscaled_ss("e4m3", desc.data, 0, desc.data, 0, c.data, 0, 0, 1, sfa.data, 0, sfb.data, 0)
+            T.ptx_arrive_barrier(barrier[0])
+
+    body = _apply(before)["main"].body
+    calls = []
+
+    def visit(node):
+        if isinstance(node, tirx.Call):
+            calls.append(str(getattr(node.op, "name", "")))
+
+    tirx.stmt_functor.post_order_visit(body, visit)
+    assert _count_calls(body, "tl.tcgen05_after_thread_sync") == 1
+    assert _count_calls(body, "tl.tcgen05_before_thread_sync") == 1
+    assert _count_calls(body, "tl.tcgen05_mma_arrive") == 0
+    assert calls.index("tl.mbarrier_wait_parity") < calls.index("tl.tcgen05_after_thread_sync")
+    assert calls.index("tl.tcgen05_after_thread_sync") < calls.index("tl.ptx_tcgen05_mma_blockscaled_ss")
+    assert calls.index("tl.ptx_tcgen05_mma_blockscaled_ss") < calls.index("tl.tcgen05_before_thread_sync")
+    assert calls.index("tl.tcgen05_before_thread_sync") < calls.index("tirx.ptx_arrive_barrier")
+
+
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_lower_tmem_copy_uses_tcgen05_st_intrin():
