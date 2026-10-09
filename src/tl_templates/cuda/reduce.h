@@ -377,25 +377,23 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
     return static_cast<T>(run_reduce_sync(static_cast<int32_t>(value)));
   }
 #endif
-  const int block_threads = blockDim.x * blockDim.y * blockDim.z;
-  const int tail_threads = block_threads % 32;
-  if (tail_threads != 0) {
+  // A synchronized ballot preserves the launched prefix across scheduling.
+  const uint32_t warp_mask = __ballot_sync(mask, true);
+  if (warp_mask != mask) {
     const int thread_idx =
         threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
-    if (thread_idx >= block_threads - tail_threads) {
-      const int lane = thread_idx % 32;
-      const uint32_t tail_mask = (1u << tail_threads) - 1;
+    const int lane = thread_idx % 32;
+    const int warp_threads = __popc(warp_mask);
 #pragma unroll
-      for (int offset = 16; offset > 0; offset /= 2) {
-        const bool has_partner = lane + offset < tail_threads;
-        // Missing partners must still shuffle from a participating lane.
-        const T other =
-            tl::shfl_down_sync(tail_mask, value, has_partner ? offset : 0);
-        if (has_partner)
-          value = op(value, other);
-      }
-      return tl::shfl_sync(tail_mask, value, 0);
+    for (int offset = 16; offset > 0; offset /= 2) {
+      const bool has_partner = lane + offset < warp_threads;
+      // Missing partners must still shuffle from a participating lane.
+      const T other =
+          tl::shfl_down_sync(warp_mask, value, has_partner ? offset : 0);
+      if (has_partner)
+        value = op(value, other);
     }
+    return tl::shfl_sync(warp_mask, value, 0);
   }
   // Preserve the full-warp reduction order; XOR sources are valid only there.
   value = op(value, tl::shfl_xor_sync(mask, value, 16));
