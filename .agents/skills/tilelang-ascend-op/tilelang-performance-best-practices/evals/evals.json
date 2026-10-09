@@ -1,0 +1,243 @@
+{
+  "eval_mode": "text",
+  "evals": [
+    {
+      "id": 1,
+      "title": "TileLang PTO Reduction/Norm implementation decisions",
+      "config": {
+        "max_tokens": 120000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "Use tilelang-performance-best-practices to explain how to select the execution domain, accumulation precision, UB/pipeline configuration, and test gates when implementing bf16 RMSNorm for the PTO backend in the current repository. Do not execute external tools.",
+      "expected_output": "First cite similar implementations in the target repository and explain how to locate TileLang through the actual import path. Reuse the validated SimtVF + reduction execution domain from similar implementations, while treating SimdVF as an optimization candidate requiring measurement. Use fp32 statistics, accumulation, and eps for bf16 input. Obtain the core count from the target configuration. Include padding, resident data, and buffer versions in UB usage. Tests must follow the public interface contract: first run targeted PTO correctness tests, then the complete relevant test suite and the project's required pre-merge extended tests.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "uses_trusted_sources",
+          "description": "Verify implementations and APIs in the correct priority order",
+          "assertion_text": "Inspect similar operator implementations in the current repository first, and locate the TileLang source through the actual import path instead of guessing the version in a sibling directory"
+        },
+        {
+          "name": "keeps_fp32_statistics",
+          "description": "Use fp32 state for low-precision reductions",
+          "assertion_text": "Keep the sum of squares, statistics, eps, and accumulation for bf16 RMSNorm in fp32, converting the output only at the final boundary"
+        },
+        {
+          "name": "uses_repository_core_config",
+          "description": "Obtain the core count from the target hardware query",
+          "assertion_text": "For a pure Vector path, explicitly pass the confirmed available AIV core count and limit it to no more than the number of independent tasks"
+        },
+        {
+          "name": "requires_full_test_gates",
+          "description": "Explain staged validation and the interface contract",
+          "assertion_text": "First determine the shape matrix from the public interface, then run targeted correctness tests, the complete relevant test suite, and the project's required pre-merge extended tests in sequence"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "TileLang PTO GEMM implementation decisions",
+      "config": {
+        "max_tokens": 120000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "Use tilelang-performance-best-practices to review a TileLang GEMM design intended for the PTO backend. List constraints for the kernel, layout, buffers, accumulation, and performance validation, and explain whether [N,K] + transpose_B=True is a mandatory T.gemm requirement for every target. Do not execute external tools.",
+      "expected_output": "Explain that an Ascend kernel uses a one-dimensional grid and does not pass threads. [N,K] + transpose_B=True is the currently validated canonical PTO Ascend pattern, not a mandatory API constraint for every target. L0C uses fp32 by default. Set clear_accum only on the first valid K sub-tile; nested loops must check both outer and inner indices. Use L1/L0, the Cube core count, and the task count. Adapt tail handling from validated examples, then test correctness and latency under identical conditions.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "states_ascend_kernel_contract",
+          "description": "State the Ascend kernel launch constraints",
+          "assertion_text": "T.Kernel uses a one-dimensional grid and does not pass threads; the thread domain is specified in SimtVF"
+        },
+        {
+          "name": "qualifies_gemm_layout_rule",
+          "description": "Do not misrepresent the canonical layout as a universal API restriction",
+          "assertion_text": "[N,K] with transpose_B=True is the currently validated PTO Ascend pattern. Other layouts require validation for the target version but are not prohibited by the API for every target"
+        },
+        {
+          "name": "handles_nested_k_clear",
+          "description": "Describe the L0C clearing condition correctly",
+          "assertion_text": "Clear only on the first valid K sub-tile; for nested kt/sk loops, the example condition is kt == 0 and sk == 0"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Attributing PTO test failures",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "During targeted PTO correctness testing, some cases pass before an Ascend backward branch deliberately raises NotImplementedError. Use tilelang-performance-best-practices to determine how to report and handle this result. Do not execute external tools.",
+      "expected_output": "Distinguish passing paths from unimplemented paths. Record the collection count, pass count, first failing case, shape/dtype, exception, and root cause. Do not relax tolerances, skip the failure, or claim that the full suite passed. After implementing backward, rerun from the targeted correctness tests, then proceed to the complete relevant test suite, the project's required extended tests, and benchmarks.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "classifies_not_implemented",
+          "description": "Separate an unimplemented path from a numerical failure",
+          "assertion_text": "NotImplementedError denotes an unimplemented path; it is not a correctness pass and cannot be resolved by relaxing tolerances"
+        },
+        {
+          "name": "does_not_claim_full_pass",
+          "description": "Do not overstate the passing scope",
+          "assertion_text": "Report only the subset that actually passed, while recording the first failure and coverage scope; do not claim that every case passed"
+        },
+        {
+          "name": "restarts_test_sequence",
+          "description": "Restart validation from the smallest gate after the fix",
+          "assertion_text": "After completing the implementation, rerun targeted correctness tests, then the complete relevant test suite, the project's required pre-merge extended tests, and performance tests"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Determining template maturity",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "A file named softmax_v2_ara_recompute.py contains only STRATEGY metadata and no @T.prim_func, @tilelang.jit, or build. Another file, ar_small_r.py, has a build but merely calls a serial full-load baseline. Use tilelang-performance-best-practices to determine whether either can serve as an optimization template that may be copied directly. Do not execute external tools.",
+      "expected_output": "Classify ara_recompute as DESIGN_ONLY and ar_small_r as PARTIAL. Neither is a validated optimization that can be copied directly. They may be upgraded only after adding evidence for an actual kernel, dispatch, PTO lowering, on-device correctness, and performance measured under identical conditions.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "classifies_design_only",
+          "description": "Correctly identify a design file containing only metadata",
+          "assertion_text": "Classify ara_recompute without a kernel/build as DESIGN_ONLY"
+        },
+        {
+          "name": "classifies_partial_alias",
+          "description": "Correctly identify a strategy that degrades to the baseline",
+          "assertion_text": "ar_small_r contains only a baseline alias, so classify it as PARTIAL rather than as an implemented small-R optimization"
+        },
+        {
+          "name": "requires_upgrade_evidence",
+          "description": "State the evidence required for a maturity upgrade",
+          "assertion_text": "Upgrading to VERIFIED requires an actual kernel, dispatch, lowering, on-device correctness, and performance evidence collected under identical conditions"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Reviewing PTO tail-tile layouts",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "For cols=129, a Broadcast template sets tile_cols=129, allocates a fragment of length 129 inside T.SimtVF(threads=128), and executes T.Parallel(129), using valid only for GM copy/store operations. Use tilelang-performance-best-practices to review the risks and recommend a correction. Do not execute external tools.",
+      "expected_output": "Explain that restricting only the valid GM range is insufficient to guarantee a valid PTO layout. UB/fragment storage must be padded to a complete, validated SIMD/thread footprint, such as the 256-element footprint validated by this skill. GM still accesses only valid elements; invalid lanes either do not participate in computation or are filled with a safe identity value. Add lowering and correctness tests for 127/128/129/255/256/257.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "identifies_layout_risk",
+          "description": "Identify the lowering risk of an unaligned fragment",
+          "assertion_text": "Using cols=129 directly as the fragment/T.Parallel extent may cause PTO layout inference to fail"
+        },
+        {
+          "name": "requires_padded_footprint",
+          "description": "State the correct padding principle",
+          "assertion_text": "Pad UB and fragments to a complete validated footprint while limiting GM copy/store operations to valid elements"
+        },
+        {
+          "name": "requires_tail_matrix",
+          "description": "Cover critical boundaries",
+          "assertion_text": "At minimum, validate lowering and correctness around tile boundaries and for 127/128/129/255/256/257"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Persistent multidimensional task mapping",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "A PTO kernel has a task domain of row_tiles×col_tiles. It currently flattens this domain to task_id, then reconstructs both coordinates with division and modulo in every Persistent iteration. Profiling shows substantial Scalar/address-preparation overhead. Use tilelang-performance-best-practices to propose a general optimization and validation method. Do not execute external tools.",
+      "expected_output": "When supported by the current TileLang/PTO version, use the multidimensional task domain of T.Persistent to obtain each axis's tile ID directly while retaining a one-dimensional T.Kernel. Select the axis order according to memory locality and load balance, and inspect lowering. Validate that no task is omitted or duplicated, cover tail tiles on every axis, inspect generated code for division/modulo, measure per-core tail imbalance and latency, and retain the flattened fallback if lowering support or performance benefit is absent.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "uses_multiaxis_persistent_domain",
+          "description": "Express the multidimensional task domain directly",
+          "assertion_text": "Use T.Persistent([tiles_0, tiles_1, ...]) to obtain each axis ID directly and avoid flattened-index division and modulo in the hot loop"
+        },
+        {
+          "name": "keeps_one_dimensional_kernel",
+          "description": "Preserve the Ascend kernel grid constraint",
+          "assertion_text": "T.Kernel remains a one-dimensional block grid; the multidimensional list represents only the Persistent task domain"
+        },
+        {
+          "name": "validates_mapping_and_codegen",
+          "description": "Validate mapping completeness and actual benefit",
+          "assertion_text": "Check for omissions and duplicates, tail tiles on every axis, div/mod in generated code, load tail imbalance, and latency measured with the same methodology; retain a fallback when there is no benefit"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Tiling a wide output axis for reductions",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "A PTO reduction performs little reduction computation and has a wide, contiguous non-reduction output axis. The current small tile creates many Persistent tasks and small DMA operations. Use tilelang-performance-best-practices to propose a general optimization without operator-specific constants. Do not execute external tools.",
+      "expected_output": "Increase the tile geometrically along the contiguous non-reduction axis so each task handles multiple SIMD chunks. Calculate tasks/waves, valid and padded elements, DMA operations, UB×versions, and then reselect the core count. Test tile and stage changes separately. Preserve fp32 reduction state, single-output ownership, and valid-only GM access, and cover tile boundaries plus forward/backward. Roll back when parallelism, tail handling, UB usage, or latency regresses.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "tiles_non_reduction_axis",
+          "description": "Combine contiguous output along the correct axis",
+          "assertion_text": "Increase the tile along the contiguous non-reduction output axis so one Persistent task handles multiple SIMD chunks without changing the reduction axis or numerical order"
+        },
+        {
+          "name": "models_resource_tradeoffs",
+          "description": "Model task and resource tradeoffs explicitly",
+          "assertion_text": "Calculate tasks/waves, valid and padded elements, DMA count, core count, and UB usage including buffer versions"
+        },
+        {
+          "name": "requires_separate_ab_and_fallback",
+          "description": "Do not treat a large tile as a fixed rule",
+          "assertion_text": "Search geometric candidates and A/B test tile and stage separately; retain a fallback when parallelism, tail handling, UB usage, or measured latency is unfavorable"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Use bundled Ascend implementation references without template maturity",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": ["A2"],
+        "eval_mode": "text"
+      },
+      "prompt": "The best-practices Skill contains a complete references/reduce/code/sinkhorn_asc.py host-and-kernel implementation. It has target=\"pto\" and is not registered in template_status.md. Explain whether generation and performance tuning may read it, and whether the file itself must be lowered or run on a device merely to remain in the Skill. Do not execute external tools.",
+      "expected_output": "Treat the _asc.py file as an Ascend source-reading implementation reference. target=\"pto\" does not make it CUDA code. Generation may study its host dispatch and kernel structure, while tuning may use its tiling, execution-domain, buffer, pipeline, and fusion choices to form hypotheses. It requires no template maturity entry and no lowering, device correctness, or performance run merely to remain in the Skill. When a target operator adopts an idea, validate that target implementation through its normal workflow and do not inherit a performance claim from the reference file alone.",
+      "files": [],
+      "expectations": [
+        {
+          "name": "accepts_pto_asc_reference",
+          "description": "Recognize PTO-targeted _asc.py as Ascend reference code",
+          "assertion_text": "An _asc.py reference remains eligible when it contains target=\"pto\"; do not classify it as CUDA"
+        },
+        {
+          "name": "separates_code_reference_from_template",
+          "description": "Do not force implementation-reading code into template maturity",
+          "assertion_text": "references/*/code/*_asc.py is source-reading material for generation and tuning and requires neither template-status registration nor separate device validation merely to stay in the Skill"
+        },
+        {
+          "name": "preserves_target_validation",
+          "description": "Do not inherit performance conclusions from reference code",
+          "assertion_text": "When an idea is applied, validate the resulting target operator normally and do not treat the reference file alone as a current performance result"
+        }
+      ]
+    }
+  ],
+  "skill_name": "tilelang-performance-best-practices"
+}
