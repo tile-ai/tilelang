@@ -114,6 +114,24 @@ def test_materialize_launch_new_options_are_keyword_only(parameter_name):
     assert signature.parameters[parameter_name].kind is inspect.Parameter.KEYWORD_ONLY
 
 
+def test_materialize_launch_preserves_existing_grid_annotations():
+    @T.prim_func
+    def main(A: T.Tensor((2,), "int32")):
+        for bx in T.thread_binding(2, thread="blockIdx.x", annotations={"backend.grid_axis": 7, "backend.parallel_grid": True}):
+            A[bx] = 1
+
+    materialized = _materialize(main, "c", lower_thread_binding=False)
+    loop = _collect(materialized, tvm.tirx.For)[0]
+    assert int(loop.annotations["backend.grid_axis"]) == 7
+    assert bool(loop.annotations["backend.parallel_grid"])
+
+
+def test_materialize_launch_does_not_read_cpu_parallel_config():
+    with tvm.transform.PassContext(config={"tl.cpu_parallel": True}):
+        materialized = _materialize(_parallel_kernel(), "c", lower_thread_binding=False)
+    assert all("tl.cpu_grid_dim" not in loop.annotations for loop in _collect(materialized, tvm.tirx.For))
+
+
 def test_traced_launch_records_grid_and_thread_placeholders():
     func = _parallel_kernel()
 

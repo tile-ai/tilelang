@@ -53,7 +53,6 @@
 
 #include "../op/builtin.h"
 #include "common/attr.h"
-#include "op/builtin.h"
 #include "support/check.h"
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
@@ -136,13 +135,13 @@ public:
                            Optional<Array<PrimExpr>> default_threads,
                            Array<ffi::String> unsupported_annotations,
                            Array<ffi::String> launch_dim_tags,
-                           ffi::String target_name, bool annotate_grid)
+                           ffi::String target_name)
       : lower_grid_binding_(lower_grid_binding),
         lower_thread_binding_(lower_thread_binding),
         default_threads_(std::move(default_threads)),
         unsupported_annotations_(std::move(unsupported_annotations)),
         launch_dim_tags_(std::move(launch_dim_tags)),
-        target_name_(std::move(target_name)), annotate_grid_(annotate_grid) {}
+        target_name_(std::move(target_name)) {}
 
   Stmt VisitStmt_(const ForNode *op) final {
     if (IsLaunchDimBinding(op)) {
@@ -191,8 +190,8 @@ private:
     body = lower_thread_binding_ ? BindThreads(thread_binds, body)
                                  : DropThreads(thread_binds, body);
 
-    for (size_t i = grid_loops.size(); i-- > 0;) {
-      const ForNode *loop = grid_loops[i];
+    for (auto it = grid_loops.rbegin(); it != grid_loops.rend(); ++it) {
+      const ForNode *loop = *it;
       if (lower_grid_binding_) {
         ffi::String tag = loop->thread_binding.value()->thread_tag;
         IterVar iter_var(Range::FromMinExtent(loop->min, loop->extent),
@@ -200,18 +199,9 @@ private:
         body = AttrStmt(std::move(iter_var), tirx::attr::thread_extent,
                         loop->extent, std::move(body), loop->span);
       } else {
-        // On CPU, stamp the grid loop for the OpenMP lowering when the
-        // tl.cpu_parallel pass config is enabled; the value is the grid
-        // dimension index within this launch (see
-        // src/cpu/transform/materialize_cpu_parallel_grid.cc).
-        ffi::Map<ffi::String, ffi::Any> annotations = loop->annotations;
-        if (annotate_grid_ && !annotations.count(attr::kCPUGridDim)) {
-          annotations.Set(attr::kCPUGridDim,
-                          IntImm(DataType::Int(32), static_cast<int64_t>(i)));
-        }
         body = For(loop->loop_var, loop->min, loop->extent, ForKind::kSerial,
                    std::move(body),
-                   /*thread_binding=*/std::nullopt, std::move(annotations),
+                   /*thread_binding=*/std::nullopt, loop->annotations,
                    loop->step, loop->span);
       }
     }
@@ -309,7 +299,6 @@ private:
   Array<ffi::String> unsupported_annotations_;
   Array<ffi::String> launch_dim_tags_;
   ffi::String target_name_;
-  bool annotate_grid_;
 };
 
 } // namespace
@@ -331,13 +320,9 @@ MaterializeKernelLaunch(bool lower_grid_binding, bool lower_thread_binding,
     if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
       target_name = target.value()->kind->name;
     }
-    bool annotate_grid = false;
-    if (!lower_grid_binding) {
-      annotate_grid = ctx->GetConfig<Bool>(kCPUParallel, Bool(false)).value();
-    }
     KernelLaunchMaterializer mutator(lower_grid_binding, lower_thread_binding,
                                      default_threads, unsupported, dim_tags,
-                                     target_name, annotate_grid);
+                                     target_name);
     func.CopyOnWrite()->body = mutator(func->body);
     return func;
   };

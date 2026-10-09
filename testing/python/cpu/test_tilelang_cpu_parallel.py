@@ -12,6 +12,7 @@ Covers the opt-in contract of the CPU OpenMP lowering:
 
 import sys
 
+import pytest
 import torch
 
 import tilelang
@@ -36,7 +37,6 @@ def make_gemm(M, N, K, BM, BN, BK, cpu_num_threads=None):
         B: T.Tensor((K, N), dtype="float32"),
         C: T.Tensor((M, N), dtype="float32"),
     ):
-        # cpu_num_threads is declared only by the CPU dialect's Kernel.
         with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), cpu_num_threads=cpu_num_threads) as (bx, by):
             A_shared = T.alloc_buffer((BM, BK), dtype="float32", scope="shared")
             B_shared = T.alloc_buffer((BK, BN), dtype="float32", scope="shared")
@@ -124,30 +124,24 @@ def test_cpu_parallel_min_trip_gate():
 
 
 def test_cpu_parallel_default_off_injects_no_flags():
-    # Default-off contract: the compile command stays free of OpenMP flags
-    # (the injection channel is empty unless the switch is enabled).
-    from tilelang.jit.adapter.libgen import cpu_openmp_flags
+    from tilelang.cpu.toolchain import get_compile_flags
 
-    assert cpu_openmp_flags(None) == []
-    assert cpu_openmp_flags({}) == []
-    assert cpu_openmp_flags({PassConfigKey.TL_DISABLE_VECTORIZE_256: True}) == []
+    target = Target("c")
+    assert get_compile_flags(target, None, execution_backend="cython") == []
+    assert get_compile_flags(target, {}, execution_backend="cython") == []
+    assert get_compile_flags(target, {PassConfigKey.TL_DISABLE_VECTORIZE_256: True}, execution_backend="cython") == []
 
-    enabled = cpu_openmp_flags({PassConfigKey.TL_CPU_PARALLEL: True})
+    enabled = get_compile_flags(target, {PassConfigKey.TL_CPU_PARALLEL: True}, execution_backend="cython")
     assert "-O2" in enabled
-    # With a discoverable libomp (torch bundle or Homebrew on the CI/macOS
-    # hosts) the OpenMP flag must be present; a missing runtime legitimately
-    # degrades to serial with only -O2.
-    from tilelang.contrib.openmp import _find_libomp
+    # A missing OpenMP runtime leaves the kernel serial with only -O2.
+    from tilelang.cpu.toolchain import _find_libomp
 
     if sys.platform != "win32" and (sys.platform != "darwin" or _find_libomp() is not None):
         assert "-fopenmp" in enabled
 
 
 def test_cpu_parallel_codegen_nested_parallel_keeps_pragma():
-    # A kParallel loop reached through an IfThenElse inside another parallel
-    # chain's body is NOT a collapse member and must keep its own pragma.
-    # Regression for the chain-depth-counter bug where any kParallel seen
-    # while printing a chain was wrongly suppressed.
+    # A parallel loop inside a conditional needs its own pragma.
     code = """
 @I.ir_module
 class Module:
@@ -169,11 +163,8 @@ class Module:
     assert source.count("#pragma omp parallel for") == 2
 
 
-def test_cpu_parallel_two_sequential_kernels():
-    # Regression: alloc sinking must attribute uses to the nest they belong
-    # to — the second kernel's scratch buffer used to be sunk into the first
-    # nest, failing the C compile with "use of undeclared identifier". Both
-    # sibling nests are parallelized independently.
+@pytest.mark.parametrize("mode", ["parallel", "default_off", "min_trip"])
+def test_cpu_parallel_two_sequential_kernels(mode):
     TILE = 128
 
     @T.prim_func
@@ -182,29 +173,36 @@ def test_cpu_parallel_two_sequential_kernels():
         B: T.Tensor((M,), "float32"),
         C: T.Tensor((M,), "float32"),
     ):
-        with T.Kernel(M // TILE) as bx:
+        with T.Kernel(M // TILE, cpu_num_threads=2) as bx:
             buf1 = T.alloc_buffer((TILE,), "float32", scope="local")
             for i in T.serial(TILE):
                 buf1[i] = A[bx * TILE + i] + 1.0
             for i in T.serial(TILE):
                 B[bx * TILE + i] = buf1[i]
-        with T.Kernel(M // TILE) as bx2:
+        with T.Kernel(M // TILE, cpu_num_threads=3) as bx2:
             buf2 = T.alloc_buffer((TILE,), "float32", scope="local")
             for i in T.serial(TILE):
                 buf2[i] = A[bx2 * TILE + i] * 2.0
             for i in T.serial(TILE):
                 C[bx2 * TILE + i] = buf2[i]
 
+    pass_configs = None if mode == "default_off" else {PassConfigKey.TL_CPU_PARALLEL: True}
+    if mode == "min_trip":
+        pass_configs[PassConfigKey.TL_CPU_PARALLEL_MIN_TRIP] = 1024
     kernel = tilelang.compile(
         two_kernels,
         target="c",
         out_idx=[-2, -1],
         execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
+        pass_configs=pass_configs,
     )
     source = kernel.get_kernel_source()
-    # Each nest becomes its own parallel region.
-    assert source.count("#pragma omp parallel for") == 2
+    if mode == "parallel":
+        assert source.count("#pragma omp parallel for") == 2
+        assert source.count("num_threads(2)") == 1
+        assert source.count("num_threads(3)") == 1
+    else:
+        assert "#pragma omp" not in source
 
     torch.manual_seed(0)
     A = torch.randn(M, dtype=torch.float32)
@@ -246,7 +244,6 @@ def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
     # Mixed case: a normal store inside the nest plus an opaque use outside
     # it. The buffer cannot be privatized (the outside use would dangle), and
     # sharing it across workers would race — the nest must stay serial.
-    # (Sinking it used to break the C compile with an undeclared identifier.)
     TILE = 128
 
     @T.prim_func
@@ -281,10 +278,7 @@ def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
 
 
 def test_cpu_parallel_outside_first_access_stays_serial():
-    # Regression: an outside access that comes *before* the first in-nest
-    # access used to leave no trace (min_depth got overwritten), so the
-    # buffer was sunk into the nest and the outside store crashed the
-    # pipeline with "used before definition". The nest must stay serial.
+    # An outside access prevents privatization regardless of access order.
     TILE = 128
 
     @T.prim_func

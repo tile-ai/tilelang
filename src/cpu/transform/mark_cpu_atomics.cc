@@ -12,8 +12,8 @@
  * serial RMW into a data race.
  */
 
+#include "cpu/op/builtin.h"
 #include "support/check.h"
-#include "transform/common/attr.h"
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>

@@ -47,4 +47,9 @@ def Kernel(
             for i in T.Parallel(128):
                 ...
     """
-    return launch_kernel(blocks, prelude=prelude, cpu_num_threads=cpu_num_threads)
+    annotations = {}
+    if cpu_num_threads is not None:
+        if isinstance(cpu_num_threads, bool) or not isinstance(cpu_num_threads, int) or cpu_num_threads <= 0:
+            raise ValueError(f"cpu_num_threads must be a positive integer, got {cpu_num_threads}")
+        annotations["tl.cpu_num_threads"] = tirx.IntImm("int32", cpu_num_threads)
+    return launch_kernel(blocks, prelude=prelude, **annotations)

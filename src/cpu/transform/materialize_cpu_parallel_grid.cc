@@ -2,25 +2,14 @@
  * \file materialize_cpu_parallel_grid.cc
  * \brief Convert the annotated CPU grid loop nests to parallel loops.
  *
- * MaterializeKernelLaunch tags each grid (blockIdx) loop with
- * ``tl.cpu_grid_dim`` when ``tl.cpu_parallel`` is enabled; the annotation
- * rides the pipeline inertly until this tail pass, where loop structure is
- * final. For every annotated nest this pass:
- *
- *  1. Gates on total trip count (``tl.cpu_parallel_min_trip``, default 0;
- *     dynamic extents skip the gate).
- *  2. Converts the chain to kParallel: every dim on ``c`` (for
- *     ``collapse(n)``), the first non-unit dim on ``llvm`` (its codegen
- *     rejects nested parallel loops).
- *  3. Sinks AllocBuffers into the parallel body (per-worker private copies)
- *     when every use is a plain load/store inside the nest. A buffer mutated
- *     inside but not privatizable refuses the nest with a warning.
- *
- * Invariant: no ``tl.cpu_grid_dim`` survives this pass — every nest is
- * converted or stripped with a warning naming the loop and the reason.
+ * LowerCPUKernelLaunch marks grid axes when ``tl.cpu_parallel`` is enabled.
+ * This pass checks trip count, access independence, and allocation privacy
+ * after loop lowering. Safe nests become parallel; others remain serial.
+ * C collapses grid axes; LLVM parallelizes the first non-unit axis.
+ * All grid markers are removed before codegen.
  */
 
-#include "op/builtin.h"
+#include "cpu/op/builtin.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
 #include <tvm/arith/analyzer.h>

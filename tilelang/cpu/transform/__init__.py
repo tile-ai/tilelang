@@ -3,6 +3,11 @@
 from .. import _ffi_api
 
 
+def LowerCPUKernelLaunch():
+    """Prepare grid markers and per-launch thread counts before MaterializeKernelLaunch."""
+    return _ffi_api.LowerCPUKernelLaunch()  # type: ignore
+
+
 def LowerCPUAtomics():
     """Lower tl.atomic_*_elem_op intrinsics to serial read-modify-write.
 
@@ -20,19 +25,7 @@ def LowerCPUAtomics():
 
 
 def MarkCPUAtomics():
-    """Tag functions that call any ``tl.atomic*`` op with the
-    ``tl.cpu_had_atomics`` attribute.
-
-    Runs before LowerTileOp (both atomic forms are lowered to plain
-    read-modify-write afterwards, where the tail pass could no longer see
-    them). MaterializeCPUParallelGrid keeps such kernels serial: a parallel
-    grid would turn the RMW into a data race.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
+    """Mark atomic kernels before LowerTileOp to prevent parallel RMW races."""
     return _ffi_api.MarkCPUAtomics()  # type: ignore
 
 
@@ -41,7 +34,7 @@ def MaterializeCPUParallelGrid():
 
     CPU targets only; runs at the tail of the CPU pipeline (only inserted
     when the ``tl.cpu_parallel`` pass config is enabled). Consumes the
-    ``tl.cpu_grid_dim`` annotations added by MaterializeKernelLaunch,
+    ``tl.cpu_grid_dim`` annotations added by LowerCPUKernelLaunch,
     converts the grid loops to ForKind::kParallel (all dims on the ``c``
     target for collapse(n); the first non-unit dim on ``llvm``), and sinks
     function-scope allocations whose uses all lie inside the parallel

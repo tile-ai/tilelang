@@ -247,25 +247,9 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
 
   Map<String, Any> block_annotations =
       attrs.defined() ? attrs : Map<String, Any>{};
-  Map<String, Any> grid_annotations;
-  if (auto num_threads = block_annotations.Get(attr::kCPUNumThreads)) {
-    // The value arrives as a POD int64 through the ffi attrs dict; accept an
-    // IntImm too so manually constructed IR keeps working.
-    int64_t num_threads_value;
-    if (const auto *imm = num_threads->as<IntImmNode>()) {
-      num_threads_value = imm->value;
-    } else {
-      num_threads_value = num_threads->cast<int64_t>();
-    }
-    grid_annotations.Set(attr::kCPUNumThreads,
-                         IntImm(DataType::Int(32), num_threads_value));
-    block_annotations.erase(attr::kCPUNumThreads);
-  }
-
   for (size_t i = 0; i < grid_size.size(); i++) {
-    ForFrame frame = MakeThreadBindingFrame(
-        kBlockVarNames[i], kBlockTags[i], grid_size[i],
-        i == 0 ? std::move(grid_annotations) : Map<String, Any>{});
+    ForFrame frame =
+        MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]);
     n->grid_vars.push_back(frame->vars[0]);
     n->grid_extents.push_back(grid_size[i]);
     n->frames.push_back(frame);

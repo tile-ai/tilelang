@@ -12,7 +12,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "op/builtin.h"
+#include "cpu/op/builtin.h"
 #include "support/str_escape.h"
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"

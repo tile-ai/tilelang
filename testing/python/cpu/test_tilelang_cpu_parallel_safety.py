@@ -1,8 +1,4 @@
-"""CPU parallel safety regressions; shared proofs avoid a target cross product.
-
-GEMM and atomic integration tests cover both execution backends. These tests
-retain the P1 counterexamples and direct-TIR boundaries missing from those tests.
-"""
+"""CPU grid access independence, allocation privacy, and serial fallback."""
 
 import pytest
 import torch
@@ -84,9 +80,7 @@ def test_read_before_covering_loop_finishes_stays_serial():
 
 @pytest.mark.parametrize("reset_kind", ["empty_outer", "predicate", "block_predicate", "complete"])
 def test_direct_reset_control_flow(reset_kind):
-    # Initialization in a nested complete loop must not escape a possibly
-    # empty outer loop or a predicated region. While and partial initialization
-    # already have numerical regressions through the full CPU pipeline.
+    # Complete initialization must not escape an empty or predicated region.
     bx = tirx.Var("bx", "int32")
     j = tirx.Var("j", "int32")
     t = tirx.Var("t", "int32")

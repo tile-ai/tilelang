@@ -20,6 +20,28 @@ from __future__ import annotations
 import os
 import sys
 import warnings
+from typing import Any
+
+from tvm.target import Target
+
+from tilelang.transform.pass_config import PassConfigKey
+
+
+def get_compile_flags(target: Target, pass_configs: dict[str, Any] | None, *, execution_backend: str) -> list[str]:
+    """CPU flags for the selected target, pass configuration, and adapter.
+
+    LLVM uses TVM's thread pool, so OpenMP flags only apply to the C target.
+    Disabled parallelization leaves the serial compile command unchanged.
+    """
+    if target.kind.name != "c" or not pass_configs or not pass_configs.get(PassConfigKey.TL_CPU_PARALLEL, False):
+        return []
+    if sys.platform == "win32" and execution_backend == "tvm_ffi":
+        warnings.warn(
+            "tl.cpu_parallel: OpenMP flag injection for the tvm_ffi backend is not supported on Windows yet; compiling serially.",
+            stacklevel=2,
+        )
+        return []
+    return get_openmp_compile_flags()
 
 
 class _LibompLocation:
