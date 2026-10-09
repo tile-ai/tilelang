@@ -240,6 +240,10 @@ public:
     // Check for if_then_else pattern for predicated loads
     if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3) {
       PrimExpr condition = call->args[0];
+      // A load in a predicated store's value also needs the enclosing guard.
+      if (current_predicate_.defined()) {
+        condition = And(current_predicate_.value(), condition);
+      }
       PrimExpr then_value = call->args[1];
       PrimExpr else_value = call->args[2];
 
