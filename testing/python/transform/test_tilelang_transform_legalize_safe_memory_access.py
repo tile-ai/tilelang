@@ -613,7 +613,7 @@ def test_cp_async_signed_zero_safe_value_oob(safe_value):
 
     mod = tl.transform.LegalizeSafeMemoryAccess()(tvm.IRModule.from_expr(main))
     body = mod["main"].body
-    calls = _collect_call_nodes(body, "tl.ptx_cp_async")
+    calls = collect_calls(body, op="tl.ptx_cp_async")
     assert len(calls) == 1
     if math.copysign(1.0, safe_value) > 0:
         assert len(calls[0].args) == 4
