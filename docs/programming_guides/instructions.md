@@ -191,8 +191,8 @@ Compute primitives
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
   For CUDA C++ kernels, all launched lanes in a participating warp must call
-  the same reducer. Every lane receives its warp's result, including lanes in
-  the block's final partial warp.
+  the same reducer convergently. Every lane receives its warp's result,
+  including lanes in the block's final partial warp.
 - Elementwise math: TIR ops (`T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`, ...).
 - Fast math: `T.__log/__log2/__log10/__exp/__exp2/__exp10/__sin/__cos/__tan`.
 - IEEE math: `T.ieee_add/sub/mul/fmaf` (configurable rounding).
