@@ -40,6 +40,38 @@ reviews:
         the actual shared semantic or architectural impact, not just the directory.
 
     - reviewers:
+        - handle: chengyupku
+          type: user
+      instructions: |
+        Primary scope: Attention and sequence-model kernels (FlashAttention,
+        GQA/MHA, MLA decoding, and related Mamba workloads), plus kernel/compiler
+        co-design for software pipelines, warp specialization, producer/consumer
+        synchronization, persistent loops, and loop unswitching.
+        Suggest when: Changes materially affect attention/decoding algorithm
+        correctness, kernel schedules or performance, or the compiler mechanisms
+        enabling these kernels. Also suggest for foundational pipeline/warp-specialization
+        correctness, TMA/WGMMA synchronization, multiversion-buffer stage/phase
+        indexing, logical iteration versus physical pipeline counters,
+        nested/persistent-loop semantics, or loop-unswitching changes, even when
+        the reproducer is a GEMM rather than an attention kernel.
+        Do not suggest: Solely because of original-author status, for all examples,
+        or as a default reviewer for every CUDA/compiler PR. Prefer Yongqi-Zhuo for
+        isolated CuTe/layout algebra or automatic schedule construction without
+        substantive kernel/pipeline semantic changes; prefer Rachmanino for isolated
+        ISA exposure, architecture guards, physical TMEM/cluster constraints, or CLC
+        scheduler primitives. Suggest multiple reviewers for substantive cross-layer
+        changes, not overlapping terminology alone. Prefer backend specialists for
+        ROCm/Metal/Ascend-local work. Never suggest the PR author.
+        Path hints: examples/flash_attention/, examples/flash_attention_sm100/,
+        examples/flash_decoding/, examples/deepseek_mla/,
+        src/transform/pipeline_planning.cc, src/transform/inject_pipeline.cc,
+        src/transform/common/warp_specialize.h,
+        src/cuda/transform/materialize_ws_schedule.cc,
+        src/cuda/transform/lower_hopper_intrin.cc,
+        tilelang/language/warp_specialize.py, and src/transform/loop_unswitching.cc.
+        Match algorithm/pipeline intent, not directory membership alone.
+
+    - reviewers:
         - handle: Yongqi-Zhuo
           type: user
       instructions: |
