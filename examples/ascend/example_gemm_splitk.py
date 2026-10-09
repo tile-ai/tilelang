@@ -14,7 +14,7 @@ from tilelang.profiler import do_bench
 
 def gemm_splitk(M_DIM=8192, K_DIM=8192, N_DIM=8192, split_k=4, deterministic=False):
     """BF16 GEMM with explicit cross-core reduction and FP32 output."""
-    NUM_BLOCKS = 32
+    NUM_BLOCKS = 16
     TILE_M = 256
     TILE_N = 256
     TILE_K = 256
