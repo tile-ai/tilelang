@@ -330,6 +330,41 @@ def test_hoist_multiple_let_bound_variables():
     _check(before, expected)
 
 
+def test_unswitch_restores_ssa_after_simplify_keeps_bind():
+    """Copied flat Bind definitions must receive distinct Var identities."""
+
+    @T.prim_func
+    def before(out: T.Tensor((4,), T.int32), enabled: T.int32):
+        for i in range(4):
+            condition = enabled > 0
+            if condition:
+                out[i] = 1
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.Simplify()(mod)
+    mod = tl.transform.LoopUnswitching()(mod)
+
+    assert tvm.tirx.analysis.verify_ssa(mod["main"])
+    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+
+
+def test_unswitch_freshens_non_condition_bind_definitions():
+    """SSA repair must cover all copied Bind definitions, not only guards."""
+
+    @T.prim_func
+    def before(out: T.Tensor((4,), T.int32), enabled: T.int32):
+        for i in range(4):
+            value = i + 1
+            if enabled > 0:
+                out[i] = value
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tl.transform.LoopUnswitching()(mod)
+
+    assert tvm.tirx.analysis.verify_ssa(mod["main"])
+    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+
+
 def test_multiple_identical_conditions():
     """Multiple if statements with the same condition should all be replaced."""
 

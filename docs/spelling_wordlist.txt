@@ -1,11 +1,16 @@
 cancelled
+cann
 disjointness
 dout
 hsa
+inout
 inouts
 ist
 LOD
 nd
 NotIn
 offen
+olt
 te
+ue
+vor

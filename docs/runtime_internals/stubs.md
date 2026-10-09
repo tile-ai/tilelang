@@ -1,7 +1,7 @@
-# CUDA and ROCm Stub Libraries
+# CUDA, ROCm, and Ascend Stub Libraries
 
-This document describes TileLang's stub mechanism for GPU driver/runtime
-libraries (CUDA and ROCm/HIP).
+This document describes TileLang's stub mechanism for GPU/NPU driver and
+runtime libraries (CUDA, ROCm/HIP, and Ascend/CANN).
 
 ## Purpose
 
@@ -28,10 +28,20 @@ ROCm:
    loads `libhiprtc.so` and exposes the minimal HIPRTC API subset used by
    TileLang/TVM.
 
+Ascend:
+
+1. **CANN Runtime (`ascendcl_stub`, file `libstub_ascendcl.so`)**: Allows
+   TileLang to be imported on systems without CANN installed by lazy-loading
+   `libascendcl.so` only when needed. The stub prefers the copy already loaded
+   by torch_npu (via `RTLD_DEFAULT` / `RTLD_NEXT`) before searching the
+   filesystem. There is no RTC-style stub for Ascend: device kernels are
+   compiled by invoking the `bisheng` compiler as a subprocess, not through a
+   library API.
+
 ## Implementation
 
-The CUDA stubs in `src/cuda/stubs/` and ROCm stubs in
-`src/rocm/stubs/` implement a lazy-loading mechanism:
+The CUDA stubs in `src/cuda/stubs/`, ROCm stubs in `src/rocm/stubs/`, and
+Ascend stubs in `src/ascend/stubs/` implement a lazy-loading mechanism:
 
 - **Lazy Loading**: Libraries are loaded via `dlopen` only upon the first API call.
 - **Global Symbol Reuse**: For `cudart` and `nvrtc`, the stubs first check the global namespace (`RTLD_DEFAULT`) to use any already loaded symbols (e.g., from PyTorch).
@@ -39,6 +49,16 @@ The CUDA stubs in `src/cuda/stubs/` and ROCm stubs in
   falls back to `dlopen("libamdhip64.so")`. It additionally provides wrappers
   for `hsa_init` / `hsa_shut_down` so that ROCm-enabled wheels do not record a
   hard dependency on `libhsa-runtime64` at import time.
+- **Ascend Notes**: `ascendcl_stub` checks `RTLD_DEFAULT` / `RTLD_NEXT` first
+  (reusing the `libascendcl` copy loaded by torch_npu), then
+  `dlopen("libascendcl.so")` (which honors the `LD_LIBRARY_PATH` set by CANN's
+  `set_env.sh`), and finally well-known install roots: `$ASCEND_HOME_PATH`,
+  `$ASCEND_TOOLKIT_HOME`, and `/usr/local/Ascend/ascend-toolkit/latest`, each
+  with the `lib64/` and `runtime/lib64/` suffixes. The stub exposes only the
+  small entrypoint set used by the Ascend runtime module; `aclGetRecentErrMsg`
+  degrades gracefully (returns `nullptr` instead of throwing) so error
+  reporting never fails. No CANN headers are needed to build the stub — the
+  ABI is expressed with opaque pointer and fixed-width integer types.
 - **Versioning Support**: Handles ABI differences between CUDA versions (e.g., `cudaGraphInstantiate` changes in CUDA 12).
 
 ## Build Option
@@ -49,3 +69,9 @@ The CUDA stubs in `src/cuda/stubs/` and ROCm stubs in
 - `TILELANG_USE_HIP_STUBS` (Default: `ON`) controls ROCm stubs. When enabled
   (and `USE_ROCM=ON`), TileLang/TVM link against `hip_stub` / `hiprtc_stub`
   instead of the system ROCm libraries.
+- `TILELANG_USE_ASCEND_STUBS` (Default: `ON` on non-Windows) controls the
+  Ascend stub. When enabled (and `USE_ASCEND=ON`), TileLang links against
+  `ascendcl_stub` instead of the system CANN library. When disabled, TileLang
+  links directly against the real `libascendcl` found under
+  `$ASCEND_HOME_PATH` / `$ASCEND_TOOLKIT_HOME` /
+  `/usr/local/Ascend/ascend-toolkit/latest`.

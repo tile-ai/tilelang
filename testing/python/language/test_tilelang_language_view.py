@@ -79,7 +79,7 @@ def view_shape_mismatch_test(N, M, dtype, new_dtype=None):
 
 
 def test_view_shape_mismatch():
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="logical bit count"):
         view_shape_mismatch_test(1024, 32, T.float32)
 
 

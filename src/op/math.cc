@@ -51,6 +51,7 @@ PrimExpr LowerClamp(PrimExpr expr) {
 }
 
 TVM_REGISTER_OP("tl.clamp")
+    .set_attr<FLowerIntrinsic>("ascend.FLowerIntrinsic", LowerClamp)
     .set_attr<FLowerIntrinsic>("llvm.FLowerIntrinsic", LowerClamp)
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", LowerClamp)
     .set_attr<FLowerIntrinsic>("metal.FLowerIntrinsic", LowerClamp)
@@ -108,7 +109,8 @@ TVM_REGISTER_OP("tl.infinity")
                                Integer(CallEffectKind::kPure))
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "infinity")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", infinity_op)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", infinity_op);
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", infinity_op)
+    .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", infinity_op);
 
 PrimExpr round_ties_away_from_zero_op(PrimExpr args) {
   const CallNode *call = args.as<CallNode>();

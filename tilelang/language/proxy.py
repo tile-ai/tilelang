@@ -170,10 +170,10 @@ class StridedTensorProxy(BaseTensorProxy):
     This class implements the default tensor proxy with global memory scope, with the stride information required.
     """
 
-    def __call__(self, shape: ShapeType, strides: tuple[Any], dtype: DType = "float32", scope=None) -> tirx.Buffer:
+    def __call__(self, shape: ShapeType, strides: tuple[Any], dtype: DType = "float32", scope=None, *, data=None) -> tirx.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
-        return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
+        return super().__call__(shape, dtype=dtype, data=data, strides=strides, scope=scope)
 
 
 class FragmentBufferProxy(BaseTensorProxy):
