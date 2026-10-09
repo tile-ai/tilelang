@@ -447,13 +447,10 @@ jobs:
     needs: [lint]
     runs-on: linux-amd64-a5-4
     container:
-      image: quay.io/celenewyear/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
-    timeout-minutes: 180
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
+    timeout-minutes: 120
     env:
       PIP_USER: "0"
-      # The container cannot reach pypi.org reliably (read timeouts); use a
-      # reachable mirror for every pip install in this job.
-      PIP_INDEX_URL: "https://mirrors.huaweicloud.com/repository/pypi/simple"
       USE_CUDA: "OFF"
       USE_ASCEND: "ON"
 
@@ -465,18 +462,15 @@ jobs:
           submodules: recursive
 
       - name: Trust the mounted workspace for git
-        shell: bash
         run: |
-          # The container runs as root while the runner mounts the workspace
-          # from the host, so git refuses to read it as "dubious ownership".
-          # The CMake submodule check below needs git to work in the checkout.
+          # The container runs as root over the host-mounted workspace, so git
+          # rejects it as "dubious ownership"; CMake's submodule check needs it.
           git config --global --add safe.directory '*'
 
       - name: Build and test Ascend
         shell: bash
         run: |
-          # The CANN image ships no PyTorch stack; install the CPU torch and the
-          # matching torch_npu build before anything imports them.
+          # Keep the runner's preinstalled Torch/Torch-NPU stack.
           CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
           for CANN_SET_ENV in \
             "${ASCEND_HOME_PATH:-}/set_env.sh" \
