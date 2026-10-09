@@ -1061,6 +1061,14 @@ private:
     return VisitStmt(op->body, state);
   }
   FlowState VisitStmt_(const IfThenElseNode *op, uint8_t state) final {
+    PrimExpr condition = analyzer_.Simplify(op->condition);
+    if (const auto *imm = condition.as<IntImmNode>()) {
+      if (imm->value != 0) {
+        return VisitStmt(op->then_case, state);
+      }
+      return op->else_case ? VisitStmt(op->else_case.value(), state)
+                           : FlowState{state, 0};
+    }
     FlowState then_out = VisitStmt(op->then_case, state);
     FlowState else_out = op->else_case ? VisitStmt(op->else_case.value(), state)
                                        : FlowState{state, 0};
@@ -1068,10 +1076,21 @@ private:
             static_cast<uint8_t>(then_out.breaks | else_out.breaks)};
   }
   FlowState VisitStmt_(const ForNode *op, uint8_t state) final {
+    if (analyzer_.CanProve(op->extent <= 0)) {
+      // Codegen can still emit the body. Record its MADs as unreachable
+      // without allowing its direction setters to affect subsequent code.
+      VisitStmt(op->body, 0);
+      return {state, 0};
+    }
     return AnalyzeLoop(op->body, state, analyzer_.CanProve(op->extent > 0));
   }
   FlowState VisitStmt_(const WhileNode *op, uint8_t state) final {
-    const bool always_true = is_one(analyzer_.Simplify(op->condition));
+    PrimExpr condition = analyzer_.Simplify(op->condition);
+    if (is_zero(condition)) {
+      VisitStmt(op->body, 0);
+      return {state, 0};
+    }
+    const bool always_true = is_one(condition);
     // A constant-true while only exits through break. Its normal body exit is
     // a backedge, and the incoming state cannot bypass the body.
     return AnalyzeLoop(op->body, state, always_true, !always_true);
@@ -1128,8 +1147,13 @@ private:
     return body;
   }
   FlowState VisitStmt_(const SBlockRealizeNode *op, uint8_t state) final {
+    PrimExpr predicate = analyzer_.Simplify(op->predicate);
+    if (is_zero(predicate)) {
+      VisitStmt(op->block, 0);
+      return {state, 0};
+    }
     FlowState block_out = VisitStmt(op->block, state);
-    if (!is_one(op->predicate)) {
+    if (!is_one(predicate)) {
       block_out.fallthrough |= state;
     }
     return block_out;
@@ -1926,6 +1950,7 @@ void CodeGenTileLangPTO::ResetRngState_() {
 }
 
 void CodeGenTileLangPTO::ResetFunctionState_() {
+  integer_address_vars_.clear();
   local_var_buffers_.clear();
   current_unroll_factor_loop_var_ = Optional<Var>();
   current_unroll_factor_ = 0;
@@ -2120,6 +2145,9 @@ CodeGenTileLangPTO::PointerTypeName(DataType t,
 
 bool CodeGenTileLangPTO::NeedsCastptr_(const VarNode *buffer_var,
                                        DataType elem_dtype) const {
+  if (integer_address_vars_.count(GetRef<Var>(buffer_var))) {
+    return true;
+  }
   // Compare physical PTO element types. TVM bool buffers use int8 backing
   // storage even though scalar bool expressions use i1.
   DataType storage_dtype = elem_dtype.is_bool() ? DataType::Int(8) : elem_dtype;
@@ -2152,12 +2180,7 @@ std::string CodeGenTileLangPTO::ScalarPointerBase_(const VarNode *buffer_var,
   std::string base = GetVarID(buffer_var);
   if (scope == "shared" || scope == "shared.dyn" || scope == "global" ||
       scope.empty()) {
-    // Mixed AIC/AIV kernels represent their shared UB arena as an integer
-    // address, even when the TIR handle annotation already has this dtype.
-    // addptr and SIMD memory operations still need a PTODSL pointer.
-    if (NeedsCastptr_(buffer_var, elem_dtype) ||
-        (current_function_has_gemm_ &&
-         (scope == "shared" || scope == "shared.dyn"))) {
+    if (NeedsCastptr_(buffer_var, elem_dtype)) {
       std::string pto_space =
           (scope == "shared" || scope == "shared.dyn") ? "ub" : "gm";
       base = "pto.castptr(" + base + ", " +
@@ -2388,9 +2411,7 @@ std::string CodeGenTileLangPTO::GetPointerExpr(const VarNode *buffer_var,
   // mirroring AscendC's (__gm__/__ubuf__ T*) casts.
   if (scope == "shared" || scope == "shared.dyn" || scope == "global" ||
       scope.empty()) {
-    if (NeedsCastptr_(buffer_var, elem_dtype) ||
-        (current_function_has_gemm_ &&
-         (scope == "shared" || scope == "shared.dyn"))) {
+    if (NeedsCastptr_(buffer_var, elem_dtype)) {
       std::string pto_space =
           (scope == "global" || scope.empty()) ? "gm" : "ub";
       base = "pto.castptr(" + base + ", " +
@@ -6621,6 +6642,11 @@ void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
       }
       std::string scope = GetPtrStorageScope(op->var);
       alloc_storage_scope_[op->var.get()] = scope;
+      if (const auto *source_var = op->value.as<VarNode>()) {
+        if (integer_address_vars_.count(GetRef<Var>(source_var))) {
+          integer_address_vars_.insert(op->var);
+        }
+      }
 
       // T.make_tensor: reinterpret(handle, int_addr) carries an int64 address.
       // PTODSL's pto.addptr expects a pointer, not i64; emit a castptr so the
@@ -6690,6 +6716,7 @@ void CodeGenTileLangPTO::VisitStmt_(const AllocBufferNode *op) {
     PrintIndent();
     stream << AllocVarID(buffer_var.get())
            << " = pto.const(0, dtype=pto.int64)\n";
+    integer_address_vars_.insert(buffer_var);
   } else if (scope == "local.fragment") {
     AllocVarID(buffer_var.get());
     auto alloc_ref = GetRef<AllocBuffer>(op);

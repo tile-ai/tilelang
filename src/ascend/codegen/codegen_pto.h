@@ -212,6 +212,9 @@ private:
   // A single function-wide constant pad value is safe to materialize directly
   // at a guarded copy when scheduling split its setter into an earlier guard.
   PrimExpr uniform_const_copy_pad_value_;
+  // Cube-side allocations hold integer addresses despite their TIR pointer
+  // annotations. Vector-side allocations and make_tensor binds hold pointers.
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> integer_address_vars_;
   std::unordered_set<const VarNode *> local_var_buffers_;
   std::unordered_map<Call, int64_t, ObjectPtrHash, ObjectPtrEqual>
       hf32_mode_by_gemm_;
