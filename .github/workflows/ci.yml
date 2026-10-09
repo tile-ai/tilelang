@@ -445,7 +445,9 @@ jobs:
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
-    runs-on: [self-hosted, ascend]
+    runs-on: linux-amd64-a5-4
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20260930-ubuntu22.04-py3.12
     timeout-minutes: 120
     env:
       PIP_USER: "0"
@@ -459,13 +461,14 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          activate-environment: false
-          enable-cache: false
+      - name: Trust the mounted workspace for git
+        run: |
+          # The container runs as root over the host-mounted workspace, so git
+          # rejects it as "dubious ownership"; CMake's submodule check needs it.
+          git config --global --add safe.directory '*'
 
       - name: Build and test Ascend
+        shell: bash
         run: |
           # Keep the runner's preinstalled Torch/Torch-NPU stack.
           CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
