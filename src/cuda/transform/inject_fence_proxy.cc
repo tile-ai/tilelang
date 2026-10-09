@@ -118,6 +118,16 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   return false;
 }
 
+bool IsTmaStoreIntrinsic(const CallNode *call) {
+  return call != nullptr && (call->op.same_as(tma_store()) ||
+                             call->op.same_as(tma_store_scatter4()));
+}
+
+bool IsTmaLeaderCondition(const PrimExpr &condition) {
+  const auto *call = condition.as<CallNode>();
+  return call != nullptr && call->op.same_as(tl_shuffle_elect());
+}
+
 inline bool IsSharedPointerVar(const VarNode *var) {
   if (var == nullptr) {
     return false;
@@ -231,6 +241,7 @@ ProxyEvent ClassifyCallProxyEvent(const CallNode *call) {
 struct ProxyEventSummary {
   bool has_async{false};
   bool has_generic{false};
+  bool has_tma_store{false};
 };
 
 ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
@@ -252,6 +263,7 @@ ProxyEventSummary SummarizeProxyEvents(const Stmt &stmt) {
       ProxyEvent event = ClassifyCallProxyEvent(call);
       if (event == ProxyEvent::kAsync) {
         summary.has_async = true;
+        summary.has_tma_store |= IsTmaStoreIntrinsic(call);
       } else if (event == ProxyEvent::kGeneric) {
         summary.has_generic = true;
       }
@@ -427,6 +439,21 @@ private:
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     PrimExpr cond = VisitExpr(op->condition);
     ProxyStateSet entry = current_state_;
+
+    if (entry.MayBeGeneric() && !op->else_case.defined() &&
+        IsTmaLeaderCondition(cond)) {
+      ProxyEventSummary then_summary = SummarizeProxyEvents(op->then_case);
+      if (then_summary.has_tma_store && !then_summary.has_generic) {
+        Stmt pre_fence = MakeFenceProxyAsyncStmt();
+        RewriteResult then_res =
+            RewriteWithState(op->then_case, ProxyStateSet::None());
+        current_state_ = then_res.out_state.Union(entry);
+        return SeqStmt(Array<Stmt>{
+            pre_fence,
+            IfThenElse(cond, then_res.stmt),
+        });
+      }
+    }
 
     if (entry.MayBeGeneric() && op->else_case.defined()) {
       ProxyEventSummary then_summary = SummarizeProxyEvents(op->then_case);
