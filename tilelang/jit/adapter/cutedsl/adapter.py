@@ -282,7 +282,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                     return value
                 non_tensor_values.append((buffer_idx, value))
                 continue
-            if ref_id == 0:
+            elif ref_id == 0:
                 has_shape_candidate = True
             elif ref_id == 1:
                 has_stride_candidate = True
