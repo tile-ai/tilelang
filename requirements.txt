@@ -1,6 +1,7 @@
 # Runtime requirements
 
 apache-tvm-ffi>=0.1.11,<0.1.13
+# No prebuilt Windows ARM64 wheels are available for this optional extension.
 torch-c-dlpack-ext; python_version < '3.14' and (platform_system != 'Windows' or platform_machine != 'ARM64')
 cloudpickle
 ml-dtypes

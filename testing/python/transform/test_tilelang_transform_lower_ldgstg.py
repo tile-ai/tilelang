@@ -43,6 +43,7 @@ def _check_has_intrinsic(mod, intrinsic_name):
     return found[0]
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("lanes", [1, 2, 4, 8])
 @pytest.mark.parametrize("enable_non_predicated", [False, True])
 @pytest.mark.parametrize("enclosing_store", [False, True])
@@ -81,6 +82,7 @@ def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicat
         tvm.ir.assert_structural_equal(stores[0].args[-1], outer > 0)
 
 
+@tilelang.testing.requires_cuda
 def test_nested_predicated_load_does_not_leak_store_guard():
     """A subsequent load uses its own condition, not a preceding store guard."""
 
