@@ -69,8 +69,11 @@ def atomic_max(
         >>> # Use in parallel reduction to find global maximum
         >>> @T.prim_func
         >>> def find_max(data: T.Buffer, result: T.Buffer):
+        >>>     # `result[0]` must already hold a lower bound for the domain when the
+        >>>     # kernel is launched: an initialization written here would run in every
+        >>>     # thread and could overwrite an update another thread already made.
         >>>     for i in T.thread_binding(128, "threadIdx.x"):
-        >>>         atomic_max(result, data[i])
+        >>>         atomic_max(result[0], data[i])  # a whole-buffer destination applies once
 
         >>> # Tensor-to-tensor atomic max (tile-region based)
         >>> src_tensor = T.Tensor([128, 64], "float32", name="src")
@@ -147,8 +150,9 @@ def atomic_min(
         >>> # Find minimum across threads
         >>> @T.prim_func
         >>> def find_min(data: T.Buffer, result: T.Buffer):
+        >>>     # As above, but `result[0]` has to hold an upper bound for the domain.
         >>>     for i in T.thread_binding(256, "threadIdx.x"):
-        >>>         atomic_min(result, data[i])
+        >>>         atomic_min(result[0], data[i])  # a whole-buffer destination applies once
 
         >>> # Track minimum with previous value
         >>> threshold = T.Tensor([1], "float32", name="threshold")
@@ -240,8 +244,9 @@ def atomic_add(
         >>> # Parallel sum reduction
         >>> @T.prim_func
         >>> def parallel_sum(data: T.Buffer, result: T.Buffer):
+        >>>     # As above: the identity for a sum is zero.
         >>>     for i in T.thread_binding(1024, "threadIdx.x"):
-        >>>         atomic_add(result, data[i])
+        >>>         atomic_add(result[0], data[i])  # a whole-buffer destination applies once
 
         >>> # Get previous value for debugging
         >>> old_value = atomic_add(counter, 5, return_prev=True)
