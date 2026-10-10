@@ -183,6 +183,35 @@ def test_lazy_jit_unhashable_defaults_are_normalized_in_cache_key():
     assert omitted_key == explicit_key
 
 
+@pytest.mark.parametrize("nested", [False, True])
+def test_lazy_jit_mutated_default_uses_current_specialization(monkeypatch, nested):
+    config = {"value": 1}
+    default = (config,) if nested else config
+
+    @tilelang.jit
+    def make_kernel(options=default):
+        value = options[0]["value"] if nested else options["value"]
+
+        @T.prim_func
+        def kernel():
+            T.evaluate(value)
+
+        return kernel
+
+    # Skip backend compilation to keep this test portable.
+    monkeypatch.setattr(make_kernel, "compile", make_kernel.get_tir)
+    first = make_kernel()
+    assert first.body.value.value == 1
+
+    config["value"] = 2
+    second = make_kernel()
+    assert second.body.value.value == 2
+    assert make_kernel() is second
+
+    config["value"] = 1
+    assert make_kernel() is first
+
+
 def test_lazy_jit_unsupported_unhashable_compile_time_value_errors():
     with pytest.raises(TypeError, match="Unsupported unhashable JIT compile-time cache key value"):
         _lazy_unhashable_default_factory.func.parse_args(
