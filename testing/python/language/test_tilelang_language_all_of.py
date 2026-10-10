@@ -4,6 +4,91 @@ import tilelang.language as T
 import torch
 
 
+def shared_all_of(size, threads):
+    @T.prim_func
+    def main(
+        source: T.Tensor((size,), "int32"),
+        result: T.Tensor((threads,), "bool"),
+    ):
+        with T.Kernel(1, threads=threads):
+            shared = T.alloc_shared((size,), "int32")
+            tx = T.get_thread_binding()
+            T.copy(source, shared)
+            T.sync_threads()
+            result[tx] = T.all_of(shared)
+
+    return main
+
+
+def global_all_of(size, threads):
+    @T.prim_func
+    def main(
+        source: T.Tensor((size,), "int32"),
+        result: T.Tensor((threads,), "bool"),
+    ):
+        with T.Kernel(1, threads=threads):
+            tx = T.get_thread_binding()
+            result[tx] = T.all_of(source)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_all_of_shared_scope():
+    size, threads = 70, 32
+    kernel = tilelang.compile(shared_all_of(size, threads), target="cuda", out_idx=-1)
+    for false_index in (None, 0, threads - 1, size - 1):
+        source = torch.ones(size, dtype=torch.int32, device="cuda")
+        if false_index is not None:
+            source[false_index] = 0
+        result = kernel(source)
+        expected = torch.full((threads,), false_index is None, dtype=torch.bool, device="cuda")
+        torch.testing.assert_close(result, expected)
+
+    assert "tl::AllWarp(" in kernel.get_kernel_source()
+
+
+@tilelang.testing.requires_cuda
+def test_all_of_auto_scope_partial_warp_falls_back_to_thread():
+    size, threads = 70, 48
+    kernel = tilelang.compile(shared_all_of(size, threads), target="cuda", out_idx=-1)
+    source = torch.ones(size, dtype=torch.int32, device="cuda")
+    source[20] = 0
+
+    result = kernel(source)
+    expected = torch.zeros(threads, dtype=torch.bool, device="cuda")
+    torch.testing.assert_close(result, expected)
+    assert "tl::All(" in kernel.get_kernel_source()
+
+
+@tilelang.testing.requires_cuda
+def test_all_of_global_uniform_range_uses_warp():
+    size, threads = 70, 32
+    kernel = tilelang.compile(global_all_of(size, threads), target="cuda", out_idx=-1)
+    source = torch.ones(size, dtype=torch.int32, device="cuda")
+    source[-1] = 0
+
+    result = kernel(source)
+    expected = torch.zeros(threads, dtype=torch.bool, device="cuda")
+    torch.testing.assert_close(result, expected)
+    assert "tl::AllWarp(" in kernel.get_kernel_source()
+
+
+@tilelang.testing.requires_rocm
+def test_all_of_shared_scope_rocm():
+    size, threads = 134, 64
+    kernel = tilelang.compile(shared_all_of(size, threads), target="hip", out_idx=-1)
+    for false_index in (None, size - 1):
+        source = torch.ones(size, dtype=torch.int32, device="cuda")
+        if false_index is not None:
+            source[false_index] = 0
+        result = kernel(source)
+        expected = torch.full((threads,), false_index is None, dtype=torch.bool, device="cuda")
+        torch.testing.assert_close(result, expected)
+
+    assert "tl::AllWarp" in kernel.get_kernel_source()
+
+
 def ref_program(A, B, BlockMask, block_M, block_N, block_K):
     M, K = A.shape
     N = B.shape[1]
