@@ -129,7 +129,7 @@ def test_warp_reduce_64(op, dtype, N):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "threads",
-    [(1, 1, 1), (3, 1, 1), (7, 1, 1), (24, 1, 1), (33, 1, 1), (48, 1, 1), (100, 1, 1), (7, 7, 1), (3, 3, 5)],
+    [(1, 1, 1), (3, 1, 1), (7, 1, 1), (31, 1, 1), (33, 1, 1), (48, 1, 1), (100, 1, 1), (7, 7, 1), (3, 3, 5)],
 )
 @pytest.mark.parametrize(
     "op,dtype",
@@ -139,11 +139,24 @@ def test_warp_reduce_64(op, dtype, N):
 def test_warp_reduce_partial(op, dtype, threads):
     N = threads[0] * threads[1] * threads[2]
     indices = torch.arange(N, dtype=torch.int64, device="cuda")
-    a = (indices // 32 + indices % 2 + 1).to(getattr(torch, dtype))
-    if dtype == "int64":
-        a += 1 << 40
-    if op == "max":
-        a = -a
+    if op in ("bitand", "bitor"):
+        # Distinct bits expose missing lanes and int64 high-word shuffles.
+        lane = indices % 32
+        a = torch.ones_like(indices) << (lane + 31 if dtype == "int64" else lane % 31)
+        if dtype == "int32":
+            a[lane == 31] = -(1 << 31)
+        if op == "bitand":
+            a = ~a
+        a = a.to(getattr(torch, dtype))
+    else:
+        a = (indices // 32 + indices % 2 + 2).to(getattr(torch, dtype))
+        if op in ("min", "max"):
+            tail = (indices % 32 == 31) | (indices == N - 1)
+            a[tail] = (indices[tail] // 32 + 1).to(a.dtype)
+        if dtype == "int64":
+            a += 1 << 40
+        if op == "max":
+            a = -a
 
     ref = torch.empty_like(a)
     for start in range(0, N, 32):
