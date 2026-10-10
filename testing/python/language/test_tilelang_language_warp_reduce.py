@@ -148,7 +148,7 @@ def test_warp_reduce_64(op, dtype, N):
 )
 @pytest.mark.parametrize(
     "op,dtype",
-    [(op, dtype) for op in ("sum", "min", "max") for dtype in ("float32", "float16", "bfloat16", "int32", "int64")]
+    [(op, dtype) for op in ("sum", "min", "max") for dtype in ("float32", "float64", "float16", "bfloat16", "int32", "int64")]
     + [(op, dtype) for op in ("bitand", "bitor") for dtype in ("int32", "int64")],
 )
 def test_warp_reduce_partial(op, dtype, threads):
@@ -241,9 +241,14 @@ def test_warp_reduce_codegen_launch_extent():
                 {tag: tirx.const(extent, "int64") if isinstance(extent, int) else extent for tag, extent in extents.items()},
             )
         functions[name] = func
+    mod = tvm.IRModule(functions)
+    # Preserve the map's keys but force full kernels to precede fallbacks.
+    for key, func in zip(list(mod.functions), functions.values()):
+        mod[key] = func
+    assert [str(func.attrs["global_symbol"]) for func in mod.functions.values()] == list(functions)
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     with target:
-        source = build(tvm.IRModule(functions), target).inspect_source()
+        source = build(mod, target).inspect_source()
     for index, (_, extent) in enumerate(cases):
         for op in operations:
             specialization = f"<int64_t, {extent}>" if extent is not None else ""
