@@ -167,5 +167,74 @@ def test_regular_mutable_assignment_and_tuple_swap():
     torch.testing.assert_close(result.cpu(), torch.tensor([2, 4], dtype=torch.int32), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("constant", [10, T.int32(10)])
+def test_constant_rebind_inside_a_region_is_rejected(constant):
+    """The expression form of this rebind is rejected already.
+
+    A constant right-hand side took the fast path in `bind`, which dropped the
+    binding record instead: the branch was lost, the constant replaced the value at
+    trace time, and every later read saw it unconditionally.
+    """
+    with pytest.raises(RuntimeError, match="outside its defining region"):
+
+        @T.prim_func
+        def kernel(A: T.Tensor((4,), "int32"), Out: T.Tensor((4,), "int32")):
+            with T.Kernel(1, threads=1):
+                for i in T.serial(4):
+                    val = A[i]
+                    if val < 10:
+                        val = constant
+                    Out[i] = val
+
+
+def test_constant_rebind_at_the_same_level_is_still_accepted():
+    """Control: nothing is conditional here, so there is nothing to reject."""
+
+    @T.prim_func
+    def kernel(Out: T.Tensor((2,), "int32")):
+        with T.Kernel(1, threads=1):
+            value = 1
+            value = 2
+            Out[0] = value
+
+    tilelang.compile(kernel, target="cuda")
+
+
+@pytest.mark.parametrize("spelling", ["int", "IntImm"])
+def test_both_constant_spellings_expire_alike(spelling):
+    """`7` and `T.int32(7)` are the same constant and must leave the same record.
+
+    Only the `int` path cleared the name's record, so a record left by an earlier
+    expression binding of the same name survived an `IntImm` reassignment and the
+    later read reported the name as outside its defining region.
+    """
+
+    @T.prim_func
+    def kernel(A: T.Tensor((2,), "int32"), Out: T.Tensor((2,), "int32")):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(1):
+                val = A[i]
+                val = 7 if spelling == "int" else T.int32(7)
+            for j in T.serial(1, 2):
+                Out[j] = val
+
+    tilelang.compile(kernel, target="cuda")
+
+
+def test_constant_stays_reusable_once_its_region_closed():
+    """Control: a constant is not a TIR binding, so it does not expire with its region."""
+
+    @T.prim_func
+    def kernel(Out: T.Tensor((2,), "int32")):
+        with T.Kernel(1, threads=1):
+            for i in T.serial(1):
+                reused = 7
+                Out[i] = reused
+            for j in T.serial(1, 2):
+                Out[j] = reused
+
+    tilelang.compile(kernel, target="cuda")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
