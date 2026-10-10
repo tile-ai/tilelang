@@ -557,6 +557,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   bool has_cube = false, has_vector = false;
   bool has_nd2nz_post_copy = false;
   bool has_cooperative_groups = false;
+  bool has_ascend_std_math = false;
   int vector_count = 2;
   tirx::PostOrderVisit(f->body, [&](const ffi::ObjectRef &n) {
     if (const auto *block = n.as<SBlockNode>()) {
@@ -575,6 +576,14 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       }
     }
     if (const auto *call = n.as<CallNode>()) {
+      if ((call->op.same_as(builtin::call_extern()) ||
+           call->op.same_as(builtin::call_pure_extern())) &&
+          !call->args.empty()) {
+        if (const auto *func_name = call->args[0].as<StringImmNode>()) {
+          has_ascend_std_math = has_ascend_std_math ||
+                                func_name->value.find("AscendC::Std::") == 0;
+        }
+      }
       if (call->op.same_as(tl::ascend_gemm_l1()) ||
           call->op.same_as(tl::ascend_blockscaled_gemm_l1())) {
         has_gemm_l1_ = true;
@@ -632,6 +641,11 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   if (has_cooperative_groups && !has_cooperative_groups_included_) {
     decl_stream << "#include <simt_api/cooperative_groups.h>\n";
     has_cooperative_groups_included_ = true;
+  }
+
+  if (has_ascend_std_math && !has_ascend_std_math_included_) {
+    decl_stream << "#include <utils/std/cmath.h>\n";
+    has_ascend_std_math_included_ = true;
   }
 
   if (has_cube && has_vector) {

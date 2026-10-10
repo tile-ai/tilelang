@@ -197,6 +197,56 @@ private:
   Map<Buffer, Buffer> remap_;
 };
 
+/*!
+ * \brief Lower scalar float32 sqrt calls outside VF regions to the AscendC
+ * standard-library implementation.
+ *
+ * VF blocks are deliberately opaque here: SIMT math continues through the
+ * existing intrinsic lowering, while SIMD math is handled by its own lowering.
+ */
+class ScalarSqrtLegalizer : public arith::IRMutatorWithAnalyzer {
+public:
+  /*!
+   * \brief Rewrite scalar sqrt calls for the plain AscendC target.
+   * \param stmt The statement to rewrite.
+   * \param target The function target.
+   * \return The rewritten statement, or the original statement for PTO.
+   */
+  static Stmt Substitute(const Stmt &stmt, const Target &target) {
+    for (const auto &key : target->keys) {
+      if (key == "pto") {
+        return stmt;
+      }
+    }
+    arith::Analyzer analyzer;
+    ScalarSqrtLegalizer legalizer(&analyzer);
+    return legalizer.VisitStmt(stmt);
+  }
+
+private:
+  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
+
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    if (IsVFRegion(op->name_hint)) {
+      return GetRef<SBlock>(op);
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  PrimExpr VisitExpr_(const tirx::CallNode *op) final {
+    auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+    if (!call->op.same_as(Op::Get("tirx.sqrt")) || !call->dtype.is_scalar() ||
+        !call->dtype.is_float() || call->dtype.bits() != 32) {
+      return call;
+    }
+
+    ICHECK_EQ(call->args.size(), 1U) << "T.sqrt expects exactly one argument";
+    Array<PrimExpr> args = {StringImm("AscendC::Std::sqrt"), call->args[0]};
+    return Call(call->dtype, builtin::call_pure_extern(), args,
+                call->annotations, call->span);
+  }
+};
+
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -219,6 +269,7 @@ public:
     substituter.mx_sf_bindings_ = CollectL0SFBindings(f->body);
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
+    fptr->body = ScalarSqrtLegalizer::Substitute(fptr->body, target.value());
     fptr->body =
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
     fptr->body =
