@@ -2,7 +2,7 @@ from __future__ import annotations
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal
 from tvm.target import Target
-from .nvcc import get_target_compute_version, parse_compute_version
+from .nvcc import get_target_arch, get_target_arch_and_code
 
 
 def get_nvrtc_version() -> tuple[int, int]:
@@ -31,7 +31,8 @@ def compile_cuda(
     arch : Optional[Union[int, str]]
         The CUDA architecture code. String tokens preserve the exact suffix,
         such as "90", "90a", or "100f". Integer values use the legacy
-        architecture-specific suffix for SM90 and newer.
+        architecture-specific suffix for SM90 and newer. If None, use the
+        current target architecture or detect it from the GPU, as in NVCC.
 
     options : Optional[Union[str, List[str]]]
         The additional options.
@@ -45,13 +46,11 @@ def compile_cuda(
         The bytearray of the cubin or ptx code.
     """
     if arch is None:
-        # If None, then it will use `tvm.target.Target.current().arch`.
-        # Target arch could be a str like "80", "90", "90a", etc.
-        major, minor = parse_compute_version(get_target_compute_version(Target.current(allow_none=True)))
-        arch = major * 10 + minor
+        arch, _ = get_target_arch_and_code(Target.current(allow_none=True))
+    elif isinstance(arch, int):
+        arch = get_target_arch(divmod(arch, 10))
     prefix = "compute" if target_format == "ptx" else "sm"
-    suffix = "a" if isinstance(arch, int) and arch >= 90 else ""
-    arch_option = f"--gpu-architecture={prefix}_{arch}{suffix}"
+    arch_option = f"--gpu-architecture={prefix}_{arch}"
 
     file_name = "tvm_kernels"
     if target_format not in ["cubin", "ptx"]:
