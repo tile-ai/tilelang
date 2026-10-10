@@ -5,6 +5,7 @@
 #ifndef TVM_TL_TARGET_CODEGEN_CUDA_H_
 #define TVM_TL_TARGET_CODEGEN_CUDA_H_
 
+#include "runtime/metadata.h"
 #include "support/check.h"
 #include <optional>
 #include <tvm/target/codegen.h>
@@ -19,6 +20,9 @@
 
 namespace tvm {
 namespace codegen {
+
+ffi::Map<ffi::String, runtime::FunctionInfo>
+ExtractCudaFuncInfo(const IRModule &mod);
 
 class CodeGenTileLangCUDA final : public CodeGenCWithLineDirectives {
 public:

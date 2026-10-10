@@ -6,6 +6,32 @@ import tilelang.language as T
 import tilelang.testing
 
 
+def test_nvrtc_compile_destroys_failed_program(monkeypatch):
+    pytest.importorskip("cuda.bindings.nvrtc")
+    from tilelang.contrib import nvrtc
+
+    success = nvrtc.nvrtc.nvrtcResult.NVRTC_SUCCESS
+    destroyed = []
+    monkeypatch.setattr(nvrtc, "get_nvrtc_version", lambda: (12, 7))
+    monkeypatch.setattr(nvrtc.nvrtc, "nvrtcCreateProgram", lambda *args: (success, object()))
+    monkeypatch.setattr(
+        nvrtc.nvrtc,
+        "nvrtcCompileProgram",
+        lambda *args: (nvrtc.nvrtc.nvrtcResult.NVRTC_ERROR_COMPILATION,),
+    )
+
+    def destroy_program(program):
+        destroyed.append(program)
+        return (success,)
+
+    monkeypatch.setattr(nvrtc.nvrtc, "nvrtcDestroyProgram", destroy_program)
+
+    with pytest.raises(RuntimeError, match="Compilation error"):
+        nvrtc.compile_cuda('extern "C" __global__ void kernel() {}', arch=80)
+
+    assert len(destroyed) == 1
+
+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("standard", ["c++17", "c++20"])
 def test_nvrtc_is_integral(standard):
@@ -59,12 +85,15 @@ def test_nvrtc_warp_reduce(dtype, op):
             tid = T.get_thread_binding()
             O[tid] = reduce(A[tid])
 
-    kernel = tilelang.compile(main, out_idx=[1], execution_backend="nvrtc")
+    kernel = tilelang.compile(main, out_idx=[1], pass_configs={"tl.cuda_compiler": "nvrtc"})
     values = torch.arange(32, device="cuda", dtype=torch.int32)
     a = values.to(getattr(torch, dtype))
     expected = getattr(values, op)().to(a.dtype).expand_as(a)
-    out = kernel(a, stream=torch.cuda.current_stream().cuda_stream)
-    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        out = kernel(a)
+        torch.testing.assert_close(out, expected, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

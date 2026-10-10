@@ -95,7 +95,7 @@ def sync_grid():
     """Synchronize all thread blocks in a grid.
 
     NOTE: This requires the kernel to be launched with cuLaunchCooperativeKernel
-    to guarantee all blocks are resident simultaneously. The CuTeDSL wrapper
+    to guarantee all blocks are resident simultaneously. The shared CUDA runtime
     handles this automatically when the kernel uses sync_grid().
     """
     cute.arch.sync_threads()

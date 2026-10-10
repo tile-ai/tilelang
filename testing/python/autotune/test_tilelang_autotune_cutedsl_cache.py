@@ -5,57 +5,13 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang.autotuner.param import AutotuneResult
 from tilelang.env import env
-
-
-def test_cutedsl_save_creates_kernel_py(tmp_path):
-    """_save_kernel_to_disk should write kernel.py (not kernel_lib.so) for CuTeDSL."""
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-    (src_dir / "kernel.py").write_text("# cutedsl kernel\n")
-    (src_dir / "kernel.cubin").write_bytes(b"fake_cubin")
-
-    class FakeLibGen:
-        """Minimal CuTeDSL library generator stub for cache-save tests."""
-
-        launcher_libpath = None
-
-    class FakeAdapter:
-        """Minimal CuTeDSL adapter stub exposing source accessors."""
-
-        libpath = str(src_dir / "kernel.py")
-        lib_generator = FakeLibGen()
-
-        def get_kernel_source(self, kernel_only=True):
-            """Return a fake device source."""
-            return "# device src"
-
-        def get_host_source(self):
-            """Return a fake host wrapper source."""
-            return "# host src"
-
-    class FakeKernel:
-        """Minimal JITKernel stub for CuTeDSL autotune cache saving."""
-
-        execution_backend = "cutedsl"
-        adapter = FakeAdapter()
-        kernel_source = "# src"
-        params = []
-
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    AutotuneResult()._save_kernel_to_disk(cache, FakeKernel())
-
-    assert (cache / "kernel.py").exists()
-    assert not (cache / "kernel_lib.so").exists()
-    assert (cache / "kernel.cubin").exists()
 
 
 def _is_cutedsl_available():
     """Return whether the CuTeDSL stack is usable in the current environment."""
     try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+        from tilelang.cuda.cutedsl_backend import check_cutedsl_available
 
         check_cutedsl_available()
         return True

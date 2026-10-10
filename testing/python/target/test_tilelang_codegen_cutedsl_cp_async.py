@@ -11,7 +11,7 @@ from tilelang.cuda.target import normalize_cutedsl_target
 
 
 def test_cutedsl_dict_target_normalizes_to_cuda_marker(monkeypatch):
-    from tilelang.jit.adapter.cutedsl import checks
+    from tilelang.cuda import cutedsl_backend as checks
 
     monkeypatch.setattr(checks, "check_cutedsl_available", lambda: None)
     target = determine_target({"kind": "cutedsl", "arch": "sm_80"}, return_object=True)
@@ -24,7 +24,7 @@ def test_cutedsl_dict_target_normalizes_to_cuda_marker(monkeypatch):
 def test_cutedsl_string_target_uses_detected_cuda_arch(monkeypatch):
     """Verify bare CuTeDSL targets use TileLang's CUDA arch normalization."""
 
-    from tilelang.jit.adapter.cutedsl import checks
+    from tilelang.cuda import cutedsl_backend as checks
 
     monkeypatch.setattr(checks, "check_cutedsl_available", lambda: None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)

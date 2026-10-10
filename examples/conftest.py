@@ -36,7 +36,7 @@ else:
 # CuTeDSL backend: auto-mark known failures / unsupported tests
 # ---------------------------------------------------------------------------
 
-# Known failures when running with TILELANG_TARGET=cutedsl.
+# Known failures when running with TILELANG_DEFAULT_TARGET=cutedsl.
 # These are marked as xfail(strict=False) so unexpected passes are reported.
 CUTEDSL_KNOWN_FAILURES = {
     # Flaky — passes when run in isolation, fails under parallel execution
@@ -52,8 +52,8 @@ def _match_any(nodeid, patterns):
 
 
 def pytest_collection_modifyitems(config, items):  # noqa: ARG001
-    """When TILELANG_TARGET=cutedsl, annotate known-bad tests automatically."""
-    if os.environ.get("TILELANG_TARGET") != "cutedsl":
+    """When TILELANG_DEFAULT_TARGET=cutedsl, annotate known-bad tests automatically."""
+    if os.environ.get("TILELANG_DEFAULT_TARGET") != "cutedsl":
         return
 
     for item in items:

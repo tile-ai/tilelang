@@ -27,53 +27,6 @@ def match_declare_kernel(source: str, annotation: str = "__global__") -> int:
     raise ValueError("No global kernel found in the source code")
 
 
-def match_declare_kernel_cutedsl(source: str, annotation: str = "@cute.kernel") -> int:
-    # Match decorator followed by function definition across lines
-    # \s+ allows any whitespace including newlines between decorator and def
-    pattern = r"@cute\.kernel\s+def\s+(\w+)"
-    matched = re.search(pattern, source, re.MULTILINE)
-    if matched:
-        # Find the position of the opening parenthesis after the function name
-        # matched.start(1) gives position of function name
-        func_name_pos = matched.start(1)
-        # Find the '(' after function name
-        paren_pos = source.find("(", func_name_pos)
-        if paren_pos != -1:
-            return paren_pos
-    raise ValueError("No global kernel found in the source code")
-
-
-def extract_python_func_declaration(source: str, func_name: str) -> str:
-    """Extract the full Python function declaration from decorator to colon.
-
-    Args:
-        source: Source code containing the function
-        func_name: Name of the function to extract (can include '(' suffix)
-
-    Returns:
-        The function declaration from 'def' to ':', including parameters
-
-    Example:
-        For code:
-            @cute.kernel
-            def kernel(arg1: cute.Tensor, arg2: int):
-                ...
-        Returns: "def kernel(arg1: cute.Tensor, arg2: int)"
-    """
-    # Remove '(' suffix if present
-    if func_name.endswith("("):
-        func_name = func_name[:-1]
-
-    # Match from def to the closing ) followed by :
-    # This handles multi-line function signatures
-    pattern = rf"def\s+{re.escape(func_name)}\s*\([^)]*\)"
-    matched = re.search(pattern, source, re.DOTALL)
-    if matched:
-        return matched.group(0)
-
-    raise ValueError(f"No function declaration found for {func_name}")
-
-
 def match_declare_kernel_cpu(source: str, annotation: str = "int32_t") -> int:
     pattern = r"int32_t\s+\w+"
     for line in source.split("\n"):
@@ -102,10 +55,6 @@ def is_metal_target(target: Target) -> bool:
 
 def is_ascend_target(target: Target) -> bool:
     return target.kind.name == "ascend"
-
-
-def is_cutedsl_target(target: Target) -> bool:
-    return target.kind.name == "cuda" and "cutedsl" in target.keys
 
 
 def pythonic_expr(
