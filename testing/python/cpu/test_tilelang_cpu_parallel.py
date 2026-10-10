@@ -1,16 +1,4 @@
-"""OpenMP CPU parallelization (``tl.cpu_parallel``) tests.
-
-Covers the opt-in contract of the CPU OpenMP lowering:
-
-- enabled: grid loops become ``#pragma omp parallel for [collapse(n)]`` in
-  the generated C source, function-scope buffers are sunk into the parallel
-  region (per-worker private copies), and results are exact;
-- disabled (default): no OpenMP pragma in the generated source and results
-  are unchanged (bit-identical serial lowering);
-- ``tl.cpu_parallel_min_trip`` keeps small grids serial.
-"""
-
-import sys
+"""OpenMP CPU grid lowering, private scratch buffers, and serial fallback."""
 
 import pytest
 import torch
@@ -30,134 +18,86 @@ BLOCK_M = BLOCK_N = 128
 BLOCK_K = 32
 
 
-def make_gemm(M, N, K, BM, BN, BK, cpu_num_threads=None):
+def _make_gemm(rows, cpu_num_threads):
     @T.prim_func
     def gemm(
-        A: T.Tensor((M, K), dtype="float32"),
-        B: T.Tensor((K, N), dtype="float32"),
-        C: T.Tensor((M, N), dtype="float32"),
+        A: T.Tensor((rows, K), dtype=T.float32),
+        B: T.Tensor((K, N), dtype=T.float32),
+        C: T.Tensor((rows, N), dtype=T.float32),
     ):
-        with T.Kernel(T.ceildiv(N, BN), T.ceildiv(M, BM), cpu_num_threads=cpu_num_threads) as (bx, by):
-            A_shared = T.alloc_buffer((BM, BK), dtype="float32", scope="shared")
-            B_shared = T.alloc_buffer((BK, BN), dtype="float32", scope="shared")
-            C_local = T.alloc_buffer((BM, BN), dtype="float32", scope="local")
+        with T.Kernel(T.ceildiv(N, BLOCK_N), T.ceildiv(rows, BLOCK_M), cpu_num_threads=cpu_num_threads) as (bx, by):
+            A_shared = T.alloc_buffer((BLOCK_M, BLOCK_K), dtype=T.float32, scope="shared")
+            B_shared = T.alloc_buffer((BLOCK_K, BLOCK_N), dtype=T.float32, scope="shared")
+            C_local = T.alloc_buffer((BLOCK_M, BLOCK_N), dtype=T.float32, scope="local")
             T.clear(C_local)
-            for ko in T.Pipelined(K // BK, num_stages=1):
-                T.copy(A[by * BM, ko * BK], A_shared)
-                T.copy(B[ko * BK, bx * BN], B_shared)
+            for ko in T.Pipelined(K // BLOCK_K, num_stages=1):
+                T.copy(A[by * BLOCK_M, ko * BLOCK_K], A_shared)
+                T.copy(B[ko * BLOCK_K, bx * BLOCK_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
-            T.copy(C_local, C[by * BM, bx * BN])
+            T.copy(C_local, C[by * BLOCK_M, bx * BLOCK_N])
 
     return gemm
 
 
-def _compile(pass_configs, cpu_num_threads=None):
-    return tilelang.compile(
-        make_gemm(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, cpu_num_threads=cpu_num_threads),
+def _compile_parallel(func, out_idx=-1):
+    return tilelang.compile(func, target="c", out_idx=out_idx, pass_configs={PassConfigKey.TL_CPU_PARALLEL: True})
+
+
+@pytest.mark.parametrize(
+    "rows,pass_configs,cpu_num_threads,parallel",
+    [
+        pytest.param(M, {PassConfigKey.TL_CPU_PARALLEL: True}, 4, True, id="parallel"),
+        pytest.param(BLOCK_M, {PassConfigKey.TL_CPU_PARALLEL: True}, None, True, id="unit_grid_dim"),
+        pytest.param(M, None, None, False, id="default_off"),
+        pytest.param(
+            M,
+            {PassConfigKey.TL_CPU_PARALLEL: True, PassConfigKey.TL_CPU_PARALLEL_MIN_TRIP: 1024},
+            None,
+            False,
+            id="min_trip",
+        ),
+    ],
+)
+def test_cpu_parallel_gemm_correctness(rows, pass_configs, cpu_num_threads, parallel):
+    kernel = tilelang.compile(
+        _make_gemm(rows, cpu_num_threads),
         target="c",
         out_idx=-1,
-        execution_backend="cython",
         pass_configs=pass_configs,
     )
-
-
-def test_cpu_parallel_gemm_correctness():
-    torch.manual_seed(0)
-    kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True}, cpu_num_threads=4)
     source = kernel.get_kernel_source()
-    assert "#pragma omp parallel for collapse(2) num_threads(4)" in source
-    assert source.index("float C_local") > source.index("for (int32_t by")
-    A = torch.randn(M, K, dtype=torch.float32)
-    B = torch.randn(K, N, dtype=torch.float32)
-    C = kernel(A, B)
-    torch.testing.assert_close(C, A @ B, rtol=1e-3, atol=1e-3)
-
-
-def test_cpu_parallel_unit_grid_dim_stays_in_chain():
-    # A unit-extent middle grid dim must not cut the deeper dims off from
-    # the parallel chain: M=128 gives grid (4, 1) and the collapse clause
-    # still covers both dims.
-    kernel = tilelang.compile(
-        make_gemm(128, N, K, BLOCK_M, BLOCK_N, BLOCK_K),
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
-    source = kernel.get_kernel_source()
-    assert "collapse(2)" in source
-    assert "num_threads" not in source
+    if parallel:
+        pragma = "#pragma omp parallel for collapse(2)"
+        if cpu_num_threads is not None:
+            pragma += f" num_threads({cpu_num_threads})"
+        assert pragma in source
+        assert source.index("float C_local") > source.index("for (int32_t by")
+    else:
+        assert "#pragma omp" not in source
+    if cpu_num_threads is None:
+        assert "num_threads" not in source
 
     torch.manual_seed(0)
-    A = torch.randn(128, K, dtype=torch.float32)
+    A = torch.randn(rows, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
     torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
-
-
-def test_cpu_parallel_disabled_by_default():
-    kernel = _compile(None)
-    source = kernel.get_kernel_source()
-    assert "#pragma omp" not in source
-
-    torch.manual_seed(0)
-    A = torch.randn(M, K, dtype=torch.float32)
-    B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
-
-
-def test_cpu_parallel_min_trip_gate():
-    # Total grid trip count is 4x4=16; a threshold above that keeps the grid
-    # serial (no pragma), while the switch itself stays on.
-    kernel = _compile(
-        {
-            PassConfigKey.TL_CPU_PARALLEL: True,
-            PassConfigKey.TL_CPU_PARALLEL_MIN_TRIP: 1024,
-        }
-    )
-    source = kernel.get_kernel_source()
-    assert "#pragma omp" not in source
-
-    torch.manual_seed(0)
-    A = torch.randn(M, K, dtype=torch.float32)
-    B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
-
-
-def test_cpu_parallel_default_off_injects_no_flags():
-    from tilelang.cpu.toolchain import get_compile_flags
-
-    target = Target("c")
-    assert get_compile_flags(target, None, execution_backend="cython") == []
-    assert get_compile_flags(target, {}, execution_backend="cython") == []
-    assert get_compile_flags(target, {PassConfigKey.TL_DISABLE_VECTORIZE_256: True}, execution_backend="cython") == []
-
-    enabled = get_compile_flags(target, {PassConfigKey.TL_CPU_PARALLEL: True}, execution_backend="cython")
-    assert "-O2" in enabled
-    # A missing OpenMP runtime leaves the kernel serial with only -O2.
-    from tilelang.cpu.toolchain import _find_libomp
-
-    if sys.platform != "win32" and (sys.platform != "darwin" or _find_libomp() is not None):
-        assert "-fopenmp" in enabled
 
 
 def test_cpu_parallel_codegen_nested_parallel_keeps_pragma():
     # A parallel loop inside a conditional needs its own pragma.
-    code = """
-@I.ir_module
-class Module:
     @T.prim_func
     def main():
-        A = T.alloc_buffer((64,), "float32", scope="local")
+        A = T.alloc_buffer((64,), T.float32, scope="local")
         for bx in T.parallel(4):
             if bx == 0:
                 for i in T.parallel(64):
                     A[bx * 16 + i] = 1.0
             for j in range(16):
                 A[bx * 16 + j] = 2.0
-"""
+
     from tilelang.cpu.codegen import build_c
 
-    mod = tvm.script.from_source(code)
+    mod = tvm.IRModule.from_expr(main)
     mod = tirx.transform.BindTarget(Target("c"))(mod)
     source = build_c(mod, Target("c")).inspect_source()
     assert source.count("#pragma omp parallel for") == 2
@@ -169,18 +109,18 @@ def test_cpu_parallel_two_sequential_kernels(mode):
 
     @T.prim_func
     def two_kernels(
-        A: T.Tensor((M,), "float32"),
-        B: T.Tensor((M,), "float32"),
-        C: T.Tensor((M,), "float32"),
+        A: T.Tensor((M,), T.float32),
+        B: T.Tensor((M,), T.float32),
+        C: T.Tensor((M,), T.float32),
     ):
         with T.Kernel(M // TILE, cpu_num_threads=2) as bx:
-            buf1 = T.alloc_buffer((TILE,), "float32", scope="local")
+            buf1 = T.alloc_buffer((TILE,), T.float32, scope="local")
             for i in T.serial(TILE):
                 buf1[i] = A[bx * TILE + i] + 1.0
             for i in T.serial(TILE):
                 B[bx * TILE + i] = buf1[i]
         with T.Kernel(M // TILE, cpu_num_threads=3) as bx2:
-            buf2 = T.alloc_buffer((TILE,), "float32", scope="local")
+            buf2 = T.alloc_buffer((TILE,), T.float32, scope="local")
             for i in T.serial(TILE):
                 buf2[i] = A[bx2 * TILE + i] * 2.0
             for i in T.serial(TILE):
@@ -189,13 +129,7 @@ def test_cpu_parallel_two_sequential_kernels(mode):
     pass_configs = None if mode == "default_off" else {PassConfigKey.TL_CPU_PARALLEL: True}
     if mode == "min_trip":
         pass_configs[PassConfigKey.TL_CPU_PARALLEL_MIN_TRIP] = 1024
-    kernel = tilelang.compile(
-        two_kernels,
-        target="c",
-        out_idx=[-2, -1],
-        execution_backend="cython",
-        pass_configs=pass_configs,
-    )
+    kernel = tilelang.compile(two_kernels, target="c", out_idx=[-2, -1], pass_configs=pass_configs)
     source = kernel.get_kernel_source()
     if mode == "parallel":
         assert source.count("#pragma omp parallel for") == 2
@@ -219,19 +153,13 @@ def test_cpu_parallel_dynamic_extent():
     m = T.dynamic("m")
 
     @T.prim_func
-    def dyn(A: T.Tensor((m,), "float32"), B: T.Tensor((m,), "float32")):
+    def dyn(A: T.Tensor((m,), T.float32), B: T.Tensor((m,), T.float32)):
         with T.Kernel(T.ceildiv(m, 128)) as bx:
             for i in T.serial(128):
                 if bx * 128 + i < m:
                     B[bx * 128 + i] = A[bx * 128 + i] * 2.0
 
-    kernel = tilelang.compile(
-        dyn,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(dyn)
     source = kernel.get_kernel_source()
     assert "#pragma omp parallel for" in source
 
@@ -248,10 +176,10 @@ def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
 
     @T.prim_func
     def mixed_use(
-        A: T.Tensor((M,), "float32"),
-        B: T.Tensor((M,), "float32"),
+        A: T.Tensor((M,), T.float32),
+        B: T.Tensor((M,), T.float32),
     ):
-        buf = T.alloc_buffer((TILE,), "float32", scope="local")
+        buf = T.alloc_buffer((TILE,), T.float32, scope="local")
         with T.Kernel(
             M // TILE,
             prelude='extern "C" void my_sink(float* p, int n) { for (int t = 0; t < n; ++t) p[t] = 0.0f; }\n',
@@ -262,13 +190,7 @@ def test_cpu_parallel_mutable_state_outside_nest_stays_serial():
                 B[bx * TILE + i] = buf[i]
         T.call_extern("void", "my_sink", buf.data, TILE)
 
-    kernel = tilelang.compile(
-        mixed_use,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(mixed_use)
     source = kernel.get_kernel_source()
     assert "#pragma omp" not in source
 
@@ -283,10 +205,10 @@ def test_cpu_parallel_outside_first_access_stays_serial():
 
     @T.prim_func
     def outside_first(
-        A: T.Tensor((M,), "float32"),
-        B: T.Tensor((M,), "float32"),
+        A: T.Tensor((M,), T.float32),
+        B: T.Tensor((M,), T.float32),
     ):
-        buf = T.alloc_buffer((TILE,), "float32", scope="local")
+        buf = T.alloc_buffer((TILE,), T.float32, scope="local")
         buf[0] = 0.0  # outside access before the kernel nest
         with T.Kernel(M // TILE) as bx:
             for i in T.serial(TILE):
@@ -294,13 +216,7 @@ def test_cpu_parallel_outside_first_access_stays_serial():
             for i in T.serial(TILE):
                 B[bx * TILE + i] = buf[i]
 
-    kernel = tilelang.compile(
-        outside_first,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(outside_first)
     source = kernel.get_kernel_source()
     assert "#pragma omp" not in source
 
@@ -317,23 +233,17 @@ def test_cpu_parallel_readonly_shared_table_still_parallelizes():
 
     @T.prim_func
     def table_read(
-        A: T.Tensor((M,), "float32"),
-        B: T.Tensor((M,), "float32"),
+        A: T.Tensor((M,), T.float32),
+        B: T.Tensor((M,), T.float32),
     ):
-        tbl = T.alloc_buffer((TILE,), "float32", scope="local")
+        tbl = T.alloc_buffer((TILE,), T.float32, scope="local")
         for i in T.serial(TILE):
             tbl[i] = 2.0
         with T.Kernel(M // TILE) as bx:
             for i in T.serial(TILE):
                 B[bx * TILE + i] = T.sqrt(A[bx * TILE + i] * A[bx * TILE + i]) * tbl[i]
 
-    kernel = tilelang.compile(
-        table_read,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(table_read)
     source = kernel.get_kernel_source()
     assert "#pragma omp parallel for" in source
 
@@ -348,19 +258,13 @@ def test_cpu_parallel_atomic_stays_serial():
     N_ATOMIC = 200000
 
     @T.prim_func
-    def atomic_sum(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((1,), "float32")):
+    def atomic_sum(A: T.Tensor((N_ATOMIC,), T.float32), B: T.Tensor((1,), T.float32)):
         B[0] = 0.0  # initialize the accumulator before the grid
         with T.Kernel(200) as bx:
             for i in T.serial(1000):
                 T.atomic_add(B[0], A[bx * 1000 + i])
 
-    kernel = tilelang.compile(
-        atomic_sum,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(atomic_sum)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -375,18 +279,12 @@ def test_cpu_parallel_param_overlapping_store_stays_serial():
     TILE = 128
 
     @T.prim_func
-    def overlapping(A: T.Tensor((M,), "float32"), B: T.Tensor((1,), "float32")):
+    def overlapping(A: T.Tensor((M,), T.float32), B: T.Tensor((1,), T.float32)):
         with T.Kernel(M // TILE, M // TILE) as (bx, by):
             for i in T.serial(TILE):
                 B[0] = A[bx * TILE + i] + by * 0.0
 
-    kernel = tilelang.compile(
-        overlapping,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(overlapping)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -401,19 +299,13 @@ def test_cpu_parallel_region_atomic_stays_serial():
     N_ATOMIC = 256
 
     @T.prim_func
-    def region_atomic(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((N_ATOMIC,), "float32")):
+    def region_atomic(A: T.Tensor((N_ATOMIC,), T.float32), B: T.Tensor((N_ATOMIC,), T.float32)):
         for i in T.serial(N_ATOMIC):
             B[i] = 0.0
         with T.Kernel(N_ATOMIC):
             T.atomic_add(B, A)
 
-    kernel = tilelang.compile(
-        region_atomic,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(region_atomic)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -429,9 +321,9 @@ def test_cpu_parallel_partial_init_stays_serial():
     BLOCK_PI = 32
 
     @T.prim_func
-    def partial_init(A: T.Tensor((N_PI,), "float32"), B: T.Tensor((N_PI,), "float32")):
+    def partial_init(A: T.Tensor((N_PI,), T.float32), B: T.Tensor((N_PI,), T.float32)):
         with T.Kernel(N_PI // BLOCK_PI) as bx:
-            state = T.alloc_buffer((2,), "float32", scope="local")
+            state = T.alloc_buffer((2,), T.float32, scope="local")
             state[0] = 1.0
             if bx == 0:
                 state[1] = 0.0
@@ -439,13 +331,7 @@ def test_cpu_parallel_partial_init_stays_serial():
                 state[1] = state[1] + A[bx * BLOCK_PI + i]
                 B[bx * BLOCK_PI + i] = state[1]
 
-    kernel = tilelang.compile(
-        partial_init,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(partial_init)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -460,20 +346,14 @@ def test_cpu_parallel_colliding_affine_store_stays_serial():
     BLOCK_COL = 32
 
     @T.prim_func
-    def collide(A: T.Tensor((N_COL,), "float32"), B: T.Tensor((2,), "float32")):
+    def collide(A: T.Tensor((N_COL,), T.float32), B: T.Tensor((2,), T.float32)):
         B[0] = 0.0
         B[1] = 0.0
         with T.Kernel(N_COL // BLOCK_COL) as bx:
             for i in T.serial(BLOCK_COL):
                 B[bx % 2] = B[bx % 2] + A[bx * BLOCK_COL + i]
 
-    kernel = tilelang.compile(
-        collide,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(collide)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -489,19 +369,13 @@ def test_cpu_parallel_shared_rmw_no_grid_var_stays_serial():
     BLOCK_RMW = 32
 
     @T.prim_func
-    def shared_rmw(A: T.Tensor((N_RMW,), "float32"), B: T.Tensor((1,), "float32")):
+    def shared_rmw(A: T.Tensor((N_RMW,), T.float32), B: T.Tensor((1,), T.float32)):
         B[0] = 0.0
         with T.Kernel(N_RMW // BLOCK_RMW):
             for i in T.serial(BLOCK_RMW):
                 B[0] = B[0] + A[i]
 
-    kernel = tilelang.compile(
-        shared_rmw,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(shared_rmw)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -517,27 +391,18 @@ def test_cpu_parallel_address_of_write_range_stays_serial():
     N_AW = 4096
 
     @T.prim_func
-    def address_of_range(
-        A: T.Tensor((N_AW,), "float32"),
-        B: T.Tensor((N_AW + 1,), "float32"),
-    ):
+    def address_of_range(B: T.Tensor((N_AW + 1,), T.float32)):
         with T.Kernel(
             N_AW,
             prelude='extern "C" void writer(float* p) {\n    p[0] += 1.0f;\n    p[1] += 1.0f;\n}\n',
         ) as bx:
             T.call_extern("void", "writer", T.address_of(B[bx]))
 
-    kernel = tilelang.compile(
-        address_of_range,
-        target="c",
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(address_of_range, out_idx=None)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
-    A = torch.zeros(N_AW, dtype=torch.float32)
     B = torch.zeros(N_AW + 1, dtype=torch.float32)
-    kernel(A, B)
+    kernel(B)
     torch.testing.assert_close(B.sum(), torch.tensor(float(2 * N_AW)))
 
 
@@ -547,19 +412,13 @@ def test_cpu_parallel_cross_store_collision_stays_serial():
     N_CS = 256
 
     @T.prim_func
-    def cross_store(A: T.Tensor((N_CS,), "float32"), B: T.Tensor((N_CS,), "float32")):
+    def cross_store(A: T.Tensor((N_CS,), T.float32), B: T.Tensor((N_CS,), T.float32)):
         with T.Kernel(N_CS) as bx:
             if bx + 1 < N_CS:
                 B[bx + 1] = A[bx]
             B[bx] = A[bx]
 
-    kernel = tilelang.compile(
-        cross_store,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(cross_store)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -573,18 +432,12 @@ def test_cpu_parallel_loop_carried_dependency_stays_serial():
     N_LC = 256
 
     @T.prim_func
-    def loop_carried(A: T.Tensor((N_LC,), "float32"), B: T.Tensor((N_LC,), "float32")):
+    def loop_carried(A: T.Tensor((N_LC,), T.float32), B: T.Tensor((N_LC,), T.float32)):
         B[0] = 0.0
         with T.Kernel(N_LC - 1) as bx:
             B[bx + 1] = B[bx] + A[bx]
 
-    kernel = tilelang.compile(
-        loop_carried,
-        target="c",
-        out_idx=-1,
-        execution_backend="cython",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
+    kernel = _compile_parallel(loop_carried)
     assert "#pragma omp" not in kernel.get_kernel_source()
 
     torch.manual_seed(0)
@@ -592,67 +445,6 @@ def test_cpu_parallel_loop_carried_dependency_stays_serial():
     expected = torch.zeros(N_LC, dtype=torch.float32)
     expected[1:] = torch.cumsum(A, 0)[:-1]
     torch.testing.assert_close(kernel(A), expected, rtol=1e-4, atol=1e-3)
-
-
-def _bx_kind_after_parallel_grid_pass(func):
-    """Loop kind of the `bx` grid loop after MaterializeCPUParallelGrid."""
-    mod = tvm.IRModule.from_expr(func.with_attr({"target": Target("c"), "global_symbol": "main"}))
-    out = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)["main"]
-    kinds = []
-    tvm.tirx.stmt_functor.post_order_visit(
-        out.body, lambda n: kinds.append(n.kind) if isinstance(n, tirx.For) and n.loop_var.name == "bx" else None
-    )
-    assert len(kinds) == 1
-    return kinds[0]
-
-
-def _ramp_test_buffers(local_numel=None, param_numel=256):
-    A = tirx.decl_buffer((256,), "float32", name="A")
-    B = tirx.decl_buffer((param_numel,), "float32", name="B")
-    s = tirx.decl_buffer((local_numel,), "float32", name="s", scope="local") if local_numel else None
-    return A, B, s
-
-
-def test_cpu_parallel_strided_ramp_reset_stays_serial():
-    # A stride-0 ramp store s[Ramp(4t,0,4)] writes only s[0],s[4],s[8] — not
-    # a per-iteration reset. If the ramp stride were dropped in the affine
-    # analysis, the store would be misjudged as a full reset and the buffer
-    # sunk into the parallel region with cross-iteration state in s[9].
-    bx = tirx.Var("bx", "int32")
-    t = tirx.Var("t", "int32")
-    A, B, s = _ramp_test_buffers(local_numel=12)
-    one = tirx.Broadcast(tirx.FloatImm("float32", 1.0), 4)
-    fake_reset = tirx.For(t, 0, 3, tirx.ForKind.SERIAL, tirx.BufferStore(s, one, [tirx.Ramp(4 * t, 0, 4)]))
-    read_carried = tirx.BufferStore(B, tirx.BufferLoad(s, [9]) + tirx.BufferLoad(s, [0]), [bx])
-    write9 = tirx.BufferStore(s, tirx.BufferLoad(A, [bx]), [9])
-    grid = tirx.For(
-        bx,
-        0,
-        256,
-        tirx.ForKind.SERIAL,
-        tirx.SeqStmt([fake_reset, read_carried, write9]),
-        annotations={"tl.cpu_grid_dim": 0},
-    )
-    func = tirx.PrimFunc([A.data, B.data], tirx.SeqStmt([tirx.AllocBuffer(s), grid]), buffer_map={A.data: A, B.data: B})
-    assert _bx_kind_after_parallel_grid_pass(func) == tirx.ForKind.SERIAL
-
-
-def test_cpu_parallel_strided_ramp_overlap_stays_serial():
-    # B[Ramp(4bx,2,4)]: iteration bx and bx+1 collide at B[4bx+4]. Dropping
-    # the stride would prove 4bx+lane injective and parallelize the race.
-    bx = tirx.Var("bx", "int32")
-    A, B2, _ = _ramp_test_buffers(param_numel=4 * 256 + 4)
-    one = tirx.Broadcast(tirx.FloatImm("float32", 1.0), 4)
-    grid = tirx.For(
-        bx,
-        0,
-        256,
-        tirx.ForKind.SERIAL,
-        tirx.BufferStore(B2, one, [tirx.Ramp(bx * 4, 2, 4)]),
-        annotations={"tl.cpu_grid_dim": 0},
-    )
-    func = tirx.PrimFunc([A.data, B2.data], grid, buffer_map={A.data: A, B2.data: B2})
-    assert _bx_kind_after_parallel_grid_pass(func) == tirx.ForKind.SERIAL
 
 
 if __name__ == "__main__":

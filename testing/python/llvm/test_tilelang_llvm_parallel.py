@@ -1,10 +1,10 @@
+import pytest
 import torch
 
 import tilelang
-import tilelang.language as T
+import tilelang.cpu.language as T
 import tilelang.testing
-import tvm
-from tilelang.transform import PassConfigKey
+from tilelang import tvm
 from tvm import tirx
 
 M = N = K = 256
@@ -14,14 +14,14 @@ BLOCK_K = 32
 
 @T.prim_func
 def gemm(
-    A: T.Tensor((M, K), dtype="float32"),
-    B: T.Tensor((K, N), dtype="float32"),
-    C: T.Tensor((M, N), dtype="float32"),
+    A: T.Tensor((M, K), dtype=T.float32),
+    B: T.Tensor((K, N), dtype=T.float32),
+    C: T.Tensor((M, N), dtype=T.float32),
 ):
-    with T.Kernel(T.ceildiv(N, BLOCK_N), T.ceildiv(M, BLOCK_M), threads=1) as (bx, by):
-        A_shared = T.alloc_buffer((BLOCK_M, BLOCK_K), dtype="float32", scope="shared")
-        B_shared = T.alloc_buffer((BLOCK_K, BLOCK_N), dtype="float32", scope="shared")
-        C_local = T.alloc_buffer((BLOCK_M, BLOCK_N), dtype="float32", scope="local")
+    with T.Kernel(T.ceildiv(N, BLOCK_N), T.ceildiv(M, BLOCK_M)) as (bx, by):
+        A_shared = T.alloc_buffer((BLOCK_M, BLOCK_K), dtype=T.float32, scope="shared")
+        B_shared = T.alloc_buffer((BLOCK_K, BLOCK_N), dtype=T.float32, scope="shared")
+        C_local = T.alloc_buffer((BLOCK_M, BLOCK_N), dtype=T.float32, scope="local")
         T.clear(C_local)
         for ko in T.Pipelined(K // BLOCK_K, num_stages=1):
             T.copy(A[by * BLOCK_M, ko * BLOCK_K], A_shared)
@@ -30,52 +30,25 @@ def gemm(
         T.copy(C_local, C[by * BLOCK_M, bx * BLOCK_N])
 
 
-def _compile(pass_configs):
-    return tilelang.compile(
-        gemm,
-        target="llvm",
-        out_idx=-1,
-        execution_backend="tvm_ffi",
-        pass_configs=pass_configs,
-    )
-
-
-def _count_parallel_loops(mod):
-    count = 0
-
-    def visit(node):
-        nonlocal count
-        if isinstance(node, tirx.For) and node.kind == tirx.ForKind.PARALLEL:
-            count += 1
-
-    for _, f in mod.functions.items():
-        tirx.stmt_functor.post_order_visit(f.body, visit)
-    return count
-
-
-def _lowered_parallel_loop_count(pass_config, func=gemm):
-    """kParallel loops in the lowered module (host + device) — proof the
-    grid nest was actually parallelized, not just numerically correct."""
-    with tvm.target.Target("llvm"), tvm.transform.PassContext(config=pass_config):
-        artifact = tilelang.lower(func, target="llvm")
-    return _count_parallel_loops(artifact.host_mod) + _count_parallel_loops(artifact.device_mod)
+def _parallel_loop_count(func, pass_configs):
+    with tvm.target.Target("llvm"), tvm.transform.PassContext(config=pass_configs):
+        lowered = tilelang.lower(func, target="llvm")
+    loops = []
+    for mod in (lowered.host_mod, lowered.device_mod):
+        for func in mod.functions.values():
+            tirx.stmt_functor.post_order_visit(
+                func.body, lambda node: loops.append(node) if isinstance(node, tirx.For) and node.kind == tirx.ForKind.PARALLEL else None
+            )
+    return len(loops)
 
 
 @tilelang.testing.requires_llvm
-def test_llvm_cpu_parallel_gemm_correctness():
+@pytest.mark.parametrize("parallel", [False, True])
+def test_llvm_cpu_parallel_gemm_correctness(parallel):
+    pass_configs = {"tl.cpu_parallel": True} if parallel else {}
+    assert (_parallel_loop_count(gemm, pass_configs) > 0) == parallel
+    kernel = tilelang.compile(gemm, target="llvm", out_idx=-1, pass_configs=pass_configs)
     torch.manual_seed(0)
-    assert _lowered_parallel_loop_count({"tl.cpu_parallel": True}) >= 1
-    kernel = _compile({PassConfigKey.TL_CPU_PARALLEL: True})
-    A = torch.randn(M, K, dtype=torch.float32)
-    B = torch.randn(K, N, dtype=torch.float32)
-    torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
-
-
-@tilelang.testing.requires_llvm
-def test_llvm_cpu_parallel_disabled_by_default():
-    torch.manual_seed(0)
-    assert _lowered_parallel_loop_count({}) == 0
-    kernel = _compile(None)
     A = torch.randn(M, K, dtype=torch.float32)
     B = torch.randn(K, N, dtype=torch.float32)
     torch.testing.assert_close(kernel(A, B), A @ B, rtol=1e-3, atol=1e-3)
@@ -88,22 +61,16 @@ def test_llvm_cpu_parallel_region_atomic_stays_serial():
     N_ATOMIC = 256
 
     @T.prim_func
-    def region_atomic(A: T.Tensor((N_ATOMIC,), "float32"), B: T.Tensor((N_ATOMIC,), "float32")):
+    def region_atomic(A: T.Tensor((N_ATOMIC,), T.float32), B: T.Tensor((N_ATOMIC,), T.float32)):
         for i in T.serial(N_ATOMIC):
             B[i] = 0.0
-        with T.Kernel(N_ATOMIC, threads=1):
+        with T.Kernel(N_ATOMIC):
             T.atomic_add(B, A)
 
-    assert _lowered_parallel_loop_count({"tl.cpu_parallel": True}, region_atomic) == 0
-
+    pass_configs = {"tl.cpu_parallel": True}
+    assert _parallel_loop_count(region_atomic, pass_configs) == 0
+    kernel = tilelang.compile(region_atomic, target="llvm", out_idx=-1, pass_configs=pass_configs)
     torch.manual_seed(0)
-    kernel = tilelang.compile(
-        region_atomic,
-        target="llvm",
-        out_idx=-1,
-        execution_backend="tvm_ffi",
-        pass_configs={PassConfigKey.TL_CPU_PARALLEL: True},
-    )
     A = torch.randn(N_ATOMIC, dtype=torch.float32)
     torch.testing.assert_close(kernel(A), N_ATOMIC * A, rtol=1e-4, atol=1e-3)
 

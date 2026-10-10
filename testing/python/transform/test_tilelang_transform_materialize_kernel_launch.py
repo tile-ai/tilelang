@@ -60,7 +60,7 @@ def _materialize(func, target: str, **kwargs):
 
 def _parallel_kernel(threads=None):
     @T.prim_func
-    def main(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32")):
+    def main(A: T.Tensor((256,), T.float32), B: T.Tensor((256,), T.float32)):
         with T.Kernel(2, threads=threads) as bx:
             for i in T.Parallel(128):
                 B[bx * 128 + i] = A[bx * 128 + i] + 1.0
@@ -70,7 +70,7 @@ def _parallel_kernel(threads=None):
 
 def _thread_indexed_kernel():
     @T.prim_func
-    def main(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32")):
+    def main(A: T.Tensor((256,), T.float32), B: T.Tensor((256,), T.float32)):
         with T.Kernel(2, threads=128) as bx:
             tx = T.get_thread_binding()
             B[bx * 128 + tx] = A[bx * 128 + tx] + 1.0
@@ -116,7 +116,7 @@ def test_materialize_launch_new_options_are_keyword_only(parameter_name):
 
 def test_materialize_launch_preserves_existing_grid_annotations():
     @T.prim_func
-    def main(A: T.Tensor((2,), "int32")):
+    def main(A: T.Tensor((2,), T.int32)):
         for bx in T.thread_binding(2, thread="blockIdx.x", annotations={"backend.grid_axis": 7, "backend.parallel_grid": True}):
             A[bx] = 1
 
@@ -157,7 +157,7 @@ def test_traced_launch_records_requested_threads_as_annotation():
 
 def test_kernel_launch_annotations_are_recorded_on_the_root_block():
     @T.prim_func
-    def main(A: T.Tensor((16,), "int32")):
+    def main(A: T.Tensor((16,), T.int32)):
         with T.Kernel(1, threads=64, prelude="// hi", cluster_dims=2):
             A[0] = 0
 
@@ -173,14 +173,14 @@ def test_kernel_rejects_unknown_launch_annotation():
     with pytest.raises(TypeError, match="unexpected keyword argument 'thread'"):
 
         @T.prim_func
-        def typo(A: T.Tensor((16,), "int32")):
+        def typo(A: T.Tensor((16,), T.int32)):
             with T.Kernel(1, thread=128):
                 A[0] = 0
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'core_type'"):
 
         @T.prim_func
-        def foreign(A: T.Tensor((16,), "int32")):
+        def foreign(A: T.Tensor((16,), T.int32)):
             with T.Kernel(1, core_type="aiv"):
                 A[0] = 0
 
@@ -214,12 +214,12 @@ def test_cpu_dialect_kernel_has_no_threads():
     with pytest.raises(TypeError, match="unexpected keyword argument 'threads'"):
 
         @Tcpu.prim_func
-        def main(A: Tcpu.Tensor((16,), "int32")):
+        def main(A: Tcpu.Tensor((16,), Tcpu.int32)):
             with Tcpu.Kernel(1, threads=128):
                 A[0] = 0
 
     @Tcpu.prim_func
-    def ok(A: Tcpu.Tensor((16,), "int32")):
+    def ok(A: Tcpu.Tensor((16,), Tcpu.int32)):
         with Tcpu.Kernel(1, prelude="// cpu"):
             A[0] = 0
 
@@ -276,14 +276,14 @@ def test_get_thread_extent_requires_threads_at_trace_time():
     with pytest.raises(ValueError, match="not known at trace time"):
 
         @T.prim_func
-        def main(A: T.Tensor((16,), "int32")):
+        def main(A: T.Tensor((16,), T.int32)):
             with T.Kernel(1):
                 A[0] = T.get_thread_extent()
 
 
 def test_get_thread_extent_with_threads_at_trace_time():
     @T.prim_func
-    def main(A: T.Tensor((16,), "int32")):
+    def main(A: T.Tensor((16,), T.int32)):
         with T.Kernel(1, threads=(32, 4)):
             A[0] = T.get_thread_extent(0) * T.get_thread_extent(1)
 
@@ -301,7 +301,7 @@ def test_failed_trace_unwinds_launch_frames():
     with pytest.raises(_TraceFailure):
 
         @T.prim_func
-        def failing(A: T.Tensor((16,), "int32")):
+        def failing(A: T.Tensor((16,), T.int32)):
             with T.Kernel(1, threads=128):
                 raise _TraceFailure()
 
@@ -322,7 +322,7 @@ def test_failed_trace_unwinds_launch_frames():
 
 def _cluster_kernel():
     @T.prim_func
-    def main(A: T.Tensor((16,), "int32")):
+    def main(A: T.Tensor((16,), T.int32)):
         with T.ClusterKernel(8, 4, threads=128, cluster_dims=2) as (bx, by):
             A[0] = 0
 
@@ -340,7 +340,7 @@ def test_cluster_id_is_program_space_arithmetic():
     captured = {}
 
     @T.prim_func
-    def main(A: T.Tensor((16,), "int32")):
+    def main(A: T.Tensor((16,), T.int32)):
         with T.ClusterKernel(8, 4, threads=128, cluster_dims=2) as (bx, by):
             captured["bx"], captured["by"] = bx, by
             captured["ids"] = T.get_cluster_ids()
@@ -364,7 +364,7 @@ def test_cluster_id_without_clusters_is_the_program_index():
     captured = {}
 
     @T.prim_func
-    def main(A: T.Tensor((16,), "int32")):
+    def main(A: T.Tensor((16,), T.int32)):
         with T.Kernel(8) as bx:
             captured["bx"] = bx
             captured["id"] = T.get_cluster_id()

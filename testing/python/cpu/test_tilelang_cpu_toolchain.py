@@ -1,5 +1,7 @@
 """CPU compile-flag policy consumed by the shared execution adapters."""
 
+import sys
+
 import pytest
 
 from tilelang.cpu import toolchain
@@ -8,12 +10,28 @@ from tilelang import tvm
 
 @pytest.mark.parametrize("backend", ["cython", "tvm_ffi"])
 @pytest.mark.parametrize(
-    "target,enabled,expected", [("c", False, []), ("c", True, ["-O2", "-fopenmp"]), ("llvm", True, []), ("cuda", True, [])]
+    "target,pass_configs,expected",
+    [
+        ("c", None, []),
+        ("c", {}, []),
+        ("c", {"tl.disable_vectorize_256": True}, []),
+        ("c", {"tl.cpu_parallel": False}, []),
+        ("c", {"tl.cpu_parallel": True}, ["-O2", "-fopenmp"]),
+        ("llvm", {"tl.cpu_parallel": True}, []),
+        ("cuda", {"tl.cpu_parallel": True}, []),
+    ],
 )
-def test_cpu_compile_flag_policy(monkeypatch, backend, target, enabled, expected):
+def test_cpu_compile_flag_policy(monkeypatch, backend, target, pass_configs, expected):
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target == "cuda" else target)
     monkeypatch.setattr(toolchain.sys, "platform", "linux")
-    assert toolchain.get_compile_flags(target, {"tl.cpu_parallel": enabled}, execution_backend=backend) == expected
+    assert toolchain.get_compile_flags(target, pass_configs, execution_backend=backend) == expected
+
+
+def test_cpu_openmp_runtime_flags():
+    flags = toolchain.get_compile_flags(tvm.target.Target("c"), {"tl.cpu_parallel": True}, execution_backend="cython")
+    assert "-O2" in flags
+    if sys.platform != "win32" and (sys.platform != "darwin" or toolchain._find_libomp() is not None):
+        assert "-fopenmp" in flags
 
 
 @pytest.mark.parametrize("backend,expected", [("cython", ["-O2"]), ("tvm_ffi", [])])

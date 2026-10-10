@@ -19,7 +19,7 @@ def test_cpu_num_threads_validation(count):
     with pytest.raises(ValueError, match="cpu_num_threads must be a positive integer"):
 
         @T.prim_func
-        def main(A: T.Tensor((2,), "int32")):
+        def main(A: T.Tensor((2,), T.int32)):
             with T.Kernel(2, cpu_num_threads=count) as bx:
                 A[bx] = 1
 
@@ -27,7 +27,7 @@ def test_cpu_num_threads_validation(count):
 @pytest.mark.parametrize("parallel", [False, True])
 def test_cpu_launch_thread_count_is_per_kernel(parallel):
     @T.prim_func
-    def main(A: T.Tensor((8,), "int32")):
+    def main(A: T.Tensor((8,), T.int32)):
         with T.Kernel(2, 2, cpu_num_threads=3) as (bx, by):
             A[bx * 2 + by] = 1
         with T.Kernel(2, 2, cpu_num_threads=5) as (bx, by):
@@ -64,7 +64,7 @@ def test_cpu_launch_thread_count_is_per_kernel(parallel):
 
 def test_cpu_launch_marks_only_grid_loops():
     @T.prim_func
-    def main(A: T.Tensor((48,), "int32")):
+    def main(A: T.Tensor((48,), T.int32)):
         with T.Kernel(2, 3, 4) as (bx, by, bz):
             for i in T.serial(2):
                 A[((bx * 3 + by) * 4 + bz) * 2 + i] = 1
@@ -83,7 +83,7 @@ def test_cpu_launch_marks_only_grid_loops():
 
 def test_cpu_launch_without_thread_count_is_unchanged():
     @T.prim_func
-    def main(A: T.Tensor((2,), "int32")):
+    def main(A: T.Tensor((2,), T.int32)):
         with T.Kernel(2) as bx:
             A[bx] = 1
 
