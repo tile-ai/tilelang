@@ -147,21 +147,21 @@ def _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, gemm
     return kernel
 
 
-@tilelang.jit(execution_backend="tvm_ffi", compile_flags=COMPILE_FLAGS)
+@tilelang.jit(compile_flags=COMPILE_FLAGS)
 def build_bf16_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config, with_alpha=False):
     return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, GemmType.Normal, with_alpha)
 
 
-@tilelang.jit(execution_backend="tvm_ffi", compile_flags=COMPILE_FLAGS)
+@tilelang.jit(compile_flags=COMPILE_FLAGS)
 def build_bf16_batched_gemm(m, n, k, major_a, major_b, out_dtype, accumulate, config):
     return _build_kernel(m, n, k, major_a, major_b, out_dtype, accumulate, config, GemmType.Batched)
 
 
-@tilelang.jit(execution_backend="tvm_ffi", compile_flags=COMPILE_FLAGS)
+@tilelang.jit(compile_flags=COMPILE_FLAGS)
 def build_bf16_m_grouped_gemm(total_m, n, k, major_b, out_dtype, config):
     return _build_kernel(total_m, n, k, Major.K, major_b, out_dtype, False, config, GemmType.MGroupedContiguousWithPsumLayout)
 
 
-@tilelang.jit(execution_backend="tvm_ffi", compile_flags=COMPILE_FLAGS)
+@tilelang.jit(compile_flags=COMPILE_FLAGS)
 def build_bf16_k_grouped_gemm(m, n, total_k, out_dtype, config):
     return _build_kernel(m, n, total_k, Major.MN, Major.MN, out_dtype, True, config, GemmType.KGroupedContiguousWithPsumLayout)

@@ -27,7 +27,7 @@ def _transpose_16rows(src, dst, row, cols, stride, mask):
         dst_ptr = S.vsstb(regs[idx], dst_ptr, T.int32(((stride // 16) << 16) | (stride // 2)), mask, update=True)
 
 
-@tilelang.jit(target="ascend")
+@tilelang.jit
 def build_transform_sf(is_float, major, config, gemm_type=GemmType.Normal, alignment=256, gran_mn=1):
     src_block_m, src_block_k = config.src_block_m, config.src_block_k
     dtype = "float32" if is_float else "int16"
