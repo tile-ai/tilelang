@@ -10,6 +10,7 @@
 #include <tvm/target/target.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -224,6 +225,11 @@ private:
   // Compute plan-based loop layout candidate using vectorization and thread
   // bounds.
   Fragment ComputePlanCandidate(const LayoutInferArgs &layout_args) const;
+  // If `root`'s body is a pure global->shared copy, return the minimum
+  // element bit-width (dtype bits times lanes) of the copied dtypes;
+  // otherwise return std::nullopt. Drives the cp.async-oriented partition
+  // coalescing in ComputePlanCandidate.
+  std::optional<int> GlobalToSharedCopyMinElementBits(const For &root) const;
   // Propose the partial layout of a reducer this nest updates, from the
   // solved loop layout: the induced projection when every narrow-plan proof
   // passes, participant-wide replication otherwise.
