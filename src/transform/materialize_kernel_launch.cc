@@ -15,16 +15,33 @@
  * thread placeholders only reserve Var identities the body may reference;
  * what they mean, and how many threads run, is decided here once the Target
  * is bound. Each backend pipeline chooses the mode for itself (no target
- * dispatch happens in this pass):
+ * dispatch happens in this pass).
+ *
+ * "How a launch dimension is lowered" and "whether SIMT threads exist" are
+ * independent axes, so they are two flags rather than one:
+ *  - lower_grid_binding = true: every launch loop becomes an AttrStmt
+ *    thread_extent scope carrying that loop's own thread tag. This is what
+ *    targets with a real block/core-level launch want (CUDA, Ascend, ...).
+ *    false (e.g. CPU): the launch loops become plain serial For loops, since
+ *    such targets have no program-index space at all.
  *  - lower_thread_binding = true (SIMT backends, e.g. CUDA/ROCm/Metal):
- *    grid loops become AttrStmt thread_extent scopes; each thread placeholder
- *    is rebound as a threadIdx.* thread_extent over the same Var, with the
- *    extent taken from the `tl.launch_threads` annotation (T.Kernel
- *    threads=...) or, failing that, from `default_threads`.
- *  - lower_thread_binding = false (backends without SIMT, e.g. CPU):
- *    grid loops become serial For loops; thread placeholders are dropped and
- *    `tl.launch_threads` is ignored. A body that references a thread index
- *    has no meaning on such a target and is rejected.
+ *    each thread placeholder is rebound as a threadIdx.* thread_extent over
+ *    the same Var, with the extent taken from the `tl.launch_threads`
+ *    annotation (T.Kernel threads=...) or, failing that, from
+ *    `default_threads`.
+ *    false (backends without SIMT, e.g. CPU and Ascend): thread placeholders
+ *    are dropped and `tl.launch_threads` is ignored. A body that references a
+ *    thread index has no meaning on such a target and is rejected. Ascend
+ *    pairs this with lower_grid_binding = true: its NPU launch is a real 1-D
+ *    core grid, while thread domains only exist inside T.SimtVF, which emits
+ *    its own thread scopes below the launch nest.
+ *
+ * `launch_dim_tags` names extra thread_binding tags that belong to the launch
+ * nest rather than to the thread domain, so a backend can extend the launch
+ * vocabulary without this pass knowing about it. Ascend's T.MixedKernel uses
+ * it for its `cthread` sub-block-id dimension, which its codegen reads back
+ * off the thread_extent AttrStmt.
+ *
  * Launch annotations listed in `unsupported_annotations` (e.g. `cluster_dims`
  * on a target without thread block clusters) are rejected instead of being
  * silently dropped further down the pipeline.
@@ -45,6 +62,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -113,17 +131,20 @@ Optional<Array<PrimExpr>> GetLaunchThreads(const Stmt &body) {
 
 class KernelLaunchMaterializer : public StmtMutator {
 public:
-  KernelLaunchMaterializer(bool lower_thread_binding,
+  KernelLaunchMaterializer(bool lower_grid_binding, bool lower_thread_binding,
                            Optional<Array<PrimExpr>> default_threads,
                            Array<ffi::String> unsupported_annotations,
+                           Array<ffi::String> launch_dim_tags,
                            ffi::String target_name)
-      : lower_thread_binding_(lower_thread_binding),
+      : lower_grid_binding_(lower_grid_binding),
+        lower_thread_binding_(lower_thread_binding),
         default_threads_(std::move(default_threads)),
         unsupported_annotations_(std::move(unsupported_annotations)),
+        launch_dim_tags_(std::move(launch_dim_tags)),
         target_name_(std::move(target_name)) {}
 
   Stmt VisitStmt_(const ForNode *op) final {
-    if (IsBlockBinding(op)) {
+    if (IsLaunchDimBinding(op)) {
       return ConvertNest(GetRef<Stmt>(op));
     }
     return StmtMutator::VisitStmt_(op);
@@ -138,13 +159,25 @@ public:
   }
 
 private:
+  // A launch dimension: the blockIdx.* grid axes every target shares, plus the
+  // tags this backend declared in `launch_dim_tags` (e.g. Ascend's `cthread`).
+  bool IsLaunchDimBinding(const ForNode *op) const {
+    if (IsBlockBinding(op))
+      return true;
+    if (op->kind != ForKind::kThreadBinding || !op->thread_binding.defined())
+      return false;
+    const std::string tag = op->thread_binding.value()->thread_tag;
+    return std::find(launch_dim_tags_.begin(), launch_dim_tags_.end(), tag) !=
+           launch_dim_tags_.end();
+  }
+
   // Peel the contiguous launch nest rooted at `root` without descending into
   // the kernel body below it, then rebuild it in the backend's form.
   Stmt ConvertNest(const Stmt &root) {
     std::vector<const ForNode *> grid_loops;
     Stmt body = root;
     while (const ForNode *loop = body.as<ForNode>()) {
-      if (!IsBlockBinding(loop))
+      if (!IsLaunchDimBinding(loop))
         break;
       grid_loops.push_back(loop);
       body = loop->body;
@@ -159,7 +192,7 @@ private:
 
     for (auto it = grid_loops.rbegin(); it != grid_loops.rend(); ++it) {
       const ForNode *loop = *it;
-      if (lower_thread_binding_) {
+      if (lower_grid_binding_) {
         ffi::String tag = loop->thread_binding.value()->thread_tag;
         IterVar iter_var(Range::FromMinExtent(loop->min, loop->extent),
                          loop->loop_var, IterVarType::kThreadIndex, tag);
@@ -260,30 +293,36 @@ private:
     return extents;
   }
 
+  bool lower_grid_binding_;
   bool lower_thread_binding_;
   Optional<Array<PrimExpr>> default_threads_;
   Array<ffi::String> unsupported_annotations_;
+  Array<ffi::String> launch_dim_tags_;
   ffi::String target_name_;
 };
 
 } // namespace
 
 tvm::transform::Pass
-MaterializeKernelLaunch(bool lower_thread_binding,
+MaterializeKernelLaunch(bool lower_grid_binding, bool lower_thread_binding,
                         Optional<Array<PrimExpr>> default_threads,
-                        Optional<Array<ffi::String>> unsupported_annotations) {
+                        Optional<Array<ffi::String>> unsupported_annotations,
+                        Optional<Array<ffi::String>> launch_dim_tags) {
   using namespace tirx::transform;
   Array<ffi::String> unsupported =
       unsupported_annotations.value_or(Array<ffi::String>());
-  auto pass_func = [lower_thread_binding, default_threads, unsupported](
-                       PrimFunc func, const IRModule &mod,
-                       const tvm::transform::PassContext &ctx) -> PrimFunc {
+  Array<ffi::String> dim_tags = launch_dim_tags.value_or(Array<ffi::String>());
+  auto pass_func =
+      [lower_grid_binding, lower_thread_binding, default_threads, unsupported,
+       dim_tags](PrimFunc func, const IRModule &mod,
+                 const tvm::transform::PassContext &ctx) -> PrimFunc {
     ffi::String target_name = "<unbound>";
     if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
       target_name = target.value()->kind->name;
     }
-    KernelLaunchMaterializer mutator(lower_thread_binding, default_threads,
-                                     unsupported, target_name);
+    KernelLaunchMaterializer mutator(lower_grid_binding, lower_thread_binding,
+                                     default_threads, unsupported, dim_tags,
+                                     target_name);
     func.CopyOnWrite()->body = mutator(func->body);
     return func;
   };

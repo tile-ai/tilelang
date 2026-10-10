@@ -483,6 +483,12 @@ private:
     // code.
 
     bool can_propagate_errors = [&]() {
+      // Target kinds whose kernel ABI cannot return a status code override
+      // the device-type heuristic through this attribute.
+      if (auto status_return =
+              device_target->GetAttr<Bool>("supports_kernel_status_return")) {
+        return static_cast<bool>(status_return.value());
+      }
       auto kind = device_target->GetTargetDeviceType();
       return kind == kDLCPU || kind == kDLExtDev || kind == kDLHexagon;
     }();

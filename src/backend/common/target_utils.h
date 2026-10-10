@@ -9,6 +9,7 @@
 
 #include <tvm/target/target.h>
 
+#include "ascend/target_utils.h"
 #include "cpu/target_utils.h"
 #include "cuda/target_utils.h"
 #include "metal/target_utils.h"

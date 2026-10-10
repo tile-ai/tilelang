@@ -123,6 +123,7 @@ include = [
     "version_provider.py",
     "requirements*.txt",
     "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "tilelang/jit/adapter/pto/cython_wrapper.pyx",
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
@@ -245,6 +246,7 @@ markers = [
     # decorators (see 3rdparty/tvm/python/tvm/testing/utils.py). TVM registers
     # these via its own conftest, but tilelang only imports the decorators, so
     # they must be registered here to avoid PytestUnknownMarkWarning.
+    "pto: tests for the PTO backend",
     "cpu: Mark a test as running on CPU",
     "gpu: Mark a test as using a GPU",
     "multi_gpu: Mark a test as using multiple GPUs",
@@ -281,13 +283,13 @@ environment.PYTHONDEVMODE = "1"
 environment.PYTHONUNBUFFERED = "1"
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
-# Build a fat wheel that supports both CUDA and ROCm at runtime. ROCm sources
-# compile against the vendored HIP headers under 3rdparty/hip-headers/include
-# and link to libstub_hip (dlopen-based), so no ROCm runtime is required in
-# the cibuildwheel manylinux container. The resulting wheel still requires
-# a real ROCm runtime to be present at execution time on AMD hosts.
+# Build a wheel with CUDA, ROCm, and Ascend support. ROCm uses vendored HIP
+# headers and Ascend uses local ACL declarations; both link to runtime stubs,
+# so the manylinux container only needs the CUDA toolkit. Execution still
+# requires the selected backend's real runtime and device.
 environment.USE_CUDA = "ON"
 environment.USE_ROCM = "ON"
+environment.USE_ASCEND = "ON"
 manylinux-x86_64-image  = "manylinux_2_28"  # AlmaLinux 8
 manylinux-aarch64-image = "manylinux_2_34"  # Z3 requires
 # Install CUDA runtime and stub driver library

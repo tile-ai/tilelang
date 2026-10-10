@@ -454,9 +454,7 @@ def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     per-lane width, not the full element width.  Multiply by ``lanes`` so
     that the total bit count is correct.
     """
-    if len(shape) == 0:
-        return tirx.IntImm("int32", 1)
-    result = shape[0]
+    result = tirx.IntImm("int32", 1) if len(shape) == 0 else shape[0]
     for i in range(1, len(shape)):
         result = result * shape[i]
     dt = DataType(dtype)

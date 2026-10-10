@@ -57,6 +57,7 @@ class SparseTensorCoreIntrinEmitter:
         "bfloat16": "bf16",
         "float32": "fp32",
         "int8": "int8",
+        "uint8": "uint8",
         "int32": "int32",
         "float8_e4m3": "e4m3",
         "float8_e5m2": "e5m2",

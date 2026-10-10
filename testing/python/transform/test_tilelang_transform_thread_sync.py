@@ -1,5 +1,7 @@
 # ruff: noqa
 
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang.testing
 from tvm.script import tirx as T
@@ -448,6 +450,86 @@ def test_loop_carry_with_cross_thread_dependency():
     # Should have sync because thread tx reads from thread (tx+127)%128's location
     # This is a WAR hazard across threads
     assert 'T.tvm_storage_sync("shared")' in s, f"Expected sync for cross-thread dependency:\n{s}"
+
+
+@pytest.mark.parametrize(
+    "start, stop, step, expected_syncs",
+    [
+        pytest.param(0, 2, None, 0, id="default_step"),
+        pytest.param(0, 2, 1, 0, id="unit_step"),
+        pytest.param(0, 6, 2, 1, id="non_unit_step"),
+        pytest.param(3, 9, 2, 1, id="nonzero_start"),
+        pytest.param(3, 8, 2, 1, id="nondivisible_extent"),
+        pytest.param(3, 5, 2, 0, id="single_iteration"),
+        pytest.param(3, 4, 2, 0, id="extent_smaller_than_step"),
+    ],
+)
+@pytest.mark.parametrize("canonicalize", [False, True])
+@tilelang.testing.requires_cuda
+def test_loop_carry_respects_loop_step(start, stop, step, expected_syncs, canonicalize):
+    """Raw and canonicalized steps must agree on adjacent-iteration hazards."""
+
+    @T.prim_func(private=True)
+    def func():
+        temp_shared = T.alloc_buffer((4, 32), dtype="float32", scope="shared")
+        result_local = T.alloc_buffer((1,), dtype="float32", scope="local")
+        tx = T.launch_thread("threadIdx.x", 32)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        temp_shared[0, tx] = T.float32(0)
+        temp_shared[1, tx] = T.float32(0)
+        temp_shared[2, tx] = T.float32(0)
+        temp_shared[3, tx] = T.float32(0)
+        T.tvm_storage_sync("shared")
+        # Use TVM's serial builder to retain For.step; TileLang normalizes it.
+        for i in T.serial(start, stop, step=step):
+            temp_shared[i % 4, tx] = T.Cast("float32", i)
+            result_local[0] = result_local[0] + temp_shared[(i + 2) % 4, (tx + 1) % 32]
+
+    mod = tvm.IRModule({"main": func})
+    if canonicalize:
+        mod = tvm.s_tir.transform.CanonicalizeLoop()(mod)
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod.script())
+    loop_body = s[s.index("for i in ") :]
+    sync = 'T.tvm_storage_sync("shared")'
+    assert loop_body.count(sync) == expected_syncs, f"Unexpected loop-carried syncs:\n{s}"
+    if expected_syncs:
+        # The read must finish before the next iteration overwrites its row.
+        assert loop_body.index(sync) < loop_body.index("temp_shared["), s
+
+
+@pytest.mark.parametrize("canonicalize", [False, True])
+@tilelang.testing.requires_cuda
+def test_loop_carry_non_unit_step_last_pair(canonicalize):
+    """The final valid pair must remain in the loop-carried dependency domain."""
+
+    @T.prim_func(private=True)
+    def func():
+        temp_shared = T.alloc_buffer((24, 32), dtype="float32", scope="shared")
+        result_local = T.alloc_buffer((1,), dtype="float32", scope="local")
+        tx = T.launch_thread("threadIdx.x", 32)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        for j in range(24):
+            temp_shared[j, tx] = T.float32(0)
+        T.tvm_storage_sync("shared")
+        for i in range(3, 13, 3):
+            temp_shared[i, tx] = T.Cast("float32", i)
+            # Only i=9 -> i=12 aliases across neighboring threads.
+            result_local[0] = result_local[0] + temp_shared[21 - i, (tx + 1) % 32]
+
+    mod = tvm.IRModule({"main": func})
+    if canonicalize:
+        mod = tvm.s_tir.transform.CanonicalizeLoop()(mod)
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    s = str(mod.script())
+    loop_body = s[s.index("for i in ") :]
+    sync = 'T.tvm_storage_sync("shared")'
+    assert loop_body.count(sync) == 1, f"Expected a sync for the final iteration pair:\n{s}"
+    assert loop_body.index(sync) < loop_body.index("temp_shared["), s
 
 
 @tilelang.testing.requires_cuda
