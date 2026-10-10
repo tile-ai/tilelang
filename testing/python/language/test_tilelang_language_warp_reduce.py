@@ -228,7 +228,7 @@ def test_warp_reduce_codegen_launch_extent():
     functions = {}
     for index, (extents, _) in enumerate(cases):
         value = tirx.Var(f"value_{index}", "int64")
-        body = tirx.SeqStmt([tirx.Evaluate(tirx.call_intrin("int64", f"tl.warp_reduce_{op}", value)) for op in operations])
+        body = tirx.SeqStmt([tirx.Evaluate(tirx.call_intrin("int64", tvm.ir.Op.get(f"tl.warp_reduce_{op}"), value)) for op in operations])
         # A launch-bounds maximum alone must not authorize specialization.
         axis = tvm.te.thread_axis("threadIdx.x")
         body = tirx.AttrStmt(axis, "thread_extent", 32, body)
