@@ -1,0 +1,140 @@
+{
+  "reference": {
+    "text_bytes": 14440,
+    "functions": [
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE15clear_kv_buf_vfERU3AS6NS5_23UnifiedBufferMemoryPlanEj.vector.thread",
+        "bytes": 24
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE23kv_nd2nz_for_prefill_vfERU3AS6NS5_23UnifiedBufferMemoryPlanEj.vector.thread",
+        "bytes": 536
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE10softmax_vfILb0EEEvRU3AS6NS5_23UnifiedBufferMemoryPlanEffjjjjjj.vector.thread",
+        "bytes": 552
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE10softmax_vfILb1EEEvRU3AS6NS5_23UnifiedBufferMemoryPlanEffjjjjjj.vector.thread",
+        "bytes": 484
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE27get_final_lse_and_denorm_vfERU3AS6NS5_23UnifiedBufferMemoryPlanEjf.vector.thread",
+        "bytes": 96
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE19process_kv_index_vfIL9ModelType0EEEvRU3AS6NS5_23UnifiedBufferMemoryPlanEjjjij10FastDivMod.vector.thread",
+        "bytes": 184
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE18add_and_scale_o_vfILb1ELb0EEEvRU3AS6NS5_23UnifiedBufferMemoryPlanEjjjj.vector.thread",
+        "bytes": 52
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE18add_and_scale_o_vfILb1ELb1EEEvRU3AS6NS5_23UnifiedBufferMemoryPlanEjjjj.vector.thread",
+        "bytes": 68
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE19get_final_output_vfILb1EEEvRU3AS6NS5_23UnifiedBufferMemoryPlanEjjjjb.vector.thread",
+        "bytes": 136
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE19get_final_output_vfILb0EEEvRU3AS6NS5_23UnifiedBufferMemoryPlanEjjjjb.vector.thread",
+        "bytes": 100
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd22sparse_attn_fwd_kernelINS1_6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEEEEEvNT_6ParamsENS7_9AuxParamsE_mix_aic",
+        "bytes": 96
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE30sparse_attn_fwd_kernel_devfuncE19SparseAttnFwdParamsNS5_9AuxParamsE.cube",
+        "bytes": 4380
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd22sparse_attn_fwd_kernelINS1_6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEEEEEvNT_6ParamsENS7_9AuxParamsE_mix_aiv",
+        "bytes": 96
+      },
+      {
+        "symbol": "_ZN6ascend7prefill10sparse_fwd6KernelIXtlNS1_6ConfigEL17SparseAttnFwdMode0ELj64ELj640ELb1EEEE30sparse_attn_fwd_kernel_devfuncE19SparseAttnFwdParamsNS5_9AuxParamsE.vector",
+        "bytes": 6128
+      }
+    ]
+  },
+  "manual": {
+    "text_bytes": 15560,
+    "functions": [
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_0PU3AS6hi.vector.thread",
+        "bytes": 24
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_1PU3AS6hi.vector.thread",
+        "bytes": 536
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_3PU3AS6hiiii.vector.thread",
+        "bytes": 600
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_2PU3AS6hiiii.vector.thread",
+        "bytes": 552
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_4PU3AS6hi.vector.thread",
+        "bytes": 196
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_5PU3AS6hii.vector.thread",
+        "bytes": 168
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_6PU3AS6hiii.vector.thread",
+        "bytes": 124
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_7PU3AS6hiii.vector.thread",
+        "bytes": 100
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_8PU3AS6hii.vector.thread",
+        "bytes": 196
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_9PU3AS6hii.vector.thread",
+        "bytes": 140
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_8PU3AS6hii.vector.thread.1",
+        "bytes": 196
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_9PU3AS6hii.vector.thread.1",
+        "bytes": 140
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_8PU3AS6hii.vector.thread.2",
+        "bytes": 196
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_9PU3AS6hii.vector.thread.2",
+        "bytes": 140
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_8PU3AS6hii.vector.thread.3",
+        "bytes": 196
+      },
+      {
+        "symbol": "_ZL21main_kernel_simd_vf_9PU3AS6hii.vector.thread.3",
+        "bytes": 140
+      },
+      {
+        "symbol": "main_kernel_mix_aic",
+        "bytes": 3888
+      },
+      {
+        "symbol": "main_kernel_mix_aiv",
+        "bytes": 5880
+      }
+    ]
+  }
+}

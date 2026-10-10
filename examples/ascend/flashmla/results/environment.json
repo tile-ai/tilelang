@@ -1,0 +1,51 @@
+{
+  "tilelang_revision": "a35f8ddf45eba16c21211ec8822d56ce5363036f",
+  "reference_revision": "a123d0b0191e0da7aa1e044f8644e0989cc63220",
+  "python_version": "3.12.13",
+  "torch": "2.13.0+cpu",
+  "torch_npu": "2.13.0rc1",
+  "cann": "/usr/local/Ascend/cann-9.2.0",
+  "bisheng": "2026-08-27T22:23:38+08:00 clang version 15.0.5 (clang-5c68a1cb1231 flang-5c68a1cb1231)\nTarget: aarch64-unknown-linux-gnu\nThread model: posix\nInstalledDir: /usr/local/Ascend/cann-9.2.0/bin\n",
+  "physical_device": 5,
+  "process_visible_device": 0,
+  "device": "Ascend950DT_9581",
+  "kernel_launch": {
+    "aic": 32,
+    "aiv_per_aic": 2,
+    "q_per_job": 1,
+    "heads": 64,
+    "dimension": 512,
+    "kv_block": 64
+  },
+  "pass_config": {
+    "tl.disable_shared_memory_reuse": true,
+    "tl.disable_safe_memory_legalize": true,
+    "tl.enable_auto_schedule": false
+  },
+  "compile_flags": [
+    "-Ofast",
+    "-mllvm",
+    "-enable-hiipu-vf-loop-unroll"
+  ],
+  "deterministic_algorithms": false,
+  "measurement_source_sha256": {
+    "examples/ascend/flashmla/decode.py": "8c156739d27ab2a0db7b68039c7eebac9e696aa1e3690e6c43029904399755f6",
+    "examples/ascend/flashmla/manual_intrinsics.h": "b1588c1bfeeccdd0fc4858cb5833bbd3a67a27a023df2292989678c8341ffe9c",
+    "examples/ascend/flashmla/quantization.py": "530dcc9133fb4d50b9ee278b8dee4e146ca016a20c67313e54e7f4b13c59efd0",
+    "examples/ascend/flashmla/core.py": "0a43fed18d416c498f43d44163037ac1a457b0f347aed7bcfff3a02b95d63e21",
+    "examples/ascend/flashmla/run.py": "01a9f4accc0302300c8ea8a6364120f2f4541eea20b99133d01123f2086e7a66",
+    "examples/ascend/flashmla/run_decode.py": "419de1ce91da6e0476abcb444d1ca0de684f25f5ee6388e9575bdfaee68cc567",
+    "examples/ascend/flashmla/manual.py": "0de7427f4514b84a58c4cf6f789dc0fba3f4f1617ebe05cebc9a08675c43abbb"
+  },
+  "publication_note": "Hardware measurements were collected on the pinned tilelang_revision. The publication branch targets newer main; kernel and decode preparation sources are unchanged, while runners expose only reference and manual implementations.",
+  "publication_base_revision": "adeea32bcecdddca32195a95e90730b175606a0e",
+  "published_source_sha256": {
+    "examples/ascend/flashmla/core.py": "0a43fed18d416c498f43d44163037ac1a457b0f347aed7bcfff3a02b95d63e21",
+    "examples/ascend/flashmla/decode.py": "8c156739d27ab2a0db7b68039c7eebac9e696aa1e3690e6c43029904399755f6",
+    "examples/ascend/flashmla/manual.py": "0de7427f4514b84a58c4cf6f789dc0fba3f4f1617ebe05cebc9a08675c43abbb",
+    "examples/ascend/flashmla/manual_intrinsics.h": "b1588c1bfeeccdd0fc4858cb5833bbd3a67a27a023df2292989678c8341ffe9c",
+    "examples/ascend/flashmla/quantization.py": "530dcc9133fb4d50b9ee278b8dee4e146ca016a20c67313e54e7f4b13c59efd0",
+    "examples/ascend/flashmla/run.py": "5e673ca6266d6b7f090659b4004a4189d8103711fb6a1bafe6e38c2c50560247",
+    "examples/ascend/flashmla/run_decode.py": "a3c34e31a48e3e0cb61de567dab771e6027f5b06566811f860b5af84de467d5b"
+  }
+}

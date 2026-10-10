@@ -1,0 +1,675 @@
+{
+  "provenance": "Shapes reconstructed from pinned lib.py/quant.py/generate.py with seed=42; flattened strides verified in each saved ASC.",
+  "cases": [
+    {
+      "case": 0,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        64,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 256,
+        "max_padded_sequence": 1024,
+        "shape": [
+          256,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 34603008
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 4096,
+        "max_padded_sequence": 4096,
+        "shape": [
+          4096,
+          64,
+          1,
+          528
+        ],
+        "strides": [
+          33792,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 138412032
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 1,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        128,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 512,
+        "max_padded_sequence": 1024,
+        "shape": [
+          512,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 69206016
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 11264,
+        "max_padded_sequence": 5632,
+        "shape": [
+          11264,
+          64,
+          1,
+          528
+        ],
+        "strides": [
+          33792,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 380633088
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 2,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        256,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 1024,
+        "max_padded_sequence": 1024,
+        "shape": [
+          1024,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 138412032
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 22528,
+        "max_padded_sequence": 5632,
+        "shape": [
+          22528,
+          64,
+          1,
+          528
+        ],
+        "strides": [
+          33792,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 761266176
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 3,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        512,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 2048,
+        "max_padded_sequence": 1024,
+        "shape": [
+          2048,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 276824064
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 45056,
+        "max_padded_sequence": 5632,
+        "shape": [
+          45056,
+          64,
+          1,
+          528
+        ],
+        "strides": [
+          33792,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 1522532352
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 4,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        64,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 256,
+        "max_padded_sequence": 1024,
+        "shape": [
+          256,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 34603008
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 4096,
+        "max_padded_sequence": 4096,
+        "shape": [
+          4096,
+          64,
+          1,
+          288
+        ],
+        "strides": [
+          18432,
+          288,
+          288,
+          1
+        ],
+        "storage_bytes": 75497472
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 5,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        128,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 512,
+        "max_padded_sequence": 1024,
+        "shape": [
+          512,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 69206016
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 11264,
+        "max_padded_sequence": 5632,
+        "shape": [
+          11264,
+          64,
+          1,
+          288
+        ],
+        "strides": [
+          18432,
+          288,
+          288,
+          1
+        ],
+        "storage_bytes": 207618048
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 6,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        256,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 1024,
+        "max_padded_sequence": 1024,
+        "shape": [
+          1024,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 138412032
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 22528,
+        "max_padded_sequence": 5632,
+        "shape": [
+          22528,
+          64,
+          1,
+          288
+        ],
+        "strides": [
+          18432,
+          288,
+          288,
+          1
+        ],
+        "storage_bytes": 415236096
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 7,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        512,
+        4,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        208000,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        32768,
+        512,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        128,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        512,
+        1
+      ],
+      "main_cache": {
+        "block_size": 256,
+        "num_blocks": 2048,
+        "max_padded_sequence": 1024,
+        "shape": [
+          2048,
+          256,
+          1,
+          528
+        ],
+        "strides": [
+          135168,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 276824064
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 45056,
+        "max_padded_sequence": 5632,
+        "shape": [
+          45056,
+          64,
+          1,
+          288
+        ],
+        "strides": [
+          18432,
+          288,
+          288,
+          1
+        ],
+        "storage_bytes": 830472192
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NOTALLOC_CLEAN"
+    },
+    {
+      "case": 8,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        1,
+        4096,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        170435200,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        41600,
+        640,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        256,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        640,
+        1
+      ],
+      "main_cache": {
+        "block_size": 64,
+        "num_blocks": 64,
+        "max_padded_sequence": 4096,
+        "shape": [
+          64,
+          64,
+          1,
+          528
+        ],
+        "strides": [
+          33792,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 2162688
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 64,
+        "max_padded_sequence": 4096,
+        "shape": [
+          64,
+          64,
+          1,
+          528
+        ],
+        "strides": [
+          33792,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 2162688
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NORMAL_LAST_VICTIM"
+    },
+    {
+      "case": 9,
+      "sm_scale": 0.032352028870043036,
+      "query_shape": [
+        1,
+        4096,
+        64,
+        512
+      ],
+      "query_original_strides": [
+        170435200,
+        41600,
+        640,
+        1
+      ],
+      "flattened_query_strides_verified_in_asc": [
+        41600,
+        640,
+        1
+      ],
+      "flattened_main_index_strides_verified_in_asc": [
+        256,
+        1
+      ],
+      "flattened_extra_index_strides_verified_in_asc": [
+        640,
+        1
+      ],
+      "main_cache": {
+        "block_size": 64,
+        "num_blocks": 64,
+        "max_padded_sequence": 4096,
+        "shape": [
+          64,
+          64,
+          1,
+          528
+        ],
+        "strides": [
+          33792,
+          528,
+          528,
+          1
+        ],
+        "storage_bytes": 2162688
+      },
+      "extra_cache": {
+        "block_size": 64,
+        "num_blocks": 64,
+        "max_padded_sequence": 4096,
+        "shape": [
+          64,
+          64,
+          1,
+          288
+        ],
+        "strides": [
+          18432,
+          288,
+          288,
+          1
+        ],
+        "storage_bytes": 1179648
+      },
+      "cache_container_dtype": "float8_e4m3fn (manual kernel views raw bytes as uint8)",
+      "cache_hint": "NORMAL_LAST_VICTIM"
+    }
+  ]
+}
