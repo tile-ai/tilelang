@@ -500,5 +500,54 @@ def test_match_all_sync():
     assert torch.all(b2 == 0), f"Expected all 0, got {b2}"
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "dtype, nonzero_values",
+    [
+        ("int32", [1, -1, -(1 << 31)]),
+        ("int64", [1, 1 << 32, -(1 << 32), -(1 << 63)]),
+        ("uint64", [1, 1 << 32, 1 << 63]),
+        ("bool", [True]),
+    ],
+)
+def test_predicate_intrinsics_preserve_truth_value(dtype, nonzero_values):
+    @T.prim_func
+    def main(A: T.Tensor((128,), dtype), B: T.Tensor((7, 128), "uint64")):
+        with T.Kernel(1, threads=128):
+            lane = T.get_thread_binding(0)
+            predicate = A[lane]
+            B[0, lane] = T.cast(T.any_sync(predicate), "uint64")
+            B[1, lane] = T.cast(T.all_sync(predicate), "uint64")
+            B[2, lane] = T.ballot_sync(predicate)
+            B[3, lane] = T.ballot(predicate)
+            B[4, lane] = T.cast(T.syncthreads_count(predicate), "uint64")
+            B[5, lane] = T.cast(T.syncthreads_and(predicate), "uint64")
+            B[6, lane] = T.cast(T.syncthreads_or(predicate), "uint64")
+
+    kernel = tilelang.compile(main, out_idx=[1])
+    warp_size = getattr(torch.cuda.get_device_properties(0), "warp_size", 32)
+    for value in nonzero_values:
+        for pattern in ["zero", "all", "alternating", "one_per_warp"]:
+            values = [
+                value
+                if pattern == "all" or (pattern == "alternating" and lane % 2) or (pattern == "one_per_warp" and lane % warp_size == 0)
+                else 0
+                for lane in range(128)
+            ]
+            predicates = [bool(value) for value in values]
+            block_results = [sum(predicates), int(all(predicates)), int(any(predicates))]
+            expected = [[] for _ in range(7)]
+            for start in range(0, 128, warp_size):
+                warp = predicates[start : start + warp_size]
+                ballot = sum(int(predicate) << lane for lane, predicate in enumerate(warp))
+                warp_results = [int(any(warp)), int(all(warp)), ballot, ballot, *block_results]
+                for output, expected_value in zip(expected, warp_results):
+                    output.extend([expected_value] * len(warp))
+            inputs = torch.tensor(values, dtype=getattr(torch, dtype), device="cuda")
+            actual = kernel(inputs).cpu().tolist()
+            if actual != expected:
+                pytest.fail(f"Incorrect collective predicates for {dtype}, {value}, {pattern}: {actual}")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
