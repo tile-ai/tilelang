@@ -805,16 +805,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
       stream << "#pragma unroll\n";
     }
   }
-  std::string extent =
-      PrintExpr(arith::Analyzer().Simplify(op->extent + op->min));
-  PrintIndent();
-  std::string vid = AllocVarID(op->loop_var.get());
-  std::string start = PrintExpr(op->min);
-  stream << "for (";
-  PrintType(op->loop_var.dtype(), stream);
-  stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
-         << "; ++" << vid << ") {\n";
-  int for_scope = BeginScope();
   // A lexical_alloc_scope spanning the entire loop body is redundant with
   // the loop's own braces; unwrap it to avoid emitting `{ {`.
   Stmt body = op->body;
@@ -823,10 +813,16 @@ void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
       break;
     body = attr->body;
   }
-  PrintStmt(body);
-  this->EndScope(for_scope);
-  PrintIndent();
-  stream << "}\n";
+  For loop = GetRef<For>(op);
+  auto *loop_node = loop.CopyOnWrite();
+  arith::Analyzer analyzer;
+  loop_node->min = analyzer.Simplify(loop_node->min);
+  loop_node->extent = analyzer.Simplify(loop_node->extent);
+  if (loop_node->step.defined()) {
+    loop_node->step = analyzer.Simplify(loop_node->step.value());
+  }
+  loop_node->body = body;
+  CodeGenC::VisitStmt_(loop.get());
 }
 
 void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
