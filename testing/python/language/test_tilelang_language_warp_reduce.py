@@ -4,6 +4,8 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+from tilelang import tvm
+from tvm import tirx
 
 
 @tilelang.jit
@@ -129,7 +131,20 @@ def test_warp_reduce_64(op, dtype, N):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     "threads",
-    [(1, 1, 1), (3, 1, 1), (7, 1, 1), (31, 1, 1), (33, 1, 1), (48, 1, 1), (100, 1, 1), (7, 7, 1), (3, 3, 5)],
+    [
+        (1, 1, 1),
+        (3, 1, 1),
+        (7, 1, 1),
+        (31, 1, 1),
+        (33, 1, 1),
+        (48, 1, 1),
+        (100, 1, 1),
+        (7, 7, 1),
+        (3, 3, 5),
+        (32, 1, 1),
+        (8, 8, 1),
+        (4, 8, 2),
+    ],
 )
 @pytest.mark.parametrize(
     "op,dtype",
@@ -191,6 +206,48 @@ def test_warp_reduce_partial_nan(op, all_nan):
     kernel = get_kernel(op, "float32", (7, 1, 1))
     kernel(a)
     torch.testing.assert_close(a, ref, rtol=0, atol=0, equal_nan=True)
+
+
+@tilelang.testing.requires_cuda
+def test_warp_reduce_codegen_launch_extent():
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
+    dynamic = tirx.Var("threads", "int32")
+    cases = [
+        ({"threadIdx.x": 32}, 32),
+        ({"threadIdx.x": 8, "threadIdx.y": 8}, 64),
+        ({"threadIdx.x": 4, "threadIdx.y": 8, "threadIdx.z": 2}, 64),
+        ({"threadIdx.x": 48}, None),
+        ({"threadIdx.x": 32, "threadIdx.y": dynamic}, None),
+        ({"blockIdx.x": 32}, None),
+        (None, None),
+        ({"threadIdx.x": 0}, None),
+        ({"threadIdx.x": -32}, None),
+        ({"threadIdx.x": 32, "threadIdx.y": 1 << 62}, None),
+    ]
+    operations = ("sum", "min", "max", "bitand", "bitor")
+    functions = {}
+    for index, (extents, _) in enumerate(cases):
+        value = tirx.Var(f"value_{index}", "int64")
+        body = tirx.SeqStmt([tirx.Evaluate(tirx.call_intrin("int64", f"tl.warp_reduce_{op}", value)) for op in operations])
+        # A launch-bounds maximum alone must not authorize specialization.
+        axis = tvm.te.thread_axis("threadIdx.x")
+        body = tirx.AttrStmt(axis, "thread_extent", 32, body)
+        name = f"reduce_{index}"
+        func = tirx.PrimFunc([value, dynamic], body).with_attr("global_symbol", name)
+        func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+        if extents is not None:
+            func = func.with_attr(
+                "thread_extent",
+                {tag: tirx.const(extent, "int64") if isinstance(extent, int) else extent for tag, extent in extents.items()},
+            )
+        functions[name] = func
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        source = build(tvm.IRModule(functions), target).inspect_source()
+    for index, (_, extent) in enumerate(cases):
+        for op in operations:
+            specialization = f"<int64_t, {extent}>" if extent is not None else ""
+            assert f"tl::warp_reduce_{op}{specialization}(value_{index})" in source
 
 
 if __name__ == "__main__":
