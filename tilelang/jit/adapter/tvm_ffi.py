@@ -16,7 +16,6 @@ import torch
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
-from tvm.relax import TensorType
 from tilelang.backend.target import determine_target
 from tilelang.jit.abi import CALLEE_ALLOCATED_OUTPUTS_ATTR
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
@@ -387,7 +386,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     @classmethod
     def from_database(
         cls,
-        params: list[TensorType],
+        params: list[KernelParam],
         result_idx: list[int],
         target: str,
         func_or_mod: tirx.PrimFunc | tvm.IRModule,
@@ -398,9 +397,15 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
     ):
-        adapter = cls.__new__(cls)
-        adapter.params = params
-        adapter.result_idx = adapter._legalize_result_idx(result_idx)
+        adapter = cls(
+            params=params,
+            result_idx=result_idx,
+            target=target,
+            func_or_mod=func_or_mod,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+        )
         host_kernel_source = adapter._set_cached_text_source("host_kernel_source", "_host_kernel_source_path", host_kernel_source)
         device_kernel_source = adapter._set_cached_text_source("device_kernel_source", "_device_kernel_source_path", device_kernel_source)
         adapter.wrapped_source = (
@@ -408,25 +413,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             if device_kernel_source.text is not None and host_kernel_source.text is not None
             else None
         )
-        adapter.pass_configs = pass_configs
-
-        if isinstance(func_or_mod, tirx.PrimFunc):
-            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
-        else:
-            adapter.ir_module = func_or_mod
-
-        target = determine_target(target, return_object=True)
-        adapter.target = Target(determine_target(target))
-
-        adapter.verbose = verbose
         adapter.libpath = kernel_lib_path
         adapter.kernel_global_source = device_kernel_source.text
-        adapter.rt_mod = None
         adapter.executable = runtime.load_module(kernel_lib_path)
-        adapter._ffi_callee_allocated_output_abi = adapter._uses_ffi_callee_allocated_output_abi()
-        adapter.dynamic_symbolic_map = None if adapter._ffi_callee_allocated_output_abi else adapter._process_dynamic_symbolic()
-        adapter._executable_lock = threading.Lock()
-        adapter._post_init()
         return adapter
 
     def get_host_source(self) -> str | None:

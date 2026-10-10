@@ -56,5 +56,37 @@ def test_invalid_output_indices(execution_backend, output_indices):
         pytest.fail(f"Failed compilation changed the caller's output indices to {output_indices}")
 
 
+@tilelang.testing.requires_cuda
+def test_grouped_output_selection_and_export(tmp_path):
+    from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
+    from tilelang.autotuner.param import CompileArgs
+    from tilelang.jit.kernel import JITKernel
+
+    args = CompileArgs(out_idx=[-1], execution_backend="tvm_ffi", target="cuda", target_host="c")
+    results = compile_grouped_unit_tvm_ffi([(0, {"program": copy_output}), (1, {"program": sum_output})], args, lambda program: program)
+    a = torch.arange(128, dtype=torch.float32, device="cuda")
+    for idx, _, kernel, error in results:
+        assert error is None, error
+        assert kernel.artifact.target_host.kind.name == "c"
+        inputs, expected = ((a,), a + 1) if idx == 0 else ((a, a, a), a * 3)
+        torch.testing.assert_close(kernel(*inputs), expected)
+        path = str(tmp_path / f"kernel_{idx}.so")
+        kernel.export_library(path)
+        restored = JITKernel.from_database(
+            func=kernel.prim_func,
+            host_kernel_source=kernel.get_host_source(),
+            device_kernel_source=kernel.get_kernel_source(),
+            kernel_lib_path=path,
+            params=kernel.params,
+            target=kernel.target,
+            target_host=kernel.target_host,
+            out_idx=[-1],
+            execution_backend="tvm_ffi",
+        )
+        torch.testing.assert_close(restored(*inputs), expected)
+    assert len(results) == 2
+    assert args.out_idx == [-1]
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
