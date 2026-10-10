@@ -276,16 +276,16 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         has_shape_candidate = False
         has_stride_candidate = False
         for ref_id, buffer_idx, dim_idx in candidates:
-            if ref_id == 2:
+            if ref_id == 0:
+                has_shape_candidate = True
+            elif ref_id == 1:
+                has_stride_candidate = True
+            elif ref_id == 2:
                 value = param_values[buffer_idx]
                 if value is not None:
                     return value
                 non_tensor_values.append((buffer_idx, value))
                 continue
-            elif ref_id == 0:
-                has_shape_candidate = True
-            elif ref_id == 1:
-                has_stride_candidate = True
             else:
                 raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
 
