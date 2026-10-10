@@ -544,6 +544,35 @@ public:
   ArithmeticAnalyzer(arith::Analyzer *analyzer, ArithmeticFacts *facts)
       : IRMutatorWithAnalyzer(analyzer), facts_(facts) {}
 
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    const auto *lt = op->condition.as<LTNode>();
+    if (!lt || !lt->b.as<MulNode>() ||
+        HasUnprovenWrap(lt->a, analyzer_, range_opaque_) ||
+        !analyzer_->CanProve(lt->a >= 0)) {
+      return IRMutatorWithAnalyzer::VisitStmt_(op);
+    }
+    // A nonnegative index below a product excludes zero factors, even if
+    // multiplication can wrap. The fact holds only in the taken branch.
+    std::vector<PrimExpr> factors{lt->b};
+    Stmt body = op->then_case;
+    while (!factors.empty()) {
+      PrimExpr factor = factors.back();
+      factors.pop_back();
+      if (const auto *mul = factor.as<MulNode>()) {
+        factors.push_back(mul->a);
+        factors.push_back(mul->b);
+      } else if (factor.as<VarNode>() && IsSupportedInteger(factor.dtype()) &&
+                 !analyzer_->CanProve(factor != 0)) {
+        PrimExpr nonzero =
+            analyzer_->CanProve(factor >= 0) ? factor > 0 : factor != 0;
+        body = AttrStmt(nonzero, tirx::attr::tilelang_assume,
+                        StringImm("nonzero factor of guarded product"), body);
+      }
+    }
+    IfThenElse guarded(op->condition, body, op->else_case, op->span);
+    return IRMutatorWithAnalyzer::VisitStmt_(guarded.operator->());
+  }
+
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
       const auto *div = op->value.as<FloorDivNode>();
@@ -1144,14 +1173,26 @@ private:
                             : std::nullopt,
                         span);
     }
-    // Only split a flat two-term guard around a single store. Do not expand
-    // arbitrary Boolean trees: duplicating their branches can grow
-    // exponentially.
-    if (const auto *op = condition.as<AndNode>();
-        split_store_guard && op && !op->a.as<AndNode>() &&
-        !op->a.as<OrNode>() && !op->b.as<AndNode>() && !op->b.as<OrNode>()) {
-      return MaterializeCondition_(op->a, IfThenElse(op->b, yes, no, span), no,
-                                   span);
+    // Flatten only conjunctions around a single store. Each term stays behind
+    // its preceding guards; duplicating the fallback store costs linear space.
+    // Keep OR trees opaque rather than distributing Boolean expressions.
+    if (split_store_guard && condition.as<AndNode>()) {
+      std::vector<PrimExpr> pending{condition}, terms;
+      while (!pending.empty()) {
+        PrimExpr term = pending.back();
+        pending.pop_back();
+        if (const auto *op = term.as<AndNode>()) {
+          pending.push_back(op->b);
+          pending.push_back(op->a);
+        } else {
+          terms.push_back(term);
+        }
+      }
+      Stmt body = yes;
+      for (auto it = terms.rbegin(); it != terms.rend(); ++it) {
+        body = IfThenElse(*it, body, no, span);
+      }
+      return VisitStmt(body);
     }
     ArithmeticCallBinder binder(bindings_);
     PrimExpr value = binder(condition);

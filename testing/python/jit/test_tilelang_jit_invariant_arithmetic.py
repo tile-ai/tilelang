@@ -41,14 +41,24 @@ def divmod_kernel(size=512, dtype="int32", truncating=False, remainder_only=Fals
     return main
 
 
-@pytest.mark.parametrize(
-    "target",
-    [
+@pytest.fixture(
+    params=[
         pytest.param("cuda", marks=tilelang.testing.requires_cuda.marks()),
         pytest.param("hip", marks=tilelang.testing.requires_rocm.marks()),
         pytest.param("cutedsl", marks=tilelang.testing.requires_cuda.marks()),
-    ],
+    ]
 )
+def target(request):
+    target = request.param
+    if target == "cutedsl":
+        from tilelang.backend.module import get_backend
+
+        if not any(spec.name == "tvm_ffi" for spec in get_backend("cutedsl").execution_backends):
+            pytest.skip("CuTe invariant arithmetic requires the unified Host IR execution path")
+        pytest.importorskip("cutlass.cute")
+    return target
+
+
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
 @pytest.mark.parametrize("truncating", [False, True])
 @pytest.mark.parametrize("remainder_only", [False, True])
@@ -56,12 +66,6 @@ def test_invariant_divmod(dtype, truncating, remainder_only, target):
     # One matrix owns basic arithmetic, boundary/random inputs and parameter
     # sharing. Remainder-only is separate because it selects Barrett rather
     # than reusing a quotient's signed-int32 magic parameters.
-    if target == "cutedsl":
-        from tilelang.backend.module import get_backend
-
-        if not any(spec.name == "tvm_ffi" for spec in get_backend("cutedsl").execution_backends):
-            pytest.skip("CuTe invariant arithmetic requires the unified Host IR execution path")
-        pytest.importorskip("cutlass.cute")
     kernel = _compile_invariant(divmod_kernel(dtype=dtype, truncating=truncating, remainder_only=remainder_only), target)
     source = kernel.get_kernel_source()
     signature = re.search(r"(?:void|def) main_kernel\((.*?)\)", source, re.S).group(1)
@@ -100,15 +104,14 @@ def test_invariant_divmod(dtype, truncating, remainder_only, target):
         assert r.cpu().tolist() == [x - y * d for x, y in zip(inputs, expected_q)]
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_div_skips_device_divisor():
+def test_invariant_div_skips_device_divisor(target):
     @T.prim_func
     def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32")):
         with T.Kernel(1, threads=128):
             for i in T.Parallel(128):
                 B[i] = i // A[i]
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     assert "fastdiv_multiplier" not in kernel.get_kernel_source()
     a = torch.arange(1, 129, dtype=torch.int32, device="cuda")
     b = torch.empty_like(a)
@@ -116,8 +119,7 @@ def test_invariant_div_skips_device_divisor():
     torch.testing.assert_close(b, torch.zeros_like(b))
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_div_guarded_launch():
+def test_invariant_div_guarded_launch(target):
     @T.prim_func
     def main(B: T.Tensor((128,), "int32"), d: T.int32):
         if d > 0:
@@ -125,7 +127,7 @@ def test_invariant_div_guarded_launch():
                 for i in T.Parallel(128):
                     B[i] = i // d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     assert "fastdiv_multiplier" in kernel.get_kernel_source()
     b = torch.full((128,), -999, dtype=torch.int32, device="cuda")
     kernel(b, 0)
@@ -165,25 +167,23 @@ def test_invariant_div_rejects_unsupported_adapter():
         )
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_div_leaves_constant_divisor_unchanged():
+def test_invariant_div_leaves_constant_divisor_unchanged(target):
     @T.prim_func
     def main(B: T.Tensor((128,), "int32")):
         with T.Kernel(1, threads=128):
             for i in T.Parallel(128):
                 B[i] = i // 7
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     assert "fastdiv_multiplier" not in kernel.get_kernel_source()
     b = torch.empty(128, dtype=torch.int32, device="cuda")
     kernel(b)
     torch.testing.assert_close(b, torch.arange(128, dtype=torch.int32, device="cuda") // 7)
 
 
-@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("remainder_only", [False, True])
 @pytest.mark.parametrize("truncating", [False, True])
-def test_widened_divisor_preserves_int64_arithmetic(remainder_only, truncating):
+def test_widened_divisor_preserves_int64_arithmetic(remainder_only, truncating, target):
     @T.prim_func
     def main(A: T.Tensor((128,), "int64"), Q: T.Tensor((128,), "int64"), R: T.Tensor((128,), "int64"), d: T.int32):
         with T.Kernel(1, threads=128):
@@ -192,7 +192,7 @@ def test_widened_divisor_preserves_int64_arithmetic(remainder_only, truncating):
                     Q[i] = T.truncdiv(A[i], T.int64(d)) if truncating else A[i] // T.int64(d)
                 R[i] = T.truncmod(A[i], T.int64(d)) if truncating else A[i] % T.int64(d)
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     source = kernel.get_kernel_source()
     assert "barrett_reciprocal" in source
     assert "fastdiv_multiplier" not in source
@@ -241,9 +241,8 @@ def test_widened_layout_gather():
         torch.testing.assert_close(b, expected)
 
 
-@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", ["int16", "uint16"])
-def test_narrow_divmod(dtype):
+def test_narrow_divmod(dtype, target):
     @T.prim_func
     def main(A: T.Tensor((128,), dtype), Q: T.Tensor((128,), dtype), R: T.Tensor((128,), dtype), d: T.dtype(dtype)):
         with T.Kernel(1, threads=128):
@@ -252,7 +251,7 @@ def test_narrow_divmod(dtype):
                 Q[i] = x // d
                 R[i] = x % d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     signed = dtype.startswith("int")
     bits = 16  # The byte domain is exhaustively covered separately.
     high = 2 ** (bits - int(signed)) - 1
@@ -313,8 +312,7 @@ def test_divmod_preparation_shared_across_widths(dtype, wide):
         assert b.cpu().tolist() == expected
 
 
-@tilelang.testing.requires_cuda
-def test_wide_range_proof_does_not_survive_buffer_mutation():
+def test_wide_range_proof_does_not_survive_buffer_mutation(target):
     @T.prim_func
     def main(A: T.Tensor((128,), "uint64"), B: T.Tensor((128,), "uint64"), d: T.uint32):
         with T.Kernel(1, threads=128):
@@ -323,7 +321,7 @@ def test_wide_range_proof_does_not_survive_buffer_mutation():
                     A[i] = A[i] + T.uint64(2**40)
                     B[i] = A[i] // T.uint64(d)
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     a = torch.arange(128, device="cuda", dtype=torch.int64).to(torch.uint64)
     b = torch.empty_like(a)
     kernel(a, b, 7)
@@ -414,7 +412,8 @@ def test_reassociated_divisor_preparation(dtype):
 
 
 @tilelang.testing.requires_cuda
-def test_invariant_arithmetic_materialization_preserves_lazy_guards():
+@pytest.mark.parametrize("long_guard", [False, True])
+def test_invariant_arithmetic_materialization_preserves_lazy_guards(long_guard):
     @T.prim_func
     def main(B: T.Tensor((128,), "int32"), d: T.int32, e: T.int32):
         with T.Kernel(1, threads=128):
@@ -422,28 +421,30 @@ def test_invariant_arithmetic_materialization_preserves_lazy_guards():
                 if d != 0 and e != 0:
                     q = i // d
                     r = q % e
-                    B[i] = T.if_then_else(q + r >= 0 and q + r < 128, q + r, -1)
+                    B[i] = T.if_then_else(q + r >= 0 and q + r < 128 and (not long_guard or (q < 64 and r < 16)), q + r, -1)
                 else:
                     B[i] = -9
 
     kernel = _compile_invariant(main)
     source = kernel.get_kernel_source()
     assert "invariant_value" in source
-    assert "tl::fast_div" in source  # Materialization must not expand fallback math.
+    assert source.count("tl::fast_div(") == 1  # Share across all short-circuit terms.
     out = torch.empty(128, dtype=torch.int32, device="cuda")
     x = torch.arange(128, dtype=torch.int32, device="cuda")
     for d, e in ((0, 0), (0, 7), (7, 0), (1, 1), (7, 3), (-3, 7), (7, -3)):
         kernel(out, d, e)
         if d and e:
             value = x // d + (x // d) % e
-            expected = torch.where((value >= 0) & (value < 128), value, -1)
+            guard = (value >= 0) & (value < 128)
+            if long_guard:
+                guard &= (x // d < 64) & ((x // d) % e < 16)
+            expected = torch.where(guard, value, -1)
         else:
             expected = torch.full_like(x, -9)
         torch.testing.assert_close(out, expected)
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_arithmetic_materialization_does_not_cache_loads():
+def test_invariant_arithmetic_materialization_does_not_cache_loads(target):
     @T.prim_func
     def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32"), d: T.int32):
         with T.Kernel(1, threads=128):
@@ -452,7 +453,7 @@ def test_invariant_arithmetic_materialization_does_not_cache_loads():
                 A[i] = -A[i]
                 B[i] = B[i] + A[i] % d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     values = torch.arange(-64, 64, dtype=torch.int32, device="cuda")
     out = torch.empty_like(values)
     for d in (1, 7, -3):
@@ -528,10 +529,9 @@ def test_wide_remainder_swizzle_keeps_narrow_arithmetic():
             assert r.cpu().tolist() == [x % e for x in expected]
 
 
-@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", ["int8", "uint8"])
 @pytest.mark.parametrize("truncating", [False, True])
-def test_invariant_divmod_exhaustive_byte_domain(dtype, truncating):
+def test_invariant_divmod_exhaustive_byte_domain(dtype, truncating, target):
     @T.prim_func
     def main(A: T.Tensor((256,), dtype), Q: T.Tensor((256,), dtype), R: T.Tensor((256,), dtype), d: T.dtype(dtype)):
         with T.Kernel(2, threads=128) as bx:
@@ -540,7 +540,7 @@ def test_invariant_divmod_exhaustive_byte_domain(dtype, truncating):
                 Q[i] = T.truncdiv(A[i], d) if truncating else A[i] // d
                 R[i] = T.truncmod(A[i], d) if truncating else A[i] % d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     low, high = (-128, 127) if dtype == "int8" else (0, 255)
     q = torch.empty(256, dtype=getattr(torch, dtype), device="cuda")
     r = torch.empty_like(q)
@@ -598,27 +598,41 @@ def test_invariant_condition_propagation(constraint):
 
 
 @tilelang.testing.requires_cuda
-def test_invariant_positive_factors_do_not_prove_positive_product():
+@pytest.mark.parametrize("guarded", [False, True])
+def test_invariant_positive_factors_do_not_prove_positive_product(guarded):
     @T.prim_func
     def main(Q: T.Tensor((128,), "int32"), R: T.Tensor((128,), "int32"), a: T.int32, b: T.int32):
         with T.Kernel(1, threads=128):
-            T.assume(a > 0)
-            T.assume(b > 0)
+            T.assume(a >= (0 if guarded else 1))
+            T.assume(b >= (0 if guarded else 1))
             for i in T.Parallel(128):
-                Q[i] = i // (a * b)
-                R[i] = i % (a * b)
+                if guarded:
+                    if i < a * b:
+                        Q[i] = i // a
+                        R[i] = i % b
+                    else:
+                        Q[i] = -1
+                        R[i] = -1
+                else:
+                    Q[i] = i // (a * b)
+                    R[i] = i % (a * b)
 
     kernel = _compile_invariant(main)
     calls = [line for line in kernel.get_kernel_source().splitlines() if "tl::fast_div(" in line or "tl::fast_rem(" in line]
-    assert calls and all(line.rstrip().endswith("(bool)0);") for line in calls)
+    assert calls and all(line.rstrip().endswith(f"(bool){int(guarded)});") for line in calls)
     q = torch.empty(128, dtype=torch.int32, device="cuda")
     r = torch.empty_like(q)
     x = torch.arange(128, dtype=torch.int64, device="cuda")
-    for a, b in [(7, 13), (50000, 50000), (65537, 65537)]:
+    cases = [(7, 13), (50000, 50000), (65537, 65537)]
+    if guarded:
+        cases += [(0, 7), (7, 0), (65536, 65536)]
+    for a, b in cases:
         d = (a * b + 2**31) % 2**32 - 2**31
         kernel(q, r, a, b)
-        torch.testing.assert_close(q, (x // d).to(torch.int32), rtol=0, atol=0)
-        torch.testing.assert_close(r, (x % d).to(torch.int32), rtol=0, atol=0)
+        expected_q = torch.where(x < d, x // max(a, 1), -1) if guarded else x // d
+        expected_r = torch.where(x < d, x % max(b, 1), -1) if guarded else x % d
+        torch.testing.assert_close(q, expected_q.to(torch.int32), rtol=0, atol=0)
+        torch.testing.assert_close(r, expected_r.to(torch.int32), rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda
@@ -785,8 +799,7 @@ def test_invariant_reassociated_quotient_remainder_identity(dtype):
             torch.testing.assert_close(out, expected)
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_dynamic_shape_can_be_zero():
+def test_invariant_dynamic_shape_can_be_zero(target):
     n = T.dynamic("n")
 
     @T.prim_func
@@ -798,7 +811,7 @@ def test_invariant_dynamic_shape_can_be_zero():
                 if i < n:
                     B[i] = A[i] // n
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     for size in [0, 1, 7, 31, 129]:
         a = torch.arange(size, dtype=torch.int32, device="cuda") * 37 - 1000
         b = torch.empty_like(a)
@@ -806,8 +819,7 @@ def test_invariant_dynamic_shape_can_be_zero():
         torch.testing.assert_close(b, a // size)
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_guarded_host_expression():
+def test_invariant_guarded_host_expression(target):
     @T.prim_func
     def main(B: T.Tensor((128,), "int32"), p: T.int32):
         with T.Kernel(1, threads=128):
@@ -815,7 +827,7 @@ def test_invariant_guarded_host_expression():
                 if p > 0:
                     B[i] = i // (7 // p + 1) + i // p
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     out = torch.full((128,), -9, dtype=torch.int32, device="cuda")
     for p in [0, -1, -(2**31)]:
         kernel(out, p)
@@ -851,8 +863,7 @@ def test_invariant_partial_block_write_then_read():
     assert body.index("if (") < body.index("A[") < body.index("tl::fast_div")
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_serial_loop_scope():
+def test_invariant_serial_loop_scope(target):
     n = T.dynamic("n")
 
     @T.prim_func
@@ -863,7 +874,7 @@ def test_invariant_serial_loop_scope():
                 for i in T.Parallel(128):
                     B[k, i] = k // d + k % d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     out = torch.empty((19, 128), dtype=torch.int32, device="cuda")
     for d in [1, 7, 23]:
         kernel(out, d)
@@ -897,8 +908,7 @@ def test_invariant_preserves_index_intermediate_widening():
             torch.testing.assert_close(b, a[indices])
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_launch_extent_bounds_do_not_narrow_wide_indices():
+def test_invariant_launch_extent_bounds_do_not_narrow_wide_indices(target):
     n = T.dynamic("n")
 
     @T.prim_func
@@ -911,7 +921,7 @@ def test_invariant_launch_extent_bounds_do_not_narrow_wide_indices():
                     Q[i] = x // d
                     R[i] = x % d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     q = torch.empty(129, dtype=torch.int64, device="cuda")
     r = torch.empty_like(q)
     for base in [0, 2**31, 2**48, -(2**48)]:
@@ -922,8 +932,7 @@ def test_invariant_launch_extent_bounds_do_not_narrow_wide_indices():
             torch.testing.assert_close(r, x % d)
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_positive_addition_can_wrap():
+def test_invariant_positive_addition_can_wrap(target):
     @T.prim_func
     def main(Q: T.Tensor((128,), "int64"), R: T.Tensor((128,), "int64"), base: T.int32, d: T.int32):
         with T.Kernel(1, threads=128):
@@ -933,7 +942,7 @@ def test_invariant_positive_addition_can_wrap():
                 Q[i] = x // d
                 R[i] = x % d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     q = torch.empty(128, dtype=torch.int64, device="cuda")
     r = torch.empty_like(q)
     base = 2**31 - 64
@@ -1097,8 +1106,7 @@ def test_host_clz_cuda_graph_capture(dtype):
         torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@tilelang.testing.requires_cuda
-def test_invariant_swizzle_signed_wrap():
+def test_invariant_swizzle_signed_wrap(target):
     @T.prim_func
     def main(B: T.Tensor((128,), "int32"), base: T.int32, modulus: T.int32, d: T.int32):
         with T.Kernel(1, threads=128):
@@ -1111,7 +1119,7 @@ def test_invariant_swizzle_signed_wrap():
                     else:
                         B[i] = u // d + 1
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     out = torch.empty(128, dtype=torch.int32, device="cuda")
     for base in (-(2**31), -127, 0, 2**31 - 64):
         x = (base + torch.arange(128, dtype=torch.int64, device="cuda")).to(torch.int32).to(torch.int64)
@@ -1124,10 +1132,9 @@ def test_invariant_swizzle_signed_wrap():
                 torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
 @pytest.mark.parametrize("form", ["sum", "offset"])
-def test_invariant_symbolic_remainder(dtype, form):
+def test_invariant_symbolic_remainder(dtype, form, target):
     @T.prim_func
     def main(B: T.Tensor((128,), dtype), d: T.dtype(dtype)):
         with T.Kernel(1, threads=128):
@@ -1138,7 +1145,7 @@ def test_invariant_symbolic_remainder(dtype, form):
                 y = (T.cast(i, dtype) * 7) % d if form == "sum" else d - 1
                 B[i] = (x + y) % d
 
-    kernel = _compile_invariant(main)
+    kernel = _compile_invariant(main, target)
     out = torch.empty(128, dtype=getattr(torch, dtype), device="cuda")
     x = torch.arange(128, dtype=torch.int64, device="cuda")
     for d in [1, 2, 3, 7, 31, 127, 128, 1024]:
