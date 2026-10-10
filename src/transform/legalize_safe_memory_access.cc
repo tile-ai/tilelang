@@ -42,6 +42,34 @@ bool AccessMaskMayUse(const PrimExpr &expr, int required_mask) {
   return (GetConstAccessMask(expr) & required_mask) != 0;
 }
 
+// Integer division and modulo are total only when a compile-time divisor is
+// strictly positive.  In particular, a negative divisor can still expose the
+// signed-minimum / -1 overflow case, while a zero or runtime divisor may
+// trap.  Keep this predicate deliberately narrow because it controls whether
+// a short-circuiting safety guard may be flattened into one conjunction.
+bool IsPositiveConst(const PrimExpr &expr) {
+  const auto *imm = expr.as<IntImmNode>();
+  return imm != nullptr && imm->value > 0;
+}
+
+// Return the divisor of an integer division or modulo node. Other nodes return
+// an undefined expression so callers can handle all four operations uniformly.
+PrimExpr GetIntegerDivisor(const ObjectRef &node) {
+  if (const auto *op = node.as<DivNode>()) {
+    return op->b;
+  }
+  if (const auto *op = node.as<ModNode>()) {
+    return op->b;
+  }
+  if (const auto *op = node.as<FloorDivNode>()) {
+    return op->b;
+  }
+  if (const auto *op = node.as<FloorModNode>()) {
+    return op->b;
+  }
+  return PrimExpr();
+}
+
 // Extract a scalar lane from vector expressions used in bounds predicates.
 // This intentionally expands Ramp/Broadcast/Shuffle by structure instead of
 // using Shuffle::ExtractElement, because the arithmetic prover handles the
@@ -641,12 +669,19 @@ private:
         return false;
       }
 
+      // Positive constant divisors make Div, Mod, FloorDiv, and FloorMod
+      // total. Zero or symbolic divisors may trap, while negative divisors
+      // (especially -1) can overflow for the signed minimum value, so only
+      // positive constant divisors are safe to flatten.
       bool is_total = true;
       PostOrderVisit(condition, [&](const ObjectRef &node) {
         if (node.as<CallNode>() || node.as<BufferLoadNode>() ||
-            node.as<ProducerLoadNode>() || node.as<DivNode>() ||
-            node.as<ModNode>() || node.as<FloorDivNode>() ||
-            node.as<FloorModNode>()) {
+            node.as<ProducerLoadNode>()) {
+          is_total = false;
+          return;
+        }
+        PrimExpr divisor = GetIntegerDivisor(node);
+        if (divisor.defined() && !IsPositiveConst(divisor)) {
           is_total = false;
         }
       });
@@ -687,7 +722,12 @@ private:
           << condition.dtype() << ": " << condition;
     }
     PrimExpr combined = CombineConditionsFrom(conditions, 0);
-    ICHECK(combined.defined());
+    // All conditions may already be proven true.  In that case the recursive
+    // combiner uses an undefined expression as its empty-result sentinel; the
+    // flattened guard is simply the boolean constant true.
+    if (!combined.defined()) {
+      return IntImm(DataType::Bool(), 1);
+    }
     return analyzer_->Simplify(combined);
   }
 
