@@ -9,6 +9,7 @@ import re
 import subprocess
 import warnings
 import contextlib
+from functools import cache
 from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 import shutil
 import tempfile
@@ -681,3 +682,13 @@ def have_mbarrier(target):
 def get_nvcc_compiler() -> str:
     """Get the path to the nvcc compiler"""
     return os.path.join(find_cuda_path(), "bin", "nvcc")
+
+
+@cache
+def get_nvcc_version() -> tuple[int, ...]:
+    """Return the selected NVCC's full version, cached for this process."""
+    output = subprocess.check_output([get_nvcc_compiler(), "--version"], stderr=subprocess.STDOUT, text=True)
+    match = re.search(r"\bV(\d+\.\d+\.\d+)\b", output)
+    if match is None:
+        raise RuntimeError(f"Cannot determine NVCC version from: {output}")
+    return tuple(int(part) for part in match.group(1).split("."))
