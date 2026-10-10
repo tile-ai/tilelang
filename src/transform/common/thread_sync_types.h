@@ -4,18 +4,28 @@
 #ifndef TVM_TL_THREAD_BOUND_KEY_H_
 #define TVM_TL_THREAD_BOUND_KEY_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
+#include <tvm/ffi/extra/structural_hash.h>
+#include <tvm/tirx/analysis.h>
 
 namespace tvm {
 namespace tl {
 
 struct ThreadBoundKey {
   int64_t tx_min, tx_max, ty_min, ty_max, tz_min, tz_max;
+  size_t thread_count;
+  std::optional<PrimExpr> scope_predicate;
   bool operator==(const ThreadBoundKey &other) const {
     return tx_min == other.tx_min && tx_max == other.tx_max &&
            ty_min == other.ty_min && ty_max == other.ty_max &&
-           tz_min == other.tz_min && tz_max == other.tz_max;
+           tz_min == other.tz_min && tz_max == other.tz_max &&
+           thread_count == other.thread_count &&
+           scope_predicate.has_value() == other.scope_predicate.has_value() &&
+           (!scope_predicate ||
+            tirx::ExprDeepEqual()(*scope_predicate, *other.scope_predicate));
   }
 };
 
@@ -43,6 +53,11 @@ template <> struct hash<tvm::tl::ThreadBoundKey> {
     h = h * 31 + std::hash<int64_t>()(k.ty_max);
     h = h * 31 + std::hash<int64_t>()(k.tz_min);
     h = h * 31 + std::hash<int64_t>()(k.tz_max);
+    h = h * 31 + std::hash<int64_t>()(k.thread_count);
+    h = h * 31 + std::hash<bool>()(k.scope_predicate.has_value());
+    if (k.scope_predicate) {
+      h = h * 31 + tvm::ffi::StructuralHash()(*k.scope_predicate);
+    }
     return h;
   }
 };
