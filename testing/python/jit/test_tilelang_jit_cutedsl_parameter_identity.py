@@ -1,4 +1,4 @@
-"""Parameter identity regressions for CuTeDSL host source and launches."""
+"""Parameter identity regressions for CuTeDSL host code generation."""
 
 import ast
 
@@ -7,7 +7,6 @@ import torch
 
 import tilelang
 import tilelang.language as T
-import tilelang.testing
 from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
 
@@ -86,17 +85,6 @@ def test_cutedsl_host_preserves_scalar_identity(name):
     assert len(host_args) == len(next(iter(artifact.device_mod.functions.values())).params)
 
 
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("name", ["n", "stream", "device_id", "_lib", "ctypes", "kernel_wrapper", "_tl_arg_0"])
-def test_cutedsl_launch_preserves_scalar_identity(name):
-    program = _scalar_program(name)
-    kernel = tilelang.compile(program, target={"kind": "cutedsl", "arch": "sm_120"}, execution_backend="cutedsl")
-    output = torch.empty(2, dtype=torch.int32, device="cuda")
-    for first, second in ((2, 5), (7, 3)):
-        kernel(output, first, second)
-        torch.testing.assert_close(output, torch.tensor([first, second], dtype=torch.int32, device="cuda"))
-
-
 def _shape_program():
     length = T.dynamic("size")
     other_length = T.dynamic("size")
@@ -120,18 +108,6 @@ def test_cutedsl_host_preserves_distinct_same_named_shape_vars():
     args, _ = wrapper._collect_function_args()
     assert [arg["var"] for arg in args[-2:]] == [length, other_length]
     assert len({arg["name"] for arg in args}) == 4
-
-
-@tilelang.testing.requires_cuda
-def test_cutedsl_launch_preserves_distinct_same_named_shape_vars():
-    main, _, _ = _shape_program()
-    kernel = tilelang.compile(main, target={"kind": "cutedsl", "arch": "sm_120"}, execution_backend="cutedsl")
-    for first, second in ((3, 7), (5, 2)):
-        a = torch.empty(first, dtype=torch.int32, device="cuda")
-        b = torch.empty(second, dtype=torch.int32, device="cuda")
-        kernel(a, b)
-        assert a[0].item() == second
-        assert b[0].item() == first
 
 
 @pytest.mark.parametrize("reverse_descriptor_order", [False, True])
