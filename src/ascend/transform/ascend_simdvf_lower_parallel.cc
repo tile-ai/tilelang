@@ -720,7 +720,7 @@ private:
         acc = next_acc;
       }
 
-      PrimExpr dst_off = rep * i32(vreg_size_);
+      PrimExpr dst_off = rep;
       if (!clear) {
         Var old = MakeReg(dtype);
         Var merged = MakeReg(dtype);
@@ -734,7 +734,7 @@ private:
       }
       row.push_back(Evaluate(Call(DataType::Void(), simd_vsts(),
                                   {addr1d(dst, dst_off, /*rw_mask=*/2), acc,
-                                   mask_var_, StringImm("NORM_B32")})));
+                                   mask_var_, StringImm("ONEPT_B32")})));
 
       Stmt row_body =
           MakeSeq({tirx::Bind(mask_var_, mask_value), MakeSeq(row)});
