@@ -115,6 +115,7 @@ def pythonic_expr(
     floor_div_op: str = "/",
     func_name_map: dict[str, str] | None = None,
     expression_style: Literal["legacy", "python", "cxx"] = "legacy",
+    var_name_map: dict[tvm.tirx.Var, str] | None = None,
 ) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
@@ -131,6 +132,7 @@ def pythonic_expr(
                        {"max": "std::max"} when generating C++.
         expression_style: Controls conditional and logical operator spelling.
                           ``legacy`` preserves the historical output.
+        var_name_map: Optional identity-based names for variables in generated wrappers.
     Returns:
         A string representation of the expression.
     """
@@ -195,7 +197,10 @@ def pythonic_expr(
             return
 
         if isinstance(node, tvm.tirx.Var):
-            s, p = node.name, ATOMIC_PRECEDENCE
+            s, p = (
+                (var_name_map.get(node, node.name) if var_name_map is not None else node.name),
+                ATOMIC_PRECEDENCE,
+            )
         elif isinstance(node, (tvm.tirx.IntImm, tvm.tirx.FloatImm)):
             s, p = str(node.value), ATOMIC_PRECEDENCE
         elif isinstance(node, tvm.tirx.Cast):
