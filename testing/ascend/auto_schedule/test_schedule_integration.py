@@ -70,13 +70,13 @@ def _make_epilogue_program(sids: int):
     def main(
         A: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
         B: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
-        C: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
+        C: T.Tensor((STEPS, TILE, TILE), "float32"),
     ):
         with T.MixedKernel(1, sids=sids):
             a_l1 = T.alloc_l1((TILE, TILE), "bfloat16")
             b_l1 = T.alloc_l1((TILE, TILE), "bfloat16")
             accum = T.alloc_l0c((TILE, TILE), "float32")
-            output = T.alloc_shared((TILE, TILE), "bfloat16")
+            output = T.alloc_shared((TILE // sids, TILE), "float32")
             T.annotate_buffer_versions({output: 2})
 
             for step in T.Pipelined(STEPS, num_stages=2):
@@ -90,8 +90,14 @@ def _make_epilogue_program(sids: int):
                     clear_accum=True,
                     unit_flag_ctrl=3,
                 )
-                T.copy(accum, output, unit_flag_ctrl=3)
-                T.copy(output, C[step, :, :])
+                if sids == 1:
+                    T.copy(accum, output, unit_flag_ctrl=3)
+                    T.copy(output, C[step, :, :])
+                else:
+                    # Each AIV owns half of the output; launch-count coverage
+                    # must not depend on synchronizing overlapping GM stores.
+                    T.dual_copy(accum, output, unit_flag_ctrl=3)
+                    T.dual_copy(output, C[step, :, :])
 
     return main
 
@@ -147,6 +153,198 @@ def test_counter_slot_is_compatible_with_l1_layout_lowering():
     assert artifact.kernel_source and artifact.device_mod
 
 
+def _make_subcore_gemm(pattern, steps, unit_flag=0):
+    @T.prim_func
+    def main(
+        A: T.Tensor((steps, 32, 32), "bfloat16"),
+        B: T.Tensor((32, 32), "bfloat16"),
+        C: T.Tensor((steps, 32, 32), "float32"),
+    ):
+        with T.MixedKernel(1) as (_, sid):
+            a_l1 = T.alloc_l1((32, 32), "bfloat16")
+            b_l1 = T.alloc_l1((32, 32), "bfloat16")
+            accum = T.alloc_l0c((32, 32), "float32")
+            dq = T.alloc_shared((32, 32), "bfloat16")
+            half = T.alloc_shared((16, 32), "bfloat16")
+            epi = T.alloc_shared((32, 32), "float32")
+            T.annotate_buffer_versions({epi: (2, "counter")})
+            T.copy(B, b_l1)
+            for i in T.Pipelined(steps, num_stages=2):
+                if pattern == "epilogue":
+                    T.copy(A[i, :, :], a_l1)
+                elif pattern == "halves":
+                    T.copy(A[i, sid * 16 : (sid + 1) * 16, :], half)
+                    with T.SimdVF():
+                        value = T.simd.vld(half[0, 0])
+                        T.simd.vsts(half[0, 0], value)
+                    T.copy(half, a_l1[sid * 16 : (sid + 1) * 16, :])
+                elif pattern == "fixed":
+                    if sid == 0:
+                        T.copy(A[i, :, :], dq)
+                        with T.SimdVF():
+                            value = T.simd.vld(dq[0, 0])
+                            T.simd.vsts(dq[0, 0], value)
+                        T.copy(dq, a_l1)
+                else:
+                    if sid == i % 2:
+                        T.copy(A[i, :, :], dq)
+                        with T.SimdVF():
+                            value = T.simd.vld(dq[0, 0])
+                            T.simd.vsts(dq[0, 0], value)
+                        T.copy(dq, a_l1)
+                T.gemm(a_l1, b_l1, accum, transpose_B=True, clear_accum=True, unit_flag_ctrl=unit_flag)
+                if pattern == "fixed":
+                    if sid == 1:
+                        T.copy(accum, epi, unit_flag_ctrl=unit_flag)
+                        with T.SimdVF():
+                            value = T.simd.vld(epi[0, 0])
+                            T.simd.vsts(epi[0, 0], value)
+                        T.copy(epi, C[i, :, :])
+                else:
+                    if sid == (i + 1) % 2:
+                        T.copy(accum, epi, unit_flag_ctrl=unit_flag)
+                        with T.SimdVF():
+                            value = T.simd.vld(epi[0, 0])
+                            T.simd.vsts(epi[0, 0], value)
+                        T.copy(epi, C[i, :, :])
+
+    return main
+
+
+@pytest.mark.parametrize("pattern", ["epilogue", "fixed", "halves", "switch"])
+def test_subcore_roles_survive_complete_lowering(pattern):
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name in ("tl.ResolveCore", "tl.MaterializeMultiBuffer"):
+                snapshots[info.name] = mod
+
+    with tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(_make_subcore_gemm(pattern, 5), target="ascend")
+    assert artifact.kernel_source and artifact.device_mod
+    resolved = snapshots["tl.ResolveCore"]
+    copies = [
+        task for task in nodes(resolved, tirx.AttrStmt) if task.attr_key == "tl.ascend_task" and calls(task.body, "tl.tileop.ascend_copy")
+    ]
+    assert {1, 2, 4} <= {int(task.node["core_mask"]) for task in copies}
+    buffers = [
+        buffer
+        for block in nodes(snapshots["tl.MaterializeMultiBuffer"], tirx.SBlock)
+        for buffer in block.alloc_buffers
+        if buffer.name.startswith("epi_aiv") and buffer.scope() == "shared.dyn"
+    ]
+    assert len(buffers) == (1 if pattern == "fixed" else 2)
+    assert all(tuple(int(dim) for dim in buffer.shape) == (2, 32, 32) for buffer in buffers)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "pattern, steps, unit_flag",
+    [
+        ("epilogue", 1, 0),
+        ("epilogue", 5, 0),
+        ("fixed", 5, 0),
+        ("halves", 5, 0),
+        ("switch", 5, 0),
+        ("epilogue", 5, 3),
+        ("fixed", 5, 3),
+    ],
+)
+def test_subcore_gemm_results(pattern, steps, unit_flag):
+    import torch
+
+    torch.manual_seed(23)
+    a = torch.randn(steps, 32, 32, dtype=torch.bfloat16).npu()
+    b = torch.randn(32, 32, dtype=torch.bfloat16).npu()
+    output = tilelang.compile(_make_subcore_gemm(pattern, steps, unit_flag), target="ascend", out_idx=-1)(a, b)
+    torch.testing.assert_close(output.cpu(), a.cpu().float() @ b.cpu().float().T, rtol=0.01, atol=0.02)
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("rows, dual", [(16, True), (32, True), (16, False)])
+def test_subcore_fixpipe_preserves_unit_flag_lifetime(rows, dual):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((rows, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((2, rows, 32), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((rows, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            accum = T.alloc_l0c((rows, 32), "float32")
+            ub = T.alloc_shared((rows // 2 if dual else rows, 32), "float32")
+            T.copy(A, a)
+            T.copy(B, b)
+            T.gemm(a, b, accum, transpose_B=True, clear_accum=True, unit_flag_ctrl=3)
+            if dual:
+                T.dual_copy(accum, ub, unit_flag_ctrl=3)
+                with T.SimdVF():
+                    value = T.simd.vld(ub[0, 0])
+                    T.simd.vsts(ub[0, 0], value)
+                T.copy(ub, C[0, sid * (rows // 2) : (sid + 1) * (rows // 2), :])
+            else:
+                T.copy(accum, ub, unit_flag_ctrl=3)
+                T.copy(ub, C[sid, :, :])
+
+    torch.manual_seed(37)
+    a = torch.randn(rows, 32, dtype=torch.bfloat16).npu()
+    b = torch.randn(32, 32, dtype=torch.bfloat16).npu()
+    output = tilelang.compile(main, target="ascend", out_idx=-1)(a, b).cpu()
+    expected = a.cpu().float() @ b.cpu().float().T
+    torch.testing.assert_close(output[0], expected, rtol=0.01, atol=0.02)
+    if not dual:
+        torch.testing.assert_close(output[1], expected, rtol=0.01, atol=0.02)
+
+
+@tilelang.testing.requires_ascend
+def test_subcore_loops_can_have_different_extents():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 3, 64), "float32"), C: T.Tensor((2, 3, 64), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            ub = T.alloc_shared((64,), "float32")
+            T.annotate_buffer_versions({ub: (2, "counter")})
+            for i in T.Pipelined(sid + 2, num_stages=2):
+                T.copy(A[sid, i, :], ub)
+                T.copy(ub, C[sid, i, :])
+
+    a = torch.randn(2, 3, 64).npu()
+    output = tilelang.compile(main, target="ascend", out_idx=-1)(a).cpu()
+    torch.testing.assert_close(output[0, :2], a.cpu()[0, :2])
+    torch.testing.assert_close(output[1], a.cpu()[1])
+
+
+def test_subcore_mutable_scalar_is_replicated_with_its_guard():
+    from testing.ascend._ir import schedule
+
+    @T.prim_func
+    def main(C: T.Tensor((5, 16, 16), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            accum = T.alloc_l0c((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            progress = T.alloc_var("int32", init=0)
+            for i in T.serial(5):
+                if sid == i % 2 and progress < sid + 2:
+                    T.copy(accum, ub)
+                    T.copy(ub, C[i, :, :])
+                    progress += 1
+
+    resolved = schedule(main, through="ResolveCore", auto_schedule=False)
+    progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
+    assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)
+    masks = {
+        int(task.node["core_mask"])
+        for task in nodes(resolved, tirx.AttrStmt)
+        if task.attr_key == "tl.ascend_task"
+        and any(store.buffer.same_as(buffer) for store in nodes(task.body, tirx.BufferStore) for buffer in progress)
+    }
+    # C's shared storage epoch is the union of the two guards. Both scalar
+    # states can be recomputed on all three cores, independently of UB data.
+    assert masks == {7}
+
+
 @pytest.mark.parametrize("sids", [1, 2])
 def test_mixed_kernel_uses_requested_vector_count(sids):
     snapshots = {}
@@ -154,13 +352,35 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
     @tvm.ir.instrument.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
-            if info.name == "tl.LowerScheduledTIR":
+            if info.name in ("tl.AssignCore", "tl.InsertSync", "tl.LowerScheduledTIR"):
                 snapshots[info.name] = mod
 
     with tvm.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(_make_epilogue_program(sids), target="ascend")
+    vector_mask = 1 if sids == 1 else 5
+    assigned = [task for task in nodes(snapshots["tl.AssignCore"], tirx.AttrStmt) if task.attr_key == "tl.ascend_task"]
+    masks = {int(task.node["core_mask"]) for task in assigned}
+    assert vector_mask in masks
+    assert all(mask & (2 | vector_mask) == mask for mask in masks)
+
+    # AIC flags address exactly the participating AIV banks. The uniform AIV
+    # body and its synchronization stay shared when both subcores participate.
+    cube_banks = set()
+    analyzer = tvm.arith.Analyzer()
+    for task in nodes(snapshots["tl.InsertSync"], tirx.AttrStmt):
+        if task.attr_key != "tl.ascend_task":
+            continue
+        for operation in ("set", "wait"):
+            for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
+                if int(task.node["core_mask"]) == 2:
+                    bound = analyzer.const_int_bound(call.args[2])
+                    assert bound.min_value // 16 == bound.max_value // 16
+                    cube_banks.add(bound.min_value // 16)
+                else:
+                    assert int(task.node["core_mask"]) == vector_mask
+    assert cube_banks == set(range(sids))
     vectors = [block for block in nodes(snapshots["tl.LowerScheduledTIR"], tirx.SBlock) if block.name_hint == "VECTOR"]
-    assert vectors and all(int(block.annotations["vector_count"]) == sids for block in vectors)
+    assert len(vectors) == 1 and int(vectors[0].annotations["vector_count"]) == sids
     assert "asc_sync_intra_arrive(" in artifact.kernel_source
     assert "asc_sync_intra_wait(" in artifact.kernel_source
     if sids == 1:

@@ -49,12 +49,20 @@ using namespace ascend;
 namespace {
 
 const char *CoreMaskName(CoreMask core_mask) {
+  if (core_mask == kCoreVector0)
+    return "Vector0";
+  if (core_mask == kCoreVector1)
+    return "Vector1";
   if (core_mask == kCoreVector)
-    return "Vector";
+    return "Vector0 and Vector1";
+  if (core_mask == (kCoreCube | kCoreVector1))
+    return "Vector1 and Cube";
+  if (core_mask == kCoreAll)
+    return "Vector0, Vector1 and Cube";
   if (core_mask == kCoreCube)
     return "Cube";
-  if (core_mask == kCoreBroadcast)
-    return "Vector and Cube";
+  if (core_mask == (kCoreCube | kCoreVector0))
+    return "Vector0 and Cube";
   return "no core";
 }
 
@@ -67,8 +75,10 @@ public:
   static void Resolve(const std::vector<std::shared_ptr<IRStructure>> &root,
                       const std::vector<TaskNode *> &all_tasks,
                       const MultiBufferPlan &plan,
-                      const ffi::Optional<Var> &outer_sid) {
-    CoreMaskResolver resolver(root, all_tasks, plan, outer_sid);
+                      const ffi::Optional<Var> &outer_sid,
+                      int num_aiv_subcores) {
+    CoreMaskResolver resolver(root, all_tasks, plan, outer_sid,
+                              num_aiv_subcores);
     resolver.Run();
   }
 
@@ -94,9 +104,10 @@ private:
   CoreMaskResolver(const std::vector<std::shared_ptr<IRStructure>> &root,
                    const std::vector<TaskNode *> &all_tasks,
                    const MultiBufferPlan &plan,
-                   const ffi::Optional<Var> &outer_sid)
+                   const ffi::Optional<Var> &outer_sid, int num_aiv_subcores)
       : root_(root), all_tasks_(all_tasks), plan_(plan),
-        epoch_domains_(root, plan), availability_(all_tasks) {
+        epoch_domains_(root, plan), availability_(all_tasks),
+        active_core_mask_(kCoreCube | VectorCoreMask(num_aiv_subcores)) {
     if (outer_sid.has_value())
       availability_.SetExternalVarCoreMask(outer_sid.value(), kCoreVector);
     RegisterStorageEpochGuards();
@@ -105,7 +116,7 @@ private:
       CoreMask candidate = task->GetCoreMask();
       candidate_masks_[task] = candidate;
       execution_masks_[task] =
-          IsConcreteCore(candidate) ? candidate : kCoreUnassigned;
+          IsCoreLocalMask(candidate) ? candidate : kCoreUnassigned;
     }
   }
 
@@ -131,7 +142,7 @@ private:
     CoreMask candidate = task->GetCoreMask();
     ICHECK_NE(candidate, kCoreUnassigned)
         << "ResolveCore requires AssignCore to run first";
-    candidate &= availability_.GetTaskInputCoreMask(task);
+    candidate &= active_core_mask_ & availability_.GetTaskInputCoreMask(task);
     if (candidate == kCoreUnassigned) {
       LOG(FATAL) << "Cannot resolve core placement because a task's scalar "
                     "or control expression is unavailable on every legal "
@@ -233,8 +244,15 @@ private:
     if (it == task_epoch_guards_.end())
       return false;
     bool changed = false;
-    for (size_t guard_index : it->second)
+    for (size_t guard_index : it->second) {
+      ICHECK_EQ(
+          availability_.GetAccessCoreMask(epoch_guards_[guard_index].accesses) &
+              mask,
+          mask)
+          << "Cannot evaluate storage-epoch guard on " << CoreMaskName(mask)
+          << ": " << epoch_guards_[guard_index].expression;
       changed |= AddReadDemand(epoch_guards_[guard_index].accesses, mask);
+    }
     return changed;
   }
 
@@ -363,7 +381,8 @@ private:
 
     for (int bit_index = 0; bit_index < kSpecialRegisterBits; ++bit_index) {
       for (TaskNode *writer : scope.writers[bit_index])
-        special_writer_demand_[writer] |= scope.readers[bit_index];
+        special_writer_demand_[writer] |=
+            scope.readers[bit_index] & candidate_masks_.at(writer);
     }
     return scope;
   }
@@ -478,7 +497,8 @@ private:
       special_writer_demand_.clear();
       CollectSpecialRegisterDemand(root_);
       for (const auto &node : root_)
-        changed |= SeedTreeReadDemand(node.get(), kCoreBroadcast);
+        changed |=
+            SeedTreeReadDemand(node.get(), GetSubtreeExecutionMask(node.get()));
       for (TaskNode *task : all_tasks_)
         changed |= RequireExecution(task, GetWriteDemand(task));
     }
@@ -490,17 +510,19 @@ private:
       if (HasCore(GetExecutionMask(task), kCoreCube))
         has_cube_core = true;
     }
-    CoreMask preferred_core = has_cube_core ? kCoreCube : kCoreVector;
     for (TaskNode *task : all_tasks_) {
       if (GetExecutionMask(task) != kCoreUnassigned)
         continue;
       CoreMask available = candidate_masks_.at(task);
       ICHECK_NE(available, kCoreUnassigned)
           << "ResolveCore stored an empty candidate mask";
-      CoreMask fallback =
-          HasCore(available, preferred_core)
-              ? preferred_core
-              : (HasCore(available, kCoreVector) ? kCoreVector : kCoreCube);
+      CoreMask fallback = available & kCoreVector;
+      if ((has_cube_core && HasCore(available, kCoreCube)) ||
+          fallback == kCoreUnassigned)
+        fallback = kCoreCube;
+      if (auto sid = GetTaskSubcore(task->stmt);
+          sid && HasCore(available, VectorCore(*sid)))
+        fallback = VectorCore(*sid);
       RequireExecution(task, fallback);
     }
   }
@@ -510,6 +532,7 @@ private:
   const MultiBufferPlan &plan_;
   EpochDomainRegistry epoch_domains_;
   CoreMaskAvailability availability_;
+  CoreMask active_core_mask_;
   std::unordered_map<const TaskNode *, CoreMask> candidate_masks_;
   std::unordered_map<const TaskNode *, CoreMask> execution_masks_;
   std::vector<PreparedEpochGuard> epoch_guards_;
@@ -524,13 +547,13 @@ private:
 void ResolveCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
                       const BufferVersionMap &buffer_versions,
                       const ffi::Optional<Var> &outer_sid,
-                      const L0StorageGroups &groups) {
+                      const L0StorageGroups &groups, int num_aiv_subcores) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
   // PrepareMultiBuffer persists the chosen counters and active guards on owner
   // loops; reconstruct exactly that plan instead of recomputing it here.
   MultiBufferPlan plan = ReadMultiBufferPlan(root, buffer_versions, groups);
-  CoreMaskResolver::Resolve(root, all_tasks, plan, outer_sid);
+  CoreMaskResolver::Resolve(root, all_tasks, plan, outer_sid, num_aiv_subcores);
 }
 
 } // namespace
@@ -547,7 +570,8 @@ tvm::transform::Pass ResolveCore() {
           ResolveCoreMasks(scheduled_tir.tree,
                            scheduled_tir.metadata.buffer_versions,
                            context.outer_sid,
-                           L0StorageGroups(CollectL0SFBindings(context.root)));
+                           L0StorageGroups(CollectL0SFBindings(context.root)),
+                           scheduled_tir.metadata.num_aiv_subcores.value_or(2));
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });
   };

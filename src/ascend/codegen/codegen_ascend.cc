@@ -555,6 +555,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 
   // Pre-scan body to determine kernel mode (Mix / Vector / Cube)
   bool has_cube = false, has_vector = false;
+  bool has_vector_subcores = false;
   bool has_nd2nz_post_copy = false;
   bool has_cooperative_groups = false;
   int vector_count = 2;
@@ -565,6 +566,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       else if (block->name_hint == "VECTOR") {
         has_vector = true;
         if (auto opt = block->annotations.Get("vector_count")) {
+          has_vector_subcores = true;
           const auto *count = opt.value().as<IntImmNode>();
           ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
               << "Mixed-kernel vector_count must be the constant integer 1 or "
@@ -634,7 +636,9 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
     has_cooperative_groups_included_ = true;
   }
 
-  if (has_cube && has_vector) {
+  if (has_vector && (has_cube || has_vector_subcores)) {
+    // An explicit subcore group needs the 1C2V launch geometry even when
+    // its Cube stream is empty. A pure Vector launch exposes only sid 0.
     kernel_mode_ = AscendKernelMode::kMix;
     mix_aiv_count_ = vector_count;
   } else if (has_cube) {

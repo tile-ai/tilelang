@@ -28,3 +28,28 @@ def test_packer_respects_complete_allocation_conflicts(disable_reuse):
             assert offsets[left] + left_size <= offsets[right] or offsets[right] + right_size <= offsets[left]
     else:
         assert any(offsets[0] < offsets[index] + 32 and offsets[index] < offsets[0] + 64 for index in (1, 2))
+
+
+@pytest.mark.parametrize("disable_reuse", [False, True])
+def test_subcore_ub_allocations_have_independent_address_spaces(disable_reuse):
+    common, dq, epi = [
+        tirx.decl_buffer((size,), "int32", name=name, scope="shared.dyn") for name, size in [("common", 32), ("dq", 128), ("epi", 64)]
+    ]
+    buffers = (common, dq, epi)
+    body = tirx.SeqStmt(
+        [
+            *[tirx.AllocBuffer(buffer) for buffer in buffers],
+            *[tirx.BufferStore(buffer, index, [0]) for index, buffer in enumerate(buffers)],
+        ]
+    )
+    body = tirx.AttrStmt({buffer.data: [] for buffer in buffers}, "tl.buffer_alias_map", 1, body)
+    body = tirx.AttrStmt({dq.data: 0, epi.data: 1}, "tl.aiv_storage_map", 1, body)
+    thread = tirx.IterVar(tvm.ir.Range(0, 1), tirx.Var("block", "int32"), tirx.IterVar.ThreadIndex, "blockIdx.x")
+    body = tirx.AttrStmt(thread, "thread_extent", 1, body)
+    after = transform.MergeUBAllocations(disable_reuse=disable_reuse)(tvm.IRModule({"main": tirx.PrimFunc([], body)}))
+    offsets = {int(store.value): int(tvm.arith.Analyzer().simplify(store.indices[0])) for store in nodes(after, tirx.BufferStore)}
+    assert offsets == {0: 0, 1: 32, 2: 32}
+    (allocation,) = nodes(after, tirx.AllocBuffer)
+    assert (
+        int(tvm.arith.Analyzer().simplify(allocation.buffer.shape[0])) * tvm.DataType(allocation.buffer.dtype).bits // 8 == (32 + 128) * 4
+    )

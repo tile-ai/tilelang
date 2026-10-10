@@ -95,7 +95,7 @@ struct SyncInsertionSite {
         domain_id(domain.id) {
     ICHECK(path_begin != nullptr);
     ICHECK(task != nullptr);
-    ICHECK(IsConcreteCore(core));
+    ICHECK(IsCoreLocalMask(core));
     ICHECK_GT(domain_id, 0);
     if (domain.IsCounter()) {
       ICHECK(domain.owner != nullptr && path_begin != domain.owner &&
@@ -297,8 +297,9 @@ struct VisibleSyncPoint {
 
 class SyncSiteRegistry {
 public:
-  explicit SyncSiteRegistry(const EpochDomainRegistry &domains)
-      : domains_(domains) {}
+  SyncSiteRegistry(const EpochDomainRegistry &domains,
+                   std::vector<CoreMask> cores)
+      : domains_(domains), cores_(std::move(cores)) {}
 
   void Collect(const std::vector<IRStructure *> &nodes) {
     sites_.clear();
@@ -366,6 +367,8 @@ public:
   }
 
   const SyncInsertionSiteList &Sites() const { return sites_; }
+
+  const std::vector<CoreMask> &Cores() const { return cores_; }
 
   size_t Size() const { return sites_.size(); }
 
@@ -468,7 +471,8 @@ public:
     bool lhs_cross_core = IsCrossCore(lhs);
     bool rhs_cross_core = IsCrossCore(rhs);
     if (lhs_cross_core || rhs_cross_core)
-      return lhs_cross_core && rhs_cross_core;
+      return lhs_cross_core && rhs_cross_core &&
+             (Src(lhs).core | Dst(lhs).core) == (Src(rhs).core | Dst(rhs).core);
     return HasSameFlagKind(lhs, rhs);
   }
 
@@ -582,7 +586,7 @@ private:
       const std::vector<int> &domain_ids, SyncInsertionSiteList &sites,
       std::map<SyncInsertionSiteKey, SyncInsertionSite> &keyed_sites) const {
     for (bool at_beginning : {false, true}) {
-      for (CoreMask core : kConcreteCores) {
+      for (CoreMask core : cores_) {
         if (!HasCore(task->GetCoreMask(), core))
           continue;
         auto add = [&](int domain_id) {
@@ -605,7 +609,7 @@ private:
                            const std::vector<int> &domain_ids,
                            std::vector<size_t> &site_ids) const {
     for (bool at_beginning : {false, true}) {
-      for (CoreMask core : kConcreteCores) {
+      for (CoreMask core : cores_) {
         if (!HasCore(task->GetCoreMask(), core))
           continue;
         for (int domain_id : domain_ids) {
@@ -617,6 +621,7 @@ private:
   }
 
   const EpochDomainRegistry &domains_;
+  std::vector<CoreMask> cores_;
   SyncInsertionSiteList sites_;
   std::map<SyncInsertionSiteKey, size_t> site_ids_;
   std::vector<std::vector<size_t>> parent_site_ids_;
@@ -778,13 +783,14 @@ class SyncAnalyzer : public BufferAliasAnalysisContext {
 public:
   explicit SyncAnalyzer(const MultiBufferPlan &multi_buffer_plan,
                         const EpochDomainRegistry &domains,
+                        std::vector<CoreMask> cores,
                         BufferVersionMap manual = {},
                         ConflictHintList root_conflicts = {},
                         L0StorageGroups storage_groups = L0StorageGroups())
       : storage_groups_(std::move(storage_groups)),
         multi_buffer_plan_(multi_buffer_plan), domains_(domains),
         manual_(std::move(manual)), root_conflicts_(std::move(root_conflicts)),
-        site_registry_(domains) {
+        site_registry_(domains, std::move(cores)) {
     for (const MultiBufferInfo &info : multi_buffer_plan_.Infos()) {
       ICHECK(!info.owners.empty());
       std::vector<ControlNode *> owners;
@@ -855,7 +861,7 @@ private:
     int domain_id = domains_.DomainForStorage(storage, scope);
 
     std::vector<size_t> endpoints;
-    for (CoreMask core : kConcreteCores) {
+    for (CoreMask core : site_registry_.Cores()) {
       if (!HasCore(task->GetCoreMask(), core))
         continue;
       endpoints.push_back(site_registry_.FindSiteId(SyncInsertionSiteKey{
@@ -1267,9 +1273,9 @@ private:
       deps = std::move(directed_deps);
     }
 
-    auto expand_cores = [](CoreMask task_mask) {
+    auto expand_cores = [&](CoreMask task_mask) {
       std::vector<CoreMask> result;
-      for (CoreMask core : kConcreteCores) {
+      for (CoreMask core : site_registry_.Cores()) {
         if (HasCore(task_mask, core))
           result.push_back(core);
       }
@@ -1534,10 +1540,34 @@ private:
                           DepClosure &closure, int max_distance,
                           ControlNode *projection_scope) const {
     std::stable_sort(sync_points.begin(), sync_points.end());
+    auto between_aivs = [&](const SyncPoint &point) {
+      CoreMask src = site_registry_.Src(point).core;
+      CoreMask dst = site_registry_.Dst(point).core;
+      return src != dst && IsVectorCore(src) && IsVectorCore(dst);
+    };
+    // Existing C<->V dependencies may already order the two AIVs. Establish
+    // those paths before checking edges that would need unsupported V<->V
+    // synchronization; never use such an edge to eliminate a supported one.
+    std::stable_partition(
+        sync_points.begin(), sync_points.end(),
+        [&](const SyncPoint &point) { return !between_aivs(point); });
     std::vector<SyncPoint> emit;
     for (SyncPoint &sync_point : sync_points) {
       if (closure.Contains(sync_point.edge))
         continue;
+      if (between_aivs(sync_point)) {
+        const SyncInsertionSite &src = site_registry_.Src(sync_point);
+        const SyncInsertionSite &dst = site_registry_.Dst(sync_point);
+        LOG(FATAL)
+            << "Ascend AutoSchedule does not support synchronization between "
+               "AIV0 and AIV1: uncovered AIV"
+            << VectorSid(src.core) << "." << src.pipe << " -> AIV"
+            << VectorSid(dst.core) << "." << dst.pipe
+            << " dependency at logical distance " << sync_point.edge.distance
+            << ". Use disjoint storage regions or an actual AIC data "
+               "dependency that orders these accesses; mode-1 flags and "
+               "AIC relay synchronization are not generated.";
+      }
       if (sync_point.dependency_kind == DependencyKind::kOwnerExclusion &&
           sync_point.edge.distance != 0 && sync_point.edge.distance != 1) {
         LOG(FATAL) << "InsertSync cannot materialize an uncovered multi-buffer "
@@ -1841,12 +1871,10 @@ public:
   FlagAllocator(const SyncSiteRegistry &site_registry,
                 std::vector<SyncPoint> &sync_points,
                 const std::set<std::pair<size_t, size_t>> &reusable_pairs,
-                const CrossCoreFlagReservation &cross_core_flag_reservation,
-                int num_aiv_subcores)
+                const CrossCoreFlagReservation &cross_core_flag_reservation)
       : site_registry_(site_registry), sync_points_(sync_points),
         reusable_pairs_(reusable_pairs),
-        cross_core_flag_reservation_(cross_core_flag_reservation),
-        num_aiv_subcores_(num_aiv_subcores) {}
+        cross_core_flag_reservation_(cross_core_flag_reservation) {}
 
   void Plan() {
     allocations_.clear();
@@ -1876,15 +1904,16 @@ public:
            "integer range cannot be bounded; constrain the flag_id with a "
            "constant-range loop or disable AutoSchedule";
 
-    // All cross-core modes share the same 16 base slots. The Cube side may
-    // additionally address slot + 16 for the second Vector core.
-    std::array<bool, kCrossCoreFlagLimit> cross_core_slots{};
+    // Each AIV has 16 slots, addressed as sid * 16 + id by the Cube.
+    // Explicit flags may be collective; conservatively reserve both banks.
+    std::array<std::array<bool, kCrossCoreFlagLimit>, 2> cross_core_slots{};
     for (const auto &[lo, hi] :
          cross_core_flag_reservation_.explicit_id_ranges) {
       ICHECK_LE(lo, hi);
       uint64_t span = static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo);
       if (span >= static_cast<uint64_t>(kCrossCoreFlagLimit - 1)) {
-        cross_core_slots.fill(true);
+        for (auto &bank : cross_core_slots)
+          bank.fill(true);
         continue;
       }
       for (uint64_t offset = 0; offset <= span; ++offset) {
@@ -1892,17 +1921,20 @@ public:
         int normalized_id = static_cast<int>(explicit_id % kCrossCoreFlagLimit);
         if (normalized_id < 0)
           normalized_id += kCrossCoreFlagLimit;
-        cross_core_slots[normalized_id] = true;
+        for (auto &bank : cross_core_slots)
+          bank[normalized_id] = true;
       }
     }
 
-    int explicit_cross_core_slots =
-        std::count(cross_core_slots.begin(), cross_core_slots.end(), true);
-    auto find_cross_core_range = [&](int width) {
+    int explicit_cross_core_slots = std::count(cross_core_slots[0].begin(),
+                                               cross_core_slots[0].end(), true);
+    auto find_cross_core_range = [&](int width, int banks) {
       for (int base = 0; base + width <= kCrossCoreFlagLimit; ++base) {
         bool available = true;
-        for (int offset = 0; offset < width; ++offset)
-          available &= !cross_core_slots[base + offset];
+        for (int sid = 0; sid < 2; ++sid)
+          if (banks & (1 << sid))
+            for (int offset = 0; offset < width; ++offset)
+              available &= !cross_core_slots[sid][base + offset];
         if (available)
           return base;
       }
@@ -1940,9 +1972,11 @@ public:
         bool compatible = false;
         std::string domain = FlagDomain(sync_point);
         bool cross_core = site_registry_.IsCrossCore(sync_point);
+        int banks = cross_core ? CrossCoreBanks(sync_point) : 0;
         int limit = cross_core ? kCrossCoreFlagLimit : kIntraCoreFlagLimit;
         int cross_core_base =
-            cross_core ? find_cross_core_range(sync_point.num_versions) : -1;
+            cross_core ? find_cross_core_range(sync_point.num_versions, banks)
+                       : -1;
         bool needs_reuse =
             cross_core ? required_ids[domain] + explicit_cross_core_slots >
                                  kCrossCoreFlagLimit ||
@@ -1997,8 +2031,10 @@ public:
                  "explicit cross-core flags or safely reusable auto-scheduled "
                  "flags";
           base_id = cross_core_base;
-          for (int offset = 0; offset < sync_point.num_versions; ++offset)
-            cross_core_slots[base_id + offset] = true;
+          for (int sid = 0; sid < 2; ++sid)
+            if (banks & (1 << sid))
+              for (int offset = 0; offset < sync_point.num_versions; ++offset)
+                cross_core_slots[sid][base_id + offset] = true;
         } else {
           base_id = next_intra_core_id[domain];
         }
@@ -2080,10 +2116,21 @@ private:
     return counter_channel_size_[representative] > 1;
   }
 
+  int CrossCoreBanks(const SyncPoint &sync_point) const {
+    CoreMask src = site_registry_.Src(sync_point).core;
+    CoreMask dst = site_registry_.Dst(sync_point).core;
+    CoreMask vector = src == kCoreCube ? dst : src;
+    ICHECK((vector & kCoreVector) == vector &&
+           (src == kCoreCube || dst == kCoreCube));
+    return (HasCore(vector, kCoreVector0) ? 1 : 0) |
+           (HasCore(vector, kCoreVector1) ? 2 : 0);
+  }
+
   std::string FlagDomain(const SyncPoint &sync_point) const {
     if (site_registry_.IsCrossCore(sync_point))
-      return "Cube-Vector";
-    return GetHardEvent(site_registry_.Src(sync_point).pipe,
+      return "Cube-Vector-" + std::to_string(CrossCoreBanks(sync_point));
+    return std::to_string(site_registry_.Src(sync_point).core) + ":" +
+           GetHardEvent(site_registry_.Src(sync_point).pipe,
                         site_registry_.Dst(sync_point).pipe);
   }
 
@@ -2105,12 +2152,14 @@ private:
       return;
     }
 
-    if (src.core == kCoreVector) {
+    if (src.core != kCoreCube) {
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(FlagInfo{kCoreVector, Integer(base_id + version),
-                                       producer_pipe, 1});
+        flag_infos_.push_back(
+            FlagInfo{src.core, Integer(base_id + version), producer_pipe, 1});
       }
-      for (int sid = 0; sid < num_aiv_subcores_; ++sid) {
+      for (int sid = 0; sid < 2; ++sid) {
+        if (!HasCore(src.core | dst.core, VectorCore(sid)))
+          continue;
         for (int version = 0; version < allocation.num_versions; ++version) {
           flag_infos_.push_back(FlagInfo{kCoreCube,
                                          Integer(base_id + sid * 16 + version),
@@ -2118,7 +2167,9 @@ private:
         }
       }
     } else {
-      for (int sid = 0; sid < num_aiv_subcores_; ++sid) {
+      for (int sid = 0; sid < 2; ++sid) {
+        if (!HasCore(src.core | dst.core, VectorCore(sid)))
+          continue;
         for (int version = 0; version < allocation.num_versions; ++version) {
           flag_infos_.push_back(FlagInfo{kCoreCube,
                                          Integer(base_id + sid * 16 + version),
@@ -2126,8 +2177,8 @@ private:
         }
       }
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(FlagInfo{kCoreVector, Integer(base_id + version),
-                                       consumer_pipe, 2});
+        flag_infos_.push_back(
+            FlagInfo{dst.core, Integer(base_id + version), consumer_pipe, 2});
       }
     }
   }
@@ -2139,7 +2190,6 @@ private:
   std::vector<SyncPoint> &sync_points_;
   const std::set<std::pair<size_t, size_t>> &reusable_pairs_;
   const CrossCoreFlagReservation &cross_core_flag_reservation_;
-  int num_aiv_subcores_;
   std::vector<FlagAllocation> allocations_;
   FlagInfoList flag_infos_;
   std::vector<size_t> counter_channel_representative_;
@@ -2191,7 +2241,7 @@ std::unique_ptr<IRExtraInfo> MakeSyncInsertionExtraInfo() {
 }
 
 Stmt MakeSyncTask(const Stmt &body, CoreMask core_mask) {
-  ICHECK(IsConcreteCore(core_mask));
+  ICHECK(IsCoreLocalMask(core_mask));
   TaskMetadata metadata;
   metadata.core_mask = core_mask;
   return AttrStmt(MergeTaskMetadata(metadata, IntImm(DataType::Int(32), 0)),
@@ -2214,7 +2264,7 @@ public:
                           CoreMask core_mask)
       : before_(std::move(before)), after_(std::move(after)),
         core_mask_(core_mask) {
-    ICHECK(IsConcreteCore(core_mask_));
+    ICHECK(IsCoreLocalMask(core_mask_));
   }
 
   Stmt Rewrite(Stmt body) {
@@ -2328,7 +2378,7 @@ bool ShouldElidePerCoreTaskSyncGuard(IRStructure *node, CoreMask core,
 void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
                      CoreMask core, const PrimExpr &guard = PrimExpr()) {
   ICHECK(node != nullptr);
-  ICHECK(IsConcreteCore(core));
+  ICHECK(IsCoreLocalMask(core));
   bool elide_guard = ShouldElidePerCoreTaskSyncGuard(node, core, guard);
   if (guard.defined() && !elide_guard)
     stmt = WrapWithGuard(std::move(stmt), guard);
@@ -2345,10 +2395,9 @@ class SyncMaterializer {
 public:
   SyncMaterializer(const SyncSiteRegistry &site_registry,
                    const std::vector<SyncPoint> &sync_points,
-                   const std::vector<FlagAllocation> &allocations,
-                   int num_aiv_subcores)
+                   const std::vector<FlagAllocation> &allocations)
       : site_registry_(site_registry), sync_points_(sync_points),
-        allocations_(allocations), num_aiv_subcores_(num_aiv_subcores) {}
+        allocations_(allocations) {}
 
   void Run(std::vector<std::shared_ptr<IRStructure>> &root) {
     InsertSyncPoints();
@@ -2385,12 +2434,14 @@ private:
                                           sync_point.num_versions, base_id);
 
       if (site_registry_.IsCrossCore(sync_point)) {
-        if (src.core == kCoreVector) {
+        if (src.core != kCoreCube) {
           InsertStatement(
               src.path_end,
               MakeAscendCrossCoreSetFlag(4, producer_pipe, event_id), false,
               src.core, producer_guard);
-          for (int sid = 0; sid < num_aiv_subcores_; ++sid) {
+          for (int sid = 0; sid < 2; ++sid) {
+            if (!HasCore(src.core | dst.core, VectorCore(sid)))
+              continue;
             PrimExpr wait_id =
                 MakeFlagEventId(sync_point.flag_iteration,
                                 sync_point.num_versions, base_id + 16 * sid);
@@ -2400,7 +2451,9 @@ private:
                 dst.core, consumer_guard);
           }
         } else {
-          for (int sid = 0; sid < num_aiv_subcores_; ++sid) {
+          for (int sid = 0; sid < 2; ++sid) {
+            if (!HasCore(src.core | dst.core, VectorCore(sid)))
+              continue;
             PrimExpr set_id =
                 MakeFlagEventId(sync_point.flag_iteration,
                                 sync_point.num_versions, base_id + 16 * sid);
@@ -2444,7 +2497,7 @@ private:
         auto *task = static_cast<TaskNode *>(node.get());
         if (task->IsPerCoreTask()) {
           CoreMask core_mask = task->GetCoreMask();
-          ICHECK(IsConcreteCore(core_mask))
+          ICHECK(IsCoreLocalMask(core_mask))
               << "Scheduled T.PerCoreTask must belong to one concrete core";
           migrated_core = core_mask;
           std::vector<Stmt> before =
@@ -2476,7 +2529,6 @@ private:
   const SyncSiteRegistry &site_registry_;
   const std::vector<SyncPoint> &sync_points_;
   const std::vector<FlagAllocation> &allocations_;
-  int num_aiv_subcores_;
 };
 
 // ============================================================================
@@ -2485,20 +2537,38 @@ private:
 SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
   std::vector<std::shared_ptr<IRStructure>> &root = scheduled_tir.tree;
   int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.value_or(2);
+  CoreMask vector_mask = VectorCoreMask(num_aiv_subcores);
   L0StorageGroups groups(
       CollectL0SFBindings(scheduled_tir.metadata.kernel_root));
   MultiBufferPlan multi_buffer_plan =
       ReadMultiBufferPlan(root, scheduled_tir.metadata.buffer_versions, groups);
   std::vector<TaskNode *> tasks;
   CollectAllTaskNodes(root, tasks);
+  bool split_subcores = false;
   for (TaskNode *task : tasks) {
-    ICHECK_NE(task->GetCoreMask(), kCoreUnassigned)
+    CoreMask mask = task->GetCoreMask();
+    ICHECK_NE(mask, kCoreUnassigned)
         << "InsertSync requires ResolveCore to assign every T.Task";
+    ICHECK_EQ(mask & (kCoreCube | vector_mask), mask)
+        << "Task core mask includes an AIV absent from this kernel";
+    CoreMask vectors = mask & kCoreVector;
+    split_subcores |= vectors != kCoreUnassigned && vectors != vector_mask;
+  }
+  // Uniform AIV work shares one synchronization stream and one IR body.
+  // Only kernels with subcore-specific masks need separate AIV streams.
+  std::vector<CoreMask> cores;
+  if (split_subcores) {
+    for (CoreMask core : kConcreteCores)
+      if (HasCore(kCoreCube | vector_mask, core))
+        cores.push_back(core);
+  } else {
+    cores = {vector_mask, kCoreCube};
   }
   EpochDomainRegistry domains(root, multi_buffer_plan);
-  SyncAnalyzer analyzer(
-      multi_buffer_plan, domains, scheduled_tir.metadata.manual_buffer_versions,
-      std::move(scheduled_tir.metadata.root_conflict_hints), groups);
+  SyncAnalyzer analyzer(multi_buffer_plan, domains, std::move(cores),
+                        scheduled_tir.metadata.manual_buffer_versions,
+                        std::move(scheduled_tir.metadata.root_conflict_hints),
+                        groups);
   scheduled_tir.metadata.root_conflict_hints = {};
   analyzer.Analyze(root);
   scheduled_tir.metadata.buffer_aliases = analyzer.BufferAliases();
@@ -2508,10 +2578,10 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
       CollectExplicitCrossCoreFlags(kernel_body);
   FlagAllocator flag_allocator(analyzer.SiteRegistry(), analyzer.SyncPoints(),
                                analyzer.ReusablePairs(),
-                               cross_core_flag_reservation, num_aiv_subcores);
+                               cross_core_flag_reservation);
   flag_allocator.Plan();
   SyncMaterializer(analyzer.SiteRegistry(), analyzer.SyncPoints(),
-                   flag_allocator.Allocations(), num_aiv_subcores)
+                   flag_allocator.Allocations())
       .Run(root);
   FlagInfoList flag_infos = flag_allocator.TakeFlagInfos();
 

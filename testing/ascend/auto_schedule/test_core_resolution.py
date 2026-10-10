@@ -4,7 +4,7 @@ import pytest
 from tilelang import tvm
 from tilelang.ascend import transform
 from tvm import tirx
-from testing.ascend._ir import allocated_buffer, copy, kernel, nodes, seq
+from testing.ascend._ir import allocated_buffer, calls, copy, kernel, nodes, seq
 from testing.ascend.auto_schedule._scheduled_ir import copy_ring, unit
 
 
@@ -12,14 +12,15 @@ def _tasks(mod):
     return [node for node in nodes(mod, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
 
 
-@pytest.mark.parametrize("scope, expected", [("shared.dyn", 1), ("shared.l1", 2)])
-def test_copy_destination_selects_core(scope, expected):
+@pytest.mark.parametrize("scope, expected", [("shared.dyn", 5), ("shared.l1", 2)])
+@pytest.mark.parametrize("sids", [1, 2])
+def test_copy_destination_selects_core(scope, expected, sids):
     a = tirx.decl_buffer((16, 16), "float32", name="A")
     local = tirx.decl_buffer((16, 16), "float32", name="local", scope=scope)
-    before = kernel(unit(copy(a, local), core=0), buffers=[local], params=[a])
+    before = kernel(unit(copy(a, local), core=0), buffers=[local], params=[a], annotations={"vector_count": tirx.IntImm("int32", sids)})
     after = transform.AssignCore()(before)
     (task,) = _tasks(after)
-    assert int(task.node["core_mask"]) == expected
+    assert int(task.node["core_mask"]) == (expected & (3 if sids == 1 else 7))
 
 
 def test_scalar_cannot_mix_cube_and_vector_local_memory():
@@ -48,7 +49,7 @@ def test_core_local_condition_cannot_control_other_core(producer_scope, consumer
 
 @pytest.mark.parametrize("mixed", [False, True], ids=["vector-only", "shared-with-cube"])
 def test_counter_updates_cover_all_protocol_cores(mixed):
-    before = copy_ring(prepared=True, owners=2, core=3)
+    before = copy_ring(prepared=True, owners=2, core=7)
     counter = allocated_buffer(before, "epoch")
     if mixed:
         # The first owner consumes L0C on Cube and shares the UB epoch with
@@ -82,17 +83,17 @@ def test_counter_updates_cover_all_protocol_cores(mixed):
     after = transform.ResolveCore()(before)
     writes = [task for task in _tasks(after) if any(store.buffer.same_as(counter) for store in nodes(task.body, tirx.BufferStore))]
     assert len(writes) == 3
-    assert {int(task.node["core_mask"]) for task in writes} == ({3} if mixed else {1})
+    assert {int(task.node["core_mask"]) for task in writes} == ({7} if mixed else {5})
 
 
 def test_control_extent_restricts_flexible_scalar_task():
     ub = tirx.decl_buffer((1,), "int32", name="ub", scope="shared.dyn")
     out = tirx.decl_buffer((4,), "int32", name="out")
     i = tirx.Var("i", "int32")
-    loop = tirx.For(i, 0, ub[0], tirx.ForKind.SERIAL, unit(tirx.BufferStore(out, i, [i]), core=3))
+    loop = tirx.For(i, 0, ub[0], tirx.ForKind.SERIAL, unit(tirx.BufferStore(out, i, [i]), core=7))
     before = kernel(unit(loop, core=None), buffers=[ub], params=[out])
     after = transform.ResolveCore()(before)
-    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {1}
+    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {5}
 
 
 @pytest.mark.parametrize("control", ["bound", "assume"])
@@ -125,7 +126,7 @@ def test_epoch_guard_producer_must_cover_all_protocol_cores(source):
         seq(
             unit(copy(accum, ub), core=2),
             unit(copy(ub, out), guard=guard),
-            unit(tirx.BufferStore(epoch, epoch[0] + 1, [0]), core=3, guard=guard),
+            unit(tirx.BufferStore(epoch, epoch[0] + 1, [0]), core=7, guard=guard),
         ),
         annotations={
             "multi_buffer_eligible": [ub.data],
@@ -135,8 +136,8 @@ def test_epoch_guard_producer_must_cover_all_protocol_cores(source):
     )
     before = kernel(
         seq(
-            unit(tirx.Bind(guard, pred[0] > 0), core=3 if source == "global" else 1),
-            unit(tirx.BufferStore(epoch, 0, [0]), core=3),
+            unit(tirx.Bind(guard, pred[0] > 0), core=7 if source == "global" else 5),
+            unit(tirx.BufferStore(epoch, 0, [0]), core=7),
             unit(loop, core=None),
         ),
         buffers=[ub, accum, epoch] + ([pred] if source != "global" else []),
@@ -149,7 +150,7 @@ def test_epoch_guard_producer_must_cover_all_protocol_cores(source):
     else:
         after = transform.ResolveCore()(before)
         (producer,) = [task for task in _tasks(after) if isinstance(task.body, tirx.Bind) and task.body.var.same_as(guard)]
-        assert int(producer.node["core_mask"]) == 3
+        assert int(producer.node["core_mask"]) == 7
 
 
 @pytest.mark.parametrize("context", ["task-guard", "ancestor", "pure-kernel"])
@@ -167,28 +168,61 @@ def test_ambiguous_cross_core_pipe_uses_available_context(context):
     before = kernel(seq(unit(copy(a, l1), core=0), flag_unit), buffers=[pred, l1], params=[a])
     after = transform.AssignCore()(before)
     (placed,) = [task for task in _tasks(after) if isinstance(task.body, tirx.Evaluate) and task.body.value.same_as(flag.value)]
-    assert int(placed.node["core_mask"]) == (2 if context == "pure-kernel" else 1)
+    assert int(placed.node["core_mask"]) == (2 if context == "pure-kernel" else 5)
 
 
-@pytest.mark.parametrize("scope, legal", [("shared.dyn", True), ("shared.l1", False)])
-def test_subblock_id_is_only_available_on_vector(scope, legal):
+@pytest.mark.parametrize("scope, core", [("shared.dyn", 1), ("shared.l1", 2)])
+@pytest.mark.parametrize("assumption", [False, True])
+def test_subblock_guard_is_specialized_before_core_assignment(scope, core, assumption):
     a = tirx.decl_buffer((16, 16), "float32", name="A")
     dst = tirx.decl_buffer((16, 16), "float32", name="dst", scope=scope)
     sid = tirx.Var("sid", "int32")
-    before = kernel(unit(copy(a, dst), core=0, guard=sid == 0), buffers=[dst], params=[a])
+    scheduled = unit(copy(a, dst), core=0, guard=sid == 0)
+    if assumption:
+        scheduled = tirx.AttrStmt(
+            scheduled.node,
+            scheduled.attr_key,
+            scheduled.value,
+            tirx.AttrStmt(sid >= 0, "tl.assume", 1, scheduled.body),
+        )
+    before = kernel(scheduled, buffers=[dst], params=[a])
     thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
     before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
-    if legal:
-        assert {int(task.node["core_mask"]) for task in _tasks(transform.AssignCore()(before))} == {1}
-    else:
-        with pytest.raises(tvm.error.InternalError, match="unavailable on every legal execution core"):
-            transform.AssignCore()(before)
+    after = transform.AssignCore()(before)
+    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {core}
+    assert len(_tasks(after)) == 1
+    assert all(not any(var.same_as(sid) for var in tirx.analysis.undefined_vars(task.body)) for task in _tasks(after))
 
 
 def test_scalar_global_store_uses_the_existing_vector_core():
     src = tirx.decl_buffer((16,), "float32", name="src")
     out = tirx.decl_buffer((16,), "float32", name="out")
     ub = tirx.decl_buffer((16,), "float32", name="ub", scope="shared.dyn")
-    before = kernel(seq(unit(copy(src, ub), core=1), unit(tirx.BufferStore(out, src[0] + 1, [0]), core=3)), buffers=[ub], params=[src, out])
+    before = kernel(seq(unit(copy(src, ub), core=5), unit(tirx.BufferStore(out, src[0] + 1, [0]), core=7)), buffers=[ub], params=[src, out])
     after = transform.ResolveCore()(before)
-    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {1}
+    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {5}
+
+
+@pytest.mark.parametrize("steps, exclusive, expected", [(1, True, 3), (1, False, 0), (2, True, 0)])
+@pytest.mark.parametrize("bound_guard", [False, True])
+def test_projected_fixpipe_unit_flags_include_single_iteration_loop_guards(steps, exclusive, expected, bound_guard):
+    accum = tirx.decl_buffer((32, 32), "float32", name="accum", scope="shared.l0c")
+    ub = tirx.decl_buffer((32, 32), "float32", name="ub", scope="shared.dyn")
+    sid, selector, i = (tirx.Var(name, "int32") for name in ("sid", "selector", "i"))
+    fix = unit(copy(accum, ub, annotations={"unit_flag_ctrl": tirx.IntImm("int32", 3)}), core=0)
+    loop = tirx.For(i, 0, steps, tirx.ForKind.SERIAL, fix)
+    guard = sid == (selector & 1) if exclusive else None
+    if bound_guard and exclusive:
+        active, outer = tirx.Var("active", "bool"), tirx.Var("outer", "int32")
+        # Layout/OOB assumptions can wrap the snapshot Bind before projection.
+        binding = unit(tirx.AttrStmt(selector >= 0, "tl.assume", 1, unit(tirx.Bind(active, guard), core=0).body), core=None)
+        body = unit(tirx.For(outer, 0, 2, tirx.ForKind.SERIAL, seq(binding, unit(loop, core=None, guard=active))), core=None)
+    else:
+        body = unit(loop, core=None, guard=guard)
+    before = kernel(body, buffers=[accum, ub], params=[selector])
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    after = transform.AssignCore()(before)
+    copies = calls(after, "tl.tileop.ascend_copy")
+    assert len(copies) == 2
+    assert {int(call.annotations["unit_flag_ctrl"]) for call in copies} == {expected}
