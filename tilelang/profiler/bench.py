@@ -25,7 +25,7 @@ from .wall import bench_with_wall
 
 logger = logging.getLogger(__name__)
 
-device = "cuda:0" if IS_CUDA else "npu" if IS_NPU else "mps:0"
+device = "cuda" if IS_CUDA else "npu" if IS_NPU else "mps:0"
 
 
 def do_bench(
