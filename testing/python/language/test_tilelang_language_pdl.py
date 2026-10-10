@@ -308,6 +308,7 @@ def _lower_cutedsl_for_pdl(program):
     return artifact
 
 
+@tilelang.testing.requires_cuda
 def test_cutedsl_pdl_codegen_and_launcher_support():
     """Verify CuTeDSL PDL lowering and launch metadata."""
 
