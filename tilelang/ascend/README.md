@@ -52,6 +52,31 @@ USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
 
 ## Quick Start
 
+### Selecting AscendC or PTO code generation
+
+The execution backend selects the Ascend target variant during JIT compilation:
+
+```python
+# Default AscendC code generation.
+kernel = tilelang.compile(func, target="ascend", execution_backend="auto")
+
+# PTO execution and PTO device code generation (codegen_pto.cc).
+kernel = tilelang.compile(func, target="ascend", execution_backend="pto")
+```
+
+The PTO form specializes the native `ascend` target with the `pto` target key,
+selects the `pto` backend module, and dispatches device code generation through
+`target.build.tilelang_pto_without_compile`. The existing `target="pto"` shorthand
+remains supported.
+
+The same selection can be made through defaults used by `@tilelang.jit` and
+`tilelang.compile(..., target=None, execution_backend=None)`:
+
+```bash
+export TILELANG_DEFAULT_TARGET=ascend
+export TILELANG_EXECUTION_BACKEND=pto
+```
+
 The following example implements the same GEMM with a fused ReLU epilogue as
 the [main README](../../README.md#quick-start), while using Huawei Ascend 950
 features such as SIMT vector programming and direct Cube-to-Vector data
