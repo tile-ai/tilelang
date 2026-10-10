@@ -68,7 +68,7 @@ def test_invariant_divmod(dtype, truncating, remainder_only, target):
     # than reusing a quotient's signed-int32 magic parameters.
     kernel = _compile_invariant(divmod_kernel(dtype=dtype, truncating=truncating, remainder_only=remainder_only), target)
     source = kernel.get_kernel_source()
-    signature = re.search(r"(?:void|def) main_kernel\((.*?)\)", source, re.S).group(1)
+    signature = re.search(r"\bmain_kernel\s*\((.*?)\)", source, re.S).group(1)
     magic = dtype == "int32" and not remainder_only
     assert signature.count("fastdiv_multiplier") == int(magic)
     assert signature.count("fastdiv_shift") == int(magic)
