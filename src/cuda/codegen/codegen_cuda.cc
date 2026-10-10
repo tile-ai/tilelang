@@ -5071,19 +5071,19 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     os << "(&" << this->curand_random_generator_state << ")";
     return true;
   } else if (op->op.same_as(tl::warp_reduce_sum())) {
-    os << "tl::warp_reduce_sum(" << PrintExpr(op->args[0]) << ")";
+    PrintWarpReduce("warp_reduce_sum", op, os);
     return true;
   } else if (op->op.same_as(tl::warp_reduce_max())) {
-    os << "tl::warp_reduce_max(" << PrintExpr(op->args[0]) << ")";
+    PrintWarpReduce("warp_reduce_max", op, os);
     return true;
   } else if (op->op.same_as(tl::warp_reduce_min())) {
-    os << "tl::warp_reduce_min(" << PrintExpr(op->args[0]) << ")";
+    PrintWarpReduce("warp_reduce_min", op, os);
     return true;
   } else if (op->op.same_as(tl::warp_reduce_bitand())) {
-    os << "tl::warp_reduce_bitand(" << PrintExpr(op->args[0]) << ")";
+    PrintWarpReduce("warp_reduce_bitand", op, os);
     return true;
   } else if (op->op.same_as(tl::warp_reduce_bitor())) {
-    os << "tl::warp_reduce_bitor(" << PrintExpr(op->args[0]) << ")";
+    PrintWarpReduce("warp_reduce_bitor", op, os);
     return true;
   } else if (op->op.same_as(tl::atomic_add_elem_op())) {
     need_atomic_h_ = true;
@@ -6541,8 +6541,20 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
   }
 }
 
+void CodeGenTileLangCUDA::PrintWarpReduce(const char *name, const CallNode *op,
+                                          std::ostream &os) {
+  os << "tl::" << name;
+  if (warp_reduce_block_threads_ != 0) {
+    os << "<";
+    PrintType(op->args[0].dtype(), os);
+    os << ", " << warp_reduce_block_threads_ << ">";
+  }
+  os << "(" << PrintExpr(op->args[0]) << ")";
+}
+
 void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
                                       const PrimFunc &f) {
+  warp_reduce_block_threads_ = 0;
   auto code_block_source = f->GetAttr<String>(tl::attr::kCodeBlockSource);
   if (code_block_source) {
     auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
@@ -6564,6 +6576,25 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   CodeGenC::DeclareFunction(gvar, f);
   // clear previous generated state.
   this->InitFuncState(f);
+  // Use the launcher's exact block dimensions, not the launch-bounds maximum.
+  if (auto extents = f->GetAttr<Map<String, PrimExpr>>("thread_extent")) {
+    int block_threads = 1;
+    for (String tag : {String("threadIdx.x"), String("threadIdx.y"),
+                       String("threadIdx.z")}) {
+      auto extent = extents.value().Get(tag);
+      if (!extent.has_value())
+        continue;
+      const auto *constant = extent.value().as<IntImmNode>();
+      if (!constant || constant->value <= 0 ||
+          constant->value > 1024 / block_threads) {
+        block_threads = 0;
+        break;
+      }
+      block_threads *= static_cast<int>(constant->value);
+    }
+    if (block_threads % 32 == 0)
+      warp_reduce_block_threads_ = block_threads;
+  }
   // reserve keywords
   ReserveKeywordsAsUnique_();
 

@@ -11,7 +11,7 @@
 
 namespace tl {
 
-template <typename T, typename ReduceOp>
+template <typename T, typename ReduceOp, int BlockThreads = 0>
 TL_DEVICE T warp_reduce(T value, ReduceOp op);
 
 // Select a wider accumulator type for improved numerical accuracy.
@@ -326,7 +326,7 @@ private:
 
 // Reference:
 // https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#reduction
-template <typename T, typename ReduceOp>
+template <typename T, typename ReduceOp, int BlockThreads>
 TL_DEVICE T warp_reduce(T value, ReduceOp op) {
   constexpr uint32_t mask = 0xffffffff;
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
@@ -377,6 +377,28 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
     return static_cast<T>(run_reduce_sync(static_cast<int32_t>(value)));
   }
 #endif
+  // Nonzero BlockThreads must match the actual launch, not __launch_bounds__.
+  if constexpr (BlockThreads <= 0 || BlockThreads % 32 != 0) {
+    // A synchronized ballot preserves the launched prefix across scheduling.
+    const uint32_t warp_mask = __ballot_sync(mask, true);
+    if (warp_mask != mask) {
+      const int thread_idx =
+          threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+      const int lane = thread_idx % 32;
+      const int warp_threads = __popc(warp_mask);
+#pragma unroll
+      for (int offset = 16; offset > 0; offset /= 2) {
+        const bool has_partner = lane + offset < warp_threads;
+        // Missing partners must still shuffle from a participating lane.
+        const T other =
+            tl::shfl_down_sync(warp_mask, value, has_partner ? offset : 0);
+        if (has_partner)
+          value = op(value, other);
+      }
+      return tl::shfl_sync(warp_mask, value, 0);
+    }
+  }
+  // Preserve the full-warp reduction order; XOR sources are valid only there.
   value = op(value, tl::shfl_xor_sync(mask, value, 16));
   value = op(value, tl::shfl_xor_sync(mask, value, 8));
   value = op(value, tl::shfl_xor_sync(mask, value, 4));
@@ -385,24 +407,29 @@ TL_DEVICE T warp_reduce(T value, ReduceOp op) {
   return value;
 }
 
-template <typename T> TL_DEVICE T warp_reduce_sum(T value) {
-  return warp_reduce<T>(value, SumOp());
+template <typename T, int BlockThreads = 0>
+TL_DEVICE T warp_reduce_sum(T value) {
+  return warp_reduce<T, SumOp, BlockThreads>(value, SumOp());
 }
 
-template <typename T> TL_DEVICE T warp_reduce_max(T value) {
-  return warp_reduce<T>(value, MaxOp());
+template <typename T, int BlockThreads = 0>
+TL_DEVICE T warp_reduce_max(T value) {
+  return warp_reduce<T, MaxOp, BlockThreads>(value, MaxOp());
 }
 
-template <typename T> TL_DEVICE T warp_reduce_min(T value) {
-  return warp_reduce<T>(value, MinOp());
+template <typename T, int BlockThreads = 0>
+TL_DEVICE T warp_reduce_min(T value) {
+  return warp_reduce<T, MinOp, BlockThreads>(value, MinOp());
 }
 
-template <typename T> TL_DEVICE T warp_reduce_bitand(T value) {
-  return warp_reduce<T>(value, BitAndOp());
+template <typename T, int BlockThreads = 0>
+TL_DEVICE T warp_reduce_bitand(T value) {
+  return warp_reduce<T, BitAndOp, BlockThreads>(value, BitAndOp());
 }
 
-template <typename T> TL_DEVICE T warp_reduce_bitor(T value) {
-  return warp_reduce<T>(value, BitOrOp());
+template <typename T, int BlockThreads = 0>
+TL_DEVICE T warp_reduce_bitor(T value) {
+  return warp_reduce<T, BitOrOp, BlockThreads>(value, BitOrOp());
 }
 
 } // namespace tl
