@@ -2825,7 +2825,7 @@ private:
   Stmt EmitImpl(const PrimExpr &start, const PrimExpr &end, bool unroll_loop,
                 bool need_bound_check) {
     PrimExpr new_loop_var;
-    PrimExpr extent = end - start;
+    PrimExpr extent = analyzer_.Simplify(end - start);
     Optional<Integer> pipeline_num_stages =
         GetPipelineNumStages(pipeline_loop_.get());
     // Written against the original loop var; the per-block Substitute below
