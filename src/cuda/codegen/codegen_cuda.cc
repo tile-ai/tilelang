@@ -1727,7 +1727,7 @@ void CodeGenTileLangCUDA::PrintStorageScope(const std::string &scope,
       scope == "shared.cluster_barrier") {
     os << "__shared__ __align__(" << barrier_alignment_bytes_ << ") ";
   } else if (scope == "shared.dyn") {
-    os << "extern __shared__ __align__(1024) ";
+    os << "extern __shared__ __align__(" << dynamic_smem_alignment_ << ") ";
   }
 }
 
@@ -6564,6 +6564,9 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   CodeGenC::DeclareFunction(gvar, f);
   // clear previous generated state.
   this->InitFuncState(f);
+  dynamic_smem_alignment_ = f->GetAttr<Integer>(tl::kDynamicSmemAlignment)
+                                .value_or(Integer(1024))
+                                ->value;
   // reserve keywords
   ReserveKeywordsAsUnique_();
 

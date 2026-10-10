@@ -412,6 +412,10 @@ private:
 
   void VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
+        op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_gather4()) ||
+        op->op.same_as(tl::tma_store_scatter4()) ||
         op->op.same_as(tl::initialize_wgmma_descriptor()) ||
         op->op.same_as(tl::initialize_tcgen05_descriptor())) {
       // These intrinsics introduce stricter SMEM alignment requirements; mark
@@ -469,16 +473,15 @@ public:
    * \brief plan the memory reuse for all the buffer allocated in the statement
    * \param stmt the statement
    */
-  void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
-                 bool enable_aggressive_merge = false, bool verbose = false,
-                 bool disable_reuse = false,
-                 const std::unordered_map<const VarNode *, int>
-                     &explicit_alignments = {}) {
+  void
+  PlanReuse(const Stmt &stmt, bool is_dynamic = true,
+            bool enable_aggressive_merge = false, bool verbose = false,
+            bool disable_reuse = false,
+            const std::unordered_map<const VarNode *, int> &alignments = {}) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
-    shmem_alignment_map_ =
-        SharedMemoryAlignmentPlanner::Plan(stmt, explicit_alignments);
+    shmem_alignment_map_ = alignments;
     if (disable_reuse) {
       this->PlanSequentialLayout();
     } else {
@@ -1573,13 +1576,12 @@ private:
   bool preserve_aliases_{true};
 };
 
-Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
-                                  bool enable_aggressive_merge,
-                                  int align_bytes = 16, bool verbose = false,
-                                  bool preserve_aliases = true,
-                                  bool disable_reuse = false,
-                                  const std::unordered_map<std::string, int>
-                                      &explicit_alignments_by_name = {}) {
+std::pair<Stmt, int> MergeSharedMemoryAllocations(
+    Stmt stmt, bool merge_static_smem, bool enable_aggressive_merge,
+    int align_bytes = 16, bool verbose = false, bool preserve_aliases = true,
+    bool disable_reuse = false,
+    const std::unordered_map<std::string, int> &explicit_alignments_by_name =
+        {}) {
   AllocateCollector collector;
   collector(stmt);
   // The kSmemAlignmentMap attribute is keyed by buffer-var name (names are
@@ -1600,12 +1602,22 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
         }
         return resolved;
       };
+  auto dynamic_alignments = SharedMemoryAlignmentPlanner::Plan(
+      stmt, resolve(collector.dyn_shmem_allocs_));
+  // Offsets alone are insufficient: the arena base must satisfy every dynamic
+  // allocation's requirement, including when there is only one allocation.
+  int dynamic_alignment = std::max(16, align_bytes);
+  for (const auto &[var, alignment] : dynamic_alignments) {
+    if (collector.dyn_shmem_allocs_.count(var)) {
+      dynamic_alignment = std::max(dynamic_alignment, alignment);
+    }
+  }
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, true,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse, resolve(collector.dyn_shmem_allocs_));
+                       disable_reuse, dynamic_alignments);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
@@ -1613,10 +1625,12 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   verbose, align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, false,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse, resolve(collector.static_shmem_allocs_));
+                       disable_reuse,
+                       SharedMemoryAlignmentPlanner::Plan(
+                           stmt, resolve(collector.static_shmem_allocs_)));
     stmt = rewriter(std::move(stmt));
   }
-  return stmt;
+  return {std::move(stmt), dynamic_alignment};
 }
 
 using namespace tirx::transform;
@@ -1647,11 +1661,13 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
       }
     }
     auto *n = f.CopyOnWrite();
-    n->body = tl::MergeSharedMemoryAllocations(
+    auto [body, dynamic_alignment] = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
         align_bytes, debug_merge_shared_memory_allocations, preserve_aliases,
         disable_reuse, explicit_alignments);
-    return f;
+    n->body = std::move(body);
+    return WithAttr(std::move(f), kDynamicSmemAlignment,
+                    Integer(dynamic_alignment));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",
                             {});
