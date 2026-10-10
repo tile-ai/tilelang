@@ -21,24 +21,28 @@ __device__ __forceinline__ void global_load_256(ulonglong4 &D, void const *ptr,
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
     ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
      (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9))
-  asm volatile("{\n"
-               "  .reg .pred p;\n"
-               "  setp.ne.b32 p, %5, 0;\n"
-               "  mov.b64 %0, %6;\n"
-               "  mov.b64 %1, %7;\n"
-               "  mov.b64 %2, %8;\n"
-               "  mov.b64 %3, %9;\n"
+  // A 256-bit instruction needs stronger alignment than the 128-bit fallback.
+  if ((reinterpret_cast<unsigned long long>(ptr) & 31) == 0) {
+    asm volatile("{\n"
+                 "  .reg .pred p;\n"
+                 "  setp.ne.b32 p, %5, 0;\n"
+                 "  mov.b64 %0, %6;\n"
+                 "  mov.b64 %1, %7;\n"
+                 "  mov.b64 %2, %8;\n"
+                 "  mov.b64 %3, %9;\n"
 #if TL_ENABLE_L2_PREFETCH
-               "  @p ld.global.L2::128B.v4.u64 {%0, %1, %2, %3}, [%4];\n"
+                 "  @p ld.global.L2::128B.v4.u64 {%0, %1, %2, %3}, [%4];\n"
 #else
-               "  @p ld.global.v4.u64 {%0, %1, %2, %3}, [%4];\n"
+                 "  @p ld.global.v4.u64 {%0, %1, %2, %3}, [%4];\n"
 #endif
-               "}\n"
-               : "=l"(D.x), "=l"(D.y), "=l"(D.z), "=l"(D.w)
-               : "l"(ptr), "r"((int)pred_guard), "l"(D.x), "l"(D.y), "l"(D.z),
-                 "l"(D.w));
-#else
-  // Pre-SM100 or CUDA < 12.9 fallback: two 128-bit loads.
+                 "}\n"
+                 : "=l"(D.x), "=l"(D.y), "=l"(D.z), "=l"(D.w)
+                 : "l"(ptr), "r"((int)pred_guard), "l"(D.x), "l"(D.y), "l"(D.z),
+                   "l"(D.w));
+    return;
+  }
+#endif
+  // Also handles 16-byte-aligned pointers on SM100+ with CUDA 12.9+.
   uint4 *data = reinterpret_cast<uint4 *>(&D);
   asm volatile("{\n"
                "  .reg .pred p;\n"
@@ -65,7 +69,6 @@ __device__ __forceinline__ void global_load_256(ulonglong4 &D, void const *ptr,
                : "l"(ptr), "r"((int)pred_guard), "r"(data[0].x), "r"(data[0].y),
                  "r"(data[0].z), "r"(data[0].w), "r"(data[1].x), "r"(data[1].y),
                  "r"(data[1].z), "r"(data[1].w), "l"(((uint8_t *)ptr) + 16));
-#endif
 }
 
 // Convenience wrapper functions
@@ -126,16 +129,19 @@ __device__ __forceinline__ void global_store_256(ulonglong4 const &D, void *ptr,
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000) &&                       \
     ((__CUDACC_VER_MAJOR__ > 12) ||                                            \
      (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9))
-  asm volatile("{\n"
-               "  .reg .pred p;\n"
-               "  setp.ne.b32 p, %5, 0;\n"
-               "  @p st.global.v4.u64 [%0], {%1, %2, %3, %4};\n"
-               "}\n"
-               :
-               : "l"(ptr), "l"(D.x), "l"(D.y), "l"(D.z), "l"(D.w),
-                 "r"((int)pred_guard));
-#else
-  // Pre-SM100 or CUDA < 12.9 fallback: two 128-bit stores.
+  if ((reinterpret_cast<unsigned long long>(ptr) & 31) == 0) {
+    asm volatile("{\n"
+                 "  .reg .pred p;\n"
+                 "  setp.ne.b32 p, %5, 0;\n"
+                 "  @p st.global.v4.u64 [%0], {%1, %2, %3, %4};\n"
+                 "}\n"
+                 :
+                 : "l"(ptr), "l"(D.x), "l"(D.y), "l"(D.z), "l"(D.w),
+                   "r"((int)pred_guard));
+    return;
+  }
+#endif
+  // Also handles 16-byte-aligned pointers on SM100+ with CUDA 12.9+.
   uint4 const *data = reinterpret_cast<uint4 const *>(&D);
   asm volatile("{\n"
                "  .reg .pred p;\n"
@@ -148,7 +154,6 @@ __device__ __forceinline__ void global_store_256(ulonglong4 const &D, void *ptr,
                  "r"(data[0].w), "r"((int)pred_guard),
                  "l"(((uint8_t *)ptr) + 16), "r"(data[1].x), "r"(data[1].y),
                  "r"(data[1].z), "r"(data[1].w));
-#endif
 }
 
 // Convenience wrapper functions for 256-bit store
