@@ -494,9 +494,12 @@ public:
   }
 
   bool IsAsyncProducerCandidate(const PipelineStageInfo &pinfo) const {
-    if (pinfo.conditional_execution) {
-      return false;
-    }
+    // Conditionally executed copies are still eligible for cp.async: commit is
+    // emitted outside the user branch (a skipped iteration commits an empty
+    // group, which completes immediately), so group counting stays consistent.
+    // Conditional TMA remains excluded (tma_copy is never set for conditional
+    // stages): mbarrier arrive/wait must pair up, and a skipped arrive with a
+    // non-skipped wait deadlocks (see #2002, blocksparse_gemm launch failures).
     if (pinfo.IsTmaCopy()) {
       return false;
     }
@@ -602,6 +605,10 @@ public:
   void ClassifyCopyLikeStage(const Stmt &stmt, PipelineStageInfo *pinfo) const {
     ICHECK(pinfo != nullptr);
     if (pinfo->conditional_execution) {
+      // Intentional exclusion (safe, not policy): conditional plain copies
+      // are already classified by the pure-copy path in MakePipelineStageInfo,
+      // so this fallback only gates conditional im2col, whose pipeline-managed
+      // cp.async path has no test coverage yet.
       return;
     }
 
@@ -942,6 +949,10 @@ public:
       ClassifyCopyLikeStage(pipeline_stmts[i], &pinfo);
       pinfo.order = static_cast<int>(order_array[i]->value);
       pinfo.stage = static_cast<int>(stage_array[i]->value);
+      // The conditional check here is an intentional conservative exclusion:
+      // this legacy heuristic promotes non-pure (mixed compute+copy)
+      // statements to copy stages, and extending that guess to conditionally
+      // executed statements is not covered by any use case.
       if (!pinfo.IsCopyStage() && !pinfo.conditional_execution &&
           pinfo.stage == 0) {
         bool reads_global = false;
