@@ -18,37 +18,53 @@ def _require_cutedsl():
 
 
 @pytest.mark.parametrize("out_idx", [None, -1])
+@pytest.mark.parametrize("compiler", ["nvcc", "nvrtc", "cutedsl"])
 @tilelang.testing.requires_cuda
-def test_cutedsl_tvm_ffi_host_execution(out_idx, tmp_path):
-    _require_cutedsl()
+def test_cutedsl_tvm_ffi_host_execution(out_idx, compiler, tmp_path):
+    if compiler == "cutedsl":
+        _require_cutedsl()
     N = T.dynamic("N")
+    M = T.dynamic("N")  # Distinct Vars must not be bound by their printed name.
 
     @T.prim_func
-    def main(A: T.Tensor((N,), T.float32), scale: T.int32, repeats: T.int32, B: T.Tensor((N,), T.float32)):
-        with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
+    def main(
+        A: T.Tensor((N * 2,), T.float32),
+        shape: T.Tensor((M,), T.float32),
+        scale: T.int32,
+        repeats: T.int32,
+        B: T.Tensor((N * 2,), T.float32),
+    ):
+        with T.Kernel(T.ceildiv(N * 2, 128), threads=128) as bx:
             i = bx * 128 + T.get_thread_binding()
-            if i < N:
+            if i < N * 2:
                 B[i] = A[i]
         if scale > 0:
             for step in T.serial(repeats):
-                offset = T.bind(scale * 3 + step)
-                with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
+                offset = T.bind(scale * 3 + step + M)
+                with T.Kernel(T.ceildiv(N * 2, 128), threads=128) as bx:
                     i = bx * 128 + T.get_thread_binding()
-                    if i < N:
+                    if i < N * 2:
                         B[i] = B[i] + T.float32(offset)
 
-    kernel = tilelang.compile(main, target="cutedsl", out_idx=out_idx)
+    kernel = tilelang.compile(
+        main,
+        target="cutedsl" if compiler == "cutedsl" else "cuda",
+        out_idx=out_idx,
+        execution_backend="tvm_ffi",
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if compiler == "nvrtc" else None,
+    )
     assert kernel.execution_backend == "tvm_ffi"
     stream = torch.cuda.Stream()
     for size, scale, repeats in ((17, 3, 4), (128, -1, 3), (257, 7, 0)):
         with torch.cuda.stream(stream):
-            a = torch.arange(size, device="cuda", dtype=torch.float32)
+            a = torch.arange(size * 2, device="cuda", dtype=torch.float32)
+            shape = torch.empty(3, device="cuda")
             if out_idx is None:
                 b = torch.empty_like(a)
-                assert kernel(a, scale, repeats, b) == []
+                assert kernel(a, shape, scale, repeats, b) == []
             else:
-                b = kernel(a, scale, repeats)
-            expected = a + (repeats * scale * 3 + repeats * (repeats - 1) / 2 if scale > 0 else 0)
+                b = kernel(a, shape, scale, repeats)
+            expected = a + (repeats * (scale * 3 + 3) + repeats * (repeats - 1) / 2 if scale > 0 else 0)
         stream.synchronize()
         torch.testing.assert_close(b, expected)
     library = str(tmp_path / "kernel.so")
@@ -56,10 +72,21 @@ def test_cutedsl_tvm_ffi_host_execution(out_idx, tmp_path):
     loaded = tilelang.tvm.runtime.load_module(library)
     if out_idx is None:
         b.zero_()
-        loaded(a, 2, 1, b)
+        loaded(a, shape, 2, 1, b)
     else:
-        b = loaded(a, 2, 1, a)  # allocator anchor
+        b = loaded(a, shape, 2, 1, a)  # allocator anchor
+    torch.testing.assert_close(b, a + 9)
+    if out_idx is None:
+        kernel(a, None, 2, 1, b)  # A nullable shape carrier binds its extent to zero.
+    else:
+        b = kernel(a, None, 2, 1)
     torch.testing.assert_close(b, a + 6)
+    for invalid in (a[:-1], a.reshape(-1, 2), a.double(), a.repeat_interleave(2)[::2]):
+        with pytest.raises((ValueError, RuntimeError)):
+            if out_idx is None:
+                kernel(invalid, shape, 2, 1, b)
+            else:
+                kernel(invalid, shape, 2, 1)
 
 
 @tilelang.testing.requires_cuda

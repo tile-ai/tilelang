@@ -7,6 +7,20 @@ from tilelang.jit import JITKernel
 class TVMFFIKernelCache(KernelCache):
     kernel_lib_path = "executable.so"
 
+    def _save_kernel_to_disk(self, key, kernel, func=None, verbose=False):
+        super()._save_kernel_to_disk(key, kernel, func, verbose)
+        library = os.path.join(self._get_cache_path(key), self.kernel_lib_path)
+        if os.path.isfile(library):
+            from tvm import runtime
+
+            # Load only after publication; do not lock the staging DLL on Windows.
+            try:
+                kernel.adapter.executable = runtime.load_module(library)
+            except Exception:
+                self.logger.warning("Could not reuse the published Host IR library", exc_info=True)
+                return
+            kernel.adapter.libpath = library
+
     @staticmethod
     def _get_export_kwargs(kernel: JITKernel) -> dict:
         artifact = getattr(kernel, "artifact", None)

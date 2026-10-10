@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal
 from tvm.target import Target
@@ -111,6 +112,7 @@ def compile_cuda(
             assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX: {result}"
     finally:
         result = nvrtc.nvrtcDestroyProgram(program)[0]
-        assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
+        if result != nvrtc.nvrtcResult.NVRTC_SUCCESS and sys.exc_info()[0] is None:
+            raise RuntimeError(f"Failed to destroy program: {result}")
 
     return result_bytes

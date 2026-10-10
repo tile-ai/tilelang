@@ -66,6 +66,9 @@ Map<String, runtime::FunctionInfo> ExtractCudaFuncInfo(const IRModule &mod) {
       DataType dtype = f->params[i].dtype();
       if (dtype.is_bool())
         dtype = DataType::Int(32);
+      // CUDA copies the kernel parameter's byte width from this holder.
+      if (dtype.is_uint() && dtype.bits() < 32)
+        dtype = DataType::UInt(32);
       // Packed CUDA arguments carry uint64 with the same bits as int64.
       if (dtype == DataType::UInt(64))
         dtype = DataType::Int(64);

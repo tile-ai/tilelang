@@ -28,21 +28,29 @@ def test_uint64_tensor(execution_backend):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("execution_backend", ["cython", "nvrtc", "tvm_ffi"])
-def test_uint64_scalar(execution_backend):
+@pytest.mark.parametrize(
+    "execution_backend,bits",
+    [("cython", 64)] + [(backend, bits) for backend in ("tvm_ffi", "nvrtc", "cutedsl") for bits in (8, 16, 32, 64)],
+)
+def test_uint64_scalar(execution_backend, bits):
+    if execution_backend == "cutedsl":
+        pytest.importorskip("cutlass.cute")
+    dtype = f"uint{bits}"
+
     @T.prim_func
-    def main(B: T.Tensor((1,), "uint64"), value: T.uint64):
+    def main(B: T.Tensor((1,), dtype), value: T.dtype(dtype)):
         with T.Kernel(1, threads=1):
             B[0] = value
 
     kernel = tilelang.compile(
         main,
-        target="cuda",
-        execution_backend="tvm_ffi" if execution_backend == "nvrtc" else execution_backend,
+        target="cutedsl" if execution_backend == "cutedsl" else "cuda",
+        execution_backend="cython" if execution_backend == "cython" else "tvm_ffi",
         pass_configs={"tl.cuda_compiler": "nvrtc"} if execution_backend == "nvrtc" else None,
+        compile_flags=["--opt-level=0"] if execution_backend == "cutedsl" else None,
     )
-    b = torch.empty((1,), dtype=torch.uint64, device="cuda")
-    for value in [0, (1 << 63) - 1, 1 << 63, (1 << 64) - 1]:
+    b = torch.empty((1,), dtype=getattr(torch, dtype), device="cuda")
+    for value in [0, (1 << (bits - 1)) - 1, 1 << (bits - 1), (1 << bits) - 1]:
         kernel(b, value)
         assert b.item() == value
 

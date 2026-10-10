@@ -107,6 +107,7 @@ CUTEDSL_TYPES: dict[str, str] = {
     "int64": "cutlass.Int64",
     "int32": "cutlass.Int32",
     "uint32": "cutlass.Uint32",
+    "uint64": "cutlass.Uint64",
     "bool": "cutlass.Uint8",  # CuTeDSL only supports i1 in rmem; use u8 for gmem
     "int8": "cutlass.Int8",
     "uint8": "cutlass.Uint8",
@@ -127,9 +128,13 @@ def compile_cutedsl(code, func, target):
     import cutlass
     import cutlass.cute as cute
     from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
-    from tvm import tirx
+    from tvm import tirx, transform
 
     from tilelang.contrib.nvcc import get_target_arch_and_code, get_target_code_list
+    from tilelang.transform import PassConfigKey
+
+    flags = transform.PassContext.current().config.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS, [])
+    options = flags if isinstance(flags, str) else " ".join(str(flag) for flag in flags)
 
     arch, target_code = get_target_arch_and_code(target)
     if target_code and get_target_code_list(target_code) != [f"sm_{arch}"]:
@@ -153,7 +158,7 @@ def compile_cutedsl(code, func, target):
             dtype = getattr(cutlass, CUTEDSL_TYPES[str(pointer.element_type.dtype)].removeprefix("cutlass."))
             args.append(make_fake_compact_tensor(dtype, (1,), stride_order=(0,), assumed_align=16))
         else:
-            if str(param.dtype) not in ("int32", "uint32", "int64", "float32", "float64"):
+            if str(param.dtype) not in ("int32", "uint8", "uint16", "uint32", "int64", "uint64", "float32", "float64"):
                 raise ValueError(f"CuTeDSL tvm_ffi does not support device scalar type {param.dtype}")
             args.append(getattr(cutlass, CUTEDSL_TYPES[str(param.dtype)].removeprefix("cutlass."))(0))
         names.append(name)
@@ -193,7 +198,7 @@ def compile_cutedsl(code, func, target):
             module.compile_only,
             *args,
             make_fake_stream(),
-            options=f"--enable-tvm-ffi --keep-ptx --gpu-arch=sm_{arch} --dump-dir={Path(directory).as_posix()}",
+            options=f"{options} --enable-tvm-ffi --keep-ptx --gpu-arch=sm_{arch} --dump-dir={Path(directory).as_posix()}",
         )
         # Each compilation has exactly one entry. Rename its exact compiler
         # symbol in PTX so the shared CUDA runtime resolves the Host IR name.
