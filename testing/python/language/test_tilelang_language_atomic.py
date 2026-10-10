@@ -391,7 +391,7 @@ def region_atomic_target(request):
     ],
 )
 def test_region_atomic_rank_mismatch_has_diagnostic(operation, source_shape, destination_shape, region_atomic_target):
-    with region_atomic_target, pytest.raises(tvm.error.InternalError, match="Cannot map atomic region") as exc_info:
+    with region_atomic_target, pytest.raises(ValueError, match="Cannot map atomic region") as exc_info:
         tilelang.lower(
             region_atomic_program(operation, source_shape, destination_shape),
             target=region_atomic_target,
@@ -423,45 +423,47 @@ def test_region_atomic_matching_rank_is_accepted(operation, source_shape, destin
         )
 
 
-def region_atomic_scalar_source_program(operation, source_form):
+def region_atomic_scalar_source_program(operation, source_form, source_index=1):
     atomic_op = getattr(T, f"atomic_{operation}")
 
     @T.prim_func
     def main(A: T.Tensor((4,), "float32"), B: T.Tensor((20,), "float32")):
         with T.Kernel(1, threads=128):
             if source_form == "load":
-                atomic_op(B[2:18], A[1])
+                atomic_op(B[2:18], A[source_index])
             elif source_form == "region":
-                atomic_op(B[2:18], A[1:2])
+                atomic_op(B[2:18], A[source_index : source_index + 1])
             else:
-                atomic_op(B[2:18], A[1] + 1.0)
+                atomic_op(B[2:18], A[source_index] + 1.0)
 
     return main
 
 
 @pytest.mark.parametrize("operation", ["add", "max", "min"])
 @pytest.mark.parametrize("source_form", ["load", "region", "expression"])
-def test_region_atomic_scalar_source_codegen(operation, source_form, region_atomic_target):
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_region_atomic_scalar_source_codegen(operation, source_form, source_index, region_atomic_target):
     with region_atomic_target:
         artifact = tilelang.lower(
-            region_atomic_scalar_source_program(operation, source_form),
+            region_atomic_scalar_source_program(operation, source_form, source_index),
             target=region_atomic_target,
             enable_host_codegen=False,
             enable_device_compile=False,
         )
-    assert "A[1]" in artifact.kernel_source
+    assert f"A[{source_index}]" in artifact.kernel_source
     assert f"Atomic{operation.title()}(" in artifact.kernel_source
 
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("operation", ["add", "max", "min"])
 @pytest.mark.parametrize("source_form", ["load", "region", "expression"])
-def test_region_atomic_scalar_source(operation, source_form):
-    kernel = tilelang.compile(region_atomic_scalar_source_program(operation, source_form))
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_region_atomic_scalar_source(operation, source_form, source_index):
+    kernel = tilelang.compile(region_atomic_scalar_source_program(operation, source_form, source_index))
     source = torch.tensor([99.0, 3.0, -77.0, 55.0], device="cuda")
-    destination = torch.full((20,), 7.0 if operation == "min" else 1.0, device="cuda")
+    value = (99.0 if source_index == 0 else 3.0) + (1.0 if source_form == "expression" else 0.0)
+    destination = torch.full((20,), value + 4.0 if operation == "min" else 1.0, device="cuda")
     expected = destination.clone()
-    value = 4.0 if source_form == "expression" else 3.0
     expected[2:18] = 1.0 + value if operation == "add" else value
 
     kernel(source, destination)

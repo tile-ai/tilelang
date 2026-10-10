@@ -63,9 +63,10 @@ MakeAtomicSIMTIndexMap(const Op &operation, const tirx::BufferRegion &dst,
 
     const size_t num_loop_vars = result.loop_vars.size();
     // Validate before indexing, preserving the existing single-element case.
-    ICHECK(num_loop_vars <= ranges.size() &&
-           (non_unit_dims == num_loop_vars ||
-            (non_unit_dims == 0 && num_loop_vars == 1)))
+    CHECK(num_loop_vars <= ranges.size() &&
+              (non_unit_dims == num_loop_vars ||
+               (non_unit_dims == 0 && num_loop_vars == 1)),
+          ValueError)
         << "Cannot map atomic region to SIMT loop variables for "
         << operation->name << ": buffer " << region->buffer->name << " has "
         << non_unit_dims << " non-unit dimensions, but there are "
