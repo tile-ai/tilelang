@@ -1496,5 +1496,58 @@ def test_sync_grid_acts_as_shared_barrier():
     assert 'T.tvm_storage_sync("shared")' not in s, f"sync_grid already covers the barrier:\n{s}"
 
 
+def _masked_extern_write_kernel(use_access_ptr):
+    """Thread 0 zeroes a shared buffer through an opaque extern, then everyone reads it.
+
+    Written with the tilelang frontend, so it uses its own ``TL`` alias: this
+    module's ``T`` is the raw TVMScript parser.
+    """
+    from tilelang import language as TL
+
+    N = 8192
+
+    @TL.prim_func
+    def kern(Y: TL.Tensor((N,), "float32")):
+        with TL.Kernel(1, threads=256):
+            B = TL.alloc_shared((N,), "float32")
+            tx = TL.get_thread_binding()
+            for i in TL.Parallel(N):
+                B[i] = 1.0
+            # Discharge this phase's conflicts so the barrier under test is only the
+            # one that has to separate the extern from the read below.
+            TL.sync_threads()
+            if tx == 0:
+                if use_access_ptr:
+                    TL.call_extern("handle", "memset", TL.access_ptr(B, "w"), 0, N * 4)
+                else:
+                    TL.call_extern("handle", "memset", TL.address_of(B[0]), 0, N * 4)
+            TL.copy(B, Y)
+
+    return kern
+
+
+def _barrier_follows_extern(use_access_ptr):
+    import tilelang
+
+    with tvm.target.Target("cuda"):
+        source = tilelang.lower(_masked_extern_write_kernel(use_access_ptr), target="cuda").kernel_source
+    assert "memset" in source, source
+    return "__syncthreads" in source.split("memset", 1)[1]
+
+
+def test_address_of_extern_write_is_fenced_before_block_reads():
+    """`address_of` says nothing about how its consumer uses the pointer, so the
+    access has to be treated as a write. Classified as a read, the extern write
+    never conflicted with the block-wide reads that follow and no barrier was
+    planned between them."""
+    assert _barrier_follows_extern(use_access_ptr=False), "no barrier after the extern write"
+
+
+def test_access_ptr_write_is_fenced_before_block_reads():
+    """Control: the same kernel using `access_ptr(..., "w")`, which names the
+    access type, already got its barrier."""
+    assert _barrier_follows_extern(use_access_ptr=True), "no barrier after the extern write"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
