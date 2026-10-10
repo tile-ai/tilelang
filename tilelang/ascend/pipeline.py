@@ -35,6 +35,10 @@ def allow_autoschedule(pass_ctx=None) -> bool:
 
 def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
+    # Fold T.PersistentKernel logical grids onto num_cores physical cores before
+    # the launch nest is materialized (the grid is still a blockIdx.x
+    # thread-binding For loop here). A no-op for T.Kernel / T.MixedKernel.
+    mod = ascend_transform.AutoPersistent()(mod)
     # Materialize the target-neutral kernel-launch nest emitted by T.Kernel.
     # Ascend's NPU launch is a real 1-D blockIdx.x core grid, so the grid loop
     # becomes a thread_extent AttrStmt; there is no threadIdx at kernel scope,

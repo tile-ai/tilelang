@@ -11,6 +11,18 @@ def InsertNd2Nz():
     return _ffi_api.InsertNd2Nz()  # type: ignore
 
 
+def AutoPersistent():
+    """Fold ``T.PersistentKernel`` logical grids onto ``num_cores`` Ascend cores.
+
+    The pass must run before ``MaterializeKernelLaunch``, while the
+    launch grid is still represented by a thread-binding ``For`` loop. Regular
+    ``T.Kernel`` and ``T.MixedKernel`` launches are left unchanged. The
+    physical core count is taken from the launch's required ``num_cores``
+    argument.
+    """
+    return _ffi_api.AutoPersistent()  # type: ignore
+
+
 def NormalizeControlFlowForSchedule():
     """Normalize control flow ahead of AutoSchedule.
 
@@ -232,6 +244,7 @@ __all__ = [
     "AscendLayoutInference",
     "AscendLowerTileOp",
     "AssignCore",
+    "AutoPersistent",
     "AutoSchedule",
     "InsertSync",
     "LowerScheduledTIR",
