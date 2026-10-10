@@ -8,6 +8,7 @@ from tvm.target import Target as TVMTarget
 from tvm.tirx import PrimFunc
 from tilelang.jit import JITKernel
 from tilelang import env
+from tilelang.backend.execution_backend import normalize_execution_alias
 from tilelang.jit.adapter.cython.kernel_cache import CythonKernelCache
 from tilelang.jit.adapter.torch.kernel_cache import TorchKernelCache
 from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
@@ -35,7 +36,7 @@ _ascend_dispatch_map: dict[str, KernelCache] = {
 def _resolve_cache_dispatch(
     target: TargetLike | None,
     target_host: TargetLike | None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "torch", "pto"] | None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "torch", "pto", "nvrtc", "cutedsl"] | None,
     verbose: bool | None,
 ):
     if target is None:
@@ -75,7 +76,7 @@ def cached(
     *args,
     target: TargetLike | None = None,
     target_host: TargetLike | None = None,
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "torch", "pto"] | None = None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "torch", "pto", "nvrtc", "cutedsl"] | None = None,
     verbose: bool | None = None,
     pass_configs: dict | None = None,
     compile_flags: list[str] | str | None = None,
@@ -83,6 +84,7 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
+    target, execution_backend, pass_configs = normalize_execution_alias(target, execution_backend, pass_configs)
     cache, backend_context, verbose = _resolve_cache_dispatch(target, target_host, execution_backend, verbose)
     return cache.cached(
         func,

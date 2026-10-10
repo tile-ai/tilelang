@@ -37,13 +37,9 @@ def main() -> None:
     kernel = tilelang.compile(
         prim_func,
         target="cutedsl",
-        execution_backend="cutedsl",
+        execution_backend="tvm_ffi",
     )
     print(f"adapter={type(kernel.adapter).__name__}")
-    pymodule = getattr(kernel.adapter, "pymodule", None)
-    print(f"has_tma_descs={getattr(pymodule, '_has_tma_descs', None)}")
-    print(f"cutlass_host_launcher_supported={getattr(pymodule, '_cutlass_host_launcher_supported', None)}")
-    print(f"cutlass_host_launcher_disabled_reason={getattr(pymodule, '_cutlass_host_launcher_disabled_reason', None)}")
     source = kernel.get_kernel_source(kernel_only=False) or ""
     print(f"source_has_im2col_offsets={'im2col_offsets' in source}")
 

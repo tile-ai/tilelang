@@ -47,8 +47,9 @@ constructs their runtime values. Clustered/cooperative launches and PDL reuse
 the CUDA runtime's launch metadata, subject to device support.
 CuTeDSL is an optional device compiler, not a separate execution backend.
 For NVRTC, use `pass_configs={"tl.cuda_compiler": "nvrtc"}` with the same
-`tvm_ffi` executor. The old `"cutedsl"` and `"nvrtc"` execution backends and
-their wrapper caches are removed; kernels are recompiled into the shared cache.
+`tvm_ffi` executor. The old `execution_backend="cutedsl"` and `"nvrtc"` names
+remain as deprecated aliases and emit `DeprecationWarning`; they select the new
+shared path, not the removed wrappers. Legacy wrapper caches are not reused.
 Replace the old `kernel(..., stream=...)` argument with a `torch.cuda.stream(stream)`
 context. `compile_flags` are passed to the selected device compiler; for CuTeDSL,
 use CuTe options such as `compile_flags=["--opt-level=0"]`, not NVCC flags.

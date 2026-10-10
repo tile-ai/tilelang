@@ -105,6 +105,33 @@ def test_cutedsl_backend_reuses_cuda_pipeline():
     assert cutedsl_backend.allowed_execution_backends(cutedsl_target) == ("tvm_ffi",)
 
 
+@pytest.mark.parametrize("alias", ["nvrtc", "cutedsl"])
+@pytest.mark.parametrize("from_env", [False, True])
+def test_execution_aliases_normalize_before_cache(monkeypatch, alias, from_env):
+    from tilelang.cache import cached, _dispatch_map
+    from tilelang.env import env
+    from tilelang.cuda import cutedsl_backend
+
+    monkeypatch.setattr(cutedsl_backend, "check_cutedsl_available", lambda: None)
+    monkeypatch.setattr(env, "TILELANG_DEFAULT_EXECUTION_BACKEND", alias)
+    monkeypatch.setattr(_dispatch_map["tvm_ffi"], "cached", lambda *args, **kwargs: kwargs)
+    configs = {"tl.enable_fast_math": True}
+    target = {"kind": "cuda", "arch": "sm_80"}
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        result = cached(target=target, execution_backend=None if from_env else alias, pass_configs=configs)
+    context = result["backend_context"]
+    assert context.execution_backend.name == "tvm_ffi"
+    assert context.module.name == ("cuda" if alias == "nvrtc" else "cutedsl")
+    assert context.target.attrs["arch"] == "sm_80"
+    assert configs == {"tl.enable_fast_math": True}
+    assert result["pass_configs"] == (dict(configs, **{"tl.cuda_compiler": "nvrtc"}) if alias == "nvrtc" else configs)
+    with pytest.raises(ValueError, match="requires a compatible CUDA target"):
+        cached(target="hip", execution_backend=alias)
+    if alias == "nvrtc":
+        with pytest.raises(ValueError, match="conflicts"):
+            cached(target=target, execution_backend=alias, pass_configs={"tl.cuda_compiler": "nvcc"})
+
+
 def test_webgpu_only_exposes_tvm_ffi_execution():
     target = tvm.target.Target("webgpu")
     backend = get_backend("webgpu")

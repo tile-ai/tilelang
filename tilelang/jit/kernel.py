@@ -8,6 +8,7 @@ from tvm.tirx import PrimFunc
 from tilelang import tvm
 from tilelang import env
 from tilelang.backend.module import BackendContext, create_backend_context
+from tilelang.backend.execution_backend import normalize_execution_alias
 from tvm.target import Target
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (
@@ -104,6 +105,8 @@ class JITKernel(Generic[_P, _T]):
         self.prim_func = func
         self.verbose = verbose
 
+        if backend_context is None:
+            target, execution_backend, pass_configs = normalize_execution_alias(target, execution_backend, pass_configs)
         self.pass_configs = normalize_pass_configs(pass_configs)
 
         self.compile_flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
