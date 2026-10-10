@@ -1,4 +1,5 @@
 __all__ = [
+    "mul_hi",
     "abs2",
     "exp",
     "exp2",
@@ -33,6 +34,20 @@ from cutlass.cute.tensor import TensorSSA
 from cutlass.experimental import primitives as prims
 from cutlass.base_dsl.typing import BFloat16, Float16, Float32, Uint16, Uint32
 from cutlass.cutlass_dsl import dsl_user_op
+
+
+@dsl_user_op
+def mul_hi(a, b, *, loc=None, ip=None):
+    dtype = type(a)
+    return dtype(
+        prims.inline_ptx(
+            f"mul.hi.u{dtype.width} {{$w0}}, {{$r0}}, {{$r1}};",
+            write_only_types=[dtype],
+            read_only_args=[a, dtype(b)],
+            loc=loc,
+            ip=ip,
+        )
+    )
 
 
 def _scalar_arg_type(arg):

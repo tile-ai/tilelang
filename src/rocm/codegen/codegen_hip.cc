@@ -1494,6 +1494,15 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
 }
 
 void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
+  if (auto lowered = tl::LowerInvariantArithmetic(GetRef<Call>(op))) {
+    PrintExpr(lowered.value(), os);
+    return;
+  }
+  if (op->op.same_as(tl::mul_hi())) {
+    os << (op->dtype.bits() == 64 ? "__umul64hi(" : "__umulhi(")
+       << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1]) << ")";
+    return;
+  }
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
     this->PrintIndent();
