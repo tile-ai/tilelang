@@ -1244,6 +1244,9 @@ class AutoTuneImpl(Generic[_P, _T]):
         autotuner = (
             AutoTuner(self.jit_impl.func, configs=self.configs)
             .set_profile_args(
+                warmup=self.warmup,
+                rep=self.rep,
+                timeout=self.timeout,
                 supply_type=self.supply_type,
                 ref_prog=self.ref_prog,
                 supply_prog=self.supply_prog,
