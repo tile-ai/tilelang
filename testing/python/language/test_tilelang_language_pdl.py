@@ -286,12 +286,11 @@ def test_pdl_sync():
 
 
 def _lower_cutedsl_for_pdl(program):
-    """Lower a PDL program through CuTeDSL and build its host wrapper."""
+    """Lower a PDL program through CuTeDSL."""
 
     try:
         from cutlass.cute import arch as cute_arch
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-        from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
+        from tilelang.cuda.cutedsl_backend import check_cutedsl_available
         from tilelang.backend.target import determine_target
 
         check_cutedsl_available()
@@ -306,25 +305,18 @@ def _lower_cutedsl_for_pdl(program):
     target = determine_target({"kind": "cutedsl", "arch": "sm_90"})
     with target:
         artifact = tilelang.lower(program, target=target)
-    mod = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
-    wrapper = TLCuTeDSLSourceWrapper(mod, artifact.kernel_source, target, artifact.device_mod, artifact.host_mod)
-    return artifact, wrapper
+    return artifact
 
 
 def test_cutedsl_pdl_codegen_and_launcher_support():
-    """Verify CuTeDSL PDL lowering and host launcher generation."""
+    """Verify CuTeDSL PDL lowering and launch metadata."""
 
-    trigger_artifact, _ = _lower_cutedsl_for_pdl(kernels_with_pdl_trigger(64, block_size=64))
+    trigger_artifact = _lower_cutedsl_for_pdl(kernels_with_pdl_trigger(64, block_size=64))
     assert "tl.griddepcontrol_launch_dependents()" in trigger_artifact.kernel_source
 
-    sync_artifact, sync_wrapper = _lower_cutedsl_for_pdl(kernels_with_pdl_sync(64, block_size=64))
+    sync_artifact = _lower_cutedsl_for_pdl(kernels_with_pdl_sync(64, block_size=64))
     assert "tl.griddepcontrol_wait()" in sync_artifact.kernel_source
-    assert "use_pdl=True" in sync_wrapper.host_func
-    assert "--gpu-arch=sm_90" in sync_wrapper.host_func
-
-    launcher_cpp = sync_wrapper.get_launcher_cpp_code()
-    assert "CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION" in launcher_cpp
-    assert "cuLaunchKernelEx" in launcher_cpp
+    assert any(func.attrs.get("has_cuda_pdl_sync", False) for func in sync_artifact.device_mod.functions.values())
 
     import tilelang.contrib.cutedsl as tl
 
@@ -344,7 +336,7 @@ def test_cutedsl_pdl_runtime_pipeline():
         _lower_cutedsl_for_pdl(kernels_with_pdl_pipeline(N, block_size=64))
         kernel = tilelang.compile(
             kernels_with_pdl_pipeline(N, block_size=64),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target="cutedsl",
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         b = torch.empty_like(a)

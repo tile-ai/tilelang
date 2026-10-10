@@ -510,7 +510,7 @@ jobs:
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
 
   cutedsl:
-    name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
+    name: CuTeDSL and Host IR for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
@@ -657,6 +657,18 @@ jobs:
         run: |
           rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
           rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
+
+      - name: Run unified Host IR regressions
+        run: |
+          uv run --no-project -m pytest --maxfail=3 \
+            testing/python/jit/test_tilelang_jit_cutedsl_host_codegen.py \
+            testing/python/jit/test_tilelang_jit_nvrtc.py \
+            testing/python/jit/test_tilelang_jit_nvrtc_std.py \
+            testing/python/jit/test_tilelang_jit_uint64.py \
+            testing/python/jit/test_tilelang_jit_output_selection.py \
+            testing/python/cache/test_tilelang_kernel_cache.py \
+            testing/python/autotune/test_tilelang_autotune_cutedsl_cache.py \
+            testing/python/language/test_tilelang_language_pdl.py
 
       - name: Run CuTeDSL examples with Python 3.12 (CUDA-auto)
         env:

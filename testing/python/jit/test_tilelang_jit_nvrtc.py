@@ -129,7 +129,7 @@ def run_gemm_jit_kernel(
         num_threads,
     )
 
-    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="nvrtc")
+    matmul_kernel = tilelang.compile(program, out_idx=-1, pass_configs={"tl.cuda_compiler": "nvrtc"})
 
     in_dtype = T.dtype(in_dtype).as_torch()
     out_dtype = T.dtype(out_dtype).as_torch()
@@ -185,13 +185,13 @@ def _make_add_constant_kernel(value):
 
 @tilelang.testing.requires_cuda
 def test_nvrtc_kernel_handles_are_isolated_between_adapters():
-    first_kernel = tilelang.compile(_make_add_constant_kernel(1.0), out_idx=-1, execution_backend="nvrtc")
+    first_kernel = tilelang.compile(_make_add_constant_kernel(1.0), out_idx=-1, pass_configs={"tl.cuda_compiler": "nvrtc"})
     x = torch.zeros(128, device="cuda", dtype=torch.float32)
 
     first_result_before = first_kernel(x)
-    second_kernel = tilelang.compile(_make_add_constant_kernel(5.0), out_idx=-1, execution_backend="nvrtc")
+    second_kernel = tilelang.compile(_make_add_constant_kernel(5.0), out_idx=-1, pass_configs={"tl.cuda_compiler": "nvrtc"})
 
-    assert first_kernel.adapter.kernels is not second_kernel.adapter.kernels
+    assert first_kernel.adapter.rt_mod is not second_kernel.adapter.rt_mod
     torch.testing.assert_close(first_result_before, torch.ones_like(x))
     torch.testing.assert_close(first_kernel(x), torch.ones_like(x))
     torch.testing.assert_close(second_kernel(x), torch.full_like(x, 5.0))
@@ -216,7 +216,7 @@ def run_nvrtc_kernel_do_bench(
         num_threads,
     )
 
-    matmul_kernel = tilelang.compile(program, execution_backend="nvrtc")
+    matmul_kernel = tilelang.compile(program, pass_configs={"tl.cuda_compiler": "nvrtc"})
 
     profiler = matmul_kernel.get_profiler()
 
@@ -256,7 +256,7 @@ def run_nvrtc_kernel_multi_stream(
         num_threads,
     )
 
-    matmul_kernel = tilelang.compile(program, execution_backend="nvrtc")
+    matmul_kernel = tilelang.compile(program, pass_configs={"tl.cuda_compiler": "nvrtc"})
     in_dtype = T.dtype(in_dtype).as_torch()
     out_dtype = T.dtype(out_dtype).as_torch()
     tensor_a = torch.randn(M, K, dtype=in_dtype).cuda()
@@ -299,7 +299,7 @@ def run_nvrtc_dynamic_shape(
         num_threads,
     )
 
-    matmul_kernel = tilelang.compile(program, execution_backend="nvrtc")
+    matmul_kernel = tilelang.compile(program, pass_configs={"tl.cuda_compiler": "nvrtc"})
     if isinstance(M, T.Var):
         M = 1024
     if isinstance(N, T.Var):
@@ -378,7 +378,7 @@ def run_nvrtc_im2col_tma_desc(N, C, H, W, F, K, S, D, P, block_M, block_N, block
     """Test im2col TMA descriptor functionality in NVRTC backend."""
     program = convolution_im2col(N, C, H, W, F, K, S, D, P, block_M, block_N, block_K, num_stages, num_threads)
 
-    conv_kernel = tilelang.compile(program, out_idx=-1, execution_backend="nvrtc")
+    conv_kernel = tilelang.compile(program, out_idx=-1, pass_configs={"tl.cuda_compiler": "nvrtc"})
 
     a = torch.randn(N, H, W, C).cuda().half()
     b = torch.randn(K, K, C, F).cuda().half()
@@ -419,7 +419,7 @@ def test_nvrtc_l2_persistent_map():
     M = 1024
     N = 1024
 
-    @tilelang.jit(out_idx=[-1], execution_backend="nvrtc")
+    @tilelang.jit(out_idx=[-1], pass_configs={"tl.cuda_compiler": "nvrtc"})
     def elementwise_add_with_l2_cache(
         M,
         N,
@@ -470,7 +470,7 @@ def test_nvrtc_pdl():
 
     N = 64
 
-    @tilelang.jit(execution_backend="nvrtc")
+    @tilelang.jit(pass_configs={"tl.cuda_compiler": "nvrtc"})
     def multi_kernels_with_pdl(N, block_size=256, dtype=T.float32):
         @T.prim_func
         def main(

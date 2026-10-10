@@ -34,8 +34,18 @@ def test_reused_output_indices(execution_backend):
     c = torch.full_like(a, 2000)
 
     for _ in range(2):
-        copy_kernel = tilelang.compile(copy_output, out_idx=output_indices, execution_backend=execution_backend)
-        sum_kernel = tilelang.compile(sum_output, out_idx=output_indices, execution_backend=execution_backend)
+        copy_kernel = tilelang.compile(
+            copy_output,
+            out_idx=output_indices,
+            execution_backend="tvm_ffi" if execution_backend == "nvrtc" else execution_backend,
+            pass_configs={"tl.cuda_compiler": "nvrtc"} if execution_backend == "nvrtc" else None,
+        )
+        sum_kernel = tilelang.compile(
+            sum_output,
+            out_idx=output_indices,
+            execution_backend="tvm_ffi" if execution_backend == "nvrtc" else execution_backend,
+            pass_configs={"tl.cuda_compiler": "nvrtc"} if execution_backend == "nvrtc" else None,
+        )
         for kernel, inputs, expected in [(copy_kernel, (a,), a + 1), (sum_kernel, (a, b, c), a + b + c)]:
             actual = kernel(*inputs)
             if not torch.equal(actual, expected):
@@ -51,18 +61,34 @@ def test_reused_output_indices(execution_backend):
 def test_invalid_output_indices(execution_backend, output_indices):
     original = output_indices.copy() if isinstance(output_indices, list) else output_indices
     with pytest.raises(ValueError):
-        tilelang.compile(copy_output, out_idx=output_indices, execution_backend=execution_backend)
+        tilelang.compile(
+            copy_output,
+            out_idx=output_indices,
+            execution_backend="tvm_ffi" if execution_backend == "nvrtc" else execution_backend,
+            pass_configs={"tl.cuda_compiler": "nvrtc"} if execution_backend == "nvrtc" else None,
+        )
     if output_indices != original:
         pytest.fail(f"Failed compilation changed the caller's output indices to {output_indices}")
 
 
 @tilelang.testing.requires_cuda
-def test_grouped_output_selection_and_export(tmp_path):
+@pytest.mark.parametrize("compiler", ["nvcc", "nvrtc", "cutedsl"])
+def test_grouped_output_selection_and_export(tmp_path, compiler):
     from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
     from tilelang.autotuner.param import CompileArgs
     from tilelang.jit.kernel import JITKernel
 
-    args = CompileArgs(out_idx=[-1], execution_backend="tvm_ffi", target="cuda", target_host="c")
+    if compiler == "nvrtc":
+        pytest.importorskip("cuda.bindings.nvrtc")
+    if compiler == "cutedsl":
+        pytest.importorskip("cutlass.cute")
+    args = CompileArgs(
+        out_idx=[-1],
+        execution_backend="tvm_ffi",
+        target="cutedsl" if compiler == "cutedsl" else "cuda",
+        target_host="c",
+        pass_configs={} if compiler == "cutedsl" else {"tl.cuda_compiler": compiler},
+    )
     results = compile_grouped_unit_tvm_ffi([(0, {"program": copy_output}), (1, {"program": sum_output})], args, lambda program: program)
     a = torch.arange(128, dtype=torch.float32, device="cuda")
     for idx, _, kernel, error in results:

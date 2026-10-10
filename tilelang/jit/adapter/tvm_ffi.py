@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 from collections.abc import Callable
+from functools import cached_property
 import sys
 import threading
 
@@ -155,6 +156,28 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         """Return the lazy executable, or the runnable module loaded from disk cache."""
         return self._get_executable()
 
+    @cached_property
+    def _entry(self) -> Callable[..., Any]:
+        executable = self._get_executable()
+        if isinstance(executable, runtime.Executable):
+            executable = executable.jit()
+        entry = executable.main
+        params = [p for i, p in enumerate(self.params) if not self._ffi_callee_allocated_output_abi or i not in self.result_idx]
+        uint64_indices = [i for i, p in enumerate(params) if str(p.dtype) == "uint64" and p.is_scalar()]
+        if not uint64_indices:
+            return entry
+
+        def call(*args):
+            # TVM-FFI transports integers in signed 64-bit slots; retain the bits.
+            args = list(args)
+            for i in uint64_indices:
+                value = args[i]
+                if (1 << 63) <= value < (1 << 64):
+                    args[i] = value - (1 << 64)
+            return entry(*args)
+
+        return call
+
     def _uses_ffi_callee_allocated_output_abi(self) -> bool:
         """Whether lowering gives this kernel the callee-allocated main ABI."""
         if not self.result_idx:
@@ -239,28 +262,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         dynamic_symbolic_map = self.dynamic_symbolic_map
         assert dynamic_symbolic_map is not None
 
-        # Prepare helpers for friendly dtype error messages
-        prim_func = self.prim_func
-        buffer_map = prim_func.buffer_map
-        params = prim_func.params
-        # Expected dtype string per parameter index (for buffers only)
-        expected_dtype_strs: list[str | None] = []
-        # Track whether each param is a buffer (has dtype) vs scalar
-        is_buffer_param: list[bool] = []
-        for p in params:
-            if p in buffer_map:
-                expected_dtype_strs.append(str(buffer_map[p].dtype))
-                is_buffer_param.append(True)
-            else:
-                expected_dtype_strs.append(None)
-                is_buffer_param.append(False)
+        expected_inputs = len(self.params) - len(self.result_idx)
 
         def func(*inputs: torch.Tensor | Any):
             nonlocal current_device_functor
             # Validate input count strictly
-            expected_inputs = len(self.params) - len(self.result_idx)
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
+
+            # No allocation or argument stitching is needed. Keep NPU stream
+            # initialization on the device-aware path below.
+            if not self.result_idx and not hasattr(torch, "npu"):
+                self._entry(*inputs)
+                return []
 
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
@@ -335,8 +349,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
             if out_device is not None:
                 self._prepare_torch_device(out_device)
-            executable = self._get_executable()
-            executable(*tensor_list)
+            self._entry(*tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -376,7 +389,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 # a zero-element anchor solely for that allocator/device state.
                 allocator_anchor = torch.empty(0, device=device)
 
-            result = self._get_executable()(*inputs, allocator_anchor)
+            result = self._entry(*inputs, allocator_anchor)
             if len(self.result_idx) == 1:
                 return result
             return list(result)

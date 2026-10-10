@@ -14,7 +14,6 @@ from tilelang.engine.param import KernelParam, dump_kernel_params
 from tilelang.env import env
 from tilelang.jit.adapter.base import CachedTextSource
 from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
-from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
 
 
 class _FakeAdapter:
@@ -43,13 +42,6 @@ def cache_dirs(tmp_path, monkeypatch):
 def _make_fake_kernel(tmp_path):
     lib_path = tmp_path / "kernel_lib.so"
     lib_path.write_bytes(b"fake-so")
-    return _FakeKernel(str(lib_path))
-
-
-def _make_fake_nvrtc_kernel(tmp_path):
-    lib_path = tmp_path / "kernel.cubin"
-    lib_path.write_bytes(b"fake-cubin")
-    lib_path.with_suffix(".py").write_text("# fake launcher")
     return _FakeKernel(str(lib_path))
 
 
@@ -221,34 +213,6 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
     assert loaded is None
 
 
-def test_nvrtc_adapter_host_source_lazy_loads(tmp_path):
-    pytest.importorskip("cuda.bindings.driver", reason="NVRTC adapter requires cuda-python")
-    from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter
-
-    host_source_path = tmp_path / "host_kernel.cu"
-    host_source_path.write_text("// nvrtc host source")
-    adapter = NVRTCKernelAdapter.__new__(NVRTCKernelAdapter)
-    adapter.host_func = None
-    adapter._host_kernel_source_path = str(host_source_path)
-
-    assert adapter.get_host_source() == "// nvrtc host source"
-    assert adapter.host_func == "// nvrtc host source"
-
-
-def test_cutedsl_adapter_host_source_lazy_loads(tmp_path):
-    from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
-
-    host_source_path = tmp_path / "kernel.py"
-    host_source_path.write_text("# cutedsl host source")
-    adapter = CuTeDSLKernelAdapter.__new__(CuTeDSLKernelAdapter)
-    adapter.host_kernel_source = None
-    adapter.host_func = None
-    adapter._host_kernel_source_path = str(host_source_path)
-
-    assert adapter.get_host_source() == "# cutedsl host source"
-    assert adapter.host_kernel_source == "# cutedsl host source"
-
-
 def test_tvm_ffi_source_fallback_handles_missing_runtime_module():
     from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
 
@@ -323,23 +287,6 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
     assert not cache_path.exists()
     assert "Error during atomic cache save" in logged
     assert not staging_root.exists() or not any(staging_root.iterdir())
-
-
-def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
-    cache = NVRTCKernelCache()
-    key = "nvrtc-atomic-repair"
-    cache_path = Path(cache._get_cache_path(key))
-    cache_path.mkdir(parents=True)
-    (cache_path / cache.device_kernel_path).write_text("// device kernel")
-    (cache_path / cache.host_kernel_path).write_text("// host kernel")
-    (cache_path / cache.kernel_lib_path).write_bytes(b"old-cubin")
-    (cache_path / cache.params_path).write_bytes(b"old-params")
-    (cache_path / "legacy.txt").write_text("stale")
-
-    cache._save_kernel_to_disk(key, _make_fake_nvrtc_kernel(tmp_path))
-
-    assert (cache_path / cache.kernel_py_path).exists()
-    assert not (cache_path / "legacy.txt").exists()
 
 
 def test_safe_write_executable_uses_explicit_export_kwargs(cache_dirs, tmp_path):

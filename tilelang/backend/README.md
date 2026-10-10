@@ -22,7 +22,7 @@ A target backend owns four implementation areas:
 
 The target backend also declares which shared execution backends can consume
 its outputs. This is a compatibility declaration, not a fifth implementation
-area. A new target backend normally reuses `tvm_ffi`, `nvrtc`, `cython`,
+area. A new target backend normally reuses `tvm_ffi`, `cython`,
 `torch`, or another existing execution implementation.
 
 The logical flow is:
@@ -62,8 +62,8 @@ resolve either backend again.
 
 - A **target backend**, such as CUDA, ROCm, CPU, Metal, or WebGPU, owns the
   dialect, lowering, codegen, and target-specific toolchain primitives.
-- An **execution backend**, such as `tvm_ffi`, `nvrtc`, `cython`, `torch`,
-  `cutedsl`, or `pto`, is a reusable Build/JIT/Runtime implementation that may
+- An **execution backend**, such as `tvm_ffi`, `cython`, `torch`,
+  or `pto`, is a reusable Build/JIT/Runtime implementation that may
   serve one or more compatible target backends.
 - A target backend **declares execution compatibility** and satisfies the
   selected implementation's source, artifact, and launch-metadata contract; it
@@ -74,7 +74,7 @@ resolve either backend again.
 - `BackendContext` is the resolved, immutable state for one compilation.
 
 Target backends and execution backends are deliberately separate. For example,
-CUDA can execute through `tvm_ffi`, `nvrtc`, or `cython`; selecting `nvrtc` does
+CUDA can execute through `tvm_ffi` or `cython`; selecting the `nvrtc` device compiler does
 not select a different target architecture or pass pipeline.
 
 ## Source Layout
@@ -109,10 +109,7 @@ BACKEND = register_backend(
         device_codegens={...},
         host_codegens={...},
         host_codegen_hooks={...},
-        execution_backends=(
-            ExecutionBackendSpec("tvm_ffi"),
-            ExecutionBackendSpec("nvrtc"),
-        ),
+        execution_backends=(ExecutionBackendSpec("tvm_ffi"),),
         callbacks={...},
     )
 )
@@ -249,7 +246,6 @@ declares which shared execution backends can consume its generated outputs:
 ```text
 execution_backends:
   tvm_ffi -> compatible with TVM FFI runtime modules
-  nvrtc   -> compatible with CUDA source + driver launch
   cython  -> compatible with generated Cython wrappers
   torch   -> compatible with framework-provided compile/launch
 ```
@@ -286,7 +282,7 @@ and the selected execution backend decides whether and when it is invoked.
 | Python package | Target kind | Notes |
 | --- | --- | --- |
 | `tilelang/cuda/backend.py` | `cuda` | Plain CUDA codegen, compiler callbacks, and execution compatibility. |
-| `tilelang/cuda/cutedsl_backend.py` | `cuda` | CuTeDSL variant explicitly reusing the CUDA pipeline. |
+| `tilelang/cuda/cutedsl_backend.py` | `cuda` | CuTeDSL variant reusing the CUDA pipeline; default `tvm_ffi` Host IR execution, including TMA and CUDA launch extensions. |
 | `tilelang/rocm` | `hip` | ROCm/HIP pipeline, codegen, compiler callback, and MFMA/WMMA extensions. |
 | `tilelang/cpu` | `c`, `llvm` | CPU pipeline, codegen, and scalar CPU tile-op implementations. |
 | `tilelang/metal` | `metal` | Metal pipeline, codegen, host hook, and Metal language extensions. |

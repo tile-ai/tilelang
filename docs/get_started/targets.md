@@ -34,6 +34,22 @@ def compiled_kernel(*args):
     return func(*args)
 ```
 
+## CuTeDSL with compiled Host IR
+
+`tilelang.compile(func, target="cutedsl")` defaults to `execution_backend="tvm_ffi"`, using
+CuTeDSL device compilation with the shared native Host IR executor, cache and
+library export. Ordinary tensor pointers, dynamic sizes, host control flow and
+multiple kernels are supported. Device scalars currently support `int32`,
+`uint32`, `int64`, `float32` and `float64`; block dimensions must be constant.
+The device artifact is PTX, which the CUDA driver JIT-compiles on first use.
+TMA descriptors use CuTe's grid-constant TensorMap type; the compiled Host IR
+constructs their runtime values. Clustered/cooperative launches and PDL reuse
+the CUDA runtime's launch metadata, subject to device support.
+CuTeDSL is an optional device compiler, not a separate execution backend.
+For NVRTC, use `pass_configs={"tl.cuda_compiler": "nvrtc"}` with the same
+`tvm_ffi` executor. The old `"cutedsl"` and `"nvrtc"` execution backends and
+their wrapper caches are removed; kernels are recompiled into the shared cache.
+
 ## Target input forms
 
 Most TileLang APIs that accept a target, such as `tilelang.compile`, `tilelang.jit`, and the autotuner, accept the

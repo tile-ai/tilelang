@@ -59,12 +59,15 @@ def test_nvrtc_warp_reduce(dtype, op):
             tid = T.get_thread_binding()
             O[tid] = reduce(A[tid])
 
-    kernel = tilelang.compile(main, out_idx=[1], execution_backend="nvrtc")
+    kernel = tilelang.compile(main, out_idx=[1], pass_configs={"tl.cuda_compiler": "nvrtc"})
     values = torch.arange(32, device="cuda", dtype=torch.int32)
     a = values.to(getattr(torch, dtype))
     expected = getattr(values, op)().to(a.dtype).expand_as(a)
-    out = kernel(a, stream=torch.cuda.current_stream().cuda_stream)
-    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        out = kernel(a)
+        torch.testing.assert_close(out, expected, atol=0, rtol=0)
 
 
 if __name__ == "__main__":

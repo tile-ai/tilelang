@@ -1,3 +1,4 @@
+#include "codegen_cuda.h"
 #include "codegen_cutedsl.h"
 #include "runtime/pack_args.h"
 #include "support/check.h"
@@ -8,49 +9,6 @@ namespace tvm {
 namespace codegen {
 
 using namespace ffi;
-
-static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
-  Map<String, runtime::FunctionInfo> fmap;
-
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
-        << "Can only lower IR Module with PrimFuncs";
-    auto f = Downcast<tirx::PrimFunc>(kv.second);
-
-    Array<DLDataType> arg_types;
-    for (size_t i = 0; i < f->params.size(); ++i) {
-      if (f->params[i]->dtype.is_handle()) {
-        auto ptr = f->params[i]->type_annotation.as<PointerTypeNode>();
-        if (ptr && ptr->storage_scope == "grid_constant") {
-          arg_types.push_back(DataType(runtime::kDLGridConstant, 64, 1));
-          continue;
-        }
-      }
-      arg_types.push_back(f->params[i].dtype());
-    }
-    Array<String> launch_param_tags;
-    if (f->GetAttr<Array<Integer>>("cluster_dims").defined()) {
-      launch_param_tags.push_back(runtime::launch_param::kClusterDimX);
-      launch_param_tags.push_back(runtime::launch_param::kClusterDimY);
-      launch_param_tags.push_back(runtime::launch_param::kClusterDimZ);
-    }
-    if (auto opt = f->GetAttr<Array<String>>(tirx::attr::kKernelLaunchParams)) {
-      for (const auto &tag : opt.value()) {
-        if (tag != runtime::launch_param::kClusterDimX &&
-            tag != runtime::launch_param::kClusterDimY &&
-            tag != runtime::launch_param::kClusterDimZ) {
-          launch_param_tags.push_back(tag);
-        }
-      }
-    }
-    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-    std::string name = static_cast<std::string>(global_symbol.value());
-    runtime::FunctionInfo info(String(name), arg_types, launch_param_tags,
-                               Array<runtime::ArgExtraTags>());
-    fmap.Set(String(name), info);
-  }
-  return fmap;
-}
 
 Module BuildTileLangCuTeDSLWithoutCompile(IRModule mod, Target target) {
   CodeGenTileLangCuTeDSL cg;
@@ -78,13 +36,35 @@ Module BuildTileLangCuTeDSLWithoutCompile(IRModule mod, Target target) {
   static constexpr const char kDummyPtx[] = "ptx";
   return target::CUDAModuleCreateWithFallback(
       Bytes(kDummyPtx, sizeof(kDummyPtx) - 1), String("ptx"),
-      ExtractFuncInfo(mod), source_map);
+      ExtractCudaFuncInfo(mod), source_map);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
-  refl::GlobalDef().def("target.build.tilelang_cutedsl_without_compile",
-                        BuildTileLangCuTeDSLWithoutCompile);
+  refl::GlobalDef()
+      .def("target.build.tilelang_cutedsl_without_compile",
+           BuildTileLangCuTeDSLWithoutCompile)
+      .def("target.build.tilelang_cutedsl", [](IRModule mod, Target target) {
+        auto source_mod = BuildTileLangCuTeDSLWithoutCompile(mod, target);
+        auto code = source_mod->InspectSource(ffi::String("cuda"));
+        auto compile =
+            Function::GetGlobalRequired("tilelang_callback_cutedsl_compile");
+        auto fmap = ExtractCudaFuncInfo(mod);
+        Optional<Module> result;
+        for (const auto &kv : mod->functions) {
+          auto func = Downcast<tirx::PrimFunc>(kv.second);
+          auto name = func->GetAttr<String>(tvm::attr::kGlobalSymbol).value();
+          Bytes ptx = compile(code, func, target).cast<Bytes>();
+          auto device = target::CUDAModuleCreateWithFallback(
+              ptx, String("ptx"), {{name, fmap[name]}}, {{"cuda", code}});
+          if (result.defined()) {
+            result.value()->ImportModule(device);
+          } else {
+            result = device;
+          }
+        }
+        return result.value_or(source_mod);
+      });
 }
 
 } // namespace codegen

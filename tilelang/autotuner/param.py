@@ -36,8 +36,6 @@ DEVICE_KERNEL_PATH = "device_kernel.cu"
 HOST_KERNEL_PATH = "host_kernel.cu"
 EXECUTABLE_PATH = "executable.so"
 KERNEL_LIB_PATH = "kernel_lib.so"
-KERNEL_CUBIN_PATH = "kernel.cubin"
-KERNEL_PY_PATH = "kernel.py"
 PARAMS_PATH = "params.json"
 TargetLike = str | dict[str, object] | Target
 
@@ -56,7 +54,7 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"] = "auto"
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "torch", "pto"] = "auto"
     target: TargetLike = "auto"
     target_host: TargetLike | None = None
     verbose: bool = False
@@ -205,8 +203,6 @@ class AutotuneResult:
         if verbose:
             logger.debug(f"Saving kernel source code to file: {device_kernel_path}")
         device_kernel_source = kernel.kernel_source
-        if kernel.execution_backend == "cutedsl":
-            device_kernel_source = kernel.adapter.get_kernel_source(kernel_only=True)
         if device_kernel_source is not None:
             self._safe_write_file(device_kernel_path, "w", lambda f: f.write(device_kernel_source))
 
@@ -215,7 +211,7 @@ class AutotuneResult:
         if verbose:
             logger.debug(f"Saving wrapped kernel source code to file: {host_kernel_path}")
         # Match kernel_cache behavior: use host source for tvm_ffi, otherwise wrapped kernel
-        if kernel.execution_backend == "tvm_ffi" or kernel.execution_backend == "cutedsl":
+        if kernel.execution_backend == "tvm_ffi":
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_host_source()))
         else:
             self._safe_write_file(host_kernel_path, "w", lambda f: f.write(kernel.adapter.get_kernel_source()))
@@ -225,46 +221,10 @@ class AutotuneResult:
 
         kernel_lib_path = os.path.join(cache_path, kernel_lib_file)
 
-        if kernel.execution_backend == "nvrtc":
-            # Save cubin and python helper file
-            src_lib_path = kernel.adapter.libpath
-            kernel_py_path = os.path.join(cache_path, KERNEL_PY_PATH)
-            py_src_path = src_lib_path.replace(".cubin", ".py")
-            if verbose:
-                logger.debug(f"Saving kernel nvrtc python code to file: {kernel_py_path}")
-            self._safe_write_file(kernel_py_path, "wb", lambda f: f.write(self._load_binary(py_src_path)))
-            if verbose:
-                logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
-            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
-        elif kernel.execution_backend == "tvm_ffi":
+        if kernel.execution_backend == "tvm_ffi":
             from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 
             TVMFFIKernelCache.export_library(kernel, kernel_lib_path)
-        elif kernel.execution_backend == "cutedsl":
-            # Save the Python source file (CuTeDSL "library" is a .py, not a .so)
-            src_lib_path = kernel.adapter.libpath
-            if verbose:
-                logger.debug(f"Saving CuTeDSL kernel Python source to file: {kernel_lib_path}")
-            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
-
-            # Save launcher .so if present (compiled C++ launcher for TMA etc.)
-            lib_gen = kernel.adapter.lib_generator
-            launcher_src = getattr(lib_gen, "launcher_libpath", None)
-            if launcher_src and os.path.exists(launcher_src):
-                launcher_name = getattr(lib_gen, "launcher_libname", os.path.basename(launcher_src))
-                dst_launcher = os.path.join(cache_path, launcher_name)
-                if verbose:
-                    logger.debug(f"Saving CuTeDSL launcher library to file: {dst_launcher}")
-                self._safe_write_file(dst_launcher, "wb", lambda f: f.write(self._load_binary(launcher_src)))
-
-            # Save cubin if already generated (generated during autotuning benchmark)
-            src_dir = os.path.dirname(src_lib_path)
-            src_cubin = os.path.join(src_dir, "kernel.cubin")
-            if os.path.exists(src_cubin):
-                dst_cubin = os.path.join(cache_path, KERNEL_CUBIN_PATH)
-                if verbose:
-                    logger.debug(f"Saving CuTeDSL cubin to file: {dst_cubin}")
-                self._safe_write_file(dst_cubin, "wb", lambda f: f.write(self._load_binary(src_cubin)))
         else:
             src_lib_path = kernel.adapter.libpath
             if verbose:
@@ -530,21 +490,14 @@ class AutotuneResult:
     @staticmethod
     def _get_kernel_lib_file(execution_backend: str) -> str:
         """Return the cache filename for one backend's executable artifact."""
-        if execution_backend == "nvrtc":
-            return KERNEL_CUBIN_PATH
         if execution_backend == "tvm_ffi":
             return EXECUTABLE_PATH
-        if execution_backend == "cutedsl":
-            return KERNEL_PY_PATH
         return KERNEL_LIB_PATH
 
     @classmethod
     def _get_required_kernel_files(cls, path: Path, execution_backend: str) -> list[Path]:
         """Return backend-specific files required to reload a kernel."""
-        files = [path / cls._get_kernel_lib_file(execution_backend)]
-        if execution_backend == "nvrtc":
-            files.append(path / KERNEL_PY_PATH)
-        return files
+        return [path / cls._get_kernel_lib_file(execution_backend)]
 
     @classmethod
     def _get_complete_result_files(cls, path: Path, execution_backend: str) -> list[Path]:

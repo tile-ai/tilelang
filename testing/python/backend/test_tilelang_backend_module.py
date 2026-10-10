@@ -10,8 +10,8 @@ from tilelang.backend import BackendContext, create_backend_context, get_backend
 
 def test_builtin_backend_modules_are_explicit():
     expected = {
-        "cuda": (("cuda",), ["tvm_ffi", "nvrtc", "cython"]),
-        "cutedsl": (("cuda",), ["cutedsl"]),
+        "cuda": (("cuda",), ["tvm_ffi", "cython"]),
+        "cutedsl": (("cuda",), ["tvm_ffi"]),
         "rocm": (("hip",), ["tvm_ffi", "cython"]),
         "cpu": (("c", "llvm"), ["cython", "tvm_ffi"]),
         "metal": (("metal",), ["torch", "tvm_ffi"]),
@@ -102,7 +102,7 @@ def test_cutedsl_backend_reuses_cuda_pipeline():
     assert cutedsl_backend.name == "cutedsl"
     assert cutedsl_backend.get_pipeline(cutedsl_target) is cuda_backend.get_pipeline(cuda_target)
     assert cutedsl_backend.get_device_codegen(cutedsl_target).name == "cutedsl"
-    assert cutedsl_backend.allowed_execution_backends(cutedsl_target) == ("cutedsl",)
+    assert cutedsl_backend.allowed_execution_backends(cutedsl_target) == ("tvm_ffi",)
 
 
 def test_webgpu_only_exposes_tvm_ffi_execution():

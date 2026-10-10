@@ -8,7 +8,7 @@ import pytest
 
 def _is_cutedsl_available():
     try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+        from tilelang.cuda.cutedsl_backend import check_cutedsl_available
 
         check_cutedsl_available()
         return True

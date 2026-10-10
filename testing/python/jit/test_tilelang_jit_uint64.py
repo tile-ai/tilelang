@@ -17,19 +17,30 @@ def test_uint64_tensor(execution_backend):
 
     values = [0, 1, (1 << 63) - 1, 1 << 63, (1 << 64) - 1] * 25 + [2, 3, 4]
     a = torch.tensor(values, dtype=torch.uint64, device="cuda")
-    kernel = tilelang.compile(main, out_idx=[1], target="cuda", execution_backend=execution_backend)
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        target="cuda",
+        execution_backend="tvm_ffi" if execution_backend == "nvrtc" else execution_backend,
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if execution_backend == "nvrtc" else None,
+    )
     assert kernel(a).cpu().tolist() == [(x + 1) % (1 << 64) for x in values]
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("execution_backend", ["cython", "nvrtc"])
+@pytest.mark.parametrize("execution_backend", ["cython", "nvrtc", "tvm_ffi"])
 def test_uint64_scalar(execution_backend):
     @T.prim_func
     def main(B: T.Tensor((1,), "uint64"), value: T.uint64):
         with T.Kernel(1, threads=1):
             B[0] = value
 
-    kernel = tilelang.compile(main, target="cuda", execution_backend=execution_backend)
+    kernel = tilelang.compile(
+        main,
+        target="cuda",
+        execution_backend="tvm_ffi" if execution_backend == "nvrtc" else execution_backend,
+        pass_configs={"tl.cuda_compiler": "nvrtc"} if execution_backend == "nvrtc" else None,
+    )
     b = torch.empty((1,), dtype=torch.uint64, device="cuda")
     for value in [0, (1 << 63) - 1, 1 << 63, (1 << 64) - 1]:
         kernel(b, value)

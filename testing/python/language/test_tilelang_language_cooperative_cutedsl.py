@@ -6,7 +6,7 @@ import tilelang.language as T
 import tilelang.testing
 
 try:
-    from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+    from tilelang.cuda.cutedsl_backend import check_cutedsl_available
 
     check_cutedsl_available()
 except (ImportError, AssertionError):
