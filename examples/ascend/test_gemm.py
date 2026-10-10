@@ -29,7 +29,7 @@ def test_gemm(dtype, out_dtype, mixed, hf32, unit_flag):
     generator = torch.Generator().manual_seed(0)
     a = torch.randn(m, k, generator=generator).to(getattr(torch, dtype))
     b = torch.randn(n, k, generator=generator).to(getattr(torch, dtype))
-    kernel = tilelang.compile(gemm(m, k, n, dtype, out_dtype, mixed, hf32, unit_flag), target="ascend", out_idx=-1)
+    kernel = tilelang.compile(gemm(m, k, n, dtype, out_dtype, mixed, hf32, unit_flag), out_idx=-1)
     tolerance = 0.1 if hf32 else 1e-2 if out_dtype == "bfloat16" else 1e-3
     expected = (a.float() @ b.float().T).to(getattr(torch, out_dtype))
     torch.testing.assert_close(kernel(a.npu(), b.npu()).cpu(), expected, rtol=tolerance, atol=tolerance)
@@ -42,7 +42,7 @@ def test_gemm_accumulate(out_dtype):
     b = (torch.randint(-4, 5, (256, 512)).float() / 8).to(torch.bfloat16)
     initial = torch.ones(256, 256, dtype=getattr(torch, out_dtype))
     output = initial.npu()
-    kernel = tilelang.compile(gemm(256, 512, 256, out_dtype=out_dtype, acc=True), target="ascend")
+    kernel = tilelang.compile(gemm(256, 512, 256, out_dtype=out_dtype, acc=True))
     kernel(a.npu(), b.npu(), output)
     expected = (a.float() @ b.float().T).to(initial.dtype) + initial
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)

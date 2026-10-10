@@ -107,7 +107,7 @@ def ref_program(x, w):
 
 
 def run_regression_perf(M_DIM=512, K_DIM=8192, N_DIM=512, split_k=8, deterministic=False):
-    kernel = tilelang.compile(gemm_splitk(M_DIM, K_DIM, N_DIM, split_k, deterministic), target="ascend", out_idx=-1)
+    kernel = tilelang.compile(gemm_splitk(M_DIM, K_DIM, N_DIM, split_k, deterministic), out_idx=-1)
     x = torch.randn(M_DIM, K_DIM, dtype=torch.bfloat16, device="npu")
     w = torch.randn(N_DIM, K_DIM, dtype=torch.bfloat16, device="npu")
     latency = do_bench(lambda: kernel(x, w), backend="msprof", _n_warmup=30, _n_repeat=50)
@@ -126,7 +126,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     x = torch.randn(512, 4096, dtype=torch.bfloat16, device="npu")
     w = torch.randn_like(x)
-    kernel = tilelang.compile(gemm_splitk(512, 4096, 512, 8, args.deterministic), target="ascend", out_idx=-1)
+    kernel = tilelang.compile(gemm_splitk(512, 4096, 512, 8, args.deterministic), out_idx=-1)
     result = kernel(x, w)
     torch.testing.assert_close(result, ref_program(x, w), rtol=1e-2, atol=1e-2)
     if args.deterministic:

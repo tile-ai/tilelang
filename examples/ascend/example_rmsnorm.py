@@ -93,7 +93,7 @@ def ref_program(x, weight, eps=1e-06):
 
 
 def run_regression_perf(batch=4096, d=4096, eps=1e-6):
-    kernel = tilelang.compile(rms_norm_fwd(batch, d), target="ascend", out_idx=[1, 3])
+    kernel = tilelang.compile(rms_norm_fwd(batch, d), out_idx=[1, 3])
     x = torch.randn(batch * d, device="npu")
     weight = torch.randn(d, device="npu")
     latency = do_bench(lambda: kernel(x, weight, eps), backend="msprof", _n_warmup=30, _n_repeat=50)
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     batch, d, eps = 128, 4096, 1e-6
     x, weight = torch.randn(batch, d, device="npu"), torch.randn(d, device="npu")
-    kernel = tilelang.compile(rms_norm_fwd(batch, d), target="ascend", out_idx=[1, 3])
+    kernel = tilelang.compile(rms_norm_fwd(batch, d), out_idx=[1, 3])
     y, rstd = kernel(x.flatten(), weight, eps)
     torch.testing.assert_close(y.reshape(batch, d), ref_program(x, weight, eps), rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(rstd, torch.rsqrt(x.square().mean(-1) + eps), rtol=1e-5, atol=1e-5)
