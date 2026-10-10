@@ -146,7 +146,10 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
                 B_local = T.alloc_local((warp_cols * local_size_b), b_dtype)
                 if clear_accum:
                     T.clear(C_buf)
-                for ki in T.serial(block_K // micro_size_k):
+                # Unroll in TIR so every access to the A fragment has a compile-time
+                # index. A runtime K-atom index forces fragments that span more than
+                # one atom into local memory.
+                for ki in T.unroll(block_K // micro_size_k, explicit=True):
                     mma_emitter.ldmatrix_b(B_local, B_region, ki)
                     mma_emitter.mma(
                         A_buf,
