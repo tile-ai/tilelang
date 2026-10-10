@@ -13,7 +13,7 @@ class PassConfigKey(str, Enum):
     # TileLang specific configs: TL_XX
 
     TL_ENABLE_INVARIANT_ARITHMETIC = "tl.enable_invariant_arithmetic"
-    """Enable host-prepared integer arithmetic (CUDA TVM-FFI, opt-in)."""
+    """Enable host-prepared integer arithmetic (CUDA/ROCm TVM-FFI, opt-in)."""
 
     TL_SIMPLIFY = "tl.Simplify"
     """Configuration for TileLang simplification passes.

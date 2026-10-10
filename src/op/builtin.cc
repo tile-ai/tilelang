@@ -309,6 +309,9 @@ TIR_DEFINE_TL_BUILTIN(bounded_rem)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
+TIR_DEFINE_TL_BUILTIN(mul_hi).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(barrett_reduce)
     .set_num_inputs(7)
     .set_attr<TCallEffectKind>("TCallEffectKind",

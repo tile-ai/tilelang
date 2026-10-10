@@ -28,7 +28,7 @@ public:
     return var;
   }
 
-  // CUDA's TVM scalar packer uses 32/64-bit slots and lacks uint64 slots.
+  // TVM's GPU scalar packer uses 32/64-bit slots and lacks uint64 slots.
   // Arithmetic keeps its logical type; only the captured ABI value changes.
   PrimExpr PrepareArgument(const PrimExpr &value, const std::string &name) {
     DataType dtype = value.dtype();

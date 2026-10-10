@@ -9,9 +9,9 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _compile_invariant(func):
+def _compile_invariant(func, target="cuda"):
     return tilelang.compile(
-        func, target="cuda", target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
+        func, target=target, target_host="c", execution_backend="tvm_ffi", pass_configs={"tl.enable_invariant_arithmetic": True}
     )
 
 
@@ -41,17 +41,30 @@ def divmod_kernel(size=512, dtype="int32", truncating=False, remainder_only=Fals
     return main
 
 
-@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param("cuda", marks=tilelang.testing.requires_cuda.marks()),
+        pytest.param("hip", marks=tilelang.testing.requires_rocm.marks()),
+        pytest.param("cutedsl", marks=tilelang.testing.requires_cuda.marks()),
+    ],
+)
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
 @pytest.mark.parametrize("truncating", [False, True])
 @pytest.mark.parametrize("remainder_only", [False, True])
-def test_invariant_divmod(dtype, truncating, remainder_only):
+def test_invariant_divmod(dtype, truncating, remainder_only, target):
     # One matrix owns basic arithmetic, boundary/random inputs and parameter
     # sharing. Remainder-only is separate because it selects Barrett rather
     # than reusing a quotient's signed-int32 magic parameters.
-    kernel = _compile_invariant(divmod_kernel(dtype=dtype, truncating=truncating, remainder_only=remainder_only))
+    if target == "cutedsl":
+        from tilelang.backend.module import get_backend
+
+        if not any(spec.name == "tvm_ffi" for spec in get_backend("cutedsl").execution_backends):
+            pytest.skip("CuTe invariant arithmetic requires the unified Host IR execution path")
+        pytest.importorskip("cutlass.cute")
+    kernel = _compile_invariant(divmod_kernel(dtype=dtype, truncating=truncating, remainder_only=remainder_only), target)
     source = kernel.get_kernel_source()
-    signature = re.search(r"void main_kernel\((.*?)\)", source).group(1)
+    signature = re.search(r"(?:void|def) main_kernel\((.*?)\)", source, re.S).group(1)
     magic = dtype == "int32" and not remainder_only
     assert signature.count("fastdiv_multiplier") == int(magic)
     assert signature.count("fastdiv_shift") == int(magic)
@@ -773,21 +786,20 @@ def test_invariant_reassociated_quotient_remainder_identity(dtype):
 
 
 @tilelang.testing.requires_cuda
-def test_invariant_inherits_dynamic_shape_positivity():
+def test_invariant_dynamic_shape_can_be_zero():
     n = T.dynamic("n")
 
     @T.prim_func
     def main(A: T.Tensor((n,), "int32"), B: T.Tensor((n,), "int32")):
-        with T.Kernel(T.ceildiv(n, 128), threads=128) as bx:
+        # Exercise zero shapes without requesting an invalid zero-grid launch.
+        with T.Kernel(T.max(1, T.ceildiv(n, 128)), threads=128) as bx:
             for lane in T.Parallel(128):
                 i = bx * 128 + lane
                 if i < n:
                     B[i] = A[i] // n
 
     kernel = _compile_invariant(main)
-    division = next(line for line in kernel.get_kernel_source().splitlines() if "tl::fast_div(" in line)
-    assert ", (bool)1)" in division  # Positive divisor from shape metadata, not T.assume.
-    for size in [1, 7, 31, 129]:
+    for size in [0, 1, 7, 31, 129]:
         a = torch.arange(size, dtype=torch.int32, device="cuda") * 37 - 1000
         b = torch.empty_like(a)
         kernel(a, b)

@@ -6,10 +6,39 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 import tilelang
+import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tvm import tirx
+
+
+@pytest.mark.parametrize(
+    "target, multiply",
+    [
+        pytest.param("cutedsl", "tl.mul_hi", marks=tilelang.testing.requires_cuda.marks()),
+        pytest.param("hip", "__umulhi", marks=tilelang.testing.requires_rocm.marks()),
+    ],
+)
+def test_invariant_arithmetic_device_codegen(target, multiply):
+    @T.prim_func
+    def main(B: T.Tensor((4,), "int32"), x: T.int32, d: T.int32, mu: T.uint32, shift: T.int32):
+        with T.Kernel(1, threads=1):
+            B[0] = T.call_intrin("int32", tvm.ir.Op.get("tl.fast_div"), x, d, mu, shift, True, False, False, False)
+            B[1] = T.call_intrin("int32", tvm.ir.Op.get("tl.fast_rem"), x, d, mu, shift, True, False, False, False)
+            B[2] = T.call_intrin("int32", tvm.ir.Op.get("tl.barrett_reduce"), x, d, mu, True, False, False, False)
+            B[3] = T.call_intrin("int32", tvm.ir.Op.get("tl.bounded_rem"), x, d)
+
+    if target == "cutedsl":
+        # Source-only CUDA lowering does not require the optional CuTe runtime.
+        mod = tilelang.lower(main, target={"kind": "cuda", "arch": "sm_80"}).device_mod
+        target = tvm.target.Target({"kind": "cuda", "keys": ["cutedsl", "cuda"], "arch": "sm_80"})
+        source = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile")(mod, target).inspect_source()
+    else:
+        source = tilelang.lower(main, target={"kind": "hip", "mcpu": "gfx942"}).kernel_source
+    assert multiply in source
+    assert "tl.fast_div" not in source and "tl::fast_div" not in source
 
 
 def _prepare(divisors, params, copies=1, complex_index=False):

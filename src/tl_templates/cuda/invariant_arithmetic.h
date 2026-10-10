@@ -1,7 +1,7 @@
 #pragma once
 
 #include "common.h"
-#include <type_traits>
+#include <cuda/std/type_traits>
 
 namespace tl {
 
@@ -38,7 +38,7 @@ TL_DEVICE X invariant_divmod(X x, D divisor, Word reciprocal, int shift,
     }
   }
   if constexpr (sizeof(X) == 8 && sizeof(Word) == 4 && sizeof(D) == 4 &&
-                std::is_unsigned_v<D>) {
+                cuda::std::is_unsigned_v<D>) {
     // The pass already bounds the dividend magnitude to the reciprocal word.
     // Keep the unsigned core narrow and widen only its result.
     if (nonnegative) {
@@ -47,9 +47,9 @@ TL_DEVICE X invariant_divmod(X x, D divisor, Word reciprocal, int shift,
           true, true));
     }
   }
-  using U = std::make_unsigned_t<X>;
+  using U = cuda::std::make_unsigned_t<X>;
   X d = X(divisor);
-  if constexpr (std::is_signed_v<X>) {
+  if constexpr (cuda::std::is_signed_v<X>) {
     if (!truncating && (positive_divisor || d > 0)) {
       // A launch-uniform positive-divisor path avoids the general sign/bias
       // restoration cost. Complementing negative x also handles INT_MIN.
@@ -66,7 +66,7 @@ TL_DEVICE X invariant_divmod(X x, D divisor, Word reciprocal, int shift,
   }
   U ax = U(x), ad = U(d);
   bool negative_q = false, negative_r = false, bias = false;
-  if constexpr (std::is_signed_v<X>) {
+  if constexpr (cuda::std::is_signed_v<X>) {
     bool negative_x = !nonnegative && x < 0;
     bool negative_d = !positive_divisor && d < 0;
     U sx = U(0) - U(negative_x), sd = U(0) - U(negative_d);
@@ -157,7 +157,7 @@ TL_DEVICE int barrett_reduce(int x, int d, unsigned reciprocal, bool valid,
 template <typename X, typename D>
 TL_DEVICE X fast_div(X x, D d, unsigned multiplier, int shift, bool valid,
                      bool truncating, bool nonnegative, bool positive_divisor) {
-  constexpr bool magic = sizeof(D) == 4 && std::is_signed_v<D>;
+  constexpr bool magic = sizeof(D) == 4 && cuda::std::is_signed_v<D>;
   return invariant_divmod<false, magic>(x, d, multiplier, shift, valid,
                                         truncating, nonnegative,
                                         positive_divisor);
@@ -166,7 +166,7 @@ TL_DEVICE X fast_div(X x, D d, unsigned multiplier, int shift, bool valid,
 template <typename X, typename D>
 TL_DEVICE X fast_rem(X x, D d, unsigned multiplier, int shift, bool valid,
                      bool truncating, bool nonnegative, bool positive_divisor) {
-  constexpr bool magic = sizeof(D) == 4 && std::is_signed_v<D>;
+  constexpr bool magic = sizeof(D) == 4 && cuda::std::is_signed_v<D>;
   return invariant_divmod<true, magic>(x, d, multiplier, shift, valid,
                                        truncating, nonnegative,
                                        positive_divisor);

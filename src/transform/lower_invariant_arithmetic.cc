@@ -909,7 +909,7 @@ private:
     unsigned properties = found->second;
     PrimExpr d = facts_.ResolveDivisor(divisor);
     // The operation type is independent of the reciprocal's word size.
-    // Narrow operations use CUDA's scalar 32-bit arithmetic and cast the
+    // Narrow operations use GPU scalar 32-bit arithmetic and cast the
     // result back; wide operations retain their original fallback width.
     DataType compute_type =
         x.dtype().bits() < 32

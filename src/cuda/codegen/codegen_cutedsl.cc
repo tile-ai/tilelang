@@ -757,6 +757,15 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const MaxNode *op,
  */
 void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
                                         std::ostream &os) { // NOLINT(*)
+  if (auto lowered = tl::LowerInvariantArithmetic(GetRef<Call>(op))) {
+    os << PrintExpr_(lowered.value());
+    return;
+  }
+  if (op->op.same_as(tl::mul_hi())) {
+    os << "tl.mul_hi(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
+    return;
+  }
   if (op->op.same_as(tl::clamp())) {
     os << PrintExpr_(tl::LowerClamp(GetRef<Call>(op)));
     return;

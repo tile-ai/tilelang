@@ -613,6 +613,10 @@ TVM_DLL const Op &fast_rem();
 TVM_DLL const Op &barrett_reduce();
 // Remainder with proven 0 <= x < 2*d and d > 0.
 TVM_DLL const Op &bounded_rem();
+TVM_DLL const Op &mul_hi();
+// Shared late expansion for backends without the CUDA arithmetic templates.
+TVM_DLL ffi::Optional<PrimExpr>
+LowerInvariantArithmetic(const tirx::Call &call);
 
 } // namespace tl
 } // namespace tvm
