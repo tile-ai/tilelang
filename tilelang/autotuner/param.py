@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import tilelang
 from tilelang import tvm as tvm
 from tvm.tirx import PrimFunc
@@ -23,7 +22,6 @@ from tilelang import logger
 import json
 import hashlib
 import uuid
-from tvm.runtime import Executable
 
 if TYPE_CHECKING:
     from tilelang.backend.module import BackendContext
@@ -184,22 +182,6 @@ class AutotuneResult:
 
         KernelCache._safe_write_file(path, mode, operation)
 
-    @staticmethod
-    def _safe_write_executable(executable: Executable, path: str):
-        """Atomically export one runtime executable to disk."""
-        directory, filename = os.path.split(path)
-        stem, suffix = os.path.splitext(filename)
-        temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
-        try:
-            executable.export_library(temp_path)
-            # Flush exported data before the rename publishes the file.
-            with open(temp_path, "rb+") as temp_file:
-                os.fsync(temp_file.fileno())
-            os.replace(temp_path, path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.remove(temp_path)
-
     def _save_kernel_to_disk(self, cache_path: Path, kernel: JITKernel, verbose: bool = False):
         """
         Persists a compiled kernel to disk cache.
@@ -255,16 +237,9 @@ class AutotuneResult:
                 logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
             self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
         elif kernel.execution_backend == "tvm_ffi":
-            if hasattr(kernel.adapter, "libpath") and kernel.adapter.libpath:
-                src_lib_path = kernel.adapter.libpath
-                if verbose:
-                    logger.debug(f"Copying kernel library to file: {kernel_lib_path}")
-                self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
-            else:
-                executable = kernel.adapter.get_exportable_executable()
-                if verbose:
-                    logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
-                self._safe_write_executable(executable, kernel_lib_path)
+            from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
+
+            TVMFFIKernelCache.export_library(kernel, kernel_lib_path)
         elif kernel.execution_backend == "cutedsl":
             # Save the Python source file (CuTeDSL "library" is a .py, not a .so)
             src_lib_path = kernel.adapter.libpath

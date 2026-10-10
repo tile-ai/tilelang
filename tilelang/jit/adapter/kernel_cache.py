@@ -24,7 +24,18 @@ class TVMFFIKernelCache(KernelCache):
 
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
         kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
-        executable = kernel.adapter.get_exportable_executable()
         if verbose:
-            self.logger.debug(f"Saving kernel executable to file: {executable}")
-        KernelCache._safe_write_executable(executable, kernel_lib_path, export_kwargs=self._get_export_kwargs(kernel))
+            self.logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
+        self.export_library(kernel, kernel_lib_path)
+
+    @staticmethod
+    def export_library(kernel: JITKernel, path: str):
+        """Export fresh modules or copy loaded libraries through the same writer."""
+        library = getattr(kernel.adapter, "libpath", None)
+        if library:
+            if not (os.path.exists(path) and os.path.samefile(library, path)):
+                KernelCache._safe_write_file(path, "wb", lambda file: file.write(KernelCache._load_binary(library)))
+        else:
+            KernelCache._safe_write_executable(
+                kernel.adapter.get_exportable_executable(), path, export_kwargs=TVMFFIKernelCache._get_export_kwargs(kernel)
+            )
