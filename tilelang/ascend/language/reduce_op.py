@@ -23,7 +23,7 @@ from tilelang.language.reduce_op import (
     reduce as _common_reduce,
 )
 from tilelang.language.utils import _normalize_annotations
-from tilelang.utils.language import is_shared, retrieve_shape, to_buffer_region, to_tile_region
+from tilelang.utils.language import _get_buffer, is_shared, retrieve_shape, to_buffer_region, to_tile_region
 
 from .frame import inside_simdvf
 
@@ -58,8 +58,12 @@ def reduce(
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     out_buffer = to_buffer_region(out).buffer
-    if reduce_type in ("bitand", "bitor", "bitxor") and not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
-        raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
+    if reduce_type in ("bitand", "bitor", "bitxor"):
+        buf_dtype = _get_buffer(buffer).dtype
+        if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
+        if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out)
     expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
