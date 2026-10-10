@@ -3,6 +3,20 @@
 from .. import _ffi_api
 
 
+def UsesSIMTIm2Col(target):
+    """Whether this CUDA target selects the generic SIMT im2col implementation."""
+    return _ffi_api.UsesSIMTIm2Col(target)
+
+
+def ExpandSIMTIm2Col():
+    """Opt-in SIMT im2col expansion before WS and pipeline planning.
+
+    Preserve annotated operations and specialized implementations unchanged.
+    The CUDA pipeline enables this only with ``tl.enable_early_simt_im2col``.
+    """
+    return _ffi_api.ExpandSIMTIm2Col()
+
+
 def AutoWarpSpecialization():
     """Derive a warp-specialization schedule with the scheduler named by
     the ``tl.enable_auto_warp_specialization`` pass config (currently
