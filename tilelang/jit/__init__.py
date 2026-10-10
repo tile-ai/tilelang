@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
+import threading
 from typing import (
     Any,
     Generic,
@@ -44,6 +45,7 @@ _Ret = TypeVar("_Ret")
 TargetLike = str | dict[str, object] | Target
 _CallFormKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]]
 _CALL_FORM_CACHE_MISS = object()
+_DEBUG_COMPILE_LOCK = threading.RLock()
 
 
 @dataclass
@@ -465,34 +467,38 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
 
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
         prim_func = self.get_tir(*args, **kwargs)
-        kernel_result = compile(
-            prim_func,
-            out_idx=self.out_idx,
-            execution_backend=self.execution_backend,
-            target=self.target,
-            target_host=self.target_host,
-            verbose=self.verbose,
-            pass_configs=self.pass_configs,
-            compile_flags=self.compile_flags,
-        )
+        func_pass_configs = prim_func.attrs.get("tilelang_pass_configs", {}) if prim_func.attrs else {}
+        enable_dump_ir = (self.pass_configs or {}).get("tl.enable_dump_ir", func_pass_configs.get("tl.enable_dump_ir", False))
+        # Debug compilations write shared filenames, including across JIT copies.
+        with _DEBUG_COMPILE_LOCK if self.debug_root_path or enable_dump_ir else nullcontext():
+            kernel_result = compile(
+                prim_func,
+                out_idx=self.out_idx,
+                execution_backend=self.execution_backend,
+                target=self.target,
+                target_host=self.target_host,
+                verbose=self.verbose,
+                pass_configs=self.pass_configs,
+                compile_flags=self.compile_flags,
+            )
 
-        if self.debug_root_path:
-            if isinstance(self.func, PrimFunc):
-                func_name = self.func.attrs["global_symbol"]
-            else:
-                func_name = getattr(self.func, "__name__", "jit_kernel")
+            if self.debug_root_path:
+                if isinstance(self.func, PrimFunc):
+                    func_name = self.func.attrs["global_symbol"]
+                else:
+                    func_name = getattr(self.func, "__name__", "jit_kernel")
 
-            # cutedsl emits python executor not `c`
-            is_cutedsl = (self.execution_backend or self.target) == "cutedsl"
-            kernel_suffix = "py" if is_cutedsl else "c"
-            kernel_file = f"tilelang_jit_kernel_{func_name}.{kernel_suffix}"
+                # cutedsl emits python executor not `c`
+                is_cutedsl = (self.execution_backend or self.target) == "cutedsl"
+                kernel_suffix = "py" if is_cutedsl else "c"
+                kernel_file = f"tilelang_jit_kernel_{func_name}.{kernel_suffix}"
 
-            program_file = f"tilelang_jit_program_{func_name}.py"
-            makedirs(self.debug_root_path, exist_ok=True)
-            with open(path.join(self.debug_root_path, kernel_file), "w") as f:
-                print(kernel_result.get_kernel_source(), file=f)
-            with open(path.join(self.debug_root_path, program_file), "w") as f:
-                print(prim_func.script(), file=f)
+                program_file = f"tilelang_jit_program_{func_name}.py"
+                makedirs(self.debug_root_path, exist_ok=True)
+                with open(path.join(self.debug_root_path, kernel_file), "w") as f:
+                    print(kernel_result.get_kernel_source(), file=f)
+                with open(path.join(self.debug_root_path, program_file), "w") as f:
+                    print(prim_func.script(), file=f)
 
         return kernel_result
 
