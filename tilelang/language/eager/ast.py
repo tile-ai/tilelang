@@ -333,6 +333,19 @@ class LoopControlFinder(ast.NodeVisitor):
         pass
 
 
+class _GeneratedNameRewriter(ast.NodeTransformer):
+    def __init__(self, names: dict[str, str]):
+        self.names = names
+
+    def visit_Name(self, node: ast.Name):
+        node.id = self.names.get(node.id, node.id)
+        return node
+
+    def visit_arg(self, node: ast.arg):
+        node.arg = self.names.get(node.arg, node.arg)
+        return node
+
+
 class DSLMutator(ast.NodeTransformer):
     def __init__(self, nonlocals: dict[str, Any], globals: dict[str, Any], filename: str):
         self.tmp_counter = 0
@@ -341,23 +354,77 @@ class DSLMutator(ast.NodeTransformer):
         self.extra_type_hints: dict[str, Any] = {}
         self.filename = filename
         self.comprehension_locals: set[str] = set()
+        self.used_names = set(nonlocals) | set(globals)
+        self.generated_names: dict[str, str] = {}
+
+    def _fresh_name(self, preferred: str) -> str:
+        name = preferred
+        suffix = 0
+        while name in self.used_names:
+            suffix += 1
+            name = f"{preferred}_{suffix}"
+        self.used_names.add(name)
+        return name
+
+    def visit(self, node: ast.AST):
+        if not self.generated_names:
+            # Reserve the entire user tree, including names in nested scopes,
+            # before inserting any generated code. Globals/nonlocals also matter
+            # because generated locals must not hide a captured value.
+            for item in ast.walk(node):
+                if isinstance(item, ast.Name):
+                    self.used_names.add(item.id)
+                elif isinstance(item, ast.arg):
+                    self.used_names.add(item.arg)
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    self.used_names.add(item.name)
+                elif isinstance(item, ast.alias):
+                    self.used_names.add(item.asname or item.name.split(".")[0])
+                elif isinstance(item, ast.ExceptHandler) and item.name:
+                    self.used_names.add(item.name)
+            self.generated_names = {name: self._fresh_name(name) for name in ("__tb", "__tb_fl", "__tb_fn", "__kwargs", "_")}
+        return super().visit(node)
+
+    def quote(
+        self, expr: str, *, passes: Sequence[QuoteReplacement] | None = None, span: ast.AST | Span | None = None, **kws: QuoteReplacement
+    ) -> list[ast.stmt]:
+        # Rewrite only the generated template, BEFORE substituting user AST.
+        # Renaming the final tree would also rename colliding user parameters.
+        tree = _GeneratedNameRewriter(self.generated_names).visit(ast.parse(expr))
+        if isinstance(span, ast.AST):
+            span = ast_get_span(span)
+        return cast(ast.Module, QuoteVisitor(kws, passes, span).visit(tree)).body
+
+    def quote1(self, expr: str, **kws: QuoteReplacement) -> ast.stmt:
+        res = self.quote(expr, **kws)
+        assert len(res) == 1
+        return res[0]
+
+    def quote_expr(self, expr: str, **kws: QuoteReplacement) -> ast.expr:
+        res = self.quote1(expr, **kws)
+        assert isinstance(res, ast.Expr)
+        return res.value
 
     def get_tmp(self) -> str:
-        name = f"__{self.tmp_counter}"
-        self.tmp_counter += 1
-        return name
+        while True:
+            name = f"__{self.tmp_counter}"
+            self.tmp_counter += 1
+            # The loop-control form also emits a companion iterator local.
+            if name not in self.used_names and f"{name}_iter" not in self.used_names:
+                self.used_names.update((name, f"{name}_iter"))
+                return name
 
     def visit_If(self, node: ast.If):
         node = self.generic_visit(node)
         br = self.get_tmp()
         if len(node.orelse) == 0:
-            return quote(
+            return self.quote(
                 f"for {br} in __tb.ctx_if(cond):\n  for _ in __tb.ctx_then({br}):\n    pass\n",
                 cond=node.test,
                 passes=[node.body],
                 span=node,
             )
-        return quote(
+        return self.quote(
             f"for {br} in __tb.ctx_if(cond):\n  for _ in __tb.ctx_then({br}):\n    pass\n  for _ in __tb.ctx_else({br}):\n    pass\n",
             cond=node.test,
             passes=[node.body, node.orelse],
@@ -366,7 +433,7 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_Expr(self, node: ast.Expr):
         node = self.generic_visit(node)
-        return quote("__tb.eval(value)", value=node.value, span=node)
+        return self.quote("__tb.eval(value)", value=node.value, span=node)
 
     def _parse_names(self, target: ast.expr):
         if isinstance(target, ast.Name):
@@ -393,7 +460,7 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         if isinstance(node.iter, ast.Call):
             call = ast.Call(
-                func=quote_expr("__tb.iter_call"),
+                func=self.quote_expr("__tb.iter_call"),
                 args=[node.iter.func, *node.iter.args],
                 keywords=node.iter.keywords,
             )
@@ -413,7 +480,7 @@ class DSLMutator(ast.NodeTransformer):
         source = f"for {tmp} in __tb.ctx_for(range):\n" + textwrap.indent(body, "  ")
         if exits.has_control or exits.has_return:
             source = f"with __tb.loop(range) as {tmp}_iter:\n  for {tmp} in {tmp}_iter:\n" + textwrap.indent(body, "    ")
-        return quote(
+        return self.quote(
             source,
             target=node.target,
             range=node.iter,
@@ -423,11 +490,11 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_Continue(self, node: ast.Continue):
         node = self.generic_visit(node)
-        return quote("if __tb.ctx_continue(): continue", span=node)
+        return self.quote("if __tb.ctx_continue(): continue", span=node)
 
     def visit_Break(self, node: ast.Break):
         node = self.generic_visit(node)
-        return quote("if __tb.ctx_break(): break", span=node)
+        return self.quote("if __tb.ctx_break(): break", span=node)
 
     def _emit_assign_target(
         self, target: ast.expr, rval: ast.expr, annot: ast.expr | None = None, *, loop_target: bool = False
@@ -435,15 +502,15 @@ class DSLMutator(ast.NodeTransformer):
         bind_options = ", loop_target=True" if loop_target else ""
         if isinstance(target, ast.Name):
             if annot is None:
-                return quote(f"name = __tb.bind('{target.id}', value{bind_options})", name=target, value=rval, span=target)
+                return self.quote(f"name = __tb.bind('{target.id}', value{bind_options})", name=target, value=rval, span=target)
             else:
-                return quote(f'name = __tb.bind("{target.id}", value, annot)', name=target, value=rval, annot=annot, span=target)
+                return self.quote(f'name = __tb.bind("{target.id}", value, annot)', name=target, value=rval, annot=annot, span=target)
         elif isinstance(target, ast.Attribute):
             s = ast.unparse(target)
             raise NotImplementedError(f"Attribute assignment not supported yet, `{s}`")
         elif isinstance(target, ast.Subscript):
             if annot is None:
-                return quote(
+                return self.quote(
                     "__tb.assign_slice(lval, slice, value)",
                     lval=target.value,
                     slice=target.slice,
@@ -451,7 +518,7 @@ class DSLMutator(ast.NodeTransformer):
                     span=target,
                 )
             else:
-                return quote(
+                return self.quote(
                     "__tb.assign_slice(lval, slice, value, annot)",
                     lval=target.value,
                     slice=target.slice,
@@ -479,7 +546,9 @@ class DSLMutator(ast.NodeTransformer):
                     s = ast.unparse(target)
                     raise NotImplementedError(f"Attribute assignment not supported yet, `{s}`")
 
-            unpack_stmt = ast.Assign(targets=[_visit_target(target)], value=quote_expr("__tb.unwrap_value(rval)", rval=rval, span=rval))
+            unpack_stmt = ast.Assign(
+                targets=[_visit_target(target)], value=self.quote_expr("__tb.unwrap_value(rval)", rval=rval, span=rval)
+            )
             ast_set_span(unpack_stmt, ast_get_span(target))
             stmts: list[ast.stmt] = [unpack_stmt]
             bind_lvals: list[str] = []
@@ -487,7 +556,13 @@ class DSLMutator(ast.NodeTransformer):
 
             def flush_binds():
                 if bind_lvals:
-                    stmts.append(cast(ast.Assign, quote1(f"{', '.join(bind_lvals)}, = {', '.join(bind_rvals)},", span=target)))
+                    # User assignment targets are not generated-template names.
+                    stmt = ast.Assign(
+                        targets=[ast.Tuple(elts=[ast.Name(name, ctx=ast.Store()) for name in bind_lvals], ctx=ast.Store())],
+                        value=ast.Tuple(elts=[self.quote_expr(value, span=target) for value in bind_rvals], ctx=ast.Load()),
+                    )
+                    ast_set_span(stmt, ast_get_span(target))
+                    stmts.append(stmt)
                     bind_lvals.clear()
                     bind_rvals.clear()
 
@@ -517,7 +592,7 @@ class DSLMutator(ast.NodeTransformer):
                     bind_rvals.append(f'__tb.bind("{target.id}", {tmp}{bind_options})')
                 elif isinstance(target, ast.Subscript):
                     flush_binds()
-                    stmts.append(quote1(f"__tb.assign_slice(lval, slice, {tmp})", lval=target.value, slice=target.slice, span=target))
+                    stmts.append(self.quote1(f"__tb.assign_slice(lval, slice, {tmp})", lval=target.value, slice=target.slice, span=target))
                 else:
                     s = ast.unparse(target)
                     raise NotImplementedError(f"Unsupported target: {s}")
@@ -550,7 +625,7 @@ class DSLMutator(ast.NodeTransformer):
             # otherwise substitute the target identifier unexpectedly.
             target_load = ast.Name(target.id, ctx=ast.Load())
             ast_set_span(target_load, ast_get_span(target))
-            return quote(
+            return self.quote(
                 f"__tl_lhs = __tb.aug_assign('{op}', __tl_target, __tl_aug_value, name='{target.id}')",
                 __tl_lhs=target,
                 __tl_target=target_load,
@@ -558,7 +633,7 @@ class DSLMutator(ast.NodeTransformer):
                 span=node,
             )
         elif isinstance(target, ast.Subscript):
-            return quote(
+            return self.quote(
                 f"__tb.aug_assign_slice('{op}', lval, slice, value)",
                 lval=target.value,
                 slice=target.slice,
@@ -570,7 +645,7 @@ class DSLMutator(ast.NodeTransformer):
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         node = self.generic_visit(node)
-        rval = node.value or quote_expr("__tb.empty", span=node, annot=node)
+        rval = node.value or self.quote_expr("__tb.empty", span=node, annot=node)
         return self._emit_assign_target(node.target, rval, annot=node.annotation)
 
     def visit_While(self, node):
@@ -580,8 +655,8 @@ class DSLMutator(ast.NodeTransformer):
             exits.visit(stmt)
         node = self.generic_visit(node)
         if not exits.has_control:
-            return quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
-        return quote1(
+            return self.quote1("for _ in __tb.ctx_while(lambda: cond):\n  pass", cond=node.test, passes=[node.body], span=node)
+        return self.quote1(
             "for _ in __tb.ctx_while(lambda: cond):\n"
             "  try:\n    pass\n"
             "  except __tb.PythonLoopBreak:\n    break\n"
@@ -603,7 +678,13 @@ class DSLMutator(ast.NodeTransformer):
         for arg in all_args:
             name = arg.arg
             arg_names.add(name)
-            arg_stmt = quote1(f'{name} = __tb.arg("{name}", {name})', span=arg)
+            arg_stmt = self.quote1(
+                "target = __tb.arg(name, value)",
+                target=ast.Name(name, ctx=ast.Store()),
+                name=ast.Constant(name),
+                value=ast.Name(name, ctx=ast.Load()),
+                span=arg,
+            )
             arg.annotation = None
             stmts.append(arg_stmt)
         # trying to find `A: T.Tensor, b: T.float32` like type hints
@@ -614,18 +695,23 @@ class DSLMutator(ast.NodeTransformer):
         node.decorator_list.clear()
         name = node.name
         if node.args.kwarg is None:
-            node.args.kwarg = ast.arg(arg="__kwargs")
-        node = SpanAttacher("__tb_fl", "__tb_fn").visit(node)
-        return quote1(
-            f"def make_closure({', '.join(self.nonlocals.keys())}):\n"
+            node.args.kwarg = ast.arg(arg=self.generated_names["__kwargs"])
+        node = SpanAttacher(self.generated_names["__tb_fl"], self.generated_names["__tb_fn"], self.quote).visit(node)
+        closure = self.quote1(
+            "def make_closure():\n"
             f"  def {name}(__tb):\n"
             f"    __tb_fl = {self.filename!r}\n"
             f"    __tb_fn = {name!r}\n"
             "    pass\n"
-            f"    return {name}\n"
-            f"  return {name}",
+            "    return function\n"
+            "  return function",
+            function=ast.Name(name, ctx=ast.Load()),
             passes=[node],
         )
+        # Captured variables are user names, not template builder arguments.
+        assert isinstance(closure, ast.FunctionDef)
+        closure.args.args = [ast.arg(arg=name) for name in self.nonlocals]
+        return closure
 
     def _try_eval(self, node: ast.expr) -> Any:
         return _try_eval(node, self.nonlocals, self.globals)
@@ -668,7 +754,7 @@ class DSLMutator(ast.NodeTransformer):
         op_name = get_boolop_name(node.op)
         last = node.values[-1]
         for i in reversed(range(len(node.values) - 1)):
-            last = quote_expr(
+            last = self.quote_expr(
                 expr=f"__tb.boolop('{op_name}', left, lambda: right)",
                 left=node.values[i],
                 right=last,
@@ -679,9 +765,9 @@ class DSLMutator(ast.NodeTransformer):
     def visit_UnaryOp(self, node: ast.UnaryOp):
         node = self.generic_visit(node)
         if isinstance(node.op, ast.Not):
-            return quote_expr("__tb.boolop('Not', operand)", operand=node.operand, span=node)
+            return self.quote_expr("__tb.boolop('Not', operand)", operand=node.operand, span=node)
         if isinstance(node.op, ast.UAdd):
-            return quote_expr("__tb.unaryop('UAdd', operand)", operand=node.operand, span=node)
+            return self.quote_expr("__tb.unaryop('UAdd', operand)", operand=node.operand, span=node)
         return node
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
@@ -695,18 +781,18 @@ class DSLMutator(ast.NodeTransformer):
             left = comp
         last = split[-1]
         for i in reversed(range(len(split) - 1)):
-            last = quote_expr("__tb.boolop('And', left, lambda: right)", left=split[i], right=last, span=node)
+            last = self.quote_expr("__tb.boolop('And', left, lambda: right)", left=split[i], right=last, span=node)
         return last
 
     def visit_IfExp(self, node: ast.IfExp) -> ast.expr:
         node = self.generic_visit(node)
-        return quote_expr(
+        return self.quote_expr(
             "__tb.ifexp(cond, lambda: then, lambda: otherwise)", cond=node.test, then=node.body, otherwise=node.orelse, span=node
         )
 
     def visit_Return(self, node: ast.Return):
         node = self.generic_visit(node)
-        return quote("return __tb.ret(value)", value=node.value, span=node)
+        return self.quote("return __tb.ret(value)", value=node.value, span=node)
 
     def visit_With(self, node: ast.With):
         is_kernel_ctx = False
@@ -731,26 +817,26 @@ class DSLMutator(ast.NodeTransformer):
                     break
         node = self.generic_visit(node)
         for expr in node.items:
-            expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
+            expr.context_expr = self.quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
         if is_kernel_ctx:
-            return [quote1("if __tb.skip_kernel_ctx(): return"), node]
+            return [self.quote1("if __tb.skip_kernel_ctx(): return"), node]
         return node
 
     def visit_Assert(self, node: ast.Assert):
         node = self.generic_visit(node)
-        return quote("__tb.assert_expr(cond, msg)", cond=node.test, msg=node.msg, span=node)
+        return self.quote("__tb.assert_expr(cond, msg)", cond=node.test, msg=node.msg, span=node)
 
     def visit_Name(self, node: ast.Name):
         if isinstance(node.ctx, ast.Load):
             name = None if node.id in self.comprehension_locals else node.id
-            return quote_expr("__tb.rval(name, node)", name=ast.Constant(name), node=node, span=node)
+            return self.quote_expr("__tb.rval(name, node)", name=ast.Constant(name), node=node, span=node)
         return node
 
     def visit_Call(self, node: ast.Call):
         node = self.generic_visit(node)
         # Resolve by callable identity, not spelling, so aliases are checked
         # without changing shadowed builtins or adding a frame to other calls.
-        node.func = quote_expr("__tb.resolve_call(func)", func=node.func, span=node.func)
+        node.func = self.quote_expr("__tb.resolve_call(func)", func=node.func, span=node.func)
         return node
 
     def visit_ListComp(self, node):
@@ -765,8 +851,8 @@ class DSLMutator(ast.NodeTransformer):
             for i, gen in enumerate(node.generators):
                 if i:
                     gen.iter = self.visit(gen.iter)
-                gen.iter = quote_expr("__tb.python_iterable(value, 'comprehension')", value=gen.iter, span=gen.iter)
-                gen.ifs = [quote_expr("__tb.comprehension_filter(cond)", cond=self.visit(cond), span=cond) for cond in gen.ifs]
+                gen.iter = self.quote_expr("__tb.python_iterable(value, 'comprehension')", value=gen.iter, span=gen.iter)
+                gen.ifs = [self.quote_expr("__tb.comprehension_filter(cond)", cond=self.visit(cond), span=cond) for cond in gen.ifs]
             if isinstance(node, ast.DictComp):
                 node.key = self.visit(node.key)
                 node.value = self.visit(node.value)
@@ -782,14 +868,15 @@ class DSLMutator(ast.NodeTransformer):
 
 
 class SpanAttacher(ast.NodeTransformer):
-    def __init__(self, filename_var: str, func_name_var: str):
+    def __init__(self, filename_var: str, func_name_var: str, quote_func=quote):
         self.filename_var = filename_var
         self.func_name_var = func_name_var
+        self.quote = quote_func
 
     def visit(self, node: ast.AST):
         node = self.generic_visit(node)
         if isinstance(node, ast.stmt) and hasattr(node, "lineno"):
-            return quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})") + [node]
+            return self.quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})") + [node]
         return node
 
 
