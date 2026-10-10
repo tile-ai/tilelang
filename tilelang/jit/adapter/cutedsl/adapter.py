@@ -206,7 +206,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
-            if entry[0] != 2:
+            if v not in params:
                 dynamic_symbolic_order.append(v)
             self._dynamic_symbolic_name_map[v.name] = entry
 
