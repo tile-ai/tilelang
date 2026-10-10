@@ -7,6 +7,7 @@
 
 #include <tvm/target/codegen.h>
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -56,8 +57,12 @@ public:
 private:
   std::string GetStorageScopeOf(const PrimExpr &ptr_expr) const;
   std::string GetAddrSpaceOf(const PrimExpr &ptr_expr) const;
-  std::string GetPointeeTypeOf(const PrimExpr &ptr_expr,
-                               const std::string &fallback);
+  // Structured dtype of the pointee of a pointer expression; nullopt when the
+  // pointee type cannot be recovered (a reinterpret cast, for example). The
+  // cooperative-tensor paths fall back to the tensor's own dtype.
+  std::optional<DataType> GetPointeeDataType(const PrimExpr &ptr_expr) const;
+  // Printed Metal type name of a dtype, for emission only.
+  std::string PrintTypeName(DataType dtype);
   bool IsThreadIdxXExpr(const PrimExpr &expr) const;
   bool IsBlockIdxExpr(const PrimExpr &expr, int dim) const;
   bool IsConstIntExpr(const PrimExpr &expr, int64_t value) const;
@@ -73,9 +78,9 @@ private:
   void EnsureFragmentLaneVars();
   void EnsureCooperativeTensorBuffer(const Var &var);
 
-  std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+  std::unordered_map<Var, DataType, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       simdgroup_dtype_;
-  std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+  std::unordered_map<Var, DataType, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       cooperative_tensor_dtype_;
   std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       ct_c_inlined_;
