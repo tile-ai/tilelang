@@ -1,0 +1,5 @@
+{
+  "kind": "metal",
+  "max_num_threads": 256,
+  "thread_warp_size": 16
+}

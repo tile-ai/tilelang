@@ -1,34 +1,13 @@
 #!/usr/bin/env python
-"""Layout-inference verification driver.
+"""Layout-inference golden check.
 
-Each module under ``cases/`` constructs PrimFuncs whose free-mode layout
-search has a known-good answer.  This driver runs LayoutInference under
-both selection policies (``tl.layout_cost_model`` = "register-count" or
-"io-aware"), snapshots the inferred layouts, and compares them against
-the reviewed golden files under ``expected/``.
+Runs each case through LayoutInference under a pinned target and both
+``tl.layout_cost_model`` policies, and diffs the snapshots against
+``expected/<suite>/<case>.json``.  Layout inference is target-dependent, so
+the target is pinned rather than read from the host GPU.
 
-Usage:
-    python run.py                 # verify every case against goldens
-    python run.py --case NAME     # verify one case (substring match)
-    python run.py --record        # (re)write goldens from current behavior
-    python run.py --show          # print inferred layouts as they run
-    python run.py --anchor        # lower fully and check that the widest
-                                  # per-buffer vector access in device TIR
-                                  # matches each case's VECTOR_ANCHOR (the
-                                  # width the io-aware model believed in);
-                                  # variants without an anchor print the
-                                  # observed widths for review
-    python run.py --cute          # compare the symbolic scorer with the
-                                  # independent exact-enumeration oracle
-
-Golden files are one JSON per case:
-    expected/<case>.json = {variant: {model: {"buffers": ..., "loops": ...}}}
-
-Record, review the diff by hand (the layouts ARE the expectation — never
-commit a recording you have not read), then commit.  A case module may
-additionally define ``check(variant, model, result)`` for invariants that
-must hold regardless of the exact golden (e.g. "this fragment must be
-fully replicated").
+    python run.py --target cuda-sm90 --record   # re-record a suite
+    python run.py --list-targets
 """
 
 from __future__ import annotations
@@ -46,13 +25,59 @@ sys.path.insert(0, str(HERE))
 
 from common import (  # noqa: E402
     COST_MODELS,
+    DEFAULT_TARGET_SUITE,
+    TARGET_SUITE_SPECS,
+    _canonical,
     lower_and_extract_vector_widths,
+    _suite_config,
+    resolve_target,
     run_layout_inference,
     run_layout_inference_objects,
 )
 
 CASES_DIR = HERE / "cases"
 EXPECTED_DIR = HERE / "expected"
+
+
+def suite_dir(target_key: str) -> Path:
+    return EXPECTED_DIR / target_key
+
+
+def load_suite_meta(target_key: str, config: dict, *, recording: bool) -> None:
+    """Fail when a run's target differs from the suite's recorded target.
+
+    Without this a target change reads as whole-suite drift.
+    """
+    if recording:
+        return
+    meta_path = suite_dir(target_key) / "target.json"
+    if not meta_path.exists():
+        raise SystemExit(
+            f"no goldens for target suite {target_key!r} ({meta_path} is missing).\n"
+            f"Record them with: python run.py --target {target_key} --record\n"
+            f"Known suites: {', '.join(sorted(TARGET_SUITE_SPECS))}"
+        )
+    recorded = json.loads(meta_path.read_text())
+    if _canonical(recorded) != _canonical(config):
+        raise SystemExit(
+            f"target mismatch for suite {target_key!r}:\n"
+            f"  run:      {json.dumps(config, sort_keys=True)}\n"
+            f"  recorded: {json.dumps(recorded, sort_keys=True)}\n"
+            f"Re-record with: python run.py --target {target_key} --record"
+        )
+
+
+def load_suite_exclusions(target_key: str) -> dict:
+    """Cases this suite does not cover, e.g. ones needing another build's codegen."""
+    path = suite_dir(target_key) / "excluded.json"
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def write_suite_meta(target_key: str, config: dict) -> Path:
+    meta_path = suite_dir(target_key) / "target.json"
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    return meta_path
 
 
 def load_case_modules(name_filter: str | None):
@@ -91,22 +116,32 @@ def format_layout(info: dict) -> str:
     return "  |  ".join(parts)
 
 
-def run_anchor(modules) -> int:
+def run_anchor(modules, target, allow_unsupported: bool = False) -> int:
     """Anchor mode: lower each variant under the IO-AWARE pass config and
     check the widest per-buffer vector access in the device TIR against the
     case's VECTOR_ANCHOR — the width the cost model's winning layout was
     scored to sustain. A mismatch means the model believed a width the
-    vectorizer did not deliver (or vice versa)."""
+    vectorizer did not deliver (or vice versa).
+
+    Unlike the golden check this needs the full lowering pipeline, so it
+    depends on more of the backend than layout inference does; a build that
+    cannot lower the pinned target is reported as unsupported rather than as
+    a wrong answer."""
     failures = 0
+    unsupported = 0
     for case_name, module in modules:
         anchors = getattr(module, "VECTOR_ANCHOR", {})
         for variant, build in module.VARIANTS.items():
             tag = f"{case_name}/{variant}"
             try:
-                widths = lower_and_extract_vector_widths(build())
+                widths = lower_and_extract_vector_widths(build(), target=target)
             except Exception as exc:  # noqa: BLE001 - report, keep going
-                print(f"ERROR {tag}: {type(exc).__name__}: {exc}")
-                failures += 1
+                verdict = "SKIP" if allow_unsupported else "ERROR"
+                print(f"{verdict} {tag}: target cannot lower this case: {type(exc).__name__}: {exc}")
+                if allow_unsupported:
+                    unsupported += 1
+                else:
+                    failures += 1
                 continue
             expected = anchors.get(variant)
             if expected is None:
@@ -119,10 +154,12 @@ def run_anchor(modules) -> int:
                 failures += 1
             else:
                 print(f"PASS {tag}: {expected}")
+    if unsupported:
+        print(f"\n{unsupported} skipped (target unsupported)")
     return failures
 
 
-def run_cute(modules) -> int:
+def run_cute(modules, target) -> int:
     """CuTe-algebra parity check: for every golden fragment layout, score the
     fragment<->global copy statement both symbolically (cute_model, via the
     in-tree CuTe layout algebra) and by exact enumeration (oracle, numpy),
@@ -140,7 +177,7 @@ def run_cute(modules) -> int:
         cute_specs = getattr(module, "CUTE_STATEMENTS", {})
         for variant, build in module.VARIANTS.items():
             for model in COST_MODELS:
-                objs = run_layout_inference_objects(build(), model)
+                objs = run_layout_inference_objects(build(), model, target=target)
                 for name, (buffer, layout) in sorted(objs["buffers"].items()):
                     if not isinstance(layout, Fragment):
                         continue
@@ -182,11 +219,40 @@ def run_cute(modules) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", help="substring filter on case name")
+    parser.add_argument(
+        "--target",
+        default=None,
+        help=(
+            "pinned target suite: " + ", ".join(sorted(TARGET_SUITE_SPECS)) + ", or auto "
+            "(host-detected), or an inline JSON target config. "
+            f"Default: {DEFAULT_TARGET_SUITE}"
+        ),
+    )
+    parser.add_argument("--list-targets", action="store_true", help="list pinned target suites and exit")
     parser.add_argument("--record", action="store_true", help="write goldens instead of verifying")
     parser.add_argument("--show", action="store_true", help="print inferred layouts")
     parser.add_argument("--anchor", action="store_true", help="check lowered vector widths against VECTOR_ANCHOR")
     parser.add_argument("--cute", action="store_true", help="diff the CuTe-algebra scorer against the exact oracle")
+    parser.add_argument(
+        "--allow-unsupported",
+        action="store_true",
+        help=(
+            "downgrade 'target cannot infer this case' to a counted skip instead of a failure. "
+            "Use only when the missing capability is expected on this machine (e.g. a CPU-only "
+            "build without CUDA codegen); the count is always printed."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.list_targets:
+        for key in sorted(TARGET_SUITE_SPECS):
+            config = _suite_config(key)
+            marker = " (default)" if key == DEFAULT_TARGET_SUITE else ""
+            print(f"{key:12s} {json.dumps(config, sort_keys=True)}{marker}")
+        return 0
+
+    target, target_key, target_config = resolve_target(args.target)
+    print(f"target suite: {target_key}  {json.dumps(target_config, sort_keys=True)}")
 
     modules = load_case_modules(args.case)
     if not modules:
@@ -194,7 +260,7 @@ def main() -> int:
         return 2
 
     if args.anchor:
-        failures = run_anchor(modules)
+        failures = run_anchor(modules, target, allow_unsupported=args.allow_unsupported)
         if failures:
             print(f"\n{failures} failure(s)")
             return 1
@@ -202,27 +268,40 @@ def main() -> int:
         return 0
 
     if args.cute:
-        failures = run_cute(modules)
+        failures = run_cute(modules, target)
         if failures:
             print(f"\n{failures} failure(s)")
             return 1
         print("\nall cute-vs-oracle checks passed")
         return 0
 
+    load_suite_meta(target_key, target_config, recording=args.record)
+    excluded = load_suite_exclusions(target_key)
+
     failures = 0
+    unsupported = 0
+    excluded_cases = 0
+    recorded_cases: list[str] = []
     for case_name, module in modules:
-        golden_path = EXPECTED_DIR / f"{case_name}.json"
+        if case_name in excluded:
+            print(f"EXCLUDED {case_name}: {excluded[case_name]}")
+            excluded_cases += 1
+            continue
+        golden_path = suite_dir(target_key) / f"{case_name}.json"
         golden = json.loads(golden_path.read_text()) if golden_path.exists() else {}
         recording: dict = {}
-
         for variant, build in module.VARIANTS.items():
             for model in COST_MODELS:
                 tag = f"{case_name}/{variant}/{model}"
                 try:
-                    result = run_layout_inference(build(), model)
+                    result = run_layout_inference(build(), model, target=target)
                 except Exception as exc:  # noqa: BLE001 - report, keep going
-                    print(f"ERROR {tag}: {type(exc).__name__}: {exc}")
-                    failures += 1
+                    verdict = "SKIP" if args.allow_unsupported else "FAIL"
+                    print(f"{verdict} {tag}: target cannot infer this case: {type(exc).__name__}: {exc}")
+                    if args.allow_unsupported:
+                        unsupported += 1
+                    else:
+                        failures += 1
                     continue
 
                 if args.show:
@@ -231,8 +310,6 @@ def main() -> int:
                         for key, layout in result[section].items():
                             print(f"    {section}/{key}: {format_layout(layout)}")
 
-                # Structural invariants hold in both record and verify mode:
-                # a recording that violates them must never become a golden.
                 check = getattr(module, "check", None)
                 if check is not None:
                     try:
@@ -258,15 +335,31 @@ def main() -> int:
                 else:
                     print(f"PASS {tag}")
 
-        if args.record and recording:
-            EXPECTED_DIR.mkdir(exist_ok=True)
-            golden_path.write_text(json.dumps(recording, indent=2, sort_keys=True) + "\n")
-            print(f"wrote {golden_path}")
+        if args.record:
+            if recording:
+                golden_path.parent.mkdir(parents=True, exist_ok=True)
+                golden_path.write_text(json.dumps(recording, indent=2, sort_keys=True) + "\n")
+                print(f"wrote {golden_path}")
+            elif golden_path.exists():
+                golden_path.unlink()
+                print(f"removed {golden_path} (nothing to record)")
+            recorded_cases.append(case_name)
 
+    if args.record and recorded_cases:
+        meta_path = write_suite_meta(target_key, target_config)
+        print(f"wrote {meta_path}")
+
+    summary = f"\n{len(modules)} case(s) under target suite {target_key}"
+    if excluded_cases:
+        summary += f", {excluded_cases} excluded for this target"
+    if unsupported:
+        summary += f", {unsupported} skipped (target unsupported)"
     if failures:
-        print(f"\n{failures} failure(s)")
+        print(summary)
+        print(f"{failures} failure(s)")
         return 1
-    print("\nall checks passed")
+    print(summary)
+    print("all checks passed")
     return 0
 
 
