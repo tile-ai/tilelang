@@ -12,6 +12,7 @@ import re
 import subprocess
 import warnings
 import contextlib
+from functools import cache
 from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 import shutil
 import tempfile
@@ -731,3 +732,13 @@ def discover_cuda_include_paths(cuda_home: str, machine: str | None = None, syst
     # Preserve the previous Linux search paths when probing an incomplete or
     # not-yet-mounted toolkit. NVRTC will then report the missing headers.
     return [flat_include, target_include, osp.join(target_include, "cccl")]
+
+
+@cache
+def get_nvcc_version() -> tuple[int, ...]:
+    """Return the selected NVCC's full version, cached for this process."""
+    output = subprocess.check_output([get_nvcc_compiler(), "--version"], stderr=subprocess.STDOUT, text=True)
+    match = re.search(r"\bV(\d+\.\d+\.\d+)\b", output)
+    if match is None:
+        raise RuntimeError(f"Cannot determine NVCC version from: {output}")
+    return tuple(int(part) for part in match.group(1).split("."))

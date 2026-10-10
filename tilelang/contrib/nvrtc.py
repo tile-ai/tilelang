@@ -1,12 +1,15 @@
 from __future__ import annotations
 import sys
+from functools import cache
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal
 from tvm.target import Target
 from .nvcc import get_target_arch, get_target_arch_and_code
 
 
+@cache
 def get_nvrtc_version() -> tuple[int, int]:
+    """Return the loaded NVRTC's version, cached for this process."""
     result, major, minor = nvrtc.nvrtcVersion()
     assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get NVRTC version: {result}"
     return (major, minor)
