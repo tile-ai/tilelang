@@ -122,7 +122,6 @@ def compile_cutedsl(code, func, target):
     import importlib.util
     import inspect
     from pathlib import Path
-    import re
     import tempfile
 
     import cutlass
@@ -198,13 +197,12 @@ def compile_cutedsl(code, func, target):
             module.compile_only,
             *args,
             make_fake_stream(),
-            options=f"{options} --enable-tvm-ffi --keep-ptx --gpu-arch=sm_{arch} --dump-dir={Path(directory).as_posix()}",
+            options=f"{options} --enable-tvm-ffi --keep-cubin --gpu-arch=sm_{arch} --dump-dir={Path(directory).as_posix()}",
         )
-        # Each compilation has exactly one entry. Rename its exact compiler
-        # symbol in PTX so the shared CUDA runtime resolves the Host IR name.
+        # Load the native binary without requiring the driver's PTX JIT to
+        # support the PTX version emitted by the CuTe compiler.
         (device_symbol,) = compiled.kernel_info
-        ptx = re.sub(r"\b" + re.escape(device_symbol) + r"\b", lambda _: symbol, compiled.__ptx__)
-        return bytearray((ptx + "\0").encode())
+        return {"cubin": bytearray(compiled.__cubin__), "symbol": device_symbol}
 
 
 BACKEND = register_backend(

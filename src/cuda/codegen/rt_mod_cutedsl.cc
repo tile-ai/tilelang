@@ -1,6 +1,7 @@
 #include "codegen_cuda.h"
 #include "codegen_cutedsl.h"
 #include "runtime/pack_args.h"
+#include "support/bytes_io.h"
 #include "support/check.h"
 #include "target/cuda/cuda_fallback_module.h"
 #include <tvm/ir/cast.h>
@@ -9,6 +10,38 @@ namespace tvm {
 namespace codegen {
 
 using namespace ffi;
+
+namespace {
+// Resolve the logical Host IR name once; launches use the CUDA function
+// directly.
+class CuTeDSLModuleNode : public ModuleObj {
+public:
+  Map<String, String> symbols;
+
+  const char *kind() const final { return "tilelang_cutedsl"; }
+  int GetPropertyMask() const final {
+    return Module::kBinarySerializable | Module::kRunnable;
+  }
+  Optional<Function> GetFunction(const String &lookup) final {
+    if (auto symbol = symbols.Get(lookup)) {
+      for (const auto &device : imports()) {
+        if (auto func = device.cast<Module>()->GetFunction(*symbol))
+          return func;
+      }
+    }
+    return std::nullopt;
+  }
+  String InspectSource(const String &format) const final {
+    return imports()[0].cast<Module>()->InspectSource(format);
+  }
+  Bytes SaveToBytes() const final {
+    std::string buffer;
+    support::BytesOutStream stream(&buffer);
+    stream.Write(symbols);
+    return Bytes(buffer);
+  }
+};
+} // namespace
 
 Module BuildTileLangCuTeDSLWithoutCompile(IRModule mod, Target target) {
   CodeGenTileLangCuTeDSL cg;
@@ -42,6 +75,13 @@ Module BuildTileLangCuTeDSLWithoutCompile(IRModule mod, Target target) {
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
+      .def("ffi.Module.load_from_bytes.tilelang_cutedsl",
+           [](Bytes bytes) {
+             auto node = make_object<CuTeDSLModuleNode>();
+             support::BytesInStream stream(bytes);
+             ICHECK(stream.Read(&node->symbols));
+             return Module(node);
+           })
       .def("target.build.tilelang_cutedsl_without_compile",
            BuildTileLangCuTeDSLWithoutCompile)
       .def("target.build.tilelang_cutedsl", [](IRModule mod, Target target) {
@@ -50,20 +90,22 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         auto compile =
             Function::GetGlobalRequired("tilelang_callback_cutedsl_compile");
         auto fmap = ExtractCudaFuncInfo(mod);
-        Optional<Module> result;
+        auto node = make_object<CuTeDSLModuleNode>();
         for (const auto &kv : mod->functions) {
           auto func = Downcast<tirx::PrimFunc>(kv.second);
           auto name = func->GetAttr<String>(tvm::attr::kGlobalSymbol).value();
-          Bytes ptx = compile(code, func, target).cast<Bytes>();
-          auto device = target::CUDAModuleCreateWithFallback(
-              ptx, String("ptx"), {{name, fmap[name]}}, {{"cuda", code}});
-          if (result.defined()) {
-            result.value()->ImportModule(device);
-          } else {
-            result = device;
-          }
+          auto compiled = compile(code, func, target).cast<Map<String, Any>>();
+          auto symbol = compiled["symbol"].cast<String>();
+          node->symbols.Set(name, symbol);
+          auto info = fmap[name];
+          runtime::FunctionInfo device_info(symbol, info->arg_types,
+                                            info->launch_param_tags,
+                                            info->arg_extra_tags);
+          node->ImportModule(target::CUDAModuleCreateWithFallback(
+              compiled["cubin"].cast<Bytes>(), String("cubin"),
+              {{symbol, device_info}}, {{"cuda", code}}));
         }
-        return result.value_or(source_mod);
+        return node->symbols.empty() ? source_mod : Module(node);
       });
 }
 

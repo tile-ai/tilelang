@@ -191,6 +191,7 @@ def run_gemm_jit_kernel(
     )
 
     matmul_kernel = tilelang.compile(program, out_idx=-1, target="cutedsl")
+    assert not matmul_kernel.adapter.rt_mod.imports[0].inspect_source("ptx")
 
     in_dtype = T.dtype(in_dtype).as_torch()
     out_dtype = T.dtype(out_dtype).as_torch()
