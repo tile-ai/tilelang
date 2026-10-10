@@ -187,6 +187,7 @@ class AutoTuner:
         target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
+        compile_flags: list[str] | str | None = None,
     ):
         """Set compilation arguments for the auto-tuner.
 
@@ -201,6 +202,8 @@ class AutoTuner:
             verbose: Whether to enable verbose output. If None, reads from
                 TILELANG_VERBOSE environment variable (defaults to False).
             pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
+            compile_flags: Extra flags forwarded to the device compiler. They change the
+                built binary, so they take part in the cache identity.
 
         Environment Variables:
             TILELANG_DEFAULT_TARGET: Default compilation target (e.g., "cuda", "llvm", or a JSON
@@ -230,6 +233,7 @@ class AutoTuner:
             target_host=backend_context.target_host,
             verbose=verbose,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
 
         return self
@@ -1261,6 +1265,7 @@ class AutoTuneImpl(Generic[_P, _T]):
                 target_host=self.jit_impl.target_host,
                 verbose=self.jit_impl.verbose,
                 pass_configs=self.jit_impl.pass_configs,
+                compile_flags=self.jit_impl.compile_flags,
             )
         )
         autotuner.run = partial(
