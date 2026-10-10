@@ -75,6 +75,11 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.VerifyReducerEpoch()(mod)
     mod = tilelang.transform.VerifyBufferInit()(mod)
 
+    # Wrap eligible Parallel compute regions into SIMT_VF blocks before
+    # unrolling, so the generated VF boundaries are in place for the
+    # downstream unroll/layout/VFChecker stages.
+    mod = ascend_transform.AutoSimtVF()(mod)
+
     # Materialize only user-requested explicit unrolls outside VF blocks so
     # LayoutInference and AutoSchedule can consume the expanded operations.
     mod = ascend_transform.UnrollLoopSkipVF()(mod)
