@@ -4,12 +4,13 @@ from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,
+    check_operand_origin_aligned,
 )
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.ir import Range
-from tvm import tirx
+from tvm import DataType, tirx
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -68,6 +69,34 @@ class GemmMMA(GemmBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
 
+    def _check_ldmatrix_origins(self, layout_map) -> None:
+        """Reject a shared operand whose ldmatrix origin is provably misaligned.
+
+        Mirrors ``ldmatrix_available`` in ``TensorCoreIntrinEmitter``: 16-bit
+        operands always use ldmatrix, other widths only when K-major, fp64 never.
+        The origin is mapped through the selected shared layout, so a padded
+        ``T.annotate_layout`` is judged by its physical row pitch.
+        """
+        for operand, region, k_major in (("A", self.ARegion, not self.trans_A), ("B", self.BRegion, self.trans_B)):
+            buf = region.buffer
+            bits = DataType(buf.dtype).bits
+            if not is_shared(buf) or bits == 64 or not (bits == 16 or k_major):
+                continue
+            mins = [r.min for r in region.region]
+            layout = layout_map.get(buf)
+            if layout is None:
+                phys, shape = mins, list(buf.shape)
+            else:
+                # A layout may cover only the trailing dims; leading dims stay dense.
+                n = len(layout.get_input_shape())
+                lead = len(mins) - n
+                phys = mins[:lead] + list(layout.map_forward_index(mins[lead:]))
+                shape = list(buf.shape[:lead]) + list(layout.get_output_shape())
+            offset = 0
+            for idx, extent in zip(phys, shape):
+                offset = offset * extent + idx
+            check_operand_origin_aligned(operand, region, offset * bits // 8, "ldmatrix")
+
     def lower(
         self,
         layout_map: dict,
@@ -105,6 +134,7 @@ class GemmMMA(GemmBase):
         assert block_K % micro_size_k == 0, f"block_K ({block_K}) must be a multiple of micro_size_k ({micro_size_k})"
 
         assert is_full_region(C_region), "Fragment output C must be a full region"
+        self._check_ldmatrix_origins(layout_map)
 
         if self.is_gemm_ss():
 

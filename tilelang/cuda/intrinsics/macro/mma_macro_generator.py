@@ -35,6 +35,24 @@ from tilelang.cuda.intrinsics.layout.mma_layout import (
 lift = convert
 
 
+def check_operand_origin_aligned(operand: str, region: BufferRegion, byte_offset, inst: str) -> None:
+    """Reject a shared GEMM operand whose physical origin is provably not 16-byte aligned.
+
+    ldmatrix row addresses and the WGMMA descriptor start address (stored as
+    ``addr >> 4``) both need a 16-byte aligned origin. A misaligned origin faults
+    on the ldmatrix path and is silently truncated on the WGMMA path.
+    ``byte_offset`` must be the layout-mapped physical offset of the region origin.
+    """
+    analyzer = tvm.arith.Analyzer()
+    byte_offset = analyzer.simplify(convert(byte_offset))
+    misalign = analyzer.simplify(tirx.floormod(byte_offset, 16))
+    if analyzer.can_prove(misalign != 0):
+        raise ValueError(
+            f"T.gemm() operand {operand} region {region} starts at physical byte offset {byte_offset}, "
+            f"which is never a multiple of 16; {inst} requires a 16-byte aligned operand origin."
+        )
+
+
 # Copied from bitblas
 class TransformKind(IntEnum):
     NonTransform = 0

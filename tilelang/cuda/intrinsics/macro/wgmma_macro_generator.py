@@ -2,7 +2,7 @@ from __future__ import annotations
 import tilelang.cuda.language as T
 from dataclasses import dataclass
 from collections.abc import Callable
-from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
+from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter, check_operand_origin_aligned
 from tvm import DataType
 from tvm.tirx import PrimExpr, Buffer, Var, IndexMap, BufferRegion, handle_add_byte_offset
 from tilelang import tvm as tvm
@@ -489,13 +489,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         is consumed by ``init_wgmma_b_desc()`` and ``wgmma_*_atom()``.
         """
         assert self.b_shared_layout is not None, "WGMMA B operand has no shared layout to decode"
-        return compute_gmma_descriptor(
+        params = compute_gmma_descriptor(
             self.b_shared_layout,
             B_region.buffer if isinstance(B_region, BufferRegion) else B_region,
             transposed=not self.b_transposed,
             micro_size_k=self.micro_size_k,
             region=list(B_region.region) if isinstance(B_region, BufferRegion) else None,
         )
+        if isinstance(B_region, BufferRegion):
+            check_operand_origin_aligned("B", B_region, params.slice_byte_offset, "the WGMMA descriptor")
+        return params
 
     def compute_wgmma_a_desc_params(self, A_region: BufferRegion) -> WGMMADescriptorParams:
         """Compute A descriptor parameters from the A shared buffer region (SS variant).
@@ -504,13 +507,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         is consumed by ``init_wgmma_a_desc()`` and ``wgmma_ss_atom()``.
         """
         assert self.a_shared_layout is not None, "WGMMA A operand has no shared layout to decode"
-        return compute_gmma_descriptor(
+        params = compute_gmma_descriptor(
             self.a_shared_layout,
             A_region.buffer if isinstance(A_region, BufferRegion) else A_region,
             transposed=self.a_transposed,
             micro_size_k=self.micro_size_k,
             region=list(A_region.region) if isinstance(A_region, BufferRegion) else None,
         )
+        if isinstance(A_region, BufferRegion):
+            check_operand_origin_aligned("A", A_region, params.slice_byte_offset, "the WGMMA descriptor")
+        return params
 
     # -- Descriptor initialization (emit TIR) --
 
