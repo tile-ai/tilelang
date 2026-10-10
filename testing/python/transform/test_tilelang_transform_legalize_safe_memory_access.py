@@ -943,5 +943,70 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert _collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
 
 
+_DIV_OPS = {
+    "truncdiv": T.truncdiv,
+    "truncmod": T.truncmod,
+    "floordiv": T.floordiv,
+    "floormod": T.floormod,
+}
+
+
+def _make_division_index_load(op_name, divisor, symbolic=False):
+    div_op = _DIV_OPS[op_name]
+
+    if symbolic:
+
+        @T.prim_func
+        def main(
+            A: T.Tensor((8, 8), T.float32),
+            out: T.Tensor((1,), T.float32),
+            index: T.int32,
+            divisor: T.int32,
+        ):
+            out[0] = A[div_op(index, divisor), index]
+    else:
+
+        @T.prim_func
+        def main(
+            A: T.Tensor((8, 8), T.float32),
+            out: T.Tensor((1,), T.float32),
+            index: T.int32,
+        ):
+            out[0] = A[div_op(index, divisor), index]
+
+    return main
+
+
+def _division_load_guards(func):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    return _collect_call_nodes(transformed["main"].body, "tirx.if_then_else")
+
+
+@pytest.mark.parametrize("op_name", list(_DIV_OPS))
+def test_positive_constant_divisors_flatten_safe_load_guards(op_name):
+    guards = _division_load_guards(_make_division_index_load(op_name, 16))
+
+    assert len(guards) == 1
+    assert isinstance(guards[0].args[0], tvm.tirx.And)
+    assert isinstance(guards[0].args[1], tvm.tirx.BufferLoad)
+    assert not _collect_call_nodes(guards[0].args[0], "tirx.if_then_else")
+
+
+@pytest.mark.parametrize("op_name", list(_DIV_OPS))
+def test_negative_constant_divisors_keep_safe_load_guards_nested(op_name):
+    guards = _division_load_guards(_make_division_index_load(op_name, -16))
+
+    assert len(guards) > 1
+    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
+
+
+def test_symbolic_divisor_keeps_safe_load_guards_nested():
+    guards = _division_load_guards(_make_division_index_load("truncdiv", None, symbolic=True))
+
+    assert len(guards) > 1
+    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
