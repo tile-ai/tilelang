@@ -108,22 +108,22 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         options.append("--ptxas-options=--verbose")
         options.append("-w")
 
-    compiler_key = compiler
     if compiler == "nvrtc":
         from tilelang.contrib import nvrtc
         from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
 
         if target_code_list and target_code_list != [f"sm_{target_arch}"]:
             raise ValueError("NVRTC requires a single code target matching the CUDA target arch")
-        version = nvrtc.get_nvrtc_version()
-        compiler_key = f"nvrtc-{version[0]}.{version[1]}"
+        compiler_version = nvrtc.get_nvrtc_version()
         include_paths = discover_cuda_include_paths(CUDA_HOME or "/usr/local/cuda")
         options += [f"-I{path}" for path in include_paths]
-        options.append(f"-D__CUDACC_VER_MAJOR__={version[0]}")
-        if version[0] < 13:
+        options.append(f"-D__CUDACC_VER_MAJOR__={compiler_version[0]}")
+        if compiler_version[0] < 13:
             options += [f"-I{path}/cuda/std" for path in include_paths if not path.endswith(osp.join("include", "cccl"))]
         if cfg.get(PassConfigKey.TL_EMIT_LINE_DIRECTIVES, False) and not any(flag in {"-lineinfo", "--lineinfo"} for flag in options):
             options.append("-lineinfo")
+    else:
+        compiler_version = nvcc.get_nvcc_version()
 
     cache_key = CUDABinaryCache.make_key(
         code=code,
@@ -132,7 +132,8 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         target_code=target_code_list,
         compile_format=compile_format,
         options=options,
-        compiler=compiler_key,
+        compiler=compiler,
+        compiler_version=compiler_version,
     )
     cached_binary = CUDABinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:

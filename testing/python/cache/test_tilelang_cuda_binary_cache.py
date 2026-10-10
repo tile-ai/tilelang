@@ -43,46 +43,60 @@ def test_kernel_cache_namespace_includes_host_platform(monkeypatch):
     assert KernelCache._get_cache_namespace() == os.path.join("1.2.3_cuda_gitabc", "linux-aarch64")
 
 
-def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "compiler,versions",
+    [("nvcc", [(13, 0, 88), (13, 0, 96), (13, 1, 115)]), ("nvrtc", [(13, 0), (13, 1)])],
+)
+def test_cuda_binary_cache_hit_skips_compile(monkeypatch, tmp_path, compiler, versions):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.cuda import backend as cuda_backend
 
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
 
+    if compiler == "nvrtc":
+        pytest.importorskip("cuda.bindings.nvrtc")
+        from tilelang.contrib import nvrtc
+
+        compiler_module = nvrtc
+    else:
+        compiler_module = cuda_backend.nvcc
+
+    version = versions[0]
+    monkeypatch.setattr(compiler_module, f"get_{compiler}_version", lambda: version)
+
     compile_calls = []
 
     def fake_compile_cuda(code, target_format, arch, options=None, verbose=False):
         compile_calls.append((code, target_format, tuple(arch), tuple(options or ())))
-        return bytearray(b"fake-cubin")
+        return bytearray(f"fake-cubin-{version}".encode())
 
-    monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_compile_cuda)
+    monkeypatch.setattr(compiler_module, "compile_cuda", fake_compile_cuda)
 
     target = Target({"kind": "cuda", "arch": "sm_90a"})
     source = 'extern "C" __global__ void kernel() {}'
 
+    pass_configs = {tilelang.PassConfigKey.TL_CUDA_COMPILER: compiler}
     fast_math_pass_configs = {
+        **pass_configs,
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DEVICE_COMPILE_FLAGS: ["--extra-device-vectorization"],
     }
 
-    first = cuda_backend.tilelang_callback_cuda_compile(source, target)
-    second = cuda_backend.tilelang_callback_cuda_compile(source, target)
-    # Different compiler options (e.g. --use_fast_math) change the generated
-    # SASS without changing the source, so they must NOT share a cache entry.
-    third = cuda_backend.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
-    fourth = cuda_backend.tilelang_callback_cuda_compile(source, target, fast_math_pass_configs)
+    for version in versions:
+        # A toolchain upgrade must miss even with identical source/options;
+        # subsequent requests with the same version and options must hit.
+        for configs in (pass_configs, fast_math_pass_configs):
+            first = cuda_backend.tilelang_callback_cuda_compile(source, target, configs)
+            second = cuda_backend.tilelang_callback_cuda_compile(source, target, configs)
+            assert bytes(first) == f"fake-cubin-{version}".encode()
+            assert second == first
 
-    assert bytes(first) == b"fake-cubin"
-    assert bytes(second) == b"fake-cubin"
-    assert bytes(third) == b"fake-cubin"
-    assert bytes(fourth) == b"fake-cubin"
-    # first compiles, second hits; third compiles (new options), fourth hits
-    assert len(compile_calls) == 2
+    assert len(compile_calls) == 2 * len(versions)
     assert compile_calls[0][3] != compile_calls[1][3]
     cache_files = list((tmp_path / "cache").glob("*/cuda-binaries/*/kernel.cubin"))
-    assert len(cache_files) == 2
+    assert len(cache_files) == 2 * len(versions)
     for cache_file in cache_files:
-        assert cache_file.read_bytes() == b"fake-cubin"
+        assert cache_file.read_bytes() in {f"fake-cubin-{version}".encode() for version in versions}
         assert (cache_file.parent / "metadata.json").is_file()
 
 
@@ -91,6 +105,7 @@ def test_cuda_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     from tilelang.cuda import backend as cuda_backend
 
     monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+    monkeypatch.setattr(cuda_backend.nvcc, "get_nvcc_version", lambda: (13, 0, 88))
 
     compile_calls = []
 

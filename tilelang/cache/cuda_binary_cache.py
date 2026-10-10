@@ -29,6 +29,7 @@ class CUDABinaryCache(BinaryCache):
         compile_format: str,
         options: list[str] | None = None,
         compiler: str = "nvcc",
+        compiler_version: tuple[int, ...] | None = None,
     ) -> str:
         # Compiler options must be part of the key: flags like --use_fast_math
         # change the generated SASS without changing the CUDA source, so keying
@@ -43,5 +44,6 @@ class CUDABinaryCache(BinaryCache):
             "compile_format": compile_format,
             "options": tuple(options or []),
             "compiler": compiler,
+            "compiler_version": compiler_version,
         }
         return cls._finalize_key(key_data)
