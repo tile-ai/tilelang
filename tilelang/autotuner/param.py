@@ -180,20 +180,9 @@ class AutotuneResult:
 
     @staticmethod
     def _safe_write_file(path: str, mode: str, operation: Callable[[Any], None]):
-        """Atomically write one cache file through a temporary sibling file."""
-        directory, filename = os.path.split(path)
-        temp_path = os.path.join(directory, f".{filename}.{os.getpid()}_{uuid.uuid4().hex}.tmp")
-        try:
-            with open(temp_path, mode) as temp_file:
-                operation(temp_file)
-                # Without this barrier a crash can persist the rename below
-                # before the file data, publishing a truncated file.
-                temp_file.flush()
-                os.fsync(temp_file.fileno())
-            os.replace(temp_path, path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.remove(temp_path)
+        from tilelang.cache.kernel_cache import KernelCache
+
+        KernelCache._safe_write_file(path, mode, operation)
 
     @staticmethod
     def _safe_write_executable(executable: Executable, path: str):
