@@ -64,7 +64,8 @@ def main(
     a_sparse, e = compress(a, meta_dtype=e_dtype.as_torch())
     c = kernel(a_sparse, e, b)
 
-    ref_c = a @ b
+    # Match the kernel's FP32 accumulation in the correctness reference.
+    ref_c = a.float() @ b.float()
 
     assert not c.isnan().any(), "Reference result contains NaNs, please report an issue"
     torch.testing.assert_close(c, ref_c.to(c.dtype), rtol=1e-2, atol=1e-2)

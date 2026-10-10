@@ -672,7 +672,7 @@ jobs:
 
       - name: Run CuTeDSL examples with Python 3.12 (CUDA-auto)
         env:
-          TILELANG_TARGET: cutedsl
+          TILELANG_DEFAULT_TARGET: cutedsl
         run: |
           cd testing
           PYTEST=(

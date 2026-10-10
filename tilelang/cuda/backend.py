@@ -127,8 +127,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         target_code=target_code_list,
         compile_format=compile_format,
         options=options,
-        compiler=compiler,
-        compiler_version=version,
+        compiler=f"{compiler} version={'.'.join(map(str, version))}",
     )
     cached_binary = CUDABinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
