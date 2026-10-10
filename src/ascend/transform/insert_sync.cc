@@ -836,6 +836,25 @@ public:
     buffer_aliases_ = buffer_alias_analyzer.GetAliases();
   }
 
+  void ValidateSyncPoints() const {
+    for (const SyncPoint &sync_point : sync_points_) {
+      const SyncInsertionSite &src = site_registry_.Src(sync_point);
+      const SyncInsertionSite &dst = site_registry_.Dst(sync_point);
+      if (src.core == dst.core || !IsVectorCore(src.core) ||
+          !IsVectorCore(dst.core))
+        continue;
+      LOG(FATAL)
+          << "Ascend AutoSchedule does not support synchronization between "
+             "AIV0 and AIV1: uncovered AIV"
+          << VectorSid(src.core) << "." << src.pipe << " -> AIV"
+          << VectorSid(dst.core) << "." << dst.pipe
+          << " dependency at logical distance " << sync_point.edge.distance
+          << ". Use disjoint storage regions or an actual AIC data "
+             "dependency that orders these accesses; mode-1 flags and "
+             "AIC relay synchronization are not generated.";
+    }
+  }
+
   const SyncSiteRegistry &SiteRegistry() const { return site_registry_; }
 
   std::vector<SyncPoint> &SyncPoints() { return sync_points_; }
@@ -1540,34 +1559,10 @@ private:
                           DepClosure &closure, int max_distance,
                           ControlNode *projection_scope) const {
     std::stable_sort(sync_points.begin(), sync_points.end());
-    auto between_aivs = [&](const SyncPoint &point) {
-      CoreMask src = site_registry_.Src(point).core;
-      CoreMask dst = site_registry_.Dst(point).core;
-      return src != dst && IsVectorCore(src) && IsVectorCore(dst);
-    };
-    // Existing C<->V dependencies may already order the two AIVs. Establish
-    // those paths before checking edges that would need unsupported V<->V
-    // synchronization; never use such an edge to eliminate a supported one.
-    std::stable_partition(
-        sync_points.begin(), sync_points.end(),
-        [&](const SyncPoint &point) { return !between_aivs(point); });
     std::vector<SyncPoint> emit;
     for (SyncPoint &sync_point : sync_points) {
       if (closure.Contains(sync_point.edge))
         continue;
-      if (between_aivs(sync_point)) {
-        const SyncInsertionSite &src = site_registry_.Src(sync_point);
-        const SyncInsertionSite &dst = site_registry_.Dst(sync_point);
-        LOG(FATAL)
-            << "Ascend AutoSchedule does not support synchronization between "
-               "AIV0 and AIV1: uncovered AIV"
-            << VectorSid(src.core) << "." << src.pipe << " -> AIV"
-            << VectorSid(dst.core) << "." << dst.pipe
-            << " dependency at logical distance " << sync_point.edge.distance
-            << ". Use disjoint storage regions or an actual AIC data "
-               "dependency that orders these accesses; mode-1 flags and "
-               "AIC relay synchronization are not generated.";
-      }
       if (sync_point.dependency_kind == DependencyKind::kOwnerExclusion &&
           sync_point.edge.distance != 0 && sync_point.edge.distance != 1) {
         LOG(FATAL) << "InsertSync cannot materialize an uncovered multi-buffer "
@@ -2571,6 +2566,7 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
                         groups);
   scheduled_tir.metadata.root_conflict_hints = {};
   analyzer.Analyze(root);
+  analyzer.ValidateSyncPoints();
   scheduled_tir.metadata.buffer_aliases = analyzer.BufferAliases();
   scheduled_tir.metadata.has_buffer_aliases = true;
 
