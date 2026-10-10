@@ -168,6 +168,7 @@ class LibraryGenerator:
             ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
+            from tilelang.cpu.toolchain import get_compile_flags
 
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
@@ -176,6 +177,7 @@ class LibraryGenerator:
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
+            command += get_compile_flags(target, self.pass_configs, execution_backend="cython")
         else:
             raise ValueError(f"Unsupported target: {target}")
 

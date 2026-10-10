@@ -29,15 +29,17 @@ using namespace ffi;
 
 ForFrame MakeThreadBindingFrame(const std::string &name,
                                 const String &thread_tag,
-                                const PrimExpr &extent) {
+                                const PrimExpr &extent,
+                                const Map<String, Any> &annotations) {
   using namespace tvm::tirx;
   Var var = Var(name, extent->dtype);
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   n->vars.push_back(var);
   n->doms.push_back(Range(make_const(extent->dtype, 0), extent));
-  n->f_make_for_loop =
-      [thread_tag](const Array<Var> &vars, const Array<Range> &doms,
-                   const Array<Optional<PrimExpr>> &steps, Stmt body) -> Stmt {
+  n->f_make_for_loop = [thread_tag, annotations](
+                           const Array<Var> &vars, const Array<Range> &doms,
+                           const Array<Optional<PrimExpr>> &steps,
+                           Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), 1);
     ICHECK_EQ(doms.size(), 1);
     IterVar iter_var(Range{nullptr}, Var(thread_tag, vars[0]->dtype),
@@ -47,7 +49,7 @@ ForFrame MakeThreadBindingFrame(const std::string &name,
     return For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kThreadBinding,
                body,
                /*thread_binding=*/iter_var,
-               /*annotations=*/Map<String, Any>{},
+               /*annotations=*/annotations,
                /*step=*/step);
   };
   return ForFrame(n);
@@ -243,6 +245,8 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   static const char *kBlockVarNames[3] = {"bx", "by", "bz"};
   static const char *kBlockTags[3] = {"blockIdx.x", "blockIdx.y", "blockIdx.z"};
 
+  Map<String, Any> block_annotations =
+      attrs.defined() ? attrs : Map<String, Any>{};
   for (size_t i = 0; i < grid_size.size(); i++) {
     ForFrame frame =
         MakeThreadBindingFrame(kBlockVarNames[i], kBlockTags[i], grid_size[i]);
@@ -257,8 +261,6 @@ KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
   n->thread_vars = thread_frame->vars;
   n->frames.push_back(thread_frame);
 
-  Map<String, Any> block_annotations =
-      attrs.defined() ? attrs : Map<String, Any>{};
   if (block_size_opt.defined()) {
     Array<PrimExpr> block_size = block_size_opt.value();
     ICHECK(block_size.size() <= 3);

@@ -135,9 +135,17 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if self.rt_mod is None:
             raise RuntimeError("Cannot create TVM FFI executable without a runtime module.")
         executable = runtime.Executable(self.rt_mod)
-        if COMPILE_ARGS:
-            # Precompile jit module with extra arguments.
-            executable.jit(**COMPILE_ARGS)
+        compile_args = dict(COMPILE_ARGS)
+        from tilelang.cpu.toolchain import get_compile_flags
+
+        backend_flags = get_compile_flags(self.target, self.pass_configs, execution_backend="tvm_ffi")
+        if backend_flags:
+            options = list(compile_args.get("options", []))
+            options += backend_flags
+            compile_args["options"] = options
+        if compile_args:
+            # Precompile with platform and backend-owned toolchain options.
+            executable.jit(**compile_args)
         return executable
 
     def _get_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
