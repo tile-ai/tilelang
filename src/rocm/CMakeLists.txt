@@ -16,6 +16,19 @@ endif()
 message(STATUS "ROCM Backend is enabled")
 
 set(CMAKE_HIP_STANDARD 17)
+# Use the same SDK discovery as Python, including AMD's optional pip SDK.
+# Preserve an explicit -DUSE_ROCM=<sdk> path over all detected candidates.
+if(NOT IS_DIRECTORY "${USE_ROCM}")
+  tilelang_get_python_interpreter(_TL_ROCM_PYTHON)
+  execute_process(
+    COMMAND "${_TL_ROCM_PYTHON}" "${CMAKE_SOURCE_DIR}/tilelang/toolchain/rocm.py"
+    RESULT_VARIABLE _TL_ROCM_RESULT
+    OUTPUT_VARIABLE _TL_ROCM_SDK
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(_TL_ROCM_RESULT EQUAL 0 AND IS_DIRECTORY "${_TL_ROCM_SDK}")
+    set(USE_ROCM "${_TL_ROCM_SDK}")
+  endif()
+endif()
 include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
 find_rocm(${USE_ROCM})
 add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
@@ -30,12 +43,6 @@ add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 #   2. $ENV{TILELANG_HIP_INCLUDE_DIR}
 #   3. /opt/rocm/include (if a system ROCm install exists)
 #   4. 3rdparty/hip-headers/include (vendored, default fallback)
-#
-# A minimal hsa/hsa.h is vendored alongside the HIP headers because TVM's
-# src/runtime/rocm/rocm_device_api.cc unconditionally #includes <hsa/hsa.h>.
-# Only two HSA symbols (hsa_init / hsa_shut_down) are actually referenced;
-# both are exported by hip_stub and lazy-loaded from libhsa-runtime64 at run
-# time, so no HSA library is linked.
 if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
   set(_TL_VENDORED_HIP_INC "${CMAKE_SOURCE_DIR}/3rdparty/hip-headers/include")
   set(_TL_HIP_INC "")
@@ -58,8 +65,6 @@ if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
     set(ROCM_INCLUDE_DIRS "${_TL_HIP_INC}")
     set(ROCM_HIPHCC_LIBRARY hip_stub CACHE STRING
         "HIP runtime library to link against" FORCE)
-    set(ROCM_HSA_LIBRARY ROCM_HSA_LIBRARY-NOTFOUND CACHE STRING
-        "HSA runtime library to link against" FORCE)
   else()
     message(STATUS
       "ROCm runtime library not found on host and no HIP headers could be "
@@ -82,9 +87,6 @@ if(TILELANG_USE_HIP_STUBS)
   # ============================================================================
   # This library provides drop-in replacements for HIP runtime/module APIs by
   # lazily loading libamdhip64.so at runtime.
-  #
-  # It also provides minimal HSA wrappers (hsa_init / hsa_shut_down) to avoid a
-  # hard DT_NEEDED dependency on libhsa-runtime64 in ROCm-enabled wheels.
   # ============================================================================
   add_library(hip_stub SHARED src/rocm/stubs/hip.cc)
   target_include_directories(hip_stub PRIVATE ${ROCM_INCLUDE_DIRS})
@@ -122,12 +124,6 @@ if(TILELANG_USE_HIP_STUBS)
   # `find_library()` will not override an already-cached variable, so setting it
   # here ensures TVM doesn't record a DT_NEEDED on libamdhip64.
   set(ROCM_HIPHCC_LIBRARY hip_stub CACHE STRING "HIP runtime library to link against" FORCE)
-
-  # Prevent TVM from recording a DT_NEEDED on libhsa-runtime64.
-  # The few HSA entrypoints used by TVM are stubbed by hip_stub and resolved
-  # lazily when available.
-  set(ROCM_HSA_LIBRARY ROCM_HSA_LIBRARY-NOTFOUND CACHE STRING
-      "HSA runtime library to link against" FORCE)
 endif()
 
 file(GLOB TILE_LANG_ROCM_ACTIVE_SRCS

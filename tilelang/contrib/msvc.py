@@ -196,9 +196,15 @@ def _import_vsdevcmd_environment(vsdevcmd: str) -> dict[str, str] | None:
             continue
         name, value = line.split("=", 1)
         if name:
-            compiler_env[name] = value
             if name.upper() == "PATH":
+                # A subprocess environment is a plain, case-sensitive dict.
+                # Duplicate Path/PATH keys make Windows ignore later SDK paths.
+                for key in list(compiler_env):
+                    if key.upper() == "PATH":
+                        del compiler_env[key]
                 compiler_env["PATH"] = value
+            else:
+                compiler_env[name] = value
     return compiler_env
 
 
