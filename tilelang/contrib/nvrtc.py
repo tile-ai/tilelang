@@ -1,8 +1,11 @@
 from __future__ import annotations
 from functools import cache
+import os.path as osp
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal
 from tvm.target import Target
+from tilelang.env import CUDA_HOME
+from .cuda_include import discover_cuda_include_paths
 from .nvcc import get_target_arch, get_target_arch_and_code
 
 
@@ -12,6 +15,19 @@ def get_nvrtc_version() -> tuple[int, int]:
     result, major, minor = nvrtc.nvrtcVersion()
     assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get NVRTC version: {result}"
     return (major, minor)
+
+
+def get_compile_options(cuda_home: str | None = None) -> list[str]:
+    """Return CUDA header paths and compatibility defines for NVRTC."""
+    include_paths = discover_cuda_include_paths(cuda_home or CUDA_HOME or "/usr/local/cuda")
+    major = get_nvrtc_version()[0]
+    options = [*(f"-I{path}" for path in include_paths), f"-D__CUDACC_VER_MAJOR__={major}"]
+    # CUDA <13 uses the legacy cuda/std search root. CUDA 13 exposes it
+    # through include/cccl; adding the deeper root can expose private CCCL
+    # headers whose tuple declarations conflict with CuTe under NVRTC.
+    if major < 13:
+        options += [f"-I{path}/cuda/std" for path in include_paths if not path.endswith(osp.join("include", "cccl"))]
+    return options
 
 
 def compile_cuda(

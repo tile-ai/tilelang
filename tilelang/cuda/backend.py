@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os.path as osp
 import re
 
 from tvm import tirx
@@ -9,7 +8,7 @@ from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.module import BackendModule, register_backend
 from tilelang.contrib import nvcc
-from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
+from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 
 from . import codegen, execution_backend, pipeline
@@ -110,16 +109,11 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     if compiler == "nvrtc":
         from tilelang.contrib import nvrtc
-        from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
 
         if target_code_list and target_code_list != [f"sm_{target_arch}"]:
             raise ValueError("NVRTC requires a single code target matching the CUDA target arch")
         compiler_version = nvrtc.get_nvrtc_version()
-        include_paths = discover_cuda_include_paths(CUDA_HOME or "/usr/local/cuda")
-        options += [f"-I{path}" for path in include_paths]
-        options.append(f"-D__CUDACC_VER_MAJOR__={compiler_version[0]}")
-        if compiler_version[0] < 13:
-            options += [f"-I{path}/cuda/std" for path in include_paths if not path.endswith(osp.join("include", "cccl"))]
+        options += nvrtc.get_compile_options()
         if cfg.get(PassConfigKey.TL_EMIT_LINE_DIRECTIVES, False) and not any(flag in {"-lineinfo", "--lineinfo"} for flag in options):
             options.append("-lineinfo")
     else:
