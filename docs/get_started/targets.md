@@ -26,6 +26,8 @@ To add options, pass a target config dictionary. For example:
 ```python
 target = {"kind": "cuda", "arch": "sm_90"}
 kernel = tilelang.compile(func, target=target, execution_backend="cython")
+
+
 # or
 @tilelang.jit(target=target)
 def compiled_kernel(*args):
@@ -38,10 +40,10 @@ Most TileLang APIs that accept a target, such as `tilelang.compile`, `tilelang.j
 same input forms:
 
 ```python
-target = "auto"                                      # detect CUDA, HIP, or Metal
-target = "cuda"                                      # bare TVM target kind
-target = {"kind": "cuda", "arch": "sm_90"}           # target config dict
-target = tvm.target.Target({"kind": "cuda"})         # already-built TVM Target
+target = "auto"  # detect CUDA, HIP, or Metal
+target = "cuda"  # bare TVM target kind
+target = {"kind": "cuda", "arch": "sm_90"}  # target config dict
+target = tvm.target.Target({"kind": "cuda"})  # already-built TVM Target
 ```
 
 Use the bare string form for simple cases. Use a config dictionary when you need target attributes such as CUDA

@@ -14,7 +14,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
 
 def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
-    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=False, unsupported_annotations=["cluster_dims"])(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 
     if should_force_let_inline():
@@ -60,6 +60,10 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.Simplify()(mod)
     mod = tirx.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
+    # The CPU codegens have no native BF16. Host codegen legalizes BF16 storage
+    # to uint16, which requires BF16 arithmetic to have been legalized first;
+    # this is the point TVM's default pipeline runs it.
+    mod = tirx.transform.BF16ComputeLegalize()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tirx.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)

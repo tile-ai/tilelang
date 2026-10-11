@@ -128,20 +128,6 @@ def test_load_removes_entry_with_same_size_corruption(cache_dirs, tmp_path, monk
     assert not cache_path.exists()
 
 
-def test_hash_check_disabled_still_catches_truncation(cache_dirs, tmp_path, monkeypatch):
-    monkeypatch.setattr(env, "TILELANG_CACHE_VERIFY_HASH", "0")
-    cache = KernelCache()
-    key = "size-only-check"
-    cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
-    cache_path = Path(cache._get_cache_path(key))
-
-    lib_file = cache_path / cache.kernel_lib_path
-    lib_file.write_bytes(b"short")
-
-    assert _load_expecting_no_build(cache, key, monkeypatch) is None
-    assert not cache_path.exists()
-
-
 def test_source_files_are_size_checked_but_not_hashed(cache_dirs, tmp_path, monkeypatch):
     # Hashing sources on load would regress lazy source loading; only their
     # size is checked, so a same-size rewrite of a source file must not

@@ -36,6 +36,7 @@ from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.utils.language import get_prim_func_name
 from tilelang.utils.device import get_available_cpu_count
 from tilelang.autotuner.capture import get_autotune_inputs
+from tilelang.engine.param import KernelParam
 from tilelang import __version__
 
 TargetLike = str | dict[str, object] | Target
@@ -94,9 +95,37 @@ def _normalize_value(value, sort_dict_items: bool = False):
     return value
 
 
+def _can_reuse_inputs(params: list[KernelParam], cached_params: list[KernelParam] | None, inputs: list[Any]) -> bool:
+    """Check cached inputs against the current signature as a whole."""
+    if cached_params is None or len(params) != len(inputs) or len(params) != len(cached_params):
+        return False
+
+    symbolic_dims: dict[Var, int] = {}
+    for param, cached_param, value in zip(params, cached_params, inputs):
+        if not isinstance(value, torch.Tensor):
+            # Python scalars do not retain their kernel dtype. Compare the
+            # signatures instead of duplicating backend scalar conversion rules.
+            if param.dtype != cached_param.dtype or len(param.shape) != len(cached_param.shape):
+                return False
+            continue
+
+        if param.torch_dtype() != value.dtype or len(param.shape) != value.ndim:
+            return False
+        for dim, size in zip(param.shape, value.shape):
+            if isinstance(dim, Var):
+                # Bind by Var identity across all inputs, not by variable name.
+                if symbolic_dims.setdefault(dim, size) != size:
+                    return False
+            elif dim != size:
+                return False
+
+    return True
+
+
 @dataclass
 class _BenchmarkWorkerState:
     jit_input_tensors: Any = None
+    jit_input_params: list[KernelParam] | None = None
     ref_input_tensors: Any = None
     ref_latency_cache: float | None = None
     shared_best_latency: list[float] | None = None
@@ -124,9 +153,6 @@ class AutoTuner:
     def __init__(self, fn: Callable, configs):
         self.fn = fn
         self.configs = configs
-        self.ref_latency_cache = None
-        self.jit_input_tensors = None
-        self.ref_input_tensors = None
         self.jit_compile = None
         self.jit_elaborate = None
 
@@ -157,7 +183,7 @@ class AutoTuner:
         self,
         out_idx: list[int] | int | None = None,
         target: TargetLike | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"] | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"] | None = None,
         target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
@@ -235,11 +261,11 @@ class AutoTuner:
             max_mismatched_ratio: Maximum allowed mismatch ratio.
             skip_check: Whether to skip validation.
             manual_check_prog: Manual check program for validation.
-            cache_input_tensors: Whether to cache input tensors.
+            cache_input_tensors: Whether to reuse compatible input tensors across trials within each run.
             warmup: Number of warmup iterations.
             rep: Number of repetitions for timing.
             timeout: Maximum time per configuration.
-            backend: Profiler backend - "event" (CUDA events), "cupti", or "cudagraph".
+            backend: Profiler backend - "event", "cupti", or "cudagraph".
         Returns:
             AutoTuner: Self for method chaining.
         """
@@ -583,6 +609,7 @@ class AutoTuner:
                     call_result_queue: queue.Queue = queue.Queue()
                     call_state = _BenchmarkWorkerState(
                         jit_input_tensors=worker_state.jit_input_tensors,
+                        jit_input_params=worker_state.jit_input_params,
                         ref_input_tensors=worker_state.ref_input_tensors,
                         ref_latency_cache=worker_state.ref_latency_cache,
                         shared_best_latency=worker_state.shared_best_latency,
@@ -603,6 +630,8 @@ class AutoTuner:
                     benchmark_call_thread.start()
                     benchmark_call_thread.join(timeout=timeout)
                     if benchmark_call_thread.is_alive():
+                        # The timed-out call may still mutate its cached inputs.
+                        worker_state.jit_input_tensors = None
                         result_queue.put((idx, config, jit_kernel, None, None, "timeout", ""))
                         continue
 
@@ -624,6 +653,7 @@ class AutoTuner:
 
                     if status == "ok":
                         worker_state.jit_input_tensors = call_state.jit_input_tensors
+                        worker_state.jit_input_params = call_state.jit_input_params
                         worker_state.ref_input_tensors = call_state.ref_input_tensors
                         worker_state.ref_latency_cache = call_state.ref_latency_cache
                         result_queue.put((idx, config, jit_kernel, latency, worker_ref_latency, None, ""))
@@ -675,36 +705,21 @@ class AutoTuner:
         jit_input_tensors_cache = benchmark_state.jit_input_tensors
         ref_input_tensors_cache = benchmark_state.ref_input_tensors
         ref_latency_cache = benchmark_state.ref_latency_cache
+        params = profiler._get_params(with_output=False)
 
-        if cache_input_tensors:
-            params = profiler._get_params(with_output=False)
-            if jit_input_tensors_cache is None:
-                jit_input_tensors_cache = jit_input_tensors_supply()
-            else:
-                assert len(params) == len(jit_input_tensors_cache), "len(params) != len(jit_input_tensors_cache)"
-                for p, c in zip(params, jit_input_tensors_cache):
-                    if not isinstance(c, torch.Tensor):
-                        continue
-
-                    def shape_equal(a, b):
-                        return all(
-                            a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape)
-                        )
-
-                    if p.dtype != c.dtype or not shape_equal(p, c):
-                        logger.warning(
-                            "\nIncompatible input tensor properties detected between cached tensors and "
-                            "tensors regenerated for the current configuration trial. "
-                            "This can happen if different tuning configurations require different input shapes/dtypes "
-                            "and input tensor caching is enabled.\n"
-                            "To ensure fresh, compatible inputs are generated for every trial "
-                            "you can disable caching by setting:\n"
-                            "  `cache_input_tensors=False`\n"
-                            "within your `.set_compile_args(...)` call.\n"
-                        )
-                        jit_input_tensors_cache = jit_input_tensors_supply()
-                        break
-        else:
+        if not cache_input_tensors or jit_input_tensors_cache is None:
+            jit_input_tensors_cache = jit_input_tensors_supply()
+        elif not _can_reuse_inputs(params, benchmark_state.jit_input_params, jit_input_tensors_cache):
+            logger.warning(
+                "\nIncompatible input properties detected between cached inputs and "
+                "the current configuration trial. "
+                "This can happen if different tuning configurations require different input shapes/dtypes "
+                "and input tensor caching is enabled.\n"
+                "To ensure fresh, compatible inputs are generated for every trial "
+                "you can disable caching by setting:\n"
+                "  `cache_input_tensors=False`\n"
+                "within your `.set_profile_args(...)` call.\n"
+            )
             jit_input_tensors_cache = jit_input_tensors_supply()
 
         if (not skip_check) and (ref_prog is not None):
@@ -736,6 +751,7 @@ class AutoTuner:
             )
 
         benchmark_state.jit_input_tensors = jit_input_tensors_cache
+        benchmark_state.jit_input_params = params
         benchmark_state.ref_input_tensors = ref_input_tensors_cache
         benchmark_state.ref_latency_cache = ref_latency_cache
 
@@ -973,12 +989,9 @@ class AutoTuner:
         )
 
         ref_latency = None
-        main_thread_benchmark_state = _BenchmarkWorkerState(
-            jit_input_tensors=self.jit_input_tensors,
-            ref_input_tensors=self.ref_input_tensors,
-            ref_latency_cache=self.ref_latency_cache,
-            shared_best_latency=shared_best_latency_ref,
-        )
+        # Keep inputs and reference timings local to this run. A later run may
+        # use another device or input supplier even with the same signature.
+        main_thread_benchmark_state = _BenchmarkWorkerState(shared_best_latency=shared_best_latency_ref)
 
         def _record_benchmark_result(latency: float, config: dict[str, Any], jit_kernel: tilelang.JITKernel, idx: int, progress_bar):
             nonlocal best_latency, best_config, best_kernel
@@ -1129,10 +1142,6 @@ class AutoTuner:
             compile_progress.close()
             progress_bar.close()
             pool.shutdown()
-
-        self.jit_input_tensors = main_thread_benchmark_state.jit_input_tensors
-        self.ref_input_tensors = main_thread_benchmark_state.ref_input_tensors
-        self.ref_latency_cache = main_thread_benchmark_state.ref_latency_cache
 
         if best_kernel is None:
             error_msg = "Auto-tuning failed: No configuration successfully compiled and passed benchmarking/validation."
@@ -1370,9 +1379,9 @@ def autotune(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, dict, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch"], optional
+    execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"], optional
         Backend for kernel execution and argument passing. Use "auto" to pick a sensible
-        default per target (cuda->tvm_ffi, metal->torch, others->cython).
+        default declared by the target backend (e.g., cuda->tvm_ffi, metal->torch, pto->pto).
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.
     pass_configs : Optional[Dict[str, Any]], optional

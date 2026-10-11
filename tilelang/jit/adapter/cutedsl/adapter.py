@@ -182,6 +182,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         The mapping encodes:
         - id=0: shape var -> (0, buffer_param_index, dim_index)
         - id=1: stride var -> (1, buffer_param_index, stride_index)
+        - id=2: explicit scalar -> (2, scalar_param_index, -1)
 
         Returns:
             (dynamic_symbolic_map, dynamic_symbolic_order)
@@ -205,8 +206,15 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             if v in dynamic_symbolic_map:
                 return
             dynamic_symbolic_map[v] = entry
-            dynamic_symbolic_order.append(v)
+            if v not in params:
+                dynamic_symbolic_order.append(v)
             self._dynamic_symbolic_name_map[v.name] = entry
+
+        # Explicit scalars already occupy a primary wrapper argument. They
+        # can supply a buffer's dynamic shape without being appended again.
+        for i, param in enumerate(params):
+            if param not in buffer_map:
+                unique_push_back(param, (2, i, -1))
 
         # 1) Shapes
         for i, param in enumerate(params):
@@ -240,6 +248,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if v in self.dynamic_symbolic_map:
             return self.dynamic_symbolic_map[v]
         if v.name in self._dynamic_symbolic_name_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
             return self._dynamic_symbolic_name_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
@@ -248,6 +258,8 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if v in self._dynamic_symbolic_candidates_map:
             return self._dynamic_symbolic_candidates_map[v]
         if v.name in self._dynamic_symbolic_name_candidates_map:
+            if sum(symbol.name == v.name for symbol in self.dynamic_symbolic_map) != 1:
+                raise KeyError(f"Dynamic symbolic variable '{v.name}' has ambiguous name-only candidates")
             return self._dynamic_symbolic_name_candidates_map[v.name]
         raise KeyError(f"Dynamic symbolic variable '{v.name}' not found in symbolic map")
 
@@ -268,6 +280,12 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
                 has_shape_candidate = True
             elif ref_id == 1:
                 has_stride_candidate = True
+            elif ref_id == 2:
+                value = param_values[buffer_idx]
+                if value is not None:
+                    return value
+                non_tensor_values.append((buffer_idx, value))
+                continue
             else:
                 raise ValueError(f"Unknown dynamic symbol ref id: {ref_id}")
 

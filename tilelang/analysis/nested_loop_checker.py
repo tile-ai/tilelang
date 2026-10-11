@@ -11,7 +11,7 @@ from tvm.tirx.transform import prim_func_pass
 def is_pipelined_for(op: For) -> bool:
     """Check if a for loop is pipelined."""
 
-    anno_keys = ["num_stages", "tl_pipeline_order", "tl_pipeline_stage", "tl_pipeline_group"]
+    anno_keys = ["num_stages", "tl_pipeline_order", "tl_pipeline_stage"]
     return any(key in op.annotations for key in anno_keys)
 
 

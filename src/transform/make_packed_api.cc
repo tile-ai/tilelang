@@ -36,6 +36,8 @@ using namespace ffi;
 
 namespace {
 constexpr const char *kTileLangOutIdx = "tilelang_out_idx";
+constexpr const char *kTileLangCalleeAllocatedOutputs =
+    "tilelang_callee_allocated_outputs";
 constexpr const char *kOutputStorageDTypeResolver =
     "tl.tvm_ffi.resolve_output_storage_dtype";
 
@@ -141,7 +143,7 @@ private:
     } else if (dtype.is_int() || dtype.is_uint()) {
       info.type_index = TypeIndex::kTVMFFIInt;
       info.expr = Cast(DataType::Int(64), val);
-    } else if (dtype.is_float()) {
+    } else if (dtype.is_float() || dtype.is_bfloat16()) {
       info.type_index = TypeIndex::kTVMFFIFloat;
       info.expr = Cast(DataType::Float(64), val);
     } else if (dtype.is_void()) {
@@ -338,20 +340,20 @@ Optional<String> RequiresPackedAPI(const PrimFunc &func) {
 }
 
 std::vector<int> GetCalleeAllocatedOutputIndices(const PrimFunc &func) {
-  auto output_attr = func->GetAttr<Array<Integer>>(kTileLangOutIdx);
-  if (!output_attr || output_attr.value().empty() ||
+  // The callee-allocated-output ABI decision is made at compile time by the
+  // execution backend that declared the capability (see
+  // ExecutionBackendSpec.supports_callee_allocated_outputs) and recorded on
+  // the entry function; the pass honors the recorded decision instead of
+  // inspecting target kinds.
+  if (!func->HasNonzeroAttr(kTileLangCalleeAllocatedOutputs) ||
       !func->HasNonzeroAttr(tirx::attr::kIsEntryFunc)) {
     return {};
   }
 
-  auto target = func->GetAttr<Target>(tvm::attr::kTarget);
-  if (!target || target.value()->kind->name != "cuda") {
-    return {};
-  }
-  auto target_host = target.value()->GetHost();
-  if (!target_host || target_host.value()->kind->name != "c") {
-    return {};
-  }
+  auto output_attr = func->GetAttr<Array<Integer>>(kTileLangOutIdx);
+  ICHECK(output_attr && !output_attr.value().empty())
+      << kTileLangCalleeAllocatedOutputs << " requires a non-empty "
+      << kTileLangOutIdx << " attribute listing the output parameters";
 
   std::vector<int> indices;
   std::unordered_set<int> seen;

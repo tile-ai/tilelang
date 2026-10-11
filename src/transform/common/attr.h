@@ -24,6 +24,10 @@ inline bool IsDeviceMainBlock(const tirx::SBlockNode *node) {
   return node->name_hint == DeviceMainBlockName;
 }
 
+// The kernel-launch frame no longer needs a per-backend marker annotation:
+// KernelLaunchFrame exposes its grid_vars/thread_vars explicitly and each
+// backend pipeline decides what the launch means (MaterializeKernelLaunch).
+
 namespace attr {
 // Attributes to mark CUDA sync calls
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
@@ -37,6 +41,9 @@ constexpr const char *pipeline_exec_scope = "pipeline_exec_scope";
 // corresponding tl.assume remains in the IR as an optimizer fact.
 constexpr const char *kAssumeRequiresRuntimeCheck =
     "tl.assume_requires_runtime_check";
+
+// Compiler-internal physical buffer version count.
+constexpr const char *kBufferVersion = "tl.buffer_version";
 
 // Attributes to implement SourceCodeBlock
 constexpr const char *kCodeBlockSource = "code_block_source";

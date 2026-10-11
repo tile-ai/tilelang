@@ -3,9 +3,9 @@
 from .. import _ffi_api
 
 
-def AutoSchedule():
+def AutoWarpSpecialization():
     """Derive a warp-specialization schedule with the scheduler named by
-    the ``tl.enable_auto_schedule`` pass config (currently
+    the ``tl.enable_auto_warp_specialization`` pass config (currently
     ``"role_based"``); a no-op when the config is unset.
 
     Eligible kernels gain stable ``tl.ws_op_id`` markers and a typed
@@ -18,7 +18,7 @@ def AutoSchedule():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.AutoSchedule()  # type: ignore
+    return _ffi_api.AutoWarpSpecialization()  # type: ignore
 
 
 def AnnotateDeviceBoundTmaCopies():
@@ -178,7 +178,7 @@ def PersistThreadblock():
 
 __all__ = [
     "AnnotateDeviceBoundTmaCopies",
-    "AutoSchedule",
+    "AutoWarpSpecialization",
     "AnnotateWarpGroupRegAlloc",
     "FuseMBarrierArriveExpectTx",
     "InjectFenceProxy",

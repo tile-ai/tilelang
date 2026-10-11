@@ -1,34 +1,18 @@
 """Tests for TileLang `LowerTileOp` synchronization and copy lowering."""
 
+from collections import Counter
+
 import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang import tvm
 from tvm.tirx.stmt_functor import post_order_visit
 
 
 def _count_calls(func: tvm.tirx.PrimFunc):
-    counts = {}
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op):
-            name = str(node.op.name)
-            counts[name] = counts.get(name, 0) + 1
-
-    post_order_visit(func.body, _visit)
-    return counts
-
-
-def _collect_calls(root, op_name: str):
-    calls = []
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name).endswith(op_name):
-            calls.append(node)
-
-    post_order_visit(root.body if hasattr(root, "body") else root, _visit)
-    return calls
+    return Counter(str(call.op.name) for call in collect_nodes(func, tvm.tirx.Call) if isinstance(call.op, tvm.ir.Op))
 
 
 def _find_loop_with_annotation(func: tvm.tirx.PrimFunc, annotation: str):
@@ -104,6 +88,55 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("enable_let_inline", [False, True])
+@pytest.mark.parametrize(
+    "cols,vector_size,dtype",
+    [(1024, 8, "bfloat16"), (1024, 4, "bfloat16"), (1024, 4, "float32"), (3072, 8, "bfloat16")],
+)
+def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dtype, enable_let_inline):
+    """Simplify inverse-layout indices enough to prove cp.async contiguity."""
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    layout = T.Fragment(
+        (4, cols),
+        forward_fn=lambda i, j: (
+            i * 64 + (j // vector_size) % 64,
+            j % vector_size + (j // (64 * vector_size)) * vector_size,
+        ),
+    )
+
+    @T.prim_func
+    def main(A: T.Tensor((4, cols), dtype), B: T.Tensor((4, cols), dtype)):
+        with T.Kernel(1, threads=256):
+            shared = T.alloc_shared((4, cols), dtype)
+            T.async_copy(A, shared, loop_layout=layout)
+            T.ptx_wait_group(0)
+            T.sync_threads()
+            T.copy(shared, B)
+
+    config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: enable_let_inline}}
+    with target, tvm.transform.PassContext(config=config):
+        mod = tvm.IRModule.from_expr(main)
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.Simplify()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    func = mod["main"]
+    _assert_no_unexpected_free_vars(func)
+    assert_call_count(func, op="tl.ptx_cp_async", count=1)
+    async_vector_loops = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.VECTORIZED and collect_calls(node, op="tl.ptx_cp_async"):
+            async_vector_loops.append(node)
+
+    post_order_visit(func.body, collect)
+    assert len(async_vector_loops) == 1
+    assert int(async_vector_loops[0].extent) == vector_size
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("num_stages", [2, 3])
 def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(num_stages):
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
@@ -131,15 +164,15 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     with target:
         mod = tl.transform.InjectSoftwarePipeline()(mod)
-        copy_calls = _collect_calls(mod["main"], "tileop.copy")
+        copy_calls = collect_calls(mod["main"], op="tl.tileop.copy")
         assert all("tl.pipeline_mbar_phase_expr" not in call.annotations for call in copy_calls)
         mod = tl.transform.LayoutInference()(mod)
         mod = tl.transform.LowerTileOp()(mod)
 
     func = mod["main"]
-    waits = _collect_calls(func, "mbarrier_wait_parity")
+    waits = collect_calls(func, op="tl.mbarrier_wait_parity")
     loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
-    loop_waits = _collect_calls(loop, "mbarrier_wait_parity")
+    loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
 
     assert len(waits) == num_stages
     assert len(loop_waits) == 1
@@ -190,9 +223,9 @@ def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
         mod = tl.transform.LowerTileOp()(mod)
 
     func = mod["main"]
-    waits = _collect_calls(func, "mbarrier_wait_parity")
+    waits = collect_calls(func, op="tl.mbarrier_wait_parity")
     loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
-    loop_waits = _collect_calls(loop, "mbarrier_wait_parity")
+    loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
 
     assert len(waits) == num_stages
     assert len(loop_waits) == 1
@@ -354,6 +387,37 @@ def _assert_no_unexpected_free_vars(func: tvm.tirx.PrimFunc):
 def _cpu_target(with_host: bool = False) -> tvm.target.Target:
     host = tvm.target.Target("llvm") if with_host else None
     return tvm.target.Target("c", host) if with_host else tvm.target.Target("c")
+
+
+@pytest.mark.parametrize("target_kind", ["cuda", "hip"])
+@pytest.mark.parametrize("rows,cols,threads,thread_start", [(1, 2, 2, 0), (2, 8, 4, 0), (3, 5, 8, 0), (2, 8, 8, 4)])
+def test_lower_tile_op_parallel_let_indices(target_kind, rows, cols, threads, thread_start):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target_kind == "cuda" else {"kind": "hip", "mcpu": "gfx1100"})
+    size = 2 * rows * cols + 8
+
+    @T.prim_func
+    def main(A: T.Tensor((size,), T.int32), B: T.Tensor((size,), T.int32)):
+        with T.Kernel(2, threads=threads) as bx:
+            if T.get_thread_binding() >= thread_start:
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = A[idx] * 3 + idx
+                for i, j in T.Parallel(rows, cols):
+                    offset = bx * rows * cols + i * cols
+                    idx = offset + j + 4
+                    B[idx] = B[idx] + 5
+
+    config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: False}}
+    with target, tvm.transform.PassContext(config=config):
+        mod = tvm.IRModule.from_expr(main)
+        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.Simplify()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+
+    _assert_no_unexpected_free_vars(mod["main"])
 
 
 def _cpu_while_kernel_module(with_host: bool = False):

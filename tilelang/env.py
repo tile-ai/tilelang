@@ -375,9 +375,6 @@ class Environment:
     TILELANG_KERNEL_CACHE_USE_LIB_STAMP = EnvVar(
         "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0"
     )  # include native TileLang library content hash in kernel cache keys
-    TILELANG_CACHE_VERIFY_HASH = EnvVar(
-        "TILELANG_CACHE_VERIFY_HASH", "1"
-    )  # verify content hashes of cached binary artifacts at load time (set to 0 to only check file sizes)
     TILELANG_CLEANUP_TEMP_FILES = EnvVar(
         "TILELANG_CLEANUP_TEMP_FILES", "1"
     )  # cleanup temporary compiler files/dirs after compilation (set to 0 to keep for debugging)
@@ -449,9 +446,6 @@ class Environment:
 
     def should_use_kernel_cache_lib_stamp(self) -> bool:
         return str(self.TILELANG_KERNEL_CACHE_USE_LIB_STAMP).lower() in ("1", "true", "yes", "on")
-
-    def should_verify_cache_hash(self) -> bool:
-        return str(self.TILELANG_CACHE_VERIFY_HASH).lower() in ("1", "true", "yes", "on")
 
     def is_autotune_cache_disabled(self) -> bool:
         return self.TILELANG_AUTO_TUNING_DISABLE_CACHE.lower() in ("1", "true", "yes", "on")
@@ -591,14 +585,12 @@ def get_cuda_dll_search_dirs() -> list[str]:
     return [os.path.abspath(p) for p in cands if os.path.isdir(p)]
 
 
-def get_windows_runtime_dll_dirs() -> list[str]:
-    """Return Windows-only DLL directories shipped with sibling Python packages.
+def get_runtime_library_dirs() -> list[str]:
+    """Return library directories shipped with sibling Python packages.
 
-    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their DLLs resolve
+    Currently locates ``tvm_ffi`` and ``z3`` install dirs so their libraries resolve
     when TileLang is imported. Each lookup is best-effort; failures are ignored.
     """
-    if not sys.platform.startswith("win32"):
-        return []
     dirs: list[str] = []
     try:
         from tvm_ffi import libinfo as tvm_ffi_libinfo

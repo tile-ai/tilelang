@@ -683,6 +683,43 @@ bool CanProveInjective(const Array<PrimExpr> &forward_indices,
   return injective;
 }
 
+// A left inverse proves injectivity even when symbolic padding prevents a
+// bijective IterMap. NoCheck only constructs the candidate: every logical
+// coordinate must still be recovered on the original input domain.
+bool CanProveLeftInverse(const Array<PrimExpr> &forward_indices,
+                         const Map<Var, Range> &input_iters) {
+  arith::Analyzer analyzer;
+  PrimExpr nonempty = Bool(true);
+  for (const auto &[var, range] : input_iters) {
+    analyzer.Bind(var, range);
+    nonempty = And(nonempty, range->extent > 0);
+  }
+  // Empty input domains are trivially injective. For a nonempty domain all
+  // extents are positive, including symbolic strides in a flattened index.
+  With<arith::ConstraintContext> constraint(&analyzer, nonempty);
+  auto iter_map = arith::DetectIterMap(forward_indices, input_iters, 1,
+                                       arith::IterMapLevel::NoCheck, &analyzer);
+  if (!iter_map->errors.empty()) {
+    return false;
+  }
+  Map<Var, PrimExpr> inverse;
+  try {
+    inverse = arith::InverseAffineIterMap(iter_map->indices, forward_indices);
+  } catch (const Error &) {
+    // NoCheck can produce overlapping iter sums that the inverse builder
+    // cannot invert. Such a candidate supplies no proof of injectivity.
+    return false;
+  }
+  for (const auto &[var, range] : input_iters) {
+    auto it = inverse.find(var);
+    PrimExpr recovered = it == inverse.end() ? range->min : (*it).second;
+    if (!analyzer.CanProveEqual(recovered, var)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 arith::IterMapResult MakeInjectivityError(const std::string &message) {
   arith::IterMapResult result;
   result->errors.push_back(message);
@@ -711,7 +748,15 @@ DetectInjectiveMapping(const Array<PrimExpr> &forward_indices,
   if (exact.status == ExactInjectivityStatus::kNonInjective) {
     return MakeInjectivityError(exact.detail);
   }
-  if (CanProveInjective(forward_indices, input_iters)) {
+  // The two symbolic proofs have disjoint blind spots, so neither subsumes
+  // the other. CanProveInjective propagates equalities across outputs but
+  // cannot invert floordiv/floormod with a symbolic divisor: it proves
+  // (i, i + j) yet fails the padded partition ((i*n+j)%128, (i*n+j)//128).
+  // CanProveLeftInverse decodes a mixed-radix IterMap digit by digit, which
+  // handles that partition but has no candidate inverse for (i, i + j),
+  // whose second output is not a radix chain. Keep both.
+  if (CanProveInjective(forward_indices, input_iters) ||
+      CanProveLeftInverse(forward_indices, input_iters)) {
     return arith::IterMapResult();
   }
   return MakeInjectivityError("injectivity could not be proven: " +
@@ -799,6 +844,47 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
     }
   }
   return ret;
+}
+
+Array<Range> LayoutNode::MapRegionBounds(const Array<Range> &region) const {
+  ICHECK_EQ(region.size(), InputDim())
+      << "MapRegionBounds: region rank (" << region.size()
+      << ") != layout input rank (" << InputDim() << ")";
+
+  arith::Analyzer analyzer;
+  // Bind each InputPlaceholder to the sub-range [min, min + extent)
+  // instead of the full extent [0, input_size) that OutputShape uses.
+  for (size_t i = 0; i < InputDim(); i++) {
+    PrimExpr min = region[i]->min;
+    PrimExpr ext = region[i]->extent;
+    analyzer.Bind(InputPlaceholder(i), Range(min, min + ext));
+  }
+
+  Array<Range> result;
+  result.reserve(OutputDim());
+  for (size_t i = 0; i < OutputDim(); i++) {
+    auto ist = analyzer.int_set(forward_index_[i]);
+    PrimExpr lo = ist.min();
+    PrimExpr hi = ist.max();
+    if (arith::is_neg_inf(lo) && arith::is_pos_inf(hi)) {
+      // Analyzer couldn't form an IntervalSet (e.g. bitwise ops).
+      // Fall back to ConstIntBound, mirroring OutputShape's strategy.
+      auto cib = analyzer.const_int_bound(forward_index_[i]);
+      if (cib->min_value != arith::ConstIntBound::kNegInf &&
+          cib->max_value != arith::ConstIntBound::kPosInf &&
+          cib->min_value >= 0) {
+        lo = Integer(cib->min_value);
+        hi = Integer(cib->max_value);
+      } else {
+        // Last-resort: use the full output dimension extent.
+        Array<PrimExpr> out_shape = OutputShape();
+        lo = Integer(0);
+        hi = out_shape[i];
+      }
+    }
+    result.push_back(Range(lo, hi + 1));
+  }
+  return result;
 }
 
 PrimExpr LayoutNode::GetLinearizedForwardIndex() const {
@@ -1727,6 +1813,10 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Layout layout, Layout other) {
              const LayoutNode *other_node = other.as<LayoutNode>();
              return layout->IsEqual(other_node);
+           })
+      .def("tl.Layout_map_region_bounds",
+           [](Layout layout, Array<Range> region) {
+             return layout->MapRegionBounds(region);
            })
       .def_packed("tl.Fragment",
                   [](PackedArgs args, Any *rv) {
