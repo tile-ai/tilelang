@@ -76,6 +76,7 @@ torch = [
 requires = [
     "cython>=3.1.0",
     "scikit-build-core",
+    "torch; platform_system == 'Darwin'",
     "z3-solver>=4.13.0,<4.15.5",
     # Not for auditwheel, explicitly add patchelf for repairing libz3.so.
     # See tvm's CMakeLists.txt for more information.

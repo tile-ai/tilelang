@@ -402,8 +402,8 @@ list(REMOVE_DUPLICATES TILE_LANG_SRCS)
 # MIR is an optional host compiler, not a device/execution backend. Do not build
 # its C frontend, tools or tests, and never download dependencies during builds.
 set(TILELANG_MIR_SOURCE_DEFAULT "")
-# Native MIR cache images currently support x86-64 only.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+# Native MIR cache images support x86-64 and AArch64.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64)$")
   set(TILELANG_MIR_SOURCE_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/mir")
 endif()
 set(TILELANG_MIR_SOURCE_DIR "${TILELANG_MIR_SOURCE_DEFAULT}" CACHE PATH "MIR source checkout (empty to disable)")
@@ -542,6 +542,10 @@ if(WIN32)
 else()
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
   target_link_libraries(tilelang PUBLIC tvm_compiler)
+  if(APPLE AND USE_METAL)
+    # Torch is loaded by the caller; do not bundle/link a second copy into wheels.
+    target_link_options(tilelang PRIVATE "-undefined" "dynamic_lookup")
+  endif()
   if(TARGET tilelang_mir)
     target_sources(tilelang PRIVATE $<TARGET_OBJECTS:tilelang_mir>)
     target_link_libraries(tilelang PRIVATE ${CMAKE_DL_LIBS} m)

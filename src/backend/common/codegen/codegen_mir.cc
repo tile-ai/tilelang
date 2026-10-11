@@ -484,7 +484,7 @@ private:
       slot = MIR_new_bss(ctx_, ("__tl_packed_" + name).c_str(), sizeof(void *));
     auto handle = Op(MIR_MOV, DataType::Handle(),
                      {Memory(MIR_new_ref_op(ctx_, slot), DataType::Handle())});
-    return External("TVMFFIFunctionCall", DataType::Int(32),
+    return External(packed_call_, DataType::Int(32),
                     {DataType::Handle(), DataType::Handle(), DataType::Int(32),
                      DataType::Handle()},
                     {handle, args, count, result});
@@ -808,6 +808,13 @@ private:
         Stack(size, std::max(16, op->buffer->data_alignment));
   }
   void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == "tl.packed_call") {
+      std::string previous = packed_call_;
+      packed_call_ = op->value.as<StringImmNode>()->value;
+      VisitStmt(op->body);
+      packed_call_ = previous;
+      return;
+    }
     ICHECK(op->attr_key == "compute_scope" ||
            op->attr_key == "storage_alignment" || op->attr_key == "device_id" ||
            op->attr_key == "device_type" || op->attr_key == "tl.assume")
@@ -879,6 +886,7 @@ private:
          {Memory(address, op->value.dtype()), VisitExpr(op->value)});
   }
 
+  std::string packed_call_ = "TVMFFIFunctionCall";
   MIRState *state_;
   MIR_context_t ctx_;
   MIR_item_t func_ = nullptr;

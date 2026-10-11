@@ -15,7 +15,7 @@ execution ordering and memory consistency between PyTorch operators and TVM kern
 
 This pass identifies calls to `tir.tvm_call_packed_lowered` occurring within a
 `compute_scope` and wraps them with a `metal_context` attribute. This attribute
-signals the downstream host C codegen to inject specific runtime logic that:
+signals the host implementation to provide runtime logic that:
 1. Retrieves the current command buffer from `torch::mps`.
 2. Passes this stream to the TVM runtime before the kernel executes.
 """
@@ -26,9 +26,10 @@ _tvm_call_packed_lowered = Op.get("tirx.tvm_call_packed_lowered")
 
 @functor.mutator
 class _MarkHostMetalContextMutator(PyStmtExprMutator):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, packed_call=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.is_in_compute_scope = False
+        self.packed_call = packed_call
 
     def visit_attr_stmt_(self, stmt):
         switch = stmt.attr_key == "compute_scope"
@@ -39,17 +40,19 @@ class _MarkHostMetalContextMutator(PyStmtExprMutator):
         s = self.visit_stmt(stmt.body)
         if switch:
             self.is_in_compute_scope = old_value
-        return s
+        return AttrStmt(stmt.node, stmt.attr_key, stmt.value, s)
 
     def visit_evaluate_(self, op: Evaluate):
         if self.is_in_compute_scope and isinstance(op.value, tir.Call) and op.value.op.same_as(_tvm_call_packed_lowered):
+            if self.packed_call is not None:
+                return AttrStmt(0, "tl.packed_call", self.packed_call, op)
             return AttrStmt(0, "metal_context", "", op)
         return op
 
 
-def MarkHostMetalContext():
+def MarkHostMetalContext(packed_call=None):
     def pass_fn(func, mod, ctx):
-        mutator = _MarkHostMetalContextMutator()
+        mutator = _MarkHostMetalContextMutator(packed_call)
         new_body = mutator.visit_stmt(func.body)
         return func.with_body(new_body, span=func.span)
 
