@@ -27,21 +27,34 @@ __all__ = [
 import cutlass
 import cutlass.cute as cute
 from cutlass.experimental import primitives as prims
+from .utils import bitcast, select
+
+
+def _minmax(a, b, minimum):
+    if type(a) is type(b) and isinstance(a, (cutlass.Float8E4M3FN, cutlass.Float8E5M2)):
+        # Order FP8 encodings without converting their values. Negative codes
+        # run backwards; this also orders -0 below +0. Preserve NaN payloads.
+        x, y = cutlass.Int32(bitcast(a, cutlass.Uint8)), cutlass.Int32(bitcast(b, cutlass.Uint8))
+        kx, ky = select(x >= 128, 127 - x, x), select(y >= 128, 127 - y, y)
+        last = 126 if isinstance(a, cutlass.Float8E4M3FN) else 124
+        choose_a = kx < ky if minimum else kx > ky
+        return select(((x & 127) > last) | (((y & 127) <= last) & choose_a), a, b)
+    return cutlass.min(a, b) if minimum else cutlass.max(a, b)
 
 
 def min(a, b, c=None):
     """Type-preserving min for scalar CuTeDSL values."""
-    result = cutlass.min(a, b)
+    result = _minmax(a, b, True)
     if c is not None:
-        result = cutlass.min(result, c)
+        result = _minmax(result, c, True)
     return result
 
 
 def max(a, b, c=None):
     """Type-preserving max for scalar CuTeDSL values."""
-    result = cutlass.max(a, b)
+    result = _minmax(a, b, False)
     if c is not None:
-        result = cutlass.max(result, c)
+        result = _minmax(result, c, False)
     return result
 
 

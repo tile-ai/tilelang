@@ -165,7 +165,7 @@ def bitcast(value, target_dtype, lanes=1):
     def bitcast_impl(src_val, *, loc=None, ip=None):
         src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val
         result_type = mlir_ir.VectorType.get([lanes], tgt_mlir_type) if lanes > 1 else tgt_mlir_type
-        result = llvm.bitcast(result_type, src_ir, loc=loc, ip=ip)
+        result = arith.bitcast(result_type, src_ir, loc=loc, ip=ip)
         return TensorSSA(result, (lanes,), tgt_wrapper) if lanes > 1 else tgt_wrapper(result)
 
     return bitcast_impl(value)

@@ -202,7 +202,8 @@ def test_clamp_vectorized_operands(dtype, target):
 
     if target == "cutedsl":
         pytest.importorskip("cutlass.cute")
-    N = 128
+    fp8 = target == "cutedsl" and dtype in (T.float8_e4m3, T.float8_e5m2)
+    N = 256 if fp8 else 128
 
     @T.prim_func
     def main(A: T.Tensor((N,), dtype), Lo: T.Tensor((N,), dtype), Hi: T.Tensor((N,), dtype), C: T.Tensor((N,), dtype)):
@@ -232,6 +233,12 @@ def test_clamp_vectorized_operands(dtype, target):
     kernel(a, lo, hi, c)
     ref = torch.clamp(a.double(), lo.double(), hi.double())
     torch.testing.assert_close(c.double(), ref, equal_nan=True, atol=0, rtol=0)
+    if fp8:
+        bits = torch.arange(256, device="cuda").to(torch.uint8)
+        a, lo, hi = (bits.roll(shift).view(dtype.as_torch()) for shift in (0, 85, 171))
+        kernel(a, lo, hi, c)
+        ref = torch.clamp(a.double(), lo.double(), hi.double())
+        torch.testing.assert_close(c.double(), ref, equal_nan=True, atol=0, rtol=0)
 
 
 @tilelang.testing.requires_cuda
