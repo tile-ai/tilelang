@@ -3,6 +3,7 @@
 import pytest
 
 from tilelang import tvm as tvm
+import tilelang.language as TL
 import tilelang.testing
 from tvm.script import tirx as T
 
@@ -1494,6 +1495,169 @@ def test_sync_grid_acts_as_shared_barrier():
     mod = tilelang.transform.ThreadSync("shared")(mod)
     s = str(mod.script())
     assert 'T.tvm_storage_sync("shared")' not in s, f"sync_grid already covers the barrier:\n{s}"
+
+
+def _tilelang_sync_calls(func):
+    mod = tvm.IRModule.from_expr(func)
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    barriers = []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.Call) and node.op == tvm.ir.Op.get("tirx.tvm_storage_sync"):
+            barriers.append(tuple(int(arg) for arg in node.args[1:]))
+
+    tvm.tirx.stmt_functor.post_order_visit(mod[func.attrs["global_symbol"]].body, collect)
+    return barriers
+
+
+@tilelang.testing.requires_cuda
+def test_disjoint_partial_sync_scopes_use_distinct_ids():
+    @TL.prim_func
+    def func():
+        with TL.Kernel(1, threads=128):
+            tx = TL.get_thread_binding()
+            if tx // 64 == 0:
+                for i in TL.serial(2):
+                    TL.sync_threads()
+                    TL.sync_threads()
+            else:
+                for j in TL.serial(2):
+                    TL.sync_threads()
+                    TL.sync_threads()
+
+    barriers = _tilelang_sync_calls(func)
+    assert len(barriers) == 4
+    assert all(count == 64 for _, count in barriers)
+    assert barriers[0] == barriers[1]
+    assert barriers[2] == barriers[3]
+    assert barriers[0][0] != barriers[2][0]
+
+
+@tilelang.testing.requires_cuda
+def test_partial_sync_assume_scopes_use_distinct_ids():
+    @TL.prim_func
+    def func():
+        with TL.Kernel(1, threads=128):
+            tx = TL.get_thread_binding()
+            with TL.attr(tx // 64 == 0, "tl.assume", 1):
+                TL.sync_threads()
+            with TL.attr(tx // 64 == 1, "tl.assume", 1):
+                TL.sync_threads()
+            with TL.attr(tx // 64 == 0, "tl.assume", 1):
+                TL.sync_threads()
+
+    barriers = _tilelang_sync_calls(func)
+    assert len(barriers) == 3
+    assert all(count == 64 for _, count in barriers)
+    assert barriers[0] == barriers[2]
+    assert barriers[0][0] != barriers[1][0]
+
+
+@tilelang.testing.requires_cuda
+def test_equivalent_partial_thread_guards_lower_to_the_same_barriers():
+    """Equivalent TileLang guards must produce the same CUDA barriers."""
+    import re
+
+    threads = 128
+    active = 64
+    rounds = 2
+
+    @TL.prim_func
+    def less_than(
+        A: TL.Tensor((rounds, active), "float16"),
+        PartialOut: TL.Tensor((rounds, active), "float16"),
+        AllOut: TL.Tensor((threads,), "float16"),
+    ):
+        with TL.Kernel(1, threads=threads):
+            tx = TL.get_thread_binding()
+            S = TL.alloc_shared((active,), "float16")
+
+            if tx < active:
+                for k in TL.serial(rounds):
+                    S[tx] = A[k, tx]
+                    PartialOut[k, tx] = S[(tx + 1) % active]
+            TL.sync_threads()
+            AllOut[tx] = S[tx % active]
+
+    @TL.prim_func
+    def floor_div(
+        A: TL.Tensor((rounds, active), "float16"),
+        PartialOut: TL.Tensor((rounds, active), "float16"),
+        AllOut: TL.Tensor((threads,), "float16"),
+    ):
+        with TL.Kernel(1, threads=threads):
+            tx = TL.get_thread_binding()
+            S = TL.alloc_shared((active,), "float16")
+
+            if tx // active == 0:
+                for k in TL.serial(rounds):
+                    S[tx] = A[k, tx]
+                    PartialOut[k, tx] = S[(tx + 1) % active]
+            TL.sync_threads()
+            AllOut[tx] = S[tx % active]
+
+    partial_pattern = r"tl::__sync_thread_partial\(\d+,\s*64\)"
+    for func in (less_than, floor_div):
+        source = tilelang.compile(func, out_idx=[1, 2]).get_kernel_source()
+        assert len(re.findall(partial_pattern, source)) == 2, source
+
+
+@tilelang.testing.requires_cuda
+def test_partial_sync_preserves_outer_constraint_across_block_scope():
+    @TL.prim_func
+    def main():
+        with TL.Kernel(1, threads=128):
+            tx = TL.get_thread_binding()
+            TL.sync_threads()
+            if tx < 64:
+                with TL.sblock("guarded_sync"):
+                    TL.sync_threads()
+            else:
+                with TL.sblock("other_sync"):
+                    TL.sync_threads()
+            TL.sync_threads()
+
+    barriers = _tilelang_sync_calls(main)
+    assert len(barriers) == 4
+    assert barriers[0] == barriers[3] == ()
+    assert barriers[1][1] == barriers[2][1] == 64
+    assert barriers[1][0] != barriers[2][0]
+
+
+@tilelang.testing.requires_cuda
+def test_equivalent_partial_thread_guards_reuse_barrier_id():
+    import re
+    import torch
+
+    @TL.prim_func
+    def main(A: TL.Tensor((64,), "float32"), Out: TL.Tensor((2, 64), "float32")):
+        with TL.Kernel(1, threads=128):
+            tx = TL.get_thread_binding()
+            S0 = TL.alloc_shared((64,), "float32")
+            S1 = TL.alloc_shared((64,), "float32")
+
+            if tx // 64 == 0:
+                S0[tx] = A[tx]
+                TL.sync_threads()
+                Out[0, tx] = S0[(tx + 1) % 64]
+
+            if tx < 64:
+                S1[tx] = A[tx]
+                TL.sync_threads()
+                Out[1, tx] = S1[(tx + 1) % 64]
+
+    kernel = tilelang.compile(main, out_idx=[1])
+    source = kernel.get_kernel_source()
+    barriers = re.findall(r"tl::__sync_thread_partial\((\d+),\s*(\d+)\)", source)
+    assert len(barriers) == 2, source
+    assert all(count == "64" for _, count in barriers), source
+    assert barriers[0][0] == barriers[1][0], source
+
+    a = torch.arange(64, dtype=torch.float32, device="cuda")
+    expected = torch.roll(a, shifts=-1).repeat(2, 1)
+    torch.testing.assert_close(kernel(a), expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
