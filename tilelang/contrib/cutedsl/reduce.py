@@ -329,7 +329,7 @@ class CumSum2D:
         self.TILE_H = threads // self.WARP_SIZE
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
         """
         Perform 2D cumulative sum.
 
@@ -345,8 +345,9 @@ class CumSum2D:
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, (H * W,))
-        dst_tensor = cute.make_tensor(dst, (H * W,))
+        # Scalar indexing stays row-major while each view preserves its pitch.
+        src_tensor = cute.make_tensor(src, cute.make_layout((W, H), stride=(1, src_stride)))
+        dst_tensor = cute.make_tensor(dst, cute.make_layout((W, H), stride=(1, dst_stride)))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile
@@ -399,15 +400,16 @@ class CumMax2D:
         self.WARP_SIZE = 32
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
         lane = tidx % self.WARP_SIZE
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, (H * W,))
-        dst_tensor = cute.make_tensor(dst, (H * W,))
+        # Scalar indexing stays row-major while each view preserves its pitch.
+        src_tensor = cute.make_tensor(src, cute.make_layout((W, H), stride=(1, src_stride)))
+        dst_tensor = cute.make_tensor(dst, cute.make_layout((W, H), stride=(1, dst_stride)))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile

@@ -120,12 +120,16 @@ def _wgmma_ab_dtype(dtype_str):
     return _FP32_TO_TF32.get(dtype_str, dtype_str)
 
 
-def wgmma_ss(A_dtype, B_dtype, C_dtype, M, N, K, tnspA, tnspB, scaleA, scaleB, desc_a, desc_b, C_ptr, scale_out):
-    return _wgmma(A_dtype, B_dtype, C_dtype, M, N, K, tnspA, tnspB, scaleA, scaleB, desc_a, desc_b, C_ptr, scale_out)
+def wgmma_ss(
+    A_dtype, B_dtype, C_dtype, M, N, K, tnspA, tnspB, scaleA, scaleB, desc_a, desc_b, C_ptr, scale_out, E_ptr=None, sparse_selector=0
+):
+    return _wgmma(
+        A_dtype, B_dtype, C_dtype, M, N, K, tnspA, tnspB, scaleA, scaleB, desc_a, desc_b, C_ptr, scale_out, E_ptr, sparse_selector
+    )
 
 
-def wgmma_rs(A_dtype, B_dtype, C_dtype, M, N, K, tnspB, scaleA, scaleB, A_ptr, desc_b, C_ptr, scale_out):
-    return _wgmma(A_dtype, B_dtype, C_dtype, M, N, K, False, tnspB, scaleA, scaleB, A_ptr, desc_b, C_ptr, scale_out)
+def wgmma_rs(A_dtype, B_dtype, C_dtype, M, N, K, tnspB, scaleA, scaleB, A_ptr, desc_b, C_ptr, scale_out, E_ptr=None, sparse_selector=0):
+    return _wgmma(A_dtype, B_dtype, C_dtype, M, N, K, False, tnspB, scaleA, scaleB, A_ptr, desc_b, C_ptr, scale_out, E_ptr, sparse_selector)
 
 
 @cute.jit
@@ -144,6 +148,8 @@ def _wgmma(
     desc_b: GmmaDescriptor,
     C_ptr: cute.Pointer,
     scale_out,
+    E_ptr=None,
+    sparse_selector: Constexpr[int] = 0,
 ):
     """Shared PTX emission keeps scale-out a runtime predicate for both variants."""
     is_ss = isinstance(A_ptr, GmmaDescriptor)
@@ -165,7 +171,8 @@ def _wgmma(
 
     d_regs_str = ", ".join(f"${i}" for i in range(num_c_regs))
     a_regs_str = f"${a_base}" if is_ss else "{" + ", ".join(f"${a_base + i}" for i in range(num_a_regs)) + "}"
-    tail_args = "p"
+    sparse = E_ptr is not None
+    tail_args = f"${scale_idx + 1}, {sparse_selector}, p" if sparse else "p"
     if cutlass.const_expr(ptx_a not in ("s8", "u8")):
         tail_args += f", {scaleA}, {scaleB}"
     if cutlass.const_expr(ptx_a in ("f16", "bf16")):
@@ -177,7 +184,7 @@ def _wgmma(
         "{\n"
         ".reg .pred p;\n"
         f"setp.ne.b32 p, ${scale_idx}, 0;\n"
-        f"wgmma.mma_async.sync.aligned.m{M}n{N}k{K}"
+        f"wgmma.mma_async{'.sp' if sparse else ''}.sync.aligned.m{M}n{N}k{K}"
         f".{ptx_c}.{ptx_a}.{ptx_b} "
         f"{{{d_regs_str}}}, "
         f"{a_regs_str}, "
@@ -199,6 +206,9 @@ def _wgmma(
     a_constraints = "l" if is_ss else ",".join(["r"] * num_a_regs)
     constraints = f"{out_constraints},{tied_constraints},{a_constraints},l,r"
 
+    if cutlass.const_expr(sparse):
+        constraints += ",r"
+
     # Prepare operands list
     operands = []
 
@@ -216,6 +226,10 @@ def _wgmma(
     # desc_b (i64)
     operands.append(desc_b.desc_i64[0].ir_value())
     operands.append(cutlass.Int32(scale_out).ir_value())
+
+    if cutlass.const_expr(sparse):
+        metadata = cute.make_tensor(cute.recast_ptr(E_ptr, dtype=cute.Int32), (1,))
+        operands.append(metadata[0].ir_value())
 
     # Result type
     result_type = llvm.StructType.get_literal([c_ir_type] * num_c_regs)
