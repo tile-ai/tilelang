@@ -73,7 +73,7 @@ void *ResolveSymbol(const char *name) {
 #endif
 }
 
-[[noreturn]] void MIRError(MIR_error_type_t, const char *format, ...) {
+MIR_NO_RETURN void MIRError(MIR_error_type_t, const char *format, ...) {
   char message[1024];
   va_list args;
   va_start(args, format);
