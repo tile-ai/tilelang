@@ -69,6 +69,11 @@ void *ResolveSymbol(const char *name) {
       return reinterpret_cast<void *>(address);
   return nullptr;
 #else
+#ifdef __APPLE__
+  // Darwin's RTLD_DEFAULT excludes our RTLD_LOCAL library and its bridges.
+  if (void *address = dlsym(RTLD_SELF, name))
+    return address;
+#endif
   return dlsym(RTLD_DEFAULT, name);
 #endif
 }
