@@ -42,8 +42,10 @@ def test_out_idx_via_attr_lazy(monkeypatch, tmp_path):
         b = compiled(a)
         torch.testing.assert_close(b, a + 1.0)
 
-        # Cold compilation also reuses the published library instead of JITing twice.
+        # MIR keeps the cold JIT module; disk hits load the published native image.
         rt_mod = compiled.adapter.get_exportable_executable()
+        if isinstance(rt_mod, tilelang.tvm.runtime.Executable):
+            rt_mod = rt_mod.mod
         assert isinstance(rt_mod, tilelang.tvm.runtime.Module)
         assert rt_mod.get_function(str(kernel.attrs["global_symbol"]), query_imports=True) is not None
         with pytest.raises(AttributeError):

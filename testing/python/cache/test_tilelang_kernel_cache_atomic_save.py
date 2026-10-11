@@ -332,10 +332,12 @@ def test_tvm_ffi_kernel_cache_selects_export_kwargs_from_host_target(cache_dirs,
             return FakeExecutable()
 
     def make_kernel(target_host_kind: str):
+        target_host = SimpleNamespace(kind=SimpleNamespace(name=target_host_kind))
         return SimpleNamespace(
             adapter=FakeAdapter(),
             target=SimpleNamespace(kind=SimpleNamespace(name="cuda")),
-            artifact=SimpleNamespace(target_host=SimpleNamespace(kind=SimpleNamespace(name=target_host_kind))),
+            target_host=target_host,
+            artifact=SimpleNamespace(target_host=target_host),
         )
 
     cache = TVMFFIKernelCache()
