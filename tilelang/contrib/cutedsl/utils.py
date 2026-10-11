@@ -22,6 +22,7 @@ from cutlass.base_dsl.typing import (
     Int16,
     Int32,
     Numeric,
+    as_numeric,
     Uint8,
     Uint16,
     Uint32,
@@ -42,6 +43,7 @@ __all__ = [
     "bitcast",
     "recast_ptr",
     "cast_tensor",
+    "select",
     "as_tensor_ssa",
     "as_rmem_tensor",
     "make_filled_tensor",
@@ -135,14 +137,15 @@ def _recast_type(src_type: mlir_ir.Type, res_elem_type: mlir_ir.Type) -> mlir_ir
     return res_elem_type
 
 
-def bitcast(value, target_dtype):
+def bitcast(value, target_dtype, lanes=1):
     """
     Reinterpret the bits of a value as a different type.
     Equivalent to C's (*(target_type *)(&value)).
 
     Args:
-        value: Source value (Numeric type from CuTeDSL)
+        value: Source Numeric or TensorSSA value
         target_dtype: Target type (CuTeDSL type like Int8, Float16, etc.)
+        lanes: Number of elements in the result
 
     Returns:
         Value reinterpreted as target type
@@ -161,8 +164,9 @@ def bitcast(value, target_dtype):
     @dsl_user_op
     def bitcast_impl(src_val, *, loc=None, ip=None):
         src_ir = src_val.ir_value(loc=loc, ip=ip) if hasattr(src_val, "ir_value") else src_val
-        result = llvm.bitcast(tgt_mlir_type, src_ir, loc=loc, ip=ip)
-        return tgt_wrapper(result)
+        result_type = mlir_ir.VectorType.get([lanes], tgt_mlir_type) if lanes > 1 else tgt_mlir_type
+        result = llvm.bitcast(result_type, src_ir, loc=loc, ip=ip)
+        return TensorSSA(result, (lanes,), tgt_wrapper) if lanes > 1 else tgt_wrapper(result)
 
     return bitcast_impl(value)
 
@@ -308,6 +312,15 @@ def cast_tensor(value, dtype):
             return value
         return value.to(dtype)
     return dtype(value)
+
+
+def select(condition, x, y):
+    if isinstance(x, TensorSSA) or isinstance(y, TensorSSA):
+        if not isinstance(condition, TensorSSA):
+            condition = cute.full(x.shape if isinstance(x, TensorSSA) else y.shape, condition, cutlass.Boolean)
+        return cute.where(condition, x, y)
+    x, y = as_numeric(x), as_numeric(y)
+    return type(x)(arith.select(cutlass.Boolean(condition).ir_value(), x.ir_value(), y.ir_value()))
 
 
 def as_tensor_ssa(value):

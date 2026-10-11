@@ -1555,7 +1555,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
             LinearizeBufferIndices_(load->buffer.get(), load->indices));
         os << "tl.bitcast(" << expr_str << ", ";
         PrintType(tgt_dtype.element_of(), os);
-        os << ")";
+        os << ", " << tgt_dtype.lanes() << ")";
         return;
       }
 
@@ -1588,7 +1588,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       std::string expr_str = PrintExpr_(op->args[0]);
       os << "tl.bitcast(" << expr_str << ", ";
       PrintType(tgt_dtype.element_of(), os);
-      os << ")";
+      os << ", " << tgt_dtype.lanes() << ")";
     }
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
@@ -1888,24 +1888,22 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     // prev value
     os << "tl.AtomicMinRet(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ")";
-  } else if (op->op.same_as(builtin::shift_right())) {
+  } else if (op->op.same_as(builtin::shift_right()) ||
+             op->op.same_as(builtin::shift_left())) {
     // CuTeDSL type promotion fix: Int8 >> 4 returns Int32 in CuTeDSL,
     // but TIR expects result type to match operand type. Wrap in explicit
     // type conversion to match CUDA behavior.
     ICHECK_EQ(op->args.size(), 2U);
+    const char *shift = op->op.same_as(builtin::shift_right()) ? ">>" : "<<";
+    if (!op->dtype.is_scalar()) {
+      PrintBinaryIntrinsic_(op, shift, os);
+      return;
+    }
     DataType result_dtype = op->dtype;
     std::string lhs = PrintExpr_(op->args[0]);
     std::string rhs = PrintExpr_(op->args[1]);
     PrintType(result_dtype, os);
-    os << "((" << lhs << " >> " << rhs << "))";
-  } else if (op->op.same_as(builtin::shift_left())) {
-    // Same fix for shift_left
-    ICHECK_EQ(op->args.size(), 2U);
-    DataType result_dtype = op->dtype;
-    std::string lhs = PrintExpr_(op->args[0]);
-    std::string rhs = PrintExpr_(op->args[1]);
-    PrintType(result_dtype, os);
-    os << "((" << lhs << " << " << rhs << "))";
+    os << "((" << lhs << " " << shift << " " << rhs << "))";
   } else {
     CodeGenTileLangPY::VisitExpr_(op, os);
   }
@@ -1913,10 +1911,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
                                         std::ostream &os) { // NOLINT(*)
-  // Emit Python ternary: (true_val if cond else false_val).
-  // This yields ArithValue which is fine in expression contexts (range(),
-  // etc.). When used as a BufferStore value that requires TensorSSA, the store
-  // handler will wrap it with tl.where() at statement level.
+  // TIR Select evaluates both branches, unlike if_then_else. Emit a select
+  // operation instead of nested Python conditionals in the CuTe AST frontend.
   std::string cond = PrintExpr_(op->condition);
   std::string t = PrintExpr_(op->true_value);
   std::string f = PrintExpr_(op->false_value);
@@ -1947,7 +1943,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const SelectNode *op,
   };
   t = cast_branch(t, op->true_value.dtype());
   f = cast_branch(f, op->false_value.dtype());
-  os << "(" << t << " if " << cond << " else " << f << ")";
+  os << "tl.select(" << cond << ", " << t << ", " << f << ")";
 }
 
 void CodeGenTileLangCuTeDSL::VisitExpr_(const LetNode *op,
@@ -2928,18 +2924,14 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
 
     // Emit the for header (same logic as below, but always non-unrolled path
     // since break loops use runtime conditions)
+    std::string bounds;
+    if (!is_zero(op->min)) {
+      bounds = PrintExpr_(op->min) + ", ";
+    }
+    bounds += PrintExpr_(arith::Analyzer().Simplify(op->extent + op->min));
     PrintIndent();
     std::string vid = AllocVarID(op->loop_var.get());
-    stream << "for " << vid << " in range(";
-    if (is_zero(op->min)) {
-      PrintExpr_(op->extent, stream);
-    } else {
-      PrintExpr_(op->min, stream);
-      stream << ", ";
-      PrimExpr upper_bound = arith::Analyzer().Simplify(op->extent + op->min);
-      PrintExpr_(upper_bound, stream);
-    }
-    stream << "):\n";
+    stream << "for " << vid << " in range(" << bounds << "):\n";
 
     // Emit the body wrapped in guard check
     int for_scope = BeginScope();
@@ -2971,18 +2963,18 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const ForNode *op) {
   bool use_range_constexpr = unroll_factor.empty() &&
                              as_const_int(op->extent) != nullptr &&
                              *as_const_int(op->extent) <= LOOP_UNROLL_THRESHOLD;
+  std::string bounds;
+  if (!is_zero(start_expr)) {
+    bounds = PrintExpr_(start_expr) + ", ";
+  }
+  bounds += PrintExpr_(stop_expr);
   PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
   stream << "for " << vid << " in cutlass.range";
   if (use_range_constexpr) {
     stream << "_constexpr";
   }
-  stream << "(";
-  if (!is_zero(start_expr)) {
-    PrintExpr_(start_expr, stream);
-    stream << ", ";
-  }
-  PrintExpr_(stop_expr, stream);
+  stream << "(" << bounds;
   if (!unroll_factor.empty()) {
     stream << ", unroll=" << unroll_factor;
   } else if (!use_range_constexpr) {
@@ -3195,7 +3187,11 @@ void CodeGenTileLangCuTeDSL::PrintVecBinaryOp_(const std::string &opstr,
         PrintVecElemLoad_(vrhs, rhs.dtype(), i, value_temp);
         value_temp << ")";
       }
-      PrintVecElemStore_(sret, dtype, i, value_temp.str());
+      std::string value = value_temp.str();
+      if (opstr == ">>" || opstr == "<<") {
+        value = DTypeToString(dtype.element_of()) + "(" + value + ")";
+      }
+      PrintVecElemStore_(sret, dtype, i, value);
     }
   }
   os << sret << ".load()";

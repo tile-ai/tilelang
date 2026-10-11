@@ -99,7 +99,7 @@ CUTEDSL_TYPES: dict[str, str] = {
     "float32": "cutlass.Float32",
     "float16": "cutlass.Float16",
     "bfloat16": "cutlass.BFloat16",
-    "float8_e4m3": "cutlass.Float8E4M3",
+    "float8_e4m3": "cutlass.Float8E4M3FN",  # Match device codegen's CUDA FP8 alias.
     "float8_e4m3fn": "cutlass.Float8E4M3FN",
     "float8_e5m2": "cutlass.Float8E5M2",
     "float4_e2m1fn": "cutlass.Float4E2M1FN",

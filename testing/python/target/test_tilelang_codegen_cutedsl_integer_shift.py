@@ -1,3 +1,5 @@
+import ast
+
 import pytest
 
 import tilelang.language as T
@@ -47,6 +49,23 @@ def test_cutedsl_codegen_does_not_promote_shift_across_signedness():
     artifact = _lower_cutedsl(prog)
 
     assert "cutlass.Uint16(local[0]) >>" not in artifact.kernel_source
+
+
+@pytest.mark.parametrize("dtype,out_dtype", [("uint8", "int8"), ("uint16", "float16"), ("int32", "float32")])
+def test_cutedsl_codegen_vector_shifts_in_dynamic_loop(dtype, out_dtype):
+    @T.prim_func
+    def prog(A: T.Tensor((128,), dtype), B: T.Tensor((128,), out_dtype), n: T.int32, divisor: T.int32):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            for _ in T.serial(n // divisor):
+                value = A[T.Ramp(tx * 4, 1, 4)] >> T.Broadcast(T.cast(1, dtype), 4)
+                B[T.Ramp(tx * 4, 1, 4)] = T.reinterpret(value << T.Broadcast(T.cast(2, dtype), 4), out_dtype + "x4")
+
+    source = _lower_cutedsl(prog).kernel_source
+    ast.parse(source)
+    assert "[0]>>" in source
+    assert "[0]<<" in source
+    assert "tl.bitcast(" in source
 
 
 if __name__ == "__main__":

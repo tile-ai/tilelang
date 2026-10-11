@@ -196,9 +196,12 @@ def test_clamp_python_literals():
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", CLAMP_NAN_DTYPES)
-def test_clamp_vectorized_operands(dtype):
+@pytest.mark.parametrize("target", ["cuda", "cutedsl"])
+def test_clamp_vectorized_operands(dtype, target):
     import torch
 
+    if target == "cutedsl":
+        pytest.importorskip("cutlass.cute")
     N = 128
 
     @T.prim_func
@@ -207,14 +210,15 @@ def test_clamp_vectorized_operands(dtype):
             for i in T.Parallel(N):
                 C[i] = T.clamp(A[i], Lo[i], Hi[i])
 
-    kernel = tilelang.compile(main, target="cuda")
+    kernel = tilelang.compile(main, target=target)
     source = kernel.get_kernel_source()
-    if dtype in (T.float16, T.bfloat16):
-        assert "tl::clamp2(" in source
-    else:
-        assert "tl::clamp(" in source
-    if dtype == T.float32:
-        assert "*(float4*)" in source
+    if target == "cuda":
+        if dtype in (T.float16, T.bfloat16):
+            assert "tl::clamp2(" in source
+        else:
+            assert "tl::clamp(" in source
+        if dtype == T.float32:
+            assert "*(float4*)" in source
 
     a = torch.linspace(-2.0, 2.0, N, dtype=torch.float64, device="cuda")
     lo = torch.full_like(a, -1.0)
