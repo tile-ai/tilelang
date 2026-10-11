@@ -328,8 +328,8 @@ def create_backend_context(
     if target_host is None:
         use_mir = (
             execution.name == "tvm_ffi"
-            and normalized_target.kind.name in ("cuda", "hip")
-            and platform.machine().lower() in ("x86_64", "amd64")
+            and normalized_target.kind.name in ("cuda", "hip", "ascend", "metal")
+            and platform.machine().lower() in ("x86_64", "amd64", "aarch64", "arm64")
             and tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is not None
         )
         target_host = "mir" if use_mir else "llvm" if tvm.runtime.enabled("llvm") else "c"

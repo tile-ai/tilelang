@@ -238,63 +238,8 @@ The engine must not contain a `target.kind.name` dispatch table for backend
 codegen. Backend variants, such as CUDA and CuTeDSL, declare their own codegen
 entries in their manifests.
 
-### Experimental MIR host compiler
-
-This experimental branch builds the [MIR fork](https://github.com/sepcnt/mir)
-by default on x86-64 and selects it for CUDA (including NVRTC/CuTe) and ROCm TVM-FFI
-execution on x86-64. ROCm execution is pending CI validation. Other targets,
-architectures and execution backends retain the previous host selection.
-Use `target_host="c"` for comparison, or `-DTILELANG_MIR_SOURCE_DIR=` to disable
-MIR at build time; builds without MIR retain the previous host selection.
-
-```sh
-git submodule update --init 3rdparty/mir
-cmake -S . -B build
-cmake --build build
-```
-
-Only MIR's core and machine-code generator are built, not its C frontend.
-The `3rdparty/mir`
-submodule pins the `tilelang-host-jit` fork (native images and builtin reconstruction support). Linux x86-64
-and Windows x64/clang-cl have been tested; other 64-bit MIR platforms still
-need execution testing.
-
-```python
-kernel = tilelang.compile(func, target="cuda", target_host="mir", execution_backend="tvm_ffi")
-```
-
-Lowered scalar Host IR is translated directly into MIR instructions and JIT
-compiled in-process. Device compilation, imported runtime modules, TVM-FFI
-argument handling and tensor allocation remain shared with the C host path.
-There is no MIR-specific Python adapter or generated C wrapper.
-The fork's `MIR_gen_set_host_ir` selects scalar SSA cleanup, full register allocation
-and coalescing independently of numeric optimization levels. Block cloning, LICM
-and pressure-relief code motion are omitted; ordinary Host IR loops remain supported.
-
-The current subset covers scalar arithmetic/casts, packed calls, tensor fields,
-typed assertions, eager selects, lazy branches, serial loops and loop breaks.
-Static allocations are hoisted to the function entry. Runtime-sized buffers and
-shape/FFI stacks use scoped MIR stack allocation, including cleanup on loop breaks;
-loop iterations do not accumulate stack storage. Unsupported IR is rejected, not silently
-translated to C. This is not a general CPU/device compiler and does not yet
-replace the C/LLVM host paths. In particular, vector IR, parallel host loops,
-Metal's Objective-C context and arbitrary host intrinsics are not implemented.
-
-Caches contain native host machine code, symbolic relocations, MIR module data
-and the existing TVM module import graph, including device binaries. Function
-bodies/local registers are omitted: loading reconstructs signatures/data and
-relocates machine code without parsing function IR, initializing the MIR generator
-or recompiling functions. Source inspection after native reload exposes module
-data/signatures only; the normal cache retains generated source separately. No process addresses are persisted, and
-packed-call slots are resolved once. Native export/load currently requires x86-64;
-there is no bytecode-JIT fallback or compatibility with earlier experimental caches.
-The atomic cache writer is shared with the other host paths. Cache publication,
-reload and `kernel.export_library("kernel.tlm")` do not invoke a host compiler.
-Publication keeps the already-JITted module rather than compiling it again.
-Module data contains native host layouts: exports require a compatible host ABI,
-and normal caches retain the existing OS/architecture namespace.
-Load exports with `tvm.runtime.load_module("kernel.tlm")`. Explicit `.so` exports
-retain the existing shared-library packaging behavior and require a host compiler.
+For experimental MIR host compilation, platform support and native exports,
+see [TVM-FFI host execution](../../docs/get_started/targets.md#tvm-ffi-host-execution).
 
 ## Execution Backend Compatibility
 

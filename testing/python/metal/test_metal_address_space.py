@@ -77,7 +77,7 @@ def test_both_metal_build_paths_use_type_driven_shared_aliases(monkeypatch):
 
 
 @tilelang.testing.requires_metal
-@pytest.mark.parametrize("execution_backend", ["tvm_ffi", "torch"])
+@pytest.mark.parametrize("execution_backend", ["auto", "torch"])
 def test_shared_alias_address_spaces_execute_on_metal(execution_backend):
     kernel = tilelang.compile(
         shared_alias_gemm(),

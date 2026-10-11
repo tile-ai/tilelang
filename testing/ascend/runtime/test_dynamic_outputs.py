@@ -28,7 +28,7 @@ def dynamic_outputs(
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("execution_backend", ["cython", "tvm_ffi"])
+@pytest.mark.parametrize("execution_backend", ["cython", "auto"])
 @pytest.mark.parametrize("rows", [1, 3])
 def test_dynamic_outputs_before_sizing_input(execution_backend, rows):
     kernel = tilelang.compile(dynamic_outputs, out_idx=[0, 2], target="ascend", execution_backend=execution_backend)

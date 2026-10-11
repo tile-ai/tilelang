@@ -34,32 +34,31 @@ def compiled_kernel(*args):
     return func(*args)
 ```
 
-## CuTeDSL with compiled Host IR
+## TVM-FFI host execution
 
-`tilelang.compile(func, target="cutedsl")` defaults to `execution_backend="tvm_ffi"`, using
-CuTeDSL device compilation with the shared native Host IR executor, cache and
-library export. Ordinary tensor pointers, dynamic sizes, host control flow and
-multiple kernels are supported. Device scalars support `int32`, `int64`,
-`uint8`, `uint16`, `uint32`, `uint64`, `float32` and `float64`; block dimensions must be constant.
-The device artifact is PTX, which the CUDA driver JIT-compiles on first use.
-TMA descriptors use CuTe's grid-constant TensorMap type; the compiled Host IR
-constructs their runtime values. Clustered/cooperative launches and PDL reuse
-the CUDA runtime's launch metadata, subject to device support.
-CuTeDSL is an optional device compiler, not a separate execution backend.
-For NVRTC, use `pass_configs={"tl.cuda_compiler": "nvrtc"}` with the same
-`tvm_ffi` executor. The old `execution_backend="cutedsl"` and `"nvrtc"` names
-remain as deprecated aliases and emit `DeprecationWarning`; they select the new
-shared path, not the removed wrappers. Legacy wrapper caches are not reused.
-Replace the old `kernel(..., stream=...)` argument with a `torch.cuda.stream(stream)`
-context. `compile_flags` are passed to the selected device compiler; for CuTeDSL,
-use CuTe options such as `compile_flags=["--opt-level=0"]`, not NVCC flags.
+CUDA (including CuTeDSL), ROCm, Metal and Ascend default to `tvm_ffi`.
+On x86-64/AArch64, builds with the experimental [MIR fork](https://github.com/sepcnt/mir/tree/tilelang-host-jit)
+use it by default to compile scalar Host IR in-process, without an external host compiler.
+Use `target_host="c"` for the C path; other targets/architectures keep their existing fallback, and PTO is unchanged.
+Source builds include `3rdparty/mir`; initialize the submodule before building, or disable MIR with `-DTILELANG_MIR_SOURCE_DIR=`.
+MIR supports scalar computations, packed calls, conditions and serial loops; unsupported IR is rejected rather than falling back to C.
 
-Native Host IR compilation still needs a host C++ toolchain, including when NVRTC
-or CuTeDSL compiles the device code: GCC/Clang on Linux, or MSVC on Windows
-(run from a Developer PowerShell). Cached libraries do not recompile Host IR.
-The TileLang adapter accepts the full Python `uint64` range; direct calls to an
-exported TVM-FFI function use signed `int64` transport, so pass `value - (1 << 64)`
-for values at or above `1 << 63`.
+For NVRTC, use `pass_configs={"tl.cuda_compiler": "nvrtc"}` with `tvm_ffi`.
+For CuTeDSL, use `target="cutedsl"`; compiled cubins use the shared CUDA runtime and Host IR executor.
+CuTeDSL requires constant block dimensions and supports device scalars `int32`, `int64`,
+`uint8/16/32/64`, `float32` and `float64`.
+`compile_flags` go to the device compiler; CuTeDSL accepts options such as `--opt-level=0`, not NVCC flags.
+The old `execution_backend="nvrtc"` and `"cutedsl"` names are deprecated aliases; legacy wrapper caches are not reused.
+Replace `kernel(..., stream=...)` with a `torch.cuda.stream(stream)` context.
+
+Returned outputs are allocated by generated Host IR and require Torch's DLPack allocator exchange API
+(a supported PyTorch build or `torch-c-dlpack-ext`).
+MIR caches and `kernel.export_library("kernel.tlm")` store native code; load with `tvm.runtime.load_module("kernel.tlm")`
+on a compatible OS/architecture and host ABI, without a host compiler or re-JIT.
+The C host path and explicit shared-library exports still require GCC/Clang on Linux or MSVC on Windows (Developer PowerShell).
+Device compiler/runtime requirements are unchanged.
+The adapter accepts the full Python `uint64` range; direct exported TVM-FFI calls use signed `int64` transport,
+so pass `value - (1 << 64)` for values at or above `1 << 63`.
 
 ## Target input forms
 

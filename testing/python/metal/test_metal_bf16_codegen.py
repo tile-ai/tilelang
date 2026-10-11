@@ -10,7 +10,7 @@ import tilelang.testing
 import tilelang.language as T
 
 
-@tilelang.jit(out_idx=[2], target="metal", execution_backend="torch")
+@tilelang.jit(out_idx=[2], target="metal")
 def repro_gemm(dtype: str):
     M = 32
     N = 64

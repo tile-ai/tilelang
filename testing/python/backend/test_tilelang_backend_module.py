@@ -14,7 +14,7 @@ def test_builtin_backend_modules_are_explicit():
         "cutedsl": (("cuda",), ["tvm_ffi"]),
         "rocm": (("hip",), ["tvm_ffi", "cython"]),
         "cpu": (("c", "llvm"), ["cython", "tvm_ffi"]),
-        "metal": (("metal",), ["torch", "tvm_ffi"]),
+        "metal": (("metal",), ["tvm_ffi", "torch"]),
         "webgpu": (("webgpu",), ["tvm_ffi"]),
         "ascend": (("ascend",), ["tvm_ffi", "cython"]),
         "pto": (("ascend",), ["pto"]),
@@ -150,12 +150,16 @@ def test_create_backend_context_binds_compile_state():
 
     import platform
 
-    default = create_backend_context("cuda", execution_backend="tvm_ffi")
     has_mir = tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is not None
-    if has_mir and platform.machine().lower() in ("x86_64", "amd64"):
-        assert default.target_host.kind.name == "mir"
-    else:
-        assert default.target_host.kind.name == ("llvm" if tvm.runtime.enabled("llvm") else "c")
+    for target in ("cuda", "hip", "ascend", "metal"):
+        if target not in tvm.target.Target.list_kinds():
+            continue
+        default = create_backend_context(target)
+        assert default.execution_backend.name == "tvm_ffi"
+        if has_mir and platform.machine().lower() in ("x86_64", "amd64", "aarch64", "arm64"):
+            assert default.target_host.kind.name == "mir"
+        else:
+            assert default.target_host.kind.name == ("llvm" if tvm.runtime.enabled("llvm") else "c")
     assert create_backend_context("cuda", execution_backend="cython").target_host.kind.name != "mir"
 
     with pytest.raises(AttributeError):
