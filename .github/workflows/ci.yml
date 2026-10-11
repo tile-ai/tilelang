@@ -368,6 +368,24 @@ jobs:
           rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
           rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
 
+      - name: Compare C and MIR Host IR
+        env:
+          TOOLKIT: ${{ matrix.runner.toolkit }}
+        run: |
+          case "$TOOLKIT" in
+            *CUDA*) TARGET=cuda ;;
+            *ROCm*) TARGET=hip ;;
+            *Metal*) TARGET=metal ;;
+          esac
+          uv run --no-project python maint/host_checks/host_ir_benchmark.py --targets "$TARGET"
+
+      - name: Upload Host IR measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-ir-${{ matrix.runner.name }}-${{ matrix.python-version }}
+          path: host-ir-report/
+
       - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
@@ -510,9 +528,18 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
+          python maint/host_checks/host_ir_benchmark.py --targets ascend
+
           cd testing
           python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
+
+      - name: Upload Host IR measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-ir-ascend
+          path: host-ir-report/
 
   cutedsl:
     name: CuTeDSL and Host IR for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
@@ -662,6 +689,16 @@ jobs:
         run: |
           rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
           rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
+
+      - name: Compare NVRTC and CuTe Host IR
+        run: uv run --no-project python maint/host_checks/host_ir_benchmark.py --targets nvrtc cutedsl
+
+      - name: Upload Host IR measurements
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-ir-nvrtc-cutedsl
+          path: host-ir-report/
 
       - name: Run unified Host IR regressions
         run: |
