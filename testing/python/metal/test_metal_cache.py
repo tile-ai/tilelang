@@ -58,8 +58,10 @@ def test_auto_backend_resolves_to_tvm_ffi():
 
 
 @tilelang.testing.requires_metal
-def test_torch_backend_no_disk_cache_write():
+def test_torch_backend_no_disk_cache_write(tmp_path, monkeypatch):
     """The torch backend must not write disk cache entries or log save errors."""
+    # Other xdist workers may publish MIR kernels to the shared cache.
+    monkeypatch.setattr(tilelang.env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
     cache_logger = logging.getLogger("tilelang.cache.kernel_cache")
     records = []
     handler = logging.Handler()
