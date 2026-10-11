@@ -240,17 +240,22 @@ entries in their manifests.
 
 ### Experimental MIR host compiler
 
-An optional [MIR fork](https://github.com/sepcnt/mir) build provides
-`target_host="mir"` with the existing `execution_backend="tvm_ffi"`:
+This experimental branch builds the [MIR fork](https://github.com/sepcnt/mir)
+by default on x86-64 and selects it for CUDA (including NVRTC/CuTe) and ROCm TVM-FFI
+execution on x86-64. ROCm execution is pending CI validation. Other targets,
+architectures and execution backends retain the previous host selection.
+Use `target_host="c"` for comparison, or `-DTILELANG_MIR_SOURCE_DIR=` to disable
+MIR at build time; builds without MIR retain the previous host selection.
 
 ```sh
-cmake -S . -B build -DTILELANG_MIR_SOURCE_DIR=/path/to/mir
+git submodule update --init 3rdparty/mir
+cmake -S . -B build
 cmake --build build
 ```
 
 Only MIR's core and machine-code generator are built, not its C frontend.
-The default build has no MIR dependency and does not fetch it. Use the
-`tilelang-host-jit` fork branch (native images and builtin reconstruction support). Linux x86-64
+The `3rdparty/mir`
+submodule pins the `tilelang-host-jit` fork (native images and builtin reconstruction support). Linux x86-64
 and Windows x64/clang-cl have been tested; other 64-bit MIR platforms still
 need execution testing.
 

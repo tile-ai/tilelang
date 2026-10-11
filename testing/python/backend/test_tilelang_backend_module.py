@@ -148,6 +148,16 @@ def test_create_backend_context_binds_compile_state():
     assert context.target_host.kind.name == "c"
     assert context.execution_backend.name == "tvm_ffi"
 
+    import platform
+
+    default = create_backend_context("cuda", execution_backend="tvm_ffi")
+    has_mir = tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is not None
+    if has_mir and platform.machine().lower() in ("x86_64", "amd64"):
+        assert default.target_host.kind.name == "mir"
+    else:
+        assert default.target_host.kind.name == ("llvm" if tvm.runtime.enabled("llvm") else "c")
+    assert create_backend_context("cuda", execution_backend="cython").target_host.kind.name != "mir"
+
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
 

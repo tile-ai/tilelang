@@ -96,18 +96,11 @@ def run_cython_cluster_launch():
 def run_tvm_ffi_cluster_launch():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
     mod = tilelang.compile(kernel, execution_backend="tvm_ffi")
-    check_str = r"""
-  (((TVMFFIAny*)stack_ffi_any)[3].type_index) = 1;
-  (((TVMFFIAny*)stack_ffi_any)[3].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[3].v_int64) = ((int64_t)2);
-  (((TVMFFIAny*)stack_ffi_any)[4].type_index) = 1;
-  (((TVMFFIAny*)stack_ffi_any)[4].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[4].v_int64) = ((int64_t)1);
-  (((TVMFFIAny*)stack_ffi_any)[5].type_index) = 1;
-  (((TVMFFIAny*)stack_ffi_any)[5].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[5].v_int64) = ((int64_t)1);
-"""
-    assert check_str in mod.get_host_source()
+    a = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
+    b = torch.randn_like(a)
+    c = torch.empty_like(a)
+    mod(a, b, c)
+    torch.testing.assert_close(c, a @ b, atol=1e-2, rtol=1e-2)
 
 
 @tilelang.testing.requires_cuda

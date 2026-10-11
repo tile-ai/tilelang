@@ -113,7 +113,9 @@ def run_alloc_var_with_initializer(
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
-    assert f"= {init_value};" in code
+    assert f"= {init_value}" in code
+    a = torch.zeros(N, device="cuda", dtype=getattr(torch, dtype))
+    torch.testing.assert_close(kernel(a), torch.full_like(a, init_value))
 
 
 def test_alloc_var_with_initializer():

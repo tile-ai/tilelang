@@ -401,7 +401,12 @@ list(REMOVE_DUPLICATES TILE_LANG_SRCS)
 
 # MIR is an optional host compiler, not a device/execution backend. Do not build
 # its C frontend, tools or tests, and never download dependencies during builds.
-set(TILELANG_MIR_SOURCE_DIR "" CACHE PATH "Optional MIR source checkout")
+set(TILELANG_MIR_SOURCE_DEFAULT "")
+# Native MIR cache images currently support x86-64 only.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  set(TILELANG_MIR_SOURCE_DEFAULT "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/mir")
+endif()
+set(TILELANG_MIR_SOURCE_DIR "${TILELANG_MIR_SOURCE_DEFAULT}" CACHE PATH "MIR source checkout (empty to disable)")
 if(TILELANG_MIR_SOURCE_DIR)
   if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "The MIR host compiler requires a 64-bit host")

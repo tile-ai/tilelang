@@ -220,22 +220,29 @@ def test_tvm_ffi_export_library_after_disk_cache_hit(tmp_path, monkeypatch):
 
     kernel_func = vector_add.with_attr("global_symbol", f"export_library_{uuid.uuid4().hex[:8]}")
     cold_kernel = tilelang.compile(kernel_func, out_idx=[1], execution_backend="tvm_ffi")
-    assert isinstance(cold_kernel.adapter.executable, tilelang.tvm.runtime.Module)
+    is_mir = cold_kernel.target_host.kind.name == "mir"
+    executable_type = tilelang.tvm.runtime.Executable if is_mir else tilelang.tvm.runtime.Module
+    assert isinstance(cold_kernel.adapter.executable, executable_type)
+    suffix = ".tlm" if is_mir else ".so"
     a = torch.ones(128, device="cuda")
     torch.testing.assert_close(cold_kernel(a), a + 1)
-    cold_library = tmp_path / "cold.so"
+    cold_library = tmp_path / f"cold{suffix}"
     cold_kernel.export_library(str(cold_library))
 
     cache._memory_cache.clear()
     cached_kernel = tilelang.compile(kernel_func, out_idx=[1], execution_backend="tvm_ffi")
-    cached_library = tmp_path / "cached.so"
+    cached_library = tmp_path / f"cached{suffix}"
     cached_kernel.export_library(str(cached_library))
 
     assert cold_library.is_file()
     assert cold_library.read_bytes() == cached_library.read_bytes()
     assert cached_kernel.artifact is None
     assert cached_library.read_bytes() == Path(cached_kernel.adapter.libpath).read_bytes()
-    assert tilelang.tvm.runtime.load_module(str(cached_library)) is not None
+    torch.testing.assert_close(cached_kernel(a), a + 1)
+    loaded = tilelang.tvm.runtime.load_module(str(cached_library))
+    b = torch.empty_like(a)
+    loaded(a, b)
+    torch.testing.assert_close(b, a + 1)
 
 
 @tilelang.testing.requires_cuda

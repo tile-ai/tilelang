@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import platform
+
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -321,13 +323,19 @@ def create_backend_context(
     normalized_target = determine_target(target, return_object=True)
     assert isinstance(normalized_target, Target)
 
+    module = _resolve_backend_module(normalized_target)
+    execution = module.resolve_execution_backend(execution_backend, normalized_target)
     if target_host is None:
-        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
+        use_mir = (
+            execution.name == "tvm_ffi"
+            and normalized_target.kind.name in ("cuda", "hip")
+            and platform.machine().lower() in ("x86_64", "amd64")
+            and tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is not None
+        )
+        target_host = "mir" if use_mir else "llvm" if tvm.runtime.enabled("llvm") else "c"
     normalized_target_host = Target(target_host)
     normalized_target = Target(normalized_target, normalized_target_host)
 
-    module = _resolve_backend_module(normalized_target)
-    execution = module.resolve_execution_backend(execution_backend, normalized_target)
     return BackendContext(
         module=module,
         target=normalized_target,

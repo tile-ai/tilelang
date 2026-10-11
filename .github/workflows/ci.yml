@@ -350,6 +350,11 @@ jobs:
         run: |
           uv pip install -v .
 
+      - name: Check experimental MIR default
+        if: runner.arch == 'X64' && (contains(matrix.runner.toolkit, 'CUDA') || contains(matrix.runner.toolkit, 'ROCm'))
+        run: |
+          uv run --no-project python -c 'from tilelang.backend import create_backend_context; ctx = create_backend_context(); print(ctx); assert ctx.target_host.kind.name == "mir"'
+
       - name: Show ccache stats
         if: always()
         run: |

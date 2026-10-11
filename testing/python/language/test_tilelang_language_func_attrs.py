@@ -179,6 +179,7 @@ def test_multiple_empty_outputs_are_returned_from_tvm_ffi():
     torch.testing.assert_close(outputs[1], torch.arange(30, dtype=torch.float32, device="cuda"))
 
 
+@tilelang.testing.requires_cuda
 def test_all_attrs_together_lazy():
     """annotate_pass_configs, annotate_compile_flags, and out_idx should all work together."""
 
@@ -186,7 +187,7 @@ def test_all_attrs_together_lazy():
     def kernel(A):
         A: T.Tensor[[64, 64], T.float32]
         T.annotate_pass_configs({PassConfigKey.TL_ENABLE_FAST_MATH: True})
-        T.annotate_compile_flags(["--use_fast_math"])
+        T.annotate_compile_flags(["--ptxas-options=-O0"])
         B = T.empty([64, 64], T.float32)
         with T.Kernel(1):
             for i in T.serial(64):
@@ -295,6 +296,7 @@ def test_pass_configs_only_lazy():
     torch.testing.assert_close(b, a + 1.0)
 
 
+@tilelang.testing.requires_cuda
 def test_compile_flags_only_lazy():
     """annotate_compile_flags should work standalone."""
 
@@ -302,7 +304,7 @@ def test_compile_flags_only_lazy():
     def kernel(A, B):
         A: T.Tensor[[32, 32], T.float32]
         B: T.Tensor[[32, 32], T.float32]
-        T.annotate_compile_flags(["--use_fast_math"])
+        T.annotate_compile_flags(["--ptxas-options=-O0"])
         with T.Kernel(1):
             for i in T.serial(32):
                 for j in T.serial(32):
@@ -316,13 +318,14 @@ def test_compile_flags_only_lazy():
     torch.testing.assert_close(b, a + 1.0)
 
 
+@tilelang.testing.requires_cuda
 def test_annotations_before_tensor_type():
     """Annotations placed before tensor type annotations should work."""
 
     @T.prim_func
     def kernel(A, B):
         T.annotate_pass_configs({PassConfigKey.TL_ENABLE_FAST_MATH: True})
-        T.annotate_compile_flags(["--use_fast_math"])
+        T.annotate_compile_flags(["--ptxas-options=-O0"])
         A: T.Tensor[[32, 32], T.float32]
         B: T.Tensor[[32, 32], T.float32]
         with T.Kernel(1):
@@ -339,6 +342,7 @@ def test_annotations_before_tensor_type():
     torch.testing.assert_close(b, a + 1.0)
 
 
+@tilelang.testing.requires_cuda
 def test_annotations_after_tensor_type():
     """Annotations placed after tensor type annotations should work."""
 
@@ -347,7 +351,7 @@ def test_annotations_after_tensor_type():
         A: T.Tensor[[32, 32], T.float32]
         B: T.Tensor[[32, 32], T.float32]
         T.annotate_pass_configs({PassConfigKey.TL_ENABLE_FAST_MATH: True})
-        T.annotate_compile_flags(["--use_fast_math"])
+        T.annotate_compile_flags(["--ptxas-options=-O0"])
         with T.Kernel(1):
             for i in T.serial(32):
                 for j in T.serial(32):
