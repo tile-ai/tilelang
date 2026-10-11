@@ -150,3 +150,76 @@ def test_create_backend_context_binds_compile_state():
 
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_mir_scalar_host_and_binary_cache(tmp_path, monkeypatch, dynamic):
+    from tilelang import transform
+    from tvm import tirx as T
+
+    build = tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True)
+    if build is None:
+        pytest.skip("MIR host compiler is not built")
+    params = [T.Var("self", "handle"), T.Var("args", "handle"), T.Var("n", "int32"), T.Var("ret", "handle")]
+    x, y = T.Var("x", "int64"), T.Var("y", "int64")
+    cases = [
+        (T.min(x, y), 7, -2, -2),
+        (T.max(x, y), 7, -2, 7),
+        (T.Cast("bool", x), 2, 0, 1),
+        (T.Cast("float64", T.Cast("uint64", x)), 8192, 0, 8192),
+        (T.Cast("float32", T.Cast("uint64", x)), 8192, 0, 8192),
+        (T.Cast("bool", T.Cast("float64", x)), 2, 0, 1),
+        (T.tvm_struct_get(params[1], 0, 15, "float32") * 4, 1.75, 0, 7),
+        (T.Cast("uint64", T.Cast("float64", x)), 17, 0, 17),
+        (T.Cast("uint64", T.Cast("float64", x) + T.const(float(2**63), "float64")), 8192, 0, -(2**63) + 8192),
+        (T.floordiv(x, y), -7, 3, -3),
+        (T.floormod(x, y), -7, 3, 2),
+        (T.bitwise_not(x), 7, 0, -8),
+        (T.call_extern("float64", "sqrt", T.Cast("float64", x)), 81, 0, 9),
+        (T.max(T.call_extern("float64", "sqrt", T.Cast("float64", x)), T.Cast("float64", y)), -1, 7, 7),
+    ]
+
+    def no_compiler(*args, **kwargs):
+        pytest.fail("MIR host compilation or cache packaging invoked a subprocess")
+
+    monkeypatch.setattr("subprocess.Popen", no_compiler)
+    for expr, a, b, expected in cases:
+        # TVMFFIAny fields: type_index=13, union_value=15; integer type index=1.
+        value = T.Cast("int64", expr)
+        store = T.Evaluate(T.tvm_struct_set(params[3], 0, 15, value))
+        if dynamic:
+            size = params[2] * 4096
+            buffer = T.decl_buffer((size,), "int64", scope="local", data_alignment=128)
+            loop = T.Var("i", "int32")
+            store = T.For(
+                loop,
+                0,
+                256,
+                T.ForKind.SERIAL,
+                T.SeqStmt(
+                    [
+                        T.AllocBuffer(buffer),
+                        T.BufferStore(buffer, value, [size - 1]),
+                        T.Evaluate(T.tvm_struct_set(params[3], 0, 15, T.BufferLoad(buffer, [size - 1]))),
+                        T.IfThenElse(loop == 128, T.Evaluate(T.call_intrin("int32", tvm.ir.Op.get("tl.loop_break"))), None),
+                    ]
+                ),
+            )
+        body = T.SeqStmt(
+            [
+                T.Bind(x, T.tvm_struct_get(params[1], 0, 15, "int64")),
+                T.Bind(y, T.tvm_struct_get(params[1], 1, 15, "int64")),
+                T.Evaluate(T.tvm_struct_set(params[3], 0, 13, 1)),
+                store,
+            ]
+        )
+        func = T.PrimFunc(params, body).with_attr("global_symbol", "__tvm_ffi_main").with_attr("tirx.is_entry_func", True)
+        func = func.with_attr("target", tvm.target.Target("mir"))
+        module = build(transform.LowerIntrin()(tvm.IRModule({"main": func})), tvm.target.Target("mir"))
+        assert module.main(a, b) == expected
+        path = tmp_path / "scalar.tlm"
+        path.write_bytes(tvm.ffi.get_global_func("tilelang.ModuleSerialize")(module))
+        cached = tvm.runtime.load_module(str(path))
+        assert cached.main(a, b) == expected
+        path.write_bytes(tvm.ffi.get_global_func("tilelang.ModuleSerialize")(cached))
+        assert tvm.runtime.load_module(str(path)).main(a, b) == expected

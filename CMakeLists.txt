@@ -399,6 +399,24 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/src/webgpu/CMakeLists.txt")
 include("${CMAKE_CURRENT_SOURCE_DIR}/src/ascend/CMakeLists.txt")
 list(REMOVE_DUPLICATES TILE_LANG_SRCS)
 
+# MIR is an optional host compiler, not a device/execution backend. Do not build
+# its C frontend, tools or tests, and never download dependencies during builds.
+set(TILELANG_MIR_SOURCE_DIR "" CACHE PATH "Optional MIR source checkout")
+if(TILELANG_MIR_SOURCE_DIR)
+  if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    message(FATAL_ERROR "The MIR host compiler requires a 64-bit host")
+  endif()
+  add_library(tilelang_mir OBJECT
+    ${TILELANG_MIR_SOURCE_DIR}/mir.c ${TILELANG_MIR_SOURCE_DIR}/mir-gen.c)
+  set_target_properties(tilelang_mir PROPERTIES POSITION_INDEPENDENT_CODE ON C_STANDARD 11)
+  if(NOT MSVC)
+    target_compile_options(tilelang_mir PRIVATE -fsigned-char)
+  endif()
+  list(APPEND TILE_LANG_SRCS src/backend/common/codegen/codegen_mir.cc)
+  set_source_files_properties(src/backend/common/codegen/codegen_mir.cc
+    PROPERTIES INCLUDE_DIRECTORIES "${TILELANG_MIR_SOURCE_DIR}")
+endif()
+
 set(USE_Z3      ON CACHE STRING "Use Z3 SMT solver for TileLang optimizations")
 set(USE_PYPI_Z3 ON CACHE BOOL   "Use Z3 provided by PyPI z3-solver package")
 
@@ -512,9 +530,17 @@ if(WIN32)
   # Windows' 65535-symbol DLL limit. This keeps Windows on explicit split TVM
   # DLL names without falling back to the old unified tvm.dll.
   target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
+  if(TARGET tilelang_mir)
+    target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_mir>)
+    target_link_libraries(tvm_compiler PRIVATE psapi)
+  endif()
 else()
   add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
   target_link_libraries(tilelang PUBLIC tvm_compiler)
+  if(TARGET tilelang_mir)
+    target_sources(tilelang PRIVATE $<TARGET_OBJECTS:tilelang_mir>)
+    target_link_libraries(tilelang PRIVATE ${CMAKE_DL_LIBS} m)
+  endif()
 
   # Place dev build outputs under build/lib for consistency
   set_target_properties(tilelang PROPERTIES

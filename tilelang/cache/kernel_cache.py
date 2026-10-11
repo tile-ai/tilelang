@@ -662,7 +662,7 @@ class KernelCache:
         cache_path = self._get_cache_path(key)
         device_kernel_path = os.path.join(cache_path, self.device_kernel_path)
         host_kernel_path = os.path.join(cache_path, self.host_kernel_path)
-        kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
+        kernel_lib_path = self._get_kernel_lib_path(cache_path)
         params_path = os.path.join(cache_path, self.params_path)
 
         missing_files = self._get_missing_complete_cache_files(cache_path)
@@ -757,15 +757,18 @@ class KernelCache:
         KernelCache._safe_write_file(host_kernel_path, "w", lambda file: file.write(kernel.adapter.get_kernel_source()))
 
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
-        kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
+        kernel_lib_path = self._get_kernel_lib_path(cache_path)
         if (src_lib_path := getattr(kernel.adapter, "libpath", None)) is None:
             return
         if verbose:
             self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
         KernelCache._safe_write_file(kernel_lib_path, "wb", lambda file: file.write(KernelCache._load_binary(src_lib_path)))
 
+    def _get_kernel_lib_path(self, cache_path: str) -> str:
+        return os.path.join(cache_path, self.kernel_lib_path)
+
     def _get_required_files(self, cache_path: str) -> list[str]:
-        kernel_lib_path = os.path.join(cache_path, self.kernel_lib_path)
+        kernel_lib_path = self._get_kernel_lib_path(cache_path)
         params_path = os.path.join(cache_path, self.params_path)
         return [kernel_lib_path, params_path]
 

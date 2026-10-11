@@ -55,8 +55,11 @@ def test_cutedsl_compiles_without_host_jit(monkeypatch):
 
 @pytest.mark.parametrize("out_idx", [None, -1])
 @pytest.mark.parametrize("compiler", ["nvcc", "nvrtc", "cutedsl"])
+@pytest.mark.parametrize("target_host", ["c", "mir"])
 @tilelang.testing.requires_cuda
-def test_cutedsl_tvm_ffi_host_execution(out_idx, compiler, tmp_path):
+def test_cutedsl_tvm_ffi_host_execution(out_idx, compiler, target_host, tmp_path):
+    if target_host == "mir" and tilelang.tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is None:
+        pytest.skip("MIR host compiler is not built")
     if compiler == "cutedsl":
         _require_cutedsl()
     N = T.dynamic("N")
@@ -85,6 +88,7 @@ def test_cutedsl_tvm_ffi_host_execution(out_idx, compiler, tmp_path):
     kernel = tilelang.compile(
         main,
         target="cutedsl" if compiler == "cutedsl" else "cuda",
+        target_host=target_host,
         out_idx=out_idx,
         execution_backend="tvm_ffi",
         pass_configs={"tl.cuda_compiler": "nvrtc"} if compiler == "nvrtc" else None,
@@ -103,7 +107,7 @@ def test_cutedsl_tvm_ffi_host_execution(out_idx, compiler, tmp_path):
             expected = a + (repeats * (scale * 3 + 3) + repeats * (repeats - 1) / 2 if scale > 0 else 0)
         stream.synchronize()
         torch.testing.assert_close(b, expected)
-    library = str(tmp_path / "kernel.so")
+    library = str(tmp_path / ("kernel.tlm" if target_host == "mir" else "kernel.so"))
     kernel.export_library(library)
     loaded = tilelang.tvm.runtime.load_module(library)
     if out_idx is None:
@@ -127,7 +131,10 @@ def test_cutedsl_tvm_ffi_host_execution(out_idx, compiler, tmp_path):
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("feature", ["tma", "cluster", "cooperative"])
-def test_cutedsl_tvm_ffi_device_extensions(feature, tmp_path):
+@pytest.mark.parametrize("target_host", ["c", "mir"])
+def test_cutedsl_tvm_ffi_device_extensions(feature, target_host, tmp_path):
+    if target_host == "mir" and tilelang.tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True) is None:
+        pytest.skip("MIR host compiler is not built")
     _require_cutedsl()
     if torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("Requires SM90 or newer")
@@ -157,13 +164,13 @@ def test_cutedsl_tvm_ffi_device_extensions(feature, tmp_path):
                 i = T.get_thread_binding()
                 C[bx, i] = B[bx, i]
 
-    kernel = tilelang.compile(main, target="cutedsl", execution_backend="tvm_ffi", out_idx=[1, 2])
+    kernel = tilelang.compile(main, target="cutedsl", target_host=target_host, execution_backend="tvm_ffi", out_idx=[1, 2])
     for _ in range(2):
         a = torch.randn(2, 128, device="cuda")
         b, c = kernel(a)
         torch.testing.assert_close(b, a)
         torch.testing.assert_close(c, a if feature == "tma" else a.flip(0))
-    library = str(tmp_path / "extensions.so")
+    library = str(tmp_path / ("extensions.tlm" if target_host == "mir" else "extensions.so"))
     kernel.export_library(library)
     b, c = tilelang.tvm.runtime.load_module(library)(a, a)
     torch.testing.assert_close(b, a)
