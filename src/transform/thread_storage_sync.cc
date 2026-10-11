@@ -30,6 +30,9 @@
 #include "tir/transforms/ir_utils.h"
 #include "tvm/ir/expr.h"
 #include <algorithm>
+#include <array>
+#include <limits>
+#include <map>
 #include <string>
 #include <tvm/arith/analyzer.h>
 #include <tvm/arith/int_set.h>
@@ -270,6 +273,7 @@ public:
   }
 
 private:
+  using ThreadSetKey = std::pair<std::array<int64_t, 3>, std::vector<bool>>;
   explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer, int warp_size)
       : IRMutatorWithAnalyzer(analyzer), warp_size_(warp_size) {}
 
@@ -295,30 +299,53 @@ private:
   }
 
   Stmt ProcessSharedSync(const CallNode *op, const std::string &scope) {
-    // Get thread bounds
-    auto bound_tx = analyzer_->const_int_bound(tx_);
-    auto bound_ty = analyzer_->const_int_bound(ty_);
-    auto bound_tz = analyzer_->const_int_bound(tz_);
+    std::array<IterVar, 3> thread_axes{tx_, ty_, tz_};
+    std::array<int64_t, 3> extents;
+    size_t total = 1;
+    for (size_t axis = 0; axis < extents.size(); ++axis) {
+      auto range = iter_vars_.Get(thread_axes[axis]->var);
+      PrimExpr extent = range ? range.value()->extent : Integer(1);
+      extent = analyzer_->Simplify(extent);
+      const auto *value = extent.as<IntImmNode>();
 
-    // Check if all threads are participating (full extent)
-    if (IsFullThreadExtent(tx_, bound_tx) &&
-        IsFullThreadExtent(ty_, bound_ty) &&
-        IsFullThreadExtent(tz_, bound_tz)) {
+      ICHECK(value && value->value > 0)
+          << "[ThreadSync] Expected a positive constant thread extent, got "
+          << extent;
+
+      extents[axis] = value->value;
+      total *= value->value;
+    }
+
+    std::vector<bool> participants(total, false);
+    size_t thread_count = 0;
+    size_t id = 0;
+    for (int64_t z = 0; z < extents[2]; ++z) {
+      for (int64_t y = 0; y < extents[1]; ++y) {
+        for (int64_t x = 0; x < extents[0]; ++x, ++id) {
+          PrimExpr thread = (tx_->var == make_const(tx_->var.dtype(), x)) &&
+                            (ty_->var == make_const(ty_->var.dtype(), y)) &&
+                            (tz_->var == make_const(tz_->var.dtype(), z));
+
+          if (!analyzer_->CanProve(Not(thread))) {
+            participants[id] = true;
+            ++thread_count;
+          }
+        }
+      }
+    }
+
+    if (thread_count == 0) {
+      return Evaluate(0);
+    }
+    if (thread_count == total) {
       return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
 
-    // Calculate thread extents
-    auto extent_tx = CalculateThreadExtent(tx_, bound_tx);
-    auto extent_ty = CalculateThreadExtent(ty_, bound_ty);
-    auto extent_tz = CalculateThreadExtent(tz_, bound_tz);
+    ThreadSetKey key{extents, std::move(participants)};
+    size_t barrier_id = GetOrCreateBarrier(key);
 
-    // Create or get barrier info
-    ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
-                       bound_ty->min_value, bound_ty->max_value,
-                       bound_tz->min_value, bound_tz->max_value};
+    ICHECK_LT(barrier_id, 16U) << "[ThreadSync] Too many partial-sync barriers";
 
-    auto [barrier_id, thread_count] =
-        GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
     if (thread_count % warp_size_ != 0) {
       // TODO(lei): This is a workaround for the case where the thread count is
       // not a multiple of the warp size. we should enhance the pass to analysis
@@ -338,55 +365,16 @@ private:
                                 IntImm(DataType::Int(32), thread_count)};
     return Evaluate(Call(op->dtype, op->op, new_args));
   }
-
-  std::pair<size_t, size_t> GetOrCreateBarrier(const ThreadBoundKey &key,
-                                               size_t extent_tx,
-                                               size_t extent_ty,
-                                               size_t extent_tz) {
-    if (barrier_id_map_.count(key)) {
-      return {barrier_id_map_[key], thread_count_map_[key]};
+  size_t GetOrCreateBarrier(const ThreadSetKey &key) {
+    auto cached = barrier_id_map_.find(key);
+    if (cached != barrier_id_map_.end()) {
+      return cached->second;
     }
-
     size_t barrier_id =
         barrier_id_map_.size() +
         static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
-    size_t thread_count = extent_tx * extent_ty * extent_tz;
-
-    barrier_id_map_[key] = barrier_id;
-    thread_count_map_[key] = thread_count;
-
-    return {barrier_id, thread_count};
-  }
-
-  /*!
-   * \brief Calculate the number of threads that satisfy current constraints.
-   *
-   * This method uses Z3's model enumeration (AllSAT) to precisely count
-   * how many thread IDs satisfy all current constraints. This is essential
-   * for cases like `if (threadIdx.x % 4 == 0)` where const_int_bound only
-   * gives us the range [0, 127] but the actual number of satisfying threads
-   * is 32 (i.e., 0, 4, 8, ..., 124).
-   *
-   * Falls back to range-based calculation if Z3 enumeration fails or returns
-   * an invalid result.
-   */
-  size_t CalculateThreadExtent(const IterVar &iv,
-                               const arith::ConstIntBound &bound) {
-    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
-      return 1;
-    }
-    auto extent = *as_const_int(iv->dom->extent);
-    // Always use Z3 enumeration to count satisfying values.
-    // This handles constraints like `tx % 4 == 0` that const_int_bound cannot
-    // detect. Z3 enumeration will return the exact count of satisfying values.
-    int64_t z3_count =
-        analyzer_->z3_prover.CountSatisfyingValues(iv->var, extent);
-    if (z3_count > 0) {
-      return static_cast<size_t>(z3_count);
-    }
-
-    // Fallback to range-based calculation if Z3 enumeration failed
-    return static_cast<size_t>(bound->max_value - bound->min_value + 1);
+    barrier_id_map_.emplace(key, barrier_id);
+    return barrier_id;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -403,26 +391,6 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  bool IsFullThreadExtent(const IterVar &iv,
-                          const arith::ConstIntBound &bound) {
-    if (!analyzer_->const_int_bound.IsBound(iv->var)) {
-      return true;
-    }
-
-    if (!iv->dom.defined()) {
-      return true;
-    }
-
-    const auto *min_node = iv->dom->min.as<IntImmNode>();
-    const auto *extent_node = iv->dom->extent.as<IntImmNode>();
-
-    int64_t min = min_node->value;
-    int64_t extent = extent_node->value;
-    int64_t max = min + extent - 1;
-
-    return min == bound->min_value && max == bound->max_value;
-  }
-
   // Member variables
   IterVar tx_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
@@ -430,8 +398,7 @@ private:
       IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
   IterVar tz_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
-  std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
-  std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
+  std::map<ThreadSetKey, size_t> barrier_id_map_;
   int warp_size_;
 };
 
