@@ -37,6 +37,9 @@ def _scales_kernel():
         out_scales: T.Tensor[(num_experts, num_groups, size_n), T.uint8]
         total = num_experts * num_groups * size_n
         with T.Kernel(T.ceildiv(total, block), threads=block) as bx:
+            T.assume(num_experts > 0)
+            T.assume(num_groups > 0)
+            T.assume(size_n > 0)
             for i in T.Parallel(block):
                 idx = bx * block + i
                 if idx < total:
@@ -114,6 +117,7 @@ def _mod_only_kernel():
         A: T.Tensor[(n,), T.int32]
         B: T.Tensor[(divisor,), T.int32]
         with T.Kernel(T.ceildiv(n, block), threads=block) as bx:
+            T.assume(divisor > 0)
             for i in T.Parallel(block):
                 idx = bx * block + i
                 if idx < n:
@@ -132,6 +136,7 @@ def _condition_reuse_kernel():
         divisor_buffer: T.Tensor[(divisor,), T.uint8]
         limit_buffer: T.Tensor[(limit,), T.uint8]
         with T.Kernel(T.ceildiv(n, block), threads=block) as bx:
+            T.assume(divisor > 0)
             for i in T.Parallel(block):
                 idx = bx * block + i
                 if idx < n:
@@ -153,6 +158,7 @@ def _trunc_condition_no_reuse_kernel():
         divisor_buffer: T.Tensor[(divisor,), T.uint8]
         limit_buffer: T.Tensor[(limit,), T.uint8]
         with T.Kernel(T.ceildiv(n, block), threads=block) as bx:
+            T.assume(divisor > 0)
             for i in T.Parallel(block):
                 idx = bx * block + i
                 if idx < n:
@@ -173,6 +179,7 @@ def _condition_runtime_fallback_kernel():
         divisor_buffer: T.Tensor[(divisor,), T.uint8]
         limit_buffer: T.Tensor[(limit,), T.uint8]
         with T.Kernel(T.ceildiv(n, block), threads=block) as bx:
+            T.assume(divisor > 0)
             for i in T.Parallel(block):
                 idx = bx * block + i
                 if idx < n:
@@ -231,6 +238,7 @@ def _widened_dividend_kernel():
             with T.Kernel(1, threads=lanes):
                 tx = T.get_thread_binding()
                 T.assume(base >= 0)
+                T.assume(n > 0)
                 B[tx] = A[((tx + base) * 4) // n]
 
         return main
@@ -402,6 +410,8 @@ def _unrelated_guard_zero_divisor_kernel():
     ):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
+            # Make the magic site eligible while checking the emitted zero fallback.
+            T.assume(n > 0)
             if gate > 0:
                 output[tx] = tx // n
 
@@ -502,6 +512,7 @@ def _loop_dependent_dividend_kernel():
         ):
             with T.Kernel(1, threads=block):
                 tx = T.get_thread_binding()
+                T.assume(divisor > 0)
                 for k in T.serial(n):
                     B[k, tx] = k // divisor
 
