@@ -365,6 +365,40 @@ def test_subcore_break_preserves_the_other_cube_stream(break_sid):
     torch.testing.assert_close(output.cpu(), expected)
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("owner", [0, 1])
+@pytest.mark.parametrize("consumer", ["copy", "loop-bound", "loop-break"])
+def test_subcore_scalar_loop_exit_reaches_later_cube_consumers(owner, consumer):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 32, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((32, 32), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            count = T.alloc_var("int32", init=0)
+            for i in T.serial(4):
+                if sid == owner:
+                    if i == 1:
+                        T.loop_break()
+                    count += 1
+            if sid == owner:
+                T.copy(B, b)
+                for j in T.serial(count if consumer == "loop-bound" else (1 if consumer == "copy" else 4)):
+                    if consumer == "loop-break" and j >= count:
+                        T.loop_break()
+                    T.copy(A[count - 1 if consumer == "copy" else j, :, :], a)
+                    T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+                    T.copy(acc, C)
+
+    a = torch.arange(1, 5, dtype=torch.float32)[:, None, None].expand(4, 32, 32).contiguous().to(torch.bfloat16).npu()
+    b = torch.ones((32, 32), dtype=torch.bfloat16).npu()
+    output = torch.full((32, 32), -1.0).npu()
+    tilelang.compile(main, target="ascend")(a, b, output)
+    torch.testing.assert_close(output.cpu(), torch.full((32, 32), 32.0))
+
+
 def test_subcore_mutable_scalar_is_replicated_with_its_guard():
     from testing.ascend._ir import schedule
 

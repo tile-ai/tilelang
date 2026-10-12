@@ -85,11 +85,35 @@ public:
 private:
   static constexpr int kSpecialRegisterBits =
       std::numeric_limits<uint16_t>::digits;
+  // Cube is one physical core, but its work can belong to a shared stream or
+  // either projected subcore. Preserve that domain through scalar/control
+  // demand so a producer also retains the exits of its logical loop.
+  static constexpr uint8_t kSharedCubeDomain = 1U;
+  static uint8_t SubcoreCubeDomain(int sid) { return 1U << (sid + 1); }
+  struct CoreDemand {
+    CoreMask cores{kCoreUnassigned};
+    uint8_t cube_domains{0};
+
+    bool Merge(CoreDemand other) {
+      CoreMask updated_cores = cores | other.cores;
+      uint8_t updated_domains = cube_domains | other.cube_domains;
+      bool changed = updated_cores != cores || updated_domains != cube_domains;
+      cores = updated_cores;
+      cube_domains = updated_domains;
+      return changed;
+    }
+
+    CoreDemand Restrict(CoreMask mask) const {
+      return {static_cast<CoreMask>(cores & mask),
+              static_cast<uint8_t>((mask & kCoreCube) ? cube_domains : 0)};
+    }
+  };
   using DemandMap =
-      std::unordered_map<Var, CoreMask, ObjectPtrHash, ObjectPtrEqual>;
+      std::unordered_map<Var, CoreDemand, ObjectPtrHash, ObjectPtrEqual>;
   using SpecialRegisterDemandMap =
-      std::unordered_map<const TaskNode *, CoreMask>;
-  using SpecialRegisterReadDemand = std::array<CoreMask, kSpecialRegisterBits>;
+      std::unordered_map<const TaskNode *, CoreDemand>;
+  using SpecialRegisterReadDemand =
+      std::array<CoreDemand, kSpecialRegisterBits>;
   using SpecialRegisterWriters =
       std::array<std::vector<TaskNode *>, kSpecialRegisterBits>;
   struct SpecialRegisterScopeDemand {
@@ -115,17 +139,8 @@ private:
     for (TaskNode *task : all_tasks_) {
       CoreMask candidate = task->GetCoreMask();
       candidate_masks_[task] = candidate;
-      execution_masks_[task] =
-          IsCoreLocalMask(candidate) ? candidate : kCoreUnassigned;
-      // Flexible scalar producers follow their consumers; they do not own a
-      // Cube stream. A break's condition must not create its own Cube exit
-      // demand during fixed-point propagation.
-      if (candidate == kCoreCube && !task->ContainsLoopBreak()) {
-        auto sid = GetTaskSubcore(task->stmt);
-        for (const IRStructure *parent = task->GetParent(); parent;
-             parent = parent->GetParent())
-          loop_cube_owners_[parent][sid ? *sid + 1 : 0] = true;
-      }
+      execution_demands_[task] = InitialDemand(
+          task, IsCoreLocalMask(candidate) ? candidate : kCoreUnassigned);
     }
   }
 
@@ -134,17 +149,45 @@ private:
     AssignFallbackCores();
     PropagateToFixedPoint();
     for (TaskNode *task : all_tasks_) {
-      CoreMask resolved = execution_masks_.at(task);
+      CoreMask resolved = GetExecutionDemand(task).cores;
       ICHECK_NE(resolved, kCoreUnassigned)
           << "ResolveCore left a task without an execution core";
       task->SetCoreMask(resolved);
     }
   }
 
-  CoreMask GetExecutionMask(const TaskNode *task) const {
-    auto it = execution_masks_.find(task);
-    ICHECK(it != execution_masks_.end());
+  CoreDemand GetExecutionDemand(const TaskNode *task) const {
+    auto it = execution_demands_.find(task);
+    ICHECK(it != execution_demands_.end());
     return it->second;
+  }
+
+  CoreDemand InitialDemand(const TaskNode *task, CoreMask cores) const {
+    CoreDemand demand{cores};
+    if (!(cores & kCoreCube))
+      return demand;
+    // Pure scalar/register producers and configuration writers inherit their
+    // consumers' domains. In particular, an unused binding placed on Cube as
+    // a fallback and a break's own condition must not seed shared Cube work.
+    bool external_effect = false;
+    PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
+      if (const auto *store = node.as<BufferStoreNode>())
+        external_effect |=
+            !IsRegisterRegion(BufferRegion::FullRegion(store->buffer));
+      if (const auto *call = node.as<CallNode>()) {
+        Call expression = ffi::GetRef<Call>(call);
+        Stmt statement = Evaluate(expression);
+        external_effect |=
+            SideEffect(expression) > CallEffectKind::kReadState &&
+            (AnalyzeSpecialRegisterWrites(statement) == 0 ||
+             HasCrossCoreSync(statement));
+      }
+    });
+    if (external_effect) {
+      auto sid = GetTaskSubcore(task->stmt);
+      demand.cube_domains = sid ? SubcoreCubeDomain(*sid) : kSharedCubeDomain;
+    }
+    return demand;
   }
 
   CoreMask GetRefinedCandidateCoreMask(TaskNode *task) const {
@@ -211,44 +254,39 @@ private:
     }
   }
 
-  bool AddDemand(DemandMap *demands, const Var &value, CoreMask mask) {
-    if (mask == kCoreUnassigned)
+  bool AddDemand(DemandMap *demands, const Var &value, CoreDemand demand) {
+    if (demand.cores == kCoreUnassigned)
       return false;
-    CoreMask &current = (*demands)[value];
-    CoreMask updated = current | mask;
-    if (updated == current)
-      return false;
-    current = updated;
-    return true;
+    return (*demands)[value].Merge(demand);
   }
 
-  bool AddReadDemand(const TaskNode *task, CoreMask mask) {
-    if (mask == kCoreUnassigned)
+  bool AddReadDemand(const TaskNode *task, CoreDemand demand) {
+    if (demand.cores == kCoreUnassigned)
       return false;
     bool changed = false;
     for (const Var &var : task->GetReadVars())
-      changed |= AddDemand(&var_demand_, var, mask);
+      changed |= AddDemand(&var_demand_, var, demand);
     for (const BufferRegion &region : task->GetReadRegions()) {
       if (IsRegisterRegion(region))
-        changed |= AddDemand(&register_demand_, region->buffer->data, mask);
+        changed |= AddDemand(&register_demand_, region->buffer->data, demand);
     }
     return changed;
   }
 
-  bool AddReadDemand(const TaskAccessInfo &accesses, CoreMask mask) {
-    if (mask == kCoreUnassigned)
+  bool AddReadDemand(const TaskAccessInfo &accesses, CoreDemand demand) {
+    if (demand.cores == kCoreUnassigned)
       return false;
     bool changed = false;
     for (const Var &var : accesses.read_vars)
-      changed |= AddDemand(&var_demand_, var, mask);
+      changed |= AddDemand(&var_demand_, var, demand);
     for (const BufferRegion &region : accesses.read_regions) {
       if (IsRegisterRegion(region))
-        changed |= AddDemand(&register_demand_, region->buffer->data, mask);
+        changed |= AddDemand(&register_demand_, region->buffer->data, demand);
     }
     return changed;
   }
 
-  bool AddStorageEpochGuardDemand(const TaskNode *task, CoreMask mask) {
+  bool AddStorageEpochGuardDemand(const TaskNode *task, CoreDemand demand) {
     auto it = task_epoch_guards_.find(task);
     if (it == task_epoch_guards_.end())
       return false;
@@ -256,115 +294,115 @@ private:
     for (size_t guard_index : it->second) {
       ICHECK_EQ(
           availability_.GetAccessCoreMask(epoch_guards_[guard_index].accesses) &
-              mask,
-          mask)
-          << "Cannot evaluate storage-epoch guard on " << CoreMaskName(mask)
-          << ": " << epoch_guards_[guard_index].expression;
-      changed |= AddReadDemand(epoch_guards_[guard_index].accesses, mask);
+              demand.cores,
+          demand.cores)
+          << "Cannot evaluate storage-epoch guard on "
+          << CoreMaskName(demand.cores) << ": "
+          << epoch_guards_[guard_index].expression;
+      changed |= AddReadDemand(epoch_guards_[guard_index].accesses, demand);
     }
     return changed;
   }
 
-  CoreMask GetWriteDemand(const TaskNode *task) const {
-    CoreMask mask = kCoreUnassigned;
+  CoreDemand GetWriteDemand(const TaskNode *task) const {
+    CoreDemand demand;
     auto special_it = special_writer_demand_.find(task);
     if (special_it != special_writer_demand_.end())
-      mask |= special_it->second;
+      demand.Merge(special_it->second);
     for (const Var &var : task->GetWriteVars()) {
       auto it = var_demand_.find(var);
       if (it != var_demand_.end())
-        mask |= it->second;
+        demand.Merge(it->second);
     }
     for (const BufferRegion &region : task->GetWriteRegions()) {
       if (!IsRegisterRegion(region))
         continue;
       auto it = register_demand_.find(region->buffer->data);
       if (it != register_demand_.end())
-        mask |= it->second;
+        demand.Merge(it->second);
     }
-    return mask;
+    return demand;
   }
 
-  bool RequireExecution(TaskNode *task, CoreMask demand) {
-    if (demand == kCoreUnassigned)
+  bool RequireExecution(TaskNode *task, CoreDemand demand) {
+    if (demand.cores == kCoreUnassigned)
       return false;
     CoreMask candidate = candidate_masks_.at(task);
-    if ((demand & candidate) != demand) {
+    if ((demand.cores & candidate) != demand.cores) {
       LOG(FATAL) << "Cannot resolve core placement for task: consumers require "
-                 << CoreMaskName(demand) << ", but the task can only run on "
-                 << CoreMaskName(candidate)
+                 << CoreMaskName(demand.cores)
+                 << ", but the task can only run on " << CoreMaskName(candidate)
                  << ". The producer cannot be broadcast to all required "
                     "cores because of its resource or core-local memory "
                     "accesses: "
                  << task->stmt;
     }
-    CoreMask &current = execution_masks_.at(task);
-    CoreMask updated = current | demand;
-    if (updated == current)
-      return false;
-    ICHECK_EQ(updated & candidate, updated);
-    current = updated;
-    return true;
+    if ((demand.cores & kCoreCube) &&
+        !(GetExecutionDemand(task).cores & kCoreCube))
+      demand.Merge(InitialDemand(task, kCoreCube));
+    // A projected scalar may be consumed after its loop by shared Cube work.
+    // Its computation still belongs to its own subcore's control domain.
+    if (auto sid = GetTaskSubcore(task->stmt); sid && demand.cube_domains)
+      demand.cube_domains = SubcoreCubeDomain(*sid);
+    return execution_demands_.at(task).Merge(demand);
   }
 
-  CoreMask GetSubtreeExecutionMask(const IRStructure *node) const {
+  CoreDemand GetSubtreeExecutionDemand(const IRStructure *node) const {
     if (node->IsTask())
-      return GetExecutionMask(static_cast<const TaskNode *>(node));
-    CoreMask result = kCoreUnassigned;
+      return GetExecutionDemand(static_cast<const TaskNode *>(node));
+    CoreDemand result;
     const auto *control = static_cast<const ControlNode *>(node);
     for (const auto &child : control->children)
-      result |= GetSubtreeExecutionMask(child.get());
+      result.Merge(GetSubtreeExecutionDemand(child.get()));
     return result;
   }
 
-  CoreMask GetLoopExitCoverage(const TaskNode *task,
-                               CoreMask enclosing_coverage) const {
+  CoreDemand GetLoopExitDemand(const TaskNode *task,
+                               CoreDemand enclosing_demand) const {
     auto sid = GetTaskSubcore(task->stmt);
     if (!sid)
-      return enclosing_coverage;
-    CoreMask coverage = enclosing_coverage & VectorCore(*sid);
-    auto it = loop_cube_owners_.find(task->GetParent());
-    if (it == loop_cube_owners_.end())
-      return coverage;
-    const auto &owners = it->second;
+      return enclosing_demand;
+    CoreDemand demand = enclosing_demand.Restrict(VectorCore(*sid));
+    uint8_t owners = enclosing_demand.cube_domains;
     // One physical Cube loop cannot exit independently for multiple logical
     // subcore streams, nor can a subcore-local break stop shared Cube work.
-    ICHECK(!owners[0] && !(owners[1] && owners[2]))
+    ICHECK(!(owners & kSharedCubeDomain) && !((owners & SubcoreCubeDomain(0)) &&
+                                              (owners & SubcoreCubeDomain(1))))
         << "Independent subcore loop_break with shared Cube work is not "
            "supported in one loop; put each subcore branch and its Cube work "
            "in a separate loop";
-    if (owners[*sid + 1])
-      coverage |= kCoreCube;
-    return coverage;
+    if (owners & SubcoreCubeDomain(*sid))
+      demand.Merge({kCoreCube, SubcoreCubeDomain(*sid)});
+    return demand;
   }
 
-  bool SeedTreeReadDemand(IRStructure *node, CoreMask enclosing_coverage) {
+  bool SeedTreeReadDemand(IRStructure *node, CoreDemand enclosing_demand) {
     if (node->IsTask()) {
       auto *task = static_cast<TaskNode *>(node);
       bool changed = false;
       if (task->ContainsLoopBreak())
-        changed |= RequireExecution(
-            task, GetLoopExitCoverage(task, enclosing_coverage));
-      CoreMask execution_mask = GetExecutionMask(task);
-      changed |= AddReadDemand(task, execution_mask);
-      changed |= AddStorageEpochGuardDemand(task, execution_mask);
-      changed |= AddCounterDemand(task, execution_mask);
+        changed |=
+            RequireExecution(task, GetLoopExitDemand(task, enclosing_demand));
+      CoreDemand demand = GetExecutionDemand(task);
+      changed |= AddReadDemand(task, demand);
+      changed |= AddStorageEpochGuardDemand(task, demand);
+      changed |= AddCounterDemand(task, demand);
       return changed;
     }
     auto *control = static_cast<ControlNode *>(node);
-    CoreMask coverage = GetSubtreeExecutionMask(node);
-    bool changed = AddReadDemand(control->task.get(), coverage);
-    changed |= AddCounterDemand(control->task.get(), coverage);
-    CheckExpressionAvailability(control->task.get(), coverage);
+    CoreDemand demand = GetSubtreeExecutionDemand(node);
+    bool changed = AddReadDemand(control->task.get(), demand);
+    changed |= AddCounterDemand(control->task.get(), demand);
+    CheckExpressionAvailability(control->task.get(), demand.cores);
     for (const auto &child : control->children)
-      changed |= SeedTreeReadDemand(child.get(), coverage);
+      changed |= SeedTreeReadDemand(child.get(), demand);
     return changed;
   }
 
   // Special registers have one independent instance per core. Return both
   // reader demand and concrete descendant writers so readers in an outer
   // sibling list can place writers nested under a control node. loop_break
-  // instead uses GetLoopExitCoverage to retain its projected control domain.
+  // instead uses GetLoopExitDemand to retain its projected control domain.
   SpecialRegisterScopeDemand CollectSpecialRegisterDemand(
       const std::vector<std::shared_ptr<IRStructure>> &nodes) {
     SpecialRegisterScopeDemand scope;
@@ -378,7 +416,7 @@ private:
           uint16_t bit = static_cast<uint16_t>(1U << bit_index);
           if (bit == static_cast<uint16_t>(SpecialRegister::kLoopControl))
             continue;
-          scope.readers[bit_index] |= child_scope.readers[bit_index];
+          scope.readers[bit_index].Merge(child_scope.readers[bit_index]);
           scope.writers[bit_index].insert(
               scope.writers[bit_index].end(),
               child_scope.writers[bit_index].begin(),
@@ -386,12 +424,12 @@ private:
         }
       } else {
         const auto *task = static_cast<const TaskNode *>(node.get());
-        CoreMask core_mask = GetExecutionMask(task);
+        CoreDemand demand = GetExecutionDemand(task);
         uint16_t read_mask = node->GetSpecialReadMask();
         for (int bit_index = 0; bit_index < kSpecialRegisterBits; ++bit_index) {
           uint16_t bit = static_cast<uint16_t>(1U << bit_index);
           if ((read_mask & bit) != 0)
-            scope.readers[bit_index] |= core_mask;
+            scope.readers[bit_index].Merge(demand);
         }
       }
 
@@ -415,13 +453,13 @@ private:
           static_cast<uint16_t>(SpecialRegister::kLoopControl))
         continue;
       for (TaskNode *writer : scope.writers[bit_index])
-        special_writer_demand_[writer] |=
-            scope.readers[bit_index] & candidate_masks_.at(writer);
+        special_writer_demand_[writer].Merge(
+            scope.readers[bit_index].Restrict(candidate_masks_.at(writer)));
     }
     return scope;
   }
 
-  bool AddCounterDemand(const TaskNode *task, CoreMask mask) {
+  bool AddCounterDemand(const TaskNode *task, CoreDemand demand) {
     auto it = task_counter_groups_.find(task);
     if (it == task_counter_groups_.end())
       return false;
@@ -429,7 +467,7 @@ private:
     // MaterializeMultiBuffer will add one counter load for each returned
     // group, so its writers must exist on every core that executes this task.
     for (const MultiBufferInfo *info : it->second)
-      changed |= AddDemand(&register_demand_, info->counter->data, mask);
+      changed |= AddDemand(&register_demand_, info->counter->data, demand);
     return changed;
   }
 
@@ -523,16 +561,16 @@ private:
   }
 
   void PropagateToFixedPoint() {
-    // Demand and execution masks only gain core bits, so rescanning the tree
-    // converges even though special-register demand is rebuilt each round.
+    // Physical cores and logical Cube domains only gain bits, so rescanning
+    // converges even when a consumer outside a loop adds a new exit demand.
     bool changed = true;
     while (changed) {
       changed = false;
       special_writer_demand_.clear();
       CollectSpecialRegisterDemand(root_);
       for (const auto &node : root_)
-        changed |=
-            SeedTreeReadDemand(node.get(), GetSubtreeExecutionMask(node.get()));
+        changed |= SeedTreeReadDemand(node.get(),
+                                      GetSubtreeExecutionDemand(node.get()));
       for (TaskNode *task : all_tasks_)
         changed |= RequireExecution(task, GetWriteDemand(task));
     }
@@ -541,11 +579,11 @@ private:
   void AssignFallbackCores() {
     bool has_cube_core = false;
     for (TaskNode *task : all_tasks_) {
-      if (HasCore(GetExecutionMask(task), kCoreCube))
+      if (HasCore(GetExecutionDemand(task).cores, kCoreCube))
         has_cube_core = true;
     }
     for (TaskNode *task : all_tasks_) {
-      if (GetExecutionMask(task) != kCoreUnassigned)
+      if (GetExecutionDemand(task).cores != kCoreUnassigned)
         continue;
       CoreMask available = candidate_masks_.at(task);
       ICHECK_NE(available, kCoreUnassigned)
@@ -557,7 +595,7 @@ private:
       if (auto sid = GetTaskSubcore(task->stmt);
           sid && HasCore(available, VectorCore(*sid)))
         fallback = VectorCore(*sid);
-      RequireExecution(task, fallback);
+      RequireExecution(task, {fallback});
     }
   }
 
@@ -568,10 +606,7 @@ private:
   CoreMaskAvailability availability_;
   CoreMask active_core_mask_;
   std::unordered_map<const TaskNode *, CoreMask> candidate_masks_;
-  std::unordered_map<const TaskNode *, CoreMask> execution_masks_;
-  // Index 0 is shared Cube work; indices 1 and 2 belong to AIV0 and AIV1.
-  std::unordered_map<const IRStructure *, std::array<bool, 3>>
-      loop_cube_owners_;
+  std::unordered_map<const TaskNode *, CoreDemand> execution_demands_;
   std::vector<PreparedEpochGuard> epoch_guards_;
   std::unordered_map<const TaskNode *, std::vector<size_t>> task_epoch_guards_;
   std::unordered_map<const TaskNode *, std::vector<const MultiBufferInfo *>>

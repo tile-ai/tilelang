@@ -270,7 +270,8 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
 
 @pytest.mark.parametrize("effect", ["store", "extern", "route-call", "gm-copy", "pure-call"])
 @pytest.mark.parametrize("routing", ["dynamic", "constant", "single-projection"])
-def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routing):
+@pytest.mark.parametrize("context", ["task", "loop", "nested-loop", "guarded-loop"])
+def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routing, context):
     accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
     ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
     out = tirx.decl_buffer((16, 16), "float32", name="out")
@@ -292,8 +293,18 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     elif effect == "pure-call" and routing != "constant":
         target = tirx.call_pure_extern("int32", "read_route", routes[0])
     body = seq(tirx.Bind(route, routes[0] % 2), side_effect, copy(accum, ub, annotations={"sub_blockid": target}))
+    body = unit(body, core=0, guard=sid == 0 if routing == "single-projection" and context != "guarded-loop" else None)
+    if context != "task":
+        i = tirx.Var("i", "int32")
+        if context == "nested-loop":
+            body = unit(tirx.For(tirx.Var("j", "int32"), 0, 2, tirx.ForKind.SERIAL, body), core=None)
+        body = unit(
+            tirx.For(i, 0, sid + 2, tirx.ForKind.SERIAL, body),
+            core=None,
+            guard=sid == 0 if routing == "single-projection" and context == "guarded-loop" else None,
+        )
     before = kernel(
-        unit(body, core=0, guard=sid == 0 if routing == "single-projection" else None),
+        body,
         buffers=[accum, ub],
         params=[routes, out],
     )
@@ -311,7 +322,8 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     "cube_owners", [(), (0,), (1,), (None,), (0, 1)], ids=["vector-only", "cube-aiv0", "cube-aiv1", "shared-cube", "both-cube"]
 )
 @pytest.mark.parametrize("nested", [False, True])
-def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested):
+@pytest.mark.parametrize("via_scalar", [False, True])
+def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested, via_scalar):
     src = tirx.decl_buffer((16,), "float32", name="src")
     buffers = [tirx.decl_buffer((16,), "float32", name=f"ub{sid}", scope="shared.dyn") for sid in range(2)]
     i = tirx.Var("i", "int32")
@@ -320,11 +332,18 @@ def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested):
         marker = tirx.AttrStmt({"core_mask": core | 2, "subcore": sid}, "tl.ascend_task", 1, tirx.Evaluate(T.loop_break()))
         body.extend((unit(marker, core=None, guard=i >= sid + 1), unit(copy(src, buffers[sid]), core=core)))
     l1 = tirx.decl_buffer((16,), "float32", name="l1", scope="shared.l1")
+    prefix, suffix = [], []
     for sid in cube_owners:
         metadata = {"core_mask": 2}
         if sid is not None:
             metadata["subcore"] = sid
         cube = unit(tirx.AttrStmt(metadata, "tl.ascend_task", 1, copy(src, l1)), core=None)
+        if via_scalar:
+            value = tirx.decl_buffer((1,), "int32", name=f"value_{sid}", scope="local.var")
+            buffers.append(value)
+            prefix.append(unit(tirx.BufferStore(value, 0, [0]), core=7))
+            suffix.append(unit(cube.body, core=None, guard=value[0] > 0))
+            cube = unit(tirx.AttrStmt({**metadata, "core_mask": 7}, "tl.ascend_task", 1, tirx.BufferStore(value, i, [0])), core=None)
         if nested:
             cube = unit(tirx.For(tirx.Var("j", "int32"), 0, 2, tirx.ForKind.SERIAL, cube), core=None)
         body.append(cube)
@@ -332,7 +351,9 @@ def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested):
     # loop control. Its fallback placement must not broaden either break.
     body.append(unit(tirx.Bind(tirx.Var("value", "int32"), i), core=7))
     buffers.append(l1)
-    before = kernel(unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, seq(*body)), core=None), buffers=buffers, params=[src])
+    before = kernel(
+        seq(*prefix, unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, seq(*body)), core=None), *suffix), buffers=buffers, params=[src]
+    )
     if cube_owners in ((None,), (0, 1)):
         with pytest.raises(tvm.error.InternalError, match="Independent subcore loop_break.*separate loop"):
             transform.ResolveCore()(before)
@@ -343,6 +364,60 @@ def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested):
     assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in exits} == {
         sid: core | (2 if sid in cube_owners else 0) for sid, core in enumerate((1, 4))
     }
+
+
+@pytest.mark.parametrize("owner", [0, 1])
+@pytest.mark.parametrize("consumer", ["copy", "loop-bound", "loop-break"])
+@pytest.mark.parametrize("shared_consumer", [False, True])
+def test_projected_loop_exit_follows_scalar_demand_from_later_consumers(owner, consumer, shared_consumer):
+    src = tirx.decl_buffer((4, 16), "float32", name="src")
+    l1 = tirx.decl_buffer((16,), "float32", name="l1", scope="shared.l1")
+    ub = tirx.decl_buffer((16,), "float32", name="ub", scope="shared.dyn")
+    count = tirx.decl_buffer((1,), "int32", name="count", scope="local.var")
+    i, j, offset = (tirx.Var(name, "int32") for name in ("i", "j", "offset"))
+    stop = tirx.Var("stop", "bool")
+
+    def task(body, core, sid=None, guard=None):
+        metadata = {"core_mask": core}
+        if sid is not None:
+            metadata["subcore"] = sid
+        return unit(tirx.AttrStmt(metadata, "tl.ascend_task", 1, body), core=None, guard=guard)
+
+    loop = unit(
+        tirx.For(
+            i,
+            0,
+            4,
+            tirx.ForKind.SERIAL,
+            seq(
+                # A common predicate is required by both exits. Its Cube
+                # execution must inherit the actual consumer's domain.
+                task(tirx.Bind(stop, i == 1), 7),
+                task(tirx.Evaluate(T.loop_break()), 3, 0, stop),
+                task(tirx.Evaluate(T.loop_break()), 6, 1, stop),
+                task(tirx.BufferStore(count, count[0] + 1, [0]), 7, owner),
+                task(copy(src, ub, src_indices=[i, 0], src_shape=[1, 16]), 4 if owner == 0 else 1, 1 - owner),
+            ),
+        ),
+        core=None,
+    )
+    consumer_sid = None if shared_consumer else owner
+    read = task(copy(src, l1, src_indices=[offset if consumer == "copy" else 0, 0], src_shape=[1, 16]), 2, consumer_sid)
+    if consumer == "copy":
+        read = seq(task(tirx.Bind(offset, count[0] - 1), 7), read)
+    else:
+        if consumer == "loop-break":
+            read = seq(task(tirx.Evaluate(T.loop_break()), 7, guard=j >= count[0]), read)
+        read = unit(tirx.For(j, 0, count[0] if consumer == "loop-bound" else 4, tirx.ForKind.SERIAL, read), core=None)
+    before = kernel(seq(task(tirx.BufferStore(count, 0, [0]), 7, owner), loop, read), buffers=[l1, ub, count], params=[src])
+    after = transform.ResolveCore()(before)
+    exits = [task for task in _tasks(after) if calls(task, "tl.loop_break") and "subcore" in task.node]
+    assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in exits} == {
+        sid: 2 if sid == owner else core for sid, core in enumerate((1, 4))
+    }
+    count_writes = [task for task in _tasks(after) if any(store.buffer.same_as(count) for store in nodes(task, tirx.BufferStore))]
+    assert len(count_writes) == 2
+    assert all(int(task.node["core_mask"]) & 2 for task in count_writes)
 
 
 @pytest.mark.parametrize("steps, exclusive, expected", [(1, True, 3), (1, False, 0), (2, True, 0)])

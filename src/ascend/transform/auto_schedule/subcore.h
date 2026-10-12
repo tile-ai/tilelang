@@ -52,6 +52,7 @@ public:
       return root;
     SBlock result = root;
     Stmt body = projector.RewriteList(scheduled.tree, -1);
+    projector.VerifyProjectedFixpipeTasks(body);
     VarSet used;
     PostOrderVisit(body, [&](const ObjectRef &node) {
       if (const auto *var = node.as<VarNode>())
@@ -416,6 +417,30 @@ private:
            "route before the Fixpipe task";
   }
 
+  void VerifyProjectedFixpipeTasks(const Stmt &body) const {
+    std::unordered_map<int, std::vector<AttrStmt>> projections;
+    PostOrderVisit(body, [&](const ObjectRef &node) {
+      const auto *attr = node.as<AttrStmtNode>();
+      if (!attr || (attr->attr_key != tl::attr::kAscendTask &&
+                    attr->attr_key != tl::attr::kAscendPerCoreTask))
+        return;
+      auto metadata = task_metadata_detail::CopyTaskMetadata(attr->node);
+      auto origin = metadata.Get("subcore_origin");
+      if (origin && local_copy_guard_origins_.count(
+                        origin.value().cast<Integer>()->value))
+        projections[origin.value().cast<Integer>()->value].push_back(
+            ffi::GetRef<AttrStmt>(attr));
+    });
+    // An enclosing projected loop may rewrite a task once per recursive call.
+    // Count surviving copies across the complete tree, after outer guards have
+    // removed inactive branches, rather than within one RewriteList call.
+    for (const auto &[origin, tasks] : projections) {
+      if (tasks.size() > 1)
+        for (const AttrStmt &task : tasks)
+          VerifyReplayableFixpipeTask(task);
+    }
+  }
+
   class Rewriter : public StmtExprMutator {
   public:
     Rewriter(SubcoreProjector *owner, int p, bool allow_constants = true)
@@ -680,8 +705,6 @@ private:
       if (inserted)
         ++next_origin_;
       int origin = origin_it->second;
-      size_t projection_begin = result.size();
-      bool has_local_copy_guard = false;
       for (int p = begin; p < end; ++p) {
         Stmt body;
         if (node->IsTask()) {
@@ -717,7 +740,8 @@ private:
           PrimExpr active = analyzer.Simplify(rewriter.active_);
           if (is_zero(active))
             continue;
-          has_local_copy_guard |= rewriter.HasLocalCopyGuard();
+          if (node->IsTask() && rewriter.HasLocalCopyGuard())
+            local_copy_guard_origins_.insert(origin);
           if (!is_one(active))
             body = IfThenElse(active, body);
         }
@@ -729,11 +753,6 @@ private:
                                            Integer(node->GetStage())}},
                      attr::kScheduleUnit, Integer(1), body));
       }
-      if (node->IsTask() && has_local_copy_guard &&
-          result.size() - projection_begin > 1) {
-        for (size_t i = projection_begin; i < result.size(); ++i)
-          VerifyReplayableFixpipeTask(result[i]);
-      }
     }
     return SeqStmt::Flatten(result);
   }
@@ -742,6 +761,7 @@ private:
   int count_;
   int next_origin_{0};
   std::unordered_map<const IRStructure *, int> origins_;
+  std::unordered_set<int> local_copy_guard_origins_;
   VarSet varying_;
   VarSet dual_storages_;
   std::unordered_set<const TaskNode *> dual_tasks_;
