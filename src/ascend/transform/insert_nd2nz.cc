@@ -227,11 +227,6 @@ private:
   Array<PrimExpr> ValidatePrepackedNZSource(const CopyNode &copy, PrimExpr rows,
                                             PrimExpr cols,
                                             PrimExpr full_rows) const {
-    TVM_FFI_CHECK(
-        IsAscendCompactNZLayout(LayoutFor(copy.src).value(), copy.src),
-        ValueError)
-        << "UB-to-L1 NZ post-copy requires compact NZ storage; use "
-           "make_ascend_compact_nz_layout for UB input tiles.";
     RequireStaticInt(rows, "NZ post-copy rows");
     RequireStaticInt(cols, "NZ post-copy cols");
     RequireStaticInt(full_rows, "NZ post-copy full_rows");
