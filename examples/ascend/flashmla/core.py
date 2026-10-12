@@ -10,6 +10,7 @@ from pathlib import Path
 import tilelang
 import tilelang.ascend.language as T
 from tilelang import tvm
+from tilelang.layout import make_ascend_l0c_layout
 from examples.ascend.flashmla.quantization import dequantize
 
 PASS_CONFIG = {
@@ -95,7 +96,7 @@ def sparse_attention(
         T.ascend_set_flag("MTE2_MTE1", job % 2)
 
     @T.macro
-    def qk(job, k, acounter, l1, a, b, c, p):
+    def qk(job, k, acounter, l1, a, b, c, c_nz, p_nz):
         T.call_extern("void", "asc_set_mmad_direction_m")
         slot = (job * nb + k) % 4
         for d in T.unroll(4):
@@ -130,7 +131,7 @@ def sparse_attention(
             T.ascend_rls_buf("PIPE_M", ai)
             T.ascend_rls_buf("PIPE_M", 4 + d)
         cwait("PIPE_FIX", 0)
-        T.call_extern("void", "fm_p_store", T.access_ptr(p[0], "w"), T.access_ptr(c[32768], "r"))
+        T.dual_copy(c_nz[8, :, :], p_nz, unit_flag_ctrl=3)
         cset("PIPE_FIX", 0)
 
     @T.macro
@@ -329,6 +330,8 @@ def sparse_attention(
             a = T.alloc_l0a((32768,), "bfloat16")
             b = T.alloc_l0b((32768,), "bfloat16")
             c = T.alloc_l0c((36864,), "float32", layout=False)
+            # The score tile follows the 32768-element output accumulator.
+            c_nz = T.view(c, (9, 64, 64))
             kv = T.alloc_shared((3, 32, 1 if decode else 512), "bfloat16")
             raw8 = T.alloc_shared((3, 32, 544 if decode else 1), "uint8")
             raw4 = T.alloc_shared((3, 32, 288 if decode else 1), "uint8")
@@ -336,7 +339,11 @@ def sparse_attention(
             nz = T.alloc_shared((33 * 512,), "bfloat16")
             accum = T.alloc_shared((32 * 512,), "float32")
             out = T.alloc_shared((2, 32 * 128), "float32")
-            p = T.alloc_shared((32 * 64,), "float32")
+            p_nz = T.alloc_shared((32, 64), "float32")
+            T.annotate_layout({c_nz: make_ascend_l0c_layout(c_nz), p_nz: make_ascend_l0c_layout(p_nz)})
+            # Softmax and its in-place BF16 output use physical NZ offsets.
+            # Keep their flat view separate from logical layout remapping.
+            p = T.make_tensor_from_addr(T.access_ptr(p_nz[0, 0], "rw", extent=32 * 64), (32 * 64,), "float32", storage_scope="shared.dyn")
             s = tvm.tirx.decl_buffer((32 * 128,), "bfloat16", data=p.data, scope="shared.dyn")
             final = tvm.tirx.decl_buffer((32 * 1024,), "bfloat16", data=accum.data, scope="shared.dyn")
             maxima = T.alloc_shared((2, 64), "float32")
@@ -362,16 +369,16 @@ def sparse_attention(
                 acounter = T.alloc_var("int32", init=0)
                 jobs = T.ceildiv(nq - bx, 32)
                 load_q(0, bx, Q, l1)
-                qk(0, 0, acounter, l1, a, b, c, p)
+                qk(0, 0, acounter, l1, a, b, c, c_nz, p_nz)
                 for job in rolled(jobs):
                     if job + 1 < jobs:
                         load_q(job + 1, bx, Q, l1)
                     for k in rolled(nb - 1):
-                        qk(job, k + 1, acounter, l1, a, b, c, p)
+                        qk(job, k + 1, acounter, l1, a, b, c, c_nz, p_nz)
                         pv(job, k, acounter, l1, a, b, c, out)
                         acounter = (acounter + 1) % 4
                     if job + 1 < jobs:
-                        qk(job + 1, 0, acounter, l1, a, b, c, p)
+                        qk(job + 1, 0, acounter, l1, a, b, c, c_nz, p_nz)
                     pv(job, nb - 1, acounter, l1, a, b, c, out)
                     acounter = (acounter + 1) % 4
                 T.ascend_pipe_barrier("PIPE_ALL")
