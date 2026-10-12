@@ -26,6 +26,7 @@ from .ascend import (
     make_ascend_major_k_layout,  # noqa: F401
     make_ascend_major_mn_layout,  # noqa: F401
     make_ascend_l0c_layout,  # noqa: F401
+    make_ascend_ub_nz_layout,  # noqa: F401
     make_ascend_sf_layout,  # noqa: F401
     make_strided_slice,  # noqa: F401
     try_extract_fractal_layout,  # noqa: F401
