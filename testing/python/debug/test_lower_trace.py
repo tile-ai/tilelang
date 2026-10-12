@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+from pathlib import Path
 import pytest
 import tempfile
 
@@ -439,12 +440,12 @@ def _make_trace_session(tmp_path, mode="terminal"):
     )
 
 
-def _run_codegen(session, build, ffi_name, mod="fake_mod", target=None):
+def _run_codegen(session, build, ffi_name, mod="fake_mod", target=None, *, role="device"):
     """Exercise the same explicit codegen middleware used by backend registries."""
     from tilelang.instrumentation import CodegenEvent
 
     return session.run_codegen(
-        CodegenEvent(name=ffi_name, mod=mod, target=target),
+        CodegenEvent(name=ffi_name, mod=mod, target=target, role=role),
         lambda: build(mod) if target is None else build(mod, target),
     )
 
@@ -530,6 +531,148 @@ def _patch_make_patched_source_module():
 
     with patch("tilelang.tools.lower_trace.core._make_patched_source_module", side_effect=_patched_module_factory) as mock:
         yield mock
+
+
+@pytest.mark.parametrize("ffi_name", ["target.build.tilelang_cuda_without_compile", "target.build.tilelang_ascend"])
+@pytest.mark.parametrize(
+    "output_name,device_name,host_name",
+    [
+        (None, "codegen_device.cpp", "codegen_host.cpp"),
+        ("foo.cpp", "foo.cpp", "foo_host.cpp"),
+        ("foo", "foo", "foo_host"),
+        ("foo.kernel.cpp", "foo.kernel.cpp", "foo.kernel_host.cpp"),
+    ],
+)
+def test_codegen_device_and_host_paths_are_isolated(tmp_path, capsys, ffi_name, output_name, device_name, host_name):
+    """Device and host events preserve separate sources, baselines, and snapshots."""
+    options = {} if output_name is None else {"codegen_output": str(tmp_path / output_name)}
+    trace = _core.LowerTraceSession(mode="html", trace_dir=str(tmp_path), **options)
+    device_path = Path(trace.get_codegen_output_path())
+    host_path = Path(trace.get_codegen_output_path("host"))
+    assert device_path.name == device_name
+    assert host_path.name == host_name
+    assert device_path != host_path
+
+    device_source = f"// generated device source from {ffi_name}\n"
+    host_source = "// generated host wrapper\n"
+    target = tvm.target.Target("c")
+    _run_codegen(trace, _make_mock_build(device_source), ffi_name, target=target)
+    _run_codegen(trace, _make_mock_build(host_source), "target.build.tilelang_c_host", target=target, role="host")
+
+    for path, source in ((device_path, device_source), (host_path, host_source)):
+        for suffix in ("", ".original", ".latest"):
+            assert Path(str(path) + suffix).read_text() == source
+    assert [(record.phase, record.name, record.after_text) for record in trace.records] == [
+        ("codegen", "codegen_device", device_source),
+        ("codegen", "codegen_host", host_source),
+    ]
+    assert trace.run_dir is not None
+    for record in trace.records:
+        snapshot = Path(trace.run_dir) / "codegen" / f"{record.index:02d}_{record.name}_after.cpp"
+        assert snapshot.read_text() == record.after_text
+    report = (Path(trace.run_dir) / "report.html").read_text()
+    assert "codegen_device" in report
+    assert "codegen_host" in report
+    output = capsys.readouterr().out
+    assert "codegen_device" in output
+    assert "codegen_host" in output
+    assert "REGENERATED" not in output
+    assert "CONFLICT" not in output
+
+
+@pytest.mark.parametrize("ffi_name", ["target.build.tilelang_cuda_without_compile", "target.build.tilelang_ascend"])
+def test_codegen_role_edits_are_isolated_across_sessions(tmp_path, capsys, ffi_name):
+    """Mock source-module edits remain attached to their role across compilations."""
+    device_source = "// generated device source\n"
+    host_source = "// generated host source\n"
+    device_edit = "// edited device source\n"
+    host_edit = "// edited host source\n"
+
+    def new_session():
+        return _core.LowerTraceSession(mode="html", trace_dir=str(tmp_path))
+
+    first = new_session()
+    _run_codegen(first, _make_mock_build(device_source), ffi_name)
+    _run_codegen(first, _make_mock_build(host_source), "target.build.tilelang_c_host", role="host")
+    device_path = Path(first.get_codegen_output_path())
+    host_path = Path(first.get_codegen_output_path("host"))
+    device_path.write_text(device_edit)
+    capsys.readouterr()
+
+    second = new_session()
+    with _patch_make_patched_source_module() as mock_factory:
+        device_result = _run_codegen(second, _make_mock_build(device_source), ffi_name)
+        host_result = _run_codegen(second, _make_mock_build(host_source), "target.build.tilelang_c_host", role="host")
+        assert device_result.inspect_source() == device_edit
+        assert host_result.inspect_source() == host_source
+        mock_factory.assert_called_once()
+        assert mock_factory.call_args.args[1] == device_edit
+    assert Path(str(device_path) + ".original").read_text() == device_source
+    assert Path(str(device_path) + ".latest").read_text() == device_source
+    for suffix in ("", ".original", ".latest"):
+        assert Path(str(host_path) + suffix).read_text() == host_source
+    assert [record.after_text for record in second.records] == [device_edit, host_source]
+
+    # Host edits are captured for inspection; this test does not execute them.
+    host_path.write_text(host_edit)
+    third = new_session()
+    host_module = _MockCodegenModule(host_source)
+    with _patch_make_patched_source_module() as mock_factory:
+        device_result = _run_codegen(third, _make_mock_build(device_source), ffi_name)
+        host_result = _run_codegen(third, lambda *_args: host_module, "target.build.tilelang_c_host", role="host")
+        assert device_result.inspect_source() == device_edit
+        assert host_result is host_module
+        mock_factory.assert_called_once()
+        assert mock_factory.call_args.args[1] == device_edit
+    assert [(record.name, record.after_text) for record in third.records] == [
+        ("codegen_device", device_edit),
+        ("codegen_host", host_edit),
+    ]
+    assert device_path.read_text() == device_edit
+    assert host_path.read_text() == host_edit
+    for path, source in ((device_path, device_source), (host_path, host_source)):
+        assert Path(str(path) + ".original").read_text() == source
+        assert Path(str(path) + ".latest").read_text() == source
+        assert not Path(str(path) + ".bak").exists()
+    output = capsys.readouterr().out
+    assert "codegen_device: PATCHED" in output
+    assert "codegen_host: PATCHED" in output
+    assert "REGENERATED" not in output
+    assert "CONFLICT" not in output
+
+
+@pytest.mark.parametrize("mode,options", [("html", {"codegen_output": None}), ("terminal", {})])
+def test_codegen_roles_without_stable_output(tmp_path, mode, options):
+    """Explicit None and the terminal default suppress both roles' edit files."""
+    trace = _core.LowerTraceSession(mode=mode, trace_dir=str(tmp_path), **options)
+    for role, ffi_name in (("device", "target.build.tilelang_c"), ("host", "target.build.tilelang_c_host")):
+        assert trace.get_codegen_output_path(role) is None
+        _run_codegen(trace, _make_mock_build(f"// {role} source\n"), ffi_name, role=role)
+    assert [record.name for record in trace.records] == ["codegen_device", "codegen_host"]
+    assert all(record.status == _core.STATUS_CODEGEN for record in trace.records)
+    stable_files = [path for path in tmp_path.rglob("*") if ".run_records" not in path.parts and path.is_file()]
+    assert not any(path.name.startswith("codegen") or path.suffix in (".original", ".latest") for path in stable_files)
+
+
+@pytest.mark.parametrize("role", ["device", "host"])
+def test_codegen_failure_records_role(tmp_path, capsys, role):
+    """Failures identify the failed role and restore the caller's phase."""
+    from tilelang.instrumentation import current_pass_phase, pass_phase
+
+    trace = _make_trace_session(tmp_path)
+
+    def failing_build(*_args):
+        raise RuntimeError("codegen failed")
+
+    with pass_phase("pipeline_test"):
+        with pytest.raises(RuntimeError, match="codegen failed"):
+            _run_codegen(trace, failing_build, "target.build.test", role=role)
+        assert current_pass_phase() == "pipeline_test"
+    assert len(trace.records) == 1
+    record = trace.records[0]
+    assert (record.phase, record.name, record.status) == ("codegen", f"codegen_{role}", _core.STATUS_FAILED)
+    assert record.error_msg == "codegen failed"
+    assert f"codegen_{role}: FAILED" in capsys.readouterr().out
 
 
 def test_codegen_proxy_for_without_compile(tmp_path):
@@ -719,7 +862,7 @@ def test_codegen_record_index_after_nested_pass(tmp_path):
 
     _run_codegen(trace, mock_build, "target.build.tilelang_cuda_without_compile")
 
-    codegen_records = [record for record in trace.records if record.name == "codegen"]
+    codegen_records = [record for record in trace.records if record.status == _core.STATUS_CODEGEN]
     assert codegen_records, "no codegen record found"
     assert codegen_records[-1].index > nested_idx[0], "codegen index not after nested pass"
     indices = [record.index for record in trace.records]
