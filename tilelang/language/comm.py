@@ -1132,8 +1132,16 @@ def all_reduce(
             return T.alloc_shared(shape, out_dtype, scope=out_scope)
         return T.alloc_fragment(shape, out_dtype, scope=out_scope)
 
-    row_allgather = alloc_tmp([mesh_shape["ncol"]] + list(out_shape))
-    col_allgather = alloc_tmp([mesh_shape["nrow"]] + list(out_shape))
+    direction_value = DIRECTION_MAP[direction.lower()]
+    if direction_value == 0:
+        row_allgather = alloc_tmp([mesh_shape["ncol"]] + list(out_shape))
+        col_allgather = row_allgather
+    elif direction_value == 1:
+        col_allgather = alloc_tmp([mesh_shape["nrow"]] + list(out_shape))
+        row_allgather = col_allgather
+    else:
+        row_allgather = alloc_tmp([mesh_shape["ncol"]] + list(out_shape))
+        col_allgather = alloc_tmp([mesh_shape["nrow"]] + list(out_shape))
 
     row_allgather_region = _prepare_allreduce_temporary(row_allgather, "rw")
     col_allgather_region = _prepare_allreduce_temporary(col_allgather, "rw")
@@ -1145,7 +1153,7 @@ def all_reduce(
         row_allgather_region,
         col_allgather_region,
         reduce_type,
-        DIRECTION_MAP[direction.lower()],
+        direction_value,
         dim,
         clear,
         cid,

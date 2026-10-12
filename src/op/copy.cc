@@ -969,29 +969,54 @@ Stmt CopyNode::LowerSunmmioDramRsramCopy(const LowerArgs &T,
 
     const int innermost = static_cast<int>(ranges.size()) - 1;
     const Range &row = ranges[innermost];
-    if (!analyzer->CanProveEqual(row->min, make_zero(row->min.dtype()))) {
-      carrier.reason = "innermost range must start at zero";
-      return carrier;
-    }
-    if (!analyzer->CanProveEqual(row->extent, buffer->shape[innermost])) {
-      carrier.reason = "innermost range must cover the complete logical row";
-      return carrier;
-    }
-    if (analyzer->CanProve(carrier.covered_shape[innermost] <
-                           buffer->shape[innermost])) {
-      carrier.reason = "covered row is smaller than the logical row";
-      return carrier;
-    }
-    if (!analyzer->CanProve(carrier.covered_shape[innermost] >=
-                            buffer->shape[innermost])) {
-      carrier.reason =
-          "required equality could not be proven for symbolic extents";
-      return carrier;
-    }
-    if (!bit_count_is_aligned(carrier.covered_shape[innermost], buffer->dtype,
-                              kDramRowAlignBytes)) {
-      carrier.reason = "covered row byte size is not a multiple of 1024";
-      return carrier;
+    const PrimExpr zero = make_zero(row->min.dtype());
+    const bool is_full_logical_row =
+        analyzer->CanProveEqual(row->min, zero) &&
+        analyzer->CanProveEqual(row->extent, buffer->shape[innermost]);
+    PrimExpr physical_row_extent;
+    if (is_full_logical_row) {
+      if (analyzer->CanProve(carrier.covered_shape[innermost] <
+                             buffer->shape[innermost])) {
+        carrier.reason = "covered row is smaller than the logical row";
+        return carrier;
+      }
+      if (!analyzer->CanProve(carrier.covered_shape[innermost] >=
+                              buffer->shape[innermost])) {
+        carrier.reason =
+            "required equality could not be proven for symbolic extents";
+        return carrier;
+      }
+      if (!bit_count_is_aligned(carrier.covered_shape[innermost], buffer->dtype,
+                                kDramRowAlignBytes)) {
+        carrier.reason = "covered row byte size is not a multiple of 1024";
+        return carrier;
+      }
+      physical_row_extent = carrier.covered_shape[innermost];
+    } else {
+      for (int i = 0; i < innermost; ++i) {
+        if (!analyzer->CanProveEqual(ranges[i]->extent, 1)) {
+          carrier.reason =
+              "partial-row DMA must select exactly one logical row";
+          return carrier;
+        }
+      }
+      if (!analyzer->CanProve(row->min >= zero) ||
+          !analyzer->CanProve(row->min + row->extent <=
+                              buffer->shape[innermost])) {
+        carrier.reason = "partial-row range must be within the logical row";
+        return carrier;
+      }
+      if (!bit_count_is_aligned(row->min, buffer->dtype, kDramRowAlignBytes)) {
+        carrier.reason =
+            "partial-row start byte offset is not a multiple of 1024";
+        return carrier;
+      }
+      if (!bit_count_is_aligned(row->extent, buffer->dtype,
+                                kDramRowAlignBytes)) {
+        carrier.reason = "partial-row byte size is not a multiple of 1024";
+        return carrier;
+      }
+      physical_row_extent = row->extent;
     }
 
     Array<PrimExpr> logical_shape = shape_of_ranges(ranges);
@@ -1001,8 +1026,8 @@ Stmt CopyNode::LowerSunmmioDramRsramCopy(const LowerArgs &T,
       physical_shape.push_back(ranges[i]->extent);
     }
     carrier.physical_ranges.push_back(
-        Range::FromMinExtent(row->min, carrier.covered_shape[innermost]));
-    physical_shape.push_back(carrier.covered_shape[innermost]);
+        Range::FromMinExtent(row->min, physical_row_extent));
+    physical_shape.push_back(physical_row_extent);
     carrier.canonical_logical_shape = remove_leading_singletons(logical_shape);
     carrier.canonical_carrier_shape = remove_leading_singletons(physical_shape);
     if (carrier.canonical_logical_shape.empty() ||
@@ -1044,7 +1069,8 @@ Stmt CopyNode::LowerSunmmioDramRsramCopy(const LowerArgs &T,
                << dst_carrier.aligned_1024 << "\n"
                << "  reason: " << reason << "\n"
                << "  required: matching 1024-byte aligned row-major full-row "
-                  "regions with one or two effective dimensions";
+                  "regions, or exact single-row segments whose byte offset "
+                  "and size are multiples of 1024";
     return Stmt();
   };
 

@@ -87,6 +87,30 @@ def comm_all_gather_kernel(
 
 
 @target("Sunmmio")
+def comm_all_reduce_horizontal_kernel(M=32, N=128, dtype="float32"):
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel():
+            reduce_src = T.alloc_shared((1, M, N), dtype, scope="shared.rsram")
+            reduced = T.alloc_shared((M, N), dtype, scope="shared.rsram")
+            T.copy(A, reduce_src[0, 0:M, 0:N])
+            T.comm.all_reduce(
+                reduce_src,
+                reduced,
+                "sum",
+                "horizontal",
+                dim=0,
+                clear=True,
+            )
+            T.copy(reduced, B)
+
+    return main
+
+
+@target("Sunmmio")
 def sync_simple_copy_kernel(M=128, N=128, block_M=32, block_N=32, dtype="bfloat16"):
     @T.prim_func
     def main(
@@ -260,6 +284,17 @@ def test_comm_all_gather_kernel_codegen_validates_with_npuir_opt(
         direction = line.split("direction =", 1)[1].lstrip()
         expected_unit = "odma1" if direction.startswith("row") else "odma0"
         assert f"#suvm.unit<{expected_unit}>" in line
+
+
+def test_comm_all_reduce_horizontal_codegen_validates_with_npuir_opt(tmp_path):
+    src = _validate_kernel(
+        comm_all_reduce_horizontal_kernel(),
+        tmp_path,
+        mlir_filename="comm_all_reduce_horizontal_kernel_suvm.mlir",
+        expected_tokens=("suvm.copy_async", "suvm.mcast_tok"),
+    )
+
+    assert src.count("suvm.mcast_tok") >= 1
 
 
 def test_sync_simple_copy_kernel_codegen_validates_with_npuir_opt(tmp_path):

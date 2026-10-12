@@ -148,6 +148,29 @@ def test_comm_allreduce_frontend_allocates_rsram_temporaries():
     ) in script
 
 
+@pytest.mark.parametrize("direction", ["h", "horizontal", "v", "vertical", "all"])
+@pytest.mark.parametrize("clear", [True, False])
+@pytest.mark.parametrize("mesh", [(4, 4), (2, 3)])
+def test_allreduce_allocates_only_active_carriers(direction, clear, mesh, monkeypatch):
+    nrow, ncol = mesh
+    monkeypatch.setattr(T.comm, "get_target_mesh_shape", lambda: {"nrow": nrow, "ncol": ncol})
+    func = _allreduce_frontend_kernel(direction=direction, clear=clear)
+    (call,) = _collect_calls(func, "tl.tileop.comm_allreduce")
+    carriers = []
+
+    def collect(node):
+        if isinstance(node, tvm.tir.Block):
+            carriers.extend(buffer for buffer in node.alloc_buffers if len(buffer.shape) == 2 and not buffer.same_as(call.args[0].buffer))
+
+    tvm.tir.stmt_functor.post_order_visit(func.body, collect)
+    assert len(carriers) == (2 if direction == "all" else 1)
+    assert call.args[2].buffer.same_as(call.args[3].buffer) == (direction != "all")
+    if direction in ("h", "horizontal", "all"):
+        assert int(call.args[2].buffer.shape[0]) == ncol
+    if direction in ("v", "vertical", "all"):
+        assert int(call.args[3].buffer.shape[0]) == nrow
+
+
 def test_comm_buffer_like_region_python_api():
     @T.prim_func
     def main(A: T.Tensor((128, 128), "float32")):
@@ -168,7 +191,7 @@ def test_comm_buffer_like_region_python_api():
     assert "T.comm_put(A_shared[0:64, 0:64], B_shared[32:96, 32:96], -1, 0, 1)" in script
     assert "T.comm_allgather(A_shared[8:72, 16:80], C_shared[0:4, 0:64, 0:64], 0, -1, -1, bx)" in script
     assert (
-        'T.comm_allreduce(A_shared[8:72, 16:80], Out_shared[32:96], buffer[0:4, 0:64], buffer_1[0:4, 0:64], "sum", 0, 1, T.bool(True), bx)'
+        'T.comm_allreduce(A_shared[8:72, 16:80], Out_shared[32:96], buffer[0:4, 0:64], buffer[0:4, 0:64], "sum", 0, 1, T.bool(True), bx)'
     ) in script
 
 
