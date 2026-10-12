@@ -318,13 +318,14 @@ def maybe_desc_name(name: str, matches: list[str], i: int, desc_name_map: dict[s
     if not (match == name + "_desc" or match.startswith(name + "_desc_")):
         return False
     desc_decls = []
-    if desc_name_map is not None:
-        desc_name_map[match] = name
     if i > 0:
         desc_decls.append(matches[i - 1])
     if i < len(matches) - 1:
         desc_decls.append(matches[i + 1])
-    return any([decl == "CUtensorMap" for decl in desc_decls])
+    is_descriptor = any(decl == "CUtensorMap" for decl in desc_decls)
+    if is_descriptor and desc_name_map is not None:
+        desc_name_map[match] = name
+    return is_descriptor
 
 
 def parse_function_call_args(
