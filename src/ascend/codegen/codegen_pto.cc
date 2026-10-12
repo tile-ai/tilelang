@@ -1082,6 +1082,13 @@ private:
       VisitStmt(op->body, 0);
       return {state, 0};
     }
+    if (analyzer_.CanProveEqual(op->extent,
+                                make_const(op->extent.dtype(), 1))) {
+      // A single-trip loop has no backedge. Both normal completion and break
+      // leave the loop, so merge them directly into its fallthrough state.
+      FlowState body_out = VisitStmt(op->body, state);
+      return {static_cast<uint8_t>(body_out.fallthrough | body_out.breaks), 0};
+    }
     return AnalyzeLoop(op->body, state, analyzer_.CanProve(op->extent > 0));
   }
   FlowState VisitStmt_(const WhileNode *op, uint8_t state) final {
