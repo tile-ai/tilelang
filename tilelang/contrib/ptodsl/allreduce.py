@@ -317,7 +317,8 @@ def _broadcast_warp_result(partial_reduced, scratch, *, tx, threads, scale: int)
     """Store the final partial and load the value broadcast within the group."""
     group = tx // threads
     local = tx % threads
-    bcast_base = group * threads
+    # Broadcast only overwrites this group's partial region.
+    bcast_base = group * (threads // 32) * scale
     is_group_leader = local < scale
     with if_(is_group_leader) as br5, br5.then_:
         scalar.store(partial_reduced, scratch, bcast_base + local)

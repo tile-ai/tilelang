@@ -141,6 +141,57 @@ def test_reduce_default_layout_multiple_groups(target, rows, extent, dtype, op):
     torch.testing.assert_close(b, ref_program(a, op).to(b.dtype), rtol=0, atol=1e-3)
 
 
+def make_multigroup_scale_kernel(rows, group_rows, extent, dtype, op):
+    # Annotated layout: each group of `group_rows * extent` threads hosts `group_rows` interleaved rows (scale > 1).
+    @T.prim_func
+    def kernel(A: T.Tensor((rows, extent), dtype), B: T.Tensor((rows,), dtype)):
+        with T.Kernel(1) as _, T.SimtVF(threads=rows * extent):
+            a = T.alloc_fragment((rows, extent), dtype)
+            b = T.alloc_fragment((rows,), dtype)
+            T.copy(A, a)
+            T.annotate_layout(
+                {
+                    a: T.Fragment(
+                        (rows, extent),
+                        forward_fn=lambda i, j: (
+                            (i // group_rows) * group_rows * extent + j * group_rows + (i % group_rows),
+                            0,
+                        ),
+                    )
+                }
+            )
+            getattr(T, f"reduce_{op}")(a, b, dim=1)
+            T.copy(b, B)
+
+    return kernel
+
+
+@pytest.mark.parametrize(
+    "rows,group_rows,extent",
+    [
+        # threads=256: 4 groups of 64, scale=16
+        (64, 16, 4),
+        # threads=512: 4 groups of 128, scale=16, serial cross-warp combine
+        (64, 16, 8),
+    ],
+)
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+def test_reduce_multiple_groups_scale_greater_than_one(target, rows, group_rows, extent):
+    kernel = tilelang.compile(
+        make_multigroup_scale_kernel(rows, group_rows, extent, "int32", "sum"),
+        target=target,
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False},
+    )
+
+    device = torch.device("npu")
+    a = torch.arange(1, rows + 1, dtype=torch.int32, device=device).unsqueeze(1).expand(rows, extent).contiguous()
+    b = kernel(a)
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(b, ref_program(a, "sum").to(b.dtype), rtol=0, atol=1e-3)
+
+
 @pytest.mark.parametrize("coalesced_width", [None, 2])
 def test_reducer_v2_multidim_narrow_plan(coalesced_width):
     width = None if coalesced_width is None else T.int32(coalesced_width)

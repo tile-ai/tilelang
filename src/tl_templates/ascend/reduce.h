@@ -264,7 +264,8 @@ private:
     int group = tx / threads;
     int local = tx % threads;
     int partial_base = group * num_warps * scale;
-    int bcast_base = group * threads;
+    // Broadcast only overwrites this group's partial region.
+    int bcast_base = group * num_warps * scale;
 
     // Step 1: intra-warp reduce.
     U warp_val =
