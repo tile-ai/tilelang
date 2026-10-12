@@ -94,6 +94,53 @@ def test_reduce(extent, scale, dtype, op):
     _test_one(extent, scale, dtype, op)
 
 
+def make_default_layout_reduce_kernel(rows, extent, dtype, op):
+    # No annotate_layout: the default layout places each row on a consecutive
+    # thread range, so one allreduce call covers `rows` reduction groups.
+    @T.prim_func
+    def kernel(A: T.Tensor((rows, extent), dtype), B: T.Tensor((rows,), dtype)):
+        with T.Kernel(1) as _, T.SimtVF(threads=rows * extent):
+            a = T.alloc_fragment((rows, extent), dtype)
+            b = T.alloc_fragment((rows,), dtype)
+            T.copy(A, a)
+            getattr(T, f"reduce_{op}")(a, b, dim=1)
+            T.copy(b, B)
+
+    return kernel
+
+
+@pytest.mark.parametrize(
+    "rows,extent,dtype,op",
+    [
+        # extent > 32: one allreduce call spans several cross-warp groups
+        (2, 64, "int32", "sum"),
+        (2, 64, "float32", "min"),
+        (4, 64, "float32", "sum"),
+        (2, 128, "int32", "max"),
+    ],
+)
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+def test_reduce_default_layout_multiple_groups(target, rows, extent, dtype, op):
+    kernel = tilelang.compile(
+        make_default_layout_reduce_kernel(rows, extent, dtype, op),
+        target=target,
+        out_idx=-1,
+        pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False},
+    )
+
+    device = torch.device("npu")
+    td = DTYPE_MAP[dtype]
+    a = (
+        torch.randn(rows, extent, dtype=td, device=device)
+        if td.is_floating_point
+        else torch.randint(-100, 100, (rows, extent), dtype=td, device=device)
+    )
+    b = kernel(a)
+    torch.npu.synchronize()
+
+    torch.testing.assert_close(b, ref_program(a, op).to(b.dtype), rtol=0, atol=1e-3)
+
+
 @pytest.mark.parametrize("coalesced_width", [None, 2])
 def test_reducer_v2_multidim_narrow_plan(coalesced_width):
     width = None if coalesced_width is None else T.int32(coalesced_width)
