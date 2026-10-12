@@ -61,10 +61,6 @@ __aicore__ inline void fm_mmad(__cc__ float *dst, __ca__ bfloat16_t *a,
                                uint32_t unit, bool clear) {
   asc_mmad(dst, a, b, 64u, k, n, unit, true, false, clear);
 }
-__aicore__ inline void fm_p_store(__ubuf__ float *dst, __cc__ float *src) {
-  asc_copy_l0c2ub(dst, src, 64u, 64u, 512u, 64u, 1, false, 0, 3, 0, 0, false,
-                  false, 0, 0, 0, 0, 0, 0, 0, 0);
-}
 __aicore__ inline void fm_o_store(__ubuf__ float *dst, __cc__ float *src,
                                   uint32_t unit) {
   asc_copy_l0c2ub(dst, src, 128u, 64u, 128u, 64u, 1, false, 0, unit, 0, 0,
