@@ -52,11 +52,12 @@ def test_pto_report_covers_both_hosts_cases_and_cache_phases(monkeypatch, tmp_pa
         return SimpleNamespace(
             stdout=io.StringIO("HOST_IR_READY\nHOST_IR_RESULT " + json.dumps(metrics) + "\n"),
             wait=lambda: 0,
+            poll=lambda: 0,
         )
 
     monkeypatch.setattr(benchmark.subprocess, "Popen", popen)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    assert not benchmark.report(SimpleNamespace(targets=["ascend", "pto"], trials=1, output=str(tmp_path)))
+    assert not benchmark.report(SimpleNamespace(targets=["ascend", "pto"], trials=1, output=str(tmp_path), timeout=30))
     assert len(commands) == 24
     rows = json.loads((tmp_path / "samples.json").read_text())
     assert {(r["target"], r["case"], r["host"], r["phase"]) for r in rows} == {

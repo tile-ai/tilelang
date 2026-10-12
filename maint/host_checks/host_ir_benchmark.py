@@ -1,21 +1,81 @@
 """C/MIR comparison on real kernels; fresh processes, isolated caches, no speed gate."""
 
 import argparse
+from contextlib import suppress
 import importlib
 import json
 import os
 from pathlib import Path
 import platform
 import runpy
+import signal
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def run_logged(command, env, path, label, timeout):
+    """Stream worker output while bounding even a silent or stuck compiler."""
+    print(f"START {label} (timeout={timeout:g}s)", flush=True)
+    start = time.perf_counter()
+    expired = threading.Event()
+    result, ready = None, None
+    with path.open("w", encoding="utf-8") as log:
+        proc = subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=os.name == "posix",
+        )
+
+        def kill():
+            if os.name == "posix":
+                with suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+
+        def expire():
+            expired.set()
+            print(f"TIMEOUT {label} after {timeout:g}s", flush=True)
+            kill()
+
+        timer = threading.Timer(timeout, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                log.write(line)
+                log.flush()
+                if line.strip() == "HOST_IR_READY":
+                    ready = time.perf_counter() - start
+                if line.startswith("HOST_IR_RESULT "):
+                    result = json.loads(line.removeprefix("HOST_IR_RESULT "))
+            code = proc.wait()
+        finally:
+            timer.cancel()
+            timer.join()
+            if proc.poll() is None:
+                kill()
+            proc.wait()
+            proc.stdout.close()
+        if expired.is_set():
+            log.write(f"TIMEOUT {label} after {timeout:g}s\n")
+            code = -1
+    failed = bool(code or result is None or ready is None)
+    print(f"{'FAILED' if failed else 'DONE'} {label} ({time.perf_counter() - start:.1f}s)", flush=True)
+    return failed, result, ready
 
 
 def workload(target, case, torch):
@@ -153,9 +213,10 @@ def report(args):
                 for host in ("c", "mir") if trial % 2 == 0 else ("mir", "c"):
                     with tempfile.TemporaryDirectory(prefix="tilelang-host-bench-") as cache:
                         for phase in ("cold", "hit"):
-                            env = dict(os.environ, TILELANG_CACHE_DIR=cache, TILELANG_DISABLE_CACHE="0")
+                            env = dict(os.environ, TILELANG_CACHE_DIR=cache, TILELANG_DISABLE_CACHE="0", PYTHONUNBUFFERED="1")
                             command = [
                                 sys.executable,
+                                "-u",
                                 str(Path(__file__).resolve()),
                                 "--target",
                                 target,
@@ -166,22 +227,10 @@ def report(args):
                                 "--phase",
                                 phase,
                             ]
-                            start = time.perf_counter()
-                            proc = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                            result, ready = None, None
-                            log = []
-                            for line in proc.stdout:
-                                log.append(line)
-                                if line.strip() == "HOST_IR_READY":
-                                    ready = time.perf_counter() - start
-                                if line.startswith("HOST_IR_RESULT "):
-                                    result = json.loads(line.removeprefix("HOST_IR_RESULT "))
-                            code = proc.wait()
                             label = f"{target}-{case}-{host}-{trial}-{phase}"
-                            (output / f"{label}.log").write_text("".join(log), encoding="utf-8")
-                            if code or result is None or ready is None:
+                            failed, result, ready = run_logged(command, env, output / f"{label}.log", label, args.timeout)
+                            if failed:
                                 errors.append(label)
-                                print(f"FAILED {label}\n{''.join(log[-20:])}", flush=True)
                                 break
                             rows.append(
                                 dict(target=target, case=case, host=host, trial=trial, phase=phase, process_to_first_s=ready, **result)
@@ -235,6 +284,7 @@ if __name__ == "__main__":
     parser.add_argument("--targets", nargs="+", choices=["cuda", "nvrtc", "cutedsl", "hip", "metal", "ascend", "pto"], default=["cuda"])
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--output", default="host-ir-report")
+    parser.add_argument("--timeout", type=float, default=300, help="Timeout in seconds per worker (default: 300)")
     parser.add_argument("--target")
     parser.add_argument("--host", choices=["c", "mir"])
     parser.add_argument("--case", choices=["small", "dynamic", "gemm"])
@@ -242,6 +292,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.trials < 1:
         parser.error("--trials must be positive")
+    if not 0 < args.timeout < float("inf"):
+        parser.error("--timeout must be finite and positive")
     if args.target:
         worker(args)
     else:
