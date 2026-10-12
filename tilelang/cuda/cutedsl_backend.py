@@ -197,7 +197,10 @@ def compile_cutedsl(code, func, target):
             module.compile_only,
             *args,
             make_fake_stream(),
-            options=f"{options} --enable-tvm-ffi --keep-cubin --gpu-arch=sm_{arch} --dump-dir={Path(directory).as_posix()}",
+            # Only the device binary is consumed below. TileLang Host IR owns
+            # launch, so do not JIT an unused CuTe host entry or request its FFI wrapper.
+            no_jit_engine=True,
+            options=f"{options} --keep-cubin --gpu-arch=sm_{arch} --dump-dir={Path(directory).as_posix()}",
         )
         # Load the native binary without requiring the driver's PTX JIT to
         # support the PTX version emitted by the CuTe compiler.

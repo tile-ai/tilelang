@@ -17,6 +17,42 @@ def _require_cutedsl():
         pytest.skip(f"CuTeDSL is not available: {err}")
 
 
+@tilelang.testing.requires_cuda
+def test_cutedsl_compiles_without_host_jit(monkeypatch):
+    _require_cutedsl()
+    import cutlass.cute as cute
+    from cutlass.base_dsl.compiler import Compiler
+    from tilelang.cuda.cutedsl_backend import compile_cutedsl
+    from tilelang.engine import lower
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128):
+            i = T.get_thread_binding()
+            B[i] = A[i] + 1
+
+    artifact = lower(main, target="cutedsl")
+    (device_func,) = artifact.device_mod.functions.values()
+    original_compile = cute.compile
+    calls = []
+
+    def checked_compile(*args, **kwargs):
+        assert kwargs["no_jit_engine"] is True
+        assert "--enable-tvm-ffi" not in kwargs["options"]
+        calls.append(True)
+        return original_compile(*args, **kwargs)
+
+    def unexpected_jit(*args, **kwargs):
+        pytest.fail("Device compilation must not create a CuTe host execution engine")
+
+    monkeypatch.setattr(cute, "compile", checked_compile)
+    monkeypatch.setattr(Compiler, "jit", unexpected_jit)
+    binary = compile_cutedsl(artifact.kernel_source, device_func, artifact.target)
+    assert calls == [True]
+    assert binary["cubin"][:4] == b"\x7fELF"
+    assert binary["symbol"]
+
+
 @pytest.mark.parametrize("out_idx", [None, -1])
 @pytest.mark.parametrize("compiler", ["nvcc", "nvrtc", "cutedsl"])
 @tilelang.testing.requires_cuda
