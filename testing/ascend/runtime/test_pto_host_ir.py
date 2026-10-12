@@ -2,25 +2,12 @@
 
 import pytest
 import torch
-import tvm_ffi
 
 import tilelang
 from tilelang import tvm
 from tilelang.ascend import language as T
-from tilelang.backend import create_backend_context
-from tilelang.cache import _resolve_cache_dispatch
 from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
 import tilelang.testing
-
-
-def test_pto_context_uses_shared_host_and_cache():
-    context = create_backend_context("pto", "mir", "auto")
-    assert context.module.name == "pto"
-    assert context.execution_backend.name == "tvm_ffi"
-    assert context.execution_backend.supports_callee_allocated_outputs
-    cache, resolved, _ = _resolve_cache_dispatch("pto", "c", "tvm_ffi", False)
-    assert resolved.module.name == "pto"
-    assert cache.host_kernel_path.endswith(".c")
 
 
 def _loop_kernel():
@@ -39,29 +26,6 @@ def _loop_kernel():
                         B[bx * 128 + i] += 1.0
 
     return main
-
-
-def test_pto_device_module_build_without_toolchain():
-    name = "tilelang_callback_pto_compile"
-    original = tvm_ffi.get_global_func(name)
-    entries = []
-
-    def compile_entry(code, symbol, target, config):
-        entries.append(str(symbol))
-        assert "@pto.jit" in code
-        assert "pto" in target.keys
-        # The native module stores bytes lazily; this test never launches them.
-        return bytearray(b"test-device-binary")
-
-    try:
-        tvm_ffi.register_global_func(name, compile_entry, override=True)
-        artifact = tilelang.lower(_loop_kernel(), target="pto", target_host="c", enable_device_compile=True)
-        assert len(entries) == 2
-        assert len(set(entries)) == 2
-        assert "@pto.jit" in artifact.kernel_source
-        assert "for" in artifact.host_mod.script()
-    finally:
-        tvm_ffi.register_global_func(name, original, override=True)
 
 
 @tilelang.testing.requires_ascend

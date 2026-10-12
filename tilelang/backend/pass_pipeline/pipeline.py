@@ -27,7 +27,9 @@ class PassPipeline:
             # caller's session.
             from tilelang.instrumentation import pass_pipeline
 
-            with pass_pipeline(self.name):
+            # Direct lowering callers need the same target scope as the JIT.
+            # Passes may consult Target.current() in addition to function attrs.
+            with target, pass_pipeline(self.name):
                 return self._lower(mod, target)
         except Exception as exc:
             # Compiler passes append a machine-readable `--> file:line:col`

@@ -1,11 +1,40 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from contextlib import nullcontext
 
 import pytest
 
 from tilelang import tvm
 from tilelang.backend import BackendContext, create_backend_context, get_backend, list_backends, register_backend
+from tilelang.backend.pass_pipeline import PassPipeline
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_pass_pipeline_scopes_and_restores_target(nested, fail):
+    target = tvm.target.Target("c")
+    outer = tvm.target.Target("llvm") if nested else None
+    mod = tvm.IRModule()
+
+    def lower(input_mod, input_target):
+        assert input_mod.same_as(mod)
+        assert input_target.same_as(target)
+        assert tvm.target.Target.current().same_as(target)
+        if fail:
+            raise ValueError("pipeline failure")
+        return input_mod
+
+    pipeline = PassPipeline("test-target-scope", lower)
+    with outer if nested else nullcontext():
+        previous = tvm.target.Target.current(allow_none=True)
+        if fail:
+            with pytest.raises(ValueError, match="pipeline failure"):
+                pipeline.lower(mod, target)
+        else:
+            assert pipeline.lower(mod, target).same_as(mod)
+        current = tvm.target.Target.current(allow_none=True)
+        assert current is None if previous is None else current.same_as(previous)
 
 
 def test_builtin_backend_modules_are_explicit():
