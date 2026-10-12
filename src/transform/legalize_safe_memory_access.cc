@@ -19,6 +19,7 @@
 
 #include "../op/builtin.h"
 #include "../op/parallel.h"
+#include "../op/utils.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/access_ptr_utils.h"
 #include "loop_partition.h"
@@ -719,11 +720,8 @@ private:
     }
     safe_value = analyzer_->Simplify(safe_value);
 
-    // Predicated cp.async zero-fills on the false path. Use that form when the
-    // buffer's safe value is zero so downstream codegen can emit the native
-    // conditional intrinsic instead of materializing an explicit fallback
-    // store.
-    if (analyzer_->CanProveEqual(safe_value, make_zero(dst_dtype))) {
+    // Hardware zero-fill requires an all-zero bit pattern.
+    if (IsZeroBitPattern(safe_value)) {
       PrimExpr predicate = existing_predicate.defined()
                                ? analyzer_->Simplify(tirx::And(
                                      existing_predicate.value(), combined))

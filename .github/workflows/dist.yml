@@ -150,21 +150,6 @@ jobs:
           python-version: ${{ matrix.target.python_version }}
           activate-environment: true
 
-      # CMakeLists.txt only plugs cmake/ccache_strip_pep517.py (normalizes the
-      # random PEP 517 build-env paths before ccache hashes the preprocessed
-      # output) in front of the preprocessor when a stable interpreter exists
-      # at .venv/Scripts/python.exe. Without it ccache misses on ~99% of
-      # lookups and the Windows wheel build recompiles all of TVM + TileLang
-      # from scratch (~40 min).
-      - name: Create stable .venv for ccache wrapper (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (-not (Test-Path ".venv\Scripts\python.exe")) {
-            uv venv .venv
-          }
-          & ".venv\Scripts\python.exe" --version
-
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
         with:
@@ -175,11 +160,11 @@ jobs:
           create-symlink: ${{ runner.os != 'Windows' }}
           evict-old-files: "7d"
           append-timestamp: false
-          # Build configuration changes must also create a new cache entry:
-          # existing GitHub cache entries cannot be updated in place.
-          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc', 'CMakeLists.txt', 'cmake/**', 'pyproject.toml') }}
+          # A commit key covers source, headers, submodules and build settings.
+          # Avoid hashFiles('**/*.cc'): its post-job scan also walks the freshly
+          # installed multi-GB Python environments and delays cache cleanup.
+          key: wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ github.sha }}
           restore-keys: |
-            wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}-${{ hashFiles('**/*.cc', 'CMakeLists.txt', 'cmake/**', 'pyproject.toml') }}
             wheel-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.python_version }}
             wheel-${{ runner.os }}-${{ runner.arch }}
 
@@ -209,16 +194,11 @@ jobs:
             echo "CIBW_BEFORE_BUILD_LINUX=dnf install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
           fi
 
-      - name: Set CIBW_BUILD (Windows)
+      - name: Set build environment (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $pythonVersion = "${{ matrix.target.python_version }}"
-          $pythonVersionMajMin = ($pythonVersion -split '\.')[0..1] -join '.'
-          $pythonVersionMajMinNoDot = $pythonVersionMajMin -replace '\.', ''
-          "CIBW_BUILD=cp${pythonVersionMajMinNoDot}-*" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-          "CIBW_CONFIG_SETTINGS=cmake.build-type=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-          "CMAKE_BUILD_TYPE=Release" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          "CMAKE_BUILD_TYPE=Release" | Out-File -FilePath $env:GITHUB_ENV -Append
 
           if ("${{ matrix.target.toolkit }}" -like "*CUDA*") {
             $cudaVersion = "${{ matrix.target.toolkit }}".Split('-')[-1]
@@ -226,7 +206,6 @@ jobs:
             $cudaVersionMajMinNoDot = $cudaVersionMajMin -replace '\.', ''
             "CUDA_VERSION=$cudaVersion" | Tee-Object -FilePath $env:GITHUB_ENV -Append
             "UV_TORCH_BACKEND=cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
-            "PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu$cudaVersionMajMinNoDot" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
           if ("${{ env.IS_RELEASE }}" -eq "true") {
@@ -234,11 +213,82 @@ jobs:
           }
 
       - name: Build wheels
+        if: runner.os != 'Windows'
         uses: pypa/cibuildwheel@v4.2
         with:
           package-dir: .
           output-dir: wheelhouse
           config-file: "{package}/pyproject.toml"
+
+      # Fixed dependency paths allow ccache direct hits across runner instances.
+      # cibuildwheel's random PEP 517 directories forced 700/703 warm hits through
+      # preprocessing and also installed/tested the same cp310 wheel twice.
+      - name: Build wheels (Windows)
+        id: windows_wheel
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CCACHE_STATSLOG: ${{ runner.temp }}/tilelang-wheel-ccache.log
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          "started=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_OUTPUT
+          $python = (Resolve-Path .venv/Scripts/python.exe).Path
+          uv pip install --python $python build tomli "cmake>=3.26.1" "ninja>=1.11"
+          $requirements = & $python -c "import tomli; print('\n'.join(tomli.load(open('pyproject.toml', 'rb'))['build-system']['requires']))"
+          uv pip install --python $python @requirements
+          $extra = @(& $python -c "from build import ProjectBuilder; print('\n'.join(ProjectBuilder('.').get_requires_for_build('wheel')))") | Where-Object { $_ -ne '' }
+          if ($extra.Count) {
+            uv pip install --python $python @extra
+          }
+          uv build --wheel --no-build-isolation --python $python --out-dir raw-wheelhouse `
+            -C cmake.build-type=Release -C "cmake.define.Python3_EXECUTABLE=$python"
+          Get-ChildItem raw-wheelhouse -Filter *.whl | ForEach-Object {
+            uvx delvewheel repair -w wheelhouse $_.FullName
+          }
+
+      - name: Windows wheel build summary
+        if: ${{ always() && runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          BUILD_OUTCOME: ${{ steps.windows_wheel.outcome }}
+          BUILD_STARTED: ${{ steps.windows_wheel.outputs.started }}
+          CCACHE_STATSLOG: ${{ runner.temp }}/tilelang-wheel-ccache.log
+        run: |
+          $summary = @('## Windows wheel build', '', "Build step: **$env:BUILD_OUTCOME**")
+          if ($env:BUILD_STARTED) {
+            $elapsed = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [long]$env:BUILD_STARTED
+            $summary += "Elapsed: **$elapsed seconds** (dependencies, build and wheel repair)."
+          }
+          $summary += @('', '### Compiler cache', '')
+          if (Test-Path $env:CCACHE_STATSLOG) {
+            $summary += @('```text') + @(ccache --version | Select-Object -First 1)
+            $summary += @(ccache --show-log-stats --verbose) + @('```')
+            $source = ''
+            $misses = @(Get-Content $env:CCACHE_STATSLOG | ForEach-Object {
+              if ($_.StartsWith('# ')) {
+                $source = $_.Substring(2)
+              } elseif ($_ -eq 'cache_miss') {
+                $source
+              }
+            })
+            if ($misses.Count) {
+              $summary += @('', "### Cache misses ($($misses.Count))", '', '```text')
+              $summary += $misses + @('```')
+            }
+          } else {
+            $summary += 'No per-build ccache log was produced; compilation may not have started.'
+          }
+          $summary += @('', '### Repaired wheels', '')
+          $wheels = @(Get-ChildItem wheelhouse -Filter *.whl -ErrorAction SilentlyContinue)
+          if ($wheels.Count) {
+            $summary += @('| Wheel | Size (MiB) |', '| --- | ---: |')
+            foreach ($wheel in $wheels) {
+              $summary += ('| {0} | {1:F2} |' -f $wheel.Name, ($wheel.Length / 1MB))
+            }
+          } else {
+            $summary += 'No repaired wheels were produced.'
+          }
+          $summary | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Test built wheels
         if: runner.os != 'Windows'
@@ -268,6 +318,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
             $wheel = $_.FullName
             Write-Host "Testing wheel: $wheel"
@@ -321,6 +372,7 @@ jobs:
         if: contains(matrix.target.toolkit, 'CUDA') && runner.os == 'Windows'
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           $env:UV_PYTHON = "3.12"
           $versionLog = Join-Path $env:RUNNER_TEMP "tilelang-wheel-versions.txt"
           if (Test-Path $versionLog) {

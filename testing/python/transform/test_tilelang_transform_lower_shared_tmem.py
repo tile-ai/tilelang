@@ -5,6 +5,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import assert_call_count, collect_calls
 
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
@@ -16,17 +17,6 @@ def _apply(func):
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.cuda.transform.LowerSharedTmem()(mod)
     return mod
-
-
-def _collect_calls(stmt, op_name: str):
-    calls = []
-
-    def visitor(node):
-        if isinstance(node, tvm.tirx.Call) and hasattr(node, "op") and hasattr(node.op, "name") and node.op.name == op_name:
-            calls.append(node)
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, visitor)
-    return calls
 
 
 @tilelang.testing.requires_cuda
@@ -43,11 +33,11 @@ def test_explicit_deallocate_tmem_suppresses_auto_dealloc():
 
     mod = _apply(func)
     body = mod["main"].body
-    assert len(_collect_calls(body, "tl.ptx_init_tensor_memory")) == 1
-    assert len(_collect_calls(body, "tl.ptx_deallocate_tensor_memory")) == 1
-    assert len(_collect_calls(body, "tl.deallocate_tmem")) == 0
+    assert_call_count(body, op="tl.ptx_init_tensor_memory", count=1)
+    assert_call_count(body, op="tl.ptx_deallocate_tensor_memory", count=1)
+    assert_call_count(body, op="tl.deallocate_tmem", count=0)
 
-    dealloc_call = _collect_calls(body, "tl.ptx_deallocate_tensor_memory")[0]
+    dealloc_call = collect_calls(body, op="tl.ptx_deallocate_tensor_memory")[0]
     assert dealloc_call.args[1].value == 128
 
 
@@ -67,7 +57,7 @@ def test_explicit_deallocate_only_suppresses_matching_buffer():
     mod = _apply(func)
     body = mod["main"].body
 
-    dealloc_calls = _collect_calls(body, "tl.ptx_deallocate_tensor_memory")
+    dealloc_calls = collect_calls(body, op="tl.ptx_deallocate_tensor_memory")
     # A_tmem: 1 explicit (auto suppressed); B_tmem: 1 auto = 2 total
     assert len(dealloc_calls) == 2
 
@@ -94,7 +84,7 @@ def test_dealloc_before_thread_return_keeps_auto_dealloc():
     mod = _apply(func)
     body = mod["main"].body
 
-    dealloc_calls = _collect_calls(body, "tl.ptx_deallocate_tensor_memory")
+    dealloc_calls = collect_calls(body, op="tl.ptx_deallocate_tensor_memory")
     # 1 explicit (non-fallthrough) + 1 auto (block end) = 2
     assert len(dealloc_calls) == 2
     assert [call.args[1].value for call in dealloc_calls] == [128, 128]

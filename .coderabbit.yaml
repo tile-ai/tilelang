@@ -1,6 +1,242 @@
 language: en-US
 
 reviews:
+  suggested_reviewers: true
+  auto_assign_reviewers: false
+  suggested_reviewers_instructions:
+    - reviewers:
+        - handle: LeiWang1999
+          type: user
+      instructions: |
+        Primary scope: Project-wide architecture, shared backend/runtime contracts,
+        cross-backend correctness, and release or dependency compatibility.
+        Suggest when: A change has substantial cross-cutting design or compatibility
+        consequences, or needs architectural escalation across multiple subsystems.
+        Base the suggestion on the change's impact, not a broad path match.
+        Do not suggest: As a default reviewer for every PR, for routine backend-local
+        work, or for ordinary documentation, tests, and examples. Prefer oraluben for
+        routine packaging or host-toolchain work without release-wide compatibility
+        implications. Never suggest the PR author.
+        Path hints: Shared interfaces in src/backend/, tilelang/engine/, and
+        tilelang/jit/; dependency, build, and release metadata in CMakeLists.txt,
+        cmake/, pyproject.toml, and .github/workflows/. Paths alone are insufficient.
+
+    - reviewers:
+        - handle: SiriusNEO
+          type: user
+      instructions: |
+        Primary scope: Shared IR, language/frontend, layout and compiler-pass
+        architecture and integration, plus shared compilation, JIT, and profiler
+        infrastructure.
+        Suggest when: Changes alter common semantics, pass composition, or shared
+        compiler/runtime integration beyond a single specialist's subsystem, or
+        require core compiler design triage.
+        Do not suggest: As a mandatory second reviewer. Prefer the relevant
+        specialists for compiler tools, vectorization, CUDA scheduling, backend-local
+        Ascend/ROCm/Metal work, and backend-specific JIT adapters unless shared
+        architecture also changes materially. Never suggest the PR author.
+        Path hints: src/ir.*, src/layout/, src/transform/, tilelang/language/,
+        tilelang/engine/, tilelang/jit/, and shared profiler infrastructure. Inspect
+        the actual shared semantic or architectural impact, not just the directory.
+
+    - reviewers:
+        - handle: chengyupku
+          type: user
+      instructions: |
+        Primary scope: Attention and sequence-model kernels (FlashAttention,
+        GQA/MHA, MLA decoding, and related Mamba workloads), plus kernel/compiler
+        co-design for software pipelines, warp specialization, producer/consumer
+        synchronization, persistent loops, and loop unswitching.
+        Suggest when: Changes materially affect attention/decoding algorithm
+        correctness, kernel schedules or performance, or the compiler mechanisms
+        enabling these kernels. Also suggest for foundational pipeline/warp-specialization
+        correctness, TMA/WGMMA synchronization, multiversion-buffer stage/phase
+        indexing, logical iteration versus physical pipeline counters,
+        nested/persistent-loop semantics, or loop-unswitching changes, even when
+        the reproducer is a GEMM rather than an attention kernel.
+        Do not suggest: Solely because of original-author status, for all examples,
+        or as a default reviewer for every CUDA/compiler PR. Prefer Yongqi-Zhuo for
+        isolated CuTe/layout algebra or automatic schedule construction without
+        substantive kernel/pipeline semantic changes; prefer Rachmanino for isolated
+        ISA exposure, architecture guards, physical TMEM/cluster constraints, or CLC
+        scheduler primitives. Suggest multiple reviewers for substantive cross-layer
+        changes, not overlapping terminology alone. Prefer backend specialists for
+        ROCm/Metal/Ascend-local work. Never suggest the PR author.
+        Path hints: examples/flash_attention/, examples/flash_attention_sm100/,
+        examples/flash_decoding/, examples/deepseek_mla/,
+        src/transform/pipeline_planning.cc, src/transform/inject_pipeline.cc,
+        src/transform/common/warp_specialize.h,
+        src/cuda/transform/materialize_ws_schedule.cc,
+        src/cuda/transform/lower_hopper_intrin.cc,
+        tilelang/language/warp_specialize.py, and src/transform/loop_unswitching.cc.
+        Match algorithm/pipeline intent, not directory membership alone.
+
+    - reviewers:
+        - handle: Yongqi-Zhuo
+          type: user
+      instructions: |
+        Primary scope: CuTe/layout algebra, logical SMEM/TMEM layout mapping,
+        copy/GEMM/TMA/GMMA/UMMA lowering, and compiler-driven automatic warp
+        specialization, role analysis, schedule materialization, and pipeline
+        organization.
+        Suggest when: Changes affect layout inference, logical tile/memory mapping,
+        data-movement or tensor-core lowering, automatic warp-role assignment, or
+        compiler-generated pipelines. Also suggest Rachmanino for substantial
+        instruction or hardware-execution changes, or LJC00118 for substantial
+        vectorization/cast/pack changes; overlap alone does not require both.
+        Do not suggest: For CUDA/TMA/TMEM keywords alone. Prefer Rachmanino for pure
+        instruction wrappers, architecture guards, physical TMEM allocation/access
+        constraints, or kernel-level persistent/CLC tile scheduling. Prefer
+        lucifer1004 for CuTeDSL execution-backend-only work. Never suggest the PR author.
+        Path hints: src/layout/cute_layout.*, src/layout/tcgen05_layout.*,
+        src/cuda/op/tma_layout.*, src/cuda/op/copy_analysis.cc,
+        src/cuda/transform/auto_schedule.cc, src/cuda/transform/auto_schedule/,
+        src/cuda/transform/materialize_ws_schedule.cc, and logical mapping changes in
+        src/cuda/transform/lower_shared_tmem.cc. Match intent, not paths alone.
+
+    - reviewers:
+        - handle: oraluben
+          type: user
+      instructions: |
+        Primary scope: Metal backend, build and packaging, host toolchains, and
+        Windows portability.
+        Suggest when: Changes affect Metal lowering/execution, package or wheel
+        construction, host compiler integration, or platform-specific build behavior.
+        Windows HIP changes fit here when they concern build/toolchain integration
+        rather than AMD device execution semantics.
+        Do not suggest: For every ROCm, runtime, or CI edit. Prefer andyluo7 for HIP
+        execution semantics, AMD intrinsics, and wavefront algorithms; involve
+        LeiWang1999 for substantive release-wide or cross-backend compatibility
+        decisions rather than routine packaging. Never suggest the PR author.
+        Path hints: src/metal/, tilelang/metal/, cmake/, CMakeLists.txt,
+        pyproject.toml, .github/workflows/dist.yml, and tilelang/contrib/msvc.py.
+        Build and workflow paths require a relevant packaging or toolchain change.
+
+    - reviewers:
+        - handle: silentCoder-dev
+          type: user
+      instructions: |
+        Primary scope: Ascend backend lowering, synchronization, scheduling, and
+        code generation, plus substantial shared ThreadSync/synchronization
+        algorithm changes.
+        Suggest when: A change affects Ascend execution or lowering correctness,
+        Ascend synchronization/scheduling, or shared synchronization analysis and
+        insertion algorithms with substantive correctness implications.
+        Do not suggest: For the word "schedule" alone, unrelated CUDA scheduling,
+        or diagnostic-only synchronization error reporting. Prefer Yongqi-Zhuo for
+        compiler-driven CUDA automatic warp specialization and penguin-wwy for
+        diagnostics without synchronization algorithm changes. Never suggest the PR author.
+        Path hints: src/ascend/, tilelang/ascend/, testing/ascend/,
+        examples/ascend/, and relevant algorithm changes in
+        src/transform/thread_storage_sync.cc. Distinguish semantics from diagnostics.
+
+    - reviewers:
+        - handle: andyluo7
+          type: user
+      instructions: |
+        Primary scope: ROCm/HIP, AMD kernel behavior, wavefront and intrinsic
+        portability, and AMD-specific examples and validation.
+        Suggest when: Changes affect HIP execution semantics, AMD device code,
+        wavefront-dependent algorithms, backend portability, or AMD-specific kernel
+        correctness and performance validation.
+        Do not suggest: For generic CUDA changes, every example/test, or a ROCm
+        keyword without AMD execution or portability impact. Prefer oraluben for
+        host Windows/toolchain-only changes, including HIP build integration with
+        no device-semantic change. Never suggest the PR author.
+        Path hints: src/rocm/, tilelang/rocm/, src/tl_templates/hip/, and
+        AMD-specific portions of examples/ and testing/. Inspect backend behavior
+        rather than relying on directory membership alone.
+
+    - reviewers:
+        - handle: lucifer1004
+          type: user
+      instructions: |
+        Primary scope: CuTeDSL and NVRTC execution backends and their JIT adapters,
+        including compilation, launch, cache/context handling, thread safety, and
+        backend integration.
+        Suggest when: Changes affect CuTeDSL/NVRTC backend code generation,
+        compilation or runtime integration, adapter lifecycle, launch behavior,
+        caching, context management, or concurrency correctness.
+        Do not suggest: For every CUDA or generic JIT change, or for CuTe layout
+        algebra merely because it shares the CuTe name. Prefer Yongqi-Zhuo for
+        layout algebra and logical copy/GEMM mapping without execution-backend
+        integration changes. Never suggest the PR author.
+        Path hints: tilelang/cuda/cutedsl_backend.py, tilelang/contrib/cutedsl/,
+        tilelang/contrib/nvrtc.py, tilelang/jit/adapter/cutedsl/,
+        tilelang/jit/adapter/nvrtc/, src/cuda/codegen/codegen_cutedsl.*,
+        src/cuda/codegen/rt_mod_cutedsl.cc, src/cuda/stubs/nvrtc.cc, and
+        src/tl_templates/cuda/nvrtc_std.h. Match execution-backend intent.
+
+    - reviewers:
+        - handle: Rachmanino
+          type: user
+      instructions: |
+        Primary scope: CUDA intrinsic/ISA exposure, architecture guards, Tensor Core
+        instruction interfaces, physical TMEM allocation/arena packing and load/store
+        shape constraints, cluster/2-SM mechanisms, kernel-level persistent/CLC tile
+        scheduling, optimized CUDA kernels, and GPU execution profiling. This scope
+        is not limited to Blackwell.
+        Suggest when: Changes add or correct CUDA instructions, architecture-specific
+        constraints, physical TMEM storage/access, inter-CTA execution, persistent
+        tile scheduling, or kernel execution/performance analysis. Also suggest
+        Yongqi-Zhuo only when logical layouts, lowering, or compiler-driven automatic
+        scheduling change substantially.
+        Do not suggest: For every CUDA PR or TMA/TMEM keyword. Prefer Yongqi-Zhuo for
+        pure CuTe algebra, logical layout mapping, or compiler automatic warp-role
+        scheduling; prefer penguin-wwy for compile-time pass timing rather than GPU
+        execution profiling. Never suggest the PR author.
+        Path hints: src/tl_templates/cuda/instruction/,
+        tilelang/cuda/intrinsics/macro/tcgen05_macro_generator.py,
+        src/cuda/transform/lower_blackwell_2sm.cc,
+        src/cuda/transform/annotate_warp_group_reg_alloc.cc,
+        physical allocation/access changes in src/cuda/transform/lower_shared_tmem.cc,
+        tilelang/language/tile_schedule.py, and tilelang/tools/cuda/iket/.
+        Paths are contextual hints, not automatic matches.
+
+    - reviewers:
+        - handle: LJC00118
+          type: user
+      instructions: |
+        Primary scope: TileKernels-related compiler requirements, vectorization
+        planning/legality/scalarization, low-precision vector cast/pack, and vectorized
+        memory accesses. TileKernels denotes a workload/project context, not a
+        TileLang source directory.
+        Suggest when: Changes materially affect vectorization decisions, legal
+        vector widths, scalarization, low-precision vector conversion/packing, or
+        vectorized memory correctness/performance, including requirements exposed
+        by TileKernels workloads.
+        Do not suggest: As a generic Frontend/Simplify/compiler owner, or solely
+        because a transform/codegen file changes. Prefer penguin-wwy for source
+        mapping and diagnostics alone, and Yongqi-Zhuo for overall layout/copy/GEMM
+        or compiler warp scheduling without substantial vectorization changes.
+        Never suggest the PR author.
+        Path hints: src/transform/loop_vectorize.*, src/transform/vectorize_loop.cc,
+        src/transform/legalize_vectorized_loop.cc,
+        src/transform/common/loop_vectorization_utils.h, and vector cast/pack/memory
+        portions of src/cuda/codegen/ and src/tl_templates/cuda/. Match the changed
+        vectorization semantics, not all edits in these paths.
+
+    - reviewers:
+        - handle: penguin-wwy
+          type: user
+      instructions: |
+        Primary scope: Compiler developer tools and observability: compiler-pass
+        timing, source spans/locations, generated-code source mapping and #line
+        directives, diagnostics, debugging aids, and IR testing helpers.
+        Suggest when: Changes add or correct developer-facing compiler instrumentation,
+        error reporting, source mapping, debugging support, or reusable IR test
+        utilities. A pass/codegen edit fits when its intent is tooling/observability
+        rather than changing compilation semantics.
+        Do not suggest: As a general transform/codegen owner, for all tools/ or tests,
+        or for GPU runtime profiling. Prefer LJC00118 for vector cast/pack or
+        vectorization semantics, Rachmanino for GPU execution profiling, and the
+        relevant compiler/backend specialist for lowering or synchronization
+        algorithm changes. Never suggest the PR author.
+        Path hints: tilelang/tools/pass_timing.py, src/span_utils.*,
+        src/backend/common/codegen/codegen_c_line_directives.h, tilelang/errors.py,
+        tilelang/testing/ir.py, and source-mapping/diagnostic portions of codegen
+        and compiler passes. Match tooling intent, not filenames alone.
+
   high_level_summary_instructions: |
     Add a short "C++ style / lint notes" section when the PR changes C++, CI,
     lint tooling, or C++ style documentation.

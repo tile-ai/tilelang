@@ -7,6 +7,16 @@
 #include <cstdint>
 #endif
 
+// The SM120 block-scaled warp MMA also runs on SM121 (GB10). CUTLASS defines
+// CUTLASS_ARCH_MMA_SM120A_ENABLED only when __CUDA_ARCH__ == 1200, so accept
+// both arch-specific (a) and family-specific (f) SM120 and SM121 targets.
+#if (defined(CUTLASS_ARCH_MMA_SM120A_ENABLED) ||                               \
+     defined(CUTLASS_ARCH_MMA_SM120F_ENABLED) ||                               \
+     defined(CUTLASS_ARCH_MMA_SM121A_ENABLED) ||                               \
+     defined(CUTLASS_ARCH_MMA_SM121F_ENABLED))
+#define TL_SM120_BLOCK_SCALED_MMA_ENABLED 1
+#endif
+
 namespace tl {
 
 enum class SM120MmaBlockScaledKind : int {
@@ -39,7 +49,7 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
     uint16_t scale_a_byte_id = 0, uint16_t scale_a_thread_id = 0,
     uint16_t scale_b_byte_id = 0, uint16_t scale_b_thread_id = 0) {
 #if defined(CUTE_ARCH_MXF4NVF4_4X_UE4M3_MMA_ENABLED) &&                        \
-    defined(CUTLASS_ARCH_MMA_SM120A_ENABLED)
+    defined(TL_SM120_BLOCK_SCALED_MMA_ENABLED)
   asm volatile(
       "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::"
       "4X.f32.e2m1.e2m1.f32.ue4m3 "
@@ -56,8 +66,8 @@ TL_DEVICE void sm120_mma_m16n8k64_mxf4nvf4_4x_ue4m3_regs(
         "h"(scale_b_thread_id));
 #else
   CUTE_INVALID_CONTROL_PATH(
-      "tl::sm120_mma_sync_blockscaled requires sm_120a and CUDA 12.8 or "
-      "later");
+      "tl::sm120_mma_sync_blockscaled requires sm_120a/f or sm_121a/f and "
+      "CUDA 12.8 or later");
 #endif
 }
 
