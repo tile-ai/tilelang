@@ -805,6 +805,24 @@ public:
     };
     Array<PrimExpr> indices = op->indices.Map(fmutate);
 
+    // Pack-safety: a vector index that is not a unit-stride Ramp is a gather.
+    // Ascend SimtVF codegen cannot lower int64x2 (etc.) gather addresses into
+    // shared/global (see remat_idx). Local/fragment register gathers are fine
+    // as scalarized element extracts; non-local must scalarize the loop body.
+    if (!IsLocalBuffer(op->buffer, /*allow_var=*/true) &&
+        !IsFragmentBuffer(op->buffer)) {
+      for (const PrimExpr &idx : indices) {
+        if (!idx.dtype().is_scalable_or_fixed_length_vector()) {
+          continue;
+        }
+        const RampNode *ramp = idx.as<RampNode>();
+        if (ramp == nullptr || !is_one(ramp->stride)) {
+          need_scalarize_ = true;
+          return GetRef<PrimExpr>(op);
+        }
+      }
+    }
+
     if (!indices.same_as(op->indices)) {
       BufferLoadNode *writer = load.CopyOnWrite();
       writer->indices = indices;

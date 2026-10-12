@@ -1016,6 +1016,11 @@ private:
     for (size_t i = 0; i < transformed_indices.size(); ++i) {
       elem_offset += transformed_indices[i] * strides[i];
     }
+    // Fold analyzer Let bindings (e.g. remat idx_i = idx_ub[i]) so a
+    // syntactically loop-independent Var is not mistaken for a broadcast
+    // load. Otherwise IndicesCanVectorize(allow_broadcast) returns true and
+    // Vectorizer packs a shared gather into int64x2 — illegal on Ascend.
+    elem_offset = analyzer_->Simplify(elem_offset);
 
     // 2. Check if current buffer_vec_size works with invariant boundary check
     // In some cases, buffer_vec_size is max (e.g. 128), but
