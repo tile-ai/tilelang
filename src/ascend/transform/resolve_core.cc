@@ -312,8 +312,14 @@ private:
     if (node->IsTask()) {
       auto *task = static_cast<TaskNode *>(node);
       bool changed = false;
-      if (task->ContainsLoopBreak())
-        changed |= RequireExecution(task, enclosing_coverage);
+      if (task->ContainsLoopBreak()) {
+        // A shared loop header can contain independently projected AIV
+        // bodies. Each projected break exits only its own AIV stream.
+        CoreMask exit_coverage = enclosing_coverage;
+        if (auto sid = GetTaskSubcore(task->stmt))
+          exit_coverage &= kCoreCube | VectorCore(*sid);
+        changed |= RequireExecution(task, exit_coverage);
+      }
       CoreMask execution_mask = GetExecutionMask(task);
       changed |= AddReadDemand(task, execution_mask);
       changed |= AddStorageEpochGuardDemand(task, execution_mask);

@@ -432,10 +432,14 @@ private:
     }
 
     Stmt VisitStmt_(const ForNode *op) final {
+      // Each projected loop needs its own binder, even with uniform bounds.
+      owner_->varying_.insert(op->loop_var);
+      Var loop_var = owner_->VarFor(op->loop_var, p_);
+      local_vars_.insert(loop_var);
       For loop = Downcast<For>(StmtExprMutator::VisitStmt_(op));
       if (is_no_op(loop->body))
         return Evaluate(0);
-      loop.CopyOnWrite()->loop_var = owner_->VarFor(op->loop_var, p_);
+      loop.CopyOnWrite()->loop_var = loop_var;
       loop.CopyOnWrite()->annotations =
           RewriteMetadata(op->annotations).cast<Map<String, Any>>();
       return loop;
@@ -482,6 +486,7 @@ private:
     Stmt VisitStmt_(const BindNode *op) final {
       Var var = owner_->VarFor(op->var, p_);
       PrimExpr value = analyzer_.Simplify(VisitExpr(op->value));
+      local_vars_.insert(var);
       if (conditional_depth_ == 0 && value.as<IntImmNode>())
         owner_->constants_.Set(var, value);
       return Bind(var, value, op->span);
@@ -522,18 +527,25 @@ private:
                             ? ObjectRef(VisitExpr(Downcast<PrimExpr>(value)))
                             : value);
       call.CopyOnWrite()->annotations = annotations;
-      if (!IsAscendCopyCall(call.get()))
-        return call;
+      return call;
+    }
+
+    Stmt VisitStmt_(const EvaluateNode *op) final {
+      Evaluate statement = Downcast<Evaluate>(StmtExprMutator::VisitStmt_(op));
+      const auto *call_node = statement->value.as<CallNode>();
+      if (!call_node || !IsAscendCopyCall(call_node))
+        return statement;
+      Call call = ffi::GetRef<Call>(call_node);
       AscendCopy copy(call->args, call->annotations);
       if (!IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst))
-        return call;
+        return statement;
       // AIC executes this task, while its UB destination is owned by p.
       ICHECK_EQ(copy->dual_dst_ctl, 0);
+      Map<String, ObjectRef> annotations = call->annotations;
       PrimExpr target = Integer(p_);
       if (auto explicit_sid = annotations.Get("sub_blockid"))
         target = Downcast<PrimExpr>(explicit_sid.value());
-      // Routing guards the entire atomic task, so its copies must agree on
-      // the destination instead of silently intersecting different targets.
+      // Keep a single routing target for each projected atomic task.
       if (copy_target_.defined()) {
         ICHECK(analyzer_.CanProveEqual(target, copy_target_.value()))
             << "Projected Fixpipe copies in one T.Task must use the same "
@@ -541,10 +553,23 @@ private:
                "separate T.Task scopes";
       }
       copy_target_ = target;
-      active_ = active_ && (target == p_);
       annotations.Set("sub_blockid", Integer(p_));
       call.CopyOnWrite()->annotations = annotations;
-      return call;
+      statement.CopyOnWrite()->value = call;
+
+      PrimExpr condition = analyzer_.Simplify(target == p_);
+      bool task_local = false;
+      PostOrderVisit(condition, [&](const ObjectRef &node) {
+        if (const auto *var = node.as<VarNode>())
+          task_local |= local_vars_.count(ffi::GetRef<Var>(var)) != 0;
+        task_local |= node.as<BufferLoadNode>() != nullptr;
+      });
+      // Task-local definitions must dominate the route test. Mutable loads
+      // also stay at the copy site so earlier task writes remain visible.
+      if (task_local)
+        return IfThenElse(condition, statement, std::nullopt, op->span);
+      active_ = active_ && condition;
+      return statement;
     }
 
   public:
@@ -554,6 +579,7 @@ private:
     SubcoreProjector *owner_;
     int p_;
     int conditional_depth_;
+    VarSet local_vars_;
     Optional<PrimExpr> copy_target_;
     arith::Analyzer analyzer_;
   };

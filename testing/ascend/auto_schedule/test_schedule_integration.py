@@ -298,7 +298,8 @@ def test_subcore_fixpipe_preserves_unit_flag_lifetime(rows, dual):
 
 
 @tilelang.testing.requires_ascend
-def test_subcore_loops_can_have_different_extents():
+@pytest.mark.parametrize("loop_kind", ["pipelined", "while"])
+def test_subcore_loops_can_have_different_extents(loop_kind):
     import torch
 
     @T.prim_func
@@ -306,14 +307,23 @@ def test_subcore_loops_can_have_different_extents():
         with T.MixedKernel(1) as (_, sid):
             ub = T.alloc_shared((64,), "float32")
             T.annotate_buffer_versions({ub: (2, "counter")})
-            for i in T.Pipelined(sid + 2, num_stages=2):
-                T.copy(A[sid, i, :], ub)
-                T.copy(ub, C[sid, i, :])
+            if loop_kind == "while":
+                i = T.alloc_var("int32", init=0)
+                while i < sid + 2:
+                    T.copy(A[sid, i, :], ub)
+                    T.copy(ub, C[sid, i, :])
+                    i += 1
+            else:
+                for i in T.Pipelined(sid + 2, num_stages=2):
+                    T.copy(A[sid, i, :], ub)
+                    T.copy(ub, C[sid, i, :])
 
     a = torch.randn(2, 3, 64).npu()
-    output = tilelang.compile(main, target="ascend", out_idx=-1)(a).cpu()
-    torch.testing.assert_close(output[0, :2], a.cpu()[0, :2])
-    torch.testing.assert_close(output[1], a.cpu()[1])
+    output = torch.full_like(a, -1)
+    tilelang.compile(main, target="ascend")(a, output)
+    expected = a.cpu()
+    expected[0, 2] = -1
+    torch.testing.assert_close(output.cpu(), expected)
 
 
 def test_subcore_mutable_scalar_is_replicated_with_its_guard():

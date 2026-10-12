@@ -1,6 +1,7 @@
 """Core assignment follows storage access and scalar availability."""
 
 import pytest
+import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
 from tvm import tirx
@@ -231,6 +232,55 @@ def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets):
         assert len(projected) == len(copies)
         assert int(task.node["core_mask"]) == 2
         assert {int(call.annotations["sub_blockid"]) for call in projected} == {targets[0]}
+
+
+@pytest.mark.parametrize("route_kind", ["bind", "load", "loop-var"])
+def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
+    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
+    routes = tirx.decl_buffer((1,), "int32", name="routes")
+    sid, route = tirx.Var("sid", "int32"), tirx.Var("route", "int32")
+    state = tirx.decl_buffer((1,), "int32", name="state", scope="local.var")
+    target = state[0] if route_kind == "load" else route
+    body = copy(accum, ub, annotations={"sub_blockid": target})
+    if route_kind == "bind":
+        body = seq(tirx.Bind(route, routes[0] % 2), body)
+    elif route_kind == "load":
+        body = seq(tirx.BufferStore(state, routes[0] % 2, [0]), body)
+    elif route_kind == "loop-var":
+        body = tirx.For(route, 0, 2, tirx.ForKind.SERIAL, body)
+    before = kernel(unit(body, core=0), buffers=[accum, ub] + ([state] if route_kind == "load" else []), params=[routes])
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    after = transform.AssignCore()(before)
+    assert not tirx.analysis.undefined_vars(after["main"].body, after["main"].params)
+    tasks = _tasks(after)
+    assert len(tasks) == 2
+    for task in tasks:
+        (branch,) = nodes(task.body, tirx.IfThenElse)
+        (operation,) = calls(branch.then_case, "tl.tileop.ascend_copy")
+        if route_kind == "bind":
+            expected = nodes(task.body, tirx.Bind)[0].var
+        elif route_kind == "loop-var":
+            expected = nodes(task.body, tirx.For)[0].loop_var
+        else:
+            expected = nodes(task.body, tirx.BufferStore)[0].buffer[0]
+        tvm.ir.assert_structural_equal(branch.condition, expected == int(operation.annotations["sub_blockid"]))
+
+
+def test_projected_loop_break_only_requires_its_own_subcore():
+    src = tirx.decl_buffer((16,), "float32", name="src")
+    buffers = [tirx.decl_buffer((16,), "float32", name=f"ub{sid}", scope="shared.dyn") for sid in range(2)]
+    i = tirx.Var("i", "int32")
+    body = []
+    for sid, core in enumerate((1, 4)):
+        marker = tirx.AttrStmt({"core_mask": core | 2, "subcore": sid}, "tl.ascend_task", 1, tirx.Evaluate(T.loop_break()))
+        body.extend((unit(marker, core=None, guard=i >= sid + 1), unit(copy(src, buffers[sid]), core=core)))
+    before = kernel(unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, seq(*body)), core=None), buffers=buffers, params=[src])
+    after = transform.ResolveCore()(before)
+    exits = [task for task in _tasks(after) if calls(task, "tl.loop_break")]
+    assert len(exits) == 2
+    assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in exits} == {0: 1, 1: 4}
 
 
 @pytest.mark.parametrize("steps, exclusive, expected", [(1, True, 3), (1, False, 0), (2, True, 0)])
