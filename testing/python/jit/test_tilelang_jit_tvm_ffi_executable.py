@@ -242,3 +242,27 @@ def test_manual_out_idx_is_exposed_to_tvm_ffi_lowering_without_mutating_source()
 
     with pytest.raises(ValueError, match="does not match"):
         prepare_tvm_ffi_callee_allocated_outputs(attributed, [0])
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
+def test_mir_host_clz_native_reload(dtype, tmp_path):
+    build = tvm.ffi.get_global_func("target.build.tilelang_mir", allow_missing=True)
+    if build is None:
+        pytest.skip("MIR host compiler is not built")
+    params = [tirx.Var(name, ty) for name, ty in [("self", "handle"), ("args", "handle"), ("n", "int32"), ("ret", "handle")]]
+    value = tirx.Cast(dtype, tirx.tvm_struct_get(params[1], 0, 15, "int64"))
+    body = tirx.SeqStmt(
+        [
+            tirx.Evaluate(tirx.tvm_struct_set(params[3], 0, 13, 1)),
+            tirx.Evaluate(tirx.tvm_struct_set(params[3], 0, 15, tirx.Cast("int64", tirx.clz(value)))),
+        ]
+    )
+    func = tirx.PrimFunc(params, body).with_attr("global_symbol", "__tvm_ffi_main").with_attr("tirx.is_entry_func", True)
+    module = build(tvm.IRModule({"main": func}), tvm.target.Target("mir"))
+    path = tmp_path / "clz.tlm"
+    path.write_bytes(tvm.ffi.get_global_func("tilelang.ModuleSerialize")(module))
+    loaded = tvm.runtime.load_module(str(path))
+    bits = int(dtype[-2:])
+    for value in [0, -1, -(1 << 63)] + [1 << b for b in range(63)]:
+        expected = bits - (value & ((1 << bits) - 1)).bit_length()
+        assert module.main(value) == loaded.main(value) == expected

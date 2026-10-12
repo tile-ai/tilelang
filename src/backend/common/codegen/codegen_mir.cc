@@ -688,6 +688,15 @@ private:
       return MIR_new_uint_op(
           ctx_, (uint64_t(Downcast<IntImm>(args[1])->value) << 32) |
                     uint64_t(Downcast<IntImm>(args[0])->value));
+    static const tvm::Op clz = tvm::Op::Get("tirx.clz");
+    if (op->op.same_as(clz)) {
+      DataType dtype = args[0].dtype();
+      ICHECK((dtype.is_int() || dtype.is_uint()) && dtype.is_scalar() &&
+             (dtype.bits() == 32 || dtype.bits() == 64))
+          << "MIR clz requires a 32- or 64-bit integer, got " << dtype;
+      return Op(dtype.bits() == 32 ? MIR_CLZS : MIR_CLZ, op->dtype,
+                {VisitExpr(args[0])});
+    }
     if (op->op.same_as(builtin::bitwise_not()))
       return Narrow(Op(MIR_XOR, op->dtype, {VisitExpr(args[0]), Int(-1)}),
                     op->dtype);
