@@ -92,6 +92,27 @@ def make_ascend_l0c_layout(buffer: BufferLikeType):
     return _ffi_api.make_ascend_l0c_layout(buf)
 
 
+def make_ascend_ub_nz_layout(buffer: BufferLikeType):
+    """Declare the UB NZ format produced by an L0C-to-UB copy.
+
+    Use with ``T.annotate_layout({ub: make_ascend_ub_nz_layout(ub)})``.
+    ``T.copy`` and ``T.dual_copy`` then preserve NZ instead of converting to
+    ND. Logical ``[..., m, n]`` maps to
+    ``[..., n // 16, m // 16, m % 16, n % 16]``. Unlike the L1 NZ layout,
+    the column block has 16 elements even for float32.
+
+    Declare any padding in the buffer shape; copy regions retain the
+    allocation's physical panel pitch. NZ copies require whole 16-column
+    panels. Ordinary indexing uses logical coordinates; raw SIMD pointers
+    still access consecutive physical elements.
+    """
+    buf, _, _ = _get_buffer_info(buffer)
+    if buf.scope() not in ("shared", "shared.dyn"):
+        raise ValueError("make_ascend_ub_nz_layout requires a UB buffer")
+    # Fixpipe preserves the accumulator's 16x16 ordering in UB.
+    return _ffi_api.make_ascend_l0c_layout(buf)
+
+
 def make_ascend_sf_layout(buffer: BufferLikeType):
     """
     Create an Ascend SF layout for MX scale-factor L1 buffers.
