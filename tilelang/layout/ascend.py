@@ -18,16 +18,25 @@ class _AscendFractalLayout(Layout):
 
 
 def make_ascend_nz_layout(buffer: BufferLikeType):
-    """
-    Create an Ascend NZ (zN fractal) layout for a Cube operand buffer.
+    """Create the Ascend NZ layout appropriate for the buffer's scope.
 
-    A logical ``[.., rows, cols]`` tile maps to physical
-    ``[.., rows / 16, cols / C0, 16, C0]`` -- a grid of 16xC0 fractals -- where
-    ``C0 = 32 bytes / element_size`` is the Cube unit's fractal width and the
-    forward map is ``(.., r, c) -> [.., r / 16, c / C0, r % 16, c % C0]``.
+    Logical ``[..., m, n]`` maps to
+    ``[..., n // C0, m // 16, m % 16, n % C0]``. L0C and UB
+    (``shared``/``shared.dyn``) use the fixed 16-column accumulator format.
+    Other scopes use the Cube input format, with
+    ``C0 = 32 bytes / element_size``.
+
+    With ``T.annotate_layout({ub: make_ascend_nz_layout(ub)})``, L0C-to-UB
+    ``T.copy`` and ``T.dual_copy`` preserve NZ. Declare padding in the UB
+    shape; copy regions retain the allocation's physical panel pitch and
+    must cover whole 16-column panels. Buffer indices remain logical;
+    SIMD pointer increments access consecutive physical elements.
+
+    For compact UB packing before UB-to-L1 copies, use
+    :func:`make_ascend_compact_nz_layout` explicitly.
 
     Args:
-        buffer: BufferLikeType (rank >= 2, constant last-2 dims)
+        buffer: BufferLikeType (rank >= 2).
 
     Returns:
         Layout: The NZ fractal layout for the buffer.
@@ -89,27 +98,6 @@ def make_ascend_l0c_layout(buffer: BufferLikeType):
     is ``(.., m, n) -> [.., n / 16, m / 16, m % 16, n % 16]``.
     """
     buf, _, _ = _get_buffer_info(buffer)
-    return _ffi_api.make_ascend_l0c_layout(buf)
-
-
-def make_ascend_ub_nz_layout(buffer: BufferLikeType):
-    """Declare the UB NZ format produced by an L0C-to-UB copy.
-
-    Use with ``T.annotate_layout({ub: make_ascend_ub_nz_layout(ub)})``.
-    ``T.copy`` and ``T.dual_copy`` then preserve NZ instead of converting to
-    ND. Logical ``[..., m, n]`` maps to
-    ``[..., n // 16, m // 16, m % 16, n % 16]``. Unlike the L1 NZ layout,
-    the column block has 16 elements even for float32.
-
-    Declare any padding in the buffer shape; copy regions retain the
-    allocation's physical panel pitch. NZ copies require whole 16-column
-    panels. Ordinary indexing uses logical coordinates; raw SIMD pointers
-    still access consecutive physical elements.
-    """
-    buf, _, _ = _get_buffer_info(buffer)
-    if buf.scope() not in ("shared", "shared.dyn"):
-        raise ValueError("make_ascend_ub_nz_layout requires a UB buffer")
-    # Fixpipe preserves the accumulator's 16x16 ordering in UB.
     return _ffi_api.make_ascend_l0c_layout(buf)
 
 

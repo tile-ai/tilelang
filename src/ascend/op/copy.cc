@@ -601,7 +601,7 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                         analyzer->CanProveEqual(dst_info.c0, 16),
                     ValueError)
           << "Ascend NZ L0C->UB requires 16-column NZ panels on "
-          << op.dst->name << "; use make_ascend_ub_nz_layout.";
+          << op.dst->name << "; use make_ascend_nz_layout.";
       if (!op.dst->strides.empty()) {
         PrimExpr stride = I(1);
         for (int i = static_cast<int>(op.dst->shape.size()) - 1; i >= 0; --i) {

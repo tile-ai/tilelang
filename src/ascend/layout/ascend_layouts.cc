@@ -36,8 +36,8 @@ static Layout ExpandLayout2D(const Layout &base, const Buffer &buffer) {
 // ND2NZ convention where the contiguous axis (cols) is grouped by C0 and is the
 // outer physical major. Within a fractal the row lane remains stride C0 and the
 // column lane remains stride 1. MajorK means cols is the reduce-K axis; MajorMN
-// means cols is the output M/N axis. The legacy NZ API remains an alias of
-// MajorK while the frontend migrates to explicit major names.
+// means cols is the output M/N axis. The NZ API selects this layout for Cube
+// inputs and the fixed accumulator layout for L0C and UB Fixpipe output.
 static constexpr int kAscendRowFractal = 16;
 
 namespace {
@@ -196,6 +196,10 @@ Layout MakeAscendMajorMNLayout(const Buffer &buffer, int k_align) {
 }
 
 Layout MakeAscendNZLayout(const Buffer &buffer) {
+  ICHECK(buffer.defined()) << "NZ layout expects a defined buffer";
+  const String scope = buffer.scope();
+  if (scope == "shared" || scope == "shared.dyn" || scope == "shared.l0c")
+    return MakeAscendL0CLayout(buffer);
   return MakeAscendMajorKLayout(buffer);
 }
 
