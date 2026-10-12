@@ -156,9 +156,11 @@ def ptx_mma_block_scale(
 ):
     """TVM intrinsic for SM120-family warp-level block-scaled MMA.
 
-    Supports ``m16n8k64 kind::mxf4nvf4 scale_vec::4X`` (E2M1, UE4M3) and
+    Supports ``m16n8k64 kind::mxf4nvf4 scale_vec::4X`` (E2M1, UE4M3),
+    ``m16n8k64 kind::mxf4nvf4 scale_vec::2X`` (E2M1, UE8M0), and
     ``m16n8k32 kind::mxf8f6f4 scale_vec::1X`` (E4M3/E5M2/E2M1 operands, UE8M0).
-    The byte selectors pick the scale byte for ``scale_vec::1X``.
+    The byte selectors pick one scale byte for ``scale_vec::1X`` or a pair
+    of scale bytes for ``scale_vec::2X``.
     """
 
     def _selector_value(value):

@@ -124,6 +124,7 @@ def _make_mxfp8_matmul_kernel(M, N, K, block_K=128, fragment_a=False, in_dtype=T
     return main
 
 
+@tilelang.testing.requires_cuda(support_required="compile-only")
 @pytest.mark.parametrize("arch", ["sm_120a", "sm_121a"])
 def test_mxf8f6f4_codegen(arch):
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
@@ -136,6 +137,7 @@ def test_mxf8f6f4_codegen(arch):
     assert "SM120MmaBlockScaledKind::kMxf4nvf4" not in src
 
 
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_mxf8f6f4_fp4_operand_codegen():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_121a"})
     with target:
@@ -145,12 +147,14 @@ def test_mxf8f6f4_fp4_operand_codegen():
     assert "tl::SM120MmaOperandType::kE4M3, tl::SM120MmaOperandType::kE2M1" in src
 
 
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_mxf8f6f4_rejects_fragment_a():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_121a"})
     with target, pytest.raises(Exception, match="mxf8f6f4 block-scaled GEMM currently requires A in shared memory"):
         tilelang.lower(_make_mxfp8_matmul_kernel(64, 64, 128, fragment_a=True), target=target, enable_device_compile=False)
 
 
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_mxf8f6f4_rejects_compact_kmajor_scales():
     @T.prim_func
     def main(O: T.Tensor((64, 64), T.float32)):

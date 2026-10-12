@@ -46,7 +46,7 @@ def test_mxfp4_emitter_selects_scale_halves():
     assert [emitter._scale_word_k(0, ki, 32) for ki in range(4)] == [0, 0, 1, 1]
 
 
-def _make_mxfp4_matmul_kernel(M, N, K):
+def _make_mxfp4_matmul_kernel(M, N, K, sf_layout="rowmajor"):
     words = K // 128
 
     @T.prim_func
@@ -83,18 +83,31 @@ def _make_mxfp4_matmul_kernel(M, N, K):
                     k_start=0,
                     sf_a_granularity_k=32,
                     sf_b_granularity_k=32,
+                    sf_layout=sf_layout,
                 )
             T.copy(C_local, C[by * 64, bx * 64])
 
     return main
 
 
+@tilelang.testing.requires_cuda(support_required="compile-only")
 @pytest.mark.parametrize("arch", ["sm_120a", "sm_121a"])
 def test_mxfp4_codegen(arch):
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
     with target:
         result = tilelang.lower(_make_mxfp4_matmul_kernel(64, 64, 256), target=target, enable_device_compile=False)
     assert "tl::SM120MmaBlockScaledKind::kMxf4nvf4, 2, tl::SM120MmaScaleType::kUE8M0" in result.kernel_source
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+def test_mxfp4_rejects_compact_kmajor_scales():
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_121a"})
+    with target, pytest.raises(Exception, match="MXFP4 block-scaled GEMM currently requires sf_layout='rowmajor'"):
+        tilelang.lower(
+            _make_mxfp4_matmul_kernel(64, 64, 128, sf_layout="blockscaled_chunk_kmajor"),
+            target=target,
+            enable_device_compile=False,
+        )
 
 
 def _random_mxfp4(rows, K, seed):
