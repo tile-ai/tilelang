@@ -797,6 +797,14 @@ public:
   }
 
   // BufferLoad
+  /*!
+   * \brief Vectorize a load, or scalarize a non-local gather.
+   *
+   * A vector index that is not a unit-stride Ramp, on a non-local and
+   * non-fragment load, is a gather and sets need_scalarize_. Ascend MergeUB
+   * Broadcast is a shared alias, not a hardware broadcast, so packing that
+   * gather trips AscendThreadSync EvalSet's eval_vec_ ICHECK.
+   */
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = GetRef<BufferLoad>(op);
 

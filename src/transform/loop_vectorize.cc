@@ -998,6 +998,14 @@ private:
     return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
   }
 
+  /*!
+   * \brief Choose the vector width for one buffer access.
+   *
+   * Simplify the element offset before invariance, independence, and
+   * broadcast checks. That folds Let-bound remat indices such as
+   * idx_i = idx_ub[i], so the gather's loop dependence stays visible.
+   * An unfolded Var looks loop-independent and is packed as a broadcast.
+   */
   VectorSizeConstraint ComputeBufferVectorSize(const Array<PrimExpr> &indices,
                                                const Buffer &buffer,
                                                bool is_store) {
