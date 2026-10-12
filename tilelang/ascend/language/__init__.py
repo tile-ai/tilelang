@@ -66,6 +66,9 @@ from .frame import Cube, CubeFrame, SimdVF, SimdVFFrame, SimtVF, SimtVFFrame, Ve
 
 from . import simd as simd  # noqa: F401 (exposed as T.simd.*)
 
+# Scalar reciprocal sqrt is a frontend composition of common math ops.
+from .math import rsqrt  # noqa: F401
+
 # Ascend owns its debug surface: device_assert lowers through the toolkit's
 # assert() macro, print gates by the NPU execution model (no CUDA-style
 # single-thread condition), and rng_init derives its default sequence id from
@@ -119,6 +122,7 @@ _ASCEND_API_ALL = (
     "rng_init",
     "rng_rand",
     "rng_rand_float",
+    "rsqrt",
     "simd",
     "unroll",
 )
