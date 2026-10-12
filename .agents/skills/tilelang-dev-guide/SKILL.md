@@ -21,21 +21,6 @@ PR preparation. Use only the guidance relevant to the task.
 Read both for C++ behavior changes. Test-only tasks do not need the C++ guidance
 unless they change C++ code.
 
-## Design Tests Before Writing Them
-
-- Find the closest existing tests and the concrete behavior their assertions do
-  not protect. Check that their target, pass, and fixture configurations reach
-  the affected path; a similar file name or a passing run is not sufficient.
-- Use the guide to choose existing coverage, a minimal extension, or a focused
-  new test. Reuse suitable kernel and verification helpers without forcing
-  unrelated behaviors into one test.
-- Choose a test layer that actually exposes the failure. Preserve runtime
-  checks for execution-dependent failures and apply the required backend or
-  device constraints.
-- Consider parameter expansion and repeated compilation or execution inside
-  tests, not just file or function counts. Preserve cases that protect distinct
-  behavior or interactions.
-
 ## Validate Within the Requested Scope
 
 When implementing a behavior change or modifying tests, run focused tests and
