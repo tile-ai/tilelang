@@ -1,6 +1,8 @@
 """Reduce operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
+
+import warnings
 from typing import Literal
 from tilelang._typing import BufferLikeType
 from tvm import tir
@@ -79,6 +81,15 @@ def reduce(buffer: BufferLikeType, out: BufferLikeType, reduce_type: ReduceKind,
         )
         is_sunmmio_target = target is not None and target_is_sunmmio(target)
         if is_sunmmio_target or is_sunmmio_scope:
+            if len(buffer_shape) == 2 and dim == 1 and len(out_shape) == 2:
+                warnings.warn(
+                    "Sunmmio 2D reduction with a trailing unit-dimension output (N, 1) "
+                    "may cause layout issues and prevent the kernel from compiling; "
+                    "prefer a rank-1 output (N,). "
+                    f"Got input shape {buffer_shape}, dim={dim}, output shape {out_shape}.",
+                    UserWarning,
+                    stacklevel=5,
+                )
             tir.call_intrin(
                 "handle",
                 tir.op.Op.get(_REDUCE_OP_KEY),

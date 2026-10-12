@@ -229,7 +229,8 @@ std::string SerializePlannerState(const PlannerState &state) {
   os << SerializeDynamicBitset(state.scheduled_mask);
   for (const OpenScopeFrame &frame : state.open_scopes) {
     os << '[' << JoinAxes(frame.shell_axes) << '@'
-       << JoinExtents(frame.shell_extents) << "|P:";
+       << JoinExtents(frame.shell_extents) << '#' << frame.execution_rank
+       << "|P:";
     for (int edge_index : frame.pending_edge_indices) {
       os << edge_index << ',';
     }
@@ -266,10 +267,12 @@ bool PathMatchesExecutionPrefix(
     return false;
   }
   StructuralEqual equal;
+  int region_execution_rank = static_cast<int>(region_execution_axes.size());
   for (int depth = 1; depth <= close_to_depth; ++depth) {
     const OpenScopeFrame &frame = open_scopes[depth - 1];
     if (frame.shell_axes.size() != static_cast<size_t>(depth) ||
-        frame.shell_extents.size() != static_cast<size_t>(depth)) {
+        frame.shell_extents.size() != static_cast<size_t>(depth) ||
+        frame.execution_rank != region_execution_rank) {
       return false;
     }
     if (frame.shell_axes[depth - 1] != region_execution_axes[depth - 1]) {
@@ -434,10 +437,13 @@ TransitionResult ApplyAction(const WindowPlannerInput &input,
   // `close_to_depth` shells from the current state, then open any deeper
   // prefixes needed to attach this region at `open_to_depth`.
   result.next_state.open_scopes.resize(close_to_depth);
+  int execution_rank =
+      static_cast<int>(region.logical_execution_axis_keys.size());
   for (int depth = close_to_depth + 1; depth <= open_to_depth; ++depth) {
     result.next_state.open_scopes.push_back(
         {TakeExecutionAxisPrefix(region.logical_execution_axis_keys, depth),
          TakeExecutionExtentPrefix(region.execution_loop_extents, depth),
+         execution_rank,
          {},
          {}});
   }

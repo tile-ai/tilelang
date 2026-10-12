@@ -316,9 +316,10 @@ SelectScalarTilePattern(const tir::Buffer &buffer, int tile_rank,
                         arith::Analyzer *analyzer, std::string *last_reason) {
   std::vector<tl::TrailingTilePattern> legal_patterns;
   for (const tl::TrailingTilePattern &pattern :
-       tl::EnumerateInferredTrailingTilePatterns(buffer, tile_rank, layout_map,
-                                                 config, analyzer,
-                                                 tl::AlignmentMode::kStrict)) {
+       tl::EnumerateInferredTrailingTilePatterns(
+           buffer, tile_rank, layout_map, config, analyzer,
+           {tl::TileExtentPolicy::kRegisterBounded,
+            tl::AlignmentMode::kStrict})) {
     if (static_cast<int>(pattern.tile_shape.size()) != tile_rank) {
       continue;
     }
@@ -347,8 +348,8 @@ SelectScalarTilePattern(const tir::Buffer &buffer, int tile_rank,
   std::sort(legal_patterns.begin(), legal_patterns.end(),
             [](const tl::TrailingTilePattern &lhs,
                const tl::TrailingTilePattern &rhs) {
-              int lhs_elems = tl::TileElements(lhs.tile_shape);
-              int rhs_elems = tl::TileElements(rhs.tile_shape);
+              int64_t lhs_elems = tl::TileElements(lhs.tile_shape);
+              int64_t rhs_elems = tl::TileElements(rhs.tile_shape);
               if (lhs_elems != rhs_elems) {
                 return lhs_elems > rhs_elems;
               }
@@ -2494,22 +2495,52 @@ const char *CodeGenTileLangSunMMIO::CallBucketName(CallBucket bucket) const {
   return "unsupported";
 }
 
-SunMMIOValue
-CodeGenTileLangSunMMIO::EmitRegionCall(const tvm::PrimExpr &region_expr,
-                                       int64_t byte_offset) {
+SunMMIOValue CodeGenTileLangSunMMIO::EmitRegionCall(
+    const tvm::PrimExpr &region_expr, int64_t byte_offset,
+    bool use_layout_covered_shape, bool preserve_unit_dims) {
   BufferRegion region = NormalizeRegionTracked(region_expr);
   const BufferBinding &binding = LookupBuffer(region->buffer);
+  std::vector<int64_t> effective_extents;
+  if (use_layout_covered_shape) {
+    std::vector<int64_t> logical_shape =
+        ExtractStaticShape(binding.buffer_type);
+    effective_extents = logical_shape;
+    if (!binding.buffer_type.layout_hshape.empty() &&
+        !binding.buffer_type.layout_dim_levels.empty()) {
+      std::vector<int64_t> layout_shape = ExtractStaticPrimExprs(
+          binding.buffer_type.layout_hshape, "layout shape");
+      ICHECK_EQ(binding.buffer_type.layout_dim_levels.size(),
+                logical_shape.size());
+      size_t mode = 0;
+      for (size_t dim = 0; dim < logical_shape.size(); ++dim) {
+        int levels = binding.buffer_type.layout_dim_levels[dim];
+        ICHECK_GT(levels, 0);
+        int64_t covered_extent = 1;
+        for (int level = 0; level < levels; ++level) {
+          ICHECK_LT(mode, layout_shape.size());
+          covered_extent *= layout_shape[mode++];
+        }
+        effective_extents[dim] = covered_extent;
+      }
+      ICHECK_EQ(mode, layout_shape.size());
+    }
+    ICHECK_EQ(effective_extents.size(), region->region.size());
+  }
   std::vector<SunMMIOValue> mins;
   std::vector<int64_t> extents;
   mins.reserve(region->region.size());
   extents.reserve(region->region.size());
   arith::Analyzer analyzer;
-  for (const Range &range : region->region) {
+  for (size_t dim = 0; dim < region->region.size(); ++dim) {
+    const Range &range = region->region[dim];
     const auto *extent_imm = range->extent.as<IntImmNode>();
     ICHECK(extent_imm) << "tl.tileop.region extent must be IntImm";
     MarkVisitedExprRoot(range->extent);
-    extents.push_back(static_cast<int64_t>(extent_imm->value));
-    PrimExpr min = floordiv(range->min, range->extent);
+    int64_t extent = use_layout_covered_shape
+                         ? effective_extents[dim]
+                         : static_cast<int64_t>(extent_imm->value);
+    extents.push_back(extent);
+    PrimExpr min = floordiv(range->min, Integer(extent));
     min = analyzer.Simplify(min);
     MarkVisitedExprTree(range->min);
     mins.push_back(EvalExpr(min));
@@ -2517,7 +2548,8 @@ CodeGenTileLangSunMMIO::EmitRegionCall(const tvm::PrimExpr &region_expr,
   SunMMIOType ret_ty = MapType(region_expr.dtype());
   std::string result_name = region_expr.dtype().is_void() ? "" : NewValueName();
   return builder_->RegionCall(result_name, binding.handle, mins, extents,
-                              region_expr.dtype(), ret_ty, byte_offset);
+                              region_expr.dtype(), ret_ty, byte_offset,
+                              preserve_unit_dims);
 }
 
 SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
@@ -2630,19 +2662,26 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
     struct LayoutTransformRegionInfo {
       int rank{0};
       int tiled_dims{0};
+      bool is_full_region{true};
     };
     auto get_region_info =
         [](const PrimExpr &region_expr) {
           BufferRegion region = tl::NormalizeToBufferRegion(region_expr);
           LayoutTransformRegionInfo info;
           info.rank = static_cast<int>(region->region.size());
-          for (const Range &range : region->region) {
+          for (size_t dim = 0; dim < region->region.size(); ++dim) {
+            const Range &range = region->region[dim];
             const auto *extent_imm = range->extent.as<IntImmNode>();
             ICHECK(extent_imm)
                 << "tl.sunmmio_layout_transform region extent must be IntImm";
             if (extent_imm->value != 1) {
               ++info.tiled_dims;
             }
+            const auto *min_imm = range->min.as<IntImmNode>();
+            const auto *shape_imm = region->buffer->shape[dim].as<IntImmNode>();
+            info.is_full_region = info.is_full_region && min_imm &&
+                                  min_imm->value == 0 && shape_imm &&
+                                  shape_imm->value == extent_imm->value;
           }
           return info;
         };
@@ -2653,19 +2692,31 @@ SunMMIOValue CodeGenTileLangSunMMIO::EmitCall(const tir::CallNode *op) {
       return info.rank == 1 && info.tiled_dims == 0;
     };
     bool is_2d_transform = src_info.tiled_dims == 2 && dst_info.tiled_dims == 2;
+    bool is_unit_axis_2d_transform =
+        src_info.rank == 2 && dst_info.rank == 2 && src_info.tiled_dims == 1 &&
+        dst_info.tiled_dims == 1 && src_info.is_full_region &&
+        dst_info.is_full_region;
     bool is_singleton_1d_transform =
         is_singleton_1d_region(src_info) && is_singleton_1d_region(dst_info);
-    ICHECK(is_2d_transform || is_singleton_1d_transform)
+    ICHECK(is_2d_transform || is_unit_axis_2d_transform ||
+           is_singleton_1d_transform)
         << "tl.sunmmio_layout_transform expects source and destination "
-           "regions to both have exactly 2 tiled dims, or to both be rank-1 "
-           "singleton regions; got source rank="
+           "regions to both have exactly 2 tiled dims, to be full rank-2 "
+           "unit-axis regions, or to both be rank-1 singleton regions; got "
+           "source rank="
         << src_info.rank << ", tiled dims=" << src_info.tiled_dims
         << ", destination rank=" << dst_info.rank
         << ", tiled dims=" << dst_info.tiled_dims;
 
     operands.reserve(2);
-    operands.push_back(EmitRegionCall(op->args[0]));
-    operands.push_back(EmitRegionCall(op->args[1]));
+    operands.push_back(
+        EmitRegionCall(op->args[0], /*byte_offset=*/0,
+                       /*use_layout_covered_shape=*/is_unit_axis_2d_transform,
+                       /*preserve_unit_dims=*/is_unit_axis_2d_transform));
+    operands.push_back(
+        EmitRegionCall(op->args[1], /*byte_offset=*/0,
+                       /*use_layout_covered_shape=*/is_unit_axis_2d_transform,
+                       /*preserve_unit_dims=*/is_unit_axis_2d_transform));
 
     ICHECK(TryConsumeSunmmioOdmaUnit(op->args[2], &attrs))
         << "tl.sunmmio_layout_transform expects third argument to be "

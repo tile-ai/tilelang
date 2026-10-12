@@ -80,11 +80,11 @@ def test_tiles_shape_predicate_is_projected_to_access_axes(tmp_path, monkeypatch
 
     tir_src = (tmp_path / log_subdir / "tiles_shape_predicate_projection_suvm.tir.log").read_text(encoding="utf-8")
 
-    assert "A_shared.vload([i * 4 + ki, j * 32 + kj], predicate=i * 4 + ki < 50 and j * 32 + kj < 50)" in tir_src
-    assert "B_shared.vload([i * 4 + ki], predicate=i * 4 + ki < 50)" in tir_src
-    assert "B_shared.vload([i * 4 + ki], predicate=i * 4 + ki < 50 and j * 32 + kj < 50)" not in tir_src
+    assert "A_shared.vload([i0 * 32 + ki, i1 * 32 + kj], predicate=i0 * 32 + ki < 50 and i1 * 32 + kj < 50)" in tir_src
+    assert "B_shared.vload([i0 * 32 + ki], predicate=i0 * 32 + ki < 50)" in tir_src
+    assert "B_shared.vload([i0 * 32 + ki], predicate=i0 * 32 + ki < 50 and i1 * 32 + kj < 50)" not in tir_src
 
-    assert "B_shared.vload([j * 32 + kj], predicate=j * 32 + kj < 60)" in tir_src
+    assert "B_shared.vload([i1 * 32 + kj], predicate=i1 * 32 + kj < 60)" in tir_src
 
 
 if __name__ == "__main__":

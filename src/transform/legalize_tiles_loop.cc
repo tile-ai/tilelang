@@ -505,6 +505,13 @@ private:
                "extract, or insert the logical tile. This may degrade "
                "performance.";
       }
+      if (active_tileview_plan_.requires_small_2d_carrier) {
+        LOG(WARNING)
+            << "T.Tiles domain " << domain
+            << " uses a logical small 2D tile carried by one register-sized "
+               "RSRAM tile. Codegen will extract and insert the logical "
+               "slice through the carrier.";
+      }
       if (active_tileview_plan_.execution_domain_axes.size() < domain.size()) {
         LOG(WARNING) << "T.Tiles domain " << domain
                      << " cannot infer a full-rank TileView and is falling "

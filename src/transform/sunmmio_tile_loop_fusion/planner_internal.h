@@ -170,6 +170,9 @@ struct ResidentValueState {
 struct OpenScopeFrame {
   std::vector<std::string> shell_axes;
   Array<PrimExpr> shell_extents;
+  // Complete execution rank of the region that opened this shell. A shared
+  // prefix is only codegen-compatible when attached regions have equal rank.
+  int execution_rank{0};
   std::vector<ResidentValueState> residents;
   std::vector<int> pending_edge_indices;
 };

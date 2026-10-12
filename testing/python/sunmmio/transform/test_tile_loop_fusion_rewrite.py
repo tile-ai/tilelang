@@ -316,6 +316,26 @@ def _lowered_2d_tile_region(dst, expr, *, block_m=32, block_n=32, tile_size=(8, 
     ).strip()
 
 
+def _lowered_1d_tile_region(dst, expr, *, length=64, tile_size=64):
+    outer = length // tile_size
+    return textwrap.dedent(
+        f"""
+        for i in T.serial(
+            {outer},
+            annotations={{
+                "tile.domain": [T.int32({length})],
+                "tile.execution_axis": T.int32(0),
+                "tile.execution_domain_axes": [T.int32(0)],
+                "tile.scope_entry": T.int32(1),
+                "tile.tile_size": [T.int32({tile_size})],
+            }},
+        ):
+            for ki in T.vectorized({tile_size}, annotations={{"tile.interior": T.int32(1), "tile.interior_axis": T.int32(0)}}):
+                {dst}[i * {tile_size} + ki] = {expr}
+        """
+    ).strip()
+
+
 def _lowered_row_reduction_region(src, dst, *, block_m=64, block_n=64, tile_size=(4, 32)):
     tile_m, tile_n = tile_size
     outer_m = block_m // tile_m
@@ -555,6 +575,25 @@ def incompatible_prefix_two_region_lowered_kernel(dtype="float16"):
         [
             _lowered_2d_tile_region("Tmp_shared", "A_shared[i * 8 + ki, j * 32 + kj]", tile_size=(8, 32)),
             _lowered_2d_tile_region("B_shared", "Tmp_shared[i * 4 + ki, j * 32 + kj]", tile_size=(4, 32)),
+        ],
+    )
+
+
+def mixed_rank_two_region_lowered_kernel(dtype="float32"):
+    return _make_manual_lowered_primfunc(
+        [
+            f'A_shared = T.alloc_buffer((64, 128), "{dtype}", scope="shared.rsram")',
+            f'B_shared = T.alloc_buffer((64,), "{dtype}", scope="shared.rsram")',
+        ],
+        [
+            _lowered_1d_tile_region("B_shared", f'T.Cast("{dtype}", 2)'),
+            _lowered_2d_tile_region(
+                "A_shared",
+                "A_shared[i * 64 + ki, j * 128 + kj] + B_shared[i * 64 + ki]",
+                block_m=64,
+                block_n=128,
+                tile_size=(64, 128),
+            ),
         ],
     )
 
@@ -925,6 +964,20 @@ def test_sunmmio_tile_loop_fusion_does_not_merge_incompatible_execution_prefixes
     assert [_single_write_name(loop) for loop in scope_loops] == ["Tmp_shared", "B_shared"]
     assert [[int(x) for x in _for_annotations(loop)["tile.tile_size"]] for loop in scope_loops] == [[8, 32], [4, 32]]
     assert [int(loop.extent) for loop in scope_loops] == [4, 8]
+
+
+def test_sunmmio_tile_loop_fusion_does_not_merge_different_execution_ranks():
+    mod = IRModule.from_expr(mixed_rank_two_region_lowered_kernel().with_attr("global_symbol", "main"))
+    mod = tl.transform.SunmmioTileLoopFusion()(mod)
+
+    scope_loops = _find_scope_entry_loops(_root_seq(mod))
+
+    assert len(scope_loops) == 2
+    assert [_single_write_name(loop) for loop in scope_loops] == ["B_shared", "A_shared"]
+    assert [[int(x) for x in _for_annotations(loop)["tile.tile_size"]] for loop in scope_loops] == [
+        [64],
+        [64, 128],
+    ]
 
 
 def test_sunmmio_tile_loop_fusion_does_not_cross_non_tile_statement():

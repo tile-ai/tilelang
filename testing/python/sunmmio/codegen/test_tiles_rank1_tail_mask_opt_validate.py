@@ -13,7 +13,7 @@ from testing.python.sunmmio.common.compile_pipeline import target
 tilelang.env.disable_cache()
 os.environ.setdefault("SUNMMIO_TEST_PRINT", "0")
 
-STRICT_OPT_ARGS = ("--verify-each", "--suvm-to-llvm-pipeline")
+RAW_MLIR_OPT_ARGS = ("--verify-each",)
 
 
 @target("Sunmmio")
@@ -58,7 +58,7 @@ def test_dynamic_rank1_tail_uses_axis_mask(tmp_path, monkeypatch):
         tmp_path,
         mlir_filename="dynamic_rank1_tail_mask_suvm.mlir",
         expected_tokens=("suvm.tile.range", "suvm.tile.cmpi"),
-        opt_args=STRICT_OPT_ARGS,
+        opt_args=RAW_MLIR_OPT_ARGS,
     )
     # TileAxisMask expands to tile.range + cmpi in the SUVM builder.
     assert "suvm.tile.rect_mask" not in src

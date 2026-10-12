@@ -10,7 +10,7 @@ import tilelang
 import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tilelang.layout import make_aligned_row_major, make_zz_layout
+from tilelang.layout import CuteLayout, make_aligned_row_major, make_zz_layout
 from tilelang.utils.target import SUNMMIO_TARGET_DESC
 from tvm import tir
 from tvm import IRModule
@@ -169,7 +169,7 @@ def test_infer_tileview_2d_no_annotation():
 
 
 def test_infer_tileview_2d_with_layout_annotation():
-    """Blockwise 2D pointwise access should choose the densest h x 32 tile."""
+    """Blockwise 2D pointwise access should use one full ZZ block."""
     M, N = 256, 128
 
     @T.prim_func
@@ -204,6 +204,175 @@ def test_infer_tileview_2d_with_layout_annotation():
     target = tvm.target.Target(SUNMMIO_TARGET_DESC)
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[0, 1])
+
+
+@pytest.mark.parametrize("dtype", ["float16", "float32"])
+def test_infer_tileview_layout_bounded_zz_uses_full_inner_block(dtype):
+    """Execution TileView uses one full ZZ block regardless of dtype."""
+    M, N = 128, 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(1, threads=128) as (bx,):
+            A_shared = T.alloc_shared((M, N), dtype)
+            B_shared = T.alloc_shared((M, N), dtype)
+
+            T.annotate_layout(
+                {
+                    A_shared: make_zz_layout(A_shared),
+                    B_shared: make_zz_layout(B_shared),
+                }
+            )
+
+            T.copy(A, A_shared)
+            for i, j in T.Tiles([M, N], parallel=True):
+                B_shared[i, j] = A_shared[i, j] + A_shared[i, j]
+            T.copy(B_shared, B)
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[0, 1])
+
+
+def test_infer_tileview_layout_bounded_rank1_uses_covered_extent_and_predicate():
+    """A padded row-major buffer tiles its covered extent and masks logical padding."""
+    N = 1000
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), "float16"),
+        B: T.Tensor((N,), "float16"),
+    ):
+        with T.Kernel(1, threads=128) as (bx,):
+            A_shared = T.alloc_shared((N,), "float16")
+            B_shared = T.alloc_shared((N,), "float16")
+
+            T.annotate_layout(
+                {
+                    A_shared: make_aligned_row_major((N,), "float16", align_bytes=64),
+                    B_shared: make_aligned_row_major((N,), "float16", align_bytes=64),
+                }
+            )
+
+            T.copy(A, A_shared)
+            for i in T.Tiles([N], parallel=True):
+                B_shared[i] = A_shared[i] + A_shared[i]
+            T.copy(B_shared, B)
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=[1024], expected_execution_domain_axes=[0])
+    stores = collect_stores(mod["main"], "B_shared")
+    assert stores, "Expected lowered B_shared stores"
+    assert all(store.predicate is not None for store in stores)
+    assert all("< 1000" in str(store.predicate) or "<1000" in str(store.predicate) for store in stores)
+    assert not collect_if_conditions(mod["main"]), "Every lane scope is a partial tile"
+
+
+def test_infer_tileview_layout_bounded_rowmajor_uses_full_2d_region():
+    """A dense aligned row-major execution region is one semantic tile."""
+    M, N = 8, 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), "float16"),
+        B: T.Tensor((M, N), "float16"),
+    ):
+        with T.Kernel(1, threads=128) as (bx,):
+            A_shared = T.alloc_shared((M, N), "float16")
+            B_shared = T.alloc_shared((M, N), "float16")
+
+            T.annotate_layout(
+                {
+                    A_shared: make_aligned_row_major((M, N), "float16", align_bytes=64),
+                    B_shared: make_aligned_row_major((M, N), "float16", align_bytes=64),
+                }
+            )
+
+            T.copy(A, A_shared)
+            for i, j in T.Tiles([M, N], parallel=True):
+                B_shared[i, j] = A_shared[i, j] + A_shared[i, j]
+            T.copy(B_shared, B)
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+    assert_scope_plan(mod, expected_tile_size=[8, 128], expected_execution_domain_axes=[0, 1])
+
+
+def test_infer_tileview_layout_bounded_rowmajor_uses_padded_2d_region():
+    """A 2D row-major TileView spans covered padding and masks logical width."""
+    M, N = 8, 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), "float16"),
+        B: T.Tensor((M, N), "float16"),
+    ):
+        with T.Kernel(1, threads=128) as (bx,):
+            A_shared = T.alloc_shared((M, N), "float16")
+            B_shared = T.alloc_shared((M, N), "float16")
+
+            T.annotate_layout(
+                {
+                    A_shared: make_aligned_row_major((M, N), "float16", align_bytes=1024),
+                    B_shared: make_aligned_row_major((M, N), "float16", align_bytes=1024),
+                }
+            )
+
+            T.copy(A, A_shared)
+            for i, j in T.Tiles([M, N], parallel=True):
+                B_shared[i, j] = A_shared[i, j] + A_shared[i, j]
+            T.copy(B_shared, B)
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=[8, 512], expected_execution_domain_axes=[0, 1])
+    stores = collect_stores(mod["main"], "B_shared")
+    assert stores, "Expected lowered B_shared stores"
+    assert all(store.predicate is not None for store in stores)
+    assert all("< 128" in str(store.predicate) or "<128" in str(store.predicate) for store in stores)
+    assert all("< 8" not in str(store.predicate) and "<8" not in str(store.predicate) for store in stores)
+    assert not collect_if_conditions(mod["main"]), "The only execution tile is width-partial"
+
+
+def test_infer_tileview_non_rowmajor_single_level_layout_stays_register_bounded():
+    """A single-level column-major layout must not enter row-major policy."""
+    M, N = 8, 128
+    column_major = CuteLayout(
+        [M, N],
+        [M, N],
+        [1, M],
+        [1, 1],
+    )._inner
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((M, N), "float16")
+            B_shared = T.alloc_shared((M, N), "float16")
+            T.annotate_layout({A_shared: column_major, B_shared: column_major})
+
+            for i, j in T.Tiles([M, N], parallel=True):
+                B_shared[i, j] = A_shared[i, j] + A_shared[i, j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
     assert_scope_plan(mod, expected_tile_size=[8, 32], expected_execution_domain_axes=[0, 1])
 
 
@@ -211,7 +380,7 @@ def test_infer_tileview_2d_with_layout_annotation():
 # Test 2: 1D T.Tiles without annotate_tileview
 # ---------------------------------------------------------
 def test_infer_tileview_1d_no_annotation():
-    """1D row-major fp32 buffers should fill the 4096-bit register."""
+    """Layout-inferred 1D row-major buffers use the full covered extent."""
     N = 1024
 
     @T.prim_func
@@ -234,7 +403,7 @@ def test_infer_tileview_1d_no_annotation():
     target = tvm.target.Target(SUNMMIO_TARGET_DESC)
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
-    assert_scope_plan(mod, expected_tile_size=[128], expected_execution_domain_axes=[0])
+    assert_scope_plan(mod, expected_tile_size=[1024], expected_execution_domain_axes=[0])
 
 
 def test_infer_rank1_tileview_from_2d_buffer_access():
@@ -292,15 +461,226 @@ def test_infer_rank1_tileview_from_2d_buffer_access_with_outer_loop_var():
     assert_scope_plan(mod, expected_tile_size=[32], expected_execution_domain_axes=[0])
 
 
+@pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
+def test_infer_complete_rank1_nondivisor_domain(dtype):
+    """Original rank-1 scopes may keep a complete non-divisor domain tile."""
+    storage_width = 64
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            src = T.alloc_shared((storage_width,), dtype, scope="shared.rsram")
+            dst = T.alloc_shared((storage_width,), dtype, scope="shared.rsram")
+            layout = make_aligned_row_major((storage_width,), dtype, align_bytes=64)
+            T.annotate_layout({src: layout, dst: layout})
+
+            for segment in T.serial(4):
+                for j in T.Tiles([14], parallel=True):
+                    dst[segment * 14 + j] = src[segment * 14 + j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=[14], expected_execution_domain_axes=[0])
+
+
+def test_fp16_nondivisor_rank1_keeps_legacy_plan():
+    """FP16 remains outside the cross-carrier aligned-1D bridge."""
+    storage_width = 64
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            src = T.alloc_shared((storage_width,), "float16", scope="shared.rsram")
+            dst = T.alloc_shared((storage_width,), "float16", scope="shared.rsram")
+            layout = make_aligned_row_major((storage_width,), "float16", align_bytes=64)
+            T.annotate_layout({src: layout, dst: layout})
+
+            for segment in T.serial(4):
+                for j in T.Tiles([14], parallel=True):
+                    dst[segment * 14 + j] = src[segment * 14 + j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=[2], expected_execution_domain_axes=[0])
+
+
+def test_zz_nondivisor_rank1_keeps_legacy_plan():
+    """Hierarchical layouts do not receive the flat-layout relaxation."""
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            src = T.alloc_shared((32, 64), "bfloat16", scope="shared.rsram")
+            dst = T.alloc_shared((32, 64), "bfloat16", scope="shared.rsram")
+            layout = make_zz_layout((32, 64), [0, 1], (32, 32))
+            T.annotate_layout({src: layout, dst: layout})
+
+            for segment in T.serial(4):
+                for j in T.Tiles([14], parallel=True):
+                    dst[0, segment * 14 + j] = src[0, segment * 14 + j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=[2], expected_execution_domain_axes=[0])
+
+
+def test_rank2_domain_does_not_enable_nondivisor_side_bridge():
+    """Rank reduction from an original 2D scope keeps the legacy search space."""
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            matrix = T.alloc_shared((32, 32), "bfloat16", scope="shared.rsram")
+            side = T.alloc_shared((28,), "bfloat16", scope="shared.rsram")
+            T.annotate_layout(
+                {
+                    matrix: make_zz_layout((32, 32), [0, 1], (32, 32)),
+                    side: make_aligned_row_major((28,), "bfloat16", align_bytes=64),
+                }
+            )
+
+            for i, j in T.Tiles([4, 14], parallel=True):
+                matrix[i, j] = matrix[i, j] + side[j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert all(tile_size != [4, 14] for tile_size, _ in collect_scope_plans(mod["main"]))
+
+
 # ---------------------------------------------------------
 # Test 3: Mixed-rank (1D + 2D) in same T.Tiles
 # ---------------------------------------------------------
 @pytest.mark.parametrize(
+    "dtype,expected_tile_size",
+    [
+        ("float16", [32, 32]),
+        ("bfloat16", [4, 4]),
+        ("float32", [4, 4]),
+    ],
+)
+def test_exact_small_2d_fallback_uses_domain_sized_carrier_plan(dtype, expected_tile_size):
+    """The motivating 4x4 domain avoids oversubscribing to the full ZZ block."""
+    matrix_shape = (64, 64)
+    vector_shape = (500,)
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(matrix_shape, dtype, scope="shared.rsram")
+            B_shared = T.alloc_shared(vector_shape, dtype, scope="shared.rsram")
+            T.annotate_layout(
+                {
+                    A_shared: make_zz_layout(matrix_shape, [0, 1], (32, 32)),
+                    B_shared: make_aligned_row_major(vector_shape, dtype, align_bytes=64),
+                }
+            )
+
+            for i, j in T.Tiles([4, 4], parallel=True):
+                A_shared[i, j] = A_shared[i, j] * B_shared[i]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=expected_tile_size, expected_execution_domain_axes=[0, 1])
+
+
+@pytest.mark.parametrize(
+    "dtype,matrix_shape,expected_tile_size",
+    [
+        ("float32", (64, 32), [4, 4]),
+        ("float32", (64, 64), [64, 64]),
+        ("float16", (64, 64), [64, 64]),
+        ("bfloat16", (64, 64), [4, 4]),
+        ("bfloat16", (64, 128), [64, 128]),
+    ],
+)
+def test_row_major_small_2d_fallback_requires_one_complete_carrier(dtype, matrix_shape, expected_tile_size):
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            src = T.alloc_shared(matrix_shape, dtype, scope="shared.rsram")
+            dst = T.alloc_shared(matrix_shape, dtype, scope="shared.rsram")
+            layout = make_aligned_row_major(matrix_shape, dtype, align_bytes=64)
+            T.annotate_layout({src: layout, dst: layout})
+
+            for i, j in T.Tiles([4, 4], parallel=True):
+                dst[i, j] = src[i, j] * 2.0
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=expected_tile_size, expected_execution_domain_axes=[0, 1])
+
+
+def test_small_2d_fallback_does_not_override_manual_tileview():
+    from tilelang.tileview import make_tileview
+
+    shape = (64, 64)
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            src = T.alloc_shared(shape, "float32", scope="shared.rsram")
+            dst = T.alloc_shared(shape, "float32", scope="shared.rsram")
+            layout = make_zz_layout(shape, [0, 1], (32, 32))
+            T.annotate_layout({src: layout, dst: layout})
+            T.annotate_tileview({src: make_tileview(src, (32, 32), (-2, -1))})
+
+            for i, j in T.Tiles([4, 4], parallel=True):
+                dst[i, j] = src[i, j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[0, 1])
+
+
+def test_dynamic_domain_does_not_select_static_small_2d_plan():
+    shape = (64, 64)
+
+    @T.prim_func
+    def main(n: T.int32):
+        with T.Kernel(1, threads=128):
+            src = T.alloc_shared(shape, "float32", scope="shared.rsram")
+            dst = T.alloc_shared(shape, "float32", scope="shared.rsram")
+            layout = make_zz_layout(shape, [0, 1], (32, 32))
+            T.annotate_layout({src: layout, dst: layout})
+
+            for i, j in T.Tiles([n, 4], parallel=True):
+                dst[i, j] = src[i, j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[0, 1])
+
+
+@pytest.mark.parametrize(
     ("dtype", "expected_tile_size"),
     [
-        ("float32", [4, 32]),
-        ("float16", [8, 32]),
-        ("bfloat16", [8, 32]),
+        ("float32", [32, 32]),
+        ("float16", [32, 32]),
+        ("bfloat16", [32, 32]),
     ],
 )
 def test_infer_tileview_mixed_rank_load(dtype, expected_tile_size):
@@ -308,9 +688,9 @@ def test_infer_tileview_mixed_rank_load(dtype, expected_tile_size):
 
     B_shared is 1D and tiled along the height axis. Strict TileView search
     rejects tile width 1 because 64-byte RSRAM alignment requires multiple
-    elements, then the fallback search allows the side load. The eventual
-    hardware unaligned load repair is deferred to Sunmmio codegen so mid-level
-    analysis can still see a normal BufferLoad.
+    elements, then the fallback search allows the side load. The side load does
+    not cap the execution TileView; its register-bounded carrier repair remains
+    deferred to Sunmmio codegen.
     """
     M, N = 128, 64
 
@@ -344,9 +724,9 @@ def test_infer_tileview_mixed_rank_load(dtype, expected_tile_size):
 @pytest.mark.parametrize(
     ("dtype", "expected_tile_size"),
     [
-        ("float32", [4, 32]),
-        ("float16", [8, 32]),
-        ("bfloat16", [8, 32]),
+        ("float32", [32, 32]),
+        ("float16", [32, 32]),
+        ("bfloat16", [32, 32]),
     ],
 )
 def test_infer_tileview_mixed_rank_load_inside_exp2(dtype, expected_tile_size):
@@ -732,7 +1112,7 @@ def test_infer_tileview_swapped_domain_binding():
     target = tvm.target.Target(SUNMMIO_TARGET_DESC)
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
-    assert_scope_plan(mod, expected_tile_size=[8, 32], expected_execution_domain_axes=[1, 0])
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[1, 0])
 
 
 # ---------------------------------------------------------
@@ -741,7 +1121,7 @@ def test_infer_tileview_swapped_domain_binding():
 def test_manual_annotation_overrides_inference():
     """When T.annotate_tileview is provided, it overrides inference.
 
-    Without annotation, blockwise inference would produce tile_size=(8, 32).
+    Without annotation, blockwise inference would produce tile_size=(32, 32).
     With annotation specifying a smaller but legal blockwise tile, we should
     preserve that override.
     """
@@ -784,6 +1164,111 @@ def test_manual_annotation_overrides_inference():
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
     assert_scope_plan(mod, expected_tile_size=[4, 32], expected_execution_domain_axes=[0, 1])
+
+
+def test_manual_layout_bounded_zz_accepts_full_inner_block():
+    """A manual execution TileView may use one full ZZ block."""
+    from tilelang.tileview import make_tileview
+
+    M, N = 128, 128
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, N), "float16"),
+        B: T.Tensor((M, N), "float16"),
+    ):
+        with T.Kernel(1, threads=128) as (bx,):
+            A_shared = T.alloc_shared((M, N), "float16")
+            B_shared = T.alloc_shared((M, N), "float16")
+
+            T.annotate_layout(
+                {
+                    A_shared: make_zz_layout(A_shared),
+                    B_shared: make_zz_layout(B_shared),
+                }
+            )
+            T.annotate_tileview(
+                {
+                    A_shared: make_tileview(A_shared, (32, 32), (-2, -1)),
+                    B_shared: make_tileview(B_shared, (32, 32), (-2, -1)),
+                }
+            )
+
+            T.copy(A, A_shared)
+            for i, j in T.Tiles([M, N], parallel=True):
+                B_shared[i, j] = A_shared[i, j] + A_shared[i, j]
+            T.copy(B_shared, B)
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[0, 1])
+
+
+def test_manual_layout_bounded_rowmajor_accepts_covered_shape():
+    """A manual execution TileView may use the padded row-major envelope."""
+    from tilelang.tileview import make_tileview
+
+    M, N = 8, 128
+    layout = make_aligned_row_major((M, N), "float16", align_bytes=1024)
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((M, N), "float16")
+            B_shared = T.alloc_shared((M, N), "float16")
+            T.annotate_layout({A_shared: layout, B_shared: layout})
+            T.annotate_tileview(
+                {
+                    A_shared: make_tileview(A_shared, (M, 512), (-2, -1)),
+                    B_shared: make_tileview(B_shared, (M, 512), (-2, -1)),
+                }
+            )
+
+            for i, j in T.Tiles([M, N], parallel=True):
+                B_shared[i, j] = A_shared[i, j] + A_shared[i, j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+    assert_scope_plan(mod, expected_tile_size=[8, 512], expected_execution_domain_axes=[0, 1])
+
+
+def test_manual_layout_bounded_rowmajor_rejects_shape_beyond_covered_shape():
+    """A manual execution TileView cannot exceed the row-major envelope."""
+    from tilelang.tileview import make_tileview
+
+    M, N = 8, 128
+    layout = make_aligned_row_major((M, N), "float16", align_bytes=1024)
+
+    @T.prim_func
+    def main():
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((M, N), "float16")
+            B_shared = T.alloc_shared((M, N), "float16")
+            T.annotate_layout({A_shared: layout, B_shared: layout})
+            T.annotate_tileview(
+                {
+                    A_shared: make_tileview(A_shared, (M, 1024), (-2, -1)),
+                    B_shared: make_tileview(B_shared, (M, 1024), (-2, -1)),
+                }
+            )
+
+            for i, j in T.Tiles([M, N], parallel=True):
+                B_shared[i, j] = A_shared[i, j] + A_shared[i, j]
+
+    mod = IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    with (
+        tvm.target.Target(target),
+        pytest.raises(
+            tvm.error.InternalError,
+            match="outside the layout-bounded execution envelope",
+        ),
+    ):
+        apply_sunmmio_passes(mod, target)
 
 
 def test_infer_tileview_3d_swapped_domain_binding():
@@ -868,7 +1353,7 @@ def test_infer_tileview_2d_rowmajor_fp32():
 
 
 def test_infer_tileview_2d_blockwise_fp32():
-    """Blockwise fp32 buffers should use the densest legal h x 32 tile."""
+    """Blockwise fp32 buffers should use one full ZZ block."""
     M, N = 256, 128
 
     @T.prim_func
@@ -902,7 +1387,7 @@ def test_infer_tileview_2d_blockwise_fp32():
     target = tvm.target.Target(SUNMMIO_TARGET_DESC)
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
-    assert_scope_plan(mod, expected_tile_size=[4, 32], expected_execution_domain_axes=[0, 1])
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[0, 1])
 
 
 def test_infer_tileview_blockwise_small_height():
@@ -940,12 +1425,12 @@ def test_infer_tileview_blockwise_small_height():
     target = tvm.target.Target(SUNMMIO_TARGET_DESC)
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
-    assert_scope_plan(mod, expected_tile_size=[8, 32], expected_execution_domain_axes=[0, 1])
+    assert_scope_plan(mod, expected_tile_size=[32, 32], expected_execution_domain_axes=[0, 1])
 
     stores = collect_stores(mod["main"], "C_shared")
     assert stores, "Expected lowered C_shared stores"
     assert all(store.predicate is not None for store in stores)
-    assert any("* 8" in str(store.indices[0]) or "*8" in str(store.indices[0]) for store in stores)
+    assert any("* 32" in str(store.indices[0]) or "*32" in str(store.indices[0]) for store in stores)
     assert all("< 4" in str(store.predicate) or "<4" in str(store.predicate) for store in stores)
     assert all("< 128" not in str(store.predicate) and "<128" not in str(store.predicate) for store in stores)
     assert not collect_if_conditions(mod["main"]), "Expected no full/tail branch when every tile is partial"
@@ -1031,7 +1516,7 @@ def test_infer_tileview_rowmajor_region_width_offset():
 
 
 def test_infer_tileview_blockwise_region_height_and_width_offset():
-    """Aligned blockwise regions should keep the densest h x 32 tile."""
+    """A half-block row offset selects the largest aligned block factor."""
     src_M, src_N = 64, 64
     dst_M, dst_N = 32, 32
 
@@ -1062,7 +1547,7 @@ def test_infer_tileview_blockwise_region_height_and_width_offset():
     target = tvm.target.Target(SUNMMIO_TARGET_DESC)
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
-    assert_scope_plan(mod, expected_tile_size=[8, 32], expected_execution_domain_axes=[0, 1])
+    assert_scope_plan(mod, expected_tile_size=[16, 32], expected_execution_domain_axes=[0, 1])
 
 
 def test_infer_tileview_blockwise_region_misaligned_width_offset_falls_back():

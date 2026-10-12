@@ -159,5 +159,6 @@ def test_direct_runtime_codegen_accepts_dynamic_mesh_symbols_without_make_packed
     tiles = coverage["tiles"]
     assert tiles["missing_node_types"] == []
     assert tiles["missing_call_ops"] == []
-    assert "tir.Mul" in tiles["expected_node_types"]
-    assert "tir.Mul" in tiles["visited_node_types"]
+    for node_type in ("tir.BufferLoad", "tir.Add"):
+        assert node_type in tiles["expected_node_types"]
+        assert node_type in tiles["visited_node_types"]

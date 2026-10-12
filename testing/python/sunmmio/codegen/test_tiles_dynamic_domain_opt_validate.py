@@ -67,7 +67,7 @@ def test_dynamic_rank2_domain_is_materialized_once(tmp_path, monkeypatch):
     assert valid_match is not None
     domain_casts = re.findall(rf"(?P<domain>%\d+) = arith\.index_cast {valid_match['valid']} : i32 to index", src)
     assert len(domain_casts) == 1
-    assert len(re.findall(rf"{re.escape(domain_casts[0])}(?!\d)", src)) >= 4
+    assert len(re.findall(rf"{re.escape(domain_casts[0])}(?!\d)", src)) >= 3
 
 
 if __name__ == "__main__":

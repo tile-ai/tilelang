@@ -449,9 +449,10 @@ def test_tilelang_reduce_sunmmio(shape, reduce_axis, expected_in_tile):
     assert set(checker.interior_axes).issuperset(set(range(len(tile_size)))), "Missing tile.interior annotations for one or more tile axes"
 
 
-def test_tilelang_reduce_sunmmio_preserves_blockwise_kept_axis_tile():
+@pytest.mark.parametrize("dtype", ["float16", "float32"])
+def test_tilelang_reduce_sunmmio_uses_layout_bounded_zz_source_tile(dtype):
     target = tvm.target.Target(SUNMMIO_TARGET_DESC)
-    mod = reduce_kernel_with_blockwise_layout_builder((32, 32), 1, dtype="float32")
+    mod = reduce_kernel_with_blockwise_layout_builder((128, 128), 1, dtype=dtype)
 
     with tvm.target.Target(target):
         mod = apply_sunmmio_passes(mod, target)
@@ -466,8 +467,85 @@ def test_tilelang_reduce_sunmmio_preserves_blockwise_kept_axis_tile():
     execution_domain_axes = [int(x) for x in root_ann["tile.execution_domain_axes"]]
 
     assert checker.has_in_tile_reduce, "Expected vector_core_in_tile_reduce intrinsic but not found"
-    assert tile_size == [4, 32], "Reduction should preserve the blockwise kept-axis tile instead of collapsing to [1, 32]"
+    assert tile_size == [32, 32]
     assert execution_domain_axes == [0, 1]
+
+
+def test_tilelang_reduce_sunmmio_bounds_source_tile_by_destination_layout():
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    mod = reduce_kernel_with_blockwise_layout_builder((4, 32), 1, dtype="float32")
+
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    checker = ReduceIRChecker()
+    checker.visit_stmt(mod["main"].body)
+    assert checker.scope_root is not None
+    assert [int(x) for x in checker.scope_root.annotations["tile.tile_size"]] == [16, 32]
+
+
+def test_tilelang_reduce_sunmmio_manual_full_zz_block_source_tile():
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+    mod = reduce_kernel_with_tileview_builder((128, 128), reduce_axis=1, tile_size=(32, 32))
+
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    checker = ReduceIRChecker()
+    checker.visit_stmt(mod["main"].body)
+    assert checker.scope_root is not None
+    assert [int(x) for x in checker.scope_root.annotations["tile.tile_size"]] == [32, 32]
+
+
+def test_tilelang_reduce_sunmmio_rejects_incompatible_manual_destination_tileview():
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+
+    @T.prim_func
+    def main(A: T.Tensor((32, 128), "float32"), Out: T.Tensor((32,), "float32")):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((32, 128), "float32", scope="shared.rsram")
+            Out_shared = T.alloc_shared((32,), "float32", scope="shared.rsram")
+            T.annotate_tileview({Out_shared: make_tileview(Out_shared, (64,), (-1,))})
+            T.copy(A, A_shared)
+            T.reduce_sum(A_shared, Out_shared, dim=1)
+            T.copy(Out_shared, Out)
+
+    with (
+        tvm.target.Target(target),
+        pytest.raises(
+            tvm.error.InternalError,
+            match="Cannot infer a legal Sunmmio reduction TileView plan",
+        ),
+    ):
+        apply_sunmmio_passes(tvm.IRModule({"main": main}), target)
+
+
+def test_tilelang_reduce_sunmmio_uses_row_major_covered_source_tile():
+    target = tvm.target.Target(SUNMMIO_TARGET_DESC)
+
+    @T.prim_func
+    def main(A: T.Tensor((1000,), "float16"), Out: T.Tensor((1,), "float16")):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((1000,), "float16", scope="shared.rsram")
+            Out_shared = T.alloc_shared((1,), "float16", scope="shared.rsram")
+            T.annotate_layout({A_shared: make_aligned_row_major((1000,), "float16", 64)})
+            T.annotate_tileview({A_shared: make_tileview(A_shared, (1024,), (-1,))})
+            T.copy(A, A_shared)
+            T.reduce_max(A_shared, Out_shared, dim=0)
+            T.copy(Out_shared, Out)
+
+    mod = tvm.IRModule({"main": main})
+
+    with tvm.target.Target(target):
+        mod = apply_sunmmio_passes(mod, target)
+
+    checker = ReduceIRChecker()
+    checker.visit_stmt(mod["main"].body)
+    assert checker.scope_root is not None
+    assert [int(x) for x in checker.scope_root.annotations["tile.tile_size"]] == [1024]
+    script = mod.script()
+    assert 'T.float16("-inf")' in script
+    assert "< 1000" in script or "<1000" in script
 
 
 def test_tilelang_reduce_sunmmio_multiple_reduces_are_ssa_clean():

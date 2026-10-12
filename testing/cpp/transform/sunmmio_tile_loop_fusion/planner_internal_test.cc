@@ -128,6 +128,18 @@ TEST(SunmmioTileLoopFusionPlannerInternalTest,
 }
 
 TEST(SunmmioTileLoopFusionPlannerInternalTest,
+     PlannerStateSerializationIncludesExecutionRank) {
+  PlannerState first{DynamicBitset(2), std::vector<OpenScopeFrame>(1)};
+  first.open_scopes[0].shell_axes = {"i"};
+  first.open_scopes[0].shell_extents = MakeUnitExtentPrefix(1);
+  first.open_scopes[0].execution_rank = 1;
+  PlannerState second = first;
+  second.open_scopes[0].execution_rank = 2;
+
+  EXPECT_NE(SerializePlannerState(first), SerializePlannerState(second));
+}
+
+TEST(SunmmioTileLoopFusionPlannerInternalTest,
      ApplyActionTracksPendingDependences) {
   for (TileScopeDependenceKind kind :
        {TileScopeDependenceKind::kRAW, TileScopeDependenceKind::kWAR,

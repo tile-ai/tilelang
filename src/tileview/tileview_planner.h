@@ -35,6 +35,7 @@ struct TileViewPlan {
   TileView execution_tileview;
   std::vector<int> execution_domain_axes;
   bool requires_aligned_1d_bridge{false};
+  bool requires_small_2d_carrier{false};
 };
 
 std::vector<BufferAccessRecord> CollectBufferAccesses(const Stmt &stmt);

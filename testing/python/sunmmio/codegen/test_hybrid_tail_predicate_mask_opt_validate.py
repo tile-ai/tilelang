@@ -157,7 +157,17 @@ def test_hybrid_tail_predicate_mask_lowers_without_bool_broadcast(tmp_path):
         opt_args=LOOSE_OPT_ARGS,
     )
 
-    assert_source_contains(src, ("suvm.tile.reduce", "suvm.tile.cmpi", "suvm.tile.select"))
+    assert_source_contains(
+        src,
+        (
+            "suvm.tile.reduce",
+            "suvm.tile.cmpi",
+            "suvm.tile.select",
+            "!suvm.tile_view<4x32xf32>",
+            "suvm.tile.extract_slice",
+            "suvm.tile.insert_slice",
+        ),
+    )
     assert "!suvm.tile<1x32xi1> -> !suvm.tile<4x32xi1>" not in src
 
 

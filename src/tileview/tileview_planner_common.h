@@ -6,6 +6,7 @@
 #ifndef TVM_TL_TILEVIEW_TILEVIEW_PLANNER_COMMON_H_
 #define TVM_TL_TILEVIEW_TILEVIEW_PLANNER_COMMON_H_
 
+#include <cstdint>
 #include <vector>
 
 #include <tvm/arith/analyzer.h>
@@ -68,6 +69,25 @@ enum class AlignmentMode {
 };
 
 /*!
+ * \brief Selects the semantic extent limit used by a TileView consumer.
+ *
+ * Execution TileViews may span the layout-defined contiguous envelope and be
+ * split into register-sized partitions later by NPU-IR. Reduction uses a
+ * separate policy because its lowering and cost model impose additional
+ * capability checks. Scalar carrier TileViews remain register-bounded.
+ */
+enum class TileExtentPolicy {
+  kRegisterBounded,
+  kTilesExecutionLayoutBounded,
+  kReductionLayoutBounded,
+};
+
+struct TilePatternOptions {
+  TileExtentPolicy extent_policy;
+  AlignmentMode alignment_mode;
+};
+
+/*!
  * \brief Return the integer value of a static `PrimExpr`, or `fallback`
  * otherwise.
  *
@@ -93,6 +113,13 @@ int GetElementBits(const Buffer &buffer);
  */
 int GetCapacityElems(const Buffer &buffer,
                      const SunmmioTileProcessorConfig &config);
+
+/*!
+ * \brief Check whether a tile chunk occupies an alignment-sized number of
+ * bits without overflowing for large static extents.
+ */
+bool IsTileChunkRsramAligned(int tile_height, int tile_width, int element_bits,
+                             int rsram_align_bytes);
 
 /*!
  * \brief Check whether `value` is provably divisible by `factor`.
@@ -139,7 +166,7 @@ bool HasTrailingIndexMap(const TileView &tv, int exec_rank);
  * This overload is used when a planner already stores tile extents as plain
  * integers.
  */
-int TileElements(const std::vector<int> &tile_shape);
+int64_t TileElements(const std::vector<int> &tile_shape);
 
 /*!
  * \brief Return the total number of elements in a static TileView tile shape.
@@ -147,7 +174,7 @@ int TileElements(const std::vector<int> &tile_shape);
  * This overload is used when a tile shape is still represented as `PrimExpr`s.
  * It requires every extent to be a positive compile-time constant.
  */
-int TileElements(const Array<PrimExpr> &tile_shape);
+int64_t TileElements(const Array<PrimExpr> &tile_shape);
 
 /*!
  * \brief Convert a plain integer tile shape into the canonical `PrimExpr` form.
@@ -186,7 +213,7 @@ TileView MakeTrailingTileView(const Array<PrimExpr> &buffer_shape,
 std::vector<TrailingTilePattern> EnumerateInferredTrailingTilePatterns(
     const Buffer &buffer, int exec_rank, const Map<Buffer, Layout> &layout_map,
     const SunmmioTileProcessorConfig &config, arith::Analyzer *analyzer,
-    AlignmentMode alignment_mode = AlignmentMode::kStrict);
+    TilePatternOptions options);
 
 /*!
  * \brief Validate a manual trailing TileView and normalize it into a shared
@@ -199,12 +226,11 @@ std::vector<TrailingTilePattern> EnumerateInferredTrailingTilePatterns(
  * checks such as loop binding compatibility or region alignment remain in the
  * caller.
  */
-TrailingTilePattern
-ValidateManualTrailingTileView(const Buffer &buffer, const TileView &manual_tv,
-                               int exec_rank,
-                               const Map<Buffer, Layout> &layout_map,
-                               const SunmmioTileProcessorConfig &config,
-                               arith::Analyzer *analyzer, const char *usage);
+TrailingTilePattern ValidateManualTrailingTileView(
+    const Buffer &buffer, const TileView &manual_tv, int exec_rank,
+    const Map<Buffer, Layout> &layout_map,
+    const SunmmioTileProcessorConfig &config, arith::Analyzer *analyzer,
+    TilePatternOptions options, const char *usage);
 
 } // namespace tl
 } // namespace tvm

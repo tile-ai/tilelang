@@ -85,10 +85,18 @@ struct TileAccessInfo {
   bool requires_aligned_1d_load{false};
   int64_t aligned_load_bytes{0};
   int64_t aligned_load_elems{0};
+  bool may_cross_aligned_1d_carrier{false};
+  bool requires_aligned_2d_carrier{false};
+  std::vector<int64_t> aligned_2d_carrier_shape;
 };
 
 struct Aligned1DAddressInfo {
   SunMMIOValue offset_elems;
+  std::vector<SunMMIOValue> partition_indices;
+};
+
+struct Aligned2DAddressInfo {
+  std::vector<SunMMIOValue> slice_offsets;
   std::vector<SunMMIOValue> partition_indices;
 };
 
@@ -717,7 +725,8 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
 
   const tl::SunmmioTileProcessorConfig tile_processor_config =
       tl::GetSunmmioTileProcessorConfig(target_);
-  auto populate_aligned_1d_access = [&](TileAccessInfo *access) {
+  auto populate_aligned_1d_access = [&](TileAccessInfo *access,
+                                        const SunMMIOType &memtensor_type) {
     const DataType dtype = CanonicalizeSuvmDType(access->buffer->dtype);
     const int64_t align_bytes =
         static_cast<int64_t>(tile_processor_config.rsram_align_bytes);
@@ -733,6 +742,116 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     access->aligned_load_elems = align_elems;
     access->requires_aligned_1d_load =
         access->tile_shape[0] < access->aligned_load_elems;
+    access->may_cross_aligned_1d_carrier =
+        access->requires_aligned_1d_load &&
+        access->aligned_load_elems % access->tile_shape[0] != 0;
+    if (!access->may_cross_aligned_1d_carrier) {
+      return;
+    }
+
+    ICHECK(dtype.is_bfloat16() || (dtype.is_float() && dtype.bits() == 32))
+        << "Cross-carrier aligned 1D access supports only BF16 and FP32, but "
+           "buffer "
+        << access->buffer->name << " has dtype " << access->buffer->dtype;
+    ICHECK_EQ(access->tiled_dims.size(), 1U);
+    ICHECK_EQ(access->tiled_dims[0],
+              static_cast<int64_t>(access->buffer->shape.size()) - 1)
+        << "Cross-carrier aligned 1D access must tile the trailing buffer "
+           "dimension";
+    ICHECK_EQ(memtensor_type.layout_dim_levels.size(),
+              access->buffer->shape.size())
+        << "Cross-carrier aligned 1D access requires an explicit flat layout";
+    ICHECK(std::all_of(memtensor_type.layout_dim_levels.begin(),
+                       memtensor_type.layout_dim_levels.end(),
+                       [](uint8_t levels) { return levels == 1; }))
+        << "Cross-carrier aligned 1D access requires a flat row-major layout";
+    std::vector<int64_t> layout_shape = ExtractStaticPrimExprs(
+        memtensor_type.layout_hshape, "cross-carrier layout shape");
+    std::vector<int64_t> strides = ExtractStaticPrimExprs(
+        memtensor_type.layout_hstride, "cross-carrier layout stride");
+    ICHECK_EQ(layout_shape.size(), access->buffer->shape.size());
+    ICHECK_EQ(strides.size(), layout_shape.size());
+    ICHECK_EQ(strides.back(), 1)
+        << "Cross-carrier aligned 1D access requires trailing stride 1";
+    ICHECK_EQ(layout_shape.back() % access->aligned_load_elems, 0)
+        << "Cross-carrier aligned 1D covered width must be carrier-aligned";
+    for (size_t dim = 0; dim + 1 < strides.size(); ++dim) {
+      ICHECK_EQ(strides[dim] % access->aligned_load_elems, 0)
+          << "Cross-carrier aligned 1D outer strides must be "
+             "carrier-aligned";
+    }
+  };
+
+  auto populate_aligned_2d_access = [&](TileAccessInfo *access,
+                                        const SunMMIOType &memtensor_type) {
+    DataType dtype = CanonicalizeSuvmDType(access->buffer->dtype);
+    bool supported_dtype =
+        dtype.is_bfloat16() || (dtype.is_float() && dtype.bits() == 32);
+    if (!supported_dtype || access->promoted_unit_tile_view ||
+        access->tile_shape.size() != 2 || access->tile_shape[0] <= 1 ||
+        access->tile_shape[1] <= 1 ||
+        memtensor_type.layout_dim_levels.size() != 2) {
+      return;
+    }
+    std::vector<int64_t> layout_shape =
+        ExtractStaticPrimExprs(memtensor_type.layout_hshape, "layout shape");
+    std::vector<int64_t> strides =
+        ExtractStaticPrimExprs(memtensor_type.layout_hstride, "layout stride");
+    int64_t capacity_elems = tile_processor_config.register_bits / dtype.bits();
+    int64_t logical_elems = access->tile_shape[0] * access->tile_shape[1];
+    bool is_flat_row_major = memtensor_type.layout_dim_levels[0] == 1 &&
+                             memtensor_type.layout_dim_levels[1] == 1 &&
+                             layout_shape.size() == 2 && strides.size() == 2 &&
+                             strides[1] == 1 && strides[0] == layout_shape[1];
+    if (is_flat_row_major && logical_elems < capacity_elems) {
+      int64_t carrier_width = layout_shape[1];
+      bool legal_carrier =
+          carrier_width > 0 && capacity_elems % carrier_width == 0;
+      int64_t carrier_height =
+          legal_carrier ? capacity_elems / carrier_width : 0;
+      legal_carrier = legal_carrier && carrier_height > 0 &&
+                      carrier_height <= layout_shape[0] &&
+                      access->tile_shape[0] <= carrier_height &&
+                      access->tile_shape[1] <= carrier_width &&
+                      carrier_height % access->tile_shape[0] == 0 &&
+                      carrier_width % access->tile_shape[1] == 0;
+      ICHECK(legal_carrier)
+          << "Row-major small 2D tile " << access->tile_shape[0] << "x"
+          << access->tile_shape[1]
+          << " must fit entirely in one 4096-bit carrier whose width is the "
+             "covered row extent "
+          << carrier_width << ", but no such carrier exists for buffer "
+          << access->buffer->name << ".";
+      access->requires_aligned_2d_carrier = true;
+      access->aligned_2d_carrier_shape = {carrier_height, carrier_width};
+      return;
+    }
+
+    if (memtensor_type.layout_dim_levels[0] < 2 ||
+        memtensor_type.layout_dim_levels[1] < 2) {
+      return;
+    }
+    size_t width_mode = memtensor_type.layout_dim_levels[0];
+    if (width_mode >= layout_shape.size() || width_mode >= strides.size() ||
+        strides[width_mode] != 1 || strides[0] != layout_shape[width_mode]) {
+      return;
+    }
+    int64_t carrier_width = layout_shape[width_mode];
+    if (carrier_width <= 0 || capacity_elems < carrier_width) {
+      return;
+    }
+    int64_t carrier_height =
+        std::min(layout_shape[0], capacity_elems / carrier_width);
+    if (carrier_height <= 0 || access->tile_shape[0] > carrier_height ||
+        access->tile_shape[1] > carrier_width ||
+        carrier_height % access->tile_shape[0] != 0 ||
+        carrier_width % access->tile_shape[1] != 0 ||
+        (access->tile_shape[0] == carrier_height &&
+         access->tile_shape[1] == carrier_width)) {
+      return;
+    }
+    access->requires_aligned_2d_carrier = true;
+    access->aligned_2d_carrier_shape = {carrier_height, carrier_width};
   };
 
   auto analyze_access = [&](const Buffer &buffer,
@@ -753,6 +872,25 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     std::vector<PrimExpr> logical_partition_indices(indices.size());
     for (int dim = 0; dim < static_cast<int>(indices.size()); ++dim) {
       MarkVisitedExprRoot(indices[dim]);
+      for (const ForNode *interior_loop :
+           {state->interior_axis0_loop, state->interior_axis1_loop}) {
+        if (interior_loop == nullptr ||
+            !indices[dim].same_as(interior_loop->loop_var)) {
+          continue;
+        }
+        std::optional<int> axis = GetInteriorAxisAnnotation(interior_loop);
+        std::optional<int64_t> extent = GetStaticLoopExtent(interior_loop);
+        ICHECK(axis.has_value() && extent.has_value());
+        ICHECK_GE(*axis, 0);
+        ICHECK_LT(static_cast<size_t>(*axis), scope.tile_shape.size());
+        logical_tile_axes[dim] = *axis;
+        logical_tile_shapes[dim] = *extent;
+        logical_partition_indices[dim] = IntImm(indices[dim].dtype(), 0);
+        break;
+      }
+      if (logical_tile_axes[dim] >= 0) {
+        continue;
+      }
       for (int axis = 0; axis < static_cast<int>(scope.tile_shape.size());
            ++axis) {
         const ForNode *exec_loop = scope.execution_loops[axis];
@@ -898,8 +1036,10 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       ICHECK_EQ(access.tile_axes.size(), 1U);
       access.unsqueeze_axis = access.tile_axes[0] == 0 ? 1 : 0;
       if (IsRsramScope(binding.buffer_type.memory_scope)) {
-        populate_aligned_1d_access(&access);
+        populate_aligned_1d_access(&access, binding.buffer_type);
       }
+    } else if (IsRsramScope(binding.buffer_type.memory_scope)) {
+      populate_aligned_2d_access(&access, binding.buffer_type);
     }
     return access;
   };
@@ -912,6 +1052,9 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     if (access.requires_aligned_1d_load) {
       return ExtractStaticShape(value.type) ==
              std::vector<int64_t>{access.aligned_load_elems};
+    }
+    if (access.requires_aligned_2d_carrier) {
+      return ExtractStaticShape(value.type) == access.aligned_2d_carrier_shape;
     }
     return ExtractStaticShape(value.type) == access.tile_shape;
   };
@@ -1092,8 +1235,20 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     return std::make_pair(tile_type, single_non_unit_dim);
   };
 
+  std::unordered_map<const BufferNode *, std::string> register_value_names;
   auto make_register_value_name = [&](const Buffer &buffer) {
-    return "__tile_reg_" + buffer->name;
+    auto existing = register_value_names.find(buffer.get());
+    if (existing != register_value_names.end()) {
+      return existing->second;
+    }
+    // Reduction rewrites may create distinct temporary buffers with the same
+    // human-readable name, so the MLIR alias must also carry SSA identity.
+    std::string unique_id = NewValueName();
+    ICHECK(!unique_id.empty() && unique_id.front() == '%');
+    std::string value_name =
+        "__tile_reg_" + buffer->name + "_" + unique_id.substr(1);
+    register_value_names.emplace(buffer.get(), value_name);
+    return value_name;
   };
 
   auto make_register_tile_value = [&](const Buffer &buffer,
@@ -1196,8 +1351,14 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
             const auto *axis_imm = call->args[3].as<IntImmNode>();
             ICHECK(axis_imm)
                 << "tl.vector_core_in_tile_reduce axis must be IntImm";
+            int64_t reduce_axis = static_cast<int64_t>(axis_imm->value);
+            SunMMIOType src_type = make_tile_type_from_region(src_region);
+            if (ExtractStaticShape(src_type).size() == 1) {
+              ICHECK_EQ(reduce_axis, 0) << "Rank-1 tile reduce expects axis 0";
+              reduce_axis = 1;
+            }
             note_register_unsqueeze_axis(state, dst_region->buffer,
-                                         static_cast<int64_t>(axis_imm->value));
+                                         reduce_axis);
           }
           if (IsSunmmioReduceLoopCarriedTempBuffer(src_region->buffer) &&
               !state->register_tile_types.count(src_region->buffer.get())) {
@@ -1623,6 +1784,12 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     if (IsTileLike(value)) {
       SunMMIOValue tile = value;
       std::vector<int64_t> shape = ExtractStaticShape(tile.type);
+      // Keep singleton reduce results rank-2 so the aligned carrier store can
+      // lower them through tile.pick/tile.set.
+      if (shape == std::vector<int64_t>({1, 1}) &&
+          vector_shape == std::vector<int64_t>({1})) {
+        return cast_tile_dtype_preserving_shape(tile, dst_dtype);
+      }
       if (shape != vector_shape) {
         tile = reorient_unit_tile_to_shape(tile, vector_shape);
         shape = ExtractStaticShape(tile.type);
@@ -1985,6 +2152,86 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     return Aligned1DAddressInfo{offset_elems, aligned_partition_indices};
   };
 
+  auto next_aligned_1d_address =
+      [&](const TileAccessInfo &access,
+          const Aligned1DAddressInfo &base) -> Aligned1DAddressInfo {
+    ICHECK_EQ(access.tiled_dims.size(), 1U);
+    Aligned1DAddressInfo next = base;
+    size_t tiled_dim = static_cast<size_t>(access.tiled_dims[0]);
+    ICHECK_LT(tiled_dim, next.partition_indices.size());
+    next.partition_indices[tiled_dim] = add_index(
+        EnsureIndex(next.partition_indices[tiled_dim]), make_index_const(1));
+    next.offset_elems = make_index_const(0);
+    return next;
+  };
+
+  auto make_zero_tile = [&](DataType dtype,
+                            const std::vector<int64_t> &shape) -> SunMMIOValue {
+    DataType value_dtype = CanonicalizeSuvmDType(dtype).with_lanes(1);
+    SunMMIOType scalar_type{SunMMIOType::Kind::kScalar, value_dtype, 1, {}};
+    SunMMIOValue zero = value_dtype.is_float() || value_dtype.is_bfloat16()
+                            ? builder_->ConstantFloat(NewValueName(), "0.0",
+                                                      scalar_type, value_dtype)
+                            : builder_->ConstantInt(NewValueName(), 0,
+                                                    scalar_type, value_dtype);
+    SunMMIOType tile_type = MakeTileType(dtype, shape);
+    return builder_->TileFill(NewValueName(), zero, tile_type, value_dtype);
+  };
+
+  auto get_aligned_1d_view =
+      [&](const TileAccessInfo &access,
+          const Aligned1DAddressInfo &address) -> SunMMIOValue {
+    const BufferBinding &binding = LookupBuffer(access.buffer);
+    DataType value_dtype =
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1);
+    SunMMIOValue memtensor{value_dtype, binding.handle, binding.buffer_type};
+    SunMMIOType aligned_view_type =
+        MakeTileViewType(access.buffer->dtype, {access.aligned_load_elems});
+    return builder_->GetPartitionedTileView(
+        NewValueName(), memtensor, address.partition_indices, access.tiled_dims,
+        aligned_view_type, value_dtype);
+  };
+
+  auto load_aligned_1d_carrier = [&](const TileAccessInfo &access,
+                                     const Aligned1DAddressInfo &address,
+                                     TileBlockState *state) -> SunMMIOValue {
+    DataType value_dtype =
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1);
+    std::string cache_key = make_tile_cache_key(access, address);
+    SunMMIOValue aligned_view = get_aligned_1d_view(access, address);
+    SunMMIOType aligned_tile_type =
+        MakeTileType(access.buffer->dtype, {access.aligned_load_elems});
+    auto current_it = state->current_tile_values.find(cache_key);
+    if (current_it != state->current_tile_values.end() &&
+        cached_value_matches_access(current_it->second, access) &&
+        state->mlir_ctx != nullptr &&
+        state->mlir_ctx->LookupMLIRValue(current_it->second.value)) {
+      return current_it->second;
+    }
+    SunMMIOValue aligned_tile =
+        builder_->TileLoad(NewValueName(), aligned_view, aligned_tile_type,
+                           std::nullopt, std::nullopt, value_dtype);
+    return state->current_tile_values[cache_key] = builder_->BindValueAlias(
+               make_current_value_name(access.buffer, cache_key), aligned_tile);
+  };
+
+  auto combine_aligned_1d_carriers =
+      [&](const TileAccessInfo &access, const SunMMIOValue &first,
+          const SunMMIOValue &second) -> SunMMIOValue {
+    DataType value_dtype =
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1);
+    SunMMIOType wide_type =
+        MakeTileType(access.buffer->dtype, {2 * access.aligned_load_elems});
+    SunMMIOValue wide =
+        make_zero_tile(access.buffer->dtype, {2 * access.aligned_load_elems});
+    wide = builder_->TileInsertSlice(NewValueName(), wide, first,
+                                     {make_index_const(0)}, wide_type,
+                                     value_dtype);
+    return builder_->TileInsertSlice(
+        NewValueName(), wide, second,
+        {make_index_const(access.aligned_load_elems)}, wide_type, value_dtype);
+  };
+
   auto load_aligned_1d_tile = [&](const TileAccessInfo &access,
                                   TileBlockState *state) -> SunMMIOValue {
     ICHECK(access.requires_aligned_1d_load);
@@ -1992,36 +2239,10 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
         << "Aligned 1D tile load expects exactly one tiled dimension";
 
     const BufferBinding &binding = LookupBuffer(access.buffer);
-    SunMMIOValue memtensor{
-        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1),
-        binding.handle, binding.buffer_type};
     Aligned1DAddressInfo aligned_address =
         compute_aligned_1d_address(access, binding.buffer_type);
-    std::string cache_key = make_tile_cache_key(access, aligned_address);
-
-    SunMMIOType aligned_view_type =
-        MakeTileViewType(access.buffer->dtype, {access.aligned_load_elems});
-    SunMMIOValue aligned_view = builder_->GetPartitionedTileView(
-        NewValueName(), memtensor, aligned_address.partition_indices,
-        access.tiled_dims, aligned_view_type,
-        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
-    SunMMIOType aligned_tile_type =
-        MakeTileType(access.buffer->dtype, {access.aligned_load_elems});
-    SunMMIOValue aligned_tile;
-    auto current_it = state->current_tile_values.find(cache_key);
-    if (current_it != state->current_tile_values.end() &&
-        cached_value_matches_access(current_it->second, access) &&
-        state->mlir_ctx != nullptr &&
-        state->mlir_ctx->LookupMLIRValue(current_it->second.value)) {
-      aligned_tile = current_it->second;
-    } else {
-      aligned_tile = builder_->TileLoad(
-          NewValueName(), aligned_view, aligned_tile_type, std::nullopt,
-          std::nullopt,
-          CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
-      state->current_tile_values[cache_key] = builder_->BindValueAlias(
-          make_current_value_name(access.buffer, cache_key), aligned_tile);
-    }
+    SunMMIOValue aligned_tile =
+        load_aligned_1d_carrier(access, aligned_address, state);
 
     DataType value_dtype =
         CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1);
@@ -2032,19 +2253,46 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
                                 value_dtype);
     }
 
-    std::vector<SunMMIOValue> slice_offsets{aligned_address.offset_elems};
     SunMMIOType sliced_tile_type =
         MakeTileType(access.buffer->dtype, access.tile_shape);
-    SunMMIOValue sliced_tile = builder_->TileSlice(
-        NewValueName(), aligned_tile, slice_offsets, sliced_tile_type,
-        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
-    return sliced_tile;
+    if (!access.may_cross_aligned_1d_carrier) {
+      return builder_->TileSlice(NewValueName(), aligned_tile,
+                                 {aligned_address.offset_elems},
+                                 sliced_tile_type, value_dtype);
+    }
+
+    SunMMIOValue tile_end = add_index(aligned_address.offset_elems,
+                                      make_index_const(access.tile_shape[0]));
+    SunMMIOValue cross = builder_->Compare(
+        NewValueName(), CompareOp::kGT, CompareDomain::kSignedInt, tile_end,
+        make_index_const(access.aligned_load_elems), tile_end.type);
+    SunMMIOValue initial =
+        make_zero_tile(access.buffer->dtype, access.tile_shape);
+    SunMMIOValue result = builder_->BindValueAlias(NewValueName(), initial);
+    builder_->BeginIf(cross, std::vector<SunMMIOValue>{result});
+    Aligned1DAddressInfo next_address =
+        next_aligned_1d_address(access, aligned_address);
+    SunMMIOValue next_tile =
+        load_aligned_1d_carrier(access, next_address, state);
+    SunMMIOValue wide_tile =
+        combine_aligned_1d_carriers(access, aligned_tile, next_tile);
+    SunMMIOValue cross_slice = builder_->TileSlice(
+        NewValueName(), wide_tile, {aligned_address.offset_elems},
+        sliced_tile_type, value_dtype);
+    builder_->BindValueAlias(result.value, cross_slice);
+    builder_->BeginElse();
+    SunMMIOValue fast_slice = builder_->TileSlice(
+        NewValueName(), aligned_tile, {aligned_address.offset_elems},
+        sliced_tile_type, value_dtype);
+    builder_->BindValueAlias(result.value, fast_slice);
+    builder_->EndIf();
+    return result;
   };
 
   auto store_aligned_1d_tile =
       [&](const TileAccessInfo &access, const SunMMIOValue &value,
-          const std::optional<SunMMIOValue> &store_mask,
-          TileBlockState *state) -> SunMMIOValue {
+          const std::optional<SunMMIOValue> &store_mask, TileBlockState *state,
+          bool store_only_logical_lane_zero) -> SunMMIOValue {
     ICHECK(access.requires_aligned_1d_load);
     ICHECK_EQ(access.tiled_dims.size(), 1U)
         << "Aligned 1D tile store expects exactly one tiled dimension";
@@ -2078,6 +2326,29 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
           std::nullopt,
           CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
     }
+    DataType value_dtype =
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1);
+    std::vector<int64_t> value_shape = IsTileLike(value)
+                                           ? ExtractStaticShape(value.type)
+                                           : std::vector<int64_t>{};
+    bool store_singleton_tile = !store_mask.has_value() &&
+                                access.tile_shape[0] == 1 &&
+                                value_shape == std::vector<int64_t>({1, 1});
+    if ((store_singleton_tile || store_only_logical_lane_zero) &&
+        SupportsSuvmTilePickDType(value_dtype) && IsTileLike(value)) {
+      SunMMIOType scalar_type{SunMMIOType::Kind::kScalar, value_dtype, 1, {}};
+      std::vector<SunMMIOValue> value_indices(value_shape.size(),
+                                              make_index_const(0));
+      SunMMIOValue scalar = builder_->TilePick(
+          NewValueName(), value, value_indices, scalar_type, value_dtype);
+      SunMMIOValue merged = builder_->TileSet(
+          NewValueName(), scalar, aligned_tile, {aligned_address.offset_elems},
+          aligned_tile_type, value_dtype);
+      builder_->TileStore(merged, aligned_view, std::nullopt);
+      return builder_->BindValueAlias(
+          make_current_value_name(access.buffer, cache_key), merged);
+    }
+
     std::vector<int64_t> slice_shape = access.tile_shape;
     SunMMIOType slice_type = MakeTileType(access.buffer->dtype, slice_shape);
 
@@ -2123,6 +2394,206 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     builder_->TileStore(merged_tile, aligned_view, std::nullopt);
     return builder_->BindValueAlias(
         make_current_value_name(access.buffer, cache_key), merged_tile);
+  };
+
+  auto store_cross_carrier_aligned_1d_tile =
+      [&](const TileAccessInfo &access, const SunMMIOValue &value,
+          const std::optional<SunMMIOValue> &store_mask,
+          TileBlockState *state) {
+        ICHECK(access.requires_aligned_1d_load &&
+               access.may_cross_aligned_1d_carrier);
+        ICHECK_EQ(access.tiled_dims.size(), 1U)
+            << "Cross-carrier aligned 1D store expects one tiled dimension";
+
+        const BufferBinding &binding = LookupBuffer(access.buffer);
+        Aligned1DAddressInfo address =
+            compute_aligned_1d_address(access, binding.buffer_type);
+        SunMMIOValue first = load_aligned_1d_carrier(access, address, state);
+        DataType value_dtype =
+            CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1);
+        SunMMIOType logical_type =
+            MakeTileType(access.buffer->dtype, access.tile_shape);
+        SunMMIOType carrier_type =
+            MakeTileType(access.buffer->dtype, {access.aligned_load_elems});
+        SunMMIOType wide_type =
+            MakeTileType(access.buffer->dtype, {2 * access.aligned_load_elems});
+
+        SunMMIOValue source = value;
+        if (source.type.shape.size() != 1) {
+          source = reorient_unit_tile_to_shape(source, access.tile_shape);
+        }
+        ICHECK(StaticShapesEqual(source.type, logical_type))
+            << "Cross-carrier aligned 1D store source must be rank-1";
+
+        std::optional<SunMMIOValue> normalized_mask;
+        if (store_mask.has_value()) {
+          SunMMIOValue mask = store_mask.value();
+          if (IsTileLike(mask)) {
+            mask = reorient_unit_tile_to_shape(mask, access.tile_shape);
+            if (ExtractStaticShape(mask.type) != access.tile_shape) {
+              mask = broadcast_tile_to_shape(mask, access.tile_shape);
+            }
+            ICHECK(StaticShapesEqual(
+                mask.type, MakeTileType(DataType::Bool(), access.tile_shape)))
+                << "Cross-carrier aligned 1D store cannot normalize mask shape";
+          } else {
+            SunMMIOType bool_scalar_type{
+                SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}};
+            mask = EnsureType(mask, bool_scalar_type, DataType::Bool());
+            mask = builder_->TileFill(
+                NewValueName(), mask,
+                MakeTileType(DataType::Bool(), access.tile_shape),
+                DataType::Bool());
+          }
+          normalized_mask = mask;
+        }
+
+        auto merge_logical_slice = [&](const SunMMIOValue &old_tile,
+                                       const SunMMIOType &old_tile_type) {
+          SunMMIOValue logical_value = source;
+          if (normalized_mask.has_value()) {
+            SunMMIOValue old_slice = builder_->TileSlice(
+                NewValueName(), old_tile, {address.offset_elems}, logical_type,
+                value_dtype);
+            logical_value = builder_->TileSelect(
+                NewValueName(), normalized_mask.value(), source, old_slice,
+                logical_type, value_dtype);
+          }
+          return builder_->TileInsertSlice(
+              NewValueName(), old_tile, logical_value, {address.offset_elems},
+              old_tile_type, value_dtype);
+        };
+
+        SunMMIOValue tile_end = add_index(
+            address.offset_elems, make_index_const(access.tile_shape[0]));
+        SunMMIOValue cross = builder_->Compare(
+            NewValueName(), CompareOp::kGT, CompareDomain::kSignedInt, tile_end,
+            make_index_const(access.aligned_load_elems), tile_end.type);
+        builder_->BeginIf(cross, std::vector<SunMMIOValue>{});
+        Aligned1DAddressInfo next_address =
+            next_aligned_1d_address(access, address);
+        SunMMIOValue second =
+            load_aligned_1d_carrier(access, next_address, state);
+        SunMMIOValue wide = combine_aligned_1d_carriers(access, first, second);
+        SunMMIOValue updated_wide = merge_logical_slice(wide, wide_type);
+        SunMMIOValue updated_first = builder_->TileSlice(
+            NewValueName(), updated_wide, {make_index_const(0)}, carrier_type,
+            value_dtype);
+        SunMMIOValue updated_second =
+            builder_->TileSlice(NewValueName(), updated_wide,
+                                {make_index_const(access.aligned_load_elems)},
+                                carrier_type, value_dtype);
+        builder_->TileStore(updated_first, get_aligned_1d_view(access, address),
+                            std::nullopt);
+        builder_->TileStore(updated_second,
+                            get_aligned_1d_view(access, next_address),
+                            std::nullopt);
+        builder_->BeginElse();
+        SunMMIOValue updated_fast = merge_logical_slice(first, carrier_type);
+        builder_->TileStore(updated_fast, get_aligned_1d_view(access, address),
+                            std::nullopt);
+        builder_->EndIf();
+      };
+
+  auto compute_aligned_2d_address = [&](const TileAccessInfo &access) {
+    ICHECK(access.requires_aligned_2d_carrier);
+    ICHECK_EQ(access.tiled_dims.size(), 2U);
+    ICHECK_EQ(access.partition_indices.size(), access.buffer->shape.size());
+    Aligned2DAddressInfo result;
+    result.partition_indices = access.partition_indices;
+    result.slice_offsets.reserve(2);
+    for (int axis = 0; axis < 2; ++axis) {
+      int64_t dim = access.tiled_dims[axis];
+      SunMMIOValue logical_origin =
+          mul_index(EnsureIndex(access.partition_indices[dim]),
+                    make_index_const(access.tile_shape[axis]));
+      int64_t carrier_extent = access.aligned_2d_carrier_shape[axis];
+      result.partition_indices[dim] =
+          div_index(logical_origin, make_index_const(carrier_extent));
+      result.slice_offsets.push_back(
+          mod_index(logical_origin, make_index_const(carrier_extent)));
+    }
+    return result;
+  };
+
+  auto load_aligned_2d_tile = [&](const TileAccessInfo &access,
+                                  TileBlockState *state) {
+    (void)state;
+    const BufferBinding &binding = LookupBuffer(access.buffer);
+    SunMMIOValue memtensor{
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1),
+        binding.handle, binding.buffer_type};
+    Aligned2DAddressInfo address = compute_aligned_2d_address(access);
+    SunMMIOType view_type =
+        MakeTileViewType(access.buffer->dtype, access.aligned_2d_carrier_shape);
+    SunMMIOValue view = builder_->GetPartitionedTileView(
+        NewValueName(), memtensor, address.partition_indices, access.tiled_dims,
+        view_type, CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+    SunMMIOType carrier_type =
+        MakeTileType(access.buffer->dtype, access.aligned_2d_carrier_shape);
+    SunMMIOValue carrier = builder_->TileLoad(
+        NewValueName(), view, carrier_type, std::nullopt, std::nullopt,
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+    SunMMIOType logical_type =
+        MakeTileType(access.buffer->dtype, access.tile_shape);
+    SunMMIOValue logical_tile = builder_->TileSlice(
+        NewValueName(), carrier, address.slice_offsets, logical_type,
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+    if (state->tile_mask.has_value()) {
+      DataType value_dtype =
+          CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1);
+      SunMMIOType scalar_type{SunMMIOType::Kind::kScalar, value_dtype, 1, {}};
+      SunMMIOValue zero =
+          value_dtype.is_float() || value_dtype.is_bfloat16()
+              ? builder_->ConstantFloat(NewValueName(), "0.0", scalar_type,
+                                        value_dtype)
+              : builder_->ConstantInt(NewValueName(), 0, scalar_type,
+                                      value_dtype);
+      SunMMIOValue maskedoff =
+          builder_->TileFill(NewValueName(), zero, logical_type, value_dtype);
+      logical_tile = builder_->TileSelect(
+          NewValueName(), state->tile_mask.value(), logical_tile, maskedoff,
+          logical_type, value_dtype);
+    }
+    return logical_tile;
+  };
+
+  auto store_aligned_2d_tile = [&](const TileAccessInfo &access,
+                                   const SunMMIOValue &value,
+                                   const std::optional<SunMMIOValue> &mask,
+                                   TileBlockState *state) {
+    (void)state;
+    const BufferBinding &binding = LookupBuffer(access.buffer);
+    SunMMIOValue memtensor{
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1),
+        binding.handle, binding.buffer_type};
+    Aligned2DAddressInfo address = compute_aligned_2d_address(access);
+    SunMMIOType view_type =
+        MakeTileViewType(access.buffer->dtype, access.aligned_2d_carrier_shape);
+    SunMMIOValue view = builder_->GetPartitionedTileView(
+        NewValueName(), memtensor, address.partition_indices, access.tiled_dims,
+        view_type, CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+    SunMMIOType carrier_type =
+        MakeTileType(access.buffer->dtype, access.aligned_2d_carrier_shape);
+    SunMMIOValue carrier = builder_->TileLoad(
+        NewValueName(), view, carrier_type, std::nullopt, std::nullopt,
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+    SunMMIOValue slice = value;
+    if (mask.has_value()) {
+      SunMMIOValue old_slice = builder_->TileSlice(
+          NewValueName(), carrier, address.slice_offsets,
+          MakeTileType(access.buffer->dtype, access.tile_shape),
+          CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+      slice = builder_->TileSelect(
+          NewValueName(), mask.value(), slice, old_slice,
+          MakeTileType(access.buffer->dtype, access.tile_shape),
+          CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+    }
+    SunMMIOValue merged = builder_->TileInsertSlice(
+        NewValueName(), carrier, slice, address.slice_offsets, carrier_type,
+        CanonicalizeSuvmDType(access.buffer->dtype).with_lanes(1));
+    builder_->TileStore(merged, view, std::nullopt);
+    return merged;
   };
 
   auto make_tile_access_from_region =
@@ -2187,7 +2658,7 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       ICHECK_EQ(access.tile_axes.size(), 1U);
       access.unsqueeze_axis = access.tile_axes[0] == 0 ? 1 : 0;
       if (IsRsramScope(binding.buffer_type.memory_scope)) {
-        populate_aligned_1d_access(&access);
+        populate_aligned_1d_access(&access, binding.buffer_type);
       }
     }
     return access;
@@ -2433,6 +2904,38 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     return matched_axes[0] && matched_axes[1];
   };
 
+  // clear=False scalar reduce finalization uses a carrier loop guarded by
+  // `interior_var == 0`; only that exact lane may bypass mask materialization.
+  auto is_single_lane_zero_store_predicate = [&](const PrimExpr &predicate,
+                                                 TileBlockState *state,
+                                                 const TileAccessInfo &access) {
+    if (access.tile_rank != 1 || access.tile_axes.size() != 1 ||
+        scope.tile_shape.empty()) {
+      return false;
+    }
+    int axis = access.tile_axes[0];
+    if (axis < 0 || axis >= static_cast<int>(scope.tile_shape.size())) {
+      return false;
+    }
+    const ForNode *interior_loop =
+        axis == 0 ? state->interior_axis0_loop : state->interior_axis1_loop;
+    if (interior_loop == nullptr) {
+      return false;
+    }
+    const auto *eq = predicate.as<EQNode>();
+    if (!eq) {
+      return false;
+    }
+    arith::Analyzer analyzer;
+    const Var &interior_var = interior_loop->loop_var;
+    auto matches = [&](const PrimExpr &var_expr, const PrimExpr &zero_expr) {
+      const auto *var = var_expr.as<VarNode>();
+      return var == interior_var.get() &&
+             analyzer.CanProve(zero_expr == make_zero(zero_expr.dtype()));
+    };
+    return matches(eq->a, eq->b) || matches(eq->b, eq->a);
+  };
+
   auto match_canonical_rank2_predicate_axes = [&](const PrimExpr &predicate,
                                                   TileBlockState *state) {
     std::array<bool, 2> matched_axes{false, false};
@@ -2673,7 +3176,8 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     ICHECK_EQ(src_shape.size(), dst_shape.size())
         << "Tile broadcast expects rank-compatible shapes";
     ICHECK(CanBroadcastShapeTo(src_shape, dst_shape))
-        << "Tile value with shape " << shape_to_string(src_shape)
+        << "Tile value " << tile.value << " with shape "
+        << shape_to_string(src_shape)
         << " is not broadcastable to target shape "
         << shape_to_string(dst_shape);
     ICHECK(!tile.dtype.is_bool())
@@ -3115,130 +3619,6 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       }
       return lower_expr(let->body, &let_state, preferred_dtype);
     }
-    if (const auto *load = expr.as<BufferLoadNode>()) {
-      if (IsSunmmioLocalVarBuffer(load->buffer)) {
-        return EmitLocalVarLoad(load->buffer, load->indices);
-      }
-      auto local_it = state->local_tile_values.find(load->buffer.get());
-      if (local_it != state->local_tile_values.end()) {
-        return local_it->second;
-      }
-      auto reg_it = state->register_tile_values.find(load->buffer.get());
-      if (reg_it != state->register_tile_values.end()) {
-        SunMMIOValue value = reg_it->second;
-        if (IsTileLike(value) && value.type.shape.size() == 1 &&
-            state->interior_axis0_loop != nullptr &&
-            state->interior_axis1_loop == nullptr) {
-          int64_t unsqueeze_axis = 0;
-          auto axis_it =
-              state->register_unsqueeze_axes.find(load->buffer.get());
-          if (axis_it != state->register_unsqueeze_axes.end()) {
-            unsqueeze_axis = axis_it->second;
-          }
-          ICHECK(unsqueeze_axis == 0 || unsqueeze_axis == 1)
-              << "1D register tile can only be unsqueezed back to a 2D tile";
-          int64_t extent = ExtractStaticShape(value.type)[0];
-          std::vector<int64_t> unsqueezed_shape =
-              unsqueeze_axis == 0 ? std::vector<int64_t>{1, extent}
-                                  : std::vector<int64_t>{extent, 1};
-          SunMMIOType unsqueezed_type =
-              MakeTileType(value.dtype, unsqueezed_shape);
-          value =
-              checked_tile_unsqueeze(value, unsqueezed_type, unsqueeze_axis,
-                                     value.dtype, "reduce register tile load");
-        }
-        return value;
-      }
-      TileAccessInfo access =
-          analyze_access(load->buffer, load->indices, state);
-      std::optional<int64_t> mx_scale_valid_elems =
-          mx_scale_e8m0_prefix_load_extent(load, access);
-      std::string cache_key = make_tile_cache_key(access);
-      if (!access.promoted_unit_tile_view && !access.requires_aligned_1d_load) {
-        auto it = state->current_tile_values.find(cache_key);
-        if (it != state->current_tile_values.end() &&
-            cached_value_matches_access(it->second, access) &&
-            state->mlir_ctx != nullptr &&
-            state->mlir_ctx->LookupMLIRValue(it->second.value)) {
-          return it->second;
-        }
-      }
-      SunMMIOValue tile;
-      if (access.requires_aligned_1d_load) {
-        tile = load_aligned_1d_tile(access, state);
-      } else {
-        SunMMIOValue view = get_or_create_tile_view(access, state);
-        SunMMIOType tile_type =
-            MakeTileType(load->buffer->dtype, access.tile_shape);
-        std::optional<SunMMIOValue> load_mask;
-        std::optional<SunMMIOValue> load_maskedoff;
-        bool skip_load_predicate = false;
-        if (load->predicate.defined()) {
-          skip_load_predicate =
-              mx_scale_valid_elems.has_value() ||
-              (state->active_tail_store_predicate.has_value() &&
-               can_prove_expr_equal(
-                   load->predicate.value(),
-                   state->active_tail_store_predicate.value())) ||
-              is_canonical_tail_load_predicate(load->predicate.value(), state,
-                                               access);
-        }
-        if (load->predicate.defined() && !skip_load_predicate) {
-          DataType mask_index_dtype =
-              mask_index_dtype_for_value_dtype(load->buffer->dtype);
-          std::optional<SunMMIOValue> canonical_mask =
-              build_canonical_rank2_predicate_mask(
-                  load->predicate.value(), state, access, mask_index_dtype);
-          SunMMIOValue lowered_mask =
-              canonical_mask.has_value()
-                  ? canonical_mask.value()
-                  : lower_bool_expr_to_shape(load->predicate.value(),
-                                             access.tile_shape,
-                                             mask_index_dtype);
-          if (!IsTileLike(lowered_mask)) {
-            SunMMIOType bool_scalar_type{
-                SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}};
-            lowered_mask =
-                EnsureType(lowered_mask, bool_scalar_type, DataType::Bool());
-            lowered_mask = builder_->TileFill(
-                NewValueName(), lowered_mask,
-                MakeTileType(DataType::Bool(), access.tile_shape),
-                DataType::Bool());
-          }
-          DataType value_dtype =
-              CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1);
-          SunMMIOType scalar_type{
-              SunMMIOType::Kind::kScalar, value_dtype, 1, {}};
-          SunMMIOValue zero =
-              value_dtype.is_float() || value_dtype.is_bfloat16()
-                  ? builder_->ConstantFloat(NewValueName(), "0.0", scalar_type,
-                                            value_dtype)
-                  : builder_->ConstantInt(NewValueName(), 0, scalar_type,
-                                          value_dtype);
-          load_maskedoff =
-              builder_->TileFill(NewValueName(), zero, tile_type, value_dtype);
-          load_mask = lowered_mask;
-        }
-        // Always load the full padded tile.  Tail stores preserve old
-        // destination values explicitly with tile.select, and predicated loads
-        // are represented as load + select so this path does not depend on
-        // masked tile.load dialect semantics.
-        tile = builder_->TileLoad(
-            NewValueName(), view, tile_type, std::nullopt, std::nullopt,
-            CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1));
-        if (load_mask.has_value()) {
-          tile = builder_->TileSelect(
-              NewValueName(), load_mask.value(), tile, load_maskedoff.value(),
-              tile_type,
-              CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1));
-        }
-      }
-      if (!access.promoted_unit_tile_view && !access.requires_aligned_1d_load) {
-        state->current_tile_values[cache_key] = builder_->BindValueAlias(
-            make_current_value_name(load->buffer, cache_key), tile);
-      }
-      return tile;
-    }
     if (const auto *imm = expr.as<IntImmNode>()) {
       DataType dtype = CanonicalizeSuvmDType(imm->dtype);
       SunMMIOType scalar_type{SunMMIOType::Kind::kScalar, dtype, 1, {}};
@@ -3556,6 +3936,206 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       return builder_->Unary(NewValueName(), op, data, result_type,
                              result_dtype);
     };
+    // Predicated loads may recurse through lower_bool_expr_to_shape, so keep
+    // this dispatch after all mask helpers above have been initialized.
+    if (const auto *load = expr.as<BufferLoadNode>()) {
+      if (IsSunmmioLocalVarBuffer(load->buffer)) {
+        return EmitLocalVarLoad(load->buffer, load->indices);
+      }
+      auto local_it = state->local_tile_values.find(load->buffer.get());
+      if (local_it != state->local_tile_values.end()) {
+        const SunMMIOValue &local = local_it->second;
+        if (IsTileLike(local) &&
+            ExtractStaticShape(local.type) == std::vector<int64_t>({1, 1}) &&
+            SupportsSuvmTilePickDType(local.dtype)) {
+          SunMMIOType scalar_type{
+              SunMMIOType::Kind::kScalar, local.dtype, 1, {}};
+          return builder_->TilePick(NewValueName(), local,
+                                    {make_index_const(0), make_index_const(0)},
+                                    scalar_type, local.dtype);
+        }
+        return local_it->second;
+      }
+      auto reg_it = state->register_tile_values.find(load->buffer.get());
+      if (reg_it != state->register_tile_values.end()) {
+        SunMMIOValue value = reg_it->second;
+        if (IsTileLike(value) && value.type.shape.size() == 1 &&
+            state->interior_axis0_loop != nullptr &&
+            state->interior_axis1_loop == nullptr) {
+          int64_t unsqueeze_axis = 0;
+          auto axis_it =
+              state->register_unsqueeze_axes.find(load->buffer.get());
+          if (axis_it != state->register_unsqueeze_axes.end()) {
+            unsqueeze_axis = axis_it->second;
+          }
+          ICHECK(unsqueeze_axis == 0 || unsqueeze_axis == 1)
+              << "1D register tile can only be unsqueezed back to a 2D tile";
+          int64_t extent = ExtractStaticShape(value.type)[0];
+          std::vector<int64_t> unsqueezed_shape =
+              unsqueeze_axis == 0 ? std::vector<int64_t>{1, extent}
+                                  : std::vector<int64_t>{extent, 1};
+          SunMMIOType unsqueezed_type =
+              MakeTileType(value.dtype, unsqueezed_shape);
+          value =
+              checked_tile_unsqueeze(value, unsqueezed_type, unsqueeze_axis,
+                                     value.dtype, "reduce register tile load");
+        }
+        return value;
+      }
+      TileAccessInfo access =
+          analyze_access(load->buffer, load->indices, state);
+      std::optional<int64_t> mx_scale_valid_elems =
+          mx_scale_e8m0_prefix_load_extent(load, access);
+      std::string cache_key = make_tile_cache_key(access);
+      if (!access.promoted_unit_tile_view && !access.requires_aligned_1d_load &&
+          !access.requires_aligned_2d_carrier) {
+        auto it = state->current_tile_values.find(cache_key);
+        if (it != state->current_tile_values.end() &&
+            cached_value_matches_access(it->second, access) &&
+            state->mlir_ctx != nullptr &&
+            state->mlir_ctx->LookupMLIRValue(it->second.value)) {
+          return it->second;
+        }
+      }
+      SunMMIOValue tile;
+      if (access.requires_aligned_1d_load) {
+        tile = load_aligned_1d_tile(access, state);
+      } else if (access.requires_aligned_2d_carrier) {
+        tile = load_aligned_2d_tile(access, state);
+        bool skip_load_predicate =
+            load->predicate.defined() &&
+            ((state->active_tail_store_predicate.has_value() &&
+              can_prove_expr_equal(
+                  load->predicate.value(),
+                  state->active_tail_store_predicate.value())) ||
+             is_canonical_tail_load_predicate(load->predicate.value(), state,
+                                              access));
+        if (load->predicate.defined() && !skip_load_predicate) {
+          DataType mask_index_dtype =
+              mask_index_dtype_for_value_dtype(load->buffer->dtype);
+          std::optional<SunMMIOValue> canonical_mask =
+              build_canonical_rank2_predicate_mask(
+                  load->predicate.value(), state, access, mask_index_dtype);
+          SunMMIOValue load_mask =
+              canonical_mask.has_value()
+                  ? canonical_mask.value()
+                  : lower_bool_expr_to_shape(load->predicate.value(),
+                                             access.tile_shape,
+                                             mask_index_dtype);
+          if (!IsTileLike(load_mask)) {
+            SunMMIOType bool_scalar_type{
+                SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}};
+            load_mask =
+                EnsureType(load_mask, bool_scalar_type, DataType::Bool());
+            load_mask = builder_->TileFill(
+                NewValueName(), load_mask,
+                MakeTileType(DataType::Bool(), access.tile_shape),
+                DataType::Bool());
+          }
+          DataType value_dtype =
+              CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1);
+          SunMMIOType scalar_type{
+              SunMMIOType::Kind::kScalar, value_dtype, 1, {}};
+          SunMMIOValue zero =
+              value_dtype.is_float() || value_dtype.is_bfloat16()
+                  ? builder_->ConstantFloat(NewValueName(), "0.0", scalar_type,
+                                            value_dtype)
+                  : builder_->ConstantInt(NewValueName(), 0, scalar_type,
+                                          value_dtype);
+          SunMMIOValue maskedoff = builder_->TileFill(
+              NewValueName(), zero,
+              MakeTileType(load->buffer->dtype, access.tile_shape),
+              value_dtype);
+          tile = builder_->TileSelect(
+              NewValueName(), load_mask, tile, maskedoff,
+              MakeTileType(load->buffer->dtype, access.tile_shape),
+              value_dtype);
+        }
+      } else {
+        SunMMIOValue view = get_or_create_tile_view(access, state);
+        SunMMIOType tile_type =
+            MakeTileType(load->buffer->dtype, access.tile_shape);
+        std::optional<SunMMIOValue> load_mask;
+        std::optional<SunMMIOValue> load_maskedoff;
+        bool skip_load_predicate = false;
+        if (load->predicate.defined()) {
+          skip_load_predicate =
+              mx_scale_valid_elems.has_value() ||
+              (state->active_tail_store_predicate.has_value() &&
+               can_prove_expr_equal(
+                   load->predicate.value(),
+                   state->active_tail_store_predicate.value())) ||
+              is_canonical_tail_load_predicate(load->predicate.value(), state,
+                                               access);
+        }
+        if (load->predicate.defined() && !skip_load_predicate) {
+          DataType mask_index_dtype =
+              mask_index_dtype_for_value_dtype(load->buffer->dtype);
+          std::optional<SunMMIOValue> canonical_mask =
+              build_canonical_rank2_predicate_mask(
+                  load->predicate.value(), state, access, mask_index_dtype);
+          SunMMIOValue lowered_mask =
+              canonical_mask.has_value()
+                  ? canonical_mask.value()
+                  : lower_bool_expr_to_shape(load->predicate.value(),
+                                             access.tile_shape,
+                                             mask_index_dtype);
+          if (!IsTileLike(lowered_mask)) {
+            SunMMIOType bool_scalar_type{
+                SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}};
+            lowered_mask =
+                EnsureType(lowered_mask, bool_scalar_type, DataType::Bool());
+            lowered_mask = builder_->TileFill(
+                NewValueName(), lowered_mask,
+                MakeTileType(DataType::Bool(), access.tile_shape),
+                DataType::Bool());
+          }
+          DataType value_dtype =
+              CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1);
+          SunMMIOType scalar_type{
+              SunMMIOType::Kind::kScalar, value_dtype, 1, {}};
+          SunMMIOValue zero =
+              value_dtype.is_float() || value_dtype.is_bfloat16()
+                  ? builder_->ConstantFloat(NewValueName(), "0.0", scalar_type,
+                                            value_dtype)
+                  : builder_->ConstantInt(NewValueName(), 0, scalar_type,
+                                          value_dtype);
+          load_maskedoff =
+              builder_->TileFill(NewValueName(), zero, tile_type, value_dtype);
+          load_mask = lowered_mask;
+        }
+        // Always load the full padded tile.  Tail stores preserve old
+        // destination values explicitly with tile.select, and predicated loads
+        // are represented as load + select so this path does not depend on
+        // masked tile.load dialect semantics.
+        tile = builder_->TileLoad(
+            NewValueName(), view, tile_type, std::nullopt, std::nullopt,
+            CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1));
+        if (load_mask.has_value()) {
+          tile = builder_->TileSelect(
+              NewValueName(), load_mask.value(), tile, load_maskedoff.value(),
+              tile_type,
+              CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1));
+        }
+        if (access.tile_rank == 1 && scope.tile_shape.size() == 2) {
+          std::vector<int64_t> unit_shape =
+              access.unsqueeze_axis == 1
+                  ? std::vector<int64_t>{access.tile_shape[0], 1}
+                  : std::vector<int64_t>{1, access.tile_shape[0]};
+          tile = checked_tile_unsqueeze(
+              tile, MakeTileType(load->buffer->dtype, unit_shape),
+              access.unsqueeze_axis,
+              CanonicalizeSuvmDType(load->buffer->dtype).with_lanes(1),
+              "rank-1 tile load orientation");
+        }
+      }
+      if (!access.promoted_unit_tile_view && !access.requires_aligned_1d_load &&
+          !access.requires_aligned_2d_carrier) {
+        state->current_tile_values[cache_key] = builder_->BindValueAlias(
+            make_current_value_name(load->buffer, cache_key), tile);
+      }
+      return tile;
+    }
     if (const auto *add = expr.as<AddNode>()) {
       return emit_binary(BinaryOp::kAdd, add->a, add->b, add->dtype);
     }
@@ -3901,7 +4481,8 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       TileAccessInfo natural_access =
           analyze_access(store->buffer, store->indices, state);
       bool use_forced_unit_axis = forced_unit_axis.has_value() &&
-                                  !natural_access.requires_aligned_1d_load;
+                                  !natural_access.requires_aligned_1d_load &&
+                                  !natural_access.requires_aligned_2d_carrier;
       bool canonical_tail_store_for_rhs =
           store->predicate.defined() &&
           (is_canonical_tail_load_predicate(store->predicate.value(), state,
@@ -3934,9 +4515,30 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
           store->predicate.defined()) {
         state->active_tail_store_predicate = store->predicate.value();
       }
+      std::unordered_map<const BufferNode *, SunMMIOValue>
+          saved_local_unit_values;
+      if (use_forced_unit_axis && access.tile_rank == 2) {
+        tir::PostOrderVisit(store->value, [&](const ObjectRef &obj) {
+          const auto *load = obj.as<BufferLoadNode>();
+          if (!load) {
+            return;
+          }
+          auto local_it = state->local_tile_values.find(load->buffer.get());
+          if (local_it == state->local_tile_values.end() ||
+              saved_local_unit_values.count(load->buffer.get())) {
+            return;
+          }
+          saved_local_unit_values.emplace(load->buffer.get(), local_it->second);
+          local_it->second =
+              reorient_unit_tile_to_shape(local_it->second, access.tile_shape);
+        });
+      }
       SunMMIOValue raw_rhs =
           lower_expr(store->value, state,
                      CanonicalizeSuvmDType(store->buffer->dtype).with_lanes(1));
+      for (const auto &kv : saved_local_unit_values) {
+        state->local_tile_values[kv.first] = kv.second;
+      }
       state->active_tail_store_predicate = saved_tail_store_predicate;
       SunMMIOValue rhs = access.requires_aligned_1d_load
                              ? normalize_for_aligned_1d_store(access, raw_rhs)
@@ -3957,8 +4559,13 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       bool canonical_tail_store = store->predicate.defined() &&
                                   is_canonical_tail_load_predicate(
                                       store->predicate.value(), state, access);
+      bool single_lane_zero_store =
+          store->predicate.defined() &&
+          is_single_lane_zero_store_predicate(store->predicate.value(), state,
+                                              access);
       if (!mx_scale_valid_elems.has_value() &&
-          !access.requires_aligned_1d_load && store->predicate.defined() &&
+          !access.requires_aligned_1d_load &&
+          !access.requires_aligned_2d_carrier && store->predicate.defined() &&
           !mask.has_value()) {
         if (canonical_tail_store && access.tile_rank == 1) {
           mask =
@@ -3978,9 +4585,52 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
         mask = lower_expr(store->predicate.value(), state,
                           get_store_mask_index_dtype());
       }
+      if (!mx_scale_valid_elems.has_value() &&
+          access.requires_aligned_2d_carrier && store->predicate.defined() &&
+          !canonical_tail_store) {
+        std::optional<SunMMIOValue> canonical_mask =
+            build_canonical_rank2_predicate_mask(store->predicate.value(),
+                                                 state, access,
+                                                 get_store_mask_index_dtype());
+        SunMMIOValue explicit_mask =
+            canonical_mask.has_value()
+                ? canonical_mask.value()
+                : lower_expr(store->predicate.value(), state,
+                             get_store_mask_index_dtype());
+        if (!IsTileLike(explicit_mask)) {
+          SunMMIOType bool_scalar_type{
+              SunMMIOType::Kind::kScalar, DataType::Bool(), 1, {}};
+          explicit_mask =
+              EnsureType(explicit_mask, bool_scalar_type, DataType::Bool());
+          explicit_mask = builder_->TileFill(
+              NewValueName(), explicit_mask,
+              MakeTileType(DataType::Bool(), access.tile_shape),
+              DataType::Bool());
+        } else {
+          explicit_mask =
+              reorient_unit_tile_to_shape(explicit_mask, access.tile_shape);
+          if (ExtractStaticShape(explicit_mask.type) != access.tile_shape) {
+            ICHECK(!explicit_mask.dtype.is_bool())
+                << "Small 2D carrier store predicate cannot broadcast a bool "
+                   "tile; lower the predicate to the logical tile shape";
+            explicit_mask =
+                broadcast_tile_to_shape(explicit_mask, access.tile_shape);
+          }
+        }
+        if (mask.has_value()) {
+          mask = builder_->Binary(
+              NewValueName(), BinaryOp::kAnd, ArithmeticFlavor::kBool,
+              mask.value(), explicit_mask,
+              MakeTileType(DataType::Bool(), access.tile_shape),
+              DataType::Bool());
+        } else {
+          mask = explicit_mask;
+        }
+      }
       std::optional<SunMMIOValue> dst_view;
       if ((mx_scale_valid_elems.has_value() || mask.has_value()) &&
-          !access.requires_aligned_1d_load) {
+          !access.requires_aligned_1d_load &&
+          !access.requires_aligned_2d_carrier) {
         dst_view = get_or_create_tile_view(access, state);
         SunMMIOType dst_tile_type =
             MakeTileType(store->buffer->dtype, access.tile_shape);
@@ -3998,6 +4648,22 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
           rhs = builder_->TileInsertSlice(
               NewValueName(), old_tile, valid_slice, offsets, dst_tile_type,
               CanonicalizeSuvmDType(store->buffer->dtype).with_lanes(1));
+        } else if (single_lane_zero_store) {
+          DataType value_dtype =
+              CanonicalizeSuvmDType(store->buffer->dtype).with_lanes(1);
+          ICHECK(IsTileLike(rhs) && SupportsSuvmTilePickDType(value_dtype))
+              << "Single-lane tile store expects a pick-compatible tile RHS";
+          std::vector<int64_t> rhs_shape = ExtractStaticShape(rhs.type);
+          std::vector<SunMMIOValue> rhs_indices(rhs_shape.size(),
+                                                make_index_const(0));
+          SunMMIOType scalar_type{
+              SunMMIOType::Kind::kScalar, value_dtype, 1, {}};
+          SunMMIOValue scalar = builder_->TilePick(
+              NewValueName(), rhs, rhs_indices, scalar_type, value_dtype);
+          std::vector<SunMMIOValue> dst_indices(access.tile_shape.size(),
+                                                make_index_const(0));
+          rhs = builder_->TileSet(NewValueName(), scalar, old_tile, dst_indices,
+                                  dst_tile_type, value_dtype);
         } else {
           SunMMIOValue store_mask = mask.value();
           if (IsTileLike(store_mask)) {
@@ -4028,12 +4694,36 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       }
       std::optional<SunMMIOValue> updated_aligned_tile;
       erase_current_values_for_buffer(state, store->buffer.get());
-      if (access.requires_aligned_1d_load) {
+      if (access.may_cross_aligned_1d_carrier) {
+        ICHECK(!single_lane_zero_store)
+            << "Cross-carrier aligned 1D store does not support singleton "
+               "writeback";
+        ICHECK_EQ(scope.domain_shape.size(), 1U)
+            << "Cross-carrier aligned 1D stores require an original rank-1 "
+               "T.Tiles scope";
+        ICHECK_EQ(scope.execution_loops.size(), 1U);
+        ICHECK(scope.execution_domain_axes == std::vector<int>({0}));
+        std::optional<int64_t> domain_extent =
+            TryGetIntImm(scope.domain_shape[0]);
+        ICHECK(domain_extent.has_value() &&
+               domain_extent.value() == access.tile_shape[0])
+            << "Cross-carrier aligned 1D stores require one complete static "
+               "domain tile";
         if (!mask.has_value() && canonical_tail_store) {
           mask =
               build_canonical_tail_mask(access, get_store_mask_index_dtype());
         }
-        updated_aligned_tile = store_aligned_1d_tile(access, rhs, mask, state);
+        store_cross_carrier_aligned_1d_tile(access, rhs, mask, state);
+        erase_current_values_for_buffer(state, store->buffer.get());
+      } else if (access.requires_aligned_1d_load) {
+        if (!mask.has_value() && canonical_tail_store) {
+          mask =
+              build_canonical_tail_mask(access, get_store_mask_index_dtype());
+        }
+        updated_aligned_tile = store_aligned_1d_tile(access, rhs, mask, state,
+                                                     single_lane_zero_store);
+      } else if (access.requires_aligned_2d_carrier) {
+        updated_aligned_tile = store_aligned_2d_tile(access, rhs, mask, state);
       } else {
         if (!dst_view.has_value()) {
           dst_view = get_or_create_tile_view(access, state);
@@ -4042,14 +4732,16 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
       }
       if (access.promoted_unit_tile_view) {
         erase_current_values_for_buffer(state, store->buffer.get());
-      } else if (updated_aligned_tile.has_value()) {
+      } else if (updated_aligned_tile.has_value() &&
+                 access.requires_aligned_1d_load &&
+                 !access.may_cross_aligned_1d_carrier) {
         Aligned1DAddressInfo aligned_address = compute_aligned_1d_address(
             access, LookupBuffer(access.buffer).buffer_type);
         std::string aligned_cache_key =
             make_tile_cache_key(access, aligned_address);
         state->current_tile_values[aligned_cache_key] =
             updated_aligned_tile.value();
-      } else {
+      } else if (!access.requires_aligned_2d_carrier) {
         state->current_tile_values[cache_key] = builder_->BindValueAlias(
             make_current_value_name(store->buffer, cache_key), rhs);
       }
@@ -4103,7 +4795,6 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
     ICHECK(axis_imm) << "tl.vector_core_in_tile_reduce axis must be IntImm";
     MarkVisitedNodeType(axis_imm->GetTypeKey());
     int64_t axis = static_cast<int64_t>(axis_imm->value);
-    note_register_unsqueeze_axis(state, dst_region->buffer, axis);
 
     SunMMIOValue src_tile;
     std::vector<int64_t> src_shape;
@@ -4122,22 +4813,36 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
           CanonicalizeSuvmDType(src_region->buffer->dtype).with_lanes(1));
     }
 
+    int64_t lowered_axis = axis;
+    if (src_shape.size() == 1) {
+      ICHECK_EQ(axis, 0) << "Rank-1 tile reduce expects axis 0";
+      src_shape.insert(src_shape.begin(), 1);
+      SunMMIOType promoted_src_type =
+          MakeTileType(src_region->buffer->dtype, src_shape);
+      src_tile = checked_tile_unsqueeze(
+          src_tile, promoted_src_type, 0,
+          CanonicalizeSuvmDType(src_region->buffer->dtype).with_lanes(1),
+          "rank-1 vector_core_in_tile_reduce source");
+      lowered_axis = 1;
+    }
+    note_register_unsqueeze_axis(state, dst_region->buffer, lowered_axis);
+
     std::vector<int64_t> result_shape = src_shape;
-    ICHECK_GE(axis, 0);
-    ICHECK_LT(axis, static_cast<int64_t>(result_shape.size()));
-    result_shape[axis] = 1;
+    ICHECK_GE(lowered_axis, 0);
+    ICHECK_LT(lowered_axis, static_cast<int64_t>(result_shape.size()));
+    result_shape[lowered_axis] = 1;
     SunMMIOType result_tile_type =
         MakeTileType(src_region->buffer->dtype, result_shape);
     SunMMIOValue reduced = builder_->TileReduce(
         NewValueName(), static_cast<std::string>(predicate->value), src_tile,
-        result_tile_type, axis,
+        result_tile_type, lowered_axis,
         CanonicalizeSuvmDType(src_region->buffer->dtype).with_lanes(1));
 
     if (IsSunmmioReduceLocalTempBuffer(dst_region->buffer)) {
       SunMMIOValue local = builder_->BindValueAlias(
           make_local_value_name(dst_region->buffer), reduced);
       state->local_tile_values[dst_region->buffer.get()] = local;
-      state->local_unit_tile_axes[dst_region->buffer.get()] = axis;
+      state->local_unit_tile_axes[dst_region->buffer.get()] = lowered_axis;
       return;
     }
 
@@ -4208,7 +4913,7 @@ bool CodeGenTileLangSunMMIO::TryLowerTilesScope(const tir::ForNode *op) {
         std::string dst_cache_key =
             make_tile_cache_key(dst_access, aligned_address);
         state->current_tile_values[dst_cache_key] =
-            store_aligned_1d_tile(dst_access, rhs, std::nullopt, state);
+            store_aligned_1d_tile(dst_access, rhs, std::nullopt, state, false);
       } else {
         SunMMIOValue dst_view = get_or_create_tile_view(dst_access, state);
         builder_->TileStore(rhs, dst_view, std::nullopt);

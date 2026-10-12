@@ -424,15 +424,15 @@ def test_dot_mul_tiled_parallel_2d_codegen_validates_with_npuir_opt(tmp_path):
     assert_source_contains(src, ("suvm.tile.mulf", "suvm.tile.exp"))
 
 
-def test_tiles_rank2_first_tile_partial_builds_full_shape_mask(tmp_path):
+def test_tiles_rank2_small_logical_buffer_uses_carrier_rmw(tmp_path):
     src = validate_sunmmio_codegen_loose(
         tiles_rank2_first_tile_partial(),
         tmp_path,
         mlir_filename="tiles_rank2_first_tile_partial_suvm.mlir",
-        expected_tokens=("suvm.tile.cmpi", "suvm.tile.select", "suvm.tile.store"),
+        expected_tokens=("!suvm.tile_view<4x32xf32>", "suvm.tile.extract_slice", "suvm.tile.insert_slice", "suvm.tile.store"),
     )
-    assert "suvm.tile.broadcast" in src
-    assert "!suvm.tile<1x32xi1> -> !suvm.tile<4x32xi1>" not in src
+    assert "suvm.tile.cmpi" not in src
+    assert "suvm.tile.select" not in src
 
 
 def test_dot_mul_tiled_parallel_3d_large_block_codegen_validates_loose_with_npuir_opt(tmp_path):
