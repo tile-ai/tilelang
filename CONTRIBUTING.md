@@ -45,6 +45,9 @@ If you're new to contributing to TileLang, you can follow the following guidelin
 - Explain the additional coverage when introducing new tests.
 - Update documentation when applicable.
 
+For test placement, case selection, and examples, follow the
+[Testing Style Guide](docs/developer_guide/testing_style.md).
+
 ## Coding Style
 
 Run the repository formatter on the files touched by your pull request:

@@ -1,16 +1,38 @@
 ---
 name: tilelang-submit-pr
-description: Prepare, update, and submit TileLang pull requests with repository-specific CI readiness checks. Use when asked to commit, push, publish, open, or make an existing TileLang PR ready; covers scoped diffs, backend-aware test gating, build freshness, formatting, validation, and post-push verification. Do not use for ordinary local builds or test runs without PR intent.
+description: Plan focused validation for TileLang bug fixes and behavior changes, design or extend tests and parameter cases, and prepare, update, or submit pull requests. Use before deciding what regression coverage to add and when asked to commit, push, publish, open, or make a PR ready. Do not use for merely running existing builds or tests without test-design or PR intent.
 ---
 
-# Submit a TileLang Pull Request
+# Plan Tests and Submit a TileLang Pull Request
 
 ## Objective
 
-Make the intended patch reviewable and CI-ready before it is pushed. A request
-to inspect or test changes does not authorize committing, pushing, opening a PR,
-or changing an existing PR. When updating an existing PR, push its current head
-branch instead of opening a duplicate PR.
+Plan focused validation while developing a change, then make the intended patch
+reviewable and CI-ready before publication. Planning, writing, inspecting, or
+running tests does not authorize committing, pushing, opening a PR, or changing
+an existing PR. When updating an existing PR, push its current head branch
+instead of opening a duplicate PR.
+
+For test-design work, use the design and portability guidance before editing
+tests, then validate the affected behavior when implementing the change. If only
+a plan was requested, stop at the proposed coverage. PR metadata inspection and
+publication-readiness checks apply when preparing a PR; they are not prerequisites
+for local test design.
+
+## Design Tests Before Writing Them
+
+Read the [Testing Style Guide](../../../docs/developer_guide/testing_style.md)
+before deciding whether to add or expand tests.
+
+- Find the closest existing tests and the concrete behavior their assertions do
+  not protect. Check that their target, pass, and fixture configurations reach
+  the affected path; a similar file name or a passing run is not sufficient.
+- Use the guide to choose existing coverage, a minimal extension, or a focused
+  new test. Reuse suitable kernel and verification helpers without forcing
+  unrelated behaviors into one test.
+- Consider parameter expansion and repeated compilation or execution inside
+  tests, not just file or function counts. Preserve cases that protect distinct
+  behavior or interactions.
 
 ## Inspect the Patch
 
