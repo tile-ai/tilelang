@@ -5,7 +5,7 @@ import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang import tvm
-from tilelang.layout import make_ascend_ub_nz_layout
+from tilelang.layout import make_ascend_nz_layout
 from tvm import tirx
 from testing.ascend._ir import allocated_buffer, calls, nodes, statements
 
@@ -25,7 +25,7 @@ def _nz_fixpipe_kernel(split, dtype="float32", n=64, alias=False):
                 ub = T.view(storage, (2, 48, 80))
             else:
                 ub = T.alloc_shared((2, 48, 80), dtype)
-            T.annotate_layout({ub: make_ascend_ub_nz_layout(ub)})
+            T.annotate_layout({ub: make_ascend_nz_layout(ub)})
             T.copy(A, a)
             T.copy(B, b)
             T.gemm(a, b, acc, transpose_B=True, clear_accum=True)

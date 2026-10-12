@@ -18,12 +18,13 @@ namespace tl {
 // tile maps to physical [.., cols / C0, rows / 16, 16, C0] (a grid of 16xC0
 // fractals, row-major within a fractal) where C0 = 32 bytes / element_size
 // (16 for bf16/fp16, 32 for fp8, 8 for fp32). In MajorK, cols is the reduce-K
-// axis; in MajorMN, cols is the output M/N axis. The legacy NZ name is kept as
-// an alias of MajorK during the transition.
+// axis; in MajorMN, cols is the output M/N axis.
 Layout MakeAscendMajorKLayout(const tirx::Buffer &buffer, int k_align = 1);
 Layout MakeAscendMajorMNLayout(const tirx::Buffer &buffer, int k_align = 1);
 Layout MakeAscendL0CLayout(const tirx::Buffer &buffer);
 Layout MakeAscendSFLayout(const tirx::Buffer &buffer);
+// NZ selects the fixed 16x16 accumulator layout for L0C and UB Fixpipe
+// output, and MajorK for other scopes. Compact UB packing remains explicit.
 Layout MakeAscendNZLayout(const tirx::Buffer &buffer);
 
 // Compact padded-NZ layout used by software UB ND->NZ scatter:

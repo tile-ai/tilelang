@@ -8,7 +8,7 @@ from tilelang.layout import (
     make_ascend_major_k_layout,
     make_ascend_major_mn_layout,
     make_ascend_sf_layout,
-    make_ascend_ub_nz_layout,
+    make_ascend_nz_layout,
     try_extract_fractal_layout,
 )
 
@@ -19,7 +19,7 @@ from tilelang.layout import (
         (make_ascend_major_k_layout, (16, 32), "float8_e4m3fn", (0, 1, 0)),
         (make_ascend_major_mn_layout, (32, 16), "float8_e4m3fn", (3, 0, 1)),
         (make_ascend_l0c_layout, (16, 16), "float32", (1, 1, 0)),
-        (make_ascend_ub_nz_layout, (2, 32, 64), "float32", (1, 1, 0)),
+        (make_ascend_nz_layout, (2, 32, 64), "float32", (1, 1, 0)),
         (make_ascend_sf_layout, (16, 1), "uint16", (2, 1, 0)),
         (make_ascend_sf_layout, (32, 1), "uint16", (2, 1, 0)),
         # The same small shape has different semantics despite identical indices.
@@ -31,9 +31,20 @@ def test_canonical_layout_tags(factory, shape, dtype, expected):
     info = try_extract_fractal_layout(factory(buf), buf)
 
     assert (info.kind, info.c0_axis, info.row16_axis) == expected
-    if factory == make_ascend_ub_nz_layout:
+    if factory == make_ascend_nz_layout:
         assert int(info.c0) == 16
         assert list(factory(buf).get_output_shape()) == [2, 4, 2, 16, 16]
+
+
+@pytest.mark.parametrize("scope,kind", [("shared", 1), ("shared.dyn", 1), ("shared.l0c", 1), ("shared.l1", 0)])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_nz_layout_uses_buffer_scope(scope, kind, dtype):
+    buf = tirx.decl_buffer((2, 32, 64), dtype, name="A", scope=scope)
+    layout = make_ascend_nz_layout(buf)
+    info = try_extract_fractal_layout(layout, buf)
+    c0 = 8 if scope == "shared.l1" and dtype == "float32" else 16
+    assert (info.kind, int(info.c0), info.c0_axis, info.row16_axis) == (kind, c0, 1, 0)
+    assert list(layout.get_output_shape()) == [2, 64 // c0, 2, 16, c0]
 
 
 def test_expand_preserves_sf_tag():
