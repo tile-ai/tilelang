@@ -245,7 +245,12 @@ private:
 
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
                                           const Array<PrimExpr> &indices) {
-    auto flattened_indices = buffer->ElemOffset(indices);
+    // Simplify the mixed-radix index before widening it.  Int64Promoter
+    // distributes casts through the expression tree, which hides identities
+    // such as floordiv(x, d) * d + floormod(x, d) == x from the iter-map
+    // simplifier and leaves an unnecessary int64 div/mod in device code.
+    auto flattened_indices =
+        this->IterMapSimplifyWithContext(buffer->ElemOffset(indices), false);
     Array<PrimExpr> safe_indices;
     Int64Promoter promoter;
     for (const auto &index : flattened_indices) {

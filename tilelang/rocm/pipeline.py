@@ -9,6 +9,7 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     allow_vectorize,
     should_disable_shared_memory_reuse,
     should_enable_aggressive_merge,
+    should_enable_magic_div,
     should_enable_race_check,
     should_force_let_inline,
 )
@@ -61,6 +62,8 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tirx.transform.NarrowDataType(32)(mod)
+    if should_enable_magic_div(pass_ctx=pass_ctx, target=target):
+        mod = tilelang.transform.LowerMagicDiv()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tirx.transform.Simplify()(mod)

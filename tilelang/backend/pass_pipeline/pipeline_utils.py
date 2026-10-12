@@ -107,3 +107,19 @@ def LayoutVisual(mod: IRModule) -> None:
     if should_enable_layout_visual():
         formats = get_layout_visual_formats()
         tilelang.analysis.LayoutVisual(formats=formats)(mod)
+
+
+def should_enable_magic_div(pass_ctx: PassContext | None = None, target: Target | None = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    if not pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_MAGIC_DIV, False):
+        return False
+    if target is None:
+        return True
+    kind = target.kind.name
+    if kind == "cuda":
+        # CuTeDSL shares the CUDA lowering pipeline but has its own device
+        # codegen that does not know the tl.magic_div intrinsic.
+        return "cutedsl" not in target.keys
+    # "llvm" target codegen (stock TVM LLVM) does not know the intrinsic.
+    return kind in ("rocm", "hip", "c")

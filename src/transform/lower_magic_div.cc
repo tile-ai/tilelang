@@ -1,0 +1,1262 @@
+/*!
+ * \file lower_magic_div.cc
+ * \brief Lower divisions by launch-invariant dynamic shapes to host-precomputed
+ *        magic-number multiply-shift sequences (CUTLASS FastDivmod style).
+ *
+ * For each FloorDiv/FloorMod/Div/Mod site whose divisor is a launch-invariant
+ * positive int32 expression and whose dividend is either provably
+ * non-negative or protected by the intrinsic's exact runtime fallback,
+ * rewrite:
+ *
+ *   floordiv(x, d)  ->  tl.magic_div(x, d_i, m_i, s_i)
+ *   floormod(x, d)  ->  x - tl.magic_div(x, d_i, m_i, s_i) * d_i
+ *
+ * where (m_i, s_i) are fresh variables bound on the host before
+ * SplitHostDevice, which threads them into the device parameter list like any
+ * other symbolic variable. The intrinsic stays opaque until device codegen,
+ * where it expands to a mul-high + shift sequence with a d == 1 fallback.
+ *
+ * Magic constants (valid for 0 <= x < 2^31, d >= 2):
+ *   k = ceil_log2(d), p = 31 + k, M = ceil(2^p / d), s = p - 32
+ *   q = umulhi(uint32(x), M) >> s
+ * d == 1 is handled by a device-side select (host binds m = s = 0).
+ *
+ * Performance note: index expressions in this pipeline can be fully inlined
+ * and huge. This pass deliberately avoids canonical_simplify / CanProve on
+ * whole expressions; all checks are either structural (factor-spine walks,
+ * sum-term decomposition) or O(n) interval evaluation.
+ */
+
+#include "support/check.h"
+#include <tvm/arith/analyzer.h>
+#include <tvm/ffi/cast.h>
+#include <tvm/ir/cast.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/transform.h>
+
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <sstream>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
+#include "../op/builtin.h"
+#include "arith/ir_mutator_with_analyzer.h"
+
+namespace tvm {
+namespace tl {
+
+using namespace tirx;
+using namespace ffi;
+using arith::IRMutatorWithAnalyzer;
+
+namespace {
+
+// Decompose a product into its factors (Mul spine walk).
+std::vector<PrimExpr> CollectFactors(const PrimExpr &e) {
+  std::vector<PrimExpr> factors;
+  PrimExpr cur = e;
+  while (const MulNode *mul = cur.as<MulNode>()) {
+    factors.push_back(mul->b);
+    cur = mul->a;
+  }
+  factors.push_back(cur);
+  return factors;
+}
+
+// Structural multiset equality of two factor lists. canonical_simplify does
+// not commute free products (e.g. `sn * n` vs `n * sn` stay distinct), so
+// product equality up to reassociation must be checked this way. A miss only
+// loses an optimization opportunity; a match is always sound.
+bool FactorMultisetEqual(const std::vector<PrimExpr> &a,
+                         const std::vector<PrimExpr> &b) {
+  if (a.size() != b.size()) {
+    return false;
+  }
+  ExprDeepEqual deep_equal;
+  std::vector<bool> used(b.size(), false);
+  for (const PrimExpr &fa : a) {
+    bool found = false;
+    for (size_t j = 0; j < b.size(); j++) {
+      if (!used[j] && deep_equal(fa, b[j])) {
+        used[j] = true;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Step 0: canonicalize `x - floordiv(x, d) * e` into `floormod(x, d)` when
+// CanonicalSimplify(e - d) == 0 (i.e. the multiplied term is the divisor up to
+// reassociation). The identity holds for any d != 0, so no positivity gate is
+// required here; downstream logic decides whether the floormod is eligible
+// for magic-number lowering.
+class FloorModCanonicalizer : public IRMutatorWithAnalyzer {
+public:
+  explicit FloorModCanonicalizer(arith::Analyzer *analyzer)
+      : IRMutatorWithAnalyzer(analyzer) {}
+
+  Stmt Apply(const Stmt &body) { return VisitStmt(body); }
+
+  PrimExpr VisitExpr_(const SubNode *op) final {
+    PrimExpr expr = IRMutatorWithAnalyzer::VisitExpr_(op);
+    const SubNode *sub = expr.as<SubNode>();
+    if (sub == nullptr || !sub->a.dtype().is_int() || !sub->b.as<MulNode>() ||
+        SideEffect(expr) > CallEffectKind::kPure) {
+      return expr;
+    }
+    // Decompose the right operand into a product of factors (spine walk,
+    // cheap even for huge expressions) and look for a FloorDiv factor whose
+    // dividend matches the left operand: x - floordiv(x, d) * rest.
+    std::vector<PrimExpr> factors = CollectFactors(sub->b);
+    ExprDeepEqual deep_equal;
+    for (size_t i = 0; i < factors.size(); i++) {
+      const FloorDivNode *fd = factors[i].as<FloorDivNode>();
+      if (fd == nullptr || !deep_equal(fd->a, sub->a)) {
+        continue;
+      }
+      // The remaining factors must equal the divisor fd->b up to
+      // reassociation (factor multiset equality).
+      std::vector<PrimExpr> rest;
+      for (size_t j = 0; j < factors.size(); j++) {
+        if (j != i) {
+          rest.push_back(factors[j]);
+        }
+      }
+      if (rest.empty()) {
+        continue; // b == floordiv alone is not a remainder pattern
+      }
+      if (FactorMultisetEqual(rest, CollectFactors(fd->b))) {
+        return floormod(sub->a, fd->b);
+      }
+    }
+    return expr;
+  }
+};
+
+struct MagicDivisorEntry {
+  PrimExpr divisor; // original divisor expression (host-side value for d_i)
+  Var d_var;        // tl_magic_d_i : int32
+  Var m_var;        // tl_magic_m_i : int32 (uint32 bit pattern)
+  Var s_var;        // tl_magic_s_i : int32
+};
+
+class MagicDivRewriter : public IRMutatorWithAnalyzer {
+public:
+  MagicDivRewriter(arith::Analyzer *analyzer, const PrimFunc &func)
+      : IRMutatorWithAnalyzer(analyzer) {
+    MarkBufferMapShapes(func);
+    for (const Var &param : func->params) {
+      if (param->dtype.is_int() && param->dtype.lanes() == 1) {
+        invariant_vars_.insert(param.get());
+        safe_host_vars_.insert(param.get());
+        non_shape_params_.insert(param.get());
+      }
+    }
+    auto collect_vars = [&](const PrimExpr &e) {
+      PostOrderVisit(e, [&](const ObjectRef &n) {
+        if (const VarNode *v = n.as<VarNode>()) {
+          invariant_vars_.insert(v);
+        }
+      });
+    };
+    for (const auto &kv : func->buffer_map) {
+      const Buffer &buf = kv.second;
+      for (const PrimExpr &e : buf->shape) {
+        collect_vars(e);
+        PostOrderVisit(e, [&](const ObjectRef &n) {
+          if (const VarNode *v = n.as<VarNode>()) {
+            safe_host_vars_.insert(v);
+            shape_vars_.insert(v);
+          }
+        });
+        // A positive shape such as p + 1 does not imply that p is positive.
+        // Only a shape that is itself a Var supplies an entry bound for it.
+        if (const VarNode *v = e.as<VarNode>()) {
+          entry_analyzer_.const_int_bound.Update(
+              GetRef<Var>(v),
+              arith::ConstIntBound(1, arith::ConstIntBound::kPosInf),
+              /*allow_override=*/true);
+        }
+      }
+      for (const PrimExpr &e : buf->strides) {
+        collect_vars(e);
+      }
+      collect_vars(buf->elem_offset);
+    }
+    for (const VarNode *v : shape_vars_) {
+      non_shape_params_.erase(v);
+    }
+  }
+
+  Stmt Apply(const Stmt &body) {
+    CollectConditionDivMods(body);
+    return VisitStmt(body);
+  }
+
+  // The div/mod overrides gate on the *current* (not yet visited) node so the
+  // dividend stays in its original, most analyzable form (e.g. floormod)
+  // before nested sites inside it are rewritten. Rewritten expressions are
+  // then visited to handle nested sites in their operands.
+  PrimExpr VisitExpr_(const FloorDivNode *op) final {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/false, /*is_floor=*/true);
+        r.defined()) {
+      return VisitExpr(r);
+    }
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr_(const FloorModNode *op) final {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/true, /*is_floor=*/true);
+        r.defined()) {
+      return VisitExpr(r);
+    }
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr_(const DivNode *op) final {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/false, /*is_floor=*/false);
+        r.defined()) {
+      return VisitExpr(r);
+    }
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr_(const ModNode *op) final {
+    if (PrimExpr r = TryRewriteDivMod(op, /*is_mod=*/true, /*is_floor=*/false);
+        r.defined()) {
+      return VisitExpr(r);
+    }
+    return IRMutatorWithAnalyzer::VisitExpr_(op);
+  }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    // Keep a complete mixed-radix unflatten chain visible until
+    // FlattenBuffer.  Replacing its quotient/remainder pieces with opaque
+    // magic calls prevents the flattened store offset from simplifying back
+    // to the original linear index.
+    if (!IsLinearIndexUnflatten(op->indices, op->buffer->shape)) {
+      return IRMutatorWithAnalyzer::VisitStmt_(op);
+    }
+
+    PrimExpr value = VisitExpr(op->value);
+    Optional<PrimExpr> predicate = op->predicate;
+    if (predicate.defined()) {
+      predicate = VisitExpr(predicate.value());
+    }
+    if (value.same_as(op->value) && predicate.same_as(op->predicate)) {
+      return GetRef<Stmt>(op);
+    }
+    return BufferStore(op->buffer, value, op->indices, predicate, op->span);
+  }
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    if (!IsLinearIndexUnflatten(op->indices, op->buffer->shape)) {
+      return IRMutatorWithAnalyzer::VisitExpr_(op);
+    }
+    Optional<PrimExpr> predicate = op->predicate;
+    if (predicate.defined()) {
+      predicate = VisitExpr(predicate.value());
+    }
+    if (predicate.same_as(op->predicate)) {
+      return GetRef<PrimExpr>(op);
+    }
+    return BufferLoad(op->buffer, op->indices, predicate, op->span);
+  }
+
+  bool HasMagicDivisors() const { return !entries_.empty(); }
+
+  // Bind the magic constants on the host: one libtvm_runtime helper call per
+  // constant (multiplier / shift) for CUTLASS FastDivmod
+  // (k = ceil_log2(d), p = 31 + k, M = ceil(2^p / d), s = p - 32; 0 for
+  // d == 1 where the device expansion selects x).
+  Stmt WrapWithHostBinds(const Stmt &body) {
+    ICHECK(!entries_.empty());
+    std::vector<Stmt> seq;
+    for (size_t i = 0; i < entries_.size(); i++) {
+      const MagicDivisorEntry &e = entries_[i];
+      std::string suffix = std::to_string(i);
+      seq.emplace_back(Bind(e.d_var, e.divisor));
+      // Opaque extern calls: downstream analyzer-based passes see no
+      // arithmetic chain (an earlier unrolled ceil_log2 ladder of arithmetic
+      // binds caused multi-minute slowdowns in rewrite/canonical simplify
+      // passes on large kernels), and the binds are not substituted into the
+      // device body (m/s must stay separate kernel params: the runtime arg
+      // packer rejects uint64, so a packed (M<<32)|s param is not an option).
+      seq.emplace_back(
+          Bind(e.m_var, Cast(DataType::Int(32),
+                             Call(DataType::UInt(32), builtin::call_extern(),
+                                  {StringImm("TileLangHostFastDivmodU32Mul"),
+                                   Cast(DataType::UInt(32), e.d_var)}))));
+      seq.emplace_back(
+          Bind(e.s_var, Call(DataType::Int(32), builtin::call_extern(),
+                             {StringImm("TileLangHostFastDivmodU32Shift"),
+                              Cast(DataType::UInt(32), e.d_var)})));
+    }
+    seq.push_back(body);
+    return SeqStmt(seq);
+  }
+
+private:
+  struct ConditionDivModSite {
+    PrimExpr x;
+    PrimExpr d;
+    bool is_mod;
+    bool is_floor;
+  };
+
+  bool CanReuseConditionSite(const PrimExpr &x, const PrimExpr &d,
+                             bool is_mod) const {
+    ExprDeepEqual deep_equal;
+    bool has_floor = false;
+    bool has_trunc = false;
+    for (const ConditionDivModSite &site : condition_sites_) {
+      if (site.is_mod != is_mod || !deep_equal(site.x, x) ||
+          !deep_equal(site.d, d)) {
+        continue;
+      }
+      has_floor |= site.is_floor;
+      has_trunc |= !site.is_floor;
+    }
+    return has_floor && !has_trunc;
+  }
+
+  bool IsMatchingDiv(const PrimExpr &expr, const PrimExpr &dividend,
+                     const std::vector<PrimExpr> &divisor_factors) const {
+    PrimExpr lhs;
+    PrimExpr rhs;
+    if (const FloorDivNode *div = expr.as<FloorDivNode>()) {
+      lhs = div->a;
+      rhs = div->b;
+    } else if (const DivNode *div = expr.as<DivNode>()) {
+      lhs = div->a;
+      rhs = div->b;
+    } else {
+      return false;
+    }
+    return ExprDeepEqual()(lhs, dividend) &&
+           FactorMultisetEqual(CollectFactors(rhs), divisor_factors);
+  }
+
+  bool IsMatchingMod(const PrimExpr &expr, const PrimExpr &dividend,
+                     const std::vector<PrimExpr> &divisor_factors) const {
+    PrimExpr lhs;
+    PrimExpr rhs;
+    if (const FloorModNode *mod = expr.as<FloorModNode>()) {
+      lhs = mod->a;
+      rhs = mod->b;
+    } else if (const ModNode *mod = expr.as<ModNode>()) {
+      lhs = mod->a;
+      rhs = mod->b;
+    } else {
+      return false;
+    }
+    return ExprDeepEqual()(lhs, dividend) &&
+           FactorMultisetEqual(CollectFactors(rhs), divisor_factors);
+  }
+
+  bool IsLinearIndexUnflatten(const Array<PrimExpr> &indices,
+                              const Array<PrimExpr> &shape) const {
+    if (indices.size() < 2 || indices.size() != shape.size()) {
+      return false;
+    }
+
+    const auto *outer_div = indices[0].as<FloorDivNode>();
+    if (outer_div == nullptr) {
+      return false;
+    }
+    PrimExpr linear_index = outer_div->a;
+    PrimExpr remainder;
+    for (size_t i = 0; i + 1 < indices.size(); ++i) {
+      std::vector<PrimExpr> stride_factors;
+      for (size_t j = i + 1; j < shape.size(); ++j) {
+        std::vector<PrimExpr> shape_factors = CollectFactors(shape[j]);
+        stride_factors.insert(stride_factors.end(), shape_factors.begin(),
+                              shape_factors.end());
+      }
+      const PrimExpr &dividend = i == 0 ? linear_index : remainder;
+      if (!IsMatchingDiv(indices[i], dividend, stride_factors)) {
+        return false;
+      }
+      if (i + 1 == indices.size() - 1) {
+        return IsMatchingMod(indices.back(), dividend, stride_factors);
+      }
+      const auto *next_div = indices[i + 1].as<FloorDivNode>();
+      if (next_div == nullptr ||
+          !IsMatchingMod(next_div->a, dividend, stride_factors)) {
+        return false;
+      }
+      remainder = next_div->a;
+    }
+    return false;
+  }
+
+  bool ProvePositive(const PrimExpr &e) {
+    try {
+      if (analyzer_->CanProve(e > 0, arith::ProofStrength::kSymbolicBound)) {
+        return true;
+      }
+    } catch (const std::exception &) {
+    }
+    return analyzer_->const_int_bound(e)->min_value >= 1;
+  }
+
+  bool IsSafeHostDivisor(const PrimExpr &d) {
+    bool safe = true;
+    PostOrderVisit(d, [&](const ObjectRef &n) {
+      if (n.as<DivNode>() || n.as<ModNode>() || n.as<FloorDivNode>() ||
+          n.as<FloorModNode>() || n.as<BufferLoadNode>() || n.as<CallNode>()) {
+        safe = false;
+        return;
+      }
+      if (const VarNode *v = n.as<VarNode>();
+          v != nullptr && !safe_host_vars_.count(v)) {
+        safe = false;
+      }
+    });
+    return safe;
+  }
+
+  bool IsEntryPositive(const PrimExpr &d) {
+    try {
+      if (entry_analyzer_.CanProve(d > 0,
+                                   arith::ProofStrength::kSymbolicBound)) {
+        return true;
+      }
+    } catch (const std::exception &) {
+    }
+    return entry_analyzer_.const_int_bound(d)->min_value >= 1;
+  }
+
+  // Cheap structural proof for x >= 0 that avoids heavyweight symbolic
+  // analysis on large expressions. Covers the shapes of bit-twiddled
+  // permutation indices: floormod with a positive divisor, term-wise
+  // non-negative sums, and the `a - floormod(a, c)` remainder pattern.
+  bool ProveNonNegative(const PrimExpr &e) { return ProveNonNegative(e, 0); }
+
+  bool ProveNonNegative(const PrimExpr &e, int depth) {
+    try {
+      if (analyzer_->const_int_bound(e)->min_value >= 0) {
+        return true;
+      }
+    } catch (const std::exception &) {
+    }
+    if (depth >= 16) {
+      return false;
+    }
+    if (const FloorModNode *fm = e.as<FloorModNode>()) {
+      // floormod with a positive divisor is always non-negative.
+      if (ProvePositive(fm->b)) {
+        return true;
+      }
+    }
+    if (const AddNode *add = e.as<AddNode>()) {
+      return ProveNonNegative(add->a, depth + 1) &&
+             ProveNonNegative(add->b, depth + 1);
+    }
+    if (const SubNode *sub = e.as<SubNode>()) {
+      // a - floormod(a, c) >= 0 when a >= 0 and c > 0.
+      if (const FloorModNode *fm = sub->b.as<FloorModNode>()) {
+        ExprDeepEqual deep_equal;
+        if (deep_equal(sub->a, fm->a) && ProveNonNegative(fm->a, depth + 1) &&
+            ProvePositive(fm->b)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool ShouldWidenDividend(const PrimExpr &e) {
+    const int64_t int32_min = std::numeric_limits<int32_t>::min();
+    const int64_t int32_max = std::numeric_limits<int32_t>::max();
+    class Visitor : public tirx::ExprVisitor {
+    public:
+      explicit Visitor(
+          const std::unordered_set<const VarNode *> &non_shape_params,
+          const std::unordered_set<const VarNode *> &shape_vars,
+          arith::Analyzer *analyzer, int64_t int32_min, int64_t int32_max)
+          : non_shape_params_(non_shape_params), shape_vars_(shape_vars),
+            analyzer_(analyzer), int32_min_(int32_min), int32_max_(int32_max) {}
+
+      bool widen{false};
+      void Visit(const PrimExpr &expr) { VisitExpr(expr); }
+
+    private:
+      using tirx::ExprVisitor::VisitExpr_;
+
+      void VisitExpr_(const AddNode *op) final {
+        Check(GetRef<PrimExpr>(op));
+        CheckArithmeticRange(GetRef<PrimExpr>(op));
+        ExprVisitor::VisitExpr_(op);
+      }
+
+      void VisitExpr_(const SubNode *op) final {
+        Check(GetRef<PrimExpr>(op));
+        CheckArithmeticRange(GetRef<PrimExpr>(op));
+        ExprVisitor::VisitExpr_(op);
+      }
+
+      void VisitExpr_(const MulNode *op) final {
+        Check(GetRef<PrimExpr>(op));
+        CheckArithmeticRange(GetRef<PrimExpr>(op));
+        ExprVisitor::VisitExpr_(op);
+      }
+
+      void VisitExpr_(const CallNode *op) final {
+        // Treat nested magic calls as opaque values. Their ABI arguments are
+        // not intermediate arithmetic in the enclosing dividend.
+        if (op->op.same_as(tl::magic_div()) ||
+            op->op.same_as(tl::magic_mod()) ||
+            op->op.same_as(tl::magic_div_with_validity()) ||
+            op->op.same_as(tl::magic_mod_with_validity()) ||
+            op->op.same_as(tl::magic_mod_from_quotient())) {
+          return;
+        }
+        ExprVisitor::VisitExpr_(op);
+      }
+
+      void Check(const PrimExpr &expr) {
+        if (!expr.dtype().is_int() || expr.dtype().bits() != 32) {
+          return;
+        }
+        if (UsesVar(expr, [&](const VarNode *v) {
+              return non_shape_params_.count(v) != 0;
+            })) {
+          widen = true;
+        }
+      }
+
+      void CheckArithmeticRange(const PrimExpr &expr) {
+        Check(expr);
+        if (!expr.dtype().is_int() || expr.dtype().bits() != 32 ||
+            !UsesVar(expr, [&](const VarNode *v) {
+              return shape_vars_.count(v) != 0;
+            })) {
+          return;
+        }
+        try {
+          arith::ConstIntBound bound = analyzer_->const_int_bound(expr);
+          if (bound.defined() && (bound->min_value < int32_min_ ||
+                                  bound->max_value > int32_max_)) {
+            widen = true;
+          }
+        } catch (const std::exception &) {
+          widen = true;
+        }
+      }
+
+      const std::unordered_set<const VarNode *> &non_shape_params_;
+      const std::unordered_set<const VarNode *> &shape_vars_;
+      arith::Analyzer *analyzer_;
+      int64_t int32_min_;
+      int64_t int32_max_;
+    };
+
+    Visitor visitor(non_shape_params_, shape_vars_, analyzer_, int32_min,
+                    int32_max);
+    visitor.Visit(e);
+    return visitor.widen;
+  }
+
+  // A divisor is launch-invariant when it is a positive int32 expression
+  // whose only variables are scalar parameters or buffer shape/stride/offset
+  // symbols (thread indices and loop variables are never in that set).
+  bool IsInvariantDivisor(const PrimExpr &d) {
+    if (d.dtype() != DataType::Int(32)) {
+      return false;
+    }
+    bool ok = true;
+    bool has_var = false;
+    PostOrderVisit(d, [&](const ObjectRef &n) {
+      if (n.as<CallNode>() || n.as<BufferLoadNode>()) {
+        ok = false;
+        return;
+      }
+      if (const VarNode *v = n.as<VarNode>()) {
+        has_var = true;
+        if (!invariant_vars_.count(v)) {
+          ok = false;
+        }
+      }
+    });
+    if (!ok || !has_var || !IsSafeHostDivisor(d)) {
+      return false;
+    }
+    return ProvePositive(d);
+  }
+
+  template <typename NodeT>
+  PrimExpr TryRewriteDivMod(const NodeT *node, bool is_mod, bool is_floor) {
+    // The magic ABI and its backend fallback implement floordiv/floormod.
+    // Do not lower truncdiv/truncmod until a truncating intrinsic is available:
+    // using the floor fallback changes both quotient and remainder for negative
+    // operands (and can be exposed after int32 overflow).
+    if (!is_floor) {
+      return PrimExpr();
+    }
+    if (skip_nodes_.count(node)) {
+      return PrimExpr();
+    }
+    const PrimExpr &x = node->a;
+    const PrimExpr &d = node->b;
+    bool can_reuse_condition_div =
+        is_floor && CanReuseConditionSite(x, d, /*is_mod=*/false);
+    // A condition-associated floor-div may use the guarded magic intrinsic
+    // even when static analysis cannot prove x >= 0.  Its shared runtime
+    // validity predicate selects the exact floor-div fallback for negative x,
+    // while later condition rewriting must preserve floor/trunc semantics.
+    // Codegen evaluates x in both the validity check and the selected branch.
+    // Keep reads and effectful expressions at their original evaluation sites.
+    if (x.dtype() != DataType::Int(32) ||
+        SideEffect(x) > CallEffectKind::kPure || !IsInvariantDivisor(d) ||
+        (!ProveNonNegative(x) && !can_reuse_condition_div)) {
+      return PrimExpr();
+    }
+    size_t idx = GetOrCreateEntry(d);
+    const MagicDivisorEntry &e = entries_[idx];
+    // floormod is lowered to its own opaque intrinsic: exposing
+    // x - q * d in TIR would give rewrite_simplify a distributable Sub/Mul
+    // form and can send it into distribute/collect oscillation on large
+    // expressions.
+    const Op &op = is_mod ? tl::magic_mod() : tl::magic_div();
+    Map<String, ObjectRef> annotations;
+    annotations.Set("tl.magic_condition_reuse_div",
+                    Bool(can_reuse_condition_div));
+    annotations.Set("tl.magic_widen_dividend", Bool(ShouldWidenDividend(x)));
+    annotations.Set("tl.magic_safe_to_hoist", Bool(IsEntryPositive(d)));
+    return Call(DataType::Int(32), op, {x, e.d_var, e.m_var, e.s_var},
+                annotations);
+  }
+
+  size_t GetOrCreateEntry(const PrimExpr &d) {
+    // Dedup by factor-multiset identity: reassociated divisors
+    // (ng*sn vs sn*ng) share one entry, while distinct same-named Vars
+    // never merge. Entries are few, so a linear scan is fine.
+    std::vector<PrimExpr> factors = CollectFactors(d);
+    for (size_t i = 0; i < entries_.size(); i++) {
+      if (FactorMultisetEqual(factors, CollectFactors(entries_[i].divisor))) {
+        return i;
+      }
+    }
+    size_t idx = entries_.size();
+    std::string suffix = std::to_string(idx);
+    MagicDivisorEntry e;
+    e.divisor = d;
+    e.d_var = Var("tl_magic_d_" + suffix, DataType::Int(32));
+    e.m_var = Var("tl_magic_m_" + suffix, DataType::Int(32));
+    e.s_var = Var("tl_magic_s_" + suffix, DataType::Int(32));
+    entries_.push_back(e);
+    return idx;
+  }
+
+  // Div/mod sites inside condition expressions (if guards, select
+  // conditions) are NOT rewritten. Downstream analyzer-based passes run
+  // rewrite_simplify over those conditions; floordiv/floormod forms are what
+  // their rules expect, and opaque intrinsics there have caused extreme
+  // slowdowns. Conditions are also exactly the guards whose provability the
+  // floormod canonical form improves.
+  void CollectConditionDivMods(const Stmt &body) {
+    auto mark = [&](const PrimExpr &cond) {
+      PostOrderVisit(cond, [&](const ObjectRef &c) {
+        if (const FloorDivNode *div = c.as<FloorDivNode>()) {
+          condition_sites_.push_back(
+              {div->a, div->b, /*is_mod=*/false, /*is_floor=*/true});
+        } else if (const FloorModNode *mod = c.as<FloorModNode>()) {
+          condition_sites_.push_back(
+              {mod->a, mod->b, /*is_mod=*/true, /*is_floor=*/true});
+        } else if (const DivNode *div = c.as<DivNode>()) {
+          condition_sites_.push_back(
+              {div->a, div->b, /*is_mod=*/false, /*is_floor=*/false});
+        } else if (const ModNode *mod = c.as<ModNode>()) {
+          condition_sites_.push_back(
+              {mod->a, mod->b, /*is_mod=*/true, /*is_floor=*/false});
+        } else {
+          return;
+        }
+        if (c->IsInstance<FloorDivNode>() || c->IsInstance<FloorModNode>() ||
+            c->IsInstance<DivNode>() || c->IsInstance<ModNode>()) {
+          skip_nodes_.insert(static_cast<const BaseExprNode *>(c.get()));
+        }
+      });
+    };
+    PostOrderVisit(body, [&](const ObjectRef &n) {
+      if (const IfThenElseNode *ite = n.as<IfThenElseNode>()) {
+        mark(ite->condition);
+      } else if (const SelectNode *sel = n.as<SelectNode>()) {
+        mark(sel->condition);
+      } else if (const AssertStmtNode *asrt = n.as<AssertStmtNode>()) {
+        mark(asrt->condition);
+      } else if (const CallNode *call = n.as<CallNode>()) {
+        if (call->op.same_as(builtin::if_then_else())) {
+          mark(call->args[0]);
+        }
+      }
+    });
+  }
+
+  std::unordered_set<const VarNode *> invariant_vars_;
+  std::unordered_set<const VarNode *> safe_host_vars_;
+  std::unordered_set<const VarNode *> shape_vars_;
+  std::unordered_set<const VarNode *> non_shape_params_;
+  std::unordered_set<const BaseExprNode *> skip_nodes_;
+  std::vector<ConditionDivModSite> condition_sites_;
+  std::vector<MagicDivisorEntry> entries_;
+  arith::Analyzer entry_analyzer_;
+};
+
+namespace {
+
+// Post-rewrite CSE for magic calls: calls with the same (x, d), including a
+// div/mod pair duplicated by let-inlining, share one quotient per thread.
+class MagicCallHoister {
+  static bool CanHoistDividend(const PrimExpr &expr) {
+    if (SideEffect(expr) > CallEffectKind::kPure) {
+      return false;
+    }
+    bool safe = true;
+    PostOrderVisit(expr, [&](const ObjectRef &n) {
+      // Pure integer division can still trap when moved out of its guard.
+      if (const DivNode *div = n.as<DivNode>()) {
+        const int64_t *d = as_const_int(div->b);
+        safe &= d != nullptr && *d != 0;
+      } else if (const ModNode *mod = n.as<ModNode>()) {
+        const int64_t *d = as_const_int(mod->b);
+        safe &= d != nullptr && *d != 0;
+      } else if (const FloorDivNode *div = n.as<FloorDivNode>()) {
+        const int64_t *d = as_const_int(div->b);
+        safe &= d != nullptr && *d != 0;
+      } else if (const FloorModNode *mod = n.as<FloorModNode>()) {
+        const int64_t *d = as_const_int(mod->b);
+        safe &= d != nullptr && *d != 0;
+      }
+      if (const CallNode *call = n.as<CallNode>()) {
+        // Nested magic calls may carry a proof from their original condition.
+        // Other pure builtin arithmetic calls (bitwise ops, shifts, etc.) are
+        // safe to move with their enclosing expression; only effectful calls
+        // must block hoisting.
+        if (call->op.same_as(tl::magic_div()) ||
+            call->op.same_as(tl::magic_mod())) {
+          Optional<ObjectRef> entry_safe =
+              call->annotations.Get("tl.magic_safe_to_hoist");
+          if (!entry_safe.defined() ||
+              !Downcast<Bool>(entry_safe.value())->value) {
+            safe = false;
+          }
+        } else if (SideEffect(GetRef<PrimExpr>(call)) > CallEffectKind::kPure) {
+          safe = false;
+        }
+      }
+    });
+    return safe;
+  }
+
+public:
+  static Stmt Apply(const PrimFunc &func) {
+    const Stmt &body = func->body;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> param_vars;
+    for (const Var &param : func->params) {
+      param_vars.insert(param);
+    }
+    // 1. Collect groups with the same (x, d) in post-order (inner first).
+    // Div and mod share one quotient; the remainder is derived as x - q*d.
+    struct Group {
+      Call repr;
+      std::vector<Call> div_calls;
+      std::vector<Call> mod_calls;
+      PrimExpr x;
+      PrimExpr d;
+      Var valid;
+      Var q;
+      Var r;
+      bool can_reuse_condition_div{false};
+    };
+    std::vector<Group> groups;
+    ExprDeepEqual deep_equal;
+    PostOrderVisit(body, [&](const ObjectRef &n) {
+      const CallNode *call = n.as<CallNode>();
+      if (call == nullptr) {
+        return;
+      }
+      bool is_mod = call->op.same_as(tl::magic_mod());
+      if (!is_mod && !call->op.same_as(tl::magic_div())) {
+        return;
+      }
+      Call call_ref = GetRef<Call>(call);
+      ICHECK_EQ(call->args.size(), 4U);
+      bool safe_to_hoist = false;
+      if (Optional<ObjectRef> safe =
+              call->annotations.Get("tl.magic_safe_to_hoist")) {
+        safe_to_hoist = Downcast<Bool>(safe.value())->value;
+      }
+      if (!safe_to_hoist || !CanHoistDividend(call->args[0]) ||
+          SideEffect(call->args[1]) > CallEffectKind::kPure) {
+        return;
+      }
+      bool can_reuse_condition_div = false;
+      if (Optional<ObjectRef> reuse =
+              call->annotations.Get("tl.magic_condition_reuse_div")) {
+        can_reuse_condition_div = Downcast<Bool>(reuse.value())->value;
+      }
+      for (Group &g : groups) {
+        if (deep_equal(g.d, call->args[1]) && deep_equal(g.x, call->args[0])) {
+          (is_mod ? g.mod_calls : g.div_calls).push_back(call_ref);
+          g.can_reuse_condition_div |= can_reuse_condition_div;
+          return;
+        }
+      }
+      Group g;
+      g.repr = call_ref;
+      g.x = call->args[0];
+      g.d = call->args[1];
+      g.valid = Var("tl_magic_valid_" + std::to_string(groups.size()),
+                    DataType::Bool());
+      g.q = Var("tl_magic_q_" + std::to_string(groups.size()), call->dtype);
+      g.r = Var("tl_magic_r_" + std::to_string(groups.size()), call->dtype);
+      (is_mod ? g.mod_calls : g.div_calls).push_back(call_ref);
+      g.can_reuse_condition_div = can_reuse_condition_div;
+      groups.push_back(std::move(g));
+    });
+    if (groups.empty()) {
+      return body;
+    }
+
+    struct DivisorValidity {
+      PrimExpr d;
+      Var valid;
+    };
+    std::vector<DivisorValidity> divisor_validities;
+    std::vector<Var> group_divisor_valid;
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+      const Group &g = groups[group_index];
+      Optional<Var> valid;
+      for (const DivisorValidity &entry : divisor_validities) {
+        if (deep_equal(entry.d, g.d)) {
+          valid = entry.valid;
+          break;
+        }
+      }
+      if (!valid.defined()) {
+        valid = Var("tl_magic_divisor_valid_" +
+                        std::to_string(divisor_validities.size()),
+                    DataType::Bool());
+        divisor_validities.push_back({g.d, valid.value()});
+      }
+      group_divisor_valid.push_back(valid.value());
+    }
+
+    // 2. Find the innermost thread_extent AttrStmt containing all groups.
+    std::unordered_set<Call, ObjectPtrHash, ObjectPtrEqual> targets;
+    for (const Group &g : groups) {
+      for (const Call &c : g.div_calls) {
+        targets.insert(c);
+      }
+      for (const Call &c : g.mod_calls) {
+        targets.insert(c);
+      }
+    }
+    auto contains_all = [&](const Stmt &root) {
+      std::unordered_set<const Object *> seen;
+      PostOrderVisit(root, [&](const ObjectRef &n) {
+        if (const auto *call = n.as<CallNode>();
+            call != nullptr && targets.count(GetRef<Call>(call))) {
+          seen.insert(n.get());
+        }
+      });
+      return seen.size() == targets.size();
+    };
+    // Thread bindings are thread_extent AttrStmts at this pipeline stage;
+    // pick the innermost one containing every group.
+    Optional<AttrStmt> scope;
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> scope_vars;
+    std::function<void(const Stmt &,
+                       std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>)>
+        walk = [&](const Stmt &cur_s,
+                   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>
+                       visible_vars) {
+          if (const AttrStmtNode *a = cur_s.as<AttrStmtNode>()) {
+            bool is_thread_extent = a->attr_key == tirx::attr::thread_extent;
+            if (is_thread_extent) {
+              if (const IterVarNode *iter = a->node.as<IterVarNode>()) {
+                visible_vars.insert(iter->var);
+              }
+            }
+            if (is_thread_extent && contains_all(a->body)) {
+              scope = GetRef<AttrStmt>(a);
+              scope_vars = visible_vars;
+              // Walk continues deeper; the last hit is the innermost.
+            }
+            walk(a->body, std::move(visible_vars));
+            return;
+          }
+          if (const ForNode *f = cur_s.as<ForNode>()) {
+            visible_vars.insert(f->loop_var);
+            walk(f->body, std::move(visible_vars));
+            return;
+          }
+          if (const SeqStmtNode *s = cur_s.as<SeqStmtNode>()) {
+            for (const Stmt &c : s->seq) {
+              walk(c, visible_vars);
+              if (const BindNode *bind = c.as<BindNode>()) {
+                visible_vars.insert(bind->var);
+              }
+            }
+          } else if (const SBlockNode *b = cur_s.as<SBlockNode>()) {
+            walk(b->body, std::move(visible_vars));
+          } else if (const IfThenElseNode *i = cur_s.as<IfThenElseNode>()) {
+            walk(i->then_case, visible_vars);
+            if (i->else_case.defined()) {
+              walk(i->else_case.value(), std::move(visible_vars));
+            }
+          }
+        };
+    walk(body, param_vars);
+    if (!scope.defined()) {
+      return body; // no uniform thread scope covers every use; leave inline
+    }
+
+    // Moving a division out of a branch that protects its divisor can expose
+    // a zero divisor, including inside a short-circuit condition or
+    // if_then_else expression. Conservatively keep calls inline if a control
+    // predicate uses this divisor and its protected branch contains this
+    // group's calls.
+    for (const Group &g : groups) {
+      bool guarded = false;
+      PostOrderVisit(body, [&](const ObjectRef &n) {
+        if (guarded) {
+          return;
+        }
+        auto contains_group_call = [&](const ObjectRef &root) {
+          bool found = false;
+          PostOrderVisit(root, [&](const ObjectRef &child) {
+            if (const auto *call = child.as<CallNode>()) {
+              for (const Call &c : g.div_calls) {
+                found |= GetRef<Call>(call).same_as(c);
+              }
+              for (const Call &c : g.mod_calls) {
+                found |= GetRef<Call>(call).same_as(c);
+              }
+            }
+          });
+          return found;
+        };
+        auto condition_bounds_divisor = [&](const PrimExpr &condition) {
+          bool bounds_divisor = false;
+          PostOrderVisit(condition, [&](const ObjectRef &predicate) {
+            const auto *lt = predicate.as<LTNode>();
+            if (lt != nullptr && deep_equal(lt->b, g.d)) {
+              bounds_divisor = true;
+            }
+          });
+          return bounds_divisor;
+        };
+        if (const auto *ite = n.as<IfThenElseNode>()) {
+          guarded = condition_bounds_divisor(ite->condition) &&
+                    contains_group_call(ite->then_case);
+        } else if (const auto *sel = n.as<SelectNode>()) {
+          guarded = condition_bounds_divisor(sel->condition) &&
+                    (contains_group_call(sel->true_value) ||
+                     contains_group_call(sel->false_value));
+        } else if (const auto *call = n.as<CallNode>();
+                   call != nullptr &&
+                   call->op.same_as(builtin::if_then_else()) &&
+                   !call->args.empty()) {
+          guarded = condition_bounds_divisor(call->args[0]) &&
+                    contains_group_call(GetRef<PrimExpr>(call));
+        }
+      });
+      if (guarded) {
+        return body;
+      }
+    }
+
+    // Only values already defined at the selected insertion point are
+    // available to the hoisted binds. This includes host magic-parameter
+    // binds, without treating a user's `tl_magic_*` local as an intrinsic.
+    for (const Group &g : groups) {
+      auto uses_undefined_at_scope = [&](const PrimExpr &expr) {
+        return UsesVar(expr, [&](const VarNode *v) {
+          return !scope_vars.count(GetRef<Var>(v));
+        });
+      };
+      if (uses_undefined_at_scope(g.x) || uses_undefined_at_scope(g.d)) {
+        return body;
+      }
+    }
+
+    // 3. Rewrite: replace each group call with its q var (bottom-up so nested
+    // groups substitute first), and prepend the binds to the scope body.
+    class Replacer : public StmtExprMutator {
+    public:
+      struct ConditionMatch {
+        PrimExpr x;
+        PrimExpr d;
+        Var valid;
+        Var q;
+        Var r;
+        bool has_div;
+        bool has_mod;
+        bool can_reuse_div;
+        bool can_reuse_mod;
+      };
+
+      std::unordered_map<Call, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+          replace_;
+      AttrStmt scope_;
+      explicit Replacer(AttrStmt scope) : scope_(std::move(scope)) {}
+
+      PrimExpr Apply(const PrimExpr &e) { return VisitExpr(e); }
+      Stmt Apply(const Stmt &s) { return VisitStmt(s); }
+
+      PrimExpr VisitExpr_(const CallNode *op) final {
+        auto it = replace_.find(GetRef<Call>(op));
+        if (it != replace_.end()) {
+          return it->second;
+        }
+        if (op->op.same_as(builtin::if_then_else())) {
+          ICHECK_GE(op->args.size(), 1U);
+          Array<PrimExpr> args;
+          args.push_back(RewriteCondition(op->args[0]));
+          for (size_t i = 1; i < op->args.size(); ++i) {
+            args.push_back(VisitExpr(op->args[i]));
+          }
+          return Call(op->dtype, op->op, args, op->annotations, op->span);
+        }
+        return StmtExprMutator::VisitExpr_(op);
+      }
+
+      PrimExpr VisitExpr_(const FloorDivNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/false);
+      }
+
+      PrimExpr VisitExpr_(const FloorModNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/true);
+      }
+
+      PrimExpr VisitExpr_(const DivNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/false);
+      }
+
+      PrimExpr VisitExpr_(const ModNode *op) final {
+        return RewriteConditionDivMod(StmtExprMutator::VisitExpr_(op),
+                                      /*is_mod=*/true);
+      }
+
+      PrimExpr VisitExpr_(const SelectNode *op) final {
+        PrimExpr condition = RewriteCondition(op->condition);
+        PrimExpr true_value = VisitExpr(op->true_value);
+        PrimExpr false_value = VisitExpr(op->false_value);
+        return Select(condition, true_value, false_value, op->span);
+      }
+
+      Stmt VisitStmt_(const IfThenElseNode *op) final {
+        PrimExpr condition = RewriteCondition(op->condition);
+        Stmt then_case = VisitStmt(op->then_case);
+        Optional<Stmt> else_case = op->else_case;
+        if (else_case.defined()) {
+          else_case = VisitStmt(else_case.value());
+        }
+        return IfThenElse(condition, then_case, else_case, op->span);
+      }
+
+      Stmt VisitStmt_(const AssertStmtNode *op) final {
+        return AssertStmt(RewriteCondition(op->condition), op->error_kind,
+                          op->message_parts, op->span);
+      }
+
+      Stmt VisitStmt_(const AttrStmtNode *op) final {
+        if (GetRef<AttrStmt>(op).same_as(scope_)) {
+          Stmt new_body = VisitStmt(op->body);
+          std::vector<Stmt> seq;
+          for (const auto &[var, value] : binds_) {
+            seq.emplace_back(Bind(var, value));
+          }
+          seq.push_back(new_body);
+          auto n = CopyOnWrite(op);
+          n->body = SeqStmt(seq);
+          return Stmt(n);
+        }
+        return StmtExprMutator::VisitStmt_(op);
+      }
+
+      std::vector<std::pair<Var, PrimExpr>> binds_;
+      std::vector<ConditionMatch> condition_matches_;
+
+    private:
+      PrimExpr RewriteCondition(const PrimExpr &condition) {
+        bool previous = in_condition_;
+        in_condition_ = true;
+        PrimExpr result = VisitExpr(condition);
+        in_condition_ = previous;
+        return result;
+      }
+
+      PrimExpr RewriteConditionDivMod(const PrimExpr &expr, bool is_mod) {
+        if (!in_condition_) {
+          return expr;
+        }
+        PrimExpr x;
+        PrimExpr d;
+        if (const FloorDivNode *div = expr.as<FloorDivNode>()) {
+          x = div->a;
+          d = div->b;
+        } else if (const FloorModNode *mod = expr.as<FloorModNode>()) {
+          x = mod->a;
+          d = mod->b;
+        } else if (const DivNode *div = expr.as<DivNode>()) {
+          x = div->a;
+          d = div->b;
+        } else if (const ModNode *mod = expr.as<ModNode>()) {
+          x = mod->a;
+          d = mod->b;
+        } else {
+          return expr;
+        }
+        ExprDeepEqual deep_equal;
+        for (const ConditionMatch &match : condition_matches_) {
+          if (!deep_equal(match.x, x) || !deep_equal(match.d, d)) {
+            continue;
+          }
+          if (is_mod && match.has_mod) {
+            if (expr.as<ModNode>() && !match.can_reuse_mod) {
+              return expr;
+            }
+            return match.r;
+          }
+          if (!is_mod && match.has_div) {
+            if (expr.as<DivNode>() && !match.can_reuse_div) {
+              return expr;
+            }
+            return match.q;
+          }
+        }
+        return expr;
+      }
+
+      bool in_condition_{false};
+    };
+
+    Replacer replacer(scope.value());
+    for (const DivisorValidity &entry : divisor_validities) {
+      PrimExpr divisor_valid =
+          Cast(DataType::UInt(32), entry.d - make_const(entry.d.dtype(), 1)) <=
+          make_const(DataType::UInt(32), 0x7ffffffeU);
+      replacer.binds_.emplace_back(entry.valid, divisor_valid);
+    }
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+      const Group &g = groups[group_index];
+      for (const Call &c : g.div_calls) {
+        replacer.replace_[c] = g.q;
+      }
+      for (const Call &c : g.mod_calls) {
+        replacer.replace_[c] = g.r;
+      }
+    }
+    for (size_t group_index = 0; group_index < groups.size(); ++group_index) {
+      const Group &g = groups[group_index];
+      // Bind values are built by mutating the args only, so a group nested
+      // inside x refers to the already-bound inner quotient/remainder.
+      Array<PrimExpr> new_args;
+      for (const PrimExpr &arg : g.repr->args) {
+        new_args.push_back(replacer.Apply(arg));
+      }
+      PrimExpr valid =
+          logical_and(new_args[0] >= make_const(new_args[0].dtype(), 0),
+                      group_divisor_valid[group_index]);
+      if (new_args[0].dtype().bits() > 32) {
+        valid = logical_and(
+            valid, new_args[0] <= make_const(new_args[0].dtype(), 0x7fffffff));
+      }
+      replacer.binds_.emplace_back(g.valid, valid);
+      replacer.condition_matches_.push_back(
+          {new_args[0], new_args[1], g.valid, g.q, g.r, !g.div_calls.empty(),
+           !g.mod_calls.empty(), g.can_reuse_condition_div,
+           /*can_reuse_mod=*/false});
+      new_args.push_back(g.valid);
+      if (g.div_calls.empty()) {
+        replacer.binds_.emplace_back(
+            g.r, Call(g.repr->dtype, tl::magic_mod_with_validity(), new_args,
+                      g.repr->annotations, g.repr->span));
+        continue;
+      }
+      replacer.binds_.emplace_back(
+          g.q, Call(g.repr->dtype, tl::magic_div_with_validity(), new_args,
+                    g.repr->annotations, g.repr->span));
+      if (!g.mod_calls.empty()) {
+        replacer.binds_.emplace_back(
+            g.r, Call(g.repr->dtype, tl::magic_mod_from_quotient(),
+                      {new_args[0], new_args[1], g.q, g.valid},
+                      g.repr->annotations, g.repr->span));
+      }
+    }
+    return replacer.Apply(body);
+  }
+};
+
+} // namespace
+
+} // namespace
+
+tvm::transform::Pass LowerMagicDiv() {
+  using namespace tirx::transform;
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    if (!ctx->GetConfig<Bool>(kEnableMagicDiv, Bool(false)).value()) {
+      return f;
+    }
+    Stmt body = f->body;
+    {
+      // The canonicalizer gets its own analyzer: IRMutatorWithAnalyzer feeds
+      // Bind constraints into the shared analyzer, and a second visit of the
+      // same binds with a differently-constrained context trips
+      // ConstIntBoundAnalyzer's conflicting-update check.
+      arith::Analyzer canon_analyzer;
+      FloorModCanonicalizer canonicalizer(&canon_analyzer);
+      body = canonicalizer.Apply(body);
+    }
+    arith::Analyzer analyzer;
+    MagicDivRewriter rewriter(&analyzer, f);
+    body = rewriter.Apply(body);
+    if (!rewriter.HasMagicDivisors()) {
+      return f;
+    }
+    f.CopyOnWrite()->body = rewriter.WrapWithHostBinds(body);
+    return f;
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tl.LowerMagicDiv", {});
+}
+
+tvm::transform::Pass MagicCallHoist() {
+  using namespace tirx::transform;
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    if (!ctx->GetConfig<Bool>(kEnableMagicDiv, Bool(false)).value()) {
+      return f;
+    }
+    f.CopyOnWrite()->body = MagicCallHoister::Apply(f);
+    return f;
+  };
+  return CreatePrimFuncPass(pass_func, 0, "tl.MagicCallHoist", {});
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = reflection;
+  refl::GlobalDef().def("tl.transform.LowerMagicDiv", LowerMagicDiv);
+  refl::GlobalDef().def("tl.transform.MagicCallHoist", MagicCallHoist);
+}
+
+} // namespace tl
+} // namespace tvm
