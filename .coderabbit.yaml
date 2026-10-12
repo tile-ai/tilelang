@@ -2,7 +2,7 @@ language: en-US
 
 reviews:
   suggested_reviewers: true
-  auto_assign_reviewers: false
+  auto_assign_reviewers: true
   suggested_reviewers_instructions:
     - reviewers:
         - handle: LeiWang1999
