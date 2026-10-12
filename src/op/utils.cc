@@ -4,6 +4,9 @@
  */
 
 #include "utils.h"
+
+#include <cmath>
+
 #include "builtin.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
@@ -65,6 +68,19 @@ DecodedRegionCall DecodeRegionCall(const ffi::Array<PrimExpr> &args) {
 }
 
 } // namespace
+
+bool IsZeroBitPattern(const PrimExpr &expr) {
+  if (const auto *broadcast = expr.as<BroadcastNode>()) {
+    return IsZeroBitPattern(broadcast->value);
+  }
+  if (const auto *imm = expr.as<IntImmNode>()) {
+    return imm->value == 0;
+  }
+  if (const auto *imm = expr.as<FloatImmNode>()) {
+    return imm->value == 0.0 && !std::signbit(imm->value);
+  }
+  return false;
+}
 
 bool IsBufferLikeExpr(const PrimExpr &expr) {
   if (expr.as<BufferLoadNode>() || expr.as<BufferRegionNode>()) {

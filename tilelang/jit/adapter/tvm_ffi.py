@@ -61,7 +61,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # that is not wrapped by the wrapper code
     host_kernel_source: str | None = None
     device_kernel_source: str | None = None
-    executable: tvm.runtime.Executable | None = None
+    executable: tvm.runtime.Executable | tvm.runtime.Module | None = None
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
     # host_mod
@@ -140,7 +140,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             executable.jit(**COMPILE_ARGS)
         return executable
 
-    def _get_executable(self) -> tvm.runtime.Executable:
+    def _get_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
         executable = self.executable
         if executable is not None:
             return executable
@@ -152,7 +152,8 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 self.executable = executable
             return executable
 
-    def get_exportable_executable(self) -> tvm.runtime.Executable:
+    def get_exportable_executable(self) -> tvm.runtime.Executable | tvm.runtime.Module:
+        """Return the lazy executable, or the runnable module loaded from disk cache."""
         return self._get_executable()
 
     def _uses_ffi_callee_allocated_output_abi(self) -> bool:

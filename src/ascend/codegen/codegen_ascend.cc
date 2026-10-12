@@ -709,6 +709,9 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 
 void CodeGenTileLangAscend::PreFunctionBody(const PrimFunc &f) {
   this->stream << "  asc_init();\n";
+  // Emit the function-entry #line anchor after the compiler prologue, so the
+  // directive's line mapping is not consumed by generated code.
+  CodeGenCWithLineDirectives::PreFunctionBody(f);
 }
 
 ffi::Array<Var>

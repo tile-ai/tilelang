@@ -95,6 +95,76 @@ def test_ascend_thread_sync_keeps_thread_private_accesses_unsynchronized(storage
     tvm.ir.assert_structural_equal(after, before)
 
 
+@pytest.mark.parametrize(
+    "start, stop, step, expected_syncs",
+    [
+        pytest.param(0, 2, None, 0, id="default_step"),
+        pytest.param(0, 2, 1, 0, id="unit_step"),
+        pytest.param(0, 6, 2, 1, id="non_unit_step"),
+        pytest.param(3, 9, 2, 1, id="nonzero_start"),
+        pytest.param(3, 8, 2, 1, id="nondivisible_extent"),
+        pytest.param(3, 5, 2, 0, id="single_iteration"),
+        pytest.param(3, 4, 2, 0, id="extent_smaller_than_step"),
+    ],
+)
+@pytest.mark.parametrize("canonicalize", [False, True])
+def test_ascend_thread_sync_loop_carry_respects_loop_step(start, stop, step, expected_syncs, canonicalize):
+    shared = tirx.decl_buffer((4, 32), "float32", name="shared", scope="shared")
+    output = tirx.decl_buffer((32,), "float32", name="output")
+    index = tirx.Var("i", "int32")
+
+    def make_body(thread_id):
+        body = tirx.SeqStmt(
+            [
+                tirx.BufferStore(shared, tirx.Cast("float32", index), [index % 4, thread_id]),
+                tirx.BufferStore(output, tirx.BufferLoad(shared, [(index + 2) % 4, (thread_id + 1) % 32]), [thread_id]),
+            ]
+        )
+        return tirx.For(index, start, stop - start, tirx.ForKind.SERIAL, body, step=step)
+
+    before = _module(_vf(_thread_body(make_body)), [shared, output])
+    if canonicalize:
+        before = tvm.s_tir.transform.CanonicalizeLoop()(before)
+
+    after = ascend_transform.AscendThreadSync("shared")(before)["main"]
+
+    loop = after.body.body.body.body.body
+    assert isinstance(loop, tirx.For)
+    assert len(_syncs(loop.body)) == expected_syncs
+    if expected_syncs:
+        assert isinstance(loop.body, tirx.SeqStmt)
+        assert len(_syncs(loop.body.seq[0])) == 1
+
+
+@pytest.mark.parametrize("canonicalize", [False, True])
+def test_ascend_thread_sync_loop_carry_non_unit_step_last_pair(canonicalize):
+    shared = tirx.decl_buffer((24, 32), "float32", name="shared", scope="shared")
+    output = tirx.decl_buffer((32,), "float32", name="output")
+    index = tirx.Var("i", "int32")
+
+    def make_body(thread_id):
+        # Only i=9 -> i=12 aliases across neighboring threads.
+        body = tirx.SeqStmt(
+            [
+                tirx.BufferStore(shared, tirx.Cast("float32", index), [index, thread_id]),
+                tirx.BufferStore(output, tirx.BufferLoad(shared, [21 - index, (thread_id + 1) % 32]), [thread_id]),
+            ]
+        )
+        return tirx.For(index, 3, 10, tirx.ForKind.SERIAL, body, step=3)
+
+    before = _module(_vf(_thread_body(make_body)), [shared, output])
+    if canonicalize:
+        before = tvm.s_tir.transform.CanonicalizeLoop()(before)
+
+    after = ascend_transform.AscendThreadSync("shared")(before)["main"]
+
+    loop = after.body.body.body.body.body
+    assert isinstance(loop, tirx.For)
+    assert len(_syncs(loop.body)) == 1
+    assert isinstance(loop.body, tirx.SeqStmt)
+    assert len(_syncs(loop.body.seq[0])) == 1
+
+
 @pytest.mark.parametrize("storage_scope", ["shared", "shared.dyn"])
 def test_ascend_thread_sync_does_not_synchronize_between_vfs(storage_scope):
     shared, output = _buffers(storage_scope)
