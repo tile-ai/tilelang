@@ -96,7 +96,7 @@ def sparse_attention(
         T.ascend_set_flag("MTE2_MTE1", job % 2)
 
     @T.macro
-    def qk(job, k, acounter, l1, a, b, c, c_nz, p_nz):
+    def qk(job, k, acounter, l1, a, b, c, p_nz):
         T.call_extern("void", "asc_set_mmad_direction_m")
         slot = (job * nb + k) % 4
         for d in T.unroll(4):
@@ -120,7 +120,7 @@ def sparse_attention(
             T.call_extern(
                 "void",
                 "fm_mmad",
-                T.access_ptr(c[32768], "rw"),
+                T.access_ptr(c[8, 0, 0], "rw"),
                 T.access_ptr(a[ai * 8192], "r"),
                 T.access_ptr(b[d * 8192], "r"),
                 64,
@@ -131,7 +131,7 @@ def sparse_attention(
             T.ascend_rls_buf("PIPE_M", ai)
             T.ascend_rls_buf("PIPE_M", 4 + d)
         cwait("PIPE_FIX", 0)
-        T.dual_copy(c_nz[8, :, :], p_nz, unit_flag_ctrl=3)
+        T.dual_copy(c[8, :, :], p_nz, unit_flag_ctrl=3)
         cset("PIPE_FIX", 0)
 
     @T.macro
@@ -141,7 +141,7 @@ def sparse_attention(
             T.ascend_wait_flag("M_FIX", 0)
         for d in T.unroll(4):
             cwait("PIPE_FIX", 4 + d % 2)
-            T.call_extern("void", "fm_o_store", T.access_ptr(out[d % 2, 0], "w"), T.access_ptr(c[d * 8192], "r"), 3 if last else 0)
+            T.call_extern("void", "fm_o_store", T.access_ptr(out[d % 2, 0], "w"), T.access_ptr(c[2 * d, 0, 0], "r"), 3 if last else 0)
             cset("PIPE_FIX", 4 + d % 2)
         if not last:
             T.ascend_set_flag("FIX_M", 0)
@@ -176,7 +176,7 @@ def sparse_attention(
             T.call_extern(
                 "void",
                 "fm_mmad",
-                T.access_ptr(c[d * 8192], "rw"),
+                T.access_ptr(c[2 * d, 0, 0], "rw"),
                 T.access_ptr(a[ai * 8192], "r"),
                 T.access_ptr(b[d * 8192], "r"),
                 128,
@@ -329,9 +329,8 @@ def sparse_attention(
             l1 = T.alloc_l1((262144,), "bfloat16")
             a = T.alloc_l0a((32768,), "bfloat16")
             b = T.alloc_l0b((32768,), "bfloat16")
-            c = T.alloc_l0c((36864,), "float32", layout=False)
-            # The score tile follows the 32768-element output accumulator.
-            c_nz = T.view(c, (9, 64, 64))
+            # Eight 64x64 tiles hold the output; the ninth holds QK scores.
+            c = T.alloc_l0c((9, 64, 64), "float32")
             kv = T.alloc_shared((3, 32, 1 if decode else 512), "bfloat16")
             raw8 = T.alloc_shared((3, 32, 544 if decode else 1), "uint8")
             raw4 = T.alloc_shared((3, 32, 288 if decode else 1), "uint8")
@@ -340,7 +339,7 @@ def sparse_attention(
             accum = T.alloc_shared((32 * 512,), "float32")
             out = T.alloc_shared((2, 32 * 128), "float32")
             p_nz = T.alloc_shared((32, 64), "float32")
-            T.annotate_layout({c_nz: make_ascend_l0c_layout(c_nz), p_nz: make_ascend_l0c_layout(p_nz)})
+            T.annotate_layout({p_nz: make_ascend_l0c_layout(p_nz)})
             # Softmax and its in-place BF16 output use physical NZ offsets.
             # Keep their flat view separate from logical layout remapping.
             p = T.make_tensor_from_addr(T.access_ptr(p_nz[0, 0], "rw", extent=32 * 64), (32 * 64,), "float32", storage_scope="shared.dyn")
@@ -369,16 +368,16 @@ def sparse_attention(
                 acounter = T.alloc_var("int32", init=0)
                 jobs = T.ceildiv(nq - bx, 32)
                 load_q(0, bx, Q, l1)
-                qk(0, 0, acounter, l1, a, b, c, c_nz, p_nz)
+                qk(0, 0, acounter, l1, a, b, c, p_nz)
                 for job in rolled(jobs):
                     if job + 1 < jobs:
                         load_q(job + 1, bx, Q, l1)
                     for k in rolled(nb - 1):
-                        qk(job, k + 1, acounter, l1, a, b, c, c_nz, p_nz)
+                        qk(job, k + 1, acounter, l1, a, b, c, p_nz)
                         pv(job, k, acounter, l1, a, b, c, out)
                         acounter = (acounter + 1) % 4
                     if job + 1 < jobs:
-                        qk(job + 1, 0, acounter, l1, a, b, c, c_nz, p_nz)
+                        qk(job + 1, 0, acounter, l1, a, b, c, p_nz)
                     pv(job, nb - 1, acounter, l1, a, b, c, out)
                     acounter = (acounter + 1) % 4
                 T.ascend_pipe_barrier("PIPE_ALL")
