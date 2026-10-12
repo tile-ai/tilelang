@@ -1157,6 +1157,9 @@ private:
       ValidateL0SFGemm(Downcast<GemmBlockScaled>(tile_op), mx_sf_bindings_,
                        analyzer_);
     }
+    if (const auto *gemm = tile_op.as<GemmNode>()) {
+      RecordL0CProducerPitch(*gemm);
+    }
     if (const auto *copy = tile_op.as<CopyNode>();
         copy && IsL0SFBuffer(copy->dst)) {
       auto bound = mx_sf_bindings_.Get(copy->dst->data);
@@ -1238,6 +1241,7 @@ private:
     lower_args.alloc_mbarrier = mbarrier_callback;
     lower_args.update_barrier_arrive = barrier_arrive_callback;
     lower_args.require_smem_alignment = require_smem_alignment_callback;
+    lower_args.l0c_producer_m = l0c_producer_m_;
 
     auto lowered = tile_op->Lower(lower_args, analyzer_);
     // Let the whole lowered subtree inherit the source location of the tile
@@ -1499,6 +1503,22 @@ private:
     return IntImm(DataType::Int(32), 0);
   }
 
+  void RecordL0CProducerPitch(const GemmNode &gemm) {
+    if (!IsL0CBuffer(gemm.c_) || !gemm.cRegion_.defined() ||
+        gemm.cRegion_->region.size() < 2) {
+      return;
+    }
+    // L0 MAD uses the C region's M, which can be shorter than the allocation
+    // stored on GemmNode::m. That region M is the NZ pitch FixPipe must use.
+    const Array<Range> &ranges = gemm.cRegion_->region;
+    PrimExpr pitch = analyzer_->Simplify(ranges[ranges.size() - 2]->extent);
+    l0c_producer_m_.Set(gemm.c_->data, pitch);
+    if (gemm.cRegion_->buffer.defined() &&
+        !gemm.cRegion_->buffer->data.same_as(gemm.c_->data)) {
+      l0c_producer_m_.Set(gemm.cRegion_->buffer->data, pitch);
+    }
+  }
+
   void RecordSafeValueAnnotations(const SBlockNode *op) {
     if (!op->annotations.count(attr::kSafeValueMap)) {
       return;
@@ -1517,6 +1537,7 @@ private:
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Var, PrimExpr> safe_value_map_;
+  Map<Var, PrimExpr> l0c_producer_m_;
   Map<Buffer, Layout> layout_map_;
   Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;

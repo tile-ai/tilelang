@@ -130,13 +130,18 @@ static int GetCCQuantPre(DataType src_dtype, DataType dst_dtype) {
   return 0; // NoQuant
 }
 
-// FIXPIPE src_stride is the stored L0C NZ M-pitch, not the copied row count.
-// A row prefix of a full-width GEMM still walks the allocation M; a compact
-// MAD whose N is also sliced uses the compact region M.
+// FIXPIPE src_stride is the M pitch MAD used when it wrote this L0C.
+// A full-width copy of a compact MAD and a prefix of a larger MAD both keep
+// that producer pitch. Without a recorded producer, a full-N copy keeps the
+// allocation pitch and a sliced-N copy keeps the region pitch.
 PrimExpr GetL0CFixPipeSrcStride(const AscendFractalLayoutInfo &info,
                                 const AscendFractalRegionInfo &region,
                                 const PrimExpr &copied_cols,
-                                arith::Analyzer *analyzer) {
+                                arith::Analyzer *analyzer,
+                                const PrimExpr &producer_m) {
+  if (producer_m.defined()) {
+    return cast(DataType::Int(32), producer_m);
+  }
   if (analyzer->CanProveEqual(copied_cols, info.cols)) {
     return info.outer1 * info.row_frac;
   }
@@ -593,8 +598,12 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
                                          &compact_src_region))
         << "Failed to map L0C->UB source region through layout for buffer "
         << op.src->name;
-    loop_src_stride = GetL0CFixPipeSrcStride(info, compact_src_region,
-                                             src_inner.size, analyzer);
+    PrimExpr producer_m;
+    if (auto recorded = T.l0c_producer_m.Get(op.src->data)) {
+      producer_m = recorded.value();
+    }
+    loop_src_stride = GetL0CFixPipeSrcStride(
+        info, compact_src_region, src_inner.size, analyzer, producer_m);
 
     int dual_dst_ctl = op.dual_dst_ctl;
     int quant_pre = GetCCQuantPre(op.src->dtype, op.dst->dtype);
@@ -658,9 +667,11 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       ICHECK_GE(op.dst->shape.size(), 2);
       DataType split_dtype =
           m_split ? src_row.size.dtype() : src_inner.size.dtype();
+      // The half is the destination region each AIV writes, which can be a
+      // window inside a larger UB. A dynamic source shorter than that window
+      // still takes only the first pipe.
       PrimExpr tile_half =
-          cast(split_dtype, m_split ? op.dst->shape[op.dst->shape.size() - 2]
-                                    : op.dst->shape[op.dst->shape.size() - 1]);
+          cast(split_dtype, m_split ? dst_row.size : dst_inner.size);
       PrimExpr src_extent = m_split ? src_row.size : src_inner.size;
       PrimExpr pipe0_split = analyzer->Simplify(Min(src_extent, tile_half));
       PrimExpr pipe1_split = analyzer->Simplify(
@@ -700,15 +711,20 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
           src_extent <= tile_half, arith::ProofStrength::kSymbolicBound);
       bool both_pipes = analyzer->CanProve(
           src_extent > tile_half, arith::ProofStrength::kSymbolicBound);
+      // M-split pipes share the N columns whose UnitFlags MAD set, so only
+      // the last pipe clears them. N-split pipes read disjoint columns, and
+      // each column's flag is released only by the pipe that consumes it.
       PrimExpr first_unit_flag = unit_flag_ctl_val;
-      if (both_pipes) {
-        first_unit_flag = analyzer->Simplify(
-            Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val));
-      } else if (!only_pipe0) {
-        first_unit_flag = analyzer->Simplify(
-            Select(src_extent > tile_half,
-                   Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val),
-                   unit_flag_ctl_val));
+      if (m_split) {
+        if (both_pipes) {
+          first_unit_flag = analyzer->Simplify(
+              Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val));
+        } else if (!only_pipe0) {
+          first_unit_flag = analyzer->Simplify(
+              Select(src_extent > tile_half,
+                     Select(unit_flag_ctl_val == I(3), I(2), unit_flag_ctl_val),
+                     unit_flag_ctl_val));
+        }
       }
       PrimExpr pipe0_extent = analyzer->Simplify(pipe0_rows * pipe0_inner);
       PrimExpr pipe0_src_ptr =
@@ -716,12 +732,26 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
       Stmt copy_stmt = Evaluate(make_cc_to_ub(
           pipe0_src_ptr, I(0), I(0), first_unit_flag, pipe0_inner, pipe0_rows));
       if (!only_pipe0) {
-        // Logical ND offset of the second tile half; access-ptr remap turns
-        // it into NZ. M-split uses the source row pitch, not the region inner
-        // extent.
+        // Logical ND offset of the second half. Layout remap then uses the
+        // allocation M. Scale the N offset so that remap lands on the producer
+        // pitch: physical(col) = col * stored_m, while remap(j) = j * alloc_m.
+        PrimExpr n_half_offset = tile_half;
+        if (!m_split) {
+          PrimExpr stored_m = cast(DataType::Int(32), loop_src_stride);
+          PrimExpr alloc_m = cast(DataType::Int(32), info.rows);
+          if (!analyzer->CanProveEqual(stored_m, alloc_m)) {
+            PrimExpr product = stored_m * cast(stored_m.dtype(), tile_half);
+            PrimExpr zero = make_zero(product.dtype());
+            ICHECK(analyzer->CanProveEqual(FloorMod(product, alloc_m), zero))
+                << "Ascend N-split on-path dual_copy cannot place the second "
+                   "half on producer L0C pitch "
+                << stored_m << " inside allocation M " << alloc_m;
+            n_half_offset = analyzer->Simplify(FloorDiv(product, alloc_m));
+          }
+        }
         PrimExpr pipe1_offset =
             m_split ? tile_half * cast(DataType::Int(32), src_row.stride)
-                    : tile_half;
+                    : n_half_offset;
         pipe1_offset = analyzer->Simplify(pipe1_offset);
         PrimExpr pipe1_extent = analyzer->Simplify(pipe1_rows * pipe1_inner);
         PrimExpr pipe1_src_ptr = make_access_ptr(

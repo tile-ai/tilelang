@@ -8,7 +8,17 @@ import pytest
 import torch
 
 import tilelang
-from example_dual_copy_onpath_cast import gemm, ref_program, run_dynamic_tail, run_subregion
+from example_dual_copy_onpath_cast import (
+    gemm,
+    ref_program,
+    run_compact_full_n_copy_and_dual,
+    run_compact_n_split,
+    run_destination_window,
+    run_dynamic_tail,
+    run_region_prefix,
+    run_subregion,
+    run_unit_flag_reuse,
+)
 
 DST_CASES = (("float16", 2e-2), ("bfloat16", 5e-2))
 
@@ -46,6 +56,33 @@ def test_onpath_full_tile_small(split):
     assert rel < thresh, f"rel_max={rel:.2e}"
 
 
+def test_onpath_compact_mad_copy_and_dual():
+    """Compact 32x64 MAD in a 64x64 L0C: plain fp32 copy + fp32/fp16 dual_copy."""
+    run_compact_full_n_copy_and_dual()
+
+
+@pytest.mark.parametrize("dst_dtype,thresh", DST_CASES)
+def test_onpath_compact_n_split(dst_dtype, thresh):
+    """Compact 32x64 MAD N-split into two 32x32 UB halves."""
+    run_compact_n_split(dst_dtype, thresh)
+
+
+def test_onpath_unit_flag_reuse():
+    """Two GEMMs reuse one L0C with unit_flag_ctrl=3, then dual_copy."""
+    run_unit_flag_reuse()
+
+
+@pytest.mark.parametrize("row_start,row_end", [(0, 32), (16, 48)])
+def test_onpath_destination_window(row_start, row_end):
+    """dual_copy into a window smaller than the UB allocation."""
+    run_destination_window(row_start, row_end)
+
+
+def test_onpath_region_prefix():
+    """128x128 prefix of a 256x256 GEMM keeps the producer M pitch."""
+    run_region_prefix()
+
+
 if __name__ == "__main__":
     for dst_dtype, thresh in DST_CASES:
         for split in ["M", "N"]:
@@ -54,4 +91,11 @@ if __name__ == "__main__":
             test_onpath_dynamic_tail(split, dst_dtype, thresh)
     for split in ["M", "N"]:
         test_onpath_full_tile_small(split)
-    print("PASS: onpath column-slice / dynamic-tail / small full-tile")
+    test_onpath_compact_mad_copy_and_dual()
+    for dst_dtype, thresh in DST_CASES:
+        test_onpath_compact_n_split(dst_dtype, thresh)
+    test_onpath_unit_flag_reuse()
+    for row_start, row_end in [(0, 32), (16, 48)]:
+        test_onpath_destination_window(row_start, row_end)
+    test_onpath_region_prefix()
+    print("PASS: onpath column-slice / dynamic-tail / small full-tile / review cases")
