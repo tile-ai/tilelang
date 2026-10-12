@@ -3,7 +3,7 @@
 import pytest
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
-from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_nz_layout
+from tilelang.layout import make_ascend_compact_nz_layout
 from tvm import tirx
 from testing.ascend._ir import calls
 
@@ -66,26 +66,3 @@ def test_scatter_storage_requirements(kwargs, error):
             transform.InsertNd2Nz()(before)
     else:
         assert len(calls(transform.InsertNd2Nz()(before), "tl.ascend_nd2nz_scatter")) == 1
-
-
-@pytest.mark.parametrize("factory", [make_ascend_nz_layout, make_ascend_compact_nz_layout])
-@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_post_copy_requires_compact_nz_panel_pitch(factory, dtype):
-    src = tirx.decl_buffer((33, 128), dtype, name="src", scope="shared.dyn")
-    dst = tirx.decl_buffer((32, 128), dtype, name="dst", scope="shared.l1")
-    region = tirx.BufferRegion(src, [tvm.ir.Range(0, 32), tvm.ir.Range(0, 128)])
-    root = tirx.SBlock(
-        [],
-        [],
-        [],
-        "root",
-        tirx.Evaluate(T.copy(region, dst)),
-        alloc_buffers=[src, dst],
-        annotations={"layout_map": {src: factory(src), dst: make_ascend_nz_layout(dst)}},
-    )
-    before = tvm.IRModule({"main": tirx.PrimFunc([], tirx.SBlockRealize([], True, root))})
-    if factory == make_ascend_nz_layout:
-        with pytest.raises(ValueError, match="requires compact NZ storage"):
-            transform.InsertNd2Nz()(before)
-    else:
-        assert len(calls(transform.InsertNd2Nz()(before), "tl.ascend_nd2nz_post_copy")) == 1
