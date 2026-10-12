@@ -66,7 +66,7 @@ class JITKernel(Generic[_P, _T]):
         self,
         func: PrimFunc = None,
         out_idx: list[int] | int = None,
-        execution_backend: Literal["tvm_ffi", "cython", "torch", "pto"] = "tvm_ffi",
+        execution_backend: Literal["tvm_ffi", "cython", "torch"] = "tvm_ffi",
         target: TargetLike = "auto",
         target_host: TargetLike | None = None,
         verbose: bool = False,
@@ -84,7 +84,7 @@ class JITKernel(Generic[_P, _T]):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["tvm_ffi", "cython", "torch", "pto"], optional
+        execution_backend : Literal["tvm_ffi", "cython", "torch"], optional
             Execution backend to use for kernel execution.
         target : str, dict, or tvm.target.Target, optional
             Compilation target (default: "auto"). Use a dict for target attributes,
@@ -160,7 +160,7 @@ class JITKernel(Generic[_P, _T]):
         target: TargetLike,
         target_host: TargetLike | None,
         out_idx: list[int] | int,
-        execution_backend: Literal["tvm_ffi", "cython", "torch", "pto"],
+        execution_backend: Literal["tvm_ffi", "cython", "torch"],
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
         backend_context: BackendContext | None = None,
@@ -387,22 +387,6 @@ class JITKernel(Generic[_P, _T]):
                 # pass_configs=pass_configs,
                 # compile_flags=compile_flags,
             )
-        elif execution_backend == "pto":
-            from tilelang.jit.adapter.pto import PTOKernelAdapter
-
-            adapter = create_adapter(
-                PTOKernelAdapter,
-                params=artifact.params,
-                result_idx=out_idx,
-                target=target,
-                func_or_mod=tilelang_func,
-                host_mod=artifact.host_mod,
-                device_mod=artifact.device_mod,
-                device_kernel_source=artifact.kernel_source,
-                verbose=self.verbose,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
@@ -447,20 +431,6 @@ class JITKernel(Generic[_P, _T]):
                 device_kernel_source=device_kernel_source,
                 kernel_lib_path=kernel_lib_path,
                 pass_configs=pass_configs,
-            )
-        elif execution_backend == "pto":
-            from tilelang.jit.adapter.pto import PTOKernelAdapter
-
-            adapter = PTOKernelAdapter.from_database(
-                params=params,
-                result_idx=result_idx,
-                target=target,
-                func_or_mod=func_or_mod,
-                host_kernel_source=host_kernel_source,
-                device_kernel_source=device_kernel_source,
-                kernel_lib_path=kernel_lib_path,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
             )
         else:
             # Handle invalid backend.
@@ -512,7 +482,7 @@ class JITKernel(Generic[_P, _T]):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"cython", "tvm_ffi", "pto"}:
+        if self.execution_backend in {"cython", "tvm_ffi"}:
             return self.adapter.get_kernel_source(kernel_only=kernel_only)
         return self.artifact.kernel_source
 
@@ -520,7 +490,7 @@ class JITKernel(Generic[_P, _T]):
         """
         Returns the source code of the host function.
         """
-        if self.execution_backend in {"cython", "tvm_ffi", "pto"}:
+        if self.execution_backend in {"cython", "tvm_ffi"}:
             return self.adapter.get_host_source()
         assert self.artifact.host_mod is not None, "host_mod is not available"
         return str(self.artifact.host_mod)

@@ -124,7 +124,6 @@ include = [
     "version_provider.py",
     "requirements*.txt",
     "tilelang/jit/adapter/cython/cython_wrapper.pyx",
-    "tilelang/jit/adapter/pto/cython_wrapper.pyx",
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
@@ -249,6 +248,7 @@ markers = [
     # these via its own conftest, but tilelang only imports the decorators, so
     # they must be registered here to avoid PytestUnknownMarkWarning.
     "pto: tests for the PTO backend",
+    "ascend: tests requiring the Ascend backend and an NPU",
     "cpu: Mark a test as running on CPU",
     "gpu: Mark a test as using a GPU",
     "multi_gpu: Mark a test as using multiple GPUs",

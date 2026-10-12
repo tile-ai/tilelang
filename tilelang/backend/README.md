@@ -62,8 +62,8 @@ resolve either backend again.
 
 - A **target backend**, such as CUDA, ROCm, CPU, Metal, or WebGPU, owns the
   dialect, lowering, codegen, and target-specific toolchain primitives.
-- An **execution backend**, such as `tvm_ffi`, `cython`, `torch`,
-  or `pto`, is a reusable Build/JIT/Runtime implementation that may
+- An **execution backend**, such as `tvm_ffi`, `cython`, or `torch`,
+  is a reusable Build/JIT/Runtime implementation that may
   serve one or more compatible target backends.
 - A target backend **declares execution compatibility** and satisfies the
   selected implementation's source, artifact, and launch-metadata contract; it
@@ -290,6 +290,7 @@ and the selected execution backend decides whether and when it is invoked.
 | `tilelang/cpu` | `c`, `llvm` | CPU pipeline, codegen, and scalar CPU tile-op implementations. |
 | `tilelang/metal` | `metal` | Metal pipeline, codegen, host hook, and Metal language extensions. |
 | `tilelang/webgpu/backend.py` | `webgpu` | WebGPU compiler component registration. |
+| `tilelang/ascend/backend.py` | `ascend` | AscendC and PTO variants share the Ascend pipeline, TVM-FFI Host IR, and executable device ELF runtime. |
 
 ## Common Backend Infrastructure
 

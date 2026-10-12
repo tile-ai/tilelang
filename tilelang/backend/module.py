@@ -178,6 +178,7 @@ class BackendModule:
             tip = {
                 "nvrtc": "use execution_backend='tvm_ffi' with pass_configs={'tl.cuda_compiler': 'nvrtc'}",
                 "cutedsl": "use target='cutedsl' with execution_backend='tvm_ffi'",
+                "pto": "use target='pto' with execution_backend='tvm_ffi'",
             }.get(requested_name, "use execution_backend='auto'")
             raise ValueError(f"Invalid execution backend {requested!r} for target {target.kind.name!r}. Allowed: {allowed}. Tip: {tip}.")
         if not spec.is_available():

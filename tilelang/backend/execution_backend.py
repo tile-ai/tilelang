@@ -14,16 +14,22 @@ def normalize_execution_alias(target, execution_backend, pass_configs):
 
     name = execution_backend if execution_backend is not None else env.get_default_execution_backend()
     name = str(name).lower()
-    if name not in ("nvrtc", "cutedsl"):
+    if name not in ("nvrtc", "cutedsl", "pto"):
         return target, execution_backend, pass_configs
 
     import warnings
     from tilelang.backend.target import determine_target
 
     target = determine_target(target if target is not None else env.get_default_target(), return_object=True)
-    if target.kind.name != "cuda" or (name == "nvrtc" and "cutedsl" in target.keys):
+    if name == "pto":
+        from tilelang.ascend.target import target_is_pto
+
+        if not target_is_pto(target):
+            raise ValueError("execution_backend='pto' requires target='pto'; use execution_backend='tvm_ffi'")
+        replacement = "target='pto', execution_backend='tvm_ffi'"
+    elif target.kind.name != "cuda" or (name == "nvrtc" and "cutedsl" in target.keys):
         raise ValueError(f"execution_backend={name!r} requires a compatible CUDA target")
-    if name == "cutedsl":
+    elif name == "cutedsl":
         from tilelang.cuda.target import _with_cutedsl_key
 
         target = _with_cutedsl_key(target)

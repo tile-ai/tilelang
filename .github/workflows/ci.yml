@@ -528,7 +528,7 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
-          python maint/host_checks/host_ir_benchmark.py --targets ascend
+          python maint/host_checks/host_ir_benchmark.py --targets ascend pto
 
           cd testing
           python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend

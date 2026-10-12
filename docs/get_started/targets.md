@@ -15,6 +15,8 @@ dictionary when you need options such as GPU architecture or CPU model. The most
 | `auto` | Detects CUDA → HIP → Metal in that order. Useful when running the same script across machines. |
 | `cuda` | NVIDIA GPUs. Use a config dict for options such as `{"kind": "cuda", "arch": "sm_80"}`. |
 | `cutedsl` | NVIDIA CUTLASS/CuTe DSL backend. Requires `nvidia-cutlass-dsl`. |
+| `ascend` / `asc` | Huawei AscendC backend. Requires CANN/Bisheng. |
+| `pto` | Ascend A5 PTO variant. Requires PTODSL, PTOAS, and CANN/Bisheng. |
 | `hip` | AMD GPUs via ROCm. Use a config dict for options such as `{"kind": "hip", "mcpu": "gfx90a"}`. |
 | `metal` | Apple Silicon GPUs (arm64 Macs). |
 | `llvm` | CPU execution. Use a config dict for options such as `{"kind": "llvm", "mtriple": "x86_64-linux-gnu"}`. |
@@ -36,7 +38,7 @@ def compiled_kernel(*args):
 
 ## TVM-FFI host execution
 
-CUDA (including CuTeDSL), ROCm, Metal and Ascend default to `tvm_ffi`.
+CUDA (including CuTeDSL), ROCm, Metal and Ascend (including PTO) default to `tvm_ffi`.
 On x86-64/AArch64, builds with the experimental [MIR fork](https://github.com/sepcnt/mir/tree/tilelang-host-jit)
 use it by default to compile scalar Host IR in-process, without an external host compiler.
 Use `target_host="c"` for the C path; other targets/architectures keep their existing fallback, and PTO is unchanged.
@@ -59,6 +61,27 @@ The C host path and explicit shared-library exports still require GCC/Clang on L
 Device compiler/runtime requirements are unchanged.
 The adapter accepts the full Python `uint64` range; direct exported TVM-FFI calls use signed `int64` transport,
 so pass `value - (1 << 64)` for values at or above `1 << 63`.
+
+### Ascend and PTO
+
+Use the explicit dialect `from tilelang.ascend import language as T` and
+`target="ascend"` or `target="pto"`, with `execution_backend="tvm_ffi"`.
+Both use the same Host IR ABI, output allocator, stream exchange, native Ascend
+runtime, and C/MIR host compilation. PTO no longer has a Python/Cython launch
+wrapper; `execution_backend="pto"` is a deprecated alias for TVM-FFI on a PTO
+target. Old wrapper cache entries are not reused. Use `torch.npu.stream(stream)`
+instead of passing a `stream=` keyword to the kernel.
+
+PTO compilation produces one executable device ELF per entry. PTOAS emits a fat
+object, Bisheng performs the final device link, and CANN's
+[`msobjdump --extract-elf`](https://asc.gitcode.com/guide/programming_guide/appendix/msobjdump_tool.html)
+extracts the device ELF for the shared Ascend runtime. The temporary host shared
+library is only a toolchain container: it is never loaded or used as a launcher.
+Source CANN's `set_env.sh` so `bisheng`, `ptoas`, and `msobjdump` are available.
+Compilation requires `PTO_ARCH=a5` (the default). `PTO_FLAGS` and `compile_flags`
+are passed to PTOAS. Unsupported extraction layouts fail during compilation.
+Host control flow and multiple kernel launches remain in Host IR rather than
+being reconstructed from generated PTODSL source.
 
 ## Target input forms
 

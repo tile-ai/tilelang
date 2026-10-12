@@ -21,10 +21,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def workload(target, case, torch):
     import tilelang.language as T
 
-    device = "npu" if target == "ascend" else "mps" if target == "metal" else "cuda"
+    device = "npu" if target in ("ascend", "pto") else "mps" if target == "metal" else "cuda"
     if case != "gemm":
         rows = 1 if case == "small" else 8
-        if target == "ascend":
+        if target in ("ascend", "pto"):
             program = runpy.run_path(str(ROOT / "testing/ascend/runtime/test_tvm_ffi_host_args.py"))["dynamic_grid_kernel"]
             dtype = torch.bfloat16
         else:
@@ -39,7 +39,7 @@ def workload(target, case, torch):
             dtype = torch.float32
         a = torch.randn(rows, 128, device=device, dtype=dtype)
         return program, [a, torch.empty_like(a)], a
-    if target == "ascend":
+    if target in ("ascend", "pto"):
         program = runpy.run_path(str(ROOT / "examples/ascend/example_gemm.py"))["gemm"](256, 256, 256)
         a, b = [torch.randn(256, 256, device=device, dtype=torch.bfloat16) for _ in range(2)]
         reference = a.float() @ b.float().T
@@ -72,9 +72,9 @@ def worker(args):
     import tilelang
     from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 
-    if args.target == "ascend":
+    if args.target in ("ascend", "pto"):
         import torch_npu  # noqa: F401
-    device = torch.npu if args.target == "ascend" else torch.mps if args.target == "metal" else torch.cuda
+    device = torch.npu if args.target in ("ascend", "pto") else torch.mps if args.target == "metal" else torch.cuda
     if device is torch.cuda:
         torch.backends.cuda.matmul.allow_tf32 = False
     torch.manual_seed(0)
@@ -232,7 +232,7 @@ def report(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--targets", nargs="+", choices=["cuda", "nvrtc", "cutedsl", "hip", "metal", "ascend"], default=["cuda"])
+    parser.add_argument("--targets", nargs="+", choices=["cuda", "nvrtc", "cutedsl", "hip", "metal", "ascend", "pto"], default=["cuda"])
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--output", default="host-ir-report")
     parser.add_argument("--target")

@@ -1381,7 +1381,7 @@ def autotune(  # This is the new public interface
         Target host for cross-compilation. Defaults to None.
     execution_backend : Literal["auto", "tvm_ffi", "cython", "torch", "pto"], optional
         Backend for kernel execution and argument passing. Use "auto" to pick a sensible
-        default declared by the target backend (e.g., cuda->tvm_ffi, metal->torch, pto->pto).
+        default declared by the target backend (e.g., cuda->tvm_ffi, metal->torch, pto->tvm_ffi).
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.
     pass_configs : Optional[Dict[str, Any]], optional

@@ -23,7 +23,6 @@ TargetLike = str | dict[str, object] | TVMTarget
 _dispatch_map: dict[str, KernelCache] = {
     "tvm_ffi": TVMFFIKernelCache(),
     "cython": CythonKernelCache(),
-    "pto": CythonKernelCache(),
     "torch": TorchKernelCache(),
 }
 
@@ -64,7 +63,7 @@ def _resolve_cache_dispatch(
                 ", ".join(sorted(allowed_now)),
             )
     # Dispatch on the resolved backend module rather than on the target kind.
-    dispatch_map = _ascend_dispatch_map if context.module.name == "ascend" else _dispatch_map
+    dispatch_map = _ascend_dispatch_map if context.module.name in ("ascend", "pto") else _dispatch_map
     if resolved_backend not in dispatch_map:
         raise ValueError(f'Cannot find support for execution backend "{resolved_backend}"')
     return dispatch_map[resolved_backend], context, verbose
