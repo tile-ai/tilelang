@@ -259,6 +259,12 @@ private:
     constexpr int num_warps = threads / 32;
     int tx = threadIdx.x - thread_offset;
     int wid = tx >> 5, lid = tx & 31;
+    // One call covers every consecutive group of `threads` threads; all
+    // slots below are derived from this thread's own group.
+    int group = tx / threads;
+    int local = tx % threads;
+    int partial_base = group * num_warps * scale;
+    int bcast_base = group * threads;
 
     // Step 1: intra-warp reduce.
     U warp_val =
@@ -269,37 +275,40 @@ private:
       red_buf[wid * scale + lid] = warp_val;
     asc_syncthreads();
 
-    // Step 3: cross-warp reduce — single warp reads and reduces.
+    // Step 3: cross-warp reduce — each group's leader warp reduces its
+    // partials.
     U result;
     if constexpr (scale == 1) {
-      if (tx < 32) {
-        U v = (lid < num_warps) ? red_buf[lid] : reduce_identity<U>();
+      if (local < 32) {
+        U v = (lid < num_warps) ? red_buf[partial_base + lid]
+                                : reduce_identity<U>();
         result = HwReduce<Reducer, U>::call(v);
       }
     } else if constexpr (scale * num_warps <= 32) {
-      if (tx < 32) {
+      if (local < 32) {
         constexpr int total = scale * num_warps;
-        U v = (lid < total) ? red_buf[lid] : reduce_identity<U>();
+        U v =
+            (lid < total) ? red_buf[partial_base + lid] : reduce_identity<U>();
         result = AscendAllReduce<Reducer, total, scale, 0>::warp_reduce(v, 0);
       }
     } else {
-      if (tx < 32) {
+      if (local < 32) {
         Reducer op;
         result = reduce_identity<U>();
         int my_slot = lid % scale;
         for (int w = 0; w < num_warps; ++w) {
-          int idx = w * scale + my_slot;
+          int idx = partial_base + w * scale + my_slot;
           result = (lid < scale) ? op(result, red_buf[idx]) : result;
         }
       }
     }
     asc_syncthreads();
 
-    // Step 4: broadcast result back to all threads.
-    if (tx < scale)
-      red_buf[tx] = result;
+    // Step 4: broadcast each group's result back to its threads.
+    if (local < scale)
+      red_buf[bcast_base + local] = result;
     asc_syncthreads();
-    result = red_buf[tx % scale];
+    result = red_buf[bcast_base + (local % scale)];
     asc_syncthreads();
     return result;
   }
