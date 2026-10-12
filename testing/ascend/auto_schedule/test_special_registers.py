@@ -8,7 +8,7 @@ from tilelang import tvm
 from tilelang.ascend import transform
 from tilelang.ascend.transform import z3_scheduler
 from tvm import tirx
-from testing.ascend._ir import calls, copy, kernel, seq, task_core_masks
+from testing.ascend._ir import calls, copy, kernel, nodes, seq, task_core_masks
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
@@ -38,6 +38,32 @@ def test_nested_pad_writer_follows_the_reader_core():
     before = kernel(seq(loop, reader), buffers=[ub], params=[a])
     after = transform.ResolveCore()(before)
     assert task_core_masks(after, "tl.ascend_set_copy_pad_value") == {5}
+
+
+@pytest.mark.parametrize("operation", ["padding", "atomic"])
+def test_projected_special_register_writers_keep_their_subcore(operation):
+    a = tirx.decl_buffer((16,), "float32", name="A")
+    ub = tirx.decl_buffer((16,), "float32", name="ub", scope="shared.dyn")
+    sid = tirx.Var("sid", "int32")
+    setters = (
+        [T.ascend_set_copy_pad_value(value, dtype="float32") for value in (1.0, 2.0)]
+        if operation == "padding"
+        else [T.set_atomic("add", "float32"), T.set_atomic_none()]
+    )
+    reader = copy(a, ub, annotations={"data_select": tirx.IntImm("int32", 1)}) if operation == "padding" else copy(ub, a)
+    body = seq(*(unit(tirx.Evaluate(setter), core=0, guard=sid == index) for index, setter in enumerate(setters)), unit(reader, core=0))
+    before = kernel(body, buffers=[ub], params=[a])
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    assigned = transform.AssignCore()(before)
+    for mod, masks in ((assigned, {0: 3, 1: 6}), (transform.ResolveCore()(assigned), {0: 1, 1: 4})):
+        writers = [
+            task
+            for task in nodes(mod, tirx.AttrStmt)
+            if task.attr_key == "tl.ascend_task" and any(calls(task, setter.op.name) for setter in setters)
+        ]
+        assert len(writers) == 2
+        assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in writers} == masks
 
 
 @pytest.mark.parametrize("operation", ["atomic", "loop-break"])

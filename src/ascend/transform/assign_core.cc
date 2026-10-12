@@ -358,10 +358,12 @@ private:
   void AssignCandidateCoreMasks() {
     for (TaskNode *task : all_tasks_) {
       CoreMask mask = GetCandidateCoreMask(task);
-      // A scalar that uses neither core's private memory may be recomputed
-      // on any core, even when its value was specialized for one sid.
-      if (auto sid = GetTaskSubcore(task->stmt); sid && mask == kCoreVector)
-        mask = VectorCore(*sid);
+      // Pure scalar values may be recomputed on other cores. Special-register
+      // writes affect core-local state and must retain their projected AIV.
+      // Keep Cube eligible for configuration consumed by Cube operations.
+      if (auto sid = GetTaskSubcore(task->stmt);
+          sid && (mask == kCoreVector || task->GetSpecialWriteMask() != 0))
+        mask &= kCoreCube | VectorCore(*sid);
       task->SetCoreMask(mask & (kCoreCube | vector_mask_));
     }
   }

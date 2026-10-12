@@ -529,11 +529,19 @@ private:
         return call;
       // AIC executes this task, while its UB destination is owned by p.
       ICHECK_EQ(copy->dual_dst_ctl, 0);
-      if (auto explicit_sid = annotations.Get("sub_blockid")) {
-        PrimExpr target = Downcast<PrimExpr>(explicit_sid.value());
-        // An explicitly routed copy belongs only to its selected destination.
-        active_ = active_ && (target == p_);
+      PrimExpr target = Integer(p_);
+      if (auto explicit_sid = annotations.Get("sub_blockid"))
+        target = Downcast<PrimExpr>(explicit_sid.value());
+      // Routing guards the entire atomic task, so its copies must agree on
+      // the destination instead of silently intersecting different targets.
+      if (copy_target_.defined()) {
+        ICHECK(analyzer_.CanProveEqual(target, copy_target_.value()))
+            << "Projected Fixpipe copies in one T.Task must use the same "
+               "sub_blockid; put copies with different destinations in "
+               "separate T.Task scopes";
       }
+      copy_target_ = target;
+      active_ = active_ && (target == p_);
       annotations.Set("sub_blockid", Integer(p_));
       call.CopyOnWrite()->annotations = annotations;
       return call;
@@ -546,6 +554,7 @@ private:
     SubcoreProjector *owner_;
     int p_;
     int conditional_depth_;
+    Optional<PrimExpr> copy_target_;
     arith::Analyzer analyzer_;
   };
 
