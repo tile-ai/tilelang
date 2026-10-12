@@ -2874,6 +2874,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
     need_copy_sm90_h_ = true;
     print_extern_call_stmt("tl::prefetch_tma_descriptor");
+  } else if (op->op.same_as(tl::prefetch_l2())) {
+    need_copy_h_ = true;
+    auto policy = Downcast<IntImm>(op->args[1])->value;
+    std::string func_name = "tl::prefetch_l2<" + std::to_string(policy) + ">";
+    print_extern_call_stmt(func_name, 0, 1);
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);

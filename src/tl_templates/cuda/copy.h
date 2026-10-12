@@ -281,4 +281,27 @@ TL_DEVICE void store_global_128_conditional(void *ptr, uint4 value, bool pred) {
   global_store<uint4, 16>(ptr, value, pred);
 }
 
+template <int EvictionPolicy>
+TL_DEVICE void prefetch_l2(const void *ptr) {
+  static_assert(EvictionPolicy == 0 || EvictionPolicy == 2,
+                "tl::prefetch_l2 only supports `evict_normal` and `evict_last`");
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  uint64_t g_addr = __cvta_generic_to_global(ptr);
+  if constexpr (EvictionPolicy == 0) {
+    asm volatile("prefetch.global.L2::evict_normal [%0];"
+                 :
+                 : "l"(g_addr)
+                 : "memory");
+  } else {
+    asm volatile("prefetch.global.L2::evict_last [%0];"
+                 :
+                 : "l"(g_addr)
+                 : "memory");
+  }
+#else
+  static_assert(EvictionPolicy != EvictionPolicy,
+                "tl::prefetch_l2 requires sm_80 or later");
+#endif
+}
+
 } // namespace tl
