@@ -268,7 +268,50 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
         tvm.ir.assert_structural_equal(branch.condition, expected == int(operation.annotations["sub_blockid"]))
 
 
-def test_projected_loop_break_only_requires_its_own_subcore():
+@pytest.mark.parametrize("effect", ["store", "extern", "route-call", "gm-copy", "pure-call"])
+@pytest.mark.parametrize("routing", ["dynamic", "constant", "single-projection"])
+def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routing):
+    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
+    out = tirx.decl_buffer((16, 16), "float32", name="out")
+    routes = tirx.decl_buffer((1,), "int32", name="routes")
+    sid, route = tirx.Var("sid", "int32"), tirx.Var("route", "int32")
+    if effect == "store":
+        side_effect = tirx.BufferStore(routes, routes[0] + 1, [0])
+    elif effect == "gm-copy":
+        side_effect = copy(accum, out)
+    elif effect == "pure-call":
+        side_effect = tirx.Evaluate(tirx.call_pure_extern("int32", "read_route", route))
+    elif effect == "route-call":
+        side_effect = tirx.Evaluate(0)
+    else:
+        side_effect = tirx.Evaluate(tirx.call_extern("int32", "record_route", route))
+    target = tirx.IntImm("int32", 0) if routing == "constant" else route
+    if effect == "route-call" and routing != "constant":
+        target = tirx.call_extern("int32", "next_route")
+    elif effect == "pure-call" and routing != "constant":
+        target = tirx.call_pure_extern("int32", "read_route", routes[0])
+    body = seq(tirx.Bind(route, routes[0] % 2), side_effect, copy(accum, ub, annotations={"sub_blockid": target}))
+    before = kernel(
+        unit(body, core=0, guard=sid == 0 if routing == "single-projection" else None),
+        buffers=[accum, ub],
+        params=[routes, out],
+    )
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    if routing == "dynamic" and effect != "pure-call":
+        with pytest.raises(tvm.error.InternalError, match="Dynamic Fixpipe routing.*external side effects.*separate T.Task"):
+            transform.AssignCore()(before)
+    else:
+        after = transform.AssignCore()(before)
+        assert len(_tasks(after)) == (2 if routing == "dynamic" else 1)
+
+
+@pytest.mark.parametrize(
+    "cube_owners", [(), (0,), (1,), (None,), (0, 1)], ids=["vector-only", "cube-aiv0", "cube-aiv1", "shared-cube", "both-cube"]
+)
+@pytest.mark.parametrize("nested", [False, True])
+def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested):
     src = tirx.decl_buffer((16,), "float32", name="src")
     buffers = [tirx.decl_buffer((16,), "float32", name=f"ub{sid}", scope="shared.dyn") for sid in range(2)]
     i = tirx.Var("i", "int32")
@@ -276,11 +319,30 @@ def test_projected_loop_break_only_requires_its_own_subcore():
     for sid, core in enumerate((1, 4)):
         marker = tirx.AttrStmt({"core_mask": core | 2, "subcore": sid}, "tl.ascend_task", 1, tirx.Evaluate(T.loop_break()))
         body.extend((unit(marker, core=None, guard=i >= sid + 1), unit(copy(src, buffers[sid]), core=core)))
+    l1 = tirx.decl_buffer((16,), "float32", name="l1", scope="shared.l1")
+    for sid in cube_owners:
+        metadata = {"core_mask": 2}
+        if sid is not None:
+            metadata["subcore"] = sid
+        cube = unit(tirx.AttrStmt(metadata, "tl.ascend_task", 1, copy(src, l1)), core=None)
+        if nested:
+            cube = unit(tirx.For(tirx.Var("j", "int32"), 0, 2, tirx.ForKind.SERIAL, cube), core=None)
+        body.append(cube)
+    # A common scalar producer may be recomputed on Cube without owning its
+    # loop control. Its fallback placement must not broaden either break.
+    body.append(unit(tirx.Bind(tirx.Var("value", "int32"), i), core=7))
+    buffers.append(l1)
     before = kernel(unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, seq(*body)), core=None), buffers=buffers, params=[src])
+    if cube_owners in ((None,), (0, 1)):
+        with pytest.raises(tvm.error.InternalError, match="Independent subcore loop_break.*separate loop"):
+            transform.ResolveCore()(before)
+        return
     after = transform.ResolveCore()(before)
     exits = [task for task in _tasks(after) if calls(task, "tl.loop_break")]
     assert len(exits) == 2
-    assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in exits} == {0: 1, 1: 4}
+    assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in exits} == {
+        sid: core | (2 if sid in cube_owners else 0) for sid, core in enumerate((1, 4))
+    }
 
 
 @pytest.mark.parametrize("steps, exclusive, expected", [(1, True, 3), (1, False, 0), (2, True, 0)])

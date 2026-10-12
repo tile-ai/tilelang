@@ -117,6 +117,15 @@ private:
       candidate_masks_[task] = candidate;
       execution_masks_[task] =
           IsCoreLocalMask(candidate) ? candidate : kCoreUnassigned;
+      // Flexible scalar producers follow their consumers; they do not own a
+      // Cube stream. A break's condition must not create its own Cube exit
+      // demand during fixed-point propagation.
+      if (candidate == kCoreCube && !task->ContainsLoopBreak()) {
+        auto sid = GetTaskSubcore(task->stmt);
+        for (const IRStructure *parent = task->GetParent(); parent;
+             parent = parent->GetParent())
+          loop_cube_owners_[parent][sid ? *sid + 1 : 0] = true;
+      }
     }
   }
 
@@ -308,18 +317,34 @@ private:
     return result;
   }
 
+  CoreMask GetLoopExitCoverage(const TaskNode *task,
+                               CoreMask enclosing_coverage) const {
+    auto sid = GetTaskSubcore(task->stmt);
+    if (!sid)
+      return enclosing_coverage;
+    CoreMask coverage = enclosing_coverage & VectorCore(*sid);
+    auto it = loop_cube_owners_.find(task->GetParent());
+    if (it == loop_cube_owners_.end())
+      return coverage;
+    const auto &owners = it->second;
+    // One physical Cube loop cannot exit independently for multiple logical
+    // subcore streams, nor can a subcore-local break stop shared Cube work.
+    ICHECK(!owners[0] && !(owners[1] && owners[2]))
+        << "Independent subcore loop_break with shared Cube work is not "
+           "supported in one loop; put each subcore branch and its Cube work "
+           "in a separate loop";
+    if (owners[*sid + 1])
+      coverage |= kCoreCube;
+    return coverage;
+  }
+
   bool SeedTreeReadDemand(IRStructure *node, CoreMask enclosing_coverage) {
     if (node->IsTask()) {
       auto *task = static_cast<TaskNode *>(node);
       bool changed = false;
-      if (task->ContainsLoopBreak()) {
-        // A shared loop header can contain independently projected AIV
-        // bodies. Each projected break exits only its own AIV stream.
-        CoreMask exit_coverage = enclosing_coverage;
-        if (auto sid = GetTaskSubcore(task->stmt))
-          exit_coverage &= kCoreCube | VectorCore(*sid);
-        changed |= RequireExecution(task, exit_coverage);
-      }
+      if (task->ContainsLoopBreak())
+        changed |= RequireExecution(
+            task, GetLoopExitCoverage(task, enclosing_coverage));
       CoreMask execution_mask = GetExecutionMask(task);
       changed |= AddReadDemand(task, execution_mask);
       changed |= AddStorageEpochGuardDemand(task, execution_mask);
@@ -338,8 +363,8 @@ private:
 
   // Special registers have one independent instance per core. Return both
   // reader demand and concrete descendant writers so readers in an outer
-  // sibling list can place writers nested under a control node. loop_break is
-  // body-local and is therefore the only register not propagated outward.
+  // sibling list can place writers nested under a control node. loop_break
+  // instead uses GetLoopExitCoverage to retain its projected control domain.
   SpecialRegisterScopeDemand CollectSpecialRegisterDemand(
       const std::vector<std::shared_ptr<IRStructure>> &nodes) {
     SpecialRegisterScopeDemand scope;
@@ -386,6 +411,9 @@ private:
     }
 
     for (int bit_index = 0; bit_index < kSpecialRegisterBits; ++bit_index) {
+      if ((1U << bit_index) ==
+          static_cast<uint16_t>(SpecialRegister::kLoopControl))
+        continue;
       for (TaskNode *writer : scope.writers[bit_index])
         special_writer_demand_[writer] |=
             scope.readers[bit_index] & candidate_masks_.at(writer);
@@ -541,6 +569,9 @@ private:
   CoreMask active_core_mask_;
   std::unordered_map<const TaskNode *, CoreMask> candidate_masks_;
   std::unordered_map<const TaskNode *, CoreMask> execution_masks_;
+  // Index 0 is shared Cube work; indices 1 and 2 belong to AIV0 and AIV1.
+  std::unordered_map<const IRStructure *, std::array<bool, 3>>
+      loop_cube_owners_;
   std::vector<PreparedEpochGuard> epoch_guards_;
   std::unordered_map<const TaskNode *, std::vector<size_t>> task_epoch_guards_;
   std::unordered_map<const TaskNode *, std::vector<const MultiBufferInfo *>>

@@ -326,6 +326,45 @@ def test_subcore_loops_can_have_different_extents(loop_kind):
     torch.testing.assert_close(output.cpu(), expected)
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("break_sid", [0, 1])
+def test_subcore_break_preserves_the_other_cube_stream(break_sid):
+    import torch
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((4, 32, 32), "bfloat16"),
+        B: T.Tensor((32, 32), "bfloat16"),
+        V: T.Tensor((4, 32, 32), "float32"),
+        C: T.Tensor((2, 4, 32, 32), "float32"),
+    ):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            ub = T.alloc_shared((32, 32), "float32")
+            T.copy(B, b)
+            for i in T.serial(4):
+                if sid == break_sid and i == 1:
+                    T.loop_break()
+                if sid == 0:
+                    T.copy(V[i, :, :], ub)
+                else:
+                    T.copy(A[i, :, :], a)
+                    T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+                    T.copy(acc, ub)
+                T.copy(ub, C[sid, i, :, :])
+
+    a = torch.ones((4, 32, 32), dtype=torch.bfloat16).npu()
+    b = torch.ones((32, 32), dtype=torch.bfloat16).npu()
+    v = torch.full((4, 32, 32), 7.0).npu()
+    output = torch.full((2, 4, 32, 32), -1.0).npu()
+    tilelang.compile(main, target="ascend")(a, b, v, output)
+    expected = torch.stack((v.cpu(), torch.full_like(v.cpu(), 32.0)))
+    expected[break_sid, 1:] = -1
+    torch.testing.assert_close(output.cpu(), expected)
+
+
 def test_subcore_mutable_scalar_is_replicated_with_its_guard():
     from testing.ascend._ir import schedule
 

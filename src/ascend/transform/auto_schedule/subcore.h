@@ -23,6 +23,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <tvm/tirx/analysis.h>
+
 #include "layout/layout.h"
 #include "scheduled_tir.h"
 #include "task_analysis.h"
@@ -390,10 +392,36 @@ private:
     return result;
   }
 
+  static void VerifyReplayableFixpipeTask(const Stmt &body) {
+    bool external_effect = false;
+    PostOrderVisit(body, [&](const ObjectRef &node) {
+      if (const auto *store = node.as<BufferStoreNode>())
+        external_effect |=
+            !IsRegisterRegion(BufferRegion::FullRegion(store->buffer));
+      if (const auto *call = node.as<CallNode>()) {
+        if (IsAscendCopyCall(call)) {
+          AscendCopy copy(call->args, call->annotations);
+          external_effect |=
+              !IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst);
+        } else {
+          external_effect |= SideEffect(ffi::GetRef<PrimExpr>(call)) >
+                             CallEffectKind::kReadState;
+        }
+      }
+    });
+    ICHECK(!external_effect)
+        << "Dynamic Fixpipe routing in a projected T.Task with external side "
+           "effects is not supported: projection would repeat those effects. "
+           "Move the side effects into a separate T.Task and snapshot the "
+           "route before the Fixpipe task";
+  }
+
   class Rewriter : public StmtExprMutator {
   public:
     Rewriter(SubcoreProjector *owner, int p, bool allow_constants = true)
         : owner_(owner), p_(p), conditional_depth_(allow_constants ? 0 : 1) {}
+
+    bool HasLocalCopyGuard() const { return has_local_copy_guard_; }
 
     Any RewriteMetadata(const Any &value) {
       if (auto buffer = value.try_cast<Buffer>())
@@ -558,7 +586,7 @@ private:
       statement.CopyOnWrite()->value = call;
 
       PrimExpr condition = analyzer_.Simplify(target == p_);
-      bool task_local = false;
+      bool task_local = SideEffect(condition) > CallEffectKind::kReadState;
       PostOrderVisit(condition, [&](const ObjectRef &node) {
         if (const auto *var = node.as<VarNode>())
           task_local |= local_vars_.count(ffi::GetRef<Var>(var)) != 0;
@@ -566,8 +594,10 @@ private:
       });
       // Task-local definitions must dominate the route test. Mutable loads
       // also stay at the copy site so earlier task writes remain visible.
-      if (task_local)
+      if (task_local) {
+        has_local_copy_guard_ = true;
         return IfThenElse(condition, statement, std::nullopt, op->span);
+      }
       active_ = active_ && condition;
       return statement;
     }
@@ -581,6 +611,7 @@ private:
     int conditional_depth_;
     VarSet local_vars_;
     Optional<PrimExpr> copy_target_;
+    bool has_local_copy_guard_{false};
     arith::Analyzer analyzer_;
   };
 
@@ -649,6 +680,8 @@ private:
       if (inserted)
         ++next_origin_;
       int origin = origin_it->second;
+      size_t projection_begin = result.size();
+      bool has_local_copy_guard = false;
       for (int p = begin; p < end; ++p) {
         Stmt body;
         if (node->IsTask()) {
@@ -684,6 +717,7 @@ private:
           PrimExpr active = analyzer.Simplify(rewriter.active_);
           if (is_zero(active))
             continue;
+          has_local_copy_guard |= rewriter.HasLocalCopyGuard();
           if (!is_one(active))
             body = IfThenElse(active, body);
         }
@@ -694,6 +728,11 @@ private:
             AttrStmt(ScheduleUnitMetadata{{kScheduleUnitStage,
                                            Integer(node->GetStage())}},
                      attr::kScheduleUnit, Integer(1), body));
+      }
+      if (node->IsTask() && has_local_copy_guard &&
+          result.size() - projection_begin > 1) {
+        for (size_t i = projection_begin; i < result.size(); ++i)
+          VerifyReplayableFixpipeTask(result[i]);
       }
     }
     return SeqStmt::Flatten(result);
