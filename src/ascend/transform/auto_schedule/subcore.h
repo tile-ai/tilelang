@@ -426,8 +426,8 @@ private:
         return;
       auto metadata = task_metadata_detail::CopyTaskMetadata(attr->node);
       auto origin = metadata.Get("subcore_origin");
-      if (origin && local_copy_guard_origins_.count(
-                        origin.value().cast<Integer>()->value))
+      if (origin &&
+          replay_check_origins_.count(origin.value().cast<Integer>()->value))
         projections[origin.value().cast<Integer>()->value].push_back(
             ffi::GetRef<AttrStmt>(attr));
     });
@@ -469,6 +469,86 @@ private:
     }
 
   private:
+    struct PerCoreRouting {
+      PrimExpr path{Bool(true)};
+      PrimExpr active{Bool(false)};
+      bool routed{false};
+    };
+
+    PrimExpr GetPerCoreActiveGuard(const AttrStmt &task, PrimExpr active) {
+      Map<Var, PrimExpr> bindings;
+      VarSet locals;
+      PostOrderVisit(task->body, [&](const ObjectRef &node) {
+        if (const auto *loop = node.as<ForNode>())
+          locals.insert(loop->loop_var);
+        if (const auto *bind = node.as<BindNode>()) {
+          locals.insert(bind->var);
+          PrimExpr value = Substitute(bind->value, bindings);
+          bool immutable = SideEffect(value) <= CallEffectKind::kReadState;
+          PostOrderVisit(value, [&](const ObjectRef &input) {
+            immutable &= input.as<BufferLoadNode>() == nullptr;
+          });
+          if (immutable)
+            bindings.Set(bind->var, value);
+        }
+      });
+      // Condition snapshots belong inside PerCoreTask. Expand only immutable
+      // bindings when exposing the selected candidates to outer
+      // synchronization.
+      active = analyzer_.Simplify(Substitute(active, bindings));
+      bool available = SideEffect(active) <= CallEffectKind::kReadState;
+      PostOrderVisit(active, [&](const ObjectRef &node) {
+        if (const auto *var = node.as<VarNode>())
+          available &= !locals.count(ffi::GetRef<Var>(var));
+        available &= node.as<BufferLoadNode>() == nullptr;
+      });
+      ICHECK(available)
+          << "Cannot project PerCoreTask Fixpipe routing: candidate dispatch "
+             "must use immutable values available before PerCoreTask. Move "
+             "the dispatch and route computation outside PerCoreTask";
+      return active;
+    }
+
+    Stmt RewritePerCoreCandidate(const AttrStmt &task) {
+      auto metadata = task_metadata_detail::CopyTaskMetadata(task->node);
+      auto origin = metadata.Get("subcore_origin");
+      int origin_id;
+      if (origin) {
+        origin_id = origin.value().cast<Integer>()->value;
+      } else {
+        auto [it, inserted] =
+            owner_->candidate_origins_.emplace(task, owner_->next_origin_);
+        if (inserted)
+          ++owner_->next_origin_;
+        origin_id = it->second;
+        metadata.Set("subcore_origin", Integer(origin_id));
+      }
+      AttrStmt marked = task;
+      marked.CopyOnWrite()->node = std::move(metadata);
+      // Each candidate is its own atomic task. Neither the routing target nor
+      // its guard may leak into a sibling candidate's rewrite.
+      Rewriter rewriter(owner_, p_, conditional_depth_ == 0);
+      rewriter.local_vars_ = local_vars_;
+      Stmt body = rewriter(marked);
+      local_vars_.insert(rewriter.local_vars_.begin(),
+                         rewriter.local_vars_.end());
+      PrimExpr active = analyzer_.Simplify(rewriter.active_);
+      bool has_access = HasTaskBufferAccess(task->body);
+      if (has_access) {
+        per_core_->active = per_core_->active || (per_core_->path && active);
+        per_core_->routed |= !is_one(active);
+      }
+      has_local_copy_guard_ |= rewriter.HasLocalCopyGuard();
+      // An enclosing loop can revisit an already projected candidate. Its
+      // explicit route now names p_, while the original guard is outside it.
+      if (rewriter.HasLocalCopyGuard() ||
+          (!origin && has_access && is_one(active)))
+        owner_->replay_check_origins_.insert(origin_id);
+      if (is_zero(active))
+        return Evaluate(0);
+      return is_one(active) ? body : IfThenElse(active, body);
+    }
+
     Buffer VisitBufferUse(const Buffer &buffer) final {
       return owner_->BufferFor(buffer, p_);
     }
@@ -499,7 +579,20 @@ private:
     }
 
     Stmt VisitStmt_(const AttrStmtNode *op) final {
-      AttrStmt attr = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+      if (per_core_ && op->attr_key == tl::attr::kAscendTask)
+        return RewritePerCoreCandidate(ffi::GetRef<AttrStmt>(op));
+      AttrStmt attr;
+      if (op->attr_key == tl::attr::kAscendPerCoreTask) {
+        ICHECK(per_core_ == nullptr);
+        PerCoreRouting routing;
+        per_core_ = &routing;
+        attr = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+        per_core_ = nullptr;
+        if (routing.routed)
+          active_ = active_ && GetPerCoreActiveGuard(attr, routing.active);
+      } else {
+        attr = Downcast<AttrStmt>(StmtExprMutator::VisitStmt_(op));
+      }
       // Projection can remove a condition inside an assumption/attribute
       // guard. Do not leave a schedule unit whose guarded payload is empty.
       if (is_no_op(attr->body))
@@ -545,6 +638,16 @@ private:
       return Bind(var, value, op->span);
     }
 
+    Stmt VisitStmt_(const SeqStmtNode *op) final {
+      Array<Stmt> statements;
+      for (const Stmt &statement : op->seq) {
+        Stmt rewritten = VisitStmt(statement);
+        if (!is_no_op(rewritten))
+          statements.push_back(std::move(rewritten));
+      }
+      return SeqStmt::Flatten(statements);
+    }
+
     Stmt VisitStmt_(const IfThenElseNode *op) final {
       PrimExpr condition = analyzer_.Simplify(VisitExpr(op->condition));
       if (is_one(condition))
@@ -552,16 +655,28 @@ private:
       if (is_zero(condition))
         return op->else_case.has_value() ? VisitStmt(op->else_case.value())
                                          : Evaluate(0);
+      PrimExpr path = per_core_ ? per_core_->path : Bool(true);
+      if (per_core_)
+        per_core_->path = path && condition;
       ++conditional_depth_;
       Stmt then_case = VisitStmt(op->then_case);
+      if (per_core_)
+        per_core_->path = path && !condition;
       Optional<Stmt> else_case =
           op->else_case.has_value()
               ? Optional<Stmt>(VisitStmt(op->else_case.value()))
               : std::nullopt;
       --conditional_depth_;
+      if (per_core_)
+        per_core_->path = path;
       if (is_no_op(then_case) &&
           (!else_case.has_value() || is_no_op(else_case.value())))
         return Evaluate(0);
+      if (is_no_op(then_case))
+        return IfThenElse(!condition, else_case.value(), std::nullopt,
+                          op->span);
+      if (else_case.has_value() && is_no_op(else_case.value()))
+        else_case = std::nullopt;
       return IfThenElse(condition, then_case, else_case, op->span);
     }
 
@@ -634,6 +749,7 @@ private:
     SubcoreProjector *owner_;
     int p_;
     int conditional_depth_;
+    PerCoreRouting *per_core_{nullptr};
     VarSet local_vars_;
     Optional<PrimExpr> copy_target_;
     bool has_local_copy_guard_{false};
@@ -741,7 +857,7 @@ private:
           if (is_zero(active))
             continue;
           if (node->IsTask() && rewriter.HasLocalCopyGuard())
-            local_copy_guard_origins_.insert(origin);
+            replay_check_origins_.insert(origin);
           if (!is_one(active))
             body = IfThenElse(active, body);
         }
@@ -761,7 +877,9 @@ private:
   int count_;
   int next_origin_{0};
   std::unordered_map<const IRStructure *, int> origins_;
-  std::unordered_set<int> local_copy_guard_origins_;
+  std::unordered_map<AttrStmt, int, ObjectPtrHash, ObjectPtrEqual>
+      candidate_origins_;
+  std::unordered_set<int> replay_check_origins_;
   VarSet varying_;
   VarSet dual_storages_;
   std::unordered_set<const TaskNode *> dual_tasks_;

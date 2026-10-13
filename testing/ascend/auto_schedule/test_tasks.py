@@ -80,6 +80,71 @@ def test_per_core_candidates_preserve_conditions(explicit, mixed):
     assert len(nodes(groups[0].body, tirx.IfThenElse)) == 2
 
 
+@pytest.mark.parametrize("routing", ["constant", "parameter", "local"])
+@pytest.mark.parametrize("bound_guard", [False, True])
+@pytest.mark.parametrize("enclosing_loop", [False, True])
+@pytest.mark.parametrize("side_effect", [False, True])
+def test_per_core_fixpipe_candidates_keep_separate_routes(routing, bound_guard, enclosing_loop, side_effect):
+    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
+    counter = tirx.decl_buffer((4,), "int32", name="counter")
+    sid, block = tirx.Var("sid", "int32"), tirx.Var("block", "int32")
+    selected = block % 2 == 0
+    prefix, candidates = [], []
+    if bound_guard:
+        condition = tirx.Var("condition", "bool")
+        prefix.append(unit(tirx.Bind(condition, selected), core=0).body)
+        selected = condition
+    for index in range(2):
+        target = tirx.IntImm("int32", index) if routing == "constant" else (block // 2 + index) % 2
+        body = []
+        if routing == "local":
+            route = tirx.Var(f"route{index}", "int32")
+            body.append(tirx.Bind(route, target))
+            target = route
+        if side_effect:
+            body.append(tirx.BufferStore(counter, counter[block] + 1, [block]))
+        body.append(copy(accum, ub, annotations={"sub_blockid": target}))
+        candidates.append(tirx.IfThenElse(selected if index == 0 else tirx.Not(selected), unit(seq(*body), core=0).body, None))
+    body = unit(tirx.AttrStmt({}, "tl.ascend_per_core_task", 1, seq(*prefix, *candidates)), core=None)
+    if enclosing_loop:
+        body = unit(tirx.For(tirx.Var("i", "int32"), 0, sid + 2, tirx.ForKind.SERIAL, body), core=None)
+    before = kernel(body, buffers=[accum, ub], params=[block, counter])
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    if side_effect and routing == "local":
+        with pytest.raises(tvm.error.InternalError, match="Dynamic Fixpipe routing.*external side effects"):
+            transform.AssignCore()(before)
+        return
+    after = transform.AssignCore()(before)
+    assert not tirx.analysis.undefined_vars(after["main"].body, after["main"].params)
+    groups = [
+        (stmt, parents)
+        for stmt, parents in statements(after)
+        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "tl.ascend_per_core_task"
+    ]
+    assert len(groups) == 2
+    analyzer = tvm.arith.Analyzer()
+    for group, parents in groups:
+        projected_sid = int(group.node["subcore"])
+        assert int(group.node["core_mask"]) == 2
+        copies = calls(group, "tl.tileop.ascend_copy")
+        assert len(copies) == (1 if routing == "constant" else 2)
+        assert {int(call.annotations["sub_blockid"]) for call in copies} == {projected_sid}
+        for statement, ancestors in statements(group.body):
+            if isinstance(statement, (tirx.Evaluate, tirx.Bind, tirx.BufferStore)):
+                assert any(isinstance(parent, tirx.AttrStmt) and parent.attr_key == "tl.ascend_task" for parent in ancestors)
+        active = tirx.const(True, "bool")
+        for parent in parents:
+            if isinstance(parent, tirx.IfThenElse):
+                active = tirx.And(active, parent.condition)
+        for block_id in range(4):
+            route = block_id % 2 if routing == "constant" else (block_id // 2 + block_id % 2) % 2
+            expected = routing == "local" or route == projected_sid
+            actual = analyzer.simplify(tirx.stmt_functor.substitute(active, {block: tirx.IntImm("int32", block_id)}))
+            assert isinstance(actual, tirx.IntImm) and bool(actual.value) == expected
+
+
 def test_sync_set_is_migrated_into_each_per_core_candidate():
     a = tirx.decl_buffer((16, 16), "float32", name="A")
     b = tirx.decl_buffer((16, 16), "float32", name="B")
@@ -110,6 +175,27 @@ def test_sync_set_is_migrated_into_each_per_core_candidate():
     assert len(guards) == 2
     assert tvm.arith.Analyzer().can_prove(tirx.Or(*guards))
     assert all(tvm.arith.Analyzer().can_prove_equal(event.args[1], waits[0].args[1]) for event in sets)
+
+
+def test_guarded_per_core_task_keeps_wider_sync_outside_candidates():
+    a = tirx.decl_buffer((16, 16), "float32", name="A")
+    l1 = tirx.decl_buffer((16, 16), "float32", name="l1", scope="shared.l1")
+    l0 = tirx.decl_buffer((16, 16), "float32", name="l0", scope="shared.l0a")
+    enabled = tirx.Var("enabled", "bool")
+    group = tirx.AttrStmt({"core_mask": 2}, "tl.ascend_per_core_task", 1, unit(copy(a, l1), core=2).body)
+    before = kernel(
+        seq(unit(copy(a, l1), core=2), unit(group, core=None, guard=enabled), unit(copy(l1, l0), core=2)),
+        buffers=[l1, l0],
+        params=[a, enabled],
+    )
+    after = transform.InsertSync()(before)
+    sets = []
+    for stmt, parents in statements(after):
+        if isinstance(stmt, tirx.Evaluate) and calls(stmt, "tl.ascend_set_flag"):
+            assert not any(isinstance(parent, tirx.AttrStmt) and parent.attr_key == "tl.ascend_per_core_task" for parent in parents)
+            assert not any(isinstance(parent, tirx.IfThenElse) for parent in parents)
+            sets.append(stmt.value)
+    assert sets and calls(after, "tl.ascend_wait_flag")
 
 
 @pytest.mark.parametrize("dynamic", [False, True], ids=["static-fill", "dynamic-fill"])

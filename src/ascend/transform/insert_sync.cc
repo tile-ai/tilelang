@@ -2194,12 +2194,17 @@ private:
 // ============================================================================
 // Synchronization statement construction and IR materialization
 // ============================================================================
-using SyncInsertionMap = std::map<CoreMask, std::vector<Stmt>>;
+struct SyncInsertion {
+  Stmt statement;
+  bool at_candidate{false};
+};
+using SyncInsertionMap = std::map<CoreMask, std::vector<SyncInsertion>>;
 
 // InsertSync records synchronization here while dependency analysis still
 // refers to the original tree. Build() materializes the lists as adjacent
 // TaskNodes after all sync points have been planned and inserted. Same-core
-// T.PerCoreTask synchronization is instead migrated beside its candidate tasks.
+// T.PerCoreTask synchronization is migrated beside its candidate tasks only
+// when the synchronization guard implies the group's execution guard.
 class SyncInsertionExtraInfo final : public IRExtraInfo {
 public:
   std::unique_ptr<IRExtraInfo> Clone() const final {
@@ -2212,14 +2217,11 @@ public:
   const SyncInsertionMap &After() const { return after_; }
 
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
-    for (auto &[_, statements] : before_) {
-      for (Stmt &statement : statements)
-        statement = Substitute(statement, {{old_var, new_var}});
-    }
-    for (auto &[_, statements] : after_) {
-      for (Stmt &statement : statements)
-        statement = Substitute(statement, {{old_var, new_var}});
-    }
+    for (SyncInsertionMap *insertions : {&before_, &after_})
+      for (auto &[_, statements] : *insertions)
+        for (SyncInsertion &insertion : statements)
+          insertion.statement =
+              Substitute(insertion.statement, {{old_var, new_var}});
   }
 
 private:
@@ -2297,18 +2299,22 @@ private:
 
 std::vector<Stmt> GetCoreStatements(const SyncInsertionMap &insertions,
                                     CoreMask core_mask) {
+  std::vector<Stmt> result;
   auto it = insertions.find(core_mask);
-  return it == insertions.end() ? std::vector<Stmt>() : it->second;
+  if (it != insertions.end())
+    for (const SyncInsertion &insertion : it->second)
+      if (insertion.at_candidate)
+        result.push_back(insertion.statement);
+  return result;
 }
 
 void AppendSyncTaskNodes(std::vector<std::shared_ptr<IRStructure>> *result,
-                         const SyncInsertionMap &insertions, int stage,
-                         std::optional<CoreMask> migrated_core = std::nullopt) {
+                         const SyncInsertionMap &insertions, int stage) {
   for (const auto &[core_mask, statements] : insertions) {
-    if (migrated_core.has_value() && core_mask == migrated_core.value())
-      continue;
-    for (const Stmt &statement : statements)
-      result->push_back(MakeSyncTaskNode(statement, core_mask, stage));
+    for (const SyncInsertion &insertion : statements)
+      if (!insertion.at_candidate)
+        result->push_back(
+            MakeSyncTaskNode(insertion.statement, core_mask, stage));
   }
 }
 
@@ -2352,37 +2358,34 @@ PrimExpr MakeFlagEventId(const PrimExpr &iteration, int num_versions,
                                     : cast(DataType::Int(32), event_id);
 }
 
-bool ShouldElidePerCoreTaskSyncGuard(IRStructure *node, CoreMask core,
-                                     const PrimExpr &guard) {
-  if (!node->IsTask())
-    return false;
-  const auto *task = static_cast<const TaskNode *>(node);
-  if (!task->IsPerCoreTask() || task->GetCoreMask() != core)
-    return false;
-
-  ConstrSet outer_ctx = task->GetContextBeforeConditionGuards();
-  PrimExpr task_guard = task->GetConditionGuard();
-  PrimExpr sync_guard = guard.defined() ? guard : Bool(true);
-  ICHECK(GuardImplies(sync_guard, task_guard, outer_ctx))
-      << "Cannot migrate synchronization into guarded T.PerCoreTask: "
-         "the synchronization guard "
-      << sync_guard << " does not imply the T.PerCoreTask guard " << task_guard;
-  return GuardsEquivalent(sync_guard, task_guard, outer_ctx);
-}
-
 void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
                      CoreMask core, const PrimExpr &guard = PrimExpr()) {
   ICHECK(node != nullptr);
   ICHECK(IsCoreLocalMask(core));
-  bool elide_guard = ShouldElidePerCoreTaskSyncGuard(node, core, guard);
+  bool at_candidate = false;
+  bool elide_guard = false;
+  if (node->IsTask()) {
+    const auto *task = static_cast<const TaskNode *>(node);
+    if (task->IsPerCoreTask() && task->GetCoreMask() == core) {
+      ConstrSet outer_ctx = task->GetContextBeforeConditionGuards();
+      PrimExpr task_guard = task->GetConditionGuard();
+      PrimExpr sync_guard = guard.defined() ? guard : Bool(true);
+      // Projection can make a PerCoreTask optional on a block while its
+      // storage protocol remains shared. Keep wider events outside the group
+      // so candidate selection cannot suppress a required wait or set.
+      at_candidate = GuardImplies(sync_guard, task_guard, outer_ctx);
+      elide_guard =
+          at_candidate && GuardsEquivalent(sync_guard, task_guard, outer_ctx);
+    }
+  }
   if (guard.defined() && !elide_guard)
     stmt = WrapWithGuard(std::move(stmt), guard);
   SyncInsertionExtraInfo *insertions = GetSyncInsertionExtraInfo(node);
   if (at_beginning) {
-    std::vector<Stmt> &before = insertions->Before()[core];
-    before.insert(before.begin(), std::move(stmt));
+    std::vector<SyncInsertion> &before = insertions->Before()[core];
+    before.insert(before.begin(), SyncInsertion{std::move(stmt), at_candidate});
   } else {
-    insertions->After()[core].push_back(std::move(stmt));
+    insertions->After()[core].push_back({std::move(stmt), at_candidate});
   }
 }
 
@@ -2487,14 +2490,12 @@ private:
       const SyncInsertionMap &before_insertions = insertions->Before();
       const SyncInsertionMap &after_insertions = insertions->After();
 
-      std::optional<CoreMask> migrated_core;
       if (node->IsTask()) {
         auto *task = static_cast<TaskNode *>(node.get());
         if (task->IsPerCoreTask()) {
           CoreMask core_mask = task->GetCoreMask();
           ICHECK(IsCoreLocalMask(core_mask))
               << "Scheduled T.PerCoreTask must belong to one concrete core";
-          migrated_core = core_mask;
           std::vector<Stmt> before =
               GetCoreStatements(before_insertions, core_mask);
           std::vector<Stmt> after =
@@ -2507,11 +2508,9 @@ private:
         }
       }
 
-      AppendSyncTaskNodes(&materialized, before_insertions, node->GetStage(),
-                          migrated_core);
+      AppendSyncTaskNodes(&materialized, before_insertions, node->GetStage());
       materialized.push_back(node);
-      AppendSyncTaskNodes(&materialized, after_insertions, node->GetStage(),
-                          migrated_core);
+      AppendSyncTaskNodes(&materialized, after_insertions, node->GetStage());
     }
 
     for (size_t i = 0; i < materialized.size(); ++i) {

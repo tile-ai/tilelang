@@ -207,7 +207,8 @@ def test_scalar_global_store_uses_the_existing_vector_core():
 @pytest.mark.parametrize(
     "targets", [(0, 0), (1, 1), (0, 1), (None, 0)], ids=["aiv0", "aiv1", "different-subcores", "implicit-and-explicit"]
 )
-def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets):
+@pytest.mark.parametrize("per_core", [False, True])
+def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets, per_core):
     accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
     ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
     out = tirx.decl_buffer((16, 16), "float32", name="out")
@@ -215,7 +216,10 @@ def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets):
     copies = [copy(accum, ub, annotations={} if target is None else {"sub_blockid": tirx.IntImm("int32", target)}) for target in targets]
     # AssignCore only needs the copy destinations; the L0C producer is outside
     # this pass's contract.
-    before = kernel(seq(unit(seq(*copies), core=0), unit(copy(ub, out), core=0)), buffers=[accum, ub], params=[out])
+    producer = unit(seq(*copies), core=0)
+    if per_core:
+        producer = unit(tirx.AttrStmt({}, "tl.ascend_per_core_task", 1, producer.body), core=None)
+    before = kernel(seq(producer, unit(copy(ub, out), core=0)), buffers=[accum, ub], params=[out])
     thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
     before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
     if targets[0] != targets[1]:
@@ -225,8 +229,9 @@ def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets):
         after = transform.AssignCore()(before)
         (task,) = [
             task
-            for task in _tasks(after)
-            if any(call.args[0].args[0].buffer.same_as(accum) for call in calls(task, "tl.tileop.ascend_copy"))
+            for task in nodes(after, tirx.AttrStmt)
+            if task.attr_key == ("tl.ascend_per_core_task" if per_core else "tl.ascend_task")
+            and any(call.args[0].args[0].buffer.same_as(accum) for call in calls(task, "tl.tileop.ascend_copy"))
         ]
         projected = calls(task, "tl.tileop.ascend_copy")
         assert len(projected) == len(copies)

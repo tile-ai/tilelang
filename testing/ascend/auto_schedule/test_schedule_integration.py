@@ -399,6 +399,52 @@ def test_subcore_scalar_loop_exit_reaches_later_cube_consumers(owner, consumer):
     torch.testing.assert_close(output.cpu(), torch.full((32, 32), 32.0))
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("routing", ["constant", "parameter", "local"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_per_core_fixpipe_dispatch_preserves_each_subcore_output(routing, explicit):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((4, 32, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((4, 2, 32, 32), "float32")):
+        with T.MixedKernel(4) as (bx, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            ub = T.alloc_shared((32, 32), "float32")
+            T.fill(ub, 0.0)
+            T.copy(A[bx, :, :], a)
+            T.copy(B, b)
+            T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+            with T.PerCoreTask():
+                if bx % 2 == 0:
+                    if explicit:
+                        with T.Task():
+                            route = bx // 2 % 2
+                            T.copy(acc, ub, sub_blockid=0 if routing == "constant" else (route if routing == "local" else bx // 2 % 2))
+                    else:
+                        route = bx // 2 % 2
+                        T.copy(acc, ub, sub_blockid=0 if routing == "constant" else (route if routing == "local" else bx // 2 % 2))
+                elif explicit:
+                    with T.Task():
+                        route = (bx // 2 + 1) % 2
+                        T.copy(acc, ub, sub_blockid=1 if routing == "constant" else (route if routing == "local" else (bx // 2 + 1) % 2))
+                else:
+                    route = (bx // 2 + 1) % 2
+                    T.copy(acc, ub, sub_blockid=1 if routing == "constant" else (route if routing == "local" else (bx // 2 + 1) % 2))
+            T.copy(ub, C[bx, sid, :, :])
+
+    a = torch.arange(1, 5, dtype=torch.float32)[:, None, None].expand(4, 32, 32).contiguous().to(torch.bfloat16).npu()
+    b = torch.ones((32, 32), dtype=torch.bfloat16).npu()
+    output = torch.full((4, 2, 32, 32), -1.0).npu()
+    tilelang.compile(main, target="ascend")(a, b, output)
+    expected = torch.zeros_like(output.cpu())
+    for block in range(4):
+        sid = block % 2 if routing == "constant" else (block // 2 + block % 2) % 2
+        expected[block, sid] = 32.0 * (block + 1)
+    torch.testing.assert_close(output.cpu(), expected)
+
+
 def test_subcore_mutable_scalar_is_replicated_with_its_guard():
     from testing.ascend._ir import schedule
 
