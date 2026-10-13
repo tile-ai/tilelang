@@ -204,6 +204,108 @@ def test_scalar_global_store_uses_the_existing_vector_core():
     assert {int(task.node["core_mask"]) for task in _tasks(after)} == {5}
 
 
+@pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
+@pytest.mark.parametrize("view", [False, True], ids=["allocation", "view"])
+def test_subcore_buffer_expressions_preserve_definitions_and_views(field, view):
+    sid = tirx.Var("sid", "int32")
+    storage = tirx.decl_buffer((16, 64), "float32", name="storage", scope="shared.dyn")
+    buffer = tirx.decl_buffer(
+        (16, (sid + 1) * 16 if field == "shape" else 16),
+        "float32",
+        name="view" if view else "ub",
+        data=storage.data if view else None,
+        scope="shared.dyn",
+        strides=[(sid + 1) * 16 if field == "strides" else 32, 1],
+        elem_offset=sid * 16 if field == "elem_offset" else 0,
+    )
+    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
+    # The L0C producer is outside AssignCore's contract. Both accesses must
+    # reuse the projected view, while allocation ownership follows its data.
+    task = unit(seq(tirx.DeclBuffer(buffer), copy(accum, buffer, dst_shape=[16, 16])), core=0)
+    before = kernel(
+        seq(task, unit(copy(accum, buffer, dst_shape=[16, 16]), core=0)),
+        buffers=[accum, storage if view else buffer],
+        annotations={"test.buffer_metadata": {buffer: buffer}},
+    )
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    after = transform.AssignCore()(before)
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    metadata = root.annotations["test.buffer_metadata"]
+    projected = {}
+    for task in _tasks(after):
+        owner = int(task.node["subcore"])
+        (operation,) = calls(task, "tl.tileop.ascend_copy")
+        result = operation.args[1].args[0].buffer
+        assert [int(value) for value in result.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
+        assert [int(value) for value in result.strides] == [(owner + 1) * 16 if field == "strides" else 32, 1]
+        assert int(result.elem_offset) == (owner * 16 if field == "elem_offset" else 0)
+        if owner in projected:
+            assert result.same_as(projected[owner])
+        projected[owner] = result
+        for definition in nodes(task, tirx.DeclBuffer):
+            assert definition.buffer.same_as(result)
+        assert metadata[result].same_as(result)
+        (allocation,) = [allocated for allocated in root.alloc_buffers if allocated.data.same_as(result.data)]
+        assert view or allocation.same_as(result)
+    assert set(projected) == {0, 1}
+    assert not projected[0].data.same_as(projected[1].data)
+
+
+@pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
+@pytest.mark.parametrize("scope", ["global", "shared.l1"])
+def test_subcore_view_metadata_projects_without_cloning_common_storage(field, scope):
+    from tilelang.layout import Layout
+
+    sid = tirx.Var("sid", "int32")
+    storage = tirx.decl_buffer((16, 64), "float32", name="storage", scope=scope)
+    view = tirx.decl_buffer(
+        (16, (sid + 1) * 16 if field == "shape" else 16),
+        "float32",
+        name="view",
+        data=storage.data,
+        scope=scope,
+        strides=[(sid + 1) * 16 if field == "strides" else 32, 1],
+        elem_offset=sid * 16 if field == "elem_offset" else 0,
+    )
+    destination = tirx.decl_buffer((16, 16), "float32", name="destination", scope="shared.l1" if scope == "global" else "shared.l0a")
+    annotations = {"test.buffer_metadata": {view: view}}
+    layout = Layout((16, 16), lambda i, j: (i, j))
+    if field != "shape":
+        annotations["layout_map"] = {view: layout}
+    # No address or control expression mentions sid: the view's metadata is
+    # the only reason these Cube copies require subcore projection.
+    before = kernel(
+        unit(copy(view, destination, src_shape=[16, 16]), core=0),
+        buffers=[destination] + ([storage] if scope != "global" else []),
+        params=[storage] if scope == "global" else [],
+        annotations=annotations,
+    )
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    after = transform.AssignCore()(before)
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    tasks = _tasks(after)
+    assert len(tasks) == 2
+    metadata = root.annotations["test.buffer_metadata"]
+    for task in tasks:
+        owner = int(task.node["subcore"])
+        (operation,) = calls(task, "tl.tileop.ascend_copy")
+        result = operation.args[0].args[0].buffer
+        assert result.data.same_as(storage.data)
+        assert operation.args[1].args[0].buffer.same_as(destination)
+        assert [int(value) for value in result.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
+        assert [int(value) for value in result.strides] == [(owner + 1) * 16 if field == "strides" else 32, 1]
+        assert int(result.elem_offset) == (owner * 16 if field == "elem_offset" else 0)
+        assert metadata[result].same_as(result)
+        if field != "shape":
+            assert root.annotations["layout_map"][result].same_as(layout)
+    if scope == "global":
+        assert after["main"].buffer_map[storage.data].same_as(storage)
+    else:
+        assert any(allocated.same_as(storage) for allocated in root.alloc_buffers)
+
+
 @pytest.mark.parametrize(
     "targets", [(0, 0), (1, 1), (0, 1), (None, 0)], ids=["aiv0", "aiv1", "different-subcores", "implicit-and-explicit"]
 )

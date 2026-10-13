@@ -108,9 +108,11 @@ public:
       } else if (auto layouts = value.try_cast<Map<Buffer, Layout>>()) {
         Map<Buffer, Layout> mapped;
         for (const auto &[buffer, layout] : layouts.value()) {
-          if (projector.varying_.count(buffer->data)) {
+          if (projector.Varies(buffer)) {
             for (int p = 0; p < projector.count_; ++p)
-              if (active(buffer->data, p))
+              if (active(buffer->data, p) ||
+                  (!projector.varying_.count(buffer->data) &&
+                   projector.buffers_[p].count(buffer)))
                 mapped.Set(projector.BufferFor(buffer, p), layout);
           } else {
             mapped.Set(buffer, layout);
@@ -258,9 +260,8 @@ private:
     for (const auto &regions :
          {task->GetReadRegions(), task->GetWriteRegions()})
       for (const BufferRegion &region : regions)
-        if (varying_.count(region->buffer->data) ||
-            (IsSharedBuffer(region->buffer) &&
-             !task->UsesPipe(ResourcePipe::kFixpipe)))
+        if (Varies(region->buffer) || (IsSharedBuffer(region->buffer) &&
+                                       !task->UsesPipe(ResourcePipe::kFixpipe)))
           return true;
     return task->UsesPipe(ResourcePipe::kVector) ||
            task->UsesPipe(ResourcePipe::kMTE3);
@@ -275,6 +276,16 @@ private:
         varying |= varying_.count(load->buffer->data);
     });
     return varying;
+  }
+
+  bool Varies(const Buffer &buffer) const {
+    if (varying_.count(buffer->data) || Varies(buffer->elem_offset))
+      return true;
+    for (const auto &expressions : {buffer->shape, buffer->strides})
+      for (const PrimExpr &expr : expressions)
+        if (Varies(expr))
+          return true;
+    return false;
   }
 
   bool NeedsProjection(
@@ -379,16 +390,27 @@ private:
   }
 
   Buffer BufferFor(const Buffer &buffer, int p) {
-    if (!varying_.count(buffer->data))
-      return buffer;
     auto it = buffers_[p].find(buffer);
     if (it != buffers_[p].end())
       return it->second;
+    if (!Varies(buffer))
+      return buffer;
+    // Views can depend on sid even when their underlying storage is common.
+    // Use the same projection for definitions, accesses, and metadata keys.
+    Rewriter rewriter(this, p);
+    arith::Analyzer analyzer;
+    auto rewrite = [&](const PrimExpr &expr) {
+      return analyzer.Simplify(rewriter(expr));
+    };
     Buffer result = buffer;
-    result.CopyOnWrite()->data = VarFor(buffer->data, p);
-    result.CopyOnWrite()->name = buffer->name + "_aiv" + std::to_string(p);
+    auto *writer = result.CopyOnWrite();
+    writer->data = VarFor(buffer->data, p);
+    writer->name = buffer->name + "_aiv" + std::to_string(p);
+    writer->shape = buffer->shape.Map(rewrite);
+    writer->strides = buffer->strides.Map(rewrite);
+    writer->elem_offset = rewrite(buffer->elem_offset);
     buffers_[p].emplace(buffer, result);
-    if (IsSharedBuffer(buffer))
+    if (IsSharedBuffer(buffer) && varying_.count(buffer->data))
       ub_sids_.Set(result->data, Integer(p));
     return result;
   }
@@ -779,7 +801,7 @@ private:
     if (auto var = value.try_cast<Var>())
       return varying_.count(var.value());
     if (auto buffer = value.try_cast<Buffer>())
-      return varying_.count(buffer.value()->data);
+      return Varies(buffer.value());
     return false;
   }
 

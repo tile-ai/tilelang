@@ -400,6 +400,48 @@ def test_subcore_scalar_loop_exit_reaches_later_cube_consumers(owner, consumer):
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.parametrize("varying_stride", [False, True])
+def test_subcore_strided_view_preserves_physical_storage(varying_stride):
+    import torch
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((32, 32), "bfloat16"),
+        B: T.Tensor((32, 32), "bfloat16"),
+        C: T.Tensor((2, 32, 32), "float32"),
+        Storage: T.Tensor((2, 32, 64), "float32"),
+    ):
+        with T.MixedKernel(1) as (_, sid):
+            a = T.alloc_l1((32, 32), "bfloat16")
+            b = T.alloc_l1((32, 32), "bfloat16")
+            acc = T.alloc_l0c((32, 32), "float32")
+            storage = T.alloc_shared((32, 64), "float32")
+            view = T.StridedTensor(
+                (32, 32), ((sid + 1) * 32 if varying_stride else 64, 1), "float32", data=storage.data, scope="shared.dyn"
+            )
+            T.fill(storage, -1.0)
+            T.copy(A, a)
+            T.copy(B, b)
+            T.gemm(a, b, acc, transpose_B=True, clear_accum=True)
+            T.copy(acc, view)
+            T.copy(view, C[sid, :, :])
+            T.copy(storage, Storage[sid, :, :])
+
+    a = torch.arange(32 * 32, dtype=torch.float32).reshape(32, 32).to(torch.bfloat16).npu()
+    b = torch.eye(32, dtype=torch.bfloat16).npu()
+    output = torch.empty((2, 32, 32), dtype=torch.float32).npu()
+    storage = torch.empty((2, 32, 64), dtype=torch.float32).npu()
+    tilelang.compile(main, target="ascend")(a, b, output, storage)
+    expected = a.cpu().float()
+    expected_storage = torch.full((2, 32, 64), -1.0)
+    for sid in range(2):
+        row_stride = (sid + 1) * 32 if varying_stride else 64
+        expected_storage[sid].as_strided((32, 32), (row_stride, 1)).copy_(expected)
+    torch.testing.assert_close(output.cpu(), expected.expand(2, 32, 32), rtol=0, atol=0)
+    torch.testing.assert_close(storage.cpu(), expected_storage, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
 @pytest.mark.parametrize("routing", ["constant", "parameter", "local"])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_per_core_fixpipe_dispatch_preserves_each_subcore_output(routing, explicit):
