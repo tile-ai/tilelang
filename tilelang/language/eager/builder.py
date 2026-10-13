@@ -1115,6 +1115,10 @@ from typing import _eval_type
 import re
 
 
+# Python 3.15 requires type_params, while older Python versions do not accept it.
+_EVAL_TYPE_HAS_TYPE_PARAMS = "type_params" in inspect.signature(_eval_type).parameters
+
+
 def get_type_hints(func):
     annot = getattr(func, "__annotations__", None)
     if annot is None:
@@ -1168,7 +1172,10 @@ def get_type_hints(func):
                 except Exception:
                     pass
             value = ForwardRef(value, module=func.__module__)
-            hints[name] = _eval_type(value, globalns=globalns, localns=localns)
+            if _EVAL_TYPE_HAS_TYPE_PARAMS:
+                hints[name] = _eval_type(value, globalns=globalns, localns=localns, type_params=getattr(func, "__type_params__", ()))
+            else:
+                hints[name] = _eval_type(value, globalns=globalns, localns=localns)
         else:
             hints[name] = value
     return hints
