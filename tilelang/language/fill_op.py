@@ -1,14 +1,14 @@
 """Fill operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang._typing import BufferLikeType
+from tilelang._typing import BufferLikeType, PyPrimExpr
 from tvm import tirx
 from tilelang.language.common import has_let_value, get_let_value
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import get_buffer_region_from_load, to_buffer_region
 
 
-def fill(buffer: BufferLikeType, value: tirx.PrimExpr, annotations: dict | None = None) -> tirx.PrimExpr:
+def fill(buffer: BufferLikeType, value: PyPrimExpr, annotations: dict[str, object] | None = None) -> tirx.PrimExpr:
     """Fill a buffer or buffer region with a specified value.
 
     Args:
@@ -45,7 +45,7 @@ def fill(buffer: BufferLikeType, value: tirx.PrimExpr, annotations: dict | None 
     )
 
 
-def clear(buffer: BufferLikeType, annotations: dict | None = None) -> tirx.PrimExpr:
+def clear(buffer: BufferLikeType, annotations: dict[str, object] | None = None) -> tirx.PrimExpr:
     """Clear a buffer by filling it with zeros.
 
     Args:

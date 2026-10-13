@@ -2,11 +2,45 @@
 
 from __future__ import annotations
 
+from typing import overload
+
 from tvm import tirx
 
 from tilelang.language.kernel import KernelLaunchFrame, kernel_launch_factory, launch_kernel
 
 __all__ = ["Kernel"]
+
+
+@overload
+def Kernel(
+    block: int | tirx.PrimExpr,
+    /,
+    *,
+    threads: int | list[int] | tuple[int, ...] | None = None,
+    prelude: str | None = None,
+    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+) -> KernelLaunchFrame[tirx.Var]: ...
+
+
+@overload
+def Kernel(
+    block: int | tirx.PrimExpr,
+    second_block: int | tirx.PrimExpr,
+    /,
+    *blocks: int | tirx.PrimExpr,
+    threads: int | list[int] | tuple[int, ...] | None = None,
+    prelude: str | None = None,
+    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+) -> KernelLaunchFrame[list[tirx.Var]]: ...
+
+
+@overload
+def Kernel(
+    *blocks: int | tirx.PrimExpr,
+    threads: int | list[int] | tuple[int, ...] | None = None,
+    prelude: str | None = None,
+    cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+) -> KernelLaunchFrame: ...
 
 
 @kernel_launch_factory

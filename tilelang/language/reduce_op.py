@@ -29,7 +29,7 @@ def reduce(
     dim: int,
     clear: bool,
     batch: int = 1,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> None:
     """Perform a reduction operation on a buffer along a specified dimension.
 
@@ -185,7 +185,7 @@ def reduce_max(
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> None:
     """Perform reduce max on input buffer, store the result to output buffer
 
@@ -215,7 +215,7 @@ def reduce_min(
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> None:
     """Perform reduce min on input buffer, store the result to output buffer.
 
@@ -234,7 +234,7 @@ def reduce_min(
 
 
 def reduce_sum(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict[str, object] | None = None
 ) -> None:
     """Perform reduce sum on input buffer, store the result to output buffer.
 
@@ -265,7 +265,9 @@ def reduce_sum(
     reduce(buffer, out, "sum", dim, clear, batch=batch, annotations=annotations)
 
 
-def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1, annotations: dict | None = None) -> None:
+def reduce_abssum(
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1, annotations: dict[str, object] | None = None
+) -> None:
     """Perform reduce absolute sum on input buffer, store the result to output buffer.
 
     Args:
@@ -291,7 +293,7 @@ def reduce_absmax(
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> None:
     """Perform reduce absolute max on input buffer, store the result to output buffer.
 
@@ -309,7 +311,7 @@ def reduce_absmax(
 
 
 def reduce_bitand(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict[str, object] | None = None
 ) -> None:
     """Perform reduce bitwise-and on input buffer, store the result to output buffer.
 
@@ -327,7 +329,7 @@ def reduce_bitand(
 
 
 def reduce_bitor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict[str, object] | None = None
 ) -> None:
     """Perform reduce bitwise-or on input buffer, store the result to output buffer.
 
@@ -345,7 +347,7 @@ def reduce_bitor(
 
 
 def reduce_bitxor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict[str, object] | None = None
 ) -> None:
     """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
 
@@ -438,7 +440,7 @@ def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
 
 
 def finalize_reducer(
-    reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch: int = 1, annotations: dict | None = None
+    reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch: int = 1, annotations: dict[str, object] | None = None
 ) -> tirx.PrimExpr:
     """Close a reducer epoch.
 

@@ -3,17 +3,16 @@ from tvm import ir
 import functools
 import torch
 import tvm_ffi
-from typing import Generic, TypeVar, TYPE_CHECKING
+from typing import TYPE_CHECKING
 from tvm import tirx
 import tvm.tirx.script.builder._ffi_api as tb_ffi
 import numpy as np
 from tilelang import logger
 
-_T = TypeVar("_T")
-
 if TYPE_CHECKING:
+    from tvm.tirx.expr import PrimExprWithOp
 
-    class dtype(Generic[_T]):
+    class dtype(PrimExprWithOp):
         @property
         def bits(self) -> int: ...
         @property

@@ -69,7 +69,7 @@ from .allocate import (
     alloc_reducer,  # noqa: F401
     empty,  # noqa: F401
 )
-from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
+from tvm.tirx.script.builder.ir import evaluate, alloc_buffer as allocate  # noqa: F401
 from .copy_op import (  # noqa: F401
     copy,
     async_copy,
@@ -196,6 +196,7 @@ __all__ += ["add2", "sub2", "mul2", "fma2", "max2", "min2", "abs2"]
 
 __all__ += [
     "BaseTileScheduler",
+    "Buffer",
     "Fragment",
     "FragmentBuffer",
     "PartialFragment",
@@ -263,6 +264,7 @@ __all__ += [
     "dynamic",
     "symbolic",
     "empty",
+    "evaluate",
     "fill",
     "reducer_init",
     "reducer_update",
@@ -322,6 +324,11 @@ __all__ += [
     "warp_reduce_max",
     "warp_reduce_min",
     "warp_reduce_sum",
+    "ptr",
+    "serial",
+    "unroll",
+    "vectorized",
+    "dp4a",
 ]
 
 if not TYPE_CHECKING:

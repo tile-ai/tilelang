@@ -3,7 +3,8 @@
 from __future__ import annotations
 from collections import deque
 import os
-from typing import Any
+from typing import Any, Generic, cast, overload
+from typing_extensions import TypeVar
 from tvm import tirx
 from tvm.tirx import Var
 from tvm.tirx.script.builder import evaluate as T_evaluate
@@ -151,8 +152,11 @@ def _normalize_cluster_dims(
     return None if cluster_dims == [1, 1, 1] else cluster_dims
 
 
+_Binding = TypeVar("_Binding", bound=Var | list[Var], default=Var | list[Var], covariant=True)
+
+
 @register_object("tl.KernelLaunchFrame")
-class KernelLaunchFrame(TIRFrame):
+class KernelLaunchFrame(TIRFrame, Generic[_Binding]):
     """
     KernelLaunchFrame is a custom TIRFrame that manages block/thread indices
     and handles the entry and exit of the kernel launch scope.
@@ -164,7 +168,7 @@ class KernelLaunchFrame(TIRFrame):
     passed to :func:`Kernel`.
     """
 
-    def __enter__(self) -> Var | list[Var]:
+    def __enter__(self) -> _Binding:
         """
         Enters the KernelLaunchFrame scope and pushes this frame onto the stack.
         Returns one Var for a single grid dimension, or a list of Vars otherwise.
@@ -175,7 +179,7 @@ class KernelLaunchFrame(TIRFrame):
         last_block_frame = self.frames[-1]
         assert isinstance(last_block_frame, SBlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
 
-        return _normalize_bindings(list(self.grid_vars))
+        return cast(_Binding, _normalize_bindings(list(self.grid_vars)))
 
     def __exit__(self, ptype, value, trace):
         """
@@ -425,6 +429,20 @@ def launch_kernel(
             attrs[key] = value
 
     return _ffi_api.KernelLaunch(blocks, _normalize_threads(threads), attrs)
+
+
+@overload
+def Kernel(block: int | tirx.PrimExpr, /) -> KernelLaunchFrame[tirx.Var]: ...
+
+
+@overload
+def Kernel(
+    block: int | tirx.PrimExpr, second_block: int | tirx.PrimExpr, /, *blocks: int | tirx.PrimExpr
+) -> KernelLaunchFrame[list[tirx.Var]]: ...
+
+
+@overload
+def Kernel(*blocks: int | tirx.PrimExpr) -> KernelLaunchFrame: ...
 
 
 @kernel_launch_factory
