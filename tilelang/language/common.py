@@ -189,7 +189,9 @@ from .tir import common as _tir_common
 from . import eager as _eager
 from .tir import ir as _tir_ir
 
-__all__ = ["PrimExprWithOp"]
+Expr = PrimExprWithOp
+
+__all__ = ["Expr", "PrimExprWithOp"]
 __all__.extend(_tir_common.__all__)
 __all__.extend(_eager.__all__)
 __all__.extend(_tir_ir.__all__)

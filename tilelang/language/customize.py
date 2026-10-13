@@ -1,10 +1,11 @@
 """Some customized operations frequently used in tensor programming, exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang._typing import ShapeType, DType, BufferLikeType
+from tilelang._typing import ShapeType, DType, BufferLikeType, PyPrimExpr
 import tilelang.language as T
 from tvm import DataType, DataTypeCode, arith
 from tvm.tirx import PrimExpr, Buffer, Broadcast, convert, op
+from tvm.tirx.expr import PrimExprWithOp
 from tilelang.utils.language import bits_product, prim_expr_equal, retrieve_buffer_and_offset
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_or, atomic_store  # noqa: F401
 
@@ -49,7 +50,7 @@ _NON_FLOAT_TYPE_CODES = (
 )
 
 
-def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
+def clamp(dst: PyPrimExpr, min_val: PyPrimExpr, max_val: PyPrimExpr) -> PrimExprWithOp:
     """Clamps the input value dst between [min_val, max_val]
 
     Floating-point ``NaN`` values in the input or either bound propagate to

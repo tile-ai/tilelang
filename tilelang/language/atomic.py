@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tilelang.language as T
-from tilelang._typing import BufferLikeType
+from tilelang._typing import BufferLikeType, PyPrimExpr
 from tvm import DataType, ir
 from tvm.tirx import PrimExpr, Buffer, Var, op
 from tilelang.language.utils import _normalize_annotations
@@ -209,11 +209,11 @@ def atomic_min(
 
 
 def atomic_add(
-    dst: Buffer,
-    value: PrimExpr,
+    dst: BufferLikeType | PrimExpr,
+    value: BufferLikeType | PyPrimExpr,
     memory_order: str | None = None,
     return_prev: bool = False,
-    annotations: dict | None = None,
+    annotations: dict[str, object] | None = None,
 ) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
