@@ -103,5 +103,33 @@ def test_fill_int8_negative():
         torch.testing.assert_close(out, ref)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("threads", "shape", "region"),
+    [
+        (96, (8, 32), (8, 32)),
+        (128, (8, 64), (8, 40)),
+        (96, (3, 8, 32), (3, 8, 32)),
+    ],
+)
+def test_fill_shared_not_divisible_by_threads(threads, shape, region):
+    region_slices = tuple(slice(0, extent) for extent in region)
+
+    @T.prim_func
+    def main(out: T.Tensor(shape, T.float32)):
+        with T.Kernel(1, threads=threads):
+            smem = T.alloc_shared(shape, T.float32)
+            T.fill(smem, 1.0)
+            T.fill(smem[region_slices], 2.0)
+            T.copy(smem, out)
+
+    kernel = tilelang.compile(main, out_idx=[0])
+    out = kernel()
+    torch.cuda.synchronize()
+    ref = torch.ones(shape, dtype=torch.float32, device="cuda")
+    ref[region_slices] = 2.0
+    torch.testing.assert_close(out, ref)
+
+
 if __name__ == "__main__":
     test_matmul()
