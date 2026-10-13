@@ -712,7 +712,7 @@ else:
     tfloat32x32 = dtype("custom[tfloat32]x32")
     tfloat32x64 = dtype("custom[tfloat32]x64")
 
-_all_dtypes = [
+__all__ = [
     "bool",
     "short",
     "int",
@@ -888,7 +888,9 @@ _all_dtypes = [
     "tfloat32x64",
 ]
 
-__all__ = list(_all_dtypes) + [
+_all_dtypes = __all__.copy()
+
+__all__ += [
     "dtype",
     "AnyDType",
     "get_tvm_dtype",

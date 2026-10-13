@@ -9,6 +9,8 @@ top. ``tilelang.language`` itself is a thin facade that re-exports the default
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 # Import the upstream TIR script surface through a target-aware adapter so
 # backend-only parser exports do not leak into the common language manifest.
 from .tir.common import *  # noqa: F401,F403
@@ -182,14 +184,17 @@ def import_source(source: str | None = None):
     return sblock_attr({"pragma_import_c": source}) if source is not None else None
 
 
-# ``__all__`` is the union of the star-imported submodule surfaces (each of
-# which owns its own ``__all__``) plus the names imported explicitly above.
-from .tir.common import __all__ as _TIR_COMMON_ALL  # noqa: E402
-from .eager import __all__ as _EAGER_ALL  # noqa: E402
-from .tir.ir import __all__ as _TIR_IR_ALL  # noqa: E402
-from .math_intrinsics import COMMON_MATH_INTRINSICS as _MATH_ALL  # noqa: E402
+from .tir import common as _tir_common
+from . import eager as _eager
+from .tir import ir as _tir_ir
 
-_LOCAL_EXPORTS = (
+__all__ = []
+__all__.extend(_tir_common.__all__)
+__all__.extend(_eager.__all__)
+__all__.extend(_tir_ir.__all__)
+__all__ += ["add2", "sub2", "mul2", "fma2", "max2", "min2", "abs2"]
+
+__all__ += [
     "BaseTileScheduler",
     "Fragment",
     "FragmentBuffer",
@@ -317,20 +322,9 @@ _LOCAL_EXPORTS = (
     "warp_reduce_max",
     "warp_reduce_min",
     "warp_reduce_sum",
-)
+]
 
-__all__ = tuple(
-    dict.fromkeys(
-        (
-            *_TIR_COMMON_ALL,
-            *_EAGER_ALL,
-            *_TIR_IR_ALL,
-            *_MATH_ALL,
-            *_LOCAL_EXPORTS,
-        )
-    )
-)
+if not TYPE_CHECKING:
+    __all__ = tuple(dict.fromkeys(__all__))
 
 __tilelang_dialect__ = "common"
-
-del _TIR_COMMON_ALL, _EAGER_ALL, _TIR_IR_ALL, _MATH_ALL, _LOCAL_EXPORTS
