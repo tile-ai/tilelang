@@ -10,6 +10,7 @@ top. ``tilelang.language`` itself is a thin facade that re-exports the default
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from tvm.tirx.expr import PrimExprWithOp
 
 # Import the upstream TIR script surface through a target-aware adapter so
 # backend-only parser exports do not leak into the common language manifest.
@@ -188,7 +189,7 @@ from .tir import common as _tir_common
 from . import eager as _eager
 from .tir import ir as _tir_ir
 
-__all__ = []
+__all__ = ["PrimExprWithOp"]
 __all__.extend(_tir_common.__all__)
 __all__.extend(_eager.__all__)
 __all__.extend(_tir_ir.__all__)
