@@ -11,8 +11,11 @@ from tilelang.language.utils import _normalize_annotations
 
 
 def _legalize_dim(buffer: tirx.Buffer, dim: int):
+    shape = retrieve_shape(buffer)
+    if dim >= len(shape) or dim < -len(shape):
+        raise ValueError(f"Dimension {dim} is out of bounds for buffer with shape {shape}")
     if dim < 0:
-        dim = len(retrieve_shape(buffer)) + dim
+        dim = len(shape) + dim
     return dim
 
 

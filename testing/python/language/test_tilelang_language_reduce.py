@@ -953,6 +953,20 @@ def test_finalize_reducer_invalid_batch(batch, exc_type, match):
         tl.compile(k, out_idx=-1, pass_configs=_COMPILE_FLAGS)
 
 
+@pytest.mark.parametrize("dim", [2, -3])
+def test_reduce_rejects_out_of_range_dim(dim):
+    with pytest.raises(ValueError, match="out of bounds"):
+
+        @T.prim_func
+        def kernel(A: T.Tensor((16, 32), T.float32), B: T.Tensor((16, 32), T.float32)):
+            with T.Kernel(1, threads=128):
+                A_frag = T.alloc_fragment((16, 32), T.float32)
+                B_frag = T.alloc_fragment((16, 32), T.float32)
+                T.copy(A, A_frag)
+                T.reduce_sum(A_frag, B_frag, dim=dim)
+                T.copy(B_frag, B)
+
+
 @tilelang.testing.requires_cuda
 def test_reduce_absmax_bf16_noncontiguous_packed_layout_regression():
     num_tokens = 64
