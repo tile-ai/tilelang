@@ -1,11 +1,12 @@
 /*!
- * \file backend/common/codegen/codegen_c_line_directives.h
- * \brief CodeGenC base that optionally emits #line directives from Stmt spans.
+ * \file backend/common/codegen/codegen_c_base.h
+ * \brief Shared source emission for TileLang's C-like code generators.
  */
 
-#ifndef TILELANG_BACKEND_COMMON_CODEGEN_CODEGEN_C_LINE_DIRECTIVES_H_
-#define TILELANG_BACKEND_COMMON_CODEGEN_CODEGEN_C_LINE_DIRECTIVES_H_
+#ifndef TVM_TL_BACKEND_COMMON_CODEGEN_CODEGEN_C_BASE_H_
+#define TVM_TL_BACKEND_COMMON_CODEGEN_CODEGEN_C_BASE_H_
 
+#include <sstream>
 #include <string>
 
 #include "target/source/codegen_c.h"
@@ -14,8 +15,14 @@ namespace tvm {
 namespace codegen {
 
 /*!
- * \brief Intermediate CodeGenC base that maps generated statements back to
- * their Python source lines via `#line` directives (opt-in).
+ * \brief Common source ordering, imported C source, and optional #line
+ * directives for C-like code generators.
+ *
+ * Backend headers precede imported source, which precedes generated
+ * declarations and functions. In particular, generated helpers may call
+ * imported helpers. Backends write headers to preamble_stream_ or emit them in
+ * EmitPreamble_ after visiting the module; decl_stream is reserved for
+ * generated declarations.
  *
  * `CodeGenC::PrintStmt` is non-virtual but forwards to the virtual
  * `StmtFunctor::VisitStmt`, and every statement recursion in the vendored and
@@ -31,7 +38,7 @@ namespace codegen {
  * Enabled via the `tl.emit_line_directives` pass config (default off), read by
  * the backend builders before codegen.
  */
-class CodeGenCWithLineDirectives : public CodeGenC {
+class CodeGenTileLangCBase : public CodeGenC {
 public:
   void SetEmitLineDirectives(bool enable) { emit_line_directives_ = enable; }
 
@@ -40,6 +47,18 @@ public:
   void VisitStmt(const Stmt &n) final {
     if (emit_line_directives_ && n.defined() && n->span.defined()) {
       EmitSpanDirective_(n->span);
+    }
+    // Intercept imports before backend-specific AttrStmt dispatch. A backend
+    // may delegate other attributes directly to CodeGenC::VisitStmt_.
+    if (const auto *attr = n.as<AttrStmtNode>();
+        attr && attr->attr_key == tirx::attr::pragma_import_c) {
+      const auto *source = attr->value.as<StringImmNode>();
+      TVM_FFI_ICHECK(source != nullptr)
+          << "pragma_import_c expects a string-valued source";
+      // The second newline survives a trailing backslash-newline splice.
+      import_c_stream_ << source->value << "\n\n";
+      PrintStmt(attr->body);
+      return;
     }
     // Qualified call: dispatch through StmtFunctor::VisitStmt to the matching
     // VisitStmt_ callback without re-entering this override.
@@ -53,6 +72,22 @@ public:
       EmitSpanDirective_(f->span);
     }
   }
+
+  std::string Finish() final {
+    std::ostringstream code;
+    code << preamble_stream_.str();
+    EmitPreamble_(code);
+    code << import_c_stream_.str();
+    code << CodeGenC::Finish();
+    return code.str();
+  }
+
+protected:
+  /*! \brief Emit backend headers whose requirements are known after codegen. */
+  virtual void EmitPreamble_(std::ostream &) const {}
+
+  /*! \brief Backend headers collected during initialization or traversal. */
+  std::ostringstream preamble_stream_;
 
 private:
   void EmitSpanDirective_(const Span &span) {
@@ -89,9 +124,12 @@ private:
   std::string last_file_;
   /*! \brief Stream position right after the last emitted directive. */
   std::streampos last_directive_pos_{};
+  /*! \brief Imported source, in visitation order and separated by blank lines.
+   */
+  std::ostringstream import_c_stream_;
 };
 
 } // namespace codegen
 } // namespace tvm
 
-#endif // TILELANG_BACKEND_COMMON_CODEGEN_CODEGEN_C_LINE_DIRECTIVES_H_
+#endif // TVM_TL_BACKEND_COMMON_CODEGEN_CODEGEN_C_BASE_H_

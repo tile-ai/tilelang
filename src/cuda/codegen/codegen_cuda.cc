@@ -686,7 +686,7 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   }
 }
 
-std::string CodeGenTileLangCUDA::Finish() {
+void CodeGenTileLangCUDA::EmitPreamble_(std::ostream &os) const {
   // CUDA 13's cuda.h declares CUtensorMap with `alignas(128)`, which MSVC
   // rejects as a function parameter alignment (C2719: "formal parameter
   // requires <N>-byte alignment"). MSVC's hard limit for parameter alignment
@@ -698,101 +698,97 @@ std::string CodeGenTileLangCUDA::Finish() {
   // for the duration of <cuda.h>'s parsing there. Newer MSVC versions accept
   // the 128-byte aligned parameter, and keeping that alignment avoids
   // CUDA_ERROR_MISALIGNED_ADDRESS at launch time.
-  decl_stream
-      << "#if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER < 1940\n";
-  decl_stream << "#define _tl_orig_alignas alignas\n";
-  decl_stream << "#define alignas(N) _tl_orig_alignas((N) <= 64 ? (N) : 64)\n";
-  decl_stream << "#include <cuda.h>\n";
-  decl_stream << "#undef alignas\n";
-  decl_stream << "#define alignas _tl_orig_alignas\n";
-  decl_stream << "#endif\n";
+  os << "#if defined(_MSC_VER) && !defined(__clang__) && _MSC_VER < 1940\n";
+  os << "#define _tl_orig_alignas alignas\n";
+  os << "#define alignas(N) _tl_orig_alignas((N) <= 64 ? (N) : 64)\n";
+  os << "#include <cuda.h>\n";
+  os << "#undef alignas\n";
+  os << "#define alignas _tl_orig_alignas\n";
+  os << "#endif\n";
 
   if (need_mma_h_) {
-    decl_stream << "#include <mma.h>\n";
+    os << "#include <mma.h>\n";
   }
   if (need_mma_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/mma.h>\n";
+    os << "#include <tl_templates/cuda/instruction/mma.h>\n";
   }
   if (need_mma_block_scale_instruction_h_) {
-    decl_stream
-        << "#include <tl_templates/cuda/instruction/mma_block_scale.h>\n";
+    os << "#include <tl_templates/cuda/instruction/mma_block_scale.h>\n";
   }
   if (need_wgmma_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
+    os << "#include <tl_templates/cuda/instruction/wgmma.h>\n";
   }
   if (need_wgmma_sp_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/wgmma_sp.h>\n";
+    os << "#include <tl_templates/cuda/instruction/wgmma_sp.h>\n";
   }
   if (need_tcgen05mma_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/tcgen05mma.h>\n";
+    os << "#include <tl_templates/cuda/instruction/tcgen05mma.h>\n";
   }
   if (need_mma_sm70_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/mma_sm70.h>\n";
+    os << "#include <tl_templates/cuda/instruction/mma_sm70.h>\n";
   }
   if (need_mma_sp_instruction_h_) {
-    decl_stream << "#include <tl_templates/cuda/instruction/mma_sp.h>\n";
+    os << "#include <tl_templates/cuda/instruction/mma_sp.h>\n";
   }
   if (need_tcgen05_common_h_) {
-    decl_stream << "#include <tl_templates/cuda/tcgen_05.h>\n";
+    os << "#include <tl_templates/cuda/tcgen_05.h>\n";
   }
   if (need_intrin_h_) {
-    decl_stream << "#include <tl_templates/cuda/intrin.h>\n";
+    os << "#include <tl_templates/cuda/intrin.h>\n";
   }
   if (need_atomic_h_) {
-    decl_stream << "#include <tl_templates/cuda/atomic.h>\n";
+    os << "#include <tl_templates/cuda/atomic.h>\n";
   }
   if (need_math_h_) {
-    decl_stream << "#include <tl_templates/cuda/math.h>\n";
+    os << "#include <tl_templates/cuda/math.h>\n";
   }
   if (need_barrier_h_) {
-    decl_stream << "#include <tl_templates/cuda/barrier.h>\n";
+    os << "#include <tl_templates/cuda/barrier.h>\n";
   }
   if (need_copy_h_) {
-    decl_stream << "#include <tl_templates/cuda/copy.h>\n";
+    os << "#include <tl_templates/cuda/copy.h>\n";
   }
   if (need_copy_sm90_h_ || need_copy_sm100_h_) {
-    decl_stream << "#include <tl_templates/cuda/copy_sm90.h>\n";
+    os << "#include <tl_templates/cuda/copy_sm90.h>\n";
   }
   if (need_copy_sm100_h_) {
-    decl_stream << "#include <tl_templates/cuda/copy_sm100.h>\n";
+    os << "#include <tl_templates/cuda/copy_sm100.h>\n";
   }
   if (enable_fp8_) {
-    decl_stream << "#include <tl_templates/cuda/cuda_fp8.h>\n";
+    os << "#include <tl_templates/cuda/cuda_fp8.h>\n";
   }
   if (enable_fp6_) {
-    decl_stream << "#include <cuda_fp6.h>\n";
+    os << "#include <cuda_fp6.h>\n";
   }
   if (enable_fp4_) {
-    decl_stream << "#include <tl_templates/cuda/cuda_fp4.h>\n";
+    os << "#include <tl_templates/cuda/cuda_fp4.h>\n";
   }
 
   if (need_math_constants_h_) {
-    decl_stream << "#include <math_constants.h>\n";
+    os << "#include <math_constants.h>\n";
   }
 
   if (need_cooperative_groups_) {
-    decl_stream << "#include <cooperative_groups.h>\n";
+    os << "#include <cooperative_groups.h>\n";
   }
 
   if (need_cluster_h_) {
-    decl_stream << "#include <tl_templates/cuda/cluster.h>\n";
+    os << "#include <tl_templates/cuda/cluster.h>\n";
   }
 
   if (need_curand_kernel_h_) {
-    decl_stream << "#include <curand_kernel.h>\n";
+    os << "#include <curand_kernel.h>\n";
   }
 
-  decl_stream << "#include <tl_templates/cuda/reduce.h>\n";
-  decl_stream << "#include <tl_templates/cuda/scan.h>\n";
-  decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
-  decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
-  decl_stream << "#include <tl_templates/cuda/debug.h>\n";
-  decl_stream << "#ifdef ENABLE_BF16\n";
-  decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
-  decl_stream << "#endif\n";
-  decl_stream << "\n";
-
-  return CodeGenC::Finish();
+  os << "#include <tl_templates/cuda/reduce.h>\n";
+  os << "#include <tl_templates/cuda/scan.h>\n";
+  os << "#include <tl_templates/cuda/ldsm.h>\n";
+  os << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
+  os << "#include <tl_templates/cuda/debug.h>\n";
+  os << "#ifdef ENABLE_BF16\n";
+  os << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
+  os << "#endif\n";
+  os << "\n";
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const tirx::ForNode *op) {
