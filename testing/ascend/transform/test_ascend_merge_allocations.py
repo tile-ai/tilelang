@@ -48,8 +48,14 @@ def test_subcore_ub_allocations_have_independent_address_spaces(disable_reuse):
     body = tirx.AttrStmt(thread, "thread_extent", 1, body)
     after = transform.MergeUBAllocations(disable_reuse=disable_reuse)(tvm.IRModule({"main": tirx.PrimFunc([], body)}))
     offsets = {int(store.value): int(tvm.arith.Analyzer().simplify(store.indices[0])) for store in nodes(after, tirx.BufferStore)}
-    assert offsets == {0: 0, 1: 32, 2: 32}
+    assert set(offsets) == {0, 1, 2}
     (allocation,) = nodes(after, tirx.AllocBuffer)
-    assert (
-        int(tvm.arith.Analyzer().simplify(allocation.buffer.shape[0])) * tvm.DataType(allocation.buffer.dtype).bits // 8 == (32 + 128) * 4
-    )
+    allocated_bytes = int(tvm.arith.Analyzer().simplify(allocation.buffer.shape[0])) * tvm.DataType(allocation.buffer.dtype).bits // 8
+    # Private AIV storage shares numeric addresses, while the common buffer
+    # must remain disjoint on both cores. Placement order is not the contract.
+    assert allocated_bytes == (32 + max(128, 64)) * 4
+    for index, size in enumerate((32, 128, 64)):
+        assert offsets[index] >= 0 and (offsets[index] + size) * 4 <= allocated_bytes
+        if index:
+            assert offsets[0] + 32 <= offsets[index] or offsets[index] + size <= offsets[0]
+    assert offsets[1] < offsets[2] + 64 and offsets[2] < offsets[1] + 128

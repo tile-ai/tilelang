@@ -232,8 +232,10 @@ def test_subcore_buffer_expressions_preserve_definitions_and_views(field, view):
     after = transform.AssignCore()(before)
     root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
     metadata = root.annotations["test.buffer_metadata"]
-    projected = {}
-    for task in _tasks(after):
+    tasks = _tasks(after)
+    assert sorted(int(task.node["subcore"]) for task in tasks) == [0, 0, 1, 1]
+    projected, declared = {}, []
+    for task in tasks:
         owner = int(task.node["subcore"])
         (operation,) = calls(task, "tl.tileop.ascend_copy")
         result = operation.args[1].args[0].buffer
@@ -245,10 +247,12 @@ def test_subcore_buffer_expressions_preserve_definitions_and_views(field, view):
         projected[owner] = result
         for definition in nodes(task, tirx.DeclBuffer):
             assert definition.buffer.same_as(result)
+            declared.append(owner)
         assert metadata[result].same_as(result)
         (allocation,) = [allocated for allocated in root.alloc_buffers if allocated.data.same_as(result.data)]
         assert view or allocation.same_as(result)
     assert set(projected) == {0, 1}
+    assert sorted(declared) == [0, 1]
     assert not projected[0].data.same_as(projected[1].data)
 
 
@@ -286,7 +290,7 @@ def test_subcore_view_metadata_projects_without_cloning_common_storage(field, sc
     after = transform.AssignCore()(before)
     root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
     tasks = _tasks(after)
-    assert len(tasks) == 2
+    assert sorted(int(task.node["subcore"]) for task in tasks) == [0, 1]
     metadata = root.annotations["test.buffer_metadata"]
     for task in tasks:
         owner = int(task.node["subcore"])
@@ -376,8 +380,23 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
 
 
 @pytest.mark.parametrize("effect", ["store", "extern", "route-call", "gm-copy", "pure-call"])
-@pytest.mark.parametrize("routing", ["dynamic", "constant", "single-projection"])
-@pytest.mark.parametrize("context", ["task", "loop", "nested-loop", "guarded-loop"])
+@pytest.mark.parametrize(
+    "routing, context",
+    [
+        ("dynamic", "task"),
+        ("dynamic", "loop"),
+        ("dynamic", "nested-loop"),
+        ("constant", "task"),
+        ("constant", "loop"),
+        ("constant", "nested-loop"),
+        ("single-projection", "task"),
+        ("single-projection", "loop"),
+        ("single-projection", "nested-loop"),
+        # Only single-projection routing adds an enclosing guard; otherwise
+        # guarded-loop produces exactly the same input as loop.
+        ("single-projection", "guarded-loop"),
+    ],
+)
 def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routing, context):
     accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
     ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
@@ -426,10 +445,28 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
 
 
 @pytest.mark.parametrize(
-    "cube_owners", [(), (0,), (1,), (None,), (0, 1)], ids=["vector-only", "cube-aiv0", "cube-aiv1", "shared-cube", "both-cube"]
+    "cube_owners, nested, via_scalar",
+    [
+        # With no Cube consumer, nesting and scalar demand do not change IR.
+        pytest.param((), False, False, id="vector-only"),
+        pytest.param((0,), False, False, id="aiv0-direct-copy"),
+        pytest.param((0,), True, False, id="aiv0-nested-copy"),
+        pytest.param((0,), False, True, id="aiv0-direct-scalar"),
+        pytest.param((0,), True, True, id="aiv0-nested-scalar"),
+        pytest.param((1,), False, False, id="aiv1-direct-copy"),
+        pytest.param((1,), True, False, id="aiv1-nested-copy"),
+        pytest.param((1,), False, True, id="aiv1-direct-scalar"),
+        pytest.param((1,), True, True, id="aiv1-nested-scalar"),
+        pytest.param((None,), False, False, id="shared-direct-copy"),
+        pytest.param((None,), True, False, id="shared-nested-copy"),
+        pytest.param((None,), False, True, id="shared-direct-scalar"),
+        pytest.param((None,), True, True, id="shared-nested-scalar"),
+        pytest.param((0, 1), False, False, id="both-direct-copy"),
+        pytest.param((0, 1), True, False, id="both-nested-copy"),
+        pytest.param((0, 1), False, True, id="both-direct-scalar"),
+        pytest.param((0, 1), True, True, id="both-nested-scalar"),
+    ],
 )
-@pytest.mark.parametrize("nested", [False, True])
-@pytest.mark.parametrize("via_scalar", [False, True])
 def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested, via_scalar):
     src = tirx.decl_buffer((16,), "float32", name="src")
     buffers = [tirx.decl_buffer((16,), "float32", name=f"ub{sid}", scope="shared.dyn") for sid in range(2)]
@@ -527,8 +564,16 @@ def test_projected_loop_exit_follows_scalar_demand_from_later_consumers(owner, c
     assert all(int(task.node["core_mask"]) & 2 for task in count_writes)
 
 
-@pytest.mark.parametrize("steps, exclusive, expected", [(1, True, 3), (1, False, 0), (2, True, 0)])
-@pytest.mark.parametrize("bound_guard", [False, True])
+@pytest.mark.parametrize(
+    "steps, exclusive, expected, bound_guard",
+    [
+        pytest.param(1, True, 3, False, id="exclusive-single"),
+        pytest.param(1, False, 0, False, id="broadcast-single"),
+        pytest.param(2, True, 0, False, id="exclusive-repeated"),
+        pytest.param(1, True, 3, True, id="bound-exclusive-single"),
+        pytest.param(2, True, 0, True, id="bound-exclusive-repeated"),
+    ],
+)
 def test_projected_fixpipe_unit_flags_include_single_iteration_loop_guards(steps, exclusive, expected, bound_guard):
     accum = tirx.decl_buffer((32, 32), "float32", name="accum", scope="shared.l0c")
     ub = tirx.decl_buffer((32, 32), "float32", name="ub", scope="shared.dyn")

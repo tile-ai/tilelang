@@ -229,13 +229,16 @@ def test_subcore_roles_survive_complete_lowering(pattern):
         task for task in nodes(resolved, tirx.AttrStmt) if task.attr_key == "tl.ascend_task" and calls(task.body, "tl.tileop.ascend_copy")
     ]
     assert {1, 2, 4} <= {int(task.node["core_mask"]) for task in copies}
+    materialized = snapshots["tl.MaterializeMultiBuffer"]
+    func = materialized["main"]
+    output = func.buffer_map[func.params[2]]
     buffers = [
-        buffer
-        for block in nodes(snapshots["tl.MaterializeMultiBuffer"], tirx.SBlock)
-        for buffer in block.alloc_buffers
-        if buffer.name.startswith("epi_aiv") and buffer.scope() == "shared.dyn"
+        call.args[0].args[0].buffer for call in calls(materialized, "tl.tileop.ascend_copy") if call.args[1].args[0].buffer.same_as(output)
     ]
     assert len(buffers) == (1 if pattern == "fixed" else 2)
+    assert len({buffer.data for buffer in buffers}) == len(buffers)
+    allocations = [buffer for block in nodes(materialized, tirx.SBlock) for buffer in block.alloc_buffers]
+    assert all(buffer.scope() == "shared.dyn" and any(buffer.same_as(allocated) for allocated in allocations) for buffer in buffers)
     assert all(tuple(int(dim) for dim in buffer.shape) == (2, 32, 32) for buffer in buffers)
 
 
@@ -267,8 +270,10 @@ def test_subcore_gemm_results(pattern, steps, unit_flag):
 def test_subcore_fixpipe_preserves_unit_flag_lifetime(rows, dual):
     import torch
 
+    outputs = 1 if dual else 2
+
     @T.prim_func
-    def main(A: T.Tensor((rows, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((2, rows, 32), "float32")):
+    def main(A: T.Tensor((rows, 32), "bfloat16"), B: T.Tensor((32, 32), "bfloat16"), C: T.Tensor((outputs, rows, 32), "float32")):
         with T.MixedKernel(1) as (_, sid):
             a = T.alloc_l1((rows, 32), "bfloat16")
             b = T.alloc_l1((32, 32), "bfloat16")
@@ -292,9 +297,7 @@ def test_subcore_fixpipe_preserves_unit_flag_lifetime(rows, dual):
     b = torch.randn(32, 32, dtype=torch.bfloat16).npu()
     output = tilelang.compile(main, target="ascend", out_idx=-1)(a, b).cpu()
     expected = a.cpu().float() @ b.cpu().float().T
-    torch.testing.assert_close(output[0], expected, rtol=0.01, atol=0.02)
-    if not dual:
-        torch.testing.assert_close(output[1], expected, rtol=0.01, atol=0.02)
+    torch.testing.assert_close(output, expected.expand(outputs, rows, 32), rtol=0.01, atol=0.02)
 
 
 @tilelang.testing.requires_ascend

@@ -231,24 +231,31 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
             transform.AssignCore()(before)
         return
     after = transform.AssignCore()(before)
-    events = [
-        (statement, parents)
-        for statement, parents in statements(after)
-        if isinstance(statement, tirx.Evaluate) and calls(statement, "tl.ascend_cross_core_set_flag")
-    ]
-    assert events
+    events = {
+        operation: [
+            (statement.value, parents)
+            for statement, parents in statements(after)
+            if isinstance(statement, tirx.Evaluate) and calls(statement, "tl.ascend_cross_core_" + operation + "_flag")
+        ]
+        for operation in ("set", "wait")
+    }
+    assert events["set"] and events["wait"]
     analyzer = tvm.arith.Analyzer()
     for block_id in range(4):
-        count = 0
-        for _, parents in events:
-            active = tirx.const(True, "bool")
-            for parent in parents:
-                if isinstance(parent, tirx.IfThenElse):
-                    active = tirx.And(active, parent.condition)
-            active = analyzer.simplify(tirx.stmt_functor.substitute(active, {block: tirx.IntImm("int32", block_id)}))
-            assert isinstance(active, tirx.IntImm)
-            count += int(active)
-        assert count == 1
+        selected = {}
+        for operation, candidates in events.items():
+            active_events = []
+            for event, parents in candidates:
+                active = tirx.const(True, "bool")
+                for parent in parents:
+                    if isinstance(parent, tirx.IfThenElse):
+                        active = tirx.And(active, parent.condition)
+                active = analyzer.simplify(tirx.stmt_functor.substitute(active, {block: tirx.IntImm("int32", block_id)}))
+                assert isinstance(active, tirx.IntImm)
+                if int(active):
+                    active_events.append(event)
+            (selected[operation],) = active_events
+        tvm.ir.assert_structural_equal(selected["set"].args, selected["wait"].args)
 
 
 def test_sync_set_is_migrated_into_each_per_core_candidate():
