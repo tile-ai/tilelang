@@ -112,11 +112,13 @@ std::vector<const ControlNode *> StorageIterationNest(ControlNode *loop,
   return {controls.begin() + first, controls.end()};
 }
 
-bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
-                        const ConstrSet &b_ctx, const BufferRegion &b_region,
+bool RegionsMayConflict(const ConstrSet &a_ctx, const AccessRegion &a_access,
+                        const ConstrSet &b_ctx, const AccessRegion &b_access,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners,
                         const ConflictHintList &root_conflicts) {
+  const BufferRegion &a_region = a_access.logical;
+  const BufferRegion &b_region = b_access.logical;
   const bool cross = offset != 0;
   if (cross && loop == nullptr)
     return false;
@@ -150,8 +152,8 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   if (!a_region->buffer.same_as(b_region->buffer))
     return true;
 
-  const Array<Range> &a_rng = a_region->region;
-  const Array<Range> &b_rng = b_region->region;
+  const Array<Range> &a_rng = a_access.bounds;
+  const Array<Range> &b_rng = b_access.bounds;
   if (a_rng.size() != b_rng.size())
     return true; // shape mismatch — be safe
   const size_t ndim = a_rng.size();
@@ -208,21 +210,49 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const BufferRegion &a_region,
   }
   loop_ctx.Merge(a_local_ctx).Merge(b_local_ctx).Populate(ana);
 
-  // Freshen mutable reads (BufferLoads etc.) inline in the region bounds, per
-  // side: a read written verbatim in both bounds is not provably equal across
-  // the two access points (a store may sit between them), so it must become an
-  // independent unknown on each side.
+  // Snapshot bounds, repeat, and stride together on each side. Identical
+  // mutable reads at two access points need not have the same value.
   FreshenMutableReads freshen_a(FreshenMutableReads::Mode::kSnapshot);
   FreshenMutableReads freshen_b(FreshenMutableReads::Mode::kSnapshot);
-  PrimExpr any_dim_disjoint = Bool(false);
+  PrimExpr a_repeat = freshen_a(Substitute(a_access.repeat, a_sub));
+  PrimExpr b_repeat = freshen_b(Substitute(b_access.repeat, b_sub));
+
+  // Each side chooses an independent interval from its repeated last axis.
+  // Proving disjointness for every permitted pair is equivalent to proving
+  // that no pair overlaps; no enumeration or explicit quantifier is needed.
+  auto repeat_min = [&](PrimExpr min, const PrimExpr &repeat,
+                        const PrimExpr &stride, const char *name) -> PrimExpr {
+    if (is_one(ana.Simplify(repeat)))
+      return min;
+    // Widen before multiplying so int32 counts/pitches do not truncate the
+    // address calculation. Zero and negative strides need no special case.
+    Var index(name, DataType::Int(64));
+    ana.EnterConstraint(index >= 0 && index < cast(index.dtype(), repeat));
+    return cast(index.dtype(), min) + index * cast(index.dtype(), stride);
+  };
+
+  PrimExpr any_dim_disjoint = (a_repeat <= 0) || (b_repeat <= 0);
   for (size_t i = 0; i < ndim; ++i) {
     PrimExpr a_min = freshen_a(Substitute(a_rng[i]->min, a_sub));
-    PrimExpr a_max =
-        freshen_a(Substitute(a_rng[i]->min + a_rng[i]->extent - 1, a_sub));
+    PrimExpr a_extent = freshen_a(Substitute(a_rng[i]->extent, a_sub));
     PrimExpr b_min = freshen_b(Substitute(b_rng[i]->min, b_sub));
-    PrimExpr b_max =
-        freshen_b(Substitute(b_rng[i]->min + b_rng[i]->extent - 1, b_sub));
-    any_dim_disjoint = any_dim_disjoint || (a_max < b_min) || (b_max < a_min);
+    PrimExpr b_extent = freshen_b(Substitute(b_rng[i]->extent, b_sub));
+    if (i + 1 == ndim) {
+      a_min = repeat_min(a_min, a_repeat,
+                         freshen_a(Substitute(a_access.stride, a_sub)),
+                         "region_repeat_p");
+      b_min = repeat_min(b_min, b_repeat,
+                         freshen_b(Substitute(b_access.stride, b_sub)),
+                         "region_repeat_c");
+    }
+    // A half-open endpoint can exceed the int32 index range by one even
+    // for an ordinary single-element access.
+    PrimExpr a_end =
+        cast(DataType::Int(64), a_min) + cast(DataType::Int(64), a_extent);
+    PrimExpr b_end =
+        cast(DataType::Int(64), b_min) + cast(DataType::Int(64), b_extent);
+    any_dim_disjoint = any_dim_disjoint || (a_extent <= 0) || (b_extent <= 0) ||
+                       (a_end <= b_min) || (b_end <= a_min);
   }
   any_dim_disjoint = ana.Simplify(any_dim_disjoint);
   // Raw Z3 as a fallback catches the infeasible-context case that Analyzer's
@@ -254,7 +284,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
 
   struct RegionAccess {
     TaskNode *task;
-    BufferRegion region;
+    AccessRegion region;
   };
   struct NodeAccesses {
     std::vector<RegionAccess> reads;
@@ -265,9 +295,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     std::vector<TaskNode *> tasks;
     CollectAllTaskNodes(nodes[i], tasks);
     for (TaskNode *task : tasks) {
-      for (const BufferRegion &region : task->GetReadRegions())
+      for (const AccessRegion &region : task->GetReadAccesses())
         accesses[i].reads.push_back({task, region});
-      for (const BufferRegion &region : task->GetWriteRegions())
+      for (const AccessRegion &region : task->GetWriteAccesses())
         accesses[i].writes.push_back({task, region});
     }
   }
@@ -372,8 +402,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                           const std::vector<RegionAccess> &rhs_accesses) {
         for (const RegionAccess &lhs : lhs_accesses) {
           for (const RegionAccess &rhs : rhs_accesses) {
-            const Var &lhs_storage = lhs.region->buffer->data;
-            const Var &rhs_storage = rhs.region->buffer->data;
+            const Var &lhs_storage = lhs.region.logical->buffer->data;
+            const Var &rhs_storage = rhs.region.logical->buffer->data;
             ffi::Optional<Var> storage;
             if (lhs_storage.same_as(rhs_storage))
               storage = lhs_storage;

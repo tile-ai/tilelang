@@ -25,6 +25,7 @@
 #include "../ascend_pipe.h"
 #include "../buffer_version.h"
 #include "../core_mask.h"
+#include "./memory_detector.h"
 #include "op/utils.h"
 
 namespace tvm {
@@ -108,6 +109,15 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
     }
   }
   return true;
+}
+
+inline bool AccessRegionsEqual(const AccessRegion &a, const AccessRegion &b) {
+  arith::Analyzer analyzer;
+  return a.logical->buffer.same_as(b.logical->buffer) &&
+         RegionsEqual(a.logical->region, b.logical->region) &&
+         RegionsEqual(a.bounds, b.bounds) &&
+         analyzer.CanProveEqual(a.repeat, b.repeat) &&
+         analyzer.CanProveEqual(a.stride, b.stride);
 }
 
 // Return true only when every point in `inner` is provably contained in
@@ -375,7 +385,8 @@ public:
   // only TaskNode stores a settable mask.
   virtual uint16_t GetHbmMask() const = 0;
 
-  // Logical access regions. Physical footprints are derived from current IR.
+  // Logical projections for storage identity and core analysis. Dependency
+  // analysis consumes the leaf TaskNode's complete access records.
   virtual std::vector<BufferRegion> GetReadRegions() const = 0;
   virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
 
@@ -529,12 +540,19 @@ public:
   // A copy that stores to GM in this leaf reads the atomic-mode register.
   bool ReadsAtomicRegister() const override { return reads_atomic_; }
 
-  // Logical access regions. Physical footprints are derived from current IR.
-  std::vector<BufferRegion> GetReadRegions() const override {
+  const std::vector<AccessRegion> &GetReadAccesses() const {
     return read_regions_;
   }
-  std::vector<BufferRegion> GetWriteRegions() const override {
+  const std::vector<AccessRegion> &GetWriteAccesses() const {
     return write_regions_;
+  }
+
+  // Logical projections retain the union's individual records.
+  std::vector<BufferRegion> GetReadRegions() const override {
+    return LogicalRegions(read_regions_);
+  }
+  std::vector<BufferRegion> GetWriteRegions() const override {
+    return LogicalRegions(write_regions_);
   }
   std::vector<Var> GetReadVars() const override { return read_vars_; }
   std::vector<Var> GetWriteVars() const override { return write_vars_; }
@@ -550,10 +568,10 @@ public:
   void AddSpecialWrite(SpecialRegister reg) {
     special_write_mask_ |= static_cast<uint16_t>(reg);
   }
-  void SetReadRegions(const std::vector<BufferRegion> &regions) {
+  void SetReadAccesses(const std::vector<AccessRegion> &regions) {
     read_regions_ = regions;
   }
-  void SetWriteRegions(const std::vector<BufferRegion> &regions) {
+  void SetWriteAccesses(const std::vector<AccessRegion> &regions) {
     write_regions_ = regions;
   }
   void SetReadVars(const std::vector<Var> &vars) { read_vars_ = vars; }
@@ -568,9 +586,9 @@ public:
     };
     std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
         buffer_remap;
-    auto substitute_regions = [&](std::vector<BufferRegion> &regions) {
-      for (auto &region : regions) {
-        Buffer buffer = region->buffer;
+    auto substitute_regions = [&](std::vector<AccessRegion> &regions) {
+      for (AccessRegion &access : regions) {
+        Buffer buffer = access.logical->buffer;
         auto buffer_it = buffer_remap.find(buffer);
         if (buffer_it != buffer_remap.end()) {
           buffer = buffer_it->second;
@@ -580,8 +598,12 @@ public:
           buffer_remap.emplace(buffer, remapped);
           buffer = std::move(remapped);
         }
-        region = BufferRegion(std::move(buffer),
-                              Substitute(region->region, substitution));
+        access.logical =
+            BufferRegion(std::move(buffer),
+                         Substitute(access.logical->region, substitution));
+        access.bounds = Substitute(access.bounds, substitution);
+        access.repeat = Substitute(access.repeat, substitution);
+        access.stride = Substitute(access.stride, substitution);
       }
     };
     substitute_vars(read_vars_);
@@ -602,27 +624,21 @@ public:
   // Clone method
   std::shared_ptr<IRStructure> Clone() const override;
 
-  // Helper methods to add regions (for incremental analysis)
-  void AddReadRegion(const BufferRegion &region) {
-    // Check for duplicate regions
-    for (const auto &existing : read_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
-          RegionsEqual(existing->region, region->region)) {
-        return; // Region already exists
-      }
+  // Keep the existing deduplication, comparing the complete access record.
+  void AddReadAccess(const AccessRegion &access) {
+    for (const AccessRegion &existing : read_regions_) {
+      if (AccessRegionsEqual(existing, access))
+        return;
     }
-    read_regions_.push_back(region);
+    read_regions_.push_back(access);
   }
 
-  void AddWriteRegion(const BufferRegion &region) {
-    // Check for duplicate regions
-    for (const auto &existing : write_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
-          RegionsEqual(existing->region, region->region)) {
-        return; // Region already exists
-      }
+  void AddWriteAccess(const AccessRegion &access) {
+    for (const AccessRegion &existing : write_regions_) {
+      if (AccessRegionsEqual(existing, access))
+        return;
     }
-    write_regions_.push_back(region);
+    write_regions_.push_back(access);
   }
 
   void AddReadVar(const Var &var) {
@@ -654,9 +670,8 @@ private:
   // inferred or explicitly marked candidate.
   bool is_per_core_task_{false};
 
-  // Logical access regions. Physical footprints are derived from current IR.
-  std::vector<BufferRegion> read_regions_;
-  std::vector<BufferRegion> write_regions_;
+  std::vector<AccessRegion> read_regions_;
+  std::vector<AccessRegion> write_regions_;
   std::vector<Var> read_vars_;
   std::vector<Var> write_vars_;
 

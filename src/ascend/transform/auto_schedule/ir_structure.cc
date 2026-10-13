@@ -297,8 +297,8 @@ std::shared_ptr<IRStructure> TaskNode::Clone() const {
   if (IsPerCoreTask())
     new_task->MarkPerCoreTask();
   // Copy memory access regions
-  new_task->SetReadRegions(GetReadRegions());
-  new_task->SetWriteRegions(GetWriteRegions());
+  new_task->SetReadAccesses(GetReadAccesses());
+  new_task->SetWriteAccesses(GetWriteAccesses());
   new_task->SetReadVars(GetReadVars());
   new_task->SetWriteVars(GetWriteVars());
   new_task->outer_ctx = outer_ctx;

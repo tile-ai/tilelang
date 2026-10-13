@@ -174,8 +174,8 @@ struct TaskResourceUsage {
 // remain separate from hardware resource classification because AutoSchedule
 // also adds accesses from surrounding guards and loop expressions to a task.
 struct TaskAccessInfo {
-  std::vector<BufferRegion> read_regions;
-  std::vector<BufferRegion> write_regions;
+  std::vector<AccessRegion> read_regions;
+  std::vector<AccessRegion> write_regions;
   std::vector<Var> read_vars;
   std::vector<Var> write_vars;
 };
@@ -401,8 +401,8 @@ inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
   MemoryAccessDetector memory_detector;
   memory_detector.Analyze(stmt);
   TaskAccessInfo result;
-  result.read_regions = memory_detector.GetReadRegions();
-  result.write_regions = memory_detector.GetWriteRegions();
+  result.read_regions = memory_detector.GetReadAccesses();
+  result.write_regions = memory_detector.GetWriteAccesses();
   result.read_vars = memory_detector.GetReadVars();
   result.write_vars = memory_detector.GetWriteVars();
   return result;
@@ -410,9 +410,9 @@ inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
 
 inline bool TaskAccessesStorage(const TaskAccessInfo &accesses,
                                 const Var &storage) {
-  auto regions_access = [&](const std::vector<BufferRegion> &regions) {
+  auto regions_access = [&](const std::vector<AccessRegion> &regions) {
     return std::any_of(regions.begin(), regions.end(), [&](const auto &region) {
-      return region->buffer->data.same_as(storage);
+      return region.logical->buffer->data.same_as(storage);
     });
   };
   if (regions_access(accesses.read_regions) ||
@@ -505,7 +505,8 @@ public:
     CoreMask result = kCoreBroadcast;
     for (const Var &var : accesses.read_vars)
       result &= GetValueCoreMask(var, reader);
-    for (const BufferRegion &region : accesses.read_regions) {
+    for (const AccessRegion &access : accesses.read_regions) {
+      const BufferRegion &region = access.logical;
       if (IsSharedBuffer(region->buffer)) {
         result &= kCoreVector;
       } else if (IsL1Buffer(region->buffer) || IsL0ABuffer(region->buffer) ||
@@ -521,7 +522,7 @@ public:
   CoreMask GetTaskReadCoreMask(const TaskNode *task) const {
     ICHECK(task != nullptr);
     TaskAccessInfo accesses;
-    accesses.read_regions = task->GetReadRegions();
+    accesses.read_regions = task->GetReadAccesses();
     accesses.read_vars = task->GetReadVars();
     return GetAccessCoreMask(accesses, task);
   }
@@ -625,10 +626,10 @@ inline void ApplyTaskResourceUsage(const TaskResourceUsage &usage,
 
 inline void ApplyTaskAccesses(const TaskAccessInfo &accesses, TaskNode *task) {
   ICHECK(task != nullptr);
-  for (const BufferRegion &region : accesses.read_regions)
-    task->AddReadRegion(region);
-  for (const BufferRegion &region : accesses.write_regions)
-    task->AddWriteRegion(region);
+  for (const AccessRegion &access : accesses.read_regions)
+    task->AddReadAccess(access);
+  for (const AccessRegion &access : accesses.write_regions)
+    task->AddWriteAccess(access);
   for (const Var &var : accesses.read_vars)
     task->AddReadVar(var);
   for (const Var &var : accesses.write_vars)

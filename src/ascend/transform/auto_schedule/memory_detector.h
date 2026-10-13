@@ -35,6 +35,35 @@ namespace ascend {
 
 using namespace tirx;
 
+// One detected access. A list of these records denotes a union, including
+// when several records refer to the same logical buffer.
+struct AccessRegion {
+  explicit AccessRegion(BufferRegion logical)
+      : logical(std::move(logical)), bounds(this->logical->region),
+        repeat(Integer(1)), stride(Integer(0)) {}
+
+  // Buffer identity, conflict hints, and logical cost accounting.
+  BufferRegion logical;
+  // Conflict coordinates, independent of the logical buffer's rank. All
+  // accesses to one buffer must use the same coordinate convention.
+  Region bounds;
+  // Repeat the last axis at [min + i * stride, min + i * stride + extent),
+  // 0 <= i < repeat. Ordinary rectangular accesses use repeat=1, stride=0.
+  // A non-positive repeat or axis extent denotes an empty access. Stride may
+  // be zero or negative. The detector currently emits ordinary accesses.
+  PrimExpr repeat;
+  PrimExpr stride;
+};
+
+inline std::vector<BufferRegion>
+LogicalRegions(const std::vector<AccessRegion> &accesses) {
+  std::vector<BufferRegion> regions;
+  regions.reserve(accesses.size());
+  for (const AccessRegion &access : accesses)
+    regions.push_back(access.logical);
+  return regions;
+}
+
 // MemoryAccessDetector: detect read/write regions in statements
 // Adapted from BlockReadWriteDetector in TVM
 class MemoryAccessDetector : public StmtExprVisitor {
@@ -86,6 +115,21 @@ public:
     write_vars_.clear();
     opaque_access_vars_.clear();
     operator()(expr);
+  }
+
+  // Wrap the existing per-buffer rectangular summaries. Producing separate
+  // records for individual accesses is a later precision improvement.
+  std::vector<AccessRegion> GetReadAccesses() const {
+    std::vector<AccessRegion> accesses;
+    for (const BufferRegion &region : GetReadRegions())
+      accesses.emplace_back(region);
+    return accesses;
+  }
+  std::vector<AccessRegion> GetWriteAccesses() const {
+    std::vector<AccessRegion> accesses;
+    for (const BufferRegion &region : GetWriteRegions())
+      accesses.emplace_back(region);
+    return accesses;
   }
 
   // Return collected read regions
