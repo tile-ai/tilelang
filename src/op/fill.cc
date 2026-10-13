@@ -164,6 +164,11 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
     dst_indices.push_back(region[i]->min + var);
   }
   Stmt body = BufferStore(dst, value, dst_indices);
+  // A rank-0 buffer has no dimension to loop over; wrap its single store in a
+  // unit loop so callers always get a For.
+  if (ndim == 0) {
+    return For(Var("i"), 0, 1, ForKind::kParallel, body);
+  }
   for (int i = ndim - 1; i >= 0; i--) {
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
                ForKind::kParallel, body);

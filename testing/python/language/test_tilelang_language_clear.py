@@ -103,5 +103,27 @@ def test_fill_int8_negative():
         torch.testing.assert_close(out, ref)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("alloc", ["alloc_shared", "alloc_fragment", "alloc_local"])
+def test_fill_rank0(alloc):
+    alloc_fn = getattr(T, alloc)
+
+    @T.prim_func
+    def main(out: T.Tensor((2,), T.float32)):
+        with T.Kernel(1, threads=32):
+            s = alloc_fn((), T.float32)
+            z = alloc_fn((), T.float32)
+            T.fill(s, 1.5)
+            T.fill(z, 3.0)
+            T.clear(z)
+            out[0] = s[()]
+            out[1] = z[()]
+
+    kernel = tilelang.compile(main, out_idx=[0])
+    out = kernel()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, torch.tensor([1.5, 0.0], device="cuda"))
+
+
 if __name__ == "__main__":
     test_matmul()
