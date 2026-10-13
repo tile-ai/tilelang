@@ -2359,13 +2359,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
-  // A combination that passed the check above still lands here when the lane
-  // count has no packed lowering -- the branches handle 1, 2, 4 and 8 lanes.
+  // Reaching here with a non-empty `round` means this dtype pair has no
+  // PTX `cvt.<round>` lowering; fail loudly instead of silently dropping it.
   if (!cast_round.empty()) {
-    LOG(FATAL) << "round '" << cast_round
-               << "' is not supported for a cast from " << from_ty << " to "
-               << target_ty << " with " << lanes
-               << " lanes; the packed lowerings handle 1, 2, 4 or 8 lanes";
+    LOG(FATAL) << "round '" << cast_round << "' is not supported for cast from "
+               << from_ty << " to " << target_ty
+               << " (only supported f32 packed stochastic conversions are "
+                  "available)";
   }
 
   // Fallback: elementwise cast.
