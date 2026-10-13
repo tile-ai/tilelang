@@ -39,14 +39,10 @@ using namespace tirx;
 // when several records refer to the same logical buffer.
 struct MemoryAccess {
   explicit MemoryAccess(BufferRegion logical)
-      : logical(std::move(logical)), bounds(this->logical->region),
-        repeat(Integer(1)), stride(Integer(0)) {}
+      : logical(std::move(logical)), repeat(Integer(1)), stride(Integer(0)) {}
 
-  // Buffer identity, conflict hints, and logical cost accounting.
+  // Base region, buffer identity, conflict hints, and logical cost accounting.
   BufferRegion logical;
-  // Conflict coordinates, independent of the logical buffer's rank. All
-  // accesses to one buffer must use the same coordinate convention.
-  Region bounds;
   // Repeat the last axis at [min + i * stride, min + i * stride + extent),
   // 0 <= i < repeat. Ordinary rectangular accesses use repeat=1, stride=0.
   // A non-positive repeat or axis extent denotes an empty access. Stride may

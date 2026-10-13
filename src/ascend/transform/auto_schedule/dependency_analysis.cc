@@ -152,8 +152,8 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
   if (!a_region->buffer.same_as(b_region->buffer))
     return true;
 
-  const Array<Range> &a_rng = a_access.bounds;
-  const Array<Range> &b_rng = b_access.bounds;
+  const Array<Range> &a_rng = a_region->region;
+  const Array<Range> &b_rng = b_region->region;
   if (a_rng.size() != b_rng.size())
     return true; // shape mismatch — be safe
   const size_t ndim = a_rng.size();

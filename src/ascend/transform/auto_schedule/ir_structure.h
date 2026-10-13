@@ -115,7 +115,6 @@ inline bool MemoryAccessesEqual(const MemoryAccess &a, const MemoryAccess &b) {
   arith::Analyzer analyzer;
   return a.logical->buffer.same_as(b.logical->buffer) &&
          RegionsEqual(a.logical->region, b.logical->region) &&
-         RegionsEqual(a.bounds, b.bounds) &&
          analyzer.CanProveEqual(a.repeat, b.repeat) &&
          analyzer.CanProveEqual(a.stride, b.stride);
 }
@@ -601,7 +600,6 @@ public:
         access.logical =
             BufferRegion(std::move(buffer),
                          Substitute(access.logical->region, substitution));
-        access.bounds = Substitute(access.bounds, substitution);
         access.repeat = Substitute(access.repeat, substitution);
         access.stride = Substitute(access.stride, substitution);
       }
