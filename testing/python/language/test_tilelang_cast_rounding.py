@@ -528,17 +528,24 @@ def test_cast_rs_rbits_invariance(rbits_mode, dtype):
 
 _RS_TARGET = {"kind": "cuda", "arch": "sm_90a"}
 _UNSUPPORTED_COMBINATION = "is not supported for a cast from"
+_RS_RBITS = T.uint32(0x12345678)
 
 
-def _vectorized_cast_kernel(src_dtype, dst_dtype, *, round_mode):
+def _vectorized_cast_kernel(src_dtype, dst_dtype, *, round_mode, rbits=None):
+    """`rbits` is only passed when the caller asks for it: the frontend rejects it for
+    every mode but 'rs', and a cast rejected there never reaches the backend check
+    these tests are about."""
+
     @T.prim_func
     def main(A: T.Tensor((8,), src_dtype), B: T.Tensor((8,), dst_dtype)):
         with T.Kernel(1, threads=1):
             for i in T.vectorized(8):
                 if round_mode is None:
                     B[i] = cast(A[i], dst_dtype)
+                elif rbits is None:
+                    B[i] = cast(A[i], dst_dtype, round=round_mode)
                 else:
-                    B[i] = cast(A[i], dst_dtype, round=round_mode, rbits=T.uint32(0x12345678))
+                    B[i] = cast(A[i], dst_dtype, round=round_mode, rbits=rbits)
 
     return main
 
@@ -555,7 +562,7 @@ def test_cast_rs_rejected_for_non_f32_source_in_a_vectorized_loop():
     scalar loop was rejected.
     """
     with pytest.raises(Exception, match=_UNSUPPORTED_COMBINATION), tvm.target.Target(_RS_TARGET):
-        tilelang.lower(_vectorized_cast_kernel("float16", "float8_e4m3fn", round_mode="rs"), target=_RS_TARGET)
+        tilelang.lower(_vectorized_cast_kernel("float16", "float8_e4m3fn", round_mode="rs", rbits=_RS_RBITS), target=_RS_TARGET)
 
 
 @tilelang.testing.requires_cuda
@@ -566,7 +573,7 @@ def test_cast_rs_rejected_for_f32_to_e8m0():
     be refused for that pair as well rather than dropped by the branch.
     """
     with pytest.raises(Exception, match=_UNSUPPORTED_COMBINATION), tvm.target.Target(_RS_TARGET):
-        tilelang.lower(_vectorized_cast_kernel("float32", "float8_e8m0fnu", round_mode="rs"), target=_RS_TARGET)
+        tilelang.lower(_vectorized_cast_kernel("float32", "float8_e8m0fnu", round_mode="rs", rbits=_RS_RBITS), target=_RS_TARGET)
 
 
 @tilelang.testing.requires_cuda
@@ -574,9 +581,9 @@ def test_cast_rs_rejected_for_f32_to_e8m0():
 def test_cast_rejected_for_a_mode_without_a_lowering(round_mode):
     """Only 'rs' has a lowering today; the other accepted modes are refused.
 
-    The frontend accepts rn/rz/rp/rm, so the backend has to say which combinations it
-    can actually lower -- adding one later means listing it in the table together
-    with its lowering.
+    The frontend accepts rn/rz/rp/rm (without `rbits`), so the backend has to say which
+    combinations it can actually lower -- adding one later means listing it in the
+    table together with its lowering.
     """
     with pytest.raises(Exception, match=_UNSUPPORTED_COMBINATION), tvm.target.Target(_RS_TARGET):
         tilelang.lower(_vectorized_cast_kernel("float32", "float8_e4m3fn", round_mode=round_mode), target=_RS_TARGET)
@@ -586,7 +593,7 @@ def test_cast_rejected_for_a_mode_without_a_lowering(round_mode):
 def test_supported_rs_combination_still_lowers():
     """Control: the f32 -> fp8 stochastic combination keeps its packed lowering."""
     with tvm.target.Target(_RS_TARGET):
-        artifact = tilelang.lower(_vectorized_cast_kernel("float32", "float8_e4m3fn", round_mode="rs"), target=_RS_TARGET)
+        artifact = tilelang.lower(_vectorized_cast_kernel("float32", "float8_e4m3fn", round_mode="rs", rbits=_RS_RBITS), target=_RS_TARGET)
 
     assert "_rs_sat" in artifact.kernel_source, artifact.kernel_source
 
