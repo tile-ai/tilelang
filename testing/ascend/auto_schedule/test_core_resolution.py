@@ -319,7 +319,15 @@ def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets, per_co
     ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
     out = tirx.decl_buffer((16, 16), "float32", name="out")
     sid = tirx.Var("sid", "int32")
-    copies = [copy(accum, ub, annotations={} if target is None else {"sub_blockid": tirx.IntImm("int32", target)}) for target in targets]
+    copies = [
+        copy(
+            accum,
+            ub,
+            annotations={"unit_flag_ctrl": tirx.IntImm("int32", flag)}
+            | ({} if target is None else {"sub_blockid": tirx.IntImm("int32", target)}),
+        )
+        for target, flag in zip(targets, (2, 3))
+    ]
     # AssignCore only needs the copy destinations; the L0C producer is outside
     # this pass's contract.
     producer = unit(seq(*copies), core=0)
@@ -343,6 +351,7 @@ def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets, per_co
         assert len(projected) == len(copies)
         assert int(task.node["core_mask"]) == 2
         assert {int(call.annotations["sub_blockid"]) for call in projected} == {targets[0]}
+        assert [int(call.annotations["unit_flag_ctrl"]) for call in projected] == [2, 3]
 
 
 @pytest.mark.parametrize("route_kind", ["bind", "load", "loop-var"])
@@ -565,16 +574,16 @@ def test_projected_loop_exit_follows_scalar_demand_from_later_consumers(owner, c
 
 
 @pytest.mark.parametrize(
-    "steps, exclusive, expected, bound_guard",
+    "steps, exclusive, supported, bound_guard",
     [
-        pytest.param(1, True, 3, False, id="exclusive-single"),
-        pytest.param(1, False, 0, False, id="broadcast-single"),
-        pytest.param(2, True, 0, False, id="exclusive-repeated"),
-        pytest.param(1, True, 3, True, id="bound-exclusive-single"),
-        pytest.param(2, True, 0, True, id="bound-exclusive-repeated"),
+        pytest.param(1, True, True, False, id="exclusive-single"),
+        pytest.param(1, False, False, False, id="broadcast-single"),
+        pytest.param(2, True, False, False, id="exclusive-repeated"),
+        pytest.param(1, True, True, True, id="bound-exclusive-single"),
+        pytest.param(2, True, False, True, id="bound-exclusive-repeated"),
     ],
 )
-def test_projected_fixpipe_unit_flags_include_single_iteration_loop_guards(steps, exclusive, expected, bound_guard):
+def test_projected_fixpipe_unit_flags_require_exclusive_execution(steps, exclusive, supported, bound_guard):
     accum = tirx.decl_buffer((32, 32), "float32", name="accum", scope="shared.l0c")
     ub = tirx.decl_buffer((32, 32), "float32", name="ub", scope="shared.dyn")
     sid, selector, i = (tirx.Var(name, "int32") for name in ("sid", "selector", "i"))
@@ -591,7 +600,49 @@ def test_projected_fixpipe_unit_flags_include_single_iteration_loop_guards(steps
     before = kernel(body, buffers=[accum, ub], params=[selector])
     thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
     before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    if not supported:
+        with pytest.raises(ValueError, match="cannot preserve explicit unit_flag_ctrl.*both the related GEMM and copies"):
+            transform.AssignCore()(before)
+        return
     after = transform.AssignCore()(before)
     copies = calls(after, "tl.tileop.ascend_copy")
     assert len(copies) == 2
-    assert {int(call.annotations["unit_flag_ctrl"]) for call in copies} == {expected}
+    assert {int(call.annotations["unit_flag_ctrl"]) for call in copies} == {3}
+
+
+@pytest.mark.parametrize("rows", [16, 8], ids=["whole-fractals", "shared-fractal"])
+def test_projected_fixpipe_unit_flags_require_independent_fractals(rows):
+    accum = tirx.decl_buffer((2 * rows, 32), "float32", name="accum", scope="shared.l0c")
+    ub = tirx.decl_buffer((rows, 32), "float32", name="ub", scope="shared.dyn")
+    sid, selector = (tirx.Var(name, "int32") for name in ("sid", "selector"))
+    flag = tirx.Select(selector > 0, 3, 2)
+    fix = copy(accum, ub, src_indices=[sid * rows, 0], src_shape=[rows, 32], annotations={"unit_flag_ctrl": flag})
+    before = kernel(unit(fix, core=0), buffers=[accum, ub], params=[selector])
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    if rows == 8:
+        with pytest.raises(ValueError, match="cannot preserve explicit unit_flag_ctrl.*same UnitFlag fractal"):
+            transform.AssignCore()(before)
+        return
+    after = transform.AssignCore()(before)
+    copies = calls(after, "tl.tileop.ascend_copy")
+    assert len(copies) == 2
+    for call in copies:
+        tvm.ir.assert_structural_equal(call.annotations["unit_flag_ctrl"], flag)
+
+
+def test_unit_flag_pairing_between_source_copies_remains_caller_managed():
+    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
+    sid = tirx.Var("sid", "int32")
+    fix = copy(accum, ub, annotations={"unit_flag_ctrl": tirx.IntImm("int32", 3)})
+    # Reusing an IR node still describes two source operations. This pass does
+    # not validate their caller-managed protocol; no such kernel is executed.
+    before = kernel(seq(unit(fix, core=0, guard=sid == 0), unit(fix, core=0, guard=sid == 1)), buffers=[accum, ub])
+    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
+    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    after = transform.AssignCore()(before)
+    copies = calls(after, "tl.tileop.ascend_copy")
+    assert len(copies) == 2
+    assert {int(call.annotations["sub_blockid"]) for call in copies} == {0, 1}
+    assert all(int(call.annotations["unit_flag_ctrl"]) == 3 for call in copies)

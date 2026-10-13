@@ -176,12 +176,15 @@ def gemm(
     unit_flag_ctrl: int | tirx.PrimExpr | None = None,
     annotations: dict | None = None,
 ) -> tirx.PrimExpr:
-    """TileLang GEMM operator, with the Ascend unit-flag hint.
+    """TileLang GEMM operator, with Ascend unit-flag control.
 
     Same semantics as the common :func:`tilelang.language.gemm_op.gemm`.
-    ``unit_flag_ctrl`` records the Cube unit-flag control on the tile op, which
-    the Ascend lowering pairs with the following accumulator drain; ``None``
-    omits the annotation and lowers as 0.
+    ``unit_flag_ctrl`` records the Cube unit-flag control on the tile op.
+    Explicit nonzero values define a caller-managed protocol: the caller must
+    pair GEMM with the accumulator drains. Lowering preserves the control and
+    rejects subcore projections that cannot preserve the protocol. ``None``
+    omits the annotation and lowers as 0; omit the control on both GEMM and its
+    drains to use automatic synchronization.
 
     On Ascend, L0 operand regions specify the effective MAD M/N/K. Their
     trailing matrix dimensions must start at zero and describe a compact tile.

@@ -27,6 +27,7 @@
 
 #include "layout/layout.h"
 #include "scheduled_tir.h"
+#include "support/check.h"
 #include "task_analysis.h"
 #include "task_annotations.h"
 
@@ -44,13 +45,14 @@ public:
   static SBlock Rewrite(const SBlock &root, const ConstrSet &outer_ctx,
                         const Var &sid) {
     ICHECK(!root->annotations.count(kSplitSubcores));
-    ScheduledTIR scheduled = DecodeScheduledTIR(root, outer_ctx);
+    SBlock result = root;
+    result.CopyOnWrite()->body = DistinctFixpipeCallSites(root->body);
+    ScheduledTIR scheduled = DecodeScheduledTIR(result, outer_ctx);
     SubcoreProjector projector(sid,
                                scheduled.metadata.num_aiv_subcores.value_or(2));
     projector.FindVaryingValues(scheduled.tree);
     if (!projector.NeedsProjection(scheduled.tree))
       return root;
-    SBlock result = root;
     Stmt body = projector.RewriteList(scheduled.tree, -1);
     projector.VerifyProjectedFixpipeTasks(body);
     VarSet used;
@@ -130,7 +132,8 @@ public:
     annotations.Set(kAivStorageMap, ub_sids);
     annotations.Set(kSplitSubcores, Bool(true));
     writer->annotations = std::move(annotations);
-    return RepairUnitFlags(std::move(result), outer_ctx);
+    projector.VerifyProjectedUnitFlags(result, outer_ctx);
+    return result;
   }
 
 private:
@@ -139,11 +142,33 @@ private:
   using BufferMap =
       std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
 
-  // A dual Fixpipe instruction consumes each L0C unit flag once. After
-  // projection, two reads of the same fractal must not both clear that flag.
-  // Keep unit flags for exclusive branches and disjoint whole fractals. For
-  // overlapping reads use the ordinary M/FIX dependency protocol instead.
-  static SBlock RepairUnitFlags(SBlock root, const ConstrSet &outer_ctx) {
+  // Call nodes may be shared between source statements. Give each explicit
+  // UnitFlag copy site its own identity before recording its projections.
+  static Stmt DistinctFixpipeCallSites(const Stmt &body) {
+    class Rewriter : public StmtExprMutator {
+      Stmt VisitStmt_(const EvaluateNode *op) final {
+        const auto *call = op->value.as<CallNode>();
+        if (!call || !IsAscendCopyCall(call))
+          return ffi::GetRef<Stmt>(op);
+        AscendCopy copy(call->args, call->annotations);
+        if (!IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst) ||
+            is_zero(copy->unit_flag_ctl))
+          return ffi::GetRef<Stmt>(op);
+        return Evaluate(Call(call->dtype, call->op, call->args,
+                             call->annotations, call->span),
+                        op->span);
+      }
+    } rewriter;
+    return rewriter(body);
+  }
+
+  // Explicit UnitFlag protocols belong to the caller. Only compare copies
+  // derived from the same source operation, never separate user-written
+  // operations (even within one Task). Projection must preserve the protocol
+  // through exclusive execution or independent whole fractals; it must not
+  // silently disable UnitFlag on the accumulator and its producers.
+  void VerifyProjectedUnitFlags(const SBlock &root,
+                                const ConstrSet &outer_ctx) const {
     ScheduledTIR scheduled = DecodeScheduledTIR(root, outer_ctx);
     std::vector<TaskNode *> tasks;
     CollectAllTaskNodes(scheduled.tree, tasks);
@@ -151,24 +176,19 @@ private:
       TaskNode *task;
       AscendCopy copy;
     };
-    std::unordered_map<int, std::vector<Read>> reads;
+    std::unordered_map<Call, std::vector<Read>, ObjectPtrHash, ObjectPtrEqual>
+        reads;
     for (TaskNode *task : tasks) {
-      auto metadata = task_metadata_detail::CopyTaskMetadata(
-          Downcast<AttrStmt>(task->stmt)->node);
-      auto origin = metadata.Get("subcore_origin");
-      if (!origin)
-        continue;
       PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
         const auto *call = node.as<CallNode>();
         if (!call || !IsAscendCopyCall(call))
           return;
-        AscendCopy copy(call->args, call->annotations);
-        if (IsL0CBuffer(copy->src) && IsSharedBuffer(copy->dst) &&
-            !is_zero(copy->unit_flag_ctl))
-          reads[origin.value().cast<Integer>()->value].push_back({task, copy});
+        auto origin = copy_origins_.find(ffi::GetRef<Call>(call));
+        if (origin != copy_origins_.end())
+          reads[origin->second].push_back(
+              {task, AscendCopy(call->args, call->annotations)});
       });
     }
-    VarSet disable;
     auto single_iteration_guard = [](TaskNode *task) {
       PrimExpr guard = task->GetConditionGuard();
       IRStructure *parent = task->GetParent();
@@ -187,6 +207,8 @@ private:
       for (size_t i = 0; i < copies.size(); ++i) {
         for (size_t j = i + 1; j < copies.size(); ++j) {
           const Read &a = copies[i], &b = copies[j];
+          if (is_zero(a.copy->unit_flag_ctl) && is_zero(b.copy->unit_flag_ctl))
+            continue;
           auto [a_parent, a_guard] = single_iteration_guard(a.task);
           auto [b_parent, b_guard] = single_iteration_guard(b.task);
           ConstrSet context = b.task->outer_ctx;
@@ -202,7 +224,8 @@ private:
                                        analyzer.z3_prover.CanProve(exclusive)))
             continue;
           bool disjoint = false;
-          if (a.copy->src_range.size() == b.copy->src_range.size()) {
+          if (a.copy->src.same_as(b.copy->src) &&
+              a.copy->src_range.size() == b.copy->src_range.size()) {
             for (size_t dim = 0; dim < a.copy->src_range.size(); ++dim) {
               const Range &x = a.copy->src_range[dim];
               const Range &y = b.copy->src_range[dim];
@@ -214,35 +237,18 @@ private:
                       floordiv(x->min, fractal));
             }
           }
-          if (!disjoint)
-            disable.insert(a.copy->src->data);
+          TVM_FFI_CHECK(disjoint, ValueError)
+              << "Subcore projection cannot preserve explicit unit_flag_ctrl "
+                 "for L0C->UB copy from "
+              << a.copy->src->name
+              << ": copies derived from the same source operation may access "
+                 "the same UnitFlag fractal. Use a single AIV destination or "
+                 "independent whole fractals, or remove unit_flag_ctrl from "
+                 "both the related GEMM and copies to use automatic "
+                 "synchronization";
         }
       }
     }
-    if (disable.empty())
-      return root;
-    class Rewriter : public StmtExprMutator {
-    public:
-      explicit Rewriter(const VarSet &disable) : disable_(disable) {}
-
-    private:
-      PrimExpr VisitExpr_(const CallNode *op) final {
-        Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-        if (!call->annotations.count("unit_flag_ctrl"))
-          return call;
-        bool affected = false;
-        PostOrderVisit(call, [&](const ObjectRef &node) {
-          if (const auto *load = node.as<BufferLoadNode>())
-            affected |= disable_.count(load->buffer->data);
-        });
-        if (affected)
-          call.CopyOnWrite()->annotations.Set("unit_flag_ctrl", Integer(0));
-        return call;
-      }
-      const VarSet &disable_;
-    } rewriter(disable);
-    root.CopyOnWrite()->body = rewriter(root->body);
-    return root;
   }
 
   SubcoreProjector(Var sid, int count) : sid_(std::move(sid)), count_(count) {
@@ -737,6 +743,7 @@ private:
     }
 
     Stmt VisitStmt_(const EvaluateNode *op) final {
+      PrimExpr source_value = op->value;
       Evaluate statement = Downcast<Evaluate>(StmtExprMutator::VisitStmt_(op));
       const auto *call_node = statement->value.as<CallNode>();
       if (!call_node || !IsAscendCopyCall(call_node))
@@ -764,6 +771,11 @@ private:
       annotations.Set("sub_blockid", Integer(p_));
       call.CopyOnWrite()->annotations = annotations;
       statement.CopyOnWrite()->value = call;
+      Call source = Downcast<Call>(source_value);
+      if (auto origin = owner_->copy_origins_.find(source);
+          origin != owner_->copy_origins_.end())
+        source = origin->second;
+      owner_->copy_origins_.emplace(call, std::move(source));
 
       PrimExpr condition = analyzer_.Simplify(target == p_);
       bool task_local = SideEffect(condition) > CallEffectKind::kReadState;
@@ -921,6 +933,7 @@ private:
   std::unordered_map<AttrStmt, int, ObjectPtrHash, ObjectPtrEqual>
       candidate_origins_;
   std::unordered_set<int> replay_check_origins_;
+  std::unordered_map<Call, Call, ObjectPtrHash, ObjectPtrEqual> copy_origins_;
   VarSet varying_;
   VarSet dual_storages_;
   std::unordered_set<const TaskNode *> dual_tasks_;

@@ -266,8 +266,8 @@ def test_subcore_gemm_results(pattern, steps, unit_flag):
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("rows, dual", [(16, True), (32, True), (16, False)])
-def test_subcore_fixpipe_preserves_unit_flag_lifetime(rows, dual):
+@pytest.mark.parametrize("rows, dual, unit_flag", [(16, True, 3), (32, True, 3), (16, False, 0)])
+def test_subcore_fixpipe_synchronization(rows, dual, unit_flag):
     import torch
 
     outputs = 1 if dual else 2
@@ -281,15 +281,15 @@ def test_subcore_fixpipe_preserves_unit_flag_lifetime(rows, dual):
             ub = T.alloc_shared((rows // 2 if dual else rows, 32), "float32")
             T.copy(A, a)
             T.copy(B, b)
-            T.gemm(a, b, accum, transpose_B=True, clear_accum=True, unit_flag_ctrl=3)
+            T.gemm(a, b, accum, transpose_B=True, clear_accum=True, unit_flag_ctrl=unit_flag)
             if dual:
-                T.dual_copy(accum, ub, unit_flag_ctrl=3)
+                T.dual_copy(accum, ub, unit_flag_ctrl=unit_flag)
                 with T.SimdVF():
                     value = T.simd.vld(ub[0, 0])
                     T.simd.vsts(ub[0, 0], value)
                 T.copy(ub, C[0, sid * (rows // 2) : (sid + 1) * (rows // 2), :])
             else:
-                T.copy(accum, ub, unit_flag_ctrl=3)
+                T.copy(accum, ub, unit_flag_ctrl=unit_flag)
                 T.copy(ub, C[sid, :, :])
 
     torch.manual_seed(37)
