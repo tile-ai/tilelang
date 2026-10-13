@@ -998,23 +998,26 @@ private:
   arith::Analyzer analyzer_;
 };
 
-// Each mask is a set of reaching directions: 0 is unreachable, 1 is M, 2 is N,
-// and 3 means both directions can reach this path.
+// Retain guards for immutable SSA conditions split apart by AutoSchedule.
+struct MmadDirectionState {
+  PrimExpr m = const_false();
+  PrimExpr n = const_false();
+};
 struct MmadDirectionFlowState {
-  uint8_t fallthrough;
-  uint8_t breaks;
+  MmadDirectionState fallthrough;
+  MmadDirectionState breaks;
 };
 
 // PTODSL encodes the stateful AscendC MAD direction on each MAD operation.
-class PTOMmadDirectionAnalyzer
-    : public StmtFunctor<MmadDirectionFlowState(const Stmt &, uint8_t)> {
+class PTOMmadDirectionAnalyzer : public StmtFunctor<MmadDirectionFlowState(
+                                     const Stmt &, MmadDirectionState)> {
 public:
   using DirectionMap =
       std::unordered_map<Call, bool, ObjectPtrHash, ObjectPtrEqual>;
 
   static DirectionMap Analyze(const PrimFunc &func) {
     PTOMmadDirectionAnalyzer analyzer;
-    analyzer.VisitStmt(func->body, kM);
+    analyzer.VisitStmt(func->body, FromMask(kM));
     DirectionMap result;
     for (const auto &[call, directions] : analyzer.mad_directions_) {
       ICHECK(directions == 0 || directions == kM || directions == kN)
@@ -1030,105 +1033,140 @@ private:
   static constexpr uint8_t kM = 1;
   static constexpr uint8_t kN = 2;
 
-  FlowState AnalyzeLoop(const Stmt &body, uint8_t incoming, bool must_execute,
+  using State = MmadDirectionState;
+
+  static State FromMask(uint8_t mask) {
+    return {make_const(DataType::Bool(), (mask & kM) != 0),
+            make_const(DataType::Bool(), (mask & kN) != 0)};
+  }
+
+  uint8_t Mask(const State &state) {
+    return (analyzer_.CanProve(!state.m) ? 0 : kM) |
+           (analyzer_.CanProve(!state.n) ? 0 : kN);
+  }
+
+  State Merge(const State &a, const State &b) {
+    return {analyzer_.Simplify(a.m || b.m), analyzer_.Simplify(a.n || b.n)};
+  }
+
+  State Restrict(const State &state, const PrimExpr &condition) {
+    // Buffer reads can change between two identical-looking guards. Only SSA
+    // conditions may be correlated; uncertain paths must remain reachable.
+    if (SideEffect(condition) != CallEffectKind::kPure) {
+      return state;
+    }
+    return {analyzer_.Simplify(state.m && condition),
+            analyzer_.Simplify(state.n && condition)};
+  }
+
+  FlowState AnalyzeLoop(const Stmt &body, State incoming, bool must_execute,
                         bool can_exit_normally = true) {
-    uint8_t header = incoming;
+    // Widen at backedges: an induction variable or body-local SSA snapshot
+    // denotes a different value on the next iteration.
+    uint8_t incoming_mask = Mask(incoming);
+    uint8_t header = incoming_mask;
     for (int i = 0; i < 4; ++i) {
-      FlowState body_out = VisitStmt(body, header);
-      uint8_t next = incoming | body_out.fallthrough;
+      FlowState body_out = VisitStmt(body, FromMask(header));
+      uint8_t next = incoming_mask | Mask(body_out.fallthrough);
       if (next == header) {
         // Breaks exit this loop rather than flowing back to its header. A
         // nested loop consumes its own breaks before returning to this body.
-        uint8_t exits = body_out.breaks;
+        uint8_t exits = Mask(body_out.breaks);
         if (can_exit_normally) {
-          exits |= body_out.fallthrough;
+          exits |= Mask(body_out.fallthrough);
           if (!must_execute) {
-            exits |= incoming;
+            exits |= incoming_mask;
           }
         }
-        return {exits, 0};
+        return {FromMask(exits), {}};
       }
       header = next;
     }
     LOG(FATAL) << "PTO MAD direction loop analysis failed to converge";
-    return {incoming, 0};
+    return {incoming, {}};
   }
 
-  FlowState VisitStmt_(const BindNode *, uint8_t state) final {
-    return {state, 0};
+  FlowState VisitStmt_(const BindNode *, State state) final {
+    return {state, {}};
   }
-  FlowState VisitStmt_(const AttrStmtNode *op, uint8_t state) final {
+  FlowState VisitStmt_(const AttrStmtNode *op, State state) final {
     return VisitStmt(op->body, state);
   }
-  FlowState VisitStmt_(const IfThenElseNode *op, uint8_t state) final {
+  FlowState VisitStmt_(const IfThenElseNode *op, State state) final {
     PrimExpr condition = analyzer_.Simplify(op->condition);
     if (const auto *imm = condition.as<IntImmNode>()) {
       if (imm->value != 0) {
         return VisitStmt(op->then_case, state);
       }
       return op->else_case ? VisitStmt(op->else_case.value(), state)
-                           : FlowState{state, 0};
+                           : FlowState{state, {}};
     }
-    FlowState then_out = VisitStmt(op->then_case, state);
-    FlowState else_out = op->else_case ? VisitStmt(op->else_case.value(), state)
-                                       : FlowState{state, 0};
-    return {static_cast<uint8_t>(then_out.fallthrough | else_out.fallthrough),
-            static_cast<uint8_t>(then_out.breaks | else_out.breaks)};
+    FlowState then_out = VisitStmt(op->then_case, Restrict(state, condition));
+    FlowState else_out =
+        op->else_case
+            ? VisitStmt(op->else_case.value(), Restrict(state, !condition))
+            : FlowState{Restrict(state, !condition), {}};
+    return {Merge(then_out.fallthrough, else_out.fallthrough),
+            Merge(then_out.breaks, else_out.breaks)};
   }
-  FlowState VisitStmt_(const ForNode *op, uint8_t state) final {
+  FlowState VisitStmt_(const ForNode *op, State state) final {
     if (analyzer_.CanProve(op->extent <= 0)) {
       // Codegen can still emit the body. Record its MADs as unreachable
       // without allowing its direction setters to affect subsequent code.
-      VisitStmt(op->body, 0);
-      return {state, 0};
+      VisitStmt(op->body, {});
+      return {state, {}};
     }
     if (analyzer_.CanProveEqual(op->extent,
                                 make_const(op->extent.dtype(), 1))) {
       // A single-trip loop has no backedge. Both normal completion and break
       // leave the loop, so merge them directly into its fallthrough state.
       FlowState body_out = VisitStmt(op->body, state);
-      return {static_cast<uint8_t>(body_out.fallthrough | body_out.breaks), 0};
+      State exits = Merge(body_out.fallthrough, body_out.breaks);
+      Map<Var, PrimExpr> values{{op->loop_var, op->min}};
+      return {{analyzer_.Simplify(Substitute(exits.m, values)),
+               analyzer_.Simplify(Substitute(exits.n, values))},
+              {}};
     }
     return AnalyzeLoop(op->body, state, analyzer_.CanProve(op->extent > 0));
   }
-  FlowState VisitStmt_(const WhileNode *op, uint8_t state) final {
+  FlowState VisitStmt_(const WhileNode *op, State state) final {
     PrimExpr condition = analyzer_.Simplify(op->condition);
     if (is_zero(condition)) {
-      VisitStmt(op->body, 0);
-      return {state, 0};
+      VisitStmt(op->body, {});
+      return {state, {}};
     }
     const bool always_true = is_one(condition);
     // A constant-true while only exits through break. Its normal body exit is
     // a backedge, and the incoming state cannot bypass the body.
     return AnalyzeLoop(op->body, state, always_true, !always_true);
   }
-  FlowState VisitStmt_(const AllocBufferNode *, uint8_t state) final {
-    return {state, 0};
+  FlowState VisitStmt_(const AllocBufferNode *, State state) final {
+    return {state, {}};
   }
-  FlowState VisitStmt_(const DeclBufferNode *, uint8_t state) final {
-    return {state, 0};
+  FlowState VisitStmt_(const DeclBufferNode *, State state) final {
+    return {state, {}};
   }
-  FlowState VisitStmt_(const BufferStoreNode *, uint8_t state) final {
-    return {state, 0};
+  FlowState VisitStmt_(const BufferStoreNode *, State state) final {
+    return {state, {}};
   }
-  FlowState VisitStmt_(const AssertStmtNode *, uint8_t state) final {
-    return {state, 0};
+  FlowState VisitStmt_(const AssertStmtNode *, State state) final {
+    return {state, {}};
   }
-  FlowState VisitStmt_(const SeqStmtNode *op, uint8_t state) final {
-    FlowState result{state, 0};
+  FlowState VisitStmt_(const SeqStmtNode *op, State state) final {
+    FlowState result{state, {}};
     for (const Stmt &stmt : op->seq) {
       FlowState next = VisitStmt(stmt, result.fallthrough);
       result.fallthrough = next.fallthrough;
-      result.breaks |= next.breaks;
+      result.breaks = Merge(result.breaks, next.breaks);
     }
     return result;
   }
-  FlowState VisitStmt_(const EvaluateNode *op, uint8_t state) final {
+  FlowState VisitStmt_(const EvaluateNode *op, State state) final {
     const auto *call = op->value.as<CallNode>();
     if (call == nullptr)
-      return {state, 0};
+      return {state, {}};
     if (call->op.same_as(tl::loop_break())) {
-      return {0, state};
+      return {{}, state};
     }
     if (call->op.same_as(tl::ascend_set_mmad_direction())) {
       ICHECK_EQ(call->args.size(), 1U);
@@ -1136,32 +1174,38 @@ private:
       ICHECK(direction && (direction->value == "m" || direction->value == "n"))
           << "PTO MAD direction expects 'm' or 'n'";
       // An unreachable setter must not revive the path after a break.
-      if (state == 0) {
-        return {0, 0};
+      if (Mask(state) == 0) {
+        return {{}, {}};
       }
-      return {direction->value == "n" ? kN : kM, 0};
+      PrimExpr reachable = analyzer_.Simplify(state.m || state.n);
+      return {direction->value == "n" ? State{const_false(), reachable}
+                                      : State{reachable, const_false()},
+              {}};
     }
     if (call->op.same_as(tl::ascend_mad()) ||
-        call->op.same_as(tl::ascend_mad_mx()))
-      mad_directions_[GetRef<Call>(call)] |= state;
-    return {state, 0};
+        call->op.same_as(tl::ascend_mad_mx()) ||
+        call->op.same_as(tl::ascend_gemm_l1()) ||
+        call->op.same_as(tl::ascend_blockscaled_gemm_l1()))
+      mad_directions_[GetRef<Call>(call)] |= Mask(state);
+    return {state, {}};
   }
-  FlowState VisitStmt_(const SBlockNode *op, uint8_t state) final {
+  FlowState VisitStmt_(const SBlockNode *op, State state) final {
     FlowState init =
-        op->init ? VisitStmt(op->init.value(), state) : FlowState{state, 0};
+        op->init ? VisitStmt(op->init.value(), state) : FlowState{state, {}};
     FlowState body = VisitStmt(op->body, init.fallthrough);
-    body.breaks |= init.breaks;
+    body.breaks = Merge(body.breaks, init.breaks);
     return body;
   }
-  FlowState VisitStmt_(const SBlockRealizeNode *op, uint8_t state) final {
+  FlowState VisitStmt_(const SBlockRealizeNode *op, State state) final {
     PrimExpr predicate = analyzer_.Simplify(op->predicate);
     if (is_zero(predicate)) {
-      VisitStmt(op->block, 0);
-      return {state, 0};
+      VisitStmt(op->block, {});
+      return {state, {}};
     }
-    FlowState block_out = VisitStmt(op->block, state);
+    FlowState block_out = VisitStmt(op->block, Restrict(state, predicate));
     if (!is_one(predicate)) {
-      block_out.fallthrough |= state;
+      block_out.fallthrough =
+          Merge(block_out.fallthrough, Restrict(state, !predicate));
     }
     return block_out;
   }
@@ -4169,6 +4213,9 @@ void CodeGenTileLangPTO::EmitBlockscaledGemmRun(
 }
 
 void CodeGenTileLangPTO::EmitAscendGemmL1(const CallNode *op) {
+  ICHECK(!n_direction_by_mad_.at(GetRef<Call>(op)))
+      << "PTO L1 GEMM does not support N MAD direction; use L0 inputs "
+         "for N-directed GEMM";
   const PTOGemmEmitContext &ctx = EnsureGemmHelper(op);
   std::string acc = GetAccPtrExpr(op->args[0], DataType::Float(32));
   std::string a_mat = GetLocalPtrExpr(op->args[1], "mat", ctx.input_dtype);
@@ -4187,6 +4234,8 @@ void CodeGenTileLangPTO::EmitAscendGemmL1(const CallNode *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendBlockscaledGemmL1(const CallNode *op) {
+  ICHECK(!n_direction_by_mad_.at(GetRef<Call>(op)))
+      << "PTO blockscaled L1 GEMM does not support N MAD direction";
   const PTOGemmEmitContext &ctx = EnsureBlockscaledGemmHelper(op);
   std::string acc = GetAccPtrExpr(op->args[0], DataType::Float(32));
   std::string a_mat = GetLocalPtrExpr(op->args[1], "mat", ctx.input_dtype);
@@ -7001,6 +7050,7 @@ void CodeGenTileLangPTO::VisitStmt_(const ForNode *op) {
     stream << "):\n";
   }
   int for_scope = BeginScope();
+  const auto for_body_start = stream.tellp();
   if (!emit_static_range) {
     PrintIndent();
     stream << vid << " = pto.cast(" << range_vid << ", "
@@ -7009,6 +7059,10 @@ void CodeGenTileLangPTO::VisitStmt_(const ForNode *op) {
   ++native_loop_depth_;
   PrintStmt_(op->body);
   --native_loop_depth_;
+  if (stream.tellp() == for_body_start) {
+    PrintIndent();
+    stream << "pass\n";
+  }
   EndScope(for_scope);
   current_copy_pad_value_id_ = entry_pad_value_id;
   current_copy_pad_value_dtype_ = entry_pad_value_dtype;
@@ -7021,6 +7075,7 @@ void CodeGenTileLangPTO::VisitStmt_(const WhileNode *op) {
   PrintIndent();
   stream << "while " << PrintCondition(op->condition) << ":\n";
   int while_scope = BeginScope();
+  const auto while_body_start = stream.tellp();
   // PTODSL can infer a nested loop's condition snapshots as outer loop inputs
   // when an earlier break skips their definitions. Bind placeholders before
   // any break; the authored Bind still takes the actual snapshot at its use.
@@ -7067,6 +7122,10 @@ void CodeGenTileLangPTO::VisitStmt_(const WhileNode *op) {
   ++native_loop_depth_;
   PrintStmt_(op->body);
   --native_loop_depth_;
+  if (stream.tellp() == while_body_start) {
+    PrintIndent();
+    stream << "pass\n";
+  }
   EndScope(while_scope);
   for (const Var &var : initialized_conditions) {
     loop_condition_snapshot_ids_.erase(var);
@@ -7201,6 +7260,7 @@ void CodeGenTileLangPTO::VisitStmt_(const IfThenElseNode *op) {
   PrintIndent();
   stream << "if " << cond << ":\n";
   int then_scope = BeginScope();
+  const auto then_body_start = stream.tellp();
   PrintStmt_(op->then_case);
   int then_pad_value_id = current_copy_pad_value_id_;
   DataType then_pad_value_dtype = current_copy_pad_value_dtype_;
@@ -7208,6 +7268,10 @@ void CodeGenTileLangPTO::VisitStmt_(const IfThenElseNode *op) {
   if (needs_pad_merge) {
     merged_pad_value_id = copy_pad_value_counter_++;
     EmitCopyPadMerge_(merged_pad_value_id, symbolic_then.dtype);
+  }
+  if (stream.tellp() == then_body_start) {
+    PrintIndent();
+    stream << "pass\n";
   }
   EndScope(then_scope);
 
@@ -7219,11 +7283,16 @@ void CodeGenTileLangPTO::VisitStmt_(const IfThenElseNode *op) {
     PrintIndent();
     stream << "else:\n";
     int else_scope = BeginScope();
+    const auto else_body_start = stream.tellp();
     PrintStmt_(op->else_case.value());
     else_pad_value_id = current_copy_pad_value_id_;
     else_pad_value_dtype = current_copy_pad_value_dtype_;
     if (needs_pad_merge) {
       EmitCopyPadMerge_(merged_pad_value_id, symbolic_else.dtype);
+    }
+    if (stream.tellp() == else_body_start) {
+      PrintIndent();
+      stream << "pass\n";
     }
     EndScope(else_scope);
   } else if (needs_pad_merge) {
