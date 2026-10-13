@@ -129,6 +129,31 @@ def test_correctness_non_square_matrix():
     assert_simdgroup_store_correctness(256, 512, 128, 32, 32, 16)
 
 
+@tilelang.testing.requires_metal
+def test_benchmark_fp32_accumulation(monkeypatch):
+    from benchmark.matmul_metal import benchmark_matmul_metal as benchmark
+
+    make_kernel = benchmark.matmul_simdgroup
+
+    def make_checked_kernel(*args, **kwargs):
+        kernel = make_kernel(*args, **kwargs)
+
+        def run(a, b, c):
+            a.fill_(1)
+            b.fill_(0.25)
+            b[:32].fill_(1024)
+            kernel(a, b, c)
+            # The exact sum is 32768 + 224 * 0.25 = 32824, rounded once to
+            # fp16 as 32832. An fp16 accumulator loses the small increments.
+            torch.testing.assert_close(c, torch.full_like(c, 32832), rtol=0, atol=0)
+
+        return run
+
+    # Exercise the benchmark's actual dtype choice and mixed-dtype store.
+    monkeypatch.setattr(benchmark, "matmul_simdgroup", make_checked_kernel)
+    benchmark.bench_tilelang("simdgroup", 16, 16, 256, 16, 16, 32, 128, 0, "row", warmup=0, repeats=1)
+
+
 if __name__ == "__main__":
     if torch.mps.is_available():
         tilelang.testing.main()
