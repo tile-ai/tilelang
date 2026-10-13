@@ -1,34 +1,18 @@
 """Tests for TileLang `LowerTileOp` synchronization and copy lowering."""
 
+from collections import Counter
+
 import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang import tvm
 from tvm.tirx.stmt_functor import post_order_visit
 
 
 def _count_calls(func: tvm.tirx.PrimFunc):
-    counts = {}
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op):
-            name = str(node.op.name)
-            counts[name] = counts.get(name, 0) + 1
-
-    post_order_visit(func.body, _visit)
-    return counts
-
-
-def _collect_calls(root, op_name: str):
-    calls = []
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and str(node.op.name).endswith(op_name):
-            calls.append(node)
-
-    post_order_visit(root.body if hasattr(root, "body") else root, _visit)
-    return calls
+    return Counter(str(call.op.name) for call in collect_nodes(func, tvm.tirx.Call) if isinstance(call.op, tvm.ir.Op))
 
 
 def _find_loop_with_annotation(func: tvm.tirx.PrimFunc, annotation: str):
@@ -140,11 +124,11 @@ def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dty
 
     func = mod["main"]
     _assert_no_unexpected_free_vars(func)
-    assert len(_collect_calls(func, "tl.ptx_cp_async")) == 1
+    assert_call_count(func, op="tl.ptx_cp_async", count=1)
     async_vector_loops = []
 
     def collect(node):
-        if isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.VECTORIZED and _collect_calls(node, "tl.ptx_cp_async"):
+        if isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.VECTORIZED and collect_calls(node, op="tl.ptx_cp_async"):
             async_vector_loops.append(node)
 
     post_order_visit(func.body, collect)
@@ -180,15 +164,15 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     with target:
         mod = tl.transform.InjectSoftwarePipeline()(mod)
-        copy_calls = _collect_calls(mod["main"], "tileop.copy")
+        copy_calls = collect_calls(mod["main"], op="tl.tileop.copy")
         assert all("tl.pipeline_mbar_phase_expr" not in call.annotations for call in copy_calls)
         mod = tl.transform.LayoutInference()(mod)
         mod = tl.transform.LowerTileOp()(mod)
 
     func = mod["main"]
-    waits = _collect_calls(func, "mbarrier_wait_parity")
+    waits = collect_calls(func, op="tl.mbarrier_wait_parity")
     loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
-    loop_waits = _collect_calls(loop, "mbarrier_wait_parity")
+    loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
 
     assert len(waits) == num_stages
     assert len(loop_waits) == 1
@@ -239,9 +223,9 @@ def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
         mod = tl.transform.LowerTileOp()(mod)
 
     func = mod["main"]
-    waits = _collect_calls(func, "mbarrier_wait_parity")
+    waits = collect_calls(func, op="tl.mbarrier_wait_parity")
     loop = _find_loop_with_annotation(func, "tl_pipelined_num_stages")
-    loop_waits = _collect_calls(loop, "mbarrier_wait_parity")
+    loop_waits = collect_calls(loop, op="tl.mbarrier_wait_parity")
 
     assert len(waits) == num_stages
     assert len(loop_waits) == 1
