@@ -9,6 +9,7 @@ from tilelang.jit.adapter.wrapper import TLCPUSourceWrapper, TLCUDASourceWrapper
 
 
 def test_adapter_source_wrapper_requires_lowered_modules():
+    """Reject source wrappers that lack lowered host and device modules."""
     with pytest.raises(ValueError, match="missing: device_mod, host_mod"):
         TLCPUSourceWrapper(
             scheduled_ir_module=tvm.IRModule(),
@@ -18,6 +19,7 @@ def test_adapter_source_wrapper_requires_lowered_modules():
 
 
 def test_non_descriptor_name_does_not_modify_descriptor_map():
+    """Leave existing mappings intact for an ordinary pointer parameter."""
     descriptor_map = {"A_desc": "A"}
     assert not maybe_desc_name("A", ["half_t", "A_desc_1"], 1, descriptor_map)
     assert descriptor_map == {"A_desc": "A"}
@@ -25,11 +27,13 @@ def test_non_descriptor_name_does_not_modify_descriptor_map():
 
 @tilelang.testing.requires_cuda
 def test_cuda_wrapper_with_descriptor_named_output():
+    """Lower TMA source with an output name that resembles a descriptor."""
     @T.prim_func
     def mixed(
         A: T.StridedTensor((32, 128), (160, 1), "float16"),
         A_desc: T.Tensor((32, 128), "float16"),
     ):
+        """Copy strided input through shared memory into a descriptor-like name."""
         with T.Kernel(1, threads=128):
             shared = T.alloc_shared((32, 128), "float16")
             T.copy(A, shared, prefer_instruction="tma")
