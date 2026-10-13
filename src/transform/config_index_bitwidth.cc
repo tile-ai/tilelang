@@ -1,7 +1,7 @@
 #include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "common/int64_promoter.h"
+#include "common/index_predicate_rewriter.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/ir/cast.h>
@@ -79,7 +79,8 @@ public:
   static Stmt Rewrite(const Stmt &stmt) {
     Analyzer ana;
     auto pass = IndexLegalizer(&ana);
-    return pass.VisitStmt(stmt);
+    Stmt rewritten = pass.VisitStmt(stmt);
+    return pass.index_predicate_rewriter_.Rewrite(rewritten);
   }
 
 private:
@@ -95,8 +96,7 @@ private:
         auto int_bound = analyzer_->const_int_bound(index);
         if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          Int64Promoter promoter;
-          index = promoter(index);
+          index = index_predicate_rewriter_.Promote(index);
           new_indices.push_back(index);
           continue;
         }
@@ -117,8 +117,7 @@ private:
         auto int_bound = analyzer_->const_int_bound(index);
         if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          Int64Promoter promoter;
-          index = promoter(index);
+          index = index_predicate_rewriter_.Promote(index);
           new_indices.push_back(index);
           continue;
         }
@@ -128,6 +127,8 @@ private:
     buffer_load.CopyOnWrite()->indices = new_indices;
     return std::move(buffer_load);
   }
+
+  IndexPredicateRewriter index_predicate_rewriter_;
 };
 
 tvm::transform::Pass ConfigIndexBitwidth() {

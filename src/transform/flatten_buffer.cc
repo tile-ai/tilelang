@@ -23,7 +23,7 @@
 
 #include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "common/int64_promoter.h"
+#include "common/index_predicate_rewriter.h"
 #include "support/check.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
@@ -59,7 +59,8 @@ public:
     }
     auto writer = func.CopyOnWrite();
     pass.MarkBufferMapShapes(func);
-    writer->body = pass.VisitStmt(func->body);
+    Stmt rewritten = pass.VisitStmt(func->body);
+    writer->body = pass.index_predicate_rewriter_.Rewrite(rewritten);
     // The buffers in func->buffer_map are deliberately left
     // unflattened, as they are used for validation of user-provided
     // arguments.  The flattened buffers used in the updated
@@ -222,8 +223,8 @@ private:
           << "tvm_access_ptr must have at least 3 arguments";
       PrimExpr offset = call->args[2];
       if (NeedsInt64Promotion(offset)) {
-        Int64Promoter promoter;
-        call.CopyOnWrite()->args.Set(2, promoter(offset));
+        call.CopyOnWrite()->args.Set(2,
+                                     index_predicate_rewriter_.Promote(offset));
       }
     }
     return std::move(call);
@@ -247,10 +248,9 @@ private:
                                           const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
     Array<PrimExpr> safe_indices;
-    Int64Promoter promoter;
     for (const auto &index : flattened_indices) {
       if (NeedsInt64Promotion(index)) {
-        safe_indices.push_back(promoter(index));
+        safe_indices.push_back(index_predicate_rewriter_.Promote(index));
       } else {
         safe_indices.push_back(index);
       }
@@ -309,6 +309,8 @@ private:
 
   /*! \brief Local var initializers preserved from block annotations. */
   Map<Var, PrimExpr> local_var_init_map_;
+
+  IndexPredicateRewriter index_predicate_rewriter_;
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
