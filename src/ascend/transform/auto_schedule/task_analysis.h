@@ -174,8 +174,8 @@ struct TaskResourceUsage {
 // remain separate from hardware resource classification because AutoSchedule
 // also adds accesses from surrounding guards and loop expressions to a task.
 struct TaskAccessInfo {
-  std::vector<AccessRegion> read_regions;
-  std::vector<AccessRegion> write_regions;
+  std::vector<MemoryAccess> read_regions;
+  std::vector<MemoryAccess> write_regions;
   std::vector<Var> read_vars;
   std::vector<Var> write_vars;
 };
@@ -410,7 +410,7 @@ inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
 
 inline bool TaskAccessesStorage(const TaskAccessInfo &accesses,
                                 const Var &storage) {
-  auto regions_access = [&](const std::vector<AccessRegion> &regions) {
+  auto regions_access = [&](const std::vector<MemoryAccess> &regions) {
     return std::any_of(regions.begin(), regions.end(), [&](const auto &region) {
       return region.logical->buffer->data.same_as(storage);
     });
@@ -505,7 +505,7 @@ public:
     CoreMask result = kCoreBroadcast;
     for (const Var &var : accesses.read_vars)
       result &= GetValueCoreMask(var, reader);
-    for (const AccessRegion &access : accesses.read_regions) {
+    for (const MemoryAccess &access : accesses.read_regions) {
       const BufferRegion &region = access.logical;
       if (IsSharedBuffer(region->buffer)) {
         result &= kCoreVector;
@@ -626,9 +626,9 @@ inline void ApplyTaskResourceUsage(const TaskResourceUsage &usage,
 
 inline void ApplyTaskAccesses(const TaskAccessInfo &accesses, TaskNode *task) {
   ICHECK(task != nullptr);
-  for (const AccessRegion &access : accesses.read_regions)
+  for (const MemoryAccess &access : accesses.read_regions)
     task->AddReadAccess(access);
-  for (const AccessRegion &access : accesses.write_regions)
+  for (const MemoryAccess &access : accesses.write_regions)
     task->AddWriteAccess(access);
   for (const Var &var : accesses.read_vars)
     task->AddReadVar(var);

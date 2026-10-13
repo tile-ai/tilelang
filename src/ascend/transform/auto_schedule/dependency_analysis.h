@@ -121,8 +121,8 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
 // an identically-shaped iteration in another owner can still be a distinct
 // epoch. Shared by scheduling-time IRStructure analysis and the scheduled-TIR
 // synchronization pass.
-bool RegionsMayConflict(const ConstrSet &a_ctx, const AccessRegion &a_access,
-                        const ConstrSet &b_ctx, const AccessRegion &b_access,
+bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
+                        const ConstrSet &b_ctx, const MemoryAccess &b_access,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners = 0,
                         const ConflictHintList &root_conflicts = {});

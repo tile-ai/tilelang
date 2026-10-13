@@ -37,8 +37,8 @@ using namespace tirx;
 
 // One detected access. A list of these records denotes a union, including
 // when several records refer to the same logical buffer.
-struct AccessRegion {
-  explicit AccessRegion(BufferRegion logical)
+struct MemoryAccess {
+  explicit MemoryAccess(BufferRegion logical)
       : logical(std::move(logical)), bounds(this->logical->region),
         repeat(Integer(1)), stride(Integer(0)) {}
 
@@ -56,10 +56,10 @@ struct AccessRegion {
 };
 
 inline std::vector<BufferRegion>
-LogicalRegions(const std::vector<AccessRegion> &accesses) {
+LogicalRegions(const std::vector<MemoryAccess> &accesses) {
   std::vector<BufferRegion> regions;
   regions.reserve(accesses.size());
-  for (const AccessRegion &access : accesses)
+  for (const MemoryAccess &access : accesses)
     regions.push_back(access.logical);
   return regions;
 }
@@ -119,14 +119,14 @@ public:
 
   // Wrap the existing per-buffer rectangular summaries. Producing separate
   // records for individual accesses is a later precision improvement.
-  std::vector<AccessRegion> GetReadAccesses() const {
-    std::vector<AccessRegion> accesses;
+  std::vector<MemoryAccess> GetReadAccesses() const {
+    std::vector<MemoryAccess> accesses;
     for (const BufferRegion &region : GetReadRegions())
       accesses.emplace_back(region);
     return accesses;
   }
-  std::vector<AccessRegion> GetWriteAccesses() const {
-    std::vector<AccessRegion> accesses;
+  std::vector<MemoryAccess> GetWriteAccesses() const {
+    std::vector<MemoryAccess> accesses;
     for (const BufferRegion &region : GetWriteRegions())
       accesses.emplace_back(region);
     return accesses;

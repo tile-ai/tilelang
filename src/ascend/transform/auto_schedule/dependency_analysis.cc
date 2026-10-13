@@ -112,8 +112,8 @@ std::vector<const ControlNode *> StorageIterationNest(ControlNode *loop,
   return {controls.begin() + first, controls.end()};
 }
 
-bool RegionsMayConflict(const ConstrSet &a_ctx, const AccessRegion &a_access,
-                        const ConstrSet &b_ctx, const AccessRegion &b_access,
+bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
+                        const ConstrSet &b_ctx, const MemoryAccess &b_access,
                         ControlNode *loop, int offset,
                         size_t num_storage_owners,
                         const ConflictHintList &root_conflicts) {
@@ -284,7 +284,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
 
   struct RegionAccess {
     TaskNode *task;
-    AccessRegion region;
+    MemoryAccess region;
   };
   struct NodeAccesses {
     std::vector<RegionAccess> reads;
@@ -295,9 +295,9 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     std::vector<TaskNode *> tasks;
     CollectAllTaskNodes(nodes[i], tasks);
     for (TaskNode *task : tasks) {
-      for (const AccessRegion &region : task->GetReadAccesses())
+      for (const MemoryAccess &region : task->GetReadAccesses())
         accesses[i].reads.push_back({task, region});
-      for (const AccessRegion &region : task->GetWriteAccesses())
+      for (const MemoryAccess &region : task->GetWriteAccesses())
         accesses[i].writes.push_back({task, region});
     }
   }

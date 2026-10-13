@@ -111,7 +111,7 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
   return true;
 }
 
-inline bool AccessRegionsEqual(const AccessRegion &a, const AccessRegion &b) {
+inline bool MemoryAccessesEqual(const MemoryAccess &a, const MemoryAccess &b) {
   arith::Analyzer analyzer;
   return a.logical->buffer.same_as(b.logical->buffer) &&
          RegionsEqual(a.logical->region, b.logical->region) &&
@@ -540,10 +540,10 @@ public:
   // A copy that stores to GM in this leaf reads the atomic-mode register.
   bool ReadsAtomicRegister() const override { return reads_atomic_; }
 
-  const std::vector<AccessRegion> &GetReadAccesses() const {
+  const std::vector<MemoryAccess> &GetReadAccesses() const {
     return read_regions_;
   }
-  const std::vector<AccessRegion> &GetWriteAccesses() const {
+  const std::vector<MemoryAccess> &GetWriteAccesses() const {
     return write_regions_;
   }
 
@@ -568,10 +568,10 @@ public:
   void AddSpecialWrite(SpecialRegister reg) {
     special_write_mask_ |= static_cast<uint16_t>(reg);
   }
-  void SetReadAccesses(const std::vector<AccessRegion> &regions) {
+  void SetReadAccesses(const std::vector<MemoryAccess> &regions) {
     read_regions_ = regions;
   }
-  void SetWriteAccesses(const std::vector<AccessRegion> &regions) {
+  void SetWriteAccesses(const std::vector<MemoryAccess> &regions) {
     write_regions_ = regions;
   }
   void SetReadVars(const std::vector<Var> &vars) { read_vars_ = vars; }
@@ -586,8 +586,8 @@ public:
     };
     std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
         buffer_remap;
-    auto substitute_regions = [&](std::vector<AccessRegion> &regions) {
-      for (AccessRegion &access : regions) {
+    auto substitute_regions = [&](std::vector<MemoryAccess> &regions) {
+      for (MemoryAccess &access : regions) {
         Buffer buffer = access.logical->buffer;
         auto buffer_it = buffer_remap.find(buffer);
         if (buffer_it != buffer_remap.end()) {
@@ -625,17 +625,17 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   // Keep the existing deduplication, comparing the complete access record.
-  void AddReadAccess(const AccessRegion &access) {
-    for (const AccessRegion &existing : read_regions_) {
-      if (AccessRegionsEqual(existing, access))
+  void AddReadAccess(const MemoryAccess &access) {
+    for (const MemoryAccess &existing : read_regions_) {
+      if (MemoryAccessesEqual(existing, access))
         return;
     }
     read_regions_.push_back(access);
   }
 
-  void AddWriteAccess(const AccessRegion &access) {
-    for (const AccessRegion &existing : write_regions_) {
-      if (AccessRegionsEqual(existing, access))
+  void AddWriteAccess(const MemoryAccess &access) {
+    for (const MemoryAccess &existing : write_regions_) {
+      if (MemoryAccessesEqual(existing, access))
         return;
     }
     write_regions_.push_back(access);
@@ -670,8 +670,8 @@ private:
   // inferred or explicitly marked candidate.
   bool is_per_core_task_{false};
 
-  std::vector<AccessRegion> read_regions_;
-  std::vector<AccessRegion> write_regions_;
+  std::vector<MemoryAccess> read_regions_;
+  std::vector<MemoryAccess> write_regions_;
   std::vector<Var> read_vars_;
   std::vector<Var> write_vars_;
 
