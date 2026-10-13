@@ -445,6 +445,49 @@ def test_per_core_fixpipe_dispatch_preserves_each_subcore_output(routing, explic
     torch.testing.assert_close(output.cpu(), expected)
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("direction", ["load", "store"])
+def test_per_core_vector_dispatch_preserves_each_subcore_output(direction):
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 2, 64), "float32"), C: T.Tensor((2, 2, 64), "float32")):
+        with T.MixedKernel(2) as (bx, sid):
+            ub = T.alloc_shared((64,), "float32")
+            if direction == "load":
+                with T.PerCoreTask():
+                    if bx == 0:
+                        with T.Task():
+                            T.copy(A[0, sid, :], ub)
+                    else:
+                        with T.Task():
+                            T.copy(A[1, sid, :], ub)
+            else:
+                T.copy(A[bx, sid, :], ub)
+            if direction == "store":
+                with T.PerCoreTask():
+                    if bx == 0:
+                        with T.Task():
+                            T.copy(ub, C[0, sid, :])
+                    else:
+                        with T.Task():
+                            T.copy(ub, C[1, sid, :])
+                # Different participation forces subcore projection even
+                # though the candidate selection itself is subcore-uniform.
+                if sid == 0:
+                    T.fill(ub, 0.0)
+            else:
+                if sid == 0:
+                    T.copy(ub, C[bx, 0, :])
+                else:
+                    T.copy(ub, C[bx, 1, :])
+
+    data = torch.arange(256, dtype=torch.float32).reshape(2, 2, 64).npu()
+    output = torch.full_like(data, -1.0)
+    tilelang.compile(main, target="ascend")(data, output)
+    torch.testing.assert_close(output.cpu(), data.cpu(), rtol=0, atol=0)
+
+
 def test_subcore_mutable_scalar_is_replicated_with_its_guard():
     from testing.ascend._ir import schedule
 
