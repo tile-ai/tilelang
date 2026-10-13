@@ -10,6 +10,7 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -20,11 +21,15 @@
 #include <utility>
 #include <vector>
 
+#include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
+#include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
+#include "op/gemm.h"
+#include "op/operator.h"
 #include "op/utils.h"
 #include "support/check.h"
 #include "transform/common/attr.h"
@@ -50,9 +55,12 @@ struct MemoryAccess {
   // Repeat the last axis at [min + i * stride, min + i * stride + extent),
   // 0 <= i < repeat. Ordinary rectangular accesses use repeat=1, stride=0.
   // A non-positive repeat or axis extent denotes an empty access. Stride may
-  // be zero or negative. The detector currently emits ordinary accesses.
+  // be zero or negative.
   PrimExpr repeat;
   PrimExpr stride;
+  // Loops inside an atomic task. Keep address/pitch correlations until each
+  // side of an overlap query chooses its own iteration.
+  std::vector<std::pair<Var, Range>> domains;
 };
 
 inline std::vector<BufferRegion>
@@ -64,18 +72,140 @@ LogicalRegions(const std::vector<MemoryAccess> &accesses) {
   return regions;
 }
 
+using BufferMemoryAccesses =
+    std::unordered_map<tirx::Buffer, MemoryAccess, ffi::ObjectPtrHash,
+                       ffi::ObjectPtrEqual>;
+
+// Unknown L0 addressing covers a whole selected plane. Other storage keeps
+// its normal coordinate system, with instruction padding for L1 fractals.
+inline MemoryAccess MakeMemoryAccess(const BufferRegion &region) {
+  MemoryAccess access(region);
+  access.bounds.clear();
+  const Buffer &buffer = region->buffer;
+  if (IsL0ABuffer(buffer) || IsL0BBuffer(buffer) || IsL0CBuffer(buffer)) {
+    for (size_t i = 0; i + 2 < region->region.size(); ++i)
+      access.bounds.push_back(region->region[i]);
+    int alignment =
+        IsL0CBuffer(buffer) ? 16 : std::max(16, AscendC0(buffer->dtype.bits()));
+    PrimExpr bytes = make_const(DataType::Int(64), buffer->dtype.bits());
+    for (size_t i = buffer->shape.size() - 2; i < buffer->shape.size(); ++i)
+      bytes *= cast(DataType::Int(64),
+                    floordiv(buffer->shape[i] + alignment - 1, alignment) *
+                        alignment);
+    access.bounds.push_back(
+        Range::FromMinExtent(make_zero(DataType::Int(64)), floordiv(bytes, 8)));
+  } else {
+    access.bounds = ExpandAscendFractalMayAccess(region)->region;
+  }
+  return access;
+}
+
+inline MemoryAccess FractalAccess(const BufferRegion &region,
+                                  const AscendFractalLayoutInfo &info,
+                                  const AscendFractalRegionInfo &fractal,
+                                  PrimExpr pitch, PrimExpr count,
+                                  PrimExpr width) {
+  MemoryAccess access = MakeMemoryAccess(region);
+  // Address arithmetic must not overflow the logical index's int32 type.
+  auto wide = [](PrimExpr value) { return cast(DataType::Int(64), value); };
+  PrimExpr block_bytes =
+      floordiv(wide(info.row_frac * info.c0) * region->buffer->dtype.bits(), 8);
+  PrimExpr base =
+      (wide(fractal.outer0->min) * wide(pitch) + wide(fractal.outer1->min)) *
+      block_bytes;
+  access.bounds.Set(access.bounds.size() - 1,
+                    Range::FromMinExtent(base, wide(width) * block_bytes));
+  access.repeat = wide(count);
+  access.stride = wide(pitch) * block_bytes;
+  return access;
+}
+
+// Describe each instruction using its own fractal geometry and pitch.
+inline BufferMemoryAccesses GetCallMemoryAccesses(const Call &call,
+                                                  const LayoutMap &layouts) {
+  BufferMemoryAccesses result;
+  if (IsAscendCopyCall(call.get())) {
+    AscendCopy copy(call->args, call->annotations);
+    if (IsL1Buffer(copy->src) &&
+        (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst))) {
+      auto src_layout = FindLayoutForBuffer(layouts, copy->src);
+      auto dst_layout = FindLayoutForBuffer(layouts, copy->dst);
+      AscendFractalLayoutInfo src_info, dst_info;
+      AscendFractalRegionInfo src, dst;
+      if (!src_layout.defined() || !dst_layout.defined() ||
+          !TryExtractAscendFractalLayout(src_layout.value(), copy->src,
+                                         &src_info) ||
+          !TryExtractAscendFractalLayout(dst_layout.value(), copy->dst,
+                                         &dst_info) ||
+          !IsAscendMajorKind(src_info.kind) ||
+          !IsAscendMajorKind(dst_info.kind) ||
+          !TryExtractAscendFractalRegion(src_layout.value(), copy->src_range,
+                                         &src) ||
+          !TryExtractAscendFractalRegion(dst_layout.value(), copy->dst_range,
+                                         &dst))
+        return result;
+      PrimExpr count = src.outer0->extent;
+      PrimExpr width = src.outer1->extent;
+      if ((copy->transpose != 0) ^ (src_info.c0_axis != dst_info.c0_axis)) {
+        count = floordiv(src.outer1->extent * 16, src_info.c0);
+        width = floordiv(src.outer0->extent * src_info.c0, 16);
+      }
+      result.emplace(copy->dst,
+                     FractalAccess(BufferRegion(copy->dst, copy->dst_range),
+                                   dst_info, dst,
+                                   copy->stride.value_or(dst.outer1->extent),
+                                   count, width));
+    } else if (IsL0CBuffer(copy->src)) {
+      Layout layout = MakeAscendL0CLayout(copy->src);
+      AscendFractalLayoutInfo info;
+      AscendFractalRegionInfo fractal;
+      TryExtractAscendFractalLayout(layout, copy->src, &info);
+      TryExtractAscendFractalRegion(layout, copy->src_range, &fractal);
+      result.emplace(
+          copy->src,
+          FractalAccess(BufferRegion(copy->src, copy->src_range), info, fractal,
+                        copy->stride.value_or(fractal.outer1->extent),
+                        fractal.outer0->extent, fractal.outer1->extent));
+    }
+  } else if (call->op.same_as(Op::Get("tl.tileop.gemm"))) {
+    Gemm gemm(call->args, call->annotations);
+    if (!IsL0ABuffer(gemm->a_) || !IsL0BBuffer(gemm->b_))
+      return result;
+    auto record = [&](const BufferRegion &region, const Layout &layout) {
+      AscendFractalLayoutInfo info;
+      AscendFractalRegionInfo fractal;
+      TryExtractAscendFractalLayout(layout, region->buffer, &info);
+      TryExtractAscendFractalRegion(layout, region->region, &fractal);
+      result.emplace(region->buffer, FractalAccess(region, info, fractal,
+                                                   fractal.outer1->extent,
+                                                   fractal.outer0->extent,
+                                                   fractal.outer1->extent));
+    };
+    record(gemm->aRegion_, gemm->transA_ ? MakeAscendMajorMNLayout(gemm->a_)
+                                         : MakeAscendMajorKLayout(gemm->a_));
+    record(gemm->bRegion_, gemm->transB_ ? MakeAscendMajorKLayout(gemm->b_)
+                                         : MakeAscendMajorMNLayout(gemm->b_));
+    record(gemm->cRegion_, MakeAscendL0CLayout(gemm->c_));
+  }
+  return result;
+}
+
 // MemoryAccessDetector: detect read/write regions in statements
 // Adapted from BlockReadWriteDetector in TVM
 class MemoryAccessDetector : public StmtExprVisitor {
 public:
-  // Task/synchronization access semantics stay logical. Physical footprints
-  // are requested only by buffer-lifetime analysis and never stored in Task.
+  // Task accesses carry logical regions and instruction conflict coordinates.
+  // Lifetime analysis separately requests may/must-write coverage.
   enum class AccessMode { kLogical, kPhysical };
-  explicit MemoryAccessDetector(AccessMode mode = AccessMode::kLogical)
-      : mode_(mode) {}
+  explicit MemoryAccessDetector(AccessMode mode = AccessMode::kLogical,
+                                LayoutMap layouts = {})
+      : layouts_(std::move(layouts)), mode_(mode) {}
 
   // Analyze a statement and collect read/write regions
   void Analyze(const Stmt &stmt) {
+    read_accesses_.clear();
+    write_accesses_.clear();
+    operation_accesses_.clear();
     read_buffers_.clear();
     write_buffers_.clear();
     read_regions_.clear();
@@ -97,6 +227,9 @@ public:
   }
 
   void Analyze(const PrimExpr &expr) {
+    read_accesses_.clear();
+    write_accesses_.clear();
+    operation_accesses_.clear();
     read_buffers_.clear();
     write_buffers_.clear();
     read_regions_.clear();
@@ -117,21 +250,6 @@ public:
     operator()(expr);
   }
 
-  // Wrap the existing per-buffer rectangular summaries. Producing separate
-  // records for individual accesses is a later precision improvement.
-  std::vector<MemoryAccess> GetReadAccesses() const {
-    std::vector<MemoryAccess> accesses;
-    for (const BufferRegion &region : GetReadRegions())
-      accesses.emplace_back(region);
-    return accesses;
-  }
-  std::vector<MemoryAccess> GetWriteAccesses() const {
-    std::vector<MemoryAccess> accesses;
-    for (const BufferRegion &region : GetWriteRegions())
-      accesses.emplace_back(region);
-    return accesses;
-  }
-
   // Return collected read regions
   std::vector<BufferRegion> GetReadRegions() const {
     return CollectRegions(read_buffers_, read_regions_);
@@ -140,6 +258,13 @@ public:
   // Return collected write regions
   std::vector<BufferRegion> GetWriteRegions() const {
     return CollectRegions(write_buffers_, write_regions_);
+  }
+
+  const std::vector<MemoryAccess> &GetReadAccesses() const {
+    return read_accesses_;
+  }
+  const std::vector<MemoryAccess> &GetWriteAccesses() const {
+    return write_accesses_;
   }
 
   // Return all variables that are read from
@@ -161,6 +286,34 @@ public:
   }
 
 private:
+  LayoutMap layouts_;
+  BufferMemoryAccesses operation_accesses_;
+  std::vector<MemoryAccess> read_accesses_;
+  std::vector<MemoryAccess> write_accesses_;
+
+  MemoryAccess DescribeAccess(const Buffer &buffer,
+                              const std::vector<arith::IntSet> &region) {
+    MemoryAccess access = MakeMemoryAccess(MakeBufferRegion(buffer, region));
+    auto it = operation_accesses_.find(buffer);
+    if (it == operation_accesses_.end())
+      return access;
+    BufferRegion logical = access.logical;
+    access = it->second;
+    access.logical = std::move(logical);
+    Array<Range> bounds;
+    for (const Range &range : access.bounds)
+      bounds.push_back(Range::FromMinExtent(ResolveLets(range->min),
+                                            ResolveLets(range->extent)));
+    access.bounds = std::move(bounds);
+    access.repeat = ResolveLets(access.repeat);
+    access.stride = ResolveLets(access.stride);
+    for (const auto &[var, range] : loop_domains_)
+      access.domains.emplace_back(
+          var, Range::FromMinExtent(ResolveLets(range->min),
+                                    ResolveLets(range->extent)));
+    return access;
+  }
+
   /*! \brief Iteration range for loop_vars */
   std::unordered_map<const VarNode *, arith::IntSet> dom_map_;
   /*! \brief Extra iteration range hint for free vars */
@@ -224,6 +377,11 @@ private:
     for (const PrimExpr &stride : buffer->strides)
       visit_mutable_layout(stride);
     visit_mutable_layout(buffer->elem_offset);
+    auto &accesses =
+        buffers == &read_buffers_ ? read_accesses_ : write_accesses_;
+    accesses.push_back(mode_ == AccessMode::kLogical
+                           ? DescribeAccess(buffer, region)
+                           : MemoryAccess(MakeBufferRegion(buffer, region)));
     MergeRegion(buffers, regions, buffer, region);
   }
 
@@ -390,7 +548,7 @@ private:
   }
 
   void UpdateOpaqueAccessVar(const Var &var) {
-    if (mode_ != AccessMode::kPhysical)
+    if (mode_ == AccessMode::kLogical)
       return;
     for (const Var &existing : opaque_access_vars_) {
       if (existing.same_as(var))
@@ -424,6 +582,36 @@ private:
     } else {
       UpdateWrite(buffer, std::move(int_sets), mins, extents);
     }
+  }
+
+  // Lifetime analysis includes instruction padding, without promoting the
+  // conservative may-write footprint into an initialization fact.
+  void RecordFractalMayAccess(const BufferRegion &region, bool is_read) {
+    BufferRegion expanded = ExpandAscendFractalMayAccess(region);
+    std::vector<arith::IntSet> ranges;
+    for (const Range &range : expanded->region)
+      ranges.push_back(RelaxAccessIndex(range->min, range->extent));
+    if (is_read)
+      Update(&read_buffers_, &read_regions_, expanded->buffer,
+             std::move(ranges));
+    else
+      Update(&write_buffers_, &write_regions_, expanded->buffer,
+             std::move(ranges));
+  }
+
+  // Compact storage is opaque to allocation reuse; ordinary operands keep
+  // their must-write information. Keep the full selected plane as may-access.
+  void RecordL0MayAccess(const BufferRegion &region, bool is_read,
+                         bool compact) {
+    if (!compact) {
+      RecordFractalMayAccess(region, is_read);
+      return;
+    }
+    UpdateOpaqueAccessVar(region->buffer->data);
+    Array<Range> ranges = region->region;
+    for (size_t i = ranges.size() - 2; i < ranges.size(); ++i)
+      ranges.Set(i, Range::FromMinExtent(0, region->buffer->shape[i]));
+    RecordFractalMayAccess(BufferRegion(region->buffer, ranges), is_read);
   }
 
   BufferRegion ExpandPaddedCopyWriteRegion(const AscendCopy &copy,
@@ -961,6 +1149,60 @@ private:
 
     if (op->op.same_as(tl::loop_break()))
       has_loop_break_ = true;
+
+    if (mode_ == AccessMode::kLogical &&
+        (IsAscendCopyCall(op) || op->op.same_as(Op::Get("tl.tileop.gemm")))) {
+      auto saved = std::move(operation_accesses_);
+      operation_accesses_ =
+          GetCallMemoryAccesses(ffi::GetRef<Call>(op), layouts_);
+      StmtExprVisitor::VisitExpr_(op);
+      operation_accesses_ = std::move(saved);
+      return;
+    }
+
+    if (mode_ == AccessMode::kPhysical && IsAscendCopyCall(op)) {
+      AscendCopy copy(op->args, op->annotations);
+      if (copy->stride.defined() ||
+          (IsL1Buffer(copy->src) &&
+           (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst)))) {
+        StmtExprVisitor::VisitExpr_(op);
+        auto record = [&](const BufferRegion &region, bool is_read) {
+          bool l0 = IsL0ABuffer(region->buffer) ||
+                    IsL0BBuffer(region->buffer) || IsL0CBuffer(region->buffer);
+          bool compact = copy->stride.defined();
+          for (size_t i = region->region.size() - 2; i < region->region.size();
+               ++i)
+            compact |= !ana_.CanProveEqual(region->region[i]->extent,
+                                           region->buffer->shape[i]);
+          RecordL0MayAccess(region, is_read, l0 && compact);
+        };
+        record(BufferRegion(copy->src, copy->src_range), true);
+        record(BufferRegion(copy->dst, copy->dst_range), false);
+        return;
+      }
+    }
+    if (mode_ == AccessMode::kPhysical &&
+        op->op.same_as(Op::Get("tl.tileop.gemm"))) {
+      Gemm gemm(op->args, op->annotations);
+      if (IsL0ABuffer(gemm->a_) && IsL0BBuffer(gemm->b_)) {
+        StmtExprVisitor::VisitExpr_(op);
+        auto record = [&](const BufferRegion &region, bool is_read,
+                          size_t mn_axis) {
+          bool compact = !ana_.CanProveEqual(
+              floordiv(region->region[mn_axis]->extent + 15, 16),
+              floordiv(region->buffer->shape[mn_axis] + 15, 16));
+          RecordL0MayAccess(region, is_read, compact);
+        };
+        record(gemm->aRegion_, true,
+               gemm->a_->shape.size() - (gemm->transA_ ? 1 : 2));
+        record(gemm->bRegion_, true,
+               gemm->b_->shape.size() - (gemm->transB_ ? 2 : 1));
+        record(gemm->cRegion_, false, gemm->c_->shape.size() - 2);
+        if (!is_one(gemm->clearAccum_))
+          record(gemm->cRegion_, true, gemm->c_->shape.size() - 2);
+        return;
+      }
+    }
 
     if (mode_ == AccessMode::kPhysical && IsAscendCopyCall(op)) {
       // Visit the original operands first so symbolic indices and the logical

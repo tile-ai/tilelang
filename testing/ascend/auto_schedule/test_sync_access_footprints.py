@@ -5,7 +5,9 @@ import pytest
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
-from testing.ascend._ir import calls, schedule
+from testing.ascend._ir import calls, copy, kernel, schedule, seq
+from testing.ascend.auto_schedule._scheduled_ir import unit
+from tvm import tirx
 
 
 def _events(program, disable_reuse=False, auto_schedule=False):
@@ -15,6 +17,45 @@ def _events(program, disable_reuse=False, auto_schedule=False):
         return {
             (operation, call.args[0].value) for operation in ("set", "wait") for call in calls(after, "tl.ascend_" + operation + "_flag")
         }
+
+
+@pytest.mark.parametrize("fill_first", [False, True], ids=["protect-source-reuse", "wait-for-source-padding"])
+@pytest.mark.parametrize("row", [24, 32], ids=["same-fractal", "next-fractal"])
+def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row):
+    src = tirx.decl_buffer((48, 16), "bfloat16", name="src", scope="shared.l1")
+    dst = tirx.decl_buffer((32, 16), "bfloat16", name="dst", scope="shared.l0a")
+    load = unit(copy(src, dst, src_shape=[24, 16], dst_shape=[24, 16]), core=2)
+    padding = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
+    fill = unit(tirx.Evaluate(T.fill(padding, 0)), core=2)
+    # L1 fill can address individual rows. The load reads two whole row16
+    # fractals even though its effective region ends at row 24.
+    before = kernel(seq(fill, load) if fill_first else seq(load, fill), buffers=[src, dst])
+    after = transform.InsertSync()(before)
+    pipe = "MTE2_MTE1" if fill_first else "MTE1_MTE2"
+    events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
+    if row == 24:
+        assert len(events) == 2
+        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+    else:
+        assert not events
+
+
+def test_l0_tail_load_preserves_explicit_logical_region_conflicts():
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            left = T.alloc_l1((32, 16), "bfloat16")
+            right = T.alloc_l1((32, 16), "bfloat16")
+            dst = T.alloc_l0a((32, 16), "bfloat16")
+            T.assume_conflict(left[:24, :], right[:24, :], cross=False)
+            with T.Stage(0):
+                T.fill(left[:24, :], 0)
+                # The source is already prepared at this sync-only boundary.
+                T.copy(right[:24, :], dst[:24, :])
+
+    events = _events(main)
+    assert ("set", "MTE2_MTE1") in events
+    assert ("wait", "MTE2_MTE1") in events
 
 
 @pytest.mark.parametrize("disable_reuse", [False, True])

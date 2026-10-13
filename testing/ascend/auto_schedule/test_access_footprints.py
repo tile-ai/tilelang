@@ -9,6 +9,16 @@ from tilelang.language.utils import region
 from testing.ascend.auto_schedule._reuse_utils import _insert_sync_alias_pairs, _make_cyclic_scalar_program
 
 
+def _infer_fractal_layouts(program):
+    """Prepare the physical layouts expected at the scheduling boundary."""
+    mod = tvm.IRModule({"main": program.with_attr("target", tvm.target.Target("ascend"))})
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    with tvm.target.Target("ascend"):
+        mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
+        mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
+    return mod["main"]
+
+
 def _make_internal_conditional_write_program():
     @T.prim_func
     def main(
@@ -598,11 +608,8 @@ def test_nd2nz_statement_intrinsics_keep_source_alias_eligibility():
                     T.simd.vsts(other[0, 0], T.simd.vdup(T.float32(200), "float32"))
                 out[0] = other[0, 0]
 
-    mod = tvm.IRModule({"main": main.with_attr("target", tvm.target.Target("ascend"))})
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tvm.IRModule({"main": _infer_fractal_layouts(main)})
     with tvm.target.Target("ascend"):
-        mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
-        mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
         mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
     assert ("dst", "src") in _insert_sync_alias_pairs(mod["main"])
 
@@ -624,7 +631,7 @@ def test_nd2nz_scatter_source_can_alias_a_later_ub_copy_destination():
                 T.copy(nz, other)
                 out[0] = other[0, 0]
 
-    assert ("other", "src") in _insert_sync_alias_pairs(main)
+    assert ("other", "src") in _insert_sync_alias_pairs(_infer_fractal_layouts(main))
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
@@ -806,6 +813,35 @@ def test_padded_copy_coalesced_aligned_rows_allow_reuse():
     # The two logical four-element rows coalesce into one aligned 32B DMA
     # row: there is no physical padding outside the allocation.
     assert ("a", "b") in _insert_sync_alias_pairs(main)
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_compact_l0_drain_preserves_ub_write_coverage(compact):
+    stride = 1 if compact else None
+
+    @T.prim_func
+    def main(scratch: T.Tensor((16, 16), "float32"), out: T.Tensor((16, 16), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_shared((16, 16), "float32")
+            b = T.alloc_shared((16, 16), "float32")
+            l1 = T.alloc_l1((16, 16), "float32")
+            lhs = T.alloc_l0a((16, 16), "float32")
+            rhs = T.alloc_l0b((16, 16), "float32")
+            acc = T.alloc_l0c((32 if compact else 16, 16), "float32")
+            with T.Stage(0):
+                T.fill(a, 100.0)
+                T.fill(b, 200.0)
+                # The round trip orders b's last read before a's new write.
+                T.copy(b, scratch)
+                T.copy(scratch, l1)
+                T.copy(l1, lhs)
+                T.copy(l1, rhs)
+                T.gemm(lhs, rhs, acc[:16, :], transpose_B=True, clear_accum=True)
+                # A compact source pitch must not hide the full UB write.
+                T.copy(acc[:16, :], a, stride=stride)
+                T.copy(a, out)
+
+    assert ("a", "b") in _insert_sync_alias_pairs(_infer_fractal_layouts(main))
 
 
 def test_padded_copy_overflow_excludes_storage_from_reuse():

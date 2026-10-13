@@ -5,12 +5,14 @@
  */
 
 #include "support/check.h"
+#include <algorithm>
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/op.h>
 
 #include "ascend/layout/ascend_layouts.h"
+#include "ascend/op/utils.h"
 #include "layout/layout.h"
 
 namespace tvm {
@@ -378,6 +380,28 @@ bool TryExtractAscendFractalRegion(const Layout &layout,
   size_t n = phys.size();
   *out = {phys[n - 4], phys[n - 3], phys[n - 2], phys[n - 1]};
   return true;
+}
+
+BufferRegion ExpandAscendFractalMayAccess(const BufferRegion &region) {
+  const Buffer &buffer = region->buffer;
+  int bits = buffer->dtype.bits();
+  if (!(IsL1Buffer(buffer) || IsL0ABuffer(buffer) || IsL0BBuffer(buffer) ||
+        IsL0CBuffer(buffer)) ||
+      region->region.size() < 2 || bits <= 0 || 256 % bits != 0)
+    return region;
+  int alignment = IsL0CBuffer(buffer) ? 16 : std::max(16, 256 / bits);
+  ffi::Array<Range> ranges = region->region;
+  for (const Range &range : ranges)
+    if (is_zero(range->extent))
+      return region;
+  for (size_t i = ranges.size() - 2; i < ranges.size(); ++i) {
+    PrimExpr begin = floordiv(ranges[i]->min, alignment) * alignment;
+    PrimExpr end = floordiv(ranges[i]->min + ranges[i]->extent + alignment - 1,
+                            alignment) *
+                   alignment;
+    ranges.Set(i, Range::FromMinExtent(begin, end - begin));
+  }
+  return BufferRegion(buffer, ranges);
 }
 
 // Ascend ND (row-major) identity layout for GM/UB operands. Forward is the

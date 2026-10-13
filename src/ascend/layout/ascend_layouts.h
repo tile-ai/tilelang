@@ -127,6 +127,24 @@ bool TryExtractAscendFractalRegion(const Layout &layout,
                                    const ffi::Array<Range> &logical_region,
                                    AscendFractalRegionInfo *out);
 
+/// Conservatively expand an L1/L0 data region in logical coordinates to cover
+/// whole fractals for either Cube major. Both trailing axes are rounded to
+/// max(16, C0), or 16 for L0C; leading axes and statically empty regions remain
+/// unchanged. Unsupported scopes, ranks, or element widths pass through.
+/// This is a may-access bound only: it must not establish must-write coverage
+/// or determine the actual instruction transfer geometry.
+tirx::BufferRegion
+ExpandAscendFractalMayAccess(const tirx::BufferRegion &region);
+
+namespace attr {
+
+// Copy lowering transfers the destination pitch to its tvm_access_ptr.
+// LowerTileOp uses it to remap matrix offsets while retaining the allocation's
+// leading-plane / buffer-version stride.
+constexpr const char *kL0AccessPitch = "tl.ascend_l0_access_pitch";
+
+} // namespace attr
+
 } // namespace tl
 } // namespace tvm
 

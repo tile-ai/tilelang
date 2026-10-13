@@ -16,7 +16,8 @@ def _program(reservation):
             accum = T.alloc_l0c((16, 16), "float32")
             temp = T.alloc_shared((8, 16), "float32")
             # This is an InsertSync input: Fixpipe produces UB and MTE3 reads
-            # it. GEMM, layout inference and device execution are irrelevant.
+            # it. Layout inference prepares the scheduling input; no GEMM or
+            # device execution is needed for this flag-allocation contract.
             T.dual_copy(accum, temp)
             if reservation == "sparse":
                 T.ascend_sync_inter_arrive("PIPE_FIX", 15)
@@ -66,7 +67,7 @@ def _generated_slots(mod, operation):
 )
 def test_generated_flags_do_not_collide_with_explicit_flags(reservation, reserved):
     with tvm.transform.PassContext(config={"tl.Simplify": {"enable_simplify_let_inline": False}}):
-        before = schedule(_program(reservation), through="ResolveCore", auto_schedule=False)
+        before = schedule(_program(reservation), through="ResolveCore", auto_schedule=False, infer_layouts=True)
         mod = transform.InsertSync()(before)
     sets = _generated_slots(mod, "set")
     waits = _generated_slots(mod, "wait")
@@ -77,7 +78,7 @@ def test_generated_flags_do_not_collide_with_explicit_flags(reservation, reserve
 
 def test_unbounded_explicit_flag_is_rejected():
     with pytest.raises(tvm.error.InternalError, match="integer range cannot be bounded"):
-        before = schedule(_program("unbounded"), through="ResolveCore", auto_schedule=False)
+        before = schedule(_program("unbounded"), through="ResolveCore", auto_schedule=False, infer_layouts=True)
         transform.InsertSync()(before)
 
 

@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "cuda/op/builtin.h"
@@ -595,6 +596,16 @@ private:
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
         new_offset += forward_indices[i] * stride_offset;
         stride_offset *= new_shape[i];
+      }
+      if (auto pitch = access_ptr_call->annotations.Get(attr::kL0AccessPitch)) {
+        ICHECK(IsL0ABuffer(original_buffer) || IsL0BBuffer(original_buffer));
+        ICHECK_GE(new_shape.size(), 4);
+        size_t n = new_shape.size();
+        // Only the matrix's outer0 stride changes. Leading planes keep the
+        // full allocation size, so compact tails cannot alias adjacent slots.
+        new_offset += forward_indices[n - 4] *
+                      (Downcast<PrimExpr>(pitch.value()) - new_shape[n - 3]) *
+                      new_shape[n - 2] * new_shape[n - 1];
       }
       new_offset = analyzer_->Simplify(new_offset);
       Array<PrimExpr> new_indices;

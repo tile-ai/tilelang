@@ -397,8 +397,10 @@ inline uint16_t AnalyzeSpecialRegisterWrites(const Stmt &stmt) {
   return task_analysis_detail::SpecialRegisterWriteAnalyzer::Analyze(stmt);
 }
 
-inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt) {
-  MemoryAccessDetector memory_detector;
+inline TaskAccessInfo AnalyzeTaskAccesses(const Stmt &stmt,
+                                          const LayoutMap &layouts = {}) {
+  MemoryAccessDetector memory_detector(
+      MemoryAccessDetector::AccessMode::kLogical, layouts);
   memory_detector.Analyze(stmt);
   TaskAccessInfo result;
   result.read_regions = memory_detector.GetReadAccesses();

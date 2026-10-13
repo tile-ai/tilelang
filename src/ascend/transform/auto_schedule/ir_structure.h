@@ -112,6 +112,13 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
 }
 
 inline bool MemoryAccessesEqual(const MemoryAccess &a, const MemoryAccess &b) {
+  if (a.domains.size() != b.domains.size())
+    return false;
+  for (size_t i = 0; i < a.domains.size(); ++i) {
+    if (!a.domains[i].first.same_as(b.domains[i].first) ||
+        !RegionsEqual({a.domains[i].second}, {b.domains[i].second}))
+      return false;
+  }
   arith::Analyzer analyzer;
   return a.logical->buffer.same_as(b.logical->buffer) &&
          RegionsEqual(a.logical->region, b.logical->region) &&
@@ -604,6 +611,12 @@ public:
         access.bounds = Substitute(access.bounds, substitution);
         access.repeat = Substitute(access.repeat, substitution);
         access.stride = Substitute(access.stride, substitution);
+        for (auto &[var, range] : access.domains) {
+          if (var.same_as(old_var))
+            var = new_var;
+          range = Range::FromMinExtent(Substitute(range->min, substitution),
+                                       Substitute(range->extent, substitution));
+        }
       }
     };
     substitute_vars(read_vars_);

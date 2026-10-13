@@ -214,6 +214,24 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const MemoryAccess &a_access,
   // mutable reads at two access points need not have the same value.
   FreshenMutableReads freshen_a(FreshenMutableReads::Mode::kSnapshot);
   FreshenMutableReads freshen_b(FreshenMutableReads::Mode::kSnapshot);
+  // Internal task loops are independent access choices on the two sides.
+  // Rename them together with their bounds and pitch before adding domains.
+  auto bind_domains = [&](const MemoryAccess &access, Map<Var, PrimExpr> *sub,
+                          FreshenMutableReads &freshen, const char *suffix) {
+    for (const auto &[var, range] : access.domains)
+      sub->Set(var, var.copy_with_suffix(suffix));
+    for (const auto &[var, range] : access.domains) {
+      PrimExpr index = freshen(Substitute(var, *sub));
+      PrimExpr min = freshen(Substitute(range->min, *sub));
+      PrimExpr extent = freshen(Substitute(range->extent, *sub));
+      ana.EnterConstraint(index >= min &&
+                          cast(DataType::Int(64), index) <
+                              cast(DataType::Int(64), min) +
+                                  cast(DataType::Int(64), extent));
+    }
+  };
+  bind_domains(a_access, &a_sub, freshen_a, "_access_p");
+  bind_domains(b_access, &b_sub, freshen_b, "_access_c");
   PrimExpr a_repeat = freshen_a(Substitute(a_access.repeat, a_sub));
   PrimExpr b_repeat = freshen_b(Substitute(b_access.repeat, b_sub));
 
