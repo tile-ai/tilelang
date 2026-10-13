@@ -73,6 +73,9 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
+    TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
+    """Enable Ascend auto scheduling. Default: True."""
+
     TL_ENABLE_AUTO_WARP_SPECIALIZATION = "tl.enable_auto_warp_specialization"
     """Name of the automatic warp-specialization scheduler to run (e.g.
     "role_based"). Default: unset (disabled)."""
@@ -103,9 +106,9 @@ class PassConfigKey(str, Enum):
 
     TL_EMIT_LINE_DIRECTIVES = "tl.emit_line_directives"
     """Emit ``#line`` directives in generated C-family source from TIR spans,
-    mapping generated statements back to their Python source lines. Combined
-    with the always-on ``-lineinfo`` for nvcc, PTX ``.loc`` entries then point
-    at the Python source. Default: False
+    mapping generated statements back to their Python source lines. For example,
+    with the always-on ``-lineinfo`` for nvcc, PTX ``.loc`` entries point at
+    the Python source. Default: False
     """
 
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"

@@ -78,6 +78,42 @@ def _thread_indexed_kernel():
     return main
 
 
+@pytest.mark.parametrize(
+    ("arguments", "keywords", "expected"),
+    [
+        ((), {}, (True, True, [128, 1, 1], None, None)),
+        ((False,), {}, (False, False, [128, 1, 1], None, None)),
+        ((True, (32, 2)), {}, (True, True, [32, 2, 1], None, None)),
+        ((False, None, ("cluster_dims",)), {}, (False, False, None, ["cluster_dims"], None)),
+        (
+            (False, None, ("cluster_dims",)),
+            {"lower_grid_binding": True, "launch_dim_tags": ("cthread",)},
+            (True, False, None, ["cluster_dims"], ["cthread"]),
+        ),
+        (
+            (),
+            {
+                "lower_grid_binding": True,
+                "lower_thread_binding": False,
+                "default_threads": None,
+                "unsupported_annotations": ["cluster_dims"],
+                "launch_dim_tags": ["cthread"],
+            },
+            (True, False, None, ["cluster_dims"], ["cthread"]),
+        ),
+    ],
+)
+def test_materialize_launch_argument_compatibility(monkeypatch, arguments, keywords, expected):
+    monkeypatch.setattr(tl.transform._ffi_api, "MaterializeKernelLaunch", lambda *ffi_arguments: ffi_arguments)
+    assert tl.transform.MaterializeKernelLaunch(*arguments, **keywords) == expected
+
+
+@pytest.mark.parametrize("parameter_name", ["lower_grid_binding", "launch_dim_tags"])
+def test_materialize_launch_new_options_are_keyword_only(parameter_name):
+    signature = inspect.signature(tl.transform.MaterializeKernelLaunch)
+    assert signature.parameters[parameter_name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
 def test_traced_launch_records_grid_and_thread_placeholders():
     func = _parallel_kernel()
 

@@ -22,6 +22,7 @@
 #include <tvm/tirx/transform.h>
 
 #include "../op/builtin.h"
+#include "tir/transforms/ir_utils.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -635,7 +636,13 @@ private:
 // --- Public API ---
 
 Stmt ApplyLoopUnswitching(Stmt stmt, bool allow_non_trivial_else) {
-  return LoopUnswitcher(allow_non_trivial_else)(std::move(stmt));
+  Stmt ret = LoopUnswitcher(allow_non_trivial_else)(stmt);
+  if (!ret.same_as(stmt)) {
+    // Unswitching duplicates definitions into mutually exclusive branches.
+    // Freshen their Var identities before returning SSA IR.
+    return ConvertSSA(ret);
+  }
+  return ret;
 }
 
 using namespace tirx::transform;

@@ -119,10 +119,10 @@ private:
       auto analyzer = arith::Analyzer{};
       for (const auto &e : items) {
         auto simplified =
-            analyzer.Simplify(GT(e.expr, make_zero(e.expr->dtype)));
+            analyzer.Simplify(GE(e.expr, make_zero(e.expr->dtype)));
         std::stringstream ss;
-        ss << "Buffer shape should be greater than 0: shape `" << e.expr
-           << "` from buffer ";
+        ss << "Buffer shape should be greater than or equal to 0: shape `"
+           << e.expr << "` from buffer ";
         for (size_t i = 0; i < e.buffers.size(); i++) {
           if (i)
             ss << ", ";

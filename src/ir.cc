@@ -4,6 +4,7 @@
  *
  */
 
+#include "ir.h"
 #include "./transform/common/attr.h"
 #include "./transform/common/warp_specialize.h"
 #include "op/builtin.h"
@@ -26,14 +27,9 @@ namespace tl {
 using namespace script::ir_builder::tirx;
 using namespace ffi;
 
-// Build a ForFrame that emits a target-neutral kThreadBinding loop for one
-// grid (program index) axis of a kernel launch. The launch nest is
-// materialized into the target-specific form (thread_extent AttrStmt on GPU,
-// serial For on CPU) by the tl.MaterializeKernelLaunch pass once the Target is
-// known at compile time.
-static ForFrame MakeThreadBindingFrame(const std::string &name,
-                                       const String &thread_tag,
-                                       const PrimExpr &extent) {
+ForFrame MakeThreadBindingFrame(const std::string &name,
+                                const String &thread_tag,
+                                const PrimExpr &extent) {
   using namespace tvm::tirx;
   Var var = Var(name, extent->dtype);
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
@@ -53,6 +49,32 @@ static ForFrame MakeThreadBindingFrame(const std::string &name,
                /*thread_binding=*/iter_var,
                /*annotations=*/Map<String, Any>{},
                /*step=*/step);
+  };
+  return ForFrame(n);
+}
+
+ForFrame MakeLaunchThreadFrame() {
+  using namespace tvm::tirx;
+  static const char *kThreadVarNames[3] = {"tx", "ty", "tz"};
+  DataType dtype = DataType::Int(32);
+  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
+  for (int axis = 0; axis < 3; axis++) {
+    n->vars.push_back(Var(kThreadVarNames[axis], dtype));
+    // The extent is decided by the backend at materialization; this dom only
+    // keeps the ForFrame invariants satisfied.
+    n->doms.push_back(Range(make_const(dtype, 0), make_const(dtype, 1)));
+  }
+  n->f_make_for_loop = [](const Array<Var> &vars, const Array<Range> &doms,
+                          const Array<Optional<PrimExpr>> &steps,
+                          Stmt body) -> Stmt {
+    Array<Stmt> seq;
+    for (int axis = 0; axis < static_cast<int>(vars.size()); axis++) {
+      PrimExpr thread_idx = Call(vars[axis]->dtype, launch_thread_idx(),
+                                 {IntImm(DataType::Int(32), axis)});
+      seq.push_back(tvm::tirx::Bind(vars[axis], thread_idx));
+    }
+    seq.push_back(body);
+    return SeqStmt::Flatten(seq);
   };
   return ForFrame(n);
 }
@@ -98,7 +120,6 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
   };
   return ForFrame(n);
 }
-
 ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
                       const Array<PrimExpr> &order,
                       const Array<PrimExpr> &stages,
@@ -132,7 +153,8 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
 }
 
 ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
-                       const PrimExpr &index, PrimExpr group_size) {
+                       const PrimExpr &index, PrimExpr group_size,
+                       int num_stages, const Map<String, Any> &annotations) {
   using namespace tvm::tirx;
   ICHECK(!domain.empty());
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
@@ -173,7 +195,10 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
                            const Array<Optional<PrimExpr>> &steps,
                            Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
-    Map<String, Any> anno;
+    Map<String, Any> anno = annotations;
+    if (num_stages > 0) {
+      anno.Set("num_stages", PrimExpr(num_stages));
+    }
     Array<PrimExpr> idxs(grouped_domain.size(), PrimExpr());
     PrimExpr rem = loop_var * wave_size + index;
 
@@ -185,17 +210,14 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
     PrimExpr last_coord =
         idxs[0] * group_size + idxs[grouped_domain.size() - 1];
     PrimExpr in_range = last_coord < domain[domain.size() - 1];
-    auto out_if = tvm::tirx::IfThenElse(
-        padded_domain_size <= (loop_var * wave_size + index),
-        tvm::tirx::Evaluate(
-            tvm::tirx::Call(DataType::Handle(), tvm::tl::loop_break(), {})),
-        Stmt());
     Stmt guarded_body = tvm::tirx::IfThenElse(in_range, body, Stmt());
 
     arith::Analyzer analyzer;
     Stmt new_body = guarded_body;
     if (analyzer.CanProveGreaterEqual(waves, 2)) {
-      new_body = SeqStmt({out_if, guarded_body});
+      PrimExpr in_padded_domain =
+          (loop_var * wave_size + index) < padded_domain_size;
+      new_body = tvm::tirx::IfThenElse(in_padded_domain, guarded_body, Stmt());
     }
     Optional<PrimExpr> step =
         !steps.empty() ? steps[0] : Optional<PrimExpr>(std::nullopt);
@@ -211,102 +233,6 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
 
   return ForFrame(n);
 }
-
-// Build a frame whose exit prefixes the body with
-// `tx = tl.launch_thread_idx(0); ty = ...; tz = ...` Bind statements. The
-// launch nest is traced before the Target is known, so the thread indices are
-// only placeholders here: the Vars keep their identity through
-// tl.MaterializeKernelLaunch, which rebinds them as threadIdx.* thread_extent
-// scopes on SIMT backends and drops them elsewhere.
-static ForFrame MakeLaunchThreadFrame() {
-  using namespace tvm::tirx;
-  static const char *kThreadVarNames[3] = {"tx", "ty", "tz"};
-  DataType dtype = DataType::Int(32);
-  ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
-  for (int axis = 0; axis < 3; axis++) {
-    n->vars.push_back(Var(kThreadVarNames[axis], dtype));
-    // The extent is decided by the backend at materialization; this dom only
-    // keeps the ForFrame invariants satisfied.
-    n->doms.push_back(Range(make_const(dtype, 0), make_const(dtype, 1)));
-  }
-  n->f_make_for_loop = [](const Array<Var> &vars, const Array<Range> &doms,
-                          const Array<Optional<PrimExpr>> &steps,
-                          Stmt body) -> Stmt {
-    Array<Stmt> seq;
-    for (int axis = 0; axis < static_cast<int>(vars.size()); axis++) {
-      PrimExpr thread_idx = Call(vars[axis]->dtype, launch_thread_idx(),
-                                 {IntImm(DataType::Int(32), axis)});
-      seq.push_back(tvm::tirx::Bind(vars[axis], thread_idx));
-    }
-    seq.push_back(body);
-    return SeqStmt::Flatten(seq);
-  };
-  return ForFrame(n);
-}
-
-/*!
- * \brief A frame that represents a kernel launch.
- *
- * \sa KernelLaunchFrameNode
- */
-class KernelLaunchFrameNode : public TIRFrameNode {
-public:
-  /*! \brief Grid loops, thread placeholders and the root block, outer to
-   * inner. */
-  Array<TIRFrame> frames;
-  /*! \brief Program (grid) index vars, one per launch axis. */
-  Array<tvm::tirx::Var> grid_vars;
-  /*! \brief Grid extents, one per launch axis. */
-  Array<PrimExpr> grid_extents;
-  /*! \brief Placeholder thread index vars for the x, y and z axes. */
-  Array<tvm::tirx::Var> thread_vars;
-  /*! \brief Requested SIMT thread-block extents, when threads= was given. */
-  Optional<Array<PrimExpr>> thread_extents;
-
-  static void RegisterReflection() {
-    namespace refl = reflection;
-    refl::ObjectDef<KernelLaunchFrameNode>()
-        .def_ro("frames", &KernelLaunchFrameNode::frames)
-        .def_ro("grid_vars", &KernelLaunchFrameNode::grid_vars)
-        .def_ro("grid_extents", &KernelLaunchFrameNode::grid_extents)
-        .def_ro("thread_vars", &KernelLaunchFrameNode::thread_vars)
-        .def_ro("thread_extents", &KernelLaunchFrameNode::thread_extents);
-  }
-
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.KernelLaunchFrame",
-                                    KernelLaunchFrameNode, TIRFrameNode);
-
-public:
-  TVM_DLL void EnterWithScope() final {
-    for (auto frame = frames.begin(); frame != frames.end(); ++frame)
-      (*frame)->EnterWithScope();
-  }
-  /*!
-   * \brief The method called when exiting RAII scope.
-   * \sa tvm::support::With
-   */
-  TVM_DLL void ExitWithScope() final {
-    for (auto frame = frames.rbegin(); frame != frames.rend(); ++frame)
-      (*frame)->ExitWithScope();
-  }
-};
-
-/*!
- * \brief Managed reference to KernelLaunchFrameNode.
- *
- * \sa KernelLaunchFrameNode
- */
-class KernelLaunchFrame : public TIRFrame {
-public:
-  explicit KernelLaunchFrame(ObjectPtr<KernelLaunchFrameNode> data)
-      : TIRFrame(UnsafeInit{}) {
-    ICHECK(data != nullptr);
-    data_ = std::move(data);
-  }
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(KernelLaunchFrame, TIRFrame,
-                                                KernelLaunchFrameNode);
-};
-
 KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
                                const Optional<Array<PrimExpr>> &block_size_opt,
                                const Map<String, Any> &attrs) {

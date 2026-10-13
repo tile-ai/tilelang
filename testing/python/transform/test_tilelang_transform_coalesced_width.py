@@ -1,19 +1,28 @@
 import pytest
 from tilelang import tvm as tvm
-from tilelang.backend.target import determine_target
 import tilelang as tl
 import tilelang.language as T
+import tilelang.testing
 
 
-auto_target = tvm.target.Target(determine_target("auto"))
+@pytest.fixture(
+    params=[
+        pytest.param({"kind": "cuda", "arch": "sm_80"}, marks=tilelang.testing.requires_cuda.marks(), id="cuda"),
+        pytest.param({"kind": "hip", "mcpu": "gfx942"}, marks=tilelang.testing.requires_rocm.marks(), id="rocm"),
+    ]
+)
+def copy_target(request):
+    # These diagnostics come from SIMT copy vectorization. Ascend DMA copies
+    # do not use the coalesced-width planner.
+    return tvm.target.Target(request.param)
 
 
-def _lower_without_device_compile(func):
-    with tvm.target.Target(auto_target):
-        return tl.lower(func, target=auto_target, enable_device_compile=False)
+def _lower_without_device_compile(func, target):
+    with target:
+        return tl.lower(func, target=target, enable_device_compile=False)
 
 
-def test_ragged_copy_coalesced_width_clamps_with_warning(capfd):
+def test_ragged_copy_coalesced_width_clamps_with_warning(capfd, copy_target):
     m, n = 32, 33
     block_m, block_n = 32, 32
 
@@ -27,7 +36,7 @@ def test_ragged_copy_coalesced_width_clamps_with_warning(capfd):
             T.copy(A[by * block_m, bx * block_n], shared, coalesced_width=2)
             T.copy(shared, B[by * block_m, bx * block_n], coalesced_width=2)
 
-    artifact = _lower_without_device_compile(main)
+    artifact = _lower_without_device_compile(main, copy_target)
 
     warnings = capfd.readouterr().err
     assert "Requested coalesced_width=2" in warnings
@@ -36,7 +45,7 @@ def test_ragged_copy_coalesced_width_clamps_with_warning(capfd):
 
 
 @pytest.mark.parametrize("coalesced_width", [8, 257])
-def test_full_tile_oversized_coalesced_width_clamps_with_warning(capfd, coalesced_width):
+def test_full_tile_oversized_coalesced_width_clamps_with_warning(capfd, copy_target, coalesced_width):
     # A 128x128 fp32 tile over 128 threads vectorizes to 4 elements per thread;
     # any wider request must fall back to that width, not below it.
     m, n = 128, 128
@@ -51,7 +60,7 @@ def test_full_tile_oversized_coalesced_width_clamps_with_warning(capfd, coalesce
             T.copy(A, shared, coalesced_width=coalesced_width)
             T.copy(shared, B, coalesced_width=coalesced_width)
 
-    artifact = _lower_without_device_compile(main)
+    artifact = _lower_without_device_compile(main, copy_target)
 
     warnings = capfd.readouterr().err
     assert f"Requested coalesced_width={coalesced_width}" in warnings

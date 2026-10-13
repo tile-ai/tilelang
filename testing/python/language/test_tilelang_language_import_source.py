@@ -86,5 +86,17 @@ def test_import_uses_tl_templates(make_kernel):
     _check(tilelang.compile(make_kernel(TL_PRELUDE), target="cuda"))
 
 
+@tilelang.testing.requires_cuda
+def test_empty_import_source():
+    @T.prim_func
+    def main(A: T.Tensor((128,), "int32"), B: T.Tensor((128,), "int32")):
+        with T.Kernel(1, threads=128, prelude=""), T.attr(0, "pragma_import_c", ""):
+            T.import_source("")
+            tid = T.get_thread_binding(0)
+            B[tid] = A[tid] + 1
+
+    _check(tilelang.compile(main, target="cuda"))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

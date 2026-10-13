@@ -19,7 +19,7 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # WebGPU is a SIMT backend: lower the launch nest to thread_extent
     # bindings for codegen.
     mod = tilelang.transform.MaterializeKernelLaunch(
-        lower_thread_binding=True, default_threads=128, unsupported_annotations=["cluster_dims"]
+        lower_grid_binding=True, lower_thread_binding=True, default_threads=128, unsupported_annotations=["cluster_dims"]
     )(mod)
     pass_ctx = tilelang.transform.get_pass_context()
 

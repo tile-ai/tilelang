@@ -1,5 +1,5 @@
 from __future__ import annotations
-import tilelang.language as T
+import tilelang.cuda.language as T
 from dataclasses import dataclass
 from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter

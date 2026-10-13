@@ -404,34 +404,33 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
   }
 }
 
-std::string CodeGenTileLangHIP::Finish() {
+void CodeGenTileLangHIP::EmitPreamble_(std::ostream &os) const {
   // hip must need a header file.
-  decl_stream << "#include <hip/hip_runtime.h>\n";
+  os << "#include <hip/hip_runtime.h>\n";
   if (need_mma_h_) {
-    decl_stream << "#include <mma.h>\n";
+    os << "#include <mma.h>\n";
   }
 
   if (enable_fp8_) {
-    decl_stream << "#include <tl_templates/hip/hip_fp8.h>\n";
+    os << "#include <tl_templates/hip/hip_fp8.h>\n";
   }
 
   if (enable_fp4_) {
-    decl_stream << "#include <tl_templates/hip/hip_fp4.h>\n";
+    os << "#include <tl_templates/hip/hip_fp4.h>\n";
   }
 
   if (need_cooperative_groups_) {
-    decl_stream << "#include <hip/hip_cooperative_groups.h>\n";
+    os << "#include <hip/hip_cooperative_groups.h>\n";
   }
 
-  decl_stream << "#include <tl_templates/hip/gemm.h>\n";
-  decl_stream << "#include <tl_templates/hip/copy.h>\n";
-  decl_stream << "#include <tl_templates/hip/reduce.h>\n";
-  decl_stream << "#include <tl_templates/hip/scan.h>\n";
-  decl_stream << "#include <tl_templates/hip/ldsm.h>\n";
-  decl_stream << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
-  decl_stream << "#include <tl_templates/hip/debug.h>\n";
-  decl_stream << "\n";
-  return CodeGenCWithLineDirectives::Finish();
+  os << "#include <tl_templates/hip/gemm.h>\n";
+  os << "#include <tl_templates/hip/copy.h>\n";
+  os << "#include <tl_templates/hip/reduce.h>\n";
+  os << "#include <tl_templates/hip/scan.h>\n";
+  os << "#include <tl_templates/hip/ldsm.h>\n";
+  os << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
+  os << "#include <tl_templates/hip/debug.h>\n";
+  os << "\n";
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const tirx::ForNode *op) {
@@ -439,16 +438,6 @@ void CodeGenTileLangHIP::VisitStmt_(const tirx::ForNode *op) {
     PrintIndent();
     stream << "#pragma unroll\n";
   }
-  std::string extent =
-      PrintExpr(arith::Analyzer().Simplify(op->extent + op->min));
-  PrintIndent();
-  std::string vid = AllocVarID(op->loop_var.get());
-  std::string start = PrintExpr(op->min);
-  stream << "for (";
-  PrintType(op->loop_var.dtype(), stream);
-  stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
-         << "; ++" << vid << ") {\n";
-  int for_scope = BeginScope();
   // A lexical_alloc_scope spanning the entire loop body is redundant with
   // the loop's own braces; unwrap it to avoid emitting `{ {`.
   Stmt body = op->body;
@@ -457,10 +446,16 @@ void CodeGenTileLangHIP::VisitStmt_(const tirx::ForNode *op) {
       break;
     body = attr->body;
   }
-  PrintStmt(body);
-  this->EndScope(for_scope);
-  PrintIndent();
-  stream << "}\n";
+  For loop = GetRef<For>(op);
+  auto *loop_node = loop.CopyOnWrite();
+  arith::Analyzer analyzer;
+  loop_node->min = analyzer.Simplify(loop_node->min);
+  loop_node->extent = analyzer.Simplify(loop_node->extent);
+  if (loop_node->step.defined()) {
+    loop_node->step = analyzer.Simplify(loop_node->step.value());
+  }
+  loop_node->body = body;
+  CodeGenC::VisitStmt_(loop.get());
 }
 
 void CodeGenTileLangHIP::BindThreadIndex(const IterVar &iv) {
@@ -2113,7 +2108,7 @@ void CodeGenTileLangHIP::VisitStmt_(const AttrStmtNode *op) {
     this->VisitStmt(op->body);
     return;
   }
-  CodeGenCWithLineDirectives::VisitStmt_(op);
+  CodeGenC::VisitStmt_(op);
 }
 
 void CodeGenTileLangHIP::VisitStmt_(const AllocBufferNode *op) {

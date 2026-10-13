@@ -12,14 +12,14 @@
 #include <utility>
 #include <vector>
 
-#include "backend/common/codegen/codegen_c_line_directives.h"
+#include "backend/common/codegen/codegen_c_base.h"
 #include "tvm/target/codegen.h"
 #include <tvm/tirx/expr.h>
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangC : public CodeGenCWithLineDirectives {
+class CodeGenTileLangC : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangC();
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,

@@ -222,6 +222,13 @@ TIR_VAR_SCOPE_FRAME = (
 )
 
 
+def register_var_scope_frame(frame_type: type) -> None:
+    """Register a backend-specific frame as a variable scope."""
+    global TIR_VAR_SCOPE_FRAME
+    if frame_type not in TIR_VAR_SCOPE_FRAME:
+        TIR_VAR_SCOPE_FRAME += (frame_type,)
+
+
 def is_var(v: Any) -> bool:
     return isinstance(v, Buffer) and v.scope() == "local.var"
 
@@ -1700,8 +1707,12 @@ class JITFunc(Generic[_P, _T]):
     def get_tir(self, *args, **kwargs):
         bound = self._argument_binder.bind(args, kwargs)
         if bound.p1_key not in self.p1_cache:
-            # in legacy gemm, we use lazy tir template to build the tir
-            self.p1_cache[bound.p1_key] = self._build_tir_template(**bound.compile_kwargs)
+            # Lazy factories retain their positional arguments.
+            if self.mode == "lazy":
+                template = self._build_tir_template(*args, **kwargs)
+            else:
+                template = self._build_tir_template(**bound.compile_kwargs)
+            self.p1_cache[bound.p1_key] = template
         return self.p1_cache[bound.p1_key].get_tir(
             self.tensor_args,
             bound.tensor_args,
