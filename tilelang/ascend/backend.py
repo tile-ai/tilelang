@@ -49,6 +49,37 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
     return aibin
 
 
+def tilelang_callback_pto_compile(code, target, pass_config=None):
+    """Compile PTODSL source into a cached, executable CCE ELF."""
+    from tilelang.cache.ascend_binary_cache import PTOBinaryCache
+    from tilelang.contrib.pto_toolchain import (
+        BISHENG_FATOBJ_LINK_FLAGS,
+        compile_ptodsl_to_aibin,
+        resolve_pto_options,
+        toolchain_stamp,
+    )
+
+    pto_arch, pto_flags = resolve_pto_options()
+
+    compile_format = PTOBinaryCache.binary_format
+    cache_key = PTOBinaryCache.make_key(
+        code=code,
+        target_kind=target.kind.name,
+        target_arch=pto_arch,
+        compile_format=compile_format,
+        options=pto_flags,
+        linker_options=list(BISHENG_FATOBJ_LINK_FLAGS),
+        toolchain=toolchain_stamp(),
+    )
+    cached_binary = PTOBinaryCache.load(cache_key, compile_format)
+    if cached_binary is not None:
+        return bytearray(cached_binary)
+
+    aibin = compile_ptodsl_to_aibin(code, pto_arch, pto_flags, verbose=env.get_default_verbose())
+    PTOBinaryCache.save(cache_key, compile_format, aibin)
+    return aibin
+
+
 # Plain Ascend and PTO share the "ascend" target kind, so each is its own
 # BackendModule with a mutually exclusive `supports_target` predicate; the
 # resolver then selects exactly one. Both reuse the same lowering pipeline.
@@ -74,5 +105,6 @@ PTO_BACKEND = register_backend(
         device_codegens={"ascend": codegen.PTO_CODEGEN},
         execution_backends=execution_backend.PTO_EXECUTION_BACKENDS,
         host_codegens=STANDARD_HOST_CODEGENS,
+        callbacks={"tilelang_callback_pto_compile": tilelang_callback_pto_compile},
     )
 )
