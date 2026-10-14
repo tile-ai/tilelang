@@ -1,6 +1,8 @@
 language: en-US
 
 reviews:
+  suggested_labels: true
+  auto_apply_labels: true
   suggested_reviewers: true
   auto_assign_reviewers: true
   suggested_reviewers_instructions:
@@ -278,3 +280,9 @@ reviews:
         changes policy.
 
         Do not suggest failing CI for existing advisory backlog.
+
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+  labeling:
+    auto_apply_labels: true
