@@ -1,12 +1,7 @@
----
-name: tilelang-cpp-style
-description: Use when editing, reviewing, or documenting TileLang C++ code style, including naming conventions, clang-format choices, headers, TVM ObjectRef/ObjectNode style, FFI-visible fields, and incremental style cleanup plans.
----
-
 # TileLang C++ Style
 
-Use this skill when C++ style decisions matter in TileLang. For broad policy
-changes, review the full guide in `docs/developer_guide/cpp_style.md`.
+Use these rules when C++ style decisions matter in TileLang. For broad policy
+changes, review the [C++ Style Guide](../../../../docs/developer_guide/cpp_style.md).
 
 ## Baseline
 
@@ -21,7 +16,7 @@ Before writing new C++:
 
 - Identify whether the file is TileLang-owned compiler/runtime code, a
   `src/tl_templates` runtime template, a CUDA/HIP/Metal shim, or an external API
-  adapter. Owned compiler/runtime code follows this skill. Templates and shims
+  adapter. Owned compiler/runtime code follows these rules. Templates and shims
   may follow the generated or external interface they model.
 - Prefer the nearest local pattern in the same subsystem (`op`, `layout`,
   `transform`, `backend`, `cuda/op`, `rocm/op`, etc.) over inventing a new

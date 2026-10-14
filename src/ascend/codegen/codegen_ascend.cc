@@ -329,8 +329,8 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
   auto pass_ctx = tvm::transform::PassContext::Current();
   enable_fast_math_ =
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
-  decl_stream << "#include <tl_templates/ascend/common.h>\n";
-  decl_stream << "#include <tl_templates/ascend/debug.h>\n";
+  preamble_stream_ << "#include <tl_templates/ascend/common.h>\n";
+  preamble_stream_ << "#include <tl_templates/ascend/debug.h>\n";
 }
 
 void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
@@ -605,32 +605,32 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 
   // Conditionally include gemm.h when ascend_gemm_l1 is used
   if (has_gemm_l1_ && !has_gemm_l1_included_) {
-    decl_stream << "#include <tl_templates/ascend/gemm.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/gemm.h>\n";
     has_gemm_l1_included_ = true;
   }
 
   // Conditionally include nd2nz_copy.h when ascend_nd2nz_copy is used
   if (has_nd2nz_copy_ && !has_nd2nz_copy_included_) {
-    decl_stream << "#include <tl_templates/ascend/nd2nz_copy.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/nd2nz_copy.h>\n";
     has_nd2nz_copy_included_ = true;
   }
 
   // Conditionally include dcache_bypass.h when scalar global GM access emits
   // tl::read/write_gm_bypass_dcache
   if (has_gm_bypass_dcache_ && !has_gm_bypass_dcache_included_) {
-    decl_stream << "#include <tl_templates/ascend/dcache_bypass.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/dcache_bypass.h>\n";
     has_gm_bypass_dcache_included_ = true;
   }
 
   // Conditionally include philox_rng.h when tl.rng_init is used
   if (has_philox_rng_ && !has_philox_rng_included_) {
-    decl_stream << "#include <tl_templates/ascend/philox_rng.h>\n";
+    preamble_stream_ << "#include <tl_templates/ascend/philox_rng.h>\n";
     has_philox_rng_included_ = true;
   }
 
   // sync_warp lowers to cooperative_groups::coalesced_threads().sync().
   if (has_cooperative_groups && !has_cooperative_groups_included_) {
-    decl_stream << "#include <simt_api/cooperative_groups.h>\n";
+    preamble_stream_ << "#include <simt_api/cooperative_groups.h>\n";
     has_cooperative_groups_included_ = true;
   }
 
@@ -711,7 +711,7 @@ void CodeGenTileLangAscend::PreFunctionBody(const PrimFunc &f) {
   this->stream << "  asc_init();\n";
   // Emit the function-entry #line anchor after the compiler prologue, so the
   // directive's line mapping is not consumed by generated code.
-  CodeGenCWithLineDirectives::PreFunctionBody(f);
+  CodeGenTileLangCBase::PreFunctionBody(f);
 }
 
 ffi::Array<Var>
@@ -906,7 +906,7 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
   }
   if (op->name_hint == "SIMD_VF") {
     if (!has_simd_inst_included_) {
-      decl_stream << "#include <tl_templates/ascend/simd_inst.h>\n";
+      preamble_stream_ << "#include <tl_templates/ascend/simd_inst.h>\n";
       has_simd_inst_included_ = true;
     }
     auto captures = CollectVFCaptures(op);
