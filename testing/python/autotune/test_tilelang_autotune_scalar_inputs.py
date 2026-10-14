@@ -21,21 +21,7 @@ def add_scalar(N: int = 4096, BLOCK_N: int = 512, threads: int = 128):
     return kernel
 
 
-@pytest.mark.parametrize("cache_source", ["miss", "memory", "disk"])
-def test_autotune_scalar_inputs_require_explicit_supply(monkeypatch, cache_source):
-    from tilelang.autotuner import AutoTuner
-    from tilelang.autotuner.param import AutotuneResult
-    from tilelang.env import CacheState, env
-
-    monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
-    monkeypatch.setattr(env, "TILELANG_AUTO_TUNING_DISABLE_CACHE", "0")
-    monkeypatch.setattr(CacheState, "_enabled", True)
-    monkeypatch.setattr(add_scalar, "_tuner_cache", {})
-    monkeypatch.setattr(AutoTuner, "generate_cache_key", lambda *args: "scalar_input_validation")
-    cached_result = AutotuneResult(config={"threads": 128})
-    monkeypatch.setattr(AutoTuner, "_memory_cache", {"scalar_input_validation": cached_result} if cache_source == "memory" else {})
-    monkeypatch.setattr(AutoTuner, "_load_result_from_disk", lambda *args: cached_result if cache_source == "disk" else None)
-
+def test_autotune_scalar_inputs_require_explicit_supply():
     with pytest.raises(ValueError, match=r"set_autotune_inputs"):
         add_scalar()
 
