@@ -87,7 +87,7 @@ def test_broadcast_fill_initializes_every_version(partial, versions):
     fill = tirx.Evaluate(
         tirx.Call("handle", tvm.ir.Op.get("tl.tileop.fill"), [region(ub, 2, shape=[32 if partial else 64]), tirx.const(0, "float32")])
     )
-    fill = tirx.AttrStmt({"core_mask": tirx.IntImm("int64", 1), "tl.multi_buffer_broadcast_fill": [ub.data]}, "tl.ascend_task", 1, fill)
+    fill = tirx.AttrStmt({"core_mask": tirx.IntImm("int64", 5), "tl.multi_buffer_broadcast_fill": [ub.data]}, "tl.ascend_task", 1, fill)
     owner = tirx.For(
         i,
         0,

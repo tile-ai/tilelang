@@ -481,8 +481,8 @@ public:
 
     auto writers = writers_.find(value);
     if (writers == writers_.end())
-      return kCoreBroadcast;
-    CoreMask result = kCoreBroadcast;
+      return kCoreAll;
+    CoreMask result = kCoreAll;
     bool found = false;
     for (const TaskNode *writer : writers->second) {
       if (writer == reader)
@@ -490,19 +490,19 @@ public:
       found = true;
       result &= writer->GetCoreMask();
     }
-    return found ? result : kCoreBroadcast;
+    return found ? result : kCoreAll;
   }
 
   CoreMask GetExpressionCoreMask(const PrimExpr &expr,
                                  const TaskNode *reader = nullptr) const {
     if (!expr.defined())
-      return kCoreBroadcast;
+      return kCoreAll;
     return GetAccessCoreMask(AnalyzeTaskAccesses(Evaluate(expr)), reader);
   }
 
   CoreMask GetAccessCoreMask(const TaskAccessInfo &accesses,
                              const TaskNode *reader = nullptr) const {
-    CoreMask result = kCoreBroadcast;
+    CoreMask result = kCoreAll;
     for (const Var &var : accesses.read_vars)
       result &= GetValueCoreMask(var, reader);
     for (const BufferRegion &region : accesses.read_regions) {
@@ -566,7 +566,7 @@ private:
   using CoreMap =
       std::unordered_map<Var, CoreMask, ObjectPtrHash, ObjectPtrEqual>;
   CoreMask GetValueInputCoreMask(const TaskNode *task) const {
-    CoreMask result = kCoreBroadcast;
+    CoreMask result = kCoreAll;
     for (const Var &var : task->GetReadVars())
       result &= GetValueCoreMask(var, task);
     for (const BufferRegion &region : task->GetReadRegions()) {
@@ -578,7 +578,7 @@ private:
 
   CoreMask GetRegionIndexCoreMask(const BufferRegion &region,
                                   const TaskNode *reader) const {
-    CoreMask result = kCoreBroadcast;
+    CoreMask result = kCoreAll;
     for (const Range &range : region->region) {
       result &= GetExpressionCoreMask(range->min, reader);
       result &= GetExpressionCoreMask(range->extent, reader);
