@@ -24,12 +24,9 @@ documentation and [tilelang-build](../tilelang-build/SKILL.md).
 
 ## Task-specific references
 
-- [Independent AIV execution](references/subcores.md): distinct sub-core roles,
-  alternating epilogues, per-AIV storage, Fixpipe routing, and current limits.
-
 - [Scheduling and synchronization](references/synchronization.md): automatic,
   T.Stage performance tuning, buffer ownership and version modes, conditional
-  execution, conflict hints, and fully manual protocols.
+  execution, independent AIV roles, conflict hints, and fully manual protocols.
 
 - [Profiling recipes](references/profiling.md): device timing, regression tools,
   generated-source experiments, and operation cycle measurements with npusim.
@@ -228,8 +225,9 @@ with T.MixedKernel(NUM_BLOCKS, sids=2) as (bx, sid):
 Under automatic scheduling or `T.Stage`, `sid`-dependent guards and loops can
 assign different work to AIV0 and AIV1, including roles that change between
 iterations. Common Cube work remains shared. Read
-[independent AIV execution](references/subcores.md) before combining these
-patterns with Fixpipe copies, common GM/L1 storage, or loop exits.
+[independent AIV execution](references/synchronization.md#independent-aiv-execution)
+before combining these patterns with Fixpipe copies, common GM/L1 storage, or
+loop exits.
 
 See the mixed-core epilogues in `examples/ascend/deepgemm/kernels/epilogue.py`.
 Follow the actual buffer extents when partitioning output; a local half-sized
@@ -470,7 +468,7 @@ that launch explicitly, or `T.Kernel` with Cube and Vector work to infer it.
 For L0C→UB, the hardware copy remains one dual-destination instruction and
 requires control flow that is uniform across sub-cores. For independently
 selected destinations, use guarded `T.copy`; see
-[Fixpipe routing](references/subcores.md#route-l0c-to-ub-copies).
+[independent AIV execution](references/synchronization.md#independent-aiv-execution).
 
 | Path | Implementation and constraints |
 |---|---|
