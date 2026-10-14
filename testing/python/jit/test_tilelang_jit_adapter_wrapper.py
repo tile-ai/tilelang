@@ -28,6 +28,7 @@ def test_non_descriptor_name_does_not_modify_descriptor_map():
 @tilelang.testing.requires_cuda
 def test_cuda_wrapper_with_descriptor_named_output():
     """Lower TMA source with an output name that resembles a descriptor."""
+
     @T.prim_func
     def mixed(
         A: T.StridedTensor((32, 128), (160, 1), "float16"),
