@@ -639,70 +639,84 @@ def sparse_attention(
                         for i in T.unroll(16):
                             off = offsets[start + i]
                             if decode:
-                                count0 = T.if_then_else(off != T.uint32(0xFFFFFFFF), 2, 0)
+                                n_burst = T.if_then_else(off != T.uint32(0xFFFFFFFF), 2, 0)
                                 stride0 = T.Cast("int64", strides[start + i])
-                                # Clamp the unused pointer so bounds legalization retains
-                                # a zero-burst request, while no invalid memory is read.
-                                safe_off = T.if_then_else(count0 == 0, T.uint32(0), off)
+                                # Clamp the unused source address for fully invalid pairs.
+                                safe_off = T.if_then_else(n_burst == 0, T.uint32(0), off)
+                                # Temporary codegen workaround: omit the copy guards,
+                                # keeping runtime burst counts of 0/2 (see README).
                                 if extra_topk > 0 and extra0:
                                     if extra_fp4:
-                                        T.call_extern(
-                                            "void",
-                                            "fm_pair_bytes",
+                                        pair_src = T.make_tensor_from_addr(
+                                            T.access_ptr(ExtraKV[safe_off], "r"), (n_burst, 288), "uint8", strides=(stride0, 1)
+                                        )
+                                        pair_dst = T.make_tensor_from_addr(
                                             T.access_ptr(raw4[step % 3, i * 2, 0], "w"),
-                                            T.access_ptr(ExtraKV[safe_off], "r"),
-                                            count0,
-                                            stride0,
-                                            288,
-                                            288,
-                                            cache_hint,
+                                            (n_burst, 288),
+                                            "uint8",
+                                            strides=(288, 1),
+                                            storage_scope="shared.dyn",
                                         )
+                                        T.assume(n_burst > 0)
+                                        T.copy(pair_src, pair_dst, l2_cache_ctrl="normal_lv" if cache_hint else "notalloc_clean")
                                     else:
-                                        T.call_extern(
-                                            "void",
-                                            "fm_pair_bytes",
-                                            T.access_ptr(raw8[step % 3, i * 2, 0], "w"),
-                                            T.access_ptr(ExtraKV[safe_off], "r"),
-                                            count0,
-                                            stride0,
-                                            528,
-                                            544,
-                                            cache_hint,
+                                        pair_src = T.make_tensor_from_addr(
+                                            T.access_ptr(ExtraKV[safe_off], "r"), (n_burst, 528), "uint8", strides=(stride0, 1)
                                         )
+                                        pair_dst = T.make_tensor_from_addr(
+                                            T.access_ptr(raw8[step % 3, i * 2, 0], "w"),
+                                            (n_burst, 528),
+                                            "uint8",
+                                            strides=(544, 1),
+                                            storage_scope="shared.dyn",
+                                        )
+                                        T.assume(n_burst > 0)
+                                        T.copy(pair_src, pair_dst, l2_cache_ctrl="normal_lv" if cache_hint else "notalloc_clean")
                                 else:
                                     if fp4:
-                                        T.call_extern(
-                                            "void",
-                                            "fm_pair_bytes",
+                                        pair_src = T.make_tensor_from_addr(
+                                            T.access_ptr(KV[safe_off], "r"), (n_burst, 288), "uint8", strides=(stride0, 1)
+                                        )
+                                        pair_dst = T.make_tensor_from_addr(
                                             T.access_ptr(raw4[step % 3, i * 2, 0], "w"),
-                                            T.access_ptr(KV[safe_off], "r"),
-                                            count0,
-                                            stride0,
-                                            288,
-                                            288,
-                                            cache_hint,
+                                            (n_burst, 288),
+                                            "uint8",
+                                            strides=(288, 1),
+                                            storage_scope="shared.dyn",
                                         )
+                                        T.assume(n_burst > 0)
+                                        T.copy(pair_src, pair_dst, l2_cache_ctrl="normal_lv" if cache_hint else "notalloc_clean")
                                     else:
-                                        T.call_extern(
-                                            "void",
-                                            "fm_pair_bytes",
-                                            T.access_ptr(raw8[step % 3, i * 2, 0], "w"),
-                                            T.access_ptr(KV[safe_off], "r"),
-                                            count0,
-                                            stride0,
-                                            528,
-                                            544,
-                                            cache_hint,
+                                        pair_src = T.make_tensor_from_addr(
+                                            T.access_ptr(KV[safe_off], "r"), (n_burst, 528), "uint8", strides=(stride0, 1)
                                         )
+                                        pair_dst = T.make_tensor_from_addr(
+                                            T.access_ptr(raw8[step % 3, i * 2, 0], "w"),
+                                            (n_burst, 528),
+                                            "uint8",
+                                            strides=(544, 1),
+                                            storage_scope="shared.dyn",
+                                        )
+                                        T.assume(n_burst > 0)
+                                        T.copy(pair_src, pair_dst, l2_cache_ctrl="normal_lv" if cache_hint else "notalloc_clean")
                             else:
-                                T.call_extern(
-                                    "void",
-                                    "fm_pair",
-                                    T.access_ptr(kv[step % 3, i * 2, 0], "w"),
+                                n_burst = T.if_then_else(off != nk * 512, 2, 0)
+                                pair_src = T.make_tensor_from_addr(
                                     T.access_ptr(KV[off // 512, 0], "r"),
-                                    T.if_then_else(off != nk * 512, 2, 0),
-                                    T.Cast("int64", strides[start + i]),
+                                    (n_burst, 512),
+                                    "bfloat16",
+                                    strides=(T.Cast("int64", strides[start + i]) // 2, 1),
                                 )
+                                pair_dst = T.make_tensor_from_addr(
+                                    T.access_ptr(kv[step % 3, i * 2, 0], "w"),
+                                    (n_burst, 512),
+                                    "bfloat16",
+                                    strides=(512, 1),
+                                    storage_scope="shared.dyn",
+                                )
+                                # As above, n_burst can still be zero at runtime.
+                                T.assume(n_burst > 0)
+                                T.copy(pair_src, pair_dst, l2_cache_ctrl="normal_lv")
                         T.ascend_rls_buf("PIPE_S", 1)
                         T.ascend_rls_buf("PIPE_MTE2", 8 + step % 3)
                     if not gather_later and step >= 4 and step - 4 < total and (step - 4) % nb > 0:

@@ -13,6 +13,16 @@ only wraps individual CANN transfer / MMA instructions and SS-buffer access;
 it contains no attention loop and does not call the reference kernel.
 `TL_ENABLE_AUTO_SCHEDULE=False` and explicit `T.Cube()` / `T.Vector()` are used.
 
+Pair gathers use two-dimensional `T.make_tensor_from_addr` views and `T.copy`,
+with runtime source strides and a runtime row count of zero or two. A zero
+count preserves the UB contents; it does not clear them. The local
+`T.assume(n_burst > 0)` is a temporary code-generation workaround that removes
+the copy's positive-count guard in the current compiler while retaining the
+runtime zero-or-two DMA argument. It is **not a valid input invariant**: fully
+invalid pairs still have zero bursts. Recheck the generated code and invalid-pair
+cases when upgrading the compiler; this needs an explicit zero-burst copy
+contract to become a supported use of `T.copy`.
+
 Supported shapes are H=64, Dqk=Dv=512, BF16 Q and output, and topk multiples of
 64. Prefill takes contiguous BF16 KV and allows strided Q / indices. Decode
 accepts the PR's compact FP8 main cache and optional FP8 or FP4 extra cache.
@@ -23,7 +33,9 @@ fixed loop extent; they do not shorten this example's pipeline loop.
 
 ## Reproduce
 
-Build TileLang at `a35f8ddf45eba16c21211ec8822d56ce5363036f` with Ascend enabled.
+Build this TileLang branch with Ascend enabled. The original performance
+measurements in `RESULTS.md` used `a35f8ddf45eba16c21211ec8822d56ce5363036f`
+and the earlier C-adapter pair gathers; they do not measure the native-copy change.
 Build the pinned FlashMLA reference separately:
 
 ```bash

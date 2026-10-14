@@ -107,11 +107,22 @@ correctness JSON files, source hashes, compiler version and function sizes
 are in [results](results).
 
 These hardware results were collected on the pinned TileLang revision above.
-The publication branch targets a newer `main`; hardware execution has not been
-repeated on that base. `results/environment.json` retains the measurement
-source hashes separately from the published source hashes. The attention core,
-entry points, dequantization, and intrinsic adapters match the measured sources;
-the published runners expose only the reference and manual implementations.
+The publication branch targets a newer `main`. The current pair gathers use
+native `T.copy` with the temporary `T.assume` workaround documented in `README.md`;
+the performance numbers above predate this change and have not been remeasured.
+`results/environment.json` retains the original measurement and publication
+source hashes as historical evidence. The current attention core and intrinsic
+header differ from those snapshots.
+
+On 2026-10-14, the native pair-copy version passed all 14 prefill and 9 decode
+correctness cases through the TileLang runtime, including zero/all-invalid
+pairs. This recheck used the unchanged compiler from `b683a26`, CANN 9.2.0,
+torch_npu 2.13.0rc1, and Ascend950DT_9581 physical devices 7 (prefill) and 6
+(decode). Generated code retained runtime 0/2 DMA counts and decode address
+clamping. For representative BF16 prefill and FP8+FP4 decode specializations,
+Bisheng assembly retained the same DMA instruction counts without increasing
+conditional-jump counts. This was a correctness/code-generation recheck,
+not a performance measurement.
 
 The full local debug evidence is under `.artifacts/flashmla-pr229/` in the
 worktree: `final-suite.log`, generated `.asc` files, intermediate experiments,
