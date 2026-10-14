@@ -234,5 +234,48 @@ def test_alternating_aiv_writers_without_cube_ordering_are_rejected(scope):
         transform.InsertSync()(before)
 
 
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("to_cube", [False, True], ids=["cube-to-aivs", "aivs-to-cube"])
+def test_ss_uses_standard_cross_core_sync(packed, to_cube):
+    ss = tirx.decl_buffer((2,), "uint32", name="ss", scope="shared.ss")
+    view = tirx.decl_buffer((1,), "uint64", data=ss.data) if packed else ss
+    out = tirx.decl_buffer((2,), "uint32", name="out")
+    if to_cube:
+        tasks = [unit(tirx.BufferStore(ss, tirx.const(7, "uint32"), [sid]), core=core) for sid, core in enumerate((1, 4))]
+        value = tirx.Cast("uint32", view[0]) if packed else ss[0] + ss[1]
+        tasks.append(unit(tirx.BufferStore(out, value, [0]), core=2))
+    else:
+        writes = [tirx.BufferStore(view, tirx.const(7, view.dtype), [i]) for i in range(1 if packed else 2)]
+        tasks = [unit(seq(*writes), core=2)]
+        tasks += [unit(tirx.BufferStore(out, ss[sid], [sid]), core=core) for sid, core in enumerate((1, 4))]
+    before = kernel(seq(*tasks), buffers=[ss], params=[out], annotations={"tl.split_subcores": True})
+    after = transform.InsertSync()(before)
+    endpoints = {"set": [], "wait": []}
+    for task in nodes(after, tirx.AttrStmt):
+        if task.attr_key != "tl.ascend_task":
+            continue
+        for operation, events in endpoints.items():
+            for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
+                assert int(call.args[0]) == 4 and call.args[1].value == "PIPE_S"
+                events.append((int(task.node["core_mask"]), int(tvm.arith.Analyzer().simplify(call.args[2]))))
+    vectors = endpoints["set" if to_cube else "wait"]
+    cube = endpoints["wait" if to_cube else "set"]
+    assert {core for core, _ in vectors} == {1, 4}
+    assert len(vectors) == len(cube) == 2
+    assert set(cube) == {(2, slot + (16 if core == 4 else 0)) for core, slot in vectors}
+
+
+def test_ss_disjoint_aiv_read_modify_write_needs_no_sync():
+    ss = tirx.decl_buffer((2,), "uint32", name="ss", scope="shared.ss")
+    before = kernel(
+        seq(*(unit(tirx.BufferStore(ss, ss[sid] + 1, [sid]), core=core) for sid, core in enumerate((1, 4)))),
+        buffers=[ss],
+        annotations={"tl.split_subcores": True},
+    )
+    after = transform.InsertSync()(before)
+    assert not calls(after, "tl.ascend_cross_core_set_flag")
+    assert not calls(after, "tl.ascend_cross_core_wait_flag")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

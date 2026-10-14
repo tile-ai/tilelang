@@ -27,6 +27,11 @@ class GemmBlockScaled;
 void ValidateL0SFGemm(const GemmBlockScaled &gemm, const L0SFBindings &bindings,
                       arith::Analyzer *analyzer);
 
+inline bool IsSSBuffer(const Buffer &buffer) {
+  return buffer.defined() &&
+         (buffer.scope() == "shared.ss" || buffer.scope() == "shared.ss.dyn");
+}
+
 inline bool IsL1Buffer(const Buffer &buffer) {
   return buffer.defined() &&
          (buffer.scope() == "shared.l1" || buffer.scope() == "shared.l1.dyn");
