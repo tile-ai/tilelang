@@ -35,9 +35,9 @@ void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
-  decl_stream << "// tilelang target: " << target_str << "\n";
-  decl_stream << "#include <tl_templates/cpp/common.h>\n";
-  decl_stream << "\n";
+  preamble_stream_ << "// tilelang target: " << target_str << "\n";
+  preamble_stream_ << "#include <tl_templates/cpp/common.h>\n";
+  preamble_stream_ << "\n";
   CodeGenC::Init(output_ssa);
 }
 
