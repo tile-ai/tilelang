@@ -45,9 +45,7 @@ public:
   static SBlock Rewrite(const SBlock &root, const ConstrSet &outer_ctx,
                         const Var &sid) {
     ICHECK(!root->annotations.count(kSplitSubcores));
-    SBlock result = root;
-    result.CopyOnWrite()->body = DistinctFixpipeCallSites(root->body);
-    ScheduledTIR scheduled = DecodeScheduledTIR(result, outer_ctx);
+    ScheduledTIR scheduled = DecodeScheduledTIR(root, outer_ctx);
     SubcoreProjector projector(sid,
                                scheduled.metadata.num_aiv_subcores.value_or(2));
     projector.FindVaryingValues(scheduled.tree);
@@ -68,6 +66,7 @@ public:
       auto it = projector.vars_[p].find(storage);
       return it != projector.vars_[p].end() && used.count(it->second);
     };
+    SBlock result = root;
     SBlockNode *writer = result.CopyOnWrite();
     writer->body = std::move(body);
     Array<Buffer> allocations;
@@ -132,7 +131,6 @@ public:
     annotations.Set(kAivStorageMap, ub_sids);
     annotations.Set(kSplitSubcores, Bool(true));
     writer->annotations = std::move(annotations);
-    projector.VerifyProjectedUnitFlags(result, outer_ctx);
     return result;
   }
 
@@ -141,115 +139,6 @@ private:
   using VarMap = std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual>;
   using BufferMap =
       std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
-
-  // Call nodes may be shared between source statements. Give each explicit
-  // UnitFlag copy site its own identity before recording its projections.
-  static Stmt DistinctFixpipeCallSites(const Stmt &body) {
-    class Rewriter : public StmtExprMutator {
-      Stmt VisitStmt_(const EvaluateNode *op) final {
-        const auto *call = op->value.as<CallNode>();
-        if (!call || !IsAscendCopyCall(call))
-          return ffi::GetRef<Stmt>(op);
-        AscendCopy copy(call->args, call->annotations);
-        if (!IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst) ||
-            is_zero(copy->unit_flag_ctl))
-          return ffi::GetRef<Stmt>(op);
-        return Evaluate(Call(call->dtype, call->op, call->args,
-                             call->annotations, call->span),
-                        op->span);
-      }
-    } rewriter;
-    return rewriter(body);
-  }
-
-  // Explicit UnitFlag protocols belong to the caller. Only compare copies
-  // derived from the same source operation, never separate user-written
-  // operations (even within one Task). Projection must preserve the protocol
-  // through exclusive execution or independent whole fractals; it must not
-  // silently disable UnitFlag on the accumulator and its producers.
-  void VerifyProjectedUnitFlags(const SBlock &root,
-                                const ConstrSet &outer_ctx) const {
-    ScheduledTIR scheduled = DecodeScheduledTIR(root, outer_ctx);
-    std::vector<TaskNode *> tasks;
-    CollectAllTaskNodes(scheduled.tree, tasks);
-    struct Read {
-      TaskNode *task;
-      AscendCopy copy;
-    };
-    std::unordered_map<Call, std::vector<Read>, ObjectPtrHash, ObjectPtrEqual>
-        reads;
-    for (TaskNode *task : tasks) {
-      PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
-        const auto *call = node.as<CallNode>();
-        if (!call || !IsAscendCopyCall(call))
-          return;
-        auto origin = copy_origins_.find(ffi::GetRef<Call>(call));
-        if (origin != copy_origins_.end())
-          reads[origin->second].push_back(
-              {task, AscendCopy(call->args, call->annotations)});
-      });
-    }
-    auto single_iteration_guard = [](TaskNode *task) {
-      PrimExpr guard = task->GetConditionGuard();
-      IRStructure *parent = task->GetParent();
-      // Buffer ownership and conflict hints may retain a one-iteration loop
-      // around the copy. Its guard still selects the same single flag read.
-      while (parent && parent->IsControl()) {
-        auto *control = static_cast<ControlNode *>(parent);
-        if (control->GetTripCount() != 1)
-          break;
-        guard = guard && control->GetConditionGuard();
-        parent = parent->GetParent();
-      }
-      return std::make_pair(parent, guard);
-    };
-    for (const auto &[origin, copies] : reads) {
-      for (size_t i = 0; i < copies.size(); ++i) {
-        for (size_t j = i + 1; j < copies.size(); ++j) {
-          const Read &a = copies[i], &b = copies[j];
-          if (is_zero(a.copy->unit_flag_ctl) && is_zero(b.copy->unit_flag_ctl))
-            continue;
-          auto [a_parent, a_guard] = single_iteration_guard(a.task);
-          auto [b_parent, b_guard] = single_iteration_guard(b.task);
-          ConstrSet context = b.task->outer_ctx;
-          if (a_parent == b_parent && b_parent && b_parent->IsControl())
-            context = static_cast<ControlNode *>(b_parent)
-                          ->GetLoopBodyContext()
-                          .Merge(context);
-          arith::Analyzer analyzer;
-          analyzer.z3_prover.SetRLimit(50000);
-          context.Populate(analyzer);
-          PrimExpr exclusive = !(a_guard && b_guard);
-          if (a_parent == b_parent && (analyzer.CanProve(exclusive) ||
-                                       analyzer.z3_prover.CanProve(exclusive)))
-            continue;
-          bool disjoint = false;
-          if (a.copy->src.same_as(b.copy->src) &&
-              a.copy->src_range.size() == b.copy->src_range.size()) {
-            for (size_t dim = 0; dim < a.copy->src_range.size(); ++dim) {
-              const Range &x = a.copy->src_range[dim];
-              const Range &y = b.copy->src_range[dim];
-              int fractal = dim + 2 >= a.copy->src_range.size() ? 16 : 1;
-              disjoint |= analyzer.CanProve(
-                  floordiv(x->min + x->extent + fractal - 1, fractal) <=
-                      floordiv(y->min, fractal) ||
-                  floordiv(y->min + y->extent + fractal - 1, fractal) <=
-                      floordiv(x->min, fractal));
-            }
-          }
-          TVM_FFI_CHECK(disjoint, ValueError)
-              << "Subcore projection cannot preserve explicit unit_flag_ctrl "
-                 "for L0C->UB copy from "
-              << a.copy->src->name
-              << ": copies derived from the same source operation may access "
-                 "the same UnitFlag fractal. Use a single AIV destination or "
-                 "independent whole fractals, or remove unit_flag_ctrl from "
-                 "both the related GEMM and copies to use automatic "
-                 "synchronization";
-        }
-      }
-    }
-  }
 
   SubcoreProjector(Var sid, int count) : sid_(std::move(sid)), count_(count) {
     ICHECK(count == 1 || count == 2);

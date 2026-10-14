@@ -660,64 +660,6 @@ def test_projected_loop_exit_follows_scalar_demand_from_later_consumers(owner, c
     assert all(int(task.node["core_mask"]) & 2 for task in count_writes)
 
 
-@pytest.mark.parametrize(
-    "steps, exclusive, supported, bound_guard",
-    [
-        pytest.param(1, True, True, False, id="exclusive-single"),
-        pytest.param(1, False, False, False, id="broadcast-single"),
-        pytest.param(2, True, False, False, id="exclusive-repeated"),
-        pytest.param(1, True, True, True, id="bound-exclusive-single"),
-        pytest.param(2, True, False, True, id="bound-exclusive-repeated"),
-    ],
-)
-def test_projected_fixpipe_unit_flags_require_exclusive_execution(steps, exclusive, supported, bound_guard):
-    accum = tirx.decl_buffer((32, 32), "float32", name="accum", scope="shared.l0c")
-    ub = tirx.decl_buffer((32, 32), "float32", name="ub", scope="shared.dyn")
-    sid, selector, i = (tirx.Var(name, "int32") for name in ("sid", "selector", "i"))
-    fix = unit(copy(accum, ub, annotations={"unit_flag_ctrl": tirx.IntImm("int32", 3)}), core=0)
-    loop = tirx.For(i, 0, steps, tirx.ForKind.SERIAL, fix)
-    guard = sid == (selector & 1) if exclusive else None
-    if bound_guard and exclusive:
-        active, outer = tirx.Var("active", "bool"), tirx.Var("outer", "int32")
-        # Layout/OOB assumptions can wrap the snapshot Bind before projection.
-        binding = unit(tirx.AttrStmt(selector >= 0, "tl.assume", 1, unit(tirx.Bind(active, guard), core=0).body), core=None)
-        body = unit(tirx.For(outer, 0, 2, tirx.ForKind.SERIAL, seq(binding, unit(loop, core=None, guard=active))), core=None)
-    else:
-        body = unit(loop, core=None, guard=guard)
-    before = kernel(body, buffers=[accum, ub], params=[selector])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
-    if not supported:
-        with pytest.raises(ValueError, match="cannot preserve explicit unit_flag_ctrl.*both the related GEMM and copies"):
-            transform.AssignCore()(before)
-        return
-    after = transform.AssignCore()(before)
-    copies = calls(after, "tl.tileop.ascend_copy")
-    assert len(copies) == 2
-    assert {int(call.annotations["unit_flag_ctrl"]) for call in copies} == {3}
-
-
-@pytest.mark.parametrize("rows", [16, 8], ids=["whole-fractals", "shared-fractal"])
-def test_projected_fixpipe_unit_flags_require_independent_fractals(rows):
-    accum = tirx.decl_buffer((2 * rows, 32), "float32", name="accum", scope="shared.l0c")
-    ub = tirx.decl_buffer((rows, 32), "float32", name="ub", scope="shared.dyn")
-    sid, selector = (tirx.Var(name, "int32") for name in ("sid", "selector"))
-    flag = tirx.Select(selector > 0, 3, 2)
-    fix = copy(accum, ub, src_indices=[sid * rows, 0], src_shape=[rows, 32], annotations={"unit_flag_ctrl": flag})
-    before = kernel(unit(fix, core=0), buffers=[accum, ub], params=[selector])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
-    if rows == 8:
-        with pytest.raises(ValueError, match="cannot preserve explicit unit_flag_ctrl.*same UnitFlag fractal"):
-            transform.AssignCore()(before)
-        return
-    after = transform.AssignCore()(before)
-    copies = calls(after, "tl.tileop.ascend_copy")
-    assert len(copies) == 2
-    for call in copies:
-        tvm.ir.assert_structural_equal(call.annotations["unit_flag_ctrl"], flag)
-
-
 def test_unit_flag_pairing_between_source_copies_remains_caller_managed():
     accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
     ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")

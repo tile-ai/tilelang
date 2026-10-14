@@ -394,11 +394,9 @@ check the target SDK's pairing and reset requirements. Preserve the matching
 buffer slots, accessed regions, and guards when changing tile sizes or tails.
 Check zero-size operation behavior for each instruction involved.
 
-Sub-core projection preserves explicit nonzero `unit_flag_ctrl`. Copies derived
-from the same source L0C→UB operation must execute exclusively or access
-independent whole UnitFlag fractals; overlapping projected reads are rejected.
-This check does not validate pairing between separate user-written GEMM/copy
-operations, which remains the caller's responsibility. To use automatic
+Sub-core projection preserves explicit `unit_flag_ctrl` without validating
+UnitFlag pairing or reset lifecycles. The caller is responsible for the protocol
+across GEMM and copies, including projected copies. To use automatic
 synchronization instead, omit the control on both GEMM and its drains.
 
 Validate tail handling across repeated launches and buffer reuse. Check that
