@@ -2,9 +2,10 @@
 name: tilelang-ascend
 description: >
   Write, port, tune, and debug TileLang kernels for Huawei Ascend NPUs. Covers the
-  Ascend dialect, AIC/AIV work partitioning, SIMD/SIMT operations, memory and
-  data movement, T.Stage scheduling, synchronization, performance measurement,
-  profiling, operation cycle measurements, and VF latency annotations.
+  Ascend dialect, AIC/AIV work partitioning and independent AIV execution,
+  SIMD/SIMT operations, memory and data movement, T.Stage scheduling,
+  synchronization, performance measurement, profiling, operation cycle
+  measurements, and VF latency annotations.
   Explains how Ascend kernel programming differs from CUDA/GPU programming.
 ---
 
@@ -22,6 +23,9 @@ and `T.SimdVF`. For installation, follow the repository's current build
 documentation and [tilelang-build](../tilelang-build/SKILL.md).
 
 ## Task-specific references
+
+- [Independent AIV execution](references/subcores.md): distinct sub-core roles,
+  alternating epilogues, per-AIV storage, Fixpipe routing, and current limits.
 
 - [Scheduling and synchronization](references/synchronization.md): automatic,
   T.Stage performance tuning, buffer ownership and version modes, conditional
@@ -211,13 +215,21 @@ with T.Kernel(NUM_BLOCKS) as bx:
 
 Use `T.MixedKernel(NUM_BLOCKS, sids=2)` when the program needs the AIV sub-core
 ID returned with `bx`, or explicitly controls the active AIV count (`sids=1`
-or `2`). If neither is needed, use `T.Kernel`; the compiler handles core
-splitting and the appropriate `T.dual_copy` lowering.
+or `2`). With automatic scheduling enabled, `sids=1` activates only AIV0;
+`sids=2` preserves the two-AIV launch even when there is no Cube work.
+If neither the ID nor explicit count is needed, use `T.Kernel`; the compiler
+handles core splitting and the appropriate `T.dual_copy` lowering.
 
 ```python
 with T.MixedKernel(NUM_BLOCKS, sids=2) as (bx, sid):
-    ...  # Partition each AIV's accesses according to sid and buffer ownership.
+    ...  # Use sid to partition tiles or select distinct AIV roles.
 ```
+
+Under automatic scheduling or `T.Stage`, `sid`-dependent guards and loops can
+assign different work to AIV0 and AIV1, including roles that change between
+iterations. Common Cube work remains shared. Read
+[independent AIV execution](references/subcores.md) before combining these
+patterns with Fixpipe copies, common GM/L1 storage, or loop exits.
 
 See the mixed-core epilogues in `examples/ascend/deepgemm/kernels/epilogue.py`.
 Follow the actual buffer extents when partitioning output; a local half-sized
@@ -453,8 +465,12 @@ T.copy(A[:, :], a_ub[:, :30], data_select=True)
 ### 6.2 T.dual_copy (Ascend-Only)
 
 Distributes a logical tile across two AIV sub-cores in a mixed kernel. The
-kernel must also contain Cube-side work; `dual_copy` alone cannot turn a pure
-Vector kernel into a two-AIV launch.
+two AIVs cooperate on the tile; use `T.MixedKernel(..., sids=2)` to request
+that launch explicitly, or `T.Kernel` with Cube and Vector work to infer it.
+For L0C→UB, the hardware copy remains one dual-destination instruction and
+requires control flow that is uniform across sub-cores. For independently
+selected destinations, use guarded `T.copy`; see
+[Fixpipe routing](references/subcores.md#route-l0c-to-ub-copies).
 
 | Path | Implementation and constraints |
 |---|---|
@@ -713,9 +729,10 @@ and its original caller, with repeated-run checks when determinism is required.
    across two AIVs, the destination holds half the rows. Other copy directions
    have different ownership and shape relationships; inspect their lowering.
 
-10. **AIV sid indexing in output**: In `T.MixedKernel`, `T.copy` from
-    UB to GM uses `sid` to partition output rows. Forgetting the `sid`
-    offset causes both AIV sub-cores to write the same region.
+10. **AIV output ownership**: When both AIVs store parts of one tile, partition
+    GM regions explicitly with `sid` or use the matching `T.dual_copy`.
+    When a guard selects one AIV to drain a complete tile, keep the full tile
+    extent; that pattern does not require another half-tile split.
 
 11. **Hardware warp-reduce dtypes**: `T.warp_reduce_sum`,
     `T.warp_reduce_max`, and `T.warp_reduce_min` lower directly to the

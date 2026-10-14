@@ -23,6 +23,11 @@ stages. Stage constraints and buffer rings are covered by
 Fully manual mixed protocols are covered in `testing/ascend/language/test_tilelang_ascend_nd2nz_scatter.py`.
 The presence of low-level flags does not automatically select fully manual mode.
 
+For `sid`-dependent work, read [independent AIV execution](subcores.md).
+Automatic scheduling and `T.Stage` both support distinct AIV roles, but direct
+AIV0/AIV1 synchronization is currently unsupported. Stage order alone cannot
+replace a required cross-core dependency.
+
 For fully manual kernels, use these APIs as part of a complete protocol:
 
 | Purpose | API |
@@ -357,6 +362,13 @@ For kernels using UnitFlag synchronization between GEMM and output transfers,
 check the target SDK's pairing and reset requirements. Preserve the matching
 buffer slots, accessed regions, and guards when changing tile sizes or tails.
 Check zero-size operation behavior for each instruction involved.
+
+Sub-core projection preserves explicit nonzero `unit_flag_ctrl`. Copies derived
+from the same source L0C→UB operation must execute exclusively or access
+independent whole UnitFlag fractals; overlapping projected reads are rejected.
+This check does not validate pairing between separate user-written GEMM/copy
+operations, which remains the caller's responsibility. To use automatic
+synchronization instead, omit the control on both GEMM and its drains.
 
 Validate tail handling across repeated launches and buffer reuse. Check that
 the declared access regions cover the generated instructions' physical

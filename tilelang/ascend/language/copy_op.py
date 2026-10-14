@@ -96,9 +96,6 @@ def dual_copy(
         dst: Destination region in UB, GM, or L1, according to the supported paths.
         unit_flag_ctrl: Unit flag control (0=manual sync, 3=pipelined with mad).
             ``None`` omits the annotation and lowers as 0.
-            On the L0C-to-UB path, explicit nonzero values define a caller-managed
-            protocol and are preserved; unsupported subcore projection raises
-            an error.
         l2_cache_ctrl (int | str): Ascend L2 cache control policy for the UB→GM
             store path. Accepts an integer or case-insensitive string name
             (e.g. ``"notalloc_clean"``). Defaults to 0 (``"normal_fv"``).
@@ -276,10 +273,6 @@ def copy(  # noqa: A001
             ``"NOTALLOC_KEEP"``.
         unit_flag_ctrl (Optional[Union[int, PrimExpr]], keyword-only): Unit flag
             control for the Cube instruction; ``None`` omits the annotation.
-            Explicit nonzero values define a caller-managed protocol and are
-            preserved. L0C-to-UB subcore projection raises an error if it cannot
-            preserve that protocol. To use automatic synchronization instead,
-            omit this control on both the related GEMM and copies.
         sub_blockid (Optional[Union[int, PrimExpr]], keyword-only): Sub-block id
             that routes the copy to one of the AIV sub-blocks.
         pad_value (Optional[Union[int, float, PrimExpr]], keyword-only): Ascend
