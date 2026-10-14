@@ -6,6 +6,8 @@
 #define TVM_TL_TRANSFORM_COMMON_INDEX_PREDICATE_REWRITER_H_
 
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <tvm/ffi/extra/structural_hash.h>
 #include <tvm/tirx/analysis.h>
@@ -18,50 +20,48 @@ namespace tvm {
 namespace tl {
 
 /*!
- * \brief Record index promotions and apply them to matching predicate
- * arithmetic.
+ * \brief Associate promoted address arithmetic with its controlling predicates.
  *
- * Rewrite predicates after visiting all accesses, so enclosing guards and
- * guards introduced by safe-memory legalization use the same arithmetic as the
- * address. Only matching arithmetic is changed; data expressions and
- * fixed-width value boundaries retain their original semantics.
+ * Each access owns its promotions. Only predicates controlling that access use
+ * them; arithmetic in data selections and fixed-width value boundaries is kept.
  */
 class IndexPredicateRewriter : public tirx::StmtExprMutator {
-public:
-  PrimExpr Promote(const PrimExpr &index) {
-    RecordingPromoter promoter(&promotions_);
-    return promoter(index);
-  }
-
-  tirx::Stmt Rewrite(const tirx::Stmt &stmt) {
-    return promotions_.empty() ? stmt : VisitStmt(stmt);
-  }
-
 private:
   using PromotionMap =
       std::unordered_map<PrimExpr, PrimExpr, ffi::StructuralHash,
                          tirx::ExprDeepEqual>;
 
-  class RecordingPromoter : public Int64Promoter {
+public:
+  class Promoter : public Int64Promoter {
   public:
-    explicit RecordingPromoter(PromotionMap *promotions)
-        : promotions_(promotions) {}
-
     PrimExpr VisitExpr(const PrimExpr &expr) final {
       PrimExpr promoted = Int64Promoter::VisitExpr(expr);
       if (expr.dtype().is_int() && expr.dtype().bits() < 64 &&
           promoted.dtype().is_int() && promoted.dtype().bits() == 64 &&
           !expr.as<tirx::VarNode>() && !expr.as<tirx::IntImmNode>() &&
           !expr.as<tirx::CastNode>() && !expr.as<tirx::BufferLoadNode>()) {
-        promotions_->insert_or_assign(expr, promoted);
+        promotions_.insert_or_assign(expr, promoted);
       }
       return promoted;
     }
 
   private:
-    PromotionMap *promotions_;
+    friend class IndexPredicateRewriter;
+    PromotionMap promotions_;
   };
 
+  void Record(const ffi::ObjectRef &access, Promoter &promoter) {
+    if (!promoter.promotions_.empty()) {
+      access_promotions_.insert_or_assign(access,
+                                          std::move(promoter.promotions_));
+    }
+  }
+
+  tirx::Stmt Rewrite(const tirx::Stmt &stmt) {
+    return access_promotions_.empty() ? stmt : VisitStmt(stmt);
+  }
+
+private:
   class PredicateLegalizer : public tirx::DataTypeLegalizer {
   public:
     explicit PredicateLegalizer(const PromotionMap &promotions)
@@ -93,7 +93,18 @@ private:
       return tirx::Let(op->var, op->value, VisitExpr(op->body), op->span);
     }
 
+    PrimExpr VisitExpr_(const tirx::SelectNode *op) final {
+      // A data-valued selection is a fixed-width producer. Only a selection
+      // promoted as part of this access's address may be replaced as a whole.
+      return op->dtype.is_bool() ? DataTypeLegalizer::VisitExpr_(op)
+                                 : ffi::GetRef<PrimExpr>(op);
+    }
+
     PrimExpr VisitExpr_(const tirx::CallNode *op) final {
+      if (op->op.same_as(tirx::builtin::if_then_else()) &&
+          !op->dtype.is_bool()) {
+        return ffi::GetRef<PrimExpr>(op);
+      }
       if (op->op.same_as(tirx::builtin::if_then_else()) ||
           op->op.same_as(tirx::builtin::likely()) ||
           op->op.same_as(tirx::builtin::shift_left()) ||
@@ -115,45 +126,108 @@ private:
     const PromotionMap &promotions_;
   };
 
-  PrimExpr RewritePredicate_(const PrimExpr &predicate) {
-    PredicateLegalizer legalizer(promotions_);
+  static void Merge_(PromotionMap &target, const PromotionMap &source) {
+    target.insert(source.begin(), source.end());
+  }
+
+  PrimExpr RewritePredicate_(const PrimExpr &predicate,
+                             const PromotionMap &promotions) {
+    if (promotions.empty()) {
+      return predicate;
+    }
+    PredicateLegalizer legalizer(promotions);
     return legalizer(predicate);
   }
 
+  const PromotionMap &AccessPromotions_(const ffi::ObjectRef &access) const {
+    auto it = access_promotions_.find(access);
+    return it != access_promotions_.end() ? it->second : empty_promotions_;
+  }
+
+  void FinishScope_(const ffi::ObjectRef &node) {
+    PromotionMap promotions = std::move(scopes_.back());
+    scopes_.pop_back();
+    Merge_(promotions, AccessPromotions_(node));
+    last_promotions_ = std::move(promotions);
+    if (!scopes_.empty()) {
+      Merge_(scopes_.back(), last_promotions_);
+    }
+  }
+
+  PrimExpr VisitExpr(const PrimExpr &expr) final {
+    scopes_.emplace_back();
+    PrimExpr result = StmtExprMutator::VisitExpr(expr);
+    FinishScope_(expr);
+    return result;
+  }
+
+  tirx::Stmt VisitStmt(const tirx::Stmt &stmt) final {
+    scopes_.emplace_back();
+    tirx::Stmt result = StmtExprMutator::VisitStmt(stmt);
+    FinishScope_(stmt);
+    return result;
+  }
+
   tirx::Stmt VisitStmt_(const tirx::IfThenElseNode *op) final {
-    tirx::IfThenElse stmt =
-        tvm::Downcast<tirx::IfThenElse>(StmtExprMutator::VisitStmt_(op));
-    stmt.CopyOnWrite()->condition = RewritePredicate_(stmt->condition);
-    return stmt;
+    PrimExpr condition = VisitExpr(op->condition);
+    tirx::Stmt then_case = VisitStmt(op->then_case);
+    PromotionMap promotions = last_promotions_;
+    ffi::Optional<tirx::Stmt> else_case = std::nullopt;
+    if (op->else_case.defined()) {
+      else_case = VisitStmt(op->else_case.value());
+      Merge_(promotions, last_promotions_);
+    }
+    condition = RewritePredicate_(condition, promotions);
+    return tirx::IfThenElse(condition, then_case, else_case, op->span);
   }
 
   tirx::Stmt VisitStmt_(const tirx::WhileNode *op) final {
-    tirx::While stmt =
-        tvm::Downcast<tirx::While>(StmtExprMutator::VisitStmt_(op));
-    stmt.CopyOnWrite()->condition = RewritePredicate_(stmt->condition);
-    return stmt;
+    PrimExpr condition = VisitExpr(op->condition);
+    tirx::Stmt body = VisitStmt(op->body);
+    return tirx::While(RewritePredicate_(condition, last_promotions_), body,
+                       op->span);
   }
 
-  tirx::Stmt VisitStmt_(const tirx::AssertStmtNode *op) final {
-    tirx::AssertStmt stmt =
-        tvm::Downcast<tirx::AssertStmt>(StmtExprMutator::VisitStmt_(op));
-    stmt.CopyOnWrite()->condition = RewritePredicate_(stmt->condition);
-    return stmt;
+  tirx::Stmt VisitStmt_(const tirx::SeqStmtNode *op) final {
+    // An assertion controls only the subsequent statements in this sequence.
+    // Reverse traversal collects those accesses without including earlier ones.
+    PromotionMap suffix;
+    ffi::Array<tirx::Stmt> seq = op->seq;
+    for (size_t i = seq.size(); i > 0; --i) {
+      tirx::Stmt stmt = VisitStmt(op->seq[i - 1]);
+      PromotionMap promotions = last_promotions_;
+      if (auto assertion = stmt.as<tirx::AssertStmt>()) {
+        PrimExpr condition =
+            RewritePredicate_(assertion.value()->condition, suffix);
+        if (!condition.same_as(assertion.value()->condition)) {
+          tirx::AssertStmt updated = assertion.value();
+          updated.CopyOnWrite()->condition = condition;
+          stmt = updated;
+        }
+      }
+      seq.Set(i - 1, stmt);
+      Merge_(suffix, promotions);
+    }
+    return tirx::SeqStmt(seq, op->span);
   }
 
   tirx::Stmt VisitStmt_(const tirx::SBlockRealizeNode *op) final {
-    tirx::SBlockRealize stmt =
-        tvm::Downcast<tirx::SBlockRealize>(StmtExprMutator::VisitStmt_(op));
-    stmt.CopyOnWrite()->predicate = RewritePredicate_(stmt->predicate);
-    return stmt;
+    ffi::Array<PrimExpr> values = op->iter_values.Map(
+        [this](const PrimExpr &value) { return VisitExpr(value); });
+    PrimExpr predicate = VisitExpr(op->predicate);
+    tirx::SBlock block = tvm::Downcast<tirx::SBlock>(VisitStmt(op->block));
+    return tirx::SBlockRealize(values,
+                               RewritePredicate_(predicate, last_promotions_),
+                               block, op->span);
   }
 
   tirx::Stmt VisitStmt_(const tirx::BufferStoreNode *op) final {
     tirx::BufferStore store =
         tvm::Downcast<tirx::BufferStore>(StmtExprMutator::VisitStmt_(op));
-    if (store->predicate.defined()) {
-      store.CopyOnWrite()->predicate =
-          RewritePredicate_(store->predicate.value());
+    if (op->predicate.defined()) {
+      store.CopyOnWrite()->predicate = RewritePredicate_(
+          VisitExpr(op->predicate.value()),
+          AccessPromotions_(ffi::GetRef<tirx::BufferStore>(op)));
     }
     return store;
   }
@@ -161,31 +235,35 @@ private:
   PrimExpr VisitExpr_(const tirx::BufferLoadNode *op) final {
     tirx::BufferLoad load =
         tvm::Downcast<tirx::BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    if (load->predicate.defined()) {
-      load.CopyOnWrite()->predicate =
-          RewritePredicate_(load->predicate.value());
+    if (op->predicate.defined()) {
+      load.CopyOnWrite()->predicate = RewritePredicate_(
+          VisitExpr(op->predicate.value()),
+          AccessPromotions_(ffi::GetRef<tirx::BufferLoad>(op)));
     }
     return load;
   }
 
-  PrimExpr VisitExpr_(const tirx::SelectNode *op) final {
-    tirx::Select expr =
-        tvm::Downcast<tirx::Select>(StmtExprMutator::VisitExpr_(op));
-    expr.CopyOnWrite()->condition = RewritePredicate_(expr->condition);
-    return expr;
-  }
-
   PrimExpr VisitExpr_(const tirx::CallNode *op) final {
-    PrimExpr expr = StmtExprMutator::VisitExpr_(op);
-    if (op->op.same_as(tirx::builtin::if_then_else())) {
-      tirx::Call call = tvm::Downcast<tirx::Call>(expr);
-      call.CopyOnWrite()->args.Set(0, RewritePredicate_(call->args[0]));
-      return call;
+    if (!op->op.same_as(tirx::builtin::if_then_else())) {
+      return StmtExprMutator::VisitExpr_(op);
     }
-    return expr;
+    PrimExpr condition = VisitExpr(op->args[0]);
+    PrimExpr true_value = VisitExpr(op->args[1]);
+    PromotionMap promotions = last_promotions_;
+    PrimExpr false_value = VisitExpr(op->args[2]);
+    Merge_(promotions, last_promotions_);
+    return tirx::Call(
+        op->dtype, op->op,
+        {RewritePredicate_(condition, promotions), true_value, false_value},
+        op->annotations, op->span);
   }
 
-  PromotionMap promotions_;
+  std::unordered_map<ffi::ObjectRef, PromotionMap, ffi::ObjectPtrHash,
+                     ffi::ObjectPtrEqual>
+      access_promotions_;
+  const PromotionMap empty_promotions_;
+  std::vector<PromotionMap> scopes_;
+  PromotionMap last_promotions_;
 };
 
 } // namespace tl
