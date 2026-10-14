@@ -895,6 +895,30 @@ class AutoTuner:
 
         key = self.generate_cache_key(parameters, extra_parameters)
 
+        cached_result = None
+        with self._lock:
+            if key is not None and env.is_cache_enabled() and not env.is_autotune_cache_disabled():
+                # First check in-memory cache
+                if key in self._memory_cache:
+                    # Include PrimFunc name when hitting autotuner memory cache
+                    cached_result = self._memory_cache[key]
+                    prim = getattr(cached_result, "func", None)
+                    kernel_name = get_prim_func_name(prim, "<unknown>")
+                    logger.warning(
+                        "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.",
+                        kernel_name,
+                    )
+                else:
+                    # Then check disk cache
+                    cached_result = self._load_result_from_disk(key)
+                    if cached_result is not None:
+                        self._memory_cache[key] = cached_result
+
+        if cached_result is not None:
+            # Never invoke user code while holding the shared cache lock.
+            reporter.emit("cache_hit")
+            return cached_result
+
         best_latency: float = float("inf")
         best_config: dict[str, Any] | None = None
         best_kernel: tilelang.JITKernel | None = None
@@ -960,37 +984,13 @@ class AutoTuner:
                 reporter.emit("direct_jit")
                 return autotuner_result
 
-        # Validate scalar input requirements before cache lookup so cache hits
-        # cannot bypass the need for supply_prog or set_autotune_inputs.
+        # After confirming tuning will actually run, validate that scalar
+        # inputs can be supplied (either via supply_prog or set_autotune_inputs).
         # Build the prim_func from a concrete config so tunable parameters are
         # bound to real values instead of their ``None`` defaults, which would
         # otherwise crash inside TVM (e.g. ceildiv with a None extent).
         prim_func_for_validation = elaborate_func(**top_config)
         self._validate_input_supply_requirements(prim_func_for_validation, self.compile_args.out_idx)
-
-        cached_result = None
-        with self._lock:
-            if key is not None and env.is_cache_enabled() and not env.is_autotune_cache_disabled():
-                # First check in-memory cache
-                if key in self._memory_cache:
-                    # Include PrimFunc name when hitting autotuner memory cache
-                    cached_result = self._memory_cache[key]
-                    prim = getattr(cached_result, "func", None)
-                    kernel_name = get_prim_func_name(prim, "<unknown>")
-                    logger.warning(
-                        "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.",
-                        kernel_name,
-                    )
-                else:
-                    # Then check disk cache
-                    cached_result = self._load_result_from_disk(key)
-                    if cached_result is not None:
-                        self._memory_cache[key] = cached_result
-
-        if cached_result is not None:
-            # Never invoke user code while holding the shared cache lock.
-            reporter.emit("cache_hit")
-            return cached_result
 
         # Launch compile tasks
         pool, futures, future_to_unit, compile_desc = self._prepare_compile_execution(
