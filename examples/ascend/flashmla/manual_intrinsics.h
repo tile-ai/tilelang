@@ -30,10 +30,6 @@ __aicore__ inline void fm_kv_push(__cbuf__ bfloat16_t *dst,
                                   __ubuf__ bfloat16_t *src) {
   asc_copy_ub2l1(dst, src, 32u, 32u, 1u, 0u);
 }
-__aicore__ inline void fm_s_push(__cbuf__ bfloat16_t *dst,
-                                 __ubuf__ bfloat16_t *src) {
-  asc_copy_ub2l1(dst, src, 4u, 32u, 32u, 32u);
-}
 __aicore__ inline void fm_a_load(__ca__ bfloat16_t *dst,
                                  __cbuf__ bfloat16_t *src, uint32_t k) {
   asc_copy_l12l0a(dst, src, 0, k * 8u, 2u, 8u, 2u, 4u);

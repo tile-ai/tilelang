@@ -23,6 +23,12 @@ invalid pairs still have zero bursts. Recheck the generated code and invalid-pai
 cases when upgrading the compiler; this needs an explicit zero-burst copy
 contract to become a supported use of `T.copy`.
 
+Softmax results use the existing `tl.ascend_copy_ubuf_to_cbuf` intrinsic through
+`T.call_intrin`: one DMA with four 1 KiB bursts and 1 KiB source/destination gaps.
+This preserves the in-place BF16 packing, shared L1 tile layout, instruction
+granularity, and manual synchronization. Ordinary `T.copy` still requires
+contiguous regions on this raw UB-to-L1 path.
+
 Supported shapes are H=64, Dqk=Dv=512, BF16 Q and output, and topk multiples of
 64. Prefill takes contiguous BF16 KV and allows strided Q / indices. Decode
 accepts the PR's compact FP8 main cache and optional FP8 or FP4 extra cache.

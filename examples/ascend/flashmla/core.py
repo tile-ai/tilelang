@@ -488,7 +488,19 @@ def sparse_attention(
                             T.ascend_set_flag("V_S", 0)
                         T.ascend_wait_flag("V_MTE3", 0)
                         T.ascend_cross_core_wait_flag(4, "PIPE_MTE3", 1)
-                        T.call_extern("void", "fm_s_push", T.access_ptr(l1[129024 + sid * 512], "w"), T.access_ptr(s[0], "r"))
+                        # Preserve one DMA for four 1 KiB NZ halves. Length
+                        # and gaps are in 32-byte blocks; each view spans 7 KiB.
+                        T.call_intrin(
+                            "void",
+                            tvm.tirx.op.Op.get("tl.ascend_copy_ubuf_to_cbuf"),
+                            T.access_ptr(l1[129024 + sid * 512], "w", extent=3584),
+                            T.access_ptr(s[0], "r", extent=3584),
+                            0,  # Reserved sub-block ID.
+                            4,  # Bursts.
+                            32,  # Blocks per burst.
+                            32,  # Source gap: in-place BF16 packing.
+                            32,  # Destination gap: the other AIV's half.
+                        )
                         T.ascend_cross_core_set_flag(4, "PIPE_MTE3", 1)
                         T.ascend_cross_core_set_flag(4, "PIPE_MTE3", 0)
                         if k4 == nb - 1:
