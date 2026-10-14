@@ -44,9 +44,7 @@ def ProducerConsumerWarpSpecialized():
     fpass : tvm.transform.Pass
         The result pass
     """
-    if hasattr(_ffi_api, "ProducerConsumerWarpSpecialized"):
-        return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
-    return lambda f: f
+    return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
 
 
 def LowerBlackwell2SM():
@@ -56,9 +54,7 @@ def LowerBlackwell2SM():
         fpass : tvm.transform.Pass
             The result pass
     """
-    if hasattr(_ffi_api, "LowerBlackwell2SM"):
-        return _ffi_api.LowerBlackwell2SM()  # type: ignore
-    return lambda f: f
+    return _ffi_api.LowerBlackwell2SM()  # type: ignore
 
 
 def LowerHopperIntrin():

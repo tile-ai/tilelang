@@ -203,21 +203,14 @@ def tanh(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSS
     return cute_math.tanh(x, fastmath=fastmath)
 
 
-def pow_of_int(exp: int):
-    """Return a function that raises its argument to the integer power `exp`.
+def pow_of_int(exp: int, base):
+    """Compute an integer power using the CuTeDSL call_extern signature.
 
-    Mirrors tl::pow_of_int<exp> from math.cc — the C++ codegen emits
-    tl::pow_of_int<N> as a call_extern, which the CuTeDSL codegen translates
-    to tl.pow_of_int(N)(base). On CUDA/HIP the op is lowered by FLowerIntrinsic
-    before reaching call_extern; for the CuTeDSL Python backend it reaches here.
+    Codegen translates tl::pow_of_int<N>(base) to tl.pow_of_int(N, base).
     """
-
-    def _pow(base):
-        if exp == 0:
-            return type(base)(1)
-        result = base
-        for _ in range(exp - 1):
-            result = result * base
-        return result
-
-    return _pow
+    if exp == 0:
+        return type(base)(1)
+    result = base
+    for _ in range(exp - 1):
+        result = result * base
+    return result

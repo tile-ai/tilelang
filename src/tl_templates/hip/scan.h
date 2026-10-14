@@ -97,14 +97,14 @@ struct InclusiveScan1D {
       return;
     InclusiveScanLine<Reducer, reverse, T, SEG>(src, dst, N, 1, 1);
   }
-  // Use the target wavefront width when no segment size is specified.
+  // Use the target wavefront width, capped by the block's thread count.
   template <typename T>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
     const int wavefront_size = __builtin_amdgcn_wavefrontsize();
-    if (wavefront_size == 32 && threads >= 32) {
+    if (wavefront_size == 32 || threads == 32) {
       run<T, 32>(src, dst, N);
-    } else if (threads >= 64) {
+    } else if constexpr (threads >= 64) {
       run<T, 64>(src, dst, N);
     }
   }
@@ -144,14 +144,14 @@ struct InclusiveScan2D {
       }
     }
   }
-  // Use the target wavefront width when no segment size is specified.
+  // Use the target wavefront width, capped by the block's thread count.
   template <typename T>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int H, int W, int src_stride, int dst_stride) {
     const int wavefront_size = __builtin_amdgcn_wavefrontsize();
-    if (wavefront_size == 32 && threads >= 32) {
+    if (wavefront_size == 32 || threads == 32) {
       run<T, 32>(src, dst, H, W, src_stride, dst_stride);
-    } else if (threads >= 64) {
+    } else if constexpr (threads >= 64) {
       run<T, 64>(src, dst, H, W, src_stride, dst_stride);
     }
   }
