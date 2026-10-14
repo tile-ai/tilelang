@@ -1,14 +1,19 @@
 import builtins
 import errno
 from pathlib import Path
+from types import SimpleNamespace
 
-import cloudpickle
 import pytest
 
+from tilelang import tvm
+
 import tilelang.cache.kernel_cache as kernel_cache_mod
+from tilelang.backend import create_backend_context
 from tilelang.cache.kernel_cache import KernelCache
+from tilelang.engine.param import KernelParam, dump_kernel_params
 from tilelang.env import env
 from tilelang.jit.adapter.base import CachedTextSource
+from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
 from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
 
 
@@ -24,17 +29,14 @@ class _FakeKernel:
     def __init__(self, libpath: str):
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
-        self.params = ["param"]
+        self.params = [KernelParam(tvm.DataType("float32"), [4])]
 
 
 @pytest.fixture
 def cache_dirs(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
-    tmp_dir = tmp_path / "tmp"
     cache_dir.mkdir()
-    tmp_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
-    monkeypatch.setattr(env, "TILELANG_TMP_DIR", str(tmp_dir))
     return cache_dir
 
 
@@ -62,8 +64,8 @@ def _write_complete_kernel_cache_entry(
     (cache_path / cache.device_kernel_path).write_text(device_source)
     (cache_path / cache.host_kernel_path).write_text(host_source)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    with (cache_path / cache.params_path).open("wb") as f:
-        cloudpickle.dump(["param"], f)
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
+    cache._write_manifest(str(cache_path))
     return cache_path
 
 
@@ -85,12 +87,11 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     monkeypatch.setattr(cache, "_load_kernel_source", fail_source_load)
     monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fake_from_database))
 
+    backend_context = create_backend_context("cuda", execution_backend="tvm_ffi")
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=backend_context,
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -100,7 +101,8 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
     assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
     assert captured["kernel_lib_path"] == str(cache_path / cache.kernel_lib_path)
-    assert captured["params"] == ["param"]
+    assert captured["params"] == [KernelParam(tvm.DataType("float32"), [4])]
+    assert captured["backend_context"] is backend_context
 
 
 def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, monkeypatch):
@@ -142,10 +144,8 @@ def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, mo
 
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -202,8 +202,7 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
     cache_path = Path(cache._get_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    with (cache_path / cache.params_path).open("wb") as f:
-        cloudpickle.dump(["param"], f)
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
 
     def fail_from_database(cls, **kwargs):
         raise AssertionError("incomplete cache entries should miss before rebuilding from database")
@@ -212,10 +211,8 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
 
     loaded = cache._load_kernel_from_disk(
         key,
-        target="cuda",
-        target_host=None,
+        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
         out_idx=[0],
-        execution_backend="tvm_ffi",
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -343,3 +340,62 @@ def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
 
     assert (cache_path / cache.kernel_py_path).exists()
     assert not (cache_path / "legacy.txt").exists()
+
+
+def test_safe_write_executable_uses_explicit_export_kwargs(cache_dirs, tmp_path):
+    captured = []
+
+    class FakeExecutable:
+        def export_library(self, path, **kwargs):
+            captured.append(dict(kwargs))
+            with open(path, "wb") as f:
+                f.write(b"fake-so")
+
+    export_kwargs = {"options": ["-Wl,-dead_strip"], "custom": "keep"}
+
+    KernelCache._safe_write_executable(
+        FakeExecutable(),
+        str(tmp_path / "explicit.so"),
+        export_kwargs=export_kwargs,
+    )
+
+    assert captured == [export_kwargs]
+
+
+def test_tvm_ffi_kernel_cache_selects_export_kwargs_from_host_target(cache_dirs, tmp_path, monkeypatch):
+    """Regression: device target may be cuda while the exported host module is LLVM.
+    Source-compilation options must not be passed to that LLVM object-link step.
+    """
+
+    source_compile_args = {"options": ["-x", "objective-c++"], "source": "keep"}
+    export_link_args = {"link": "keep"}
+    captured = []
+
+    monkeypatch.setattr(KernelCache, "_get_source_compile_args", staticmethod(lambda: source_compile_args))
+    monkeypatch.setattr(KernelCache, "_get_export_link_args", staticmethod(lambda: export_link_args))
+
+    class FakeExecutable:
+        def export_library(self, path, **kwargs):
+            captured.append(dict(kwargs))
+            with open(path, "wb") as f:
+                f.write(b"fake-so")
+
+    class FakeAdapter:
+        def get_exportable_executable(self):
+            return FakeExecutable()
+
+    def make_kernel(target_host_kind: str):
+        return SimpleNamespace(
+            adapter=FakeAdapter(),
+            target=SimpleNamespace(kind=SimpleNamespace(name="cuda")),
+            artifact=SimpleNamespace(target_host=SimpleNamespace(kind=SimpleNamespace(name=target_host_kind))),
+        )
+
+    cache = TVMFFIKernelCache()
+
+    cache._save_so_cubin_to_disk(make_kernel("llvm"), str(tmp_path))
+    assert captured[-1] == export_link_args
+    assert "options" not in captured[-1]
+
+    cache._save_so_cubin_to_disk(make_kernel("c"), str(tmp_path))
+    assert captured[-1] == source_compile_args

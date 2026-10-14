@@ -1,7 +1,15 @@
 """Common math intrinsics exposed on the TileLang language surface."""
 
-from tvm import tirx
+from tvm import DataType, DataTypeCode, tirx
 from tvm.tirx import PrimExpr
+
+
+def _validate_fast_math_arg(x: PrimExpr, intrinsic: str) -> PrimExpr:
+    """Normalize a fast-math argument and reject unsupported dtypes."""
+    x = tirx.convert(x)
+    if DataType(x.dtype).type_code not in (DataTypeCode.FLOAT, DataTypeCode.BFLOAT):
+        raise TypeError(f"T.{intrinsic} only supports floating-point inputs, but got {x.dtype}")
+    return x
 
 
 def _validate_rounding_mode(rounding_mode):
@@ -25,7 +33,7 @@ def __log(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__log")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log"), x)
 
 
@@ -42,7 +50,7 @@ def __log2(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__log2")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log2"), x)
 
 
@@ -59,7 +67,7 @@ def __log10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__log10")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__log10"), x)
 
 
@@ -76,7 +84,7 @@ def __tan(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__tan")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__tan"), x)
 
 
@@ -93,7 +101,7 @@ def __cos(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__cos")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__cos"), x)
 
 
@@ -110,7 +118,7 @@ def __sin(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__sin")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__sin"), x)
 
 
@@ -127,12 +135,12 @@ def __exp10(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__exp10")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp10"), x)
 
 
 def __exp(x: PrimExpr) -> PrimExpr:
-    """Calculate 2**x with fast math
+    """Calculate e**x with fast math
 
     Parameters
     ----------
@@ -144,8 +152,14 @@ def __exp(x: PrimExpr) -> PrimExpr:
     y : PrimExpr
         The result.
     """
-    x = tirx.convert(x)
+    x = _validate_fast_math_arg(x, "__exp")
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.__exp"), x)
+
+
+def fast_rcp(x: PrimExpr) -> PrimExpr:
+    """Approximate reciprocal using CUDA fast reciprocal."""
+    x = tirx.convert(x)
+    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.fast_rcp"), x)
 
 
 # IEEE-compliant operations
@@ -337,12 +351,14 @@ _PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
 
 
 def _validate_packed_x2_args(*args: PrimExpr) -> None:
-    """Validate that all arguments are PrimExpr with a supported packed x2 dtype."""
+    """Validate that all arguments have the same supported packed x2 dtype."""
     for arg in args:
         if not isinstance(arg, PrimExpr):
             raise TypeError(f"Expected PrimExpr, got {type(arg)}: {arg}")
         if arg.dtype not in _PACKED_X2_DTYPES:
             raise ValueError(f"Expected dtype in {sorted(_PACKED_X2_DTYPES)}, got '{arg.dtype}'")
+    if len({arg.dtype for arg in args}) > 1:
+        raise ValueError(f"Expected all packed x2 arguments to have the same dtype, got {[arg.dtype for arg in args]}")
 
 
 # ---------------------------------------------------------------------------
@@ -411,28 +427,39 @@ def abs2(x: PrimExpr) -> PrimExpr:
     return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.abs2"), x)
 
 
-__all__ = [
-    "__log",  # noqa: F401
-    "__log2",  # noqa: F401
-    "__log10",  # noqa: F401
-    "__tan",  # noqa: F401
-    "__cos",  # noqa: F401
-    "__sin",  # noqa: F401
-    "__exp10",  # noqa: F401
-    "__exp",  # noqa: F401
-    "ieee_add",  # noqa: F401
-    "ieee_sub",  # noqa: F401
-    "ieee_mul",  # noqa: F401
-    "ieee_fmaf",  # noqa: F401
-    "ieee_frcp",  # noqa: F401
-    "ieee_fsqrt",  # noqa: F401
-    "ieee_frsqrt",  # noqa: F401
-    "ieee_fdiv",  # noqa: F401
-    "add2",  # noqa: F401
-    "sub2",  # noqa: F401
-    "mul2",  # noqa: F401
-    "fma2",  # noqa: F401
-    "max2",  # noqa: F401
-    "min2",  # noqa: F401
-    "abs2",  # noqa: F401
+# Packed x2 element-wise math: registered target-neutrally and lowered on
+# both CUDA and ROCm (ROCm currently supports the float32x2 flavors).
+COMMON_MATH_INTRINSICS = [
+    "add2",
+    "sub2",
+    "mul2",
+    "fma2",
+    "max2",
+    "min2",
+    "abs2",
 ]
+
+# CUDA-only intrinsics: PTX fast-math approximations and IEEE ops with an
+# explicit rounding mode. Registered and lowered only by the CUDA backend,
+# so only the CUDA dialect exports them.
+CUDA_MATH_INTRINSICS = [
+    "__log",
+    "__log2",
+    "__log10",
+    "__tan",
+    "__cos",
+    "__sin",
+    "__exp10",
+    "__exp",
+    "fast_rcp",
+    "ieee_add",
+    "ieee_sub",
+    "ieee_mul",
+    "ieee_fmaf",
+    "ieee_frcp",
+    "ieee_fsqrt",
+    "ieee_frsqrt",
+    "ieee_fdiv",
+]
+
+__all__ = CUDA_MATH_INTRINSICS + COMMON_MATH_INTRINSICS

@@ -21,7 +21,7 @@
 #include "tir/transforms/ir_utils.h"
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -99,19 +99,19 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   // TileLang async intrinsics
   if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
       call->op.same_as(tma_load_multicast()) || call->op.same_as(tma_store()) ||
+      call->op.same_as(tma_load_gather4()) ||
+      call->op.same_as(tma_store_scatter4()) ||
       call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs()) ||
+      call->op.same_as(ptx_wgmma_sp_ss()) ||
+      call->op.same_as(ptx_wgmma_sp_rs()) ||
       call->op.same_as(ptx_tcgen05_mma_ss()) ||
+      call->op.same_as(ptx_tcgen05_mma_blockscaled_ss()) ||
       call->op.same_as(ptx_tcgen05_mma_ts())) {
     return true;
   }
 
   // PTX async copy intrinsics on SM90+ (cp.async.bulk family).
   if (call->op.same_as(builtin::ptx_cp_async_bulk())) {
-    return true;
-  }
-
-  // wgmma async intrinsics
-  if (call->op.same_as(tl_gemm()) || call->op.same_as(tl_gemm_sp())) {
     return true;
   }
 
@@ -495,7 +495,7 @@ private:
                                    : body_res.out_state;
 
       Stmt loop = For(op->loop_var, min, extent, op->kind, body_res.stmt,
-                      op->thread_binding, op->annotations);
+                      op->thread_binding, op->annotations, op->step, op->span);
       return SeqStmt(Array<Stmt>{pre_fence, loop});
     }
 
@@ -504,7 +504,7 @@ private:
         may_be_zero ? entry.Union(body_res.out_state) : body_res.out_state;
 
     return For(op->loop_var, min, extent, op->kind, body_res.stmt,
-               op->thread_binding, op->annotations);
+               op->thread_binding, op->annotations, op->step, op->span);
   }
 
   Stmt VisitStmt_(const WhileNode *op) final {

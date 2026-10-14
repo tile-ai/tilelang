@@ -91,7 +91,7 @@ def bwd(
     is_causal=True,
     block_size=32,
     num_stages=0,
-    threads=256,
+    threads=None,
     indices_dtype=T.int32,
     dtype=T.bfloat16,
     accum_dtype=T.float32,
@@ -122,6 +122,13 @@ def bwd(
     H = H_kv
     padded_H = max(tilelang.math.next_power_of_2(H_kv), 16)
     block_H = min(64, padded_H)
+    # adaptive: this kernel is memory-pipe bound. When the head count is not split across
+    # blocks (block_H>=64), 256 threads (8 warps) issue many more cp.async copies at once
+    # than 128 (4 warps), greatly raising in-flight bytes -- the main perf lever here.
+    # Smaller head blocks lack the GEMM warp-tiling work to fill 256 threads, so fall back
+    # to 128 and still build.
+    if threads is None:
+        threads = 256 if block_H >= 64 else 128
     assert padded_H % block_H == 0
     NH = padded_H // block_H
     BS = block_size
@@ -139,8 +146,7 @@ def bwd(
     dKV: T.Tensor(k_shape, accum_dtype)
 
     with T.Kernel(S, B, kv_group * NH, threads=threads) as (s_i, by, bz):
-        Q_shared = T.alloc_shared([block_H, D], dtype)
-        Q_tail_shared = T.alloc_shared([block_H, D_tail], dtype)
+        Q_shared = T.alloc_shared([block_H, D + D_tail], dtype)
         KV_shared = T.alloc_shared([BS, D], dtype)
         KV_tail_shared = T.alloc_shared([BS, D_tail], dtype)
         dO_shared = T.alloc_shared([block_H, D], dtype)
@@ -162,8 +168,9 @@ def bwd(
 
         max_kv_i = s_i
 
-        T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, :D], Q_shared)
-        T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, D:], Q_tail_shared)
+        # TODO: merge the statements when the compiler has better support for non-power-of-2 extents.
+        T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, :D], Q_shared[:, :D])
+        T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, D:], Q_shared[:, D:])
         T.copy(dO[by, s_i, bz * block_H : (bz + 1) * block_H, :D], dO_shared)
 
         T.clear(acc_dq)
@@ -183,11 +190,11 @@ def bwd(
             for bi_i, d_i in T.Parallel(BS, D):
                 KV_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz // NH, i_i * BS + bi_i], bz // NH, d_i]
 
-            T.gemm(Q_shared, KV_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+            T.gemm(Q_shared[:, :D], KV_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
 
             for bi_i, d_i in T.Parallel(BS, D_tail):
                 KV_tail_shared[bi_i, d_i] = KV[by, Indices[by, s_i, bz // NH, i_i * BS + bi_i], bz // NH, D + d_i]
-            T.gemm(Q_tail_shared, KV_tail_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+            T.gemm(Q_shared[:, D:], KV_tail_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
 
             for h_i, bi_i in T.Parallel(block_H, BS):
                 acc_p[h_i, bi_i] = T.exp2(acc_p[h_i, bi_i] * sm_scale_mul_reciprocal_log2 - Lse[by, s_i, bz * block_H + h_i])
@@ -203,11 +210,11 @@ def bwd(
             T.gemm(dP_shared_cast, KV_shared, acc_dq, policy=T.GemmWarpPolicy.FullCol)
             T.gemm(dP_shared_cast, KV_tail_shared, acc_dq_tail, policy=T.GemmWarpPolicy.FullCol)
 
-            T.gemm(dP_shared_cast, Q_shared, acc_dkv, transpose_A=True, policy=T.GemmWarpPolicy.FullCol, clear_accum=True)
+            T.gemm(dP_shared_cast, Q_shared[:, :D], acc_dkv, transpose_A=True, policy=T.GemmWarpPolicy.FullCol, clear_accum=True)
             T.gemm(P_shared_cast, dO_shared, acc_dkv, transpose_A=True, policy=T.GemmWarpPolicy.FullCol)
 
             T.clear(acc_dkv_tail)
-            T.gemm(dP_shared_cast, Q_tail_shared, acc_dkv_tail, transpose_A=True, policy=T.GemmWarpPolicy.FullCol)
+            T.gemm(dP_shared_cast, Q_shared[:, D:], acc_dkv_tail, transpose_A=True, policy=T.GemmWarpPolicy.FullCol)
 
             for s in range(split_store):
                 for bi_i, d_i in T.Parallel(BS, D):

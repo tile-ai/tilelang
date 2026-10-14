@@ -30,7 +30,7 @@
 #include <tvm/tirx/transform.h>
 
 #include "backend/common/target_utils.h"
-#include "op/builtin.h"
+#include "cuda/op/builtin.h"
 #include "op/utils.h"
 #include "tir/ir/buffer_common.h"
 
@@ -38,6 +38,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace ffi;
 
 class LowerLDGSTGRewriter : public StmtExprMutator {
 public:
@@ -239,6 +240,10 @@ public:
     // Check for if_then_else pattern for predicated loads
     if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3) {
       PrimExpr condition = call->args[0];
+      // A load in a predicated store's value also needs the enclosing guard.
+      if (current_predicate_.defined()) {
+        condition = And(current_predicate_.value(), condition);
+      }
       PrimExpr then_value = call->args[1];
       PrimExpr else_value = call->args[2];
 

@@ -10,6 +10,8 @@ namespace tl {
 template <class> inline constexpr bool always_false_v = false;
 #endif
 
+namespace detail {
+
 // Generic declaration: unsupported by default
 template <DataType C_type, bool use_2cta = false>
 TL_DEVICE void
@@ -799,6 +801,73 @@ TL_DEVICE void tcgen05mma_blockscaled_ss<DataType::kFloat4_e2m1fn, true>(
     uint32_t const &tmem_sfb) {
   tcgen05mma_blockscaled_ss<DataType::kFloat8_e4m3, true>(
       desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+}
+
+} // namespace detail
+
+template <DataType C_type, bool use_2cta = false, bool kDependentFalse = false>
+TL_DEVICE void tcgen05mma_ss(uint64_t const &desc_a, uint64_t const &desc_b,
+                             uint32_t const &tmem_c, uint32_t const &scalec,
+                             uint32_t const &desc_val, int const &mask0,
+                             int const &mask1, int const &mask2,
+                             int const &mask3) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  detail::tcgen05mma_ss<C_type, use_2cta>(desc_a, desc_b, tmem_c, scalec,
+                                          desc_val, mask0, mask1, mask2, mask3);
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05mma_ss requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <DataType C_type, bool use_2cta = false, bool kDependentFalse = false>
+TL_DEVICE void tcgen05mma_ts(uint32_t const &tmem_a, uint64_t const &desc_b,
+                             uint32_t const &tmem_c, uint32_t const &scalec,
+                             uint32_t const &desc_val, int const &mask0,
+                             int const &mask1, int const &mask2,
+                             int const &mask3) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  detail::tcgen05mma_ts<C_type, use_2cta>(tmem_a, desc_b, tmem_c, scalec,
+                                          desc_val, mask0, mask1, mask2, mask3);
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05mma_ts requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <DataType C_type, bool kDependentFalse = false>
+TL_DEVICE void tcgen05mma_ws_ss(uint64_t const &desc_a, uint64_t const &desc_b,
+                                uint32_t const &tmem_c, uint32_t const &scalec,
+                                uint32_t const &desc_val, int const &mask0,
+                                int const &mask1, int const &mask2,
+                                int const &mask3) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  detail::tcgen05mma_ws_ss<C_type>(desc_a, desc_b, tmem_c, scalec, desc_val,
+                                   mask0, mask1, mask2, mask3);
+#else
+  static_assert(kDependentFalse,
+                "tl::tcgen05mma_ws_ss requires sm_100a or a compatible "
+                "architecture-specific target");
+#endif
+}
+
+template <DataType C_type, bool use_2cta = false, bool kDependentFalse = false>
+TL_DEVICE void
+tcgen05mma_blockscaled_ss(uint64_t const &desc_a, uint64_t const &desc_b,
+                          uint32_t const &tmem_c, uint32_t const &scalec,
+                          uint32_t const &desc_val, uint32_t const &tmem_sfa,
+                          uint32_t const &tmem_sfb) {
+#if defined(TL_CUDA_ARCH_TCGEN05_ENABLED)
+  detail::tcgen05mma_blockscaled_ss<C_type, use_2cta>(
+      desc_a, desc_b, tmem_c, scalec, desc_val, tmem_sfa, tmem_sfb);
+#else
+  static_assert(
+      kDependentFalse,
+      "tl::tcgen05mma_blockscaled_ss requires sm_100a or a compatible "
+      "architecture-specific target");
+#endif
 }
 
 } // namespace tl

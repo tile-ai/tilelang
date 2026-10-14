@@ -19,7 +19,7 @@
  *
  * Usage:
  *
- * 1. Link against libcuda_stub.so instead of libcuda.so
+ * 1. Link against libstub_cuda.so instead of libcuda.so
  *
  * 2. Call CUDA driver API functions normally - they are provided as
  *    exported global functions with C linkage:

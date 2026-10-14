@@ -6,7 +6,7 @@ from tvm.tirx import PrimFunc, SBlock
 from tvm.tirx.stmt_functor import post_order_visit
 
 import tilelang
-from tilelang.backend.pass_pipeline.pipeline import PassPipeline, register_pipeline
+from tilelang.backend.pass_pipeline import PassPipeline
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -67,6 +67,11 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=True, default_threads=128)(mod)
+    # Record body-bound global bases before optional let inlining obscures
+    # their provenance. CopyAnalysis consumes this marker for every lowering
+    # path, independently of whether warp specialization is enabled.
+    mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
     if should_force_let_inline():
         # Force-let inline whenever the pass config requests it.
         mod = tilelang.transform.LetInline()(mod)
@@ -81,17 +86,26 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tilelang.transform.Simplify()(mod)
-    # Set layouts for reducers
-    mod = tilelang.transform.LayoutReducer()(mod)
+    # Verify reducer v2 epoch lifecycle and access rules (early, so
+    # diagnostics point at user-written code)
+    mod = tilelang.transform.CanonicalizeLegacyReducer()(mod)
+    mod = tilelang.transform.VerifyReducerEpoch()(mod)
+    # Warn on buffers that are read before anything writes them.
+    # Runs after the reducer passes above, so legacy reducers have been
+    # canonicalized, and before PipelinePlanning and LowerTileOp, while
+    # loop bodies are still in source order and tile ops still declare
+    # their access regions.
+    mod = tilelang.transform.VerifyBufferInit()(mod)
 
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
-    # The pass classifies copy ops as TMA/cp.async/sync inline (no prior
-    # InstructionAnnotation pass needed). Shared buffers are multi-versioned
-    # internally only for functions where the WS transformation actually
-    # applies.
+    # AutoWarpSpecialization: derive a WSSchedule for kernels without one, using the scheduler named by tl.enable_auto_warp_specialization (opt-in; no-op when unset).
+    # MaterializeWSSchedule: Materialize a user-provided warp-specialization schedule (T.annotate_ws_schedule).
+    # ProducerConsumerWarpSpecialized: The pass classifies copy ops as TMA/cp.async/sync inline. Shared buffers are multi-versioned internally only for functions where the WS transformation actually applies.
     if allow_warp_specialized(target=target):
+        mod = tilelang.cuda.transform.AutoWarpSpecialization()(mod)
+        mod = tilelang.cuda.transform.MaterializeWSSchedule()(mod)
         mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
 
     # @CUDA / Blackwell specific
@@ -103,6 +117,13 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # pipeline body extraction focused on canonical SeqStmt bodies.
     mod = tilelang.transform.IfStmtBinding()(mod)
 
+    # Expand only explicitly requested unroll loops before pipeline planning
+    # and fold the constants exposed by substitution. This makes their
+    # copy/compute statements individual scheduling units.
+    mod = tilelang.transform.UnrollLoop()(mod)
+    # Simplify the unrolled loop bodies.
+    mod = tilelang.transform.Simplify()(mod)
+
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
     mod = tilelang.transform.PipelinePlanning()(mod)
@@ -111,10 +132,16 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
 
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
+    # Plan physical storage/communication for reducer v2 epochs and
+    # materialize the first-class reducer ops. Loop layouts are frozen at
+    # this point; the planner only reads them.
+    mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     # Visualize the layout
     LayoutVisual(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
+    # Assert no reducer v2 construct survived materialization
+    mod = tilelang.transform.VerifyReducerConsumed()(mod)
 
     # @CUDA specific
     # Lower l2 persistent map
@@ -240,8 +267,6 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.MergeIfStmt()(mod)
 
-    # @CUDA-specific
-    # NOTE: LowerPTXAsyncCopy is applied earlier (before PipelinePlanning).
     if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
 
@@ -256,6 +281,4 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     return mod
 
 
-cuda_pipeline = PassPipeline("cuda", CUDAPassPipelineBody)
-
-register_pipeline(cuda_pipeline)
+CUDA_PIPELINE = PassPipeline("cuda", CUDAPassPipelineBody)

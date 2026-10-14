@@ -1,0 +1,335 @@
+"""Backend module registration and per-compilation context resolution."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING, TypeVar
+
+from tvm import IRModule
+from tvm.target import Target
+
+if TYPE_CHECKING:
+    from tilelang.backend.device_codegen import DeviceCodegen
+    from tilelang.backend.execution_backend import ExecutionBackendSpec
+    from tilelang.backend.host_codegen import HostCodegen, HostCodegenHook
+    from tilelang.backend.pass_pipeline import PassPipeline
+
+BackendCallback = Callable[..., object]
+TargetPredicate = Callable[[Target], bool]
+_T = TypeVar("_T")
+
+
+def _freeze_components(components: Mapping[str, tuple[_T, ...]]) -> Mapping[str, tuple[_T, ...]]:
+    return MappingProxyType({target_kind: tuple(values) for target_kind, values in components.items()})
+
+
+@dataclass(frozen=True, slots=True)
+class BackendModule:
+    """Complete Python registration manifest for one TileLang backend."""
+
+    name: str
+    target_kinds: tuple[str, ...]
+    pipelines: Mapping[str, PassPipeline]
+    device_codegens: Mapping[str, DeviceCodegen]
+    execution_backends: tuple[ExecutionBackendSpec, ...]
+    supports_target: TargetPredicate | None = None
+    host_codegens: Mapping[str, HostCodegen] = field(default_factory=dict)
+    host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
+    callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        target_kinds = tuple(self.target_kinds)
+        if not self.name:
+            raise ValueError("BackendModule.name must not be empty")
+        if not target_kinds or any(not kind for kind in target_kinds):
+            raise ValueError(f"BackendModule {self.name!r} must own at least one non-empty target kind")
+        if len(set(target_kinds)) != len(target_kinds):
+            raise ValueError(f"BackendModule {self.name!r} target kinds must be unique")
+
+        target_kind_set = set(target_kinds)
+        pipelines = MappingProxyType(dict(self.pipelines))
+        if set(pipelines) != target_kind_set:
+            raise ValueError(f"BackendModule {self.name!r} must define exactly one pipeline for every target kind")
+        for target_kind, pipeline in pipelines.items():
+            if pipeline.name != target_kind:
+                raise ValueError(f"BackendModule {self.name!r} pipeline {pipeline.name!r} does not match target kind {target_kind!r}")
+
+        device_codegens = MappingProxyType(dict(self.device_codegens))
+        if set(device_codegens) != target_kind_set:
+            raise ValueError(f"BackendModule {self.name!r} must define device codegen for every target kind")
+
+        host_codegens = MappingProxyType(dict(self.host_codegens))
+        host_codegen_hooks = _freeze_components(self.host_codegen_hooks)
+        unknown_hook_targets = set(host_codegen_hooks) - target_kind_set
+        if unknown_hook_targets:
+            raise ValueError(
+                f"BackendModule {self.name!r} host codegen hook targets are not owned by this backend: {sorted(unknown_hook_targets)}"
+            )
+        if any(not values for values in host_codegen_hooks.values()):
+            raise ValueError(f"BackendModule {self.name!r} host codegen hook lists must not be empty")
+
+        execution_backends = tuple(self.execution_backends)
+        execution_names = [spec.name for spec in execution_backends]
+        if not execution_backends:
+            raise ValueError(f"BackendModule {self.name!r} must define at least one execution backend")
+        if len(set(execution_names)) != len(execution_names):
+            raise ValueError(f"BackendModule {self.name!r} execution backend names must be unique: {execution_names}")
+        if any(spec.enable_host_codegen for spec in execution_backends) and not host_codegens:
+            raise ValueError(f"BackendModule {self.name!r} enables host codegen but defines no host codegen targets")
+
+        callbacks = MappingProxyType(dict(self.callbacks))
+        if any(not name for name in callbacks):
+            raise ValueError(f"BackendModule {self.name!r} callback names must not be empty")
+
+        object.__setattr__(self, "target_kinds", target_kinds)
+        object.__setattr__(self, "pipelines", pipelines)
+        object.__setattr__(self, "device_codegens", device_codegens)
+        object.__setattr__(self, "execution_backends", execution_backends)
+        object.__setattr__(self, "host_codegens", host_codegens)
+        object.__setattr__(self, "host_codegen_hooks", host_codegen_hooks)
+        object.__setattr__(self, "callbacks", callbacks)
+
+    def matches(self, target: Target) -> bool:
+        """Return whether this backend module owns the target."""
+
+        if target.kind.name not in self.target_kinds:
+            return False
+        return self.supports_target(target) if self.supports_target is not None else True
+
+    def _require_target(self, target: Target) -> str:
+        target_kind = target.kind.name
+        if not self.matches(target):
+            raise ValueError(f"Backend {self.name!r} does not match target {target}")
+        return target_kind
+
+    def get_pipeline(self, target: Target) -> PassPipeline:
+        """Return the lowering pipeline declared for the target."""
+
+        return self.pipelines[self._require_target(target)]
+
+    def lower(self, mod: IRModule, target: Target) -> IRModule:
+        """Run this backend's lowering pipeline for the target."""
+
+        return self.get_pipeline(target).lower(mod, target)
+
+    def get_device_codegen(self, target: Target) -> DeviceCodegen:
+        """Return the device codegen declared for the target."""
+
+        target_kind = self._require_target(target)
+        return self.device_codegens[target_kind]
+
+    def codegen_device(self, mod: IRModule, target: Target, *, compile_device: bool) -> IRModule:
+        """Generate device code for the target."""
+
+        return self.get_device_codegen(target).lower(mod, target, compile_device=compile_device)
+
+    def get_host_codegen(self, target_host: Target) -> HostCodegen:
+        """Return the host codegen declared for the host target."""
+
+        target_kind = target_host.kind.name
+        codegen = self.host_codegens.get(target_kind)
+        if codegen is None:
+            raise ValueError(f"Backend {self.name!r} has no host codegen matching target {target_host}")
+        return codegen
+
+    def codegen_host(self, mod: IRModule, target_host: Target) -> IRModule:
+        """Generate host code for the host target."""
+
+        return self.get_host_codegen(target_host).lower(mod, target_host)
+
+    def preprocess_host_codegen(self, mod: IRModule, target_host: Target, target: Target) -> IRModule:
+        """Apply backend hooks before host code generation."""
+
+        target_kind = self._require_target(target)
+        for hook in self.host_codegen_hooks.get(target_kind, ()):
+            mod = hook.lower(mod, target_host, target)
+        return mod
+
+    def allowed_execution_backends(self, target: Target, *, include_unavailable: bool = True) -> tuple[str, ...]:
+        """Return execution backend names supported by the target."""
+
+        self._require_target(target)
+        specs = [spec for spec in self.execution_backends if spec.matches(target)]
+        if not include_unavailable:
+            specs = [spec for spec in specs if spec.is_available()]
+        return tuple(spec.name for spec in specs)
+
+    def resolve_execution_backend(self, requested: str | None, target: Target) -> ExecutionBackendSpec:
+        """Resolve an execution backend policy for the target."""
+
+        self._require_target(target)
+        requested_name = None if requested is None else str(requested).lower()
+        all_specs = [spec for spec in self.execution_backends if spec.matches(target)]
+        available_specs = [spec for spec in all_specs if spec.is_available()]
+
+        if requested_name in (None, "auto"):
+            if not available_specs:
+                allowed = ", ".join(spec.name for spec in all_specs) or "<none>"
+                raise ValueError(f"No available execution backend for target {target.kind.name!r}. Allowed: {allowed}.")
+            return available_specs[0]
+
+        spec = next((spec for spec in all_specs if spec.name == requested_name), None)
+        if spec is None:
+            allowed = ", ".join(spec.name for spec in all_specs) or "<none>"
+            raise ValueError(
+                f"Invalid execution backend {requested!r} for target {target.kind.name!r}. "
+                f"Allowed: {allowed}. Tip: use execution_backend='auto'."
+            )
+        if not spec.is_available():
+            available = ", ".join(spec.name for spec in available_specs) or "<none>"
+            raise ValueError(
+                f"Execution backend {requested!r} requires extra dependencies and is not available now. Try one of: {available}."
+            )
+        return spec
+
+
+@dataclass(frozen=True, slots=True)
+class BackendContext:
+    """Resolved backend state shared by every stage of one compilation."""
+
+    module: BackendModule
+    target: Target
+    target_host: Target
+    execution_backend: ExecutionBackendSpec
+
+    def __post_init__(self) -> None:
+        if not self.module.matches(self.target):
+            raise ValueError(f"Backend module {self.module.name!r} does not match target {self.target}")
+        if self.execution_backend not in self.module.execution_backends:
+            raise ValueError(f"Execution backend {self.execution_backend.name!r} is not declared by backend module {self.module.name!r}")
+        if not self.execution_backend.matches(self.target):
+            raise ValueError(f"Execution backend {self.execution_backend.name!r} does not match target {self.target}")
+
+    @property
+    def name(self) -> str:
+        """Return the selected backend module name."""
+
+        return self.module.name
+
+    def lower(self, mod: IRModule) -> IRModule:
+        """Run the selected backend's lowering pipeline."""
+
+        return self.module.lower(mod, self.target)
+
+    def codegen_device(self, mod: IRModule, *, compile_device: bool | None = None) -> IRModule:
+        """Generate device code using the selected execution policy by default."""
+
+        if compile_device is None:
+            compile_device = self.execution_backend.enable_device_compile
+        return self.module.codegen_device(mod, self.target, compile_device=compile_device)
+
+    def preprocess_host_codegen(self, mod: IRModule) -> IRModule:
+        """Apply selected-backend hooks before host code generation."""
+
+        return self.module.preprocess_host_codegen(mod, self.target_host, self.target)
+
+    def codegen_host(self, mod: IRModule) -> IRModule:
+        """Generate host code for the resolved host target."""
+
+        return self.module.codegen_host(mod, self.target_host)
+
+
+_BACKENDS: dict[str, BackendModule] = {}
+_TARGET_KIND_INDEX: dict[str, list[str]] = {}
+
+
+def register_backend(backend: BackendModule) -> BackendModule:
+    """Validate and register every component declared by a backend manifest."""
+
+    old = _BACKENDS.get(backend.name)
+    if old is not None:
+        if old == backend:
+            return old
+        raise ValueError(f"Backend {backend.name!r} is already registered with a different declaration")
+
+    for target_kind in backend.target_kinds:
+        for candidate_name in _TARGET_KIND_INDEX.get(target_kind, ()):
+            candidate = _BACKENDS[candidate_name]
+            if candidate.supports_target is None or backend.supports_target is None:
+                raise ValueError(f"Backends sharing target kind {target_kind!r} must define supports_target predicates")
+
+    _BACKENDS[backend.name] = backend
+    for target_kind in backend.target_kinds:
+        _TARGET_KIND_INDEX.setdefault(target_kind, []).append(backend.name)
+
+    try:
+        import tvm_ffi
+
+        for name, callback in backend.callbacks.items():
+            tvm_ffi.register_global_func(name, f=callback, override=True)
+    except Exception:
+        _BACKENDS.pop(backend.name, None)
+        for target_kind in backend.target_kinds:
+            names = _TARGET_KIND_INDEX.get(target_kind, [])
+            if backend.name in names:
+                names.remove(backend.name)
+            if not names:
+                _TARGET_KIND_INDEX.pop(target_kind, None)
+        raise
+
+    return backend
+
+
+def get_backend(name: str) -> BackendModule:
+    """Return a registered backend module by name."""
+
+    try:
+        return _BACKENDS[name]
+    except KeyError as err:
+        available = ", ".join(sorted(_BACKENDS)) or "<none>"
+        raise ValueError(f"Unknown backend {name!r}. Available: {available}") from err
+
+
+def list_backends() -> dict[str, BackendModule]:
+    """Return a copy of the registered backend modules."""
+
+    return dict(_BACKENDS)
+
+
+def _list_backend_modules_for_target_kind(target_kind: str) -> tuple[BackendModule, ...]:
+    try:
+        names = _TARGET_KIND_INDEX[target_kind]
+    except KeyError as err:
+        available = ", ".join(sorted(_TARGET_KIND_INDEX)) or "<none>"
+        raise ValueError(f"No backend registered for target kind {target_kind!r}. Available: {available}") from err
+    return tuple(_BACKENDS[name] for name in names)
+
+
+def _resolve_backend_module(target: Target) -> BackendModule:
+    candidates = [backend for backend in _list_backend_modules_for_target_kind(target.kind.name) if backend.matches(target)]
+    if not candidates:
+        raise ValueError(f"No backend matches target {target}")
+    if len(candidates) > 1:
+        names = ", ".join(backend.name for backend in candidates)
+        raise ValueError(f"Multiple backends match target {target}: {names}")
+    return candidates[0]
+
+
+def create_backend_context(
+    target: str | dict[str, object] | Target = "auto",
+    target_host: str | dict[str, object] | Target | None = None,
+    execution_backend: str | None = "auto",
+) -> BackendContext:
+    """Resolve user inputs into the immutable context for one compilation."""
+
+    from tilelang import tvm
+    from tilelang.backend.target import determine_target
+
+    normalized_target = determine_target(target, return_object=True)
+    assert isinstance(normalized_target, Target)
+
+    if target_host is None:
+        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
+    normalized_target_host = Target(target_host)
+    normalized_target = Target(normalized_target, normalized_target_host)
+
+    module = _resolve_backend_module(normalized_target)
+    execution = module.resolve_execution_backend(execution_backend, normalized_target)
+    return BackendContext(
+        module=module,
+        target=normalized_target,
+        target_host=normalized_target_host,
+        execution_backend=execution,
+    )

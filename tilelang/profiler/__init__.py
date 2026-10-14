@@ -15,7 +15,30 @@ from tilelang.utils.tensor import (
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
+from tilelang.utils.device import device_synchronize
 from tvm import tirx
+
+
+def _synchronize_tensor_devices(*values: Any) -> None:
+    """Synchronize each accelerator device referenced by nested tensor values."""
+    devices: list[torch.device] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, torch.Tensor):
+            device = value.device
+            if device.type in ("cuda", "mps", "npu") and device not in devices:
+                devices.append(device)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+
+    for value in values:
+        collect(value)
+    for device in devices:
+        device_synchronize(device)
 
 
 @dataclass
@@ -120,9 +143,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, ref_outs)
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, lib_outs)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -178,9 +201,9 @@ class Profiler:
         """
         ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, ref_outs)
         lib_outs = self.func(*ins)
-        torch.cuda.synchronize()
+        _synchronize_tensor_devices(ins, lib_outs)
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
@@ -225,10 +248,12 @@ class Profiler:
         n_warmup: int = 0,
         n_repeat: int = 0,
         input_tensors: list[torch.Tensor] = None,
-        backend: Literal["event", "cupti", "cudagraph"] = "event",
+        backend: Literal["event", "cupti", "cudagraph", "wall", "msprof", "msprof_detail"] = "event",
         quantiles: list[float] | None = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
         dynamic_symbolic_constraints: dict[str, int] | None = None,
+        device: int | torch.device | None = None,
+        early_stop_baseline: float | None = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -238,35 +263,52 @@ class Profiler:
             rep: Number of repetitions for timing
             n_warmup: Number of warmup iterations
             n_repeat: Number of timing iterations
-            backend: Which profiling backend to use - "event", "cupti", or "cudagraph"
+            backend: Which profiling backend to use - "event", "cupti", "cudagraph", "wall", "msprof", or "msprof_detail"
             input_tensors: Optional pre-generated input tensors
             dynamic_symbolic_constraints: Optional dict mapping dynamic symbolic variable
                 names to concrete int values. Use this when benchmarking kernels with
                 dynamic shapes, e.g., {"m": 2048, "n": 1024}
+            device: Optional device to benchmark on. MPS and NPU support "event" and
+                "wall"; CPU requires "wall". Asynchronous wall timing needs
+                an explicit device.
 
         Returns:
             float: Average execution time in milliseconds
         """
-        if func is None:
-            assert self.adapter is not None, "benchmarking function should be provided"
-            func = self.adapter
-        if input_tensors is not None:
-            ins = input_tensors
-        elif dynamic_symbolic_constraints is not None:
-            ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
-        else:
-            ins = self._get_inputs()
-        bench_func = partial(func, *ins)
-        return do_bench(
-            bench_func,
-            warmup=warmup,
-            rep=rep,
-            _n_warmup=n_warmup,
-            _n_repeat=n_repeat,
-            quantiles=quantiles,
-            backend=backend,
-            return_mode=return_mode,
-        )
+
+        def run_bench():
+            if func is None:
+                assert self.adapter is not None, "benchmarking function should be provided"
+                bench_target = self.adapter
+            else:
+                bench_target = func
+            if input_tensors is not None:
+                ins = input_tensors
+            elif dynamic_symbolic_constraints is not None:
+                ins = self._get_inputs(dynamic_symbolic_constraints=dynamic_symbolic_constraints)
+            else:
+                ins = self._get_inputs()
+            bench_func = partial(bench_target, *ins)
+            return do_bench(
+                bench_func,
+                warmup=warmup,
+                rep=rep,
+                _n_warmup=n_warmup,
+                _n_repeat=n_repeat,
+                quantiles=quantiles,
+                backend=backend,
+                return_mode=return_mode,
+                device=device,
+                early_stop_baseline=early_stop_baseline,
+            )
+
+        if device is not None and not isinstance(device, int) and torch.device(device).type == "npu":
+            with torch.npu.device(device):
+                return run_bench()
+        if device is None or (not isinstance(device, int) and torch.device(device).type != "cuda"):
+            return run_bench()
+        with torch.cuda.device(device):
+            return run_bench()
 
     @property
     def func(self):

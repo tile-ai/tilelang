@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file cpu/codegen/codegen_c.h
  * \brief Generate C code when target is c (CPU).
@@ -31,14 +12,14 @@
 #include <utility>
 #include <vector>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_base.h"
 #include "tvm/target/codegen.h"
 #include <tvm/tirx/expr.h>
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangC : public CodeGenC {
+class CodeGenTileLangC : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangC();
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,
@@ -68,11 +49,16 @@ public:
   void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
   // overload min and max to use the ternary operator, so we don't rely on the
   // standard library implementations
-  void VisitExpr_(const MinNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const MaxNode *op, std::ostream &os) final; // NOLINT(*)
+  void VisitExpr_(const MinNode *op, std::ostream &os) final;      // NOLINT(*)
+  void VisitExpr_(const MaxNode *op, std::ostream &os) final;      // NOLINT(*)
+  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final; // NOLINT(*)
 
   void VisitStmt_(const AssertStmtNode *op) final;  // NOLINT(*)
   void VisitStmt_(const AllocBufferNode *op) final; // NOLINT(*)
+  /*! \brief Emit `#pragma omp parallel for [collapse(n)] [num_threads(m)]`
+   * for kParallel loops (CPU OpenMP lowering); other kinds go to the base
+   * printer, which is kind-agnostic. */
+  void VisitStmt_(const ForNode *op) final; // NOLINT(*)
 
   void GenerateForwardFunctionDeclarations(ffi::String global_symbol,
                                            const ffi::Array<Type> &arg_types,
@@ -99,6 +85,12 @@ private:
   /*! \brief whether to emit forward function declarations in the resulting C
    * code */
   bool emit_fwd_func_decl_;
+  /*! \brief For-node identities of the kParallel loops that are members of
+   * the `#pragma omp parallel for [collapse(n)]` chain currently being
+   * printed; they must not re-emit the pragma. Identity-based so that a
+   * different kParallel loop reached through wrapper statements inside the
+   * chain body still gets its own pragma. */
+  std::unordered_set<const ForNode *> omp_chain_members_;
 
   FunctionInfo GetFunctionInfo(const CallNode *op, bool has_resource_handle);
   std::string GetPackedName(const CallNode *op);

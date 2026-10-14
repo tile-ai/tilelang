@@ -8,7 +8,6 @@
 
 #include "./operator.h"
 #include "cuda/stubs/cuda.h"
-#include "region.h"
 #include "support/check.h"
 #include "tvm/runtime/base.h"
 #include <tvm/tirx/buffer.h>
@@ -18,6 +17,9 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+
+/*! \brief Whether a constant has an all-zero bit pattern, excluding -0.0. */
+TVM_DLL bool IsZeroBitPattern(const PrimExpr &expr);
 
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 TVM_DLL int to_CUtensorMapDataType(DataType dtype);
@@ -90,6 +92,13 @@ inline bool IsSharedBuffer(const Buffer &buffer, bool allow_dynamic = true) {
     return buffer.scope() == "shared" || buffer.scope() == "shared.dyn";
   }
   return buffer.scope() == "shared";
+}
+
+inline bool IsTmemBuffer(const Buffer &buffer) {
+  if (!buffer.defined()) {
+    return false;
+  }
+  return buffer.scope() == "shared.tmem";
 }
 
 inline bool IsGlobalBuffer(const Buffer &buffer) {

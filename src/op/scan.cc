@@ -71,8 +71,9 @@ void InitScanOpNode(ScanOpNode *node, const Array<PrimExpr> &args,
 }
 
 template <typename ScanOpNode>
-LayoutMap InferScanLayout(const ScanOpNode &op, const LayoutInferArgs &T,
-                          InferLevel level, const char *pretty_name) {
+LayoutMap InferScanLayout(const ScanOpNode &op,
+                          const LayoutInferArgs &layout_args, InferLevel level,
+                          const char *pretty_name) {
   if (level != InferLevel::kStrict) {
     return {};
   }
@@ -80,7 +81,7 @@ LayoutMap InferScanLayout(const ScanOpNode &op, const LayoutInferArgs &T,
   LayoutMap result_map;
 
   auto make_linear_layout = [](const Buffer &buf) -> Layout {
-    return makeLinearLayout(buf->shape);
+    return MakeLinearLayout(buf->shape);
   };
 
   auto check_or_set_linear_layout = [&](const Buffer &buf) {
@@ -88,8 +89,9 @@ LayoutMap InferScanLayout(const ScanOpNode &op, const LayoutInferArgs &T,
       return;
 
     Layout linear_layout = make_linear_layout(buf);
-    if (T.layout_map.count(buf)) {
-      Layout existing = T.layout_map.Get(buf).value().as<Layout>().value();
+    if (layout_args.layout_map.count(buf)) {
+      Layout existing =
+          layout_args.layout_map.Get(buf).value().as<Layout>().value();
       ICHECK(StructuralEqual()(existing, linear_layout))
           << pretty_name << " requires linear layout for shared buffer "
           << buf->name << ", but got non-linear layout.";
@@ -136,14 +138,15 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   data_ = std::move(node);
 }
 
-Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  return ResolveScanImpl<CumSumImpl>(T.target, "cumsum")
-      .lower(*this, T, analyzer);
+Stmt CumSumOpNode::Lower(const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer) const {
+  return ResolveScanImpl<CumSumImpl>(lower_args.target, "cumsum")
+      .lower(*this, lower_args, analyzer);
 }
 
-LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                     InferLevel level) const {
-  return InferScanLayout(*this, T, level, "CumSum");
+  return InferScanLayout(*this, layout_args, level, "CumSum");
 }
 
 TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)
@@ -157,14 +160,15 @@ CumMaxOp::CumMaxOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   data_ = std::move(node);
 }
 
-Stmt CumMaxOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  return ResolveScanImpl<CumMaxImpl>(T.target, "cummax")
-      .lower(*this, T, analyzer);
+Stmt CumMaxOpNode::Lower(const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer) const {
+  return ResolveScanImpl<CumMaxImpl>(lower_args.target, "cummax")
+      .lower(*this, lower_args, analyzer);
 }
 
-LayoutMap CumMaxOpNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap CumMaxOpNode::InferLayout(const LayoutInferArgs &layout_args,
                                     InferLevel level) const {
-  return InferScanLayout(*this, T, level, "CumMax");
+  return InferScanLayout(*this, layout_args, level, "CumMax");
 }
 
 TIR_REGISTER_TL_TILE_OP(CumMaxOp, cummax)

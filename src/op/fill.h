@@ -23,8 +23,9 @@ public:
   ffi::Array<Range> region; ///< Region to fill within the buffer
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fill", FillNode, TileOperatorNode);
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
 
@@ -48,7 +49,7 @@ struct FillImpl {
   const char *name;
   FillTargetPredicate match_target;
 
-  Stmt (*lower)(const FillNode &op, const LowerArgs &T,
+  Stmt (*lower)(const FillNode &op, const LowerArgs &lower_args,
                 arith::Analyzer *analyzer);
 };
 

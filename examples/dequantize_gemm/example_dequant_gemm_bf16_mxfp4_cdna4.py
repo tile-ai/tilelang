@@ -19,7 +19,7 @@ from tvm import DataType
 from tvm import tirx
 import torch
 
-from tilelang.quantize import get_mxfp_intrin_group
+from quantize import get_mxfp_intrin_group
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 
@@ -160,7 +160,7 @@ def matmul(
                     dtype=out_dtype,
                 )
 
-                for v in T.Parallel(local_size):
+                for v in T.vectorized(local_size):
                     B_dequantize_local_thread[v] *= Scale_local_thread_exponent[0]
 
                 for v in T.vectorized(0, local_size):

@@ -14,10 +14,16 @@ def test_issue_1734():
             B: T.Tensor[(2, 512), T.float32],
             C: T.Tensor[(2,), T.float32],
         ):
-            with T.Kernel(1, threads=256):
+            with T.Kernel(1, threads=128):
                 A_local = T.alloc_fragment((2, 512), T.float32)
                 B_local = T.alloc_fragment((2, 512), T.float32)
                 C_local = T.alloc_fragment((2,), T.float32)
+
+                # Each thread owns 8 contiguous elements of one row, so i is
+                # constant per thread and the guard below is loop-invariant,
+                # while a residual serial loop survives vectorization.
+                row_chunks = T.Fragment((2, 512), forward_fn=lambda i, j: (i * 64 + j // 8, j % 8))
+                T.annotate_layout({A_local: row_chunks, B_local: row_chunks})
 
                 T.copy(A, A_local)
                 T.copy(C, C_local)
@@ -32,11 +38,14 @@ def test_issue_1734():
 
     mod = kernel.compile()
     source = mod.get_kernel_source()
-    # Verify that the if statement is hoisted outside the for loop
-    # After hoisting, we should see "if" before "for" pattern
+    # Verify that the if statement is hoisted outside the for loop: the
+    # guarded loop must sit inside the if block (a "for (" before the
+    # first "}" after the if).
     if_pos = source.find("if (")
-    for_pos = source.find("for (")
-    assert if_pos < for_pos, "Loop-invariant if should be hoisted outside the loop"
+    assert if_pos != -1, "Guard should survive lowering"
+    after_if = source[if_pos:]
+    for_pos = after_if.find("for (")
+    assert for_pos != -1 and for_pos < after_if.find("}"), "Loop-invariant if should be hoisted outside the loop"
 
 
 if __name__ == "__main__":

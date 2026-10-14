@@ -17,23 +17,41 @@ def test_tilelang_globals_leak():
             a: T.Tensor[(1,), T.float32],
         ):
             with T.Kernel(1) as _:
-                a[0] = 1
+                # `ub = T.alloc_shared(...)` is an assignment that goes through
+                # `__tb.bind` -> `get_parent_locals`. Without it the eager builder
+                # never calls `get_parent_locals` (subscript stores and `with ... as`
+                # targets do not), so this test cannot detect the frame leak.
+                ub = T.alloc_shared((1,), "float32")
+                T.copy(a, ub)
+                T.copy(ub, a)
 
         return dummy_kernel
 
-    a = torch.randn(1, 1024)
-    a_weak = weakref.ref(a)
-    _kernel = get_dummy_kernel()
-    del a
-    torch.cuda.empty_cache()
-    gc.collect()
-    torch.cuda.empty_cache()
-    a_upgrade = a_weak()
-    assert a_upgrade is None, "A is not garbage collected"
+    def compile_with_probe() -> weakref.ReferenceType:
+        # `a` lives in the first-compile call chain and is NOT deleted: any
+        # retention (JIT machinery or a leaked `get_parent_locals` frame)
+        # would keep it alive after this function returns.
+        a = torch.randn(1, 1024)
+        a_weak = weakref.ref(a)
+        _kernel = get_dummy_kernel()
+        return a_weak
 
-    # use objgraph to debug
-    # if a_upgrade is not None:
-    #     objgraph.show_backrefs([a_upgrade], max_depth=5)
+    # temporarily disable gc: automatic cyclic GC would collect the
+    # unreachable `get_parent_locals` frame cycle and mask the leak
+    gc.disable()
+
+    try:
+        a_weak = compile_with_probe()
+
+        # if anything still references `a`, a_weak() will return the object
+        assert a_weak() is None, "A is not garbage collected"
+
+        # use objgraph to debug
+        # if a_weak() is not None:
+        #     objgraph.show_backrefs([a_weak()], max_depth=5)
+    finally:
+        # re-enable gc whenever exception occurs
+        gc.enable()
 
 
 def test_error_no_cyclic_reference() -> None:

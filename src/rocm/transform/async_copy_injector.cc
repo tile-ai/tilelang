@@ -4,7 +4,6 @@
  */
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
-#include <tvm/s_tir/stmt.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -18,8 +17,8 @@
 #include <optional>
 #include <vector>
 
-#include "op/builtin.h"
 #include "op/utils.h"
+#include "rocm/op/builtin.h"
 #include "rocm/transform/async_copy_injector.h"
 #include "tir/ir/buffer_common.h"
 
@@ -31,10 +30,8 @@ using namespace ffi;
 
 class ROCmAsyncCopyInjector : public StmtMutator {
 public:
-  explicit ROCmAsyncCopyInjector(bool enable_auto_async_copy,
-                                 bool async_without_async_commit_wait)
-      : enable_auto_async_copy_(enable_auto_async_copy),
-        async_without_async_commit_wait_(async_without_async_commit_wait) {}
+  explicit ROCmAsyncCopyInjector(bool async_without_async_commit_wait)
+      : async_without_async_commit_wait_(async_without_async_commit_wait) {}
 
   bool InjectedROCmAsyncCopy() const { return injected_rocm_async_copy_; }
 
@@ -52,17 +49,6 @@ public:
     pending_sync_copies_ = false;
     uncommitted_sync_copies_ = false;
     return SeqStmt(seq);
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == s_tir::attr::async_scope) {
-      ++explicit_async_scope_depth_;
-      Stmt body = this->VisitStmt(op->body);
-      --explicit_async_scope_depth_;
-      // `async_scope` is a lowering-only marker for cp.async semantics.
-      return body;
-    }
-    return StmtMutator::VisitStmt_(op);
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
@@ -263,10 +249,6 @@ public:
     if (!IsSharedBuffer(store->buffer)) {
       return StmtMutator::VisitStmt_(store);
     }
-    // Only lower copies in regions where async-copy rewrite is enabled.
-    if (!enable_auto_async_copy_) {
-      return StmtMutator::VisitStmt_(store);
-    }
 
     Optional<PrimExpr> predicate = std::nullopt;
     const BufferLoadNode *load =
@@ -290,7 +272,7 @@ public:
 
 private:
   bool UseExplicitAsyncSemantics() const {
-    return async_without_async_commit_wait_ || explicit_async_scope_depth_ > 0;
+    return async_without_async_commit_wait_;
   }
 
   // A copy candidate represented after flattening source/destination indexing.
@@ -313,19 +295,6 @@ private:
   };
 
   // ---- Copy candidate analysis helpers ----
-  static bool IsZeroValue(const PrimExpr &expr) {
-    if (const auto *broadcast = expr.as<BroadcastNode>()) {
-      return IsZeroValue(broadcast->value);
-    }
-    if (const auto *float_imm = expr.as<FloatImmNode>()) {
-      return float_imm->value == 0.0f;
-    }
-    if (const auto *int_imm = expr.as<IntImmNode>()) {
-      return int_imm->value == 0;
-    }
-    return false;
-  }
-
   static const BufferLoadNode *
   MatchZeroFillBufferLoad(const PrimExpr &value,
                           Optional<PrimExpr> *predicate) {
@@ -335,7 +304,7 @@ private:
 
     const auto *call = value.as<CallNode>();
     if (!call || !call->op.same_as(builtin::if_then_else()) ||
-        !IsZeroValue(call->args[2])) {
+        !IsZeroBitPattern(call->args[2])) {
       return nullptr;
     }
 
@@ -688,9 +657,7 @@ private:
   // Note: AnalyzeCopyRegion replaces both the old `IsPureCopyRegion` and
   // `SummarizeAsyncIntrinsics` helpers to avoid redundant traversals.
 
-  bool enable_auto_async_copy_{true};
   bool async_without_async_commit_wait_{false};
-  int explicit_async_scope_depth_{0};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
@@ -700,10 +667,8 @@ private:
 };
 
 ROCmAsyncCopyInjectResult
-InjectROCmAsyncCopy(const Stmt &body, bool enable_auto_async_copy,
-                    bool async_without_async_commit_wait) {
-  ROCmAsyncCopyInjector injector(enable_auto_async_copy,
-                                 async_without_async_commit_wait);
+InjectROCmAsyncCopy(const Stmt &body, bool async_without_async_commit_wait) {
+  ROCmAsyncCopyInjector injector(async_without_async_commit_wait);
   Stmt injected = injector(body);
   return {injector.Finalize(injected), injector.InjectedROCmAsyncCopy()};
 }

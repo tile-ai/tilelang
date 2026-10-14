@@ -3,19 +3,77 @@ from __future__ import annotations
 import pytest
 
 import tilelang
+from tilelang.backend import get_backend
 from tvm.target import Target
 import tilelang.backend.target as target_registry
-from tilelang.backend.execution_backend import (
-    ExecutionBackendSpec,
-    allowed_backends_for_target,
-    register_execution_backend,
-    resolve_execution_backend,
+from tilelang.backend.target import (
+    auto_detect_target,
+    determine_target,
+    list_target_detectors,
+    register_target_detector,
 )
-from tilelang.backend.target import auto_detect_target, list_target_detectors, register_target_detector
 
 
 def test_tilelang_does_not_export_target_wrapper():
     assert not hasattr(tilelang, "Target")
+
+
+def test_default_target_env_accepts_json_string(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", '{"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]}')
+
+    assert tilelang.env.get_default_target() == {
+        "kind": "cuda",
+        "arch": "sm_100f",
+        "code": ["sm_100a", "sm_103a"],
+    }
+
+
+def test_default_target_env_rejects_unquoted_json_keys(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", '{kind: "cuda", arch: "sm_100f"}')
+
+    with pytest.raises(ValueError, match="Use JSON syntax"):
+        tilelang.env.get_default_target()
+
+
+def test_default_target_env_keeps_plain_string(monkeypatch):
+    monkeypatch.setenv("TILELANG_DEFAULT_TARGET", "cuda")
+
+    assert tilelang.env.get_default_target() == "cuda"
+
+
+def test_bare_cuda_target_uses_detected_exact_arch(monkeypatch):
+    from tilelang.cuda import target as cuda_target
+
+    monkeypatch.setattr(cuda_target, "_detect_torch_cuda_arch", lambda: "sm_90a")
+
+    target = determine_target("cuda", return_object=True)
+
+    assert isinstance(target, Target)
+    assert target.kind.name == "cuda"
+    assert str(target.attrs["arch"]) == "sm_90a"
+
+
+def test_cuda_target_code_attr_survives_target_normalization():
+    target = determine_target(
+        {"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]},
+        return_object=True,
+    )
+
+    assert isinstance(target, Target)
+    assert target.kind.name == "cuda"
+    assert str(target.attrs["arch"]) == "sm_100f"
+    assert list(target.attrs["code"]) == ["sm_100a", "sm_103a"]
+    assert list(target.export()["code"]) == ["sm_100a", "sm_103a"]
+
+
+def test_cuda_target_code_attr_rejects_string_code():
+    with pytest.raises(AssertionError, match="valid target config dict"):
+        determine_target({"kind": "cuda", "arch": "sm_100f", "code": "sm_100a"}, return_object=True)
+
+
+def test_cuda_target_rejects_compute_arch():
+    with pytest.raises(AssertionError, match="valid target config dict"):
+        determine_target({"kind": "cuda", "arch": "compute_90"}, return_object=True)
 
 
 def test_auto_target_uses_registered_detectors():
@@ -52,33 +110,28 @@ def test_auto_target_detector_falls_through_none_result():
         target_registry._TARGET_DETECTORS.update(old_detectors)
 
 
-def test_execution_backend_registry_resolves_target_policy():
-    target_kind = "llvm"
-    target = Target({"kind": target_kind})
-    from tilelang.backend import execution_backend as backend_registry
+def test_backend_module_resolves_execution_policy():
+    backend = get_backend("cpu")
+    c_target = Target("c")
+    llvm_target = Target("llvm")
 
-    old_execution_specs = backend_registry._EXECUTION_BACKENDS.get(target_kind)
-    was_loaded = target_kind in backend_registry._LOADED_EXECUTION_BACKENDS
-    try:
-        backend_registry._EXECUTION_BACKENDS[target_kind] = []
-        backend_registry._LOADED_EXECUTION_BACKENDS.add(target_kind)
-        register_execution_backend(target_kind, ExecutionBackendSpec("fast"), override=True)
-        register_execution_backend(target_kind, ExecutionBackendSpec("slow"), override=True)
-
-        assert allowed_backends_for_target(target) == ["fast", "slow"]
-        assert resolve_execution_backend("auto", target) == "fast"
-        assert resolve_execution_backend("slow", target) == "slow"
-    finally:
-        if old_execution_specs is None:
-            backend_registry._EXECUTION_BACKENDS.pop(target_kind, None)
-        else:
-            backend_registry._EXECUTION_BACKENDS[target_kind] = old_execution_specs
-        if not was_loaded:
-            backend_registry._LOADED_EXECUTION_BACKENDS.discard(target_kind)
+    assert backend.allowed_execution_backends(c_target) == ("cython", "tvm_ffi")
+    assert backend.allowed_execution_backends(llvm_target) == ("tvm_ffi",)
+    assert backend.resolve_execution_backend("auto", c_target).name == "cython"
+    assert backend.resolve_execution_backend("auto", llvm_target).name == "tvm_ffi"
 
 
 def test_execution_backend_registry_rejects_invalid_backend():
     target = Target("llvm")
+    backend = get_backend("cpu")
 
     with pytest.raises(ValueError, match="Invalid execution backend"):
-        resolve_execution_backend("nvrtc", target)
+        backend.resolve_execution_backend("nvrtc", target)
+
+
+def test_execution_backend_registry_rejects_removed_dlpack_backend():
+    target = Target("llvm")
+    backend = get_backend("cpu")
+
+    with pytest.raises(ValueError, match="Invalid execution backend 'dlpack'"):
+        backend.resolve_execution_backend("dlpack", target)

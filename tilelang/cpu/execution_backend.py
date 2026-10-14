@@ -1,12 +1,15 @@
 from __future__ import annotations
 
-from tilelang.backend.execution_backend import ExecutionBackendSpec, register_execution_backend
+from tvm.target import Target
+
+from tilelang.backend.execution_backend import ExecutionBackendSpec
 
 
-for _target_kind in ("c", "llvm"):
-    register_execution_backend(_target_kind, ExecutionBackendSpec("cython"), override=True)
-    register_execution_backend(
-        _target_kind,
-        ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
-        override=True,
-    )
+def _is_c_target(target: Target) -> bool:
+    return target.kind.name == "c"
+
+
+EXECUTION_BACKENDS = [
+    ExecutionBackendSpec("cython", supports_target=_is_c_target),
+    ExecutionBackendSpec("tvm_ffi", enable_host_codegen=True, enable_device_compile=True),
+]

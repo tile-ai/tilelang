@@ -56,7 +56,7 @@ const GemmSPImpl &ResolveGemmSPImpl(Target target) {
 
 } // namespace
 
-std::pair<int, int> GemmSPWarpPolicyNode::computeWarpPartition(
+std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(
     int M, int N, int block_size, Target target, String gemm_inst) const {
   return ResolveGemmSPImpl(target).compute_warp_partition(
       *this, M, N, block_size, target, gemm_inst);
@@ -68,7 +68,6 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
   ICHECK(impl.select_inst != nullptr);
   ICHECK(impl.compute_warp_partition != nullptr);
   ICHECK(impl.reuse_existing_shared_layout != nullptr);
-  ICHECK(impl.instruction_kind != nullptr);
   GemmSPImplRegistry().push_back(impl);
 }
 
@@ -77,15 +76,14 @@ void RegisterGemmSPImpl(GemmSPImpl impl) {
  *
  * Deserializes operator parameters from `args` and resolves buffer references,
  * populating an internal GemmSPNode with buffers, transpose flags, M/N/K,
- * warp policy, clear_accum, strides, offsets, and optional kPack/wg_wait.
+ * warp policy and clear_accum.
  *
  * @param args Positional serialized arguments produced by the TL frontend:
  *   expected layout is:
  *     [Aptr, Eptr, Bptr, Cptr, trans_A (Bool), trans_E (Bool),
  *      trans_B (Bool), M (Int), N (Int), K (Int), policy (Int),
- *      clear_accum (Bool), stride_A (Int), stride_B (Int),
- *      offset_A (Int), offset_B (Int),
- *      (optional) kPack (Int), (optional) wg_wait (Int)]
+ *      clear_accum (Bool)]
+ *   Backend lowering knobs (wg_wait) ride in the annotations map.
  */
 GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
@@ -113,18 +111,12 @@ GemmSP::GemmSP(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
   node->K = args[9].as<IntImm>().value()->value;
   node->policy = GemmSPWarpPolicy(args[10].as<IntImm>().value()->value);
   node->clear_accum = args[11].as<PrimExpr>().value();
-  node->stride_A = args[12].as<IntImm>().value()->value;
-  node->stride_B = args[13].as<IntImm>().value()->value;
-  node->offset_A = args[14].as<IntImm>().value()->value;
-  node->offset_B = args[15].as<IntImm>().value()->value;
-  if (args.size() > 16) {
-    node->kPack = args[16].as<IntImm>().value()->value;
-    if (node->kPack != 1 && node->kPack != 2) {
-      ICHECK(false) << "kPack must be 1 or 2";
-    }
-  }
-  if (args.size() > 17) {
-    node->wg_wait = args[17].as<IntImm>().value()->value;
+  // wg_wait is a Hopper warpgroup knob set by the CUDA dialect; it rides in
+  // the annotations rather than the positional call protocol.
+  if (auto val = annotations.Get("wg_wait")) {
+    const auto *int_val = val->as<IntImmNode>();
+    ICHECK(int_val) << "wg_wait annotation must be IntImmNode";
+    node->wg_wait = int_val->value;
   }
   if (auto val = annotations.Get("is_wgmma")) {
     const auto *int_val = val->as<IntImmNode>();
@@ -152,27 +144,35 @@ AccessRegions GemmSPNode::GetAccessRegions() const {
   return result;
 }
 
+ffi::Array<BufferRegion> GemmSPNode::GetReadBeforeWriteRegions() const {
+  ffi::Array<BufferRegion> result;
+  result.push_back(aRegion_);
+  result.push_back(eRegion_);
+  result.push_back(bRegion_);
+  // See GemmNode::GetReadBeforeWriteRegions: only a provable absence of the
+  // clear makes the accumulator's old contents a definite read.
+  if (is_zero(clear_accum)) {
+    result.push_back(cRegion_);
+  }
+  return result;
+}
+
 TileOperator GemmSPNode::Clone() const {
   auto op = make_object<GemmSPNode>(*this);
   return GemmSP(op);
 }
 
-String GemmSPNode::getGemmSPInstructionKey(int block_size,
+String GemmSPNode::GetGemmSPInstructionKey(int block_size,
                                            Target target) const {
   return ResolveGemmSPImpl(target).select_inst(*this, block_size, target);
 }
 
-String GemmSPNode::getGemmSPInstructionKind(int block_size,
-                                            Target target) const {
-  const GemmSPImpl &impl = ResolveGemmSPImpl(target);
-  return impl.instruction_kind(impl.select_inst(*this, block_size, target));
-}
-
-Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GemmSPNode::Lower(const LowerArgs &lower_args,
+                       arith::Analyzer *analyzer) const {
   if (const auto f = Function::GetGlobal("tl.gemm_sp.lower")) {
-    auto prim_func =
-        Downcast<PrimFunc>((*f)(GetRef<GemmSP>(this), T.target, T.layout_map,
-                                T.thread_bounds, T.thread_var));
+    auto prim_func = Downcast<PrimFunc>(
+        (*f)(GetRef<GemmSP>(this), lower_args.target, lower_args.layout_map,
+             lower_args.thread_bounds, lower_args.thread_index));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.has_value());
@@ -206,27 +206,29 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 }
 
-LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
+LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &layout_args,
                                   InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
   if (const auto f = Function::GetGlobal("tl.gemm_sp.infer_layout")) {
-    auto inferred_layouts = Downcast<LayoutMap>(
-        (*f)(GetRef<GemmSP>(this), T.target, T.thread_bounds));
-    auto block_size = *as_const_int(T.thread_bounds->extent);
-    String gemm_inst = getGemmSPInstructionKey(block_size, T.target);
+    auto inferred_layouts = Downcast<LayoutMap>((*f)(
+        GetRef<GemmSP>(this), layout_args.target, layout_args.thread_bounds));
+    auto block_size = *as_const_int(layout_args.thread_bounds->extent);
+    String gemm_inst = GetGemmSPInstructionKey(block_size, layout_args.target);
     bool reuse_existing_shared_layout =
-        ResolveGemmSPImpl(T.target).reuse_existing_shared_layout(gemm_inst);
+        ResolveGemmSPImpl(layout_args.target)
+            .reuse_existing_shared_layout(gemm_inst);
     for (auto kv : inferred_layouts) {
       const Buffer &buf = kv.first;
       const Layout &layout = kv.second;
       if (reuse_existing_shared_layout && IsSharedBuffer(buf) &&
-          T.layout_map.count(buf)) {
+          layout_args.layout_map.count(buf)) {
         continue;
       }
       if (auto frag = layout.as<Fragment>()) {
-        results.Set(buf, frag.value()->BindThreadRange(T.thread_bounds));
+        results.Set(buf,
+                    frag.value()->BindThreadRange(layout_args.thread_bounds));
       } else {
         results.Set(buf, layout);
       }
@@ -279,12 +281,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("tl.GemmSPWarpPolicyComputeWarpPartition",
                         [](GemmSPWarpPolicy policy, int M, int N,
                            int block_size, Target target, String gemm_inst) {
-                          policy->computeWarpPartition(M, N, block_size, target,
+                          policy->ComputeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
                         });
   refl::GlobalDef().def("tl.GemmSPGetGemmInstructionKey",
                         [](GemmSP gemm, int block_size, Target target) {
-                          return gemm->getGemmSPInstructionKey(block_size,
+                          return gemm->GetGemmSPInstructionKey(block_size,
                                                                target);
                         });
 }

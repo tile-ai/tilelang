@@ -1,10 +1,25 @@
 from __future__ import annotations
 
+import os
+
 from tvm import IRModule
 from tvm.target import Target
 
 import tilelang
 from tilelang.transform import PassContext
+
+
+def _env_data_race_check_enabled() -> bool:
+    """Whether the data race check is enabled via the environment.
+
+    The check is disabled by default; users can opt in by setting the
+    ``TILELANG_ENABLE_DATA_RACE_CHECK`` environment variable to a truthy value
+    (e.g. ``1``, ``true``, ``yes``, ``on``).
+    """
+    value = os.environ.get("TILELANG_ENABLE_DATA_RACE_CHECK")
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def allow_vectorize(pass_ctx: PassContext | None = None) -> bool:
@@ -43,7 +58,14 @@ def should_enable_layout_visual(pass_ctx: PassContext | None = None) -> bool:
 def should_enable_race_check(pass_ctx: PassContext | None = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    return not pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK, False)
+    # The check is disabled by default because it can report false positives
+    # (e.g. shared buffer stores whose per-thread addresses cannot be proven
+    # distinct). Users can opt in via the TILELANG_ENABLE_DATA_RACE_CHECK
+    # environment variable, or override it per-compile through the
+    # `tl.disable_data_race_check` pass config.
+    default_disable = not _env_data_race_check_enabled()
+    disable = pass_ctx.config.get(tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK, default_disable)
+    return not disable
 
 
 def should_disable_shared_memory_reuse(pass_ctx: PassContext | None = None) -> bool:

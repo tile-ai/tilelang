@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  *  Loop unrolling as in Halide pipeline.
  * \file unroll_loop.cc
@@ -32,6 +13,7 @@
 
 #include <unordered_set>
 
+#include "../op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -66,7 +48,7 @@ struct UnrollLoopConfigNode
         .def_ro(
             "explicit_unroll", &UnrollLoopConfigNode::explicit_unroll,
             "Whether to explicitly unroll the loop instead of setting a pragma",
-            refl::DefaultValue(true))
+            refl::DefaultValue(false))
         .def_ro(
             "unroll_local_access", &UnrollLoopConfigNode::unroll_local_access,
             "Whether to always unroll local access", refl::DefaultValue(false));
@@ -97,6 +79,40 @@ public:
 private:
   std::unordered_set<Var> *var_touched_local_;
 };
+
+namespace {
+
+class TargetedLoopBreakDetector : public StmtExprVisitor {
+public:
+  static bool Contains(const Stmt &body) {
+    TargetedLoopBreakDetector detector;
+    detector(body);
+    return detector.found_;
+  }
+
+private:
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::loop_break()) ||
+        op->op.same_as(builtin::break_loop())) {
+      found_ = true;
+      return;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const ForNode *) final {
+    // A break inside a nested loop targets that loop, not the loop being
+    // considered for full expansion.
+  }
+
+  void VisitStmt_(const WhileNode *) final {
+    // As above, do not attribute a nested while-loop's break to its parent.
+  }
+
+  bool found_{false};
+};
+
+} // namespace
 
 // The Visitor is used to check whether var is used as write index in a local
 // memory If a loop var is used as indices to a local memory, it must be
@@ -177,7 +193,15 @@ public:
     // Post order so we can collect more information
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     op = stmt.as<ForNode>();
-    int value = GetExtent(op);
+    int value = GetTripCount(op);
+
+    // Whether to explicitly unroll.
+    bool explicit_unroll = explicit_unroll_;
+    if (auto attr = op->annotations.Get(tirx::attr::pragma_unroll_explicit)) {
+      explicit_unroll =
+          static_cast<bool>(Downcast<Integer>(attr.value())->value);
+    }
+
     // condition for auto unroll
     bool auto_unroll =
         (op->kind == ForKind::kSerial && value >= 0 &&
@@ -187,9 +211,9 @@ public:
                                   value <= auto_max_extent_);
 
     if (op->kind == ForKind::kUnrolled) {
-      if (explicit_unroll_) {
+      if (explicit_unroll) {
         ICHECK_GE(value, 0)
-            << "Cannot unroll non-constant loop " << explicit_unroll_;
+            << "Cannot unroll non-constant loop " << explicit_unroll;
       }
       auto_unroll = true;
     }
@@ -208,7 +232,7 @@ public:
       normal_loop_depth_ += 1;
     }
 
-    if ((auto_unroll && explicit_unroll_) ||
+    if ((auto_unroll && explicit_unroll) ||
         // unroll loops with extent = 1, no matter how many steps in body
         (0 <= value && value <= auto_max_extent_ && auto_max_extent_ == 1)) {
       return Unroll(op);
@@ -278,19 +302,26 @@ public:
   }
 
   Stmt Unroll(const ForNode *op) {
-    int value = GetExtent(op);
+    CHECK(!TargetedLoopBreakDetector::Contains(op->body), ValueError)
+        << "[TileLang Semantic Check] A loop containing T.loop_break() that "
+           "targets that loop cannot be fully expanded. Use "
+           "T.unroll(..., explicit=False) or T.serial(...) to preserve the "
+           "loop.";
+    int value = GetTripCount(op);
     // For loop must have a constant integer extent
-    ICHECK_NE(value, -1) << "loop doesn't have a constant integer extent";
-    if (value == 0)
+    ICHECK_GE(value, 0) << "loop doesn't have a constant integer extent";
+    if (value <= 0)
       return Evaluate(0);
+    int step = GetStep(op);
     Stmt body = op->body;
     Map<Var, PrimExpr> vmap;
     Array<Stmt> unrolled;
     for (int i = 0; i < value; ++i) {
-      vmap.Set(op->loop_var, op->min + make_const(op->loop_var.dtype(), i));
-      Stmt step = Substitute(body, vmap);
-      step = UnrolledBodyDefFreshener()(std::move(step));
-      unrolled.push_back(step);
+      vmap.Set(op->loop_var,
+               op->min + make_const(op->loop_var.dtype(), i * step));
+      Stmt step_body = Substitute(body, vmap);
+      step_body = UnrolledBodyDefFreshener()(std::move(step_body));
+      unrolled.push_back(step_body);
     }
     return SeqStmt::Flatten(unrolled);
   }
@@ -309,6 +340,28 @@ private:
       value = static_cast<int>(v1->value);
     }
     return value;
+  }
+
+  // returns the step of the loop
+  int GetStep(const ForNode *op) {
+    if (!op->step.defined()) {
+      return 1;
+    }
+    auto *step = as_const_int(op->step.value());
+    ICHECK(step) << "An loop's step must be constant";
+    ICHECK_GT(*step, 0) << "A loop's step must be positive";
+    return *step;
+  }
+
+  // returns the trip count of the loop if it's a constant integer, otherwise
+  // return -1
+  int GetTripCount(const ForNode *op) {
+    int extent = GetExtent(op);
+    if (extent < 0) {
+      return -1;
+    }
+    int step = GetStep(op);
+    return 1 + (extent - 1) / step;
   }
 
   // maximum number of step to perform auto unroll.

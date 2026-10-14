@@ -507,8 +507,7 @@ public:
     Array<PrimExpr> indices = op->indices.Map(fmutate);
 
     if (!indices.same_as(op->indices)) {
-      auto writer = load.CopyOnWrite();
-      writer->indices = indices;
+      return BufferLoad(op->buffer, indices, op->predicate, op->span);
     }
 
     return std::move(load);
@@ -614,7 +613,7 @@ public:
       return GetRef<Stmt>(op);
     } else {
       return For(op->loop_var, op->min, extent, op->kind, body,
-                 op->thread_binding, op->annotations);
+                 op->thread_binding, op->annotations, op->step, op->span);
     }
   }
   // IfThenElse

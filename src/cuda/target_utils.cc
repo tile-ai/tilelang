@@ -101,11 +101,11 @@ bool TargetHasLdmatrix(Target target) {
   return arch >= 75;
 }
 
-bool TargetHasStmatrix(Target target) {
+bool TargetHasStmatrix(Target target, bool is_m16n8) {
   if (!TargetIsCuda(target))
     return false;
   int arch = GetCudaArchInt(target);
-  return arch >= 90;
+  return is_m16n8 ? arch >= 100 : arch >= 90;
 }
 
 bool TargetHasTmem(Target target) {
@@ -119,6 +119,13 @@ bool TargetHasBulkCopy(Target target) {
     return false;
   int arch = GetCudaArchInt(target);
   return arch >= 90;
+}
+
+bool TargetSupportsNamedBarrier(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetCudaArchInt(target);
+  return arch >= 80;
 }
 
 bool TargetSupportVectorize256(Target target) {
@@ -168,6 +175,22 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   // float8 (E4M3/E5M2) -> float32
   if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float() &&
       target_ty.bits() == 32)
+    return true;
+
+  // float8 (E4M3/E5M2) -> float16
+  if (IsCudaVectorizableFP8(from_ty) && target_ty.is_float16())
+    return true;
+
+  // float8 (E4M3/E5M2) -> bfloat16
+  if (IsCudaVectorizableFP8(from_ty) && target_ty.is_bfloat16())
+    return true;
+
+  // float16 -> float8 (E4M3/E5M2)
+  if (from_ty.is_float16() && IsCudaVectorizableFP8(target_ty))
+    return true;
+
+  // bfloat16 -> float8 (E4M3/E5M2)
+  if (from_ty.is_bfloat16() && IsCudaVectorizableFP8(target_ty))
     return true;
 
   // Not implemented for now
@@ -236,6 +259,11 @@ bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty) {
   if (from_ty.is_bfloat16() && target_ty.is_float4_e2m1fn())
     return true;
 
+  // float4_e2m1fn -> float8 (E4M3)
+  if (from_ty.is_float4_e2m1fn() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e4m3fn()))
+    return true;
+
   return false;
 }
 
@@ -258,8 +286,15 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            [](Target target) { return TargetCudaGetWarpSize(target); })
       .def("tl.TargetHasLdmatrix",
            [](Target target) { return TargetHasLdmatrix(target); })
-      .def("tl.TargetHasStmatrix",
-           [](Target target) { return TargetHasStmatrix(target); })
+      .def_packed(
+          "tl.TargetHasStmatrix",
+          [](ffi::PackedArgs args, ffi::Any *ret) {
+            ICHECK(args.size() == 1 || args.size() == 2)
+                << "TargetHasStmatrix expects target and optional is_m16n8";
+            Target target = args[0].cast<Target>();
+            bool is_m16n8 = args.size() == 2 ? args[1].cast<bool>() : false;
+            *ret = TargetHasStmatrix(target, is_m16n8);
+          })
       .def("tl.TargetHasBulkCopy",
            [](Target target) { return TargetHasBulkCopy(target); });
 }

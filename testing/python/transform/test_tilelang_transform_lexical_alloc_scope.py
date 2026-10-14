@@ -155,6 +155,7 @@ def test_lower_opaque_block_skips_empty_alloc():
 # ---------------------------------------------------------------------------
 # Test 4: GEMM descriptor allocs inside loop should get the marker
 # ---------------------------------------------------------------------------
+@tilelang.testing.requires_cuda
 def test_lower_opaque_block_inserts_scope_for_gemm_descriptor_alloc():
     """Lowered WGMMA descriptor buffers inside a loop should trigger lexical_alloc_scope."""
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
@@ -272,6 +273,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
 # ---------------------------------------------------------------------------
 # Test 8: disable-ws pipelined GEMM should not wrap the fragment root block
 # ---------------------------------------------------------------------------
+@tilelang.testing.requires_cuda
 def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
     """A fragment root block should not force lexical_alloc_scope in disable-ws pipeline."""
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
@@ -360,6 +362,9 @@ def test_codegen_emits_braces():
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     B[T.get_thread_binding(), k] = S[T.get_thread_binding()]
+                # Sibling statement keeps the scope from being the sole loop
+                # body, so its braces are not elided as redundant.
+                B[T.get_thread_binding(), k] = B[T.get_thread_binding(), k] + T.float32(1)
 
     kernel = tilelang.compile(func, out_idx=[1], target="cuda")
     src = kernel.get_kernel_source()
@@ -369,6 +374,36 @@ def test_codegen_emits_braces():
 
     standalone_open_braces = re.findall(r"^\s*\{\s*$", src, re.MULTILINE)
     assert len(standalone_open_braces) >= 1, f"Expected at least 1 standalone '{{' for lexical scope, found {len(standalone_open_braces)}"
+
+
+@tilelang.testing.requires_cuda
+def test_codegen_unwraps_scope_spanning_entire_loop_body():
+    """A lexical scope that spans the entire loop body must not emit `{ {`:
+    the loop's own braces already delimit the same C scope."""
+
+    @T.prim_func
+    def func(
+        A: T.Tensor((128, 4), T.float32),
+        B: T.Tensor((128, 4), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            for k in T.serial(4):
+                with T.sblock():
+                    T.sblock_attr({"lexical_alloc_scope": 1})
+                    S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
+                    S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
+                    B[T.get_thread_binding(), k] = S[T.get_thread_binding()]
+
+    kernel = tilelang.compile(func, out_idx=[1], target="cuda")
+    src = kernel.get_kernel_source()
+    import re
+
+    assert not re.search(r"\{\s*\n\s*\{", src), f"Redundant `{{ {{` emitted for loop-spanning lexical scope:\n{src}"
+    # The local alloc must still be declared inside the loop body, not hoisted
+    # to the kernel entry.
+    loop_pos = src.find("for (")
+    decl_pos = src.find("float S[")
+    assert loop_pos >= 0 and decl_pos > loop_pos, f"Expected S declared inside the loop body:\n{src}"
 
 
 @tilelang.testing.requires_cuda
@@ -389,6 +424,9 @@ def test_codegen_skips_redundant_top_level_braces():
                     S = T.alloc_buffer((128,), dtype=T.float32, scope="local")
                     S[T.get_thread_binding()] = A[T.get_thread_binding(), k]
                     C[T.get_thread_binding()] = S[T.get_thread_binding()]
+                # Sibling statement keeps the inner scope's braces from being
+                # elided as redundant with the loop body.
+                C[T.get_thread_binding()] = C[T.get_thread_binding()] + T.float32(1)
             for k in T.serial(4):
                 B[T.get_thread_binding(), k] = C[T.get_thread_binding()]
 
@@ -425,5 +463,6 @@ if __name__ == "__main__":
     test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline()
     test_storage_rewrite_preserves_scope()
     test_codegen_emits_braces()
+    test_codegen_unwraps_scope_spanning_entire_loop_body()
     test_codegen_skips_redundant_top_level_braces()
     print("All tests passed!")

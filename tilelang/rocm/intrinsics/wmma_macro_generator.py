@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-import tilelang.language as T
+import tilelang.language.common as T
 from tilelang import _ffi_api
 from tilelang import tvm as tvm
 from tvm import tirx
@@ -281,6 +281,9 @@ class WMMAIntrinEmitter:
     # ─────────────────────────────────────────────────────────────────────────
 
     def wmma(self, A_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr | None = 0):
+        # Import lazily to avoid a rocm.language -> rocm.intrinsics cycle.
+        from tilelang.rocm.language.tir import tvm_rdna_wmma
+
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -308,7 +311,7 @@ class WMMAIntrinEmitter:
                 # With hardware D layout: no A/B swap needed for either case.
                 # Both transposed and non-transposed B give correct results
                 # with A first, B second.
-                T.tvm_rdna_wmma(
+                tvm_rdna_wmma(
                     compute_out_dtype,
                     wmma_shape,
                     "row",

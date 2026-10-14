@@ -13,14 +13,15 @@ using namespace tirx;
 namespace webgpu {
 
 struct Copy {
-  static LayoutMap InferLayout(const CopyNode &op, const LayoutInferArgs &T,
+  static LayoutMap InferLayout(const CopyNode &op,
+                               const LayoutInferArgs &layout_args,
                                InferLevel level) {
-    return op.InferSIMTLayout(T, level);
+    return op.InferSIMTLayout(layout_args, level);
   }
 
-  static Stmt Lower(const CopyNode &op, const LowerArgs &T,
+  static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    return LowerNormalCopy(op, T, analyzer);
+    return LowerNormalCopy(op, lower_args, analyzer);
   }
 };
 

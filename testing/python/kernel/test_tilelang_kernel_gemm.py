@@ -153,6 +153,7 @@ def test_gemm_bf16bf16f32_nn():
     )
 
 
+# tfloat32 is an NVIDIA-only dtype and has no CDNA lowering.
 @tilelang.testing.requires_cuda
 def test_gemm_f32f32f32_nn():
     run_gemm(
@@ -221,6 +222,7 @@ def test_gemm_f64f64f64_nt():
     run_gemm(512, 512, 512, False, True, T.float64, T.float64, T.float64, 64, 32, 16)
 
 
+# tfloat32 is an NVIDIA-only dtype and has no CDNA lowering.
 @tilelang.testing.requires_cuda
 def test_gemm_f32f32f32_nt():
     run_gemm(

@@ -35,20 +35,20 @@ public:
         .def_ro("n_warp", &GemmSPWarpPolicyNode::n_warp);
   }
 
-  std::pair<int, int> computeWarpPartition(int M, int N, int block_size,
+  std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
                                            Target target,
                                            String gemm_inst) const;
 
-  bool isSquare() const {
+  bool IsSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
   }
-  bool isFullRow() const {
+  bool IsFullRow() const {
     return policy_type == int(GemmWarpPolicyType::kFullRow);
   }
-  bool isFullCol() const {
+  bool IsFullCol() const {
     return policy_type == int(GemmWarpPolicyType::kFullCol);
   }
-  bool isFree() const { return policy_type == int(GemmWarpPolicyType::kFree); }
+  bool IsFree() const { return policy_type == int(GemmWarpPolicyType::kFree); }
 };
 
 class GemmSPWarpPolicy : public ObjectRef {
@@ -84,12 +84,7 @@ public:
   BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
   bool trans_A, trans_B, trans_E;
   int M, N, K;
-  int stride_A, stride_B;
-  int offset_A, offset_B;
   PrimExpr clear_accum = const_false();
-  // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
-  // only will be enabled under cdna mfma instructions
-  int kPack = 1;
   int wg_wait = 0;
   bool isWgmma_ = false;
   bool isTcgen05_ = false;
@@ -114,28 +109,24 @@ public:
         .def_ro("M", &GemmSPNode::M)
         .def_ro("N", &GemmSPNode::N)
         .def_ro("K", &GemmSPNode::K)
-        .def_ro("stride_A", &GemmSPNode::stride_A)
-        .def_ro("stride_B", &GemmSPNode::stride_B)
-        .def_ro("offset_A", &GemmSPNode::offset_A)
-        .def_ro("offset_B", &GemmSPNode::offset_B)
         .def_ro("clear_accum", &GemmSPNode::clear_accum)
-        .def_ro("kPack", &GemmSPNode::kPack)
         .def_ro("wg_wait", &GemmSPNode::wg_wait)
         .def_ro("isWgmma", &GemmSPNode::isWgmma_)
         .def_ro("isTcgen05", &GemmSPNode::isTcgen05_)
         .def_ro("policy", &GemmSPNode::policy);
   }
 
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
+  Stmt Lower(const LowerArgs &lower_args,
+             arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
+  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
 
   TileOperator Clone() const;
 
   // Target-specific GEMM SP instruction key.
-  String getGemmSPInstructionKey(int block_size, Target target) const;
-  String getGemmSPInstructionKind(int block_size, Target target) const;
+  String GetGemmSPInstructionKey(int block_size, Target target) const;
 
 private:
   mutable bool completed_ = false;
@@ -154,8 +145,6 @@ struct GemmSPImpl {
       Target target, String gemm_inst);
 
   bool (*reuse_existing_shared_layout)(String gemm_inst);
-
-  String (*instruction_kind)(String gemm_inst);
 };
 
 void RegisterGemmSPImpl(GemmSPImpl impl);

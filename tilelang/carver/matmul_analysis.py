@@ -18,6 +18,7 @@ from .analysis import (
 from tvm.target.target import Target
 from tvm.tirx.stmt_functor import pre_order_visit
 from .arch import get_arch, is_tensorcore_supported_precision
+from .arch.cuda import check_sm_version
 from .arch.rdna import _get_rdna_tuning_config
 from tilelang.rocm.target import target_get_mcpu, target_is_rdna
 import logging
@@ -539,10 +540,6 @@ def get_tensorized_func_and_tags(
         return all(conditions)
 
     # step2. transform function to tensorcore matmul (e.g. conv2d with im2col)
-    def check_sm_version(arch: str) -> int:
-        sm_version = arch.replace("sm_", "")
-        return int(sm_version) if sm_version.isdigit() else -1
-
     def is_cuda_tensorcore_target(target: Target) -> bool:
         return target.kind.name == "cuda" and check_sm_version(target.attrs.get("arch", "")) >= 70
 

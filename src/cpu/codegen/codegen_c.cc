@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file cpu/codegen/codegen_c.cc
  */
@@ -31,10 +12,14 @@
 #include <unordered_set>
 #include <utility>
 
-#include "op/builtin.h"
+#include "cpu/op/builtin.h"
 #include "support/str_escape.h"
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"
+#include "transform/common/attr.h"
+
+#include <cmath>
+#include <sstream>
 
 namespace tvm {
 namespace codegen {
@@ -51,9 +36,9 @@ void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
-  decl_stream << "// tilelang target: " << target_str << "\n";
-  decl_stream << "#include <tl_templates/cpp/common.h>\n";
-  decl_stream << "\n";
+  preamble_stream_ << "// tilelang target: " << target_str << "\n";
+  preamble_stream_ << "#include <tl_templates/cpp/common.h>\n";
+  preamble_stream_ << "\n";
   CodeGenC::Init(output_ssa);
 }
 
@@ -382,7 +367,11 @@ CodeGenTileLangC::GetFunctionInfo(const CallNode *op,
 
 void CodeGenTileLangC::VisitExpr_(const CallNode *op,
                                   std::ostream &os) { // NOLINT(*)
-  if (op->op.same_as(builtin::tvm_stack_alloca())) {
+  if (op->op.same_as(tl::clamp())) {
+    ICHECK_EQ(op->args.size(), 3);
+    os << "tl::clamp(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
+  } else if (op->op.same_as(builtin::tvm_stack_alloca())) {
     std::string stack_name = name_supply_->FreshName("stack");
     const std::string &type = op->args[0].as<StringImmNode>()->value;
     const IntImmNode *num = op->args[1].as<IntImmNode>();
@@ -469,6 +458,45 @@ void CodeGenTileLangC::VisitStmt_(const AllocBufferNode *op) {
   RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
 }
 
+void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
+  if (op->kind == ForKind::kParallel && omp_chain_members_.count(op) == 0) {
+    // Head of a parallel chain: count the perfectly-nested kParallel body
+    // loops for the collapse(n) clause, then print serially via the base
+    // class. Chain members are remembered by node identity so that a
+    // *different* kParallel loop reached through wrapper statements
+    // (IfThenElse / AttrStmt / SeqStmt) inside the chain body still gets
+    // its own pragma instead of being mistaken for a member.
+    auto saved_members = omp_chain_members_;
+    int depth = 1;
+    for (const ForNode *child = op->body.as<ForNode>();
+         child && child->kind == ForKind::kParallel;
+         child = child->body.as<ForNode>()) {
+      omp_chain_members_.insert(child);
+      ++depth;
+    }
+    this->PrintIndent();
+    stream << "#pragma omp parallel for";
+    if (depth > 1) {
+      stream << " collapse(" << depth << ")";
+    }
+    if (auto num_threads = op->annotations.Get(tl::attr::kCPUNumThreads)) {
+      if (const auto *imm = num_threads->as<IntImmNode>()) {
+        stream << " num_threads(" << imm->value << ")";
+      }
+    }
+    stream << "\n";
+    CodeGenC::VisitStmt_(op);
+    omp_chain_members_ = std::move(saved_members);
+    return;
+  }
+  if (op->kind == ForKind::kParallel) {
+    // Continuation of an already-annotated chain: print serially.
+    CodeGenC::VisitStmt_(op);
+    return;
+  }
+  CodeGenC::VisitStmt_(op);
+}
+
 void CodeGenTileLangC::VisitExpr_(const MinNode *op,
                                   std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, "<", os);
@@ -477,6 +505,36 @@ void CodeGenTileLangC::VisitExpr_(const MinNode *op,
 void CodeGenTileLangC::VisitExpr_(const MaxNode *op,
                                   std::ostream &os) { // NOLINT(*)
   PrintTernaryCondExpr(op, ">", os);
+}
+
+void CodeGenTileLangC::VisitExpr_(const FloatImmNode *op,
+                                  std::ostream &os) { // NOLINT(*)
+  // Only intercept inf/nan: the TVM base class prints the IEEE text ("-inf")
+  // then appends the float suffix ('f'), producing "-inff" / "nanf", which
+  // C/C++ compilers reject (no inf/nan literal with a float suffix). Emit the
+  // C99 macros INFINITY / NAN for those two cases.
+  //
+  // Finite values delegate to the base class so its per-bit-width formatting
+  // is preserved. In particular fp16 keeps the legal cast form
+  // `(half)1.5e+00f`. The 'h' suffix copied from Metal (codegen_metal.cc)
+  // is MSL-only and invalid in C/C++ (g++: "no matching literal operator
+  // ... operator""h"), so it must not be replicated here. The base class
+  // default branch also throws InternalError on bad bit-widths, which a
+  // hand-rolled else would silently drop.
+  if (std::isinf(op->value)) {
+    std::ostringstream temp;
+    if (op->value < 0) {
+      temp << "-";
+    }
+    temp << "INFINITY";
+    MarkConst(temp.str());
+    os << temp.str();
+  } else if (std::isnan(op->value)) {
+    MarkConst("NAN");
+    os << "NAN";
+  } else {
+    CodeGenC::VisitExpr_(op, os);
+  }
 }
 
 template <typename T>

@@ -1,28 +1,10 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file storage_rewrite.cc
  * \brief Memory access pattern analysis and optimization.
  *  Re-write data access to enable memory sharing when possible.
  */
 #include "common/attr.h"
+#include "metal/op/utils.h"
 #include "support/check.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/attrs.h>
@@ -55,6 +37,17 @@ using runtime::StorageRank;
 using runtime::StorageScope;
 using namespace tirx;
 using namespace ffi;
+
+namespace {
+
+// Backend-managed allocation scopes whose AllocBuffer nodes must remain in
+// place. StorageRewrite should still visit their bodies, but must not plan,
+// hoist, merge, or remap the allocation itself.
+bool IsStorageRewriteOpaqueAllocBuffer(const Buffer &buffer) {
+  return metal::IsCooperativeTensorBuffer(buffer);
+}
+
+} // namespace
 
 /*!
  * \brief Perform data type legalization on the given BufferLoadNode pointer.
@@ -130,6 +123,10 @@ public:
   };
 
   void VisitStmt_(const AllocBufferNode *op) final {
+    if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
     size_t level = scope_.size();
     const VarNode *buf = op->buffer->data.get();
 
@@ -576,13 +573,16 @@ public:
       op = stmt.as<ForNode>();
       return For(op->loop_var, op->min, op->extent, op->kind,
                  MakeAttach(svec, op->body), op->thread_binding,
-                 op->annotations);
+                 op->annotations, op->step, op->span);
     } else {
       return StmtExprMutator::VisitStmt_(op);
     }
   }
 
   Stmt VisitStmt_(const AllocBufferNode *op) final {
+    if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
     // AllocBuffer combines allocation and buffer declaration.
     // Storage rewrite may merge this allocation with others.
     if (auto it = alloc_map_.find(op->buffer->data.get());
@@ -1364,6 +1364,10 @@ public:
   }
 
   void VisitStmt_(const AllocBufferNode *op) final {
+    if (IsStorageRewriteOpaqueAllocBuffer(op->buffer)) {
+      StmtExprVisitor::VisitStmt_(op);
+      return;
+    }
     const Array<PrimExpr> &shape = op->buffer->shape;
     PrimExpr extent = !shape.empty() ? shape[shape.size() - 1] : PrimExpr(0);
     OnArrayDeclaration(op->buffer->data, op->buffer->dtype, extent,

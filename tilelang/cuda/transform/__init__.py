@@ -3,6 +3,35 @@
 from .. import _ffi_api
 
 
+def AutoWarpSpecialization():
+    """Derive a warp-specialization schedule with the scheduler named by
+    the ``tl.enable_auto_warp_specialization`` pass config (currently
+    ``"role_based"``); a no-op when the config is unset.
+
+    Eligible kernels gain stable ``tl.ws_op_id`` markers and a typed
+    ``WSSchedule`` block annotation — the same surface a hand-written
+    schedule uses — which :func:`MaterializeWSSchedule` then lowers.
+    Kernels the scheduler declines are left unchanged.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AutoWarpSpecialization()  # type: ignore
+
+
+def AnnotateDeviceBoundTmaCopies():
+    """Mark tile copies whose TensorMap base is defined in the device body.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AnnotateDeviceBoundTmaCopies()  # type: ignore
+
+
 def ProducerConsumerWarpSpecialized():
     """Producer-consumer warp specialization at the tile-op level.
 
@@ -18,20 +47,6 @@ def ProducerConsumerWarpSpecialized():
     if hasattr(_ffi_api, "ProducerConsumerWarpSpecialized"):
         return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
     return lambda f: f
-
-
-def ProducerConsumerWarpSpecializedTiled():
-    """Compatibility alias for ``ProducerConsumerWarpSpecialized``.
-
-    The tiled tile-op implementation is now the canonical
-    ``ProducerConsumerWarpSpecialized`` pass.
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return ProducerConsumerWarpSpecialized()
 
 
 def LowerBlackwell2SM():
@@ -95,25 +110,6 @@ def LowerLDGSTG():
     return _ffi_api.LowerLDGSTG()  # type: ignore
 
 
-def LowerPTXAsyncCopy():
-    """Lower eligible global->shared copies into PTX `cp.async` on CUDA.
-
-    When enabled (pass config `tl.enable_async_copy`, default True), this pass
-    may rewrite plain user-written global->shared `BufferStore` patterns (e.g.
-    SIMT copies in `T.Parallel`) into `tir.ptx_cp_async`, and insert
-    `tir.ptx_commit_group` + `tir.ptx_wait_group(0)` to preserve synchronous
-    semantics for normal stores. If explicit commit/wait intrinsics already
-    exist, the pass avoids duplicating them (and may insert a missing commit
-    immediately before an existing wait to cover injected `cp.async`).
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.LowerPTXAsyncCopy()  # type: ignore
-
-
 def MarkCudaSyncCalls(have_pdl: bool = False):
     """MarkCudaSyncCalls"""
     return _ffi_api.MarkCudaSyncCalls(have_pdl)  # type: ignore
@@ -163,12 +159,30 @@ def AnnotateWarpGroupRegAlloc():
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
 
 
+def MaterializeWSSchedule():
+    """Materialize a user-provided warp-specialization schedule.
+
+    Consumes the ``ws_schedule`` block annotation attached by
+    ``T.annotate_ws_schedule`` and rewrites the kernel into explicit
+    warp-specialized form (role branches, multi-versioned buffers,
+    mbarrier synchronization, TMA copies, async tcgen05 MMA).
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MaterializeWSSchedule()  # type: ignore
+
+
 def PersistThreadblock():
     """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore
 
 
 __all__ = [
+    "AnnotateDeviceBoundTmaCopies",
+    "AutoWarpSpecialization",
     "AnnotateWarpGroupRegAlloc",
     "FuseMBarrierArriveExpectTx",
     "InjectFenceProxy",
@@ -177,11 +191,10 @@ __all__ = [
     "LowerHopperIntrin",
     "LowerLDGSTG",
     "LowerL2Persistent",
-    "LowerPTXAsyncCopy",
     "LowerSharedBarrier",
     "LowerSharedTmem",
     "MarkCudaSyncCalls",
+    "MaterializeWSSchedule",
     "PersistThreadblock",
     "ProducerConsumerWarpSpecialized",
-    "ProducerConsumerWarpSpecializedTiled",
 ]

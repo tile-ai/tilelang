@@ -119,18 +119,18 @@ def is_fragment(buffer: BufferLikeType) -> bool:
     return buffer.scope().startswith("local.fragment")
 
 
-def is_metal_simdgroup(buffer: BufferLikeType) -> bool:
+def is_reducer(buffer: BufferLikeType) -> bool:
     """
-    Check if the buffer is in the Metal simdgroup scope.
+    Check if the buffer is a reducer v2 accumulator (scope local.reducer).
 
     Args:
         buffer: The TVM buffer, BufferLoad, or BufferRegion to check.
 
     Returns:
-        bool: True if the buffer is in metal.simdgroup scope, False otherwise.
+        bool: True if the buffer is a reducer accumulator, False otherwise.
     """
     buffer = _get_buffer(buffer)
-    return buffer.scope() == "metal.simdgroup"
+    return buffer.scope() == "local.reducer"
 
 
 def is_local_var(buffer: BufferLikeType) -> bool:
@@ -195,7 +195,6 @@ def to_buffer_region(obj: BufferLikeType, access_type: str = "rw", extents: list
 
     - Buffer/BufferLoad/BufferRegion -> returns BufferRegion when extents is None
     - Buffer/BufferLoad/BufferRegion -> returns a tl.region call when extents is provided
-    - tl.region Call -> returns the decoded BufferRegion for analysis
     """
     from tilelang.language.frame import has_let_value, get_let_value
 
@@ -266,23 +265,25 @@ def retrieve_shape(obj: BufferLikeType) -> list:
 
 def retrieve_stride(obj: BufferLikeType) -> list:
     """
-    Retrieve row-major strides for a buffer-like object based on its buffer.shape.
+    Retrieve strides for a buffer-like object.
 
-    For BufferRegion and BufferLoad, uses the underlying buffer's `shape`.
+    For BufferRegion and BufferLoad, uses the underlying buffer. Declared
+    strides take precedence, with compact row-major strides as the fallback.
     """
+    # Imported lazily to avoid a cycle: `tilelang.language` imports this module.
+    from tilelang.language.eager.utils import construct_strides
+
     if isinstance(obj, tirx.Buffer):
-        shape = obj.shape
+        buffer = obj
     elif isinstance(obj, (tirx.BufferRegion, tirx.BufferLoad)):
-        shape = obj.buffer.shape
+        buffer = obj.buffer
     else:
         raise ValueError(f"Unsupported retrieve_stride argument type: {type(obj)} for object {obj}")
 
-    strides = []
-    stride = 1
-    for s in reversed(shape):
-        strides.insert(0, stride)
-        stride *= s
-    return strides
+    if len(buffer.strides) == len(buffer.shape) and len(buffer.strides) > 0:
+        return list(buffer.strides)
+
+    return list(construct_strides(buffer.shape))
 
 
 def retrive_ptr_from_buffer_region(buffer_or_load_or_region: BufferLikeType, access_type: str = "r") -> PrimExpr:
@@ -453,9 +454,7 @@ def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
     per-lane width, not the full element width.  Multiply by ``lanes`` so
     that the total bit count is correct.
     """
-    if len(shape) == 0:
-        return tirx.IntImm("int32", 1)
-    result = shape[0]
+    result = tirx.IntImm("int32", 1) if len(shape) == 0 else shape[0]
     for i in range(1, len(shape)):
         result = result * shape[i]
     dt = DataType(dtype)

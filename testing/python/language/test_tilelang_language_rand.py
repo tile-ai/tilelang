@@ -65,5 +65,63 @@ def test_rand_1d(M, seed, generator):
     kernel(A, B, C, D, E)
 
 
+@tilelang.jit
+def tilelang_rand_blockwise(M=64, seed=42, generator="curandStatePhilox4_32_10_t"):
+    threads = 32
+
+    @T.prim_func
+    def rand_kernel(A: T.Tensor((M,), "uint32")):
+        with T.Kernel(M, threads=threads) as bx:
+            tx = T.get_thread_binding()
+            T.rng_init(seed, 0, bx, generator=generator)
+            if tx == 0:
+                A[bx] = T.rng_rand()
+
+    return rand_kernel
+
+
+@tilelang.jit
+def tilelang_rand_guarded_cumsum(M=64, seed=42, generator="curandStatePhilox4_32_10_t"):
+    threads = 32
+
+    @T.prim_func
+    def rand_kernel(
+        A: T.Tensor((M,), "uint32"),
+        n: T.int32,
+    ):
+        with T.Kernel(M, threads=threads) as bx:
+            tx = T.get_thread_binding()
+            s = T.alloc_shared((threads,), "int32")
+            # rng_init inside a runtime guard, with a shared-memory cumsum
+            # between init and use: sync legalization hoists __syncthreads()
+            # out of the guard and splits it into sibling blocks, so the
+            # curand state must be declared at function scope to stay visible.
+            if bx < n:
+                T.rng_init(seed, 0, bx, generator=generator)
+                s[tx] = 1
+                T.cumsum(s, dim=0)
+                if tx == 0:
+                    A[bx] = T.rng_rand() + T.cast(s[threads - 1], "uint32") * 0
+
+    return rand_kernel
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("generator", ["curandStateMRG32k3a_t", "curandStatePhilox4_32_10_t", "curandStateXORWOW_t"])
+def test_rand_init_in_split_guard(generator):
+    M, seed, n = 64, 42, 37
+    guarded = tilelang_rand_guarded_cumsum(M, seed, generator)
+    baseline = tilelang_rand_blockwise(M, seed, generator)
+
+    sentinel = 0xDEADBEEF
+    A = torch.full((M,), sentinel, dtype=torch.uint32, device="cuda")
+    guarded(A, n)
+    A_ref = torch.empty(M, dtype=torch.uint32, device="cuda")
+    baseline(A_ref)
+
+    assert torch.equal(A[:n], A_ref[:n]), "guarded rng output differs from unguarded baseline"
+    assert (A[n:] == sentinel).all(), "rows outside the guard must stay untouched"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

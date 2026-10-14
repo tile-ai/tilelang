@@ -11,7 +11,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.fl
         B: T.Tensor((K, N), dtype),
         C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128, cluster_dims=(2, 1, 1)) as (bx, by):
+        with T.ClusterKernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128, cluster_dims=(2, 1, 1)) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -33,7 +33,7 @@ def get_cta_rank_in_cluster(cluster_size=4):
 
     @T.prim_func
     def main(A: T.Tensor((128), T.int32)):
-        with T.Kernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
+        with T.ClusterKernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
             T.cluster_arrive()
             T.cluster_wait()
             cta_rank_in_cluster = T.block_rank_in_cluster()
@@ -45,10 +45,26 @@ def get_cta_rank_in_cluster(cluster_size=4):
 
 
 @tilelang.jit(out_idx=-1)
+def get_cluster_id_kernel(cluster_size=4):
+    assert 128 % cluster_size == 0
+
+    @T.prim_func
+    def main(A: T.Tensor((128, 2), T.int32)):
+        with T.ClusterKernel(128, cluster_dims=(cluster_size, 1, 1)) as bx:
+            if T.get_thread_binding() == 0:
+                A[bx, 0] = T.get_cluster_id()
+                # Program-space cluster id and the hardware rank must agree on
+                # which programs form a cluster.
+                A[bx, 1] = T.get_cluster_id() * T.get_cluster_size() + T.block_rank_in_cluster()
+
+    return main
+
+
+@tilelang.jit(out_idx=-1)
 def barrier_kernel():
     @T.prim_func
     def main(A: T.Tensor((128), T.int32)):
-        with T.Kernel(128, threads=128, cluster_dims=(4, 1, 1)):
+        with T.ClusterKernel(128, threads=128, cluster_dims=(4, 1, 1)):
             mbar = T.alloc_cluster_barrier([256])
             T.cluster_sync()
             T.mbarrier_arrive(mbar, 0)
@@ -108,6 +124,15 @@ def test_cluster_launch_intrinsics(cluster_size=4):
     result = kernel()
     ref = torch.arange(128, dtype=torch.int32, device="cuda") % cluster_size
     assert torch.all(result == ref)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_cluster_id_matches_hardware_rank(cluster_size=4):
+    result = get_cluster_id_kernel(cluster_size)()
+    bx = torch.arange(128, dtype=torch.int32, device="cuda")
+    assert torch.all(result[:, 0] == bx // cluster_size)
+    assert torch.all(result[:, 1] == bx)
 
 
 @tilelang.testing.requires_cuda

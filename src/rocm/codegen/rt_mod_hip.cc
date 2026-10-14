@@ -7,6 +7,7 @@
 #include <hip/hip_runtime.h>
 
 #include "codegen_hip.h"
+#include "config.h"
 #include "runtime/pack_args.h"
 #include "target/rocm/rocm_fallback_module.h"
 
@@ -60,6 +61,7 @@ Module BuildTileLangHIP(IRModule mod, Target target) {
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
   cg.SetTarget(target);
+  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
@@ -100,6 +102,7 @@ Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
   cg.SetTarget(target);
+  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
 
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())

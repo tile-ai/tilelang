@@ -17,11 +17,12 @@ namespace tl {
 namespace cpu {
 
 struct Fill {
-  static Stmt Lower(const FillNode &op, const LowerArgs &T,
+  static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
     if (IsLocalBuffer(op.dst, true) || IsGlobalBuffer(op.dst)) {
       auto init_loop = op.MakeSIMTLoop(analyzer);
-      auto vectorized_loop = VectorizeLoop(init_loop, analyzer, T.layout_map);
+      auto vectorized_loop =
+          VectorizeLoop(init_loop, analyzer, lower_args.layout_map);
       return PragmaUnrollLoop(vectorized_loop);
     }
 

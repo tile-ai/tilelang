@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file merge_shared_memory_allocations.cc
  * \brief Each GPU kernel is allowed to have only one dynamic or static shared
@@ -43,8 +24,8 @@
 #include <unordered_set>
 #include <utility>
 
-#include "../op/builtin.h"
-#include "backend/common/target_utils.h"
+#include "common/storage_size.h"
+#include "cuda/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/tirx/function.h>
@@ -71,6 +52,26 @@ static bool IsStaticSharedMemory(Var buffer_var) {
       runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   return storage_scope.rank == runtime::StorageRank::kShared &&
          storage_scope.tag.empty();
+}
+
+// Scalar packed NVFP4 stores two logical elements per byte, and its buffer
+// shapes are expressed in logical elements.  Storage sizing is handled by the
+// shared GetBufferStorageSizeBytes helper; the byte-offset -> logical-index
+// conversion below is the remaining NVFP4-specific piece of this pass.
+static bool IsPackedScalarFp4(DataType dtype) {
+  return dtype.is_float4_e2m1fn() && dtype.is_scalar();
+}
+
+static PrimExpr SharedByteOffsetToLogicalIndexOffset(PrimExpr byte_offset,
+                                                     DataType dtype) {
+  // buffer_byte_offsets_ stores byte offsets into the merged uint8 arena, but
+  // the non-alias rewrite still indexes the original typed buffer. Convert the
+  // byte offset back to that buffer's logical element index.  Packed scalar
+  // NVFP4 has two logical elements per byte.
+  if (IsPackedScalarFp4(dtype)) {
+    return byte_offset * make_const(byte_offset.dtype(), 2);
+  }
+  return indexdiv(byte_offset, dtype.bytes() * dtype.lanes());
 }
 
 /*!
@@ -370,8 +371,16 @@ private:
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
 
 public:
-  static std::unordered_map<const VarNode *, int> Plan(const Stmt &stmt) {
+  // explicit_alignments carries the per-buffer requirements recorded by op
+  // lowering (kSmemAlignmentMap); the scan below adds a conservative fallback
+  // for shared vars that reach swizzle-sensitive instructions without an
+  // explicit entry.
+  static std::unordered_map<const VarNode *, int>
+  Plan(const Stmt &stmt,
+       const std::unordered_map<const VarNode *, int> &explicit_alignments) {
     SharedMemoryAlignmentPlanner planner;
+    planner.shmem_alignment_map_ = explicit_alignments;
+    planner.explicit_alignment_map_ = &explicit_alignments;
     planner(stmt);
     return planner.shmem_alignment_map_;
   }
@@ -387,26 +396,22 @@ private:
       return;
     auto scope = GetPtrStorageScope(GetRef<Var>(op));
     if (scope == "shared" || scope == "shared.dyn") {
-      auto target = Target::Current();
-      ICHECK(target.defined()) << "Target is not defined";
-      // TMA bulk-copy operands have stricter shared-memory alignment than
-      // ordinary scalar/shared accesses. Hopper keeps the existing 1024-byte
-      // alignment used by the WGMMA/TMA path, while Blackwell/SM120 also needs
-      // TMA sources at least 128-byte aligned to avoid misaligned-address
-      // launch failures.
-      int alignment = 16;
-      if (TargetIsHopper(target)) {
-        alignment = 1024;
-      } else if (TargetHasBulkCopy(target)) {
-        alignment = 128;
-      }
-      shmem_alignment_map_[op] = alignment;
+      // An explicit requirement recorded at lowering time is exact; keep it.
+      if (explicit_alignment_map_->count(op))
+        return;
+      // TMA bulk-copy and MMA-descriptor operands have stricter shared-memory
+      // alignment than ordinary shared accesses, and the exact requirement
+      // depends on the operand's swizzle mode (up to 1024B for 128B swizzle).
+      // Buffers without an explicit kSmemAlignmentMap entry get the worst
+      // case: a misaligned base is not a launch error but silent data
+      // corruption, so never under-align here.
+      int &slot = shmem_alignment_map_[op];
+      slot = std::max(slot, 1024);
     }
   }
 
   void VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
-        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+    if (op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
         op->op.same_as(tl::initialize_wgmma_descriptor()) ||
         op->op.same_as(tl::initialize_tcgen05_descriptor())) {
       // These intrinsics introduce stricter SMEM alignment requirements; mark
@@ -436,6 +441,8 @@ private:
 
   bool under_alignment_scope_{false};
 
+  const std::unordered_map<const VarNode *, int> *explicit_alignment_map_{
+      nullptr};
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };
 
@@ -464,11 +471,14 @@ public:
    */
   void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
                  bool enable_aggressive_merge = false, bool verbose = false,
-                 bool disable_reuse = false) {
+                 bool disable_reuse = false,
+                 const std::unordered_map<const VarNode *, int>
+                     &explicit_alignments = {}) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
-    shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
+    shmem_alignment_map_ =
+        SharedMemoryAlignmentPlanner::Plan(stmt, explicit_alignments);
     if (disable_reuse) {
       this->PlanSequentialLayout();
     } else {
@@ -476,6 +486,21 @@ public:
       // the arena packer.
       this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
       this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
+    }
+    // Post-condition: every buffer with an alignment requirement must have
+    // been placed on a conforming offset. A violation here would surface as
+    // silent data corruption at runtime (TMA/MMA swizzle phase mismatch), so
+    // fail loudly at compile time instead.
+    for (const auto &[var, required] : shmem_alignment_map_) {
+      auto offset_it = buffer_byte_offsets_.find(var);
+      if (offset_it == buffer_byte_offsets_.end())
+        continue;
+      if (const auto *imm = offset_it->second.as<IntImmNode>()) {
+        ICHECK_EQ(imm->value % required, 0)
+            << "Shared memory buffer " << var->name_hint << " placed at byte "
+            << "offset " << imm->value << ", which violates its required "
+            << required << "-byte alignment (TMA/MMA swizzle constraint)";
+      }
     }
   }
 
@@ -547,25 +572,7 @@ private:
 
     for (const VarNode *var : sorted_vars) {
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem = static_cast<int64_t>(
-          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
-
-      DataType size_dtype = DataType::Int(32);
-      if (!alloc->buffer->shape.empty()) {
-        size_dtype = alloc->buffer->shape[0].dtype();
-      }
-      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
-        size_dtype = DataType::Int(32);
-      }
-
-      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->buffer->shape) {
-        PrimExpr e = extent;
-        if (e.dtype() != size_dtype) {
-          e = cast(size_dtype, e);
-        }
-        size_expr = size_expr * e;
-      }
+      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
 
       int alignment = align_bytes_;
       auto align_it = shmem_alignment_map_.find(var);
@@ -604,9 +611,8 @@ private:
           auto alloc_it = shmem_allocs_.find(buffer_var_node);
           if (alloc_it != shmem_allocs_.end()) {
             const AllocBufferNode *alloc = alloc_it->second;
-            PrimExpr buffer_size_bytes = alloc->buffer->shape[0] *
-                                         alloc->buffer->dtype.bytes() *
-                                         alloc->buffer->dtype.lanes();
+            PrimExpr buffer_size_bytes =
+                GetBufferStorageSizeBytes(alloc->buffer);
             LOG(DEBUG) << "    Buffer: " << buffer_var_node->name_hint
                        << " (Type: " << alloc->buffer->dtype << ")"
                        << ", Start Offset: " << byte_offset
@@ -789,7 +795,7 @@ private:
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
-    return indexdiv(it->second, dtype.bytes() * dtype.lanes());
+    return SharedByteOffsetToLogicalIndexOffset(it->second, dtype);
   }
 
   bool HasBufferOffset(const Var &buffer_var) {
@@ -1053,18 +1059,6 @@ private:
     std::vector<const VarNode *> kill;
   };
 
-  void PlanAlignment(const Stmt &stmt) {
-    DLOG(INFO) << "PlanAlignment";
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (const auto *call = node.as<CallNode>()) {
-        if (call->op.same_as(tl::tl_gemm()) ||
-            call->op.same_as(tl::tl_gemm_sp())) {
-          DLOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
-                     << call->op;
-        }
-      }
-    });
-  }
   /*!
    * \brief Liveness analysis to find gen and kill point of each variable.
    * \param seq the linear pattern of storage access
@@ -1395,30 +1389,14 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
-      int64_t bytes_per_elem = static_cast<int64_t>(
-          alloc->buffer->dtype.bytes() * alloc->buffer->dtype.lanes());
-      DataType size_dtype = DataType::Int(32);
-      if (!alloc->buffer->shape.empty()) {
-        size_dtype = alloc->buffer->shape[0].dtype();
-      }
-      if (!size_dtype.is_int() && !size_dtype.is_uint()) {
-        size_dtype = DataType::Int(32);
-      }
-
-      PrimExpr size_expr = make_const(size_dtype, bytes_per_elem);
-      for (const PrimExpr &extent : alloc->buffer->shape) {
-        PrimExpr e = extent;
-        if (e.dtype() != size_dtype) {
-          e = cast(size_dtype, e);
-        }
-        size_expr = size_expr * e;
-      }
-      info.size_dtype = size_dtype;
+      PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
+      info.size_dtype = size_expr.dtype();
       info.size_expr = size_expr;
 
       auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
       if (const_size.has_value()) {
-        info.const_size_bytes = const_size.value() * bytes_per_elem;
+        info.const_size_bytes = GetBufferStorageSizeBytes(
+            static_cast<int64_t>(const_size.value()), alloc->buffer->dtype);
       }
 
       buf_infos.push_back(std::move(info));
@@ -1599,15 +1577,35 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
                                   int align_bytes = 16, bool verbose = false,
                                   bool preserve_aliases = true,
-                                  bool disable_reuse = false) {
+                                  bool disable_reuse = false,
+                                  const std::unordered_map<std::string, int>
+                                      &explicit_alignments_by_name = {}) {
   AllocateCollector collector;
   collector(stmt);
+  // The kSmemAlignmentMap attribute is keyed by buffer-var name (names are
+  // stable across the pass pipeline while Var nodes may be rebuilt); resolve
+  // to the VarNodes of the collected allocations. Names of distinct shared
+  // allocations are unique within a kernel, and a collision could only
+  // over-align.
+  auto resolve =
+      [&](const std::unordered_map<const VarNode *, const AllocBufferNode *>
+              &allocs) {
+        std::unordered_map<const VarNode *, int> resolved;
+        for (const auto &[var, alloc] : allocs) {
+          auto it =
+              explicit_alignments_by_name.find(std::string(var->name_hint));
+          if (it != explicit_alignments_by_name.end()) {
+            resolved[var] = it->second;
+          }
+        }
+        return resolved;
+      };
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, true,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse);
+                       disable_reuse, resolve(collector.dyn_shmem_allocs_));
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
@@ -1615,7 +1613,7 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   verbose, align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, false,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse);
+                       disable_reuse, resolve(collector.static_shmem_allocs_));
     stmt = rewriter(std::move(stmt));
   }
   return stmt;
@@ -1639,11 +1637,20 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
     if (auto target = f->GetAttr<Target>(tvm::attr::kTarget)) {
       preserve_aliases = target.value()->kind->name != "webgpu";
     }
+    // Per-buffer alignment requirements recorded by op lowering
+    // (swizzle-dependent TMA/MMA constraints), propagated onto the device
+    // kernel by SplitHostDevice.
+    std::unordered_map<std::string, int> explicit_alignments;
+    if (auto opt = f->GetAttr<Map<String, IntImm>>(kSmemAlignmentMap)) {
+      for (const auto &[name, align] : opt.value()) {
+        explicit_alignments[std::string(name)] = static_cast<int>(align->value);
+      }
+    }
     auto *n = f.CopyOnWrite();
     n->body = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
         align_bytes, debug_merge_shared_memory_allocations, preserve_aliases,
-        disable_reuse);
+        disable_reuse, explicit_alignments);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",

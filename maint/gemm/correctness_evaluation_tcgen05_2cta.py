@@ -24,7 +24,7 @@ def matmul_2cta(
         B: T.Tensor((K, N), in_dtype),
         C: T.Tensor((M, N), out_dtype),
     ):
-        with T.Kernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
+        with T.ClusterKernel(T.ceildiv(M, block_M), T.ceildiv(N, block_N), threads=128, cluster_dims=2) as (bx, by):
             A_shared = T.alloc_shared((num_stages, block_M, block_K), in_dtype)
             B_shared = T.alloc_shared((num_stages, block_K, block_N // 2), in_dtype)  # each CTA holds half of B
             C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)

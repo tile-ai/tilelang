@@ -11,6 +11,17 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+
+def _configure_torch_extensions_dir():
+    cache_dir = os.environ.get("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    path = os.path.join(cache_dir, "torch_extension", f"{worker}-{os.getpid()}")
+    os.makedirs(path, exist_ok=True)
+    os.environ["TORCH_EXTENSIONS_DIR"] = path
+
+
+_configure_torch_extensions_dir()
+
 random.seed(0)
 
 try:
@@ -62,6 +73,15 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_sep(
             "-",
             f"Skipped {config._perf_items_filtered} perf test(s). Re-run with --run-perf to include them.",
+        )
+        return
+    if executed_count == 0 and getattr(config, "_ascend_suite_gated", False):
+        # testing/ascend/conftest.py ignored its whole directory because this
+        # build has no Ascend backend; that is a legitimate outcome, not a
+        # mis-configured run.
+        terminalreporter.write_sep(
+            "-",
+            "Skipped the Ascend test suite: the Ascend backend is not built into this library.",
         )
         return
     if executed_count == 0:
