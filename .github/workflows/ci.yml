@@ -506,7 +506,11 @@ jobs:
           python -m pip install -v .
 
           cd testing
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
+          for TARGET in ascend pto; do
+            echo "Running Ascend examples with TILELANG_DEFAULT_TARGET=${TARGET}"
+            TILELANG_DEFAULT_TARGET="${TARGET}" TILELANG_EXECUTION_BACKEND=auto \
+              python -m pytest --verbose --durations=0 --maxfail=3 -n 4 ../examples/ascend
+          done
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ascend
 
   cutedsl:
