@@ -258,6 +258,7 @@ public:
   size_t parent_alloc_count_{0};
   int64_t vf_latency_{0};
   int64_t source_index_{0};
+  int64_t lanes_{128};
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -291,6 +292,10 @@ public:
     ffi::Map<ffi::String, ffi::Any> simdvf_annotations;
     simdvf_annotations.Set("tl.vf_source_index",
                            IntImm(DataType::Int(64), source_index_));
+    // Logical lane count for the PTO SIMD vector path (64/128/256). AscendC
+    // lowering ignores it and keeps its physical register width.
+    simdvf_annotations.Set("tl.simdvf_lanes",
+                           IntImm(DataType::Int(64), lanes_));
     if (vf_latency_ > 0) {
       simdvf_annotations.Set("tl.vf_latency",
                              IntImm(DataType::Int(64), vf_latency_));
@@ -325,10 +330,22 @@ public:
                                                 SimdVFFrameNode);
 };
 
-SimdVFFrame SimdVF(int64_t vf_latency, int64_t source_index) {
+// Shared validation for the lane count. The Python frontend checks the same
+// set before calling; this is the backstop for hand-written TIR and other
+// FFI callers. Keep the value list in sync with frame.py's
+// _SIMDVF_VALID_LANES and PushPtoSimdVFContext in layout_inference.cc.
+bool SimdVFLanesValid(int64_t lanes) {
+  return lanes == 64 || lanes == 128 || lanes == 256;
+}
+
+SimdVFFrame SimdVF(int64_t vf_latency, int64_t source_index, int64_t lanes) {
+  ICHECK(SimdVFLanesValid(lanes))
+      << "ValueError: T.SimdVF lanes must be one of {64, 128, 256}, got "
+      << lanes;
   ObjectPtr<SimdVFFrameNode> n = tvm::ffi::make_object<SimdVFFrameNode>();
   n->vf_latency_ = vf_latency;
   n->source_index_ = source_index;
+  n->lanes_ = lanes;
   return SimdVFFrame(n);
 }
 
@@ -473,10 +490,13 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   refl::GlobalDef()
       .def("tl.SimtVF", SimtVF)
-      .def("tl.SimdVF", SimdVF)
       .def("tl.Cube", Cube)
       .def("tl.Vector", Vector)
-      .def("tl.MixedKernelLaunch", MixedKernelLaunch);
+      .def("tl.MixedKernelLaunch", MixedKernelLaunch)
+      .def("tl.SimdVF",
+           [](int64_t vf_latency, int64_t source_index, int64_t lanes) {
+             return SimdVF(vf_latency, source_index, lanes);
+           });
   SimtVFFrameNode::RegisterReflection();
   SimdVFFrameNode::RegisterReflection();
   CubeFrameNode::RegisterReflection();

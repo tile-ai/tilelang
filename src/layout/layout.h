@@ -465,6 +465,10 @@ namespace attr {
 constexpr const char *kLayoutMap = "layout_map";
 // ForAttr, Containing the parallel loop layout for a parallel for loop
 constexpr const char *kParallelLoopLayout = "parallel_loop_layout";
+// ForAttr, PTO SIMD lane layout for a parallel for loop inside a PTO
+// SIMD_VF block. Distinct from kParallelLoopLayout so SIMT lowering never
+// misreads a PTO lane fragment as a thread layout.
+constexpr const char *kPtoParallelLoopLayout = "pto_parallel_loop_layout";
 // ForAttr, Containing the predicate for a parallel for loop
 constexpr const char *kParallelLoopPredicate = "parallel_loop_predicate";
 // ForAttr, Marks a ragged SIMT loop layout that needs guarded inverse lowering

@@ -221,6 +221,11 @@ private:
   Fragment
   ComputeLoopLayoutFromBuffer(const Buffer &buffer,
                               const LayoutInferArgs &layout_args) const;
+  // PTO SIMD lane layout inference (inside a PTO SIMD_VF block): builds the
+  // [0, L) lane Fragment with vectorize_size = 1; no SIMT vector-width
+  // selection. Returns an empty layout map (no fragment
+  // buffers in scope).
+  LayoutMap InferPtoSimdLayout(const LayoutInferArgs &layout_args) const;
   // Compute plan-based loop layout candidate using vectorization and thread
   // bounds.
   Fragment ComputePlanCandidate(const LayoutInferArgs &layout_args) const;
