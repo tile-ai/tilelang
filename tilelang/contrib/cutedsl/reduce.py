@@ -316,7 +316,7 @@ class CumSum2D:
         self.TILE_H = threads // self.WARP_SIZE
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
         """
         Perform 2D cumulative sum.
 
@@ -325,8 +325,6 @@ class CumSum2D:
             dst: Destination pointer
             H: Number of rows
             W: Number of columns (should be <= 32 for single-segment case)
-            src_stride: Source row stride in elements
-            dst_stride: Destination row stride in elements
         """
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
@@ -334,21 +332,21 @@ class CumSum2D:
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, cute.make_layout((H, W), stride=(src_stride, 1)))
-        dst_tensor = cute.make_tensor(dst, cute.make_layout((H, W), stride=(dst_stride, 1)))
+        src_tensor = cute.make_tensor(src, (H * W,))
+        dst_tensor = cute.make_tensor(dst, (H * W,))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 row = block * tile + item
                 if row < H:
-                    _scan_line_sum(src_tensor[row, None], dst_tensor[row, None], 0, W, 1, lane, self.reverse, MASK)
+                    _scan_line_sum(src_tensor, dst_tensor, row * W, W, 1, lane, self.reverse, MASK)
         else:
             num_blocks = (W + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 col = block * tile + item
                 if col < W:
-                    _scan_line_sum(src_tensor[None, col], dst_tensor[None, col], 0, H, 1, lane, self.reverse, MASK)
+                    _scan_line_sum(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
 
 
 class CumMax1D:
@@ -388,28 +386,28 @@ class CumMax2D:
         self.WARP_SIZE = 32
 
     @cute.jit
-    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W, src_stride, dst_stride):
+    def run(self, src: cute.Pointer, dst: cute.Pointer, H, W):
         MASK = 0xFFFFFFFF
         tidx, _, _ = cute.arch.thread_idx()
         lane = tidx % self.WARP_SIZE
         item = tidx // self.WARP_SIZE
         tile = self.threads // self.WARP_SIZE
 
-        src_tensor = cute.make_tensor(src, cute.make_layout((H, W), stride=(src_stride, 1)))
-        dst_tensor = cute.make_tensor(dst, cute.make_layout((H, W), stride=(dst_stride, 1)))
+        src_tensor = cute.make_tensor(src, (H * W,))
+        dst_tensor = cute.make_tensor(dst, (H * W,))
 
         if self.dim == 1:
             num_blocks = (H + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 row = block * tile + item
                 if row < H:
-                    _scan_line_max(src_tensor[row, None], dst_tensor[row, None], 0, W, 1, lane, self.reverse, MASK)
+                    _scan_line_max(src_tensor, dst_tensor, row * W, W, 1, lane, self.reverse, MASK)
         else:
             num_blocks = (W + tile - 1) // tile
             for block in cutlass.range_constexpr(num_blocks):
                 col = block * tile + item
                 if col < W:
-                    _scan_line_max(src_tensor[None, col], dst_tensor[None, col], 0, H, 1, lane, self.reverse, MASK)
+                    _scan_line_max(src_tensor, dst_tensor, col, H, W, lane, self.reverse, MASK)
 
 
 class NamedBarrier:

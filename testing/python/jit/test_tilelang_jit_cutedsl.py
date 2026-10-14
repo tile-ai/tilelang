@@ -19,20 +19,6 @@ def _is_cutedsl_available():
 pytestmark = pytest.mark.skipif(not _is_cutedsl_available(), reason="CuTeDSL not installed")
 
 
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("exponent", [2, 3])
-def test_cutedsl_pow_of_int(exponent):
-    @T.prim_func
-    def power(A: T.Tensor((32,), T.float32), B: T.Tensor((32,), T.float32)):
-        with T.Kernel(1, threads=32):
-            for i in T.Parallel(32):
-                B[i] = T.pow(A[i], exponent)
-
-    kernel = tilelang.compile(power, out_idx=1, target="cutedsl")
-    values = torch.linspace(0.5, 2.0, 32, device="cuda", dtype=torch.float32)
-    torch.testing.assert_close(kernel(values), values.pow(exponent))
-
-
 def matmul(
     M,
     N,

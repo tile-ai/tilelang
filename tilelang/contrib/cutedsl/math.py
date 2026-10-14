@@ -21,7 +21,6 @@ __all__ = [
     "__habs",
     "__float2half_rz",
     "tanh",
-    "pow_of_int",
 ]
 
 import cutlass
@@ -201,16 +200,3 @@ def __tanhf(x: Union[float, Float32], *, fastmath, loc=None, ip=None) -> Float32
 
 def tanh(x: Union[TensorSSA, Numeric], fastmath: bool = False) -> Union[TensorSSA, Numeric]:
     return cute_math.tanh(x, fastmath=fastmath)
-
-
-def pow_of_int(exp: int, base):
-    """Compute an integer power using the CuTeDSL call_extern signature.
-
-    Codegen translates tl::pow_of_int<N>(base) to tl.pow_of_int(N, base).
-    """
-    if exp == 0:
-        return type(base)(1)
-    result = base
-    for _ in range(exp - 1):
-        result = result * base
-    return result
