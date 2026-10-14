@@ -177,7 +177,8 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     bool store_returns_bool = (op->value.dtype() == DataType::Bool());
-    store = VisitBufferAccess(store);
+    IndexPredicateRewriter::Promoter promoter;
+    store = VisitBufferAccess(store, promoter);
 
     // Handle casts from the value's dtype to the dtype of the
     // backing array.
@@ -188,15 +189,16 @@ private:
           << "Expected int8 backing array for boolean tensor";
       auto writer = store.CopyOnWrite();
       writer->value = tvm::cast(DataType::Int(8), store->value);
-      return std::move(store);
     }
+    index_predicate_rewriter_.Record(store, promoter);
     return std::move(store);
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     bool load_returns_bool = (op->dtype == DataType::Bool());
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    load = VisitBufferAccess(load);
+    IndexPredicateRewriter::Promoter promoter;
+    load = VisitBufferAccess(load, promoter);
     // Handle casts from dtype of the backing array to value's dtype.
     // TODO(Lunderberg): Move the handling of boolean into a
     // dedicated pass.
@@ -204,8 +206,10 @@ private:
       ICHECK_EQ(load->buffer->dtype, DataType::Int(8))
           << "Expected int8 backing array for boolean tensor";
       load.CopyOnWrite()->dtype = DataType::Int(8);
+      index_predicate_rewriter_.Record(load, promoter);
       return tvm::cast(DataType::Bool(), load);
     } else {
+      index_predicate_rewriter_.Record(load, promoter);
       return std::move(load);
     }
   }
@@ -223,8 +227,9 @@ private:
           << "tvm_access_ptr must have at least 3 arguments";
       PrimExpr offset = call->args[2];
       if (NeedsInt64Promotion(offset)) {
-        call.CopyOnWrite()->args.Set(2,
-                                     index_predicate_rewriter_.Promote(offset));
+        IndexPredicateRewriter::Promoter promoter;
+        call.CopyOnWrite()->args.Set(2, promoter(offset));
+        index_predicate_rewriter_.Record(call, promoter);
       }
     }
     return std::move(call);
@@ -244,13 +249,14 @@ private:
     return max_value >= (type_max - 1) || min_value < type_min;
   }
 
-  Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
-                                          const Array<PrimExpr> &indices) {
+  Array<PrimExpr>
+  GetSimplifiedElemOffset(const Buffer &buffer, const Array<PrimExpr> &indices,
+                          IndexPredicateRewriter::Promoter &promoter) {
     auto flattened_indices = buffer->ElemOffset(indices);
     Array<PrimExpr> safe_indices;
     for (const auto &index : flattened_indices) {
       if (NeedsInt64Promotion(index)) {
-        safe_indices.push_back(index_predicate_rewriter_.Promote(index));
+        safe_indices.push_back(promoter(index));
       } else {
         safe_indices.push_back(index);
       }
@@ -258,10 +264,12 @@ private:
     return this->IterMapSimplifyWithContext(safe_indices, false);
   }
 
-  template <typename Node> Node VisitBufferAccess(Node node) {
+  template <typename Node>
+  Node VisitBufferAccess(Node node,
+                         IndexPredicateRewriter::Promoter &promoter) {
     ICHECK(node->buffer.defined());
     auto flattened_indices =
-        GetSimplifiedElemOffset(node->buffer, node->indices);
+        GetSimplifiedElemOffset(node->buffer, node->indices, promoter);
     Buffer flattened_buffer = GetFlattenedBuffer(node->buffer);
 
     auto writer = node.CopyOnWrite();
@@ -284,10 +292,11 @@ private:
       max_values.push_back(range->min + range->extent - 1);
     }
 
+    IndexPredicateRewriter::Promoter promoter;
     Array<PrimExpr> flattened_min =
-        GetSimplifiedElemOffset(orig_buf, min_values);
+        GetSimplifiedElemOffset(orig_buf, min_values, promoter);
     Array<PrimExpr> flattened_max =
-        GetSimplifiedElemOffset(orig_buf, max_values);
+        GetSimplifiedElemOffset(orig_buf, max_values, promoter);
 
     Array<Range> flattened_ranges;
     ICHECK_EQ(flattened_min.size(), flattened_max.size());

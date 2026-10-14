@@ -91,12 +91,13 @@ private:
         Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto indices = buffer_store->indices;
     Array<PrimExpr> new_indices;
+    IndexPredicateRewriter::Promoter promoter;
     for (auto index : indices) {
       if (index->dtype.is_int() && index->dtype.bits() < 64) {
         auto int_bound = analyzer_->const_int_bound(index);
         if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          index = index_predicate_rewriter_.Promote(index);
+          index = promoter(index);
           new_indices.push_back(index);
           continue;
         }
@@ -104,6 +105,7 @@ private:
       new_indices.push_back(index);
     }
     buffer_store.CopyOnWrite()->indices = new_indices;
+    index_predicate_rewriter_.Record(buffer_store, promoter);
     return std::move(buffer_store);
   }
 
@@ -112,12 +114,13 @@ private:
         Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
     auto indices = buffer_load->indices;
     Array<PrimExpr> new_indices;
+    IndexPredicateRewriter::Promoter promoter;
     for (auto index : indices) {
       if (index->dtype.is_int() && index->dtype.bits() < 64) {
         auto int_bound = analyzer_->const_int_bound(index);
         if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
             int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          index = index_predicate_rewriter_.Promote(index);
+          index = promoter(index);
           new_indices.push_back(index);
           continue;
         }
@@ -125,6 +128,7 @@ private:
       new_indices.push_back(index);
     }
     buffer_load.CopyOnWrite()->indices = new_indices;
+    index_predicate_rewriter_.Record(buffer_load, promoter);
     return std::move(buffer_load);
   }
 
